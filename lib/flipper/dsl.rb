@@ -290,5 +290,16 @@ module Flipper
     # Cloud DSL method that does nothing for open source version.
     def sync_secret
     end
+
+    # Public: Build a three-way promotion plan that applies to this
+    # adapter/DSL as the target.
+    #
+    # base   - adapter, DSL, Export or features Hash used as common baseline.
+    # source - adapter, DSL, Export or features Hash being promoted from.
+    #
+    # Returns a Flipper::PromotionPlan (not applied until #apply).
+    def promotion_plan(base, source)
+      Flipper::PromotionPlan.build(base, source, self)
+    end
   end
 end

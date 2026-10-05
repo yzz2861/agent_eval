@@ -130,6 +130,14 @@ module Flipper
         @adapter.export(format: format, version: version)
       end
 
+      # Public: Apply a promotion plan via the wrapped adapter and clear the
+      # memoized cache so subsequent reads reflect the new configuration.
+      def apply_promotion(expected_version, operations)
+        @adapter.apply_promotion(expected_version, operations).tap do
+          cache.clear if memoizing?
+        end
+      end
+
       # Internal: Turns local caching on/off.
       #
       # value - The Boolean that decides if local caching is on.

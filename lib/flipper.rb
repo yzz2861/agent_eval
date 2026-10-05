@@ -64,7 +64,7 @@ module Flipper
                  :enable_percentage_of_actors, :disable_percentage_of_actors,
                  :enable_percentage_of_time, :disable_percentage_of_time,
                  :features, :feature, :[], :preload, :preload_all,
-                 :adapter, :adapter_stack, :add, :exist?, :remove, :import, :export,
+                 :adapter, :adapter_stack, :add, :exist?, :remove, :import, :export, :promotion_plan,
                  :memoize=, :memoizing?, :read_only?,
                  :sync, :sync_secret # For Flipper::Cloud. Will error for OSS Flipper.
 
@@ -208,6 +208,7 @@ require 'flipper/identifier'
 require 'flipper/middleware/memoizer'
 require 'flipper/middleware/setup_env'
 require 'flipper/poller'
+require 'flipper/promotion_plan'
 require 'flipper/registry'
 require 'flipper/expression'
 require 'flipper/type'

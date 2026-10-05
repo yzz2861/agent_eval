@@ -123,6 +123,40 @@ module Flipper
         true
       end
 
+      # Public: Atomically apply a resolved Flipper::PromotionPlan. The target
+      # version is rechecked and every write is performed under the same lock,
+      # so concurrent readers and writers can never observe a partially applied
+      # plan or a plan applied against a stale configuration.
+      #
+      # expected_version - target version captured when the plan was built.
+      # operations        - Array of :write/:remove primitive operations.
+      #
+      # Raises Flipper::PromotionPlan::TargetVersionMismatch when the target
+      # changed since the plan was built.
+      # Returns true when applied.
+      def apply_promotion(expected_version, operations)
+        synchronize do
+          current = Typecast.features_hash(@source)
+          actual_version = Flipper::PromotionPlan::Snapshot.new(current).version
+          if actual_version != expected_version
+            raise Flipper::PromotionPlan::TargetVersionMismatch.new(expected_version, actual_version)
+          end
+
+          operations.each do |operation|
+            case operation[:op]
+            when :remove
+              @source.delete(operation[:feature])
+            when :write
+              @source[operation[:feature]] = promotion_config(operation[:config])
+            else
+              raise ArgumentError, "Unknown promotion operation: #{operation[:op].inspect}"
+            end
+          end
+        end
+
+        true
+      end
+
       private
 
       def synchronize(&block)
@@ -131,6 +165,16 @@ module Flipper
         else
           block.call
         end
+      end
+
+      # Internal: Deep-copy a plan config so the stored state never shares
+      # mutable Sets with the plan or snapshots.
+      def promotion_config(config)
+        copied = default_config.dup
+        config.each do |gate_key, value|
+          copied[gate_key] = value.is_a?(::Set) ? value.dup : value
+        end
+        copied
       end
     end
   end
