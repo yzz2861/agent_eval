@@ -12,8 +12,13 @@ from sqlparse import tokens as T
 class StatementSplitter:
     """Filter that split stream at individual statements"""
 
-    def __init__(self):
+    def __init__(self, track_spans=False):
+        self.track_spans = track_spans
         self._reset()
+        # Character offset of the next token in the source, used to
+        # assign source spans when track_spans is enabled. Not reset
+        # between statements since offsets refer to the whole source.
+        self._span_offset = 0
 
     def _reset(self):
         """Set the filter attributes to its default values"""
@@ -168,7 +173,12 @@ class StatementSplitter:
             self.level += self._change_splitlevel(ttype, value)
 
             # Append the token to the current statement
-            self.tokens.append(sql.Token(ttype, value))
+            token = sql.Token(ttype, value)
+            if self.track_spans:
+                token.source_span = (self._span_offset,
+                                     self._span_offset + len(value))
+                self._span_offset += len(value)
+            self.tokens.append(token)
 
             # Check if we get the end of a statement
             # Issue762: Allow GO (or "GO 2") as statement splitter.

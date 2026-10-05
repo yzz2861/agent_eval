@@ -15,11 +15,12 @@ from sqlparse.filters import StripTrailingSemicolonFilter
 
 
 class FilterStack:
-    def __init__(self, strip_semicolon=False):
+    def __init__(self, strip_semicolon=False, with_spans=False):
         self.preprocess = []
         self.stmtprocess = []
         self.postprocess = []
         self._grouping = False
+        self._with_spans = with_spans
         if strip_semicolon:
             self.stmtprocess.append(StripTrailingSemicolonFilter())
 
@@ -33,7 +34,8 @@ class FilterStack:
             for filter_ in self.preprocess:
                 stream = filter_.process(stream)
 
-            stream = StatementSplitter().process(stream)
+            stream = StatementSplitter(
+                track_spans=self._with_spans).process(stream)
 
             # Output: Stream processed Statements
             for stmt in stream:

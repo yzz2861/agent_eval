@@ -18,27 +18,35 @@ __all__ = ["cli", "engine", "filters", "formatter", "sql", "tokens"]
 
 
 def parse(
-    sql: str, encoding: str | None = None
+    sql: str, encoding: str | None = None, with_spans: bool = False
 ) -> tuple[sql.Statement, ...]:
     """Parse sql and return a list of statements.
 
     :param sql: A string containing one or more SQL statements.
     :param encoding: The encoding of the statement (optional).
+    :param with_spans: If ``True``, tokens carry their source position
+        in the parsed string, see
+        :attr:`~sqlparse.sql.Token.source_span` (default: ``False``).
     :returns: A tuple of :class:`~sqlparse.sql.Statement` instances.
     """
-    return tuple(parsestream(sql, encoding))
+    return tuple(parsestream(sql, encoding, with_spans=with_spans))
 
 
 def parsestream(
-    stream: str | IO[str], encoding: str | None = None
+    stream: str | IO[str],
+    encoding: str | None = None,
+    with_spans: bool = False,
 ) -> Generator[sql.Statement, None, None]:
     """Parses sql statements from file-like object.
 
     :param stream: A file-like object.
     :param encoding: The encoding of the stream contents (optional).
+    :param with_spans: If ``True``, tokens carry their source position
+        in the parsed string, see
+        :attr:`~sqlparse.sql.Token.source_span` (default: ``False``).
     :returns: A generator of :class:`~sqlparse.sql.Statement` instances.
     """
-    stack = engine.FilterStack()
+    stack = engine.FilterStack(with_spans=with_spans)
     stack.enable_grouping()
     return stack.run(stream, encoding)
 

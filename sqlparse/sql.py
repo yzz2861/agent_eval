@@ -48,6 +48,7 @@ class Token:
     """
 
     __slots__ = (
+        '_source_span',
         'is_group',
         'is_keyword',
         'is_newline',
@@ -68,6 +69,48 @@ class Token:
         self.is_whitespace = self.ttype in T.Whitespace
         self.is_newline = self.ttype in T.Newline
         self.normalized = value.upper() if self.is_keyword else value
+        self._source_span = None
+
+    @property
+    def source_span(self):
+        """Half-open ``(start, end)`` character offsets of this token
+        in the parsed source, or ``None``.
+
+        Spans are only available when parsing with ``with_spans=True``
+        (see :func:`sqlparse.parse`). Tokens created or replaced by
+        formatting filters have no original source position and return
+        ``None``.
+        """
+        return self._source_span
+
+    @source_span.setter
+    def source_span(self, span):
+        self._source_span = span
+
+    def source_text(self, source):
+        """Returns the slice of *source* this token was parsed from.
+
+        *source* is the string that was originally parsed. Returns
+        ``None`` if this token has no source position information.
+        """
+        span = self.source_span
+        if span is None:
+            return None
+        return source[span[0]:span[1]]
+
+    def byte_span(self, source, encoding='utf-8'):
+        """Half-open ``(start, end)`` byte offsets of this token in
+        *source* encoded with *encoding*, or ``None`` if this token
+        has no source position information.
+
+        *source* is the string that was originally parsed.
+        """
+        span = self.source_span
+        if span is None:
+            return None
+        start, end = span
+        return (len(source[:start].encode(encoding)),
+                len(source[:end].encode(encoding)))
 
     def __str__(self):
         return self.value
@@ -222,6 +265,28 @@ class TokenList(Token):
                 yield from token.flatten()
             else:
                 yield token
+
+    @property
+    def source_span(self):
+        """Half-open ``(start, end)`` character offsets of this group
+        in the parsed source, or ``None``.
+
+        The span is derived from the original child tokens: it ranges
+        from the start of the first child that has a source span to the
+        end of the last one. If no child has a source span (e.g. the
+        group was created by a formatting filter), ``None`` is returned.
+        """
+        start = None
+        end = None
+        for token in self.flatten():
+            span = token.source_span
+            if span is not None:
+                if start is None:
+                    start = span[0]
+                end = span[1]
+        if start is None:
+            return None
+        return (start, end)
 
     def get_sublists(self):
         for token in self.tokens:
