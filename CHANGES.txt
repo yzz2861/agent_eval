@@ -65,6 +65,15 @@ Feature
   See https://github.com/Pylons/webob/pull/376 and
   https://github.com/Pylons/webob/pull/379
 
+- Added RFC 4647 Extended Filtering support for ``Accept-Language``:
+  ``acceptparse.AcceptLanguage.parse_extended`` parses a header value that
+  may contain extended language ranges (e.g. ``de-*-DE``), and
+  ``extended_filtering``/``extended_best_match`` on the
+  ``AcceptLanguageValidHeader``, ``AcceptLanguageNoHeader``, and
+  ``AcceptLanguageInvalidHeader`` classes match language tags against such
+  ranges, returning all candidates (ordered by qvalue) or the best match.
+  The default Basic Filtering and Lookup behavior is unchanged.
+
 Compatibility
 ~~~~~~~~~~~~~
 

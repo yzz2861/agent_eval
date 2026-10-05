@@ -81,22 +81,22 @@ methods:
              acceptable_offers, best_match, quality
 
 .. autoclass:: AcceptLanguage
-   :members: parse
+   :members: parse, parse_extended
 
 .. autoclass:: AcceptLanguageValidHeader
    :members: header_value, parsed, __init__, __add__, __contains__, __iter__,
 	     __radd__, __str__, parse, basic_filtering, best_match, lookup,
-             quality
+             quality, extended_filtering, extended_best_match
 
 .. autoclass:: AcceptLanguageNoHeader
    :members: header_value, parsed, __init__, __add__, __contains__, __iter__,
 	     __radd__, __str__, parse, basic_filtering, best_match, lookup,
-             quality
+             quality, extended_filtering, extended_best_match
 
 .. autoclass:: AcceptLanguageInvalidHeader
    :members: header_value, parsed, __init__, __add__, __contains__, __iter__,
 	     __radd__, __str__, parse, basic_filtering, best_match, lookup,
-             quality
+             quality, extended_filtering, extended_best_match
 
 Deprecated:
 

@@ -4427,6 +4427,56 @@ class TestAcceptLanguage:
         list_of_returned = list(returned)
         assert list_of_returned == expected_list
 
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "",
+            "*s",
+            "s*",
+            "de-**-DE",
+            "de-*-",
+            "de--DE",
+            "-de",
+            "de-",
+            "a" * 9,
+            "de-" + "a" * 9,
+            "en_gb",
+            "de_*DE",
+            "de-*-DE, de;q= 0.001",
+        ],
+    )
+    def test_parse_extended__invalid_header(self, value):
+        with pytest.raises(ValueError):
+            AcceptLanguage.parse_extended(value=value)
+
+    @pytest.mark.parametrize(
+        "value, expected_list",
+        [
+            ("*", [("*", 1.0)]),
+            # Extended language ranges, RFC 4647 Section 2.2
+            ("de-*-DE", [("de-*-DE", 1.0)]),
+            ("*-DE", [("*-DE", 1.0)]),
+            ("de-*", [("de-*", 1.0)]),
+            ("de-*-*-DE", [("de-*-*-DE", 1.0)]),
+            ("zh-*-Hant", [("zh-*-Hant", 1.0)]),
+            # Basic language ranges are also valid extended language ranges
+            ("zh-Hant;q=0.500", [("zh-Hant", 0.5)]),
+            ("de-CH-x-phonebk;q=1.0", [("de-CH-x-phonebk", 1.0)]),
+            (
+                "de-*-DE, de;q=0.5, *;q=0.000",
+                [("de-*-DE", 1.0), ("de", 0.5), ("*", 0.0)],
+            ),
+            (
+                ",\t de-Latn-*-x-private \t;\t q=0.345,, fr ; Q=0.456 \t,",
+                [("de-Latn-*-x-private", 0.345), ("fr", 0.456)],
+            ),
+        ],
+    )
+    def test_parse_extended__valid_header(self, value, expected_list):
+        returned = AcceptLanguage.parse_extended(value=value)
+        list_of_returned = list(returned)
+        assert list_of_returned == expected_list
+
 
 class TestAcceptLanguageValidHeader:
     @pytest.mark.parametrize("header_value", ["", ", da;q=0.2, en-gb;q=0.3 "])
@@ -4808,6 +4858,224 @@ class TestAcceptLanguageValidHeader:
     def test_basic_filtering(self, header_value, language_tags, expected_returned):
         instance = AcceptLanguageValidHeader(header_value=header_value)
         returned = instance.basic_filtering(language_tags=language_tags)
+        assert returned == expected_returned
+
+    @pytest.mark.parametrize(
+        "header_value, ranges, language_tags, expected_returned",
+        [
+            # Examples from RFC 4647, Section 3.3.2: "de-*-DE" matches all
+            # tags with a primary language subtag of 'de' and a region
+            # subtag of 'DE', with any subtags in between
+            (
+                "en",
+                "de-*-DE",
+                ["de-DE", "de-1996-DE", "de-Latn-DE", "de-Latn-DE-1996"],
+                [
+                    ("de-DE", 1.0),
+                    ("de-1996-DE", 1.0),
+                    ("de-Latn-DE", 1.0),
+                    ("de-Latn-DE-1996", 1.0),
+                ],
+            ),
+            # ... and does not match tags without a 'DE' subtag, or where a
+            # singleton subtag (such as the 'x' that starts a private-use
+            # sequence) stands between the range subtags
+            (
+                "en",
+                "de-*-DE",
+                ["de", "de-Deva", "de-x-DE", "de-Latn-x-DE", "fr-DE"],
+                [],
+            ),
+            # A private-use sequence at the end of the tag does not prevent
+            # a match, as the matched range is a prefix of the tag
+            (
+                "en",
+                "de-*-DE",
+                ["de-DE-x-private", "de-Latn-DE-x-private"],
+                [("de-DE-x-private", 1.0), ("de-Latn-DE-x-private", 1.0)],
+            ),
+            # Ranges with private-use subtags
+            (
+                "en",
+                "de-x-private",
+                ["de-x-private", "de-x-private-foo", "de-x", "de"],
+                [("de-x-private", 1.0), ("de-x-private-foo", 1.0)],
+            ),
+            (
+                "en",
+                "de-*-x-private",
+                ["de-Latn-x-private", "de-Latn-DE-x-private", "de-x-other"],
+                [("de-Latn-x-private", 1.0), ("de-Latn-DE-x-private", 1.0)],
+            ),
+            # Matching is case-insensitive
+            (
+                "en",
+                "DE-*-de",
+                ["de-Latn-DE", "DE-1996-de"],
+                [("de-Latn-DE", 1.0), ("DE-1996-de", 1.0)],
+            ),
+            # With no '*' subtags, Extended Filtering still differs from
+            # Basic Filtering: non-matching tag subtags are skipped, so
+            # "de-DE" matches "de-Latn-DE"
+            (
+                "de-DE",
+                None,
+                ["de-DE", "de-Latn-DE", "de-1996-DE", "de", "de-Deva"],
+                [("de-DE", 1.0), ("de-Latn-DE", 1.0), ("de-1996-DE", 1.0)],
+            ),
+            # When ranges is None, the ranges are taken from the header; a
+            # valid header only contains basic ranges, but they are matched
+            # with the extended algorithm, so "de-DE" matches "de-Latn-DE"
+            (
+                "de-DE, fr;q=0.5",
+                None,
+                ["de-Latn-DE", "fr"],
+                [("de-Latn-DE", 1.0), ("fr", 0.5)],
+            ),
+            # Empty language_tags
+            ("en", "de-*-DE", [], []),
+            # No matches
+            ("en", "de-*-DE", ["fr-FR", "de-CH"], []),
+            # A tag that matches a q=0 range is filtered out, even if it
+            # also matches an acceptable range: exclusion takes precedence
+            # when ranges overlap
+            (
+                "en",
+                "de-*-DE;q=0, de;q=0.5",
+                ["de-Latn-DE", "de-Deva", "de"],
+                [("de-Deva", 0.5), ("de", 0.5)],
+            ),
+            # Exclusion also takes precedence over the '*' range
+            (
+                "en",
+                "de-*-DE;q=0, *;q=0.3",
+                ["de-Latn-DE", "fr-FR"],
+                [("fr-FR", 0.3)],
+            ),
+            # '*;q=0' filters out everything not matched by another range
+            (
+                "en",
+                "de-*-DE, *;q=0",
+                ["de-Latn-DE", "fr-FR"],
+                [("de-Latn-DE", 1.0)],
+            ),
+            # The '*' range matches only tags not matched by any other range
+            (
+                "en",
+                "de-*-DE;q=0.8, *;q=0.3",
+                ["de-Latn-DE", "fr-FR", "de-CH"],
+                [("de-Latn-DE", 0.8), ("fr-FR", 0.3), ("de-CH", 0.3)],
+            ),
+            # The returned list of tuples is sorted in descending order of
+            # qvalue
+            (
+                "en",
+                "de;q=0.7, fr-*-FR;q=0.3, es, it-*;q=0.5",
+                ["it-Latn", "es", "fr-Latn-FR", "de"],
+                [("es", 1.0), ("de", 0.7), ("it-Latn", 0.5), ("fr-Latn-FR", 0.3)],
+            ),
+            # When qvalues are the same, the tag whose matched range appears
+            # earlier in ranges comes first
+            (
+                "en",
+                "de-*-DE, fr, de-Latn-DE",
+                ["de-Latn-DE", "fr", "de-DE"],
+                [("de-Latn-DE", 1.0), ("de-DE", 1.0), ("fr", 1.0)],
+            ),
+            # When many tags match the same range, they keep their relative
+            # order from the language_tags argument
+            (
+                "en",
+                "de-*-DE",
+                ["de-Latn-DE", "de-DE", "de-1996-DE"],
+                [("de-Latn-DE", 1.0), ("de-DE", 1.0), ("de-1996-DE", 1.0)],
+            ),
+            # A tag that appears more than once in language_tags appears
+            # more than once in the returned list
+            (
+                "en",
+                "de-*-DE",
+                ["de-DE", "de-Latn-DE", "de-DE"],
+                [("de-DE", 1.0), ("de-Latn-DE", 1.0), ("de-DE", 1.0)],
+            ),
+            # When a range appears in ranges more than once, the first
+            # occurrence is used for matching and the others are ignored
+            (
+                "en",
+                "de-*-DE;q=0.5, de-*-DE;q=0.9",
+                ["de-Latn-DE"],
+                [("de-Latn-DE", 0.5)],
+            ),
+            (
+                "en",
+                "de-*-DE;q=0, de-*-DE;q=0.9",
+                ["de-Latn-DE"],
+                [],
+            ),
+            # ranges as an iterable of strs and (range, qvalue) pairs
+            (
+                "en",
+                ["de-*-DE", ("fr-FR", 0.5)],
+                ["fr-FR", "de-Latn-DE"],
+                [("de-Latn-DE", 1.0), ("fr-FR", 0.5)],
+            ),
+        ],
+    )
+    def test_extended_filtering(
+        self, header_value, ranges, language_tags, expected_returned
+    ):
+        instance = AcceptLanguageValidHeader(header_value=header_value)
+        returned = instance.extended_filtering(
+            language_tags=language_tags, ranges=ranges
+        )
+        assert returned == expected_returned
+
+    @pytest.mark.parametrize(
+        "ranges",
+        [
+            "de-**-DE",
+            "de-*-",
+            "de--DE",
+            "-de",
+            "de-",
+            "a" * 9,
+            "de_DE",
+            "en-DE;q=2",
+            ["de-*-DE", "de-**-DE"],
+            [("de-**-DE", 0.5)],
+            ["de-*-DE", "*s"],
+        ],
+    )
+    def test_extended_filtering__invalid_ranges(self, ranges):
+        instance = AcceptLanguageValidHeader(header_value="en")
+        with pytest.raises(ValueError):
+            instance.extended_filtering(language_tags=["de-DE"], ranges=ranges)
+
+    @pytest.mark.parametrize(
+        "ranges, language_tags, default, expected_returned",
+        [
+            # The most preferred match is returned
+            ("de-*-DE;q=0.8, fr;q=0.9", ["de-Latn-DE", "fr"], None, "fr"),
+            ("de-*-DE;q=0.9, fr;q=0.8", ["de-Latn-DE", "fr"], None, "de-Latn-DE"),
+            # When qvalues are tied, the tag whose matched range appears
+            # first in ranges is returned
+            ("de-*-DE, fr", ["fr", "de-Latn-DE"], None, "de-Latn-DE"),
+            # No match: the default is returned
+            ("de-*-DE", ["es", "it"], None, None),
+            ("de-*-DE", ["es", "it"], "default", "default"),
+            ("de-*-DE", [], "default", "default"),
+            # A tag excluded by a q=0 range is not returned
+            ("de-*-DE;q=0, de;q=0.5", ["de-Latn-DE"], "default", "default"),
+            ("de-*-DE;q=0, de;q=0.5", ["de-Latn-DE", "de"], None, "de"),
+        ],
+    )
+    def test_extended_best_match(
+        self, ranges, language_tags, default, expected_returned
+    ):
+        instance = AcceptLanguageValidHeader(header_value="en")
+        returned = instance.extended_best_match(
+            language_tags=language_tags, ranges=ranges, default=default
+        )
         assert returned == expected_returned
 
     @pytest.mark.parametrize(
@@ -5410,6 +5678,27 @@ class TestAcceptLanguageNoHeader:
         returned = instance.basic_filtering(language_tags=["tag1", "tag2"])
         assert returned == []
 
+    def test_extended_filtering__ranges_none(self):
+        instance = AcceptLanguageNoHeader()
+        returned = instance.extended_filtering(language_tags=["tag1", "tag2"])
+        assert returned == []
+
+    def test_extended_filtering__explicit_ranges(self):
+        instance = AcceptLanguageNoHeader()
+        returned = instance.extended_filtering(
+            language_tags=["de-Latn-DE", "de-x-DE", "fr"],
+            ranges="de-*-DE",
+        )
+        assert returned == [("de-Latn-DE", 1.0)]
+
+    def test_extended_best_match(self):
+        instance = AcceptLanguageNoHeader()
+        assert instance.extended_best_match(language_tags=["de-DE"]) is None
+        returned = instance.extended_best_match(
+            language_tags=["de-Latn-DE"], ranges="de-*-DE", default="default"
+        )
+        assert returned == "de-Latn-DE"
+
     @pytest.mark.parametrize(
         "offers, default_match, expected_returned",
         [
@@ -5587,6 +5876,32 @@ class TestAcceptLanguageInvalidHeader:
         instance = AcceptLanguageInvalidHeader(header_value="")
         returned = instance.basic_filtering(language_tags=["tag1", "tag2"])
         assert returned == []
+
+    def test_extended_filtering__ranges_none(self):
+        instance = AcceptLanguageInvalidHeader(header_value="de-*-DE")
+        returned = instance.extended_filtering(language_tags=["tag1", "tag2"])
+        assert returned == []
+
+    def test_extended_filtering__explicit_ranges(self):
+        # A client sent extended ranges, making the header invalid according
+        # to RFC 7231; the ranges can still be supplied explicitly
+        instance = AcceptLanguageInvalidHeader(header_value="de-*-DE")
+        returned = instance.extended_filtering(
+            language_tags=["de-Latn-DE", "de-x-DE", "fr"],
+            ranges=instance.header_value,
+        )
+        assert returned == [("de-Latn-DE", 1.0)]
+
+    def test_extended_best_match(self):
+        instance = AcceptLanguageInvalidHeader(header_value="de-*-DE")
+        returned = instance.extended_best_match(
+            language_tags=["de-Latn-DE"], ranges="de-*-DE", default="default"
+        )
+        assert returned == "de-Latn-DE"
+        returned = instance.extended_best_match(
+            language_tags=["fr"], ranges="de-*-DE", default="default"
+        )
+        assert returned == "default"
 
     @pytest.mark.parametrize(
         "offers, default_match, expected_returned",
