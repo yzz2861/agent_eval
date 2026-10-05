@@ -67,6 +67,16 @@ module REXML
     module Private
       SPACES_PATTERN = /\s+/um
       SCANNER_RESET_SIZE = 100000
+      UTF_32BE_BOM_PATTERN = /\x00\x00\xfe\xff/n
+      UTF_32LE_BOM_PATTERN = /\xff\xfe\x00\x00/n
+      UTF_16BE_BOM_PATTERN = /\xfe\xff/n
+      UTF_16LE_BOM_PATTERN = /\xff\xfe/n
+      UTF_8_BOM_PATTERN = /\xef\xbb\xbf/n
+      UTF_32_FOURTH_BYTE_PREFIXES = [
+        "\x00\x00".b,
+        "\xFF\xFE\x00".b,
+        "\x3C\x00\x00".b,
+      ].freeze
       PRE_DEFINED_TERM_PATTERNS = {}
       pre_defined_terms = ["'", '"', "<", "]]>", "?>"]
       if StringScanner::Version < "3.1.1"
@@ -90,6 +100,7 @@ module REXML
       @orig = arg
       @scanner = StringScanner.new(@orig)
       if encoding
+        detect_encoding_signature
         self.encoding = encoding
       else
         detect_encoding
@@ -117,7 +128,16 @@ module REXML
     # Overridden to support optimized en/decoding
     def encoding=(enc)
       return unless super
+      resolve_detected_encoding
       encoding_updated
+    end
+
+    def encode(string)
+      string.encode(@actual_encoding || @encoding)
+    end
+
+    def decode(string)
+      string.encode(::Encoding::UTF_8, @actual_encoding || @encoding)
     end
 
     def read(term = nil)
@@ -188,21 +208,64 @@ module REXML
     private
 
     def detect_encoding
+      detect_encoding_signature
+      self.encoding = @detected_encoding || "UTF-8"
+    end
+
+    def detect_encoding_signature
+      @bom = false
+      @detected_encoding = nil
       scanner_encoding = @scanner.rest.encoding
-      detected_encoding = "UTF-8"
       begin
         @scanner.string.force_encoding("ASCII-8BIT")
-        if @scanner.scan(/\xfe\xff/n)
-          detected_encoding = "UTF-16BE"
-        elsif @scanner.scan(/\xff\xfe/n)
-          detected_encoding = "UTF-16LE"
-        elsif @scanner.scan(/\xef\xbb\xbf/n)
-          detected_encoding = "UTF-8"
+        if @scanner.scan(Private::UTF_32BE_BOM_PATTERN)
+          @bom = true
+          @detected_encoding = "UTF-32BE"
+        elsif @scanner.scan(Private::UTF_32LE_BOM_PATTERN)
+          @bom = true
+          @detected_encoding = "UTF-32LE"
+        elsif @scanner.scan(Private::UTF_16BE_BOM_PATTERN)
+          @bom = true
+          @detected_encoding = "UTF-16BE"
+        elsif @scanner.scan(Private::UTF_16LE_BOM_PATTERN)
+          @bom = true
+          @detected_encoding = "UTF-16LE"
+        elsif @scanner.scan(Private::UTF_8_BOM_PATTERN)
+          @bom = true
+          @detected_encoding = "UTF-8"
+        elsif @scanner.match?(/\x00\x00\x00\x3C/n)
+          @detected_encoding = "UTF-32BE"
+        elsif @scanner.match?(/\x3C\x00\x00\x00/n)
+          @detected_encoding = "UTF-32LE"
         end
       ensure
         @scanner.string.force_encoding(scanner_encoding)
       end
-      self.encoding = detected_encoding
+    end
+
+    def resolve_detected_encoding
+      @actual_encoding = @encoding
+      return unless @detected_encoding
+
+      if @detected_encoding == "UTF-8"
+        raise_encoding_conflict unless @encoding == "UTF-8"
+        return
+      end
+
+      if /\AUTF-(?:16|32)\z/.match?(@encoding)
+        unless @detected_encoding.start_with?(@encoding.split("-").first + "-")
+          raise_encoding_conflict
+        end
+        @actual_encoding = @detected_encoding
+      elsif @encoding != @detected_encoding
+        raise_encoding_conflict
+      end
+    end
+
+    def raise_encoding_conflict
+      detection = @bom ? "byte order mark" : "document byte order"
+      raise ArgumentError,
+        "Encoding #{@encoding} conflicts with #{detection} #{@detected_encoding}"
     end
 
     def encoding_updated
@@ -226,12 +289,16 @@ module REXML
       @er_source = @source = arg
       @to_utf = false
       @pending_buffer = nil
+      @decoder = nil
 
-      if encoding
-        super(+"", encoding)
-      else
-        super(@source.read(3) || +"")
+      initial_data = @source.read(3) || +""
+      if initial_data.bytesize == 3 &&
+          Private::UTF_32_FOURTH_BYTE_PREFIXES.any? do |prefix|
+            initial_data.b.start_with?(prefix)
+          end
+        initial_data << (@source.read(1) || +"")
       end
+      super(initial_data, encoding)
 
       if !@to_utf and
           @orig.respond_to?(:force_encoding) and
@@ -258,6 +325,8 @@ module REXML
         rescue IOError
         end
         true
+      rescue EncodingError
+        raise
       rescue Exception, NameError
         @source = nil
         false
@@ -358,6 +427,7 @@ module REXML
         if str.nil?
           str = @pending_buffer
         else
+          str.force_encoding(@actual_encoding || @encoding) if @to_utf
           str = @pending_buffer + str
         end
         @pending_buffer = nil
@@ -365,9 +435,12 @@ module REXML
         str = @source.readline(term || @line_break)
       end
       return nil if str.nil?
+      str.force_encoding(@actual_encoding || @encoding) if @to_utf
 
       if @to_utf
-        decode(str)
+        decoded = @decoder.convert(str)
+        decoded << @decoder.finish if @source.eof?
+        decoded
       else
         str.force_encoding(::Encoding::UTF_8) if @force_utf8
         str
@@ -375,15 +448,18 @@ module REXML
     end
 
     def encoding_updated
-      case @encoding
-      when "UTF-16BE", "UTF-16LE"
+      source_encoding = @actual_encoding || @encoding
+      if /\AUTF-(?:16|32)(?:BE|LE)\z/.match?(source_encoding)
         @source.binmode
-        @source.set_encoding(@encoding, @encoding)
+        @source.set_encoding(source_encoding, source_encoding)
       end
-      @line_break = encode(">")
       @pending_buffer, @scanner.string = @scanner.rest, +""
-      @pending_buffer.force_encoding(@encoding)
+      @pending_buffer.force_encoding(source_encoding)
       super
+      @line_break = ">".encode(source_encoding)
+      @decoder = @to_utf ?
+        ::Encoding::Converter.new(source_encoding, ::Encoding::UTF_8) :
+        nil
     end
   end
 end

@@ -31,6 +31,18 @@ module REXMLTests
         @source.encoding = Encoding::UTF_8
         assert_equal("UTF-8", @source.encoding)
       end
+
+      test("external encoding without BOM") do
+        source = REXML::Source.new("\xE4".b, "ISO-8859-1")
+        assert_equal("ISO-8859-1", source.encoding)
+        assert_equal("\xC3\xA4".dup.force_encoding("UTF-8"), source.buffer)
+      end
+
+      test("UTF-8 BOM conflicts with external encoding") do
+        assert_raise(ArgumentError) do
+          REXML::Source.new("\xEF\xBB\xBF<a/>".b, "ISO-8859-1")
+        end
+      end
     end
   end
 end

@@ -5,6 +5,41 @@ require 'rexml/source'
 require 'rexml/document'
 
 module REXMLTests
+  class ChunkedIO
+    def initialize(data, chunk_size)
+      @io = StringIO.new(data)
+      @chunk_size = chunk_size
+    end
+
+    def binmode
+      self
+    end
+
+    def set_encoding(*)
+      @io.binmode
+    end
+
+    def external_encoding
+      ::Encoding::BINARY
+    end
+
+    def eof?
+      @io.eof?
+    end
+
+    def read(length = nil)
+      @io.read(length || @chunk_size)
+    end
+
+    def readline(separator = nil)
+      result = +""
+      until @io.eof? || (separator && result.include?(separator.b))
+        result << @io.read(@chunk_size).to_s
+      end
+      result
+    end
+  end
+
   class EncodingTester < Test::Unit::TestCase
     include Helper::Fixture
     include Helper::Global
@@ -102,6 +137,155 @@ module REXMLTests
         end
         assert_equal("UTF-16", utf16.encoding)
       end
+    end
+
+    def test_parse_utf32_across_read_chunks
+      xml = <<~XML.chomp
+        <?xml version="1.0" encoding="UTF-32"?>
+        <root attr="&#128169;">&amp; &#x1F600;</root>
+      XML
+
+      ["UTF-32BE", "UTF-32LE"].each do |encoding|
+        data = xml.encode(encoding).b
+        assert_nothing_raised do
+          REXML::Document.new(data)
+          REXML::Document.new(StringIO.new(data))
+        end
+        [1, 4, 5, 7].each do |chunk_size|
+          doc = REXML::Document.new(ChunkedIO.new(data, chunk_size))
+
+          assert_equal("UTF-32", doc.encoding)
+          assert_equal("\u{1F4A9}", doc.root.attributes["attr"])
+          assert_equal("& \u{1F600}", doc.root.text)
+
+          output = +""
+          doc.write(output)
+          assert_equal(::Encoding::UTF_32BE, output.encoding)
+          assert_equal([0x00, 0x00, 0xFE, 0xFF], output.bytes.first(4))
+          assert_predicate(output, :valid_encoding?)
+
+          reparsed = REXML::Document.new(StringIO.new(output))
+          assert_equal("& \u{1F600}", reparsed.root.text)
+        end
+      end
+    end
+
+    def test_write_utf32_with_explicit_byte_order
+      xml = %q{<?xml version='1.0'?><root attr='&#128169;'>&#x1F600;</root>}
+
+      expected = {
+        "UTF-32BE" => [0x00, 0x00, 0x00, 0x3C],
+        "UTF-32LE" => [0x3C, 0x00, 0x00, 0x00],
+      }
+      expected.each do |encoding, first_bytes|
+        doc = REXML::Document.new(xml)
+        doc.xml_decl.encoding = encoding
+        output = +""
+        doc.write(output)
+
+        assert_equal(::Encoding.find(encoding), output.encoding)
+        assert_equal(first_bytes, output.bytes.first(4))
+        assert_not_equal([0x00, 0x00, 0xFE, 0xFF], output.bytes.first(4))
+        assert_not_equal([0xFF, 0xFE, 0x00, 0x00], output.bytes.first(4))
+        assert_predicate(output, :valid_encoding?)
+
+        reparsed = REXML::Document.new(StringIO.new(output))
+        assert_equal("\u{1F600}", reparsed.root.text)
+        assert_equal("\u{1F4A9}", reparsed.root.attributes["attr"])
+      end
+    end
+
+    def test_parse_utf32_without_bom_uses_external_encoding
+      ["UTF-32BE", "UTF-32LE"].each do |encoding|
+        data = <<~XML.chomp.encode(encoding).b
+          <?xml version="1.0" encoding="#{encoding}"?>
+          <root>\u{1F600}</root>
+        XML
+        source = REXML::Source.new(data, encoding)
+        doc = REXML::Document.new(source)
+
+        assert_equal("\u{1F600}", doc.root.text)
+      end
+    end
+
+    def test_parse_utf32_without_bom_uses_generic_external_encoding
+      ["UTF-32BE", "UTF-32LE"].each do |encoding|
+        data = %q{<root>&#x1F600;</root>}.encode(encoding).b
+        source = REXML::IOSource.new(StringIO.new(data), 500, "UTF-32")
+        doc = REXML::Document.new(source)
+
+        assert_equal("\u{1F600}", doc.root.text)
+      end
+    end
+
+    def test_parse_utf32_without_bom_detects_byte_order
+      xml = <<~XML.chomp
+        <?xml version="1.0" encoding="UTF-32"?>
+        <root>&#x1F600;</root>
+      XML
+
+      ["UTF-32BE", "UTF-32LE"].each do |encoding|
+        data = xml.encode(encoding).b
+        doc = REXML::Document.new(StringIO.new(data))
+
+        assert_equal("UTF-32", doc.encoding)
+        assert_equal("\u{1F600}", doc.root.text)
+      end
+    end
+
+    def test_utf32_bom_conflicts_with_xml_encoding_declaration
+      declaration = %q{<?xml version="1.0" encoding="UTF-32BE"?><root/>}
+      data = "\xFF\xFE\x00\x00".b + declaration.encode("UTF-32LE").b
+
+      exception = assert_raise(REXML::ParseException) do
+        REXML::Document.new(StringIO.new(data))
+      end
+      assert_kind_of(ArgumentError, exception.continued_exception)
+    end
+
+    def test_utf32_byte_order_conflicts_without_bom
+      declaration = %q{<?xml version="1.0" encoding="UTF-32LE"?>}
+      data = (declaration + "<root/>").encode("UTF-32BE").b
+
+      exception = assert_raise(REXML::ParseException) do
+        REXML::Document.new(StringIO.new(data))
+      end
+      assert_kind_of(ArgumentError, exception.continued_exception)
+    end
+
+    def test_utf32_bom_conflicts_with_external_encoding
+      data = "\x00\x00\xFE\xFF".b + "<root/>".encode("UTF-32BE").b
+
+      assert_raise(ArgumentError) do
+        REXML::Source.new(data, "UTF-32LE")
+      end
+    end
+
+    def test_utf32_rejects_truncated_codepoint_across_read_chunks
+      data = <<~XML.chomp.encode("UTF-32BE").b
+        <?xml version="1.0" encoding="UTF-32"?><root>\u{1F600}</root>
+      XML
+
+      [1, 2, 3].each do |truncated_bytes|
+        exception = assert_raise(REXML::ParseException) do
+          REXML::Document.new(ChunkedIO.new(data.byteslice(0, data.bytesize - truncated_bytes), 1))
+        end
+        assert_kind_of(::Encoding::InvalidByteSequenceError,
+                       exception.continued_exception)
+      end
+    end
+
+    def test_utf32_rejects_illegal_unicode_values
+      declaration = %q{<?xml version="1.0" encoding="UTF-32BE"?>}.encode("UTF-32BE").b
+      illegal_codepoint = [0x00, 0x00, 0xDB, 0x80].pack("C4")
+      data = declaration + "<root>".encode("UTF-32BE").b +
+        illegal_codepoint + "</root>".encode("UTF-32BE").b
+
+      exception = assert_raise(REXML::ParseException) do
+        REXML::Document.new(ChunkedIO.new(data, 1))
+      end
+      assert_kind_of(::Encoding::InvalidByteSequenceError,
+                     exception.continued_exception)
     end
   end
 end

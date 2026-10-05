@@ -16,6 +16,9 @@ module REXML
       if encoding == "UTF-16"
         @output << "\ufeff".encode("UTF-16BE")
         self.encoding = "UTF-16BE"
+      elsif encoding == "UTF-32"
+        @output << "\ufeff".encode("UTF-32BE")
+        self.encoding = "UTF-32BE"
       end
     end
 

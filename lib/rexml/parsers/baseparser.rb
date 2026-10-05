@@ -654,12 +654,17 @@ module REXML
 
       def need_source_encoding_update?(xml_declaration_encoding)
         return false if xml_declaration_encoding.nil?
-        return false if /\AUTF-16\z/i =~ xml_declaration_encoding
+        return false if /\AUTF-(?:16|32)\z/i =~ xml_declaration_encoding
         true
       end
 
       def normalize_xml_declaration_encoding(xml_declaration_encoding)
-        /\AUTF-16(?:BE|LE)\z/i.match?(xml_declaration_encoding) ? "UTF-16" : nil
+        case xml_declaration_encoding
+        when /\AUTF-16(?:BE|LE)\z/i
+          "UTF-16"
+        when /\AUTF-32(?:BE|LE)\z/i
+          "UTF-32"
+        end
       end
 
       def parse_name(base_error_message)
