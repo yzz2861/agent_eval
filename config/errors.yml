@@ -2,3 +2,8 @@ en:
   dry_validation:
     errors:
       acceptance: "must accept %{key}"
+      balance_missing: "%{field} is required"
+      balance_unsupported_unit: "%{value} is not a supported unit"
+      balance_invalid_amount: "%{field} must be an exact decimal amount"
+      rules:
+        balance: "left and right amounts do not balance for group %{group} in %{unit}: difference %{difference} (tolerance %{tolerance}), lines %{positions}"

@@ -8,6 +8,11 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 ## [Unreleased]
 
 
+### Added
+
+- Added a generic `:balance` rule macro (and `Dry::Validation::Balance`) that aggregates two-sided detail lines by group keys and a unit with `BigDecimal` arithmetic, explicit per-unit tolerance, and per-line errors carrying group, difference and line positions
+
+
 ## [1.11.1] - 2025-01-21
 
 

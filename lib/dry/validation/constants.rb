@@ -39,5 +39,8 @@ module Dry
         super("#{klass} cannot be instantiated without a schema defined")
       end
     end
+
+    # Error raised when a balance rule is configured with invalid options
+    InvalidBalanceOptionError = ::Class.new(::ArgumentError)
   end
 end
