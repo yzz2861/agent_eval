@@ -7,6 +7,8 @@ from sqlalchemy import MetaData
 from sqlalchemy import select
 from sqlalchemy import String
 from sqlalchemy import Table
+from sqlalchemy import update
+from sqlalchemy import text
 from sqlalchemy import testing
 from sqlalchemy import TypeDecorator
 from sqlalchemy.sql import base as sql_base
@@ -26,6 +28,239 @@ from sqlalchemy.testing import is_not_none
 
 
 class MiscTest(fixtures.TestBase):
+    def test_table_dependencies_recursive_cte_update_example(self):
+        nodes = Table(
+            "nodes",
+            MetaData(),
+            Column("id", Integer),
+            Column("parent_id", Integer),
+        )
+        edges = Table(
+            "edges",
+            MetaData(),
+            Column("parent_id", Integer),
+            Column("child_id", Integer),
+        )
+        totals = Table(
+            "totals",
+            MetaData(),
+            Column("root_id", Integer),
+            Column("value", Integer),
+        )
+
+        descendants = select(nodes).where(
+            nodes.c.parent_id.is_(None)
+        ).cte("descendants", recursive=True)
+        recursive_alias = descendants.alias("d")
+        descendants = descendants.union_all(
+            select(edges).join(
+                recursive_alias,
+                edges.c.parent_id == recursive_alias.c.id,
+            )
+        )
+        statement = (
+            update(totals)
+            .where(totals.c.root_id == descendants.c.id)
+            .values(value=1)
+        )
+
+        analysis = sql_util.analyze_table_dependencies(statement)
+
+        eq_(
+            [(item.schema, item.name) for item in analysis.tables_read],
+            [(None, "edges"), (None, "nodes")],
+        )
+        eq_(
+            [(item.schema, item.name) for item in analysis.tables_written],
+            [(None, "totals")],
+        )
+        eq_(analysis.unknown, ())
+        eq_(analysis.has_unknown, False)
+
+    def test_table_dependencies_select_aliases_subqueries_and_text(self):
+        metadata = MetaData()
+        orders = Table(
+            "orders",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("customer_id", Integer),
+        )
+        customers = Table(
+            "customers",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("name", String(30)),
+        )
+        order_alias = orders.alias("o")
+        nested = select(customers).cte("nested_customer")
+        nested_query = select(nested).subquery("nested_query")
+        statement = (
+            select(order_alias)
+            .select_from(
+                order_alias.join(
+                    nested_query,
+                    order_alias.c.customer_id == nested_query.c.id,
+                )
+            )
+            .where(text("unknown predicate"))
+        )
+
+        analysis = sql_util.analyze_table_dependencies(statement)
+
+        eq_(
+            [(item.schema, item.name) for item in analysis.tables_read],
+            [(None, "customers"), (None, "orders")],
+        )
+        read_paths = {
+            item.name: item.paths for item in analysis.tables_read
+        }
+        assert any(part == "alias:o" for part in read_paths["orders"][0])
+        assert any(
+            part == "cte:nested_customer"
+            for part in read_paths["customers"][0]
+        )
+        assert any(
+            part == "subquery:nested_query"
+            for part in read_paths["customers"][0]
+        )
+        assert "nested_customer" not in dict(
+            (item.name, item) for item in analysis.tables_read
+        )
+        eq_(len(analysis.unknown), 1)
+        eq_(analysis.unknown[0].operation, "read")
+        eq_(analysis.unknown[0].kind, "TextClause")
+        eq_(analysis.unknown[0].text, "unknown predicate")
+
+    def test_table_dependencies_insert_from_select_and_returning(self):
+        metadata = MetaData()
+        source = Table(
+            "source",
+            metadata,
+            Column("id", Integer, primary_key=True),
+        )
+        other = Table(
+            "other",
+            metadata,
+            Column("id", Integer, primary_key=True),
+        )
+        target = Table(
+            "target",
+            metadata,
+            Column("id", Integer, primary_key=True),
+        )
+        statement = (
+            target.insert()
+            .from_select(
+                [target.c.id],
+                select(source.c.id).where(source.c.id == other.c.id),
+            )
+            .returning(target.c.id)
+        )
+
+        analysis = sql_util.analyze_table_dependencies(statement)
+
+        eq_(
+            [(item.schema, item.name) for item in analysis.tables_read],
+            [(None, "other"), (None, "source")],
+        )
+        eq_(
+            [(item.schema, item.name) for item in analysis.tables_written],
+            [(None, "target")],
+        )
+
+    def test_table_dependencies_does_not_compile_or_mutate(self):
+        metadata = MetaData()
+        source = Table(
+            "source",
+            metadata,
+            Column("id", Integer, primary_key=True),
+        )
+        target = Table(
+            "target",
+            metadata,
+            Column("id", Integer, primary_key=True),
+        )
+        statement = (
+            target.insert()
+            .from_select([target.c.id], select(source.c.id))
+            .returning(target.c.id)
+        )
+        cache_key = statement._generate_cache_key()
+
+        analysis = sql_util.analyze_table_dependencies(statement)
+
+        eq_(
+            [(item.schema, item.name) for item in analysis.tables_read],
+            [(None, "source")],
+        )
+        eq_(
+            [(item.schema, item.name) for item in analysis.tables_written],
+            [(None, "target")],
+        )
+        eq_(statement._generate_cache_key(), cache_key)
+
+    def test_table_dependencies_unknown_text_is_not_empty(self):
+        analysis = sql_util.analyze_table_dependencies(
+            text("update unknown_table set data = 'value'")
+        )
+
+        eq_(analysis.tables_read, ())
+        eq_(analysis.tables_written, ())
+        eq_(analysis.has_unknown, True)
+        eq_(analysis.unknown[0].operation, "read")
+        eq_(analysis.unknown[0].kind, "TextClause")
+        eq_(
+            analysis.unknown[0].text,
+            "update unknown_table set data = 'value'",
+        )
+
+    def test_table_dependencies_unknown_dml_value_operation(self):
+        metadata = MetaData()
+        target = Table(
+            "target",
+            metadata,
+            Column("data", String(20)),
+        )
+        statement = target.update().values(
+            data=text("unknown expression")
+        )
+
+        analysis = sql_util.analyze_table_dependencies(statement)
+
+        eq_(len(analysis.unknown), 1)
+        eq_(analysis.unknown[0].operation, "write")
+
+    def test_table_dependencies_dml_value_subquery_is_read(self):
+        metadata = MetaData()
+        target = Table(
+            "target",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("value", Integer),
+        )
+        source = Table(
+            "source",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("value", Integer),
+        )
+        value_subquery = select(source.c.value).where(
+            source.c.id == target.c.id
+        ).scalar_subquery()
+        statement = target.update().values(value=value_subquery)
+
+        analysis = sql_util.analyze_table_dependencies(statement)
+
+        eq_(
+            [(item.schema, item.name) for item in analysis.tables_read],
+            [(None, "source"), (None, "target")],
+        )
+        eq_(
+            [(item.schema, item.name) for item in analysis.tables_written],
+            [(None, "target")],
+        )
+        eq_(analysis.unknown, ())
+
     def test_column_element_no_visit(self):
         class MyElement(ColumnElement):
             _traverse_internals = []

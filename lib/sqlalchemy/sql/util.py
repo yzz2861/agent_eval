@@ -24,6 +24,7 @@ from typing import Iterable
 from typing import Iterator
 from typing import List
 from typing import Literal
+from typing import NamedTuple
 from typing import Optional
 from typing import overload
 from typing import Protocol
@@ -48,6 +49,7 @@ from .ddl import sort_tables as sort_tables  # noqa: F401
 from .elements import _find_columns as _find_columns
 from .elements import _label_reference
 from .elements import _textual_label_reference
+from .elements import AbstractTextClause
 from .elements import BindParameter
 from .elements import ClauseElement
 from .elements import ColumnClause
@@ -57,14 +59,19 @@ from .elements import KeyedColumnElement
 from .elements import Label
 from .elements import NamedColumn
 from .elements import Null
+from .elements import TextClause
+from .elements import TString
 from .elements import UnaryExpression
 from .schema import Column
 from .selectable import Alias
+from .selectable import AliasedReturnsRows
+from .selectable import CTE
 from .selectable import FromClause
 from .selectable import FromGrouping
 from .selectable import Join
 from .selectable import ScalarSelect
 from .selectable import SelectBase
+from .selectable import TextualSelect
 from .selectable import TableClause
 from .visitors import _ET
 from .. import exc
@@ -364,6 +371,561 @@ def find_tables(
 
     visitors.traverse(clause, {}, _visitors)
     return tables
+
+
+class TableDependency(NamedTuple):
+    schema: Optional[str]
+    name: str
+    paths: Tuple[Tuple[str, ...], ...]
+
+
+class UnknownDependency(NamedTuple):
+    operation: str
+    kind: str
+    path: Tuple[str, ...]
+    text: Optional[str]
+
+
+class TableDependencyAnalysis(NamedTuple):
+    tables_read: Tuple[TableDependency, ...]
+    tables_written: Tuple[TableDependency, ...]
+    unknown: Tuple[UnknownDependency, ...]
+
+    @property
+    def has_unknown(self) -> bool:
+        return bool(self.unknown)
+
+
+def analyze_table_dependencies(
+    statement: ClauseElement,
+) -> TableDependencyAnalysis:
+    """Statically identify physical tables read and written by a statement.
+
+    The traversal is limited to the in-memory expression structure. It does
+    not compile or execute SQL and therefore never opens a database
+    connection.  CTE, subquery, and alias names are resolved to their
+    underlying structures and are not reported as physical table names.
+    Textual SQL is reported as unknown because its dependencies cannot be
+    inspected statically.
+    """
+
+    reads: Dict[Tuple[Optional[str], str], List[Tuple[str, ...]]] = {}
+    writes: Dict[Tuple[Optional[str], str], List[Tuple[str, ...]]] = {}
+    unknown: Dict[
+        Tuple[str, str, Tuple[str, ...]], Optional[str]
+    ] = {}
+    active_ctes: set[object] = set()
+    frame_stack: List[Dict[str, Any]] = []
+    dml_mode_stack: List[str] = []
+    read_paths: set[Tuple[str, ...]] = set()
+    write_paths: set[Tuple[str, ...]] = set()
+    unknown_paths: set[Tuple[str, str, Tuple[str, ...]]] = set()
+
+    def describe(node: ClauseElement) -> str:
+        visit_name = getattr(node, "__visit_name__", None)
+        name = getattr(node, "name", None)
+        if name is not None:
+            return f"{visit_name or type(node).__name__}:{name}"
+        return visit_name or type(node).__name__
+
+    def node_label(node: ClauseElement) -> str:
+        if isinstance(node, TableClause):
+            return f"table:{node.fullname}"
+        return describe(node)
+
+    def text_of(node: AbstractTextClause) -> Optional[str]:
+        return getattr(node, "text", None)
+
+    def current_frame() -> Optional[Dict[str, Any]]:
+        return frame_stack[-1] if frame_stack else None
+
+    def suppress_target(node: ClauseElement) -> bool:
+        node_id = id(node)
+        for frame in reversed(frame_stack):
+            if frame["dml"]:
+                dml_targets = (
+                    frame["targets"]
+                    if frame["suppress_targets"]
+                    else frame["all_targets"] - frame["targets"]
+                )
+                if node_id in dml_targets:
+                    if node_id in frame["explicit"]:
+                        return False
+                    return True
+                return False
+            if id(node) in frame["explicit"]:
+                return False
+        return False
+
+    def is_explicit(node: ClauseElement) -> bool:
+        frame = current_frame()
+        return frame is not None and id(node) in frame["explicit"]
+
+    def saw_explicit_reference(node: ClauseElement) -> bool:
+        frame = current_frame()
+        return (
+            frame is not None
+            and id(node) in frame["seen_explicit_references"]
+        )
+
+    def mark_explicit_surfaces(node: ClauseElement) -> None:
+        frame = current_frame()
+        if frame is not None:
+            frame["seen_explicit_references"].update(
+                explicit_surface_ids(node)
+            )
+
+    def processing_explicit(node: ClauseElement) -> bool:
+        node_id = id(node)
+        return any(
+            frame["processing_explicit"] == node_id
+            or node_id in frame.get("processing_explicit_children", set())
+            for frame in frame_stack
+        )
+
+    def explicit_surface_ids(node: ClauseElement) -> set[int]:
+        ids = set()
+        stack = [node]
+        while stack:
+            current = stack.pop()
+            if id(current) in ids:
+                continue
+            ids.add(id(current))
+            if isinstance(current, Join):
+                stack.extend((current.left, current.right))
+            elif isinstance(current, FromGrouping):
+                stack.append(current.element)
+        return ids
+
+    def append_path(
+        collection: Dict[Tuple[Optional[str], str], List[Tuple[str, ...]]],
+        seen: set[Tuple[str, ...]],
+        table: TableClause,
+        path: Tuple[str, ...],
+    ) -> None:
+        if path in seen:
+            return
+        seen.add(path)
+        collection.setdefault((table.schema, table.name), []).append(path)
+
+    def add_unknown(
+        node: ClauseElement,
+        path: Tuple[str, ...],
+        *,
+        written: bool = False,
+    ) -> None:
+        operation = "write" if written else "read"
+        key = (operation, type(node).__name__, path)
+        if key not in unknown_paths:
+            unknown_paths.add(key)
+            unknown[key] = (
+                text_of(node)
+                if isinstance(node, AbstractTextClause)
+                else None
+            )
+
+    def add_write_surface(
+        node: ClauseElement, path: Tuple[str, ...]
+    ) -> None:
+        if isinstance(node, TableClause):
+            append_path(writes, write_paths, node, path)
+        elif isinstance(node, Join):
+            add_write_surface(node.left, path + ("join:left",))
+            add_write_surface(node.right, path + ("join:right",))
+        elif isinstance(node, CTE):
+            add_unknown(node, path, written=True)
+        elif isinstance(node, AliasedReturnsRows):
+            underlying = node.element
+            write_path = path
+            if isinstance(underlying, TableClause):
+                append_path(writes, write_paths, underlying, write_path)
+            elif isinstance(underlying, SelectBase):
+                if isinstance(underlying, TextualSelect):
+                    add_unknown(underlying.element, write_path, written=True)
+                else:
+                    process_select(underlying, write_path)
+            else:
+                add_unknown(node, write_path, written=True)
+        elif isinstance(node, FromGrouping):
+            add_write_surface(node.element, path + ("grouping",))
+        else:
+            add_unknown(node, path, written=True)
+
+    def cte_root(node: CTE) -> CTE:
+        reference = node._get_reference_cte()
+        cte_alias = getattr(reference, "_cte_alias", None)
+        return cte_alias if cte_alias is not None else reference
+
+    def process_cte(node: CTE, path: Tuple[str, ...]) -> None:
+        root = cte_root(node)
+        root_id = id(root)
+        is_cte_alias = getattr(node, "_cte_alias", None) is not None
+        if is_cte_alias and root_id in active_ctes:
+            return
+        if root_id in active_ctes:
+            if not is_cte_alias:
+                process_affixes(node, path)
+                process(node.element, path + ("cte_body",))
+            return
+        active_ctes.add(root_id)
+        try:
+            definition = root if is_cte_alias else node
+            process_affixes(definition, path)
+            process(definition.element, path + ("cte_body",))
+        finally:
+            active_ctes.remove(root_id)
+
+    def process_affixes(node: ClauseElement, path: Tuple[str, ...]) -> None:
+        for index, item in enumerate(getattr(node, "_prefixes", ())):
+            process(item[0], path + (f"prefix:{index}",))
+        for index, item in enumerate(getattr(node, "_suffixes", ())):
+            process(item[0], path + (f"suffix:{index}",))
+
+    def process_sequence(
+        items: Iterable[Any],
+        path: Tuple[str, ...],
+        label: str,
+    ) -> None:
+        for index, item in enumerate(items):
+            process(item, path + (f"{label}:{index}",))
+
+    def process_select(node: ClauseElement, path: Tuple[str, ...]) -> None:
+        process_affixes(node, path)
+        process_sequence(
+            getattr(node, "_independent_ctes", ()), path, "independent_cte"
+        )
+
+        if isinstance(node, TextualSelect):
+            add_unknown(node.element, path + ("textual_select",))
+            return
+
+        dml_mode_stack.append("read")
+        explicit: set[int] = set()
+        frame = {
+            "dml": False,
+            "explicit": explicit,
+            "targets": set(),
+            "all_targets": set(),
+            "suppress_targets": False,
+            "seen_explicit_references": set(),
+            "processing_explicit": None,
+            "processing_explicit_children": set(),
+        }
+        frame_stack.append(frame)
+        try:
+            if hasattr(node, "selects"):
+                process_sequence(node.selects, path, "compound_select")
+            elif hasattr(node, "_iterate_from_elements"):
+                from_nodes = list(node._iterate_from_elements())
+                explicit.update(id(item) for item in from_nodes)
+                for index, from_node in enumerate(from_nodes):
+                    frame["processing_explicit"] = id(from_node)
+                    frame["processing_explicit_children"] = (
+                        explicit_surface_ids(from_node)
+                    )
+                    mark_explicit_surfaces(from_node)
+                    process(from_node, path + (f"from:{index}",))
+                    frame["processing_explicit"] = None
+                    frame["processing_explicit_children"] = set()
+            else:
+                process(node.element, path + ("element",))
+
+            if isinstance(node, ScalarSelect):
+                return
+
+            setup_joins = getattr(node, "_setup_joins", ())
+            for index, setup_join in enumerate(setup_joins):
+                target, onclause, from_, _flags = setup_join
+                setup_path = path + (f"setup_join:{index}",)
+                if from_ is not None:
+                    frame["processing_explicit"] = id(from_)
+                    frame["processing_explicit_children"] = (
+                        explicit_surface_ids(from_)
+                    )
+                    process(from_, setup_path + ("from",))
+                    frame["processing_explicit"] = None
+                    frame["processing_explicit_children"] = set()
+                if target is not None and not isinstance(target, str):
+                    if id(target) not in explicit:
+                        explicit.update(explicit_surface_ids(target))
+                        frame["processing_explicit"] = id(target)
+                        frame["processing_explicit_children"] = (
+                            explicit_surface_ids(target)
+                        )
+                        process(target, setup_path + ("target",))
+                        frame["processing_explicit"] = None
+                        frame["processing_explicit_children"] = set()
+                if onclause is not None and not isinstance(onclause, str):
+                    process(onclause, setup_path + ("onclause",))
+
+            attribute_names = (
+                "_raw_columns",
+                "_where_criteria",
+                "_having_criteria",
+                "_order_by_clauses",
+                "_group_by_clauses",
+                "_limit_clause",
+                "_offset_clause",
+                "_fetch_clause",
+                "_for_update_arg",
+                "_distinct_on",
+                "_post_select_clause",
+                "_pre_columns_clause",
+                "_post_criteria_clause",
+                "_post_body_clause",
+            )
+            for attribute_name in attribute_names:
+                value = getattr(node, attribute_name, None)
+                if value is None:
+                    continue
+                if isinstance(value, ClauseElement):
+                    process(value, path + (attribute_name,))
+                else:
+                    process_sequence(value, path, attribute_name)
+        finally:
+            frame_stack.pop()
+            dml_mode_stack.pop()
+
+    def process_dml(node: ClauseElement, path: Tuple[str, ...]) -> None:
+        process_affixes(node, path)
+        target_surfaces = list(tables_from_leftmost(node.table))
+        primary_target = target_surfaces[0]
+        add_write_surface(primary_target, path + ("target",))
+
+        target_ids = set()
+        target_surface = [primary_target]
+        while target_surface:
+            target = target_surface.pop()
+            target_ids.add(id(target))
+            if isinstance(target, AliasedReturnsRows):
+                target_surface.append(target.element)
+            elif isinstance(target, FromGrouping):
+                target_surface.append(target.element)
+            elif isinstance(target, Join):
+                target_surface.extend((target.left, target.right))
+
+        frame = {
+            "dml": True,
+            "explicit": set(),
+            "targets": set(target_ids),
+            "all_targets": set(target_ids),
+            "suppress_targets": True,
+            "seen_explicit_references": set(),
+            "processing_explicit": None,
+            "processing_explicit_children": set(),
+        }
+        frame_stack.append(frame)
+        try:
+            dml_mode_stack.append("read")
+            for target in target_surfaces[1:]:
+                frame["explicit"].update(explicit_surface_ids(target))
+                frame["processing_explicit"] = id(target)
+                frame["processing_explicit_children"] = (
+                    explicit_surface_ids(target)
+                )
+                process(target, path + ("extra_target",))
+                frame["processing_explicit"] = None
+                frame["processing_explicit_children"] = set()
+
+            process_sequence(
+                getattr(node, "_independent_ctes", ()),
+                path,
+                "independent_cte",
+            )
+
+            def process_dml_item(
+                item: Any, item_path: Tuple[str, ...], mode: str
+            ) -> None:
+                if item is None:
+                    return
+                if isinstance(item, ClauseElement):
+                    process(item, item_path)
+                elif isinstance(item, dict):
+                    for value in item.values():
+                        dml_mode_stack.append(mode)
+                        process_dml_item(
+                            value, item_path + ("value",), mode
+                        )
+                        dml_mode_stack.pop()
+                elif isinstance(item, (list, tuple)):
+                    dml_mode_stack.append(mode)
+                    process_sequence(item, item_path, "item")
+                    dml_mode_stack.pop()
+
+            fields = (
+                "_values",
+                "select",
+                "_post_values_clause",
+                "_post_criteria_clause",
+                "_returning",
+                "_return_defaults_columns",
+                "_supplemental_returning",
+                "_where_criteria",
+                "_extra_froms",
+            )
+            for field in fields:
+                value = getattr(node, field, None)
+                if value is None:
+                    continue
+                field_path = path + (field,)
+                mode = "write" if field == "_values" else "read"
+                if field == "_extra_froms":
+                    for index, item in enumerate(value):
+                        frame["explicit"].update(explicit_surface_ids(item))
+                        frame["processing_explicit"] = id(item)
+                        frame["processing_explicit_children"] = (
+                            explicit_surface_ids(item)
+                        )
+                        mark_explicit_surfaces(item)
+                        process(item, field_path + (f"item:{index}",))
+                        frame["processing_explicit"] = None
+                        frame["processing_explicit_children"] = set()
+                else:
+                    dml_mode_stack.append(mode)
+                    process_dml_item(value, field_path, mode)
+                    dml_mode_stack.pop()
+        finally:
+            dml_mode_stack.pop()
+            frame_stack.pop()
+
+    def process(
+        node: Any,
+        path: Tuple[str, ...],
+    ) -> None:
+        if node is None or not isinstance(node, ClauseElement):
+            return
+
+        path = path + (node_label(node),)
+
+        if isinstance(node, TextClause):
+            add_unknown(
+                node,
+                path,
+                written=dml_mode_stack
+                and dml_mode_stack[-1] == "write",
+            )
+            return
+
+        if isinstance(node, TString):
+            add_unknown(
+                node,
+                path,
+                written=dml_mode_stack
+                and dml_mode_stack[-1] == "write",
+            )
+            process_sequence(node.parts, path, "tstring_part")
+            return
+
+        if isinstance(node, CTE):
+            if saw_explicit_reference(node) and not processing_explicit(
+                node
+            ):
+                return
+            process_cte(node, path)
+            return
+
+        if getattr(node, "is_dml", False):
+            process_dml(node, path)
+            return
+
+        if isinstance(node, TextualSelect):
+            process_select(node, path)
+            return
+
+        if isinstance(node, AliasedReturnsRows):
+            cte_alias = getattr(node, "_cte_alias", None)
+            if cte_alias is not None:
+                if not processing_explicit(node):
+                    if is_explicit(node) or suppress_target(node):
+                        return
+                process_cte(cte_alias, path + ("cte_alias",))
+                return
+            underlying = node.element
+            alias_path = path
+            if not processing_explicit(node) and (
+                is_explicit(node) or suppress_target(node)
+            ):
+                return
+            if isinstance(underlying, TableClause):
+                append_path(reads, read_paths, underlying, alias_path)
+            else:
+                if isinstance(underlying, SelectBase):
+                    process_select(underlying, alias_path)
+                else:
+                    process(underlying, alias_path)
+            return
+
+        if isinstance(node, TableClause):
+            if not processing_explicit(node) and (
+                is_explicit(node) or suppress_target(node)
+            ):
+                return
+            append_path(reads, read_paths, node, path)
+            return
+
+        if isinstance(node, Join):
+            if not processing_explicit(node) and suppress_target(node):
+                return
+            process(node.left, path + ("left",))
+            process(node.right, path + ("right",))
+            process(node.onclause, path + ("onclause",))
+            return
+
+        if isinstance(node, FromGrouping):
+            process(node.element, path + ("element",))
+            return
+
+        if isinstance(node, ColumnClause) and node.table is not None:
+            if processing_explicit(node.table):
+                return
+            if suppress_target(node.table):
+                return
+            if is_explicit(node.table):
+                return
+            process(node.table, path + ("column_table",))
+            return
+
+        if isinstance(node, ScalarSelect) or (
+            isinstance(node, SelectBase)
+            and not isinstance(node, TableClause)
+        ):
+            process_select(node, path)
+            return
+
+        if isinstance(node, ClauseElement):
+            for child in node.get_children():
+                process(child, path)
+
+    process(statement, ("statement",))
+
+    def build_dependencies(
+        collection: Dict[Tuple[Optional[str], str], List[Tuple[str, ...]]]
+    ) -> Tuple[TableDependency, ...]:
+        return tuple(
+            TableDependency(
+                schema=key[0],
+                name=key[1],
+                paths=tuple(collection[key]),
+            )
+            for key in sorted(
+                collection,
+                key=lambda item: (item[0] or "", item[1]),
+            )
+        )
+
+    return TableDependencyAnalysis(
+        tables_read=build_dependencies(reads),
+        tables_written=build_dependencies(writes),
+        unknown=tuple(
+            UnknownDependency(
+                operation=key[0],
+                kind=key[1],
+                path=key[2],
+                text=text_value,
+            )
+            for key, text_value in sorted(unknown.items())
+        ),
+    )
 
 
 def unwrap_order_by(clause: Any) -> Any:
