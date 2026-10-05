@@ -36,6 +36,7 @@ RSpec.configure do |config|
     Flipper::Cloud::Telemetry.reset if defined?(Flipper::Cloud::Telemetry) && Flipper::Cloud::Telemetry.respond_to?(:reset)
     Flipper::Poller.reset if defined?(Flipper::Poller)
     Flipper.unregister_groups
+    Flipper.unregister_layers
     Flipper.configuration = nil
   end
 

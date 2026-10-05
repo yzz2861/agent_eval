@@ -186,6 +186,73 @@ module Flipper
   def groups_registry=(registry)
     @groups_registry = registry
   end
+
+  # Public: Register a layer that splits a shared audience into fixed,
+  # non-overlapping bucket ranges assigned to features. Features in a layer
+  # are mutually exclusive per actor: an actor is claimed by at most one
+  # feature in the layer, and only that feature's gates are consulted.
+  #
+  # name - The Symbol or String name of the layer.
+  # block - Optional block that receives the layer to assign ranges.
+  #
+  # Examples
+  #
+  #   Flipper.register_layer(:checkout) do |layer|
+  #     layer.assign :new_checkout, 0...50
+  #     layer.assign :checkout_v2, 50...75
+  #   end
+  #
+  # Returns a Flipper::Layer.
+  # Raises Flipper::DuplicateLayer if the layer is already registered.
+  def register_layer(name)
+    layer = Layer.new(name)
+    layers_registry.add(layer.name, layer)
+    yield layer if block_given?
+    layer
+  rescue Registry::DuplicateKey
+    raise DuplicateLayer, "Layer #{name.inspect} has already been registered"
+  end
+
+  # Public: Fetches a registered layer by name.
+  #
+  # Returns a Flipper::Layer or nil.
+  def layer(name)
+    layers_registry.get(name)
+  end
+
+  # Public: All registered layers.
+  #
+  # Returns an Array of Flipper::Layer instances.
+  def layers
+    layers_registry.values
+  end
+
+  # Public: The layer a feature is assigned to, if any.
+  #
+  # Returns a Flipper::Layer or nil.
+  def layer_for(feature_name)
+    layers_registry.each do |_name, layer|
+      return layer if layer.include?(feature_name)
+    end
+    nil
+  end
+
+  # Public: Clears the layer registry.
+  #
+  # Returns nothing.
+  def unregister_layers
+    layers_registry.clear
+  end
+
+  # Internal: Registry of all layers.
+  def layers_registry
+    @layers_registry ||= Registry.new
+  end
+
+  # Internal: Change the layers_registry registry.
+  def layers_registry=(registry)
+    @layers_registry = registry
+  end
 end
 
 require 'flipper/actor'
@@ -205,6 +272,7 @@ require 'flipper/gate'
 require 'flipper/instrumenters/memory'
 require 'flipper/instrumenters/noop'
 require 'flipper/identifier'
+require 'flipper/layer'
 require 'flipper/middleware/memoizer'
 require 'flipper/middleware/setup_env'
 require 'flipper/poller'
@@ -226,5 +294,6 @@ require 'flipper/version'
 # touch Flipper concurrently during a parallel boot.
 Flipper.configuration
 Flipper.groups_registry
+Flipper.layers_registry
 
 require "flipper/engine" if defined?(Rails)

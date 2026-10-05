@@ -12,6 +12,13 @@ module Flipper
   # Raised when attempting to declare a group name that has already been used.
   class DuplicateGroup < Error; end
 
+  # Raised when attempting to register a layer name that has already been used.
+  class DuplicateLayer < Error; end
+
+  # Raised when a layer range overlaps a range already assigned to another
+  # feature in the same layer.
+  class LayerOverlap < Error; end
+
   # Raised when an invalid value is set to a configuration property
   class InvalidConfigurationValue < Flipper::Error
     def initialize(message = nil)

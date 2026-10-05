@@ -95,6 +95,18 @@ module Flipper
 
       # thing is left for backwards compatibility
       instrument(:enabled?, thing: actors&.first, actors: actors) do |payload|
+        # If this feature shares an audience layer with other features, the
+        # actor must be claimed by this feature's fixed bucket range before
+        # any gate is consulted, keeping features in the layer mutually
+        # exclusive per actor. Layer bucketing uses a separate hash domain
+        # from the percentage of actors gate, so the two stages stay
+        # independent. Only applies when actors are given: with no actor
+        # there is no one to exclude.
+        if actors && (layer = Flipper.layer_for(@name))
+          actors = actors.select { |actor| layer.assigned?(@name, actor) }
+          next false if actors.empty?
+        end
+
         context = FeatureCheckContext.new(
           feature_name: @name,
           values: gate_values,
