@@ -66,6 +66,9 @@ from pypika.enums import (
 )
 
 # noinspection PyUnresolvedReferences
+from pypika.merge import MergeQueryBuilder, MergeWhenClause
+
+# noinspection PyUnresolvedReferences
 from pypika.queries import (
     AliasedQuery,
     Column,
@@ -112,6 +115,7 @@ from pypika.utils import (
     FunctionException,
     GroupingException,
     JoinException,
+    MergeException,
     QueryException,
     RollupException,
     SetOperationException,

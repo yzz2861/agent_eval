@@ -39,6 +39,8 @@ if TYPE_CHECKING:
     else:
         from typing_extensions import Self
 
+    from pypika.merge import MergeQueryBuilder
+
 __author__ = "Timothy Heys"
 __email__ = "theys@kayak.com"
 
@@ -516,6 +518,27 @@ class Query:
         :return: QueryBuilder
         """
         return cls._builder(**kwargs).update(table)
+
+    @classmethod
+    def merge_into(cls, table: str | Table, **kwargs: Any) -> MergeQueryBuilder:
+        """
+        Query builder entry point.  Initializes query building and sets the target table to merge into.  When
+        using this function, the query becomes a MERGE statement.
+
+        :param table:
+            Type: Table or str
+
+            An instance of a Table object or a string table name.
+
+        :return: MergeQueryBuilder
+        """
+        return cls._merge_builder(**kwargs).merge_into(table)
+
+    @classmethod
+    def _merge_builder(cls, **kwargs: Any) -> MergeQueryBuilder:
+        from pypika.merge import MergeQueryBuilder
+
+        return MergeQueryBuilder(**kwargs)
 
     @classmethod
     def Table(cls, table_name: str, **kwargs) -> _TableClass:

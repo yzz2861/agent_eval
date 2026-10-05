@@ -6,6 +6,7 @@ from copy import copy
 from typing import Any
 
 from pypika.enums import Dialects
+from pypika.merge import MergeQueryBuilder, MergeWhenClause
 from pypika.queries import (
     CreateQueryBuilder,
     Database,
@@ -27,6 +28,7 @@ from pypika.terms import (
     ValueWrapper,
 )
 from pypika.utils import QueryException, builder, format_alias_sql, format_quotes
+from pypika.utils import MergeException
 
 
 class SnowflakeQuery(Query):
@@ -414,6 +416,10 @@ class PostgreSQLQuery(Query):
     def _builder(cls, **kwargs) -> PostgreSQLQueryBuilder:
         return PostgreSQLQueryBuilder(**kwargs)
 
+    @classmethod
+    def _merge_builder(cls, **kwargs: Any) -> PostgreSQLMergeQueryBuilder:
+        return PostgreSQLMergeQueryBuilder(**kwargs)
+
 
 class PostgreSQLQueryBuilder(QueryBuilder):
     ALIAS_QUOTE_CHAR = '"'
@@ -676,6 +682,20 @@ class PostgreSQLQueryBuilder(QueryBuilder):
         return querystring
 
 
+class PostgreSQLMergeQueryBuilder(MergeQueryBuilder):
+    """
+    MERGE builder for PostgreSQL (15+). PostgreSQL does not support the WHEN NOT MATCHED BY SOURCE clause.
+    """
+
+    ALIAS_QUOTE_CHAR = '"'
+    QUERY_CLS = PostgreSQLQuery
+
+    SUPPORTS_NOT_MATCHED_BY_SOURCE = False
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(dialect=Dialects.POSTGRESQL, **kwargs)
+
+
 class RedshiftQuery(Query):
     """
     Defines a query class for use with Amazon Redshift.
@@ -698,6 +718,10 @@ class MSSQLQuery(Query):
     @classmethod
     def _builder(cls, **kwargs: Any) -> MSSQLQueryBuilder:
         return MSSQLQueryBuilder(**kwargs)
+
+    @classmethod
+    def _merge_builder(cls, **kwargs: Any) -> MSSQLMergeQueryBuilder:
+        return MSSQLMergeQueryBuilder(**kwargs)
 
 
 class MSSQLQueryBuilder(FetchNextAndOffsetRowsQueryBuilder):
@@ -759,6 +783,46 @@ class MSSQLQueryBuilder(FetchNextAndOffsetRowsQueryBuilder):
             distinct="DISTINCT " if self._distinct else "",
             select=",".join(term.get_sql(with_alias=True, subquery=True, **kwargs) for term in self._selects),
         )
+
+
+class MSSQLMergeQueryBuilder(MergeQueryBuilder):
+    """
+    MERGE builder for Microsoft SQL Server. SQL Server requires the MERGE statement to be terminated with a
+    semicolon and restricts how many WHEN clauses may appear per match group:
+
+    - WHEN MATCHED: at most two clauses, one UPDATE and one DELETE.
+    - WHEN NOT MATCHED [BY TARGET]: at most one clause.
+    - WHEN NOT MATCHED BY SOURCE: at most two clauses, one UPDATE and one DELETE.
+    """
+
+    QUERY_CLS = MSSQLQuery
+
+    MAX_CLAUSES_PER_GROUP = {
+        MergeWhenClause.MATCHED: 2,
+        MergeWhenClause.NOT_MATCHED: 1,
+        MergeWhenClause.NOT_MATCHED_BY_SOURCE: 2,
+    }
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(dialect=Dialects.MSSQL, **kwargs)
+
+    def get_sql(self, **kwargs: Any) -> str:
+        return super().get_sql(**kwargs) + ";"
+
+    def _validate_group_rules(self, clause: MergeWhenClause, group: list[MergeWhenClause]) -> None:
+        max_clauses = self.MAX_CLAUSES_PER_GROUP[clause.match_type]
+        if len(group) >= max_clauses:
+            raise MergeException(
+                "SQL Server allows at most {max} WHEN {match_type} clause(s) in a MERGE statement".format(
+                    max=max_clauses, match_type=clause.match_type
+                )
+            )
+        if any(existing.action == clause.action for existing in group):
+            raise MergeException(
+                "SQL Server does not allow two {action} actions in WHEN {match_type} clauses".format(
+                    action=clause.action, match_type=clause.match_type
+                )
+            )
 
 
 class ClickHouseQuery(Query):
@@ -887,7 +951,7 @@ class ClickHouseQueryBuilder(QueryBuilder):
         return super()._apply_pagination(querystring, **kwargs)
 
     def _limit_by_sql(self, **kwargs: Any) -> str:
-        (n, offset, by) = self._limit_by
+        n, offset, by = self._limit_by
         by = ",".join(term.get_sql(with_alias=True, **kwargs) for term in by)
         if offset != 0:
             return f" LIMIT {n} OFFSET {offset} BY ({by})"

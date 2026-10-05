@@ -39,6 +39,10 @@ class RollupException(Exception):
     pass
 
 
+class MergeException(QueryException):
+    pass
+
+
 class DialectNotSupported(Exception):
     pass
 
