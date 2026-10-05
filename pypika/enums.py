@@ -116,6 +116,13 @@ class SqlTypeLength:
 
 
 class SqlTypes:
+    INT = SqlType("INT")
+    BIGINT = SqlType("BIGINT")
+    SMALLINT = SqlType("SMALLINT")
+    TINYINT = SqlType("TINYINT")
+    MEDIUMINT = SqlType("MEDIUMINT")
+    DECIMAL = SqlType("DECIMAL")
+    DOUBLE = SqlType("DOUBLE")
     BOOLEAN = "BOOLEAN"
     INTEGER = "INTEGER"
     FLOAT = "FLOAT"
@@ -126,7 +133,10 @@ class SqlTypes:
 
     DATE = "DATE"
     TIME = "TIME"
+    DATETIME = SqlType("DATETIME")
     TIMESTAMP = "TIMESTAMP"
+    YEAR = SqlType("YEAR")
+    JSON = SqlType("JSON")
 
     CHAR = SqlType("CHAR")
     VARCHAR = SqlType("VARCHAR")

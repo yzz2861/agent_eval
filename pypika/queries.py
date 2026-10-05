@@ -23,6 +23,7 @@ from pypika.terms import (
     ValueWrapper,
 )
 from pypika.utils import (
+    DialectNotSupported,
     JoinException,
     QueryException,
     RollupException,
@@ -1264,8 +1265,16 @@ class QueryBuilder(Selectable, Term):
         kwargs.setdefault("as_keyword", self.as_keyword)
         kwargs.setdefault("dialect", self.dialect)
 
+    def _validate_dialect_specific_selectables(self) -> None:
+        from pypika.json_table import JSONTable
+
+        json_tables = [*self._from, *(join.item for join in self._joins)]
+        if self.dialect != Dialects.MYSQL and any(isinstance(selectable, JSONTable) for selectable in json_tables):
+            raise DialectNotSupported("JSON_TABLE is only supported by MySQL 8.0 and later.")
+
     def get_sql(self, with_alias: bool = False, subquery: bool = False, **kwargs: Any) -> str:
         self._set_kwargs_defaults(kwargs)
+        self._validate_dialect_specific_selectables()
         if not (self._selects or self._insert_table or self._delete_from or self._update_table):
             return ""
         if self._insert_table and not (self._selects or self._values):

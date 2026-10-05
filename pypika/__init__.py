@@ -81,6 +81,17 @@ from pypika.queries import (
     make_tables as Tables,
 )
 
+from pypika.json_table import (
+    JSONTable,
+    JSONTableColumn,
+    JSONTableEmptyOption,
+    JSONTableErrorOption,
+    JSONTableExistsPathColumn,
+    JSONTableNestedPath,
+    JSONTableOrdinalityColumn,
+    JSONTablePathColumn,
+)
+
 # noinspection PyUnresolvedReferences
 from pypika.terms import (
     JSON,
@@ -146,6 +157,14 @@ __all__ = (
     'Database',
     'Tables',
     'Columns',
+    'JSONTable',
+    'JSONTableColumn',
+    'JSONTableEmptyOption',
+    'JSONTableErrorOption',
+    'JSONTableExistsPathColumn',
+    'JSONTableNestedPath',
+    'JSONTableOrdinalityColumn',
+    'JSONTablePathColumn',
     'Array',
     'Bracket',
     'Case',
