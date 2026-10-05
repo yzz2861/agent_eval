@@ -117,6 +117,10 @@ from .expression import values as values
 from .expression import within_group as within_group
 from .expression import WriteableColumnCollection as WriteableColumnCollection
 from .visitors import ClauseVisitor as ClauseVisitor
+from .util import analyze_dependencies as analyze_dependencies
+from .util import DependencySet as DependencySet
+from .util import TableDependency as TableDependency
+from .util import UnknownDependency as UnknownDependency
 
 
 def __go(lcls: Any) -> None:

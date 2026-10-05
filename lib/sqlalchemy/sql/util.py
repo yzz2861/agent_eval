@@ -20,10 +20,12 @@ from typing import Callable
 from typing import cast
 from typing import Collection
 from typing import Dict
+from typing import FrozenSet
 from typing import Iterable
 from typing import Iterator
 from typing import List
 from typing import Literal
+from typing import NamedTuple
 from typing import Optional
 from typing import overload
 from typing import Protocol
@@ -48,6 +50,7 @@ from .ddl import sort_tables as sort_tables  # noqa: F401
 from .elements import _find_columns as _find_columns
 from .elements import _label_reference
 from .elements import _textual_label_reference
+from .elements import AbstractTextClause
 from .elements import BindParameter
 from .elements import ClauseElement
 from .elements import ColumnClause
@@ -60,12 +63,15 @@ from .elements import Null
 from .elements import UnaryExpression
 from .schema import Column
 from .selectable import Alias
+from .selectable import CTE
 from .selectable import FromClause
 from .selectable import FromGrouping
 from .selectable import Join
 from .selectable import ScalarSelect
 from .selectable import SelectBase
 from .selectable import TableClause
+from .selectable import TableValuedAlias
+from .selectable import TextualSelect
 from .visitors import _ET
 from .. import exc
 from .. import util
@@ -75,8 +81,8 @@ if typing.TYPE_CHECKING:
     from ._typing import _EquivalentColumnMap
     from ._typing import _LimitOffsetType
     from ._typing import _TypeEngineArgument
-    from .elements import AbstractTextClause
     from .elements import BinaryExpression
+    from .selectable import FromClause
     from .selectable import _JoinTargetElement
     from .selectable import _SelectIterable
     from .selectable import Selectable
@@ -364,6 +370,552 @@ def find_tables(
 
     visitors.traverse(clause, {}, _visitors)
     return tables
+
+
+class TableDependency(NamedTuple):
+    """Physical table dependencies found in a SQL expression.
+
+    Paths are tuples of human-readable structural references.  CTE,
+    subquery, and alias names are included in the path when applicable, but
+    they are never themselves treated as table names.
+    """
+
+    table: TableClause
+    read_paths: Tuple[Tuple[str, ...], ...]
+    write_paths: Tuple[Tuple[str, ...], ...]
+
+    @property
+    def paths(self) -> Tuple[Tuple[str, ...], ...]:
+        return self.read_paths + self.write_paths
+
+
+class UnknownDependency(NamedTuple):
+    """An opaque fragment that may contain unresolved dependencies."""
+
+    clause: ClauseElement
+    kind: str
+    paths: Tuple[Tuple[str, ...], ...]
+
+
+class DependencySet(NamedTuple):
+    """Read, write, and unknown dependencies of a Core SQL expression."""
+
+    tables: Tuple[TableDependency, ...]
+    unknown: Tuple[UnknownDependency, ...]
+
+    @property
+    def read_tables(self) -> Tuple[TableClause, ...]:
+        return tuple(
+            dependency.table
+            for dependency in self.tables
+            if dependency.read_paths
+        )
+
+    @property
+    def write_tables(self) -> Tuple[TableClause, ...]:
+        return tuple(
+            dependency.table
+            for dependency in self.tables
+            if dependency.write_paths
+        )
+
+
+def analyze_dependencies(expression: ClauseElement) -> DependencySet:
+    """Statically determine physical table dependencies of a Core expression.
+
+    The analysis traverses the expression structure only.  It never compiles
+    or executes SQL, clones the expression, or accesses compile state or
+    cache-key state.
+
+    ``text()`` and ``tstring()`` fragments are reported as unknown
+    dependencies because their contents are not represented by SQLAlchemy
+    expression structures.
+    """
+
+    if not isinstance(expression, ClauseElement):
+        raise exc.ArgumentError(
+            "analyze_dependencies() expects a SQL expression element; got %r"
+            % (expression,)
+        )
+
+    tables: Dict[Tuple[Optional[str], str], Dict[str, Any]] = {}
+    unknown: Dict[int, Dict[str, Any]] = {}
+
+    def describe(node: ClauseElement) -> str:
+        name = getattr(node, "name", None)
+        return (
+            f"{node.__visit_name__}:{name}"
+            if name is not None
+            else node.__visit_name__
+        )
+
+    def add_table(node: TableClause, path: Tuple[str, ...], operation: str) -> None:
+        key = (node.schema, node.name)
+        entry = tables.get(key)
+        if entry is None:
+            entry = {"table": node, "read": {}, "write": {}}
+            tables[key] = entry
+        entry[operation][path] = None
+
+    def add_unknown(node: ClauseElement, kind: str, path: Tuple[str, ...]) -> None:
+        entry = unknown.get(id(node))
+        if entry is None:
+            entry = {"clause": node, "kind": kind, "paths": {}}
+            unknown[id(node)] = entry
+        entry["paths"][path] = None
+
+    def clauses_in_value(value: Any) -> Iterator[ClauseElement]:
+        if isinstance(value, ClauseElement):
+            yield value
+        elif isinstance(value, dict):
+            for subvalue in value.values():
+                yield from clauses_in_value(subvalue)
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            for subvalue in value:
+                yield from clauses_in_value(subvalue)
+
+    def resolve_primary_target(
+        node: FromClause,
+    ) -> Tuple[Optional[TableClause], Tuple[str, ...], FrozenSet[int]]:
+        current: ClauseElement = node
+        target_path: List[str] = []
+        excluded: List[int] = []
+
+        while True:
+            target_path.append(describe(current))
+            excluded.append(id(current))
+
+            if isinstance(current, TableClause):
+                return current, tuple(target_path), frozenset(excluded)
+            if isinstance(current, Join):
+                current = current.left
+            elif isinstance(current, FromGrouping):
+                current = current.element
+            elif isinstance(current, Alias):
+                current = current.element
+            else:
+                return None, tuple(target_path), frozenset(excluded)
+
+    class Frame(NamedTuple):
+        node: ClauseElement
+        path: Tuple[str, ...]
+        skip_ctes: FrozenSet[int]
+        excluded: FrozenSet[int]
+
+    stack: List[Frame] = [
+        Frame(expression, (), frozenset(), frozenset())
+    ]
+
+    while stack:
+        frame = stack.pop()
+        node = frame.node
+        node_id = id(node)
+        path = frame.path + (describe(node),)
+
+        def push(
+            child: ClauseElement,
+            *,
+            excluded: FrozenSet[int] = frame.excluded,
+        ) -> None:
+            stack.append(Frame(child, path, frame.skip_ctes, excluded))
+
+        def push_nested(
+            child: ClauseElement,
+            nested_path: Tuple[str, ...],
+            *,
+            skip_ctes: FrozenSet[int] = frame.skip_ctes,
+            excluded: FrozenSet[int] = frozenset(),
+        ) -> None:
+            stack.append(Frame(child, nested_path, skip_ctes, excluded))
+
+        def is_aliased_select(element: ClauseElement) -> bool:
+            element_inner = getattr(element, "element", None)
+            return (
+                isinstance(element, Alias)
+                or element.__visit_name__ == "subquery"
+            ) and isinstance(element_inner, SelectBase)
+
+        def process_select(
+            statement: ClauseElement,
+            excluded: FrozenSet[int] = frozenset(),
+            base_path: Tuple[str, ...] = path,
+            seen_sources: Optional[set[int]] = None,
+        ) -> None:
+            statement_path = base_path
+            if seen_sources is None:
+                seen_sources = set()
+            sources = (
+                *statement._raw_columns,
+                *statement._from_obj,
+                *statement._where_criteria,
+                *statement._having_criteria,
+                *statement._order_by_clauses,
+                *statement._group_by_clauses,
+                *(statement._correlate or ()),
+                *(statement._correlate_except or ()),
+            )
+            for clause in sources:
+                expression_sources(
+                    clause,
+                    excluded,
+                    statement_path,
+                    seen_sources,
+                )
+
+            for target, onclause, from_, flags in statement._setup_joins:
+                if from_ is not None:
+                    add_read_source(
+                        from_, excluded, statement_path, seen_sources
+                    )
+                if not isinstance(target, str):
+                    add_read_source(
+                        target, excluded, statement_path, seen_sources
+                    )
+                if onclause is not None and not isinstance(onclause, str):
+                    expression_sources(
+                        onclause,
+                        excluded,
+                        statement_path,
+                        seen_sources,
+                    )
+
+            for clause in (
+                statement._limit_clause,
+                statement._offset_clause,
+                statement._fetch_clause,
+                statement._for_update_arg,
+                statement._post_select_clause,
+                statement._pre_columns_clause,
+                statement._post_criteria_clause,
+                statement._post_body_clause,
+            ):
+                if clause is not None:
+                    stack.append(
+                        Frame(
+                            clause,
+                            statement_path,
+                            frame.skip_ctes,
+                            frozenset(),
+                        )
+                    )
+            for cte in getattr(statement, "_independent_ctes", ()):
+                push_nested(cte, statement_path)
+
+        def expression_sources(
+            clause: ClauseElement,
+            excluded: FrozenSet[int] = frame.excluded,
+            base_path: Tuple[str, ...] = path,
+            seen_sources: Optional[set[int]] = None,
+        ) -> None:
+            if seen_sources is None:
+                seen_sources = set()
+            explicit_sources = tuple(_from_objects(clause))
+            explicit_ids: List[int] = []
+            explicit_table_ids: List[int] = []
+            for source in explicit_sources:
+                source_stack: List[ClauseElement] = [source]
+                while source_stack:
+                    current = source_stack.pop()
+                    if isinstance(current, TableClause):
+                        explicit_ids.append(id(current))
+                        explicit_table_ids.append(id(current))
+                    elif isinstance(current, CTE):
+                        explicit_ids.append(id(current))
+                    elif isinstance(current, FromGrouping):
+                        source_stack.append(current.element)
+                    elif isinstance(current, Alias):
+                        explicit_ids.append(id(current))
+                        source_stack.append(current.element)
+                    elif isinstance(current, Join):
+                        source_stack.extend((current.right, current.left))
+                add_read_source(source, excluded, base_path, seen_sources)
+
+            def scan(
+                element: ClauseElement,
+                *,
+                boundary: bool,
+                element_excluded: FrozenSet[int],
+                element_path: Tuple[str, ...] = base_path,
+            ) -> None:
+                next_path = element_path + (describe(element),)
+                if isinstance(element, AbstractTextClause):
+                    add_unknown(
+                        element,
+                        "text",
+                        next_path,
+                    )
+                    return
+
+                if isinstance(element, ScalarSelect):
+                    process_select(
+                        element.element,
+                        element_excluded,
+                        next_path + (describe(element.element),),
+                        None,
+                    )
+                    return
+
+                if isinstance(element, CTE):
+                    if id(element) in seen_sources:
+                        return
+                    if id(element) in explicit_ids:
+                        return
+                    push_nested(
+                        element,
+                        next_path,
+                        skip_ctes=frame.skip_ctes,
+                    )
+                    return
+
+                if is_aliased_select(element):
+                    if isinstance(element.element, TextualSelect):
+                        add_unknown(
+                            element.element,
+                            "text",
+                            next_path + (describe(element.element),),
+                        )
+                        return
+                    if id(element) in seen_sources:
+                        return
+                    if id(element) in explicit_ids:
+                        return
+                    push_nested(element, next_path)
+                    return
+
+                if element.__visit_name__ == "select" and boundary:
+                    process_select(
+                        element,
+                        element_excluded,
+                        next_path,
+                        None,
+                    )
+                    return
+
+                if (
+                    boundary
+                    and isinstance(element, ColumnClause)
+                    and element.table is not None
+                    and id(element.table) not in explicit_table_ids
+                    and id(element.table) not in element_excluded
+                ):
+                    add_read_source(
+                        element.table,
+                        element_excluded,
+                        next_path,
+                        seen_sources,
+                    )
+
+                for child in element.get_children():
+                    if isinstance(child, ClauseElement):
+                        scan(
+                            child,
+                            boundary=False,
+                            element_excluded=element_excluded,
+                            element_path=next_path,
+                        )
+
+            scan(
+                clause,
+                boundary=True,
+                element_excluded=excluded,
+            )
+
+        def add_read_source(
+            source: ClauseElement,
+            excluded: FrozenSet[int] = frame.excluded,
+            base_path: Tuple[str, ...] = path,
+            seen_sources: Optional[set[int]] = None,
+        ) -> None:
+            if seen_sources is not None and id(source) in seen_sources:
+                return
+            if seen_sources is not None:
+                seen_sources.add(id(source))
+            surface_stack: List[ClauseElement] = [source]
+            physical: List[TableClause] = []
+
+            while surface_stack:
+                current = surface_stack.pop()
+
+                if isinstance(current, TableClause):
+                    physical.append(current)
+                elif isinstance(
+                    current, (CTE, Alias, FromGrouping)
+                ) or current.__visit_name__ == "subquery":
+                    if isinstance(current, FromGrouping):
+                        surface_stack.append(current.element)
+                    elif is_aliased_select(current) and isinstance(
+                        current.element, TextualSelect
+                    ):
+                        add_unknown(
+                            current.element,
+                            "text",
+                            base_path
+                            + (describe(current), describe(current.element)),
+                        )
+                    elif (
+                        isinstance(current, CTE)
+                        and current._cte_alias is not None
+                    ):
+                        push(current, excluded=frozenset())
+                    else:
+                        push_nested(
+                            current,
+                            base_path,
+                            skip_ctes=frame.skip_ctes,
+                        )
+                elif isinstance(current, Join):
+                    surface_stack.extend((current.right, current.left))
+                else:
+                    push(current, excluded=frozenset())
+
+            for table in physical:
+                if id(table) not in excluded:
+                    add_table(
+                        table,
+                        base_path + (describe(table),),
+                        "read",
+                    )
+
+        if isinstance(node, TextualSelect):
+            add_unknown(node, "text", path)
+            for column_arg in node.column_args:
+                push(column_arg, excluded=frozenset())
+            for cte in getattr(node, "_independent_ctes", ()):
+                push(cte, excluded=frozenset())
+            continue
+
+        if isinstance(node, AbstractTextClause):
+            add_unknown(node, "text", path)
+            for child in node.get_children():
+                if not isinstance(child, AbstractTextClause):
+                    push(child, excluded=frozenset())
+            continue
+
+        if isinstance(node, TableClause):
+            if node_id not in frame.excluded:
+                add_table(node, path, "read")
+            continue
+
+        if isinstance(node, CTE):
+            reference = node._get_reference_cte()
+            if id(reference) in frame.skip_ctes:
+                continue
+
+            skip_ctes = frame.skip_ctes
+            if node._restates is not None:
+                skip_ctes |= {id(reference)}
+
+            if node._cte_alias is not None:
+                push(node._cte_alias, excluded=frozenset())
+            else:
+                stack.append(
+                    Frame(
+                        node.element,
+                        path,
+                        skip_ctes,
+                        frozenset(),
+                    )
+                )
+            for cte in getattr(node, "_independent_ctes", ()):
+                push(cte, excluded=frozenset())
+            continue
+
+        if node.__visit_name__ in {"insert", "update", "delete"}:
+            primary, target_path, excluded = resolve_primary_target(node.table)
+            if primary is None:
+                add_unknown(node.table, "dml_target", path + target_path)
+            else:
+                add_table(primary, path + target_path, "write")
+
+            for cte in getattr(node, "_independent_ctes", ()):
+                push(cte, excluded=frozenset())
+            if getattr(node, "select", None) is not None:
+                push(node.select, excluded=frozenset())
+
+            for clause in getattr(node, "_where_criteria", ()):
+                expression_sources(clause, excluded)
+            for source in getattr(node, "_extra_froms", ()):
+                add_read_source(source)
+
+            for value in (getattr(node, "_values", None) or {}).values():
+                if isinstance(value, ClauseElement):
+                    expression_sources(value, excluded)
+
+            for values in getattr(node, "_multi_values", ()):
+                for child in clauses_in_value(values):
+                    expression_sources(child, excluded)
+
+            for clause_name in ("_post_values_clause", "_post_criteria_clause"):
+                clause = getattr(node, clause_name, None)
+                if clause is not None:
+                    push(clause, excluded=frozenset())
+
+            for clause in (*node._returning, *(node._supplemental_returning or ())):
+                expression_sources(clause, excluded)
+            continue
+
+        if isinstance(node, ScalarSelect):
+            push(node.element, excluded=frozenset())
+            continue
+
+        if isinstance(node, TableValuedAlias):
+            if node_id not in frame.excluded:
+                add_unknown(node, "table_valued_function", path)
+            continue
+
+        if (
+            not isinstance(node, TableValuedAlias)
+            and (isinstance(node, Alias) or node.__visit_name__ == "subquery")
+        ):
+            if isinstance(node.element, TextualSelect):
+                add_unknown(node.element, "text", path + (describe(node.element),))
+                continue
+            push(node.element, excluded=frozenset())
+            continue
+
+        if isinstance(node, FromGrouping):
+            push(node.element, excluded=frame.excluded)
+            continue
+
+        if node.__visit_name__ == "select":
+            process_select(node)
+            continue
+
+        if node.__visit_name__ == "compound_select":
+            for subselect in node.selects:
+                push(subselect, excluded=frozenset())
+            for clause in (
+                node._limit_clause,
+                node._offset_clause,
+                node._fetch_clause,
+                node._for_update_arg,
+                *node._order_by_clauses,
+                *node._group_by_clauses,
+            ):
+                if clause is not None:
+                    push(clause, excluded=frozenset())
+            for cte in getattr(node, "_independent_ctes", ()):
+                push(cte, excluded=frozenset())
+            continue
+
+        for child in node.get_children():
+            if isinstance(child, ClauseElement):
+                push(child, excluded=frozenset())
+
+    return DependencySet(
+        tuple(
+            TableDependency(
+                entry["table"],
+                tuple(entry["read"]),
+                tuple(entry["write"]),
+            )
+            for entry in tables.values()
+        ),
+        tuple(
+            UnknownDependency(entry["clause"], entry["kind"], tuple(entry["paths"]))
+            for entry in unknown.values()
+        ),
+    )
 
 
 def unwrap_order_by(clause: Any) -> Any:
