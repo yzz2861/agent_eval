@@ -3,6 +3,21 @@
 Changelog
 =========
 
+v5.9.0
+------
+
+* Feature
+
+  * Add calendar window rate limiting strategy
+    (:class:`limits.strategies.CalendarWindowRateLimiter`) with
+    :class:`limits.RateLimitItemPerCalendarDay` and
+    :class:`limits.RateLimitItemPerCalendarMonth` rate limit items.
+    Windows are aligned to natural days or months in a given IANA
+    timezone, share an explicit start/end boundary for all hits in the
+    same window and expire at the end of the window. Supported by the
+    synchronous and asynchronous in-memory storages, which now accept
+    an injectable ``clock`` for testing.
+
 v5.8.0
 ------
 Release Date: 2026-02-04
@@ -912,7 +927,6 @@ v1.0.0
 Release Date: 2015-01-08
 
 * Initial import of common rate limiting code from `Flask-Limiter <https://github.com/alisaifee/flask-limiter>`_
-
 
 
 

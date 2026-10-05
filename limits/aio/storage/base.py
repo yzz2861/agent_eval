@@ -232,3 +232,37 @@ class SlidingWindowCounterSupport(ABC):
         :param expiry: the rate limit expiry, needed to compute the key in some implemenations
         """
         ...
+
+
+class CalendarWindowSupport(ABC):
+    """
+    Abstract base class for async storages that support
+    the :ref:`strategies:calendar window` strategy
+    """
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:  # type: ignore[explicit-any]
+        for method in {
+            "incr_calendar_window",
+        }:
+            setattr(
+                cls,
+                method,
+                _wrap_errors(getattr(cls, method)),
+            )
+        super().__init_subclass__(**kwargs)
+
+    @abstractmethod
+    async def incr_calendar_window(
+        self, key: str, window_end: float, amount: int = 1
+    ) -> int:
+        """
+        increments the counter for a calendar window rate limit key.
+        All hits sharing the same calendar window use the same key and
+        the key expires exactly at the end of the window.
+
+        :param key: the key to increment
+        :param window_end: absolute time (seconds since the Epoch) at
+         which the calendar window ends and the key expires
+        :param amount: the number to increment by
+        """
+        raise NotImplementedError

@@ -127,8 +127,43 @@ Suppose:
 .. note::
    Some storage implementations use fixed bucket boundaries (e.g., aligning buckets with
    clock intervals), while others adjust buckets dynamically based on the first hit.
-   This difference can allow an attacker to bypass limits during the initial sampling
-   period. The affected implementations are ``memcached`` and ``in-memory``.
+  This difference can allow an attacker to bypass limits during the initial sampling
+  period. The affected implementations are ``memcached`` and ``in-memory``.
 
+
+Calendar Window
+===============
+.. versionadded:: 5.9
+
+This strategy is a variant of the fixed window where the window is aligned to a
+natural calendar boundary — a local day or a local month — in a given IANA timezone,
+instead of a fixed number of seconds measured from the first request.
+
+All requests that fall in the same calendar window share a single counter with an
+explicit start and end, and the counter expires exactly at the end of the window.
+Window boundaries are computed from the local calendar and converted to UTC through
+the tz database, so varying month lengths, leap years, DST transitions and
+non-integral UTC offsets are all accounted for (a day window may for example last
+23 or 25 hours in UTC).
+
+Calendar window limits use dedicated rate limit items that carry the timezone:
+
+.. code-block:: python
+
+   from limits import RateLimitItemPerCalendarDay, RateLimitItemPerCalendarMonth
+   from limits.storage import MemoryStorage
+   from limits.strategies import CalendarWindowRateLimiter
+
+   limiter = CalendarWindowRateLimiter(MemoryStorage())
+   daily = RateLimitItemPerCalendarDay(100, timezone="Asia/Shanghai")
+   monthly = RateLimitItemPerCalendarMonth(1000, timezone="America/New_York")
+
+   limiter.hit(daily, "user-1")
+
+.. note::
+   The calendar window strategy is currently only implemented by the synchronous
+   and asynchronous in-memory storages. Constructing a
+   :class:`~limits.strategies.CalendarWindowRateLimiter` with any other storage
+   backend raises :exc:`NotImplementedError`.
 
 

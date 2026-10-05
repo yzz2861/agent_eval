@@ -7,6 +7,8 @@ from __future__ import annotations
 from . import _version, aio, storage, strategies
 from .limits import (
     RateLimitItem,
+    RateLimitItemPerCalendarDay,
+    RateLimitItemPerCalendarMonth,
     RateLimitItemPerDay,
     RateLimitItemPerHour,
     RateLimitItemPerMinute,
@@ -18,6 +20,8 @@ from .util import WindowStats, parse, parse_many
 
 __all__ = [
     "RateLimitItem",
+    "RateLimitItemPerCalendarDay",
+    "RateLimitItemPerCalendarMonth",
     "RateLimitItemPerDay",
     "RateLimitItemPerHour",
     "RateLimitItemPerMinute",

@@ -10,6 +10,7 @@ from deprecated.sphinx import versionadded
 
 import limits.typing
 from limits.aio.storage.base import (
+    CalendarWindowSupport,
     MovingWindowSupport,
     SlidingWindowCounterSupport,
     Storage,
@@ -18,14 +19,18 @@ from limits.storage.base import TimestampedSlidingWindow
 
 
 class Entry:
-    def __init__(self, expiry: int) -> None:
-        self.atime = time.time()
+    def __init__(self, expiry: float, atime: float | None = None) -> None:
+        self.atime = atime if atime is not None else time.time()
         self.expiry = self.atime + expiry
 
 
 @versionadded(version="2.1")
 class MemoryStorage(
-    Storage, MovingWindowSupport, SlidingWindowCounterSupport, TimestampedSlidingWindow
+    Storage,
+    MovingWindowSupport,
+    SlidingWindowCounterSupport,
+    TimestampedSlidingWindow,
+    CalendarWindowSupport,
 ):
     """
     rate limit storage using :class:`collections.Counter`
@@ -40,8 +45,13 @@ class MemoryStorage(
     """
 
     def __init__(
-        self, uri: str | None = None, wrap_exceptions: bool = False, **_: str
+        self,
+        uri: str | None = None,
+        wrap_exceptions: bool = False,
+        clock: limits.typing.Callable[[], float] = time.time,
+        **_: str,
     ) -> None:
+        self.clock = clock
         self.storage: limits.typing.Counter[str] = Counter()
         self.locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self.expirations: dict[str, float] = {}
@@ -63,7 +73,7 @@ class MemoryStorage(
 
     async def __expire_events(self) -> None:
         try:
-            now = time.time()
+            now = self.clock()
             for key in list(self.events.keys()):
                 async with self.locks[key]:
                     cutoff = await asyncio.to_thread(
@@ -79,7 +89,7 @@ class MemoryStorage(
                         self.locks.pop(key, None)
 
             for key in list(self.expirations.keys()):
-                if self.expirations[key] <= time.time():
+                if self.expirations[key] <= self.clock():
                     self.storage.pop(key, None)
                     self.expirations.pop(key, None)
                     self.locks.pop(key, None)
@@ -109,7 +119,7 @@ class MemoryStorage(
         async with self.locks[key]:
             self.storage[key] += amount
             if self.storage[key] == amount:
-                self.expirations[key] = time.time() + expiry
+                self.expirations[key] = self.clock() + expiry
         return self.storage.get(key, amount)
 
     async def decr(self, key: str, amount: int = 1) -> int:
@@ -129,7 +139,7 @@ class MemoryStorage(
         """
         :param key: the key to get the counter value for
         """
-        if self.expirations.get(key, 0) <= time.time():
+        if self.expirations.get(key, 0) <= self.clock():
             self.storage.pop(key, None)
             self.expirations.pop(key, None)
             self.locks.pop(key, None)
@@ -160,7 +170,7 @@ class MemoryStorage(
         await self.__schedule_expiry()
         async with self.locks[key]:
             self.events.setdefault(key, [])
-            timestamp = time.time()
+            timestamp = self.clock()
             try:
                 entry: Entry | None = self.events[key][limit - amount]
             except IndexError:
@@ -169,7 +179,7 @@ class MemoryStorage(
             if entry and entry.atime >= timestamp - expiry:
                 return False
             else:
-                self.events[key][:0] = [Entry(expiry)] * amount
+                self.events[key][:0] = [Entry(expiry, timestamp)] * amount
             return True
 
     async def get_expiry(self, key: str) -> float:
@@ -177,7 +187,7 @@ class MemoryStorage(
         :param key: the key to get the expiry for
         """
 
-        return self.expirations.get(key, time.time())
+        return self.expirations.get(key, self.clock())
 
     async def get_moving_window(
         self, key: str, limit: int, expiry: int
@@ -191,7 +201,7 @@ class MemoryStorage(
         :return: (start of window, number of acquired entries)
         """
 
-        timestamp = time.time()
+        timestamp = self.clock()
         if events := self.events.get(key, []):
             oldest = bisect.bisect_left(
                 events, -(timestamp - expiry), key=lambda entry: -entry.atime
@@ -208,7 +218,7 @@ class MemoryStorage(
     ) -> bool:
         if amount > limit:
             return False
-        now = time.time()
+        now = self.clock()
         previous_key, current_key = self.sliding_window_keys(key, expiry, now)
         (
             previous_count,
@@ -235,17 +245,36 @@ class MemoryStorage(
     async def get_sliding_window(
         self, key: str, expiry: int
     ) -> tuple[int, float, int, float]:
-        now = time.time()
+        now = self.clock()
         previous_key, current_key = self.sliding_window_keys(key, expiry, now)
         return await self._get_sliding_window_info(
             previous_key, current_key, expiry, now
         )
 
     async def clear_sliding_window(self, key: str, expiry: int) -> None:
-        now = time.time()
+        now = self.clock()
         previous_key, current_key = self.sliding_window_keys(key, expiry, now)
         await self.clear(current_key)
         await self.clear(previous_key)
+
+    async def incr_calendar_window(
+        self, key: str, window_end: float, amount: int = 1
+    ) -> int:
+        """
+        increments the counter for a calendar window rate limit key
+
+        :param key: the key to increment
+        :param window_end: absolute time (seconds since the Epoch) at
+         which the calendar window ends and the key expires
+        :param amount: the number to increment by
+        """
+        await self.get(key)
+        await self.__schedule_expiry()
+        async with self.locks[key]:
+            self.storage[key] += amount
+            if self.storage[key] == amount:
+                self.expirations[key] = window_end
+        return self.storage.get(key, amount)
 
     async def _get_sliding_window_info(
         self,

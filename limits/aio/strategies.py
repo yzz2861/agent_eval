@@ -10,12 +10,13 @@ from math import floor, inf
 
 from deprecated.sphinx import versionadded
 
-from ..limits import RateLimitItem
+from ..calendar import CalendarWindow, calendar_window
+from ..limits import CalendarWindowRateLimitItem, RateLimitItem
 from ..storage import StorageTypes
-from ..typing import cast
+from ..typing import Callable, cast
 from ..util import WindowStats
 from .storage import MovingWindowSupport, Storage
-from .storage.base import SlidingWindowCounterSupport
+from .storage.base import CalendarWindowSupport, SlidingWindowCounterSupport
 
 
 class RateLimiter(ABC):
@@ -324,8 +325,110 @@ class SlidingWindowCounterRateLimiter(RateLimiter):
         ).clear_sliding_window(item.key_for(*identifiers), item.get_expiry())
 
 
+@versionadded(version="5.9")
+class CalendarWindowRateLimiter(RateLimiter):
+    """
+    Reference: :ref:`strategies:calendar window`
+
+    :param storage: the storage backend to use. Only storages
+     implementing :class:`limits.aio.storage.base.CalendarWindowSupport`
+     are supported.
+    :param clock: a callable returning the current time in seconds
+     since the Epoch. Defaults to :func:`time.time`. Mainly useful
+     for testing.
+    """
+
+    def __init__(
+        self,
+        storage: StorageTypes,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        if not hasattr(storage, "incr_calendar_window"):
+            raise NotImplementedError(
+                "CalendarWindowRateLimiting is not implemented for storage "
+                f"of type {storage.__class__}"
+            )
+        self.clock = clock
+        super().__init__(storage)
+
+    def _window(self, item: RateLimitItem) -> CalendarWindow:
+        if not isinstance(item, CalendarWindowRateLimitItem):
+            raise TypeError(
+                "CalendarWindowRateLimiter can only be used with "
+                "CalendarWindowRateLimitItem instances (e.g. "
+                f"RateLimitItemPerCalendarDay), not {item!r}"
+            )
+        return calendar_window(
+            item.CALENDAR_PERIOD, item.tzinfo, self.clock(), item.multiples
+        )
+
+    def _key(self, item: RateLimitItem, identifiers: tuple[str, ...]) -> str:
+        window = self._window(item)
+        return f"{item.key_for(*identifiers)}/{window.key}"
+
+    async def hit(self, item: RateLimitItem, *identifiers: str, cost: int = 1) -> bool:
+        """
+        Consume the rate limit
+
+        :param item: The rate limit item
+        :param identifiers: variable list of strings to uniquely identify this
+         instance of the limit
+        :param cost: The cost of this hit, default 1
+
+        :return: True if ``cost`` could be deducted from the rate limit without exceeding it
+        """
+        window = self._window(item)
+        return (
+            await cast(CalendarWindowSupport, self.storage).incr_calendar_window(
+                f"{item.key_for(*identifiers)}/{window.key}",
+                window.end,
+                amount=cost,
+            )
+            <= item.amount
+        )
+
+    async def test(self, item: RateLimitItem, *identifiers: str, cost: int = 1) -> bool:
+        """
+        Check if the rate limit can be consumed
+
+        :param item: The rate limit item
+        :param identifiers: variable list of strings to uniquely identify this
+         instance of the limit
+        :param cost: The expected cost to be consumed, default 1
+
+        :return: True if the rate limit is not depleted
+        """
+        return (
+            await self.storage.get(self._key(item, identifiers))
+            < item.amount - cost + 1
+        )
+
+    async def get_window_stats(
+        self, item: RateLimitItem, *identifiers: str
+    ) -> WindowStats:
+        """
+        Query the reset time and remaining amount for the limit
+
+        :param item: The rate limit item
+        :param identifiers: variable list of strings to uniquely identify this
+         instance of the limit
+        :return: (reset time, remaining)
+        """
+        window = self._window(item)
+        remaining = max(
+            0,
+            item.amount
+            - await self.storage.get(f"{item.key_for(*identifiers)}/{window.key}"),
+        )
+        return WindowStats(window.end, remaining)
+
+    async def clear(self, item: RateLimitItem, *identifiers: str) -> None:
+        return await self.storage.clear(self._key(item, identifiers))
+
+
 STRATEGIES = {
     "sliding-window-counter": SlidingWindowCounterRateLimiter,
     "fixed-window": FixedWindowRateLimiter,
     "moving-window": MovingWindowRateLimiter,
+    "calendar-window": CalendarWindowRateLimiter,
 }

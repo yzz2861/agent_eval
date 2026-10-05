@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import total_ordering
+from zoneinfo import ZoneInfo
 
 from limits.typing import ClassVar, NamedTuple, cast
 
@@ -194,3 +195,104 @@ class RateLimitItemPerSecond(RateLimitItem):
 
     GRANULARITY = TIME_TYPES["second"]
     """A second"""
+
+
+class CalendarWindowRateLimitItem(RateLimitItem):
+    """
+    Base class for rate limited resources aligned to calendar windows
+    (natural days or months) in a specific IANA timezone, for use with
+    :class:`limits.strategies.CalendarWindowRateLimiter`.
+
+    Unlike :class:`RateLimitItem` the window is not a fixed number of
+    seconds: all hits that fall in the same local calendar day or month
+    share one window with explicit start/end boundaries, and the window
+    expires at its end.
+
+    :param amount: the rate limit amount
+    :param timezone: an IANA timezone name (e.g. ``"Asia/Shanghai"``)
+     the calendar window is aligned to. Defaults to ``"UTC"``.
+    :param multiples: multiple of the calendar period
+     (e.g. ``3`` for quarterly windows with
+     :class:`RateLimitItemPerCalendarMonth`)
+    :param namespace: category for the specific rate limit
+    """
+
+    __slots__ = ["timezone", "_tzinfo"]
+
+    CALENDAR_PERIOD: ClassVar[str]
+    """
+    The calendar period this limit aligns to: ``day`` or ``month``
+    """
+
+    def __init__(
+        self,
+        amount: int,
+        timezone: str = "UTC",
+        multiples: int | None = 1,
+        namespace: str = "LIMITER",
+    ):
+        super().__init__(amount, multiples, namespace)
+        self.timezone = timezone
+        self._tzinfo = ZoneInfo(timezone)
+
+    @property
+    def tzinfo(self) -> ZoneInfo:
+        """
+        The :class:`zoneinfo.ZoneInfo` of :attr:`timezone`
+        """
+        return self._tzinfo
+
+    def get_expiry(self) -> int:
+        raise NotImplementedError(
+            "calendar window limits do not have a fixed expiry in seconds;"
+            " use them with CalendarWindowRateLimiter"
+        )
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, CalendarWindowRateLimitItem)
+            and self.timezone == other.timezone
+            and super().__eq__(other)
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"{self.amount} per {self.multiples} {self.GRANULARITY.name}"
+            f" ({self.timezone})"
+        )
+
+    def __hash__(self) -> int:
+        return hash(
+            (
+                self.namespace,
+                self.amount,
+                self.multiples,
+                self.GRANULARITY,
+                self.timezone,
+            )
+        )
+
+
+class RateLimitItemPerCalendarDay(CalendarWindowRateLimitItem):
+    """
+    per calendar day rate limited resource. The window is aligned to
+    local midnight in :attr:`CalendarWindowRateLimitItem.timezone`.
+    """
+
+    GRANULARITY = Granularity(0, "calendar-day")
+    """A calendar day (not a fixed number of seconds)"""
+
+    CALENDAR_PERIOD = "day"
+
+
+class RateLimitItemPerCalendarMonth(CalendarWindowRateLimitItem):
+    """
+    per calendar month rate limited resource. The window is aligned to
+    local midnight of the first of the month in
+    :attr:`CalendarWindowRateLimitItem.timezone`.
+    """
+
+    GRANULARITY = Granularity(0, "calendar-month")
+    """A calendar month (not a fixed number of seconds)"""
+
+    CALENDAR_PERIOD = "month"
