@@ -44,6 +44,16 @@ class TestResolvDNS < Test::Unit::TestCase
     BasicSocket.do_not_reverse_lookup = @save_do_not_reverse_lookup
   end
 
+  def loopback_bind_permitted?
+    socket = UDPSocket.new
+    socket.bind("127.0.0.1", 0)
+    true
+  rescue Errno::EACCES, Errno::EPERM
+    false
+  ensure
+    socket&.close
+  end
+
   def with_tcp(host, port)
     t = TCPServer.new(host, port)
     begin
@@ -120,6 +130,109 @@ class TestResolvDNS < Test::Unit::TestCase
     assert_equal 2, candidates.size
     assert_equal 'example.com.local', candidates[0].to_s
     assert_equal 'example.com', candidates[1].to_s
+  end
+
+  def test_edns_message_roundtrip_and_unknown_option
+    option_data = "\x00\x01raw".b
+    message = Resolv::DNS::Message.new(0x1234)
+    message.qr = 1
+    message.add_question("example.org", Resolv::DNS::Resource::IN::A)
+    message.add_answer("example.org", 3600,
+                       Resolv::DNS::Resource::IN::A.new("192.0.2.1"))
+    edns = Resolv::DNS::EDNS.new(1400,
+                                 dnssec_ok: true,
+                                 options: [[65280, option_data]])
+    message.add_additional(Resolv::DNS::Name.new([]), 0, edns.opt)
+
+    decoded = Resolv::DNS::Message.decode(message.encode)
+    opt = decoded.opt
+    assert_equal(1400, opt.udp_payload_size)
+    assert_predicate(opt, :dnssec_ok?)
+    unknown = opt.options.first
+    assert_equal(65280, unknown.option_code)
+    assert_equal(option_data, unknown.data)
+    assert_equal("192.0.2.1", decoded.answer.first.last.address.to_s)
+  end
+
+  def test_edns_merges_extended_rcode
+    message = Resolv::DNS::Message.new
+    message.qr = 1
+    message.rcode = 0
+    opt = Resolv::DNS::Resource::OPT.new(512,
+                                         version: 0,
+                                         extended_rcode: 1)
+    message.add_additional(Resolv::DNS::Name.new([]), 0, opt)
+
+    decoded = Resolv::DNS::Message.decode(message.encode)
+    assert_equal(16, decoded.rcode)
+    assert_equal(Resolv::DNS::RCode::BADVERS, decoded.rcode)
+  end
+
+  def test_edns_rejects_opt_outside_additional
+    message = Resolv::DNS::Message.new
+    message.qr = 1
+    message.add_answer(Resolv::DNS::Name.new([]), 0,
+                       Resolv::DNS::Resource::OPT.new(512))
+    assert_raise(Resolv::DNS::DecodeError) do
+      Resolv::DNS::Message.decode(message.encode)
+    end
+  end
+
+  def test_edns_rejects_multiple_opt
+    message = Resolv::DNS::Message.new
+    message.qr = 1
+    2.times do
+      message.add_additional(Resolv::DNS::Name.new([]), 0,
+                             Resolv::DNS::Resource::OPT.new(512))
+    end
+    assert_raise(Resolv::DNS::DecodeError) do
+      Resolv::DNS::Message.decode(message.encode)
+    end
+  end
+
+  def test_edns_rejects_non_root_opt_owner
+    message = Resolv::DNS::Message.new
+    message.qr = 1
+    message.add_additional("example.org", 0,
+                           Resolv::DNS::Resource::OPT.new(512))
+    assert_raise(Resolv::DNS::DecodeError) do
+      Resolv::DNS::Message.decode(message.encode)
+    end
+  end
+
+  def test_edns_cannot_fallback_with_do_bit
+    assert_raise(ArgumentError) do
+      Resolv::DNS::EDNS.new(dnssec_ok: true, fallback: true)
+    end
+  end
+
+  def test_edns_config_hash
+    config = Resolv::DNS::Config.new(
+      nameserver: "127.0.0.1",
+      search: [],
+      ndots: 0,
+      edns: {
+        udp_payload_size: 1400,
+        do: true,
+        options: [{code: 8, data: "raw"}]
+      }
+    )
+    config.lazy_initialize
+    edns = config.edns
+    assert_equal(1400, edns.udp_payload_size)
+    assert_predicate(edns, :dnssec_ok?)
+    assert_equal([8, "raw"], [edns.options.first.option_code, edns.options.first.data])
+  end
+
+  def test_edns_udp_requester_uses_configured_payload_size
+    dns = Resolv::DNS.new(
+      nameserver_port: [["127.0.0.1", 53]],
+      edns: {udp_payload_size: 1400}
+    )
+    requester = dns.make_udp_requester
+    assert_equal(1400, requester.instance_variable_get(:@udp_payload_size))
+  ensure
+    requester&.close
   end
 
   def test_conf_search
@@ -1613,6 +1726,342 @@ class TestResolvDNS < Test::Unit::TestCase
                                        tcp_server1_thread, tcp_server2_thread])
         assert_equal(['192.0.2.1'], result.map {|rr| rr.address.to_s })
       end
+    end
+  end
+
+  class EDNSTestOption < Resolv::DNS::EDNS::Option
+    OptionCode = 65222
+
+    def self.decode_rdata(msg, length)
+      new(option_code, msg.get_bytes(length).upcase)
+    end
+  end
+
+  def edns_test_option_code
+    65222
+  end
+
+  def edns_question_name
+    Resolv::DNS::Name.create("foo.example.org")
+  end
+
+  def assert_edns_query(query, expect_do = false)
+    message = Resolv::DNS::Message.decode(query)
+    assert_equal(1, message.question.length)
+    name, typeclass = message.question.first
+    assert_equal(edns_question_name, name)
+    assert_equal(Resolv::DNS::Resource::IN::A, typeclass)
+    assert_equal(1, message.additional.length)
+    _, _, opt = message.additional.first
+    assert_kind_of(Resolv::DNS::Resource::OPT, opt)
+    assert_equal(1232, opt.udp_payload_size)
+    assert_equal(0, opt.version)
+    assert_equal(expect_do, opt.dnssec_ok?)
+    assert_equal(0, opt.extended_rcode)
+    option = opt.options.find { |candidate| candidate.option_code == edns_test_option_code }
+    assert_not_nil(option)
+    assert_equal("abc", option.data)
+    message
+  end
+
+  def edns_normal_response(query)
+    message = Resolv::DNS::Message.decode(query)
+    message.qr = 1
+    message.ra = 1
+    message.add_answer(edns_question_name, 3600,
+                       Resolv::DNS::Resource::IN::A.new("192.0.2.1"))
+    message.encode
+  end
+
+  def edns_error_response(query, rcode, include_opt = true)
+    message = Resolv::DNS::Message.decode(query)
+    message.qr = 1
+    message.ra = 1
+    message.rcode = rcode
+    if rcode > 15
+      message.rcode = rcode & 15
+      opt = message.opt
+      opt.instance_variable_set(:@extended_rcode, rcode >> 4) if opt
+    end
+    unless include_opt
+      message.additional.reject! { |_, _, data| Resolv::DNS::Resource::OPT === data }
+    end
+    message.encode
+  end
+
+  def edns_truncated_response(query)
+    message = Resolv::DNS::Message.decode(query)
+    message.qr = 1
+    message.tc = 1
+    message.ra = 1
+    message.encode
+  end
+
+  def read_frame(socket)
+    length, = socket.read(2).unpack("n")
+    socket.read(length)
+  end
+
+  def edns_config(overrides = {})
+    {
+      udp_payload_size: 1232,
+      options: [[edns_test_option_code, "abc"]]
+    }.merge(overrides)
+  end
+
+  def test_edns_udp_normal
+    Resolv::DNS::EDNS::Options.register(edns_test_option_code, EDNSTestOption)
+    omit("EDNS socket tests require loopback bind permission") unless loopback_bind_permitted?
+    with_udp("127.0.0.1", 0) do |u|
+      _, port, _, host = u.addr
+      client = Thread.new do
+        Resolv::DNS.open(nameserver_port: [[host, port]],
+                         timeouts: 2,
+                         edns: edns_config) do |dns|
+          dns.getresources("foo.example.org", Resolv::DNS::Resource::IN::A)
+        end
+      end
+      server = Thread.new do
+        query, sender = u.recvfrom(4096)
+        assert_edns_query(query)
+        u.send(edns_normal_response(query), 0, sender[3], sender[1])
+      end
+      result, = assert_join_threads([client, server])
+      assert_equal(["192.0.2.1"], result.map { |rr| rr.address.to_s })
+    end
+  ensure
+    Resolv::DNS::EDNS::Options.unregister(edns_test_option_code)
+  end
+
+  def test_edns_tcp_normal_with_do_bit
+    Resolv::DNS::EDNS::Options.register(edns_test_option_code, EDNSTestOption)
+    omit("EDNS socket tests require loopback bind permission") unless loopback_bind_permitted?
+    with_tcp("127.0.0.1", 0) do |server_socket|
+      _, port, _, host = server_socket.addr
+      client = Thread.new do
+        Resolv::DNS.open(nameserver_port: [[host, port]],
+                         timeouts: 2,
+                         edns: edns_config(dnssec_ok: true)) do |dns|
+          dns.getresources("foo.example.org", Resolv::DNS::Resource::IN::A)
+        end
+      end
+      server = Thread.new do
+        connection = server_socket.accept
+        query = read_frame(connection)
+        assert_edns_query(query, true)
+        connection.write(framed(edns_normal_response(query)))
+        connection.close
+      end
+      result, = assert_join_threads([client, server])
+      assert_equal(["192.0.2.1"], result.map { |rr| rr.address.to_s })
+    end
+  ensure
+    Resolv::DNS::EDNS::Options.unregister(edns_test_option_code)
+  end
+
+  def test_edns_udp_formerr_fallback_without_opt_once_then_fails
+    omit("EDNS socket tests require loopback bind permission") unless loopback_bind_permitted?
+    with_udp("127.0.0.1", 0) do |u|
+      _, port, _, host = u.addr
+      client = Thread.new do
+        Resolv::DNS.open(nameserver_port: [[host, port]],
+                         timeouts: [0.5, 1],
+                         edns: edns_config(fallback: true)) do |dns|
+          dns.getresources("foo.example.org", Resolv::DNS::Resource::IN::A)
+        end
+      end
+      server = Thread.new do
+        first, sender = u.recvfrom(4096)
+        assert_equal(1, Resolv::DNS::Message.decode(first).additional.length)
+        u.send(edns_error_response(first, Resolv::DNS::RCode::FormErr, false),
+               0, sender[3], sender[1])
+        second, sender = u.recvfrom(4096)
+        assert_empty(Resolv::DNS::Message.decode(second).additional)
+        u.send(edns_error_response(second, Resolv::DNS::RCode::FormErr, false),
+               0, sender[3], sender[1])
+        sleep(0.1)
+        assert_raise(IO::WaitReadable) { u.recvfrom_nonblock }
+      end
+      assert_raise(Resolv::ResolvError) do
+        assert_join_threads([client, server])
+      end
+    end
+  end
+
+  def test_edns_udp_formerr_fallback_succeeds_without_opt
+    omit("EDNS socket tests require loopback bind permission") unless loopback_bind_permitted?
+    with_udp("127.0.0.1", 0) do |u|
+      _, port, _, host = u.addr
+      client = Thread.new do
+        Resolv::DNS.open(nameserver_port: [[host, port]],
+                         timeouts: [0.5, 1],
+                         edns: edns_config(fallback: true)) do |dns|
+          dns.getresources("foo.example.org", Resolv::DNS::Resource::IN::A)
+        end
+      end
+      server = Thread.new do
+        first, sender = u.recvfrom(4096)
+        u.send(edns_error_response(first, Resolv::DNS::RCode::FormErr, false),
+               0, sender[3], sender[1])
+        second, sender = u.recvfrom(4096)
+        assert_empty(Resolv::DNS::Message.decode(second).additional)
+        u.send(edns_normal_response(second), 0, sender[3], sender[1])
+      end
+      result, = assert_join_threads([client, server])
+      assert_equal(["192.0.2.1"], result.map { |rr| rr.address.to_s })
+    end
+  end
+
+  def test_edns_tcp_badvers_fallback_without_opt_once_then_fails
+    omit("EDNS socket tests require loopback bind permission") unless loopback_bind_permitted?
+    with_tcp("127.0.0.1", 0) do |server_socket|
+      _, port, _, host = server_socket.addr
+      client = Thread.new do
+        Resolv::DNS.open(nameserver_port: [[host, port]],
+                         timeouts: 2,
+                         edns: edns_config(fallback: true)) do |dns|
+          dns.getresources("foo.example.org", Resolv::DNS::Resource::IN::A)
+        end
+      end
+      server = Thread.new do
+        connection = server_socket.accept
+        first = read_frame(connection)
+        connection.write(framed(edns_error_response(first, Resolv::DNS::RCode::BADVERS)))
+        second = read_frame(connection)
+        assert_empty(Resolv::DNS::Message.decode(second).additional)
+        connection.write(framed(edns_error_response(second, Resolv::DNS::RCode::BADVERS)))
+        connection.close
+      end
+      assert_raise(Resolv::ResolvError) do
+        assert_join_threads([client, server])
+      end
+    end
+  end
+
+  def test_edns_tcp_badvers_fallback_succeeds_without_opt
+    omit("EDNS socket tests require loopback bind permission") unless loopback_bind_permitted?
+    with_tcp("127.0.0.1", 0) do |server_socket|
+      _, port, _, host = server_socket.addr
+      client = Thread.new do
+        Resolv::DNS.open(nameserver_port: [[host, port]],
+                         timeouts: 2,
+                         edns: edns_config(fallback: true)) do |dns|
+          dns.getresources("foo.example.org", Resolv::DNS::Resource::IN::A)
+        end
+      end
+      server = Thread.new do
+        connection = server_socket.accept
+        first = read_frame(connection)
+        connection.write(framed(edns_error_response(first, Resolv::DNS::RCode::BADVERS)))
+        second = read_frame(connection)
+        assert_empty(Resolv::DNS::Message.decode(second).additional)
+        connection.write(framed(edns_normal_response(second)))
+        connection.close
+      end
+      result, = assert_join_threads([client, server])
+      assert_equal(["192.0.2.1"], result.map { |rr| rr.address.to_s })
+    end
+  end
+
+  def test_edns_formerr_without_fallback_does_not_send_plain_query
+    omit("EDNS socket tests require loopback bind permission") unless loopback_bind_permitted?
+    with_udp("127.0.0.1", 0) do |u|
+      _, port, _, host = u.addr
+      client = Thread.new do
+        Resolv::DNS.open(nameserver_port: [[host, port]],
+                         timeouts: 0.5,
+                         edns: edns_config) do |dns|
+          assert_raise(Resolv::ResolvError) do
+            dns.getresources("foo.example.org", Resolv::DNS::Resource::IN::A)
+          end
+        end
+      end
+      server = Thread.new do
+        query, sender = u.recvfrom(4096)
+        u.send(edns_error_response(query, Resolv::DNS::RCode::FormErr, false),
+               0, sender[3], sender[1])
+        sleep(0.1)
+        assert_raise(IO::WaitReadable) { u.recvfrom_nonblock }
+      end
+      assert_join_threads([client, server])
+    end
+  end
+
+  def test_edns_udp_truncated_retries_tcp_with_opt
+    omit("EDNS socket tests require loopback bind permission") unless loopback_bind_permitted?
+    with_udp_and_tcp("127.0.0.1", 0) do |u, t|
+      _, port, _, host = u.addr
+      client = Thread.new do
+        Resolv::DNS.open(nameserver_port: [[host, port]],
+                         timeouts: 2,
+                         edns: edns_config) do |dns|
+          dns.getresources("foo.example.org", Resolv::DNS::Resource::IN::A)
+        end
+      end
+      udp_server = Thread.new do
+        query, sender = u.recvfrom(4096)
+        assert_edns_query(query)
+        truncated = edns_truncated_response(query)
+        assert_equal(1, Resolv::DNS::Message.decode(truncated).tc)
+        u.send(truncated, 0, sender[3], sender[1])
+      end
+      tcp_server = Thread.new do
+        connection = t.accept
+        query = read_frame(connection)
+        assert_edns_query(query)
+        connection.write(framed(edns_normal_response(query)))
+        connection.close
+      end
+      result, = assert_join_threads([client, udp_server, tcp_server])
+      assert_equal(["192.0.2.1"], result.map { |rr| rr.address.to_s })
+    end
+  end
+
+  def test_edns_udp_wrong_id_is_ignored
+    omit("EDNS socket tests require loopback bind permission") unless loopback_bind_permitted?
+    with_udp("127.0.0.1", 0) do |u|
+      _, port, _, host = u.addr
+      client = Thread.new do
+        Resolv::DNS.open(nameserver_port: [[host, port]],
+                         timeouts: 2,
+                         edns: edns_config) do |dns|
+          dns.getresources("foo.example.org", Resolv::DNS::Resource::IN::A)
+        end
+      end
+      server = Thread.new do
+        query, sender = u.recvfrom(4096)
+        wrong = edns_normal_response(query)
+        wrong[0, 2] = [(Resolv::DNS::Message.decode(query).id + 1) & 0xffff].pack("n")
+        u.send(wrong, 0, sender[3], sender[1])
+        u.send(edns_normal_response(query), 0, sender[3], sender[1])
+      end
+      result, = assert_join_threads([client, server])
+      assert_equal(["192.0.2.1"], result.map { |rr| rr.address.to_s })
+    end
+  end
+
+  def test_edns_tcp_wrong_id_is_ignored
+    omit("EDNS socket tests require loopback bind permission") unless loopback_bind_permitted?
+    with_tcp("127.0.0.1", 0) do |server_socket|
+      _, port, _, host = server_socket.addr
+      client = Thread.new do
+        Resolv::DNS.open(nameserver_port: [[host, port]],
+                         timeouts: 2,
+                         edns: edns_config) do |dns|
+          dns.getresources("foo.example.org", Resolv::DNS::Resource::IN::A)
+        end
+      end
+      server = Thread.new do
+        connection = server_socket.accept
+        query = read_frame(connection)
+        wrong = edns_normal_response(query)
+        wrong[0, 2] = [(Resolv::DNS::Message.decode(query).id + 1) & 0xffff].pack("n")
+        connection.write(framed(wrong))
+        connection.write(framed(edns_normal_response(query)))
+        connection.close
+      end
+      result, = assert_join_threads([client, server])
+      assert_equal(["192.0.2.1"], result.map { |rr| rr.address.to_s })
     end
   end
 end

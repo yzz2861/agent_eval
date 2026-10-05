@@ -292,6 +292,233 @@ class Resolv
 
     UDPSize = 512
 
+    # Default EDNS(0) UDP payload size. [RFC 6891]
+
+    EDNSUDPPayloadSize = 1232
+
+    ##
+    # EDNS(0) metadata for a DNS query. [RFC 6891]
+
+    class EDNS
+      VERSION = 0
+
+      DO_BIT = 0x8000
+
+      def self.register_option(code, codec)
+        Options.register(code, codec)
+      end
+
+      def self.unregister_option(code)
+        Options.unregister(code)
+      end
+
+      def self.option_codec(code)
+        Options[code]
+      end
+
+      def self.coerce(config)
+        case config
+        when nil, false
+          nil
+        when true
+          new
+        when EDNS
+          config
+        when Hash
+          kwargs = {}
+          udp_payload_size = EDNSUDPPayloadSize
+          config.each do |key, value|
+            case key.to_sym
+            when :udp_payload_size, :udp_size, :payload_size
+              udp_payload_size = value
+            when :dnssec_ok, :do
+              kwargs[:dnssec_ok] = value
+            when :options
+              kwargs[:options] = value
+            when :fallback, :edns_fallback
+              kwargs[:fallback] = value
+            else
+              raise ArgumentError, "unknown EDNS option: #{key.inspect}"
+            end
+          end
+          new(udp_payload_size, **kwargs)
+        else
+          raise ArgumentError, "invalid EDNS configuration: #{config.inspect}"
+        end
+      end
+
+      def initialize(udp_payload_size = EDNSUDPPayloadSize, **kwargs)
+        udp_payload_size = udp_payload_size.to_int
+        unless (512..65535).include?(udp_payload_size)
+          raise ArgumentError, "EDNS UDP payload size must be between 512 and 65535: #{udp_payload_size}"
+        end
+        dnssec_ok = kwargs.fetch(:dnssec_ok) { kwargs.fetch(:do, false) }
+        options = kwargs.fetch(:options, [])
+        fallback = kwargs.fetch(:fallback, false)
+        kwargs.delete_if { |key, _value| [:dnssec_ok, :do, :options, :fallback].include?(key) }
+        unless kwargs.empty?
+          raise ArgumentError, "unknown EDNS keyword: #{kwargs.keys.first.inspect}"
+        end
+        @udp_payload_size = udp_payload_size
+        @dnssec_ok = dnssec_ok
+        @fallback = fallback
+        if @dnssec_ok && @fallback
+          raise ArgumentError, "cannot enable EDNS fallback with DNSSEC OK"
+        end
+        @options = options.map { |option| Option.coerce(option) }
+      end
+
+      attr_reader :udp_payload_size, :options
+
+      def dnssec_ok?
+        !!@dnssec_ok
+      end
+      alias do? dnssec_ok?
+
+      def fallback?
+        !!@fallback
+      end
+
+      def opt # :nodoc:
+        Resource::OPT.new(
+          udp_payload_size,
+          version: VERSION,
+          dnssec_ok: dnssec_ok?,
+          options: @options
+        )
+      end
+
+      ##
+      # A single EDNS option. Unknown wire options remain instances of this
+      # class with their option code and original value bytes.
+
+      class Option
+        def self.coerce(option)
+          case option
+          when Option
+            option
+          when Array
+            code, data = option
+            new(code, data || "".b)
+          when Hash
+            new(option.fetch(:code) { option.fetch(:option_code) },
+                option[:data] || option[:value] || "".b)
+          else
+            unless option.respond_to?(:option_code) && option.respond_to?(:encode_rdata)
+              raise ArgumentError, "invalid EDNS option: #{option.inspect}"
+            end
+            option
+          end
+        end
+
+        def self.option_code
+          const_get(:OptionCode)
+        end
+
+        def self.decode_rdata(msg, length)
+          new(option_code, msg.get_bytes(length))
+        end
+
+        def self.register(code)
+          Options.register(code, self)
+        end
+
+        def initialize(code = self.class.option_code, data = "".b)
+          code = code.to_int
+          unless (0..65535).include?(code)
+            raise ArgumentError, "EDNS option code must be between 0 and 65535: #{code}"
+          end
+          data = data.to_str
+          unless data.bytesize <= 65535
+            raise ArgumentError, "EDNS option data is too long: #{data.bytesize} bytes"
+          end
+          @option_code = code
+          @data = data.b
+        end
+
+        attr_reader :option_code, :data
+        alias code option_code
+
+        def encode_rdata(msg)
+          msg.put_bytes(@data)
+        end
+
+        def ==(other)
+          other.is_a?(Option) &&
+            option_code == other.option_code &&
+            data == other.data
+        end
+        alias eql? ==
+
+        def hash
+          [option_code, data].hash
+        end
+      end
+
+      ##
+      # Registry for EDNS option codecs.
+
+      module Options
+        @mutex = Thread::Mutex.new
+        @codecs = {}
+
+        def self.register(code, codec)
+          code = code.to_int
+          unless (0..65535).include?(code)
+            raise ArgumentError, "EDNS option code must be between 0 and 65535: #{code}"
+          end
+          @mutex.synchronize { @codecs[code] = codec }
+        end
+
+        def self.[](code)
+          @mutex.synchronize { @codecs[code] }
+        end
+
+        def self.unregister(code)
+          @mutex.synchronize { @codecs.delete(code) }
+        end
+
+        def self.decode_rdata(msg)
+          options = []
+          while msg.remaining?
+            code, = msg.get_unpack('n')
+            option = msg.get_length16 do |length|
+              codec = self[code]
+              if codec.nil?
+                Option.new(code, msg.get_bytes(length))
+              elsif codec.respond_to?(:decode_rdata)
+                result =
+                  case codec.method(:decode_rdata).arity
+                  when 0
+                    codec.decode_rdata
+                  when 1
+                    codec.decode_rdata(msg)
+                  else
+                    codec.decode_rdata(msg, length)
+                  end
+              elsif codec.respond_to?(:decode)
+                result =
+                  case codec.method(:decode).arity
+                  when 0
+                    codec.decode
+                  when 1
+                    codec.decode(msg)
+                  else
+                    codec.decode(msg, length)
+                  end
+              elsif codec.respond_to?(:call)
+                result = codec.call(msg, length)
+              else
+                raise DecodeError, "invalid EDNS option codec for #{code}: #{codec.inspect}"
+              end
+            end
+            options << Option.coerce(option)
+          end
+          options
+        end
+      end
+    end
+
     ##
     # Creates a new DNS resolver.  See Resolv::DNS.new for argument details.
     #
@@ -319,6 +546,8 @@ class Resolv
     # :nameserver_port can be used to specify port number of nameserver address.
     # :raise_timeout_errors can be used to raise timeout errors
     # as exceptions instead of treating the same as an NXDOMAIN response.
+    # :edns can be used to enable EDNS(0). It accepts +true+ or a Hash with
+    # :udp_payload_size, :dnssec_ok (also +:do+), :options and :fallback.
     #
     # The value of :nameserver should be an address string or
     # an array of address strings.
@@ -536,6 +765,8 @@ class Resolv
       lazy_initialize
       truncated = {}
       requesters = {}
+      edns = @config.edns
+      edns_fallback_done = false
       udp_requester = begin
         make_udp_requester
       rescue Errno::EACCES
@@ -548,6 +779,10 @@ class Resolv
           msg = Message.new
           msg.rd = 1
           msg.add_question(candidate, typeclass)
+          use_edns = edns && !edns_fallback_done
+          if use_edns
+            msg.add_additional(Name.new([]), 0, edns.opt)
+          end
 
           requester = requesters.fetch([nameserver, port]) do
             if !truncated[candidate] && udp_requester
@@ -557,10 +792,10 @@ class Resolv
             end
           end
 
-          unless sender = senders[[candidate, requester, nameserver, port]]
+          unless sender = senders[[candidate, requester, nameserver, port, use_edns]]
             sender = requester.sender(msg, candidate, nameserver, port)
             next if !sender
-            senders[[candidate, requester, nameserver, port]] = sender
+            senders[[candidate, requester, nameserver, port, use_edns]] = sender
           end
           begin
             reply, reply_name = requester.request(sender, tout)
@@ -576,6 +811,12 @@ class Resolv
             raise
           end
           case reply.rcode
+          when RCode::FormErr, RCode::BADVERS
+            if use_edns && edns.fallback? && !edns_fallback_done
+              edns_fallback_done = true
+              redo
+            end
+            raise Config::OtherResolvError.new(reply_name.to_s)
           when RCode::NoError
             if reply.tc == 1 and not Requester::TCP === requester
               # Retry via TCP:
@@ -599,10 +840,13 @@ class Resolv
 
     def make_udp_requester # :nodoc:
       nameserver_port = @config.nameserver_port
+      udp_payload_size = @config.edns&.udp_payload_size || UDPSize
       if nameserver_port.length == 1
-        Requester::ConnectedUDP.new(*nameserver_port[0])
+        Requester::ConnectedUDP.new(*nameserver_port[0],
+                                    udp_payload_size: udp_payload_size)
       else
-        Requester::UnconnectedUDP.new(*nameserver_port)
+        Requester::UnconnectedUDP.new(*nameserver_port,
+                                      udp_payload_size: udp_payload_size)
       end
     end
 
@@ -791,9 +1035,10 @@ class Resolv
       end
 
       class UnconnectedUDP < Requester # :nodoc:
-        def initialize(*nameserver_port)
+        def initialize(*nameserver_port, udp_payload_size: UDPSize)
           super()
           @nameserver_port = nameserver_port
+          @udp_payload_size = udp_payload_size
           @initialized = false
           @mutex = Thread::Mutex.new
         end
@@ -829,7 +1074,7 @@ class Resolv
 
         def recv_reply(readable_socks, timelimit = nil)
           lazy_initialize
-          reply, from = readable_socks[0].recvfrom(UDPSize)
+          reply, from = readable_socks[0].recvfrom(@udp_payload_size)
           return reply, [from[3],from[1]]
         end
 
@@ -874,10 +1119,11 @@ class Resolv
       end
 
       class ConnectedUDP < Requester # :nodoc:
-        def initialize(host, port=Port)
+        def initialize(host, port=Port, udp_payload_size: UDPSize)
           super()
           @host = host
           @port = port
+          @udp_payload_size = udp_payload_size
           @mutex = Thread::Mutex.new
           @initialized = false
         end
@@ -902,7 +1148,7 @@ class Resolv
 
         def recv_reply(readable_socks, timelimit = nil)
           lazy_initialize
-          reply = readable_socks[0].recv(UDPSize)
+          reply = readable_socks[0].recv(@udp_payload_size)
           return reply, nil
         rescue Errno::ECONNREFUSED, Errno::ECONNRESET
           # The kernel reports these from an ICMP message, and a second one for
@@ -1181,6 +1427,7 @@ class Resolv
             @search = config_hash[:search] if config_hash.include? :search
             @ndots = config_hash[:ndots] if config_hash.include? :ndots
             @raise_timeout_errors = config_hash[:raise_timeout_errors]
+            @edns = DNS::EDNS.coerce(config_hash[:edns])
 
             if @nameserver_port.empty?
               @nameserver_port << ['0.0.0.0', Port]
@@ -1236,6 +1483,10 @@ class Resolv
 
       def use_ipv6?
         @use_ipv6
+      end
+
+      def edns
+        @edns
       end
 
       def generate_candidates(name)
@@ -1632,7 +1883,15 @@ class Resolv
             rr.each {|r|
               name, ttl, data = r
               msg.put_name(name)
-              msg.put_pack('nnN', data.class::TypeValue, data.class::ClassValue, ttl)
+              if Resource::OPT === data
+                msg.put_pack('nn', Resource::OPT::TypeValue, data.udp_payload_size)
+                msg.put_pack('CCn',
+                             data.extended_rcode,
+                             data.version,
+                             data.dnssec_ok? ? EDNS::DO_BIT : 0)
+              else
+                msg.put_pack('nnN', data.class::TypeValue, data.class::ClassValue, ttl)
+              end
               msg.put_length16 {data.encode_rdata(msg)}
             }
           }
@@ -1664,6 +1923,9 @@ class Resolv
           data_start = @data.length
           yield
           data_end = @data.length
+          if data_end - data_start > 65535
+            raise EncodeError, "DNS rdata is too long (#{data_end - data_start} bytes, max 65535)"
+          end
           @data[length_index, 2] = [data_end - data_start].pack("n")
         end
 
@@ -1728,13 +1990,13 @@ class Resolv
           o.id = id
           o.tc = (flag >> 9) & 1
           o.rcode = flag & 15
-          return o unless o.tc.zero?
-
           o.qr = (flag >> 15) & 1
           o.opcode = (flag >> 11) & 15
           o.aa = (flag >> 10) & 1
           o.rd = (flag >> 8) & 1
           o.ra = (flag >> 7) & 1
+          return o unless o.tc.zero?
+
           (1..qdcount).each {
             name, typeclass = msg.get_question
             o.add_question(name, typeclass)
@@ -1751,8 +2013,38 @@ class Resolv
             name, ttl, data = msg.get_rr
             o.add_additional(name, ttl, data)
           }
+          o.validate_opt!
         }
         return o
+      end
+
+      def opt # :nodoc:
+        @additional.each {|_, _, data| return data if Resource::OPT === data }
+        nil
+      end
+
+      def validate_opt! # :nodoc:
+        [@answer, @authority].each do |section|
+          section.each do |_, _, data|
+            if Resource::OPT === data
+              raise DecodeError, "OPT record outside additional section"
+            end
+          end
+        end
+
+        opt_records = @additional.select do |name, _, data|
+          next false unless Resource::OPT === data
+          unless name.absolute? && name.length.zero?
+            raise DecodeError, "OPT record owner is not root"
+          end
+          true
+        end
+
+        if opt_records.length > 1
+          raise DecodeError, "multiple OPT records"
+        elsif opt_data = opt_records.first&.last
+          @rcode = (opt_data.extended_rcode << 4) | @rcode
+        end
       end
 
       class MessageDecoder # :nodoc:
@@ -1765,6 +2057,10 @@ class Resolv
 
         def inspect
           "\#<#{self.class}: #{@data.byteslice(0, @index).inspect} #{@data.byteslice(@index..-1).inspect}>"
+        end
+
+        def remaining?
+          @index < @limit
         end
 
         def get_length16
@@ -1895,14 +2191,26 @@ class Resolv
 
         def get_rr
           name = self.get_name
-          type, klass, ttl = self.get_unpack('nnN')
+          type, klass = self.get_unpack('nn')
           typeclass = Resource.get_class(type, klass)
+          if type == Resource::OPT::TypeValue
+            extended_rcode, version, flags = self.get_unpack('CCn')
+            ttl = 0
+          else
+            ttl, = self.get_unpack('N')
+          end
           res = self.get_length16 do
             begin
               typeclass.decode_rdata self
             rescue => e
               raise DecodeError, e.message, e.backtrace
             end
+          end
+          if Resource::OPT === res
+            res.instance_variable_set(:@udp_payload_size, klass)
+            res.instance_variable_set(:@extended_rcode, extended_rcode)
+            res.instance_variable_set(:@version, version)
+            res.instance_variable_set(:@dnssec_ok, (flags & DNS::EDNS::DO_BIT) != 0)
           end
           res.instance_variable_set :@ttl, ttl
           return name, ttl, res
@@ -2353,7 +2661,72 @@ class Resolv
         cache = :"Type#{type_value}_Class#{class_value}"
 
         return (const_defined?(cache) && const_get(cache)) ||
+               (type_value == OPT::TypeValue && OPT) ||
                Generic.create(type_value, class_value)
+      end
+
+      ##
+      # EDNS(0) OPT resource. Its class field carries the requestor's UDP
+      # payload size and its TTL field carries EDNS metadata. [RFC 6891]
+
+      class OPT < Resource
+        TypeValue = 41
+
+        def initialize(udp_payload_size, version: DNS::EDNS::VERSION,
+                       dnssec_ok: false, extended_rcode: 0, options: [])
+          udp_payload_size = udp_payload_size.to_int
+          unless (0..65535).include?(udp_payload_size)
+            raise ArgumentError, "EDNS UDP payload size must be between 0 and 65535: #{udp_payload_size}"
+          end
+          version = version.to_int
+          unless (0..255).include?(version)
+            raise ArgumentError, "EDNS version must be between 0 and 255: #{version}"
+          end
+          extended_rcode = extended_rcode.to_int
+          unless (0..255).include?(extended_rcode)
+            raise ArgumentError, "EDNS extended RCODE must be between 0 and 255: #{extended_rcode}"
+          end
+          @udp_payload_size = udp_payload_size
+          @version = version
+          @dnssec_ok = dnssec_ok
+          @extended_rcode = extended_rcode
+          @options = options.map { |option| DNS::EDNS::Option.coerce(option) }
+        end
+
+        attr_reader :udp_payload_size, :version, :options
+
+        def dnssec_ok?
+          !!@dnssec_ok
+        end
+
+        def extended_rcode
+          @extended_rcode
+        end
+
+        def encode_rdata(msg)
+          @options.each do |option|
+            msg.put_pack('n', option.option_code)
+            msg.put_length16 { option.encode_rdata(msg) }
+          end
+        end
+
+        def self.decode_rdata(msg)
+          new(0, options: DNS::EDNS::Options.decode_rdata(msg))
+        end
+
+        def ==(other)
+          other.is_a?(OPT) &&
+            udp_payload_size == other.udp_payload_size &&
+            version == other.version &&
+            dnssec_ok? == other.dnssec_ok? &&
+            extended_rcode == other.extended_rcode &&
+            options == other.options
+        end
+        alias eql? ==
+
+        def hash
+          [udp_payload_size, version, dnssec_ok?, extended_rcode, options].hash
+        end
       end
 
       ##
