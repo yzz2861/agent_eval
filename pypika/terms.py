@@ -6,6 +6,7 @@ import sys
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from datetime import date, datetime, time
+from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any, TypeVar, overload
 
@@ -454,6 +455,19 @@ class ValueWrapper(Term):
 
         return param_sql, param_key
 
+    def get_parameter_value(self, **kwargs: Any) -> Any:
+        if isinstance(self.value, Term):
+            return self.value.get_sql(**kwargs)
+        if isinstance(self.value, Enum):
+            return type(self)(self.value.value).get_parameter_value(**kwargs)
+        if isinstance(self.value, (date, datetime, time)):
+            return self.value.isoformat()
+        if isinstance(self.value, uuid.UUID):
+            return str(self.value)
+        if self.value is None or isinstance(self.value, (int, float, str, bytes, bytearray, Decimal)):
+            return self.value
+        return self.get_value_sql(**kwargs)
+
     def get_sql(
         self,
         quote_char: str | None = None,
@@ -465,11 +479,7 @@ class ValueWrapper(Term):
             sql = self.get_value_sql(quote_char=quote_char, secondary_quote_char=secondary_quote_char, **kwargs)
             return format_alias_sql(sql, self.alias, quote_char=quote_char, **kwargs)
 
-        # Don't stringify numbers when using a parameter
-        if isinstance(self.value, (int, float)):
-            value_sql = self.value
-        else:
-            value_sql = self.get_value_sql(quote_char=quote_char, **kwargs)
+        value_sql = self.get_parameter_value(quote_char=quote_char, **kwargs)
         param_sql, param_key = self._get_param_data(parameter, **kwargs)
         parameter.update_parameters(param_key=param_key, value=value_sql, **kwargs)
 
