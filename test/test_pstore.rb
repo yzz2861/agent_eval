@@ -3,6 +3,8 @@ require 'test/unit'
 require 'pstore'
 require 'tmpdir'
 require 'pathname'
+require 'rbconfig'
+require 'timeout'
 
 class PStoreTest < Test::Unit::TestCase
   def setup
@@ -155,6 +157,154 @@ class PStoreTest < Test::Unit::TestCase
     File.unlink(second_file) rescue nil
   end
 
+  def test_thread_lock_timeout_does_not_run_block_or_leave_lock
+    store = PStore.new(second_file, true)
+    ready = Thread::Queue.new
+    release = Thread::Queue.new
+    owner = Thread.new do
+      store.transaction do
+        ready << true
+        release.pop
+      end
+    end
+    executed = false
+
+    ready.pop
+    error = assert_raise(PStore::ThreadLockTimeoutError) do
+      store.transaction(lock_timeout: 0.05) { executed = true }
+    end
+
+    assert_equal(:thread, error.lock)
+    assert_kind_of(PStore::LockTimeoutError, error)
+    refute(executed)
+  ensure
+    release&.<< true
+    owner&.join
+    refute(store.instance_variable_get(:@lock).locked?)
+    File.unlink(second_file) rescue nil
+  end
+
+  def test_file_lock_timeout_releases_thread_lock_and_skips_block
+    omit('advisory file locks are not supported on Windows') if Gem.win_platform?
+
+    store = PStore.new(second_file, true)
+    executed = false
+    file_wait_started = Thread::Queue.new
+    original_lock_file = store.method(:lock_file)
+    store.define_singleton_method(:lock_file) do |*args|
+      file_wait_started << true
+      original_lock_file.call(*args)
+    end
+
+    IO.popen([RbConfig.ruby, "-I#{lib_dir}", '-rpstore', '-e', CHILD_PROCESS_LOCK_SCRIPT, second_file], 'r+') do |io|
+      assert_equal("ready\n", io.gets)
+
+      error = assert_raise(PStore::FileLockTimeoutError) do
+        store.transaction(lock_timeout: 0.05) { executed = true }
+      end
+      assert_equal(:file, error.lock)
+      refute(executed)
+      refute(store.instance_variable_get(:@lock).locked?)
+      file_wait_started.pop
+
+      waiter = Thread.new do
+        store.transaction { executed = true }
+      end
+      file_wait_started.pop
+      waiter.kill
+      waiter.join
+
+      refute(executed)
+      refute(store.instance_variable_get(:@lock).locked?)
+
+      io.puts('release')
+      io.flush
+    end
+
+    store.transaction(lock_timeout: nil) { store[:recovered] = true }
+    assert_equal(true, store.transaction(true) { store[:recovered] })
+  ensure
+    File.unlink(second_file) rescue nil
+  end
+
+  def test_thread_and_file_lock_waits_share_one_deadline
+    omit('advisory file locks are not supported on Windows') if Gem.win_platform?
+
+    store = PStore.new(second_file, true)
+    current_time = 1.0
+    store.define_singleton_method(:monotonic_time) { current_time }
+
+    waiter_started = Thread::Queue.new
+    release_owner = Thread::Queue.new
+    thread_wait_observed = Thread::Queue.new
+    file_lock_attempt = Thread::Queue.new
+    condition = store.instance_variable_get(:@lock_condition)
+    condition.define_singleton_method(:wait) do |mutex, timeout|
+      waiter_started << true
+      thread_wait_observed << timeout
+      super(mutex, 0.001)
+    end
+    original_lock_file = store.method(:lock_file)
+    store.define_singleton_method(:lock_file) do |file, read_only, deadline|
+      file_lock_attempt.pop
+      current_time += 0.1
+      result = original_lock_file.call(file, read_only, deadline)
+      result
+    end
+
+    owner = Thread.new do
+      store.send(:lock_transaction_lock, 1.1)
+      release_owner.pop
+      current_time += 0.05
+      store.send(:unlock_transaction_lock)
+    end
+
+    executed = false
+    owner_released = false
+    IO.popen([RbConfig.ruby, "-I#{lib_dir}", '-rpstore', '-e', CHILD_PROCESS_LOCK_SCRIPT, second_file], 'r+') do |io|
+      assert_equal("ready\n", io.gets)
+      waiter = Thread.new do
+        Thread.current.report_on_exception = false
+        store.transaction(lock_timeout: 0.1) { executed = true }
+      end
+      waiter_started.pop
+      release_owner << true
+      owner_released = true
+      file_lock_attempt << true
+
+      error = assert_raise(PStore::FileLockTimeoutError) do
+        Timeout.timeout(2) { waiter.join }
+      end
+      assert_equal(:file, error.lock)
+      thread_wait = thread_wait_observed.pop
+      assert_operator(thread_wait, :>, 0.0)
+      assert_in_delta(0.1, thread_wait, 0.0001)
+      refute(executed)
+      refute(store.instance_variable_get(:@lock).locked?)
+      io.puts('release')
+      io.flush
+    end
+  ensure
+    release_owner << true unless owner_released
+    owner&.join
+    File.unlink(second_file) rescue nil
+  end
+
+  def test_exception_inside_block_releases_both_locks
+    store = PStore.new(second_file, true)
+
+    assert_raise(RuntimeError) do
+      store.transaction(lock_timeout: 1) { raise 'boom' }
+    end
+
+    assert_nothing_raised do
+      store.transaction(lock_timeout: 1) { store[:recovered] = true }
+    end
+    assert_equal(true, store.transaction(true) { store[:recovered] })
+  ensure
+    File.unlink(second_file) rescue nil
+  end
+
   # Test that PStore's file operations do not blow up when default encodings are set
   def test_pstore_files_are_accessed_as_binary_files
     bug5311 = '[ruby-core:39503]'
@@ -206,6 +356,19 @@ class PStoreTest < Test::Unit::TestCase
   def second_file
     File.join(Dir.tmpdir, "pstore.tmp2.#{Process.pid}")
   end
+
+  def lib_dir
+    File.expand_path('../lib', __dir__)
+  end
+
+  CHILD_PROCESS_LOCK_SCRIPT = <<~'RUBY'
+    store = PStore.new(ARGV[0])
+    store.transaction do
+      puts 'ready'
+      STDOUT.flush
+      STDIN.gets
+    end
+  RUBY
 
   def test_truncated_read_only_store_is_not_empty
     @pstore.transaction { @pstore[:foo] = "bar" }

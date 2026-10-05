@@ -339,6 +339,31 @@ class PStore
   class Error < StandardError
   end
 
+  # Raised when a transaction cannot acquire a lock before its deadline.
+  class LockTimeoutError < Error
+    # The lock that could not be acquired (+:thread+ or +:file+).
+    attr_reader :lock
+
+    def initialize(lock)
+      @lock = lock
+      super("could not acquire #{lock} lock")
+    end
+  end
+
+  # Raised when waiting for the store's in-process thread lock times out.
+  class ThreadLockTimeoutError < LockTimeoutError
+    def initialize
+      super(:thread)
+    end
+  end
+
+  # Raised when waiting for the store file's advisory lock times out.
+  class FileLockTimeoutError < LockTimeoutError
+    def initialize
+      super(:file)
+    end
+  end
+
   # Whether \PStore should do its best to prevent file corruptions,
   # even when an unlikely error (such as memory-error or filesystem error) occurs:
   #
@@ -385,6 +410,8 @@ class PStore
     @ultra_safe = false
     @thread_safe = thread_safe
     @lock = Thread::Mutex.new
+    @lock_monitor = Thread::Mutex.new
+    @lock_condition = Thread::ConditionVariable.new
   end
 
   # Raises PStore::Error if the calling code is not in a PStore#transaction.
@@ -551,21 +578,20 @@ class PStore
   # to #transaction, #[]=, or #delete.
   #
   # Raises an exception if called within a transaction block.
-  def transaction(read_only = false)  # :yields:  pstore
+  #
+  # If +lock_timeout+ is given, it is the maximum number of seconds to wait
+  # for either the in-process thread lock or the file lock. Both waits share
+  # one deadline measured against a monotonic clock. ThreadLockTimeoutError
+  # or FileLockTimeoutError is raised when the corresponding wait expires;
+  # in either case the transaction block is not called.
+  def transaction(read_only = false, lock_timeout: nil)  # :yields:  pstore
     value = nil
-    if !@thread_safe
-      raise PStore::Error, "nested transaction" unless @lock.try_lock
-    else
-      begin
-        @lock.lock
-      rescue ThreadError
-        raise PStore::Error, "nested transaction"
-      end
-    end
+    deadline = lock_deadline(lock_timeout)
+    lock_transaction_lock(deadline)
     begin
       @rdonly = read_only
       @abort = false
-      file = open_and_lock_file(@filename, read_only)
+      file = open_and_lock_file(@filename, read_only, deadline)
       if file
         begin
           @table, checksum, original_data_size = load_data(file, read_only)
@@ -578,7 +604,7 @@ class PStore
             save_data(checksum, original_data_size, file)
           end
         ensure
-          file.close
+          file.close if file
         end
       else
         # This can only occur if read_only == true.
@@ -588,13 +614,72 @@ class PStore
         end
       end
     ensure
-      @lock.unlock
+      unlock_transaction_lock
     end
     value
   end
 
   private
   # :stopdoc:
+
+  def monotonic_time
+    Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
+
+  def lock_deadline(timeout)
+    return nil if timeout.nil?
+    return nil if timeout.respond_to?(:infinite?) && timeout.infinite?
+    monotonic_time + timeout
+  end
+
+  def lock_wait_remaining(deadline)
+    deadline - monotonic_time
+  end
+
+  def lock_transaction_lock(deadline)
+    raise PStore::Error, "nested transaction" if @lock.owned?
+
+    unless @thread_safe
+      raise PStore::Error, "nested transaction" unless @lock.try_lock
+      return
+    end
+
+    if deadline.nil?
+      @lock.lock
+      return
+    end
+
+    @lock_monitor.synchronize do
+      begin
+        waited = false
+        loop do
+          if waited && lock_wait_remaining(deadline) <= 0
+            raise ThreadLockTimeoutError
+          end
+          break if @lock.try_lock
+
+          remaining = lock_wait_remaining(deadline)
+          raise ThreadLockTimeoutError if remaining <= 0
+
+          @lock_condition.wait(@lock_monitor, remaining)
+          waited = true
+        end
+      rescue Exception
+        if @lock.owned?
+          @lock.unlock
+          @lock_condition.broadcast
+        end
+        raise
+      end
+    end
+  end
+
+  def unlock_transaction_lock
+    @lock_monitor.synchronize do
+      @lock.unlock
+      @lock_condition.broadcast
+    end
+  end
 
   # Constant for relieving Ruby's garbage collector.
   CHECKSUM_ALGO = %w[SHA512 SHA384 SHA256 SHA1 RMD160 MD5].each do |algo|
@@ -620,7 +705,7 @@ class PStore
   #
   # All exceptions are propagated.
   #
-  def open_and_lock_file(filename, read_only)
+  def open_and_lock_file(filename, read_only, deadline = nil)
     filename = File.path(filename)
     loop do
       if read_only
@@ -634,12 +719,37 @@ class PStore
       end
       current = false
       begin
-        file.flock(read_only ? File::LOCK_SH : File::LOCK_EX)
+        unless lock_file(file, read_only, deadline)
+          raise FileLockTimeoutError
+        end
         # An atomic save may have replaced the file while this lock was pending.
         current = File.identical?(file, filename)
         return file if current
       ensure
         file.close unless current
+      end
+    end
+  end
+
+  def lock_file(file, read_only, deadline)
+    lock_mode = read_only ? File::LOCK_SH : File::LOCK_EX
+    return file.flock(lock_mode) unless deadline
+
+    waited = false
+    loop do
+      if waited && lock_wait_remaining(deadline) <= 0
+        return false
+      end
+      begin
+        return true if file.flock(lock_mode | File::LOCK_NB)
+      rescue Errno::EAGAIN, Errno::EWOULDBLOCK
+      end
+
+      if deadline
+        remaining = lock_wait_remaining(deadline)
+        return false if remaining <= 0
+        sleep [remaining, 0.01].min
+        waited = true
       end
     end
   end
