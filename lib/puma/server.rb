@@ -108,6 +108,7 @@ module Puma
       @io_selector_backend       = @options[:io_selector_backend]
       @http_content_length_limit = @options[:http_content_length_limit]
       @allow_underscore_headers  = @options.fetch(:allow_underscore_headers, true)
+      @header_admission_handler  = @options[:header_admission]
       @cluster_accept_loop_delay = ClusterAcceptLoopDelay.new(
         workers: @options[:workers],
         max_delay: @options[:wait_for_less_busy_worker] || 0 # Real default is in Configuration::DEFAULTS, this is for unit testing
@@ -457,6 +458,7 @@ module Puma
       client.http_content_length_limit = @http_content_length_limit
       client.supported_http_methods = @supported_http_methods
       client.allow_underscore_headers = @allow_underscore_headers
+      client.header_admission = method(:admit_headers) if @header_admission_handler
       client
     end
 
@@ -589,6 +591,9 @@ module Puma
       return if [ConnectionError, EOFError].include?(e.class)
 
       case e
+      when HeaderAdmissionError
+        response_to_header_admission_error(e, client, requests)
+        @log_writer.unknown_error(e, client, "Header admission") if e.loggable?
       when MiniSSL::SSLError
         lowlevel_error(e, client.env)
         @log_writer.ssl_error e, client.io
@@ -782,5 +787,64 @@ module Puma
     def connected_ports
       @binder.connected_ports
     end
+
+    def response_to_header_admission_error(error, client, requests)
+      prepare_response(error.status, error.headers, error.body, requests, client)
+    end
+    private :response_to_header_admission_error
+
+    def admit_headers(env)
+      result = @header_admission_handler.call(env)
+      return if result.nil? || result == true || result == :allow
+
+      reject_header_admission(result)
+    rescue StandardError => e
+      raise e if e.is_a?(HeaderAdmissionError)
+
+      @log_writer.unknown_error e, nil, "Header admission"
+      raise HeaderAdmissionError.new(500, {}, [], loggable: true)
+    end
+    private :admit_headers
+
+    def reject_header_admission(result)
+      raise HeaderAdmissionError.new unless result.is_a?(Array) && result.length == 3
+
+      status, headers, body = result
+      status = Integer(status, exception: false) unless status.is_a?(Integer)
+      body = body.to_ary if body.respond_to?(:to_ary)
+
+      raise HeaderAdmissionError.new unless status.is_a?(Integer) && status.between?(400, 599)
+      raise HeaderAdmissionError.new unless headers.respond_to?(:each_pair) && body.is_a?(Array)
+
+      response_body = body.map do |part|
+        part = part.to_s
+        raise HeaderAdmissionError.new unless part.is_a?(String)
+        part
+      end
+
+      response_headers = {}
+      response_size = response_body.sum(&:bytesize)
+      headers.each_pair do |key, value|
+        key = key.to_s.downcase
+        next if key == CONTENT_LENGTH2 || key == TRANSFER_ENCODING || key == 'connection'
+        raise HeaderAdmissionError.new if illegal_header_key?(key)
+
+        values = value.is_a?(Array) ? value : [value]
+        raise HeaderAdmissionError.new if values.empty?
+        converted_values = values.map do |header_value|
+          header_value = header_value.to_s
+          raise HeaderAdmissionError.new unless header_value.is_a?(String)
+          raise HeaderAdmissionError.new if illegal_header_value?(header_value)
+          response_size += key.bytesize + 2 + header_value.bytesize + 2
+          header_value
+        end
+        response_headers[key] = value.is_a?(Array) ? converted_values : converted_values.first
+      end
+      raise HeaderAdmissionError.new if response_size > HEADER_ADMISSION_RESPONSE_MAX
+
+      response_headers[CONTENT_LENGTH2] = response_body.sum(&:bytesize)
+      raise HeaderAdmissionError.new(status, response_headers, response_body)
+    end
+    private :reject_header_admission
   end
 end

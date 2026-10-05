@@ -114,6 +114,7 @@ module Puma
     REQUEST_PATH = "REQUEST_PATH"
     QUERY_STRING = "QUERY_STRING"
     CONTENT_LENGTH = "CONTENT_LENGTH"
+    CONTENT_TYPE = "CONTENT_TYPE"
 
     PATH_INFO = "PATH_INFO"
 
@@ -143,6 +144,9 @@ module Puma
 
     # Maximum request body size before it is moved out of memory and into a tempfile for reading.
     MAX_BODY = MAX_HEADER
+
+    # Maximum response headers and body returned by a header admission hook.
+    HEADER_ADMISSION_RESPONSE_MAX = 64 * 1024
 
     REQUEST_METHOD = "REQUEST_METHOD"
     HEAD = "HEAD"

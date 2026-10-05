@@ -902,6 +902,66 @@ class TestPumaServer < PumaTest
     assert_equal "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 0\r\n\r\n", response
   end
 
+  def test_header_admission_rejects_without_100_continue_and_closes
+    requests = Queue.new
+    request = "POST / HTTP/1.1\r\nHost: test.com\r\nConnection: keep-alive\r\n" \
+      "Content-Length: 8\r\nExpect: 100-continue\r\n\r\nRejected" \
+      "GET /next HTTP/1.1\r\nHost: test.com\r\n\r\n"
+
+    response = process_header_admission(request, requests) do
+      [413, {"Content-Type" => "text/plain"}, ["Rejected"]]
+    end
+
+    expected = "HTTP/1.1 413 #{STATUS_CODES[413]}\r\n" \
+      "content-type: text/plain\r\nconnection: close\r\ncontent-length: 8\r\n\r\nRejected"
+    assert_equal expected, response
+    assert_predicate requests, :empty?
+  end
+
+  def test_header_admission_exception_returns_500_and_closes
+    requests = Queue.new
+    request = "POST / HTTP/1.1\r\nHost: test.com\r\nContent-Length: 8\r\n" \
+      "Expect: 100-continue\r\n\r\nRejected"
+
+    response = process_header_admission(request, requests) do
+      raise "admission failed"
+    end
+
+    expected = "HTTP/1.1 500 Internal Server Error\r\nconnection: close\r\n" \
+      "content-length: 0\r\n\r\n"
+    assert_equal expected, response
+    assert_predicate requests, :empty?
+  end
+
+  def test_header_admission_invalid_large_response_returns_500
+    requests = Queue.new
+    request = "POST / HTTP/1.1\r\nHost: test.com\r\nContent-Length: 1\r\n\r\nx"
+
+    response = process_header_admission(request, requests) do
+      [413, {}, ["x" * (Puma::Const::HEADER_ADMISSION_RESPONSE_MAX + 1)]]
+    end
+
+    expected = "HTTP/1.1 500 Internal Server Error\r\nconnection: close\r\n" \
+      "content-length: 0\r\n\r\n"
+    assert_equal expected, response
+  end
+
+  def test_header_admission_allow_continues_to_rack_app
+    requests = Queue.new
+    request = "POST / HTTP/1.1\r\nHost: test.com\r\nConnection: close\r\nContent-Length: 2\r\n\r\nOK"
+
+    response = process_header_admission(request, requests) do |env|
+      assert_predicate env, :frozen?
+      assert_raises(FrozenError) { env['HTTP_HOST'] << '.example' }
+      refute_includes env, 'puma.socket'
+      refute_includes env, 'rack.input'
+      :allow
+    end
+
+    assert_equal "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 2\r\n\r\nOK", response
+    assert_equal 1, requests.length
+  end
+
   def test_chunked_request
     body = nil
     content_length = nil
@@ -2402,5 +2462,31 @@ class TestPumaServer < PumaTest
     assert_equal 0, @pool.min
     assert_equal 5, @server.max_threads
     assert_equal 0, @server.min_threads
+  end
+
+  def process_header_admission(request, requests, &hook)
+    app = ->(env) do
+      requests << env
+      [200, {}, ["OK"]]
+    end
+
+    @server = Puma::Server.new app, @events,
+      queue_requests: false,
+      min_threads: 1,
+      log_writer: @log_writer,
+      header_admission: hook
+
+    @server.run
+    client_io, socket = UNIXSocket.pair
+    client = @server.send(:new_client, client_io, nil)
+    socket.write(request)
+    thread = Thread.new { @server.process_client(nil, client) }
+    response = socket.read
+    thread.join
+    assert_predicate client_io, :closed?
+    response
+  ensure
+    client_io&.close
+    socket&.close
   end
 end

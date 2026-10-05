@@ -19,6 +19,22 @@ module Puma
 
   class HttpParserError501 < IOError; end
 
+  class HeaderAdmissionError < StandardError
+    attr_reader :status, :headers, :body
+
+    def initialize(status = 500, headers = {}, body = [], loggable: false)
+      @status = status
+      @headers = headers
+      @body = body
+      @loggable = loggable
+      super("Header admission rejected the request")
+    end
+
+    def loggable?
+      @loggable
+    end
+  end
+
   #———————————————————————— DO NOT USE — this class is for internal use only ———
 
 
@@ -78,7 +94,7 @@ module Puma
                 :requests_served, :error_status_code
 
     attr_writer :peerip, :http_content_length_limit, :supported_http_methods,
-                :allow_underscore_headers
+                :allow_underscore_headers, :header_admission
 
     attr_accessor :remote_addr_header, :listener, :env_set_http_version
 
@@ -108,6 +124,7 @@ module Puma
       @http_content_length_limit = nil
       @http_content_length_limit_exceeded = nil
       @allow_underscore_headers = true
+      @header_admission = nil
       @error_status_code = nil
 
       @peerip = nil
@@ -437,10 +454,11 @@ module Puma
         raise HttpParserError, 'Underscores are not allowed in HTTP framing headers'
       end
 
+      admit_headers
+
       @body_read_start = Process.clock_gettime(Process::CLOCK_MONOTONIC, :float_millisecond)
 
       if @env[HTTP_EXPECT] == CONTINUE
-        # TODO allow a hook here to check the headers before going forward
         @io << HTTP_11_100
         @io.flush
       end
@@ -771,6 +789,41 @@ module Puma
       @error_status_code = 413
       @env[HTTP_CONNECTION] = 'close'
       raise HttpParserError, "Payload Too Large"
+    end
+
+    HEADER_ADMISSION_ENV_KEYS = [
+      REQUEST_METHOD,
+      REQUEST_URI,
+      REQUEST_PATH,
+      QUERY_STRING,
+      SERVER_PROTOCOL,
+      CONTENT_LENGTH,
+      CONTENT_TYPE,
+    ].freeze
+
+    def admit_headers
+      return unless @header_admission
+
+      @header_admission.call(header_admission_env)
+    rescue HeaderAdmissionError
+      reject_after_header_admission
+      raise
+    end
+
+    def reject_after_header_admission
+      @buffer = nil
+      @body = EmptyBody
+      @env[HTTP_CONNECTION] = CLOSE
+    end
+
+    def header_admission_env
+      @env.each_with_object({}) do |(key, value), env|
+        next unless key.start_with?("HTTP_") || HEADER_ADMISSION_ENV_KEYS.include?(key)
+
+        key = key.dup.freeze if key.is_a?(::String) && !key.frozen?
+        value = value.dup.freeze if value.is_a?(::String) && !value.frozen?
+        env[key] = value
+      end.freeze
     end
   end
 end

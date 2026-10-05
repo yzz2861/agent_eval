@@ -754,6 +754,31 @@ class TestConfigFile < PumaTest
     assert_equal 10000, conf.final_options[:http_content_length_limit]
   end
 
+  def test_header_admission
+    conf = Puma::Configuration.new
+    conf.clamp
+
+    assert_nil conf.options.default_options[:header_admission]
+
+    hook = ->(_headers) { :allow }
+    conf = Puma::Configuration.new do |c|
+      c.header_admission hook
+    end
+    conf.clamp
+
+    assert_same hook, conf.final_options[:header_admission]
+  end
+
+  def test_header_admission_requires_callable
+    conf = Puma::Configuration.new
+
+    error = assert_raises(RuntimeError) do
+      conf.configure { |user_config| user_config.header_admission :not_callable }
+    end
+
+    assert_equal "Provide either a #call'able or a block", error.message
+  end
+
   def test_options_raises_not_clamped_error_when_not_clamped
     conf = Puma::Configuration.new
 

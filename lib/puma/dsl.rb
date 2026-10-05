@@ -1119,6 +1119,32 @@ module Puma
       @options[:lowlevel_error_handler] = obj
     end
 
+    # Register a callable that receives a frozen hash of request header
+    # information before Puma sends +100 Continue+ or reads a request body.
+    # Return +nil+, +true+, or +:allow+ to continue normal request handling.
+    # Return a small three-element Rack response to reject the request and
+    # close the connection.
+    #
+    # Rejection response headers and bodies may not exceed a total of
+    # +Puma::Const::HEADER_ADMISSION_RESPONSE_MAX+ bytes. Exceptions raised by
+    # the callable produce a +500 Internal Server Error+ response and close the
+    # connection.
+    #
+    # @example
+    #   header_admission do |headers|
+    #     if headers['CONTENT_LENGTH'].to_i > 10_000_000
+    #       [413, { 'Content-Type' => 'text/plain' }, ['Payload too large']]
+    #     end
+    #   end
+    #
+    def header_admission(obj=nil, &block)
+      obj ||= block
+      unless obj.respond_to?(:call)
+        raise "Provide either a #call'able or a block"
+      end
+      @options[:header_admission] = obj
+    end
+
     # This option is used to allow your app and its gems to be
     # properly reloaded when not using preload.
     #
