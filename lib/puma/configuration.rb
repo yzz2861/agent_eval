@@ -141,6 +141,10 @@ module Puma
       enable_keep_alives: true,
       environment: 'development'.freeze,
       fiber_per_request: !!ENV.fetch("PUMA_FIBER_PER_REQUEST", false),
+      # Limits how many consecutive requests a keep-alive connection may
+      # deliver to the application per scheduling round before it is rotated
+      # behind other ready connections.  +nil+ disables fair scheduling.
+      fair_connection_quota: nil,
       # Number of seconds to wait until we get the first data for the request.
       first_data_timeout: 30,
       force_shutdown_after: -1,

@@ -105,6 +105,8 @@ module Puma
       @max_keep_alive            = @options[:max_keep_alive]
       @enable_keep_alives        = @options[:enable_keep_alives]
       @enable_keep_alives      &&= @queue_requests
+      quota                      = @options[:fair_connection_quota]
+      @fair_connection_quota     = quota && quota.to_i > 0 ? quota.to_i : nil
       @io_selector_backend       = @options[:io_selector_backend]
       @http_content_length_limit = @options[:http_content_length_limit]
       @allow_underscore_headers  = @options.fetch(:allow_underscore_headers, true)
@@ -530,11 +532,11 @@ module Puma
             end
 
             if next_request_ready
-              # When Puma has spare threads, allow this one to be monopolized
-              # Perf optimization for https://github.com/puma/puma/issues/3788
-              if @thread_pool.waiting > 0
+              if continue_connection_round?(requests)
                 can_loop = true
               else
+                # The connection's round is over; requeue it behind any other
+                # ready connections so they are served first.
                 @thread_pool.with_mutex do
                   unless shutting_down?
                     @thread_pool << client
@@ -572,6 +574,25 @@ module Puma
     rescue StandardError => e
       @log_writer.unknown_error e, nil, "Client"
     end
+
+    # Whether a keep-alive connection may deliver another request to the
+    # application in its current scheduling round.  +requests+ is the number
+    # of requests the connection has already completed in this round; only
+    # requests actually handed to the application are counted, so empty reads
+    # and protocol errors never consume quota.
+    #
+    # When +fair_connection_quota+ is set, a connection is limited to that
+    # many consecutive requests per round.  Otherwise, when Puma has spare
+    # threads, allow this one to be monopolized.
+    # Perf optimization for https://github.com/puma/puma/issues/3788
+    def continue_connection_round?(requests)
+      if @fair_connection_quota
+        requests < @fair_connection_quota
+      else
+        @thread_pool.waiting > 0
+      end
+    end
+    private :continue_connection_round?
 
     # Triggers a client timeout if the thread-pool shuts down
     # during execution of the provided block.

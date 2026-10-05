@@ -1,3 +1,8 @@
+## Unreleased
+
+* Features
+  * Add optional connection-level fair scheduling via `fair_connection_quota`: a keep-alive connection is limited to a configurable number of consecutive requests per scheduling round, then rotated behind other ready connections
+
 ## 8.0.2 / 2026-05-27
 
 * Bugfixes

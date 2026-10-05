@@ -1468,6 +1468,29 @@ module Puma
       @options[:max_keep_alive] = Float(num_of_requests) unless num_of_requests.nil?
     end
 
+    # The number of consecutive requests a keep-alive connection may deliver
+    # to the application per scheduling round.  Once a connection has used up
+    # its quota, it is rotated to the back of the queue of ready connections,
+    # so a busy connection cannot monopolize a worker thread while other
+    # connections are waiting.
+    #
+    # The quota is charged per request actually handed to the application;
+    # empty reads and protocol errors do not count.  Requests already queued
+    # on other connections are always served before a connection starts a new
+    # round, and responses on a connection keep their original order.
+    #
+    # The default is +nil+, which disables fair scheduling and lets a
+    # connection keep its thread while Puma has spare capacity.
+    #
+    # @example
+    #   fair_connection_quota 4
+    #
+    # @see max_keep_alive
+    #
+    def fair_connection_quota(num_of_requests)
+      @options[:fair_connection_quota] = Integer(num_of_requests) unless num_of_requests.nil?
+    end
+
     # When `true`, keep-alive connections are maintained on inbound requests.
     # Enabling this setting reduces the number of TCP operations, reducing response
     # times for connections that can send multiple requests in a single connection.
