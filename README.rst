@@ -101,6 +101,35 @@ of your dict keys.  To do this you can use either of these options:
     ...               jmespath.Options(dict_cls=collections.OrderedDict))
 
 
+Group Reduce
+------------
+
+``group_reduce(array, &key_expr, &step_expr, initial)`` groups the elements
+of an array by a JSON key and incrementally reduces each group.  Results are
+returned in the order in which each key first occurs as objects with ``key``
+and ``value`` properties.  A deep copy of ``initial`` is made for every group.
+
+The key expression is evaluated once per input element.  Keys may be any JSON
+scalar, array, or object.  Object member order does not affect equality,
+array order does, ``true`` is distinct from ``1``, and a missing or ``null``
+key is grouped as ``null``.  Circular and non-JSON keys raise a
+``JMESPathError``.
+
+The step expression is evaluated with this context::
+
+    {"key": key, "item": item, "index": index, "acc": accumulator}
+
+For example, this expression groups by nested region and status fields and
+calls a custom ``add_to_group`` step function for each matching order::
+
+    group_reduce(
+      orders,
+      &[region, status],
+      &add_to_group(acc, item),
+      `{"total": 0, "count": 0}`
+    )
+
+
 Custom Functions
 ~~~~~~~~~~~~~~~~
 

@@ -1,7 +1,8 @@
 Next Release (TBD)
 ==================
 
-* No changes yet.
+* Added ``group_reduce()`` for grouping by JSON composite keys and reducing
+  each group incrementally.
 
 
 1.1.0

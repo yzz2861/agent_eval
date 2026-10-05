@@ -1,5 +1,6 @@
 import math
 import json
+from copy import deepcopy
 
 from jmespath import exceptions
 from jmespath.compat import string_type as STRING_TYPE
@@ -251,6 +252,83 @@ class Functions(metaclass=FunctionRegistry):
         for element in arg:
             result.append(expref.visit(expref.expression, element))
         return result
+
+    @signature({'types': ['array']}, {'types': ['expref']},
+               {'types': ['expref']}, {'types': []})
+    def _func_group_reduce(self, array, key_expref, step_expref, initial):
+        groups = []
+        group_index = {}
+        for index, item in enumerate(array):
+            key = key_expref.visit(key_expref.expression, item)
+            canonical_key = self._canonical_group_reduce_key(key, index)
+            group = group_index.get(canonical_key)
+            if group is None:
+                group = {'key': key, 'value': deepcopy(initial)}
+                group_index[canonical_key] = group
+                groups.append(group)
+            context = {
+                'key': key,
+                'item': item,
+                'index': index,
+                'acc': group['value'],
+            }
+            group['value'] = step_expref.visit(
+                step_expref.expression, context)
+        return groups
+
+    def _canonical_group_reduce_key(self, value, index, seen=None):
+        if seen is None:
+            seen = set()
+        if value is None:
+            return ('null', None)
+        if isinstance(value, bool):
+            return ('boolean', value)
+        if isinstance(value, int):
+            return ('number', value)
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                self._invalid_group_reduce_key(
+                    index, 'number must be finite')
+            return ('number', value)
+        if isinstance(value, STRING_TYPE):
+            return ('string', value)
+        if isinstance(value, (list, dict)):
+            value_id = id(value)
+            if value_id in seen:
+                self._invalid_group_reduce_key(
+                    index, 'circular reference is not allowed')
+            seen.add(value_id)
+            try:
+                if isinstance(value, list):
+                    canonical = ('array', tuple(
+                        self._canonical_group_reduce_key(
+                            element, index, seen)
+                        for element in value
+                    ))
+                else:
+                    members = []
+                    for member_key, member_value in value.items():
+                        if not isinstance(member_key, STRING_TYPE):
+                            self._invalid_group_reduce_key(
+                                index, 'object keys must be strings')
+                        members.append((
+                            member_key,
+                            self._canonical_group_reduce_key(
+                                member_value, index, seen),
+                        ))
+                    members.sort()
+                    canonical = ('object', tuple(members))
+            finally:
+                seen.remove(value_id)
+            return canonical
+        actual_type = self._convert_to_jmespath_type(type(value).__name__)
+        self._invalid_group_reduce_key(
+            index, 'expected a JSON value, received "%s"' % actual_type)
+
+    def _invalid_group_reduce_key(self, index, reason):
+        raise exceptions.JMESPathError(
+            'In function group_reduce(), invalid key for item at '
+            'index %s: %s' % (index, reason))
 
     @signature({"types": ['array-number', 'array-string']})
     def _func_max(self, arg):
