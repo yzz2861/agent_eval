@@ -8,6 +8,8 @@
 
 ### New features
 
+- Dataloader: add `Source.max_batch_size` to split large batches into multiple `fetch` calls
+
 ### Bug fixes
 
 # 2.6.11 (21 Sep 2026)

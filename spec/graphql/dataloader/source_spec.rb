@@ -82,6 +82,99 @@ describe GraphQL::Dataloader::Source do
     assert_equal [100, 200, 100], values
   end
 
+  describe "max_batch_size" do
+    class LimitedSource < GraphQL::Dataloader::Source
+      max_batch_size 2
+
+      def self.fetches
+        @fetches ||= []
+      end
+
+      def fetch(keys)
+        LimitedSource.fetches << keys
+        keys.map { |k| k * 10 }
+      end
+    end
+
+    class FailingLimitedSource < LimitedSource
+      def fetch(keys)
+        raise "boom" if keys == [3, 4]
+        super
+      end
+    end
+
+    it "splits fetches into batches of max_batch_size" do
+      LimitedSource.fetches.clear
+      results = nil
+      GraphQL::Dataloader.with_dataloading do |dl|
+        results = dl.with(LimitedSource).load_all([1, 2, 3, 4, 5])
+      end
+      assert_equal [10, 20, 30, 40, 50], results
+      assert_equal [[1, 2], [3, 4], [5]], LimitedSource.fetches
+    end
+
+    it "deduplicates keys across batches" do
+      LimitedSource.fetches.clear
+      results = nil
+      GraphQL::Dataloader.with_dataloading do |dl|
+        results = dl.with(LimitedSource).load_all([1, 2, 2, 3, 1])
+      end
+      assert_equal [10, 20, 20, 30, 10], results
+      assert_equal [[1, 2], [3]], LimitedSource.fetches
+    end
+
+    it "a failed slice doesn't block other slices" do
+      LimitedSource.fetches.clear
+      err = nil
+      GraphQL::Dataloader.with_dataloading do |dl|
+        err = assert_raises(RuntimeError) do
+          dl.with(FailingLimitedSource).load_all([1, 2, 3, 4, 5])
+        end
+      end
+      assert_equal "boom", err.message
+      assert_equal [[1, 2], [5]], LimitedSource.fetches
+    end
+
+    class RecursiveSource < GraphQL::Dataloader::Source
+      max_batch_size 2
+
+      def fetch(keys)
+        keys.map { |k| k < 3 ? k : load(k - 2) }
+      end
+    end
+
+    it "handles recursive loads with max_batch_size" do
+      results = nil
+      GraphQL::Dataloader.with_dataloading do |dl|
+        results = dl.with(RecursiveSource).load_all([1, 2, 3, 4, 5])
+      end
+      assert_equal [1, 2, 1, 2, 1], results
+    end
+
+    class ChainedSource < GraphQL::Dataloader::Source
+      max_batch_size 2
+
+      def fetch(keys)
+        keys.map do |k|
+          if k == 1
+            request(99)
+            1
+          else
+            k
+          end
+        end
+      end
+    end
+
+    it "requests made during fetch are handled in a later round" do
+      results = nil
+      GraphQL::Dataloader.with_dataloading do |dl|
+        results = dl.with(ChainedSource).load_all([1, 2, 3])
+      end
+      assert_equal [1, 2, 3], results
+    end
+  end
+
   class NoDataloaderSchema < GraphQL::Schema
     class ThingSource < GraphQL::Dataloader::Source
       def fetch(ids)

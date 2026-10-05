@@ -147,6 +147,23 @@ dataloader.with(Sources::ActiveRecordObject, Comment).merge(comments_by_id)
 
 After that, any calls to `.load(id)` will use those already-loaded records if they're available.
 
+## Limiting Batch Size
+
+Some external APIs limit how many keys they accept in a single call. To split large batches into smaller ones, use `max_batch_size`:
+
+```ruby
+class Sources::UserById < GraphQL::Dataloader::Source
+  # Pass at most 50 keys to `#fetch` at a time:
+  max_batch_size 50
+
+  def fetch(ids)
+    UserService.find_each(ids) # never receives more than 50 ids
+  end
+end
+```
+
+With this configuration, if more than 50 keys are pending, the source will call `#fetch` several times in a row, each time with a slice of the pending keys. Keys requested while a slice is being fetched are gathered up and handled by a subsequent call to `#fetch`.
+
 ## De-duplicating equivalent objects
 
 Sometimes, _different_ objects in the application should load the same object from `fetch`. You can customize this behavior by implementing `def result_key_for(key)` in your application. For example, to map records from your ORM to their database ID:

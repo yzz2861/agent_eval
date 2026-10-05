@@ -17,6 +17,11 @@ module GraphQL
 
       attr_reader :dataloader
 
+      # @return [Integer, nil] The maximum number of keys to pass to {#fetch} at once, or nil for no limit
+      def max_batch_size
+        self.class.max_batch_size
+      end
+
       # @return [Dataloader::Request] a pending request for a value from `key`. Call `.load` on that object to wait for the result.
       def request(value)
         res_key = result_key_for(value)
@@ -135,25 +140,39 @@ module GraphQL
       # @api private
       # @return [void]
       def run_pending_keys
-        @fetching.each_key { |k| @pending.delete(k) }
-        return if @pending.empty?
-        fetch_h = @pending
-        @fetching.merge!(fetch_h)
-        @pending = {}
-        results = fetch(fetch_h.values)
-        idx = 0
+        batch_limit = max_batch_size
+        while !@pending.empty?
+          @fetching.each_key { |k| @pending.delete(k) }
+          break if @pending.empty?
 
-        fetch_h.each_key do |key|
-          @results[key] = results[idx]
-          @fetching.delete(key)
-          idx += 1
+          fetch_h = if batch_limit && @pending.size > batch_limit
+            slice = @pending.first(batch_limit).to_h
+            slice.each_key { |k| @pending.delete(k) }
+            slice
+          else
+            all_pending = @pending
+            @pending = {}
+            all_pending
+          end
+
+          @fetching.merge!(fetch_h)
+          begin
+            results = fetch(fetch_h.values)
+            idx = 0
+
+            fetch_h.each_key do |key|
+              @results[key] = results[idx]
+              @fetching.delete(key)
+              idx += 1
+            end
+          rescue StandardError => error
+            fetch_h.each_key do |key|
+              @results[key] = error
+              @fetching.delete(key)
+            end
+          end
         end
         nil
-      rescue StandardError => error
-        fetch_h.each_key { |key|
-          @results[key] = error
-          @fetching.delete(key)
-        }
       end
 
       # These arguments are given to `dataloader.with(source_class, ...)`. The object
@@ -175,6 +194,32 @@ module GraphQL
           [*batch_args, **batch_kwargs]
         else
           batch_args
+        end
+      end
+
+      # Declare a maximum number of keys to include in each call to {#fetch}.
+      # When this is set, sources which accumulate more keys than this
+      # will be split into multiple sequential calls to {#fetch}.
+      #
+      # @example Limiting batches to 50 keys
+      #   class MySource < GraphQL::Dataloader::Source
+      #     max_batch_size 50
+      #   end
+      #
+      # @param new_max_batch_size [Integer, nil] The maximum number of keys to pass to {#fetch} at once, or nil for no limit
+      # @return [Integer, nil] The current maximum batch size, or nil if no limit is set
+      def self.max_batch_size(new_max_batch_size = nil)
+        if new_max_batch_size.nil?
+          if instance_variable_defined?(:@max_batch_size)
+            @max_batch_size
+          elsif superclass.respond_to?(:max_batch_size)
+            superclass.max_batch_size
+          end
+        else
+          if new_max_batch_size < 1
+            raise ArgumentError, "max_batch_size must be greater than 0, but got: \#{new_max_batch_size.inspect}"
+          end
+          @max_batch_size = new_max_batch_size
         end
       end
 
