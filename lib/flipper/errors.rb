@@ -19,4 +19,16 @@ module Flipper
       super(message || default)
     end
   end
+
+  # Raised when a variant is evaluated for a feature that has no variant
+  # configuration.
+  class VariantsNotConfigured < Flipper::Error
+    def initialize(feature_name)
+      super "Variants have not been configured for #{feature_name.inspect}."
+    end
+  end
+
+  # Raised when a variant configuration is invalid (bad weights, salt, or
+  # variant names).
+  class InvalidVariantConfiguration < Flipper::Error; end
 end

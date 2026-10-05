@@ -66,6 +66,8 @@ module Flipper
                  :features, :feature, :[], :preload, :preload_all,
                  :adapter, :adapter_stack, :add, :exist?, :remove, :import, :export,
                  :memoize=, :memoizing?, :read_only?,
+                 :configure_variants, :variant, :variant_configuration,
+                 :variants_configured?, :remove_variants,
                  :sync, :sync_secret # For Flipper::Cloud. Will error for OSS Flipper.
 
   def any(*args)
@@ -211,6 +213,7 @@ require 'flipper/poller'
 require 'flipper/registry'
 require 'flipper/expression'
 require 'flipper/type'
+require 'flipper/variants'
 require 'flipper/types/actor'
 require 'flipper/types/boolean'
 require 'flipper/types/group'

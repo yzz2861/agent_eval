@@ -1,5 +1,6 @@
 require 'forwardable'
 require 'concurrent/map'
+require 'flipper/variants'
 
 module Flipper
   class DSL
@@ -28,6 +29,7 @@ module Flipper
       # Flipper.new(adapter) or Flipper::Cloud.new held in a constant) can
       # memoize features without a non-atomic Hash mutation racing.
       @memoized_features = Concurrent::Map.new
+      @variant_configurations = Concurrent::Map.new
     end
 
     # Public: Check if a feature is enabled.
@@ -38,6 +40,63 @@ module Flipper
     # Returns true if feature is enabled, false if not.
     def enabled?(name, *args)
       feature(name).enabled?(*args)
+    end
+
+    # Public: Configure weight-based variants for a feature. Variant
+    # assignment is independent of the boolean enabled? gates.
+    #
+    # name    - The String or Symbol name of the feature.
+    # weights - The Hash of variant name => Integer weight. Weights are
+    #           percentages and must sum to exactly 100.
+    # salt    - The explicit String or Symbol salt used for stable
+    #           bucketing (required).
+    # version - The configuration version stamped on each result
+    #           (default: 1).
+    #
+    # Returns the Flipper::Variants::Configuration.
+    def configure_variants(name, weights, salt:, version: 1)
+      feature_name = feature_name!(name)
+      configuration = Variants::Configuration.new(weights, salt: salt, version: version)
+      @variant_configurations[feature_name] = configuration
+    end
+
+    # Public: Evaluate the configured variant for an actor.
+    #
+    # name  - The String or Symbol name of the feature.
+    # actor - A Flipper::Actor, a Flipper::Types::Actor, a String/Symbol
+    #         actor id, or any object responding to flipper_id.
+    #
+    # Returns a Flipper::Variants::Result.
+    # Raises Flipper::VariantsNotConfigured if no variants are configured.
+    def variant(name, actor)
+      configuration = variant_configuration(name)
+      Variants.evaluate_with(configuration, name, actor)
+    end
+
+    # Public: Return the variant configuration for a feature.
+    #
+    # Returns a Flipper::Variants::Configuration.
+    # Raises Flipper::VariantsNotConfigured if no variants are configured.
+    def variant_configuration(name)
+      feature_name = feature_name!(name)
+      @variant_configurations.fetch(feature_name) do
+        raise VariantsNotConfigured, name
+      end
+    end
+
+    # Public: Check whether variants have been configured for a feature.
+    #
+    # Returns true if configured, false otherwise.
+    def variants_configured?(name)
+      @variant_configurations.key?(feature_name!(name))
+    end
+
+    # Public: Remove the variant configuration for a feature. Boolean gate
+    # state stored in the adapter is untouched.
+    #
+    # Returns the removed Flipper::Variants::Configuration or nil.
+    def remove_variants(name)
+      @variant_configurations.delete(feature_name!(name))
     end
 
     # Public: Enable a feature.
@@ -225,6 +284,15 @@ module Flipper
       @memoized_features.compute_if_absent(name.to_sym) do
         Feature.new(name, @adapter, instrumenter: instrumenter)
       end
+    end
+
+    # Internal: Normalize and validate a feature name for variant methods.
+    def feature_name!(name)
+      if !name.is_a?(String) && !name.is_a?(Symbol)
+        raise ArgumentError, "#{name} must be a String or Symbol"
+      end
+
+      name.to_s
     end
 
     # Public: Preload the features with the given names.
