@@ -1,7 +1,15 @@
 Development Version
 -------------------
 
-Nothing yet.
+* Add `sqlparse.fingerprint()`, a structural SQL fingerprint API that
+  returns normalized statement text plus a stable digest.  Value
+  literals and placeholders are replaced by `?`, whitespace and keyword
+  case are normalized, while identifier quoting, optimizer hints,
+  operator boundaries (including negative signs), type parameters such
+  as `DECIMAL(10, 2)` and `ORDER BY`/`GROUP BY` column positions are
+  preserved.  Collapsing of `IN` value lists is opt-in via
+  `collapse_in_lists`.  Fingerprints are a structural grouping aid and
+  do not prove semantic equivalence.
 
 
 Release 0.6.0 (Aug 13, 2026)
