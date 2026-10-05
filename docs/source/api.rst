@@ -8,6 +8,8 @@ The :mod:`sqlparse` module provides the following functions on module-level.
 
 .. autofunction:: sqlparse.split
 
+.. autofunction:: sqlparse.split_script
+
 .. autofunction:: sqlparse.format
 
 .. autofunction:: sqlparse.parse
@@ -16,6 +18,48 @@ In most cases there's no need to set the `encoding` parameter. If
 `encoding` is not set, sqlparse assumes that the given SQL statement
 is encoded either in utf-8 or latin-1.
 
+
+.. _script_mode:
+
+Splitting scripts with client commands
+--------------------------------------
+
+Operational scripts for SQL Server or MySQL often contain commands
+that are interpreted by the client tools, not by the database server:
+``GO [count]`` lines (SSMS, sqlcmd, Azure Data Studio) and
+``DELIMITER <str>`` lines (MySQL/MariaDB client).  The
+:meth:`~sqlparse.split_script` function provides an explicit *script
+mode* that understands these commands for a chosen dialect
+(``"tsql"``/ ``"mssql"``/ ``"sqlserver"`` or
+``"mysql"``/ ``"mariadb"``):
+
+.. code-block:: python
+
+  >>> import sqlparse
+  >>> script = "SELECT 1\nGO 2\nSELECT 2\nGO\n"
+  >>> result = sqlparse.split_script(script, "tsql")
+  >>> [batch.sql for batch in result.batches]
+  ['SELECT 1', 'SELECT 2']
+  >>> [(cmd.kind, cmd.line, cmd.argument) for cmd in result.commands]
+  [('go', 2, 2), ('go', 4, None)]
+
+The commands themselves are client-side directives, not SQL, so they
+are stripped from the returned batches and reported as
+:class:`~sqlparse.script.ScriptCommand` metadata (line number,
+offset, raw text, argument).  A repeat count after ``GO`` is
+returned as metadata only; batches are never duplicated.  In MySQL
+mode the current delimiter is only recognized outside strings,
+comments, quoted identifiers and dollar-quoted sections, and the
+``DELIMITER`` directive itself is not part of the SQL body.
+Command lines with invalid arguments raise :exc:`ValueError`.
+
+By default command lines are removed from the output.  Pass
+``keep_commands=True`` to keep them verbatim in the returned
+batches, e.g. for lossless round-tripping; the metadata is reported
+in both cases.
+
+The classic :meth:`~sqlparse.split` function is not affected by
+this and keeps its semicolon-only behavior.
 
 .. _formatting:
 

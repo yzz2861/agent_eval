@@ -1,7 +1,15 @@
 Development Version
 -------------------
 
-Nothing yet.
+Enhancements
+
+* Add ``sqlparse.split_script()`, an explicit script mode splitter that
+  understands client-side batch commands for a chosen dialect: ``GO
+  [count]`` lines for SQL Server (``"tsql"``, ``"mssql"``,
+  ``"sqlserver"``) and ``DELIMITER`` directives for MySQL
+  (``"mysql"``, ``"mariadb"``).  It returns SQL batches together
+  with command metadata (positions, raw text, repeat count / new
+  delimiter).  The classic ``split()`` is unchanged.
 
 
 Release 0.6.0 (Aug 13, 2026)
