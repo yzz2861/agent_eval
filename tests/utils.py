@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import bisect
 import contextlib
 import functools
 import math
@@ -303,3 +304,57 @@ async_moving_window_storage = pytest.mark.parametrize(
 async_sliding_window_counter_storage = pytest.mark.parametrize(
     "uri, args, fixture", ALL_STORAGES_ASYNC.values()
 )
+
+
+class FakeClock:
+    """Deterministic stand-in for the :mod:`time` module."""
+
+    def __init__(self, start: float = 1_000_000.0) -> None:
+        self.now = start
+
+    def time(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class ReferenceEntry:
+    def __init__(self, expiry: float, clock: FakeClock) -> None:
+        self.atime = clock.time()
+        self.expiry = self.atime + expiry
+
+
+class ReferenceMovingWindow:
+    """
+    The original moving window algorithm that stored one entry per
+    acquired unit. Kept as a reference to validate the weighted
+    in-memory implementation against.
+    """
+
+    def __init__(self, clock: FakeClock) -> None:
+        self.clock = clock
+        self.events: dict[str, list[ReferenceEntry]] = {}
+
+    def acquire_entry(self, key: str, limit: int, expiry: int, amount: int = 1) -> bool:
+        if amount > limit:
+            return False
+        self.events.setdefault(key, [])
+        timestamp = self.clock.time()
+        try:
+            entry = self.events[key][limit - amount]
+        except IndexError:
+            entry = None
+        if entry and entry.atime >= timestamp - expiry:
+            return False
+        self.events[key][:0] = [ReferenceEntry(expiry, self.clock)] * amount
+        return True
+
+    def get_moving_window(self, key: str, limit: int, expiry: int) -> tuple[float, int]:
+        timestamp = self.clock.time()
+        if events := self.events.get(key, []):
+            oldest = bisect.bisect_left(
+                events, -(timestamp - expiry), key=lambda entry: -entry.atime
+            )
+            return events[oldest - 1].atime, oldest
+        return timestamp, 0
