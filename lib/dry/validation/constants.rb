@@ -9,6 +9,13 @@ module Dry
 
     DOT = "."
 
+    # Context key used to carry the active {Batch} session during a contract call
+    #
+    # @see Batch
+    #
+    # @api private
+    BATCH_CONTEXT_KEY = :__dry_validation_batch__
+
     # Root path is used for base errors in hash representation of error messages
     ROOT_PATH = [nil].freeze
 
@@ -39,5 +46,31 @@ module Dry
         super("#{klass} cannot be instantiated without a schema defined")
       end
     end
+
+    # Error raised when a mergeable external check is used outside of a {Batch} session
+    MissingBatchSessionError = ::Class.new(::StandardError) do
+      # @api private
+      def initialize(query_name)
+        super(
+          "mergeable external check #{query_name.inspect} requires an active " \
+          "Dry::Validation::Batch session; wrap the calls with batch.call(contract, input)"
+        )
+      end
+    end
+
+    # Error raised when a rule references a query that the batch session did not register
+    UnknownQueryError = ::Class.new(::StandardError) do
+      # @api private
+      def initialize(query_name, available = EMPTY_ARRAY)
+        suffix = available.empty? ? "no queries are registered" : "available: #{available.inspect}"
+        super("query #{query_name.inspect} is not registered on the batch session (#{suffix})")
+      end
+    end
+
+    # Error raised when {Batch#flush} is called more than once or after a flush
+    BatchFlushedError = ::Class.new(::StandardError)
+
+    # Error raised when a query callable returns a value that is not a Hash
+    QueryResultError = ::Class.new(::StandardError)
   end
 end

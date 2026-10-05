@@ -17,10 +17,16 @@ module Dry
       # @param [Dry::Schema::Result] schema_result
       #
       # @api private
-      def self.new(schema_result, context = ::Concurrent::Map.new, options = EMPTY_HASH)
-        result = super
+      def self.new(
+        schema_result,
+        context = ::Concurrent::Map.new,
+        options = EMPTY_HASH,
+        freeze: true
+      )
+        result = super(schema_result, context, options)
         yield(result) if block_given?
-        result.freeze
+        result.freeze if freeze
+        result
       end
 
       # Context that's shared between rules
@@ -192,8 +198,12 @@ module Dry
       #
       # @api private
       def freeze
-        values.freeze
-        errors.freeze
+        unless frozen?
+          errors.remove_instance_variable(:@to_h) if errors.instance_variable_defined?(:@to_h)
+          errors.remove_instance_variable(:@empty) if errors.instance_variable_defined?(:@empty)
+          values.freeze
+          errors.freeze
+        end
         super
       end
 

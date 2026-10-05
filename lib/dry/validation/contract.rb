@@ -97,7 +97,9 @@ module Dry
           context.each { |key, value| map[key] = value }
         end
 
-        Result.new(schema.(input), context_map) do |result|
+        batch = context_map[BATCH_CONTEXT_KEY]
+
+        Result.new(schema.(input), context_map, EMPTY_HASH, freeze: batch.nil?) do |result|
           rules.each do |rule|
             next if rule.keys.any? { |key| error?(result, key) }
 
@@ -108,8 +110,28 @@ module Dry
             end
           end
         end
+      ensure
+        context_map&.delete(BATCH_CONTEXT_KEY)
       end
       # rubocop: enable Metrics/AbcSize
+
+      # Add rule failures resolved through the contract's message resolver
+      #
+      # This is used by {Batch} when suspended mergeable checks are replayed
+      # after the query callable returned.
+      #
+      # @param result [Result]
+      # @param failures [Array<Hash>]
+      #
+      # @return [self]
+      #
+      # @api private
+      def apply_rule_failures(result, failures)
+        failures.each do |failure|
+          result.add_error(message_resolver.(**failure))
+        end
+        self
+      end
 
       # Return a nice string representation
       #

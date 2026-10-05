@@ -206,6 +206,50 @@ module Dry
         !base.empty? || result.base_rule_error?
       end
 
+      # Declare a mergeable external check
+      #
+      # When the contract runs inside a {Batch} session, the check does not
+      # query the external system immediately. Instead it registers its
+      # normalized key and suspends the given block. The batch groups keys
+      # with the same query definition and context partition, calls the query
+      # once and replays each block with an {Batch::Outcome} available as
+      # +outcome+.
+      #
+      # Outside of a batch session, mergeable checks cannot run on their own
+      # and raise {MissingBatchSessionError}; use an ordinary rule body for
+      # checks that must keep working per contract call.
+      #
+      # @example department existence in an import rule
+      #   rule(:department_id) do
+      #     external(:department, values[:department_id]) do |outcome:|
+      #       if outcome.missing?
+      #         key.failure("department does not exist")
+      #       elsif outcome.error?
+      #         key.failure("department lookup is unavailable")
+      #       elsif !outcome.record[:active]
+      #         key.failure("department is not active")
+      #       end
+      #     end
+      #   end
+      #
+      # @param query_name [Symbol] query definition registered on the batch
+      # @param key [Object] raw key collected for the query
+      #
+      # @return [Object] the normalized key when the check was registered
+      #
+      # @see Batch#register_query
+      #
+      # @api public
+      def external(query_name, key, &block)
+        batch = _context[BATCH_CONTEXT_KEY]
+
+        if batch.nil?
+          raise MissingBatchSessionError, query_name
+        end
+
+        batch.register_pending(query_name, key, self, &block)
+      end
+
       # @api private
       def respond_to_missing?(meth, include_private = false)
         super || _contract.respond_to?(meth, true)
