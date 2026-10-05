@@ -3,6 +3,8 @@ require 'test/unit'
 require 'pstore'
 require 'tmpdir'
 require 'pathname'
+require 'rbconfig'
+require 'fileutils'
 
 class PStoreTest < Test::Unit::TestCase
   def setup
@@ -329,5 +331,255 @@ class PStoreTest < Test::Unit::TestCase
     assert_instance_of(String, store.path)
     assert_equal(@pstore_file, store.path)
     assert_equal("bar", store.transaction(true) { store[:foo] })
+  end
+
+  def test_multi_store_transaction_publishes_both_stores
+    with_multi_stores do |a_path, b_path, a, b|
+      PStore.coordinate(a, b) do |first, second|
+        first[:value] = "new"
+        second[:value] = "new"
+      end
+
+      assert_equal("new", PStore.new(a_path).transaction(true) { _1[:value] })
+      assert_equal("new", PStore.new(b_path).transaction(true) { _1[:value] })
+      assert_equal(["a.store", "b.store"], Dir.children(File.dirname(a_path)).sort)
+    end
+  end
+
+  def test_multi_store_transaction_preserves_file_modes
+    omit("file mode checks are not supported on Windows") if Gem.win_platform?
+
+    with_multi_stores do |a_path, b_path, a, b|
+      a.transaction { a[:value] = "old" }
+      b.transaction { b[:value] = "old" }
+      File.chmod(0o600, a_path)
+      File.chmod(0o640, b_path)
+
+      PStore.coordinate(a, b) do |first, second|
+        first[:value] = "new"
+        second[:value] = "new"
+      end
+
+      assert_equal(0o600, File.stat(a_path).mode & 0o7777)
+      assert_equal(0o640, File.stat(b_path).mode & 0o7777)
+    end
+  end
+
+  def test_multi_store_failure_rolls_back_without_rerunning_block
+    with_multi_stores do |a_path, b_path, a, b|
+      a.transaction { a[:value] = "old" }
+      b.transaction { b[:value] = "old" }
+      counter = File.join(File.dirname(a_path), "counter")
+      assert_raise(RuntimeError) do
+        PStore.coordinate(a, b) do |first, second|
+          File.write(counter, File.exist?(counter) ? File.read(counter).next + "1" : "1")
+          first[:value] = "new"
+          second[:value] = "new"
+          raise "boom"
+        end
+      end
+
+      assert_equal("1", File.read(counter))
+      assert_equal("old", PStore.new(a_path).transaction(true) { _1[:value] })
+      assert_equal("old", PStore.new(b_path).transaction(true) { _1[:value] })
+      assert_equal(["a.store", "b.store", "counter"], Dir.children(File.dirname(a_path)).sort)
+    end
+  end
+
+  def test_multi_store_recovers_after_kill_between_prepare_and_decision
+    crash_multi_store_at("prepared") do |dir, _pid|
+      assert_equal("old", raw_multi_value(File.join(dir, "a.store")))
+      assert_equal("old", raw_multi_value(File.join(dir, "b.store")))
+      assert_multi_artifacts_exist(dir, 2)
+
+      reopen_multi_stores(dir, "old", "old")
+      assert_multi_artifacts_removed(dir)
+    end
+  end
+
+  def test_multi_store_recovers_after_kill_between_decision_and_publish
+    crash_multi_store_at("decision") do |dir, _pid|
+      assert_equal("old", raw_multi_value(File.join(dir, "a.store")))
+      assert_equal("old", raw_multi_value(File.join(dir, "b.store")))
+      assert_multi_artifacts_exist(dir, 2)
+
+      reopen_multi_stores(dir, "new", "new")
+      assert_multi_artifacts_removed(dir)
+    end
+  end
+
+  def test_multi_store_recovers_after_kill_between_file_publications
+    crash_multi_store_at("first_publish") do |dir, _pid|
+      assert_equal("new", raw_multi_value(File.join(dir, "a.store")))
+      assert_equal("old", raw_multi_value(File.join(dir, "b.store")))
+      assert_multi_artifacts_exist(dir, 1)
+
+      reopen_multi_stores(dir, "new", "new")
+      assert_multi_artifacts_removed(dir)
+    end
+  end
+
+  def test_missing_coordinator_record_fails
+    with_multi_stores do |_a_path, _b_path, _a, _b|
+      marker = PStore::TransactionRecovery.marker_path(@pstore_file, "missing")
+      File.binwrite(marker, PStore::TransactionRecovery.dump_record(
+        transaction_id: "missing",
+        journal_path: File.join(File.dirname(@pstore_file), "missing-journal")
+      ))
+
+      error = assert_raise(PStore::Error) do
+        @pstore.transaction(true) { @pstore[:foo] }
+      end
+      assert_match(/missing transaction recovery record/, error.message)
+    end
+  end
+
+  def test_corrupt_coordinator_record_fails
+    with_multi_stores do |_a_path, _b_path, _a, _b|
+      journal = File.join(File.dirname(@pstore_file), "corrupt-journal")
+      marker = PStore::TransactionRecovery.marker_path(@pstore_file, "corrupt")
+      File.binwrite(journal, "not-a-marshal-record")
+      File.binwrite(marker, PStore::TransactionRecovery.dump_record(
+        transaction_id: "corrupt",
+        journal_path: journal
+      ))
+
+      error = assert_raise(PStore::Error) do
+        @pstore.transaction(true) { @pstore[:foo] }
+      end
+      assert_match(/corrupted transaction recovery record/, error.message)
+    end
+  end
+
+  def test_multi_store_coordinator_locks_stores_in_stable_path_order
+    with_multi_stores do |_a_path, _b_path, a, b|
+      locked = []
+      [a, b].each do |store|
+        store.define_singleton_method(:lock_for_coordinator) do
+          locked << path
+          super()
+        end
+      end
+
+      PStore.coordinate(b, a) { |_, _| }
+      assert_equal([a.path, b.path].sort, locked)
+    end
+  end
+
+  private
+
+  def with_multi_stores
+    Dir.mktmpdir("pstore-multi", tmp_root) do |dir|
+      @pstore_file = File.join(dir, "a.store")
+      @pstore = PStore.new(@pstore_file)
+      a_path = File.join(dir, "a.store")
+      b_path = File.join(dir, "b.store")
+      yield(a_path, b_path, PStore.new(a_path), PStore.new(b_path))
+    end
+  end
+
+  def crash_multi_store_at(stage)
+    Dir.mktmpdir("pstore-crash", tmp_root) do |dir|
+      counter = File.join(dir, "counter")
+      script = File.join(dir, "crash.rb")
+      File.write(script, multi_store_crash_script)
+      pid = spawn(RbConfig.ruby, "-I#{File.expand_path("../lib", __dir__)}", script, dir, stage, counter)
+      Process.wait(pid)
+      assert_equal("1", File.read(counter))
+      yield(dir, pid)
+    end
+  end
+
+  def tmp_root
+    root = File.expand_path("../tmp", __dir__)
+    FileUtils.mkdir_p(root)
+    root
+  end
+
+  def reopen_multi_stores(dir, a_value, b_value)
+    a_path = File.join(dir, "a.store")
+    b_path = File.join(dir, "b.store")
+    assert_equal(a_value, PStore.new(a_path).transaction(true) { _1[:value] })
+    assert_equal(b_value, PStore.new(b_path).transaction(true) { _1[:value] })
+  end
+
+  def raw_multi_value(path)
+    data = File.binread(path)
+    return nil if data.empty?
+    Marshal.load(data)[:value]
+  end
+
+  def assert_multi_artifacts_exist(dir, expected_temps)
+    assert(Dir.glob(File.join(dir, ".pstore-coordinator.*")).any?)
+    assert(Dir.glob(File.join(dir, ".*.pstore-coordinator.*")).size >= 2)
+    assert_equal(expected_temps, Dir.glob(File.join(dir, "*.tmp.pstore-coordinator.*")).size)
+  end
+
+  def assert_multi_artifacts_removed(dir)
+    assert_equal([], Dir.glob(File.join(dir, ".pstore-coordinator.*")))
+    assert_equal([], Dir.glob(File.join(dir, ".*.pstore-coordinator.*")))
+    assert_equal([], Dir.glob(File.join(dir, "*.tmp.pstore-coordinator.*")))
+  end
+
+  def multi_store_crash_script
+    <<~'RUBY'
+      require "pstore"
+
+      dir, stage, counter = ARGV
+      a_path = File.join(dir, "a.store")
+      b_path = File.join(dir, "b.store")
+      a = PStore.new(a_path)
+      b = PStore.new(b_path)
+
+      PStore.coordinate(a, b) do |first, second|
+        first[:value] = "old"
+        second[:value] = "old"
+      end
+
+      CRASH_STAGE = stage
+
+      class CrashCoordinator < PStore::TransactionCoordinator
+        private
+
+        def prepare
+          record = super
+          kill! if CRASH_STAGE == "prepared"
+          record
+        end
+
+        def record_commit_decision(record)
+          result = super
+          kill! if CRASH_STAGE == "decision"
+          result
+        end
+
+        def publish_participant(participant)
+          result = super
+          if CRASH_STAGE == "first_publish" && participant[:path].end_with?("/a.store")
+            kill!
+          end
+          result
+        end
+
+        def kill!
+          $stdout.flush
+          Process.kill(:KILL, Process.pid)
+          sleep
+        end
+      end
+
+      module CrashCoordinate
+        def coordinate(*stores, &block)
+          CrashCoordinator.new(*stores).transaction(&block)
+        end
+      end
+      PStore.singleton_class.prepend(CrashCoordinate)
+
+      PStore.coordinate(a, b) do |first, second|
+        File.write(counter, File.exist?(counter) ? File.read(counter).next : "1")
+        first[:value] = "new"
+        second[:value] = "new"
+      end
+    RUBY
   end
 end

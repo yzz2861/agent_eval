@@ -275,6 +275,24 @@ require "digest"
 # Needless to say, if you're storing valuable data with \PStore, then you should
 # backup the \PStore file from time to time.
 #
+# == Multi-Store Transactions
+#
+# PStore.coordinate starts a recoverable transaction across multiple stores:
+#
+#   PStore.coordinate(account_store, ledger_store) do |account, ledger|
+#     account[:balance] -= amount
+#     ledger[:transfers] << amount
+#   end
+#
+# Stores are locked in a stable path order. Prepared values are written to
+# separate files first. The coordinator then records the final commit decision
+# and publishes participants one at a time with the usual per-file rename.
+# Those individual renames are not collectively atomic. Recovery makes the
+# already-recorded outcome consistent: a committed decision finishes the
+# remaining publications, while a transaction interrupted before that decision
+# rolls back the prepared files. Reopening a participant performs recovery.
+# A missing or corrupt coordinator record is an error rather than a guess.
+#
 # == An Example Store
 #
 #  require "pstore"
@@ -339,6 +357,17 @@ class PStore
   class Error < StandardError
   end
 
+  # Opens a recoverable transaction across multiple stores.
+  # The stores are locked in a stable path order, prepared values are written
+  # to side files, the commit decision is journaled, and each store is then
+  # published. Reopening any participant after an interrupted transaction
+  # completes or rolls back the recorded transaction.
+  def self.coordinate(*stores)
+    TransactionCoordinator.new(*stores).transaction do |*coordinated_stores|
+      yield(*coordinated_stores)
+    end
+  end
+
   # Whether \PStore should do its best to prevent file corruptions,
   # even when an unlikely error (such as memory-error or filesystem error) occurs:
   #
@@ -385,6 +414,7 @@ class PStore
     @ultra_safe = false
     @thread_safe = thread_safe
     @lock = Thread::Mutex.new
+    @coordinator = nil
   end
 
   # Raises PStore::Error if the calling code is not in a PStore#transaction.
@@ -527,7 +557,7 @@ class PStore
   def commit
     in_transaction
     @abort = false
-    throw self
+    throw(@coordinator || self)
   end
 
   # Exits the current transaction block, discarding any changes
@@ -538,7 +568,11 @@ class PStore
   def abort
     in_transaction
     @abort = true
-    throw self
+    if @coordinator
+      @coordinator.abort!
+    else
+      throw self
+    end
   end
 
   # Opens a transaction block for the store.
@@ -553,19 +587,21 @@ class PStore
   # Raises an exception if called within a transaction block.
   def transaction(read_only = false)  # :yields:  pstore
     value = nil
-    if !@thread_safe
-      raise PStore::Error, "nested transaction" unless @lock.try_lock
-    else
-      begin
-        @lock.lock
-      rescue ThreadError
-        raise PStore::Error, "nested transaction"
-      end
-    end
+    lock_transaction
     begin
       @rdonly = read_only
       @abort = false
-      file = open_and_lock_file(@filename, read_only)
+      @coordinator = nil
+      file = nil
+      loop do
+        file = open_and_lock_file(@filename, read_only)
+        if PStore::TransactionRecovery.pending_marker?(@filename)
+          file&.close
+          PStore::TransactionRecovery.recover_for_file(@filename)
+          next
+        end
+        break
+      end
       if file
         begin
           @table, checksum, original_data_size = load_data(file, read_only)
@@ -588,6 +624,7 @@ class PStore
         end
       end
     ensure
+      @coordinator = nil
       @lock.unlock
     end
     value
@@ -595,6 +632,53 @@ class PStore
 
   private
   # :stopdoc:
+
+  def lock_transaction
+    if !@thread_safe
+      raise PStore::Error, "nested transaction" unless @lock.try_lock
+    else
+      begin
+        @lock.lock
+      rescue ThreadError
+        raise PStore::Error, "nested transaction"
+      end
+    end
+  end
+
+  def lock_for_coordinator
+    @lock.lock
+  rescue ThreadError
+    raise PStore::Error, "nested transaction"
+  end
+
+  def unlock_for_coordinator
+    @lock.unlock if @lock.owned?
+  end
+
+  def begin_coordinated_transaction(coordinator, file)
+    @rdonly = false
+    @abort = false
+    @coordinator = coordinator
+    @table, @original_checksum, @original_size = load_data(file, false)
+  end
+
+  def reset_coordinated_transaction
+    @rdonly = nil
+    @abort = false
+    @coordinator = nil
+    @table = nil
+    @original_checksum = nil
+    @original_size = nil
+  end
+
+  def coordinated_state
+    {
+      path: File.expand_path(@filename),
+      table: @table,
+      original_checksum: @original_checksum,
+      original_size: @original_size
+    }
+  end
 
   # Constant for relieving Ruby's garbage collector.
   CHECKSUM_ALGO = %w[SHA512 SHA384 SHA256 SHA1 RMD160 MD5].each do |algo|
@@ -737,5 +821,438 @@ class PStore
   end
   def empty_marshal_checksum
     EMPTY_MARSHAL_CHECKSUM
+  end
+
+  def self.checksum_algo
+    CHECKSUM_ALGO
+  end
+
+  def self.empty_marshal_data
+    EMPTY_MARSHAL_DATA
+  end
+
+  def self.empty_marshal_checksum
+    EMPTY_MARSHAL_CHECKSUM
+  end
+
+  class TransactionCoordinator
+    def initialize(*stores)
+      @stores = stores
+      if @stores.length < 2
+        raise PStore::Error, "at least two stores are required"
+      end
+      unless @stores.all? { |store| store.is_a?(PStore) }
+        raise PStore::Error, "only PStore instances can be coordinated"
+      end
+      paths = @stores.map { |store| File.expand_path(store.path) }
+      if paths.uniq.length != paths.length
+        raise PStore::Error, "duplicate PStore paths are not allowed"
+      end
+      @ordered_stores = @stores.sort_by { |store| File.expand_path(store.path) }
+      @throw_tag = Object.new
+    end
+
+    def transaction
+      files = {}
+      prepared_record = nil
+      committed = false
+      value = nil
+      @ordered_stores.each { |store| store.send(:lock_for_coordinator) }
+      begin
+        loop do
+          files.each_value(&:close)
+          files = {}
+          @ordered_stores.each do |store|
+            files[store] = store.send(:open_and_lock_file, store.path, false)
+          end
+          if @ordered_stores.any? { |store| PStore::TransactionRecovery.pending_marker?(store.path) }
+            files.each_value { |file| file.close unless file.closed? }
+            files = {}
+            PStore::TransactionRecovery.recover_paths(@ordered_stores.map(&:path))
+            next
+          end
+          break
+        end
+
+        @ordered_stores.each do |store|
+          store.send(:begin_coordinated_transaction, self, files[store])
+        end
+        begin
+          aborted = catch(@throw_tag) do
+            value = yield(*@stores)
+            false
+          end
+          return nil if aborted
+          prepared_record = prepare
+          before_commit_decision
+          record_commit_decision(prepared_record)
+          committed = true
+          publish(prepared_record)
+          cleanup(prepared_record)
+        ensure
+          @ordered_stores.each { |store| store.send(:reset_coordinated_transaction) }
+        end
+      rescue Exception
+        if prepared_record && !committed
+          PStore::TransactionRecovery.rollback_prepared(prepared_record, validate_markers: false)
+        end
+        raise
+      ensure
+        files.each_value { |file| file.close unless file.closed? }
+        @ordered_stores.each { |store| store.send(:unlock_for_coordinator) }
+      end
+      value
+    end
+
+    def abort!
+      throw @throw_tag, true
+    end
+
+    private
+
+    def before_commit_decision
+    end
+
+    def prepare
+      transaction_id = generate_transaction_id
+      record = nil
+      states = []
+      journal_path = PStore::TransactionRecovery.journal_path(@ordered_stores.map(&:path), transaction_id)
+      states = @ordered_stores.map do |store|
+        state = store.send(:coordinated_state)
+        data = store.send(:dump, state[:table])
+        target_path = state[:path]
+        temp_path = PStore::TransactionRecovery.temp_path(target_path, transaction_id)
+        mode = File.exist?(target_path) ? File.stat(target_path).mode : 0o600
+        write_file_atomically(temp_path, data, perm: mode)
+        {
+          path: target_path,
+          temp_path: temp_path,
+          mode: mode,
+          data_checksum: PStore.checksum_algo.digest(data),
+          data_size: data.bytesize,
+          old_checksum: state[:original_checksum],
+          old_size: state[:original_size]
+        }
+      end
+      record = {
+        transaction_id: transaction_id,
+        state: "prepared",
+        journal_path: journal_path,
+        participants: states
+      }
+      write_file_atomically(journal_path, PStore::TransactionRecovery.dump_record(record), perm: 0o600)
+      states.each do |state|
+        marker = {
+          transaction_id: transaction_id,
+          journal_path: journal_path
+        }
+        write_file_atomically(
+          PStore::TransactionRecovery.marker_path(state[:path], transaction_id),
+          PStore::TransactionRecovery.dump_record(marker),
+          perm: 0o600
+        )
+      end
+      record
+    rescue Exception
+      if record
+        PStore::TransactionRecovery.rollback_prepared(record, validate_markers: false)
+      else
+        states.each { |state| File.unlink(state[:temp_path]) if File.exist?(state[:temp_path]) }
+        File.unlink(journal_path) if File.exist?(journal_path)
+      end
+      raise
+    end
+
+    def record_commit_decision(record)
+      committed_record = record.merge(state: "committed")
+      write_file_atomically(
+        record[:journal_path],
+        PStore::TransactionRecovery.dump_record(committed_record),
+        perm: 0o600
+      )
+    end
+
+    def publish(record)
+      record[:participants].each do |participant|
+        publish_participant(participant)
+      end
+    end
+
+    def publish_participant(participant)
+      PStore::TransactionRecovery.publish_committed_participant(participant)
+    end
+
+    def cleanup(record)
+      record[:participants].each do |participant|
+        marker_path = PStore::TransactionRecovery.marker_path(participant[:path], record[:transaction_id])
+        File.unlink(marker_path) if File.exist?(marker_path)
+        PStore::TransactionRecovery.sync_directory(File.dirname(marker_path))
+      end
+      File.unlink(record[:journal_path]) if File.exist?(record[:journal_path])
+      PStore::TransactionRecovery.sync_directory(File.dirname(record[:journal_path]))
+    end
+
+    def generate_transaction_id
+      "#{Process.pid}.#{(Time.now.to_r * 1_000_000).numerator}.#{rand(1 << 64)}.#{object_id}"
+    end
+
+    def write_file_atomically(path, data, perm:)
+      PStore::TransactionRecovery.write_file_atomically(path, data, perm: perm)
+    end
+  end
+
+  module TransactionRecovery
+    module_function
+
+    def pending_marker?(store_path)
+      path = File.expand_path(store_path)
+      Dir.glob(marker_pattern(path)).any? || related_journal_paths([path]).any?
+    end
+
+    def recover_for_file(store_path)
+      recover_paths([store_path])
+    end
+
+    def recover_paths(paths)
+      expanded_paths = paths.map { |path| File.expand_path(path) }.uniq
+      marker_paths = expanded_paths.flat_map { |path| Dir.glob(marker_pattern(path)) }.uniq
+      marker_records = marker_paths.map { |path| validate_marker!(load_record(path), path) }
+      marker_journals = marker_records.map { |record| record[:journal_path] }
+      journal_paths = (marker_journals + related_journal_paths(expanded_paths)).uniq.sort
+      journal_paths.each { |journal_path| recover_journal(journal_path, expanded_paths) }
+    end
+
+    def recover_journal(journal_path, allowed_paths = nil)
+      journal = load_record(journal_path)
+      validate_record!(journal, journal_path)
+      participants = journal.fetch(:participants).sort_by { |participant| participant.fetch(:path) }
+      participant_paths = participants.map { |participant| participant.fetch(:path) }
+      if allowed_paths && participant_paths.none? { |path| allowed_paths.include?(path) }
+        raise PStore::Error, "unrelated transaction recovery record #{journal_path}"
+      end
+      files = {}
+      begin
+        participants.each do |participant|
+          files[participant.fetch(:path)] = open_exclusive(participant.fetch(:path))
+        end
+        case journal.fetch(:state)
+        when "prepared"
+          rollback_prepared(journal, validate_markers: false)
+        when "committed"
+          participants.each { |participant| publish_committed_participant(participant) }
+          cleanup_committed(journal)
+        else
+          raise PStore::Error, "unknown transaction state #{journal[:state].inspect}"
+        end
+      ensure
+        files.each_value { |file| file.close unless file.closed? }
+      end
+    end
+
+    def rollback_prepared(record, validate_markers: true)
+      participants = record.fetch(:participants)
+      participants.each do |participant|
+        validate_participant!(participant)
+        verify_current_file(participant, participant.fetch(:old_checksum), participant.fetch(:old_size))
+        marker_path = marker_path(participant.fetch(:path), record.fetch(:transaction_id))
+        if File.exist?(marker_path) && !File.exist?(participant.fetch(:temp_path))
+          raise PStore::Error, "missing prepared transaction file #{participant.fetch(:temp_path)}"
+        elsif validate_markers && !File.exist?(marker_path)
+          raise PStore::Error, "missing participant marker #{marker_path}"
+        end
+      end
+      participants.each do |participant|
+        marker = marker_path(participant.fetch(:path), record.fetch(:transaction_id))
+        File.unlink(marker) if File.exist?(marker)
+        sync_directory(File.dirname(marker))
+        if participant[:temp_path] && File.exist?(participant[:temp_path])
+          File.unlink(participant[:temp_path])
+          sync_directory(File.dirname(participant[:temp_path]))
+        end
+      end
+      File.unlink(record[:journal_path]) if record[:journal_path] && File.exist?(record[:journal_path])
+      sync_directory(File.dirname(record[:journal_path])) if record[:journal_path]
+    end
+
+    def publish_committed_participant(participant)
+      validate_participant!(participant)
+      path = participant.fetch(:path)
+      temp_path = participant.fetch(:temp_path)
+      expected_checksum = participant.fetch(:data_checksum)
+      expected_size = participant.fetch(:data_size)
+      current = current_checksum(path)
+      expected_new = [expected_checksum, expected_size]
+      return if current == expected_new
+      unless File.exist?(temp_path)
+        raise PStore::Error, "missing prepared transaction file #{temp_path}"
+      end
+      data = File.binread(temp_path)
+      verify_data(data, expected_checksum, expected_size, temp_path)
+      expected_old = [participant.fetch(:old_checksum), participant.fetch(:old_size)]
+      unless current == expected_old || current == expected_new
+        raise PStore::Error, "unexpected transaction target contents #{path}"
+      end
+      return if current == expected_new
+      File.rename(temp_path, path)
+      sync_directory(File.dirname(path))
+    end
+
+    def cleanup_committed(record)
+      participants = record.fetch(:participants)
+      participants.each do |participant|
+        marker = marker_path(participant.fetch(:path), record.fetch(:transaction_id))
+        File.unlink(marker) if File.exist?(marker)
+        sync_directory(File.dirname(marker))
+      end
+      File.unlink(record.fetch(:journal_path)) if File.exist?(record.fetch(:journal_path))
+      sync_directory(File.dirname(record.fetch(:journal_path)))
+    end
+
+    def verify_current_file(participant, expected_checksum, expected_size)
+      current = current_checksum(participant.fetch(:path))
+      unless current == [expected_checksum, expected_size]
+        raise PStore::Error, "transaction participant changed outside recovery #{participant.fetch(:path)}"
+      end
+    end
+
+    def current_checksum(path)
+      if File.exist?(path) && File.size(path) > 0
+        data = File.binread(path)
+        [PStore.checksum_algo.digest(data), data.bytesize]
+      else
+        [PStore.empty_marshal_checksum, PStore.empty_marshal_data.bytesize]
+      end
+    end
+
+    def verify_data(data, expected_checksum, expected_size, path)
+      unless data.bytesize == expected_size && PStore.checksum_algo.digest(data) == expected_checksum
+        raise PStore::Error, "corrupted prepared transaction file #{path}"
+      end
+    end
+
+    def dump_record(record)
+      payload = Marshal.dump(record)
+      Marshal.dump(version: 1, checksum: PStore.checksum_algo.digest(payload), payload: payload)
+    end
+
+    def load_record(path)
+      unless File.exist?(path)
+        raise PStore::Error, "missing transaction recovery record #{path}"
+      end
+      envelope = Marshal.load(File.binread(path))
+      payload = envelope[:payload]
+      unless envelope.is_a?(Hash) && payload.is_a?(String) &&
+             PStore.checksum_algo.digest(payload) == envelope[:checksum]
+        raise PStore::Error, "corrupted transaction recovery record #{path}"
+      end
+      record = Marshal.load(payload)
+      raise PStore::Error, "corrupted transaction recovery record #{path}" unless record.is_a?(Hash)
+      record
+    rescue StandardError => error
+      raise PStore::Error, "corrupted transaction recovery record #{path}: #{error.message}"
+    end
+
+    def validate_record!(record, path)
+      required = [:transaction_id, :state, :journal_path, :participants]
+      unless required.all? { |key| record.key?(key) } &&
+             record[:participants].is_a?(Array) && !record[:participants].empty? &&
+             record[:transaction_id].is_a?(String) && !record[:transaction_id].empty? &&
+             record[:journal_path].is_a?(String) &&
+             %w[prepared committed].include?(record[:state]) &&
+             record[:participants].map { |participant| participant[:path] }.uniq.length == record[:participants].length
+        raise PStore::Error, "corrupted transaction recovery record #{path}"
+      end
+      unless File.expand_path(record[:journal_path]) == File.expand_path(path)
+        raise PStore::Error, "corrupted transaction recovery record #{path}"
+      end
+      record[:participants].each { |participant| validate_participant!(participant) }
+    end
+
+    def validate_participant!(participant)
+      required = [:path, :temp_path, :mode, :data_checksum, :data_size, :old_checksum, :old_size]
+      valid = participant.is_a?(Hash) && required.all? { |key| participant.key?(key) } &&
+              participant[:path].is_a?(String) && participant[:temp_path].is_a?(String) &&
+              participant[:mode].is_a?(Integer) &&
+              participant[:data_checksum].is_a?(String) && participant[:old_checksum].is_a?(String) &&
+              participant[:data_size].is_a?(Integer) && participant[:data_size] >= 0 &&
+              participant[:old_size].is_a?(Integer) && participant[:old_size] >= 0
+      raise PStore::Error, "corrupted transaction participant record" unless valid
+    end
+
+    def validate_marker!(record, path)
+      unless record.is_a?(Hash) && record[:transaction_id].is_a?(String) && !record[:transaction_id].empty? &&
+             record[:journal_path].is_a?(String) && record[:journal_path].start_with?(File::SEPARATOR)
+        raise PStore::Error, "corrupted transaction marker #{path}"
+      end
+      record
+    end
+
+    def related_journal_paths(paths)
+      paths.flat_map do |path|
+        Dir.glob(File.join(File.dirname(path), ".pstore-coordinator.*")).select do |journal_path|
+          next false unless File.file?(journal_path)
+          journal = load_record(journal_path)
+          journal[:participants].is_a?(Array) &&
+            journal[:participants].any? do |participant|
+              participant.is_a?(Hash) && participant[:path] == path
+            end
+        end
+      end.uniq
+    end
+
+    def write_file_atomically(path, data, perm:)
+      temp_path = "#{path}.write.#{Process.pid}.#{rand(1 << 64)}"
+      File.open(temp_path, File::RDWR | File::CREAT | File::EXCL | File::BINARY, 0o000) do |file|
+        file.write(data)
+        file.flush
+        file.fsync
+      end
+      File.chmod(perm, temp_path)
+      File.rename(temp_path, path)
+      sync_directory(File.dirname(path))
+    rescue Exception
+      File.unlink(temp_path) if temp_path && File.exist?(temp_path)
+      raise
+    end
+
+    def open_exclusive(path)
+      loop do
+        file = File.new(path, **PStore.const_get(:RDWR_ACCESS))
+        current = false
+        begin
+          file.flock(File::LOCK_EX)
+          current = File.identical?(file, path)
+          return file if current
+        ensure
+          file.close unless current
+        end
+      end
+    end
+
+    def marker_pattern(path)
+      File.join(File.dirname(path), ".#{File.basename(path)}.pstore-coordinator.*")
+    end
+
+    def marker_path(path, transaction_id)
+      File.join(File.dirname(path), ".#{File.basename(path)}.pstore-coordinator.#{transaction_id}")
+    end
+
+    def temp_path(path, transaction_id)
+      "#{path}.tmp.pstore-coordinator.#{transaction_id}"
+    end
+
+    def journal_path(store_paths, transaction_id)
+      expanded_paths = store_paths.map { |path| File.expand_path(path) }.sort
+      digest = Digest::SHA256.hexdigest(expanded_paths.join("\0"))
+      File.join(File.dirname(expanded_paths.first), ".pstore-coordinator.#{digest}.#{transaction_id}")
+    end
+
+    def sync_directory(path)
+      dir = File.open(path, File::RDONLY | File::BINARY)
+      dir.fsync
+    ensure
+      dir&.close
+    end
   end
 end
