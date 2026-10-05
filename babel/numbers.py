@@ -165,6 +165,64 @@ def get_currency_precision(currency: str) -> int:
     return precisions.get(currency, precisions['DEFAULT'])[0]
 
 
+def get_currency_cash_precision(currency: str) -> int:
+    """Return the currency's cash precision.
+
+    Precision is the number of decimals found after the decimal point when
+    the currency is settled in cash.  This may differ from the currency's
+    regular precision; for example, Swiss francs are rounded to 0.05 (5
+    rappen) in cash transactions.
+
+    Unknown currencies fall back to the CLDR default of 2 digits.
+
+    .. versionadded:: 2.18.0
+
+    :param currency: the currency code.
+    """
+    fractions = get_global('currency_fractions')
+    return fractions.get(currency, fractions['DEFAULT'])[2]
+
+
+def _get_currency_cash_quantum(currency: str) -> decimal.Decimal:
+    """Return the cash rounding increment of a currency as a Decimal quantum.
+
+    For example, the quantum of CHF is Decimal('0.05').  Returns
+    Decimal(0) if the currency has no specific cash rounding increment
+    (which is also the CLDR default for unknown currencies).
+    """
+    fractions = get_global('currency_fractions')
+    cash_digits, cash_rounding = fractions.get(currency, fractions['DEFAULT'])[2:4]
+    if not cash_rounding:
+        return decimal.Decimal(0)
+    return decimal.Decimal(cash_rounding).scaleb(-cash_digits)
+
+
+def _round_to_quantum(
+    value: decimal.Decimal,
+    quantum: decimal.Decimal,
+    rounding_mode: str = decimal.ROUND_HALF_EVEN,
+) -> decimal.Decimal:
+    """Round a Decimal to the nearest multiple of ``quantum``.
+
+    Only Decimal arithmetic is used, so the result is exact even for very
+    large amounts.  As the rounding modes of the :mod:`decimal` module are
+    defined on the absolute digits of a number, negative values are rounded
+    symmetrically to positive ones (e.g. with ROUND_HALF_UP, ties go
+    away from zero for both signs).
+    """
+    # The working precision must cover all integer digits of
+    # ``value / quantum`` plus a few guard digits for the division and the
+    # final multiplication, so that huge amounts are rounded exactly.
+    precision = max(
+        decimal.getcontext().prec,
+        value.adjusted() - quantum.adjusted() + 10,
+    )
+    with decimal.localcontext() as ctx:
+        ctx.prec = precision
+        units = (value / quantum).quantize(decimal.Decimal(1), rounding=rounding_mode)
+        return units * quantum
+
+
 def get_currency_unit_pattern(
     currency: str,  # TODO: unused?!
     count: float | decimal.Decimal | None = None,
@@ -711,6 +769,8 @@ def format_currency(
     format_type: Literal["name", "standard", "accounting"] = "standard",
     decimal_quantization: bool = True,
     group_separator: bool = True,
+    cash: bool = False,
+    rounding_mode: str = decimal.ROUND_HALF_EVEN,
     *,
     numbering_system: Literal["default"] | str = "latn",
 ) -> str:
@@ -791,6 +851,40 @@ def format_currency(
     >>> format_currency(1099.9876, 'USD', locale='en_US', decimal_quantization=False)
     '$1,099.9876'
 
+    Some currencies are rounded to a cash rounding increment when settled
+    in cash; for example, Swiss francs are rounded to the nearest 0.05.
+    Set the ``cash`` parameter to apply the currency's cash fraction digits
+    and cash rounding increment from the CLDR data:
+
+    >>> format_currency(1.03, 'CHF', locale='de_CH', cash=True)
+    'CHF\\xa01.05'
+    >>> format_currency(1.025, 'CHF', locale='de_CH', cash=True)
+    'CHF\\xa01.00'
+
+    The rounding strategy used for the cash rounding increment can be
+    changed with the ``rounding_mode`` parameter, which accepts any
+    rounding mode constant of the :mod:`decimal` module.  All of these
+    modes are defined on the absolute digits of the number, so negative
+    amounts are always rounded symmetrically to positive ones:
+
+    >>> format_currency(-1.025, 'CHF', locale='de_CH', cash=True,
+    ...                 rounding_mode=decimal.ROUND_HALF_UP)
+    'CHF-1.05'
+
+    Cash rounding interacts with the other parameters as follows:
+
+    * ``cash`` only takes effect when ``currency_digits`` is true (the
+      default); with ``currency_digits=False``, the format pattern's own
+      precision is used and no cash rounding occurs.
+    * ``decimal_quantization=False`` disables all quantization, including
+      the cash rounding increment.
+    * A custom ``format`` does not disable cash rounding; just like the
+      regular currency digits, the cash fraction digits take precedence
+      over the precision of a custom format.
+    * Unknown currencies use the CLDR default of 2 cash fraction digits
+      with no rounding increment, so ``cash=True`` behaves like regular
+      two-digit rounding for them.
+
     :param number: the number to format
     :param currency: the currency code
     :param format: the format string to use
@@ -802,6 +896,14 @@ def format_currency(
                                  the format pattern. Defaults to `True`.
     :param group_separator: Boolean to switch group separator on/off in a locale's
                             number format.
+    :param cash: Use the currency's cash fraction digits and cash rounding
+                 increment (e.g. 0.05 for CHF). Defaults to `False`.
+                 .. versionadded:: 2.18.0
+    :param rounding_mode: The rounding strategy used for the cash rounding
+                          increment, as a :mod:`decimal` rounding mode
+                          constant. Defaults to `decimal.ROUND_HALF_EVEN`.
+                          Only used when ``cash`` is true.
+                          .. versionadded:: 2.18.0
     :param numbering_system: The numbering system used for formatting number symbols. Defaults to "latn".
                              The special value "default" will use the default numbering system of the locale.
     :raise `UnsupportedNumberingSystemError`: If the numbering system is not supported by the locale.
@@ -818,6 +920,8 @@ def format_currency(
             decimal_quantization=decimal_quantization,
             group_separator=group_separator,
             numbering_system=numbering_system,
+            cash=cash,
+            rounding_mode=rounding_mode,
         )
 
     if format:
@@ -838,6 +942,8 @@ def format_currency(
         decimal_quantization=decimal_quantization,
         group_separator=group_separator,
         numbering_system=numbering_system,
+        cash=cash,
+        rounding_mode=rounding_mode,
     )
 
 
@@ -851,6 +957,8 @@ def _format_currency_long_name(
     decimal_quantization: bool,
     group_separator: bool,
     numbering_system: Literal["default"] | str,
+    cash: bool,
+    rounding_mode: str,
 ) -> str:
     # Algorithm described here:
     # https://www.unicode.org/reports/tr35/tr35-numbers.html#Currencies
@@ -883,6 +991,8 @@ def _format_currency_long_name(
         decimal_quantization=decimal_quantization,
         group_separator=group_separator,
         numbering_system=numbering_system,
+        cash=cash,
+        rounding_mode=rounding_mode,
     )
 
     return unit_pattern.format(number_part, display_name)
@@ -1449,6 +1559,8 @@ class NumberPattern:
         decimal_quantization: bool = True,
         force_frac: tuple[int, int] | None = None,
         group_separator: bool = True,
+        cash: bool = False,
+        rounding_mode: str = decimal.ROUND_HALF_EVEN,
         *,
         numbering_system: Literal["default"] | str = "latn",
     ):
@@ -1470,6 +1582,14 @@ class NumberPattern:
         :param force_frac: DEPRECATED - a forced override for `self.frac_prec`
                            for a single formatting invocation.
         :param group_separator: Whether to use the locale's number group separator.
+        :param cash: Whether to use the currency's cash fraction digits and
+                     cash rounding increment (e.g. 0.05 for CHF) instead of
+                     its regular precision. Only takes effect when
+                     ``currency_digits`` and ``decimal_quantization`` are
+                     both true.
+        :param rounding_mode: The rounding strategy used for the cash
+                              rounding increment, as a :mod:`decimal`
+                              rounding mode constant.
         :param numbering_system: The numbering system used for formatting number symbols. Defaults to "latn".
                                  The special value "default" will use the default numbering system of the locale.
         :return: Formatted decimal string.
@@ -1495,6 +1615,7 @@ class NumberPattern:
 
         # Adjust the precision of the fractional part and force it to the
         # currency's if necessary.
+        cash_quantum = decimal.Decimal(0)
         if force_frac:
             # TODO (3.x?): Remove this parameter
             warnings.warn(
@@ -1504,7 +1625,11 @@ class NumberPattern:
             )
             frac_prec = force_frac
         elif currency and currency_digits:
-            frac_prec = (get_currency_precision(currency),) * 2
+            if cash:
+                frac_prec = (get_currency_cash_precision(currency),) * 2
+                cash_quantum = _get_currency_cash_quantum(currency)
+            else:
+                frac_prec = (get_currency_precision(currency),) * 2
         else:
             frac_prec = self.frac_prec
 
@@ -1516,6 +1641,12 @@ class NumberPattern:
         # discussed at https://github.com/python-babel/babel/pull/494#issuecomment-307649969 .
         if not decimal_quantization or (self.exp_prec and frac_prec == (0, 0)):
             frac_prec = (frac_prec[0], max([frac_prec[1], get_decimal_precision(value)]))
+
+        # Round to the currency's cash rounding increment (e.g. 0.05 for
+        # CHF) using Decimal arithmetic only. This is a quantization step,
+        # so it is skipped when decimal quantization is disabled.
+        if cash_quantum and decimal_quantization and value.is_finite():
+            value = _round_to_quantum(value, cash_quantum, rounding_mode)
 
         # Render scientific notation.
         if self.exp_prec:
@@ -1636,7 +1767,15 @@ class NumberPattern:
         if value.is_infinite():
             return get_infinity_symbol(locale, numbering_system=numbering_system)
         quantum = get_decimal_quantum(frac_prec[1])
-        rounded = value.quantize(quantum)
+        # The working precision must cover all digits of the quantized
+        # value, so that very large amounts don't raise InvalidOperation.
+        precision = max(
+            decimal.getcontext().prec,
+            value.adjusted() + frac_prec[1] + 2,
+        )
+        with decimal.localcontext() as ctx:
+            ctx.prec = precision
+            rounded = value.quantize(quantum)
         a, sep, b = f"{rounded:f}".partition(".")
         integer_part = a
         if group_separator:

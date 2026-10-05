@@ -20,6 +20,9 @@ Features
 * Messages: Update keywords for extraction of dpgettext and dnpgettext by @mardiros in :gh:`1235`
 * Messages: Validate all plurals in Python format checker by @tomasr8 in :gh:`1188`
 * Time: Use standard library `timezone` instead of `FixedOffsetTimezone` by @akx in :gh:`1203`
+* Numbers: Add a ``cash`` mode to ``format_currency`` that applies the CLDR
+  cash fraction digits and cash rounding increment (e.g. 0.05 for CHF),
+  with a configurable ``rounding_mode``, plus ``get_currency_cash_precision()``
 
 Bugfixes
 ~~~~~~~~
