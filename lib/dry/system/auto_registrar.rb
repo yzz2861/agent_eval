@@ -31,7 +31,9 @@ module Dry
         component_dir.each_component do |component|
           next unless register_component?(component)
 
-          container.register(component.key, memoize: component.memoize?) { component.instance }
+          container.send(:skip_registration_blueprint) do
+            container.register(component.key, memoize: component.memoize?) { component.instance }
+          end
         end
       end
 

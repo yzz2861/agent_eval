@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "pathname"
+require "concurrent/hash"
 
 require "dry/configurable"
 require "dry/auto_inject"
@@ -481,8 +482,31 @@ module Dry
         end
 
         # @api public
-        def register(key, *)
-          super
+        def register(key, contents = nil, options = EMPTY_HASH, &block)
+          unless @skip_registration_blueprint
+            record_registration!(key, contents, options, &block)
+          end
+
+          register_component!(key, contents, options, &block)
+
+          self
+        end
+
+        # @api private
+        def register_component!(key, contents = nil, options = nil, &block)
+          if block
+            if contents.is_a?(::Hash)
+              options = contents
+              contents = nil
+            else
+              options ||= EMPTY_HASH
+            end
+            contents = block
+          end
+
+          options ||= EMPTY_HASH
+
+          Core::Container::Mixin.instance_method(:register).bind_call(self, key, contents, options)
 
           hooks[:after_register].each { |hook| instance_exec(key, &hook) }
 
@@ -491,9 +515,21 @@ module Dry
 
         # @api public
         def resolve(key)
+          target = active_component_graph
+          return target.resolve(key) unless target.equal?(self)
+
           load_component(key) unless finalized?
 
-          super
+          component_dependency_graph.resolve(key) { super }
+        end
+
+        # @api private
+        def activate_component_graph(graph)
+          previous = Thread.current[component_graph_thread_key]
+          Thread.current[component_graph_thread_key] = graph
+          yield
+        ensure
+          Thread.current[component_graph_thread_key] = previous
         end
 
         alias_method :registered?, :key?
@@ -529,6 +565,21 @@ module Dry
         # @api private
         def providers
           @providers ||= config.provider_registrar.new(self)
+        end
+
+        # @api private
+        def component_dependency_graph
+          @component_dependency_graph ||= ComponentDependencyGraph.new
+        end
+
+        # @api private
+        def component_graph_thread_key
+          @component_graph_thread_key ||= :"__dry_system_component_#{object_id}__"
+        end
+
+        # @api private
+        def active_component_graph
+          Thread.current[component_graph_thread_key] || self
         end
 
         # @api private
@@ -598,10 +649,110 @@ module Dry
             klass.hooks[event].concat blocks.dup
           end
 
+          klass.instance_variable_set(:@provider_definitions, provider_definitions.map(&:dup))
+          klass.instance_variable_set(:@registration_definitions, registration_definitions.map(&:dup))
+          klass.instance_variable_set(:@component_graph_thread_key, component_graph_thread_key)
+          klass.instance_variable_set(:@component_dependency_graph, component_dependency_graph)
           klass.instance_variable_set(:@__configured__, false)
           klass.instance_variable_set(:@__finalized__, false)
 
           super
+        end
+
+        # @api private
+        def provider_definitions
+          @provider_definitions ||= []
+        end
+
+        # @api private
+        def registration_definitions
+          @registration_definitions ||= []
+        end
+
+        # @api private
+        def remember_provider_definition(name, provider_options, block)
+          provider_definitions << {name: name, options: provider_options, block: block}
+        end
+
+        # @api private
+        def build_component_graph(source = self, changed_keys: [])
+          graph = Class.new(source)
+          graph.reset_component_graph!(source, changed_keys: changed_keys)
+          activate_component_graph(graph) do
+            graph.warm_reloaded_component_graph!
+          end
+          graph
+        rescue StandardError
+          graph&.providers&.started_providers&.each do |provider|
+            next if source.providers.providers[provider.name].equal?(provider)
+
+            provider.stop
+          end
+          raise
+        end
+
+        # @api private
+        def reload_component_graph(changed_keys)
+          build_component_graph(self, changed_keys: changed_keys)
+        end
+
+        # @api private
+        def reset_component_graph!(source = self, changed_keys: [])
+          @_container = ::Concurrent::Hash.new
+          @providers = nil
+          @auto_registrar = nil
+          @manifest_registrar = nil
+          @importer = nil
+          @component_dependency_graph = source.component_dependency_graph
+          @provider_definitions = []
+          @registration_definitions = []
+          @__finalized__ = false
+
+          source.provider_definitions.each do |definition|
+            block = definition[:block]
+
+            if block
+              providers.register_provider!(definition[:name], **definition[:options], &block)
+            else
+              providers.register_provider!(definition[:name], **definition[:options])
+            end
+          end
+
+          source.providers.providers.each_key do |provider_name|
+            providers[provider_name] unless providers.key?(provider_name)
+          end
+
+          source.importer.registry.each_value do |item|
+            import(from: item.container, as: item.namespace, keys: item.import_keys)
+          end
+
+          source.registration_definitions.each do |registration|
+            block = registration[:block]
+
+            if block
+              register_component!(registration[:key], registration[:contents], &block)
+            else
+              register_component!(registration[:key], registration[:contents], **registration[:options])
+            end
+          end
+
+          reuse_unchanged_providers!(source, changed_keys)
+          copy_unchanged_registrations!(source)
+
+          self
+        end
+
+        # @api private
+        def warm_reloaded_component_graph!
+          return self unless @reloaded_keys
+
+          @reloaded_keys.each do |key|
+            resolve(key)
+          rescue KeyError
+            nil
+          end
+
+          self
         end
 
         protected
@@ -618,7 +769,9 @@ module Dry
 
           component = find_component(key)
 
-          providers[component.root_key]&.start
+          if (provider = providers[component.root_key])
+            component_dependency_graph.resolve(component.root_key) { provider.start }
+          end
           return self if registered?(key)
 
           if component.loadable?
@@ -636,6 +789,63 @@ module Dry
         # rubocop:enable Metrics/AbcSize, Metrics/PerceivedComplexity
 
         private
+
+        def reuse_unchanged_providers!(source, changed_keys)
+          provider_items = {}
+
+          source.providers.providers.each_value do |provider|
+            provider_items[provider.name] = [provider.name.to_s, *provider.provider_container.keys].to_set
+          end
+
+          changed_provider_names = changed_keys.map { |key|
+            Identifier.new(key).root_key
+          }.select { |name|
+            source.providers.key?(name)
+          }.to_set
+
+          @reloaded_keys = source.component_dependency_graph.affected(
+            changed_keys,
+            provider_items.transform_values(&:to_a)
+          )
+          @reloaded_keys.merge(changed_provider_names.map(&:to_s))
+
+          source.providers.started_providers.each do |provider|
+            changed_provider = changed_provider_names.include?(provider.name) ||
+              !(@reloaded_keys & provider_items.fetch(provider.name)).empty?
+
+            next if changed_provider
+
+            providers.reuse_provider!(provider)
+            copy_provider_registrations!(provider)
+          end
+        end
+
+        def copy_provider_registrations!(provider)
+          provider.provider_container.each_key do |key|
+            item = provider.provider_container._container[key]
+            register_component!(key, item.item, **item.options)
+          end
+        end
+
+        def copy_unchanged_registrations!(source)
+          source._container.each do |key, item|
+            next if @reloaded_keys.include?(key)
+
+            _container[key] = item
+          end
+        end
+
+        def record_registration!(key, contents = nil, _options = EMPTY_HASH, &block)
+          registration_definitions << {key: key, contents: contents, block: block}
+        end
+
+        def skip_registration_blueprint
+          previous = @skip_registration_blueprint
+          @skip_registration_blueprint = true
+          yield
+        ensure
+          @skip_registration_blueprint = previous
+        end
 
         def load_local_component(component)
           if component.auto_register?

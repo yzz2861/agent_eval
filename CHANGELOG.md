@@ -9,6 +9,8 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ### Added
 
+- Add explicit component graph generation scopes. Scopes pin resolving to the graph active when they begin, while successful reloads publish a replacement graph for new scopes; old generations retain providers until every active scope has exited, with ref-counted provider shutdown.
+- Rebuild only the reverse dependency closure of changed components and their providers. New graph component registrations are rebuilt independently, so an object cannot resolve dependencies from two different generations.
 - The Zeitwerk plugin accepts an `enable_reloading:` option, which enables reloading on the loader ahead of `setup`, so Zeitwerk tracks the constants it defines and they can be unloaded later. Applied from the plugin's `after(:configure)` hook, so it is in time whether the loader is set up by the plugin or by the integrating library. (@afomera in #297)
 
 ### Changed

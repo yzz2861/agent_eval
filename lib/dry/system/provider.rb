@@ -136,6 +136,8 @@ module Dry
         @provider_container = build_provider_container
         @statuses = []
         @step_running = nil
+        @references = 1
+        @reference_mutex = Mutex.new
 
         @source = source_class.new(
           **source_options,
@@ -179,9 +181,35 @@ module Dry
       #
       # @api public
       def stop
-        return self unless started?
+        return self unless started? && !stopped?
 
         run_step(:stop)
+      end
+
+      # @api private
+      def reuse!
+        @reference_mutex.synchronize { @references += 1 }
+        self
+      end
+
+      # @api private
+      def unreuse!
+        remaining = @reference_mutex.synchronize { @references -= 1 }
+        stop if remaining.zero?
+        self
+      end
+
+      # @api private
+      def restore_reuse!
+        @reference_mutex.synchronize { @references -= 1 }
+        self
+      end
+
+      # @api private
+      def release!
+        remaining = @reference_mutex.synchronize { @references -= 1 }
+        stop if remaining.zero? && !stopped?
+        self
       end
 
       # Returns true if the provider's `prepare` lifecycle step has run
@@ -278,9 +306,13 @@ module Dry
           item = provider_container._container[key]
 
           if item.callable?
-            target_container.register(key, **item.options, &item.item)
+            target_container.send(:skip_registration_blueprint) do
+              target_container.register(key, **item.options, &item.item)
+            end
           else
-            target_container.register(key, item.item, **item.options)
+            target_container.send(:skip_registration_blueprint) do
+              target_container.register(key, item.item, **item.options)
+            end
           end
         end
 

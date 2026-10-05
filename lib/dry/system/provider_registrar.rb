@@ -47,7 +47,31 @@ module Dry
 
       # @see Container.register_provider
       # @api private
-      def register_provider(name, from: nil, source: nil, if: true, **provider_options, &)
+      def register_provider(name, from: nil, source: nil, if: true, **provider_options, &block)
+        provider_options = {from: from, source: source, **provider_options}
+        if binding.local_variable_get(:if)
+          container.remember_provider_definition(
+            name,
+            provider_options.merge(if: true),
+            block
+          )
+        end
+
+        register_provider!(name, **provider_options, if: binding.local_variable_get(:if), &block)
+      end
+
+      # @api private
+      def reuse_provider!(provider)
+        providers[provider.name] = provider
+      end
+
+      # @api private
+      def started_providers
+        providers.each_value.select(&:started?)
+      end
+
+      # @api private
+      def register_provider!(name, from: nil, source: nil, if: true, **provider_options, &)
         raise ProviderAlreadyRegisteredError, name if providers.key?(name)
 
         if from && source.is_a?(Class)
@@ -175,7 +199,7 @@ module Dry
 
       # @api private
       def shutdown
-        providers.each_value(&:stop)
+        providers.each_value(&:release!)
         self
       end
 
