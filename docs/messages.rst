@@ -293,6 +293,26 @@ directory. If you specify your own mapping configuration, this default mapping
 is discarded, so you need to explicitly add it to your mapping (as shown in the
 example above.)
 
+Python extraction can optionally be scope aware:
+
+.. code-block:: ini
+
+    [python: **.py]
+    scope_aware = true
+
+In this mode, Babel parses Python source without executing it and recognizes
+import aliases such as ``from gettext import gettext as tr`` and static
+attribute calls such as ``gettext.gettext`` or ``gettext.ngettext``.
+Parameters, assignments, local definitions, nested functions, and classes that
+shadow those names are respected. Aliases created by reassigning an imported
+translation function are also followed.
+
+Scope-aware extraction still recognizes only the same static message
+expressions as the keyword extractor. Dynamic expressions are handled by the
+existing keyword argument rules, and translator comments, contexts, plural
+arguments, and line numbers are preserved. The default keyword-based extraction
+mode remains available and is used when ``scope_aware`` is not enabled.
+
 
 .. _`referencing extraction methods`:
 

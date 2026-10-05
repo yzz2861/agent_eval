@@ -39,6 +39,7 @@ from tokenize import COMMENT, NAME, NL, OP, STRING, generate_tokens
 from typing import TYPE_CHECKING, Any, TypedDict
 
 from babel.messages._compat import find_entrypoints
+from babel.messages._python_scope import extract_python_scope_aware
 from babel.util import parse_encoding, parse_future_flags, pathmatch
 
 if TYPE_CHECKING:
@@ -49,6 +50,7 @@ if TYPE_CHECKING:
 
     class _PyOptions(TypedDict, total=False):
         encoding: str
+        scope_aware: bool | str
 
     class _JSOptions(TypedDict, total=False):
         encoding: str
@@ -115,6 +117,13 @@ def _strip_comment_tags(comments: MutableSequence[str], tags: Iterable[str]):
         return line
 
     comments[:] = [_strip(c) for c in comments]
+
+
+def _option_enabled(options: Mapping[str, Any], name: str) -> bool:
+    value = options.get(name, False)
+    if isinstance(value, str):
+        return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+    return bool(value)
 
 
 def _make_default_directory_filter(
@@ -565,6 +574,12 @@ def extract_python(
     :param options: a dictionary of additional options (optional)
     :rtype: ``iterator``
     """
+    if _option_enabled(options, 'scope_aware'):
+        yield from extract_python_scope_aware(
+            fileobj, keywords, comment_tags, options,
+        )
+        return
+
     funcname = lineno = message_lineno = None
     call_stack = []  # line numbers of calls
     buf = []

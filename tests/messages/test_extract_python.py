@@ -505,3 +505,128 @@ _('Armin'))
     assert messages[6][3] == []
     assert messages[7][2] == 'Armin'
     assert messages[7][3] == []
+
+
+def test_scope_aware_import_aliases_and_attribute_calls():
+    buf = BytesIO(b"""\
+from gettext import gettext as tr, ngettext as nr, pgettext as pc
+import gettext as g
+import gettext
+
+# NOTE: Alias
+tr('real alias')
+g.gettext('real module alias')
+gettext.gettext('real module attribute')
+nr('one', 'two', 1)
+pc('context', 'context message')
+rebound = tr
+rebound('real rebound')
+rebound_tuple, ignored_value = tr, other
+rebound_tuple('tuple rebound')
+attribute_alias = gettext.gettext
+attribute_alias('real attribute rebound')
+tr(x)
+tr(f'dynamic {x}')
+""")
+    keywords = {**extract.DEFAULT_KEYWORDS, 'tr': None}
+    messages = list(extract.extract(
+        'python', buf, keywords, ['NOTE:'], {'scope_aware': True},
+    ))
+    assert messages == [
+        (6, 'real alias', ['NOTE: Alias'], None),
+        (7, 'real module alias', [], None),
+        (8, 'real module attribute', [], None),
+        (9, ('one', 'two'), [], None),
+        (10, 'context message', [], 'context'),
+        (12, 'real rebound', [], None),
+        (14, 'tuple rebound', [], None),
+        (16, 'real attribute rebound', [], None),
+    ]
+
+
+def test_scope_aware_shadowing_in_functions_classes_and_nested_scopes():
+    buf = BytesIO(b"""\
+from gettext import gettext as tr
+import fakelib
+import gettext
+
+def defaults(value=tr('default real')):
+    tr('body real')
+
+def parameter(tr):
+    tr('parameter fake')
+
+def assignment():
+    tr('before assignment fake')
+    tr = something
+    tr('after assignment fake')
+
+def nested():
+    def inner():
+        tr('nested real')
+
+def nonlocal_rebind():
+    from gettext import gettext as tr
+
+    def inner():
+        nonlocal tr
+        tr = something
+
+    tr('nonlocal real after definition')
+
+def local_definition():
+    def tr(message):
+        return message
+    tr('definition fake')
+
+def local_import_pair():
+    from fakelib import gettext as tr
+    tr('third-party fake')
+    from gettext import gettext as tr
+    tr('local reimport real')
+
+class Scope:
+    tr = lambda value: value
+    tr('class body fake')
+
+    def method(self):
+        tr('method real')
+
+tr = something
+tr('global rebind fake')
+
+from gettext import gettext as tr
+tr('global reimport real')
+
+fakelib.gettext('unrelated module fake')
+gettext.gettext('real')
+""")
+    messages = list(extract.extract(
+        'python', buf, {'gettext': None, 'tr': None}, [], {'scope_aware': True},
+    ))
+    assert [(message[0], message[1]) for message in messages] == [
+        (5, 'default real'),
+        (6, 'body real'),
+        (18, 'nested real'),
+        (27, 'nonlocal real after definition'),
+        (38, 'local reimport real'),
+        (45, 'method real'),
+        (51, 'global reimport real'),
+        (54, 'real'),
+    ]
+
+
+def test_keyword_mode_still_extracts_same_name_locals():
+    buf = BytesIO(b"""\
+from gettext import gettext as tr
+
+def fake(tr):
+    tr('keyword mode fake')
+
+tr('keyword mode real')
+""")
+    messages = list(extract.extract('python', buf, {'tr': None}, [], {}))
+    assert [message[1] for message in messages] == [
+        'keyword mode fake',
+        'keyword mode real',
+    ]
