@@ -11,6 +11,7 @@ require_relative "parseexception"
 require_relative "output"
 require_relative "parsers/baseparser"
 require_relative "parsers/streamparser"
+require_relative "parsers/feedparser"
 require_relative "parsers/treeparser"
 
 module REXML

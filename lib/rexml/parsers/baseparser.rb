@@ -166,6 +166,21 @@ module REXML
       end
       private_constant :Private
 
+      # Patterns that cannot match a proper prefix of their matches:
+      # when they fail on input that ends at a token boundary,
+      # appending more input cannot make them match.  FeedSource uses
+      # this to report malformed input immediately instead of waiting
+      # for more data that could complete the current token.
+      FAIL_FAST_PATTERNS = [
+        Private::TAG_PATTERN,
+        Private::CLOSE_PATTERN,
+        Private::EQUAL_PATTERN,
+        Private::NAME_PATTERN,
+        QNAME,
+        /(%.*?;)\s*/um,
+        /\]\s*>/um,
+      ].to_set.freeze
+
       def initialize( source )
         self.stream = source
         @listeners = []
