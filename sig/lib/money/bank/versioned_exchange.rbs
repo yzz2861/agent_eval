@@ -1,0 +1,35 @@
+class Money
+  module Bank
+    # Raised when registering a rate whose validity interval overlaps an
+    # already registered rate for the same currency pair.
+    class OverlappingRate < Error
+    end
+
+    # A bank that stores caller-supplied exchange rates together with their
+    # validity interval and source version, and produces reproducible quotes
+    # for a specific point in time.
+    class VersionedExchange < Base
+      # A single registered rate with its validity interval and source.
+      class RateVersion < Struct[untyped]
+        def covers?: (untyped time) -> bool
+
+        def overlaps?: (untyped other) -> bool
+      end
+
+      def initialize: () { () -> untyped } -> void
+
+      def add_rate: ((Money::Currency | string | Symbol) from, (Money::Currency | string | Symbol) to, Numeric rate, ?valid_from: untyped, ?valid_to: untyped, ?source: untyped) -> RateVersion
+
+      def rate_at: ((Money::Currency | string | Symbol) from, (Money::Currency | string | Symbol) to, untyped at) -> RateVersion?
+
+      def quote: (Money money, (Money::Currency | string | Symbol) to_currency, at: untyped, ?strategy: Array[Money::Currency | string | Symbol]?) -> Quote
+
+      def exchange_with: (Money from, (Money::Currency | string | Symbol) to_currency, ?at: untyped, ?strategy: Array[Money::Currency | string | Symbol]?) { (BigDecimal) -> Integer } -> Money
+
+      private
+
+      def quote_path: (Money::Currency from_currency, Money::Currency to_currency, Array[Money::Currency | string | Symbol]? strategy) -> Array[string]
+    end
+  end
+end
+

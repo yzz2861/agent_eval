@@ -426,6 +426,34 @@ currencies don't match:
 Money.disallow_currency_conversion!
 ```
 
+### Versioned rates and reproducible quotes
+
+`Money::Bank::VersionedExchange` keeps the conversion basis used at the time:
+rates are registered with a validity interval and a source version, and the
+bank produces reproducible quotes for a specific point in time.
+
+```ruby
+bank = Money::Bank::VersionedExchange.new
+bank.add_rate("USD", "EUR", 0.9, valid_from: t0, valid_to: t1, source: "rates-2026-10-01")
+bank.add_rate("EUR", "JPY", 160.0, valid_from: t0, valid_to: t1, source: "rates-2026-10-01")
+
+quote = bank.quote(Money.from_cents(100_00, "USD"), "JPY",
+                   at: t0 + 3600, strategy: ["USD", "EUR", "JPY"])
+quote.amount #=> #<Money fractional:14400 currency:JPY>
+quote.path   #=> ["USD", "EUR", "JPY"]
+quote.rate   #=> 0.144e3
+```
+
+- Multi-hop conversion only happens through an explicit `strategy` path, and
+  every edge must have a rate covering the quoted moment; overlapping rate
+  versions for the same pair are rejected, so paths can never mix rates from
+  conflicting historical versions.
+- Intermediate amounts stay exact; rounding to the target currency happens
+  once, in the final step.
+- A quote snapshots the path and the actual rate values, so later updates to
+  the bank never change an existing quote (`quote.recalculate` replays the
+  exact same computation).
+
 ### Implementations
 
 The following is a list of Money.gem compatible currency exchange rate
