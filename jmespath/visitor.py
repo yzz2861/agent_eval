@@ -80,6 +80,32 @@ class _Expression(object):
         return self.interpreter.visit(node, *args, **kwargs)
 
 
+class _LazyArgument(object):
+    """An unevaluated function argument for lazy functions.
+
+    Captures the argument's AST node along with the current node
+    value at the call site.  Calling the object evaluates the
+    expression against that captured context.  The result is cached
+    so each argument is evaluated at most once per function call;
+    a new _LazyArgument is created for every call, so nothing is
+    shared across projection elements or separate search() calls.
+    """
+    __slots__ = ('_interpreter', '_node', '_value', '_resolved', '_result')
+
+    def __init__(self, interpreter, node, value):
+        self._interpreter = interpreter
+        self._node = node
+        self._value = value
+        self._resolved = False
+        self._result = None
+
+    def __call__(self):
+        if not self._resolved:
+            self._result = self._interpreter.visit(self._node, self._value)
+            self._resolved = True
+        return self._result
+
+
 class Visitor(object):
     def __init__(self):
         self._method_cache = {}
@@ -164,6 +190,12 @@ class TreeInterpreter(Visitor):
         return _Expression(node['children'][0], self)
 
     def visit_function_expression(self, node, value):
+        if self._functions.is_lazy(node['value']):
+            lazy_args = [
+                _LazyArgument(self, child, value)
+                for child in node['children']
+            ]
+            return self._functions.call_function(node['value'], lazy_args)
         resolved_args = []
         for child in node['children']:
             current = self.visit(child, value)

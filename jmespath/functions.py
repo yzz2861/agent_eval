@@ -42,6 +42,14 @@ def signature(*arguments):
     return _record_signature
 
 
+def lazy_signature(*arguments):
+    def _record_signature(func):
+        func.signature = arguments
+        func.lazy = True
+        return func
+    return _record_signature
+
+
 class FunctionRegistry(type):
     def __init__(cls, name, bases, attrs):
         cls._populate_function_table()
@@ -60,6 +68,7 @@ class FunctionRegistry(type):
                 function_table[name[6:]] = {
                     'function': method,
                     'signature': signature,
+                    'lazy': getattr(method, 'lazy', False),
                 }
         cls.FUNCTION_TABLE = function_table
 
@@ -77,10 +86,25 @@ class Functions(metaclass=FunctionRegistry):
                 "Unknown function: %s()" % function_name)
         function = spec['function']
         signature = spec['signature']
-        self._validate_arguments(resolved_args, signature, function_name)
+        if spec.get('lazy'):
+            # Lazy functions receive unevaluated argument objects, so
+            # only the arity can be validated up front.  Checking the
+            # actual values would force evaluation, which is exactly
+            # what lazy functions are trying to avoid.
+            self._validate_arity(resolved_args, signature, function_name)
+        else:
+            self._validate_arguments(resolved_args, signature, function_name)
         return function(self, *resolved_args)
 
+    def is_lazy(self, function_name):
+        spec = self.FUNCTION_TABLE.get(function_name)
+        return spec is not None and spec.get('lazy', False)
+
     def _validate_arguments(self, args, signature, function_name):
+        self._validate_arity(args, signature, function_name)
+        return self._type_check(args, signature, function_name)
+
+    def _validate_arity(self, args, signature, function_name):
         if signature and signature[-1].get('variadic'):
             if len(args) < len(signature):
                 raise exceptions.VariadictArityError(
@@ -88,7 +112,6 @@ class Functions(metaclass=FunctionRegistry):
         elif len(args) != len(signature):
             raise exceptions.ArityError(
                 len(signature), len(args), function_name)
-        return self._type_check(args, signature, function_name)
 
     def _type_check(self, actual, signature, function_name):
         for i in range(len(signature)):
