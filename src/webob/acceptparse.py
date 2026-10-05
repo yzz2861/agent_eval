@@ -3836,6 +3836,17 @@ class AcceptLanguage:
         element_re=lang_range_n_weight_re
     )
 
+    # RFC 4647 Section 2.2 "Extended Language Range":
+    # extended-language-range = (1*8ALPHA / "*")
+    #   *("-" (1*8alphanum / "*"))
+    extended_lang_range_re = r"(?:\*|[A-Za-z]{1,8})(?:-(?:[A-Za-z0-9]{1,8}|\*))*"
+    extended_lang_range_n_weight_re = _item_n_weight_re(item_re=extended_lang_range_re)
+    extended_lang_range_n_weight_compiled_re = re.compile(
+        extended_lang_range_n_weight_re
+    )
+    extended_lang_tag_re = r"[A-Za-z]{1,8}(?:-[A-Za-z0-9]{1,8})*"
+    extended_lang_tag_compiled_re = re.compile("^" + extended_lang_tag_re + "$")
+
     @classmethod
     def _python_value_to_header_str(cls, value):
         if isinstance(value, str):
@@ -3885,6 +3896,152 @@ class AcceptLanguage:
 
         return generator(value=value)
 
+    @classmethod
+    def _parse_extended(cls, value):
+        """
+        Parse syntactically valid extended language ranges from a header.
+
+        Invalid elements in the comma-separated list are ignored. This lets an
+        application explicitly use RFC 4647 Extended Filtering without making
+        extended ranges valid in the default, RFC 7231 basic-range parser.
+        """
+        for position, element in enumerate(value.split(",")):
+            match = cls.extended_lang_range_n_weight_compiled_re.fullmatch(
+                element.strip()
+            )
+            if match is None:
+                continue
+
+            lang_range = match.group(1)
+            qvalue = match.group(2)
+            qvalue = float(qvalue) if qvalue else 1.0
+            yield position, lang_range, qvalue
+
+    @staticmethod
+    def _extended_range_matches(language_tag, language_range):
+        tag = language_tag.replace("_", "-").lower().split("-")
+        range_subtags = language_range.lower().split("-")
+
+        if not tag or any(not subtag for subtag in tag):
+            return False
+
+        if range_subtags == ["*"]:
+            return True
+
+        def matches(tag_position, range_position):
+            if range_position == len(range_subtags):
+                return True
+
+            range_subtag = range_subtags[range_position]
+
+            if range_subtag != "*":
+                end_position = range_position
+                while (
+                    end_position < len(range_subtags)
+                    and range_subtags[end_position] != "*"
+                ):
+                    tag_index = tag_position + end_position - range_position
+                    if tag_index >= len(tag):
+                        return False
+                    if tag[tag_index] != range_subtags[end_position]:
+                        return False
+                    end_position += 1
+
+                tag_position += end_position - range_position
+                range_position = end_position
+                return matches(tag_position, range_position)
+
+            if range_position + 1 == len(range_subtags):
+                return tag_position == len(tag) or all(
+                    len(subtag) != 1 for subtag in tag[tag_position:]
+                )
+
+            skipped = 1
+            while tag_position + skipped <= len(tag):
+                if len(tag[tag_position + skipped - 1]) == 1:
+                    return False
+                if matches(tag_position + skipped, range_position + 1):
+                    return True
+
+                skipped += 1
+
+            return False
+
+        return matches(0, 0)
+
+    @classmethod
+    def _extended_filtering_parsed(cls, language_tags, parsed_ranges):
+        not_acceptable_ranges = set()
+        acceptable_ranges = {}
+        asterisk_qvalue = None
+        asterisk_position = None
+
+        for position, range_, qvalue in parsed_ranges:
+            lowered_range = range_.lower()
+            if lowered_range == "*":
+                if asterisk_qvalue is None:
+                    asterisk_qvalue = qvalue
+                    asterisk_position = position
+            elif (
+                lowered_range not in acceptable_ranges
+                and lowered_range not in not_acceptable_ranges
+            ):
+                if qvalue == 0.0:
+                    not_acceptable_ranges.add(lowered_range)
+                else:
+                    acceptable_ranges[lowered_range] = (qvalue, position)
+
+        filtered_tags = []
+        for candidate_position, tag in enumerate(language_tags):
+            normalized_tag = tag.replace("_", "-") if isinstance(tag, str) else ""
+            if (
+                not normalized_tag
+                or cls.extended_lang_tag_compiled_re.fullmatch(normalized_tag) is None
+            ):
+                continue
+
+            lowered_tag = normalized_tag.lower()
+            if any(
+                cls._extended_range_matches(lowered_tag, range_)
+                for range_ in not_acceptable_ranges
+            ):
+                continue
+
+            matched_range_qvalue = None
+            matched_range_position = None
+            for range_, (qvalue, position) in acceptable_ranges.items():
+                if not cls._extended_range_matches(lowered_tag, range_):
+                    continue
+                if (
+                    matched_range_qvalue is None
+                    or qvalue > matched_range_qvalue
+                    or (
+                        qvalue == matched_range_qvalue
+                        and position < matched_range_position
+                    )
+                ):
+                    matched_range_qvalue = qvalue
+                    matched_range_position = position
+
+            if matched_range_qvalue is None and asterisk_qvalue:
+                matched_range_qvalue = asterisk_qvalue
+                matched_range_position = asterisk_position
+
+            if matched_range_qvalue:
+                filtered_tags.append(
+                    (
+                        candidate_position,
+                        tag,
+                        matched_range_qvalue,
+                        matched_range_position,
+                    )
+                )
+
+        filtered_tags.sort(key=lambda item: item[0])
+        filtered_tags.sort(key=lambda item: item[3])
+        filtered_tags.sort(key=lambda item: item[2], reverse=True)
+        return [(tag, qvalue) for _, tag, qvalue, _ in filtered_tags]
+
 
 class AcceptLanguageValidHeader(AcceptLanguage):
     """
@@ -3893,10 +4050,11 @@ class AcceptLanguageValidHeader(AcceptLanguage):
     A valid header is one that conforms to :rfc:`RFC 7231, section 5.3.5
     <7231#section-5.3.5>`.
 
-    We take the reference from the ``language-range`` syntax rule in :rfc:`RFC
-    7231, section 5.3.5 <7231#section-5.3.5>` to :rfc:`RFC 4647, section 2.1
-    <4647#section-2.1>` to mean that only basic language ranges (and not
-    extended language ranges) are expected in the ``Accept-Language`` header.
+    The reference from the ``language-range`` syntax rule in :rfc:`RFC 7231,
+    section 5.3.5 <7231#section-5.3.5>` to :rfc:`RFC 4647, section 2.1
+    <4647#section-2.1>` means the default header parser accepts basic language
+    ranges. Extended ranges are accepted by the explicit
+    :meth:`extended_filtering` and :meth:`extended_best_match` APIs.
 
     This object should not be modified. To add to the header, we can use the
     addition operators (``+`` and ``+=``), which return a new object (see the
@@ -4003,15 +4161,10 @@ class AcceptLanguageValidHeader(AcceptLanguage):
            change in the future to better conform to the RFC.
 
            What is 'acceptable' depends on the needs of your application.
-           :rfc:`RFC 7231, section 5.3.5 <7231#section-5.3.5>` suggests three
-           matching schemes from :rfc:`RFC 4647 <4647>`, two of which WebOb
-           supports with :meth:`AcceptLanguageValidHeader.basic_filtering` and
-           :meth:`AcceptLanguageValidHeader.lookup` (we interpret the RFC to
-           mean that Extended Filtering cannot apply for the
-           ``Accept-Language`` header, as the header only accepts basic
-           language ranges.) If these are not suitable for the needs of your
-           application, you may need to write your own matching using
-           :attr:`AcceptLanguageValidHeader.parsed`.
+           :rfc:`RFC 7231, section 5.3.5 <7231#section-5.3.5>` suggests
+           matching schemes from :rfc:`RFC 4647 <4647>`. WebOb supports Basic
+           Filtering with :meth:`basic_filtering`, Extended Filtering with
+           :meth:`extended_filtering`, and Lookup with :meth:`lookup`.
 
         :param offer: (``str``) language tag offer
         :return: (``bool``) Whether ``offer`` is acceptable according to the
@@ -4348,6 +4501,47 @@ class AcceptLanguageValidHeader(AcceptLanguage):
         # for example, would be to indicate that two tags are equally preferred
         # (same qvalue), which we would not be able to do easily with a set or
         # a list without e.g. making a member of the set or list a sequence.
+
+    def extended_filtering(self, language_tags):
+        """
+        Return matching tags using RFC 4647 Extended Filtering.
+
+        Extended ranges are accepted only through this explicit API; the normal
+        header parser and :meth:`basic_filtering` continue to accept only
+        basic language ranges.
+
+        Matching is case-insensitive. A ``*`` subtag skips one or more
+        subtags, except that it cannot skip a singleton subtag. Tags may have
+        additional trailing subtags after the last matched subtag. Repeated
+        candidate tags are retained in their input order. Malformed candidate
+        tags and malformed language ranges are ignored.
+
+        Ranges with ``q=0`` take precedence over overlapping acceptable
+        ranges. A specific ``q=0`` range therefore removes a tag that would
+        otherwise match ``*``; ``*;q=0`` only excludes tags that were not
+        matched by an acceptable specific range. Repeated ranges use the
+        quality and position of their first occurrence.
+
+        :return: A list of ``(language_tag, qvalue)`` tuples, sorted by
+                 descending quality. Ties use the matched range's position in
+                 the header, then the candidate tag's input position.
+        """
+        return self._extended_filtering_parsed(
+            language_tags=language_tags,
+            parsed_ranges=self._parse_extended(self.header_value),
+        )
+
+    def extended_best_match(self, language_tags, default_match=None):
+        """
+        Return the best tag from :meth:`extended_filtering`, or a default.
+
+        The first tuple is returned without its quality value. If no candidate
+        matches, `default_match` is returned.
+        """
+        matches = self.extended_filtering(language_tags=language_tags)
+        if not matches:
+            return default_match
+        return matches[0][0]
 
     def best_match(self, offers, default_match=None):
         """
@@ -4745,17 +4939,11 @@ class AcceptLanguageValidHeader(AcceptLanguage):
            application (for example, should a language range in the header
            match a more specific language tag offer, or a less specific tag
            offer?) :rfc:`RFC 7231, section 5.3.5 <7231#section-5.3.5>` suggests
-           three matching schemes from :rfc:`RFC 4647 <4647>`, two of which
-           WebOb supports with
-           :meth:`AcceptLanguageValidHeader.basic_filtering` and
-           :meth:`AcceptLanguageValidHeader.lookup` (we interpret the RFC to
-           mean that Extended Filtering cannot apply for the
-           ``Accept-Language`` header, as the header only accepts basic
-           language ranges.) :meth:`AcceptLanguageValidHeader.basic_filtering`
-           returns quality values with the matched language tags.
-           :meth:`AcceptLanguageValidHeader.lookup` returns a language tag
-           without the quality value, but the quality value is less likely to
-           be useful when we are looking for a best match.
+           three matching schemes from :rfc:`RFC 4647 <4647>`. WebOb supports
+           them with :meth:`basic_filtering`, :meth:`extended_filtering`, and
+           :meth:`lookup`. The filtering methods return quality values with
+           the matched language tags; :meth:`lookup` returns a language tag
+           without a quality value.
 
            If these are not suitable or sufficient for the needs of your
            application, you may need to write your own matching using
@@ -4900,6 +5088,21 @@ class _AcceptLanguageInvalidOrNoHeader(AcceptLanguage):
         there are no matches, so this method always returns an empty list.
         """
         return []
+
+    def extended_filtering(self, language_tags):
+        """
+        Return tags using Extended Filtering when no valid header is present.
+
+        When the header is absent, there are no usable ranges, so this method
+        always returns an empty list.
+        """
+        return []
+
+    def extended_best_match(self, language_tags, default_match=None):
+        """
+        Return `default_match` when no valid header ranges are available.
+        """
+        return default_match
 
     def best_match(self, offers, default_match=None):
         """
@@ -5282,6 +5485,30 @@ class AcceptLanguageInvalidHeader(_AcceptLanguageInvalidOrNoHeader):
         """Return the ``str`` ``'<invalid header value>'``."""
 
         return "<invalid header value>"
+
+    def extended_filtering(self, language_tags):
+        """
+        Apply Extended Filtering to the syntactically valid extended ranges.
+
+        The default header parser rejects extended ranges, so a request using
+        them is represented by this class. Invalid elements are still ignored,
+        while valid elements retain their header positions for stable ties.
+        """
+        if not isinstance(self.header_value, str):
+            return []
+        return self._extended_filtering_parsed(
+            language_tags=language_tags,
+            parsed_ranges=self._parse_extended(self.header_value),
+        )
+
+    def extended_best_match(self, language_tags, default_match=None):
+        """
+        Return the best match found by Extended Filtering, or a default.
+        """
+        matches = self.extended_filtering(language_tags=language_tags)
+        if not matches:
+            return default_match
+        return matches[0][0]
 
     def _add_instance_and_non_accept_language_type(
         self, instance, other, instance_on_the_right=False

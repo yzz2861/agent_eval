@@ -57,6 +57,11 @@ Feature
 
 - Add Request.remote_host, exposing REMOTE_HOST environment variable.
 
+- Add explicit ``AcceptLanguage.extended_filtering()`` and
+  ``AcceptLanguage.extended_best_match()`` methods for RFC 4647 Extended
+  Filtering. Extended ranges such as ``de-*-DE`` are accepted only by these
+  methods; default Basic Filtering and Lookup are unchanged.
+
 - Added ``acceptparse.Accept.parse_offer`` to codify what types of offers
   are compatible with ``acceptparse.AcceptValidHeader.acceptable_offers``,
   ``acceptparse.AcceptMissingHeader.acceptable_offers``, and

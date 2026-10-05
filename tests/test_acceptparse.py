@@ -4811,6 +4811,183 @@ class TestAcceptLanguageValidHeader:
         assert returned == expected_returned
 
     @pytest.mark.parametrize(
+        "header_value, language_tags, expected_returned",
+        [
+            # Examples from RFC 4647, Section 3.3.2
+            (
+                "de-DE",
+                [
+                    "de-DE",
+                    "de-DE-x-goethe",
+                    "de-Latn-DE",
+                    "de-Latg-DE",
+                    "de-Latn-DE-x-goethe",
+                    "de-Deva",
+                    "de-de-1901",
+                ],
+                [
+                    ("de-DE", 1.0),
+                    ("de-DE-x-goethe", 1.0),
+                    ("de-de-1901", 1.0),
+                ],
+            ),
+            (
+                "*-DE",
+                ["de-DE", "de-Latn-DE", "de-Latg-DE", "de-DE-x-goethe", "x-DE"],
+                [
+                    ("de-DE", 1.0),
+                    ("de-Latn-DE", 1.0),
+                    ("de-Latg-DE", 1.0),
+                    ("de-DE-x-goethe", 1.0),
+                ],
+            ),
+            (
+                "de-*-DE",
+                [
+                    "de-DE",
+                    "de-Latn-DE",
+                    "de-Latf-DE",
+                    "de-DE-x-goethe",
+                    "de-Latn-DE-1996",
+                    "de-Deva-DE",
+                    "de-x-DE",
+                    "de-DE-1996",
+                ],
+                [
+                    ("de-Latn-DE", 1.0),
+                    ("de-Latf-DE", 1.0),
+                    ("de-Latn-DE-1996", 1.0),
+                    ("de-Deva-DE", 1.0),
+                ],
+            ),
+            (
+                "de-DE-*-1996",
+                ["de-DE-1901-1996", "de-DE-x-1901-1996"],
+                [("de-DE-1901-1996", 1.0)],
+            ),
+            (
+                "zh-Hans-CN",
+                ["zh-Hans-CN", "zh-Hant-CN", "zh-Hans-CN-x-private"],
+                [("zh-Hans-CN", 1.0), ("zh-Hans-CN-x-private", 1.0)],
+            ),
+            # Private-use subtags retain the same singleton boundary rules.
+            (
+                "*-x-foo",
+                ["en-x-foo", "en-US-x-foo", "en-x-bar", "de-x-foo-bar"],
+                [
+                    ("en-x-foo", 1.0),
+                    ("en-US-x-foo", 1.0),
+                    ("de-x-foo-bar", 1.0),
+                ],
+            ),
+            (
+                "de-*-x-foo",
+                ["de-Latn-x-foo", "de-Latn-DE-x-foo", "de-x-foo"],
+                [
+                    ("de-Latn-x-foo", 1.0),
+                    ("de-Latn-DE-x-foo", 1.0),
+                ],
+            ),
+            (
+                "x-foo-*-bar",
+                ["x-foo-baz-bar", "x-foo-bar"],
+                [("x-foo-baz-bar", 1.0)],
+            ),
+            # Case-insensitive matching returns candidates unchanged.
+            (
+                "DE-*-de",
+                ["de-latn-DE", "DE-LATG-de"],
+                [("de-latn-DE", 1.0), ("DE-LATG-de", 1.0)],
+            ),
+            # Internal wildcards and qvalue ordering.
+            (
+                "de-*-DE;q=0.9, fr;q=0.8, *;q=0.5",
+                ["fr-FR", "de-Latn-DE", "ja-JP", "de-DE"],
+                [
+                    ("de-Latn-DE", 0.9),
+                    ("fr-FR", 0.8),
+                    ("ja-JP", 0.5),
+                    ("de-DE", 0.5),
+                ],
+            ),
+            # Same qvalue keeps range position, then candidate position.
+            (
+                "es-*-ES, it-*-IT",
+                ["it-Latn-IT", "es-Latn-ES"],
+                [("es-Latn-ES", 1.0), ("it-Latn-IT", 1.0)],
+            ),
+            (
+                "es-*-ES",
+                ["es-Latn-ES", "es-Cast-ES", "es-Latn-ES"],
+                [
+                    ("es-Latn-ES", 1.0),
+                    ("es-Cast-ES", 1.0),
+                    ("es-Latn-ES", 1.0),
+                ],
+            ),
+            # A specific q=0 range excludes a tag matched by '*'.
+            (
+                "de-Latn-DE;q=0, de-*-DE;q=0.9, *;q=0.5",
+                ["de-Latn-DE", "de-Latg-DE", "fr-FR"],
+                [("de-Latg-DE", 0.9), ("fr-FR", 0.5)],
+            ),
+            # '*;q=0' excludes only the remainder; an acceptable specific
+            # range still matches.
+            (
+                "de-*-DE;q=0.9, *;q=0",
+                ["de-Latn-DE", "fr-FR"],
+                [("de-Latn-DE", 0.9)],
+            ),
+            # Repeated ranges use their first occurrence.
+            (
+                "de-*-DE;q=0.2, fr;q=0.8, de-*-DE;q=1, *;q=0.1",
+                ["de-Latn-DE", "fr-FR", "ja-JP"],
+                [("fr-FR", 0.8), ("de-Latn-DE", 0.2), ("ja-JP", 0.1)],
+            ),
+            # Malformed candidate tags and ranges are ignored deterministically.
+            (
+                "de-*-DE, bad_range, ;q=0.5",
+                ["de-Latn-DE", "bad_tag", "-DE", "de--DE"],
+                [("de-Latn-DE", 1.0)],
+            ),
+        ],
+    )
+    def test_extended_filtering(self, header_value, language_tags, expected_returned):
+        instance = create_accept_language_header(header_value=header_value)
+        assert (
+            instance.extended_filtering(language_tags=language_tags)
+            == expected_returned
+        )
+
+    @pytest.mark.parametrize(
+        "header_value, language_tags, default_match, expected_returned",
+        [
+            (
+                "de-*-DE;q=0.9, *;q=0.5",
+                ["fr-FR", "de-Latn-DE"],
+                None,
+                "de-Latn-DE",
+            ),
+            (
+                "de-*-DE;q=0",
+                ["de-Latn-DE"],
+                "fallback",
+                "fallback",
+            ),
+            ("*;q=0", ["fr-FR"], None, None),
+            ("bad_range", ["fr-FR"], "fallback", "fallback"),
+        ],
+    )
+    def test_extended_best_match(
+        self, header_value, language_tags, default_match, expected_returned
+    ):
+        instance = create_accept_language_header(header_value=header_value)
+        returned = instance.extended_best_match(
+            language_tags=language_tags, default_match=default_match
+        )
+        assert returned == expected_returned
+
+    @pytest.mark.parametrize(
         "header_value, offers, default_match, expected_returned",
         [
             ("bar, *;q=0", ["foo"], None, None),
@@ -5410,6 +5587,11 @@ class TestAcceptLanguageNoHeader:
         returned = instance.basic_filtering(language_tags=["tag1", "tag2"])
         assert returned == []
 
+    def test_extended_filtering(self):
+        instance = AcceptLanguageNoHeader()
+        assert instance.extended_filtering(["de-Latn-DE"]) == []
+        assert instance.extended_best_match(["de-Latn-DE"], "fallback") == "fallback"
+
     @pytest.mark.parametrize(
         "offers, default_match, expected_returned",
         [
@@ -5587,6 +5769,13 @@ class TestAcceptLanguageInvalidHeader:
         instance = AcceptLanguageInvalidHeader(header_value="")
         returned = instance.basic_filtering(language_tags=["tag1", "tag2"])
         assert returned == []
+
+    def test_extended_filtering(self):
+        instance = AcceptLanguageInvalidHeader("de-*-DE, bad_range")
+        assert instance.extended_filtering(["de-Latn-DE", "bad-tag"]) == [
+            ("de-Latn-DE", 1.0)
+        ]
+        assert instance.extended_best_match(["fr-FR"], "fallback") == "fallback"
 
     @pytest.mark.parametrize(
         "offers, default_match, expected_returned",
