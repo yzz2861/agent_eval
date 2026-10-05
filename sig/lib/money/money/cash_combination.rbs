@@ -1,0 +1,39 @@
+class Money
+  class CashCombination
+    class Result
+      attr_reader status: Symbol
+      attr_reader combination: Hash[Integer | Money, Integer]?
+      attr_reader total_count: Integer?
+      attr_reader budget: Integer?
+      attr_reader budget_used: Integer
+
+      def initialize: (
+        status: Symbol,
+        combination: Hash[Integer | Money, Integer]?,
+        total_count: Integer?,
+        budget: Integer?,
+        budget_used: Integer
+      ) -> void
+
+      def found?: () -> bool
+
+      def no_solution?: () -> bool
+
+      def budget_exhausted?: () -> bool
+    end
+
+    def self.calculate: (
+      Money target,
+      Hash[Integer | Money, Integer] available,
+      ?budget: Integer?
+    ) -> Result
+
+    def initialize: (
+      Money target,
+      Hash[Integer | Money, Integer] available,
+      Integer? budget
+    ) -> void
+
+    def calculate: () -> Result
+  end
+end

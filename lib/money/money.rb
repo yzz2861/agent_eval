@@ -6,6 +6,7 @@ require "money/money/arithmetic"
 require "money/money/constructors"
 require "money/money/formatter"
 require "money/money/allocation"
+require "money/money/cash_combination"
 require "money/money/locale_backend"
 
 # "Money is any object or record that is generally accepted as payment for
@@ -580,6 +581,16 @@ class Money
   end
 
   alias split allocate
+
+  # Finds the minimum number of cash pieces that exactly make up this amount.
+  #
+  # @param [Hash{Integer, Money => Integer}] available Denomination to quantity pairs.
+  # @param [Integer, nil] budget Maximum bounded-knapsack state transitions.
+  #
+  # @return [Money::CashCombination::Result]
+  def cash_combination(available, budget: nil)
+    Money::CashCombination.calculate(self, available, budget: budget)
+  end
 
   # Round the monetary amount to smallest unit of coinage.
   #

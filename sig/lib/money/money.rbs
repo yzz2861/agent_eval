@@ -475,6 +475,11 @@ class Money
 
   alias split allocate
 
+  def cash_combination: (
+    Hash[Integer | Money, Integer] available,
+    ?budget: Integer?
+  ) -> CashCombination::Result
+
   # Round the monetary amount to smallest unit of coinage.
   #
   # @note
