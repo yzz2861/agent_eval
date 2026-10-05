@@ -1,5 +1,13 @@
 # Changes
 
+## Unreleased
+
+* Added `TZInfo::PatchedTimezone` and `TZInfo::TimezonePatch`, allowing
+  explicit transition exceptions to be overlaid onto an existing `Timezone`
+  within a UTC window, producing a new independent `Timezone` without
+  modifying the underlying data source.
+
+
 ## Version 2.0.6 - 28-Jan-2023
 
 * Eliminate `Object#untaint` deprecation warnings on JRuby 9.4.0.0. #145.
