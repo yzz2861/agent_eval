@@ -1,4 +1,5 @@
 require "flipper/adapter"
+require "flipper/adapters/read_only"
 require "flipper/typecast"
 
 module Flipper
@@ -13,9 +14,10 @@ module Flipper
       DEFAULT_CONFIG = default_config.each_value(&:freeze).freeze
 
       # Public
-      def initialize(source = nil, threadsafe: true)
+      def initialize(source = nil, threadsafe: true, frozen: false)
         @source = Typecast.features_hash(source)
         @lock = Mutex.new if threadsafe
+        freeze_snapshot if frozen
       end
 
       # Public: The set of known features.
@@ -59,6 +61,19 @@ module Flipper
 
       def get_all(**kwargs)
         synchronize { Typecast.features_hash(@source) }
+      end
+
+      # Public: Returns a read-only, immutable snapshot of all feature
+      # configuration. The source hash and gate values are copied while the
+      # adapter lock is held, so a concurrent publication cannot leave the
+      # snapshot half old and half new.
+      def snapshot
+        source = synchronize { copy_snapshot_source(@source) }
+        Adapters::ReadOnly.new(self.class.new(source, threadsafe: false, frozen: true))
+      end
+
+      def supports_snapshot?
+        true
       end
 
       # Public
@@ -124,6 +139,60 @@ module Flipper
       end
 
       private
+
+      def freeze_snapshot
+        @source.each do |feature_key, gates|
+          gates.each do |gate_key, value|
+            gates[gate_key] = freeze_snapshot_value(value)
+          end
+          gates.freeze
+        end
+        @source.freeze
+      end
+
+      def copy_snapshot_source(source)
+        source.each_with_object({}) do |(feature_key, gates), result|
+          copied_gates = gates.each_with_object({}) do |(gate_key, value), gate_result|
+            gate_result[gate_key] = copy_snapshot_value(value)
+          end
+          result[feature_key.is_a?(String) ? feature_key.dup : feature_key] = copied_gates
+        end
+      end
+
+      def copy_snapshot_value(value)
+        case value
+        when Hash
+          value.each_with_object({}) do |(key, nested_value), result|
+            result[key.is_a?(String) ? key.dup : key] = copy_snapshot_value(nested_value)
+          end
+        when Array
+          value.map { |element| copy_snapshot_value(element) }
+        when Set
+          value.each_with_object(Set.new) do |element, result|
+            result << copy_snapshot_value(element)
+          end
+        when String
+          value.dup
+        else
+          value
+        end
+      end
+
+      def freeze_snapshot_value(value)
+        case value
+        when Hash
+          value.each { |key, nested_value| value[key] = freeze_snapshot_value(nested_value) }.freeze
+        when Array
+          value.each_with_index { |element, index| value[index] = freeze_snapshot_value(element) }.freeze
+        when Set
+          value.each { |element| freeze_snapshot_value(element) }
+          value.freeze
+        when String
+          value.freeze
+        else
+          value.freeze
+        end
+      end
 
       def synchronize(&block)
         if @lock

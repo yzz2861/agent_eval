@@ -1,4 +1,13 @@
+require "flipper/errors"
+
 module Flipper
+  class SnapshotNotSupported < Error
+    def initialize(adapter = nil)
+      name = adapter.respond_to?(:adapter_stack) ? adapter.adapter_stack : (adapter.class.name || "adapter")
+      super("#{name} does not support consistent evaluation snapshots")
+    end
+  end
+
   # Adding a module include so we have some hooks for stuff down the road
   module Adapter
     def self.included(base)
@@ -26,6 +35,19 @@ module Flipper
 
     def read_only?
       false
+    end
+
+    # Public: Returns whether this adapter can provide a point-in-time view
+    # of all feature configuration in one consistent operation.
+    def supports_snapshot?
+      false
+    end
+
+    # Public: Returns a read-only adapter containing a consistent, immutable
+    # point-in-time view of all feature configuration. Adapters that cannot
+    # make that guarantee must leave #supports_snapshot? as false.
+    def snapshot
+      raise SnapshotNotSupported, self
     end
 
     # Public: Get all features and gate values in one call. Defaults to one call
@@ -71,7 +93,7 @@ module Flipper
 
     # Public: default name of the adapter
     def name
-      @name ||= self.class.name.split('::').last.split(/(?=[A-Z])/).join('_').downcase.to_sym
+      @name ||= (self.class.name || 'anonymous').split('::').last.split(/(?=[A-Z])/).join('_').downcase.to_sym
     end
 
     # Public: Returns a string representation of the adapter stack for debugging.

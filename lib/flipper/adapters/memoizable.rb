@@ -122,6 +122,14 @@ module Flipper
         @adapter.read_only?
       end
 
+      def supports_snapshot?
+        @adapter.supports_snapshot?
+      end
+
+      def snapshot
+        @adapter.snapshot
+      end
+
       def import(source)
         @adapter.import(source).tap { cache.clear if memoizing? }
       end

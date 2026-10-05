@@ -39,6 +39,10 @@ module Flipper
         @handler = block || handler
       end
 
+      def snapshot
+        self.class.new(@adapter.snapshot, @handler)
+      end
+
       def add(feature)
         assert_feature_exists(feature) unless self.class.sync_mode
         super

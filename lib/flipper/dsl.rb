@@ -24,6 +24,7 @@ module Flipper
       memoize = options.fetch(:memoize, true)
       adapter = Adapters::Memoizable.new(adapter) if memoize
       @adapter = adapter
+      @evaluation_adapter = Adapters::EvaluationScope.new(adapter)
       # Concurrent::Map so a single DSL instance shared across threads (e.g. a
       # Flipper.new(adapter) or Flipper::Cloud.new held in a constant) can
       # memoize features without a non-atomic Hash mutation racing.
@@ -223,7 +224,7 @@ module Flipper
       end
 
       @memoized_features.compute_if_absent(name.to_sym) do
-        Feature.new(name, @adapter, instrumenter: instrumenter)
+        Feature.new(name, @evaluation_adapter, instrumenter: instrumenter)
       end
     end
 
@@ -234,7 +235,7 @@ module Flipper
     # Returns an Array of Flipper::Feature.
     def preload(names)
       features = names.map { |name| feature(name) }
-      @adapter.get_multi(features)
+      @evaluation_adapter.get_multi(features)
       features
     end
 
@@ -242,7 +243,7 @@ module Flipper
     #
     # Returns an Array of Flipper::Feature.
     def preload_all
-      keys = @adapter.get_all.keys
+      keys = @evaluation_adapter.get_all.keys
       keys.map { |key| feature(key) }
     end
 
@@ -275,8 +276,45 @@ module Flipper
     #
     # Returns Set of Flipper::Feature instances.
     def features
-      adapter.features.map { |name| feature(name) }.to_set
+      @evaluation_adapter.features.map { |name| feature(name) }.to_set
     end
+
+    # Public: Evaluate a block against a consistent snapshot of feature
+    # configuration. Only feature configuration is pinned; actor properties and
+    # other external state are read normally on every check. Writes go to the
+    # live adapter and do not alter the active snapshot.
+    # A nested scope captures a fresh live snapshot; after it returns, the outer
+    # snapshot is restored for the remainder of the outer block.
+    #
+    # consistency - :strong requires an adapter that can atomically snapshot all
+    #               configuration. :eventual does not pin reads and is useful
+    #               when scope behavior should be adapter-independent.
+    #
+    # Returns the block's result.
+    # Raises Flipper::SnapshotNotSupported for strong mode without support.
+    def with_evaluation_snapshot(consistency: :strong)
+      unless block_given?
+        raise ArgumentError, "a block is required to define the evaluation snapshot scope"
+      end
+      raise ArgumentError, "consistency must be :strong or :eventual" unless %i[strong eventual].include?(consistency)
+      return yield unless consistency == :strong
+
+      source_adapter = @evaluation_adapter.current
+      unless source_adapter.supports_snapshot?
+        raise SnapshotNotSupported, source_adapter
+      end
+
+      snapshot_adapter = source_adapter.snapshot
+      scope_adapter = Adapters::EvaluationSnapshot.new(@adapter, snapshot_adapter)
+
+      begin
+        @evaluation_adapter.push(scope_adapter)
+        yield
+      ensure
+        @evaluation_adapter.pop
+      end
+    end
+    alias_method :with_snapshot, :with_evaluation_snapshot
 
     # Public: Does this adapter support writes or not.
     def read_only?

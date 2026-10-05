@@ -22,12 +22,18 @@ RSpec.describe Flipper::Adapters::Strict do
         end
       end
 
-      context "#add" do
-        it "raises an error for unknown feature" do
-          expect { subject.add(feature) }.to raise_error(Flipper::Adapters::Strict::NotFound)
-        end
+    context "#add" do
+      it "raises an error for unknown feature" do
+        expect { subject.add(feature) }.to raise_error(Flipper::Adapters::Strict::NotFound)
       end
     end
+
+    context "#snapshot" do
+      it "preserves strict behavior" do
+        expect { subject.snapshot.get(feature) }.to raise_error(Flipper::Adapters::Strict::NotFound)
+      end
+    end
+  end
   end
 
   context "handler = :warn" do

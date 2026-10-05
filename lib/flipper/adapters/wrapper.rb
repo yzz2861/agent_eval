@@ -26,6 +26,14 @@ module Flipper
         @adapter = adapter
       end
 
+      def supports_snapshot?
+        @adapter.supports_snapshot?
+      end
+
+      def snapshot
+        @adapter.snapshot
+      end
+
       METHODS.each do |method|
         if RUBY_VERSION >= '3.0'
           define_method(method) do |*args, **kwargs|

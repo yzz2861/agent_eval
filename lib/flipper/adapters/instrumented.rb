@@ -25,6 +25,14 @@ module Flipper
         @instrumenter = options.fetch(:instrumenter, Instrumenters::Noop)
       end
 
+      def supports_snapshot?
+        @adapter.supports_snapshot?
+      end
+
+      def snapshot
+        @adapter.snapshot
+      end
+
       # Public
       def features
         default_payload = {
