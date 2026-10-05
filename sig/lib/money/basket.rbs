@@ -1,0 +1,99 @@
+class Money
+  # An immutable collection of monetary amounts in multiple currencies.
+  #
+  # A Basket keeps a net balance per currency, so amounts in different
+  # currencies are never implicitly exchanged when they are combined.
+  # Balances are normalized when the basket is built: currencies whose net
+  # amount is zero are dropped, which means adding or removing a zero entry
+  # never changes the identity of a basket, and the order in which amounts
+  # were added is irrelevant.
+  #
+  # Conversion to a single currency is an explicit valuation operation,
+  # see #value_in.
+  class Basket
+    include Comparable
+    include Enumerable[Money]
+
+    # Raised when #value_in is called without all the exchange rates needed
+    # to value every currency held by the basket.
+    class MissingRatesError < StandardError
+      # The currencies for which no rate was provided.
+      attr_reader missing_currencies: Array[Money::Currency]
+
+      # The currency the basket was being valued in.
+      attr_reader target_currency: Money::Currency
+
+      def initialize: (Array[Money::Currency] missing_currencies, Money::Currency target_currency) -> void
+    end
+
+    # Returns an empty basket.
+    def self.empty: () -> instance
+
+    # Builds a basket from a list of Money objects. Amounts sharing the same
+    # currency are netted together; no currency conversion is performed.
+    def initialize: (?Enumerable[Money] monies) -> void
+
+    # Returns the currencies held by the basket, sorted by currency id so the
+    # result does not depend on insertion order.
+    def currencies: () -> Array[Money::Currency]
+
+    # Returns one Money object per currency held by the basket, sorted by
+    # currency id.
+    def monies: () -> Array[Money]
+
+    # Iterates over the Money objects held by the basket.
+    def each: () { (Money) -> void } -> void
+           | () -> Enumerator[Money, void]
+
+    # Returns the net amount held in the given currency, or a zero Money in
+    # that currency when the basket holds none.
+    def []: (Money::Currency | String | Symbol currency) -> Money
+
+    # Returns true when the basket holds no currency.
+    def empty?: () -> bool
+
+    # Returns true when the basket holds no non-zero amount.
+    def zero?: () -> bool
+
+    # Returns a new basket combining the balances of this basket with another
+    # basket or a single Money object. Amounts are netted per currency; no
+    # currency conversion is performed.
+    def merge: (Basket | Money other) -> Basket
+
+    # Synonym for #merge.
+    def +: (Basket | Money other) -> Basket
+
+    # Returns a new basket with the balances of other subtracted from this
+    # basket, per currency.
+    def -: (Basket | Money other) -> Basket
+
+    # Returns a new basket with every balance negated.
+    def -@: () -> Basket
+
+    # Returns a new basket with every balance scaled by the given ratio.
+    def *: (Numeric ratio) -> Basket
+
+    # Compares two baskets per currency. Returns nil when the baskets are
+    # not consistently ordered across currencies.
+    def <=>: (untyped other) -> Integer?
+
+    # Checks whether two baskets hold the same net balance for every
+    # currency.
+    def ==: (untyped other) -> bool
+
+    # Checks whether two baskets hold the same net balance for every
+    # currency, suitable for use as Hash keys together with #hash.
+    def eql?: (untyped other) -> bool
+
+    # Returns an Integer hash value based on the per-currency balances.
+    def hash: () -> Integer
+
+    # Returns the total value of the basket expressed in a single currency.
+    # Every currency held by the basket (other than the target currency
+    # itself) requires a rate to be provided.
+    def value_in: (Money::Currency | String | Symbol currency, Hash[untyped, Numeric] rates) -> Money
+
+    # Returns a human readable representation.
+    def inspect: () -> String
+  end
+end

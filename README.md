@@ -443,6 +443,38 @@ implementations.
 - [money-uphold-bank](https://github.com/subvisual/money-uphold-bank)
 - [money-unirate-api](https://github.com/UniRate-API/money-unirate-api)
 
+## Multi-Currency Baskets
+
+An account may hold amounts in several currencies at once, and those amounts
+should not be implicitly exchanged every time they are added together.
+`Money::Basket` is an immutable value object that keeps a net balance per
+currency and supports merging, subtracting and scaling:
+
+```ruby
+basket = Money::Basket.new([Money.from_cents(100, "USD"), Money.from_cents(50, "EUR")])
+basket + Money.from_cents(25, "USD")  # => USD 1.25 + EUR 0.50, no conversion
+basket - Money.from_cents(10, "EUR")  # => subtracts per currency
+basket * 2                            # => scales every balance
+```
+
+Equality and comparison are strictly per currency. Balances that net to zero
+are dropped, so adding or removing a zero entry never changes a basket's
+identity, and the order in which amounts were added is irrelevant:
+
+```ruby
+Money::Basket.new([Money.from_cents(0, "EUR")]) == Money::Basket.empty  # => true
+```
+
+Converting a basket to a single currency is a separate, explicit valuation
+operation that requires a rate for every held currency and reports all
+missing rates at once:
+
+```ruby
+basket.value_in("USD", "EUR" => 1.2, "JPY" => 0.009)
+# raises Money::Basket::MissingRatesError listing every currency
+# for which no rate was provided
+```
+
 ## Formatting
 
 There are several formatting rules for when `Money#format` is called. For more information, check out the [formatting module source](https://github.com/RubyMoney/money/blob/main/lib/money/money/formatter.rb), or read the latest release's [rdoc version](https://www.rubydoc.info/gems/money/Money/Formatter).
