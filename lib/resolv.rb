@@ -521,6 +521,88 @@ class Resolv
     end
 
     ##
+    # Sends a DNS UPDATE message as specified in RFC 2136.
+    #
+    # +update+ must be a Resolv::DNS::Update instance (or any
+    # Resolv::DNS::Message with opcode Resolv::DNS::OpCode::Update).
+    #
+    # +options+ may include:
+    # :server::     overrides the nameserver/port taken from the resolver
+    #               configuration. May be a host string or a
+    #               +[host, port]+ pair. RFC 2136 requires a single
+    #               authoritative server, so no other configured server is
+    #               ever tried.
+    # :tcp::        forces TCP when true. When nil (the default) UDP is used
+    #               and messages that do not fit in a UDP datagram are sent
+    #               over TCP. There is no truncation-driven retry.
+    # :timeout::    seconds to wait for an answer, or an array of positive
+    #               numbers. Unlike ordinary queries, only the first timeout
+    #               value is used: a datagram that may already have been
+    #               applied by the server is never retransmitted.
+    #
+    # The method does not raise for transport problems or non-success
+    # responses. It returns a Resolv::DNS::Update::Result that tells the
+    # outcomes apart:
+    #
+    # :ok::          the server answered NOERROR.
+    # :rejected::    the server answered; either a prerequisite was not
+    #                satisfied (YXDomain/YXRRSet/NXRRSet; Result#prerequisite?
+    #                is true) or the server refused/update failed for another
+    #                reason (FormErr/ServFail/NXDomain/NotImp/Refused/
+    #                NotAuth/NotZone).
+    # :failed::      no answer reached the client: timeout, connection
+    #                refusal, reset or malformed response.
+    #
+    # A transport failure after the message has been handed to the socket
+    # leaves the server's state unknown. Result#uncertain? is true in that
+    # case, and the update is not replayed automatically. Callers that retry
+    # must use idempotent prerequisites or otherwise make replay safe.
+
+    def send_update(update, **options)
+      if Update === update
+        msg = update.to_message
+      else
+        msg = update
+      end
+      unless OpCode::Update == msg.opcode
+        raise ArgumentError, "not a DNS UPDATE message: opcode #{msg.opcode}"
+      end
+      wire = msg.encode
+      server = options[:server]
+      host, port = case server
+                   when nil
+                     @config.lazy_initialize.nameserver_port[0]
+                   when Array
+                     [server[0], server[1] || Port]
+                   else
+                     [server, Port]
+                   end
+      timeout_values = options.fetch(:timeout) do
+        @config.timeouts&.first || InitialUpdateTimeout
+      end
+      tout = Array(timeout_values).first
+      unless Numeric === tout && tout > 0
+        raise ArgumentError, "update timeout must be positive: #{tout.inspect}"
+      end
+      force_tcp = options[:tcp]
+      use_tcp = force_tcp == true || (force_tcp.nil? && wire.bytesize > UDPSize)
+
+      # A single transport object per update. Its #exchange reports whether
+      # the datagram/stream write completed, so failures after that point can
+      # be marked uncertain instead of being replayed.
+      transport = options[:transport] ||
+                  Update::Transport.new(host, port, tout, use_tcp,
+                    socket_factory: options[:socket_factory])
+      outcome = transport.exchange(wire, msg.id)
+      reply = outcome.reply
+      return Update::Result.for_reply(reply) if reply
+      Update::Result.new(:failed, nil, nil, outcome.uncertain,
+                         outcome.error)
+    end
+
+    InitialUpdateTimeout = 5 # :nodoc:
+
+    ##
     # Iterates over all +typeclass+ DNS resources for +name+.  See
     # #getresource for argument details.
 
@@ -1099,6 +1181,8 @@ class Resolv
           @timeouts = nil
         end
       end
+
+      attr_reader :timeouts # :nodoc:
 
       def Config.parse_resolv_conf(filename)
         nameserver = []
@@ -1898,10 +1982,17 @@ class Resolv
           type, klass, ttl = self.get_unpack('nnN')
           typeclass = Resource.get_class(type, klass)
           res = self.get_length16 do
-            begin
-              typeclass.decode_rdata self
-            rescue => e
-              raise DecodeError, e.message, e.backtrace
+            # An RR with empty RDATA is a type/class test rather than data.
+            # RFC 2136 uses them in the prerequisite and update sections
+            # (with CLASS NONE/ANY or ordinary classes).
+            if @index == @limit
+              Resource::Empty.create(type, klass).new
+            else
+              begin
+                typeclass.decode_rdata self
+              rescue => e
+                raise DecodeError, e.message, e.backtrace
+              end
             end
           end
           res.instance_variable_set :@ttl, ttl
@@ -2404,6 +2495,29 @@ class Resolv
           # class for every unknown (type, class) pair, so registering them
           # permanently would let a malicious response exhaust memory.
           return c
+        end
+      end
+
+      # A resource record carrying no RDATA and a specific TYPE/CLASS pair.
+      # RFC 2136 UPDATE and prerequisite sections use empty RDATA to express
+      # type/class tests, deletions and the ANY (255) / NONE (254) classes.
+
+      class Empty < Resource
+        def self.create(type_value, class_value) # :nodoc:
+          c = Class.new(self)
+          c.const_set(:TypeValue, type_value)
+          c.const_set(:ClassValue, class_value)
+          return c
+        end
+
+        def encode_rdata(msg) # :nodoc:
+        end
+
+        def self.decode_rdata(msg) # :nodoc:
+          return self.new
+        end
+
+        def initialize
         end
       end
 
@@ -3108,6 +3222,523 @@ class Resolv
           TypeValue = 65
           ClassValue = IN::ClassValue
           ClassHash[[TypeValue, ClassValue]] = self # :nodoc:
+        end
+      end
+    end
+
+    # Builds DNS UPDATE messages as specified in RFC 2136 ("Dynamic Updates
+    # in the Domain Name System").
+    #
+    # An update describes one zone (the SOA), prerequisite records checked
+    # by the server, and records to add or delete. Names used in
+    # prerequisites and in the update section must belong to the zone; an
+    # out-of-zone name raises ArgumentError.
+    #
+    # Example:
+    #
+    #   update = Resolv::DNS::Update.new("example.org")
+    #   update.require_name("www.example.org")
+    #   update.add("www.example.org", Resolv::DNS::Resource::IN::A.new("192.0.2.1"), ttl: 3600)
+    #   update.delete_rrset("old.example.org", Resolv::DNS::Resource::IN::AAAA)
+    #   Resolv::DNS.open {|dns| result = dns.send_update(update)}
+
+    class Update
+      # CLASS NONE (254), used by prerequisites and deletes that must not
+      # match a class. [RFC 2136 2.5]
+      ClassNONE = 254
+
+      # CLASS ANY (255), used by prerequisites and deletes that match any
+      # class. [RFC 2136 2.5]
+      ClassANY = 255
+
+      # TYPE ANY (255).
+      TypeANY = 255
+
+      # Default TTL (seconds) applied to added records when none is given.
+      DEFAULT_TTL = 3600
+
+      # Creates a new UPDATE builder for +zone+ (the zone origin, e.g.
+      # "example.org"). +klass+ is the zone CLASS; by default it is
+      # Resolv::DNS::Resource::IN (1). It may also be the integer value of a
+      # registered data class. The meta classes NONE (254) and ANY (255)
+      # are not valid in the zone section. [RFC 2136 2.3]
+      def initialize(zone, klass = Resource::IN)
+        @zone_name = absolute_name(zone)
+        @zone_class = zone_class_value(klass)
+        @zone_typeclass = synthesized_typeclass(Resource::SOA::TypeValue, @zone_class)
+        @prerequisites = []
+        @updates = []
+      end
+
+      # The zone origin as an absolute Resolv::DNS::Name.
+      attr_reader :zone_name
+
+      # The zone CLASS value (an Integer).
+      attr_reader :zone_class
+
+      # Adds a prerequisite: +name+ must be in use, i.e. at least one RR of
+      # any type must exist. Encodes (name, TYPE_ANY, CLASS_zone, TTL 0,
+      # empty RDATA). [RFC 2136 2.4.1, 3.2]
+      def require_name(name)
+        name = in_zone_name(name)
+        @prerequisites << [name, 0, Resource::Empty.create(TypeANY, @zone_class).new]
+        self
+      end
+
+      # Adds a prerequisite: +name+ must not be in use. Encodes (name,
+      # TYPE_ANY, CLASS_NONE, TTL 0, empty RDATA). [RFC 2136 2.4.2, 3.2]
+      def require_no_name(name)
+        name = in_zone_name(name)
+        @prerequisites << [name, 0, Resource::Empty.create(TypeANY, ClassNONE).new]
+        self
+      end
+
+      # Adds a prerequisite: an RRset of +typeclass+ (e.g.
+      # Resolv::DNS::Resource::IN::A) must exist at +name+. Encodes (name,
+      # type, CLASS_zone, TTL 0, empty RDATA). [RFC 2136 2.4.3, 3.2]
+      def require_rrset(name, typeclass)
+        typeclass = rrset_typeclass(typeclass, allow_any: false)
+        name = in_zone_name(name)
+        @prerequisites << [name, 0, Resource::Empty.create(typeclass::TypeValue, @zone_class).new]
+        self
+      end
+
+      # Adds a prerequisite: no RRset of +typeclass+ may exist at +name+.
+      # Encodes (name, type, CLASS_NONE, TTL 0, empty RDATA).
+      # [RFC 2136 2.4.4, 3.2]
+      def require_no_rrset(name, typeclass)
+        typeclass = rrset_typeclass(typeclass, allow_any: false)
+        name = in_zone_name(name)
+        @prerequisites << [name, 0, Resource::Empty.create(typeclass::TypeValue, ClassNONE).new]
+        self
+      end
+
+      # Adds a prerequisite: the RRset at +name+ must consist of exactly the
+      # records in +records+. The record class must match the zone class and
+      # the prerequisite TTL is encoded as 0. [RFC 2136 2.4.5, 3.2]
+      def require_record(name, *records)
+        name = in_zone_name(name)
+        flatten_records(records).each do |record|
+          assert_record_for_zone!(record)
+          @prerequisites << [name, 0, record]
+        end
+        self
+      end
+
+      # Adds records to +name+ ("Add to an RRset"). Each record's class
+      # must match the zone class and must be a concrete RR (neither a
+      # meta class nor TYPE_ANY). +ttl+ is the positive, 32-bit unsigned
+      # TTL in seconds (it may not be zero) and applies to every record;
+      # it may be passed as +ttl:+. [RFC 2136 2.5.1, 3.4]
+      def add(name, *records, ttl: nil)
+        name = in_zone_name(name)
+        records = flatten_records(records)
+        raise ArgumentError, "no records given to add at #{name}" if records.empty?
+        ttl = ttl || DEFAULT_TTL
+        ttl = assert_ttl!(ttl, allow_zero: false)
+        records.each do |record|
+          assert_record_for_zone!(record)
+          @updates << [name, ttl, record]
+        end
+        self
+      end
+
+      # Deletes the specific +records+ from the RRset at +name+ ("Delete an
+      # RR from an RRset"). RDATA must be non-empty, the class must match
+      # the zone class, and TTL is encoded as 0. [RFC 2136 2.5.4, 3.4]
+      def delete_record(name, *records)
+        name = in_zone_name(name)
+        flatten_records(records).each do |record|
+          assert_record_for_zone!(record)
+          @updates << [name, 0, record]
+        end
+        self
+      end
+
+      # Deletes the whole RRset of +typeclass+ at +name+ ("Delete an
+      # RRset"). Encodes (name, type, CLASS_ANY, TTL 0, empty RDATA).
+      # TYPE_ANY is not permitted here; use #delete_name to delete all
+      # RRsets. [RFC 2136 2.5.3, 3.4]
+      def delete_rrset(name, typeclass)
+        typeclass = rrset_typeclass(typeclass, allow_any: false)
+        name = in_zone_name(name)
+        @updates << [name, 0, Resource::Empty.create(typeclass::TypeValue, ClassANY).new]
+        self
+      end
+
+      # Deletes every RRset at +name+ ("Delete All RRsets from a Name").
+      # Encodes (name, TYPE_ANY, CLASS_ANY, TTL 0, empty RDATA).
+      # [RFC 2136 2.5.2, 3.4]
+      def delete_name(name)
+        name = in_zone_name(name)
+        @updates << [name, 0, Resource::Empty.create(TypeANY, ClassANY).new]
+        self
+      end
+
+      # The prerequisites recorded so far, as [name, ttl, resource] triples.
+      def prerequisites
+        @prerequisites.dup
+      end
+
+      # The update RRs recorded so far, as [name, ttl, resource] triples.
+      def updates
+        @updates.dup
+      end
+
+      # Builds the Resolv::DNS::Message: the zone is the sole question with
+      # opcode UPDATE, prerequisites occupy the answer section and the
+      # updates occupy the authority section. The additional section is
+      # empty. [RFC 2136 2.3-2.5]
+      def to_message
+        msg = Message.new
+        msg.qr = 0
+        msg.opcode = OpCode::Update
+        # RFC 2136 4.1.1: the zone section is the question section.
+        msg.question << [@zone_name, @zone_typeclass]
+        @prerequisites.each {|name, ttl, data| msg.answer << [name, ttl, data]}
+        @updates.each {|name, ttl, data| msg.authority << [name, ttl, data]}
+        msg
+      end
+
+      # Returns the wire representation of #to_message.
+      def encode
+        to_message.encode
+      end
+
+      private
+
+      def absolute_name(name)
+        name = Name.create(name)
+        unless name.absolute?
+          name = Name.new(name.to_a, true)
+        end
+        name
+      end
+
+      # Returns an absolute copy of +name+ after checking that it is the
+      # zone origin or in the zone. The comparison is by label suffix and
+      # is case insensitive. [RFC 2136 2.3]
+      def in_zone_name(name)
+        name = absolute_name(name)
+        labels = name.to_a
+        zone_labels = @zone_name.to_a
+        if labels.length < zone_labels.length ||
+           labels[-zone_labels.length, zone_labels.length] != zone_labels
+          raise ArgumentError,
+            "name #{name} is outside zone #{@zone_name}"
+        end
+        name
+      end
+
+      def zone_class_value(klass)
+        value = class_value_of(klass)
+        unless value.is_a?(Integer) && (1..253).include?(value)
+          raise ArgumentError,
+            "invalid zone class #{klass.inspect}: must be a data class (1..253), not NONE/ANY"
+        end
+        value
+      end
+
+      def class_value_of(klass)
+        case klass
+        when Integer then return klass
+        when Module, Class
+          begin
+            return klass::ClassValue
+          rescue NameError
+            # fall through
+          end
+        end
+        raise ArgumentError, "cannot interpret as DNS class: #{klass.inspect}"
+      end
+
+      # Accepts a Resource class/module (e.g. Resource::IN::A) or an
+      # integer TYPE value and returns an object exposing TypeValue.
+      def rrset_typeclass(typeclass, allow_any:)
+        if Integer === typeclass
+          tv = typeclass
+          unless (1..255).include?(tv) && (allow_any || tv != TypeANY)
+            raise ArgumentError, "invalid RRset type: #{typeclass}"
+          end
+          return synthesized_typeclass(tv, @zone_class)
+        end
+        begin
+          typeclass::TypeValue
+          typeclass::ClassValue
+        rescue NoMethodError, NameError
+          raise ArgumentError, "cannot interpret as RR type/class: #{typeclass.inspect}"
+        end
+        if typeclass < Query && !(typeclass < Resource)
+          raise ArgumentError, "query type cannot be used here: #{typeclass.inspect}"
+        end
+        if !allow_any && typeclass::TypeValue == TypeANY
+          raise ArgumentError, "TYPE_ANY is only valid when deleting a whole name"
+        end
+        typeclass
+      end
+
+      # Builds a question-like type/class pair for a TYPE whose class differs
+      # from the registered concrete class (e.g. SOA in a non-IN zone).
+      def synthesized_typeclass(type_value, class_value)
+        c = Class.new(Query)
+        c.const_set(:TypeValue, type_value)
+        c.const_set(:ClassValue, class_value)
+        c
+      end
+
+      def flatten_records(records)
+        records.flatten.map do |record|
+          unless Resource === record
+            raise ArgumentError,
+              "expected a Resolv::DNS::Resource instance, got #{record.inspect}"
+          end
+          if record.class::ClassValue == ClassNONE || record.class::ClassValue == ClassANY
+            raise ArgumentError, "meta class NONE/ANY records are not allowed here"
+          end
+          record
+        end
+      end
+
+      def assert_record_for_zone!(record)
+        cv = record.class::ClassValue
+        unless cv == @zone_class
+          raise ArgumentError,
+            "record class #{cv} does not match zone class #{@zone_class}"
+        end
+        if record.class <= Resource::Empty
+          raise ArgumentError, "empty RDATA records are not allowed here"
+        end
+      end
+
+      def assert_ttl!(ttl, allow_zero: true)
+        value = Integer.try_convert(ttl) ||
+                raise(ArgumentError, "TTL must be an Integer: #{ttl.inspect}")
+        max = 0xffffffff
+        if value < 0 || value > max || (!allow_zero && value == 0)
+          raise ArgumentError, "TTL out of range: #{value}"
+        end
+        value
+      end
+    end
+
+    class Update
+      # Result of DNS#send_update.
+      #
+      # +status+ is one of:
+      # :ok::       the server returned NOERROR.
+      # :rejected:: the server returned a non-zero RCODE. #prerequisite? is
+      #             true only for YXDomain (6), YXRRSet (7) and NXRRSet (8),
+      #             which mean a prerequisite was not satisfied.
+      # :failed::   no valid response was received (timeout, refused
+      #             connection, network error or undecodable reply).
+      #
+      # +uncertain+ is true when the request may already have been applied
+      # by the server. Such an update is never replayed automatically.
+      class Result
+        def initialize(status, rcode, response = nil, uncertain = false, error = nil)
+          @status = status
+          @rcode = rcode
+          @response = response
+          @uncertain = uncertain
+          @error = error
+        end
+
+        attr_reader :status, :rcode, :response, :error
+
+        def ok?
+          @status == :ok
+        end
+
+        # True when a prerequisite (2.4) was rejected by the server.
+        def prerequisite?
+          [RCode::YXDomain, RCode::YXRRSet, RCode::NXRRSet].include?(@rcode)
+        end
+
+        # True when the server answered with any non-zero RCODE.
+        def rejected?
+          @status == :rejected
+        end
+
+        # True when no valid response was received.
+        def failed?
+          @status == :failed
+        end
+
+        # True when the update may have been applied despite the failure.
+        def uncertain?
+          @uncertain
+        end
+
+        def inspect
+          "#<#{self.class} #{@status} rcode=#{@rcode.inspect} uncertain=#{@uncertain}#{@error ? " error=#{@error.inspect}" : ''}>"
+        end
+
+        def to_s
+          inspect
+        end
+
+        # :nodoc:
+        def self.for_reply(reply)
+          case reply.rcode
+          when RCode::NoError
+            new(:ok, reply.rcode, reply)
+          else
+            new(:rejected, reply.rcode, reply)
+          end
+        end
+      end
+
+      # Minimal transport used by DNS#send_update. Unlike the query
+      # requester it performs no retries and no server failover, and it
+      # records whether the wire message finished being sent so post-send
+      # failures can be reported as uncertain.
+      class Transport
+        Outcome = Struct.new(:reply, :uncertain, :error)
+
+        def initialize(host, port, timeout, tcp, socket_factory: nil)
+          @host = host
+          @port = port
+          @timeout = timeout
+          @tcp = tcp
+          @socket_factory = socket_factory
+        end
+
+        # Sends the encoded UPDATE +wire+ (whose id is +id+) exactly once
+        # and waits for a matching response. Returns Outcome with +reply+
+        # (a Message) on success, otherwise +uncertain+ and +error+ set.
+        def exchange(wire, id)
+          @tcp ? exchange_tcp(wire, id) : exchange_udp(wire, id)
+        end
+
+        private
+
+        def exchange_udp(wire, id)
+          deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @timeout
+          sock = make_udp_socket
+          sock.do_not_reverse_lookup = true
+          sent = false
+          begin
+            sock.connect(@host, @port)
+            sock.send(wire, 0)
+            sent = true
+            loop do
+              remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+              return failure_outcome(sent, "update timed out") if remaining <= 0
+              if sock.wait_readable(remaining).nil?
+                return failure_outcome(sent, "update timed out")
+              end
+              begin
+                reply, = sock.recvfrom(DNS::UDPSize)
+              rescue SystemCallError => e
+                # An ICMP port/host-unreachable on a connected UDP socket
+                # proves the server never accepted the packet.
+                return failure_outcome(false, "#{e.class}: #{e.message}")
+              end
+              message = decode_reply(reply)
+              next unless message
+              next unless message.id == id
+              next unless message.qr == 1
+              return Outcome.new(message, false, nil)
+            end
+          rescue SystemCallError => e
+            # Failure before send completed (connect/send): nothing left the
+            # client, so the state is known (the update did not happen).
+            failure_outcome(sent, "#{e.class}: #{e.message}")
+          rescue ResolvTimeout
+            failure_outcome(sent, 'update timed out')
+          ensure
+            sock.close
+          end
+        end
+
+        def exchange_tcp(wire, id)
+          deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @timeout
+          sent = false
+          begin
+            sock = make_tcp_socket
+            framed = [wire.bytesize].pack('n') << wire
+            write_deadline(sock, framed, deadline)
+            sent = true
+            prefix = read_deadline(sock, 2, deadline) or
+              return failure_outcome(true, 'connection closed reading length')
+            length = prefix.unpack1('n')
+            data = read_deadline(sock, length, deadline) or
+              return failure_outcome(true, 'connection closed reading message')
+            message = decode_reply(data) or
+              return failure_outcome(true, 'malformed DNS response')
+            return failure_outcome(true, 'not a DNS response') unless message.qr == 1
+            return Outcome.new(message, false, nil)
+          rescue ResolvTimeout
+            failure_outcome(sent, 'update timed out')
+          rescue SystemCallError, IOError => e
+            failure_outcome(sent, "#{e.class}: #{e.message}")
+          ensure
+            sock&.close
+          end
+        end
+
+        def write_deadline(sock, data, deadline)
+          offset = 0
+          while offset < data.bytesize
+            remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            raise ResolvTimeout if remaining <= 0
+            written = sock.write_nonblock(data.byteslice(offset..), exception: false)
+            case written
+            when :wait_writable
+              sock.wait_writable(remaining) or raise ResolvTimeout
+            when nil
+              raise SystemCallError, 'connection closed while writing'
+            else
+              offset += written
+            end
+          end
+        end
+
+        def read_deadline(sock, length, deadline)
+          buf = String.new.force_encoding(Encoding::BINARY)
+          while buf.bytesize < length
+            remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            return nil if remaining <= 0
+            chunk = String.new
+            read = sock.read_nonblock(length - buf.bytesize, chunk, exception: false)
+            case read
+            when :wait_readable
+              sock.wait_readable(remaining) or return nil
+            when nil
+              return nil
+            else
+              buf << chunk
+            end
+          end
+          buf
+        end
+
+        def decode_reply(data)
+          begin
+            Message.decode(data)
+          rescue DecodeError
+            nil
+          end
+        end
+
+        def failure_outcome(uncertain, error)
+          Outcome.new(nil, uncertain, error)
+        end
+
+        def ipv6?(host)
+          host.to_s.index(':') ? true : false
+        end
+
+        def make_udp_socket
+          if @socket_factory
+            return @socket_factory.udp(ipv6?(@host) ? Socket::AF_INET6 : Socket::AF_INET)
+          end
+          UDPSocket.new(ipv6?(@host) ? Socket::AF_INET6 : Socket::AF_INET)
+        end
+
+        def make_tcp_socket
+          return @socket_factory.tcp(@host, @port) if @socket_factory
+          TCPSocket.new(@host, @port)
         end
       end
     end
