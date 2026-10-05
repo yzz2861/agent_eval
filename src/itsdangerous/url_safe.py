@@ -12,6 +12,61 @@ from .serializer import Serializer
 from .timed import TimedSerializer
 
 
+def _url_safe_encode(json: bytes) -> bytes:
+    """Compress and base64 encode serialized JSON bytes so they are
+    safe to place in a URL. Shared by the sync and async URL-safe
+    serializers.
+
+    .. versionadded:: 2.3
+    """
+    is_compressed = False
+    compressed = zlib.compress(json)
+
+    if len(compressed) < (len(json) - 1):
+        json = compressed
+        is_compressed = True
+
+    base64d = base64_encode(json)
+
+    if is_compressed:
+        base64d = b"." + base64d
+
+    return base64d
+
+
+def _url_safe_decode(payload: bytes) -> bytes:
+    """Reverse :func:`_url_safe_encode`, returning the serialized
+    JSON bytes. Raises :class:`.BadPayload` if the data is malformed.
+    Shared by the sync and async URL-safe serializers.
+
+    .. versionadded:: 2.3
+    """
+    decompress = False
+
+    if payload.startswith(b"."):
+        payload = payload[1:]
+        decompress = True
+
+    try:
+        json = base64_decode(payload)
+    except Exception as e:
+        raise BadPayload(
+            "Could not base64 decode the payload because of an exception",
+            original_error=e,
+        ) from e
+
+    if decompress:
+        try:
+            json = zlib.decompress(json)
+        except Exception as e:
+            raise BadPayload(
+                "Could not zlib decompress the payload before decoding the payload",
+                original_error=e,
+            ) from e
+
+    return json
+
+
 class URLSafeSerializerMixin(Serializer[str]):
     """Mixed in with a regular serializer it will attempt to zlib
     compress the string to make it shorter if necessary. It will also
@@ -27,46 +82,10 @@ class URLSafeSerializerMixin(Serializer[str]):
         serializer: t.Any | None = None,
         **kwargs: t.Any,
     ) -> t.Any:
-        decompress = False
-
-        if payload.startswith(b"."):
-            payload = payload[1:]
-            decompress = True
-
-        try:
-            json = base64_decode(payload)
-        except Exception as e:
-            raise BadPayload(
-                "Could not base64 decode the payload because of an exception",
-                original_error=e,
-            ) from e
-
-        if decompress:
-            try:
-                json = zlib.decompress(json)
-            except Exception as e:
-                raise BadPayload(
-                    "Could not zlib decompress the payload before decoding the payload",
-                    original_error=e,
-                ) from e
-
-        return super().load_payload(json, *args, **kwargs)
+        return super().load_payload(_url_safe_decode(payload), *args, **kwargs)
 
     def dump_payload(self, obj: t.Any) -> bytes:
-        json = super().dump_payload(obj)
-        is_compressed = False
-        compressed = zlib.compress(json)
-
-        if len(compressed) < (len(json) - 1):
-            json = compressed
-            is_compressed = True
-
-        base64d = base64_encode(json)
-
-        if is_compressed:
-            base64d = b"." + base64d
-
-        return base64d
+        return _url_safe_encode(super().dump_payload(obj))
 
 
 class URLSafeSerializer(URLSafeSerializerMixin, Serializer[str]):

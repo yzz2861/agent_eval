@@ -19,6 +19,31 @@ class BadData(Exception):
         return self.message
 
 
+class SignerUnavailable(Exception):
+    """Raised when an async signing service cannot complete a signing
+    or verification request, for example because the remote service is
+    unreachable or returned an error.
+
+    This is deliberately *not* a subclass of :class:`BadData`: an
+    unavailable service is not the same as an invalid signature. It
+    must not be caught and turned into a fallback that loads
+    unverified data.
+
+    .. versionadded:: 2.3
+    """
+
+    def __init__(self, message: str, original_error: Exception | None = None):
+        super().__init__(message)
+        self.message = message
+
+        #: If available, the underlying error from the signing service
+        #: client. This might be ``None``.
+        self.original_error: Exception | None = original_error
+
+    def __str__(self) -> str:
+        return self.message
+
+
 class BadSignature(BadData):
     """Raised if a signature does not match."""
 

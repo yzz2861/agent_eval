@@ -20,3 +20,6 @@ Exceptions
 
 .. autoexception:: BadPayload
     :members:
+
+.. autoexception:: SignerUnavailable
+    :members:

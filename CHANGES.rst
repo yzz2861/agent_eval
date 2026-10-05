@@ -5,6 +5,11 @@ Unreleased
 
 -   Drop support for Python 3.8 and 3.9.
 -   Remove previously deprecated code.
+-   Add ``itsdangerous.asynchronous`` with an awaitable ``AsyncSigner``
+    protocol and async serializers (plain, timed, and URL-safe) for
+    signing through remote services that hold the secret key. Add
+    ``SignerUnavailable`` to distinguish service failures from invalid
+    signatures.
 
 
 Version 2.2.0
