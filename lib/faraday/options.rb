@@ -69,7 +69,11 @@ module Faraday
 
     # Public
     def deep_dup
-      self.class.from(self)
+      dup.tap do |copy|
+        each do |key, value|
+          copy[key] = Utils.deep_dup(value)
+        end
+      end
     end
 
     # Public

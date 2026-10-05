@@ -695,6 +695,195 @@ RSpec.describe Faraday::Connection do
     end
   end
 
+  describe '#derive' do
+    it 'copies mutable configuration and supports interlaced tenant requests' do
+      stubs = Faraday::Adapter::Test::Stubs.new do |stub|
+        stub.get('/') do |env|
+          [
+            200,
+            {},
+            {
+              host: env.url.host,
+              tenant_header: env.request_headers['X-Tenant'],
+              tenant_param: env[:params]['tenant'],
+              status: env[:params]['filters_status'],
+              tags: env[:params]['filters_tags'],
+              timeout: env.request.timeout,
+              open_timeout: env.request.open_timeout,
+              oauth: env.request.oauth,
+              ca_file: env.ssl.ca_file,
+              verify_ssl: env.ssl.verify?,
+              service: env.request.context[:service].object_id,
+              io: env.request.context[:io].object_id,
+              lock: env.request.context[:lock].object_id,
+              values: env.request.context[:values]
+            }.to_json
+          ]
+        end
+      end
+
+      service = Object.new
+      io = StringIO.new
+      lock = Mutex.new
+      encoder = Faraday::FlatParamsEncoder
+      parent_options = {
+        headers: { 'X-Tenant' => 'parent' },
+        params: {
+          'tenant' => 'parent',
+          'filters_status' => 'parent',
+          'filters_tags' => %w[parent]
+        },
+        request: {
+          timeout: 10,
+          params_encoder: encoder,
+          oauth: { 'token' => 'parent-token' },
+          context: {
+            service: service,
+            io: io,
+            lock: lock,
+            values: [1]
+          }
+        },
+        ssl: { ca_file: 'parent.pem' }
+      }
+
+      parent = Faraday::Connection.new('http://parent.example.com/base', parent_options) do |connection|
+        connection.adapter(:test, stubs)
+      end
+
+      parent.get('/')
+      expect(parent.builder).to be_locked
+      expect { parent.response(:raise_error) }.to raise_error(Faraday::RackBuilder::StackLocked)
+
+      one = parent.derive(
+        'http://one.example.com/tenant',
+        headers: { 'X-Tenant' => 'one' },
+        params: { 'tenant' => 'one' },
+        request: {
+          open_timeout: 3,
+          oauth: { 'token' => 'one-token', 'mode' => 'header' }
+        },
+        ssl: { ca_file: 'one.pem', verify: false }
+      ) do |connection|
+        connection.response(:raise_error)
+      end
+      two = parent.derive(
+        url: 'http://two.example.com/tenant',
+        headers: { 'X-Tenant' => 'two' },
+        params: { 'tenant' => 'two' },
+        request: { open_timeout: 5, oauth: { 'token' => 'two-token' } },
+        ssl: { ca_file: 'two.pem' }
+      )
+
+      expect(one.builder).not_to be_locked
+      expect(two.builder).not_to be_locked
+      expect(one.builder.handlers.map(&:klass)).to include(Faraday::Response::RaiseError)
+      expect(two.builder.handlers.map(&:klass)).not_to include(Faraday::Response::RaiseError)
+
+      one.params['filters_status'] = 'one'
+      one.params['filters_tags'] << 'one'
+      one.options.context[:values] << 11
+      one.options.oauth['token'] = 'one-token'
+      one.url_prefix.host = 'changed.example'
+
+      one_response = JSON.parse(one.get('/').body, symbolize_names: true)
+      expect(one_response).to include(
+        host: 'changed.example',
+        tenant_header: 'one',
+        tenant_param: 'one',
+        status: 'one',
+        tags: %w[parent one],
+        timeout: 10,
+        open_timeout: 3,
+        ca_file: 'one.pem',
+        verify_ssl: false,
+        service: service.object_id,
+        io: io.object_id,
+        lock: lock.object_id,
+        values: [1, 11]
+      )
+      expect(one.options.params_encoder).to equal(encoder)
+      expect(one.builder).to be_locked
+      expect(parent.url_prefix.host).to eq('parent.example.com')
+
+      two.params['filters_status'] = 'two'
+      two.params['filters_tags'] << 'two'
+      two.options.context[:values] << 22
+      two_response = JSON.parse(two.get('/').body, symbolize_names: true)
+      expect(two_response).to include(
+        host: 'two.example.com',
+        tenant_header: 'two',
+        tenant_param: 'two',
+        status: 'two',
+        tags: %w[parent two],
+        timeout: 10,
+        open_timeout: 5,
+        ca_file: 'two.pem',
+        verify_ssl: true,
+        values: [1, 22]
+      )
+
+      one_again = JSON.parse(one.get('/').body, symbolize_names: true)
+      expect(one_again).to include(status: 'one', tags: %w[parent one], values: [1, 11])
+
+      parent_response = JSON.parse(parent.get('/').body, symbolize_names: true)
+      expect(parent_response).to include(
+        host: 'parent.example.com',
+        tenant_header: 'parent',
+        tenant_param: 'parent',
+        status: 'parent',
+        tags: 'parent',
+        timeout: 10,
+        open_timeout: nil,
+        ca_file: 'parent.pem',
+        verify_ssl: true,
+        values: [1]
+      )
+      expect(parent.options.oauth['token']).to eq('parent-token')
+      expect(one.options.oauth).to eq('token' => 'one-token', 'mode' => 'header')
+      expect(two.options.oauth).to eq('token' => 'two-token')
+    end
+
+    it 'deeply duplicates manual proxy options' do
+      parent = Faraday::Connection.new(proxy: 'http://proxy.example.com')
+      child = parent.derive
+
+      expect(child.proxy).to eq(parent.proxy)
+      expect(child.proxy).not_to equal(parent.proxy)
+      expect(child.proxy.uri).not_to equal(parent.proxy.uri)
+
+      child.proxy.host = 'changed.example'
+
+      expect(parent.proxy.host).to eq('proxy.example.com')
+    end
+
+    it 'copies an override URI but keeps an explicit builder shared' do
+      url = URI('http://override.example.com/tenant')
+      stubs = Faraday::Adapter::Test::Stubs.new
+      builder = Faraday::RackBuilder.new
+      parent = Faraday::Connection.new('http://parent.example.com')
+      child = parent.derive(url: url, builder: builder)
+
+      expect(child.url_prefix).not_to equal(url)
+      expect(child.builder).to equal(builder)
+
+      child.host = 'changed.example'
+      expect(url.host).to eq('override.example.com')
+
+      child.adapter(:test, stubs)
+      stubs.get('/') { [200, {}, 'ok'] }
+      expect(child.get('/').body).to eq('ok')
+    end
+
+    it 'allows an explicit nil proxy to clear an inherited manual proxy' do
+      parent = Faraday::Connection.new(proxy: 'http://proxy.example.com')
+      child = parent.derive(proxy: nil)
+
+      expect(child.proxy).to be_nil
+      expect(child.instance_variable_get(:@manual_proxy)).to be(true)
+    end
+  end
+
   describe '#respond_to?' do
     it { expect(Faraday.respond_to?(:get)).to be_truthy }
     it { expect(Faraday.respond_to?(:post)).to be_truthy }

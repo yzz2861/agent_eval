@@ -9,6 +9,37 @@ module Faraday
   module Utils
     module_function
 
+    # Deeply duplicates mutable request and connection configuration. Plain
+    # data structures are copied, while resources such as I/O objects, locks,
+    # adapters, encoders, and other service objects are shared.
+    def deep_dup(value)
+      case value
+      when nil
+        nil
+      when Options
+        value.deep_dup
+      when defined?(RackBuilder) && RackBuilder
+        value.dup
+      when URI::Generic
+        value.dup.tap do |copy|
+          value.instance_variables.each do |ivar|
+            item = value.instance_variable_get(ivar)
+            copy.instance_variable_set(ivar, deep_dup(item))
+          end
+        end
+      when Hash
+        value.each_with_object(value.class.new) do |(key, item), copy|
+          copy[deep_dup(key)] = deep_dup(item)
+        end
+      when Array
+        value.map { |item| deep_dup(item) }
+      when String
+        value.dup
+      else
+        value
+      end
+    end
+
     def build_query(params)
       FlatParamsEncoder.encode(params)
     end

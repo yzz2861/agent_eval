@@ -43,6 +43,35 @@ conn = Faraday.new(options) do |faraday|
 end
 ```
 
+## Deriving connections
+
+Use `#derive` to create a tenant-specific connection from one that has already
+been configured and used. Derived connections start with copies of the parent's
+URL, headers, params, request options, SSL options, and middleware stack.
+Nested mutable data structures are also copied, so later changes to one
+connection do not leak into another. Service objects such as I/O objects,
+locks, params encoders, adapters, and parallel managers are shared by
+reference.
+
+```ruby
+parent = Faraday.new('https://api.example.com', headers: { 'X-Tenant' => 'parent' })
+parent.get('/health')
+
+child = parent.derive(
+  'https://tenant-a.example.com',
+  headers: { 'X-Tenant' => 'tenant-a' },
+  params: { tenant: 'a' },
+  request: { timeout: 5 },
+  ssl: { ca_file: 'tenant-a.pem' }
+) do |connection|
+  connection.response :raise_error
+end
+```
+
+The parent's middleware stack remains locked after it has performed a request.
+The derived stack starts unlocked, so the block above can finish the child's
+own construction without modifying the parent.
+
 [RequestOptions]: /customization/request-options.md
 [ProxyOptions]: /customization/proxy-options.md
 [SSLOptions]: /customization/ssl-options.md

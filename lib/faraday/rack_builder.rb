@@ -35,9 +35,16 @@ module Faraday
       def initialize(klass, *args, **kwargs, &block)
         @name = klass.to_s
         REGISTRY.set(klass) if klass.respond_to?(:name)
-        @args = args
-        @kwargs = kwargs
+        @args = Utils.deep_dup(args)
+        @kwargs = Utils.deep_dup(kwargs)
         @block = block
+      end
+
+      def initialize_dup(original)
+        super
+        @args = Utils.deep_dup(original.args)
+        @kwargs = Utils.deep_dup(original.kwargs)
+        @block = original.block
       end
 
       def klass
@@ -61,6 +68,10 @@ module Faraday
       def build(app = nil)
         klass.new(app, *@args, **@kwargs, &@block)
       end
+
+      protected
+
+      attr_reader :args, :kwargs, :block
     end
 
     def initialize(&block)
@@ -71,8 +82,9 @@ module Faraday
 
     def initialize_dup(original)
       super
-      @adapter = original.adapter
-      @handlers = original.handlers.dup
+      @adapter = original.adapter&.dup
+      @handlers = original.handlers.map(&:dup)
+      @app = nil
     end
 
     def build

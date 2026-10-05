@@ -119,6 +119,61 @@ module Faraday
 
     def_delegators :builder, :use, :request, :response, :adapter, :app
 
+    # Creates an independent connection based on this one. Mutable URL, header,
+    # parameter, SSL, request, and middleware configuration is deeply copied.
+    # Explicit service objects such as parallel managers, params encoders,
+    # adapters, I/O objects, and locks are shared by reference.
+    #
+    # @param url [URI, String, Hash, Faraday::ConnectionOptions, nil] URL or
+    #        connection options to override.
+    # @param options [Hash, Faraday::ConnectionOptions, nil] Options to
+    #        override on the derived connection.
+    # @yield [self] Configures the derived connection's unlocked middleware
+    #        stack after all inherited options have been copied.
+    # @return [Faraday::Connection]
+    def derive(url = nil, overrides = nil)
+      if url.is_a?(Hash) || url.is_a?(ConnectionOptions)
+        overrides = url
+        url = overrides[:url]
+      else
+        overrides ||= {}
+      end
+      explicit_builder = overrides[:builder]
+      has_parallel_manager = overrides.respond_to?(:key?) && overrides.key?(:parallel_manager)
+      explicit_parallel_manager = overrides[:parallel_manager]
+      has_proxy = overrides.respond_to?(:key?) && overrides.key?(:proxy)
+      overrides = ConnectionOptions.from(Utils.deep_dup(overrides))
+      overrides.builder = explicit_builder if explicit_builder
+      if has_parallel_manager
+        overrides.parallel_manager = explicit_parallel_manager
+      end
+
+      options = ConnectionOptions.new
+      options.url = Utils.deep_dup(url_prefix)
+      options.headers = Utils.deep_dup(headers)
+      options.params = Utils.deep_dup(params)
+      options.request = Utils.deep_dup(options())
+      options.ssl = Utils.deep_dup(ssl)
+      options.builder = builder.dup
+      options.parallel_manager = @default_parallel_manager if @default_parallel_manager
+      options.proxy = Utils.deep_dup(proxy) if @manual_proxy && proxy
+
+      options.url = Utils.deep_dup(Utils.URI(url)) if url
+      options.headers.update(overrides.headers) if overrides.headers
+      options.params.update(overrides.params) if overrides.params
+      options.request = options.request.merge(overrides.request) unless overrides.request.empty?
+      options.ssl = options.ssl.merge(overrides.ssl) unless overrides.ssl.empty?
+      options.proxy = overrides.proxy if has_proxy
+      options.builder = overrides.builder if overrides.builder
+      options.parallel_manager = overrides.parallel_manager if overrides.parallel_manager
+      options.builder_class = overrides.builder_class if overrides.builder_class
+
+      self.class.new(options) do |connection|
+        connection.proxy = nil if has_proxy && overrides.proxy.nil?
+        yield(connection) if block_given?
+      end
+    end
+
     # Closes the underlying resources and/or connections. In the case of
     # persistent connections, this closes all currently open connections
     # but does not prevent new connections from being made.
@@ -494,18 +549,8 @@ module Faraday
       uri
     end
 
-    # Creates a duplicate of this Faraday::Connection.
-    #
-    # @api private
-    #
-    # @return [Faraday::Connection]
     def dup
-      self.class.new(build_exclusive_url,
-                     headers: headers.dup,
-                     params: params.dup,
-                     builder: builder.dup,
-                     ssl: ssl.dup,
-                     request: options.dup)
+      derive
     end
 
     # Yields username and password extracted from a URI if they both exist.

@@ -76,6 +76,33 @@ RSpec.describe Faraday::RackBuilder do
       expect(dup.locked?).to be_falsey
     end
 
+    it 'deeply duplicates mutable handler arguments' do
+      config = { header: 'X-Test', nested: { value: 'original' } }
+      subject.insert(0, Apple, config)
+
+      dup = subject.dup
+      original_config = subject.handlers.first.instance_variable_get(:@args).first
+      copied_config = dup.handlers.first.instance_variable_get(:@args).first
+
+      copied_config[:nested][:value] = 'changed'
+
+      expect(original_config[:header]).to eq('X-Test')
+      expect(original_config[:nested][:value]).to eq('original')
+    end
+
+    it 'deeply duplicates mutable handler keyword arguments' do
+      config = { nested: { value: 'original' } }
+      subject.insert(0, Apple, config: config)
+
+      dup = subject.dup
+      original_config = subject.handlers.first.instance_variable_get(:@kwargs)[:config]
+      copied_config = dup.handlers.first.instance_variable_get(:@kwargs)[:config]
+
+      copied_config[:nested][:value] = 'changed'
+
+      expect(original_config[:nested][:value]).to eq('original')
+    end
+
     it 'allows to compare handlers' do
       expect(subject.handlers.first).to eq(Faraday::RackBuilder::Handler.new(Apple))
     end
