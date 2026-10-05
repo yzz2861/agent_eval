@@ -942,6 +942,59 @@ RSpec.describe Money do
     end
   end
 
+  describe "#allocate_constrained" do
+    it "keeps currencies intact" do
+      moneys = Money.ca_dollar(100).allocate_constrained([{ weight: 1 }, { weight: 1 }])
+      expect(moneys).to eq [Money.ca_dollar(50), Money.ca_dollar(50)]
+    end
+
+    it "keeps subclasses intact" do
+      special_money_class = Class.new(Money)
+      moneys = special_money_class.new(100).allocate_constrained([{ weight: 1 }, { weight: 1 }])
+      expect(moneys.first).to be_a special_money_class
+    end
+
+    it "respects maximum bounds without losing pennies" do
+      constraints = [{ weight: 1, max: 20 }, { weight: 1 }, { weight: 1 }]
+      moneys = Money.us_dollar(100).allocate_constrained(constraints)
+
+      expect(moneys.map(&:fractional)).to eq [20, 40, 40]
+      expect(moneys.sum).to eq Money.us_dollar(100)
+    end
+
+    it "gives zero-weight parts exactly their minimum" do
+      constraints = [{ weight: 0, min: 5 }, { weight: 1 }, { weight: 1 }]
+      moneys = Money.us_dollar(100).allocate_constrained(constraints)
+
+      expect(moneys.map(&:fractional)).to eq [5, 48, 47]
+    end
+
+    it "allocates negative amounts within bounds" do
+      constraints = [
+        { weight: 1, min: -40, max: 0 },
+        { weight: 1, min: -40, max: 0 },
+        { weight: 1, min: -40, max: 0 },
+      ]
+      moneys = Money.us_dollar(-100).allocate_constrained(constraints)
+
+      expect(moneys.map(&:fractional)).to eq [-33, -33, -34]
+    end
+
+    it "raises an error when the bounds cannot accommodate the amount" do
+      expect { Money.us_dollar(100).allocate_constrained([{ max: 10 }, { max: 10 }]) }
+        .to raise_error(ArgumentError)
+    end
+
+    context "with infinite_precision", :default_infinite_precision_true do
+      it "allocates whole cents" do
+        moneys = Money.new(100).allocate_constrained([{ weight: 1 }, { weight: 1 }, { weight: 1 }])
+
+        expect(moneys.map(&:fractional)).to eq [34, 33, 33]
+        expect(moneys.sum).to eq(Money.new(100))
+      end
+    end
+  end
+
   describe "#split" do
     it "needs at least one party" do
       expect { Money.us_dollar(1).split(0) }.to raise_error(ArgumentError)

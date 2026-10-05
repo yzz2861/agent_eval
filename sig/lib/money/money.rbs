@@ -475,6 +475,21 @@ class Money
 
   alias split allocate
 
+  # Splits a given amount in parts that each carry a weight and optional
+  # minimum and maximum bounds, without losing pennies. Every part stays
+  # within its bounds, the parts sum exactly to the original amount, and the
+  # distribution stays as close as possible to the weighted proportions.
+  #
+  # @param [Array<Hash>] constraints per-part :weight, :min and :max
+  #
+  # @return [Array<Money>]
+  #
+  # @example
+  #   Money.new(100, "USD").allocate_constrained([{ weight: 1, max: 20 }, { weight: 1 }, { weight: 1 }])
+  #   #=> [Money.new(20), Money.new(40), Money.new(40)]
+  #
+  def allocate_constrained: (Array[Hash[Symbol, Numeric?]] constraints) -> Array[Money]
+
   # Round the monetary amount to smallest unit of coinage.
   #
   # @note

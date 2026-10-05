@@ -581,6 +581,39 @@ class Money
 
   alias split allocate
 
+  # Splits a given amount in parts that each carry a weight and optional
+  # minimum and maximum bounds, without losing pennies. Every part stays
+  # within its bounds, the parts sum exactly to the original amount, and the
+  # distribution stays as close as possible to the weighted proportions.
+  #
+  # Each constraint is a Hash accepting the keys:
+  #   :weight [Numeric] — the proportion of the distributable amount this
+  #     part receives. Defaults to 1. A part with zero weight always receives
+  #     exactly its minimum.
+  #   :min [Numeric] — the smallest amount, in the smallest currency unit,
+  #     the part may receive. Defaults to 0.
+  #   :max [Numeric, nil] — the largest amount, in the smallest currency
+  #     unit, the part may receive. Defaults to nil, meaning unbounded.
+  #
+  # Parts that reach their maximum are fixed and the remainder is
+  # redistributed among the parts still below their maximum. Leftover
+  # pennies are assigned one by one to the parts with the largest fractional
+  # remainder; ties are resolved in favor of the part listed first.
+  #
+  # @param [Array<Hash>] constraints per-part :weight, :min and :max
+  #
+  # @return [Array<Money>]
+  #
+  # @example
+  #   Money.new(100, "USD").allocate_constrained([{ weight: 1, max: 20 }, { weight: 1 }, { weight: 1 }])
+  #   #=> [Money.new(20), Money.new(40), Money.new(40)]
+  #
+  # @see Money::Allocation.generate_constrained
+  def allocate_constrained(constraints)
+    amounts = Money::Allocation.generate_constrained(fractional, constraints)
+    amounts.map { |amount| dup_with(fractional: amount) }
+  end
+
   # Round the monetary amount to smallest unit of coinage.
   #
   # @note

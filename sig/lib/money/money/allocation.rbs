@@ -20,5 +20,16 @@ class Money
     # @return [Array[Numeric]] An array containing the allocated amounts.
     # @raise [ArgumentError] If parts is empty or not provided.
     def self.generate: (Numeric amount, (Numeric | Array[Numeric]) parts, ?(bool | Integer) decimal_cutoff) -> Array[Numeric]
+
+    # Allocates a specified amount into parts that each carry a weight and
+    # optional minimum and maximum bounds, keeping every part within its
+    # bounds while staying as close as possible to the weighted proportions.
+    #
+    # @param amount [Numeric] The total amount to be allocated.
+    # @param constraints [Array<Hash>] Per-part :weight, :min and :max.
+    #
+    # @return [Array[Integer]] An array containing the allocated amounts.
+    # @raise [ArgumentError] If the bounds cannot accommodate the amount.
+    def self.generate_constrained: (Numeric amount, Array[Hash[Symbol, Numeric?]]) -> Array[Integer]
   end
 end
