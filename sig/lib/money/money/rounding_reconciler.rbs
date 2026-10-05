@@ -1,0 +1,43 @@
+class Money
+  # Reconciles independently rounded line amounts with an invoice-level total.
+  #
+  # The reconciler nudges adjustable lines by at most one subunit each so the
+  # rounded lines add up exactly to the target, distributing the residual with
+  # a stable largest-remainder rule. All computation happens in integer
+  # subunits of the currency; the target total is never silently changed.
+  class RoundingReconciler
+    # Raised when the residual between the rounded lines and the target
+    # cannot be absorbed by the adjustable lines (each line absorbs at most
+    # one subunit).
+    class UnreachableTargetError < StandardError
+    end
+
+    # The outcome of a reconciliation.
+    class Result < Struct[untyped]
+      # Final per-line Money amounts, in whole subunits.
+      attr_accessor lines: Array[Money]
+
+      # Per-line Money delta applied on top of the naively rounded line
+      # (zero for untouched lines).
+      attr_accessor adjustments: Array[Money]
+
+      def initialize: (lines: Array[Money], adjustments: Array[Money]) -> void
+
+      # Sum of the reconciled lines. Always equals the target.
+      def total: () -> Money
+    end
+
+    # Reconciles unrounded line amounts with a rounded invoice-level target.
+    #
+    # @param amounts [Array[Numeric]] unrounded line amounts, in currency units.
+    # @param target [Money | Numeric] the invoice-level total.
+    # @param currency [Currency | String | Symbol] the shared currency.
+    # @param adjustable [nil | Array[Integer] | Array[bool]] which lines may be nudged.
+    # @param rounding_mode [Integer] BigDecimal rounding mode used to round to whole subunits.
+    #
+    # @return [Result] final per-line Money amounts and per-line adjustments.
+    # @raise [ArgumentError] if a Money target uses a different currency.
+    # @raise [UnreachableTargetError] if the residual cannot be absorbed by the adjustable lines.
+    def self.reconcile: (Array[Numeric] amounts, target: (Money | Numeric), ?currency: (Currency | String | Symbol), ?adjustable: (Array[Integer] | Array[bool] | nil), ?rounding_mode: Integer) -> Result
+  end
+end

@@ -6,6 +6,7 @@ require "money/money/arithmetic"
 require "money/money/constructors"
 require "money/money/formatter"
 require "money/money/allocation"
+require "money/money/rounding_reconciler"
 require "money/money/locale_backend"
 
 # "Money is any object or record that is generally accepted as payment for
