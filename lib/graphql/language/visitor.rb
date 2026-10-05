@@ -64,9 +64,26 @@ module GraphQL
       def on_document_children(document_node)
         new_node = document_node
         document_node.children.each do |child_node|
-          visit_method = :"#{child_node.visit_method}_with_modifications"
-          new_child_and_node = public_send(visit_method, child_node, new_node)
+          new_child_and_node = visit_child_with_modifications(child_node, new_node)
           # Reassign `node` in case the child hook makes a modification
+          if new_child_and_node.is_a?(Array)
+            new_node = new_child_and_node[1]
+          end
+        end
+        new_node
+      end
+
+      def visit_child_with_modifications(child_node, parent)
+        if child_node.is_a?(Nodes::SyntaxErrorNode) || child_node.is_a?(Nodes::MissingNode)
+          on_syntax_problem_with_modifications(child_node, parent)
+        else
+          public_send(:"#{child_node.visit_method}_with_modifications", child_node, parent)
+        end
+      end
+
+      def visit_recovered_nodes(new_node)
+        new_node.recovered_nodes.each do |problem|
+          new_child_and_node = on_syntax_problem_with_modifications(problem, new_node)
           if new_child_and_node.is_a?(Array)
             new_node = new_child_and_node[1]
           end
@@ -76,7 +93,7 @@ module GraphQL
 
       def on_field_children(new_node)
         new_node.arguments.each do |arg_node| # rubocop:disable Development/ContextIsPassedCop
-          new_child_and_node = on_argument_with_modifications(arg_node, new_node)
+          new_child_and_node = visit_child_with_modifications(arg_node, new_node)
           # Reassign `node` in case the child hook makes a modification
           if new_child_and_node.is_a?(Array)
             new_node = new_child_and_node[1]
@@ -84,12 +101,18 @@ module GraphQL
         end
         new_node = visit_directives(new_node)
         new_node = visit_selections(new_node)
+        new_node = visit_recovered_nodes(new_node)
         new_node
       end
 
       def visit_directives(new_node)
         new_node.directives.each do |dir_node|
-          new_child_and_node = on_directive_with_modifications(dir_node, new_node)
+          new_child_and_node = case dir_node
+          when GraphQL::Language::Nodes::SyntaxErrorNode, GraphQL::Language::Nodes::MissingNode
+            on_syntax_problem_with_modifications(dir_node, new_node)
+          else
+            on_directive_with_modifications(dir_node, new_node)
+          end
           # Reassign `node` in case the child hook makes a modification
           if new_child_and_node.is_a?(Array)
             new_node = new_child_and_node[1]
@@ -107,6 +130,8 @@ module GraphQL
             on_inline_fragment_with_modifications(selection, new_node)
           when GraphQL::Language::Nodes::FragmentSpread
             on_fragment_spread_with_modifications(selection, new_node)
+          when GraphQL::Language::Nodes::SyntaxErrorNode, GraphQL::Language::Nodes::MissingNode
+            on_syntax_problem_with_modifications(selection, new_node)
           else
             raise ArgumentError, "Invariant: unexpected field selection #{selection.class} (#{selection.inspect})"
           end
@@ -121,6 +146,7 @@ module GraphQL
       def on_fragment_definition_children(new_node)
         new_node = visit_directives(new_node)
         new_node = visit_selections(new_node)
+        new_node = visit_recovered_nodes(new_node)
         new_node
       end
 
@@ -128,7 +154,12 @@ module GraphQL
 
       def on_operation_definition_children(new_node)
         new_node.variables.each do |arg_node|
-          new_child_and_node = on_variable_definition_with_modifications(arg_node, new_node)
+          new_child_and_node = case arg_node
+          when GraphQL::Language::Nodes::SyntaxErrorNode, GraphQL::Language::Nodes::MissingNode
+            on_syntax_problem_with_modifications(arg_node, new_node)
+          else
+            on_variable_definition_with_modifications(arg_node, new_node)
+          end
           # Reassign `node` in case the child hook makes a modification
           if new_child_and_node.is_a?(Array)
             new_node = new_child_and_node[1]
@@ -136,6 +167,7 @@ module GraphQL
         end
         new_node = visit_directives(new_node)
         new_node = visit_selections(new_node)
+        new_node = visit_recovered_nodes(new_node)
         new_node
       end
 
@@ -150,6 +182,8 @@ module GraphQL
             on_enum_with_modifications(value_node, new_node)
           when Language::Nodes::NullValue
             on_null_value_with_modifications(value_node, new_node)
+          when Language::Nodes::SyntaxErrorNode, Language::Nodes::MissingNode
+            on_syntax_problem_with_modifications(value_node, new_node)
           else
             raise ArgumentError, "Invariant: unexpected argument value node #{value_node.class} (#{value_node.inspect})"
           end
@@ -249,6 +283,8 @@ module GraphQL
         Language::Nodes::ScalarTypeExtension,
         Language::Nodes::SchemaDefinition,
         Language::Nodes::SchemaExtension,
+        Language::Nodes::SyntaxErrorNode,
+        Language::Nodes::MissingNode,
         Language::Nodes::TypeName,
         Language::Nodes::UnionTypeDefinition,
         Language::Nodes::UnionTypeExtension,
@@ -256,6 +292,15 @@ module GraphQL
         Language::Nodes::VariableIdentifier,
       ].each do |ast_node_class|
         make_visit_methods(ast_node_class)
+      end
+
+      # Both kinds of syntax problem leaf node dispatch to the same hook pair.
+      def on_syntax_problem(node, parent)
+        public_send(node.visit_method, node, parent)
+      end
+
+      def on_syntax_problem_with_modifications(node, parent)
+        public_send((node.visit_method.to_s + "_with_modifications").to_sym, node, parent)
       end
 
       # rubocop:enable Development/NoEvalCop

@@ -23,12 +23,61 @@ module GraphQL
         @finished
       end
 
+      # Like {#advance}, but never raises on a malformed token and always
+      # consumes input, so a fault-tolerant parser can resynchronize after it.
+      # Returns the pair `[token_name, parse_error]`; `parse_error` is nil for
+      # well-formed tokens.
+      def advance_with_recovery
+        token_name = advance
+        [token_name, nil]
+      rescue GraphQL::ParseError => err
+        err_pos = [@pos || @scanner.pos, @scanner.pos].max
+        consumed_len = recover_scanner_after_error(err_pos).bytesize
+        if consumed_len == 0
+          consumed_len = 1
+        end
+        # Re-match the broken span so scanner accessors (matched_size, token_value)
+        # remain valid, then leave the scanner positioned after it.
+        @scanner.pos = err_pos
+        @scanner.scan(Regexp.new(Regexp.escape(@string.byteslice(err_pos, consumed_len)), Regexp::MULTILINE))
+        @pos = err_pos
+        @tokens_count += 1
+        [:UNKNOWN_CHAR, err]
+      end
+
       def freeze
         @scanner = nil
         super
       end
 
       attr_reader :pos, :tokens_count
+
+      # @return [Integer] The scanner's current byte position
+      def scanner_pos
+        @scanner.pos
+      end
+
+      # Restore lexer state to a previously observed token and re-match that
+      # token's span so scanner match accessors (matched_size, token_value) are
+      # valid again after a lookahead.
+      def rewind_and_match!(token_pos, token_end_pos)
+        @pos = token_pos
+        @scanner.pos = token_pos
+        if token_end_pos > token_pos
+          @scanner.scan(Regexp.new(Regexp.escape(@string.byteslice(token_pos, token_end_pos - token_pos)), Regexp::MULTILINE))
+        end
+        @finished = @scanner.eos?
+      end
+
+      # Ensure the scanner records the single byte at the current token position
+      # as its last match. Used to normalize stray-byte (UNKNOWN_CHAR) tokens for
+      # the fault-tolerant parser.
+      def match_last_token!
+        token_pos = @pos || (@scanner.pos - 1)
+        @scanner.pos = token_pos
+        @scanner.scan(/./m)
+        @pos = token_pos
+      end
 
       def advance
         loop do
@@ -190,6 +239,37 @@ module GraphQL
 
       def raise_parse_error(message, line = line_number, col = column_number)
         raise GraphQL::ParseError.new(message, line, col, @string, filename: @filename)
+      end
+
+      # Move the scanner past input that the strict lexer could not tokenize.
+      # The returned span is treated as a single (erroneous) token, which means
+      # punctuation inside an unterminated string can not be used as a sync point.
+      def recover_scanner_after_error(err_pos)
+        rest = @scanner.rest
+        first_byte = @string.getbyte(err_pos)
+        consumed_len = 1
+        if first_byte == 34 # double quote: an unterminated string, consume the rest of the line
+          line_break = rest.index("\r")
+          newline_pos = rest.index("\n")
+          if line_break && (newline_pos.nil? || line_break < newline_pos)
+            newline_pos = line_break
+          end
+          consumed_len = newline_pos || rest.bytesize
+        elsif first_byte == 46 # malformed ellipsis
+          leading_dots = 1
+          leading_dots += 1 while leading_dots < rest.bytesize && rest.getbyte(leading_dots) == 46
+          consumed_len = [leading_dots, 3].min
+        elsif first_byte == 45 # malformed number beginning with a dash
+          consumed_len = 1
+          consumed_len += 1 if consumed_len < rest.bytesize && rest.getbyte(1) == 32
+          consumed_len += 1 while consumed_len < rest.bytesize && rest.getbyte(consumed_len).between?(48, 57)
+        end
+        new_pos = err_pos + consumed_len
+        if new_pos > @string.bytesize
+          new_pos = @string.bytesize
+        end
+        @scanner.pos = new_pos
+        @string.byteslice(err_pos, new_pos - err_pos) || ""
       end
 
       IGNORE_REGEXP = /[, \c\r\n\t]+/

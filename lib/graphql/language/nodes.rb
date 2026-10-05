@@ -33,6 +33,9 @@ module GraphQL
 
         attr_reader :filename
 
+        # @return [Integer, nil] Zero-based byte offset of this node in the source string
+        attr_reader :pos
+
         def line
           @line ||= @source&.line_at(@pos)
         end
@@ -56,9 +59,22 @@ module GraphQL
 
         NO_CHILDREN = GraphQL::EmptyObjects::EMPTY_ARRAY
 
+        # Syntax problem nodes ({Nodes::SyntaxErrorNode}, {Nodes::MissingNode})
+        # attached to an otherwise-valid node by the fault-tolerant parser.
+        # Strict parsing never populates this.
+        # @return [Array<Nodes::SyntaxErrorNode, Nodes::MissingNode>]
+        def recovered_nodes
+          @recovered_nodes || NO_CHILDREN
+        end
+
+        # @return [Boolean] True if the fault-tolerant parser attached problem nodes
+        def recovered?
+          defined?(@recovered_nodes) && @recovered_nodes.any?
+        end
+
         # @return [Array<GraphQL::Language::Nodes::AbstractNode>] all nodes in the tree below this one
         def children
-          NO_CHILDREN
+          recovered? ? @recovered_nodes : NO_CHILDREN
         end
 
         # @return [Array<Integer, Float, String, Boolean, Array>] Scalar values attached to this node
@@ -214,15 +230,25 @@ module GraphQL
 
               if children_of_type.size == 1
                 module_eval <<-RUBY, __FILE__, __LINE__
-                  alias :children #{children_of_type.keys.first}
+                  def children
+                    @children ||= begin
+                      base_children = #{children_of_type.keys.first}
+                      if recovered?
+                        (base_children + @recovered_nodes).freeze
+                      else
+                        base_children
+                      end
+                    end
+                  end
                 RUBY
               else
                 module_eval <<-RUBY, __FILE__, __LINE__
                   def children
                     @children ||= begin
-                      if #{children_of_type.keys.map { |k| "@#{k}.any?" }.join(" || ")}
+                      if #{children_of_type.keys.map { |k| "@#{k}.any?" }.join(" || ")} || recovered?
                         new_children = []
                         #{children_of_type.keys.map { |k| "new_children.concat(@#{k})" }.join("; ")}
+                        new_children.concat(@recovered_nodes) if recovered?
                         new_children.freeze
                         new_children
                       else
@@ -378,7 +404,11 @@ module GraphQL
         #   @return [String, Float, Integer, Boolean, Array, InputObject, VariableIdentifier] The value passed for this key
 
         def children
-          @children ||= Array(value).flatten.tap { _1.select! { |v| v.is_a?(AbstractNode) } }
+          @children ||= begin
+            value_nodes = Array(value).flatten.select { |v| v.is_a?(AbstractNode) }
+            value_nodes.concat(@recovered_nodes) if recovered?
+            value_nodes
+          end
         end
       end
 
@@ -799,6 +829,82 @@ module GraphQL
           fields: GraphQL::Language::Nodes::InputValueDefinition,
         })
         self.children_method_name = :definitions
+      end
+
+      # A token or group of tokens that was expected by the grammar but never found.
+      # This node is only produced by the fault-tolerant parser.
+      class MissingNode < AbstractNode
+        # @!attribute description
+        #   @return [String] A description of what was expected
+        # @!attribute end_pos
+        #   @return [Integer, nil] Source position where the missing token should have been
+        attr_reader :description, :end_pos
+
+        def initialize(description:, pos: nil, end_pos: nil, line: nil, col: nil, filename: nil, source: nil)
+          @description = description
+          @pos = pos
+          @end_pos = end_pos || pos
+          @line = line
+          @col = col
+          @filename = filename
+          @source = source
+        end
+
+        def scalars
+          @scalars ||= [@description].freeze
+        end
+
+        # @return [Integer] 1-based line of the position where the token was expected
+        def end_line
+          @end_line ||= @source&.line_at(@end_pos)
+        end
+
+        # @return [Integer] 1-based column of the position where the token was expected
+        def end_col
+          @end_col ||= @source&.column_at(@end_pos)
+        end
+      end
+
+      # A span of source that could not be parsed.
+      # This node is only produced by the fault-tolerant parser.
+      class SyntaxErrorNode < AbstractNode
+        # @!attribute message
+        #   @return [String] The syntax error message produced for this span
+        # @!attribute end_pos
+        #   @return [Integer, nil] Source position immediately after the broken span
+        attr_reader :message, :end_pos
+
+        def initialize(message:, pos:, end_pos:, line: nil, col: nil, filename: nil, source: nil)
+          @message = message
+          @pos = pos
+          @end_pos = end_pos
+          @line = line
+          @col = col
+          @filename = filename
+          @source = source
+        end
+
+        def scalars
+          @scalars ||= [@message].freeze
+        end
+
+        # @return [Integer] 1-based line immediately after the broken span
+        def end_line
+          @end_line ||= @source&.line_at(@end_pos)
+        end
+
+        # @return [Integer] 1-based column immediately after the broken span
+        def end_col
+          @end_col ||= @source&.column_at(@end_pos)
+        end
+
+        # The original source text that could not be parsed
+        # @return [String, nil]
+        def token
+          if @source
+            @source.query_string_byteslice(@pos, @end_pos - @pos)
+          end
+        end
       end
     end
   end

@@ -17,6 +17,13 @@ module GraphQL
           self.new(graphql_str, filename: filename, trace: trace, max_tokens: max_tokens).parse
         end
 
+        # Parse while recovering from syntax errors instead of raising.
+        # @see GraphQL::Language::RecoveryParser
+        # @return [RecoveryParser::Result]
+        def parse_with_recovery(graphql_str, filename: nil, trace: Tracing::NullTrace, max_tokens: nil)
+          RecoveryParser.parse_with_recovery(graphql_str, filename: filename, trace: trace, max_tokens: max_tokens)
+        end
+
         def parse_file(filename, trace: Tracing::NullTrace)
           if cache
             cache.fetch(filename) do
@@ -72,6 +79,13 @@ module GraphQL
         else
           pos + 1
         end
+      end
+
+      # @param start [Integer]
+      # @param length [Integer]
+      # @return [String] A byte slice of the original source string
+      def query_string_byteslice(start, length)
+        @graphql_str.byteslice(start, length) || ""
       end
 
       private
@@ -157,28 +171,8 @@ module GraphQL
           variable_definitions = if at?(:LPAREN)
             expect_token(:LPAREN)
             defs = []
-            while !at?(:RPAREN)
-              loc = pos
-              expect_token(:VAR_SIGN)
-              var_name = parse_name
-              expect_token(:COLON)
-              var_type = self.type || raise_parse_error("Missing type definition for variable: $#{var_name}")
-              default_value = if at?(:EQUALS)
-                advance_token
-                value
-              end
-
-              directives = parse_directives
-
-              defs << Nodes::VariableDefinition.new(
-                pos: loc,
-                name: var_name,
-                type: var_type,
-                default_value: default_value,
-                directives: directives,
-                filename: @filename,
-                source: self
-              )
+            while !at?(:RPAREN) && !@lexer.finished?
+              defs << parse_variable_definition
             end
             expect_token(:RPAREN)
             defs
@@ -366,6 +360,31 @@ module GraphQL
             expect_one_of([:SCHEMA, :SCALAR, :TYPE, :ENUM, :INPUT, :UNION, :INTERFACE])
           end
         end
+      end
+
+      # Parse one `$name: Type = value` definition inside a variable definition list
+      def parse_variable_definition
+        loc = pos
+        expect_token(:VAR_SIGN)
+        var_name = parse_name
+        expect_token(:COLON)
+        var_type = self.type || raise_parse_error("Missing type definition for variable: $#{var_name}")
+        default_value = if at?(:EQUALS)
+          advance_token
+          value
+        end
+
+        directives = parse_directives
+
+        Nodes::VariableDefinition.new(
+          pos: loc,
+          name: var_name,
+          type: var_type,
+          default_value: default_value,
+          directives: directives,
+          filename: @filename,
+          source: self
+        )
       end
 
       def parse_input_object_field_definitions
@@ -726,7 +745,7 @@ module GraphQL
         when :LBRACKET
           advance_token
           list = []
-          while !at?(:RBRACKET)
+          while !at?(:RBRACKET) && !@lexer.finished?
             list << value
           end
           expect_token(:RBRACKET)
@@ -735,7 +754,7 @@ module GraphQL
           start = pos
           advance_token
           args = []
-          while !at?(:RCURLY)
+          while !at?(:RCURLY) && !@lexer.finished?
             loc = pos
             n = parse_name
             expect_token(:COLON)

@@ -50,6 +50,20 @@ This is probably a bug in GraphQL-Ruby, please report this error on GitHub: http
     default_parser.parse(graphql_string, trace: trace, filename: filename, max_tokens: max_tokens)
   end
 
+  # Turn a query string or schema definition into a partial AST, even when it
+  # contains syntax errors (for example, while the document is still being typed).
+  #
+  # The returned result's `diagnostics` lists every syntax problem that was found;
+  # the document contains {Language::Nodes::SyntaxErrorNode} and
+  # {Language::Nodes::MissingNode} where the source is broken. This never raises
+  # on ordinary syntax errors, and the partial document is not suitable for
+  # execution -- use {.parse} (which raises on the first error) for that.
+  # @param graphql_string [String] a GraphQL query string or schema definition
+  # @return [Language::RecoveryParser::Result]
+  def self.parse_with_recovery(graphql_string, trace: GraphQL::Tracing::NullTrace, filename: nil, max_tokens: nil)
+    Language::RecoveryParser.parse_with_recovery(graphql_string, trace: trace, filename: filename, max_tokens: max_tokens)
+  end
+
   # Read the contents of `filename` and parse them as GraphQL
   # @param filename [String] Path to a `.graphql` file containing IDL or query
   # @return [GraphQL::Language::Nodes::Document]

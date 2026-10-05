@@ -74,6 +74,10 @@ module GraphQL
       end
 
       def print_argument(argument)
+        if argument.is_a?(Nodes::SyntaxErrorNode) || argument.is_a?(Nodes::MissingNode)
+          print_node(argument)
+          return
+        end
         print_string(argument.name)
         print_string(": ")
         print_node(argument.value)
@@ -185,7 +189,11 @@ module GraphQL
         if !operation_definition.variables.empty?
           print_string("(")
           operation_definition.variables.each_with_index do |v, i|
-            print_variable_definition(v)
+            if v.is_a?(Nodes::SyntaxErrorNode) || v.is_a?(Nodes::MissingNode)
+              print_node(v)
+            else
+              print_variable_definition(v)
+            end
             print_string(", ") if i < operation_definition.variables.size - 1
           end
           print_string(")")
@@ -456,9 +464,11 @@ module GraphQL
       end
 
       def print_directives(directives)
-        return if directives.empty?
-
         directives.each do |d|
+          if d.is_a?(Nodes::SyntaxErrorNode) || d.is_a?(Nodes::MissingNode)
+            print_node(d)
+            next
+          end
           print_string(" ")
           print_directive(d)
         end
@@ -474,6 +484,17 @@ module GraphQL
         end
         print_string(indent)
         print_string("}")
+      end
+
+      def print_syntax_error_node(syntax_error_node)
+        token = syntax_error_node.token
+        print_string(GraphQL::Language.serialize(token)) unless token.nil? || token.empty?
+      end
+
+      def print_missing_node(missing_node)
+        # A missing token occupies no source, so nothing is printed.
+        # The node is still present in the AST with its source range.
+        nil
       end
 
       def print_node(node, indent: "")
@@ -546,6 +567,10 @@ module GraphQL
           print_input_object_type_definition(node, extension: true)
         when Nodes::DirectiveDefinition
           print_directive_definition(node)
+        when Nodes::SyntaxErrorNode
+          print_syntax_error_node(node)
+        when Nodes::MissingNode
+          print_missing_node(node)
         when FalseClass, Float, Integer, NilClass, String, TrueClass, Symbol
           print_string(GraphQL::Language.serialize(node))
         when Array
