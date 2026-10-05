@@ -1,0 +1,58 @@
+class Money
+  class CashCombination
+    class Result
+      @status: Symbol
+      @target: Money
+      @denominations: Array[Integer | Money]
+      @counts: Array[Integer]?
+      @total_pieces: Integer?
+      @nodes_visited: Integer
+
+      attr_reader status: Symbol
+      attr_reader target: Money
+      attr_reader denominations: Array[Integer | Money]
+      attr_reader counts: Array[Integer]?
+      attr_reader total_pieces: Integer?
+      attr_reader nodes_visited: Integer
+
+      def initialize: (Symbol status, Money target, Array[Integer | Money] denominations, Array[Integer]? counts, Integer nodes_visited) -> void
+
+      def found?: () -> bool
+      def success?: () -> bool
+      def exact?: () -> bool
+      def no_solution?: () -> bool
+      def budget_exceeded?: () -> bool
+      def search_budget_exceeded?: () -> bool
+      def combination: () -> Hash[Integer | Money, Integer]?
+      def solution: () -> Hash[Integer | Money, Integer]?
+      def pieces: () -> Integer?
+    end
+
+    DEFAULT_SEARCH_BUDGET: Integer
+
+    def self.find: (
+      target: Money,
+      denominations: Array[Integer | Money],
+      quantities: Array[Integer],
+      ?search_budget: Integer
+    ) -> Result
+
+    def initialize: (
+      target: Money,
+      denominations: Array[Integer | Money],
+      quantities: Array[Integer],
+      search_budget: Integer
+    ) -> void
+
+    def find: () -> Result
+
+    private
+
+    @target: Money
+    @denominations: Array[Integer | Money]
+    @denomination_amounts: Array[Integer]
+    @quantities: Array[Integer]
+    @search_budget: Integer
+    @target_amount: Integer
+  end
+end

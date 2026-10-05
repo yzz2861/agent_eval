@@ -6,6 +6,7 @@ require "money/money/arithmetic"
 require "money/money/constructors"
 require "money/money/formatter"
 require "money/money/allocation"
+require "money/money/cash_combination"
 require "money/money/locale_backend"
 
 # "Money is any object or record that is generally accepted as payment for
@@ -297,6 +298,58 @@ class Money
   def self.disallow_currency_conversion!
     self.default_bank = Bank::SingleCurrency.instance
   end
+
+  # Finds the minimum-piece combination of available denominations that exactly
+  # represents the target amount. Denominations are Integer smallest-unit
+  # amounts or Money objects in the target currency. Tie results prefer larger
+  # counts at denominations appearing earlier in the provided order.
+  #
+  # @param [Money] target Exact amount to compose, in whole fractional units.
+  # @param [Array<Integer, Money>, Hash{Integer, Money => Integer}] denominations
+  #   Available denominations, or a denomination-to-stock Hash.
+  # @param [Array<Integer>, nil] quantities Available stock for each denomination.
+  # @param [Integer] search_budget Maximum amount states inspected during search.
+  #
+  # @return [Money::CashCombination::Result]
+  def self.find_cash_combination(target, denominations, quantities = nil, search_budget:
+    CashCombination::DEFAULT_SEARCH_BUDGET)
+    if quantities.nil?
+      unless denominations.is_a?(Hash)
+        raise ArgumentError, "quantities must be provided or denominations must be a Hash"
+      end
+
+      quantities = denominations.values
+      denominations = denominations.keys
+    end
+
+    CashCombination.new(
+      target: target,
+      denominations: denominations,
+      quantities: quantities,
+      search_budget: search_budget,
+    ).find
+  end
+
+  class << self
+    alias calculate_cash_combination find_cash_combination
+    alias cash_combination find_cash_combination
+  end
+
+  # Finds a cash combination for this exact Money amount.
+  #
+  # @see Money.find_cash_combination
+  def find_cash_combination(denominations, quantities = nil, search_budget:
+    CashCombination::DEFAULT_SEARCH_BUDGET)
+    Money.find_cash_combination(
+      self,
+      denominations,
+      quantities,
+      search_budget: search_budget,
+    )
+  end
+
+  alias cash_combination find_cash_combination
+  alias calculate_cash_combination find_cash_combination
 
   # Creates a new Money object of value given in the +unit+ of the given
   # +currency+.

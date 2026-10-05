@@ -272,6 +272,16 @@ class Money
   # currency exchange. Useful when apps operate in a single currency at a time.
   def self.disallow_currency_conversion!: () -> untyped
 
+  def self.find_cash_combination: (
+    Money target,
+    (Array[Integer | Money] | Hash[Integer | Money, Integer]) denominations,
+    ?Array[Integer]? quantities,
+    ?search_budget: Integer
+  ) -> CashCombination::Result
+
+  alias self.calculate_cash_combination self.find_cash_combination
+  alias self.cash_combination self.find_cash_combination
+
   # Creates a new Money object of value given in the +unit+ of the given
   # +currency+.
   #
@@ -472,6 +482,15 @@ class Money
   #   Money.new(100, "USD").allocate(3) #=> [Money.new(34), Money.new(33), Money.new(33)]
   #
   def allocate: ((Array[Numeric] | Numeric) parts) -> Array[Money]
+
+  def find_cash_combination: (
+    (Array[Integer | Money] | Hash[Integer | Money, Integer]) denominations,
+    ?Array[Integer]? quantities,
+    ?search_budget: Integer
+  ) -> CashCombination::Result
+
+  alias cash_combination find_cash_combination
+  alias calculate_cash_combination find_cash_combination
 
   alias split allocate
 
