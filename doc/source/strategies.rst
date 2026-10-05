@@ -17,6 +17,11 @@ TL;DR: How to choose a strategy
   smooths transitions between time periods with less overhead than a full moving window,
   though it may trade off some precision near bucket boundaries.
 
+- **Distinct Window:**
+  Use when a fixed number of distinct resources may be active during a rolling window.
+  Repeated access to a resource only refreshes that resource's expiry and does not consume
+  an additional slot.
+
 Fixed Window
 ============
 
@@ -130,5 +135,15 @@ Suppose:
    This difference can allow an attacker to bypass limits during the initial sampling
    period. The affected implementations are ``memcached`` and ``in-memory``.
 
+Distinct Window
+===============
 
+This strategy keeps one expiry timestamp for each distinct resource in a rolling window.
+A request for a resource already represented in the window is allowed and refreshes that
+resource's expiry. A new resource is rejected when the window already contains the maximum
+number of active resources; a rejected request does not record a placeholder.
+
+``str`` and ``bytes`` resource identifiers are treated as different resources. The window
+statistics report both the active distinct resource count and the earliest time at which a
+new resource can be admitted.
 

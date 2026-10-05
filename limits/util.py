@@ -45,6 +45,17 @@ class WindowStats(NamedTuple):
     remaining: int
 
 
+class DistinctWindowStats(NamedTuple):
+    """
+    tuple to describe a distinct resource window
+    """
+
+    #: Number of distinct resources currently represented in the window
+    count: int
+    #: Earliest time at which a new resource can be represented in the window
+    next_available_time: float
+
+
 @dataclasses.dataclass
 class Dependency:
     name: str

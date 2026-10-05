@@ -8,11 +8,13 @@ from math import floor
 
 import limits.typing
 from limits.storage.base import (
+    DistinctWindowSupport,
     MovingWindowSupport,
     SlidingWindowCounterSupport,
     Storage,
     TimestampedSlidingWindow,
 )
+from limits.util import DistinctWindowStats
 
 
 class Entry:
@@ -22,7 +24,11 @@ class Entry:
 
 
 class MemoryStorage(
-    Storage, MovingWindowSupport, SlidingWindowCounterSupport, TimestampedSlidingWindow
+    Storage,
+    DistinctWindowSupport,
+    MovingWindowSupport,
+    SlidingWindowCounterSupport,
+    TimestampedSlidingWindow,
 ):
     """
     rate limit storage using :class:`collections.Counter`
@@ -38,6 +44,7 @@ class MemoryStorage(
         self.locks: defaultdict[str, threading.RLock] = defaultdict(threading.RLock)
         self.expirations: dict[str, float] = {}
         self.events: dict[str, list[Entry]] = {}
+        self.distinct_entries: dict[str, dict[str | bytes, float]] = {}
         self._timer_lock = threading.Lock()
         self.timer: threading.Timer = threading.Timer(0.01, self.__expire_events)
         self.timer.start()
@@ -134,6 +141,7 @@ class MemoryStorage(
         self.storage.pop(key, None)
         self.expirations.pop(key, None)
         self.events.pop(key, None)
+        self.distinct_entries.pop(key, None)
         self.locks.pop(key, None)
 
     def acquire_entry(self, key: str, limit: int, expiry: int, amount: int = 1) -> bool:
@@ -184,6 +192,71 @@ class MemoryStorage(
             )
             return events[oldest - 1].atime, oldest
         return timestamp, 0
+
+    @staticmethod
+    def _validate_distinct_resource(resource: str | bytes) -> None:
+        if not isinstance(resource, (str, bytes)):
+            raise TypeError("resource must be an instance of str or bytes")
+
+    def acquire_distinct_entry(
+        self, key: str, limit: int, expiry: int, resource: str | bytes
+    ) -> bool:
+        self._validate_distinct_resource(resource)
+        with self.locks[key]:
+            now = time.time()
+            entries = self.distinct_entries.setdefault(key, {})
+            for active_resource, expires_at in list(entries.items()):
+                if expires_at <= now:
+                    entries.pop(active_resource, None)
+
+            try:
+                if resource in entries:
+                    entries[resource] = now + expiry
+                    return True
+                if len(entries) < limit:
+                    entries[resource] = now + expiry
+                    return True
+                return False
+            finally:
+                if not entries:
+                    self.distinct_entries.pop(key, None)
+                    self.locks.pop(key, None)
+
+    def test_distinct_entry(
+        self, key: str, limit: int, expiry: int, resource: str | bytes
+    ) -> bool:
+        self._validate_distinct_resource(resource)
+        with self.locks[key]:
+            now = time.time()
+            entries = self.distinct_entries.setdefault(key, {})
+            for active_resource, expires_at in list(entries.items()):
+                if expires_at <= now:
+                    entries.pop(active_resource, None)
+
+            allowed = resource in entries or len(entries) < limit
+            if not entries:
+                self.distinct_entries.pop(key, None)
+                self.locks.pop(key, None)
+            return allowed
+
+    def get_distinct_window(
+        self, key: str, limit: int, expiry: int
+    ) -> DistinctWindowStats:
+        with self.locks[key]:
+            now = time.time()
+            entries = self.distinct_entries.setdefault(key, {})
+            for active_resource, expires_at in list(entries.items()):
+                if expires_at <= now:
+                    entries.pop(active_resource, None)
+
+            count = len(entries)
+            next_available_time = (
+                min(entries.values()) if count >= limit and entries else now
+            )
+            if not entries:
+                self.distinct_entries.pop(key, None)
+                self.locks.pop(key, None)
+            return DistinctWindowStats(count, next_available_time)
 
     def acquire_sliding_window_entry(
         self,
@@ -255,9 +328,12 @@ class MemoryStorage(
         return True
 
     def reset(self) -> int | None:
-        num_items = max(len(self.storage), len(self.events))
+        num_items = max(
+            len(self.storage), len(self.events), len(self.distinct_entries)
+        )
         self.storage.clear()
         self.expirations.clear()
         self.events.clear()
+        self.distinct_entries.clear()
         self.locks.clear()
         return num_items

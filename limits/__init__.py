@@ -14,7 +14,7 @@ from .limits import (
     RateLimitItemPerSecond,
     RateLimitItemPerYear,
 )
-from .util import WindowStats, parse, parse_many
+from .util import DistinctWindowStats, WindowStats, parse, parse_many
 
 __all__ = [
     "RateLimitItem",
@@ -24,6 +24,7 @@ __all__ = [
     "RateLimitItemPerMonth",
     "RateLimitItemPerSecond",
     "RateLimitItemPerYear",
+    "DistinctWindowStats",
     "WindowStats",
     "aio",
     "parse",

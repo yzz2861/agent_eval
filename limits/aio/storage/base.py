@@ -15,7 +15,7 @@ from limits.typing import (
     R,
     cast,
 )
-from limits.util import LazyDependency
+from limits.util import DistinctWindowStats, LazyDependency
 
 
 def _wrap_errors(
@@ -164,6 +164,55 @@ class MovingWindowSupport(ABC):
         :param key: rate limit key
         :param expiry: expiry of entry
         :return: (start of window, number of acquired entries)
+        """
+        raise NotImplementedError
+
+
+class DistinctWindowSupport(ABC):
+    """
+    Abstract base class for async storages that support the
+    :ref:`strategies:distinct window` strategy.
+    """
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:  # type: ignore[explicit-any]
+        for method in {
+            "acquire_distinct_entry",
+            "test_distinct_entry",
+            "get_distinct_window",
+        }:
+            setattr(
+                cls,
+                method,
+                _wrap_errors(getattr(cls, method)),
+            )
+        super().__init_subclass__(**kwargs)
+
+    @abstractmethod
+    async def acquire_distinct_entry(
+        self, key: str, limit: int, expiry: int, resource: str | bytes
+    ) -> bool:
+        """
+        Acquire or refresh a window entry for one distinct resource.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def test_distinct_entry(
+        self, key: str, limit: int, expiry: int, resource: str | bytes
+    ) -> bool:
+        """
+        Return whether an entry can be acquired for the resource without
+        consuming it.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_distinct_window(
+        self, key: str, limit: int, expiry: int
+    ) -> DistinctWindowStats:
+        """
+        Return the active distinct resource count and the earliest time a new
+        resource can be acquired.
         """
         raise NotImplementedError
 

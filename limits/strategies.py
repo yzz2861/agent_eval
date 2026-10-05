@@ -13,9 +13,14 @@ from deprecated.sphinx import versionadded
 from limits.storage.base import SlidingWindowCounterSupport
 
 from .limits import RateLimitItem
-from .storage import MovingWindowSupport, Storage, StorageTypes
+from .storage import (
+    DistinctWindowSupport,
+    MovingWindowSupport,
+    Storage,
+    StorageTypes,
+)
 from .typing import cast
-from .util import WindowStats
+from .util import DistinctWindowStats, WindowStats
 
 
 class RateLimiter(metaclass=ABCMeta):
@@ -305,14 +310,88 @@ class SlidingWindowCounterRateLimiter(RateLimiter):
         )
 
 
+class DistinctWindowRateLimiter(RateLimiter):
+    """
+    Reference: :ref:`strategies:distinct window`
+    """
+
+    def __init__(self, storage: StorageTypes):
+        if not isinstance(storage, DistinctWindowSupport):
+            raise NotImplementedError(
+                "DistinctWindowRateLimiting is not implemented for storage "
+                f"of type {storage.__class__}"
+            )
+        super().__init__(storage)
+
+    @staticmethod
+    def _resource_and_key(
+        item: RateLimitItem,
+        identifiers: tuple[str | bytes | int | float, ...],
+        resource: str | bytes | None,
+    ) -> tuple[str, str | bytes]:
+        if resource is not None:
+            return item.key_for(*identifiers), resource
+        if not identifiers:
+            raise ValueError("a resource identifier is required")
+        active_resource = identifiers[-1]
+        if not isinstance(active_resource, (str, bytes)):
+            raise TypeError("resource must be an instance of str or bytes")
+        return item.key_for(*identifiers[:-1]), active_resource
+
+    def hit(
+        self,
+        item: RateLimitItem,
+        *identifiers: str | bytes | int | float,
+        resource: str | bytes | None = None,
+        cost: int = 1,
+    ) -> bool:
+        if cost != 1:
+            return False
+        key, active_resource = self._resource_and_key(item, identifiers, resource)
+        return cast(DistinctWindowSupport, self.storage).acquire_distinct_entry(
+            key, item.amount, item.get_expiry(), active_resource
+        )
+
+    def test(
+        self,
+        item: RateLimitItem,
+        *identifiers: str | bytes | int | float,
+        resource: str | bytes | None = None,
+        cost: int = 1,
+    ) -> bool:
+        if cost != 1:
+            return False
+        key, active_resource = self._resource_and_key(item, identifiers, resource)
+        return cast(DistinctWindowSupport, self.storage).test_distinct_entry(
+            key, item.amount, item.get_expiry(), active_resource
+        )
+
+    def get_window_stats(
+        self, item: RateLimitItem, *identifiers: str
+    ) -> WindowStats:
+        count, next_available_time = self.get_distinct_window_stats(
+            item, *identifiers
+        )
+        return WindowStats(next_available_time, item.amount - count)
+
+    def get_distinct_window_stats(
+        self, item: RateLimitItem, *identifiers: str
+    ) -> DistinctWindowStats:
+        return cast(DistinctWindowSupport, self.storage).get_distinct_window(
+            item.key_for(*identifiers), item.amount, item.get_expiry()
+        )
+
+
 KnownStrategy = (
     type[SlidingWindowCounterRateLimiter]
     | type[FixedWindowRateLimiter]
     | type[MovingWindowRateLimiter]
+    | type[DistinctWindowRateLimiter]
 )
 
 STRATEGIES: dict[str, KnownStrategy] = {
     "sliding-window-counter": SlidingWindowCounterRateLimiter,
+    "distinct-window": DistinctWindowRateLimiter,
     "fixed-window": FixedWindowRateLimiter,
     "moving-window": MovingWindowRateLimiter,
 }

@@ -12,7 +12,12 @@ import limits  # noqa
 from .._storage_scheme import SCHEMES
 from ..errors import ConfigurationError
 from ..typing import TypeAlias, cast
-from .base import MovingWindowSupport, SlidingWindowCounterSupport, Storage
+from .base import (
+    DistinctWindowSupport,
+    MovingWindowSupport,
+    SlidingWindowCounterSupport,
+    Storage,
+)
 from .memcached import MemcachedStorage
 from .memory import MemoryStorage
 from .mongodb import MongoDBStorage, MongoDBStorageBase
@@ -70,6 +75,7 @@ __all__ = [
     "MemoryStorage",
     "MongoDBStorage",
     "MongoDBStorageBase",
+    "DistinctWindowSupport",
     "MovingWindowSupport",
     "RedisClusterStorage",
     "RedisSentinelStorage",
