@@ -157,6 +157,8 @@ class Money
 
     attr_reader disambiguate_symbol: untyped
 
+    attr_reader alternate_symbols: untyped
+
     attr_reader html_entity: untyped
 
     attr_reader subunit: untyped

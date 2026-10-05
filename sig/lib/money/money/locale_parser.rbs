@@ -1,0 +1,14 @@
+class Money
+  class LocaleParser
+    class InvalidFormat < ArgumentError
+    end
+
+    REGIONS: Hash[String, Hash[Symbol, untyped]]
+
+    def self.parse: (String input, region: String | Symbol | Hash[untyped, untyped], ?currency: Money::Currency | String | Symbol) -> [Integer | BigDecimal, Money::Currency]
+
+    def initialize: (String input, region: String | Symbol | Hash[untyped, untyped], ?currency: Money::Currency | String | Symbol) -> void
+
+    def parse: () -> [Integer | BigDecimal, Money::Currency]
+  end
+end

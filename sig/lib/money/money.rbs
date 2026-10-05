@@ -289,6 +289,10 @@ class Money
   # @see #initialize
   def self.from_amount: (Numeric amount, ?(Money::Currency | string | Symbol) currency, ?::Hash[untyped, untyped] options) -> Money
 
+  def self.parse_localized: (String input, ?(String | Symbol | Hash[untyped, untyped]) region, ?(Money::Currency | string | Symbol) currency, **untyped options) -> Money
+
+  alias self.from_localized self.parse_localized
+
   # DEPRECATED.
   #
   # @see Money.from_amount

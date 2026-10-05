@@ -323,6 +323,39 @@ class Money
     new(value, currency, options)
   end
 
+  # Strictly parses a localized amount String.
+  #
+  # Region rules are mandatory. They determine the decimal mark, accepted
+  # grouping lengths, currency-symbol position, and the default currency. An
+  # explicit currency disambiguates or overrides regional defaults, but cannot
+  # conflict with a marker present in the input.
+  #
+  # Parsing uses BigDecimal and goes directly to the currency's fractional
+  # unit; the input String is never converted to Float.
+  #
+  # @param [String] input The localized amount.
+  # @param [String, Symbol, Hash] region A built-in BCP 47 region or custom rules.
+  # @param [Currency, String, Symbol, nil] currency Optional explicit currency.
+  # @param [Hash] options Optional Money constructor options.
+  #
+  # @return [Money]
+  def self.parse_localized(input, region = nil, currency = nil, **options)
+    region ||= options.delete(:region)
+    currency ||= options.delete(:currency)
+    raise ArgumentError, "must provide a region" if region.nil?
+
+    fractional, resolved_currency = LocaleParser.parse(
+      input,
+      region: region,
+      currency: currency,
+    )
+    new(fractional, resolved_currency, **options)
+  end
+
+  class << self
+    alias from_localized parse_localized
+  end
+
   # DEPRECATED.
   #
   # @see Money.from_amount

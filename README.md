@@ -7,7 +7,9 @@
 
 ⚠️ Please read the [upgrade guides](#upgrade-guides) before upgrading to a new major version.
 
-If you miss String parsing, check out the new [monetize gem](https://github.com/RubyMoney/monetize).
+For ordinary numeric constructors, use `Money.new` or `Money.from_amount`.
+Strict localized string parsing is available through `Money.parse_localized`;
+see [Localized parsing](#localized-parsing).
 
 ## Contributing
 
@@ -544,6 +546,27 @@ If you wish to disable this feature and use defaults instead:
 ```ruby
 Money.locale_backend = nil
 ```
+
+### Localized parsing
+
+Money.parse_localized performs strict parsing and always requires a region.
+The region determines the decimal mark, grouping lengths and currency-symbol
+position. A currency may be supplied explicitly, but conflicting currency
+markers are rejected. Parsing uses BigDecimal and integer subunits; it never
+passes the input through Float.
+
+    Money.parse_localized("$1,234.56", "en-US")        # => 1234.56 USD
+    Money.parse_localized("$1,234.56", "en-CA")        # => 1234.56 CAD
+    Money.parse_localized("$1,234.56", "en-US", "CAD") # => 1234.56 CAD
+    Money.parse_localized("1.234,56 €", "de-DE")       # => 1234.56 EUR
+    Money.parse_localized("1 234,56 €", "fr-FR")      # => 1234.56 EUR
+    Money.parse_localized("₹12,34,567.89", "en-IN")    # => 1234567.89 INR
+    Money.parse_localized("($1,234.56)", "en-US")      # => -1234.56 USD
+
+A comma alone is never interpreted as a decimal point. For example, "12,34" is
+rejected for "en-US", while "1.234" is rejected for German-style regions
+because it has an invalid grouping length. "$" is resolved using the region or
+the explicit currency argument.
 
 ### Deprecation
 
