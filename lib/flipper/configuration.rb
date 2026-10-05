@@ -1,8 +1,17 @@
 module Flipper
   class Configuration
+    # Public: The actor property names that Feature#evaluate_with_explanation
+    # may include in its diagnostics. Properties are read from
+    # actor#flipper_properties and filtered to this allowlist. Defaults to
+    # none, so only flipper_id appears in explanations and sensitive
+    # attributes never leak. Can be overridden per call with the
+    # actor_properties option.
+    attr_accessor :explanation_actor_properties
+
     def initialize(options = {})
       @builder = AdapterBuilder.new { store Flipper::Adapters::Memory }
       @default = -> { Flipper.new(@builder.to_adapter) }
+      @explanation_actor_properties = []
     end
 
     # The default adapter to use.

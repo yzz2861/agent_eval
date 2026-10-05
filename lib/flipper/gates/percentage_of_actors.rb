@@ -52,6 +52,10 @@ module Flipper
         Zlib.crc32(id) % (100 * SCALING_FACTOR) < percentage * SCALING_FACTOR
       end
 
+      def requires_actor?
+        true
+      end
+
       def protects?(thing)
         thing.is_a?(Types::PercentageOfActors)
       end

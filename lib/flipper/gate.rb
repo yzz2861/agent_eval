@@ -37,6 +37,16 @@ module Flipper
       false
     end
 
+    # Internal: Whether the gate needs an actor to evaluate. Used by
+    # Feature#evaluate_with_explanation to report gates that cannot run
+    # as explicitly skipped (rather than silently closed) when no actor
+    # is given.
+    #
+    # Returns true if gate requires an actor, false if not.
+    def requires_actor?
+      false
+    end
+
     # Internal: Allows gate to wrap actor using one of the supported flipper
     # types so adapters always get someactor that responds to value.
     def wrap(actor)

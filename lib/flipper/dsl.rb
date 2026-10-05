@@ -40,6 +40,19 @@ module Flipper
       feature(name).enabled?(*args)
     end
 
+    # Public: Evaluate a feature exactly once and explain the outcome.
+    #
+    # name - The String or Symbol name of the feature.
+    # args - The actors to evaluate for, with an optional trailing options
+    #        Hash (e.g. actor_properties: [:plan]) passed through to
+    #        Feature#evaluate_with_explanation.
+    #
+    # Returns a Flipper::EvaluationExplanation.
+    def evaluate_with_explanation(name, *args)
+      options = args.last.is_a?(Hash) ? args.pop : {}
+      feature(name).evaluate_with_explanation(*args, **options)
+    end
+
     # Public: Enable a feature.
     #
     # name - The String or Symbol name of the feature.

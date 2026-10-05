@@ -33,6 +33,10 @@ module Flipper
         end
       end
 
+      def requires_actor?
+        true
+      end
+
       def wrap(actor)
         Types::Actor.wrap(actor)
       end

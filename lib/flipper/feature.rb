@@ -1,6 +1,7 @@
 require 'flipper/errors'
 require 'flipper/type'
 require 'flipper/gate'
+require 'flipper/evaluation_explanation'
 require 'flipper/feature_check_context'
 require 'flipper/gate_values'
 
@@ -107,6 +108,80 @@ module Flipper
         else
           false
         end
+      end
+    end
+
+    # Public: Evaluate this feature exactly once and explain the outcome.
+    #
+    # Answers "why can (or can't) this actor see this feature?" with
+    # evidence gathered during a single real evaluation: the boolean
+    # result, the gate that opened (if any), a fingerprint of the
+    # configuration used, and what happened at each gate (executed,
+    # skipped, or errored). Nothing is evaluated twice, so custom group
+    # blocks run only as many times as a real enabled? check would run
+    # them and percentage of time cannot flip between the answer and its
+    # explanation.
+    #
+    # actors - Zero or more actors, same as enabled?.
+    # actor_properties - Optional Array of property names (Strings or
+    #                    Symbols) allowed to appear in the actor
+    #                    diagnostics. Defaults to
+    #                    Flipper::Configuration#explanation_actor_properties.
+    #                    Only flipper_id is included when empty; actors are
+    #                    never inspect-ed as a whole.
+    #
+    # Returns a Flipper::EvaluationExplanation.
+    def evaluate_with_explanation(*actors, actor_properties: nil)
+      actors = wrap_actors(actors)
+
+      # thing is left for backwards compatibility
+      instrument(:evaluate_with_explanation, thing: actors&.first, actors: actors) do |payload|
+        context = FeatureCheckContext.new(
+          feature_name: @name,
+          values: gate_values,
+          actors: actors
+        )
+
+        explanation = EvaluationExplanation.new(
+          feature_name: @name,
+          config_version: EvaluationExplanation.config_version(context.values),
+          actors: diagnostic_actors(actors, actor_properties),
+        )
+
+        gates.each do |gate|
+          if explanation.result
+            explanation.record EvaluationExplanation::GateEvaluation.new(
+              name: gate.name, status: EvaluationExplanation::GateEvaluation::SKIPPED,
+              reason: :short_circuit
+            )
+            next
+          end
+
+          if gate.requires_actor? && !context.actors?
+            explanation.record EvaluationExplanation::GateEvaluation.new(
+              name: gate.name, status: EvaluationExplanation::GateEvaluation::SKIPPED,
+              reason: :no_actor
+            )
+            next
+          end
+
+          begin
+            open = !!gate.open?(context)
+            explanation.record EvaluationExplanation::GateEvaluation.new(
+              name: gate.name, status: EvaluationExplanation::GateEvaluation::EXECUTED,
+              open: open
+            )
+            payload[:gate_name] = gate.name if open
+          rescue => error
+            explanation.record EvaluationExplanation::GateEvaluation.new(
+              name: gate.name, status: EvaluationExplanation::GateEvaluation::ERROR,
+              open: false,
+              error: { class: error.class.name, message: error.message }
+            )
+          end
+        end
+
+        explanation
       end
     end
 
@@ -507,6 +582,34 @@ module Flipper
         payload[:feature_name] = name
         payload[:operation] = operation
         payload[:result] = yield(payload) if block_given?
+      end
+    end
+
+    # Private: Build diagnostic summaries of the actors for
+    # evaluate_with_explanation. Always includes flipper_id; includes only
+    # the flipper_properties explicitly allowed by the actor_properties
+    # option or Flipper::Configuration#explanation_actor_properties. The
+    # actor object itself is never inspect-ed, so sensitive attributes do
+    # not leak into explanations by default.
+    #
+    # Returns an Array of Hashes.
+    def diagnostic_actors(actors, actor_properties)
+      return [] if actors.nil?
+
+      allowlist = actor_properties || Flipper.configuration.explanation_actor_properties
+      allowlist = Array(allowlist).map(&:to_s)
+
+      actors.map do |actor|
+        summary = { flipper_id: actor.value }
+
+        unless allowlist.empty?
+          properties = actor.respond_to?(:flipper_properties) ? actor.flipper_properties : {}
+          summary[:properties] = properties.each_with_object({}) do |(key, value), allowed|
+            allowed[key.to_s] = value if allowlist.include?(key.to_s)
+          end
+        end
+
+        summary
       end
     end
   end

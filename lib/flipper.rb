@@ -57,6 +57,7 @@ module Flipper
   # interface of Flipper::DSL.
   def_delegators :instance,
                  :enabled?, :enable, :disable,
+                 :evaluate_with_explanation,
                  :enable_expression, :disable_expression,
                  :expression, :add_expression, :remove_expression,
                  :enable_actor, :disable_actor,
@@ -200,6 +201,7 @@ require 'flipper/adapter_builder'
 require 'flipper/configuration'
 require 'flipper/dsl'
 require 'flipper/errors'
+require 'flipper/evaluation_explanation'
 require 'flipper/feature'
 require 'flipper/gate'
 require 'flipper/instrumenters/memory'
