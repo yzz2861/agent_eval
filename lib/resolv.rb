@@ -530,6 +530,51 @@ class Resolv
       }
     end
 
+    ##
+    # Resolves service endpoints using an SVCB or HTTPS RR.
+    #
+    # +typeclass+ must be Resolv::DNS::Resource::IN::SVCB or
+    # Resolv::DNS::Resource::IN::HTTPS.
+    #
+    # +protocols+ is the client's supported ALPN protocol identifiers in
+    # preference order.  +params+ is an array of mandatory SvcParam key names
+    # or key numbers understood by the caller.  See
+    # Resolv::DNS::ServiceEndpoint::Resolver for the supported options.
+
+    def each_service_endpoint(name,
+                              typeclass = Resource::IN::HTTPS,
+                              protocols: nil, alpn: protocols,
+                              params: nil, mandatory_params: params,
+                              supported_params: mandatory_params,
+                              **options, &block)
+      resolver = ServiceEndpoint::Resolver.new(
+        self,
+        protocols: alpn,
+        mandatory_params: supported_params,
+        **options
+      )
+      return resolver.each(name, typeclass, &block) unless block
+      resolver.each(name, typeclass, &block)
+    end
+
+    ##
+    # Returns all service endpoints for +name+.  See #each_service_endpoint.
+
+    def get_service_endpoints(name, typeclass = Resource::IN::HTTPS, **options)
+      ret = []
+      each_service_endpoint(name, typeclass, **options) {|endpoint| ret << endpoint}
+      ret
+    end
+
+    ##
+    # Returns the first service endpoint for +name+.  See
+    # #each_service_endpoint.
+
+    def get_service_endpoint(name, typeclass = Resource::IN::HTTPS, **options)
+      each_service_endpoint(name, typeclass, **options) {|endpoint| return endpoint}
+      raise ServiceEndpoint::NoEndpointError, "no service endpoint for #{name}"
+    end
+
     # :stopdoc:
 
     def fetch_resource(name, typeclass)
@@ -1939,6 +1984,15 @@ class Resolv
       end
 
       ##
+      # Whether the given +key+ is present in this list.
+
+      def key?(key)
+        return @params.key?(canonical_key(key))
+      rescue KeyError
+        return false
+      end
+
+      ##
       # Get the number of SvcParams in this list.
 
       def count
@@ -3108,6 +3162,494 @@ class Resolv
           TypeValue = 65
           ClassValue = IN::ClassValue
           ClassHash[[TypeValue, ClassValue]] = self # :nodoc:
+        end
+      end
+    end
+
+    ##
+    # A service endpoint resolved from an SVCB or HTTPS RR.
+
+    class ServiceEndpoint
+      def initialize(name, target, port, protocols, address_candidates, priority, params, resource, fallback=false) # :nodoc:
+        @name = name
+        @target = target
+        @port = port
+        @protocols = Array(protocols).freeze
+        @address_candidates = address_candidates
+        @priority = priority
+        @params = params
+        @resource = resource
+        @fallback = fallback
+      end
+
+      ##
+      # The original service name.
+
+      attr_reader :name
+
+      ##
+      # The target host name.
+
+      attr_reader :target
+
+      ##
+      # The port to connect to.
+
+      attr_reader :port
+
+      ##
+      # ALPN protocol identifiers selected from the RR and the client's
+      # supported protocols.
+
+      attr_reader :protocols
+
+      ##
+      # The most preferred protocol in #protocols.
+
+      def protocol
+        @protocols.first
+      end
+
+      ##
+      # All address candidates, retaining whether each came from an address
+      # hint or an A/AAAA query.
+
+      attr_reader :address_candidates
+
+      ##
+      # Addresses returned by A and AAAA queries for #target.
+
+      def addresses
+        @address_candidates.select(&:resolved?).map(&:address)
+      end
+
+      ##
+      # Addresses supplied by ipv4hint and ipv6hint SvcParams.
+
+      def address_hints
+        @address_candidates.select(&:hint?).map(&:address)
+      end
+
+      ##
+      # The ServiceMode RR priority.  This is nil for a non-SVCB fallback.
+
+      attr_reader :priority
+
+      ##
+      # The service parameters of the selected RR.  This is nil for a
+      # non-SVCB fallback.
+
+      attr_reader :params
+
+      ##
+      # The selected ServiceBinding resource.  This is nil for a non-SVCB
+      # fallback.
+
+      attr_reader :resource
+
+      ##
+      # Whether this endpoint is the explicit non-SVCB fallback.
+
+      def fallback?
+        @fallback
+      end
+
+      ##
+      # An address and its source.
+
+      class AddressCandidate
+        def initialize(address, source) # :nodoc:
+          @address = address
+          @source = source
+        end
+
+        ##
+        # A Resolv::IPv4 or Resolv::IPv6 address.
+
+        attr_reader :address
+
+        ##
+        # The source of the address: :ipv4hint, :ipv6hint, :A, or :AAAA.
+
+        attr_reader :source
+
+        ##
+        # Whether the address came from an ipv4hint or ipv6hint SvcParam.
+
+        def hint?
+          @source == :ipv4hint || @source == :ipv6hint
+        end
+
+        ##
+        # Whether the address came from an A or AAAA query.
+
+        def resolved?
+          @source == :A || @source == :AAAA
+        end
+
+        ##
+        # The address family: 4 for IPv4 and 6 for IPv6.
+
+        def family
+          IPv4 === @address ? 4 : 6
+        end
+
+        def ipv4? # :nodoc:
+          family == 4
+        end
+
+        def ipv6? # :nodoc:
+          family == 6
+        end
+
+        def ==(other) # :nodoc:
+          other.is_a?(AddressCandidate) &&
+            address == other.address && source == other.source
+        end
+
+        alias eql? == # :nodoc:
+
+        def hash # :nodoc:
+          [address, source].hash
+        end
+
+        def inspect # :nodoc:
+          "#<#{self.class} #{address.inspect} source=#{source}>"
+        end
+      end
+
+      ##
+      # Indicates that service endpoint resolution failed.
+
+      class ResolutionError < ResolvError
+      end
+
+      ##
+      # Alias for ResolutionError.
+
+      Error = ResolutionError
+
+      ##
+      # Indicates that no usable service endpoint was found.
+
+      class NoEndpointError < ResolutionError
+      end
+
+      ##
+      # Alias for NoEndpointError.
+
+      NoServiceEndpointError = NoEndpointError
+
+      ##
+      # Indicates an AliasMode loop or an alias depth limit.
+
+      class AliasError < ResolutionError
+      end
+
+      ##
+      # Indicates an AliasMode loop.
+
+      class AliasLoopError < AliasError
+      end
+
+      ##
+      # Indicates that the AliasMode depth limit was reached.
+
+      class AliasDepthLimitError < AliasError
+      end
+
+      ##
+      # Resolves ServiceBinding RRs into ServiceEndpoint objects.
+
+      class Resolver
+        DEFAULT_KNOWN_PARAMS = [1, 2, 3, 4, 6, 7].freeze # :nodoc:
+        DEFAULT_MAX_ALIASES = 16 # :nodoc:
+
+        ##
+        # Creates a service endpoint resolver.
+        #
+        # +dns+ is the Resolv::DNS used for queries.
+        #
+        # Options:
+        #
+        # +protocols+:: Supported ALPN identifiers in client preference order.
+        # +mandatory_params+:: SvcParam keys the client understands when they
+        #                      are listed in an RR's mandatory SvcParam.
+        # +port+:: Default port when the RR has no port SvcParam.
+        # +default_protocols+:: Protocols allowed when an RR does not specify
+        #                        ALPN.  HTTPS defaults to ["http/1.1"].
+        # +fallback+:: +true+ or +:optional+ allows non-SVCB A/AAAA fallback;
+        # +false+ or +:reliant+ disables it.  Defaults to +false+.
+        # +max_aliases+:: Maximum number of AliasMode hops.  Defaults to 16.
+        # +use_ipv4+:: Whether to query and include IPv4 addresses.
+        # +use_ipv6+:: Whether to query and include IPv6 addresses.
+
+        def initialize(dns, protocols: nil, alpn: protocols,
+                       mandatory_params: nil, params: mandatory_params,
+                       supported_params: params,
+                       port: nil, default_port: port,
+                       default_protocols: nil,
+                       fallback: nil, fallback_policy: false,
+                       max_aliases: DEFAULT_MAX_ALIASES, alias_limit: max_aliases,
+                       use_ipv4: true, use_ipv6: nil)
+          @dns = dns
+          @protocols = Array(alpn).map(&:to_str).freeze
+          @supported_param_keys = normalize_param_keys(supported_params || DEFAULT_KNOWN_PARAMS)
+          @default_port = default_port
+          @default_protocols = default_protocols && Array(default_protocols).map(&:to_str)
+          @fallback = normalize_fallback(fallback.nil? ? fallback_policy : fallback)
+          @max_aliases = alias_limit.to_int
+          @use_ipv4 = use_ipv4
+          @use_ipv6 = use_ipv6.nil? ? detect_ipv6(dns) : use_ipv6
+          raise ArgumentError, "max_aliases must be non-negative" if @max_aliases < 0
+        end
+
+        ##
+        # Iterates usable endpoints for +name+ and +typeclass+.
+
+        def each(name, typeclass = Resource::IN::HTTPS, &block)
+          return enum_for(:each, name, typeclass) unless block
+          unless typeclass == Resource::IN::SVCB || typeclass == Resource::IN::HTTPS
+            raise ArgumentError, "expected SVCB or HTTPS resource class: #{typeclass.inspect}"
+          end
+
+          service_name = Name.create(name)
+          begin
+            endpoints = resolve_name(service_name, service_name, [service_name], typeclass)
+          rescue AliasError
+            raise
+          rescue ResolutionError
+            raise unless @fallback
+            endpoints = nil
+          end
+
+          if endpoints
+            endpoints.each(&block)
+          else
+            endpoint = fallback_endpoint(service_name, typeclass)
+            yield endpoint if endpoint
+          end
+        end
+
+        private
+
+        def resolve_name(service_name, queried_name, visited, typeclass)
+          records = @dns.getresources(queried_name, typeclass)
+          alias_record = records.find do |record|
+            record.alias_mode? && valid_alias_record?(record)
+          end
+          return follow_alias(service_name, alias_record, visited, typeclass) if alias_record
+
+          endpoints = records.select(&:service_mode?).map do |record|
+            begin
+              build_endpoint(service_name, record, typeclass == Resource::IN::HTTPS)
+            rescue ResolutionError
+              nil
+            end
+          end.compact.sort_by {|endpoint| endpoint.priority}
+
+          raise NoEndpointError, "no usable service endpoint for #{service_name}" if endpoints.empty?
+          endpoints
+        end
+
+        def follow_alias(service_name, record, visited, typeclass)
+          target = record.target
+          if target.length.zero?
+            raise AliasError, "AliasMode target must not be root for #{visited.last}"
+          end
+          if visited.include?(target)
+            raise AliasLoopError, "service binding alias loop at #{target}"
+          end
+          if visited.length - 1 >= @max_aliases
+            raise AliasDepthLimitError, "service binding alias depth limit exceeded for #{service_name}"
+          end
+
+          visited << target
+          resolve_name(service_name, target, visited, typeclass)
+        end
+
+        def valid_alias_record?(record)
+          record.target.length.nonzero? && record.params.count.zero?
+        end
+
+        def build_endpoint(service_name, record, https)
+          protocols = usable_protocols(record, https)
+          return unless protocols
+          return unless mandatory_params_supported?(record)
+
+          port_param = svc_param(record, :port)
+          port = port_param ? port_param.port : (@default_port || (https ? 443 : nil))
+          return unless port.is_a?(Integer) && port > 0 && port <= 65535
+
+          target = record.target.length.zero? ? service_name : record.target
+          candidates = address_candidates(record, target)
+          return unless candidates
+
+          ServiceEndpoint.new(
+            service_name,
+            target,
+            port,
+            protocols.first,
+            candidates,
+            record.priority,
+            record.params,
+            record
+          )
+        end
+
+        def usable_protocols(record, https)
+          alpn = svc_param(record, :alpn)
+          no_default = svc_param(record, :no_default_alpn)
+          return if alpn && no_default
+
+          if alpn
+            offered = alpn.protocol_ids
+            return if offered.empty?
+            @protocols.select {|protocol| offered.include?(protocol)}.tap do |selected|
+              return if selected.empty?
+            end
+          else
+            return if no_default
+            defaults = @default_protocols || (https ? ["http/1.1"] : [])
+            defaults.select {|protocol| @protocols.include?(protocol)}.tap do |selected|
+              return if selected.empty?
+            end
+          end
+        end
+
+        def mandatory_params_supported?(record)
+          mandatory = svc_param(record, :mandatory)
+          return true unless mandatory
+
+          mandatory.keys.each do |key|
+            param = record.params[key]
+            return false if key == 0
+            return false unless param
+            return false if SvcParam::Generic === param
+            return false unless @supported_param_keys.include?(key)
+            return false if key == 4 && !@use_ipv4
+            return false if key == 6 && !@use_ipv6
+          end
+          true
+        end
+
+        def address_candidates(record, target)
+          resolved, successful_families = resolved_address_candidates(target)
+          return if resolved.empty?
+
+          hints(record, successful_families, resolved) + resolved
+        end
+
+        def resolved_address_candidates(target)
+          candidates = []
+          successful_families = []
+          error = nil
+
+          if @use_ipv4
+            begin
+              @dns.getresources(target, Resource::IN::A).each do |record|
+                candidates << ServiceEndpoint::AddressCandidate.new(record.address, :A)
+              end
+              successful_families << 4
+            rescue ResolvError => e
+              error = e
+            end
+          end
+
+          if @use_ipv6
+            begin
+              @dns.getresources(target, Resource::IN::AAAA).each do |record|
+                candidates << ServiceEndpoint::AddressCandidate.new(record.address, :AAAA)
+              end
+              successful_families << 6
+            rescue ResolvError => e
+              error = e
+            end
+          end
+
+          raise error if error && successful_families.empty?
+          [candidates, successful_families]
+        end
+
+        def hints(record, families, resolved)
+          candidates = []
+          if families.include?(4)
+            hint = svc_param(record, :ipv4hint)
+            if hint
+              addresses = resolved.select(&:ipv4?).map(&:address)
+              candidates.concat(hint.addresses.select {|address| addresses.include?(address)}.map do |address|
+                ServiceEndpoint::AddressCandidate.new(address, :ipv4hint)
+              end)
+            end
+          end
+          if families.include?(6)
+            hint = svc_param(record, :ipv6hint)
+            if hint
+              addresses = resolved.select(&:ipv6?).map(&:address)
+              candidates.concat(hint.addresses.select {|address| addresses.include?(address)}.map do |address|
+                ServiceEndpoint::AddressCandidate.new(address, :ipv6hint)
+              end)
+            end
+          end
+          candidates
+        end
+
+        def svc_param(record, key)
+          record.params[key] if record.params.key?(key)
+        end
+
+        def detect_ipv6(dns)
+          if dns.respond_to?(:use_ipv6?, true)
+            dns.send(:use_ipv6?)
+          else
+            dns.use_ipv6?
+          end
+        end
+
+        def fallback_endpoint(service_name, typeclass)
+          candidates, = resolved_address_candidates(service_name)
+          return if candidates.empty?
+
+          https = typeclass == Resource::IN::HTTPS
+          port = @default_port || (https ? 443 : nil)
+          protocols = @default_protocols || (https ? ["http/1.1"] : [])
+          raise NoEndpointError, "SVCB fallback requires a port and protocols" unless port && !protocols.empty?
+
+          ServiceEndpoint.new(
+            service_name,
+            service_name,
+            port,
+            protocols,
+            candidates,
+            nil,
+            nil,
+            nil,
+            true
+          )
+        end
+
+        def normalize_param_keys(keys)
+          Array(keys).map do |key|
+            case key
+            when Integer
+              key
+            when SvcParam
+              key.class.key_number
+            else
+              SvcParam::ClassHash[key].key_number
+            end
+          end
+        end
+
+        def normalize_fallback(value)
+          case value
+          when true, :optional, :svcb_optional
+            true
+          when false, :reliant, :svcb_reliant
+            false
+          else
+            raise ArgumentError, "invalid fallback policy: #{value.inspect}"
+          end
         end
       end
     end
