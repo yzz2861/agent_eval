@@ -7,6 +7,16 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ## [Unreleased]
 
+### Added
+
+- Added a reusable `:non_overlapping_intervals` rule macro that checks an
+  array of records for overlapping time intervals per resource group. The
+  grouping key, start/finish fields and endpoint openness (`"[]"`, `"[)"`,
+  `"(]"`, `"()"` or explicit `left_open:`/`right_open:` overrides) are all
+  configurable; empty intervals and records whose fields failed schema checks
+  are skipped, and conflicts are reported on both original records. Detection
+  uses an O(n log n) sorted sweep instead of pairwise comparison
+
 
 ## [1.11.1] - 2025-01-21
 
