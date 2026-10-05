@@ -66,6 +66,8 @@ Basic Parsing
 
 .. autofunction:: parse_time
 
+.. autofunction:: parse_datetime
+
 .. autofunction:: parse_pattern
 
 Exceptions

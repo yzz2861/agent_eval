@@ -1,6 +1,17 @@
 Babel Changelog
 ===============
 
+Unreleased
+----------
+
+Features
+~~~~~~~~
+
+* Dates: Add `babel.dates.parse_datetime()` to parse localized datetimes
+  against explicit LDML patterns, with support for localized month, weekday
+  and day period names, numeric time zone offsets, and IANA time zone
+  validation (DST gaps and overlaps).
+
 Version 2.18.0
 --------------
 

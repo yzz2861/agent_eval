@@ -536,6 +536,182 @@ def test_parse_errors(case, func):
         func(case, locale='en_US')
 
 
+def test_parse_datetime():
+    assert (dates.parse_datetime('2004-04-01 15:30:00', 'yyyy-MM-dd HH:mm:ss')
+            == datetime(2004, 4, 1, 15, 30))
+    assert dates.parse_datetime('2004-04-01', 'yyyy-MM-dd') == datetime(2004, 4, 1)
+    # Two-digit years and quoted literals
+    assert dates.parse_datetime('01/04/04', 'dd/MM/yy') == datetime(2004, 4, 1)
+    assert (dates.parse_datetime('2004-04-01T15:30', "yyyy-MM-dd'T'HH:mm")
+            == datetime(2004, 4, 1, 15, 30))
+    assert (dates.parse_datetime("April 1, 2004 3 o'clock PM", "MMMM d, yyyy h 'o''clock' a", locale='en_US')
+            == datetime(2004, 4, 1, 15, 0))
+    # Fractional seconds
+    assert (dates.parse_datetime('2004-04-01 15:30:00.123', 'yyyy-MM-dd HH:mm:ss.SSS')
+            == datetime(2004, 4, 1, 15, 30, 0, 123000))
+
+
+def test_parse_datetime_localized_month_names():
+    assert (dates.parse_datetime('1 avril 2004', 'd MMMM yyyy', locale='fr')
+            == datetime(2004, 4, 1))
+    assert (dates.parse_datetime('1 avr. 2004', 'd MMM yyyy', locale='fr')
+            == datetime(2004, 4, 1))
+    assert (dates.parse_datetime('5. März 2024', 'd. MMMM yyyy', locale='de')
+            == datetime(2024, 3, 5))
+    # Stand-alone month names ('L')
+    assert (dates.parse_datetime('1 mars 2024', 'd LLLL yyyy', locale='fr')
+            == datetime(2024, 3, 1))
+    # Month names are matched case-insensitively
+    assert (dates.parse_datetime('1 AVRIL 2004', 'd MMMM yyyy', locale='fr')
+            == datetime(2004, 4, 1))
+
+
+def test_parse_datetime_localized_day_periods():
+    assert (dates.parse_datetime('April 1, 2004 3:30 PM', 'MMMM d, yyyy h:mm a', locale='en_US')
+            == datetime(2004, 4, 1, 15, 30))
+    assert (dates.parse_datetime('April 1, 2004 12:30 am', 'MMMM d, yyyy h:mm a', locale='en_US')
+            == datetime(2004, 4, 1, 0, 30))
+    assert (dates.parse_datetime('April 1, 2004 12:30 pm', 'MMMM d, yyyy h:mm a', locale='en_US')
+            == datetime(2004, 4, 1, 12, 30))
+    assert (dates.parse_datetime('2024年3月5日 下午3:04', 'yyyy年M月d日 ah:mm', locale='zh_Hans')
+            == datetime(2024, 3, 5, 15, 4))
+    assert (dates.parse_datetime('2024年3月5日 上午3:04', 'yyyy年M月d日 ah:mm', locale='zh_Hans')
+            == datetime(2024, 3, 5, 3, 4))
+
+
+def test_parse_datetime_weekday_names():
+    # 2024-03-05 was a Tuesday
+    assert (dates.parse_datetime('Dienstag, 5. März 2024', 'EEEE, d. MMMM yyyy', locale='de')
+            == datetime(2024, 3, 5))
+    assert (dates.parse_datetime('Tuesday, March 5, 2024', 'EEEE, MMMM d, yyyy', locale='en_US')
+            == datetime(2024, 3, 5))
+    # A weekday inconsistent with the parsed date is rejected
+    with pytest.raises(dates.ParseError):
+        dates.parse_datetime('Montag, 5. März 2024', 'EEEE, d. MMMM yyyy', locale='de')
+
+
+def test_parse_datetime_ambiguous_narrow_month():
+    # The narrow English month name 'J' stands for January, June and July
+    with pytest.raises(dates.ParseError, match='Ambiguous'):
+        dates.parse_datetime('J 1, 2004', 'MMMMM d, yyyy', locale='en_US')
+
+
+def test_parse_datetime_invalid_input():
+    with pytest.raises(dates.ParseError):
+        dates.parse_datetime('2004-02-30', 'yyyy-MM-dd')  # invalid day of month
+    with pytest.raises(dates.ParseError):
+        dates.parse_datetime('2004-13-01', 'yyyy-MM-dd')  # invalid month
+    with pytest.raises(dates.ParseError):
+        dates.parse_datetime('2004-04-01 25:00', 'yyyy-MM-dd HH:mm')  # hour out of range
+    with pytest.raises(dates.ParseError):
+        dates.parse_datetime('2004-04-01 13:00', 'yyyy-MM-dd hh:mm')  # 1-12 hour out of range
+    with pytest.raises(dates.ParseError):
+        dates.parse_datetime('not a date', 'yyyy-MM-dd')
+    with pytest.raises(dates.ParseError):
+        dates.parse_datetime('2004/04/01', 'yyyy-MM-dd')  # separators must match
+
+
+def test_parse_datetime_unsupported_pattern_fields():
+    for fmt in ['yyyy-MM-dd G', 'yyyy-MM-dd HH:mm z', 'yyyy-MM-dd KK:mm a', 'yyyy-ww-d']:
+        with pytest.raises(ValueError, match='Unsupported pattern field'):
+            dates.parse_datetime('2004-04-01', fmt)
+    # Unsupported field width
+    with pytest.raises(ValueError, match='Unsupported field width'):
+        dates.parse_datetime('2004-04-01', 'yyyy-MM-dddd')
+    # Predefined formats are not explicit patterns
+    with pytest.raises(ValueError, match='explicit LDML pattern'):
+        dates.parse_datetime('2004-04-01', 'short')
+    # A datetime needs a full date
+    with pytest.raises(ValueError, match='must contain'):
+        dates.parse_datetime('15:30', 'HH:mm')
+
+
+def test_parse_datetime_numeric_timezone_offset():
+    dt = dates.parse_datetime('2004-04-01 15:30 +0200', 'yyyy-MM-dd HH:mm xx')
+    assert dt.utcoffset() == timedelta(hours=2)
+    dt = dates.parse_datetime('2004-04-01 15:30 +02:00', 'yyyy-MM-dd HH:mm xxx')
+    assert dt.utcoffset() == timedelta(hours=2)
+    dt = dates.parse_datetime('2004-04-01 15:30 -08', 'yyyy-MM-dd HH:mm x')
+    assert dt.utcoffset() == timedelta(hours=-8)
+    dt = dates.parse_datetime('2004-04-01 15:30 Z', 'yyyy-MM-dd HH:mm X')
+    assert dt.tzinfo is dates.UTC
+    with pytest.raises(dates.ParseError):
+        dates.parse_datetime('2004-04-01 15:30 Z', 'yyyy-MM-dd HH:mm x')  # 'x' does not allow 'Z'
+
+
+def test_parse_datetime_timezone_gap(timezone_getter):
+    tz = timezone_getter('America/New_York')
+    # 2016-03-13 02:30 did not exist in New York (spring forward)
+    with pytest.raises(dates.ParseError, match='does not exist'):
+        dates.parse_datetime('2016-03-13 02:30', 'yyyy-MM-dd HH:mm', tzinfo=tz)
+
+
+def test_parse_datetime_timezone_overlap(timezone_getter):
+    tz = timezone_getter('America/New_York')
+    # 2016-11-06 01:30 occurred twice in New York (fall back)
+    with pytest.raises(dates.ParseError, match='ambiguous'):
+        dates.parse_datetime('2016-11-06 01:30', 'yyyy-MM-dd HH:mm', tzinfo=tz)
+    first = dates.parse_datetime('2016-11-06 01:30', 'yyyy-MM-dd HH:mm', tzinfo=tz, fold=0)
+    second = dates.parse_datetime('2016-11-06 01:30', 'yyyy-MM-dd HH:mm', tzinfo=tz, fold=1)
+    assert first.utcoffset() == timedelta(hours=-4)  # EDT
+    assert second.utcoffset() == timedelta(hours=-5)  # EST
+    assert second.astimezone(UTC) > first.astimezone(UTC)
+
+
+def test_parse_datetime_timezone_and_offset_consistency(timezone_getter):
+    tz = timezone_getter('America/Los_Angeles')
+    dt = dates.parse_datetime('2016-01-13 07:08 -0800', 'yyyy-MM-dd HH:mm xx', tzinfo=tz)
+    assert dt.utcoffset() == timedelta(hours=-8)
+    # An offset inconsistent with the time zone at the parsed time is rejected
+    with pytest.raises(dates.ParseError, match='inconsistent'):
+        dates.parse_datetime('2016-01-13 07:08 -0500', 'yyyy-MM-dd HH:mm xx', tzinfo=tz)
+
+
+def test_parse_datetime_fold_requires_timezone():
+    with pytest.raises(ValueError, match='fold'):
+        dates.parse_datetime('2016-11-06 01:30', 'yyyy-MM-dd HH:mm', fold=0)
+    with pytest.raises(ValueError, match='fold'):
+        dates.parse_datetime('2016-11-06 01:30', 'yyyy-MM-dd HH:mm',
+                             tzinfo='America/New_York', fold=2)
+
+
+def test_parse_datetime_fold_with_unambiguous_time(timezone_getter):
+    tz = timezone_getter('America/New_York')
+    dt = dates.parse_datetime('2016-01-13 07:08', 'yyyy-MM-dd HH:mm', tzinfo=tz, fold=1)
+    assert dt.replace(tzinfo=None) == datetime(2016, 1, 13, 7, 8)
+    assert dt.utcoffset() == timedelta(hours=-5)
+
+
+@pytest.mark.parametrize(('locale', 'fmt', 'dt'), [
+    ('en_US', 'yyyy-MM-dd HH:mm:ss', datetime(2024, 3, 5, 15, 4, 6)),
+    ('en_US', 'yyyy-MM-dd HH:mm:ss.SSS', datetime(2024, 3, 5, 15, 4, 6, 123000)),
+    ('en_US', 'MMMM d, yyyy h:mm a', datetime(2024, 3, 5, 15, 4)),
+    ('en_US', 'MMMM d, yyyy h:mm a', datetime(2024, 3, 5, 0, 4)),
+    ('en_US', 'MMMM d, yyyy h:mm a', datetime(2024, 3, 5, 12, 4)),
+    ('en_US', 'EEEE, MMMM d, yyyy', datetime(2024, 3, 5)),
+    ('fr', 'EEEE d MMMM yyyy HH:mm', datetime(2024, 3, 5, 15, 4)),
+    ('de', 'EEEE, d. MMMM yyyy HH:mm:ss', datetime(2024, 3, 5, 15, 4, 6)),
+    ('zh_Hans', 'yyyy年M月d日 ah:mm', datetime(2024, 3, 5, 15, 4)),
+    ('ja', 'yyyy年M月d日 H時m分', datetime(2024, 3, 5, 15, 4)),
+])
+def test_parse_datetime_format_datetime_roundtrip(locale, fmt, dt):
+    # parse_datetime must read back what format_datetime writes for the
+    # supported subset of pattern fields
+    formatted = dates.format_datetime(dt, fmt, locale=locale)
+    assert dates.parse_datetime(formatted, fmt, locale=locale) == dt
+
+
+def test_parse_datetime_format_datetime_roundtrip_with_timezone(timezone_getter):
+    tz = timezone_getter('America/New_York')
+    dt = _localize(tz, datetime(2016, 1, 13, 7, 8, 35))
+    fmt = 'yyyy-MM-dd HH:mm:ss xxx'
+    formatted = dates.format_datetime(dt, fmt, locale='en_US')
+    assert dates.parse_datetime(formatted, fmt, locale='en_US') == dt
+    parsed = dates.parse_datetime(formatted, fmt, locale='en_US', tzinfo=tz)
+    assert parsed == dt
+    assert parsed.utcoffset() == timedelta(hours=-5)
+
+
 def test_datetime_format_get_week_number():
     format = dates.DateTimeFormat(date(2006, 1, 8), Locale.parse('de_DE'))
     assert format.get_week_number(6) == 1
