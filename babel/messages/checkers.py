@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from babel.messages import icu
 from babel.messages.catalog import PYTHON_FORMAT, Catalog, Message, TranslationError
 
 #: list of format chars that are compatible to each other
@@ -61,6 +62,86 @@ def python_format(catalog: Catalog | None, message: Message) -> None:
         for msgstr in msgstrs[1:]:
             if msgstr:
                 _validate_format(msgids[1], msgstr)
+
+
+def icu_format(catalog: Catalog | None, message: Message) -> None:
+    """Verify ICU MessageFormat placeholders and branches in the translation."""
+    if 'icu-format' not in message.flags:
+        return
+
+    msgids = message.id
+    if not isinstance(msgids, (list, tuple)):
+        msgids = (msgids,)
+    msgstrs = message.string
+    if not isinstance(msgstrs, (list, tuple)):
+        msgstrs = (msgstrs,)
+
+    plural_categories = ordinal_categories = None
+    if catalog is not None and catalog.locale is not None:
+        plural_categories = set(catalog.locale.plural_form.rules) | {'other'}
+        ordinal_categories = set(catalog.locale.ordinal_form.rules) | {'other'}
+
+    pairs: list[tuple[int, str]] = []
+    if message.pluralizable:
+        if len(msgstrs) == 1:
+            pairs.append((0, msgstrs[0]))
+        else:
+            pairs.append((0, msgstrs[0]))
+            pairs.extend((1, msgstr) for msgstr in msgstrs[1:] if msgstr)
+    else:
+        pairs.append((0, msgstrs[0]))
+
+    parsed_sources: list[icu.MessageNode] = []
+    for index, original in enumerate(msgids):
+        try:
+            parsed_sources.append(icu.parse_message(original))
+        except icu.ICUFormatError as error:
+            raise icu.ICUFormatError(
+                icu.format_error(
+                    error,
+                    original,
+                    f'Invalid ICU message in original (msgid[{index}])',
+                ),
+                path=error.path,
+                position=error.position,
+            )
+    if message.pluralizable and len(parsed_sources) >= 2:
+        try:
+            icu.validate_nodes(parsed_sources[0], parsed_sources[1])
+        except icu.ICUFormatError as error:
+            raise icu.ICUFormatError(
+                icu.format_error(
+                    error,
+                    msgids[1],
+                    'Invalid ICU message in original (msgid_plural)',
+                ),
+                path=error.path,
+                position=error.position,
+            )
+
+    for source_index, translation in pairs:
+        if not translation:
+            continue
+        source = parsed_sources[min(source_index, len(parsed_sources) - 1)]
+        try:
+            target = icu.parse_message(translation)
+            icu.validate_nodes(
+                source,
+                target,
+                plural_categories=plural_categories,
+                ordinal_categories=ordinal_categories,
+            )
+        except icu.ICUFormatError as error:
+            label = (
+                'Invalid ICU message in translation'
+                if not message.pluralizable
+                else f'Invalid ICU message in translation (msgstr[{source_index}])'
+            )
+            raise icu.ICUFormatError(
+                icu.format_error(error, translation, label),
+                path=error.path,
+                position=error.position,
+            )
 
 
 def _validate_format(format: str, alternative: str) -> None:
@@ -169,7 +250,7 @@ def _find_checkers() -> list[Callable[[Catalog | None, Message], object]]:
     if len(checkers) == 0:
         # if entrypoints are not available or no usable egg-info was found
         # (see #230), just resort to hard-coded checkers
-        return [num_plurals, python_format]
+        return [num_plurals, python_format, icu_format]
     return checkers
 
 
