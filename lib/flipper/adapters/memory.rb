@@ -73,7 +73,8 @@ module Flipper
           when :integer
             @source[feature.key][gate.key] = thing.value.to_s
           when :set
-            @source[feature.key][gate.key] << thing.value.to_s
+            gate_values = @source[feature.key][gate.key] ||= Set.new
+            gate_values << thing.value.to_s
           when :json
             @source[feature.key][gate.key] = thing.value
           else

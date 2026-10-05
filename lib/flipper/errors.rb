@@ -2,6 +2,16 @@ module Flipper
   # Top level error that all other errors inherit from.
   class Error < StandardError; end
 
+  # Raised when feature prerequisites reference each other in a cycle.
+  class CircularDependency < Error
+    attr_reader :chain
+
+    def initialize(chain)
+      @chain = chain.map(&:to_s)
+      super("Feature prerequisites contain a circular dependency: #{@chain.join(' -> ')}")
+    end
+  end
+
   # Raised when gate can not be found for an actor.
   class GateNotFound < Error
     def initialize(actor)

@@ -1,3 +1,5 @@
+require 'flipper/feature_evaluation'
+
 module Flipper
   class FeatureCheckContext
     # Public: The name of the feature.
@@ -10,14 +12,31 @@ module Flipper
     # Public: The actors we want to know if a feature is enabled for.
     attr_reader :actors
 
-    def initialize(feature_name:, values:, actors:)
+    # Internal: All actors from the original enabled? call.
+    attr_reader :original_actors
+
+    # Internal: State shared while evaluating dependent features.
+    attr_reader :evaluation
+
+    # Internal: Returns the Feature for a dependent feature name.
+    attr_reader :feature_provider
+
+    def initialize(feature_name:, values:, actors:, original_actors: nil, evaluation: nil, feature_provider: nil)
       @feature_name = feature_name
       @values = values
       @actors = actors
+      @original_actors = original_actors || actors
+      @evaluation = evaluation || FeatureEvaluation.new(actors: actors)
+      @feature_provider = feature_provider || ->(name) { Flipper.feature(name) }
     end
 
     def actors?
       !@actors.nil? && !@actors.empty?
+    end
+
+    def feature(name)
+      raise ArgumentError, 'feature provider is not configured' unless @feature_provider
+      @feature_provider.call(name)
     end
 
     # Public: Convenience method for groups value like Feature has.

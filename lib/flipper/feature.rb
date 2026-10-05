@@ -2,6 +2,7 @@ require 'flipper/errors'
 require 'flipper/type'
 require 'flipper/gate'
 require 'flipper/feature_check_context'
+require 'flipper/feature_evaluation'
 require 'flipper/gate_values'
 
 module Flipper
@@ -95,18 +96,37 @@ module Flipper
 
       # thing is left for backwards compatibility
       instrument(:enabled?, thing: actors&.first, actors: actors) do |payload|
-        context = FeatureCheckContext.new(
-          feature_name: @name,
-          values: gate_values,
-          actors: actors
-        )
-
-        if open_gate = gates.detect { |gate| gate.open?(context) }
-          payload[:gate_name] = open_gate.name
-          true
-        else
-          false
+        shared_values = {}
+        path = []
+        FeatureEvaluation.for_actors(actors, results: shared_values, path: path).any? do |evaluation|
+          evaluation.evaluate_root(self, payload)
         end
+      end
+    end
+
+    # Internal: Evaluates this feature using state shared for one enabled? call.
+    def enabled_in_evaluation?(evaluation, payload = nil, values = nil)
+      values ||= gate_values
+      values = GateValues.new({}) if values.nil?
+      context = FeatureCheckContext.new(
+        feature_name: @name,
+        values: values,
+        actors: evaluation.actors,
+        original_actors: evaluation.original_actors,
+        evaluation: evaluation,
+        feature_provider: ->(name) { self.class.new(name, adapter, instrumenter: instrumenter) },
+      )
+
+      if values.prerequisites.any? && !prerequisite_gate.open?(context)
+        payload&.[]=(:gate_name, prerequisite_gate.name)
+        return false
+      end
+
+      if open_gate = ordinary_gates.detect { |gate| gate.open?(context) }
+        payload&.[]=(:gate_name, open_gate.name)
+        true
+      else
+        false
       end
     end
 
@@ -158,6 +178,23 @@ module Flipper
     # Returns result of enable.
     def enable_group(group)
       enable Types::Group.wrap(group)
+    end
+
+    # Public: Requires another feature to be enabled before this feature can open.
+    def enable_prerequisite(feature_name, state = true)
+      prerequisite = feature_name.is_a?(Types::Prerequisite) ? feature_name : Types::Prerequisite.new(feature_name, state)
+      enable prerequisite
+    end
+
+    # Public: Adds a prerequisite without replacing existing prerequisites.
+    def add_prerequisite(feature_name, state = true)
+      enable_prerequisite(feature_name, state)
+    end
+
+    # Public: Removes a prerequisite.
+    def remove_prerequisite(feature_name, state = true)
+      prerequisite = feature_name.is_a?(Types::Prerequisite) ? feature_name : Types::Prerequisite.new(feature_name, state)
+      disable prerequisite
     end
 
     # Public: Enables a feature a percentage of time.
@@ -234,6 +271,12 @@ module Flipper
       disable Types::Group.wrap(group)
     end
 
+    # Public: Removes a prerequisite.
+    def disable_prerequisite(feature_name, state = true)
+      prerequisite = feature_name.is_a?(Types::Prerequisite) ? feature_name : Types::Prerequisite.new(feature_name, state)
+      disable prerequisite
+    end
+
     # Public: Disables a feature a percentage of time.
     #
     # percentage - a Flipper::Types::PercentageOfTime instance or an object that
@@ -258,7 +301,7 @@ module Flipper
     def state
       values = gate_values
       boolean = gate(:boolean)
-      non_boolean_gates = gates - [boolean]
+      non_boolean_gates = ordinary_gates - [boolean]
 
       if values.boolean || values.percentage_of_time == 100
         :on
@@ -288,6 +331,7 @@ module Flipper
     # Public: Returns the raw gate values stored by the adapter.
     def gate_values
       adapter_values = adapter.get(self)
+      return GateValues.new({}) if adapter_values.nil? || adapter_values.empty?
       GateValues.new(adapter_values)
     end
 
@@ -315,6 +359,11 @@ module Flipper
     # Returns Set of String group names.
     def groups_value
       gate_values.groups
+    end
+
+    # Public: Get the adapter value for the prerequisites gate.
+    def prerequisites_value
+      gate_values.prerequisites
     end
 
     # Public: Get the adapter value for the expression gate.
@@ -357,7 +406,7 @@ module Flipper
     # Returns an Array of Flipper::Gate instances.
     def enabled_gates
       values = gate_values
-      gates.select { |gate| gate.enabled?(values.send(gate.key)) }
+      ordinary_gates.select { |gate| gate.enabled?(values.send(gate.key)) }
     end
 
     # Public: Get the names of the enabled gates.
@@ -371,7 +420,7 @@ module Flipper
     #
     # Returns an Array of Flipper::Gate instances.
     def disabled_gates
-      gates - enabled_gates
+      ordinary_gates - enabled_gates
     end
 
     # Public: Get the names of the disabled gates.
@@ -406,11 +455,12 @@ module Flipper
     #
     # Returns an array of gates
     def gates
-      @gates ||= gates_hash.values.freeze
+      @gates ||= ordinary_gate_hash.values.freeze
     end
 
     def gates_hash
       @gates_hash ||= {
+        prerequisite: Gates::Prerequisite.new,
         boolean: Gates::Boolean.new,
         expression: Gates::Expression.new,
         actor: Gates::Actor.new,
@@ -424,7 +474,7 @@ module Flipper
     #
     # Returns a Flipper::Gate if found, nil if not.
     def gate(name)
-      gates_hash[name.to_sym]
+      ordinary_gate_hash[name.to_sym]
     end
 
     # Public: Find the gate that protects an actor.
@@ -434,10 +484,26 @@ module Flipper
     # Returns a Flipper::Gate.
     # Raises Flipper::GateNotFound if no gate found for actor
     def gate_for(actor)
-      gates.detect { |gate| gate.protects?(actor) } || raise(GateNotFound, actor)
+      if actor.is_a?(Types::Prerequisite)
+        prerequisite_gate
+      else
+        gates.detect { |gate| gate.protects?(actor) } || raise(GateNotFound, actor)
+      end
     end
 
     private
+
+    def prerequisite_gate
+      @prerequisite_gate ||= Gates::Prerequisite.new
+    end
+
+    def ordinary_gate_hash
+      gates_hash.except(:prerequisite)
+    end
+
+    def ordinary_gates
+      gates
+    end
 
     # Internal: Mirrors a trusted remote expression during adapter sync,
     # including legacy expressions that predate empty-group validation.

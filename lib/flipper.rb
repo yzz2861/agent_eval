@@ -61,6 +61,7 @@ module Flipper
                  :expression, :add_expression, :remove_expression,
                  :enable_actor, :disable_actor,
                  :enable_group, :disable_group,
+                 :enable_prerequisite, :disable_prerequisite,
                  :enable_percentage_of_actors, :disable_percentage_of_actors,
                  :enable_percentage_of_time, :disable_percentage_of_time,
                  :features, :feature, :[], :preload, :preload_all,
@@ -94,6 +95,10 @@ module Flipper
 
   def boolean(value)
     Expression.build({ Boolean: value })
+  end
+
+  def prerequisite(name, enabled = true)
+    Types::Prerequisite.new(name, enabled)
   end
 
   def random(max)
@@ -214,6 +219,7 @@ require 'flipper/type'
 require 'flipper/types/actor'
 require 'flipper/types/boolean'
 require 'flipper/types/group'
+require 'flipper/types/prerequisite'
 require 'flipper/types/percentage'
 require 'flipper/types/percentage_of_actors'
 require 'flipper/types/percentage_of_time'

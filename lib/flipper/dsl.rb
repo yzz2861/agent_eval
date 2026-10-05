@@ -91,6 +91,11 @@ module Flipper
       feature(name).enable_group(group)
     end
 
+    # Public: Require another feature to have a particular state.
+    def enable_prerequisite(name, prerequisite_name, state = true)
+      feature(name).enable_prerequisite(prerequisite_name, state)
+    end
+
     # Public: Enable a feature a percentage of time.
     #
     # name - The String or Symbol name of the feature.
@@ -161,6 +166,11 @@ module Flipper
     # Returns result of disable.
     def disable_group(name, group)
       feature(name).disable_group(group)
+    end
+
+    # Public: Remove a prerequisite from a feature.
+    def disable_prerequisite(name, prerequisite_name, state = true)
+      feature(name).disable_prerequisite(prerequisite_name, state)
     end
 
     # Public: Disable a feature a percentage of time.

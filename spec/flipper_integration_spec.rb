@@ -632,17 +632,21 @@ RSpec.describe Flipper do
       expect(feature.enabled?(clooney)).to be(false)
     end
 
-    it "returns false on circular dependency" do
+    it "raises the feature chain on an indirect circular dependency" do
       feature.enable Flipper.feature_enabled(:other)
       flipper[:other].enable Flipper.feature_enabled(:search)
 
-      expect(feature.enabled?).to be(false)
+      expect { feature.enabled? }.to raise_error(Flipper::CircularDependency) do |error|
+        expect(error.chain).to eq(%w(search other search))
+      end
     end
 
-    it "returns false on self-reference" do
+    it "raises the feature chain on a self-reference" do
       feature.enable Flipper.feature_enabled(:search)
 
-      expect(feature.enabled?).to be(false)
+      expect { feature.enabled? }.to raise_error(Flipper::CircularDependency) do |error|
+        expect(error.chain).to eq(%w(search search))
+      end
     end
 
     it "cleans up thread-local state after evaluation" do
@@ -654,21 +658,19 @@ RSpec.describe Flipper do
       expect(evaluating.nil? || evaluating.empty?).to be(true)
     end
 
-    it "cleans up thread-local state after self-reference" do
+    it "raises without leaving evaluation state after self-reference" do
       feature.enable Flipper.feature_enabled(:search)
 
-      feature.enabled?
-      evaluating = Thread.current[:flipper_evaluating_features]
-      expect(evaluating.nil? || evaluating.empty?).to be(true)
+      expect { feature.enabled? }.to raise_error(Flipper::CircularDependency)
+      expect { feature.enabled? }.to raise_error(Flipper::CircularDependency)
     end
 
-    it "cleans up thread-local state after circular dependency" do
+    it "raises without leaving evaluation state after a circular dependency" do
       feature.enable Flipper.feature_enabled(:other)
       flipper[:other].enable Flipper.feature_enabled(:search)
 
-      feature.enabled?
-      evaluating = Thread.current[:flipper_evaluating_features]
-      expect(evaluating.nil? || evaluating.empty?).to be(true)
+      expect { feature.enabled? }.to raise_error(Flipper::CircularDependency)
+      expect { feature.enabled? }.to raise_error(Flipper::CircularDependency)
     end
   end
 

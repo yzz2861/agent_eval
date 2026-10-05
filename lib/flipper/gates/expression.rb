@@ -29,11 +29,25 @@ module Flipper
         return false if data.nil? || data.empty?
         expression = Flipper::Expression.build(data)
 
+        expression_context = {
+          feature_name: context.feature_name,
+          actors: context.actors,
+          original_actors: context.original_actors,
+          evaluation: context.evaluation,
+          feature_provider: context.feature_provider,
+        }
+
         if context.actors.nil? || context.actors.empty?
-          !!expression.evaluate(feature_name: context.feature_name, properties: DEFAULT_PROPERTIES, actor: nil)
+          !!expression.evaluate(expression_context.merge(properties: DEFAULT_PROPERTIES, actor: nil))
         else
-          context.actors.any? do |actor|
-            !!expression.evaluate(feature_name: context.feature_name, properties: properties(actor), actor: actor)
+          context.actors.each_with_index.any? do |actor, index|
+            actor_evaluation = context.evaluation.for_actor(actor, index)
+            actor_context = expression_context.merge(
+              evaluation: actor_evaluation,
+              properties: properties(actor),
+              actor: actor,
+            )
+            !!expression.evaluate(actor_context)
           end
         end
       end
