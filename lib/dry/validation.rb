@@ -68,6 +68,22 @@ module Dry
       Contract.build(options, &)
     end
 
+    # Start a batch validation session
+    #
+    # @example
+    #   results = Dry::Validation.batch do |batch|
+    #     inputs.map { |input| batch.call(contract, input) }
+    #   end
+    #
+    # @see Batch.session
+    #
+    # @return [Batch::Session]
+    #
+    # @api public
+    def self.batch(&)
+      Batch.session(&)
+    end
+
     # This is needed by Macros::Registrar
     #
     # @api private

@@ -84,12 +84,14 @@ module Dry
       #
       # @param [Hash] input The input to validate
       # @param [Hash] context Initial context for rules
+      # @param [Batch::Session, nil] batch Batch session collecting external
+      #   checks instead of executing them right away
       #
       # @return [Result]
       #
       # @api public
       # rubocop: disable Metrics/AbcSize
-      def call(input, context = EMPTY_HASH)
+      def call(input, context = EMPTY_HASH, batch = nil)
         validate_input_type(input)
 
         context_map = ::Concurrent::Map.new.tap do |map|
@@ -97,7 +99,7 @@ module Dry
           context.each { |key, value| map[key] = value }
         end
 
-        Result.new(schema.(input), context_map) do |result|
+        Result.new(schema.(input), context_map, freeze: batch.nil?) do |result|
           rules.each do |rule|
             next if rule.keys.any? { |key| error?(result, key) }
 
@@ -106,6 +108,12 @@ module Dry
             rule_result.failures.each do |failure|
               result.add_error(message_resolver.(**failure))
             end
+          end
+
+          self.class.external_checks.each do |check|
+            next if check.keys.any? { |key| error?(result, key) }
+
+            check.(self, result, batch)
           end
         end
       end

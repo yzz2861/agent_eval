@@ -101,6 +101,38 @@ module Dry
           end
         end
 
+        # Define an external check for your contract
+        #
+        # External checks verify a value against an external system. Within a
+        # batch session, checks that share the same query definition and
+        # context partition are merged into a single querier call.
+        #
+        # @example
+        #   external_check :department,
+        #                  on: :department_code,
+        #                  normalize: ->(code) { code.to_s.strip.upcase },
+        #                  partition: ->(context) { context[:tenant_id] },
+        #                  query: ->(codes, tenant) { department_repo.fetch_all(codes, tenant) },
+        #                  condition: ->(department) { department.active? }
+        #
+        # @param [Symbol] name Check identifier
+        # @param [Symbol, String, Hash, Array] on Key spec of the checked value
+        # @param [Hash] options See {ExternalCheck} for the supported options
+        #
+        # @return [ExternalCheck]
+        #
+        # @see ExternalCheck
+        # @see Batch::Session
+        #
+        # @api public
+        def external_check(name, on:, **options)
+          ensure_valid_keys(on) if __schema__
+
+          ExternalCheck.new(name: name, keys: [on], **options).tap do |check|
+            external_checks << check
+          end
+        end
+
         # A shortcut that can be used to define contracts that won't be reused or inherited
         #
         # @example
@@ -133,6 +165,17 @@ module Dry
           @rules ||= EMPTY_ARRAY
             .dup
             .concat(superclass.respond_to?(:rules) ? superclass.rules : EMPTY_ARRAY)
+        end
+
+        # Return external checks defined in this class
+        #
+        # @return [Array<ExternalCheck>]
+        #
+        # @api private
+        def external_checks
+          @external_checks ||= EMPTY_ARRAY
+            .dup
+            .concat(superclass.respond_to?(:external_checks) ? superclass.external_checks : EMPTY_ARRAY)
         end
 
         # Return messages configured for this class

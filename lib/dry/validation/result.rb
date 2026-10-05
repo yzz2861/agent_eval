@@ -15,12 +15,16 @@ module Dry
       # Build a new result
       #
       # @param [Dry::Schema::Result] schema_result
+      # @param [Concurrent::Map] context
+      # @param [Hash] options
+      # @param [Boolean] freeze Whether to freeze the result after yielding;
+      #   batch sessions defer freezing until they are finalized
       #
       # @api private
-      def self.new(schema_result, context = ::Concurrent::Map.new, options = EMPTY_HASH)
-        result = super
+      def self.new(schema_result, context = ::Concurrent::Map.new, options = EMPTY_HASH, freeze: true)
+        result = super(schema_result, context, options)
         yield(result) if block_given?
-        result.freeze
+        freeze ? result.freeze : result
       end
 
       # Context that's shared between rules
