@@ -1191,6 +1191,38 @@ Unbounded ranges use ``an.Preceding()`` or ``an.Following()`` without arguments.
     SELECT "date","amount",SUM("amount") OVER(PARTITION BY "account_id" ORDER BY "date" ROWS BETWEEN 7 PRECEDING AND CURRENT ROW) "rolling_7_day" FROM "transactions"
 
 
+Named Windows
+"""""""""""
+
+Use ``an.Window`` with ``Query.window()`` to share a window definition across analytic functions. A function can refer
+to a named window directly or refine it by adding only the parts that the named window does not already define.
+
+.. code-block:: python
+
+    from pypika import Query, Table, analytics as an
+
+    t = Table('transactions')
+    partitioned = an.Window('partitioned', t.account_id)
+    ordered = an.Window('ordered').over(partitioned).orderby(t.date)
+
+    q = (
+        Query.from_(t)
+        .window(partitioned)
+        .window(ordered)
+        .select(
+            an.Rank().over(ordered),
+            an.Sum(t.amount).over(partitioned).orderby(t.date).range(an.Preceding(), an.CURRENT_ROW),
+        )
+    )
+
+.. code-block:: sql
+
+    SELECT RANK() OVER ordered,SUM("amount") OVER(partitioned ORDER BY "date" RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM "transactions" WINDOW partitioned AS (PARTITION BY "account_id"),ordered AS (partitioned ORDER BY "date")
+
+Named windows are supported by the standard, PostgreSQL, and SQLite query builders. Other dialects reject ``window()``
+unless that dialect query builder explicitly enables named windows.
+
+
 Parametrized Queries
 ^^^^^^^^^^^^^^^^^^^^
 

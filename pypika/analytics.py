@@ -7,6 +7,7 @@ from __future__ import annotations
 from pypika.terms import (
     AnalyticFunction,
     IgnoreNullsAnalyticFunction,
+    Window,
     WindowFrameAnalyticFunction,
 )
 

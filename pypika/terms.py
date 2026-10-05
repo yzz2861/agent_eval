@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import copy as clone
 import inspect
 import re
 import sys
@@ -13,6 +14,7 @@ from pypika.enums import Arithmetic, Boolean, Comparator, Dialects, Equality, JS
 from pypika.utils import (
     CaseException,
     FunctionException,
+    QueryException,
     builder,
     format_alias_sql,
     format_quotes,
@@ -1511,6 +1513,122 @@ class AggregateFunction(Function):
         return sql
 
 
+class Window:
+    def __init__(self, name: str, *partition: Any, orderby: Any = None, order: Order | None = None) -> None:
+        self.name = name
+        self._partition = list(partition)
+        self._orderbys = []
+        self.frame = None
+        self.bound = None
+        self._base_window_name = None
+
+        if orderby is not None:
+            orderby_terms = orderby if isinstance(orderby, (list, tuple, set)) else [orderby]
+            self._orderbys.extend((term, order) for term in orderby_terms)
+
+    def __copy__(self) -> "Window":
+        newone = type(self).__new__(type(self))
+        newone.__dict__.update(self.__dict__)
+        newone._partition = clone(self._partition)
+        newone._orderbys = clone(self._orderbys)
+        newone.bound = clone(self.bound)
+        return newone
+
+    @builder
+    def over(self, *terms: Any) -> "Window":
+        if len(terms) == 1 and isinstance(terms[0], (Window, str)):
+            base_window = terms[0]
+            if self._base_window_name is not None:
+                raise QueryException("Cannot replace a base window")
+            self._base_window_name = base_window.name if isinstance(base_window, Window) else base_window
+        else:
+            self._partition.extend(terms)
+
+    @builder
+    def partition(self, *terms: Any) -> "Window":
+        return self.over(*terms)
+
+    @builder
+    def partition_by(self, *terms: Any) -> "Window":
+        return self.over(*terms)
+
+    def _add_orderbys(self, terms: Iterable[Any], order: Order | None = None) -> None:
+        self._orderbys.extend((term, order) for term in terms)
+
+    @builder
+    def orderby(self, *terms: Any, **kwargs: Any) -> "Window":
+        self._add_orderbys(terms, kwargs.get("order"))
+
+    def _set_frame_and_bounds(self, frame: str, bound: Any, and_bound: Any) -> None:
+        if self.frame or self.bound:
+            raise AttributeError()
+
+        self.frame = frame
+        self.bound = (bound, and_bound) if and_bound else bound
+
+    @builder
+    def rows(self, bound: Any, and_bound: Any = None) -> "Window":
+        self._set_frame_and_bounds("ROWS", bound, and_bound)
+
+    @builder
+    def range(self, bound: Any, and_bound: Any = None) -> "Window":
+        self._set_frame_and_bounds("RANGE", bound, and_bound)
+
+    def replace_table(self, current_table: Table | None, new_table: Table | None) -> "Window":
+        new_window = clone(self)
+        new_window._partition = [
+            term.replace_table(current_table, new_table) if hasattr(term, "replace_table") else term
+            for term in self._partition
+        ]
+        new_window._orderbys = [
+            (term.replace_table(current_table, new_table) if hasattr(term, "replace_table") else term, order)
+            for term, order in self._orderbys
+        ]
+        return new_window
+
+    def _orderby_field(self, field: Any, orient: Order | None, **kwargs: Any) -> str:
+        field_sql = field.get_sql(**kwargs) if hasattr(field, "get_sql") else str(field)
+        if orient is None:
+            return field_sql
+
+        return "{field} {orient}".format(field=field_sql, orient=orient.value)
+
+    def get_partition_sql(self, **kwargs: Any) -> str:
+        terms = []
+        if self._base_window_name is not None:
+            terms.append(self._base_window_name)
+
+        if self._partition:
+            args = ",".join(
+                term.get_sql(**kwargs) if hasattr(term, "get_sql") else str(term) for term in self._partition
+            )
+            terms.append("PARTITION BY {args}".format(args=args))
+
+        if self._orderbys:
+            terms.append(
+                "ORDER BY {orderby}".format(
+                    orderby=",".join(self._orderby_field(field, orient, **kwargs) for field, orient in self._orderbys)
+                )
+            )
+
+        return " ".join(terms)
+
+    def get_frame_sql(self) -> str:
+        if not isinstance(self.bound, tuple):
+            return "{frame} {bound}".format(frame=self.frame, bound=self.bound)
+
+        lower, upper = self.bound
+        return "{frame} BETWEEN {lower} AND {upper}".format(frame=self.frame, lower=lower, upper=upper)
+
+    def get_sql(self, **kwargs: Any) -> str:
+        specification = self.get_partition_sql(**kwargs)
+
+        if self.frame or self.bound:
+            specification = "{specification} {frame}".format(specification=specification, frame=self.get_frame_sql())
+
+        return "{name} AS ({specification})".format(name=self.name, specification=specification)
+
+
 class AnalyticFunction(AggregateFunction):
     is_aggregate = False
     is_analytic = True
@@ -1522,11 +1640,29 @@ class AnalyticFunction(AggregateFunction):
         self._orderbys = []
         self._include_filter = False
         self._include_over = False
+        self._named_window = None
 
     @builder
     def over(self, *terms: Any) -> None:
-        self._include_over = True
+        if len(terms) == 1 and isinstance(terms[0], (Window, str)):
+            named_window = terms[0]
+            self._include_over = True
+            self._named_window = named_window.name if isinstance(named_window, Window) else named_window
+            self._partition = []
+        else:
+            self._include_over = True
+            self._named_window = None
+            self._partition += terms
+
+    @builder
+    def partition(self, *terms: Any) -> None:
+        if self._named_window is not None:
+            self._include_over = True
         self._partition += terms
+
+    @builder
+    def partition_by(self, *terms: Any) -> None:
+        return self.partition(*terms)
 
     @builder
     def orderby(self, *terms: Any, **kwargs: Any) -> None:
@@ -1562,11 +1698,20 @@ class AnalyticFunction(AggregateFunction):
 
     def get_function_sql(self, **kwargs: Any) -> str:
         function_sql = super().get_function_sql(**kwargs)
-        partition_sql = self.get_partition_sql(**kwargs)
 
         sql = function_sql
         if self._include_over:
-            sql += f" OVER({partition_sql})"
+            if self._named_window is not None:
+                local_refinement = self.get_partition_sql(**kwargs)
+                if local_refinement:
+                    sql += " OVER({named_window} {refinement})".format(
+                        named_window=self._named_window, refinement=local_refinement
+                    )
+                else:
+                    sql += " OVER {named_window}".format(named_window=self._named_window)
+            else:
+                partition_sql = self.get_partition_sql(**kwargs)
+                sql += f" OVER({partition_sql})"
 
         return sql
 

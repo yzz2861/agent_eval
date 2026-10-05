@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from pypika.enums import Dialects, JoinType, ReferenceOption, SetOperation
 from pypika.terms import (
+    AnalyticFunction,
     ArithmeticExpression,
     Criterion,
     EmptyCriterion,
@@ -21,6 +22,7 @@ from pypika.terms import (
     Term,
     Tuple,
     ValueWrapper,
+    Window,
 )
 from pypika.utils import (
     JoinException,
@@ -714,6 +716,7 @@ class QueryBuilder(Selectable, Term):
     ALIAS_QUOTE_CHAR = None
     QUERY_ALIAS_QUOTE_CHAR = None
     QUERY_CLS = Query
+    SUPPORTS_WINDOW_CLAUSE = True
 
     def __init__(
         self,
@@ -752,6 +755,7 @@ class QueryBuilder(Selectable, Term):
         self._joins = []
         self._unions = []
         self._using = []
+        self._windows = []
 
         self._limit = None
         self._offset = None
@@ -788,6 +792,7 @@ class QueryBuilder(Selectable, Term):
         newone._joins = copy(self._joins)
         newone._unions = copy(self._unions)
         newone._updates = copy(self._updates)
+        newone._windows = copy(self._windows)
         newone._force_indexes = copy(self._force_indexes)
         newone._use_indexes = copy(self._use_indexes)
         return newone
@@ -837,6 +842,7 @@ class QueryBuilder(Selectable, Term):
         self._update_table = new_table if self._update_table == current_table else self._update_table
 
         self._with = [alias_query.replace_table(current_table, new_table) for alias_query in self._with]
+        self._windows = [window.replace_table(current_table, new_table) for window in self._windows]
         self._selects = [select.replace_table(current_table, new_table) for select in self._selects]
         self._columns = [column.replace_table(current_table, new_table) for column in self._columns]
         self._values = [
@@ -861,6 +867,19 @@ class QueryBuilder(Selectable, Term):
     def with_(self, selectable: Selectable, name: str) -> None:
         t = AliasedQuery(name, selectable)
         self._with.append(t)
+
+    @builder
+    def window(self, window: Window | str, *partition: Any, orderby: Any = None) -> None:
+        if isinstance(window, str):
+            window = Window(window, *partition, orderby=orderby)
+
+        if not self.SUPPORTS_WINDOW_CLAUSE:
+            raise QueryException("Named windows are not supported by this dialect")
+
+        if any(existing.name == window.name for existing in self._windows):
+            raise QueryException("Duplicate window name: {}".format(window.name))
+
+        self._windows.append(window)
 
     @builder
     def into(self, table: str | Table) -> None:
@@ -1264,6 +1283,150 @@ class QueryBuilder(Selectable, Term):
         kwargs.setdefault("as_keyword", self.as_keyword)
         kwargs.setdefault("dialect", self.dialect)
 
+    def _window_terms(self) -> list[Node]:
+        terms: list[Node] = []
+        for clause in self._with:
+            terms.append(clause)
+            if hasattr(clause, "query"):
+                terms.append(clause.query)
+
+        terms.extend(self._selects)
+        for table in self._select_star_tables:
+            terms.append(Star(table))
+
+        terms.extend(self._from)
+        terms.extend(join.item for join in self._joins)
+        terms.extend(self._using)
+        terms.extend(self._groupbys)
+        terms.extend(term for term, _ in self._orderbys)
+        terms.extend(value for _, value in self._updates)
+
+        for criterion in (self._wheres, self._prewheres, self._havings, self._qualifys):
+            if criterion is not None:
+                terms.append(criterion)
+
+        for table in (self._insert_table, self._update_table):
+            if table is not None:
+                terms.append(table)
+
+        for join in self._joins:
+            if isinstance(join, JoinOn):
+                terms.append(join.criterion)
+            elif isinstance(join, JoinUsing):
+                terms.extend(join.fields)
+
+        return terms
+
+    def _resolved_windows(self) -> dict[str, dict[str, Any]]:
+        windows = {window.name: window for window in self._windows}
+        resolved = {}
+
+        def resolve(name: str, trail: tuple[str, ...] = ()) -> dict[str, Any]:
+            if name in resolved:
+                return resolved[name]
+
+            if name in trail:
+                cycle = " -> ".join((*trail, name))
+                raise QueryException("Circular window reference: {}".format(cycle))
+
+            if name not in windows:
+                raise QueryException("Unknown window reference: {}".format(name))
+
+            window = windows[name]
+            base_name = window._base_window_name
+            if base_name is not None:
+                base = resolve(base_name, (*trail, name))
+                specification = {
+                    "partition": base["partition"] + window._partition,
+                    "orderbys": base["orderbys"] + window._orderbys,
+                    "frame": base["frame"] if base["frame"] is not None else window.frame,
+                    "bound": base["bound"] if base["bound"] is not None else window.bound,
+                }
+
+                if base["partition"] and window._partition:
+                    raise QueryException("Cannot override PARTITION BY from named window '{}'".format(base_name))
+                if base["orderbys"] and window._orderbys:
+                    raise QueryException("Cannot override ORDER BY from named window '{}'".format(base_name))
+                if (base["frame"] is not None or base["bound"] is not None) and (
+                    window.frame is not None or window.bound is not None
+                ):
+                    raise QueryException("Cannot override frame from named window '{}'".format(base_name))
+            else:
+                specification = {
+                    "partition": list(window._partition),
+                    "orderbys": list(window._orderbys),
+                    "frame": window.frame,
+                    "bound": window.bound,
+                }
+
+            resolved[name] = specification
+            return specification
+
+        for name in windows:
+            resolve(name)
+
+        return resolved
+
+    def _validate_windows(self, resolved_windows: dict[str, dict[str, Any]]) -> None:
+        if self._windows and not self.SUPPORTS_WINDOW_CLAUSE:
+            raise QueryException("Named windows are not supported by this dialect")
+
+        is_select = self._selects and not self._insert_table and not self._update_table and not self._delete_from
+        if self._windows and not is_select:
+            raise QueryException("Named windows are only supported in SELECT queries")
+
+        for term in self._window_terms():
+            for function in term.find_(AnalyticFunction):
+                named_window = function._named_window
+                if named_window is None:
+                    continue
+
+                if named_window not in resolved_windows:
+                    raise QueryException("Unknown window reference: {}".format(named_window))
+
+                window = resolved_windows[named_window]
+                if window["partition"] and function._partition:
+                    raise QueryException(
+                        "Cannot override PARTITION BY from named window '{}'".format(named_window)
+                    )
+                if window["orderbys"] and function._orderbys:
+                    raise QueryException("Cannot override ORDER BY from named window '{}'".format(named_window))
+                if (window["frame"] is not None or window["bound"] is not None) and (
+                    function.frame is not None or function.bound is not None
+                ):
+                    raise QueryException("Cannot override frame from named window '{}'".format(named_window))
+
+    def _ordered_windows(self) -> list[Window]:
+        windows_by_name = {window.name: window for window in self._windows}
+        ordered = []
+        visited = set()
+
+        def visit(window: Window, trail: tuple[str, ...] = ()) -> None:
+            if window.name in visited:
+                return
+
+            if window.name in trail:
+                cycle = " -> ".join((*trail, window.name))
+                raise QueryException("Circular window reference: {}".format(cycle))
+
+            base_name = window._base_window_name
+            if base_name is not None:
+                if base_name not in windows_by_name:
+                    raise QueryException("Unknown window reference: {}".format(base_name))
+                visit(windows_by_name[base_name], (*trail, window.name))
+
+            visited.add(window.name)
+            ordered.append(window)
+
+        for window in self._windows:
+            visit(window)
+
+        return ordered
+
+    def _window_sql(self, **kwargs: Any) -> str:
+        windows = self._ordered_windows()
+        return " WINDOW {windows}".format(windows=",".join(window.get_sql(**kwargs) for window in windows))
+
     def get_sql(self, with_alias: bool = False, subquery: bool = False, **kwargs: Any) -> str:
         self._set_kwargs_defaults(kwargs)
         if not (self._selects or self._insert_table or self._delete_from or self._update_table):
@@ -1272,6 +1435,9 @@ class QueryBuilder(Selectable, Term):
             return ""
         if self._update_table and not self._updates:
             return ""
+
+        resolved_windows = self._resolved_windows()
+        self._validate_windows(resolved_windows)
 
         has_joins = bool(self._joins)
         has_multiple_from_clauses = 1 < len(self._from)
@@ -1366,6 +1532,9 @@ class QueryBuilder(Selectable, Term):
 
         if self._havings:
             querystring += self._having_sql(**kwargs)
+
+        if self._windows:
+            querystring += self._window_sql(**kwargs)
 
         if self._qualifys:
             querystring += self._qualify_sql(**kwargs)
