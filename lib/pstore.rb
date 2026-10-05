@@ -158,6 +158,27 @@ require "digest"
 #       end
 #     end
 #
+# === Updating Several Stores Together
+#
+# A single PStore#transaction protects one file. To update two or more store
+# files as one recoverable unit, use PStore::TransactionCoordinator:
+#
+#   accounts = PStore.new('accounts.store')
+#   ledger   = PStore.new('ledger.store')
+#   PStore::TransactionCoordinator.transaction(accounts, ledger) do |a, l|
+#     a[:balance] -= 100
+#     l[:entries] << [:withdrawal, 100]
+#   end
+#
+# The coordinator performs an explicit two-phase commit: it first records a
+# durable prepare state and a final commit/abort decision in a coordination
+# journal, and only then publishes the store files one at a time with atomic
+# renames. A sequence of renames is not itself atomic, so if the process is
+# killed between files, reopening any participating store replays the durable
+# decision and brings every file to the same result. The given block is never
+# re-run during recovery; if the coordination record is missing or corrupt,
+# recovery raises PStore::Error instead of guessing.
+#
 # === Read-Only Transactions
 #
 # By default, a transaction allows both reading from and writing to
@@ -327,7 +348,7 @@ require "digest"
 #
 class PStore
   # :stopdoc:
-  VERSION = "0.2.1"
+  VERSION = "0.3.0"
 
   RDWR_ACCESS = {mode: IO::RDWR | IO::CREAT | IO::BINARY, encoding: Encoding::ASCII_8BIT}.freeze
   RD_ACCESS = {mode: IO::RDONLY | IO::BINARY, encoding: Encoding::ASCII_8BIT}.freeze
@@ -541,6 +562,16 @@ class PStore
     throw self
   end
 
+  # Acquire or release the store's in-process lock on behalf of a
+  # PStore::TransactionCoordinator.
+  def coordinator_lock
+    @lock.lock
+  end
+  def coordinator_unlock
+    @lock.unlock if @lock.owned?
+  end
+  private :coordinator_lock, :coordinator_unlock
+
   # Opens a transaction block for the store.
   # See {Transactions}[rdoc-ref:PStore@Transactions].
   #
@@ -565,6 +596,9 @@ class PStore
     begin
       @rdonly = read_only
       @abort = false
+      # Finish any multi-store transaction whose participant files were left
+      # behind by a crashed process before opening the current data file.
+      PStore::TransactionCoordinator.recover_pending(@filename)
       file = open_and_lock_file(@filename, read_only)
       if file
         begin
@@ -735,7 +769,433 @@ class PStore
   def empty_marshal_data
     EMPTY_MARSHAL_DATA
   end
-  def empty_marshal_checksum
-    EMPTY_MARSHAL_CHECKSUM
+ def empty_marshal_checksum
+   EMPTY_MARSHAL_CHECKSUM
+ end
+end
+
+# PStore::TransactionCoordinator updates several PStore files as one
+# recoverable, two-phase transaction.
+#
+# A single file rename is atomic on most filesystems, but a sequence of
+# renames is not: a process can die after publishing some stores but before
+# the rest.  This coordinator therefore keeps an explicit journal beside the
+# participating files:
+#
+# 1. The user block runs exactly once and may read or modify every store.
+# 2. (prepare) Each new file image is written and flushed to
+#    +<path>.p2pc.<txid>.image+, then a durable +<path>.p2pc.<txid>.ready+
+#    marker records that the image is complete.
+# 3. (decision) The journal at +<first-store-dir>/.pstore-p2pc.<digest>.journal+
+#    is atomically switched from its +prepared+ record to the final
+#    +committed+ or +aborted+ decision.  The decision is durable before any
+#    store file is replaced.
+# 4. (publish) Committed images are renamed onto their store files one at a
+#    time, in stable path order.  Each individual rename is atomic; the
+#    sequence as a whole is not, but reopening any participating file replays
+#    the durable decision until all files converge.
+#
+# If a process dies during any of these phases, the next
+# PStore#transaction (or PStore::TransactionCoordinator.recover_pending)
+# finishes the transaction: +committed+ rolls forward, every other recorded
+# state rolls back without touching the original files.
+#
+# A ready marker whose journal is missing or corrupted cannot be resolved
+# safely, so recovery raises PStore::Error instead of guessing.
+class PStore::TransactionCoordinator
+  PROTOCOL_VERSION = 1
+  private_constant :PROTOCOL_VERSION
+
+  READY_PATTERN = /\.p2pc\.([^.]+)\.ready\z/
+  IMAGE_PATTERN = /\.p2pc\.([^.]+)\.image\z/
+  private_constant :READY_PATTERN, :IMAGE_PATTERN
+
+  # Runs +block+ as a single transaction over the given stores.
+  # Stores are always locked and published in stable (sorted path) order.
+  def self.transaction(*stores)
+    new(*stores).transaction { yield(*stores) }
   end
+
+  # Creates a coordinator for the given PStore objects.
+  def initialize(*stores)
+    @stores = stores
+    unless @stores.length >= 2 && @stores.all? { |store| store.is_a?(PStore) }
+      raise PStore::Error, "at least two PStore instances are required"
+    end
+    @ordered = @stores.uniq { |store| store.path }.sort_by(&:path)
+    if @ordered.length != @stores.length
+      raise PStore::Error, "the same PStore cannot participate twice"
+    end
+    @paths = @ordered.map(&:path)
+    @digest = Digest::SHA256.digest(@paths.join("\0")).unpack1("H*")
+    @journal_path = File.join(File.dirname(@paths.first),
+                              ".pstore-p2pc.#{@digest}.journal")
+    @journal_lock_path = "#{@journal_path}.lock"
+  end
+
+  # Finishes every unfinished multi-store transaction that touches the given
+  # store file, then removes its coordination files. Raises PStore::Error if
+  # a participant marker exists but its journal is missing or unreadable.
+  def self.recover_pending(path)
+    path = File.path(path)
+    scan = scan_coordination([path])
+    return if scan[:journal_paths].empty?
+    run_recovery(scan, prelocked_data: {})
+  end
+
+  # Recovery entry for a live coordinator that already holds its own data file
+  # locks (in sorted path order).
+  def self.recover_locked(ordered_stores, locked_files)
+    paths = ordered_stores.map(&:path)
+    scan = scan_coordination(paths)
+    return if scan[:journal_paths].empty?
+    locks_by_path = {}
+    ordered_stores.each { |store| locks_by_path[store.path] = locked_files[store] }
+    run_recovery(scan, prelocked_data: locks_by_path)
+  end
+  private_class_method :recover_locked
+
+  # Scans the given participant files' directories for coordination state,
+  # then follows journal records to participant directories (participants may
+  # live in different directories).
+  def self.scan_coordination(seed_paths)
+    scanned = {}
+    discovered = Hash.new { |hash, key| hash[key] = [] }
+    journal_paths = []
+
+    scan = lambda do |participant_path|
+      directory = File.dirname(participant_path)
+      base = File.basename(participant_path)
+      return if scanned.key?(directory)
+      scanned[directory] = true
+
+      referenced_txids = []
+      orphan_images = []
+      (Dir.children(directory) rescue []).each do |name|
+        full_path = File.join(directory, name)
+        if name.start_with?(".pstore-p2pc.") && name.end_with?(".journal")
+          journal_paths << full_path unless journal_paths.include?(full_path)
+        elsif (match = READY_PATTERN.match(name))
+          record = read_record(full_path)
+          journal_path = valid_marker(record, full_path)
+          discovered[journal_path] << [full_path, record, match[1]]
+          referenced_txids << match[1]
+          unless journal_paths.include?(journal_path)
+            journal_paths << journal_path
+          end
+        elsif (match = IMAGE_PATTERN.match(name)) && name.start_with?("#{base}.p2pc.")
+          orphan_images << [full_path, match[1]]
+        end
+      end
+
+      # An image left by a crash during prepare is garbage only while no ready
+      # marker references the same transaction.
+      orphan_images.each do |image_path, txid|
+        File.unlink(image_path) unless referenced_txids.include?(txid)
+      rescue SystemCallError
+        nil
+      end
+    end
+
+    seed_paths.each { |participant_path| scan.call(participant_path) }
+
+    # Follow participant lists from every journal so cross-directory markers
+    # are recovered too. A journal with zero markers is still recovered.
+    participant_paths = seed_paths.dup
+    visited_journals = {}
+    until (journal_path = journal_paths.reject { |path| visited_journals[path] }.first).nil?
+      visited_journals[journal_path] = true
+      journal = read_record(journal_path)
+      next unless journal.is_a?(Hash) && journal[:participants].is_a?(Array)
+      journal[:participants].each do |participant_path|
+        next unless participant_path.is_a?(String)
+        next if participant_paths.include?(participant_path)
+        participant_paths << participant_path
+        scan.call(participant_path)
+      end
+    end
+
+    {journal_paths: journal_paths.sort, discovered: discovered,
+     participant_paths: participant_paths.uniq.sort}
+  end
+  private_class_method :scan_coordination
+
+  # Locks and finishes crashed transactions. Every file lock is acquired in
+  # one global order -- journal lock files and participant data files sorted
+  # together by path -- so coordinators and recovery can never deadlock. The
+  # coordinator passes its own already-open data files as +prelocked_data+.
+  def self.run_recovery(initial_scan, prelocked_data:)
+    journal_paths = initial_scan[:journal_paths]
+    journal_lock_paths = journal_paths.map { |path| "#{path}.lock" }.sort
+    data_paths = initial_scan[:participant_paths].sort
+
+    ordered_keys = (journal_lock_paths.map { |path| [:journal, path] } +
+                    data_paths.map { |path| [:data, path] }).sort_by { |_kind, path| path }
+
+    opened = {}
+    data_locks = prelocked_data.dup
+    begin
+      ordered_keys.each do |kind, path|
+        if kind == :journal
+          file = File.new(path, **PStore.const_get(:RDWR_ACCESS))
+          file.flock(File::LOCK_EX)
+          opened[path] = file
+        elsif !data_locks.key?(path)
+          file = File.new(path, **PStore.const_get(:RDWR_ACCESS))
+          file.flock(File::LOCK_EX)
+          data_locks[path] = file
+          opened[path] = file
+        end
+      end
+
+      # With all journal locks held, a journal that disappears means a live
+      # coordinator finished; then its markers must be gone too. Re-read and
+      # resolve every journal that still has either a file or a marker.
+      stable = scan_coordination(data_paths)
+      candidate = journal_paths | stable[:journal_paths]
+      candidate.sort.each do |journal_path|
+        markers = stable[:discovered].fetch(journal_path, [])
+        next if markers.empty? && !File.file?(journal_path)
+        recover_one(journal_path, markers, data_locks)
+      end
+    ensure
+      opened.each_value { |file| file.close rescue nil }
+      journal_lock_paths.each { |path| File.unlink(path) rescue nil }
+    end
+  end
+  private_class_method :run_recovery
+
+  def transaction
+    raise PStore::Error, "no block given" unless block_given?
+
+    begin
+      @ordered.each { |store| store.send(:coordinator_lock) }
+      @files = {}
+      # Acquire every file lock in the same global path order used by
+      # recovery: participant data files and the journal lock sorted together.
+      acquire_keys = (@paths.map { |path| [:data, path] } +
+                      [[:journal, @journal_lock_path]]).sort_by { |_kind, path| path }
+      acquire_keys.each do |kind, path|
+        if kind == :journal
+          @journal_lock = open_lock_file(path)
+        else
+          store = @ordered.find { |candidate| candidate.path == path }
+          file = store.send(:open_and_lock_file, path, false)
+          @files[store] = file
+        end
+      end
+      # No live coordinator holds this journal lock, so remnants on disk must
+      # belong to a crashed process; resolve them before the user block runs.
+      self.class.send(:recover_locked, @ordered, @files)
+
+      @ordered.each do |store|
+        file = @files[store]
+        table, = store.send(:load_data, file, false)
+        store.instance_variable_set(:@table, table)
+        store.instance_variable_set(:@rdonly, false)
+        store.instance_variable_set(:@abort, false)
+      end
+
+      result = run_block { yield(*@stores) }
+
+      decision = @ordered.any? { |store| store.instance_variable_get(:@abort) } ? :aborted : :committed
+      run_two_phase(decision)
+      result
+    ensure
+      @files.each_value { |file| file.close rescue nil } if @files
+      release_journal_lock
+      @ordered.reverse_each { |store| store.send(:coordinator_unlock) } if @ordered
+    end
+  end
+
+  private
+
+  # Nested catch tags: store.commit/abort throw the store itself and must only
+  # leave this coordinated transaction.
+  def run_block
+    @ordered.reverse.reduce(-> { yield }) do |inner, store|
+      -> { catch(store) { inner.call } }
+    end.call
+  end
+
+  def run_two_phase(decision)
+    crash_hook("before_prepare")
+    @txid = "#{Time.now.to_i}-#{Process.pid}-#{rand(0x100000000).to_s(36)}"
+
+    # The prepare record exists before any participant marker does, so a marker
+    # without its journal can never be an unresolved-but-valid transaction.
+    journal = {version: PROTOCOL_VERSION, txid: @txid,
+               participants: @paths, state: "prepared"}
+    write_durable(@journal_path, Marshal.dump(journal))
+    crash_hook("after_journal_prepared")
+
+    images = {}
+    @ordered.each do |store|
+      image_path = "#{store.path}.p2pc.#{@txid}.image"
+      data = store.send(:dump, store.instance_variable_get(:@table))
+      write_durable(image_path, data)
+      images[store] = image_path
+    end
+
+    @ordered.each do |store|
+      marker_path = "#{store.path}.p2pc.#{@txid}.ready"
+      marker = {version: PROTOCOL_VERSION, txid: @txid,
+                journal: @journal_path, path: store.path, image: images[store]}
+      write_durable(marker_path, Marshal.dump(marker))
+    end
+    crash_hook("after_prepare")
+
+    journal[:state] = decision.to_s
+    write_durable(@journal_path, Marshal.dump(journal))
+    crash_hook("after_decision")
+
+    if decision == :committed
+      @ordered.each_with_index do |store, index|
+        publish(store, images[store])
+        crash_hook("after_publish_#{index}")
+      end
+    end
+    cleanup(@txid)
+    crash_hook("after_cleanup")
+  end
+
+  def publish(store, image_path)
+    File.chmod(File.stat(store.path).mode, image_path) if File.file?(store.path)
+    File.rename(image_path, store.path)
+    fsync_dir(File.dirname(store.path))
+  end
+
+  def cleanup(txid)
+    @ordered.each do |store|
+      marker = "#{store.path}.p2pc.#{txid}.ready"
+      File.unlink(marker) if File.file?(marker)
+      image = "#{store.path}.p2pc.#{txid}.image"
+      File.unlink(image) if File.file?(image)
+    end
+    File.unlink(@journal_path) if File.file?(@journal_path)
+    fsync_dir(File.dirname(@journal_path))
+  end
+
+  def release_journal_lock
+    return unless @journal_lock
+    @journal_lock.close rescue nil
+    @journal_lock = nil
+    File.unlink(@journal_lock_path) rescue nil
+  end
+
+  def crash_hook(name)
+    trigger = ENV["PSTORE_P2PC_CRASH"]
+    Process.kill(:KILL, Process.pid) if trigger == name
+  end
+
+  def write_durable(path, data)
+    temp = "#{path}.tmp.#{Process.pid}.#{rand(1_000_000)}"
+    File.open(temp, File::WRONLY | File::CREAT | File::EXCL | File::BINARY,
+              0o600, encoding: Encoding::ASCII_8BIT) do |file|
+      file.write(data)
+      file.flush
+      file.fsync rescue nil
+    end
+    File.rename(temp, path)
+    fsync_dir(File.dirname(path))
+  end
+
+  def fsync_dir(path)
+    Dir.open(path) { |dir| dir.fsync rescue nil }
+  end
+
+  def open_lock_file(path)
+    file = File.new(path, **PStore.const_get(:RDWR_ACCESS))
+    file.flock(File::LOCK_EX)
+    file
+  end
+
+  def self.read_record(path)
+    Marshal.load(File.binread(path))
+  rescue StandardError, TypeError
+    nil
+  end
+  private_class_method :read_record
+
+  def self.valid_marker(record, marker_path)
+    journal_path = record.is_a?(Hash) ? record[:journal] : nil
+    valid = record.is_a?(Hash) &&
+            record[:version] == PROTOCOL_VERSION &&
+            journal_path.is_a?(String) &&
+            record[:txid].is_a?(String) &&
+            record[:path].is_a?(String) &&
+            record[:image].is_a?(String) &&
+            READY_PATTERN.match?(File.basename(marker_path)) &&
+            File.basename(marker_path) ==
+              "#{File.basename(record[:path])}.p2pc.#{record[:txid]}.ready"
+    unless valid
+      raise PStore::Error, "corrupted PStore transaction marker: #{marker_path}"
+    end
+    journal_path
+  end
+  private_class_method :valid_marker
+
+  def self.recover_one(journal_path, markers, data_locks)
+    return unless File.file?(journal_path) || !markers.empty?
+
+    journal = File.file?(journal_path) ? read_record(journal_path) : nil
+    # Markers exist only after the prepare journal is durable, so markers
+    # without a readable journal cannot be resolved and must fail loudly.
+    unless journal.is_a?(Hash) && journal[:participants].is_a?(Array) &&
+           journal[:participants].all? { |path| path.is_a?(String) } &&
+           journal[:txid].is_a?(String) && journal[:state].is_a?(String) &&
+           journal[:version] == PROTOCOL_VERSION
+      raise PStore::Error, "corrupted or missing PStore transaction journal: #{journal_path}"
+    end
+    txid = journal[:txid]
+    paths = journal[:participants].sort
+    state = journal[:state]
+    unless %w[committed prepared aborted].include?(state)
+      raise PStore::Error, "unknown PStore transaction state #{state.inspect}: #{journal_path}"
+    end
+
+    by_path = {}
+    markers.each do |marker_path, record, marker_txid|
+      unless marker_txid == txid && record[:txid] == txid &&
+             record[:journal] == journal_path && paths.include?(record[:path]) &&
+             File.basename(marker_path) == "#{File.basename(record[:path])}.p2pc.#{txid}.ready"
+        raise PStore::Error, "corrupted PStore transaction marker: #{marker_path}"
+      end
+      by_path[record[:path]] = [marker_path, record[:image]]
+    end
+
+    if state == "committed"
+      # Each participant is either still unpublished (image present) or already
+      # published (image consumed by the atomic rename, data file present).
+      unresolved = paths.reject do |path|
+        marker_path, image = by_path[path]
+        File.file?(path) || (marker_path && File.file?(image))
+      end
+      unless unresolved.empty?
+        raise PStore::Error, "incomplete committed PStore transaction: #{journal_path}"
+      end
+    end
+
+    paths.each do |path|
+      marker_path, image = by_path[path]
+      if state == "committed" && marker_path && image && File.file?(image)
+        File.rename(image, path)
+      end
+      File.unlink(image) if image && File.file?(image)
+      File.unlink(marker_path) if marker_path && File.file?(marker_path)
+      fsync_dir(File.dirname(path))
+    end
+    File.unlink(journal_path) if File.file?(journal_path)
+    fsync_dir(File.dirname(journal_path))
+  rescue PStore::Error
+    raise
+  rescue SystemCallError => error
+    raise PStore::Error, "failed to recover PStore transaction #{journal_path}: #{error.message}"
+  end
+  private_class_method :recover_one
+
+  def self.fsync_dir(path)
+    Dir.open(path) { |dir| dir.fsync rescue nil }
+  end
+  private_class_method :fsync_dir
 end
