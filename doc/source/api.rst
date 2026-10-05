@@ -28,6 +28,7 @@ a single parameter: a subclass of :class:`~limits.storage.Storage`.
 Provided by :mod:`limits.strategies`
 
 .. autoclass:: FixedWindowRateLimiter
+.. autoclass:: CalendarWindowRateLimiter
 .. autoclass:: MovingWindowRateLimiter
 .. autoclass:: SlidingWindowCounterRateLimiter
 
@@ -46,6 +47,7 @@ expose async variants and expect a subclass of :class:`limits.aio.storage.Storag
 Provided by :mod:`limits.aio.strategies`
 
 .. autoclass:: FixedWindowRateLimiter
+.. autoclass:: CalendarWindowRateLimiter
 .. autoclass:: MovingWindowRateLimiter
 .. autoclass:: SlidingWindowCounterRateLimiter
 
@@ -141,6 +143,7 @@ Abstract storage classes
 ------------------------
 
 .. autoclass:: limits.storage.Storage
+.. autoclass:: limits.storage.CalendarWindowSupport
 .. autoclass:: limits.storage.MovingWindowSupport
 .. autoclass:: limits.storage.SlidingWindowCounterSupport
 
@@ -149,6 +152,7 @@ Async Abstract storage classes
 --------------------------------
 
 .. autoclass:: limits.aio.storage.Storage
+.. autoclass:: limits.aio.storage.CalendarWindowSupport
 .. autoclass:: limits.aio.storage.MovingWindowSupport
 .. autoclass:: limits.aio.storage.SlidingWindowCounterSupport
 

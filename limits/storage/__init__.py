@@ -12,7 +12,12 @@ import limits  # noqa
 from .._storage_scheme import SCHEMES
 from ..errors import ConfigurationError
 from ..typing import TypeAlias, cast
-from .base import MovingWindowSupport, SlidingWindowCounterSupport, Storage
+from .base import (
+    CalendarWindowSupport,
+    MovingWindowSupport,
+    SlidingWindowCounterSupport,
+    Storage,
+)
 from .memcached import MemcachedStorage
 from .memory import MemoryStorage
 from .mongodb import MongoDBStorage, MongoDBStorageBase
@@ -23,9 +28,7 @@ from .redis_sentinel import RedisSentinelStorage
 StorageTypes: TypeAlias = "Storage | limits.aio.storage.Storage"
 
 
-def storage_from_string(
-    storage_string: str, **options: float | str | bool
-) -> StorageTypes:
+def storage_from_string(storage_string: str, **options: Any) -> StorageTypes:
     """
     Factory function to get an instance of the storage class based
     on the uri of the storage. In most cases using it should be sufficient
@@ -66,6 +69,7 @@ def storage_from_string(
 
 
 __all__ = [
+    "CalendarWindowSupport",
     "MemcachedStorage",
     "MemoryStorage",
     "MongoDBStorage",

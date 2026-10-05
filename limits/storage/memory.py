@@ -5,9 +5,17 @@ import threading
 import time
 from collections import Counter, defaultdict
 from math import floor
+from zoneinfo import ZoneInfo
 
 import limits.typing
+from limits.calendar import (
+    CalendarWindowUnit,
+    calendar_window_key,
+    get_calendar_window,
+    get_timezone,
+)
 from limits.storage.base import (
+    CalendarWindowSupport,
     MovingWindowSupport,
     SlidingWindowCounterSupport,
     Storage,
@@ -16,13 +24,17 @@ from limits.storage.base import (
 
 
 class Entry:
-    def __init__(self, expiry: float) -> None:
-        self.atime = time.time()
+    def __init__(self, expiry: float, atime: float | None = None) -> None:
+        self.atime = time.time() if atime is None else atime
         self.expiry = self.atime + expiry
 
 
 class MemoryStorage(
-    Storage, MovingWindowSupport, SlidingWindowCounterSupport, TimestampedSlidingWindow
+    Storage,
+    MovingWindowSupport,
+    CalendarWindowSupport,
+    SlidingWindowCounterSupport,
+    TimestampedSlidingWindow,
 ):
     """
     rate limit storage using :class:`collections.Counter`
@@ -33,7 +45,14 @@ class MemoryStorage(
 
     STORAGE_SCHEME = ["memory"]
 
-    def __init__(self, uri: str | None = None, wrap_exceptions: bool = False, **_: str):
+    def __init__(
+        self,
+        uri: str | None = None,
+        wrap_exceptions: bool = False,
+        clock: limits.typing.Callable[[], float] | None = None,
+        **_: limits.typing.Any,
+    ):
+        self.time = clock or time.time
         self.storage: limits.typing.Counter[str] = Counter()
         self.locks: defaultdict[str, threading.RLock] = defaultdict(threading.RLock)
         self.expirations: dict[str, float] = {}
@@ -58,17 +77,18 @@ class MemoryStorage(
         self.timer.start()
 
     def __expire_events(self) -> None:
+        now = self.time()
         for key in list(self.events.keys()):
             with self.locks[key]:
                 if events := self.events.get(key, []):
                     oldest = bisect.bisect_left(
-                        events, -time.time(), key=lambda event: -event.expiry
+                        events, -now, key=lambda event: -event.expiry
                     )
                     self.events[key] = self.events[key][:oldest]
                 if not self.events.get(key, None):
                     self.locks.pop(key, None)
         for key in list(self.expirations.keys()):
-            if self.expirations[key] <= time.time():
+            if self.expirations[key] <= self.time():
                 self.storage.pop(key, None)
                 self.expirations.pop(key, None)
                 self.locks.pop(key, None)
@@ -98,7 +118,7 @@ class MemoryStorage(
         with self.locks[key]:
             self.storage[key] += amount
             if self.storage[key] == amount:
-                self.expirations[key] = time.time() + expiry
+                self.expirations[key] = self.time() + expiry
         return self.storage.get(key, 0)
 
     def decr(self, key: str, amount: int = 1) -> int:
@@ -120,7 +140,7 @@ class MemoryStorage(
         :param key: the key to get the counter value for
         """
 
-        if self.expirations.get(key, 0) <= time.time():
+        if self.expirations.get(key, 0) <= self.time():
             self.storage.pop(key, None)
             self.expirations.pop(key, None)
             self.locks.pop(key, None)
@@ -149,7 +169,7 @@ class MemoryStorage(
         self.__schedule_expiry()
         with self.locks[key]:
             self.events.setdefault(key, [])
-            timestamp = time.time()
+            timestamp = self.time()
             try:
                 entry = self.events[key][limit - amount]
             except IndexError:
@@ -158,7 +178,7 @@ class MemoryStorage(
             if entry and entry.atime >= timestamp - expiry:
                 return False
             else:
-                self.events[key][:0] = [Entry(expiry)] * amount
+                self.events[key][:0] = [Entry(expiry, timestamp)] * amount
                 return True
 
     def get_expiry(self, key: str) -> float:
@@ -166,7 +186,7 @@ class MemoryStorage(
         :param key: the key to get the expiry for
         """
 
-        return self.expirations.get(key, time.time())
+        return self.expirations.get(key, self.time())
 
     def get_moving_window(self, key: str, limit: int, expiry: int) -> tuple[float, int]:
         """
@@ -177,7 +197,7 @@ class MemoryStorage(
         :param expiry: expiry of entry
         :return: (start of window, number of acquired entries)
         """
-        timestamp = time.time()
+        timestamp = self.time()
         if events := self.events.get(key, []):
             oldest = bisect.bisect_left(
                 events, -(timestamp - expiry), key=lambda entry: -entry.atime
@@ -194,7 +214,7 @@ class MemoryStorage(
     ) -> bool:
         if amount > limit:
             return False
-        now = time.time()
+        now = self.time()
         previous_key, current_key = self.sliding_window_keys(key, expiry, now)
         (
             previous_count,
@@ -237,15 +257,51 @@ class MemoryStorage(
     def get_sliding_window(
         self, key: str, expiry: int
     ) -> tuple[int, float, int, float]:
-        now = time.time()
+        now = self.time()
         previous_key, current_key = self.sliding_window_keys(key, expiry, now)
         return self._get_sliding_window_info(previous_key, current_key, expiry, now)
 
     def clear_sliding_window(self, key: str, expiry: int) -> None:
-        now = time.time()
+        now = self.time()
         previous_key, current_key = self.sliding_window_keys(key, expiry, now)
         self.clear(previous_key)
         self.clear(current_key)
+
+    def incr_calendar_window(
+        self,
+        key: str,
+        unit: CalendarWindowUnit,
+        timezone: str | ZoneInfo,
+        amount: int = 1,
+    ) -> tuple[float, float, int]:
+        zone = get_timezone(timezone)
+        self.__schedule_expiry()
+        with self.locks[key]:
+            now = self.time()
+            start, end = get_calendar_window(now, zone, unit)
+            window_key = calendar_window_key(key, start, zone, unit)
+            current_count = self.get(window_key)
+            self.storage[window_key] += amount
+            if current_count == 0:
+                self.expirations[window_key] = end
+            return start, end, self.storage[window_key]
+
+    def get_calendar_window(
+        self, key: str, unit: CalendarWindowUnit, timezone: str | ZoneInfo
+    ) -> tuple[float, float, int]:
+        zone = get_timezone(timezone)
+        now = self.time()
+        start, end = get_calendar_window(now, zone, unit)
+        window_key = calendar_window_key(key, start, zone, unit)
+        return start, end, self.get(window_key)
+
+    def clear_calendar_window(
+        self, key: str, unit: CalendarWindowUnit, timezone: str | ZoneInfo
+    ) -> None:
+        zone = get_timezone(timezone)
+        now = self.time()
+        start, _ = get_calendar_window(now, zone, unit)
+        self.clear(calendar_window_key(key, start, zone, unit))
 
     def check(self) -> bool:
         """

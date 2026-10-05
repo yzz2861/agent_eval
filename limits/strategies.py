@@ -9,8 +9,10 @@ from abc import ABCMeta, abstractmethod
 from math import floor, inf
 
 from deprecated.sphinx import versionadded
+from zoneinfo import ZoneInfo
 
-from limits.storage.base import SlidingWindowCounterSupport
+from limits.calendar import CalendarWindowUnit, get_timezone
+from limits.storage.base import CalendarWindowSupport, SlidingWindowCounterSupport
 
 from .limits import RateLimitItem
 from .storage import MovingWindowSupport, Storage, StorageTypes
@@ -191,6 +193,72 @@ class FixedWindowRateLimiter(RateLimiter):
         return WindowStats(reset, remaining)
 
 
+class CalendarWindowRateLimiter(RateLimiter):
+    """Fixed window rate limiting using local calendar day or month boundaries."""
+
+    def __init__(self, storage: StorageTypes, timezone: str | ZoneInfo):
+        if not isinstance(storage, CalendarWindowSupport):
+            raise NotImplementedError(
+                "CalendarWindowRateLimiting is not implemented for storage "
+                f"of type {storage.__class__}"
+            )
+        super().__init__(storage)
+        self.timezone = get_timezone(timezone)
+
+    def _calendar_unit(self, item: RateLimitItem) -> CalendarWindowUnit:
+        if item.GRANULARITY.name not in {"day", "month"}:
+            raise ValueError(
+                "CalendarWindowRateLimiter only supports day or month granularity"
+            )
+        if item.multiples != 1:
+            raise ValueError(
+                "CalendarWindowRateLimiter does not support granularity multiples"
+            )
+        return item.GRANULARITY.name
+
+    def hit(self, item: RateLimitItem, *identifiers: str, cost: int = 1) -> bool:
+        unit = self._calendar_unit(item)
+        _, _, count = cast(
+            CalendarWindowSupport, self.storage
+        ).incr_calendar_window(
+            item.key_for(*identifiers),
+            unit,
+            self.timezone,
+            amount=cost,
+        )
+        return count <= item.amount
+
+    def test(self, item: RateLimitItem, *identifiers: str, cost: int = 1) -> bool:
+        unit = self._calendar_unit(item)
+        _, _, count = cast(
+            CalendarWindowSupport, self.storage
+        ).get_calendar_window(
+            item.key_for(*identifiers),
+            unit,
+            self.timezone,
+        )
+        return count < item.amount - cost + 1
+
+    def get_window_stats(self, item: RateLimitItem, *identifiers: str) -> WindowStats:
+        unit = self._calendar_unit(item)
+        _, reset, count = cast(
+            CalendarWindowSupport, self.storage
+        ).get_calendar_window(
+            item.key_for(*identifiers),
+            unit,
+            self.timezone,
+        )
+        return WindowStats(reset, max(0, item.amount - count))
+
+    def clear(self, item: RateLimitItem, *identifiers: str) -> None:
+        unit = self._calendar_unit(item)
+        cast(CalendarWindowSupport, self.storage).clear_calendar_window(
+            item.key_for(*identifiers),
+            unit,
+            self.timezone,
+        )
+
+
 @versionadded(version="4.1")
 class SlidingWindowCounterRateLimiter(RateLimiter):
     """
@@ -306,12 +374,13 @@ class SlidingWindowCounterRateLimiter(RateLimiter):
 
 
 KnownStrategy = (
-    type[SlidingWindowCounterRateLimiter]
+    type[CalendarWindowRateLimiter] | type[SlidingWindowCounterRateLimiter]
     | type[FixedWindowRateLimiter]
     | type[MovingWindowRateLimiter]
 )
 
 STRATEGIES: dict[str, KnownStrategy] = {
+    "calendar-window": CalendarWindowRateLimiter,
     "sliding-window-counter": SlidingWindowCounterRateLimiter,
     "fixed-window": FixedWindowRateLimiter,
     "moving-window": MovingWindowRateLimiter,

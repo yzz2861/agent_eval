@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import functools
 from abc import ABC, abstractmethod
+from zoneinfo import ZoneInfo
 
 from limits import errors
 from limits._storage_scheme import StorageRegistry
+from limits.calendar import CalendarWindowUnit
 from limits.typing import (
     Any,
     Callable,
@@ -55,7 +57,7 @@ class Storage(LazyDependency, metaclass=StorageRegistry):
         self,
         uri: str | None = None,
         wrap_exceptions: bool = False,
-        **options: float | str | bool,
+        **options: Any,
     ):
         """
         :param wrap_exceptions: Whether to wrap storage exceptions in
@@ -157,6 +159,44 @@ class MovingWindowSupport(ABC):
         :param expiry: expiry of entry
         :return: (start of window, number of acquired entries)
         """
+        raise NotImplementedError
+
+
+class CalendarWindowSupport(ABC):
+    """Storage support for timezone-aware calendar windows."""
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:  # type: ignore[explicit-any]
+        for method in {
+            "incr_calendar_window",
+            "get_calendar_window",
+            "clear_calendar_window",
+        }:
+            setattr(cls, method, _wrap_errors(getattr(cls, method)))
+        super().__init_subclass__(**kwargs)
+
+    @abstractmethod
+    def incr_calendar_window(
+        self,
+        key: str,
+        unit: CalendarWindowUnit,
+        timezone: str | ZoneInfo,
+        amount: int = 1,
+    ) -> tuple[float, float, int]:
+        """Increment the counter for the current local calendar window."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_calendar_window(
+        self, key: str, unit: CalendarWindowUnit, timezone: str | ZoneInfo
+    ) -> tuple[float, float, int]:
+        """Return the current window start, end, and counter value."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def clear_calendar_window(
+        self, key: str, unit: CalendarWindowUnit, timezone: str | ZoneInfo
+    ) -> None:
+        """Clear the counter for the current local calendar window."""
         raise NotImplementedError
 
 
