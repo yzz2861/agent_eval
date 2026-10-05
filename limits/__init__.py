@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from . import _version, aio, storage, strategies
 from .limits import (
+    KeyEncodingVersion,
     RateLimitItem,
     RateLimitItemPerDay,
     RateLimitItemPerHour,
@@ -17,6 +18,7 @@ from .limits import (
 from .util import WindowStats, parse, parse_many
 
 __all__ = [
+    "KeyEncodingVersion",
     "RateLimitItem",
     "RateLimitItemPerDay",
     "RateLimitItemPerHour",

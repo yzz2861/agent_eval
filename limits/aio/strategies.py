@@ -111,8 +111,9 @@ class MovingWindowRateLimiter(RateLimiter):
 
         :return: True if the rate limit is not depleted
         """
+        key = item.key_for(*identifiers)
         res = await cast(MovingWindowSupport, self.storage).get_moving_window(
-            item.key_for(*identifiers),
+            key,
             item.amount,
             item.get_expiry(),
         )
@@ -131,9 +132,10 @@ class MovingWindowRateLimiter(RateLimiter):
          limit
         :return: (reset time, remaining)
         """
+        key = item.key_for(*identifiers)
         window_start, window_items = await cast(
             MovingWindowSupport, self.storage
-        ).get_moving_window(item.key_for(*identifiers), item.amount, item.get_expiry())
+        ).get_moving_window(key, item.amount, item.get_expiry())
         reset = window_start + item.get_expiry()
 
         return WindowStats(reset, item.amount - window_items)
@@ -192,11 +194,9 @@ class FixedWindowRateLimiter(RateLimiter):
          limit
         :return: reset time, remaining
         """
-        remaining = max(
-            0,
-            item.amount - await self.storage.get(item.key_for(*identifiers)),
-        )
-        reset = await self.storage.get_expiry(item.key_for(*identifiers))
+        key = item.key_for(*identifiers)
+        remaining = max(0, item.amount - await self.storage.get(key))
+        reset = await self.storage.get_expiry(key)
 
         return WindowStats(reset, remaining)
 
@@ -261,9 +261,10 @@ class SlidingWindowCounterRateLimiter(RateLimiter):
         :return: True if the rate limit is not depleted
         """
 
+        key = item.key_for(*identifiers)
         previous_count, previous_expires_in, current_count, _ = await cast(
             SlidingWindowCounterSupport, self.storage
-        ).get_sliding_window(item.key_for(*identifiers), item.get_expiry())
+        ).get_sliding_window(key, item.get_expiry())
 
         return (
             self._weighted_count(
@@ -284,13 +285,14 @@ class SlidingWindowCounterRateLimiter(RateLimiter):
         :return: (reset time, remaining)
         """
 
+        key = item.key_for(*identifiers)
         (
             previous_count,
             previous_expires_in,
             current_count,
             current_expires_in,
         ) = await cast(SlidingWindowCounterSupport, self.storage).get_sliding_window(
-            item.key_for(*identifiers), item.get_expiry()
+            key, item.get_expiry()
         )
 
         remaining = max(
