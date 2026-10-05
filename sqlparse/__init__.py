@@ -8,10 +8,11 @@
 """Parse SQL statements."""
 
 # Setup namespace
-from collections.abc import Generator
+from collections.abc import Generator, Iterable
 from typing import IO, Any
 
 from sqlparse import cli, engine, filters, formatter, sql, tokens
+from sqlparse.engine import streaming
 
 __version__ = "0.6.1.dev0"
 __all__ = ["cli", "engine", "filters", "formatter", "sql", "tokens"]
@@ -41,6 +42,52 @@ def parsestream(
     stack = engine.FilterStack()
     stack.enable_grouping()
     return stack.run(stream, encoding)
+
+
+def parse_chunks(
+    chunks: Iterable[str],
+    *,
+    max_token_size: int | None = None,
+    max_statement_size: int | None = None,
+    strict_unclosed: bool = True,
+    strip_semicolon: bool = False,
+) -> Generator[sql.Statement, None, None]:
+    """Parse complete statements from an iterable of text chunks.
+
+    Chunks are consumed in order and must not be seekable or replayable.
+    Quotes, dollar-quoted strings, comments and identifiers may span chunk
+    boundaries. Unfinished input is reported as an error when
+    *strict_unclosed* is true. The two size limits bound pending token and
+    statement buffers.
+    """
+    return streaming.parse_chunks(
+        chunks,
+        max_token_size=max_token_size,
+        max_statement_size=max_statement_size,
+        strict_unclosed=strict_unclosed,
+        strip_semicolon=strip_semicolon,
+    )
+
+
+def split_chunks(
+    chunks: Iterable[str],
+    *,
+    max_token_size: int | None = None,
+    max_statement_size: int | None = None,
+    strict_unclosed: bool = True,
+    strip_semicolon: bool = True,
+) -> Generator[str, None, None]:
+    """Yield complete statement strings from an iterable of text chunks."""
+    return streaming.split_chunks(
+        chunks,
+        max_token_size=max_token_size,
+        max_statement_size=max_statement_size,
+        strict_unclosed=strict_unclosed,
+        strip_semicolon=strip_semicolon,
+    )
+
+
+parsestream_chunks = parse_chunks
 
 
 def format(sql: str, encoding: str | None = None, **options: Any) -> str:

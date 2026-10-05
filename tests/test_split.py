@@ -6,6 +6,7 @@ from io import StringIO
 import pytest
 
 import sqlparse
+from sqlparse.exceptions import SQLParseError
 
 
 def test_split_semicolon():
@@ -374,3 +375,120 @@ def test_split_standalone_for_update():
     assert stmts[1] == "SELECT 3;"
 
 
+class OneShotIterable:
+    def __init__(self, values):
+        self.values = iter(values)
+        self.iterated = False
+
+    def __iter__(self):
+        if self.iterated:
+            raise AssertionError("input was iterated twice")
+        self.iterated = True
+        return self
+
+    def __next__(self):
+        return next(self.values)
+
+
+def test_parse_chunks_char_boundaries():
+    sql = (
+        "SELECT 'a;b' AND \"c;d\" AND $$e;f$$ AND /*g;h*/; "
+        "SELECT i.j FROM (SELECT 1);"
+    )
+    chunks = ["", *list(sql), ""]
+
+    stmts = list(sqlparse.parse_chunks(OneShotIterable(chunks)))
+
+    assert len(stmts) == 2
+    assert "".join(str(stmt) for stmt in stmts) == sql
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT 'unclosed",
+    'SELECT "unclosed',
+    "SELECT `unclosed",
+    "SELECT [unclosed",
+    "SELECT $$unclosed",
+    "SELECT $body$unclosed",
+    "SELECT /*unclosed",
+])
+def test_parse_chunks_unclosed_error(sql):
+    with pytest.raises(SQLParseError, match="Unterminated"):
+        list(sqlparse.parse_chunks(list(sql)))
+
+
+def test_parse_chunks_identifier_spans_boundaries():
+    chunks = ["SELECT sch", "e", "ma.t", "able", "_name;"]
+
+    stmt, = sqlparse.parse_chunks(chunks)
+
+    assert str(stmt) == "SELECT schema.table_name;"
+    assert stmt.get_type() == "SELECT"
+
+
+def test_parse_chunks_preserves_procedure_and_parentheses():
+    sql = (
+        "CREATE PROCEDURE p()\n"
+        "BEGIN\n"
+        "  SELECT (1 + 2);\n"
+        "END;\n"
+        "SELECT 3;"
+    )
+
+    stmts = list(sqlparse.parse_chunks(list(sql)))
+
+    assert [str(stmt).strip() for stmt in stmts] == [
+        "CREATE PROCEDURE p()\nBEGIN\n  SELECT (1 + 2);\nEND;",
+        "SELECT 3;",
+    ]
+
+
+def test_parse_chunks_emits_small_statements_promptly():
+    consumed = 0
+
+    def chunks():
+        nonlocal consumed
+        for i in range(10_000):
+            consumed += 1
+            yield f"SELECT {i};"
+
+    parser = sqlparse.parse_chunks(chunks())
+
+    first = next(parser)
+    second = next(parser)
+
+    assert str(first) == "SELECT 0;"
+    assert str(second) == "SELECT 1;"
+    assert consumed <= 5
+
+
+def test_parse_chunks_token_size_limit():
+    lexer = sqlparse.engine.streaming.StreamingLexer(max_token_size=8)
+
+    with pytest.raises(SQLParseError, match="unfinished token"):
+        for chunk in ["SELECT sch", "e", "ma_long"]:
+            list(lexer.feed(chunk))
+
+
+def test_streaming_lexer_has_bounded_pending_buffer():
+    lexer = sqlparse.engine.streaming.StreamingLexer()
+
+    for char in "SELECT abcdefghijklmnopqrstuvwxyz" * 100:
+        list(lexer.feed(char))
+        assert len(lexer.pending) <= 64
+
+
+def test_parse_chunks_statement_size_limit():
+    sql = "SELECT 1234567890;"
+
+    with pytest.raises(SQLParseError, match="unfinished statement"):
+        list(sqlparse.parse_chunks(list(sql), max_statement_size=8))
+
+
+def test_split_chunks_strips_semicolons():
+    chunks = ["SELECT 1;", " SELECT 2;"]
+
+    assert list(sqlparse.split_chunks(chunks)) == [
+        "SELECT 1",
+        "SELECT 2",
+    ]
