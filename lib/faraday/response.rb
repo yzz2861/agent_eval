@@ -91,5 +91,6 @@ module Faraday
 end
 
 require 'faraday/response/json'
+require 'faraday/response/grpc_web'
 require 'faraday/response/logger'
 require 'faraday/response/raise_error'
