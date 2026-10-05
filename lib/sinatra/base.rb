@@ -1060,6 +1060,49 @@ module Sinatra
       end
     end
 
+    # Run around filters defined on the class and all superclasses, nested
+    # around the given endpoint block. Filters defined on a superclass wrap
+    # those defined on its subclasses; within a class, filters defined
+    # earlier wrap those defined later. Each filter receives a continuation
+    # that runs the rest of the chain at most once; a filter whose pattern
+    # or conditions do not match is skipped without breaking the chain.
+    #
+    # A halt triggered by the endpoint or an inner filter is caught by the
+    # enclosing continuation and re-thrown once the whole chain has
+    # unwound, so code after the continuation call (and ensure blocks)
+    # still runs and a normal halt is not mistaken for a failure.
+    def around_filter!(base = settings, &block)
+      not_halted = Object.new
+      halted = not_halted
+      chain = around_filters(base).reverse.reduce(block) do |inner, (pattern, conditions, wrapper)|
+        proc do
+          called = false
+          continuation = proc do
+            raise 'around filter continuation called more than once' if called
+
+            called = true
+            inner_halt = catch(:halt) { inner.call; not_halted }
+            halted = inner_halt unless inner_halt.equal?(not_halted)
+          end
+          applied = false
+          process_route(pattern, conditions) do |a, v|
+            applied = true
+            wrapper.call(a, v, continuation)
+          end
+          continuation.call unless applied
+        end
+      end
+      chain.call
+      throw :halt, halted unless halted.equal?(not_halted)
+    end
+
+    # Around filters defined on the class and all superclasses, ordered
+    # outermost first (superclass filters wrap subclass filters).
+    def around_filters(base)
+      filters = base.superclass.respond_to?(:filters) ? around_filters(base.superclass) : []
+      filters + base.filters[:around]
+    end
+
     # Run routes defined on the class and all superclasses.
     def route!(base = settings, pass_block = nil)
       routes = base.routes[@request.request_method]
@@ -1192,7 +1235,7 @@ module Sinatra
         filter! :before do
           @pinned_response = !response['content-type'].nil?
         end
-        route!
+        around_filter! { route! }
       end
     rescue ::Exception => e
       invoke { handle_exception!(e) }
@@ -1311,7 +1354,7 @@ module Sinatra
       def reset!
         @conditions     = []
         @routes         = {}
-        @filters        = { before: [], after: [] }
+        @filters        = { before: [], after: [], around: [] }
         @errors         = {}
         @middleware     = []
         @prototype      = nil
@@ -1492,6 +1535,16 @@ module Sinatra
       # response.
       def after(path = /.*/, **options, &block)
         add_filter(:after, path, **options, &block)
+      end
+
+      # Define an around filter; wraps route handlers within the same
+      # context and receives a continuation as its first argument. Calling
+      # the continuation runs the remaining around filters and the route
+      # handler; it may be called at most once. Code after the continuation
+      # call (or in an ensure block) runs when the handler completes, halts,
+      # passes, or raises.
+      def around(path = /.*/, **options, &block)
+        add_filter(:around, path, **options, &block)
       end
 
       # add a filter
@@ -1805,9 +1858,14 @@ module Sinatra
         unbound_method          = generate_method(method_name, &block)
         conditions = @conditions
         @conditions = []
-        wrapper = block.arity.zero? ?
-          proc { |a, _p| unbound_method.bind(a).call } :
-          proc { |a, p| unbound_method.bind(a).call(*p) }
+        wrapper =
+          if verb == :around
+            proc { |a, p, k| unbound_method.bind(a).call(k, *p) }
+          elsif block.arity.zero?
+            proc { |a, _p| unbound_method.bind(a).call }
+          else
+            proc { |a, p| unbound_method.bind(a).call(*p) }
+          end
 
         [pattern, conditions, wrapper]
       end

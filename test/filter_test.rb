@@ -517,3 +517,259 @@ class AfterFilterTest < Minitest::Test
     assert_equal 'Been now and after', doodle
   end
 end
+
+class AroundFilterTest < Minitest::Test
+  it "wraps the route handler between before and after filters" do
+    events = []
+    mock_app do
+      before  { events << :before }
+      around do |app|
+        events << :enter
+        app.call
+        events << :exit
+      end
+      get('/') { events << :endpoint; 'hello' }
+      after   { events << :after }
+    end
+
+    get '/'
+    assert ok?
+    assert_equal 'hello', body
+    assert_equal [:before, :enter, :endpoint, :exit, :after], events
+  end
+
+  it "nests multiple around filters in the order defined" do
+    events = []
+    mock_app do
+      around do |app|
+        events << :outer_enter
+        app.call
+        events << :outer_exit
+      end
+      around do |app|
+        events << :inner_enter
+        app.call
+        events << :inner_exit
+      end
+      get('/') { events << :endpoint; 'hello' }
+    end
+
+    get '/'
+    assert ok?
+    assert_equal [:outer_enter, :inner_enter, :endpoint, :inner_exit, :outer_exit], events
+  end
+
+  it "nests superclass filters outside subclass filters" do
+    events = []
+    parent = Class.new(Sinatra::Base) do
+      around do |app|
+        events << :parent_enter
+        app.call
+        events << :parent_exit
+      end
+    end
+    mock_app(parent) do
+      around do |app|
+        events << :child_enter
+        app.call
+        events << :child_exit
+      end
+      get('/') { events << :endpoint; 'hello' }
+    end
+
+    get '/'
+    assert ok?
+    assert_equal [:parent_enter, :child_enter, :endpoint, :child_exit, :parent_exit], events
+  end
+
+  it "only wraps routes matching the filter path" do
+    events = []
+    mock_app do
+      around('/wrapped') do |app|
+        events << :enter
+        app.call
+        events << :exit
+      end
+      get('/wrapped')   { events << :endpoint; 'wrapped' }
+      get('/unwrapped') { events << :endpoint; 'unwrapped' }
+    end
+
+    get '/wrapped'
+    assert_equal 'wrapped', body
+    assert_equal [:enter, :endpoint, :exit], events
+
+    events.clear
+    get '/unwrapped'
+    assert_equal 'unwrapped', body
+    assert_equal [:endpoint], events
+  end
+
+  it "runs cleanup when the endpoint halts and still applies the halted response" do
+    events = []
+    mock_app do
+      around do |app|
+        events << :enter
+        begin
+          app.call
+        ensure
+          events << :exit
+        end
+      end
+      get('/') { halt 418, 'teapot' }
+    end
+
+    get '/'
+    assert_equal 418, response.status
+    assert_equal 'teapot', body
+    assert_equal [:enter, :exit], events
+  end
+
+  it "runs code after the continuation when the endpoint halts" do
+    events = []
+    mock_app do
+      around do |app|
+        events << :enter
+        app.call
+        events << :exit
+      end
+      get('/') { halt 200, 'halted' }
+    end
+
+    get '/'
+    assert ok?
+    assert_equal 'halted', body
+    assert_equal [:enter, :exit], events
+  end
+
+  it "keeps the chain intact when the endpoint passes to the next route" do
+    events = []
+    mock_app do
+      around do |app|
+        events << :enter
+        app.call
+        events << :exit
+      end
+      get('/') { pass }
+      get('/') { events << :endpoint; 'second' }
+    end
+
+    get '/'
+    assert ok?
+    assert_equal 'second', body
+    assert_equal [:enter, :endpoint, :exit], events
+  end
+
+  it "runs cleanup when the endpoint raises" do
+    events = []
+    mock_app do
+      around do |app|
+        events << :enter
+        begin
+          app.call
+        ensure
+          events << :exit
+        end
+      end
+      get('/') { raise 'boom' }
+      error(500) { 'handled' }
+    end
+
+    get '/'
+    assert_equal 500, response.status
+    assert_equal 'handled', body
+    assert_equal [:enter, :exit], events
+  end
+
+  it "allows a filter to short-circuit without calling the continuation" do
+    events = []
+    mock_app do
+      around do |app|
+        events << :outer_enter
+        app.call
+        events << :outer_exit
+      end
+      around do |_app|
+        events << :inner
+        body 'short-circuited'
+      end
+      get('/') { events << :endpoint; 'nope' }
+    end
+
+    get '/'
+    assert ok?
+    assert_equal 'short-circuited', body
+    assert_equal [:outer_enter, :inner, :outer_exit], events
+  end
+
+  it "allows a filter to halt the request without calling the continuation" do
+    events = []
+    mock_app do
+      around do |app|
+        events << :enter
+        halt 401, 'unauthorized' unless params[:token]
+        app.call
+        events << :exit
+      end
+      get('/') { events << :endpoint; 'secret' }
+    end
+
+    get '/'
+    assert_equal 401, response.status
+    assert_equal 'unauthorized', body
+    assert_equal [:enter], events
+
+    events.clear
+    get '/', token: '1'
+    assert ok?
+    assert_equal 'secret', body
+    assert_equal [:enter, :endpoint, :exit], events
+  end
+
+  it "runs outer filter cleanup when an inner filter halts" do
+    events = []
+    mock_app do
+      around do |app|
+        events << :outer_enter
+        app.call
+        events << :outer_exit
+      end
+      around { |_app| halt 403, 'forbidden' }
+      get('/') { events << :endpoint; 'nope' }
+    end
+
+    get '/'
+    assert_equal 403, response.status
+    assert_equal 'forbidden', body
+    assert_equal [:outer_enter, :outer_exit], events
+  end
+
+  it "raises when the continuation is called more than once" do
+    mock_app do
+      around do |app|
+        app.call
+        app.call
+      end
+      get('/') { 'hello' }
+      error(500) { env['sinatra.error'].message }
+    end
+
+    get '/'
+    assert_equal 500, response.status
+    assert_match 'more than once', body
+  end
+
+  it "shares the request context with the route handler" do
+    mock_app do
+      around do |app|
+        @resource = 'open'
+        app.call
+        @resource = 'closed'
+      end
+      get('/') { @resource }
+    end
+
+    get '/'
+    assert ok?
+    assert_equal 'open', body
+  end
+end

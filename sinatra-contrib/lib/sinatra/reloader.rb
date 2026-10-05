@@ -371,6 +371,8 @@ module Sinatra
           filters[:before].delete(element.representation)
         when :after_filter
           filters[:after].delete(element.representation)
+        when :around_filter
+          filters[:around].delete(element.representation)
         when :error
           code    = element.representation[:code]
           handler = element.representation[:handler]
