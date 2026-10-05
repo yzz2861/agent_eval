@@ -8,6 +8,10 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 ## [Unreleased]
 
 
+### Added
+
+- New `:balance` rule macro backed by `Dry::Validation::Balance`: checks that grouped detail rows balance (left-side amounts add up to right-side amounts) per group and unit, using exact BigDecimal arithmetic. Missing or unconvertible amounts and unsupported units are reported as errors instead of defaulting to zero, amounts in different units never cancel each other out, the tolerance must be set explicitly (per group, in the group's own unit), and errors carry the group, the difference and the participating row positions
+
 ## [1.11.1] - 2025-01-21
 
 

@@ -97,5 +97,41 @@ module Dry
     Macros.register(:acceptance) do
       key.failure(:acceptance, key: key_name) unless values[key_name].equal?(true)
     end
+
+    # Balance macro
+    #
+    # Checks that an array of detail rows balances per group and unit: the
+    # left-side amounts must add up to the right-side amounts within an
+    # explicitly given tolerance. See Dry::Validation::Balance for the
+    # available options and the exact error semantics.
+    #
+    # @example
+    #   rule(:lines).validate(balance: {
+    #     group_by: [:batch_id],
+    #     unit: :currency,
+    #     left: :debit,
+    #     right: :credit,
+    #     tolerance: "0.01",
+    #     units: %w[CNY USD]
+    #   })
+    #
+    # @api public
+    Macros.register(:balance) do |macro:|
+      options = macro.args.first
+
+      unless options.is_a?(::Hash)
+        raise ::ArgumentError,
+              "balance macro requires an options Hash " \
+              "(group_by:, unit:, left:, right:, tolerance:, units:)"
+      end
+
+      rows = values[key_name]
+
+      if rows.is_a?(::Array) && rows.all? { |row| row.is_a?(::Hash) }
+        Balance.call(rows, **options.transform_keys(&:to_sym)).each do |error|
+          key.failure(error.merge(text: Balance.message(error)))
+        end
+      end
+    end
   end
 end
