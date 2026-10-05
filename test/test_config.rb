@@ -17,6 +17,33 @@ class TestConfigFile < PumaTest
     assert_equal max_threads, conf.options.default_options[:max_threads]
   end
 
+  def test_adaptive_concurrency_enabled
+    conf = Puma::Configuration.new do |c|
+      c.adaptive_concurrency true
+    end
+    conf.clamp
+
+    assert_equal({}, conf.options[:adaptive_concurrency])
+  end
+
+  def test_adaptive_concurrency_options
+    conf = Puma::Configuration.new do |c|
+      c.adaptive_concurrency min_concurrency: 2, max_concurrency: 8, window: 10
+    end
+    conf.clamp
+
+    assert_equal({ min_concurrency: 2, max_concurrency: 8, window: 10 }, conf.options[:adaptive_concurrency])
+  end
+
+  def test_adaptive_concurrency_disabled
+    conf = Puma::Configuration.new do |c|
+      c.adaptive_concurrency false
+    end
+    conf.clamp
+
+    assert_equal({ enabled: false }, conf.options[:adaptive_concurrency])
+  end
+
   def test_app_from_rackup
     if Rack.release >= '3'
       fn = "test/rackup/hello-bind_rack3.ru"

@@ -3,6 +3,7 @@
 require 'thread'
 
 require_relative 'io_buffer'
+require_relative 'adaptive_admission'
 require_relative 'server_plugin_control'
 
 module Puma
@@ -99,6 +100,7 @@ module Puma
       @min = Integer(options[:min_threads])
       @max = Integer(options[:max_threads])
       @max_io_threads = Integer(options[:max_io_threads] || 0)
+      @admission = AdaptiveAdmission.from_options(options, @max, clock: options[:admission_clock])
 
       # Not an 'exposed' option, options[:pool_shutdown_grace_time] is used in CI
       # to shorten @shutdown_grace_time from SHUTDOWN_GRACE_TIME. Parallel CI
@@ -135,8 +137,18 @@ module Puma
       @shutdown_mutex = Mutex.new
     end
 
-    attr_reader :spawned, :trim_requested, :waiting
-    attr_accessor :min, :max
+    attr_reader :spawned, :trim_requested, :waiting, :admission
+
+    def min=(min)
+      with_mutex { @min = min }
+    end
+
+    def max=(max)
+      with_mutex do
+        @max = max
+        @admission&.update_max_threads(max)
+      end
+    end
 
     # generate stats hash so as not to perform multiple locks
     # @return [Hash] hash containing stat info from ThreadPool
@@ -144,12 +156,13 @@ module Puma
       with_mutex do
         temp = @backlog_max
         @backlog_max = 0
-        { backlog: @todo.size,
+        { backlog: @todo.size + (@admission&.waiting || 0),
           running: @spawned,
           pool_capacity: pool_capacity,
           busy_threads: @spawned - @waiting + @todo.size,
           io_threads: @processors.count(&:marked_as_io_thread?),
-          backlog_max: temp
+          backlog_max: temp,
+          admission: @admission&.stats
         }
       end
     end
@@ -161,7 +174,7 @@ module Puma
     # How many objects have yet to be processed by the pool?
     #
     def backlog
-      with_mutex { @todo.size }
+      with_mutex { @todo.size + (@admission&.waiting || 0) }
     end
 
     # The maximum size of the backlog
@@ -350,6 +363,7 @@ module Puma
           raise "Unable to add work while shutting down"
         end
 
+        @admission&.stamp_enqueue(work)
         @todo << work
         t = @todo.size
         @backlog_max = t if t > @backlog_max
@@ -456,6 +470,7 @@ module Puma
     def shutdown(timeout)
       threads = with_mutex do
         @shutdown = true
+        @admission&.shutdown
         @trim_requested = @spawned
         @not_empty.broadcast
         @not_full.broadcast

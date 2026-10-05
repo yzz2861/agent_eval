@@ -58,6 +58,7 @@ module Puma
       error = nil
 
       return :close if closed_socket?(socket)
+      admission = @thread_pool.admission&.start(client)
 
       if @early_hints
         env[EARLY_HINTS] = lambda { |headers|
@@ -84,28 +85,39 @@ module Puma
         res_body = app_body
 
         # full hijack, app called env['rack.hijack']
-        return :async if client.hijacked
+        if client.hijacked
+          admission&.finish
+          return :async
+        end
 
         status = status.to_i
+        admission&.fail! if status == 500
 
         if status == -1
           unless headers.empty? and res_body == []
             raise "async response must have empty headers and body"
           end
 
+          admission&.finish
           return :async
         end
       rescue ThreadPool::ForceShutdown => error
+        admission&.ignore!
         @log_writer.unknown_error error, client, "Rack app"
         @log_writer.log "Detected force shutdown of a thread"
 
         status, headers, res_body = lowlevel_error(error, env, 503)
       rescue Exception => error
+        admission&.fail!
         @log_writer.unknown_error error, client, "Rack app"
 
         status, headers, res_body = lowlevel_error(error, env, 500)
       end
-      prepare_response(status, headers, res_body, requests, client)
+      begin
+        prepare_response(status, headers, res_body, requests, client)
+      ensure
+        admission&.finish
+      end
     ensure
       io_buffer.reset
       app_body.close if app_body.respond_to? :close

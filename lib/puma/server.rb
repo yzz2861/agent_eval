@@ -507,6 +507,7 @@ module Puma
         with_force_shutdown(client) do
           client.finish(@first_data_timeout)
         end
+        client.puma_queued_at = nil
 
         can_loop = true
         while can_loop
@@ -520,6 +521,7 @@ module Puma
             requests += 1
 
             client.reset
+            client.puma_queued_at = nil
 
             # This indicates data exists in the client read buffer and there may be
             # additional requests on it, so process them

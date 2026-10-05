@@ -78,7 +78,7 @@ module Puma
                 :requests_served, :error_status_code
 
     attr_writer :peerip, :http_content_length_limit, :supported_http_methods,
-                :allow_underscore_headers
+                :allow_underscore_headers, :puma_queued_at
 
     attr_accessor :remote_addr_header, :listener, :env_set_http_version
 

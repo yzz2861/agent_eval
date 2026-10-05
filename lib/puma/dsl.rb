@@ -642,6 +642,31 @@ module Puma
       @options[:max_io_threads] = max
     end
 
+    # Enable adaptive admission control in front of the application.
+    #
+    # The configured thread ceiling remains fixed; Puma changes only the number
+    # of requests allowed to enter the application concurrently. Requests above
+    # the current limit remain in the pool queue. Lower limits do not interrupt
+    # requests that already entered.
+    #
+    # Samples use a monotonic clock. Idle samples are retained but excluded from
+    # adjustment. Failed requests contribute to the failure ratio, but do not
+    # contribute to successful completion-time statistics.
+    #
+    # @example
+    #   adaptive_concurrency true
+    # @example
+    #   adaptive_concurrency min_concurrency: 2, max_concurrency: 16,
+    #     window: 30, target_queue_ratio: 0.1, hysteresis: 0.15
+    def adaptive_concurrency(enabled = true, **options)
+      if enabled.is_a?(Hash)
+        options = enabled
+        enabled = options.fetch(:enabled, true)
+      end
+
+      @options[:adaptive_concurrency] = enabled ? options : { enabled: false }
+    end
+
     # Instead of using +bind+ and manually constructing a URI like:
     #
     #    bind 'ssl://127.0.0.1:9292?key=key_path&cert=cert_path'
