@@ -5,12 +5,15 @@ import contextlib
 import functools
 import math
 import os
+import tempfile
 import time
 
 import pytest
 from pytest_lazy_fixtures import lf
 
 from limits.limits import RateLimitItem
+
+SQLITE_TEST_DB = os.path.join(tempfile.gettempdir(), "limits-tests.sqlite")
 
 ASYNC_REDIS_IMPLEMENTATION = os.environ.get("ASYNC_REDIS_IMPLEMENTATION", "coredis")
 ASYNC_MEMCACHED_IMPLEMENTATION = os.environ.get(
@@ -89,6 +92,13 @@ async def async_window(delay_end: float, delay: float | None = None):
 ALL_STORAGES = {
     "memory": pytest.param(
         "memory://", {}, None, marks=pytest.mark.memory, id="in-memory"
+    ),
+    "sqlite": pytest.param(
+        "sqlite:///" + SQLITE_TEST_DB,
+        {},
+        lf("sqlite"),
+        marks=pytest.mark.sqlite,
+        id="sqlite",
     ),
     "redis": pytest.param(
         "redis://localhost:7379",
@@ -170,6 +180,13 @@ ALL_STORAGES = {
 ALL_STORAGES_ASYNC = {
     "memory": pytest.param(
         "async+memory://", {}, None, marks=pytest.mark.memory, id="in-memory"
+    ),
+    "sqlite": pytest.param(
+        "async+sqlite:///" + SQLITE_TEST_DB,
+        {},
+        lf("sqlite"),
+        marks=pytest.mark.sqlite,
+        id="sqlite",
     ),
     "redis": pytest.param(
         "async+redis://localhost:7379",

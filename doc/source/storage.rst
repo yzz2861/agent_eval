@@ -132,6 +132,32 @@ In-Memory Storage
 -----------------
 The in-memory storage (:class:`~limits.storage.MemoryStorage`) takes no parameters so the only relevant value is :code:`memory://`
 
+SQLite Storage
+--------------
+
+.. versionadded:: 5.9
+
+The sqlite storage (:class:`~limits.storage.SQLiteStorage`) only requires a path
+to a database file, for example :code:`sqlite:///var/tmp/limits.db` (or
+:code:`sqlite:///:memory:` for a private in-memory database).
+
+Since it uses the standard library :mod:`sqlite3` module it has no external
+dependencies and needs no separate database service, which makes it a good fit
+for sharing rate limit state between multiple processes on a single host (for
+example pre-fork workers).
+
+Some implementation details to be aware of:
+
+* Quota checks and the corresponding accounting writes are performed in a
+  single transaction so concurrent processes cannot exceed a limit.
+* If the database lock cannot be acquired within the configured
+  :paramref:`~limits.storage.SQLiteStorage.timeout`, the transaction is rolled
+  back and :class:`~limits.storage.sqlite.LockTimeoutError` is raised.
+* Connections are not shared across :code:`fork()`: each process lazily opens
+  its own connection.
+* Expired rows are cleaned up in bounded batches instead of a single database
+  wide delete.
+
 Memcached Storage
 -----------------
 

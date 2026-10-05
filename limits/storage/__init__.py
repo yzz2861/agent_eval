@@ -19,6 +19,7 @@ from .mongodb import MongoDBStorage, MongoDBStorageBase
 from .redis import RedisStorage
 from .redis_cluster import RedisClusterStorage
 from .redis_sentinel import RedisSentinelStorage
+from .sqlite import SQLiteStorage
 
 StorageTypes: TypeAlias = "Storage | limits.aio.storage.Storage"
 
@@ -74,6 +75,7 @@ __all__ = [
     "RedisClusterStorage",
     "RedisSentinelStorage",
     "RedisStorage",
+    "SQLiteStorage",
     "SlidingWindowCounterSupport",
     "Storage",
     "storage_from_string",

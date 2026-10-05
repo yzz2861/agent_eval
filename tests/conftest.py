@@ -3,15 +3,24 @@ from __future__ import annotations
 import os
 import platform
 import socket
+import tempfile
 import time
 
-import pymemcache
-import pymemcache.client
-import pymongo
 import pytest
-import redis
-import redis.sentinel
-import valkey
+
+try:
+    import pymemcache
+    import pymemcache.client
+    import pymongo
+    import redis
+    import redis.sentinel
+    import valkey
+except ImportError:  # pragma: no cover
+    # optional storage client libraries are only needed for the
+    # integration tests that talk to actual services (e.g. via docker)
+    pass
+
+SQLITE_TEST_DB = os.path.join(tempfile.gettempdir(), "limits-tests.sqlite")
 
 
 def check_redis_cluster_ready(host, port):
@@ -370,6 +379,17 @@ def mongodb(mongodb_client):
     mongodb_client.limits.counters.drop()
 
     return mongodb_client
+
+
+@pytest.fixture
+def sqlite():
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            os.remove(SQLITE_TEST_DB + suffix)
+        except OSError:
+            pass
+
+    return SQLITE_TEST_DB
 
 
 @pytest.fixture

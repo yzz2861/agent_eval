@@ -10,6 +10,7 @@ from .memcached import MemcachedStorage
 from .memory import MemoryStorage
 from .mongodb import MongoDBStorage
 from .redis import RedisClusterStorage, RedisSentinelStorage, RedisStorage
+from .sqlite import SQLiteStorage
 
 __all__ = [
     "MemcachedStorage",
@@ -19,6 +20,7 @@ __all__ = [
     "RedisClusterStorage",
     "RedisSentinelStorage",
     "RedisStorage",
+    "SQLiteStorage",
     "SlidingWindowCounterSupport",
     "Storage",
 ]

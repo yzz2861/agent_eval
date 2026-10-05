@@ -3,6 +3,18 @@
 Changelog
 =========
 
+v5.9.0
+------
+Release Date: Unreleased
+
+* Feature
+
+  * Add a sqlite storage backend (:class:`limits.storage.SQLiteStorage` and
+    :class:`limits.aio.storage.SQLiteStorage`) based on the standard library
+    :mod:`sqlite3` module, supporting the fixed window, moving window and
+    sliding window counter strategies. The backend is safe to share between
+    processes on a single host without running an external service.
+
 v5.8.0
 ------
 Release Date: 2026-02-04
@@ -912,7 +924,6 @@ v1.0.0
 Release Date: 2015-01-08
 
 * Initial import of common rate limiting code from `Flask-Limiter <https://github.com/alisaifee/flask-limiter>`_
-
 
 
 

@@ -16,12 +16,13 @@ from limits.storage import (
     RedisClusterStorage,
     RedisSentinelStorage,
     RedisStorage,
+    SQLiteStorage,
     SlidingWindowCounterSupport,
     Storage,
     storage_from_string,
 )
 from limits.strategies import MovingWindowRateLimiter, SlidingWindowCounterRateLimiter
-from tests.utils import fixed_start
+from tests.utils import SQLITE_TEST_DB, fixed_start
 
 
 class TestBaseStorage:
@@ -149,6 +150,14 @@ class TestBaseStorage:
     "uri, args, expected_instance, fixture",
     [
         pytest.param("memory://", {}, MemoryStorage, None, id="in-memory"),
+        pytest.param(
+            "sqlite:///" + SQLITE_TEST_DB,
+            {},
+            SQLiteStorage,
+            lf("sqlite"),
+            marks=pytest.mark.sqlite,
+            id="sqlite",
+        ),
         pytest.param(
             "redis://localhost:7379",
             {},

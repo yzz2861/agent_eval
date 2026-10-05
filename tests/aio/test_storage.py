@@ -14,6 +14,7 @@ from limits.aio.storage import (
     RedisClusterStorage,
     RedisSentinelStorage,
     RedisStorage,
+    SQLiteStorage,
     SlidingWindowCounterSupport,
     Storage,
 )
@@ -23,7 +24,7 @@ from limits.aio.strategies import (
 )
 from limits.errors import StorageError
 from limits.storage import storage_from_string
-from tests.utils import async_fixed_start
+from tests.utils import SQLITE_TEST_DB, async_fixed_start
 
 
 @pytest.mark.asyncio
@@ -152,6 +153,14 @@ class TestBaseStorage:
             None,
             marks=pytest.mark.memory,
             id="in-memory",
+        ),
+        pytest.param(
+            "async+sqlite:///" + SQLITE_TEST_DB,
+            {},
+            SQLiteStorage,
+            lf("sqlite"),
+            marks=pytest.mark.sqlite,
+            id="sqlite",
         ),
         pytest.param(
             "async+redis://localhost:7379",
