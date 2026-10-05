@@ -80,5 +80,105 @@ RSpec.describe Faraday::Response do
 
       expect(subject.env).to eq(callback_env)
     end
+
+    it 'is not observers_processed before finish' do
+      expect(subject.observers_processed?).to be_falsey
+    end
+
+    it 'is observers_processed after finish' do
+      subject.finish(env)
+      expect(subject.observers_processed?).to be_truthy
+    end
+
+    it 'runs observers in registration order' do
+      order = []
+      subject.on_complete { order << :first }
+      subject.on_complete { order << :second }
+      subject.finish(env)
+
+      expect(order).to eq(%i[first second])
+    end
+
+    it 'runs observers registered from within an observer, in registration order' do
+      order = []
+      subject.on_complete do
+        order << :first
+        subject.on_complete { order << :third }
+      end
+      subject.on_complete { order << :second }
+      subject.finish(env)
+
+      expect(order).to eq(%i[first second third])
+      expect(subject.observers_processed?).to be_truthy
+    end
+
+    it 'runs late-registered observers immediately after observers are processed' do
+      order = []
+      subject.on_complete { order << :early }
+      subject.finish(env)
+      subject.on_complete { order << :late }
+
+      expect(order).to eq(%i[early late])
+    end
+
+    it 'keeps running remaining observers when one raises' do
+      order = []
+      subject.on_complete { order << :first }
+      subject.on_complete { raise 'boom' }
+      subject.on_complete { order << :third }
+
+      expect { subject.finish(env) }.to raise_error('boom')
+      expect(order).to eq(%i[first third])
+      expect(subject.observers_processed?).to be_truthy
+    end
+
+    it 'records observer errors without changing status and body' do
+      error = RuntimeError.new('boom')
+      subject.on_complete { raise error }
+
+      expect { subject.finish(env) }.to raise_error(error)
+      expect(subject.completion_errors).to eq([error])
+      expect(subject.status).to eq(404)
+      expect(subject.body).to eq('yikes')
+    end
+
+    it 're-raises errors from late-registered observers by default' do
+      subject.finish(env)
+
+      expect { subject.on_complete { raise 'boom' } }.to raise_error('boom')
+      expect(subject.completion_errors.size).to eq(1)
+    end
+
+    context 'with a custom completion_error_handler' do
+      around do |example|
+        original = Faraday::Response.completion_error_handler
+        example.run
+        Faraday::Response.completion_error_handler = original
+      end
+
+      it 'forwards observer errors to the configured handler' do
+        collected = []
+        Faraday::Response.completion_error_handler = ->(error, response) { collected << [error, response] }
+
+        error = RuntimeError.new('boom')
+        subject.on_complete { raise error }
+
+        expect { subject.finish(env) }.not_to raise_error
+        expect(collected).to eq([[error, subject]])
+        expect(subject.completion_errors).to eq([error])
+        expect(subject.status).to eq(404)
+        expect(subject.body).to eq('yikes')
+      end
+
+      it 'hands errors from late-registered observers to the handler' do
+        collected = []
+        Faraday::Response.completion_error_handler = ->(error, response) { collected << [error, response] }
+
+        subject.finish(env)
+        expect { subject.on_complete { raise 'boom' } }.not_to raise_error
+        expect(collected.size).to eq(1)
+        expect(collected.first[1]).to eq(subject)
+      end
+    end
   end
 end
