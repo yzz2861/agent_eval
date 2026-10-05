@@ -25,6 +25,16 @@ module Flipper
       def open?(context)
         return false unless context.actors?
 
+        # When an actor index is configured, defer to it entirely. The index
+        # excludes actors that are definitely not on the allowlist without
+        # loading the full set, and confirms possible hits with a precise
+        # query, so the answer stays authoritative.
+        if (index = context.actor_index)
+          return context.actors.any? do |actor|
+            index.include?(actor.value)
+          end
+        end
+
         enabled_actors = context.values.actors
         return false if enabled_actors.empty?
 

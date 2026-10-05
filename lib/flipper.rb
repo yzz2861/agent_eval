@@ -189,6 +189,8 @@ module Flipper
 end
 
 require 'flipper/actor'
+require 'flipper/actor_index'
+require 'flipper/actor_indexes/bloom'
 require 'flipper/adapter'
 require 'flipper/adapters/wrapper'
 require 'flipper/adapters/actor_limit'
@@ -197,6 +199,7 @@ require 'flipper/adapters/memoizable'
 require 'flipper/adapters/memory'
 require 'flipper/adapters/strict'
 require 'flipper/adapter_builder'
+require 'flipper/bloom_filter'
 require 'flipper/configuration'
 require 'flipper/dsl'
 require 'flipper/errors'

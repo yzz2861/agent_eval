@@ -18,6 +18,10 @@ module Flipper
     # Private: The adapter this feature should use.
     attr_reader :adapter
 
+    # Public: Optional Flipper::ActorIndex consulted by the actor gate
+    # instead of scanning the full actors set. Nil means no index is in use.
+    attr_reader :actor_index
+
     # Private: What is being used to instrument all the things.
     attr_reader :instrumenter
 
@@ -28,11 +32,16 @@ module Flipper
     #
     # options - The Hash of options.
     #           :instrumenter - What to use to instrument all the things.
+    #           :actor_index - Optional Flipper::ActorIndex (or compatible
+    #                          object) used to check actor membership without
+    #                          loading the full actors set. When present, it
+    #                          is kept in sync on enable/disable of actors.
     #
     def initialize(name, adapter, options = {})
       @name = name
       @key = name.to_s
       @instrumenter = options.fetch(:instrumenter, Instrumenters::Noop)
+      @actor_index = options[:actor_index]
       @adapter = adapter
     end
 
@@ -55,7 +64,9 @@ module Flipper
         payload[:gate_name] = gate.name
         payload[:thing] = wrapped_thing
 
-        adapter.disable self, gate, wrapped_thing
+        adapter.disable(self, gate, wrapped_thing).tap do
+          sync_actor_index(:delete, gate, wrapped_thing)
+        end
       end
     end
 
@@ -84,7 +95,11 @@ module Flipper
     #
     # Returns the result of Adapter#clear.
     def clear
-      instrument(:clear) { adapter.clear(self) }
+      instrument(:clear) do
+        adapter.clear(self).tap do
+          sync_actor_index(:clear)
+        end
+      end
     end
 
     # Public: Check if a feature is enabled for zero or more actors.
@@ -98,7 +113,8 @@ module Flipper
         context = FeatureCheckContext.new(
           feature_name: @name,
           values: gate_values,
-          actors: actors
+          actors: actors,
+          actor_index: @actor_index
         )
 
         if open_gate = gates.detect { |gate| gate.open?(context) }
@@ -458,7 +474,26 @@ module Flipper
         payload[:gate_name] = gate.name
         payload[:thing] = wrapped_thing
 
-        adapter.enable self, gate, wrapped_thing
+        adapter.enable(self, gate, wrapped_thing).tap do
+          sync_actor_index(:add, gate, wrapped_thing)
+        end
+      end
+    end
+
+    # Private: Keeps an optional actor index in sync when actors are enabled,
+    # disabled or cleared through this feature. Only indexes that expose the
+    # mutation methods (like ActorIndexes::Bloom) are updated; read-only
+    # index implementations are left untouched and simply go stale, which
+    # Flipper::ActorIndex handles with its version fallback.
+    def sync_actor_index(operation, gate = nil, thing = nil)
+      return unless @actor_index
+      return unless @actor_index.respond_to?(operation)
+      return if gate && gate.name != :actor
+
+      if thing
+        @actor_index.public_send(operation, thing.value)
+      else
+        @actor_index.public_send(operation)
       end
     end
 

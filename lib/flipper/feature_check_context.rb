@@ -10,10 +10,15 @@ module Flipper
     # Public: The actors we want to know if a feature is enabled for.
     attr_reader :actors
 
-    def initialize(feature_name:, values:, actors:)
+    # Public: Optional Flipper::ActorIndex used by the actor gate to avoid
+    # scanning the full actors set. Nil means no index is in use.
+    attr_reader :actor_index
+
+    def initialize(feature_name:, values:, actors:, actor_index: nil)
       @feature_name = feature_name
       @values = values
       @actors = actors
+      @actor_index = actor_index
     end
 
     def actors?
