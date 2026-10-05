@@ -72,6 +72,35 @@ Flipper.enable_percentage_of_actors :search, 2
 
 Read more about [getting started with Flipper](https://flippercloud.io/docs?utm_source=oss&utm_medium=readme&utm_campaign=getting_started) and [enabling features](https://flippercloud.io/docs/features?utm_source=oss&utm_medium=readme&utm_campaign=enabling_features).
 
+## Declarative Rollout Schedules
+
+For rolling a feature out between two points in time (say 10% to 50%) without a background job continuously writing new percentages, wrap your adapter in `Flipper::Adapters::RolloutSchedule` and register points with explicit time zone offsets. The threshold is computed at query time from an injected clock, and actors are bucketed with Flipper's stable percentage-of-actors gate.
+
+```ruby
+require 'flipper/adapters/rollout_schedule'
+
+adapter = Flipper::Adapters::RolloutSchedule.new(
+  Flipper::Adapters::Memory.new,
+  clock: -> { Time.now }, # inject a fake/frozen clock in tests
+)
+flipper = Flipper.new(adapter)
+
+# Linear (interpolated) growth; use mode: :step to hold each value until the
+# next point. Every time string or Time must carry an explicit offset.
+flipper.add_rollout_schedule :search, [
+  ['2026-01-01T09:00:00+08:00', 10],
+  ['2026-01-08T09:00:00+08:00', 50],
+], mode: :linear
+
+flipper.enabled?(:search, current_user) # stable per-actor bucket
+```
+
+Semantics:
+
+- Before the first point the schedule contributes 0%; after the last point the final percentage is held indefinitely (the plan neither snaps on nor snaps off).
+- Schedules for the same feature may not have overlapping windows; reverse or non-increasing intervals are also rejected at configuration time. Schedules that merely touch at an endpoint are allowed and hand off at that instant.
+- `flipper.disable_rollout(:search)` is a manual kill switch with the highest precedence: it forces the feature fully off over schedules and every other gate until `flipper.enable_rollout(:search)` clears it. A fully-enabled boolean gate and explicit actor/group/expression gates otherwise apply normally.
+
 ## Flipper Cloud
 
 Like Flipper and want more? Check out [Flipper Cloud](https://www.flippercloud.io?utm_source=oss&utm_medium=readme&utm_campaign=check_out), which comes with:

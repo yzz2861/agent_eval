@@ -283,6 +283,37 @@ module Flipper
       adapter.read_only?
     end
 
+    # Public: Register a declarative rollout schedule on the
+    # Flipper::Adapters::RolloutSchedule wrapper. Raises if the DSL's adapter
+    # stack is not wrapped by it.
+    def add_rollout_schedule(feature, points, mode: :linear, clock: nil)
+      rollout_schedule_adapter.add_schedule(feature, points, mode: mode, clock: clock)
+    end
+    alias_method :schedule_rollout, :add_rollout_schedule
+
+    # Public: Manually force a feature fully off, overriding every rollout
+    # schedule and gate until #enable_rollout is called.
+    def disable_rollout(feature)
+      rollout_schedule_adapter.disable_rollout(feature)
+    end
+
+    # Public: Clear a manual rollout kill switch.
+    def enable_rollout(feature)
+      rollout_schedule_adapter.enable_rollout(feature)
+    end
+
+    private
+
+    # Private: Walks the adapter stack to find the RolloutSchedule wrapper.
+    def rollout_schedule_adapter
+      current = @adapter
+      while current
+        return current if current.is_a?(Adapters::RolloutSchedule)
+        current = current.respond_to?(:adapter) ? current.adapter : nil
+      end
+      raise ArgumentError, "register a rollout schedule requires Flipper::Adapters::RolloutSchedule in the adapter stack"
+    end
+
     # Cloud DSL method that does nothing for open source version.
     def sync
     end
