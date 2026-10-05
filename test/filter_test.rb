@@ -517,3 +517,193 @@ class AfterFilterTest < Minitest::Test
     assert_equal 'Been now and after', doodle
   end
 end
+
+class AroundFilterTest < Minitest::Test
+  it 'nests filters in superclass and definition order around the endpoint' do
+    events = []
+    base = Class.new(Sinatra::Base) do
+      around do |continuation|
+        events << :outer_enter
+        continuation.call
+        events << :outer_exit
+      end
+    end
+
+    mock_app(base) do
+      before { events << :before }
+      around do |continuation|
+        events << :inner_enter
+        continuation.call
+        events << :inner_exit
+      end
+      around do |continuation|
+        events << :middle_enter
+        continuation.call
+        events << :middle_exit
+      end
+      get('/') { events << :endpoint; 'ok' }
+      after { events << :after }
+    end
+
+    get '/'
+
+    assert_equal 'ok', body
+    expected_events = [
+      :before, :outer_enter, :inner_enter, :middle_enter,
+      :endpoint, :middle_exit, :inner_exit, :outer_exit, :after
+    ]
+    assert_equal expected_events, events
+  end
+
+  it 'passes path captures before the continuation' do
+    captured = nil
+    mock_app do
+      around('/users/:id') do |id, continuation|
+        captured = id
+        continuation.call
+      end
+      get('/users/:id') { params.fetch('id', 'missing') }
+    end
+
+    get '/users/42'
+
+    assert_equal '42', body
+    assert_equal '42', captured
+  end
+
+  it 'keeps around path captures out of endpoint params' do
+    mock_app do
+      around('/users/:id') { |_id, continuation| continuation.call }
+      get('/users/*') { params.fetch('id', 'missing') }
+    end
+
+    get '/users/42'
+
+    assert_equal 'missing', body
+  end
+
+  it 'does not run around filters when serving static files' do
+    ran_filter = false
+    mock_app do
+      around { |continuation| ran_filter = true; continuation.call }
+      set :static, true
+      set :public_folder, __dir__
+    end
+
+    get '/filter_test.rb'
+
+    assert ok?
+    assert_equal File.read(__FILE__), body
+    assert !ran_filter
+  end
+
+  it 'runs cleanup when the endpoint uses halt' do
+    events = []
+    mock_app do
+      around do |continuation|
+        events << :enter
+        continuation.call
+        assert_equal 201, response.status
+        events << :exit
+      end
+      get('/') do
+        events << :endpoint
+        halt 201, 'created'
+      end
+    end
+
+    get '/'
+
+    assert_equal 201, response.status
+    assert_equal 'created', body
+    assert_equal [:enter, :endpoint, :exit], events
+  end
+
+  it 'keeps nested cleanup ordered when routes pass' do
+    events = []
+    mock_app do
+      around do |continuation|
+        events << :enter
+        continuation.call
+        events << :exit
+      end
+      get('/') do
+        events << :first
+        pass
+      end
+      get('/') do
+        events << :second
+        'matched'
+      end
+    end
+
+    get '/'
+
+    assert_equal 'matched', body
+    assert_equal [:enter, :first, :second, :exit], events
+  end
+
+  it 'runs cleanup and error handlers when the endpoint raises' do
+    events = []
+    mock_app do
+      around do |continuation|
+        events << :enter
+        begin
+          continuation.call
+        ensure
+          events << :exit
+        end
+      end
+      get('/') { events << :endpoint; raise 'boom' }
+      error(500) { 'handled' }
+    end
+
+    get '/'
+
+    assert_equal 'handled', body
+    assert_equal [:enter, :endpoint, :exit], events
+  end
+
+  it 'supports active short circuits while still running cleanup' do
+    events = []
+    mock_app do
+      around do |continuation|
+        events << :enter
+        begin
+          halt 403, 'blocked'
+        ensure
+          events << :exit
+        end
+      end
+      get('/') { events << :endpoint; 'ok' }
+    end
+
+    get '/'
+
+    assert_equal 403, response.status
+    assert_equal 'blocked', body
+    assert_equal [:enter, :exit], events
+  end
+
+  it 'only runs the endpoint once when the continuation is called twice' do
+    events = []
+    mock_app do
+      around do |continuation|
+        events << :enter
+        begin
+          continuation.call
+          continuation.call
+        ensure
+          events << :exit
+        end
+      end
+      get('/') { events << :endpoint; 'ok' }
+      error(500) { 'handled' }
+    end
+
+    get '/'
+
+    assert_equal 'handled', body
+    assert_equal [:enter, :endpoint, :exit], events
+  end
+end

@@ -1037,6 +1037,32 @@ module Sinatra
       throw :pass, block
     end
 
+    class AroundContinuation
+      attr_reader :result
+
+      def initialize(app, chain, endpoint_params)
+        @app = app
+        @chain = chain
+        @endpoint_params = endpoint_params
+        @called = false
+      end
+
+      def call
+        raise 'around continuation can only be called once' if @called
+
+        @called = true
+        around_params = @app.params.dup
+        begin
+          @app.params = @endpoint_params.dup
+          @result = catch(:halt) { @chain.call }
+          @app.__send__(:invoke_response, @result)
+          @result
+        ensure
+          @app.params = around_params
+        end
+      end
+    end
+
     # Forward the request to the downstream app -- middleware only.
     def forward
       raise 'downstream app not set' unless @app.respond_to? :call
@@ -1058,6 +1084,35 @@ module Sinatra
         result = process_route(*args)
         block.call(result) if block_given?
       end
+    end
+
+    def around!
+      throw :halt, around_chain! { route! }
+    end
+
+    def around_chain!(base = settings, &endpoint)
+      return endpoint.call unless base.respond_to?(:filters)
+
+      inner = base.filters[:around].reverse.reduce(endpoint) do |chain, args|
+        proc { run_around_filter(*args, chain) }
+      end
+
+      if base.superclass.respond_to?(:filters)
+        around_chain!(base.superclass) { inner.call }
+      else
+        inner.call
+      end
+    end
+
+    def run_around_filter(pattern, conditions, block, chain)
+      continuation = nil
+      endpoint_params = @params.dup
+      process_route(pattern, conditions) do |_app, values|
+        continuation = AroundContinuation.new(self, chain, endpoint_params)
+        block[self, values + [continuation]]
+      end
+
+      continuation ? continuation.result : chain.call
     end
 
     # Run routes defined on the class and all superclasses.
@@ -1163,8 +1218,11 @@ module Sinatra
 
     # Run the block with 'throw :halt' support and apply result to the response.
     def invoke(&block)
-      res = catch(:halt, &block)
+      invoke_response(catch(:halt, &block))
+      nil # avoid double setting the same response tuple twice
+    end
 
+    def invoke_response(res)
       res = [res] if (Integer === res) || (String === res)
       if (Array === res) && (Integer === res.first)
         res = res.dup
@@ -1174,7 +1232,6 @@ module Sinatra
       elsif res.respond_to? :each
         body res
       end
-      nil # avoid double setting the same response tuple twice
     end
 
     # Dispatch a request with error handling.
@@ -1192,7 +1249,7 @@ module Sinatra
         filter! :before do
           @pinned_response = !response['content-type'].nil?
         end
-        route!
+        around!
       end
     rescue ::Exception => e
       invoke { handle_exception!(e) }
@@ -1311,7 +1368,7 @@ module Sinatra
       def reset!
         @conditions     = []
         @routes         = {}
-        @filters        = { before: [], after: [] }
+        @filters        = { before: [], around: [], after: [] }
         @errors         = {}
         @middleware     = []
         @prototype      = nil
@@ -1492,6 +1549,12 @@ module Sinatra
       # response.
       def after(path = /.*/, **options, &block)
         add_filter(:after, path, **options, &block)
+      end
+
+      # Define an around filter. The continuation passed to the block runs
+      # the request endpoint and may only be called once.
+      def around(path = /.*/, **options, &block)
+        add_filter(:around, path, **options, &block)
       end
 
       # add a filter
@@ -2115,7 +2178,7 @@ module Sinatra
     end
 
     delegate :get, :patch, :put, :post, :delete, :head, :options, :link, :unlink,
-             :template, :layout, :before, :after, :error, :not_found, :configure,
+             :template, :layout, :before, :around, :after, :error, :not_found, :configure,
              :set, :mime_type, :enable, :disable, :use, :development?, :test?,
              :production?, :helpers, :settings, :register, :on_start, :on_stop
 

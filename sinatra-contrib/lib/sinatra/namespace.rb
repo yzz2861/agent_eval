@@ -238,7 +238,7 @@ module Sinatra
         names.each { |n| define_method(n) { |*a, &b| prefixed(n, *a, &b) } }
       end
 
-      prefixed :before, :after, :delete, :get, :head, :options, :patch, :post, :put
+      prefixed :before, :around, :after, :delete, :get, :head, :options, :patch, :post, :put
 
       def helpers(*extensions, &block)
         class_eval(&block) if block_given?

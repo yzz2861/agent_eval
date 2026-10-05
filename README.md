@@ -1093,6 +1093,23 @@ after do
 end
 ```
 
+Around filters wrap the request endpoint. The block receives a continuation
+that runs the endpoint when called and can only be called once:
+
+```ruby
+around do |continuation|
+  resource = acquire
+  begin
+    continuation.call
+  ensure
+    resource.release
+  end
+end
+```
+
+Normal `halt` and `pass` calls in the endpoint do not bypass the code after
+the continuation; raised exceptions still propagate through the filter.
+
 Note: Unless you use the `body` method rather than just returning a
 String from the routes, the body will not yet be available in the after
 filter, since it is generated later on.
