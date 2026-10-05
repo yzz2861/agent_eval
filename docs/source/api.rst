@@ -12,6 +12,14 @@ The :mod:`sqlparse` module provides the following functions on module-level.
 
 .. autofunction:: sqlparse.parse
 
+.. autofunction:: sqlparse.fingerprint
+
+``sqlparse.fingerprint`` returns an :class:`~sqlparse.SQLFingerprint` with a
+``normalized`` SQL text and a stable ``digest``. It performs structural
+grouping: values are normalized, while quoted identifiers and optimizer hints
+are retained. A matching digest does not prove that two statements are
+semantically equivalent.
+
 In most cases there's no need to set the `encoding` parameter. If
 `encoding` is not set, sqlparse assumes that the given SQL statement
 is encoded either in utf-8 or latin-1.
