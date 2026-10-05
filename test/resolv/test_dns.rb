@@ -3,6 +3,7 @@ require 'test/unit'
 require 'resolv'
 require 'socket'
 require 'tempfile'
+require 'openssl'
 
 class Object # :nodoc:
   def stub name, val_or_callable, &block
@@ -61,6 +62,44 @@ class TestResolvDNS < Test::Unit::TestCase
       yield u
     ensure
       u.close
+    end
+  end
+
+  def generate_tls_certificate(*subject_alt_names)
+    key = OpenSSL::PKey::EC.generate('prime256v1')
+    cert = OpenSSL::X509::Certificate.new
+    cert.version = 2
+    cert.serial = SecureRandom.random_number(2**160)
+    cert.subject = cert.issuer = OpenSSL::X509::Name.new([['CN', 'Resolv Test CA']])
+    cert.public_key = key
+    cert.not_before = Time.now - 60
+    cert.not_after = Time.now + 3600
+    factory = OpenSSL::X509::ExtensionFactory.new
+    factory.subject_certificate = cert
+    factory.issuer_certificate = cert
+    cert.add_extension(factory.create_extension('basicConstraints', 'CA:TRUE', true))
+    cert.add_extension(factory.create_extension('subjectAltName', subject_alt_names.join(',')))
+    cert.sign(key, OpenSSL::Digest::SHA256.new)
+    [cert, key]
+  end
+
+  def tls_cert_store(cert)
+    store = OpenSSL::X509::Store.new
+    store.add_cert(cert)
+    store
+  end
+
+  def with_tls_server(cert, key, host='127.0.0.1', port=0)
+    tcp_server = TCPServer.new(host, port)
+    context = OpenSSL::SSL::SSLContext.new
+    context.cert = cert
+    context.key = key
+    server = OpenSSL::SSL::SSLServer.new(tcp_server, context)
+    _, server_port, _, server_address = tcp_server.addr
+    begin
+      yield server, server_address, server_port
+    ensure
+      server.close
     end
   end
 
@@ -565,6 +604,31 @@ class TestResolvDNS < Test::Unit::TestCase
         raise Timeout::Error
       end
     end
+  end
+
+  def test_conf_tls_defaults_to_port_853_and_separate_verification_hostname
+    config = Resolv::DNS::Config.new(
+      nameserver_port: [['192.0.2.1', nil, { hostname: 'dns.example.org' }]]
+    )
+    config.lazy_initialize
+    assert_equal(
+      [['192.0.2.1', 853, { hostname: 'dns.example.org' }]],
+      config.nameserver_port
+    )
+
+    config = Resolv::DNS::Config.new(nameserver: ['192.0.2.2'], tls: true)
+    config.lazy_initialize
+    assert_equal([['192.0.2.2', 853, {}]], config.nameserver_port)
+  end
+
+  def test_conf_tls_endpoint_skips_udp_requester
+    dns = Resolv::DNS.allocate
+    config = Resolv::DNS::Config.new(
+      nameserver_port: [['127.0.0.1', 853, {}]]
+    )
+    config.lazy_initialize
+    dns.instance_variable_set(:@config, config)
+    assert_nil(dns.make_udp_requester)
   end
 
   def test_invalid_byte_comment
@@ -1613,6 +1677,285 @@ class TestResolvDNS < Test::Unit::TestCase
                                        tcp_server1_thread, tcp_server2_thread])
         assert_equal(['192.0.2.1'], result.map {|rr| rr.address.to_s })
       end
+    end
+  end
+
+  def test_tls_query_verifies_local_certificate_and_hostname
+    cert, key = generate_tls_certificate('IP:127.0.0.1', 'DNS:localhost')
+    with_tls_server(cert, key) do |server, server_address, server_port|
+      server_thread = Thread.new do
+        client = server.accept
+        query = read_framed_query(client)
+        client.write(framed(reply_for_query(query, '192.0.2.10')))
+        client.close
+      end
+
+      result = Resolv::DNS.open(nameserver_port: [[
+        server_address,
+        server_port,
+        { cert_store: tls_cert_store(cert) }
+      ]]) do |dns|
+        dns.getresources('one.example.org', Resolv::DNS::Resource::IN::A)
+      end
+
+      assert_equal(['192.0.2.10'], result.map {|rr| rr.address.to_s })
+      assert_join_threads([server_thread])
+    end
+  end
+
+  def test_tls_separate_connection_address_and_verification_hostname
+    cert, key = generate_tls_certificate('DNS:localhost', 'IP:127.0.0.1')
+    with_tls_server(cert, key) do |server, server_address, server_port|
+      server_thread = Thread.new do
+        client = server.accept
+        query = read_framed_query(client)
+        client.write(framed(reply_for_query(query, '192.0.2.11')))
+        client.close
+      end
+
+      result = Resolv::DNS.open(nameserver_port: [[
+        server_address,
+        server_port,
+        { hostname: 'localhost', cert_store: tls_cert_store(cert) }
+      ]]) do |dns|
+        dns.getresources('two.example.org', Resolv::DNS::Resource::IN::A)
+      end
+
+      assert_equal(['192.0.2.11'], result.map {|rr| rr.address.to_s })
+      assert_join_threads([server_thread])
+    end
+  end
+
+  def test_tls_multiple_queries_match_out_of_order_replies_by_id_and_question
+    cert, key = generate_tls_certificate('IP:127.0.0.1')
+    with_tls_server(cert, key) do |server, server_address, server_port|
+      requester = Resolv::DNS::Requester::TLS.new(
+        server_address, server_port, cert_store: tls_cert_store(cert)
+      )
+      ready = Thread::Queue.new
+      send_queries = Thread::Queue.new
+      names = ['alpha.example.org', 'beta.example.org', 'gamma.example.org']
+      results = nil
+      senders = names.map do |name|
+        msg = Resolv::DNS::Message.new
+        msg.add_question(name, Resolv::DNS::Resource::IN::A)
+        requester.sender(msg, name)
+      end
+
+      server_thread = Thread.new do
+        client = server.accept
+        send_queries.pop
+        queries = 3.times.map { read_framed_query(client) }
+        queries.reverse_each do |query|
+          address = query.question[0][0].to_s[0] == 'a' ? '192.0.2.20' :
+                    query.question[0][0].to_s[0] == 'b' ? '192.0.2.21' : '192.0.2.22'
+          client.write(framed(reply_for_query(query, address)))
+        end
+        client.close
+      end
+
+      client_threads = names.each_with_index.map do |name, index|
+        Thread.new do
+          ready.push(true)
+          send_queries.pop
+          reply, question = requester.request(senders[index], 5)
+          [question, reply.answer[0][2].address.to_s]
+        end
+      end
+
+      begin
+        3.times { ready.pop }
+        3.times { send_queries.push(true) }
+        results = client_threads.map(&:value)
+      ensure
+        requester.close
+      end
+
+      assert_equal(
+        [['alpha.example.org', '192.0.2.20'],
+         ['beta.example.org', '192.0.2.21'],
+         ['gamma.example.org', '192.0.2.22']],
+        results
+      )
+      assert_join_threads([server_thread])
+    end
+  end
+
+  def test_tls_response_requires_both_id_and_question_section
+    cert, key = generate_tls_certificate('IP:127.0.0.1')
+    with_tls_server(cert, key) do |server, server_address, server_port|
+      requester = Resolv::DNS::Requester::TLS.new(
+        server_address, server_port, cert_store: tls_cert_store(cert)
+      )
+      query = Resolv::DNS::Message.new
+      query.add_question('correct.example.org', Resolv::DNS::Resource::IN::A)
+      sender = requester.sender(query, 'correct')
+
+      server_thread = Thread.new do
+        client = server.accept
+        request_id = read_framed_query(client).id
+        wrong = Resolv::DNS::Message.new(request_id)
+        wrong.qr = 1
+        wrong.add_question('wrong.example.org', Resolv::DNS::Resource::IN::A)
+        wrong.add_answer('wrong.example.org', 3600,
+                         Resolv::DNS::Resource::IN::A.new('192.0.2.50'))
+        encoded = wrong.encode
+        client.write(framed(encoded))
+
+        correct = Resolv::DNS::Message.new(request_id)
+        correct.qr = 1
+        correct.add_question('correct.example.org', Resolv::DNS::Resource::IN::A)
+        correct.add_answer('correct.example.org', 3600,
+                           Resolv::DNS::Resource::IN::A.new('192.0.2.51'))
+        encoded = correct.encode
+        client.write(framed(encoded))
+        client.close
+      end
+
+      begin
+        reply, data = requester.request(sender, 5)
+        assert_equal('correct', data)
+        assert_equal('correct.example.org', reply.question[0][0].to_s)
+        assert_equal('192.0.2.51', reply.answer[0][2].address.to_s)
+      ensure
+        requester.close
+      end
+      assert_join_threads([server_thread])
+    end
+  end
+
+  def test_tls_reply_length_and_body_chunks_are_reassembled
+    cert, key = generate_tls_certificate('IP:127.0.0.1')
+    with_tls_server(cert, key) do |server, server_address, server_port|
+      server_thread = Thread.new do
+        client = server.accept
+        reply = framed(reply_for_query(read_framed_query(client), '192.0.2.30'))
+        reply.each_char {|byte| client.write(byte) }
+        client.close
+      end
+
+      result = Resolv::DNS.open(nameserver_port: [[
+        server_address,
+        server_port,
+        { cert_store: tls_cert_store(cert) }
+      ]]) do |dns|
+        dns.getresources('chunks.example.org', Resolv::DNS::Resource::IN::A)
+      end
+
+      assert_equal(['192.0.2.30'], result.map {|rr| rr.address.to_s })
+      assert_join_threads([server_thread])
+    end
+  end
+
+  def test_tls_connection_closed_and_partial_frame_time_out
+    cert, key = generate_tls_certificate('IP:127.0.0.1')
+    with_tls_server(cert, key) do |server, server_address, server_port|
+      server_thread = Thread.new do
+        client = server.accept
+        read_framed_query(client)
+        client.write([10].pack('n') << '12345')
+        sleep 1
+        client.close
+      end
+
+      requester = Resolv::DNS::Requester::TLS.new(
+        server_address, server_port, cert_store: tls_cert_store(cert)
+      )
+      begin
+        msg = Resolv::DNS::Message.new
+        msg.add_question('partial.example.org', Resolv::DNS::Resource::IN::A)
+        assert_raise(Resolv::ResolvTimeout) do
+          requester.request(requester.sender(msg, msg), 0.2)
+        end
+        assert_equal(false, requester.reusable?)
+      ensure
+        requester.close
+      end
+      assert_join_threads([server_thread])
+    end
+  end
+
+  def test_tls_canceled_id_does_not_match_next_query
+    cert, key = generate_tls_certificate('IP:127.0.0.1')
+    with_tls_server(cert, key) do |server, server_address, server_port|
+      requester = Resolv::DNS::Requester::TLS.new(
+        server_address, server_port, cert_store: tls_cert_store(cert)
+      )
+      first = Resolv::DNS::Message.new
+      first.add_question('first.example.org', Resolv::DNS::Resource::IN::A)
+      first_sender = requester.sender(first, 'first')
+
+      server_thread = Thread.new do
+        client = server.accept
+        first_query = read_framed_query(client)
+        sleep 0.3
+        client.write(framed(reply_for_query(first_query, '192.0.2.40')))
+
+        second_query = read_framed_query(client)
+        client.write(framed(reply_for_query(second_query, '192.0.2.41')))
+        client.close
+      end
+
+      begin
+        assert_raise(Resolv::ResolvTimeout) do
+          requester.request(first_sender, 0.1)
+        end
+
+        second = Resolv::DNS::Message.new
+        second.add_question('second.example.org', Resolv::DNS::Resource::IN::A)
+        second_sender = requester.sender(second, 'second')
+        reply, data = requester.request(second_sender, 2)
+        assert_equal('second', data)
+        assert_equal('second.example.org', reply.question[0][0].to_s)
+        assert_equal('192.0.2.41', reply.answer[0][2].address.to_s)
+      ensure
+        requester.close
+      end
+      assert_join_threads([server_thread])
+    end
+  end
+
+  def test_tls_certificate_verification_failure_does_not_fall_back_to_plain_tcp
+    other_cert, _other_key = generate_tls_certificate('IP:127.0.0.1')
+    with_tcp('127.0.0.1', 0) do |plain_server|
+      _, server_port, _, server_address = plain_server.addr
+      received_plain_query = false
+      plain_thread = Thread.new do
+        client = plain_server.accept
+        read_framed_query(client)
+        received_plain_query = true
+        client.close
+      end
+
+      assert_raise(OpenSSL::SSL::SSLError) do
+        Resolv::DNS.open(nameserver_port: [[
+          server_address,
+          server_port,
+          { cert_store: tls_cert_store(other_cert) }
+        ]]) do |dns|
+          dns.timeouts = 2
+          dns.getresources('secure.example.org', Resolv::DNS::Resource::IN::A)
+        end
+      end
+      assert_equal(false, received_plain_query)
+      plain_thread.kill
+    end
+  end
+
+  def test_tls_hostname_verification_is_enabled_by_default
+    cert, key = generate_tls_certificate('DNS:unexpected.example')
+    with_tls_server(cert, key) do |server, server_address, server_port|
+      server_thread = Thread.new { server.accept }
+      assert_raise(OpenSSL::SSL::SSLError) do
+        Resolv::DNS.open(nameserver_port: [[
+          server_address,
+          server_port,
+          { hostname: 'localhost', cert_store: tls_cert_store(cert) }
+        ]]) do |dns|
+          dns.getresources('name.example.org', Resolv::DNS::Resource::IN::A)
+        end
+      end
+      server_thread.kill
     end
   end
 end
