@@ -93,3 +93,4 @@ end
 require 'faraday/response/json'
 require 'faraday/response/logger'
 require 'faraday/response/raise_error'
+require 'faraday/response/event_stream'

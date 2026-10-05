@@ -18,6 +18,7 @@
     * [Instrumentation](middleware/included/instrumentation.md)
     * [Logging](middleware/included/logging.md)
     * [Raising Errors](middleware/included/raising-errors.md)
+    * [Event Stream](middleware/included/event-stream.md)
   * [Writing custom middleware](middleware/custom-middleware.md)
 * Adapters
   * [Overview](adapters/index.md)
