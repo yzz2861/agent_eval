@@ -92,6 +92,59 @@ will be handled in a strict way.
 stubs.strict_mode = true
 ```
 
+## Stateful workflows
+
+Some APIs are inherently sequential: you must create a draft, submit it and
+only then can you read the result, and the same URL may return a different
+response depending on the stage. Use `state_machine` to organize stubs by
+named states and one-time transitions instead of matching each URL in
+isolation:
+
+```ruby
+stubs = Faraday::Adapter::Test::Stubs.new do |stub|
+  stub.state_machine(initial: :drafting) do |fsm|
+    fsm.state :drafting do |state|
+      state.post('/drafts') do |env, session|
+        # Transitions and handlers receive the request env and a shared
+        # session hash, so a request can generate values for later stages.
+        session[:draft_id] = JSON.parse(env[:body]).fetch('id')
+        [201, { 'X-Draft-Id' => session[:draft_id] }, 'draft created']
+      end
+
+      # This transition can only be taken once and moves the machine to
+      # :ready. The optional guard can read the request and veto the move.
+      state.transition(:post, '/submit', :ready,
+                       guard: ->(env) { env.request_headers['X-Draft-Id'] }) do |_env, session|
+        [202, {}, "submitted draft #{session[:draft_id]}"]
+      end
+
+      # The same path returns different responses in different states.
+      state.get('/result') { [409, {}, 'not submitted yet'] }
+    end
+
+    fsm.state :ready do |state|
+      state.transition(:get, '/result', :done) { [200, {}, 'processing'] }
+    end
+
+    fsm.state :done do |state|
+      state.get('/result') { [200, {}, 'done'] }
+    end
+  end
+end
+```
+
+Requests are matched in the current state only. Following a stage out of
+order raises `Faraday::Adapter::Test::Stubs::SequenceError` with a message
+that names the current state and the missing step, while a route unknown to
+every stub still raises `Stubs::NotFound` as before. Transitions are consumed
+atomically, so when concurrent requests race for the same one-time transition
+exactly one succeeds and the others receive a `SequenceError`. Plain, state
+independent stubs defined with `stub.get`/`stub.post`/... keep working exactly
+as before and can be freely mixed with state machines.
+
+`verify_stubbed_calls` also reports transitions that were never taken, and a
+machine can be returned to its initial state with `reset`.
+
 Finally, you can treat your stubs as mocks by verifying that all of the stubbed
 calls were made. NOTE: this feature is still fairly experimental. It will not
 verify the order or count of any stub.

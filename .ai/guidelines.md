@@ -22,6 +22,7 @@ These guidelines ensure all AI agents (Copilot, Claude, Cursor, etc.) contribute
 - If providing parallel support, include the `Parallelism` module and set `supports_parallel = true`.
 - Implement required methods (`build_connection`, `close`, etc.) as seen in existing adapters.
 - Keep each adapter in its own file under `lib/faraday/adapter/`.
+- The built-in test adapter (`Faraday::Adapter::Test::Stubs`) also supports stateful workflows via `state_machine`/`state`/`transition`: named states hold repeatable handlers and one-time transitions that carry a shared session hash, enforce request order with `Stubs::SequenceError`, and are consumed atomically under the existing `Monitor`. Plain URL stubs must remain independent and backwards compatible.
 
 ## Testing
 - All code must be tested with RSpec. Use shared examples for adapters/middleware where applicable (see `spec/support`).
