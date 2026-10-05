@@ -16,9 +16,10 @@ from limits.storage.base import (
 
 
 class Entry:
-    def __init__(self, expiry: float) -> None:
+    def __init__(self, expiry: float, weight: int = 1) -> None:
         self.atime = time.time()
         self.expiry = self.atime + expiry
+        self.weight = weight
 
 
 class MemoryStorage(
@@ -27,7 +28,7 @@ class MemoryStorage(
     """
     rate limit storage using :class:`collections.Counter`
     as an in memory storage for fixed and sliding window strategies,
-    and a simple list to implement moving window strategy.
+    and a list of weighted events to implement moving window strategy.
 
     """
 
@@ -148,18 +149,26 @@ class MemoryStorage(
 
         self.__schedule_expiry()
         with self.locks[key]:
-            self.events.setdefault(key, [])
             timestamp = time.time()
-            try:
-                entry = self.events[key][limit - amount]
-            except IndexError:
-                entry = None
+            events = self.events.get(key)
+            consumed = 0
+            if events:
+                oldest = bisect.bisect_right(
+                    events,
+                    -(timestamp - expiry),
+                    key=lambda event: -event.atime,
+                )
+                consumed = sum(event.weight for event in events[:oldest])
 
-            if entry and entry.atime >= timestamp - expiry:
+            if consumed + amount > limit:
                 return False
-            else:
-                self.events[key][:0] = [Entry(expiry)] * amount
-                return True
+            if amount:
+                entry = Entry(expiry, amount)
+                if events:
+                    events.insert(0, entry)
+                else:
+                    self.events[key] = [entry]
+            return True
 
     def get_expiry(self, key: str) -> float:
         """
@@ -182,7 +191,11 @@ class MemoryStorage(
             oldest = bisect.bisect_left(
                 events, -(timestamp - expiry), key=lambda entry: -entry.atime
             )
-            return events[oldest - 1].atime, oldest
+            if oldest:
+                return events[oldest - 1].atime, sum(
+                    event.weight for event in events[:oldest]
+                )
+            return events[-1].atime, 0
         return timestamp, 0
 
     def acquire_sliding_window_entry(

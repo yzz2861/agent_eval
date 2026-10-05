@@ -18,9 +18,10 @@ from limits.storage.base import TimestampedSlidingWindow
 
 
 class Entry:
-    def __init__(self, expiry: int) -> None:
+    def __init__(self, expiry: int, weight: int = 1) -> None:
         self.atime = time.time()
         self.expiry = self.atime + expiry
+        self.weight = weight
 
 
 @versionadded(version="2.1")
@@ -159,17 +160,25 @@ class MemoryStorage(
 
         await self.__schedule_expiry()
         async with self.locks[key]:
-            self.events.setdefault(key, [])
             timestamp = time.time()
-            try:
-                entry: Entry | None = self.events[key][limit - amount]
-            except IndexError:
-                entry = None
+            events = self.events.get(key)
+            consumed = 0
+            if events:
+                oldest = bisect.bisect_right(
+                    events,
+                    -(timestamp - expiry),
+                    key=lambda event: -event.atime,
+                )
+                consumed = sum(event.weight for event in events[:oldest])
 
-            if entry and entry.atime >= timestamp - expiry:
+            if consumed + amount > limit:
                 return False
-            else:
-                self.events[key][:0] = [Entry(expiry)] * amount
+            if amount:
+                entry = Entry(expiry, amount)
+                if events:
+                    events.insert(0, entry)
+                else:
+                    self.events[key] = [entry]
             return True
 
     async def get_expiry(self, key: str) -> float:
@@ -196,7 +205,11 @@ class MemoryStorage(
             oldest = bisect.bisect_left(
                 events, -(timestamp - expiry), key=lambda entry: -entry.atime
             )
-            return events[oldest - 1].atime, oldest
+            if oldest:
+                return events[oldest - 1].atime, sum(
+                    event.weight for event in events[:oldest]
+                )
+            return events[-1].atime, 0
         return timestamp, 0
 
     async def acquire_sliding_window_entry(
