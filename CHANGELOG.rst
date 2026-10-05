@@ -1,7 +1,8 @@
 Next Release (TBD)
 ==================
 
-* No changes yet.
+* Add ``group_reduce(array, &key_expr, &step_expr, initial)`` for ordered,
+  composite-key grouping and reduction within a JMESPath expression.
 
 
 1.1.0

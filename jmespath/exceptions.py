@@ -112,6 +112,24 @@ class JMESPathTypeError(JMESPathError):
                     self.expected_types, self.actual_type))
 
 
+@with_str_method
+class JMESPathValueError(JMESPathError):
+    def __init__(self, function_name, current_value, reason,
+                 path='$', index=None):
+        self.function_name = function_name
+        self.current_value = current_value
+        self.reason = reason
+        self.path = path
+        self.index = index
+
+    def __str__(self):
+        location = 'at %s' % self.path
+        if self.index is not None:
+            location += ' for array index %s' % self.index
+        return ('In function %s(), invalid value: %r, %s (%s)' % (
+            self.function_name, self.current_value, self.reason, location))
+
+
 class EmptyExpressionError(JMESPathError):
     def __init__(self):
         super(EmptyExpressionError, self).__init__(

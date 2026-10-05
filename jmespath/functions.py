@@ -1,3 +1,4 @@
+import copy
 import math
 import json
 
@@ -251,6 +252,114 @@ class Functions(metaclass=FunctionRegistry):
         for element in arg:
             result.append(expref.visit(expref.expression, element))
         return result
+
+    @signature({'types': ['array']}, {'types': ['expref']},
+               {'types': ['expref']}, {'types': []})
+    def _func_group_reduce(self, array, key_expr, step_expr, initial):
+        interpreter = key_expr.interpreter
+        groups = {}
+        for index, item in enumerate(array):
+            key = key_expr.visit(key_expr.expression, item)
+            key_token = self._json_key_token(
+                key, 'group_reduce', index)
+            if key_token not in groups:
+                try:
+                    group_initial = copy.deepcopy(initial)
+                except Exception as exc:
+                    raise exceptions.JMESPathValueError(
+                        'group_reduce', initial,
+                        'initial value cannot be copied: %s' % exc,
+                        index=index)
+                groups[key_token] = {
+                    'key': key,
+                    'acc': group_initial,
+                }
+            group = groups[key_token]
+            context = self._create_mapping(
+                interpreter,
+                key=key,
+                item=item,
+                index=index,
+                acc=group['acc'],
+            )
+            group['acc'] = step_expr.visit(step_expr.expression, context)
+
+        result = []
+        for group in groups.values():
+            result.append(self._create_mapping(
+                interpreter,
+                key=group['key'],
+                value=group['acc'],
+            ))
+        return result
+
+    def _create_mapping(self, interpreter, **values):
+        mapping = interpreter._dict_cls()
+        mapping.update(values)
+        return mapping
+
+    def _json_key_token(self, value, function_name, index):
+        return self._json_key_token_at(
+            value, function_name, index, '$', set())
+
+    def _json_key_token_at(self, value, function_name, index, path, seen):
+        value_id = id(value)
+        if isinstance(value, dict):
+            if value_id in seen:
+                raise exceptions.JMESPathValueError(
+                    function_name, value,
+                    'key contains a circular reference',
+                    path, index)
+            seen.add(value_id)
+            try:
+                members = []
+                for object_key, member in value.items():
+                    if not isinstance(object_key, STRING_TYPE):
+                        raise exceptions.JMESPathValueError(
+                            function_name, object_key,
+                            'object keys must be strings',
+                            path, index)
+                    member_path = '%s.%s' % (path, object_key)
+                    members.append((object_key, self._json_key_token_at(
+                        member, function_name, index, member_path, seen)))
+            finally:
+                seen.remove(value_id)
+            return ('object', tuple(sorted(members, key=lambda pair: pair[0])))
+
+        if isinstance(value, list):
+            if value_id in seen:
+                raise exceptions.JMESPathValueError(
+                    function_name, value,
+                    'key contains a circular reference',
+                    path, index)
+            seen.add(value_id)
+            try:
+                members = tuple(
+                    self._json_key_token_at(
+                        member, function_name, index,
+                        '%s[%s]' % (path, member_index), seen)
+                    for member_index, member in enumerate(value)
+                )
+            finally:
+                seen.remove(value_id)
+            return ('array', members)
+
+        if value is None:
+            return ('null',)
+        if isinstance(value, bool):
+            return ('boolean', value)
+        if isinstance(value, float) and not math.isfinite(value):
+            raise exceptions.JMESPathValueError(
+                function_name, value,
+                'numeric key must be finite', path, index)
+        if isinstance(value, (int, float)):
+            return ('number', value)
+        if isinstance(value, STRING_TYPE):
+            return ('string', value)
+        raise exceptions.JMESPathValueError(
+            function_name, value,
+            'key must be a JSON scalar, array, or object',
+            path, index)
 
     @signature({"types": ['array-number', 'array-string']})
     def _func_max(self, arg):

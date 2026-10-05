@@ -101,6 +101,35 @@ of your dict keys.  To do this you can use either of these options:
     ...               jmespath.Options(dict_cls=collections.OrderedDict))
 
 
+Group Reduction
+~~~~~~~~~~~~~~~
+
+``group_reduce(array, &key_expr, &step_expr, initial)`` groups array items
+without leaving JMESPath.  Keys may be JSON scalars or arbitrarily nested
+arrays and objects.  Object key order does not affect equality, array order
+does, and ``true`` remains distinct from ``1``.  Missing keys group as
+``null``.
+
+The ``step_expr`` receives an object with ``key``, ``item``, ``index``, and
+``acc``.  Each group starts from an independent copy of ``initial``, and the
+result is returned in the order each key first occurs as objects with ``key``
+and ``value`` fields.
+
+.. code:: python
+
+    >>> items = [
+    ...     {'group': 'a', 'amount': 1},
+    ...     {'group': 'b', 'amount': 2},
+    ...     {'group': 'a', 'amount': 3},
+    ... ]
+    >>> jmespath.search(
+    ...     "group_reduce(items, &group, "
+    ...     "&merge(acc, {total: sum([acc.total, item.amount])}), "
+    ...     "`{\"total\": 0}`)",
+    ...     {'items': items})
+    [{'key': 'a', 'value': {'total': 4}}, {'key': 'b', 'value': {'total': 2}}]
+
+
 Custom Functions
 ~~~~~~~~~~~~~~~~
 
