@@ -33,6 +33,7 @@ from webob.descriptors import (
     serialize_int,
 )
 from webob.headers import ResponseHeaders
+from webob.preconditions import check_if_preconditions
 from webob.request import BaseRequest
 from webob.util import (
     bytes_,
@@ -1421,16 +1422,52 @@ class Response:
 
     _safe_methods = ("GET", "HEAD")
 
+    def check_if_preconditions(self, req, environ=None):
+        """
+        Return a precondition response for this response, or ``None``.
+        """
+        status = check_if_preconditions(
+            req.method,
+            self.status_code == 200,
+            etag=self._etag_raw,
+            last_modified=self.last_modified,
+            if_match=req.environ.get("HTTP_IF_MATCH"),
+            if_none_match=req.environ.get("HTTP_IF_NONE_MATCH"),
+            if_modified_since=req.environ.get("HTTP_IF_MODIFIED_SINCE"),
+            if_unmodified_since=req.environ.get("HTTP_IF_UNMODIFIED_SINCE"),
+        )
+
+        if status is None:
+            return None
+
+        iter_close(self._app_iter)
+
+        if environ is None:
+            headerlist = self.headerlist
+        else:
+            headerlist = self._abs_headerlist(environ)
+
+        headerlist = filter_headers(headerlist)
+
+        if status == 304:
+            return Response(status=304, headerlist=headerlist, app_iter=())
+
+        from webob import exc
+
+        return exc.HTTPPreconditionFailed(headers=headerlist)
+
     def conditional_response_app(self, environ, start_response):
         """
         Like the normal ``__call__`` interface, but checks conditional headers:
 
+            * ``If-Match``             (``412 Precondition Failed``)
+            * ``If-Unmodified-Since``  (``412 Precondition Failed``)
             * ``If-Modified-Since``   (``304 Not Modified``; only on ``GET``,
               ``HEAD``)
-            * ``If-None-Match``       (``304 Not Modified``; only on ``GET``,
-              ``HEAD``)
-            * ``Range``               (``406 Partial Content``; only on ``GET``,
-              ``HEAD``)
+            * ``If-None-Match``       (``304`` on ``GET``/``HEAD``;
+              ``412`` on other methods)
+            * ``Range``               (``416 Range Not Satisfiable``; only on
+              ``GET``, ``HEAD``)
         """
         req = BaseRequest(environ)
 
@@ -1438,18 +1475,10 @@ class Response:
 
         method = environ.get("REQUEST_METHOD", "GET")
 
-        if method in self._safe_methods:
-            status304 = False
+        precondition_response = self.check_if_preconditions(req, environ)
 
-            if req.if_none_match and self.etag:
-                status304 = self.etag in req.if_none_match
-            elif req.if_modified_since and self.last_modified:
-                status304 = self.last_modified <= req.if_modified_since
-
-            if status304:
-                start_response("304 Not Modified", filter_headers(headerlist))
-
-                return EmptyResponse(self._app_iter)
+        if precondition_response is not None:
+            return precondition_response(environ, start_response)
 
         if (
             req.range

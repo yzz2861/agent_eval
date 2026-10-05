@@ -38,6 +38,10 @@ from webob.descriptors import (
 from webob.etag import AnyETag, IfRange, NoETag, etag_property
 from webob.headers import EnvironHeaders
 from webob.multidict import GetDict, MultiDict, NestedMultiDict, NoVars
+from webob.preconditions import (
+    check_if_preconditions,
+    precondition_response_headers,
+)
 from webob.util import bytes_, parse_qsl_text, text_, url_unquote, urljoin
 
 try:
@@ -1046,6 +1050,43 @@ class BaseRequest:
             # Always leave the request with a valid body, and this is pretty
             # cheap.
             self.body = b""
+
+    def check_if_preconditions(
+        self, resource_exists=True, etag=None, last_modified=None
+    ):
+        """
+        Evaluate this request's conditional headers before reading its body.
+
+        Return ``None`` when the caller should continue, or a ``304`` or
+        ``412`` response when a precondition determines the request should not
+        continue.
+        """
+        status = check_if_preconditions(
+            self.method,
+            resource_exists,
+            etag=etag,
+            last_modified=last_modified,
+            if_match=self.environ.get("HTTP_IF_MATCH"),
+            if_none_match=self.environ.get("HTTP_IF_NONE_MATCH"),
+            if_modified_since=self.environ.get("HTTP_IF_MODIFIED_SINCE"),
+            if_unmodified_since=self.environ.get("HTTP_IF_UNMODIFIED_SINCE"),
+        )
+
+        if status is None:
+            return None
+
+        headerlist = list(
+            precondition_response_headers(
+                etag=etag, last_modified=last_modified
+            ).items()
+        )
+
+        from webob import exc
+
+        if status == 304:
+            return exc.HTTPNotModified(headers=headerlist)
+
+        return exc.HTTPPreconditionFailed(headers=headerlist)
 
     def make_tempfile(self):
         """

@@ -481,6 +481,18 @@ For more on this kind of conditional request, see `Detecting the Lost
 Update Problem Using Unreserved Checkout
 <https://www.w3.org/1999/04/Editing/>`_.
 
+You can also let WebOb evaluate all four precondition headers before reading
+the request body.  Pass whether the current resource exists, its ETag, and its
+last modification time.  The method returns ``None`` when the application may
+continue, a ``304 Not Modified`` response for a successful GET/HEAD
+``If-None-Match`` or ``If-Modified-Since`` test, or a ``412 Precondition
+Failed`` response for a failed write precondition::
+
+    response = req.check_if_preconditions(resource_exists, etag, last_modified)
+    if response is not None:
+        return response
+    body = req.body  # only read after the preconditions have been checked
+
 Calling WSGI Applications
 -------------------------
 

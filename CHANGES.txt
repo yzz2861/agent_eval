@@ -47,6 +47,11 @@ Security Fix
 Feature
 ~~~~~~~
 
+- Add ``Request.check_if_preconditions(resource_exists, etag,
+  last_modified)`` for evaluating ``If-Match``, ``If-None-Match``,
+  ``If-Modified-Since`` and ``If-Unmodified-Since`` before reading the request
+  body or applying a write.
+
 - Rename "master" git branch to "main"
 
 - Add support for Python 3.12.
