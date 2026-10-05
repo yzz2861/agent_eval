@@ -26,14 +26,16 @@ class FilterStack:
     def enable_grouping(self):
         self._grouping = True
 
-    def run(self, sql, encoding=None):
+    def run(self, sql, encoding=None, source_ranges=False):
         try:
-            stream = lexer.tokenize(sql, encoding)
+            stream = lexer.tokenize(
+                sql, encoding, source_ranges=source_ranges)
             # Process token stream
             for filter_ in self.preprocess:
                 stream = filter_.process(stream)
 
-            stream = StatementSplitter().process(stream)
+            stream = StatementSplitter().process(
+                stream, source_ranges=source_ranges)
 
             # Output: Stream processed Statements
             for stmt in stream:

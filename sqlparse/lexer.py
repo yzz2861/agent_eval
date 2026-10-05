@@ -16,6 +16,7 @@ from io import TextIOBase
 from threading import Lock
 
 from sqlparse import keywords, tokens
+from sqlparse.source import SourceRange
 from sqlparse.utils import consume
 
 
@@ -103,7 +104,7 @@ class Lexer:
         else:
             return tokens.Name, value
 
-    def get_tokens(self, text, encoding=None):
+    def get_tokens(self, text, encoding=None, source_ranges=False):
         """
         Return an iterable of (tokentype, value) pairs generated from
         `text`. If `unfiltered` is set to `True`, the filtering mechanism
@@ -145,7 +146,11 @@ class Lexer:
                 resolved = delimited_spans.resolve(pos)
                 if resolved is not None:
                     end, ttype = resolved
-                    yield ttype, text[pos:end]
+                    value = text[pos:end]
+                    if source_ranges:
+                        yield ttype, value, SourceRange(pos, end, text)
+                    else:
+                        yield ttype, value
                     consume(iterable, end - pos - 1)
                     continue
 
@@ -155,20 +160,33 @@ class Lexer:
                 if not m:
                     continue
                 elif isinstance(action, tokens._TokenType):
-                    yield action, m.group()
+                    value = m.group()
+                    if source_ranges:
+                        yield action, value, SourceRange(pos, m.end(), text)
+                    else:
+                        yield action, value
                 elif action is keywords.PROCESS_AS_KEYWORD:
-                    yield self.is_keyword(m.group())
+                    ttype, value = self.is_keyword(m.group())
+                    if source_ranges:
+                        yield ttype, value, SourceRange(pos, m.end(), text)
+                    else:
+                        yield ttype, value
 
                 consume(iterable, m.end() - pos - 1)
                 break
             else:
-                yield tokens.Error, char
+                if source_ranges:
+                    yield tokens.Error, char, SourceRange(
+                        pos, pos + 1, text)
+                else:
+                    yield tokens.Error, char
 
 
-def tokenize(sql, encoding=None):
+def tokenize(sql, encoding=None, source_ranges=False):
     """Tokenize sql.
 
     Tokenize *sql* using the :class:`Lexer` and return a 2-tuple stream
     of ``(token type, value)`` items.
     """
-    return Lexer.get_default_instance().get_tokens(sql, encoding)
+    return Lexer.get_default_instance().get_tokens(
+        sql, encoding, source_ranges=source_ranges)

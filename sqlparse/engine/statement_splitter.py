@@ -148,12 +148,18 @@ class StatementSplitter:
         # Handle closing keywords
         return self._handle_closing_keyword(unified)
 
-    def process(self, stream):
+    def process(self, stream, source_ranges=False):
         """Process the stream"""
         EOS_TTYPE = T.Whitespace, T.Comment.Single
 
         # Run over all stream tokens
-        for ttype, value in stream:
+        for item in stream:
+            if source_ranges:
+                ttype, value, source_range = item
+            else:
+                ttype, value = item
+                source_range = None
+
             # Yield token if we finished a statement and there's no whitespaces
             # It will count newline token as a non whitespace. In this context
             # whitespace ignores newlines.
@@ -168,7 +174,10 @@ class StatementSplitter:
             self.level += self._change_splitlevel(ttype, value)
 
             # Append the token to the current statement
-            self.tokens.append(sql.Token(ttype, value))
+            if source_ranges:
+                self.tokens.append(sql.Token(ttype, value, source_range))
+            else:
+                self.tokens.append(sql.Token(ttype, value))
 
             # Check if we get the end of a statement
             # Issue762: Allow GO (or "GO 2") as statement splitter.

@@ -39,6 +39,8 @@ Notable Changes
 
 Enhancements
 
+- Add optional ``source_ranges`` support to expose half-open character and
+  byte offsets for parsed tokens and groups.
 * Modernize type annotations in top-level API functions using PEP 585 and
   PEP 604 syntax.
 * `END FOR` and `END CASE` are now recognized as keywords.

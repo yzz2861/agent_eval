@@ -10,6 +10,7 @@
 import re
 
 from sqlparse import tokens as T
+from sqlparse.source import SourceRange
 from sqlparse.utils import imt, remove_quotes
 
 
@@ -48,6 +49,7 @@ class Token:
     """
 
     __slots__ = (
+        '_source_range',
         'is_group',
         'is_keyword',
         'is_newline',
@@ -58,16 +60,52 @@ class Token:
         'value',
     )
 
-    def __init__(self, ttype, value):
+    def __init__(self, ttype, value, source_range=None):
         value = str(value)
         self.value = value
         self.ttype = ttype
         self.parent = None
+        if source_range is not None:
+            self.source_range = source_range
         self.is_group = False
         self.is_keyword = ttype in T.Keyword
         self.is_whitespace = self.ttype in T.Whitespace
         self.is_newline = self.ttype in T.Newline
         self.normalized = value.upper() if self.is_keyword else value
+
+    @staticmethod
+    def _validate_source_range(source_range):
+        if source_range is not None and not isinstance(source_range, SourceRange):
+            start, end = source_range
+            source_range = SourceRange(start, end)
+        return source_range
+
+    def clear_source_range(self):
+        """Mark this token as having no corresponding original range."""
+        self._source_range = None
+
+    @property
+    def source_range(self):
+        """Original source range, or ``None`` for synthetic tokens."""
+        return getattr(self, '_source_range', None)
+
+    @source_range.setter
+    def source_range(self, source_range):
+        self._source_range = self._validate_source_range(source_range)
+
+    def get_source_range(self):
+        """Return the half-open character range in the original source."""
+        source_range = getattr(self, '_source_range', None)
+        if source_range is None:
+            return None
+        return source_range.start, source_range.end
+
+    def get_byte_range(self, encoding="utf-8", errors="strict"):
+        """Return the half-open byte range in the encoded original source."""
+        source_range = getattr(self, '_source_range', None)
+        if source_range is None:
+            return None
+        return source_range.byte_range(encoding=encoding, errors=errors)
 
     def __str__(self):
         return self.value
@@ -169,6 +207,48 @@ class TokenList(Token):
         [setattr(token, 'parent', self) for token in self.tokens]
         super().__init__(None, ''.join(token.value for token in self.tokens))
         self.is_group = True
+
+    def _source_range_from_children(self):
+        start = None
+        end = None
+        source = None
+
+        for token in self.tokens:
+            if token.is_group:
+                child_range = token._source_range_from_children()
+            else:
+                child_range = getattr(token, '_source_range', None)
+            if child_range is None:
+                continue
+            if start is None or child_range.start < start:
+                start = child_range.start
+            if end is None or child_range.end > end:
+                end = child_range.end
+            if source is None:
+                source = child_range.source
+
+        if start is None:
+            return None
+        return SourceRange(start, end, source)
+
+    @property
+    def source_range(self):
+        """Original range spanned by this group's sourced children."""
+        return self._source_range_from_children()
+
+    def get_source_range(self):
+        """Return the range spanning the original child tokens."""
+        source_range = self._source_range_from_children()
+        if source_range is None:
+            return None
+        return source_range.start, source_range.end
+
+    def get_byte_range(self, encoding="utf-8", errors="strict"):
+        """Return the encoded byte range spanning the original child tokens."""
+        source_range = self._source_range_from_children()
+        if source_range is None:
+            return None
+        return source_range.byte_range(encoding=encoding, errors=errors)
 
     def __str__(self):
         return ''.join(token.value for token in self.flatten())

@@ -16,6 +16,14 @@ In most cases there's no need to set the `encoding` parameter. If
 `encoding` is not set, sqlparse assumes that the given SQL statement
 is encoded either in utf-8 or latin-1.
 
+Pass ``source_ranges=True`` to :func:`parse` or :func:`format` to attach a
+:class:`~sqlparse.source.SourceRange` to tokens originating from the input.
+Both leaf tokens and groups expose ``source_range`` and
+``get_source_range()`` for half-open character offsets. Groups calculate
+their range from their original child tokens instead of searching for their
+reconstructed text. ``get_byte_range(encoding)`` returns the corresponding
+byte offsets. Synthetic or modified formatting tokens have no source range.
+
 
 .. _formatting:
 

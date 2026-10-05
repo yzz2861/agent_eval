@@ -67,6 +67,7 @@ class OutputPythonFilter(OutputFilter):
             # (GHSA-3496-9g83-7v6x).
             else:
                 token.value = token.value.replace('\\', '\\\\').replace("'", "\\'")
+                token.clear_source_range()
 
             # Put the token
             yield sql.Token(T.Text, token.value)
@@ -118,6 +119,7 @@ class OutputPHPFilter(OutputFilter):
             # (GHSA-3496-9g83-7v6x).
             else:
                 token.value = token.value.replace('\\', '\\\\').replace('"', '\\"')
+                token.clear_source_range()
 
             # Put the token
             yield sql.Token(T.Text, token.value)

@@ -12,38 +12,46 @@ from collections.abc import Generator
 from typing import IO, Any
 
 from sqlparse import cli, engine, filters, formatter, sql, tokens
+from sqlparse.source import SourceRange
 
 __version__ = "0.6.1.dev0"
-__all__ = ["cli", "engine", "filters", "formatter", "sql", "tokens"]
+__all__ = [
+    "SourceRange", "cli", "engine", "filters", "formatter", "sql", "tokens"]
 
 
 def parse(
-    sql: str, encoding: str | None = None
+    sql: str, encoding: str | None = None, source_ranges: bool = False
 ) -> tuple[sql.Statement, ...]:
     """Parse sql and return a list of statements.
 
     :param sql: A string containing one or more SQL statements.
     :param encoding: The encoding of the statement (optional).
+    :param source_ranges: Attach original character ranges when ``True``.
     :returns: A tuple of :class:`~sqlparse.sql.Statement` instances.
     """
-    return tuple(parsestream(sql, encoding))
+    return tuple(parsestream(sql, encoding, source_ranges=source_ranges))
 
 
 def parsestream(
-    stream: str | IO[str], encoding: str | None = None
+    stream: str | IO[str], encoding: str | None = None,
+    source_ranges: bool = False
 ) -> Generator[sql.Statement, None, None]:
     """Parses sql statements from file-like object.
 
     :param stream: A file-like object.
     :param encoding: The encoding of the stream contents (optional).
+    :param source_ranges: Attach original character ranges when ``True``.
     :returns: A generator of :class:`~sqlparse.sql.Statement` instances.
     """
     stack = engine.FilterStack()
     stack.enable_grouping()
-    return stack.run(stream, encoding)
+    return stack.run(stream, encoding, source_ranges=source_ranges)
 
 
-def format(sql: str, encoding: str | None = None, **options: Any) -> str:
+def format(
+    sql: str, encoding: str | None = None, source_ranges: bool = False,
+    **options: Any
+) -> str:
     """Format *sql* according to *options*.
 
     Available options are documented in :ref:`formatting`.
@@ -57,7 +65,8 @@ def format(sql: str, encoding: str | None = None, **options: Any) -> str:
     options = formatter.validate_options(options)
     stack = formatter.build_filter_stack(stack, options)
     stack.postprocess.append(filters.SerializerUnicode())
-    return "".join(stack.run(sql, encoding))
+    return "".join(stack.run(
+        sql, encoding, source_ranges=source_ranges))
 
 
 def split(

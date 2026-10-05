@@ -16,10 +16,26 @@ class _CaseFilter:
         self.convert = getattr(str, case)
 
     def process(self, stream):
-        for ttype, value in stream:
+        for item in stream:
+            ttype, value, source_range = self._unpack(item)
             if ttype in self.ttype:
-                value = self.convert(value)
-            yield ttype, value
+                converted = self.convert(value)
+                if converted != value:
+                    source_range = None
+                value = converted
+            yield self._pack(item, ttype, value, source_range)
+
+    @staticmethod
+    def _unpack(item):
+        if len(item) == 3:
+            return item
+        return item[0], item[1], None
+
+    @staticmethod
+    def _pack(item, ttype, value, source_range):
+        if len(item) == 3:
+            return ttype, value, source_range
+        return ttype, value
 
 
 class KeywordCaseFilter(_CaseFilter):
@@ -30,10 +46,14 @@ class IdentifierCaseFilter(_CaseFilter):
     ttype = T.Name, T.String.Symbol
 
     def process(self, stream):
-        for ttype, value in stream:
+        for item in stream:
+            ttype, value, source_range = self._unpack(item)
             if ttype in self.ttype and value.strip()[0] != '"':
-                value = self.convert(value)
-            yield ttype, value
+                converted = self.convert(value)
+                if converted != value:
+                    source_range = None
+                value = converted
+            yield self._pack(item, ttype, value, source_range)
 
 
 class TruncateStringFilter:
@@ -42,9 +62,11 @@ class TruncateStringFilter:
         self.char = char
 
     def process(self, stream):
-        for ttype, value in stream:
+        for item in stream:
+            ttype, value = item[:2]
+            source_range = item[2] if len(item) == 3 else None
             if ttype != T.Literal.String.Single:
-                yield ttype, value
+                yield item
                 continue
 
             if value[:2] == "''":
@@ -56,4 +78,8 @@ class TruncateStringFilter:
 
             if len(inner) > self.width:
                 value = ''.join((quote, inner[:self.width], self.char, quote))
-            yield ttype, value
+                source_range = None
+            if len(item) == 3:
+                yield ttype, value, source_range
+            else:
+                yield ttype, value
