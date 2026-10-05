@@ -60,6 +60,8 @@ module Dry
           def inherited(subclass)
             super
 
+            subclass.instance_variable_set(:@dependencies, dependencies.dup)
+
             # Include Dry::Configurable only when first subclassing to ensure that
             # distinct Source subclasses do not share settings.
             #
@@ -68,6 +70,16 @@ module Dry
             if subclass.superclass == Source
               subclass.include Dry::Configurable
             end
+          end
+
+          # Returns the names of the providers that must be prepared and started
+          # before this one, as declared via {SourceDSL#depends_on}.
+          #
+          # @return [Array<Symbol>]
+          #
+          # @api private
+          def dependencies
+            @dependencies ||= []
           end
 
           # @api private

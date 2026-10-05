@@ -56,6 +56,52 @@ module Dry
       end
     end
 
+    # Error raised when a provider declares a dependency (via +depends_on+) on a
+    # provider that is not registered
+    #
+    # @api public
+    ProviderDependencyNotFoundError = Class.new(ArgumentError) do
+      def initialize(provider_name, dependency_name)
+        super(
+          "Provider #{provider_name.inspect} depends on #{dependency_name.inspect}, " +          "which is not registered"
+        )
+      end
+    end
+
+    # Error raised when providers declare a circular dependency via +depends_on+
+    #
+    # @api public
+    ProviderDependencyCycleError = Class.new(StandardError) do
+      # @return [Array<Symbol>] the provider names forming the cycle
+      attr_reader :cycle
+
+      def initialize(cycle)
+        @cycle = cycle
+        super("Provider dependency cycle detected: #{cycle.map(&:inspect).join(' => ')}")
+      end
+    end
+
+    # Error raised when one or more providers fail to stop
+    #
+    # Raised only after every remaining provider has been given the chance to stop,
+    # with the individual errors carried in {#errors}, keyed by provider name.
+    #
+    # @api public
+    ProviderStopError = Class.new(StandardError) do
+      # @return [Hash{Symbol => StandardError}] stop errors keyed by provider name
+      attr_reader :errors
+
+      def initialize(errors)
+        @errors = errors
+
+        details = errors.map { |name, error|
+          "#{name.inspect} (#{error.class}: #{error.message})"
+        }.join(", ")
+
+        super("Failed to stop #{errors.size} provider(s): #{details}")
+      end
+    end
+
     # Error raised when a named provider source could not be found
     #
     # @api public

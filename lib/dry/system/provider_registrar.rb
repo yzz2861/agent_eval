@@ -4,6 +4,7 @@ require "pathname"
 
 require "dry/system/errors"
 require "dry/system/constants"
+require "dry/system/provider_plan"
 
 module Dry
   module System
@@ -161,7 +162,7 @@ module Dry
           load_provider(path)
         end
 
-        providers.each_value(&:start)
+        plan.start
 
         freeze
       end
@@ -175,19 +176,48 @@ module Dry
 
       # @api private
       def shutdown
-        providers.each_value(&:stop)
+        plan.shutdown
         self
+      end
+
+      # Returns a {ProviderPlan} for the given providers and the providers they
+      # depend on (via +depends_on+), ordered so that every provider appears after
+      # its dependencies.
+      #
+      # The plan is built (and any dependency problems raised) before any provider
+      # lifecycle step runs, so it can be inspected and then executed without
+      # further dependency resolution.
+      #
+      # @example
+      #   plan = MyApp.providers.plan(:persistence)
+      #   plan.names # => [:settings, :persistence]
+      #   plan.start
+      #
+      # @param provider_names [Array<Symbol>] the providers to include, along with
+      #   their dependencies. Builds a plan for all registered providers when empty.
+      #
+      # @return [Dry::System::ProviderPlan]
+      #
+      # @raise [ProviderNotFoundError] if a named provider is not registered
+      # @raise [ProviderDependencyNotFoundError] if a declared dependency is not registered
+      # @raise [ProviderDependencyCycleError] if the dependencies form a cycle
+      #
+      # @api public
+      def plan(*provider_names)
+        provider_names = providers.keys if provider_names.empty?
+
+        ProviderPlan.new(resolve_plan(provider_names))
       end
 
       # @api private
       def prepare(provider_name)
-        with_provider(provider_name, &:prepare)
+        plan(provider_name).prepare
         self
       end
 
       # @api private
       def start(provider_name)
-        with_provider(provider_name, &:start)
+        plan(provider_name).start
         self
       end
 
@@ -198,6 +228,44 @@ module Dry
       end
 
       private
+
+      # Returns the given providers and their transitive dependencies, ordered so
+      # that every provider appears after the providers it depends on.
+      #
+      # @api private
+      def resolve_plan(provider_names)
+        ordered = []
+        states = {}
+
+        visit = ->(name, stack) {
+          return if states[name] == :visited
+
+          if states[name] == :visiting
+            cycle = (stack[stack.index(name)..] || []) + [name]
+            raise ProviderDependencyCycleError, cycle
+          end
+
+          provider = self[name]
+
+          unless provider
+            if stack.empty?
+              raise ProviderNotFoundError, name
+            else
+              raise ProviderDependencyNotFoundError.new(stack.last, name)
+            end
+          end
+
+          states[name] = :visiting
+          provider.dependencies.each { |dependency| visit.call(dependency.to_sym, stack + [name]) }
+          states[name] = :visited
+
+          ordered << provider
+        }
+
+        provider_names.each { |name| visit.call(name.to_sym, []) }
+
+        ordered
+      end
 
       # @api private
       def provider_paths

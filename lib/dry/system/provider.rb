@@ -84,6 +84,16 @@ module Dry
       attr_reader :step_running
       private :step_running
 
+      # Returns the names of the providers that must be prepared and started before
+      # this one, as declared via {Provider::SourceDSL#depends_on}.
+      #
+      # @return [Array<Symbol>]
+      #
+      # @api public
+      def dependencies
+        source.class.dependencies
+      end
+
       # Returns the container for the provider.
       #
       # This is where the provider's source will register its components, which are then

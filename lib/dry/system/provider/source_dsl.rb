@@ -24,6 +24,31 @@ module Dry
           source_class.setting(...)
         end
 
+        # Declares the providers that must be prepared and started before this one.
+        #
+        # Dependencies are taken into account whenever a provider is prepared or
+        # started (including via container finalization): the named providers run
+        # their own lifecycle steps first, in dependency order. Providers are stopped
+        # in the reverse order on shutdown.
+        #
+        # @example
+        #   register_provider(:persistence) do
+        #     depends_on :settings, :logger
+        #
+        #     start do
+        #       # ...
+        #     end
+        #   end
+        #
+        # @param names [Array<Symbol>] the names of the providers to depend on
+        #
+        # @return [Array<Symbol>] the provider's dependencies
+        #
+        # @api public
+        def depends_on(*names)
+          source_class.dependencies.concat(names.flatten.map(&:to_sym))
+        end
+
         def prepare(&)
           source_class.define_method(:prepare, &)
         end
