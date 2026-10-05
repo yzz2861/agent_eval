@@ -2,6 +2,7 @@
 
 require "money/bank/variable_exchange"
 require "money/bank/single_currency"
+require "money/bank/historical_exchange"
 require "money/money/arithmetic"
 require "money/money/constructors"
 require "money/money/formatter"

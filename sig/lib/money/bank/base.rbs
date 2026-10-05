@@ -12,6 +12,11 @@ class Money
     class UnknownRate < Error
     end
 
+    # Raised when more than one registered rate matches a conversion
+    # request and the bank cannot pick one without an explicit strategy.
+    class AmbiguousRate < Error
+    end
+
     # Money::Bank::Base is the basic interface for creating a money exchange
     # object, also called Bank.
     #

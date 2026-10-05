@@ -1,0 +1,73 @@
+class Money
+  module Bank
+    # Bank that keeps the full history of exchange rates. Every rate is
+    # registered with a validity interval and a source version, and
+    # conversions are issued as immutable, recomputable quotes.
+    class HistoricalExchange < Base
+      # A single registered exchange rate, valid over a half-open interval
+      # [valid_from, valid_to).
+      class Rate
+        attr_reader from: String
+        attr_reader to: String
+        attr_reader rate: BigDecimal
+        attr_reader valid_from: Time
+        attr_reader valid_to: Time?
+        attr_reader source: String
+
+        def initialize: (from: String, to: String, rate: BigDecimal, valid_from: Time, valid_to: Time?, source: String) -> void
+
+        def covers?: (Time time) -> bool
+
+        def ==: (untyped other) -> bool
+        alias eql? ==
+
+        def hash: () -> Integer
+      end
+
+      # Immutable snapshot of a conversion quoted at a specific point in time.
+      class Quote
+        attr_reader amount: Money
+        attr_reader to_currency: Money::Currency
+        attr_reader at: Time
+        attr_reader legs: Array[Rate]
+        attr_reader exact_fractional: BigDecimal
+        attr_reader fractional: (Integer | BigDecimal)
+
+        def initialize: (amount: Money, to_currency: Money::Currency, at: Time, legs: Array[Rate], exact_fractional: BigDecimal, fractional: (Integer | BigDecimal), ?rounding: (Proc | nil)) -> void
+
+        def from_currency: () -> Money::Currency
+
+        def rate: () -> BigDecimal
+
+        def to_money: () -> Money
+
+        def recompute: () -> Quote
+
+        def ==: (untyped other) -> bool
+        alias eql? ==
+
+        def hash: () -> Integer
+
+        def self.build: (amount: Money, to_currency: Money::Currency, at: Time, legs: Array[Rate], ?rounding: (Proc | nil)) ?{ (BigDecimal) -> untyped } -> Quote
+      end
+
+      def initialize: () { (untyped) -> untyped } -> void
+
+      def add_rate: ((Money::Currency | String | Symbol) from, (Money::Currency | String | Symbol) to, Numeric rate, valid_from: (Time | Date | DateTime), source: String, ?valid_to: (Time | Date | DateTime | nil)) -> Rate
+
+      def rates: () -> Array[Rate]
+
+      def get_rate: ((Money::Currency | String | Symbol) from, (Money::Currency | String | Symbol) to, at: (Time | Date | DateTime), ?source: String?) -> BigDecimal?
+
+      def quote: (Money money, (Money::Currency | String | Symbol) to_currency, at: (Time | Date | DateTime), ?via: Array[Money::Currency | String | Symbol], ?source: String?) ?{ (BigDecimal) -> untyped } -> Quote
+
+      def exchange_with: (Money from, (Money::Currency | String | Symbol) to_currency, ?at: Time, ?via: Array[Money::Currency | String | Symbol], ?source: String?) ?{ (BigDecimal) -> untyped } -> Money
+
+      private
+
+      def find_rate: (String from_iso, String to_iso, Time at, String? source) -> Rate?
+
+      def coerce_time: (untyped value) -> untyped
+    end
+  end
+end
