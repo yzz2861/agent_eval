@@ -218,6 +218,7 @@ require 'flipper/types/percentage'
 require 'flipper/types/percentage_of_actors'
 require 'flipper/types/percentage_of_time'
 require 'flipper/typecast'
+require 'flipper/promotion'
 require 'flipper/version'
 
 # Eagerly initialize memoized module state while loading is still

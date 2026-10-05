@@ -18,6 +18,7 @@ module Flipper
         :get_all,
         :enable,
         :disable,
+        :apply_promotion_plan,
       ].freeze
 
       attr_reader :adapter

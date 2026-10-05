@@ -126,6 +126,10 @@ module Flipper
         @adapter.import(source).tap { cache.clear if memoizing? }
       end
 
+      def apply_promotion_plan(plan)
+        @adapter.apply_promotion_plan(plan).tap { cache.clear if memoizing? }
+      end
+
       def export(format: :json, version: 1)
         @adapter.export(format: format, version: version)
       end

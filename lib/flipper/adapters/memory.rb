@@ -123,7 +123,37 @@ module Flipper
         true
       end
 
+      # Public: Atomically applies a promotion plan if the adapter still
+      # matches the plan's target version.
+      def apply_promotion_plan(plan)
+        synchronize do
+          current_version = Flipper::PromotionPlan.version_for(@source)
+          unless current_version == plan.target_version
+            raise Flipper::PromotionPlan::StaleTarget.new(
+              plan.target_version,
+              current_version
+            )
+          end
+
+          @source.replace(Typecast.features_hash(deep_duplicate(plan.result)))
+          true
+        end
+      end
+
       private
+
+      def deep_duplicate(value)
+        case value
+        when Set
+          value.dup
+        when Hash
+          value.transform_values { |item| deep_duplicate(item) }
+        when Array
+          value.map { |item| deep_duplicate(item) }
+        else
+          value
+        end
+      end
 
       def synchronize(&block)
         if @lock
