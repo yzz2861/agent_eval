@@ -167,6 +167,15 @@ module Zip
 
     alias mtime= time=
 
+    # Sets the DOS modification time directly, without also recording it
+    # in a universaltime extra field (unlike #time=). Used when
+    # normalizing entries for reproducible output, where such extra
+    # fields are typically stripped anyway.
+    def dos_time=(value) # :nodoc:
+      @dirty = true
+      @time = value.kind_of?(::Zip::DOSTime) ? value : ::Zip::DOSTime.from_time(value)
+    end
+
     # Set the last access time of this entry.
     def atime=(value)
       send(:time=, value, component: :atime)

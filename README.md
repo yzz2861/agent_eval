@@ -116,6 +116,31 @@ Zip::OutputStream.open('archive.zip', suppress_extra_fields: [:ntfs, :zip64])
 
 Note that there are some extra fields that cannot be suppressed at all (e.g. `:aes`), and some which will only be suppressed if it is safe to do so (e.g. `:zip64`).
 
+### Reproducible (deterministic) archives
+
+Build systems often need archives whose bytes depend only on the content being archived. Passing `reproducible: true` to `Zip::File` or `Zip::OutputStream` normalizes the metadata that would otherwise leak environment details into the archive: entries are sorted by name (when committed through `Zip::File`), entry mtimes are pinned to a fixed timestamp (1980-01-01, the earliest date the zip format can represent), unix permission bits are normalized (0o644 for files, 0o755 for directories and symlinks), the host platform marker is pinned to Unix, and non-essential extra fields are stripped:
+
+```ruby
+Zip::File.open('archive.zip', create: true, reproducible: true) do |zipfile|
+  zipfile.add('hello.txt', '/path/to/hello.txt')
+end
+```
+
+Each aspect can be preserved instead of normalized by passing a hash and setting the relevant key to `false` (`sort_entries`, `time`, `file_permissions`, `directory_permissions`, `symlink_permissions`, `fstype`, `suppress_extra_fields`). `time` also accepts a `Time`, epoch seconds, or `:source_date_epoch` to honour the [SOURCE_DATE_EPOCH](https://reproducible-builds.org/docs/source-date-epoch/) convention:
+
+```ruby
+# Keep the source files' mtimes, normalize everything else.
+Zip::File.open('archive.zip', create: true, reproducible: { time: false })
+
+# Stamp a specific time on every entry.
+Zip::File.open('archive.zip', create: true, reproducible: { time: Time.utc(2024, 1, 1) })
+Zip::OutputStream.open('archive.zip', reproducible: { time: :source_date_epoch })
+```
+
+Symlink entries keep their symlink file type - only their permission bits are normalized; they are never converted into regular files. `Zip::OutputStream` is a stream, so entry order is not normalized there: add entries in a deterministic order yourself, or use `Zip::File`.
+
+The determinism guarantee is deliberately narrow: identical bytes are produced only for identical input content, identical configuration, and identical versions of rubyzip and the underlying zlib (compressed bytes are whatever that zlib version produces).
+
 ### Zipping a directory recursively
 
 `Zip::File#add_recursive` adds the contents of a directory (not the directory itself) to an archive, recursing into subdirectories:
