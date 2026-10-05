@@ -700,6 +700,170 @@ RSpec.describe Faraday::Connection do
     it { expect(Faraday.respond_to?(:post)).to be_truthy }
   end
 
+  describe '#derive' do
+    let(:stubs) { Faraday::Adapter::Test::Stubs.new }
+    let(:conn) do
+      Faraday.new('https://api.example.com/v1?token=base') do |f|
+        f.headers['X-Team'] = 'core'
+        f.options.timeout = 5
+        f.options.context = { 'auth' => { 'scopes' => %w[read] } }
+        f.adapter :test, stubs
+      end
+    end
+
+    it 'inherits url, headers, params and options from the template' do
+      derived = conn.derive
+
+      expect(derived.build_exclusive_url).to eq(conn.build_exclusive_url)
+      expect(derived.headers['X-Team']).to eq('core')
+      expect(derived.params['token']).to eq('base')
+      expect(derived.options.timeout).to eq(5)
+    end
+
+    it 'overrides url, headers and params, keeping the rest' do
+      derived = conn.derive('https://tenant.example.com/v2',
+                            headers: { 'X-Tenant' => 'a' },
+                            params: { 'locale' => 'en' })
+
+      expect(derived.build_exclusive_url.to_s).to eq('https://tenant.example.com/v2')
+      expect(derived.headers['X-Tenant']).to eq('a')
+      expect(derived.headers['X-Team']).to eq('core')
+      expect(derived.params['locale']).to eq('en')
+      expect(derived.params['token']).to eq('base')
+    end
+
+    it 'accepts an options hash with url and request overrides' do
+      derived = conn.derive(url: 'https://tenant.example.com', request: { open_timeout: 3 })
+
+      expect(derived.host).to eq('tenant.example.com')
+      expect(derived.options.open_timeout).to eq(3)
+      expect(derived.options.timeout).to eq(5)
+    end
+
+    it 'does not share caller-owned override structures with the derived connection' do
+      override = { 'auth' => { 'scopes' => %w[read] } }
+      derived = conn.derive(request: { context: override })
+
+      override['auth']['scopes'] << 'admin'
+      expect(derived.options.context['auth']['scopes']).to eq(%w[read])
+    end
+
+    context 'with nested and shared configuration' do
+      it 'deep-copies nested hashes, arrays and options' do
+        derived = conn.derive
+
+        derived.options.context['auth']['scopes'] << 'write'
+        derived.options.context['auth']['token'] = 'secret'
+        derived.headers['X-Team'] = 'changed'
+        derived.params['token'] = 'changed'
+        derived.options.timeout = 9
+
+        expect(conn.options.context['auth']).to eq('scopes' => %w[read])
+        expect(conn.headers['X-Team']).to eq('core')
+        expect(conn.params['token']).to eq('base')
+        expect(conn.options.timeout).to eq(5)
+      end
+
+      it 'shares caller-owned service objects by reference' do
+        service = Object.new
+        callback = proc {}
+        conn.options.context['service'] = service
+        conn.options.on_data = callback
+
+        derived = conn.derive
+
+        expect(derived.options.context['service']).to equal(service)
+        expect(derived.options.on_data).to equal(callback)
+      end
+    end
+
+    context 'after the template has been locked by a request' do
+      before do
+        stubs.get('https://api.example.com/v1/status') { [200, {}, 'ok'] }
+        conn.get('status')
+      end
+
+      it 'keeps the template stack locked and unmodifiable' do
+        expect(conn.builder).to be_locked
+        expect { conn.builder.use Faraday::Response::RaiseError }
+          .to raise_error(Faraday::RackBuilder::StackLocked)
+      end
+
+      it 'derives an unlocked stack the child can customize and build' do
+        derived = conn.derive do |c|
+          c.request :url_encoded
+          c.adapter :test, Faraday::Adapter::Test::Stubs.new
+        end
+
+        expect(derived.builder).not_to be_locked
+        expect(derived.builder.handlers.size).to eq(conn.builder.handlers.size + 1)
+        expect(conn.builder).to be_locked
+      end
+    end
+
+    describe 'isolation between parent and two children' do
+      let(:child_a_stubs) { Faraday::Adapter::Test::Stubs.new }
+      let(:child_b_stubs) { Faraday::Adapter::Test::Stubs.new }
+
+      def stub_status(stubs, host, body)
+        stubs.get("https://#{host}/v1/status") { [200, {}, body] }
+      end
+
+      it 'stays isolated through interleaved modifications and requests' do
+        stub_status(stubs, 'api.example.com', 'parent')
+        stub_status(child_a_stubs, 'tenant-a.example.com', 'child-a')
+        stub_status(child_b_stubs, 'tenant-b.example.com', 'child-b')
+
+        expect(conn.get('status').body).to eq('parent')
+
+        child_a = conn.derive('https://tenant-a.example.com/v1',
+                              headers: { 'X-Tenant' => 'a' },
+                              params: { 'locale' => 'en' }) do |c|
+          c.adapter :test, child_a_stubs
+        end
+
+        # interleave modifications on parent and first child
+        child_a.headers['X-Team'] = 'team-a'
+        conn.headers['X-Team'] = 'core-2'
+        conn.params['token'] = 'base-2'
+
+        child_b = conn.derive('https://tenant-b.example.com/v1') do |c|
+          c.adapter :test, child_b_stubs
+        end
+        child_b.params['locale'] = 'fr'
+        child_b.options.context['auth']['scopes'] << 'write'
+
+        # child_b inherits the parent's current config, not child_a's
+        expect(child_b.headers['X-Team']).to eq('core-2')
+        expect(child_b.headers['X-Tenant']).to be_nil
+        expect(child_b.params).to include('token' => 'base-2')
+        expect(child_b.params).not_to include('locale' => 'en')
+
+        # interleaved requests hit each connection's own stack
+        expect(child_a.get('status').body).to eq('child-a')
+        expect(conn.get('status').body).to eq('parent')
+        expect(child_b.get('status').body).to eq('child-b')
+
+        # each connection builds URLs from its own config
+        expect(child_a.build_url('status').to_s).to include('token=base', 'locale=en')
+        expect(child_b.build_url('status').to_s).to include('token=base-2', 'locale=fr')
+        expect(conn.build_url('status').to_s).not_to include('locale')
+
+        # nested structures stay independent in every direction
+        expect(conn.options.context['auth']['scopes']).to eq(%w[read])
+        expect(child_a.options.context['auth']['scopes']).to eq(%w[read])
+        expect(child_b.options.context['auth']['scopes']).to eq(%w[read write])
+
+        # the parent stack remains locked; children locked their own stacks
+        expect(conn.builder).to be_locked
+        expect { conn.builder.delete(Faraday::Adapter::Test) }
+          .to raise_error(Faraday::RackBuilder::StackLocked)
+        expect(child_a.builder).to be_locked
+        expect(child_b.builder).to be_locked
+      end
+    end
+  end
+
   describe 'default_connection_options' do
     context 'assigning a default value' do
       before do

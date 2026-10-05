@@ -114,6 +114,31 @@ module Faraday
       deep_merge!(source.dup, hash)
     end
 
+    # Deep-copies "plain data" values, following clear sharing rules:
+    #
+    # * Hashes (including Headers/ParamsHash), Arrays, Strings, URIs and
+    #   Faraday::Options are copied recursively, so nested structures are
+    #   never shared between template and copy.
+    # * Anything else (IOs, locks, procs, classes, and application/service
+    #   objects owned by the caller) is returned as-is, i.e. shared by
+    #   reference. Nothing is Marshal-led.
+    def deep_dup(value)
+      case value
+      when Options
+        value.class.from(deep_dup(value.to_hash))
+      when Hash
+        copy = value.dup
+        copy.each { |key, nested| copy[key] = deep_dup(nested) }
+        copy
+      when Array
+        value.map { |nested| deep_dup(nested) }
+      when String, URI::Generic
+        value.dup
+      else
+        value
+      end
+    end
+
     def sort_query_params(query)
       query.split('&').sort.join('&')
     end

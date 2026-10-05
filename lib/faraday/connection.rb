@@ -508,6 +508,60 @@ module Faraday
                      request: options.dup)
     end
 
+    # Derives a new Faraday::Connection using this one as a template, e.g.
+    # to spawn per-tenant connections from a shared, already-used base.
+    #
+    # The derived connection receives independent copies of all mutable
+    # configuration (URL, headers, params, request/SSL options and the
+    # middleware stack), following the sharing rules of
+    # Faraday::Utils.deep_dup: plain data is copied recursively, while
+    # IOs, locks, procs and caller-owned service objects are shared by
+    # reference. The template's middleware stack is left untouched (and
+    # locked, if it already was); the derived connection gets its own
+    # unlocked stack that it can modify and build independently.
+    #
+    # @param url [URI, String, Hash, nil] optional base URL override; a
+    #           Hash is treated as +options+.
+    # @param options [Hash, Faraday::ConnectionOptions, nil]
+    # @option options [URI, String] :url base URL override.
+    # @option options [Hash] :headers headers merged over the template's.
+    # @option options [Hash] :params params merged over the template's.
+    # @option options [Hash] :request request options merged over the
+    #                 template's.
+    # @option options [Hash] :ssl SSL options merged over the template's.
+    # @option options [Hash, URI, String] :proxy proxy override; when
+    #                 omitted, the template's proxy settings are inherited.
+    # @yield [Faraday::Connection] the derived connection, to customize its
+    #         middleware stack or configuration before use.
+    #
+    # @return [Faraday::Connection]
+    def derive(url = nil, options = nil)
+      options = ConnectionOptions.from(options)
+
+      if url.is_a?(Hash) || url.is_a?(ConnectionOptions)
+        options = Utils.deep_merge(options, url)
+        url = nil
+      end
+
+      overrides = {
+        headers: Utils.deep_merge(Utils.deep_dup(headers), Utils.deep_dup(options.headers || {})),
+        params: Utils.deep_merge(Utils.deep_dup(params), Utils.deep_dup(options.params || {})),
+        request: Utils.deep_dup(self.options).merge!(Utils.deep_dup(options.request.to_hash)),
+        ssl: Utils.deep_dup(ssl).merge!(Utils.deep_dup(options.ssl.to_hash)),
+        builder: builder.deep_dup,
+        parallel_manager: options.parallel_manager || @default_parallel_manager
+      }
+      overrides[:proxy] = options.proxy if options.proxy
+
+      derived = self.class.new(url || options.url || build_exclusive_url, overrides)
+      unless options.proxy
+        derived.instance_variable_set(:@proxy, Utils.deep_dup(proxy))
+        derived.instance_variable_set(:@manual_proxy, @manual_proxy)
+      end
+      yield derived if block_given?
+      derived
+    end
+
     # Yields username and password extracted from a URI if they both exist.
     #
     # @param uri [URI]

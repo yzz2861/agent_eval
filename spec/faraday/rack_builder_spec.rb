@@ -314,4 +314,39 @@ RSpec.describe Faraday::RackBuilder do
       expect(rock.name).to eq('Chert')
     end
   end
+
+  describe '#deep_dup' do
+    let(:conn) do
+      Faraday::Connection.new('http://example.com') do |builder|
+        builder.use Apple
+        builder.adapter :test
+      end
+    end
+
+    it 'returns an unlocked copy that can be modified and built' do
+      subject.app
+      expect(subject).to be_locked
+
+      copy = subject.deep_dup
+
+      expect(copy).not_to be_locked
+      copy.use Orange
+      expect(copy.handlers.size).to eq(subject.handlers.size + 1)
+      expect(copy.adapter).to eq(subject.adapter)
+      expect { subject.use Orange }.to raise_error(Faraday::RackBuilder::StackLocked)
+    end
+
+    it 'deep-copies handler arguments but shares blocks and service objects' do
+      service = Object.new
+      subject.insert(0, Apple, { 'list' => [1], 'service' => service })
+
+      copy = subject.deep_dup
+      original_args = subject.handlers.first.instance_variable_get(:@args)
+      copy_args = copy.handlers.first.instance_variable_get(:@args)
+
+      expect(copy_args).to eq(original_args)
+      expect(copy_args.first['list']).not_to equal(original_args.first['list'])
+      expect(copy_args.first['service']).to equal(service)
+    end
+  end
 end

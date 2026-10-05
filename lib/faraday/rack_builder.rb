@@ -58,6 +58,18 @@ module Faraday
         end
       end
 
+      # Creates a copy of this handler with deep-copied arguments
+      # (see Faraday::Utils.deep_dup). The middleware class and block
+      # are shared with the original handler.
+      #
+      # @return [Faraday::RackBuilder::Handler]
+      def deep_dup
+        copy = dup
+        copy.instance_variable_set(:@args, Utils.deep_dup(@args))
+        copy.instance_variable_set(:@kwargs, Utils.deep_dup(@kwargs))
+        copy
+      end
+
       def build(app = nil)
         klass.new(app, *@args, **@kwargs, &@block)
       end
@@ -73,6 +85,20 @@ module Faraday
       super
       @adapter = original.adapter
       @handlers = original.handlers.dup
+    end
+
+    # Creates an independent, unlocked copy of this builder: handlers and
+    # adapter are deep-duped (see Faraday::Utils.deep_dup for the sharing
+    # rules) and any memoized app is discarded, so the copy can be freely
+    # modified and built even after this builder has been locked.
+    #
+    # @return [Faraday::RackBuilder]
+    def deep_dup
+      copy = dup
+      copy.instance_variable_set(:@app, nil)
+      copy.instance_variable_set(:@handlers, @handlers.map(&:deep_dup))
+      copy.instance_variable_set(:@adapter, @adapter&.deep_dup)
+      copy
     end
 
     def build

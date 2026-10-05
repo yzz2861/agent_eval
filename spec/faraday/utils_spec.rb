@@ -117,4 +117,53 @@ RSpec.describe Faraday::Utils do
       end
     end
   end
+
+  describe '.deep_dup' do
+    it 'recursively copies hashes, arrays, strings and options' do
+      options = Faraday::RequestOptions.from(
+        timeout: 5,
+        context: { 'auth' => { 'scopes' => %w[read] } }
+      )
+      source = {
+        'headers' => Faraday::Utils::Headers.new('X-Team' => 'core'),
+        'list' => ['a', %w[b c]],
+        'options' => options
+      }
+
+      copy = Faraday::Utils.deep_dup(source)
+      copy['headers']['X-Team'] = 'changed'
+      copy['list'][0] = 'changed'
+      copy['list'][1] << 'd'
+      copy['options'].timeout = 9
+      copy['options'].context['auth']['scopes'] << 'write'
+
+      expect(source['headers']['X-Team']).to eq('core')
+      expect(source['list']).to eq(['a', %w[b c]])
+      expect(options.timeout).to eq(5)
+      expect(options.context['auth']['scopes']).to eq(%w[read])
+      expect(copy['options'].context['auth']['scopes']).to eq(%w[read write])
+    end
+
+    it 'preserves the class of hash subclasses' do
+      headers = Faraday::Utils::Headers.new('X-Team' => 'core')
+      copy = Faraday::Utils.deep_dup(headers)
+
+      expect(copy).to be_a(Faraday::Utils::Headers)
+      expect(copy['x-team']).to eq('core')
+    end
+
+    it 'shares IOs, locks, procs and service objects by reference' do
+      service = Object.new
+      callback = proc {}
+      lock = Mutex.new
+      source = { 'io' => $stdout, 'lock' => lock, 'callback' => callback, 'service' => service }
+
+      copy = Faraday::Utils.deep_dup(source)
+
+      expect(copy['io']).to equal($stdout)
+      expect(copy['lock']).to equal(lock)
+      expect(copy['callback']).to equal(callback)
+      expect(copy['service']).to equal(service)
+    end
+  end
 end
