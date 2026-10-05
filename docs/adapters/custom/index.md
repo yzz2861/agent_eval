@@ -118,6 +118,38 @@ end
 `#save_response` also accepts a `finished` keyword argument, which defaults to `true`, but that you can set to false
 if you don't want it to call `#finish` on the `Response` object.
 
+### Completion observers
+
+Plugins that only need to read a completed response can register an observer with `#on_finished`.
+This is separate from the middleware `#on_complete` callback, which may parse or otherwise transform the response.
+
+There are two distinct completion points:
+
+* `#finished?` becomes `true` as soon as the response environment is assigned.
+* `#completion_observers_processed?` becomes `true` only after registered observers have run.
+
+Observers run in FIFO order, after all `#on_complete` middleware callbacks. An observer may register another observer;
+the new observer is appended to the same queue and will not jump ahead of observers already waiting. If the response is
+already complete when an observer is registered, that observer runs immediately. Asynchronous adapters can wait for the
+active observer dispatch with `#wait_for_completion_observers`.
+
+Observer exceptions do not stop other observers and do not change the response status or body. They are sent to the
+configured error collector, which can be any object responding to `#call(error, response)`, `#call(error)`, or `#<<`.
+
+```ruby
+errors = []
+response = Faraday::Response.new(error_collector: errors)
+response.on_finished { |env| puts env.status }
+```
+
+The collector can also be set for all responses:
+
+```ruby
+Faraday::Response.default_error_collector = ->(error, response) do
+  logger.error('Faraday response observer failed', error: error, status: response.status)
+end
+```
+
 ### `#request_timeout`
 
 Most HTTP libraries support different types of timeouts, like `:open_timeout`, `:read_timeout` and `:write_timeout`.
