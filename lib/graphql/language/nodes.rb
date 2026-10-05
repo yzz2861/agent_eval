@@ -33,6 +33,11 @@ module GraphQL
 
         attr_reader :filename
 
+        # @return [Integer, nil] Byte offset where this node starts in the source
+        def pos
+          @pos
+        end
+
         def line
           @line ||= @source&.line_at(@pos)
         end
@@ -627,6 +632,39 @@ module GraphQL
 
       # A type name, used for variable definitions
       class TypeName < NameOnlyNode
+      end
+
+      # Stands in for a token that the grammar expected but which is absent from
+      # the source (eg an unclosed selection set). It has no source width of its
+      # own; its {#pos} points just past the last token that was read.
+      #
+      # These nodes are only produced by the fault-tolerant recovery parser,
+      # never by normal, strict parsing.
+      class MissingToken < AbstractNode
+        # @!attribute expected
+        #   @return [String] Name of the token that was expected, eg `"RCURLY"`
+        #
+        # @!attribute message
+        #   @return [String] The syntax diagnostic associated with the missing token
+        scalar_methods :expected, :message
+        children_methods(false)
+      end
+
+      # Represents a region of source text that could not be parsed.
+      #
+      # The broken region is covered by the half-open source interval
+      # `pos...end_pos` so that tooling (eg an editor) can highlight it.
+      #
+      # These nodes are only produced by the fault-tolerant recovery parser,
+      # never by normal, strict parsing.
+      class SyntaxError < AbstractNode
+        # @!attribute message
+        #   @return [String] The syntax diagnostic describing this broken region
+        #
+        # @!attribute end_pos
+        #   @return [Integer] Position immediately after the last byte of the broken region
+        scalar_methods :message, :end_pos
+        children_methods(false)
       end
 
       # Usage of a variable in a query. Name does _not_ include `$`.

@@ -107,6 +107,8 @@ module GraphQL
             on_inline_fragment_with_modifications(selection, new_node)
           when GraphQL::Language::Nodes::FragmentSpread
             on_fragment_spread_with_modifications(selection, new_node)
+          when GraphQL::Language::Nodes::SyntaxError, GraphQL::Language::Nodes::MissingToken
+            on_syntax_problem_node_with_modifications(selection, new_node)
           else
             raise ArgumentError, "Invariant: unexpected field selection #{selection.class} (#{selection.inspect})"
           end
@@ -124,10 +126,18 @@ module GraphQL
         new_node
       end
 
+      # Syntax error and missing-token nodes are leaves: visit them via their
+      # own hook when one is defined, otherwise pass through unchanged.
+      def on_syntax_problem_node_with_modifications(node, parent)
+        method_name = node.is_a?(Nodes::SyntaxError) ? :on_syntax_error_with_modifications : :on_missing_token_with_modifications
+        public_send(method_name, node, parent)
+      end
+
       alias :on_inline_fragment_children :on_fragment_definition_children
 
       def on_operation_definition_children(new_node)
         new_node.variables.each do |arg_node|
+          next if arg_node.is_a?(Nodes::SyntaxError) || arg_node.is_a?(Nodes::MissingToken)
           new_child_and_node = on_variable_definition_with_modifications(arg_node, new_node)
           # Reassign `node` in case the child hook makes a modification
           if new_child_and_node.is_a?(Array)
@@ -142,6 +152,8 @@ module GraphQL
       def on_argument_children(new_node)
         new_node.children.each do |value_node|
           new_child_and_node = case value_node
+          when Language::Nodes::SyntaxError, Language::Nodes::MissingToken
+            on_syntax_problem_node_with_modifications(value_node, new_node)
           when Language::Nodes::VariableIdentifier
             on_variable_identifier_with_modifications(value_node, new_node)
           when Language::Nodes::InputObject
@@ -191,6 +203,7 @@ module GraphQL
                 elsif children_of_type
                   children_of_type.map do |child_accessor, child_class|
                     "node.#{child_accessor}.each do |child_node|
+                      next if child_node.is_a?(Nodes::SyntaxError) || child_node.is_a?(Nodes::MissingToken)
                       new_child_and_node = #{child_class.visit_method}_with_modifications(child_node, new_node)
                       # Reassign `node` in case the child hook makes a modification
                       if new_child_and_node.is_a?(Array)
@@ -249,6 +262,8 @@ module GraphQL
         Language::Nodes::ScalarTypeExtension,
         Language::Nodes::SchemaDefinition,
         Language::Nodes::SchemaExtension,
+        Language::Nodes::MissingToken,
+        Language::Nodes::SyntaxError,
         Language::Nodes::TypeName,
         Language::Nodes::UnionTypeDefinition,
         Language::Nodes::UnionTypeExtension,

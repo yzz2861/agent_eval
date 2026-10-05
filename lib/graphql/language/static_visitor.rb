@@ -52,6 +52,8 @@ module GraphQL
             on_inline_fragment(selection, new_node)
           when GraphQL::Language::Nodes::FragmentSpread
             on_fragment_spread(selection, new_node)
+          when GraphQL::Language::Nodes::SyntaxError, GraphQL::Language::Nodes::MissingToken
+            on_syntax_problem_node(selection, new_node)
           else
             raise ArgumentError, "Invariant: unexpected field selection #{selection.class} (#{selection.inspect})"
           end
@@ -65,8 +67,18 @@ module GraphQL
 
       alias :on_inline_fragment_children :on_fragment_definition_children
 
+      # Syntax error and missing-token nodes are leaves.
+      def on_syntax_problem_node(node, parent)
+        if node.is_a?(Language::Nodes::SyntaxError)
+          on_syntax_error(node, parent)
+        else
+          on_missing_token(node, parent)
+        end
+      end
+
       def on_operation_definition_children(new_node)
         new_node.variables.each do |arg_node|
+          next if arg_node.is_a?(Language::Nodes::SyntaxError) || arg_node.is_a?(Language::Nodes::MissingToken)
           on_variable_definition(arg_node, new_node)
         end
         visit_directives(new_node)
@@ -76,6 +88,8 @@ module GraphQL
       def on_argument_children(new_node)
         new_node.children.each do |value_node|
           case value_node
+          when Language::Nodes::SyntaxError, Language::Nodes::MissingToken
+            on_syntax_problem_node(value_node, new_node)
           when Language::Nodes::VariableIdentifier
             on_variable_identifier(value_node, new_node)
           when Language::Nodes::InputObject
@@ -114,6 +128,7 @@ module GraphQL
               elsif children_of_type
                 children_of_type.map do |child_accessor, child_class|
                   "node.#{child_accessor}.each do |child_node|
+                    next if child_node.is_a?(Language::Nodes::SyntaxError) || child_node.is_a?(Language::Nodes::MissingToken)
                     #{child_class.visit_method}(child_node, node)
                   end"
                 end.join("\n")
@@ -156,6 +171,8 @@ module GraphQL
         Language::Nodes::ScalarTypeExtension,
         Language::Nodes::SchemaDefinition,
         Language::Nodes::SchemaExtension,
+        Language::Nodes::MissingToken,
+        Language::Nodes::SyntaxError,
         Language::Nodes::TypeName,
         Language::Nodes::UnionTypeDefinition,
         Language::Nodes::UnionTypeExtension,

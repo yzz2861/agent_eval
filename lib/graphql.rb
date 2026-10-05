@@ -50,6 +50,17 @@ This is probably a bug in GraphQL-Ruby, please report this error on GitHub: http
     default_parser.parse(graphql_string, trace: trace, filename: filename, max_tokens: max_tokens)
   end
 
+  # Fault-tolerant parse for tooling (eg editors offering completions while the
+  # document is mid-edit). Unlike {.parse}, it never raises on syntax errors:
+  # it returns a {GraphQL::Language::Parser::ParseResult} with a partial AST
+  # and a list of diagnostics. The result must not be executed -- strict
+  # {.parse} remains the only path into query execution.
+  # @param graphql_string [String] a GraphQL string or schema definition
+  # @return [GraphQL::Language::Parser::ParseResult]
+  def self.parse_with_recovery(graphql_string, trace: GraphQL::Tracing::NullTrace, filename: nil, max_tokens: nil)
+    GraphQL::Language::Parser.parse_with_recovery(graphql_string, trace: trace, filename: filename, max_tokens: max_tokens)
+  end
+
   # Read the contents of `filename` and parse them as GraphQL
   # @param filename [String] Path to a `.graphql` file containing IDL or query
   # @return [GraphQL::Language::Nodes::Document]

@@ -17,6 +17,22 @@ module GraphQL
           self.new(graphql_str, filename: filename, trace: trace, max_tokens: max_tokens).parse
         end
 
+        # Fault-tolerant parse: unlike {.parse}, syntax errors don't abort the
+        # whole document. The returned {ParseResult} contains a partial AST
+        # (with {Nodes::SyntaxError} and {Nodes::MissingToken} nodes marking the
+        # broken regions) and one diagnostic per syntax problem.
+        #
+        # The strict parser is deliberately left unchanged: anything that would
+        # come out of this entry point must never flow into normal execution.
+        def parse_with_recovery(graphql_str, filename: nil, trace: Tracing::NullTrace, max_tokens: nil)
+          begin
+            parser_instance = self.new(graphql_str, filename: filename, trace: trace, max_tokens: max_tokens, tolerant: true)
+          rescue GraphQL::ParseError => err
+            return ParseResult.new(document: nil, errors: [err])
+          end
+          parser_instance.parse_with_recovery
+        end
+
         def parse_file(filename, trace: Tracing::NullTrace)
           if cache
             cache.fetch(filename) do
@@ -28,16 +44,18 @@ module GraphQL
         end
       end
 
-      def initialize(graphql_str, filename: nil, trace: Tracing::NullTrace, max_tokens: nil)
+      def initialize(graphql_str, filename: nil, trace: Tracing::NullTrace, max_tokens: nil, tolerant: false)
         if graphql_str.nil?
           raise GraphQL::ParseError.new("No query string was present", nil, nil, nil)
         end
-        @lexer = Lexer.new(graphql_str, filename: filename, max_tokens: max_tokens)
+        @lexer = Lexer.new(graphql_str, filename: filename, max_tokens: max_tokens, tolerant: tolerant)
         @graphql_str = graphql_str
         @filename = filename
         @trace = trace
         @dedup_identifiers = false
         @lines_at = nil
+        @tolerant = tolerant
+        @diagnostics = [] if tolerant
       end
 
       def parse
@@ -53,6 +71,37 @@ module GraphQL
       def tokens_count
         parse
         @lexer.tokens_count
+      end
+
+      # Result of a fault-tolerant parse. A document built with recovery is
+      # only useful together with its diagnostics -- never execute it.
+      class ParseResult
+        # @return [Nodes::Document, nil] Partial document, or nil when parsing could not start
+        attr_reader :document
+        # @return [Array<GraphQL::ParseError>] One entry per syntax problem encountered
+        attr_reader :errors
+
+        def initialize(document:, errors:)
+          @document = document
+          @errors = errors
+        end
+
+        # @return [Boolean] Was the source syntactically valid?
+        def ok?
+          @errors.empty?
+        end
+
+        alias_method :valid?, :ok?
+      end
+
+      def parse_with_recovery
+        ParseResult.new(
+          document: parse,
+          errors: @diagnostics
+        )
+      rescue GraphQL::ParseError => err
+        record_diagnostic(err)
+        ParseResult.new(document: nil, errors: @diagnostics)
       end
 
       def line_at(pos)
@@ -104,15 +153,52 @@ module GraphQL
 
       def document
         any_tokens = advance_token
+        if !@tolerant
+          defns = []
+          if any_tokens
+            defns << definition
+          else
+            # Only ignored characters is not a valid document
+            raise GraphQL::ParseError.new("Unexpected end of document", nil, nil, @graphql_str)
+          end
+          while !@lexer.finished?
+            defns << definition
+          end
+          return Document.new(pos: 0, definitions: defns, filename: @filename, source: self)
+        end
+
         defns = []
-        if any_tokens
-          defns << definition
-        else
-          # Only ignored characters is not a valid document
-          raise GraphQL::ParseError.new("Unexpected end of document", nil, nil, @graphql_str)
+        if !any_tokens
+          record_diagnostic(GraphQL::ParseError.new("Unexpected end of document", nil, nil, @graphql_str, filename: @filename))
         end
         while !@lexer.finished?
-          defns << definition
+          if CLOSERS.include?(@token_name)
+            # A stray closer with no open container: report it explicitly
+            # (its span is just the single punctuation token) and consume it.
+            error_start = current_pos
+            err = parse_error_at_current("Unexpected #{@token_name} (#{debug_token_value.inspect}) at [#{@lexer.line_number}, #{@lexer.column_number}]")
+            record_diagnostic(err)
+            advance_token
+            defns << syntax_error_node(error_start, err.message, end_pos: current_pos)
+            next
+          end
+          error_start = current_pos
+          begin
+            defns << definition
+          rescue GraphQL::ParseError => err
+            record_diagnostic(err)
+            status = resync(stop: [], bail: [], restart: DEFINITION_START_TOKENS, error_start: error_start)
+            case status
+            when :restart, :restart_with_junk
+              defns << syntax_error_node(error_start, err.message) if status == :restart_with_junk
+              next
+            when :junk
+              defns << syntax_error_node(error_start, err.message)
+            when :unmatched
+              defns << syntax_error_node(error_start, err.message)
+              @lexer.finished? ? break : next
+            end
+          end
         end
         Document.new(pos: 0, definitions: defns, filename: @filename, source: self)
       end
@@ -155,33 +241,23 @@ module GraphQL
           end
 
           variable_definitions = if at?(:LPAREN)
-            expect_token(:LPAREN)
-            defs = []
-            while !at?(:RPAREN)
-              loc = pos
-              expect_token(:VAR_SIGN)
-              var_name = parse_name
-              expect_token(:COLON)
-              var_type = self.type || raise_parse_error("Missing type definition for variable: $#{var_name}")
-              default_value = if at?(:EQUALS)
-                advance_token
-                value
+            advance_token
+            if !@tolerant
+              defs = []
+              while !at?(:RPAREN)
+                defs << parse_variable_definition
               end
-
-              directives = parse_directives
-
-              defs << Nodes::VariableDefinition.new(
-                pos: loc,
-                name: var_name,
-                type: var_type,
-                default_value: default_value,
-                directives: directives,
-                filename: @filename,
-                source: self
-              )
+              expect_token(:RPAREN)
+              defs
+            else
+              defs, status = parse_container_elements(
+                closer: :RPAREN,
+                bail: [:LCURLY, :RCURLY],
+                restart: [:VAR_SIGN] + NAME_KEYWORD_TOKENS,
+              ) { parse_variable_definition }
+              expect_closer(:RPAREN) if status == :ok
+              defs
             end
-            expect_token(:RPAREN)
-            defs
           else
             EmptyObjects::EMPTY_ARRAY
           end
@@ -370,12 +446,21 @@ module GraphQL
 
       def parse_input_object_field_definitions
         if at?(:LCURLY)
-          expect_token :LCURLY
-          list = []
-          while !at?(:RCURLY)
-            list << parse_input_value_definition
+          advance_token
+          if !@tolerant
+            list = []
+            while !at?(:RCURLY)
+              list << parse_input_value_definition
+            end
+            expect_token(:RCURLY)
+            return list
           end
-          expect_token :RCURLY
+          list, = parse_container_elements(
+            closer: :RCURLY,
+            bail: [],
+            restart: DEFINITION_FIELD_START_TOKENS,
+          ) { parse_input_value_definition }
+          expect_closer(:RCURLY) if at?(:RCURLY)
           list
         else
           EMPTY_ARRAY
@@ -439,32 +524,54 @@ module GraphQL
       end
 
       def parse_field_definitions
-        expect_token :LCURLY
-        list = []
-        while !at?(:RCURLY)
-          loc = pos
-          description = if at?(:STRING); string_value; end
-          defn_loc = pos
-          name = parse_name
-          arguments_definition = parse_argument_definitions
-          expect_token :COLON
-          type = self.type
-          directives = parse_directives
-
-          list << FieldDefinition.new(pos: loc, definition_pos: defn_loc, description: description, name: name, arguments: arguments_definition, type: type, directives: directives, filename: @filename, source: self)
+        return EMPTY_ARRAY unless at?(:LCURLY)
+        advance_token
+        if !@tolerant
+          list = []
+          while !at?(:RCURLY)
+            list << parse_field_definition
+          end
+          expect_token(:RCURLY)
+          return list
         end
-        expect_token :RCURLY
+        list, = parse_container_elements(
+          closer: :RCURLY,
+          bail: [],
+          restart: DEFINITION_FIELD_START_TOKENS,
+        ) { parse_field_definition }
+        expect_closer(:RCURLY) if at?(:RCURLY)
         list
+      end
+
+      def parse_field_definition
+        loc = pos
+        description = if at?(:STRING); string_value; end
+        defn_loc = pos
+        name = parse_name
+        arguments_definition = parse_argument_definitions
+        expect_token(:COLON)
+        type = self.type
+        directives = parse_directives
+        FieldDefinition.new(pos: loc, definition_pos: defn_loc, description: description, name: name, arguments: arguments_definition, type: type, directives: directives, filename: @filename, source: self)
       end
 
       def parse_argument_definitions
         if at?(:LPAREN)
           advance_token
-          list = []
-          while !at?(:RPAREN)
-            list << parse_input_value_definition
+          if !@tolerant
+            list = []
+            while !at?(:RPAREN)
+              list << parse_input_value_definition
+            end
+            expect_token(:RPAREN)
+            return list
           end
-          expect_token :RPAREN
+          list, = parse_container_elements(
+            closer: :RPAREN,
+            bail: [:RCURLY],
+            restart: DEFINITION_FIELD_START_TOKENS,
+          ) { parse_input_value_definition }
+          expect_closer(:RPAREN) if at?(:RPAREN)
           list
         else
           EMPTY_ARRAY
@@ -533,54 +640,91 @@ module GraphQL
       end
 
       def selection_set
-        expect_token(:LCURLY)
-        selections = []
-        while @token_name != :RCURLY
-          selections << if at?(:ELLIPSIS)
-            loc = pos
-            advance_token
-            case token_name
-            when :ON, :DIR_SIGN, :LCURLY
-              if_type = if at?(:ON)
-                advance_token
-                parse_type_name
-              else
-                nil
-              end
-
-              directives = parse_directives
-
-              Nodes::InlineFragment.new(pos: loc, type: if_type, directives: directives, selections: selection_set, filename: @filename, source: self)
-            else
-              name = parse_name_without_on
-              directives = parse_directives
-
-              # Can this ever happen?
-              # expect_token(:IDENTIFIER) if at?(:ON)
-
-              FragmentSpread.new(pos: loc, name: name, directives: directives, filename: @filename, source: self)
-            end
-          else
-            loc = pos
-            name = parse_name
-
-            field_alias = nil
-
-            if at?(:COLON)
-              advance_token
-              field_alias = name
-              name = parse_name
-            end
-
-            arguments = at?(:LPAREN) ? parse_arguments : nil
-            directives = at?(:DIR_SIGN) ? parse_directives : nil
-            selection_set = at?(:LCURLY) ? self.selection_set : nil
-
-            Nodes::Field.new(pos: loc, field_alias: field_alias, name: name, arguments: arguments, directives: directives, selections: selection_set, filename: @filename, source: self)
+        loc = pos
+        missing_open = nil
+        if !at?(:LCURLY)
+          unless @tolerant
+            expect_token(:LCURLY)
           end
+          err = GraphQL::ParseError.new(
+            expected_token_message(:LCURLY),
+            @lexer.line_number,
+            @lexer.column_number,
+            @graphql_str,
+            filename: @filename,
+          )
+          record_diagnostic(err)
+          missing_open = missing_token_node(:LCURLY, err.message)
+        else
+          advance_token
         end
-        expect_token(:RCURLY)
-        selections
+
+        selections, status = parse_container_elements(
+          closer: :RCURLY,
+          bail: [:RPAREN, :RBRACKET],
+          restart: SELECTION_START_TOKENS,
+        ) { parse_selection }
+
+        case status
+        when :ok
+          expect_closer(:RCURLY)
+        when :ok_consumed
+          # resync already consumed the RCURLY
+          nil
+        when :bail, :eof
+          # Missing RCURLY already recorded; keep whatever parsed so far.
+          nil
+        end
+
+        if missing_open
+          [missing_open] + selections
+        else
+          selections
+        end
+      end
+
+      private
+
+      def parse_selection
+        if at?(:ELLIPSIS)
+          loc = pos
+          advance_token
+          case token_name
+          when :ON, :DIR_SIGN, :LCURLY
+            if_type = if at?(:ON)
+              advance_token
+              parse_type_name
+            else
+              nil
+            end
+
+            directives = parse_directives
+
+            Nodes::InlineFragment.new(pos: loc, type: if_type, directives: directives, selections: selection_set, filename: @filename, source: self)
+          else
+            name = parse_name_without_on
+            directives = parse_directives
+
+            FragmentSpread.new(pos: loc, name: name, directives: directives, filename: @filename, source: self)
+          end
+        else
+          loc = pos
+          name = parse_name
+
+          field_alias = nil
+
+          if at?(:COLON)
+            advance_token
+            field_alias = name
+            name = parse_name
+          end
+
+          arguments = at?(:LPAREN) ? parse_arguments : nil
+          directives = at?(:DIR_SIGN) ? parse_directives : nil
+          child_selection_set = at?(:LCURLY) ? selection_set : nil
+
+          Nodes::Field.new(pos: loc, field_alias: field_alias, name: name, arguments: arguments, directives: directives, selections: child_selection_set, filename: @filename, source: self)
+        end
       end
 
       def parse_name
@@ -679,23 +823,53 @@ module GraphQL
       end
 
       def parse_arguments
-        if at?(:LPAREN)
-          advance_token
+        return EMPTY_ARRAY unless at?(:LPAREN)
+        advance_token
+        if !@tolerant
           args = []
           while !at?(:RPAREN)
-            loc = pos
-            name = parse_name
-            expect_token(:COLON)
-            args << Nodes::Argument.new(pos: loc, name: name, value: value, filename: @filename, source: self)
+            args << parse_argument
           end
           if args.empty?
             expect_token(:ARGUMENT_NAME) # At least one argument is required
           end
           expect_token(:RPAREN)
-          args
-        else
-          EMPTY_ARRAY
+          return args
         end
+
+        args, argument_status = parse_container_elements(
+          closer: :RPAREN,
+          bail: [:RCURLY, :RBRACKET],
+          restart: NAME_KEYWORD_TOKENS,
+        ) { parse_argument }
+        # A nested value bailed on RCURLY: leave it for the selection set
+        # (the missing RPAREN/RBRACKET was already diagnosed) and return what
+        # we parsed rather than retrying in place.
+        if argument_status == :bail
+          return args
+        end
+        if args.empty? && at?(:RPAREN)
+          # Empty `()` is invalid; report it but don't add a MissingToken.
+          err = GraphQL::ParseError.new(
+            expected_token_message(:ARGUMENT_NAME),
+            @lexer.line_number,
+            @lexer.column_number,
+            @graphql_str,
+            filename: @filename,
+          )
+          record_diagnostic(err)
+        end
+        if at?(:RPAREN)
+          advance_token
+        end
+        args
+      end
+
+      def parse_argument
+        loc = pos
+        name = parse_name
+        expect_token(:COLON)
+        Nodes::Argument.new(pos: loc, name: name, value: value, filename: @filename, source: self)
       end
 
       def string_value
@@ -724,24 +898,54 @@ module GraphQL
         when :IDENTIFIER
           Nodes::Enum.new(pos: pos, name: expect_token_value(:IDENTIFIER), filename: @filename, source: self)
         when :LBRACKET
+          list_start = pos
           advance_token
-          list = []
-          while !at?(:RBRACKET)
-            list << value
+          if !@tolerant
+            list = []
+            while !at?(:RBRACKET)
+              list << value
+            end
+            expect_token(:RBRACKET)
+            return list
           end
-          expect_token(:RBRACKET)
+          list, status = parse_container_elements(
+            closer: :RBRACKET,
+            bail: [:RPAREN, :RCURLY],
+            restart: VALUE_START_TOKENS,
+          ) { value }
+          case status
+          when :ok
+            expect_closer(:RBRACKET)
+          when :bail, :eof
+            # Missing RBRACKET already recorded; keep parsed elements.
+            nil
+          end
           list
         when :LCURLY
           start = pos
           advance_token
-          args = []
-          while !at?(:RCURLY)
+          if !@tolerant
+            args = []
+            while !at?(:RCURLY)
+              loc = pos
+              n = parse_name
+              expect_token(:COLON)
+              args << Argument.new(pos: loc, name: n, value: value, filename: @filename, source: self)
+            end
+            expect_token(:RCURLY)
+            return InputObject.new(pos: start, arguments: args, filename: @filename, source: self)
+          end
+          args, = parse_container_elements(
+            closer: :RCURLY,
+            bail: [:RPAREN, :RBRACKET],
+            restart: NAME_KEYWORD_TOKENS,
+          ) do
             loc = pos
             n = parse_name
             expect_token(:COLON)
-            args << Argument.new(pos: loc, name: n, value: value, filename: @filename, source: self)
+            Argument.new(pos: loc, name: n, value: value, filename: @filename, source: self)
           end
-          expect_token(:RCURLY)
+          expect_closer(:RCURLY) if at?(:RCURLY)
           InputObject.new(pos: start, arguments: args, filename: @filename, source: self)
         when :VAR_SIGN
           loc = pos
@@ -806,13 +1010,31 @@ module GraphQL
 
       def expect_token(expected_token_name)
         unless @token_name == expected_token_name
-          raise_parse_error("Expected #{expected_token_name}, #{@token_name == false ? "not end of file" : "actual: #{@token_name} (#{debug_token_value.inspect})"}")
+          raise GraphQL::ParseError.new(
+            expected_token_message(expected_token_name),
+            @lexer.line_number,
+            @lexer.column_number,
+            @graphql_str,
+            filename: @filename,
+          )
         end
         advance_token
       end
 
+      def expected_token_message(expected_token_name)
+        token_display = @token_name == false ? "not end of file" : "actual: #{@token_name} (#{debug_token_value.inspect})"
+        "Expected #{expected_token_name}, #{token_display} at [#{@lexer.line_number}, #{@lexer.column_number}]"
+      end
+
       def expect_one_of(token_names)
-        raise_parse_error("Expected one of #{token_names.join(", ")}, actual: #{token_name || "NOTHING"} (#{debug_token_value.inspect})")
+        token_display = "#{token_name || "NOTHING"} (#{debug_token_value.inspect})"
+        raise GraphQL::ParseError.new(
+          "Expected one of #{token_names.join(", ")}, actual: #{token_display} at [#{@lexer.line_number}, #{@lexer.column_number}]",
+          @lexer.line_number,
+          @lexer.column_number,
+          @graphql_str,
+          filename: @filename,
+        )
       end
 
       def raise_parse_error(message)
@@ -825,6 +1047,268 @@ module GraphQL
           filename: @filename,
         )
 
+      end
+
+      # Build a ParseError at the lexer's current position without modifying
+      # the message (used by the recovery parser, where messages already match
+      # what strict parsing would produce).
+      def parse_error_at_current(message)
+        GraphQL::ParseError.new(
+          message,
+          @lexer.line_number,
+          @lexer.column_number,
+          @graphql_str,
+          filename: @filename,
+        )
+      end
+
+      # --- Fault-tolerant recovery support ----------------------------------
+
+      # Token sets used while resyncing after a syntax error.
+      OPENER_FOR = { :RCURLY => :LCURLY, :RPAREN => :LPAREN, :RBRACKET => :LBRACKET }
+      CLOSERS = OPENER_FOR.keys.freeze
+      OPENERS = OPENER_FOR.values.freeze
+      NAME_KEYWORD_TOKENS = [
+        :IDENTIFIER, :SCHEMA, :SCALAR, :IMPLEMENTS, :INTERFACE, :UNION, :ENUM,
+        :INPUT, :DIRECTIVE, :TYPE, :QUERY, :MUTATION, :SUBSCRIPTION, :TRUE,
+        :FALSE, :FRAGMENT, :REPEATABLE, :NULL, :ON, :EXTEND,
+      ].freeze
+      DEFINITION_START_TOKENS = (
+        NAME_KEYWORD_TOKENS + [:LCURLY, :STRING, :EXTEND, :ELLIPSIS]
+      ).freeze
+      SELECTION_START_TOKENS = (NAME_KEYWORD_TOKENS + [:ELLIPSIS]).freeze
+      DEFINITION_FIELD_START_TOKENS = (NAME_KEYWORD_TOKENS + [:STRING]).freeze
+      VALUE_START_TOKENS = (
+        NAME_KEYWORD_TOKENS + [:INT, :FLOAT, :STRING, :TRUE, :FALSE, :NULL,
+          :LBRACKET, :LCURLY, :VAR_SIGN]
+      ).freeze
+
+      private
+
+      def parse_variable_definition
+        loc = pos
+        expect_token(:VAR_SIGN)
+        @current_variable_name = var_name = parse_name
+        expect_token(:COLON)
+        var_type = self.type
+        if var_type.nil?
+          if @tolerant
+            message = "Missing type definition for variable: $#{var_name} at [#{@lexer.line_number}, #{@lexer.column_number}]"
+            raise parse_error_at_current(message)
+          else
+            raise_parse_error("Missing type definition for variable: $#{var_name}")
+          end
+        end
+        default_value = if at?(:EQUALS)
+          advance_token
+          value
+        end
+
+        directives = parse_directives
+
+        Nodes::VariableDefinition.new(
+          pos: loc,
+          name: var_name,
+          type: var_type,
+          default_value: default_value,
+          directives: directives,
+          filename: @filename,
+          source: self
+        )
+      end
+
+      def current_pos
+        if @lexer.finished?
+          @lexer.prev_token_end_pos
+        else
+          pos
+        end
+      end
+
+      def record_diagnostic(err)
+        key = [err.class, err.message, err.line, err.col]
+        if !@diagnostic_keys&.include?(key)
+          (@diagnostic_keys ||= []) << key
+          @diagnostics << err
+        end
+        nil
+      end
+
+      def syntax_error_node(start_pos, message, end_pos: current_pos)
+        end_pos = start_pos if end_pos < start_pos
+        Nodes::SyntaxError.new(
+          pos: start_pos,
+          end_pos: end_pos,
+          message: message,
+          filename: @filename,
+          source: self
+        )
+      end
+
+      def missing_token_node(expected, message, position: current_pos)
+        Nodes::MissingToken.new(
+          pos: position,
+          expected: expected.to_s,
+          message: message,
+          filename: @filename,
+          source: self
+        )
+      end
+
+      # Consume tokens until a reliable synchronization point is reached.
+      #
+      # The current token is always treated as part of the broken region (it
+      # was being parsed when the error was raised). String tokens are atomic,
+      # so punctuation inside a string can never become a sync point.
+      #
+      # @return [Symbol] :stop (found `stop`), :bail (found an enclosing closer
+      #   that doesn't belong to this container), :restart (found `restart`
+      #   after skipping junk), :junk (ran out of input), :eof
+      def resync(stop:, bail:, restart:, error_start:)
+        skipped_any = false
+        open_stack = []
+        loop do
+          if @lexer.finished?
+            return skipped_any ? :junk : :eof
+          end
+          tok = @token_name
+          if open_stack.empty? && stop.include?(tok)
+            # The very first token may itself be the container's closer
+            # (eg an element failed immediately before `)`); consume it.
+            advance_token
+            return :stop
+          end
+          if open_stack.empty? && bail.include?(tok)
+            # Closer for a different container: leave it for that container.
+            return :bail
+          end
+          if open_stack.empty? && restart.include?(tok)
+            if skipped_any
+              return :restart_with_junk
+            else
+              # The very token that failed is itself a restart candidate
+              # (eg a partial keyword). Consume it so recovery progresses.
+              advance_token
+              return :junk
+            end
+          end
+
+          if OPENERS.include?(tok)
+            open_stack << tok
+          elsif CLOSERS.include?(tok)
+            if open_stack.empty?
+              advance_token
+              return :unmatched
+            elsif open_stack.last != OPENER_FOR[tok]
+              # An unexpected closer while nested junk is open: it belongs to
+              # an enclosing container, so bail out without consuming it.
+              return :bail
+            end
+            open_stack.pop
+          end
+
+          skipped_any = true
+          advance_token
+        end
+      end
+
+      # Expect a container-closing token. In recovery mode a missing closer
+      # produces a {Nodes::MissingToken} and a diagnostic instead of raising,
+      # and the token is left unconsumed for the caller's resync logic.
+      #
+      # @return [Symbol] :ok when the closer was consumed, otherwise :eof or
+      #   :bail (unexpected closer encountered)
+      def expect_closer(expected_token)
+        if at?(expected_token)
+          advance_token
+          :ok
+        elsif !@tolerant
+          expect_token(expected_token)
+          :ok
+        else
+          err = GraphQL::ParseError.new(
+            expected_token_message(expected_token),
+            @lexer.line_number,
+            @lexer.column_number,
+            @graphql_str,
+            filename: @filename,
+          )
+          record_diagnostic(err)
+          if @lexer.finished?
+            :eof
+          else
+            :bail
+          end
+        end
+      end
+
+      # Parse the repeated elements of a container (selections, arguments, ...)
+      # with error recovery. `parse_one` must parse exactly one element.
+      #
+      # @return [Array(Array, Symbol)] the parsed elements and one of :ok
+      #   (closer still present for the caller to consume), :eof or :bail
+      #   (a closer for a different container was hit)
+      def parse_container_elements(closer:, bail:, restart:, stop: [closer], &parse_one)
+        elements = []
+        if !@tolerant
+          while !at?(closer)
+            elements << parse_one.call
+          end
+          return [elements, :ok]
+        end
+
+        loop do
+          if at?(closer)
+            return [elements, :ok]
+          end
+          if @lexer.finished?
+            err = GraphQL::ParseError.new(
+              expected_token_message(closer),
+              @lexer.line_number,
+              @lexer.column_number,
+              @graphql_str,
+              filename: @filename,
+            )
+            record_diagnostic(err)
+            elements << missing_token_node(closer, err.message)
+            return [elements, :eof]
+          end
+          if bail.include?(@token_name)
+            err = GraphQL::ParseError.new(
+              expected_token_message(closer),
+              @lexer.line_number,
+              @lexer.column_number,
+              @graphql_str,
+              filename: @filename,
+            )
+            record_diagnostic(err)
+            elements << missing_token_node(closer, err.message)
+            return [elements, :bail]
+          end
+
+          error_start = current_pos
+          begin
+            elements << parse_one.call
+          rescue GraphQL::ParseError => err
+            record_diagnostic(err)
+            status = resync(stop: stop, bail: bail, restart: restart, error_start: error_start)
+            case status
+            when :restart, :restart_with_junk
+              if status == :restart_with_junk
+                elements << syntax_error_node(error_start, err.message)
+              end
+              next
+            when :stop
+              # closer was consumed by resync; mark it missing and finish
+              elements << missing_token_node(closer, err.message)
+              return [elements, :ok_consumed]
+            when :bail, :eof, :junk
+              elements << syntax_error_node(error_start, err.message)
+              elements << missing_token_node(closer, err.message) unless status == :junk
+              return [elements, status == :junk ? :eof : status]
+            end
+          end
+        end
       end
 
       # Only use when we care about the expected token's value

@@ -3,7 +3,7 @@ module GraphQL
   module Language
 
     class Lexer
-      def initialize(graphql_str, filename: nil, max_tokens: nil)
+      def initialize(graphql_str, filename: nil, max_tokens: nil, tolerant: false)
         if !(graphql_str.encoding == Encoding::UTF_8 || graphql_str.ascii_only?)
           graphql_str = graphql_str.dup.force_encoding(Encoding::UTF_8)
         end
@@ -17,6 +17,10 @@ module GraphQL
         @max_tokens = max_tokens || Float::INFINITY
         @tokens_count = 0
         @finished = false
+        # When true, malformed tokens (eg an unterminated string) are returned
+        # as tokens so the recovery parser can resync past them instead of
+        # aborting the whole document.
+        @tolerant = tolerant
       end
 
       def finished?
@@ -29,6 +33,17 @@ module GraphQL
       end
 
       attr_reader :pos, :tokens_count
+
+      # The position immediately after the most recently read token.
+      # Falls back to the start position when the token has zero width.
+      def prev_token_end_pos
+        matched = @scanner&.matched_size
+        if matched && matched > 0
+          @scanner.pos
+        else
+          @pos || @scanner&.pos || 0
+        end
+      end
 
       def advance
         loop do
@@ -86,25 +101,54 @@ module GraphQL
               if next_first_byte == ByteFor::NAME || next_first_byte == ByteFor::IDENTIFIER
                 number_part = token_value
                 name_part = @scanner.scan(IDENTIFIER_REGEXP)
-                raise_parse_error("Name after number is not allowed (in `#{number_part}#{name_part}`)")
+                if @tolerant
+                  # Treat the whole `123abc` run as one unrecognized token (the
+                  # number scan plus the identifier scan already consumed it) so
+                  # the parser can resync at the next reliable point.
+                  return :UNKNOWN_CHAR
+                else
+                  raise_parse_error("Name after number is not allowed (in `#{number_part}#{name_part}`)")
+                end
               end
             end
             # Check for a matched decimal:
             @scanner[1] ? :FLOAT : :INT
           else
-            # Attempt to find the part after the `-`
-            value = @scanner.scan(/-\s?[a-z0-9]*/i)
-            invalid_byte_for_number_error_message = "Expected type 'number', but it was malformed#{value.nil? ? "" : ": #{value.inspect}"}."
-            raise_parse_error(invalid_byte_for_number_error_message)
+            if @tolerant
+              value = @scanner.scan(/-\s?[a-z0-9]*/i)
+              if value.nil? || value.empty?
+                @scanner.pos += 1
+              end
+              return :UNKNOWN_CHAR
+            else
+              # Attempt to find the part after the `-`
+              value = @scanner.scan(/-\s?[a-z0-9]*/i)
+              invalid_byte_for_number_error_message = "Expected type 'number', but it was malformed#{value.nil? ? "" : ": #{value.inspect}"}."
+              raise_parse_error(invalid_byte_for_number_error_message)
+            end
           end
         when ByteFor::ELLIPSIS
           if @string.getbyte(@pos + 1) != 46 || @string.getbyte(@pos + 2) != 46
-            raise_parse_error("Expected `...`, actual: #{@string[@pos..@pos + 2].inspect}")
+            if @tolerant
+              @scanner.pos += 1
+              return :UNKNOWN_CHAR
+            else
+              raise_parse_error("Expected `...`, actual: #{@string[@pos..@pos + 2].inspect}")
+            end
           end
           @scanner.pos += 3
           :ELLIPSIS
         when ByteFor::STRING
           if @scanner.skip(BLOCK_STRING_REGEXP) || @scanner.skip(QUOTED_STRING_REGEXP)
+            :STRING
+          elsif @tolerant
+            # Consume the rest of the unterminated string (block strings run to
+            # end of input, regular strings run to end of line) as a single
+            # token. Keeping the whole string atomic means punctuation inside
+            # it -- such as a `{` -- is never mistaken for a resync point.
+            is_block = @string.byteslice(@pos, 3) == BLOCK_QUOTE
+            rest_pattern = is_block ? /#{BLOCK_QUOTE}.*\z/m : /#{QUOTE}[^\r\n]*/
+            @scanner.scan(rest_pattern)
             :STRING
           else
             raise_parse_error("Expected string or block string, but it was malformed")

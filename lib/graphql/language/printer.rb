@@ -62,6 +62,13 @@ module GraphQL
 
       protected
 
+      # Recovery parsing may leave {Nodes::SyntaxError}/{Nodes::MissingToken}
+      # markers inside node lists; skip those when turning the AST back into
+      # GraphQL text.
+      def printable_nodes(nodes)
+        nodes.reject { |node| node.is_a?(Nodes::SyntaxError) || node.is_a?(Nodes::MissingToken) }
+      end
+
       def print_string(str)
         @out.append(str)
       end
@@ -81,9 +88,10 @@ module GraphQL
 
       def print_input_object(input_object)
         print_string("{")
-        input_object.arguments.each_with_index do |a, i|
+        printable_arguments = input_object.arguments.reject { |a| a.is_a?(Nodes::SyntaxError) || a.is_a?(Nodes::MissingToken) }
+        printable_arguments.each_with_index do |a, i|
           print_argument(a)
-          print_string(", ") if i < input_object.arguments.size - 1
+          print_string(", ") if i < printable_arguments.size - 1
         end
         print_string("}")
       end
@@ -119,9 +127,10 @@ module GraphQL
         print_string(field.name)
         if !field.arguments.empty?
           print_string("(")
-          field.arguments.each_with_index do |a, i|
+          printable_arguments = field.arguments.reject { |a| a.is_a?(Nodes::SyntaxError) || a.is_a?(Nodes::MissingToken) }
+          printable_arguments.each_with_index do |a, i|
             print_argument(a)
-            print_string(", ") if i < field.arguments.size - 1
+            print_string(", ") if i < printable_arguments.size - 1
           end
           print_string(")")
         end
@@ -184,9 +193,10 @@ module GraphQL
 
         if !operation_definition.variables.empty?
           print_string("(")
-          operation_definition.variables.each_with_index do |v, i|
+          printable_variables = operation_definition.variables.reject { |v| v.is_a?(Nodes::SyntaxError) || v.is_a?(Nodes::MissingToken) }
+          printable_variables.each_with_index do |v, i|
             print_variable_definition(v)
-            print_string(", ") if i < operation_definition.variables.size - 1
+            print_string(", ") if i < printable_variables.size - 1
           end
           print_string(")")
         end
@@ -294,6 +304,7 @@ module GraphQL
       end
 
       def print_arguments(arguments, indent: "")
+        arguments = printable_nodes(arguments)
         if arguments.all? { |arg| !arg.description && !arg.comment }
           print_string("(")
           arguments.each_with_index do |arg, i|
@@ -360,9 +371,10 @@ module GraphQL
         print_string("enum ")
         print_string(enum_type.name)
         print_directives(enum_type.directives)
-        if !enum_type.values.empty?
+        enum_values = printable_nodes(enum_type.values)
+        if !enum_values.empty?
           print_string(" {\n")
-          enum_type.values.each.with_index do |value, i|
+          enum_values.each.with_index do |value, i|
             print_description(value, indent: "  ", first_in_block: i == 0)
             print_comment(value, indent: "  ", first_in_block: i == 0)
             print_enum_value_definition(value)
@@ -383,9 +395,10 @@ module GraphQL
         print_string("input ")
         print_string(input_object_type.name)
         print_directives(input_object_type.directives)
-        if !input_object_type.fields.empty?
+        input_fields = printable_nodes(input_object_type.fields)
+        if !input_fields.empty?
           print_string(" {\n")
-          input_object_type.fields.each.with_index do |field, i|
+          input_fields.each.with_index do |field, i|
             print_description(field, indent: "  ", first_in_block: i == 0)
             print_comment(field, indent: "  ", first_in_block: i == 0)
             print_string("  ")
@@ -440,6 +453,7 @@ module GraphQL
       end
 
       def print_field_definitions(fields)
+        fields = printable_nodes(fields)
         return if fields.empty?
 
         print_string(" {\n")
@@ -546,6 +560,10 @@ module GraphQL
           print_input_object_type_definition(node, extension: true)
         when Nodes::DirectiveDefinition
           print_directive_definition(node)
+        when Nodes::SyntaxError
+          # The broken region can't be turned back into valid GraphQL; omit it.
+        when Nodes::MissingToken
+          # Zero-width node: nothing to print
         when FalseClass, Float, Integer, NilClass, String, TrueClass, Symbol
           print_string(GraphQL::Language.serialize(node))
         when Array
