@@ -6,6 +6,8 @@ require "dry/configurable"
 require "dry/auto_inject"
 require "dry/inflector"
 
+require "dry/system/component_manifest"
+
 module Dry
   module System
     # Abstract container class to inherit from
@@ -60,6 +62,8 @@ module Dry
       setting :provider_dirs, default: ["system/providers"]
       setting :registrations_dir, default: "system/registrations"
       setting :component_dirs, default: Config::ComponentDirs.new, cloneable: true
+      setting :component_manifest_path
+      setting :component_manifest_fallback_scan, default: false
       setting :exports, reader: true
       setting :inflector, default: Dry::Inflector.new
       setting :auto_registrar, default: Dry::System::AutoRegistrar
@@ -318,6 +322,8 @@ module Dry
           run_hooks(:finalize) do
             yield(self) if block_given?
 
+            component_manifest.verify!(self) if config.component_manifest_path
+
             [providers, auto_registrar, manifest_registrar, importer].each(&:finalize!)
 
             @__finalized__ = true
@@ -526,6 +532,27 @@ module Dry
           config.component_dirs.to_a.map { |dir| ComponentDir.new(config: dir, container: self) }
         end
 
+        # @api public
+        def component_manifest
+          verify_component_manifest_configured!
+          @component_manifest ||= begin
+            ComponentManifest.load(resolved_component_manifest_path)
+          end
+        end
+
+        # @api public
+        def export_component_manifest(path: config.component_manifest_path)
+          configured!
+          manifest = ComponentManifest.build(self)
+          return manifest unless path
+
+          output_path = Pathname(path)
+          output_path = root.join(output_path) unless output_path.absolute?
+          output_path.dirname.mkpath
+          manifest.write(output_path)
+          manifest
+        end
+
         # @api private
         def providers
           @providers ||= config.provider_registrar.new(self)
@@ -656,11 +683,51 @@ module Dry
           # If no matching component is found, return a null component; this fallback is
           # important because the component may still be loadable via the manifest
           # registrar or an imported container.
+          if config.component_manifest_path
+            find_manifest_component(key) || find_fallback_component(key) ||
+              IndirectComponent.new(Identifier.new(key))
+          else
+            scan_component(key) || IndirectComponent.new(Identifier.new(key))
+          end
+        end
+
+        def find_manifest_component(key)
+          component_dirs.each do |dir|
+            entry = component_manifest.find(dir.path, key)
+            next unless entry
+
+            component = component_manifest.build_component(dir, entry)
+            return component if component.key == key
+          end
+          nil
+        end
+
+        def find_fallback_component(key)
+          return unless config.component_manifest_fallback_scan
+
+          scan_component(key)
+        end
+
+        def scan_component(key)
           component_dirs.detect { |dir|
             if (component = dir.component_for_key(key))
               break component
             end
-          } || IndirectComponent.new(Identifier.new(key))
+          }
+        end
+
+        def component_manifest_path
+          verify_component_manifest_configured!
+          resolved_component_manifest_path
+        end
+
+        def resolved_component_manifest_path
+          root.join(config.component_manifest_path)
+        end
+
+        def verify_component_manifest_configured!
+          path = config.component_manifest_path
+          raise ComponentManifestNotFoundError, path unless path && File.file?(resolved_component_manifest_path)
         end
 
         def run_hooks(event)

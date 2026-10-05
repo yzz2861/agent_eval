@@ -55,9 +55,102 @@ module Dry
       def each_component
         return enum_for(:each_component) unless block_given?
 
+        if container.config.component_manifest_path
+          manifest = container.component_manifest
+          manifest_entries = manifest.components.select { |entry| entry["component_dir"] == path }
+
+          manifest_entries.each do |entry|
+            yield manifest.component_for(self, entry)
+          end
+
+          if container.config.component_manifest_fallback_scan
+            listed_paths = manifest_entries.map { |entry| entry["relative_path"] }
+
+            each_file do |file_path, namespace|
+              relative_path = file_path.relative_path_from(container.root).to_s
+              next if listed_paths.include?(relative_path)
+
+              yield component_for_path(file_path, namespace)
+            end
+          end
+        else
+          each_component_from_files { |component| yield component }
+        end
+      end
+
+      def each_component_from_files
+        return enum_for(:each_component_from_files) unless block_given?
+
         each_file do |file_path, namespace|
           yield component_for_path(file_path, namespace)
         end
+      end
+
+      def build_manifest_component(entry, file_path, inflector)
+        relative_path = file_path.relative_path_from(full_path.expand_path).to_s
+        namespace = namespace_for_relative_path(relative_path)
+        identifier = Identifier.new(entry.fetch("key"))
+
+        Component.new(
+          identifier,
+          namespace: namespace,
+          file_path: file_path,
+          require_path: entry.fetch("require_path"),
+          const_path: entry.fetch("const_path"),
+          inflector: inflector,
+          **component_options,
+          **MagicCommentsParser.(file_path)
+        )
+      end
+
+      def namespace_for_relative_path(relative_path)
+        namespaces = config.namespaces.to_a
+        non_root_namespace = namespaces.reject(&:root?).find { |namespace|
+          relative_path.start_with?("#{namespace.path}#{File::SEPARATOR}")
+        }
+
+        non_root_namespace || namespaces.find(&:root?)
+      end
+
+      def key_for_relative_path(relative_path, namespace)
+        relative_key = relative_path
+
+        if namespace.path?
+          relative_key = relative_key.delete_prefix("#{namespace.path}#{File::SEPARATOR}")
+        end
+
+        key = relative_key.sub(RB_EXT, EMPTY_STRING).scan(WORD_REGEX).join(KEY_SEPARATOR)
+        identifier = Identifier.new(key)
+
+        if namespace.key
+          identifier.namespaced(
+            from: namespace.path&.gsub(PATH_SEPARATOR, KEY_SEPARATOR),
+            to: namespace.key
+          ).key
+        else
+          key
+        end
+      end
+
+      def const_path_for_relative_path(relative_path, namespace)
+        relative_path = relative_path
+
+        if namespace.path?
+          relative_path = relative_path.delete_prefix("#{namespace.path}#{File::SEPARATOR}")
+        end
+
+        path = relative_path.sub(RB_EXT, EMPTY_STRING)
+        namespace_const_path = namespace.const&.gsub(KEY_SEPARATOR, PATH_SEPARATOR)
+
+        if namespace_const_path
+          "#{namespace_const_path}#{PATH_SEPARATOR}#{path}"
+        else
+          path
+        end
+      end
+
+      def full_path
+        container.root.join(path)
       end
 
       private
@@ -84,13 +177,6 @@ module Dry
             Pathname(file_path).relative_path_from(full_path).to_s.start_with?(*non_root_paths)
           }
         end
-      end
-
-      # Returns the full path of the component directory
-      #
-      # @return [Pathname]
-      def full_path
-        container.root.join(path)
       end
 
       # Returns a component for a full path to a Ruby source file within the component dir

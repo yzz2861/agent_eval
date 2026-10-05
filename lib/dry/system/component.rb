@@ -37,10 +37,12 @@ module Dry
       attr_reader :options
 
       # @api private
-      def initialize(identifier, file_path:, namespace:, **options)
+      def initialize(identifier, file_path:, namespace: nil, require_path: nil, const_path: nil, **options)
         @identifier = identifier
         @file_path = Pathname(file_path)
         @namespace = namespace
+        @require_path = require_path
+        @const_path = const_path
         @options = DEFAULT_OPTIONS.merge(options)
       end
 
@@ -106,6 +108,8 @@ module Dry
       #
       # @api public
       def require_path
+        return @require_path if @require_path
+
         if namespace.path
           "#{namespace.path}#{PATH_SEPARATOR}#{path_in_namespace}"
         else
@@ -136,6 +140,8 @@ module Dry
       #
       # @api public
       def const_path
+        return @const_path if @const_path
+
         namespace_const_path = namespace.const&.gsub(KEY_SEPARATOR, PATH_SEPARATOR)
 
         if namespace_const_path

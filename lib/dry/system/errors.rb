@@ -25,6 +25,74 @@ module Dry
       end
     end
 
+    ComponentManifestError = Class.new(StandardError)
+
+    ComponentManifestMalformedError = Class.new(ComponentManifestError) do
+      def initialize(path:, cause:)
+        super("Component manifest #{path.inspect} is malformed: #{cause.message}")
+      end
+    end
+
+    ComponentManifestNotFoundError = Class.new(ComponentManifestError) do
+      def initialize(path)
+        super("Component manifest '#{path}' not found")
+      end
+    end
+
+    ComponentManifestFormatVersionError = Class.new(ComponentManifestError) do
+      def initialize(actual, expected)
+        super("Component manifest format version #{actual.inspect} is not supported (expected #{expected.inspect})")
+      end
+    end
+
+    ComponentManifestRootMismatchError = Class.new(ComponentManifestError) do
+      def initialize(expected, actual)
+        super("Component manifest root '#{expected}' does not match current root '#{actual}'")
+      end
+    end
+
+    ComponentManifestNamingConfigError = Class.new(ComponentManifestError) do
+      def initialize(expected, actual)
+        super("Component manifest naming config version '#{expected}' does not match current inflector '#{actual}'")
+      end
+    end
+
+    ComponentManifestBoundaryError = Class.new(ComponentManifestError) do
+      def initialize(root, path)
+        super("Component manifest path '#{path}' is outside component root '#{root}'")
+      end
+    end
+
+    ComponentManifestRequirePathError = Class.new(ComponentManifestError) do
+      def initialize(key, path)
+        super("Component '#{key}' has invalid require path #{path.inspect}")
+      end
+    end
+
+    ComponentManifestComponentMissingError = Class.new(ComponentManifestError) do
+      def initialize(key, path)
+        super("Component '#{key}' listed in manifest was not found at '#{path}'")
+      end
+    end
+
+    ComponentManifestDigestMismatchError = Class.new(ComponentManifestError) do
+      def initialize(key, path, expected, actual)
+        super("Component '#{key}' manifest digest does not match '#{path}': expected #{expected}, got #{actual}")
+      end
+    end
+
+    ComponentManifestComponentDirError = Class.new(ComponentManifestError) do
+      def initialize(key, path)
+        super("Component '#{key}' references unconfigured component dir #{path.inspect}")
+      end
+    end
+
+    ComponentManifestConstantNameError = Class.new(ComponentManifestError) do
+      def initialize(key, expected, actual)
+        super("Component '#{key}' constant name '#{actual}' does not match manifest '#{expected}'")
+      end
+    end
+
     # Error raised when a namespace for a component dir is added to configuration more
     # than once
     #
