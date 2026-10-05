@@ -1,5 +1,6 @@
 require 'forwardable'
 require 'concurrent/map'
+require 'flipper/rollout_schedule_registry'
 
 module Flipper
   class DSL
@@ -19,11 +20,14 @@ module Flipper
     # options - The Hash of options.
     #           :instrumenter - What should be used to instrument all the things.
     #           :memoize - Should adapter be wrapped by memoize adapter or not.
+    #           :clock - Callable returning the current Time for schedules.
     def initialize(adapter, options = {})
       @instrumenter = options.fetch(:instrumenter, Instrumenters::Noop)
       memoize = options.fetch(:memoize, true)
       adapter = Adapters::Memoizable.new(adapter) if memoize
       @adapter = adapter
+      @clock = options[:clock]
+      @rollout_schedules = RolloutScheduleRegistry.new
       # Concurrent::Map so a single DSL instance shared across threads (e.g. a
       # Flipper.new(adapter) or Flipper::Cloud.new held in a constant) can
       # memoize features without a non-atomic Hash mutation racing.
@@ -223,8 +227,62 @@ module Flipper
       end
 
       @memoized_features.compute_if_absent(name.to_sym) do
-        Feature.new(name, @adapter, instrumenter: instrumenter)
+        Feature.new(
+          name,
+          @adapter,
+          instrumenter: instrumenter,
+          rollout_schedule_provider: @rollout_schedules,
+          clock: @clock
+        )
       end
+    end
+
+    # Public: Configure a declarative rollout schedule for a feature.
+    #
+    # name - The String or Symbol feature name.
+    # config - Optional Hash accepted by RolloutSchedule.new.
+    #
+    # Yields the schedule builder when a block is given.
+    #
+    # Returns the RolloutSchedule.
+    #
+    #   flipper.set_rollout_schedule(:search,
+    #     windows: [{ starts_at: '...', ends_at: '...',
+    #                 from_percentage: 10, to_percentage: 50 }])
+    #
+    #   flipper.set_rollout_schedule(:search) do |s|
+    #     s.window '2026-10-05T10:00:00+08:00',
+    #              '2026-10-05T18:00:00+08:00',
+    #              from: 10, to: 50
+    #   end
+    def set_rollout_schedule(name, config = nil, &block)
+      @rollout_schedules.set(name, config, &block)
+    end
+
+    # Public: Returns the RolloutSchedule configured for a feature or nil.
+    def rollout_schedule(name)
+      @rollout_schedules.schedule(name)
+    end
+
+    # Public: Remove a configured schedule (and its kill switch).
+    def remove_rollout_schedule(name)
+      @rollout_schedules.remove(name)
+    end
+
+    # Public: Manually disable a scheduled rollout. The kill switch overrides
+    # every other gate except a full boolean enable.
+    def disable_rollout(name)
+      @rollout_schedules.disable(name)
+    end
+
+    # Public: Clear the manual rollout kill switch.
+    def enable_rollout(name)
+      @rollout_schedules.enable(name)
+    end
+
+    # Public: True when the feature's rollout is manually disabled.
+    def rollout_disabled?(name)
+      @rollout_schedules.disabled?(name)
     end
 
     # Public: Preload the features with the given names.

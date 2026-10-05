@@ -70,6 +70,44 @@ Flipper.enable_group :search, :admin
 Flipper.enable_percentage_of_actors :search, 2
 ```
 
+### Rollout schedules
+
+A rollout schedule is declarative configuration for gradually increasing the
+percentage of actors between two points in time. No background job is needed:
+the effective percentage is computed at query time from an injected clock and
+actors are stably bucketed with the same `crc32` hashing as
+`enable_percentage_of_actors`.
+
+Times must include an explicit offset (`Z` or `+/-HH:MM`), so the schedule means
+the same instant regardless of the server's time zone.
+
+```ruby
+flipper = Flipper.new(adapter, clock: -> { Time.now })
+
+# Linear ramp: 10% at 10:00, 50% at 18:00 (Asia/Shanghai)
+flipper.set_rollout_schedule(:search, windows: [{
+  starts_at: '2026-10-05T10:00:00+08:00',
+  ends_at:   '2026-10-05T18:00:00+08:00',
+  from_percentage: 10,
+  to_percentage:   50,
+  mode: :linear            # or :step with step_percentage: 10
+}], after_end: :hold)      # :hold keeps 50% (default); :off returns to 0%
+
+flipper.enabled?(:search, current_user) # computed from the clock
+```
+
+Between non-overlapping windows the most recent window's ending percentage
+holds. Overlapping windows and reversed windows raise `ArgumentError` when the
+schedule is configured.
+
+Manual control has a fixed priority:
+
+1. `flipper.enable(:search)` fully on wins over everything.
+2. `flipper.disable_rollout(:search)` is a kill switch that overrides the
+   schedule, actor, group and percentage gates until `enable_rollout` or a new
+   schedule is set.
+3. Other enabled gates, then the schedule itself.
+
 Read more about [getting started with Flipper](https://flippercloud.io/docs?utm_source=oss&utm_medium=readme&utm_campaign=getting_started) and [enabling features](https://flippercloud.io/docs/features?utm_source=oss&utm_medium=readme&utm_campaign=enabling_features).
 
 ## Flipper Cloud

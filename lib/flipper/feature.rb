@@ -28,12 +28,17 @@ module Flipper
     #
     # options - The Hash of options.
     #           :instrumenter - What to use to instrument all the things.
+    #           :rollout_schedule_provider - Object responding to #entry(name)
+    #             returning a RolloutScheduleRegistry::Entry (optional).
+    #           :clock - Callable returning the current Time (optional).
     #
     def initialize(name, adapter, options = {})
       @name = name
       @key = name.to_s
       @instrumenter = options.fetch(:instrumenter, Instrumenters::Noop)
       @adapter = adapter
+      @rollout_schedule_provider = options[:rollout_schedule_provider]
+      @clock = options[:clock]
     end
 
     # Public: Enable this feature for something.
@@ -101,8 +106,20 @@ module Flipper
           actors: actors
         )
 
-        if open_gate = gates.detect { |gate| gate.open?(context) }
+        # Priority: full boolean on, then schedule kill switch, then the
+        # other gates, then the schedule itself.
+        if gate(:boolean).open?(context)
+          payload[:gate_name] = :boolean
+          true
+        elsif (schedule_entry = rollout_schedule_entry) && schedule_entry.disabled?
+          # Explicit manual kill switch for the scheduled rollout. It wins
+          # over actor/group/percentage gates and over the schedule itself.
+          payload[:gate_name] = :rollout_schedule_kill_switch
+          false
+        elsif open_gate = gates.reject { |gate| gate.name == :boolean }.detect { |gate| gate.open?(context) }
           payload[:gate_name] = open_gate.name
+          true
+        elsif schedule_open?(schedule_entry, actors, payload)
           true
         else
           false
@@ -438,6 +455,35 @@ module Flipper
     end
 
     private
+
+    # Internal: Returns the configured schedule registry entry for this
+    # feature, if any.
+    def rollout_schedule_entry
+      return nil unless @rollout_schedule_provider
+      @rollout_schedule_provider.entry(@key)
+    end
+
+    # Internal: Evaluates the declarative rollout schedule against the
+    # injected clock and buckets the actors deterministically.
+    def schedule_open?(entry, actors, payload)
+      return false unless entry
+
+      schedule = entry.schedule
+      now = @clock ? @clock.call : Time.now
+
+      if actors.nil? || actors.empty?
+        # Percentage rollouts only make sense relative to an actor, matching
+        # the percentage_of_actors gate.
+        return false
+      end
+
+      if actors.any? { |actor| schedule.enabled?(actor, feature_name: @name, now: now) }
+        payload[:gate_name] = :rollout_schedule
+        true
+      else
+        false
+      end
+    end
 
     # Internal: Mirrors a trusted remote expression during adapter sync,
     # including legacy expressions that predate empty-group validation.
