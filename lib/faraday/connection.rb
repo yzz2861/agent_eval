@@ -42,6 +42,10 @@ module Faraday
     # @return [Hash] proxy options.
     attr_reader :proxy
 
+    # @return [Set] capabilities the adapter must support for all requests
+    #   on this connection. Verified when the connection is built.
+    attr_reader :required_capabilities
+
     # Initializes a new Faraday::Connection.
     #
     # @param url [URI, String] URI or String base URL to use as a prefix for all
@@ -75,6 +79,7 @@ module Faraday
       @ssl = options.ssl
       @default_parallel_manager = options.parallel_manager
       @manual_proxy = nil
+      @required_capabilities = Set.new
 
       @builder = options.builder || begin
         # pass an empty block to Builder so it doesn't assume default middleware
@@ -91,6 +96,41 @@ module Faraday
       yield(self) if block_given?
 
       @headers[:user_agent] ||= USER_AGENT
+      verify_required_capabilities!
+    end
+
+    # Declares capabilities the adapter must support for every request on
+    # this connection. Fixed requirements are verified when the connection
+    # is built; requirements added afterwards are verified immediately.
+    #
+    # @param names [Array<Symbol, String>] the required capabilities.
+    #
+    # @return [Faraday::Connection] self, to allow chaining.
+    def require_capability(*names)
+      required_capabilities.merge(names.flatten.map(&:to_sym))
+      verify_required_capabilities! if @capabilities_verified
+      self
+    end
+
+    # Verifies that the configured adapter declares support for all
+    # capabilities required by this connection.
+    #
+    # @raise [Faraday::UnsupportedCapabilityError] if the adapter does not
+    #        declare support for one or more required capabilities.
+    # @return [void]
+    def verify_required_capabilities!
+      @capabilities_verified = true
+      return if required_capabilities.empty?
+
+      adapter_handler = @builder.adapter
+      return unless adapter_handler
+
+      missing = required_capabilities.reject do |capability|
+        adapter_handler.klass.supports_capability?(capability)
+      end
+      return if missing.empty?
+
+      raise UnsupportedCapabilityError.new(adapter_handler.name, missing)
     end
 
     def initialize_proxy(url, options)
@@ -506,6 +546,7 @@ module Faraday
                      builder: builder.dup,
                      ssl: ssl.dup,
                      request: options.dup)
+        .tap { |conn| conn.required_capabilities.merge(required_capabilities) }
     end
 
     # Yields username and password extracted from a URI if they both exist.

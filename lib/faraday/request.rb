@@ -99,6 +99,22 @@ module Faraday
       headers[key] = value
     end
 
+    # Declares capabilities the adapter must support for this single
+    # request. Verified right before the request enters the adapter.
+    #
+    # @param names [Array<Symbol, String>] the required capabilities.
+    #
+    # @return [Faraday::Request] self, to allow chaining.
+    def require_capability(*names)
+      required_capabilities.merge(names.flatten.map(&:to_sym))
+      self
+    end
+
+    # @return [Set] capabilities required by this request.
+    def required_capabilities
+      @required_capabilities ||= Set.new
+    end
+
     # Marshal serialization support.
     #
     # @return [Hash] the hash ready to be serialized in Marshal.
@@ -109,7 +125,8 @@ module Faraday
         headers: headers,
         path: path,
         params: params,
-        options: options
+        options: options,
+        required_capabilities: required_capabilities
       }
     end
 
@@ -123,12 +140,16 @@ module Faraday
       self.path = serialised[:path]
       self.params = serialised[:params]
       self.options = serialised[:options]
+      require_capability(serialised[:required_capabilities].to_a) if serialised[:required_capabilities]
     end
 
     # @return [Env] the Env for this Request
     def to_env(connection)
       Env.new(http_method, body, connection.build_exclusive_url(path, params),
               options, headers, connection.ssl, connection.parallel_manager)
+        .tap do |env|
+          env[:required_capabilities] = required_capabilities unless required_capabilities.empty?
+        end
     end
   end
 end

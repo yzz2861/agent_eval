@@ -158,4 +158,44 @@ end
 Faraday::Adapter.register_middleware(florp_http: FlorpHttp)
 ```
 
+## Declaring supported capabilities
+
+Some features (like streaming responses or specific TLS options) are only
+supported by a subset of adapters. Adapters can declare the capabilities
+they support, and connections or individual requests can declare the
+capabilities they require. A capability that is not declared is treated as
+unknown, never as supported.
+
+```ruby
+class FlorpHttp < Faraday::Adapter
+  declare_capability :streaming
+  # You can also explicitly declare that a capability is NOT supported.
+  declare_capability :tls, false
+end
+```
+
+Connections declare fixed requirements with `require_capability`, which are
+verified when the connection is built:
+
+```ruby
+conn = Faraday.new('https://example.com') do |f|
+  f.require_capability :streaming
+  f.adapter :florp_http
+end
+```
+
+Individual requests can declare their own requirements, which are verified
+right before the request enters the adapter:
+
+```ruby
+conn.get('/stream') do |req|
+  req.require_capability :streaming
+end
+```
+
+When a required capability is missing, Faraday raises
+`Faraday::UnsupportedCapabilityError`, naming the adapter and the missing
+capabilities. Requests that do not declare any requirement are never
+affected, so adapters that predate capability declarations keep working.
+
 [env-object]: /getting-started/env-object.md

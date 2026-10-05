@@ -32,6 +32,48 @@ module Faraday
 
     self.supports_parallel = false
 
+    # This module allows an Adapter to declare which optional capabilities
+    # (e.g. streaming responses, TLS options) it supports. Capabilities that
+    # are not declared are treated as unknown, not as supported.
+    module Capabilities
+      # Declares whether this adapter supports the given capability.
+      #
+      # @param name [Symbol, String] the capability name (e.g. :streaming).
+      # @param supported [Boolean] whether the capability is supported.
+      #
+      # @return [void]
+      def declare_capability(name, supported = true)
+        capabilities[name.to_sym] = supported ? true : false
+      end
+
+      # @return [Hash] declared capabilities mapped to their support flag.
+      def capabilities
+        @capabilities ||= {}
+      end
+
+      # @param name [Symbol, String] the capability name.
+      #
+      # @return [true, false, nil] the declared support for the capability,
+      #         or nil when the adapter has not declared it (unknown).
+      def capability_support(name)
+        capabilities[name.to_sym]
+      end
+
+      # @param name [Symbol, String] the capability name.
+      #
+      # @return [Boolean] true only when support was explicitly declared.
+      def supports_capability?(name)
+        capability_support(name) == true
+      end
+
+      def inherited(subclass)
+        super
+        subclass.instance_variable_set(:@capabilities, capabilities.dup)
+      end
+    end
+
+    extend Capabilities
+
     def initialize(_app = nil, opts = {}, &block)
       @app = lambda(&:response)
       @connection_options = opts

@@ -25,6 +25,34 @@ module Faraday
     # Error raised when trying to modify the stack after calling `lock!`
     class StackLocked < RuntimeError; end
 
+    # Wraps the adapter and enforces per-request capability requirements
+    # right before the request enters the adapter. Requests that do not
+    # declare any requirement are passed through unchanged, so adapters
+    # that predate capability declarations keep working.
+    class CapabilityGuard
+      def initialize(app, adapter_handler)
+        @app = app
+        @adapter_handler = adapter_handler
+      end
+
+      def call(env)
+        required = env[:required_capabilities]
+        if required && !required.empty?
+          missing = required.reject do |capability|
+            @adapter_handler.klass.supports_capability?(capability)
+          end
+          unless missing.empty?
+            raise UnsupportedCapabilityError.new(@adapter_handler.name, missing)
+          end
+        end
+        @app.call(env)
+      end
+
+      def close
+        @app.close if @app.respond_to?(:close)
+      end
+    end
+
     # borrowed from ActiveSupport::Dependencies::Reference &
     # ActionDispatch::MiddlewareStack::Middleware
     class Handler
@@ -176,7 +204,7 @@ module Faraday
     def to_app
       # last added handler is the deepest and thus closest to the inner app
       # adapter is always the last one
-      @handlers.reverse.inject(@adapter.build) do |app, handler|
+      @handlers.reverse.inject(CapabilityGuard.new(@adapter.build, @adapter)) do |app, handler|
         handler.build(app)
       end
     end
@@ -212,6 +240,10 @@ module Faraday
       Env.new(request.http_method, request.body, exclusive_url,
               request.options, request.headers, connection.ssl,
               connection.parallel_manager)
+        .tap do |env|
+          required = request.required_capabilities
+          env[:required_capabilities] = required unless required.empty?
+        end
     end
 
     private
