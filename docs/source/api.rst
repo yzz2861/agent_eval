@@ -8,6 +8,8 @@ The :mod:`sqlparse` module provides the following functions on module-level.
 
 .. autofunction:: sqlparse.split
 
+.. autofunction:: sqlparse.split_script
+
 .. autofunction:: sqlparse.format
 
 .. autofunction:: sqlparse.parse
@@ -15,6 +17,26 @@ The :mod:`sqlparse` module provides the following functions on module-level.
 In most cases there's no need to set the `encoding` parameter. If
 `encoding` is not set, sqlparse assumes that the given SQL statement
 is encoded either in utf-8 or latin-1.
+
+
+.. _script_mode:
+
+Splitting scripts with client commands
+--------------------------------------
+
+Deployment scripts for SQL Server and MySQL mix SQL with client-side
+commands: lines containing `GO` separate batches in SQL Server
+scripts, and MySQL scripts redefine the statement terminator with
+`DELIMITER` directives around stored procedure bodies.
+:meth:`~sqlparse.split_script` is an explicit script mode that
+honors these commands for the chosen dialect and returns a
+:class:`~sqlparse.script.ScriptResult` with the SQL batches, the
+separator commands (positions, line numbers, `GO` repeat counts
+and new delimiters as metadata only) and any malformed directives.
+Separator commands never appear in the returned SQL, and unlike
+:meth:`~sqlparse.split` there are no output options such as
+`strip_semicolon`.  :meth:`~sqlparse.split` itself is not
+affected by this mode.
 
 
 .. _formatting:

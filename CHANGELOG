@@ -1,7 +1,16 @@
 Development Version
 -------------------
 
-Nothing yet.
+Enhancements
+
+* Add sqlparse.split_script(), an explicit script mode that splits
+  deployment scripts per dialect: SQL Server GO batch separators (the
+  repeat count is reported as metadata only, never executed) and MySQL
+  DELIMITER directives (the new delimiter is only recognized outside of
+  strings, comments, quoted identifiers and dollar-quoted literals).
+  The function returns the SQL batches together with the positions of
+  the separator commands and malformed directives as metadata.
+  sqlparse.split() is unchanged.
 
 
 Release 0.6.0 (Aug 13, 2026)
