@@ -1,0 +1,129 @@
+class Money
+  # An immutable collection of monetary amounts in multiple currencies.
+  #
+  # A Basket keeps one net balance per currency and never implicitly
+  # converts between currencies. Merging two baskets sums the balances of
+  # each currency independently, and scaling multiplies every balance by
+  # the same factor.
+  #
+  # Converting the whole basket into a single currency is a separate
+  # valuation operation that requires an explicit set of quotes.
+  #
+  # Basket is a value object and is immutable.
+  class Basket
+    include Comparable
+
+    # Raised when a valuation is requested but one or more currencies have
+    # no quote. Reports every missing currency, not just the first one.
+    class MissingQuotesError < StandardError
+      # @return [Array<Money::Currency>] currencies without a quote
+      attr_reader missing_currencies: Array[Money::Currency]
+
+      def initialize: (Array[Money::Currency] missing_currencies) -> void
+    end
+
+    # An empty basket holding no balances.
+    #
+    # @return [Money::Basket]
+    def self.empty: () -> Money::Basket
+
+    # Builds a basket from a list of Money objects. Amounts sharing the
+    # same currency are netted into a single balance. Balances that net
+    # to zero are dropped and do not affect the basket's identity.
+    #
+    # @param [Enumerable<Money>] monies
+    #
+    # @return [Money::Basket]
+    def initialize: (?Enumerable[Money] monies) -> void
+
+    # Net balance per currency. Zero balances are never stored.
+    #
+    # @return [Hash{Money::Currency => Money}]
+    def to_h: () -> Hash[Money::Currency, Money]
+
+    # Balances sorted by currency id, for deterministic enumeration.
+    #
+    # @return [Array<Money>]
+    def monies: () -> Array[Money]
+
+    # Currencies with a non-zero balance, sorted by currency id.
+    #
+    # @return [Array<Money::Currency>]
+    def currencies: () -> Array[Money::Currency]
+
+    def empty?: () -> bool
+
+    # A basket is zero when it holds no non-zero balance.
+    #
+    # @return [Boolean]
+    def zero?: () -> bool
+
+    # Merges this basket with another basket (or a single Money object),
+    # netting balances per currency. No currency conversion takes place.
+    #
+    # @param [Money::Basket, Money] other
+    #
+    # @return [Money::Basket]
+    def +: (Money::Basket | Money other) -> Money::Basket
+    alias merge +
+
+    # Subtracts another basket (or a single Money object) from this
+    # basket, netting balances per currency.
+    #
+    # @param [Money::Basket, Money] other
+    #
+    # @return [Money::Basket]
+    def -: (Money::Basket | Money other) -> Money::Basket
+
+    # Returns a basket with every balance negated.
+    #
+    # @return [Money::Basket]
+    def -@: () -> Money::Basket
+
+    # Scales every balance by the same factor.
+    #
+    # @param [Numeric] factor
+    #
+    # @return [Money::Basket]
+    def *: (Numeric factor) -> Money::Basket
+
+    # Two baskets are equal when they hold the same net balance for every
+    # currency. The order in which currencies were added is irrelevant,
+    # and zero balances never take part in the comparison.
+    #
+    # @param [Object] other
+    #
+    # @return [Boolean]
+    def ==: (untyped other) -> bool
+    alias eql? ==
+
+    def hash: () -> Integer
+
+    # Compares two baskets per currency, without any implicit conversion.
+    #
+    # @param [Money::Basket] other
+    #
+    # @return [Integer, nil] 0 when equal, -1 or 1 when every balance is
+    #   respectively smaller or greater, nil when incomparable.
+    def <=>: (untyped other) -> Integer?
+
+    # Values the whole basket in a single currency using caller-provided
+    # quotes. This is a valuation operation: it does not change the
+    # basket, and it never consults a bank or an implicit rate.
+    #
+    # @param [Currency, String, Symbol] currency The target currency.
+    # @param [Hash] quotes Maps each held currency to its price in the
+    #   target currency.
+    #
+    # @return [Money]
+    def value_in: (Money::Currency | String | Symbol currency, Hash[untyped, Numeric] quotes) -> Money
+
+    def inspect: () -> String
+
+    private
+
+    def normalize: (Hash[Money::Currency, Money] balances) -> Hash[Money::Currency, Money]
+
+    def normalize_quotes: (Hash[untyped, Numeric] quotes) -> Hash[Money::Currency, BigDecimal]
+  end
+end

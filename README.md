@@ -96,6 +96,28 @@ Money.from_cents(100, "GBP").format #=> "£1.00"
 Money.from_cents(100, "EUR").format #=> "€1.00"
 ```
 
+## Money::Basket
+
+A `Money::Basket` is an immutable collection of monetary amounts in
+multiple currencies. It keeps one net balance per currency and never
+implicitly converts between currencies.
+
+```ruby
+basket = Money::Basket.new([Money.from_cents(100, "USD"), Money.from_cents(50, "EUR")])
+basket += Money.from_cents(25, "USD")   # nets per currency, no conversion
+basket -= Money.from_cents(10, "EUR")
+scaled = basket * 2                     # scales every balance
+
+# Equality and comparison are per-currency: the order in which currencies
+# were added and zero balances do not affect identity.
+Money::Basket.new([Money.from_cents(0, "JPY")]) == Money::Basket.empty #=> true
+
+# Converting the whole basket to a single currency is an explicit
+# valuation operation that requires caller-provided quotes. Missing
+# quotes are reported together via Money::Basket::MissingQuotesError.
+basket.value_in("EUR", "USD" => BigDecimal("0.9"))
+```
+
 ## Currency
 
 Currencies are consistently represented as instances of `Money::Currency`.
