@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "dry/system/constants"
+require "dry/system/errors"
 
 module Dry
   module System
@@ -15,12 +16,19 @@ module Dry
     class Importer
       # @api private
       class Item
-        attr_reader :namespace, :container, :import_keys
+        attr_reader :namespace, :container, :import_keys, :borrowed
 
-        def initialize(namespace:, container:, import_keys:)
+        def initialize(namespace:, container:, import_keys:, borrowed: false)
           @namespace = namespace
           @container = container
           @import_keys = import_keys
+          @borrowed = borrowed
+        end
+
+        # Returns true when this import only borrows references to components whose
+        # lifecycle is owned by the source container.
+        def borrowed?
+          @borrowed
         end
       end
 
@@ -35,12 +43,19 @@ module Dry
       end
 
       # @api private
-      def register(namespace:, container:, keys: nil)
-        registry[namespace_key(namespace)] = Item.new(
-          namespace: namespace,
-          container: container,
-          import_keys: keys
-        )
+      def register(namespace:, container:, keys: nil, borrow: false)
+        ns = namespace_key(namespace)
+
+        if borrow
+          register_borrowed(namespace: ns, container: container, keys: keys)
+        else
+          # Two distinct imports cannot share a namespace (ownership would be ambiguous),
+          # but local components may intentionally shadow ordinary imports, so only
+          # duplicate import namespaces are rejected here.
+          raise ImportNamespaceConflictError.new(ns) if registry.key?(ns)
+
+          add_item(ns, namespace: namespace, container: container, import_keys: keys)
+        end
       end
 
       # @api private
@@ -56,19 +71,60 @@ module Dry
 
       # @api private
       def finalize!
-        registry.each_key { import(_1) }
+        registry.each { |ns, item| item.borrowed? ? register_borrowed_proxies(item) : import(ns) }
         self
       end
 
       # @api private
       def import(namespace, keys: Undefined)
         item = self[namespace]
+
+        if item.borrowed?
+          register_borrowed_proxies(item)
+          return self
+        end
+
         keys = Undefined.default(keys, item.import_keys)
 
         if keys
           import_keys(item.container, namespace, keys_to_import(keys, item))
         else
           import_all(item.container, namespace)
+        end
+
+        self
+      end
+
+      # Returns true if any of the registered imports are borrowed references
+      #
+      # @api private
+      def borrowed?(namespace = nil)
+        if namespace.nil?
+          registry.each_value.any?(&:borrowed?)
+        else
+          (item = registry[namespace_key(namespace)]) && item.borrowed?
+        end
+      end
+
+      # Registers proxy entries for all borrowed components in the target container.
+      #
+      # Safe to call multiple times; existing registrations are left untouched (which also
+      # preserves stubbed components).
+      #
+      # @api private
+      def register_borrowed_proxies(item = nil)
+        items = item ? [item] : registry.each_value.select(&:borrowed?)
+
+        items.each do |it|
+          keys = it.import_keys || it.container.exports || []
+
+          keys.each do |key|
+            target_key = [it.namespace, key].compact.join(KEY_SEPARATOR)
+
+            next if container.registered?(target_key)
+
+            register_borrowed_proxy(target_key, source_key: key, source: it.container)
+          end
         end
 
         self
@@ -85,6 +141,82 @@ module Dry
         return nil if namespace.nil?
 
         namespace.to_s
+      end
+
+      def register_borrowed(namespace:, container:, keys:)
+        # Borrowing components into the root namespace would make ownership ambiguous and
+        # bypass the explicit namespaced reference, so it is not supported.
+        if namespace.nil?
+          raise ArgumentError,
+            "You must provide a non-nil `as:` namespace when borrowing components"
+        end
+
+        check_namespace_conflict!(namespace)
+
+        exports = container.exports
+
+        unless exports.is_a?(Array)
+          source_name = container.config.name || container.inspect
+
+          raise ArgumentError,
+            "Cannot borrow from #{source_name.inspect}: it declares no " \
+            "`config.exports`, so it offers no components for borrowing"
+        end
+
+        borrow_keys = keys ? Array(keys).map(&:to_s) : exports
+
+        unknown = borrow_keys - exports
+
+        unless unknown.empty?
+          raise ComponentNotExportedError.new(key: unknown.first, source: container)
+        end
+
+        item = add_item(namespace, namespace: namespace, container: container,
+          import_keys: borrow_keys, borrowed: true)
+
+        # Register the borrowed references immediately so namespace conflicts and key
+        # availability are known at configuration time and the target container cannot be
+        # used to resolve arbitrary source keys.
+        register_borrowed_proxies(item)
+      end
+
+      def register_borrowed_proxy(target_key, source_key:, source:)
+        # Do not memoize at the target container: the reference must be re-validated
+        # against the source container's lifecycle on every resolution so that a shut down
+        # source always fails. Sharing of instances remains the responsibility of the
+        # source container.
+        container.register(target_key, imported: true, borrowed: true) do
+          unless source.running?
+            raise BorrowedComponentNotAvailableError.new(
+              key: source_key,
+              source: source,
+              status: source.lifecycle_status
+            )
+          end
+
+          source[source_key]
+        end
+      end
+
+      def add_item(ns, **options)
+        Item.new(**options).tap { |item| registry[ns] = item }
+      end
+
+      def check_namespace_conflict!(namespace)
+        return if namespace.nil?
+
+        if container.registered?(namespace) || registry.key?(namespace) ||
+             container.component_key?(namespace)
+          raise ImportNamespaceConflictError.new(namespace)
+        end
+
+        # Also detect conflicts with already registered nested keys, e.g. an existing
+        # "ns.component" when importing under the "ns" namespace.
+        prefix = "#{namespace}."
+
+        if container._container.each_key.any? { |key| key.start_with?(prefix) }
+          raise ImportNamespaceConflictError.new(namespace)
+        end
       end
 
       def keys_to_import(keys, item)

@@ -7,6 +7,52 @@ module Dry
     # @api public
     ContainerAlreadyFinalizedError = Class.new(StandardError)
 
+    # Error raised at configuration time when an import namespace would collide with a
+    # component or another import already registered in the container
+    #
+    # @api public
+    ImportNamespaceConflictError = Class.new(StandardError) do
+      def initialize(namespace)
+        super("Import namespace #{namespace.inspect} conflicts with an already registered component or import")
+      end
+    end
+
+    # Error raised when configuring a borrowed component that is not declared in the
+    # source container's exports
+    #
+    # @api public
+    ComponentNotExportedError = Class.new(StandardError) do
+      def initialize(key:, source:)
+        source_name = source.respond_to?(:config) && source.config.name ? source.config.name : source.inspect
+
+        super(
+          "Cannot borrow component #{key.inspect}: it is not included in the exports of " \
+          "source container #{source_name}"
+        )
+      end
+    end
+
+    # Error raised when resolving a borrowed component whose source container is not in a
+    # running state (either never started/finalized, or already shut down)
+    #
+    # @api public
+    BorrowedComponentNotAvailableError = Class.new(StandardError) do
+      def initialize(key:, source:, status:)
+        source_name = source.respond_to?(:config) && source.config.name ? source.config.name : source.inspect
+
+        case status
+        when :not_started
+          reason = "the source container has not been started or finalized"
+        when :shutdown
+          reason = "the source container has been shut down"
+        else
+          reason = "the source container is not running (status: #{status.inspect})"
+        end
+
+        super("Cannot resolve borrowed component #{key.inspect}: #{reason} (#{source_name})")
+      end
+    end
+
     # Error raised when a component dir is added to configuration more than once
     #
     # @api public

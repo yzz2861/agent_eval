@@ -35,6 +35,7 @@ module Dry
         @providers = {}
         @container = container
         @loaded = Set.new
+        @state = {shutdown: false}
       end
 
       # @api private
@@ -163,6 +164,8 @@ module Dry
 
         providers.each_value(&:start)
 
+        @state[:shutdown] = false
+
         freeze
       end
 
@@ -176,6 +179,7 @@ module Dry
       # @api private
       def shutdown
         providers.each_value(&:stop)
+        @state[:shutdown] = true
         self
       end
 
@@ -187,8 +191,22 @@ module Dry
 
       # @api private
       def start(provider_name)
+        @state[:shutdown] = false
         with_provider(provider_name, &:start)
         self
+      end
+
+      # @api private
+      def shutdown?
+        @state[:shutdown].equal?(true)
+      end
+
+      # Returns true if at least one provider has been started (lazily or during
+      # finalization)
+      #
+      # @api private
+      def any_started?
+        providers.each_value.any?(&:started?)
       end
 
       # @api private

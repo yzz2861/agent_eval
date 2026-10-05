@@ -167,18 +167,23 @@ module Dry
         #   MyApp["core.logger"].info("Test")
         #   MyApp["core2.logger"].info("Test2")
         #
-        # @param keys [Array<String>] Keys for the components to import
+        # @param keys [Array<String>] Keys for the components to import (or borrow)
         # @param from [Class] The container to import from
         # @param as [Symbol] Namespace to use for the components of the imported container
+        # @param borrow [Boolean] When true, borrow only explicit references to components
+        #   declared in the source container's {#config} `exports`. The source container
+        #   remains the lifecycle owner of these components: resolving them requires the
+        #   source to be running, and shutting down this container will never stop the
+        #   source's components.
         #
         # @raise [Dry::System::ContainerAlreadyFinalizedError] if the container has already
         #  been finalized
         #
         # @api public
-        def import(from:, as:, keys: nil)
+        def import(from:, as:, keys: nil, borrow: false)
           raise Dry::System::ContainerAlreadyFinalizedError if finalized?
 
-          importer.register(container: from, namespace: as, keys: keys)
+          importer.register(container: from, namespace: as, keys: keys, borrow: borrow)
 
           self
         end
@@ -384,6 +389,37 @@ module Dry
           self
         end
 
+        # Returns true if the container is in a running state, meaning its providers are
+        # started (either lazily or via {#finalize!}) and it has not been shut down.
+        #
+        # A container that has not been finalized (and has no lazily started providers) is
+        # considered not yet started.
+        #
+        # This is used to determine whether components borrowed from this container can be
+        # resolved.
+        #
+        # @return [Boolean]
+        #
+        # @api public
+        def running?
+          lifecycle_status == :running
+        end
+
+        # @return [Symbol] one of `:not_started`, `:running`, or `:shutdown`
+        #
+        # @api private
+        def lifecycle_status
+          return :shutdown if providers.shutdown?
+
+          started = providers.any_started?
+
+          if finalized? || started
+            :running
+          else
+            :not_started
+          end
+        end
+
         # Adds the directories (relative to the container's root) to the Ruby load path
         #
         # @example
@@ -521,6 +557,25 @@ module Dry
           end
         end
 
+        # Checks whether a key is known to be provided by this container without resolving
+        # it: either it is already registered, or a configured component dir, manifest,
+        # provider, or import namespace can provide it.
+        #
+        # This is used to detect import namespace conflicts at configuration time.
+        #
+        # @api private
+        def component_key?(key)
+          return true if registered?(key)
+
+          component = find_component(key)
+          return true if component.loadable?
+          return true if manifest_registrar.file_exists?(component)
+          return true if providers.key?(component.root_key)
+          return true if importer.key?(component.root_key)
+
+          false
+        end
+
         # @api private
         def component_dirs
           config.component_dirs.to_a.map { |dir| ComponentDir.new(config: dir, container: self) }
@@ -609,14 +664,22 @@ module Dry
         # rubocop:disable Metrics/AbcSize, Metrics/PerceivedComplexity
         # @api private
         def load_component(key)
+          component = find_component(key)
+
+          # Borrowed components are registered as proxies at configuration time and
+          # resolve through their source container. Never let local providers, component
+          # dirs, or other imports shadow a borrowed namespace.
+          if importer.borrowed?(component.root_key)
+            importer.register_borrowed_proxies
+            return self
+          end
+
           return self if registered?(key)
 
           if (provider = providers[key])
             provider.start
             return self
           end
-
-          component = find_component(key)
 
           providers[component.root_key]&.start
           return self if registered?(key)
