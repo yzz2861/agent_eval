@@ -58,7 +58,8 @@ def _is_actual_number(x):
 
 class Options(object):
     """Options to control how a JMESPath function is evaluated."""
-    def __init__(self, dict_cls=None, custom_functions=None):
+    def __init__(self, dict_cls=None, custom_functions=None,
+                 enable_let=False):
         #: The class to use when creating a dict.  The interpreter
         #  may create dictionaries during the evaluation of a JMESPath
         #  expression.  For example, a multi-select hash will
@@ -69,15 +70,18 @@ class Options(object):
         #  have predictable key ordering.
         self.dict_cls = dict_cls
         self.custom_functions = custom_functions
+        self.enable_let = enable_let
 
 
 class _Expression(object):
-    def __init__(self, expression, interpreter):
+    def __init__(self, expression, interpreter, variables=()):
         self.expression = expression
         self.interpreter = interpreter
+        self.variables = variables
 
-    def visit(self, node, *args, **kwargs):
-        return self.interpreter.visit(node, *args, **kwargs)
+    def visit(self, node, value):
+        return self.interpreter.visit_with_variables(
+            node, value, self.variables)
 
 
 class Visitor(object):
@@ -121,6 +125,7 @@ class TreeInterpreter(Visitor):
             self._functions = self._options.custom_functions
         else:
             self._functions = functions.Functions()
+        self._variables = ()
 
     def default_visit(self, node, *args, **kwargs):
         raise NotImplementedError(node['type'])
@@ -161,7 +166,36 @@ class TreeInterpreter(Visitor):
         return value
 
     def visit_expref(self, node, value):
-        return _Expression(node['children'][0], self)
+        variables = tuple(dict(scope) for scope in self._variables)
+        return _Expression(node['children'][0], self, variables)
+
+    def visit_with_variables(self, node, value, variables):
+        previous_variables = self._variables
+        self._variables = variables
+        try:
+            return self.visit(node, value)
+        finally:
+            self._variables = previous_variables
+
+    def visit_let(self, node, value):
+        scope = {}
+        self._variables = self._variables + (scope,)
+        try:
+            for binding in node['children'][:-1]:
+                scope[binding['value']] = self.visit(binding, value)
+            return self.visit(node['children'][-1], value)
+        finally:
+            self._variables = self._variables[:-1]
+
+    def visit_let_binding(self, node, value):
+        return self.visit(node['children'][0], value)
+
+    def visit_variable(self, node, value):
+        name = node['value']
+        for scope in reversed(self._variables):
+            if name in scope:
+                return scope[name]
+        return None
 
     def visit_function_expression(self, node, value):
         resolved_args = []

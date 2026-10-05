@@ -45,6 +45,8 @@ class Parser(object):
         'number': 0,
         'current': 0,
         'expref': 0,
+        'variable': 0,
+        'assign': 0,
         'colon': 0,
         'pipe': 1,
         'or': 2,
@@ -78,13 +80,17 @@ class Parser(object):
         self._tokens = [None] * lookahead
         self._buffer_size = lookahead
         self._index = 0
+        self._let_enabled = False
+        self._variable_scopes = []
 
-    def parse(self, expression):
+    def parse(self, expression, options=None):
+        enable_let = options is not None and options.enable_let
+        cache_key = (expression, enable_let) if enable_let else expression
         try:
-            return self._CACHE[expression]
+            return self._CACHE[cache_key]
         except KeyError:
             pass
-        parsed_result = self._do_parse(expression)
+        parsed_result = self._do_parse(expression, enable_let)
         if len(self._CACHE) >= self._MAX_SIZE:
             try:
                 del self._CACHE[next(iter(self._CACHE))]
@@ -99,12 +105,12 @@ class Parser(object):
                 # an element from the cache, otherwise this can grow
                 # unbounded.
                 return parsed_result
-        self._CACHE[expression] = parsed_result
+        self._CACHE[cache_key] = parsed_result
         return parsed_result
 
-    def _do_parse(self, expression):
+    def _do_parse(self, expression, enable_let=False):
         try:
-            return self._parse(expression)
+            return self._parse(expression, enable_let)
         except exceptions.LexerError as e:
             e.expression = expression
             raise
@@ -115,10 +121,13 @@ class Parser(object):
             e.expression = expression
             raise
 
-    def _parse(self, expression):
-        self.tokenizer = lexer.Lexer().tokenize(expression)
+    def _parse(self, expression, enable_let=False):
+        self.tokenizer = lexer.Lexer(
+            enable_let=enable_let).tokenize(expression)
         self._tokens = list(self.tokenizer)
         self._index = 0
+        self._let_enabled = enable_let
+        self._variable_scopes = []
         parsed = self._expression(binding_power=0)
         if not self._current_token() == 'eof':
             t = self._lookahead_token(0)
@@ -149,7 +158,17 @@ class Parser(object):
         return ast.literal(token['value'])
 
     def _token_nud_unquoted_identifier(self, token):
+        if token['value'] == 'let' and self._let_enabled:
+            return self._parse_let()
         return ast.field(token['value'])
+
+    def _token_nud_variable(self, token):
+        name = token['value']
+        if not any(name in scope for scope in self._variable_scopes):
+            raise exceptions.UndefinedVariableError(
+                token['start'], token['value'], token['type'],
+                'Undefined variable: %s' % token['value'])
+        return ast.variable(name)
 
     def _token_nud_quoted_identifier(self, token):
         field = ast.field(token['value'])
@@ -253,6 +272,35 @@ class Parser(object):
     def _token_nud_expref(self, token):
         expression = self._expression(self.BINDING_POWER['expref'])
         return ast.expref(expression)
+
+    def _parse_let(self):
+        bindings = []
+        scope = set()
+        self._variable_scopes.append(scope)
+        try:
+            while True:
+                name_token = self._lookahead_token(0)
+                self._match('variable')
+                self._match('assign')
+                value = self._expression(0)
+                bindings.append(ast.let_binding(name_token['value'], value))
+                scope.add(name_token['value'])
+                if self._current_token() == 'comma':
+                    self._match('comma')
+                    continue
+                self._match_in()
+                expression = self._expression(0)
+                return ast.let(bindings, expression)
+        finally:
+            self._variable_scopes.pop()
+
+    def _match_in(self):
+        token = self._lookahead_token(0)
+        if (token['type'] == 'unquoted_identifier'
+                and token['value'] == 'in'):
+            self._advance()
+        else:
+            self._raise_parse_error_maybe_eof('in', token)
 
     def _token_led_dot(self, left):
         if not self._current_token() == 'star':

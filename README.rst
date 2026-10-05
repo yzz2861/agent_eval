@@ -101,6 +101,43 @@ of your dict keys.  To do this you can use either of these options:
     ...               jmespath.Options(dict_cls=collections.OrderedDict))
 
 
+Let Expressions (Experimental)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The non-standard ``let`` extension is disabled by default.  Enable it with
+``Options(enable_let=True)``:
+
+.. code:: python
+
+    >>> options = jmespath.Options(enable_let=True)
+    >>> jmespath.search(
+    ...     'let $limit = config.limit in items[?score > $limit]',
+    ...     {'config': {'limit': 10},
+    ...      'items': [{'score': 20}, {'score': 5}]},
+    ...     options)
+    [{'score': 20}]
+
+Multiple comma-separated bindings are evaluated from left to right.  A binding
+can reference preceding bindings, but not later bindings.  All bindings are in
+scope for the expression following ``in``.  Nested ``let`` expressions create a
+new lexical scope, and a nested binding shadows an outer binding with the same
+name.
+
+Each binding is evaluated once against the current node of its ``let`` node.
+Changing the current node inside a filter or projection does not re-evaluate
+the binding.  Variables are kept in a separate lexical environment; they are
+never added to the input JSON.  An expression reference (``&...``) captures the
+lexical values available when the reference is created, so ``map()``,
+``sort_by()`` and similar functions use those captured values.  Reusing one
+compiled expression in multiple searches never shares variable values between
+searches.
+
+Referencing an out-of-scope variable raises ``UndefinedVariableError`` when the
+expression is compiled.  The error position points at the variable token, for
+example ``$limit`` starts at column 33 in
+``let $limit = config.limit in items[?score > $limit]``.
+
+
 Custom Functions
 ~~~~~~~~~~~~~~~~
 

@@ -1,7 +1,10 @@
 Next Release (TBD)
 ==================
 
-* No changes yet.
+* Add an experimental, opt-in ``let`` expression extension enabled with
+  ``Options(enable_let=True)``.  It supports sequential bindings, nested
+  lexical scoping and shadowing, undefined-variable parse diagnostics, and
+  lexical variable capture in expression references.
 
 
 1.1.0

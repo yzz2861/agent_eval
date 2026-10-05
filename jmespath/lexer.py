@@ -23,6 +23,9 @@ class Lexer(object):
         '}': 'rbrace',
     }
 
+    def __init__(self, enable_let=False):
+        self.enable_let = enable_let
+
     def tokenize(self, expression):
         self._initialize_for_expression(expression)
         while self._current is not None:
@@ -56,6 +59,8 @@ class Lexer(object):
                            'start': start, 'end': start + 1}
             elif self._current == "'":
                 yield self._consume_raw_string_literal()
+            elif self._current == '$' and self.enable_let:
+                yield self._consume_variable()
             elif self._current == '|':
                 yield self._match_or_else('|', 'or', 'pipe')
             elif self._current == '&':
@@ -87,28 +92,44 @@ class Lexer(object):
             elif self._current == '!':
                 yield self._match_or_else('=', 'ne', 'not')
             elif self._current == '=':
-                if self._next() == '=':
-                    yield {'type': 'eq', 'value': '==',
-                        'start': self._position - 1, 'end': self._position}
-                    self._next()
-                else:
-                    if self._current is None:
-                        # If we're at the EOF, we never advanced
-                        # the position so we don't need to rewind
-                        # it back one location.
-                        position = self._position
-                    else:
-                        position = self._position - 1
-                    raise LexerError(
-                        lexer_position=position,
-                        lexer_value='=',
-                        message="Unknown token '='")
+                yield self._consume_equals()
             else:
                 raise LexerError(lexer_position=self._position,
                                  lexer_value=self._current,
                                  message="Unknown token %s" % self._current)
         yield {'type': 'eof', 'value': '',
                'start': self._length, 'end': self._length}
+
+    def _consume_equals(self):
+        start = self._position
+        if self._next() == '=':
+            yield_value = {'type': 'eq', 'value': '==',
+                           'start': start, 'end': start + 1}
+            self._next()
+            return yield_value
+        if self.enable_let:
+            return {'type': 'assign', 'value': '=',
+                    'start': start, 'end': start + 1}
+        # If we're at the EOF, _next() leaves the position unchanged.
+        # Otherwise, start is already the position of the '=' token.
+        raise LexerError(
+            lexer_position=start,
+            lexer_value='=',
+            message="Unknown token '='")
+
+    def _consume_variable(self):
+        start = self._position
+        self._next()
+        if self._current not in self.START_IDENTIFIER:
+            raise LexerError(lexer_position=start,
+                             lexer_value='$',
+                             message="Unknown token '$'")
+        name = ''
+        while self._current in self.VALID_IDENTIFIER:
+            name += self._current
+            self._next()
+        return {'type': 'variable', 'value': '$' + name,
+                'start': start, 'end': self._position}
 
     def _consume_number(self):
         start = self._position

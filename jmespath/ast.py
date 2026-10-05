@@ -50,6 +50,14 @@ def literal(literal_value):
     return {'type': 'literal', 'value': literal_value, 'children': []}
 
 
+def let(bindings, expression):
+    return {'type': 'let', 'children': bindings + [expression]}
+
+
+def let_binding(name, expression):
+    return {'type': 'let_binding', 'children': [expression], 'value': name}
+
+
 def multi_select_dict(nodes):
     return {"type": "multi_select_dict", "children": nodes}
 
@@ -84,6 +92,10 @@ def subexpression(children):
 
 def slice(start, end, step):
     return {"type": "slice", "children": [start, end, step]}
+
+
+def variable(name):
+    return {'type': 'variable', 'children': [], 'value': name}
 
 
 def value_projection(left, right):

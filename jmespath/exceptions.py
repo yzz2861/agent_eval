@@ -44,6 +44,10 @@ class IncompleteExpressionError(ParseError):
             '"%s"\n%s' % (self.expression, underline))
 
 
+class UndefinedVariableError(ParseError):
+    pass
+
+
 @with_str_method
 class LexerError(ParseError):
     def __init__(self, lexer_position, lexer_value, message, expression=None):
