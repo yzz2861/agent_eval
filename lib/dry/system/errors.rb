@@ -90,6 +90,14 @@ module Dry
       end
     end
 
+    # Error raised when the plugin planner cannot select a set of plugin
+    # versions (from the given candidates) that satisfies every dependency and
+    # version constraint. The message describes the conflicting constraint
+    # chain.
+    #
+    # @api public
+    PluginPlanUnresolvableError = Class.new(StandardError)
+
     # Exception raised when auto-registerable component is not loadable
     #
     # @api public
