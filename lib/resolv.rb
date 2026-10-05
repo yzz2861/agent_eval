@@ -3675,6 +3675,146 @@ class Resolv
   end
 
   ##
+  # Generates the contact order for a set of SRV resource records as
+  # defined by RFC 2782: records with a lower priority are always tried
+  # before records with a higher priority, and records sharing the same
+  # priority are ordered by weighted random selection without
+  # replacement, so each record's chance of being picked next is
+  # proportional to its weight among the not yet selected records.
+  #
+  # The randomness source is injected by the caller, which keeps the
+  # selection reproducible in tests.  It may be a callable or any object
+  # responding to #rand (such as Random or a Random instance).  The
+  # source is asked for an integer in <tt>0...bound</tt> (bound
+  # exclusive, like Random#rand) and must not return a value outside
+  # that range.
+  #
+  # Selection rules:
+  #
+  # * Records whose target is the root name (".") are dropped: per
+  #   RFC 2782 the service is decidedly not available at the domain.
+  # * Within one priority, records with weight 0 are placed at the
+  #   beginning of the running-sum order, so they are selected only when
+  #   the random draw hits exactly 0.
+  # * If every remaining record at a priority has weight 0, no random
+  #   draw is made and the records are yielded in their original order.
+  # * No draw is made when a single record remains at a priority, since
+  #   any draw would select it.
+  #
+  #   selector = Resolv::SRVSelector.new(records, random: Random.new)
+  #   selector.each do |candidate|
+  #     p [candidate.target.to_s, candidate.port]
+  #   end
+  #
+  class SRVSelector
+    include Enumerable
+
+    # Root target (".") marking "service decidedly not available".
+    ROOT_TARGET = DNS::Name.create(".")
+
+    ##
+    # A single SRV contact candidate.  #record is the original SRV
+    # resource record the candidate was built from; #priority, #weight,
+    # #port and #target mirror its fields.
+
+    Candidate = Struct.new(:record, :priority, :weight, :port, :target)
+
+    ##
+    # The outcome of resolving one candidate's target via
+    # SRVSelector#each_resolution.  #addresses is the resolver's return
+    # value on success; #error is the raised exception on failure, so
+    # failed targets stay distinguishable from reachable ones.
+
+    Resolution = Struct.new(:candidate, :addresses, :error) do
+      # True when the resolver returned normally for this candidate.
+      def success?
+        return error.nil?
+      end
+    end
+
+    ##
+    # Creates a selector over +records+, an enumerable of SRV resource
+    # records (Resolv::DNS::Resource::IN::SRV or any objects responding
+    # to #priority, #weight, #port and #target).  +random+ is the
+    # randomness source described above.
+
+    def initialize(records, random: Random)
+      @records = records
+      @random = random
+    end
+
+    ##
+    # Yields a Candidate for each usable record in RFC 2782 contact
+    # order.  Returns an Enumerator when no block is given.
+
+    def each
+      return enum_for(:each) unless block_given?
+
+      usable = @records.reject {|record| record.target == ROOT_TARGET }
+      usable.group_by(&:priority).sort_by {|priority, _| priority }.each do |_, group|
+        # RFC 2782: within one priority, weight-0 records are placed at
+        # the beginning of the running-sum order.
+        zeros, rest = group.partition {|record| record.weight.zero? }
+        remaining = zeros + rest
+        until remaining.empty?
+          total = remaining.sum(&:weight)
+          if total.zero? || remaining.size == 1
+            # All remaining weights are zero, or the draw cannot change
+            # the outcome: no randomness is consumed.
+            remaining.each {|record| yield candidate_for(record) }
+            break
+          end
+
+          draw = draw_random(total + 1)
+          running = 0
+          index = remaining.index do |record|
+            running += record.weight
+            running >= draw
+          end
+          yield candidate_for(remaining.delete_at(index))
+        end
+      end
+    end
+
+    ##
+    # Yields a Resolution for each candidate in contact order.
+    # +resolver+ is called with the candidate's target name and its
+    # return value becomes Resolution#addresses.  When it raises, the
+    # exception is captured in Resolution#error instead of aborting the
+    # walk, so the caller decides whether to try the next candidate.
+    # Without +resolver+, Resolv.getaddresses is used.
+
+    def each_resolution(resolver = nil)
+      return enum_for(:each_resolution, resolver) unless block_given?
+      resolver ||= ->(target) { Resolv.getaddresses(target) }
+      each do |candidate|
+        begin
+          addresses = resolver.call(candidate.target)
+        rescue => error
+          yield Resolution.new(candidate, nil, error)
+        else
+          yield Resolution.new(candidate, addresses, nil)
+        end
+      end
+    end
+
+    private
+
+    def candidate_for(record) # :nodoc:
+      return Candidate.new(record, record.priority, record.weight, record.port, record.target)
+    end
+
+    def draw_random(bound) # :nodoc:
+      source = @random
+      draw = source.respond_to?(:call) ? source.call(bound) : source.rand(bound)
+      unless draw.is_a?(Integer) && 0 <= draw && draw < bound
+        raise ArgumentError, "random source returned #{draw.inspect}, expected an Integer in 0...#{bound}"
+      end
+      return draw
+    end
+  end
+
+  ##
   # Default resolver to use for Resolv class methods.
 
   DefaultResolver = self.new
