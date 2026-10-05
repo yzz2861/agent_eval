@@ -192,12 +192,20 @@ module REXML
       detected_encoding = "UTF-8"
       begin
         @scanner.string.force_encoding("ASCII-8BIT")
-        if @scanner.scan(/\xfe\xff/n)
+        if @scanner.scan(/\x00\x00\xfe\xff/n)
+          detected_encoding = "UTF-32BE"
+        elsif @scanner.scan(/\xff\xfe\x00\x00/n)
+          detected_encoding = "UTF-32LE"
+        elsif @scanner.scan(/\xfe\xff/n)
           detected_encoding = "UTF-16BE"
         elsif @scanner.scan(/\xff\xfe/n)
           detected_encoding = "UTF-16LE"
         elsif @scanner.scan(/\xef\xbb\xbf/n)
           detected_encoding = "UTF-8"
+        elsif @scanner.match?(/\x00\x00\x00</n)
+          detected_encoding = "UTF-32BE"
+        elsif @scanner.match?(/<\x00\x00\x00/n)
+          detected_encoding = "UTF-32LE"
         end
       ensure
         @scanner.string.force_encoding(scanner_encoding)
@@ -230,7 +238,13 @@ module REXML
       if encoding
         super(+"", encoding)
       else
-        super(@source.read(3) || +"")
+        signature = @source.read(3) || +""
+        # A UTF-32 BOM and a BOM-less UTF-32 document both need a
+        # fourth byte to be told apart from UTF-16/UTF-8 input.
+        if /\A(?:\x00\x00\xfe|\xff\xfe\x00|\x00\x00\x00|<\x00\x00)\z/n.match?(signature)
+          signature << (@source.read(1) || +"")
+        end
+        super(signature)
       end
 
       if !@to_utf and
@@ -258,6 +272,9 @@ module REXML
         rescue IOError
         end
         true
+      rescue ::Encoding::InvalidByteSequenceError,
+             ::Encoding::UndefinedConversionError
+        raise
       rescue Exception, NameError
         @source = nil
         false
@@ -376,7 +393,7 @@ module REXML
 
     def encoding_updated
       case @encoding
-      when "UTF-16BE", "UTF-16LE"
+      when "UTF-16BE", "UTF-16LE", "UTF-32BE", "UTF-32LE"
         @source.binmode
         @source.set_encoding(@encoding, @encoding)
       end

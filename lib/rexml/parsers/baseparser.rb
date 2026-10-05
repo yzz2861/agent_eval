@@ -655,11 +655,44 @@ module REXML
       def need_source_encoding_update?(xml_declaration_encoding)
         return false if xml_declaration_encoding.nil?
         return false if /\AUTF-16\z/i =~ xml_declaration_encoding
+        return false if /\AUTF-32\z/i =~ xml_declaration_encoding
         true
       end
 
       def normalize_xml_declaration_encoding(xml_declaration_encoding)
-        /\AUTF-16(?:BE|LE)\z/i.match?(xml_declaration_encoding) ? "UTF-16" : nil
+        case xml_declaration_encoding
+        when /\AUTF-16(?:BE|LE)\z/i
+          "UTF-16"
+        when /\AUTF-32(?:BE|LE)\z/i
+          "UTF-32"
+        end
+      end
+
+      def unicode_encoding_family(encoding_name)
+        case encoding_name
+        when /\AUTF-16(?:BE|LE)?\z/i
+          "UTF-16"
+        when /\AUTF-32(?:BE|LE)?\z/i
+          "UTF-32"
+        end
+      end
+
+      def check_xml_declaration_encoding_consistency(xml_declaration_encoding)
+        return if xml_declaration_encoding.nil?
+        source_encoding = @source.encoding
+        return if source_encoding.nil?
+        source_family = unicode_encoding_family(source_encoding)
+        declaration_family = unicode_encoding_family(xml_declaration_encoding)
+        return if source_family.nil? and declaration_family.nil?
+        consistent =
+          source_family == declaration_family &&
+          (/\AUTF-(?:16|32)\z/i.match?(xml_declaration_encoding) ||
+           xml_declaration_encoding.upcase == source_encoding.upcase)
+        unless consistent
+          raise REXML::ParseException.new(
+            "XML declaration encoding #{xml_declaration_encoding.inspect} conflicts with the #{source_encoding.inspect} encoded input",
+            @source)
+        end
       end
 
       def parse_name(base_error_message)
@@ -772,6 +805,7 @@ module REXML
 
         if @source.match?("encoding", true)
           encoding = parse_attribute_value_with_equal("xml")
+          check_xml_declaration_encoding_consistency(encoding)
           unless @source.skip_spaces
             unless @source.match?("?>", true)
               raise ParseException.new("Malformed XML: Unclosed XML declaration", @source)
