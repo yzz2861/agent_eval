@@ -128,5 +128,52 @@ module Dry
         super(message.join("\n"))
       end
     end
+
+    # Error raised when resolving a component that no builder or provider can provide
+    #
+    # @api public
+    # @since 1.3.0
+    ComponentNotFoundError = Class.new(StandardError) do
+      # @api private
+      def initialize(key, generation_number = nil)
+        prefix = generation_number ? "Generation #{generation_number}: " : ""
+        super("#{prefix}component #{key.inspect} could not be found")
+      end
+    end
+
+    # Error raised when a reloaded component graph fails to build or start cleanly
+    #
+    # @api public
+    # @since 1.3.0
+    ReloadFailedError = Class.new(StandardError) do
+      # @return [StandardError] the underlying cause of the failed reload
+      attr_reader :cause
+
+      # @api private
+      def initialize(cause)
+        @cause = cause
+        super("Reload failed, keeping the previous generation active: #{cause.message}")
+      end
+    end
+
+    # Error raised when interacting with a generation scope that has already closed
+    #
+    # @api public
+    # @since 1.3.0
+    ScopeClosedError = Class.new(StandardError) do
+      def initialize
+        super("The generation scope has already closed")
+      end
+    end
+
+    # Error raised when retaining a generation that has already been released
+    #
+    # @api public
+    # @since 1.3.0
+    GenerationReleasedError = Class.new(StandardError) do
+      def initialize(number)
+        super("Generation #{number} has already been released")
+      end
+    end
   end
 end

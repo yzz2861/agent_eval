@@ -9,6 +9,7 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ### Added
 
+- `Dry::System::Reloader` provides explicit, generation-scoped component graph reloading for development servers. `with_generation` (or `open_generation`) pins in-flight work to the generation current when it starts, so requests keep using their original dependencies while a reload builds a new graph. `reload` rebuilds only the changed definitions together with the components and providers that actually depend on them (derived from runtime-resolved dependencies), so an object never mixes two generations; unaffected components and providers are carried into the new generation. If the new graph fails to build or a provider fails to start, the reload is discarded and the previous generation keeps serving. Superseded generations keep their providers running until their final scope closes, at which point each provider instance is stopped exactly once.
 - The Zeitwerk plugin accepts an `enable_reloading:` option, which enables reloading on the loader ahead of `setup`, so Zeitwerk tracks the constants it defines and they can be unloaded later. Applied from the plugin's `after(:configure)` hook, so it is in time whether the loader is set up by the plugin or by the integrating library. (@afomera in #297)
 
 ### Changed
