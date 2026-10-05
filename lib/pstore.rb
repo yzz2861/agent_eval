@@ -272,6 +272,55 @@ require "digest"
 # - Optional argument +thread_safe+ at method PStore.new.
 # - Attribute #ultra_safe.
 #
+# == Log Mode
+#
+# By default, every committed transaction rewrites the entire data file.
+# For workloads where small changes are made to a large store,
+# optional <em>log mode</em> avoids that full rewrite:
+#
+#   store = PStore.new('t.store', log: true)
+#
+# In log mode the store keeps its data in up to three files
+# next to the given path:
+#
+# - <tt>t.store</tt>: the snapshot, in the exact same format
+#   as a plain \PStore file, so it remains readable by a store
+#   opened without log mode.
+# - <tt>t.store.log</tt>: an append-only log with one verifiable
+#   commit record per transaction.
+# - <tt>t.store.lock</tt>: a sidecar lock file used for the
+#   cross-process lock; it is never renamed or truncated, so the
+#   lock stays consistent across snapshot compaction and log rotation.
+#
+# Each committed transaction appends a single record to the log
+# instead of rewriting the snapshot.
+# A record carries a magic marker, its payload length,
+# and a checksum, so it can be validated during recovery.
+# When the store is opened, its state is recovered by loading the
+# snapshot and replaying the valid log records on top of it.
+#
+# Recovery distinguishes two kinds of damage:
+#
+# - An <em>incomplete tail record</em>, as left behind by a crash
+#   in the middle of an append, is discarded
+#   (and truncated away on the next write transaction).
+# - A <em>corrupted complete record</em> (bad magic or checksum)
+#   means the middle of the log is damaged and raises PStore::Error.
+#
+# Changes are detected by comparing per-entry digests taken at the
+# beginning and the end of a transaction, so in-place modifications
+# of nested objects are recorded as well, not only assignments
+# through #[]= and #delete:
+#
+#   store.transaction do
+#     store[:list] << 1 # Recorded, even without #[]=.
+#   end
+#
+# When the log grows beyond #log_compaction_threshold bytes,
+# it is compacted: the current state is written to the snapshot
+# (atomically, via rename) and the log is rotated to empty.
+# Compaction happens while the exclusive lock is held.
+#
 # Needless to say, if you're storing valuable data with \PStore, then you should
 # backup the \PStore file from time to time.
 #
@@ -357,6 +406,21 @@ class PStore
   #
   attr_accessor :ultra_safe
 
+  # The size limit in bytes for the commit log in log mode
+  # (see {Log Mode}[rdoc-ref:PStore@Log+Mode]).
+  #
+  # After a committed transaction, if the log file exceeds this size,
+  # the current state is written to the snapshot file
+  # and the log is rotated to empty.
+  #
+  # - A positive integer (the default is 1 MiB): compact when the log
+  #   grows beyond this many bytes.
+  # - +0+: compact after every committed transaction.
+  # - +nil+: never compact automatically.
+  #
+  # Has no effect unless log mode is enabled; see PStore.new.
+  attr_accessor :log_compaction_threshold
+
   # Returns a new \PStore object.
   #
   # Argument +file+ is the path to the file in which objects are to be stored;
@@ -372,7 +436,13 @@ class PStore
   #
   #   store = PStore.new(path, true)
   #
-  def initialize(file, thread_safe = false)
+  # With keyword argument +log+ as +true+, the store operates in
+  # {log mode}[rdoc-ref:PStore@Log+Mode], appending one verifiable
+  # commit record per transaction instead of rewriting all data:
+  #
+  #   store = PStore.new(path, log: true)
+  #
+  def initialize(file, thread_safe = false, log: false)
     dir = File::dirname(file)
     unless File::directory? dir
       raise PStore::Error, format("directory %s does not exist", dir)
@@ -384,6 +454,8 @@ class PStore
     @abort = false
     @ultra_safe = false
     @thread_safe = thread_safe
+    @log_mode = log ? true : false
+    @log_compaction_threshold = DEFAULT_LOG_COMPACTION_THRESHOLD
     @lock = Thread::Mutex.new
   end
 
@@ -565,17 +637,26 @@ class PStore
     begin
       @rdonly = read_only
       @abort = false
-      file = open_and_lock_file(@filename, read_only)
+      file = @log_mode ? open_and_lock_log_mode_file(read_only)
+                       : open_and_lock_file(@filename, read_only)
       if file
         begin
-          @table, checksum, original_data_size = load_data(file, read_only)
+          if @log_mode
+            @table = load_log_mode_state(read_only)
+          else
+            @table, checksum, original_data_size = load_data(file, read_only)
+          end
 
           catch(self) do
             value = yield(self)
           end
 
           if !@abort && !read_only
-            save_data(checksum, original_data_size, file)
+            if @log_mode
+              save_log_mode_state
+            else
+              save_data(checksum, original_data_size, file)
+            end
           end
         ensure
           file.close
@@ -610,6 +691,183 @@ class PStore
   EMPTY_MARSHAL_DATA.freeze
   EMPTY_MARSHAL_CHECKSUM.freeze
   private_constant :CHECKSUM_ALGO, :EMPTY_STRING, :EMPTY_MARSHAL_DATA, :EMPTY_MARSHAL_CHECKSUM
+
+  # Log-mode commit record framing:
+  #   magic (4 bytes) + payload length (4 bytes) + payload + checksum.
+  # The checksum digests the length bytes and the payload, so any
+  # torn or altered record is detected during recovery.
+  LOG_MAGIC = "PSL1".b
+  LOG_DIGEST = Digest("SHA256")
+  LOG_CHECKSUM_SIZE = LOG_DIGEST.digest("").bytesize
+  LOG_HEADER_SIZE = 8
+  DEFAULT_LOG_COMPACTION_THRESHOLD = 1024 * 1024
+  private_constant :LOG_MAGIC, :LOG_DIGEST, :LOG_CHECKSUM_SIZE, :LOG_HEADER_SIZE
+
+  #
+  # Log mode
+  #
+
+  def log_filename
+    "#{@filename}.log"
+  end
+
+  def log_lock_filename
+    "#{@filename}.lock"
+  end
+
+  # Opens (creating it if necessary) the sidecar lock file and locks it.
+  # The lock file is never renamed, truncated, or replaced, so the
+  # cross-process lock stays consistent across snapshot compaction
+  # and log rotation. Returns nil for a read-only transaction when
+  # neither the snapshot nor the log exists yet.
+  def open_and_lock_log_mode_file(read_only)
+    if read_only && !File.exist?(@filename) && !File.exist?(log_filename)
+      return nil
+    end
+    file = File.new(log_lock_filename, **RDWR_ACCESS)
+    begin
+      file.flock(read_only ? File::LOCK_SH : File::LOCK_EX)
+    rescue Exception
+      file.close
+      raise
+    end
+    file
+  end
+
+  # Recovers the store state from the snapshot and the commit log.
+  def load_log_mode_state(read_only)
+    table = load_log_snapshot
+    valid_log_size = replay_log(table)
+    unless read_only
+      # Discard an incomplete tail record left by a crashed writer.
+      File.truncate(log_filename, valid_log_size) if valid_log_size
+      @log_baseline = log_baseline(table)
+    end
+    table
+  end
+
+  def load_log_snapshot
+    return {} unless File.exist?(@filename)
+    data = File.binread(@filename)
+    return {} if data.empty?
+    table = load(data)
+    raise Error, "PStore file seems to be corrupted." unless table.is_a?(Hash)
+    table
+  end
+
+  # Replays the valid commit records of the log into +table+.
+  # Returns the size of the valid log prefix if an incomplete tail
+  # record was found (the signature of a crashed writer), or nil if
+  # the log is fully valid. A complete record with a bad magic or
+  # checksum means the middle of the log is corrupted and raises
+  # PStore::Error.
+  def replay_log(table)
+    return nil unless File.exist?(log_filename)
+    data = File.binread(log_filename)
+    pos = 0
+    size = data.bytesize
+    while pos < size
+      remaining = size - pos
+      if remaining >= LOG_MAGIC.bytesize &&
+         data.byteslice(pos, LOG_MAGIC.bytesize) != LOG_MAGIC
+        raise Error, "PStore log file seems to be corrupted."
+      end
+      return pos if remaining < LOG_HEADER_SIZE + LOG_CHECKSUM_SIZE
+      length = data.byteslice(pos + 4, 4).unpack1("N")
+      record_end = pos + LOG_HEADER_SIZE + length + LOG_CHECKSUM_SIZE
+      return pos if record_end > size
+      framed = data.byteslice(pos + 4, 4 + length)
+      checksum = data.byteslice(pos + LOG_HEADER_SIZE + length, LOG_CHECKSUM_SIZE)
+      unless checksum == LOG_DIGEST.digest(framed)
+        raise Error, "PStore log file seems to be corrupted."
+      end
+      apply_log_ops(table, load(data.byteslice(pos + LOG_HEADER_SIZE, length)))
+      pos = record_end
+    end
+    nil
+  end
+
+  def apply_log_ops(table, ops)
+    ops.each do |op|
+      case op[0]
+      when :set
+        table[op[1]] = op[2]
+      when :delete
+        table.delete(op[1])
+      else
+        raise Error, "PStore log file seems to be corrupted."
+      end
+    end
+  end
+
+  # Per-entry digests of the table, used to detect which entries were
+  # created, replaced, deleted, or mutated in place (including nested
+  # objects) during a transaction.
+  def log_baseline(table)
+    baseline = {}
+    table.each do |key, value|
+      baseline[key] = CHECKSUM_ALGO.digest(dump(value))
+    end
+    baseline
+  end
+
+  # Commits a log-mode transaction by appending a single verifiable
+  # record with the entries that changed since the transaction began.
+  def save_log_mode_state
+    ops = []
+    @table.each do |key, value|
+      digest = CHECKSUM_ALGO.digest(dump(value))
+      if !@log_baseline.key?(key) || @log_baseline[key] != digest
+        ops << [:set, key, value]
+      end
+    end
+    @log_baseline.each_key do |key|
+      ops << [:delete, key] unless @table.key?(key)
+    end
+    return if ops.empty?
+    append_log_record(ops)
+    compact_log_if_needed
+  end
+
+  def append_log_record(ops)
+    payload = dump(ops)
+    length = [payload.bytesize].pack("N")
+    record = LOG_MAGIC + length + payload + LOG_DIGEST.digest(length + payload)
+    File.open(log_filename, "ab") do |file|
+      file.write(record)
+      file.flush
+      file.fsync
+    end
+  end
+
+  def compact_log_if_needed
+    threshold = @log_compaction_threshold
+    return unless threshold
+    return unless File.exist?(log_filename)
+    compact_log if File.size(log_filename) > threshold
+  end
+
+  # Rewrites the snapshot with the current table (atomically, via a
+  # temporary file and rename) and rotates the log to empty.
+  # The caller must hold the exclusive lock; the lock file itself is
+  # never touched, so other processes keep waiting on the same lock.
+  def compact_log
+    data = dump(@table)
+    temp_filename = "#{@filename}.tmp.#{Process.pid}.#{rand 1000000}"
+    begin
+      File.open(temp_filename, **WR_ACCESS) do |temp_file|
+        temp_file.write(data)
+        temp_file.flush
+        temp_file.fsync
+        temp_file.chmod(File.stat(@filename).mode) if File.exist?(@filename)
+      end
+      File.rename(temp_filename, @filename)
+    rescue Exception
+      File.unlink(temp_filename) rescue nil
+      raise
+    end
+    File.truncate(log_filename, 0)
+  end
 
   #
   # Open the specified filename (either in read-only mode or in

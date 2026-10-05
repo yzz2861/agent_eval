@@ -13,6 +13,25 @@ Behind the scenes, Ruby objects are stored to the data store file with
 Marshal.  That carries the usual limitations.  Proc objects cannot be
 marshalled, for example.
 
+## Log Mode
+
+By default, every committed transaction rewrites the entire data file.
+With log mode enabled, each transaction instead appends a single
+verifiable commit record to an append-only log (`path.log`), which
+avoids rewriting all data for a small change:
+
+    store = PStore.new("wiki_pages.pstore", log: true)
+
+On open, the store recovers its state from the snapshot (the plain
+PStore file, still readable without log mode) plus the valid log
+records.  An incomplete tail record left by a crash is discarded,
+while corruption in the middle of the log raises PStore::Error.
+In-place modifications of nested objects are recorded as well, not
+only assignments through #[]=.  When the log grows beyond
+PStore#log_compaction_threshold bytes (1 MiB by default), the state
+is compacted back into the snapshot and the log is rotated, all
+under the same cross-process lock (`path.lock`).
+
 ## Installation
 
 Add this line to your application's Gemfile:
