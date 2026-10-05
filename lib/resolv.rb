@@ -530,6 +530,46 @@ class Resolv
       }
     end
 
+    ##
+    # Sends the DNS UPDATE [RFC 2136] described by +update+ (a
+    # Resolv::DNS::Update) to the first configured nameserver and returns
+    # the server's response as a Resolv::DNS::Message.
+    #
+    # The update is sent exactly once: a response with the truncation bit
+    # set is the only reason it is sent again, over TCP, because such a
+    # response means the server did not apply the update.  A timeout or
+    # other transport failure raises UpdateIndeterminate instead of
+    # retrying, since the server may have applied the update; whether to
+    # send it again is then the caller's decision.
+    #
+    # A response refusing the update raises UpdatePrerequisiteFailed when
+    # a prerequisite was not met, or UpdateServerError for any other
+    # refusal; both carry the response message.
+    #
+    # +timeout+ bounds each exchange with the server, in seconds.
+
+    def update(update, timeout: Config::InitialTimeout)
+      lazy_initialize
+      nameserver, port = @config.nameserver_port.first
+      msg = update.to_message
+      begin
+        reply = exchange_update(msg, Requester::ConnectedUDP.new(nameserver, port), timeout)
+        if reply.tc == 1
+          reply = exchange_update(msg, make_tcp_requester(nameserver, port), timeout)
+        end
+      rescue ResolvTimeout
+        raise UpdateIndeterminate
+      end
+      case reply.rcode
+      when RCode::NoError
+        reply
+      when RCode::NXDomain, RCode::YXDomain, RCode::YXRRSet, RCode::NXRRSet
+        raise UpdatePrerequisiteFailed.new(reply)
+      else
+        raise UpdateServerError.new(reply)
+      end
+    end
+
     # :stopdoc:
 
     def fetch_resource(name, typeclass)
@@ -603,6 +643,20 @@ class Resolv
         Requester::ConnectedUDP.new(*nameserver_port[0])
       else
         Requester::UnconnectedUDP.new(*nameserver_port)
+      end
+    end
+
+    # Sends +msg+ once over +requester+ and returns the response message,
+    # closing the requester either way.  ResolvTimeout is left to the
+    # caller, which turns it into UpdateIndeterminate rather than
+    # re-sending an update of unknown effect.
+    def exchange_update(msg, requester, timeout) # :nodoc:
+      begin
+        sender = requester.sender(msg, nil)
+        reply, = requester.request(sender, timeout)
+        return reply
+      ensure
+        requester.close
       end
     end
 
@@ -1076,6 +1130,294 @@ class Resolv
       # Indicates a problem with the DNS request.
 
       class RequestError < StandardError
+      end
+    end
+
+    ##
+    # Base class for errors raised by Resolv::DNS#update.
+
+    class UpdateError < ResolvError
+
+      ##
+      # The Resolv::DNS::Message the server sent in reply, if any.
+
+      attr_reader :reply
+
+      ##
+      # The RCODE the server replied with, or nil when no reply arrived.
+
+      def rcode
+        @reply&.rcode
+      end
+
+      def initialize(message, reply = nil) # :nodoc:
+        @reply = reply
+        super(message)
+      end
+    end
+
+    ##
+    # The server refused a DNS UPDATE because a prerequisite was not met
+    # (RCODE YXDOMAIN, YXRRSET, NXRRSET or NXDOMAIN).  None of the update
+    # was applied.
+
+    class UpdatePrerequisiteFailed < UpdateError
+      def initialize(reply) # :nodoc:
+        super("DNS update prerequisites not met (RCODE #{reply.rcode})", reply)
+      end
+    end
+
+    ##
+    # The server refused a DNS UPDATE for a reason other than the
+    # prerequisites (RCODE FORMERR, SERVFAIL, NOTIMP, REFUSED, NOTAUTH,
+    # NOTZONE, ...).  None of the update was applied.
+
+    class UpdateServerError < UpdateError
+      def initialize(reply) # :nodoc:
+        super("DNS update refused by server (RCODE #{reply.rcode})", reply)
+      end
+    end
+
+    ##
+    # A DNS UPDATE got no response: a timeout or a transport failure.  The
+    # server may or may not have received and applied the update, so
+    # Resolv::DNS#update never re-sends it on its own.  Re-check the zone
+    # state before deciding whether to send the update again.
+
+    class UpdateIndeterminate < UpdateError
+      def initialize(message = "no response to DNS update; the server may or may not have applied it") # :nodoc:
+        super(message)
+      end
+    end
+
+    ##
+    # Resolv::DNS::Update builds a DNS UPDATE message [RFC 2136] from
+    # structured prerequisites and update operations.
+    #
+    # Prerequisites let the server check the zone state before applying
+    # anything:
+    #
+    # require_name_present::  +name+ must own at least one RRset
+    # require_name_absent::   +name+ must not own any RRset
+    # require_rrset_present:: the RRset must exist; with a resource
+    #                         instance its rdata must be present as well
+    # require_rrset_absent::  the RRset must not exist
+    #
+    # Update operations:
+    #
+    # add::           add an RR to an RRset
+    # delete_record:: delete a single RR from an RRset
+    # delete_rrset::  delete a whole RRset
+    # delete_name::   delete all RRsets owned by a name
+    #
+    #   update = Resolv::DNS::Update.new("example.com.")
+    #   update.require_name_absent("host.example.com.")
+    #   update.add("host.example.com.",
+    #              Resolv::DNS::Resource::IN::A.new("192.0.2.1"), ttl: 300)
+    #   dns.update(update)
+    #
+    # All names must be absolute and inside the zone, and the class and
+    # TTL rules of RFC 2136 are checked as entries are added, so a built
+    # Update always encodes a well-formed message.
+
+    class Update
+      # RFC 2136 sections 2.4 and 2.5: class ANY (255) and NONE (254)
+      # mark the special prerequisite and delete semantics, and type ANY
+      # (255) marks the operations that apply to a whole name.
+      CLASS_ANY = 255
+      CLASS_NONE = 254
+      TYPE_ANY = 255
+
+      ##
+      # The zone this update applies to, as a Resolv::DNS::Name.
+
+      attr_reader :zone
+
+      ##
+      # The DNS class of the zone, as a numeric class value (1 for IN).
+
+      attr_reader :class_value
+
+      ##
+      # Prerequisites, as an array of [name, ttl, resource] entries in the
+      # order they were added.  The TTL is always 0, as RFC 2136 requires
+      # of prerequisites.
+
+      attr_reader :prerequisites
+
+      ##
+      # Update operations, as an array of [name, ttl, resource] entries in
+      # the order they were added.
+
+      attr_reader :updates
+
+      ##
+      # Creates an update for +zone+, which must be an absolute name.
+      #
+      # +klass+ is the zone class: a numeric class value, or a module or
+      # class with a +ClassValue+ constant such as
+      # Resolv::DNS::Resource::IN, which is the default.
+
+      def initialize(zone, klass = Resource::IN)
+        @zone = Name.create(zone)
+        unless @zone.absolute?
+          raise ArgumentError, "zone name must be absolute: #{zone.inspect}"
+        end
+        @class_value = klass.kind_of?(Integer) ? klass : klass::ClassValue
+        @prerequisites = []
+        @updates = []
+      end
+
+      ##
+      # Requires +name+ to own at least one RRset (YXDOMAIN).
+
+      def require_name_present(name)
+        name = check_in_zone(name)
+        @prerequisites << [name, 0, generic_rr(TYPE_ANY, CLASS_ANY)]
+        self
+      end
+
+      ##
+      # Requires +name+ to own no RRset at all (NXDOMAIN).
+
+      def require_name_absent(name)
+        name = check_in_zone(name)
+        @prerequisites << [name, 0, generic_rr(TYPE_ANY, CLASS_NONE)]
+        self
+      end
+
+      ##
+      # Requires the RRset of +name+ and +type_or_resource+ to exist
+      # (YXRRSET).
+      #
+      # Pass a resource class such as Resolv::DNS::Resource::IN::A to only
+      # require the RRset, or a resource instance such as
+      # Resolv::DNS::Resource::IN::A.new("192.0.2.1") to also require its
+      # rdata to be present.
+
+      def require_rrset_present(name, type_or_resource)
+        name = check_in_zone(name)
+        if type_or_resource.kind_of?(Resource)
+          resource = type_or_resource
+          check_zone_class(resource)
+          rr = generic_rr(resource.class::TypeValue, @class_value, encode_rdata(resource))
+        else
+          check_rrset_type(type_or_resource, "require_name_present")
+          rr = generic_rr(type_or_resource::TypeValue, CLASS_ANY)
+        end
+        @prerequisites << [name, 0, rr]
+        self
+      end
+
+      ##
+      # Requires the RRset of +name+ and +typeclass+ to not exist
+      # (NXRRSET).
+
+      def require_rrset_absent(name, typeclass)
+        name = check_in_zone(name)
+        check_rrset_type(typeclass, "require_name_absent")
+        @prerequisites << [name, 0, generic_rr(typeclass::TypeValue, CLASS_NONE)]
+        self
+      end
+
+      ##
+      # Adds +resource+ (a Resolv::DNS::Resource instance) to the RRset of
+      # +name+, the RRset getting +ttl+ as its time to live.
+
+      def add(name, resource, ttl:)
+        name = check_in_zone(name)
+        check_zone_class(resource)
+        unless ttl.kind_of?(Integer) && ttl.between?(0, 0x7fffffff)
+          raise ArgumentError, "TTL must be an Integer between 0 and 2147483647: #{ttl.inspect}"
+        end
+        @updates << [name, ttl, generic_rr(resource.class::TypeValue, @class_value, encode_rdata(resource))]
+        self
+      end
+
+      ##
+      # Deletes the single RR +resource+ from the RRset of +name+.
+
+      def delete_record(name, resource)
+        name = check_in_zone(name)
+        check_zone_class(resource)
+        @updates << [name, 0, generic_rr(resource.class::TypeValue, CLASS_NONE, encode_rdata(resource))]
+        self
+      end
+
+      ##
+      # Deletes the whole RRset of +name+ and +typeclass+.
+
+      def delete_rrset(name, typeclass)
+        name = check_in_zone(name)
+        check_rrset_type(typeclass, "delete_name")
+        @updates << [name, 0, generic_rr(typeclass::TypeValue, CLASS_ANY)]
+        self
+      end
+
+      ##
+      # Deletes all RRsets owned by +name+.
+
+      def delete_name(name)
+        name = check_in_zone(name)
+        @updates << [name, 0, generic_rr(TYPE_ANY, CLASS_ANY)]
+        self
+      end
+
+      ##
+      # The update as a Resolv::DNS::Message with opcode UPDATE: the zone
+      # in the question section, the prerequisites in the answer section
+      # and the update operations in the authority section.  +id+
+      # overrides the message identifier.
+
+      def to_message(id = nil)
+        msg = id.nil? ? Message.new : Message.new(id)
+        msg.opcode = OpCode::Update
+        msg.add_question(@zone, Resource.get_class(Resource::SOA::TypeValue, @class_value))
+        @prerequisites.each {|name, ttl, rr| msg.add_answer(name, ttl, rr) }
+        @updates.each {|name, ttl, rr| msg.add_authority(name, ttl, rr) }
+        msg
+      end
+
+      ##
+      # The encoded update message, ready to send.
+
+      def encode
+        to_message.encode
+      end
+
+      private
+
+      def check_in_zone(name) # :nodoc:
+        name = Name.create(name)
+        unless name.absolute?
+          raise ArgumentError, "name must be absolute: #{name.inspect}"
+        end
+        unless name == @zone || name.subdomain_of?(@zone)
+          raise ArgumentError, "name #{name} is not in zone #{@zone}"
+        end
+        name
+      end
+
+      def check_zone_class(resource) # :nodoc:
+        unless resource.class::ClassValue == @class_value
+          raise ArgumentError, "resource class #{resource.class} does not match zone class #{@class_value}"
+        end
+      end
+
+      def check_rrset_type(typeclass, alternative) # :nodoc:
+        if typeclass::TypeValue == TYPE_ANY
+          raise ArgumentError, "type ANY does not name an RRset; use \##{alternative} for a whole name"
+        end
+      end
+
+      # An RR carrying raw rdata, so prerequisites and deletes can use the
+      # ANY and NONE classes that have no resource class of their own.
+      def generic_rr(type_value, class_value, rdata = "") # :nodoc:
+        Resource::Generic.create(type_value, class_value).new(rdata)
+      end
+
+      def encode_rdata(resource) # :nodoc:
+        Message::MessageEncoder.new {|msg| resource.encode_rdata(msg) }.to_s
       end
     end
 
