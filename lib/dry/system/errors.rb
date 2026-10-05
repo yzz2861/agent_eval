@@ -90,6 +90,11 @@ module Dry
       end
     end
 
+    # Error raised when plugin dependencies or version constraints cannot be satisfied
+    #
+    # @api public
+    PluginResolutionError = Class.new(StandardError)
+
     # Exception raised when auto-registerable component is not loadable
     #
     # @api public
