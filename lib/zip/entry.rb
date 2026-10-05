@@ -343,6 +343,8 @@ module Zip
         entry = new(path)
         entry.read_c_dir_entry(io)
         entry
+      rescue SourceVersionError
+        raise
       rescue Error
         nil
       end
@@ -352,6 +354,8 @@ module Zip
         entry.read_local_entry(io)
         entry
       rescue SplitArchiveError
+        raise
+      rescue SourceVersionError
         raise
       rescue Error
         nil

@@ -134,6 +134,17 @@ module Zip
     end
   end
 
+  # Error raised when a ranged data source (see Zip::RangeIO) changes its
+  # version identifier while an archive is being read from it. Data from
+  # different versions of the source must never be spliced together, so
+  # the read is aborted.
+  class SourceVersionError < Error
+    # The message returned by this error.
+    def message
+      'The data source changed version while the archive was being read.'
+    end
+  end
+
   # Error raised if there is not enough metadata for the entry to be streamed.
   class StreamingError < Error
     # The entry that has caused this error.

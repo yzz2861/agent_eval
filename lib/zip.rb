@@ -36,6 +36,7 @@ require 'zip/deflater'
 require 'zip/streamable_stream'
 require 'zip/streamable_directory'
 require 'zip/errors'
+require 'zip/range_io'
 
 # Rubyzip is a ruby module for reading and writing zip files.
 #

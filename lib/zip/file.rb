@@ -50,6 +50,13 @@ module Zip
   #
   # Zip::FileSystem offers an alternative API that emulates ruby's
   # interface for accessing the filesystem, ie. the ::File and ::Dir classes.
+  #
+  # Instead of a path or an IO, a ranged data source can be passed: any
+  # object that responds to +read_at(offset, length)+ and +version+ — an
+  # object storage client, for example. The archive is then read directly
+  # from the source, fetching only the byte ranges needed, so opening a
+  # large archive and reading a small entry from it does not download the
+  # whole object. See Zip::RangeIO for the details of the protocol.
   class File
     include Enumerable
     extend Forwardable
@@ -72,7 +79,9 @@ module Zip
     def_delegators :@cdir, :comment, :comment=, :each, :entries, :glob, :size
 
     # Opens a zip archive. Pass create: true to create
-    # a new archive if it doesn't exist already.
+    # a new archive if it doesn't exist already. Pass an object responding
+    # to +read_at+ and +version+ (see Zip::RangeIO) to read an archive
+    # directly from a ranged data source, such as object storage.
     def initialize(path_or_io, create: false, buffer: false,
                    restore_ownership: DEFAULT_RESTORE_OPTIONS[:restore_ownership],
                    restore_permissions: DEFAULT_RESTORE_OPTIONS[:restore_permissions],
@@ -171,7 +180,9 @@ module Zip
       def count_entries(path_or_io)
         cdir = ::Zip::CentralDirectory.new
 
-        if path_or_io.kind_of?(String)
+        if path_or_io.respond_to?(:read_at)
+          cdir.count_entries(::Zip::RangeIO.new(path_or_io))
+        elsif path_or_io.kind_of?(String)
           ::File.open(path_or_io, 'rb') do |f|
             cdir.count_entries(f)
           end
@@ -517,7 +528,13 @@ module Zip
     def initialize_cdir(path_or_io, buffer: false)
       @cdir = ::Zip::CentralDirectory.new
 
-      if ::File.size?(@name.to_s)
+      if path_or_io.respond_to?(:read_at)
+        # A ranged data source (see Zip::RangeIO): read the archive
+        # directly from the source, fetching only the byte ranges needed.
+        @create = false
+        @source_io = ::Zip::RangeIO.new(path_or_io)
+        @cdir.read_from_stream(@source_io)
+      elsif ::File.size?(@name.to_s)
         # There is a file, which exists, that is associated with this zip.
         @create = false
         @file_permissions = ::File.stat(@name).mode
