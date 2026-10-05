@@ -63,6 +63,7 @@ module Flipper
                  :enable_group, :disable_group,
                  :enable_percentage_of_actors, :disable_percentage_of_actors,
                  :enable_percentage_of_time, :disable_percentage_of_time,
+                 :requires, :prerequisites,
                  :features, :feature, :[], :preload, :preload_all,
                  :adapter, :adapter_stack, :add, :exist?, :remove, :import, :export,
                  :memoize=, :memoizing?, :read_only?,
@@ -208,6 +209,8 @@ require 'flipper/identifier'
 require 'flipper/middleware/memoizer'
 require 'flipper/middleware/setup_env'
 require 'flipper/poller'
+require 'flipper/prerequisite'
+require 'flipper/prerequisite_evaluator'
 require 'flipper/registry'
 require 'flipper/expression'
 require 'flipper/type'

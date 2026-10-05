@@ -3,6 +3,8 @@ require 'flipper/type'
 require 'flipper/gate'
 require 'flipper/feature_check_context'
 require 'flipper/gate_values'
+require 'flipper/prerequisite'
+require 'flipper/prerequisite_evaluator'
 
 module Flipper
   class Feature
@@ -21,6 +23,9 @@ module Flipper
     # Private: What is being used to instrument all the things.
     attr_reader :instrumenter
 
+    # Internal: The prerequisites declared for this feature.
+    attr_reader :prerequisites
+
     # Internal: Initializes a new feature instance.
     #
     # name - The Symbol or String name of the feature.
@@ -28,12 +33,45 @@ module Flipper
     #
     # options - The Hash of options.
     #           :instrumenter - What to use to instrument all the things.
+    #           :feature_lookup - A callable used to resolve prerequisite
+    #                             dependencies to Flipper::Feature instances.
+    #                             Defaults to building a feature against the
+    #                             same adapter.
     #
     def initialize(name, adapter, options = {})
       @name = name
       @key = name.to_s
       @instrumenter = options.fetch(:instrumenter, Instrumenters::Noop)
       @adapter = adapter
+      @prerequisites = [].freeze
+      @feature_lookup = options.fetch(:feature_lookup) do
+        ->(dependency_name) { self.class.new(dependency_name, @adapter, instrumenter: @instrumenter) }
+      end
+    end
+
+    # Public: Declare that this feature requires another feature to be on
+    # (or off) before it can be enabled.
+    #
+    # Prerequisites are combined with the regular gates using AND semantics:
+    # enabled? only returns true when ALL prerequisites are satisfied AND at
+    # least one gate is open. Satisfied prerequisites alone never enable a
+    # feature with no open gate, and open gates never enable a feature with
+    # unsatisfied prerequisites. A required feature that does not exist in
+    # the adapter never satisfies the prerequisite.
+    #
+    # feature_name - The Symbol or String name of the required feature.
+    # on - When true (default) the required feature must be enabled for the
+    #      actor; when false it must be disabled for the actor.
+    #
+    #   Flipper[:new_settlement].requires(:base_payments)
+    #   Flipper[:new_settlement].requires(:legacy_mode, on: false)
+    #
+    # Returns the Flipper::Prerequisite that was added.
+    def requires(feature_name, on: true)
+      prerequisite = Prerequisite.new(feature_name, on: on)
+      remaining = @prerequisites.reject { |existing| existing.feature_name == prerequisite.feature_name }
+      @prerequisites = (remaining + [prerequisite]).freeze
+      prerequisite
     end
 
     # Public: Enable this feature for something.
@@ -90,7 +128,7 @@ module Flipper
     # Public: Check if a feature is enabled for zero or more actors.
     #
     # Returns true if enabled, false if not.
-    def enabled?(*actors)
+    def enabled?(*actors, prerequisite_evaluator: nil)
       actors = wrap_actors(actors)
 
       # thing is left for backwards compatibility
@@ -101,7 +139,21 @@ module Flipper
           actors: actors
         )
 
-        if open_gate = gates.detect { |gate| gate.open?(context) }
+        # Features without prerequisites (and not resolving one) skip the
+        # evaluator entirely to keep the hot path allocation free. A feature
+        # with no prerequisites can never be part of a cycle, so skipping
+        # the evaluator's resolution tracking is safe.
+        prerequisites_satisfied =
+          if @prerequisites.empty? && prerequisite_evaluator.nil?
+            true
+          else
+            evaluator = prerequisite_evaluator || PrerequisiteEvaluator.new(@feature_lookup)
+            evaluator.satisfied?(self, actors)
+          end
+
+        if !prerequisites_satisfied
+          false
+        elsif open_gate = gates.detect { |gate| gate.open?(context) }
           payload[:gate_name] = open_gate.name
           true
         else

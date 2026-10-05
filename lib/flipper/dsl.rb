@@ -113,6 +113,28 @@ module Flipper
       feature(name).enable_percentage_of_actors(percentage)
     end
 
+    # Public: Declare that a feature requires another feature to be on
+    # (or off) before it can be enabled. See Feature#requires.
+    #
+    # name - The String or Symbol name of the feature.
+    # dependency - The String or Symbol name of the required feature.
+    # on - When true (default) the dependency must be enabled; when false it
+    #      must be disabled.
+    #
+    # Returns the Flipper::Prerequisite that was added.
+    def requires(name, dependency, on: true)
+      feature(name).requires(dependency, on: on)
+    end
+
+    # Public: The prerequisites declared for a feature.
+    #
+    # name - The String or Symbol name of the feature.
+    #
+    # Returns an Array of Flipper::Prerequisite.
+    def prerequisites(name)
+      feature(name).prerequisites
+    end
+
     # Public: Disable a feature.
     #
     # name - The String or Symbol name of the feature.
@@ -223,7 +245,7 @@ module Flipper
       end
 
       @memoized_features.compute_if_absent(name.to_sym) do
-        Feature.new(name, @adapter, instrumenter: instrumenter)
+        Feature.new(name, @adapter, instrumenter: instrumenter, feature_lookup: ->(dependency_name) { feature(dependency_name) })
       end
     end
 

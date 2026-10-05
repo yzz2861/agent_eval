@@ -70,6 +70,20 @@ Flipper.enable_group :search, :admin
 Flipper.enable_percentage_of_actors :search, 2
 ```
 
+A feature can also declare prerequisites on other features. Prerequisites are
+combined with the gates above using AND semantics: a feature is only enabled
+when ALL of its prerequisites are satisfied AND at least one of its gates is
+open for the actor. A prerequisite on a feature that does not exist is never
+satisfied.
+
+```ruby
+# new settlement can only be enabled while base payments is on
+Flipper.requires :new_settlement, :base_payments
+
+# ...and only while the legacy mode is off
+Flipper.requires :new_settlement, :legacy_mode, on: false
+```
+
 Read more about [getting started with Flipper](https://flippercloud.io/docs?utm_source=oss&utm_medium=readme&utm_campaign=getting_started) and [enabling features](https://flippercloud.io/docs/features?utm_source=oss&utm_medium=readme&utm_campaign=enabling_features).
 
 ## Flipper Cloud
