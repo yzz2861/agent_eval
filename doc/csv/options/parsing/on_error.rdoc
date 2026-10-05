@@ -1,0 +1,39 @@
+====== Option +on_error+
+
+Specifies a callable object that is called when a malformed record is
+found in the input.  When no callback is given (the default), the parser
+raises CSV::MalformedCSVError at the first malformed record.
+
+Default value:
+  CSV::DEFAULT_OPTIONS.fetch(:on_error) # => nil
+
+The callback is called with two arguments:
+- +error+: the CSV::MalformedCSVError for the malformed record.
+  Its +line_number+ is the number of the malformed record, and its
+  +byte_range+ is the range of byte offsets that the raw record
+  occupies in the parsed input.
+- +raw_record+: the raw content of the malformed record, including
+  its row separator if one was consumed.
+
+When the callback returns +:abort+, the parser raises the error and
+stops parsing.  The callback may also raise its own exception, which
+propagates to the caller.  With any other return value, the malformed
+record is discarded and parsing resumes at the next record.
+
+Parsing resumes only when the start of the next record can be
+determined reliably: the parser never skips blindly to the next line
+ending, because a line ending may appear inside a quoted field.
+When the boundary is ambiguous (for example, a quote character
+appears between the error and the next line ending, or a quoted
+field is not closed before the end of the input), the parser raises
+CSV::MalformedCSVError with a message that explains why recovery
+is not possible.
+
+Example:
+  str = "a,b\n\"c\"d,e\nf,g\n"
+  malformed = []
+  on_error = lambda do |error, raw_record|
+    malformed << [error.line_number, error.byte_range, raw_record]
+  end
+  CSV.parse(str, on_error: on_error) # => [["a", "b"], ["f", "g"]]
+  malformed # => [[2, 4...11, "\"c\"d,e\n"]]

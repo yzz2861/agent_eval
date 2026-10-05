@@ -329,6 +329,7 @@ require_relative "csv/writer"
 #     skip_blanks:        false,
 #     skip_lines:         nil,
 #     liberal_parsing:    false,
+#     on_error:           nil,
 #     nil_value:          nil,
 #     empty_value:        "",
 #     strip:              false,
@@ -363,6 +364,9 @@ require_relative "csv/writer"
 #   then an +ArgumentError+ exception will be raised.
 # - +liberal_parsing+: Specifies whether \CSV should attempt to parse
 #   non-compliant data.
+# - +on_error+: Specifies a callback that is called when a malformed
+#   record is found; parsing resumes at the next record when its
+#   boundary can be determined reliably.
 # - +nil_value+: Specifies the object that is to be substituted for each null (no-text) field.
 # - +empty_value+: Specifies the object that is to be substituted for each empty field.
 #
@@ -391,6 +395,8 @@ require_relative "csv/writer"
 # :include: ../doc/csv/options/parsing/strip.rdoc
 #
 # :include: ../doc/csv/options/parsing/liberal_parsing.rdoc
+#
+# :include: ../doc/csv/options/parsing/on_error.rdoc
 #
 # :include: ../doc/csv/options/parsing/nil_value.rdoc
 #
@@ -852,6 +858,10 @@ class CSV
   class MalformedCSVError < RuntimeError
     attr_reader :line_number
     alias_method :lineno, :line_number
+    # The byte range of the malformed record in the parsed input, as a
+    # Range of byte offsets. This is set only when the error is reported
+    # to an +on_error+ callback; it is +nil+ otherwise.
+    attr_accessor :byte_range
     def initialize(message, line_number)
       @line_number = line_number
       super("#{message} in line #{line_number}.")
@@ -967,6 +977,7 @@ class CSV
     skip_blanks:        false,
     skip_lines:         nil,
     liberal_parsing:    false,
+    on_error:           nil,
     nil_value:          nil,
     empty_value:        "",
     strip:              false,
@@ -2047,6 +2058,7 @@ class CSV
                  force_quotes: false,
                  skip_lines: nil,
                  liberal_parsing: false,
+                 on_error: nil,
                  internal_encoding: nil,
                  external_encoding: nil,
                  encoding: nil,
@@ -2104,6 +2116,7 @@ class CSV
       skip_blanks: skip_blanks,
       skip_lines: skip_lines,
       liberal_parsing: liberal_parsing,
+      on_error: on_error,
       encoding: @encoding,
       nil_value: nil_value,
       empty_value: empty_value,
@@ -2314,6 +2327,17 @@ class CSV
   #   CSV.new('').liberal_parsing? # => false
   def liberal_parsing?
     parser.liberal_parsing?
+  end
+
+  # :call-seq:
+  #   csv.on_error -> callable or nil
+  #
+  # Returns the callback that is called when a malformed record is found;
+  # used for parsing;
+  # see {Option +on_error+}[#class-CSV-label-Option+on_error]:
+  #   CSV.new('').on_error # => nil
+  def on_error
+    parser.on_error
   end
 
   # :call-seq:
