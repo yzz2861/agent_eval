@@ -7,12 +7,18 @@
 
 from sqlparse import sql
 from sqlparse import tokens as T
+from sqlparse.exceptions import StreamLimitExceededError
 
 
 class StatementSplitter:
     """Filter that split stream at individual statements"""
 
-    def __init__(self):
+    def __init__(self, max_statement_size=None):
+        # Maximum accumulated size (in characters) of a single not yet
+        # completed statement; None means no limit.  Exceeding the limit
+        # raises StreamLimitExceededError instead of buffering the
+        # statement without bounds.
+        self.max_statement_size = max_statement_size
         self._reset()
 
     def _reset(self):
@@ -26,6 +32,7 @@ class StatementSplitter:
         self.consume_ws = False
         self.tokens = []
         self.level = 0
+        self._statement_size = 0
 
     def _handle_nested_block(self, unified):
         """Check for nested loop or control structures inside a block"""
@@ -169,6 +176,12 @@ class StatementSplitter:
 
             # Append the token to the current statement
             self.tokens.append(sql.Token(ttype, value))
+            self._statement_size += len(value)
+            if (self.max_statement_size is not None
+                    and self._statement_size > self.max_statement_size):
+                raise StreamLimitExceededError(
+                    'Statement exceeds the configured maximum size '
+                    f'({self.max_statement_size} characters)')
 
             # Check if we get the end of a statement
             # Issue762: Allow GO (or "GO 2") as statement splitter.

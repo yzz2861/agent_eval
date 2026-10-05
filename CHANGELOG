@@ -1,7 +1,20 @@
 Development Version
 -------------------
 
-Nothing yet.
+Notable Changes
+
+* Add `sqlparse.parsechunks()`, a streaming variant of `parse()` that
+  consumes an iterable of text chunks (e.g. produced by a non-seekable
+  import stream) instead of a single string.  Unterminated tokens such
+  as quoted strings, dollar-quoted literals, comments or identifiers
+  may span arbitrary chunk boundaries; a statement is yielded as soon
+  as it is complete, without buffering the whole input.  Input that
+  ends inside an unterminated string, dollar-quoted literal or
+  multiline comment raises
+  `sqlparse.exceptions.UnclosedTokenError`, and the optional
+  `max_token_size`/`max_statement_size` limits stop parsing with
+  `sqlparse.exceptions.StreamLimitExceededError` instead of
+  accumulating input without bounds.
 
 
 Release 0.6.0 (Aug 13, 2026)

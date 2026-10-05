@@ -8,7 +8,7 @@
 """Parse SQL statements."""
 
 # Setup namespace
-from collections.abc import Generator
+from collections.abc import Generator, Iterable
 from typing import IO, Any
 
 from sqlparse import cli, engine, filters, formatter, sql, tokens
@@ -41,6 +41,44 @@ def parsestream(
     stack = engine.FilterStack()
     stack.enable_grouping()
     return stack.run(stream, encoding)
+
+
+def parsechunks(
+    chunks: Iterable[str],
+    max_token_size: int | None = None,
+    max_statement_size: int | None = None,
+) -> Generator[sql.Statement, None, None]:
+    """Parse SQL statements from an iterable of text chunks.
+
+    This is a streaming variant of :func:`parse` for producers that
+    yield the input in arbitrary pieces, e.g. an import tool reading
+    from a non-seekable source.  Chunks are consumed lazily and at
+    most once; empty chunks are skipped.  Unterminated tokens such as
+    quoted strings, dollar-quoted literals, comments or identifiers
+    may span arbitrary chunk boundaries; a chunk boundary is never
+    mistaken for the end of the input.  A statement is yielded as soon
+    as it is complete, without reading the remaining input first.
+
+    When the input ends inside an unterminated quoted string,
+    dollar-quoted literal or multiline comment,
+    :class:`~sqlparse.exceptions.UnclosedTokenError` is raised.
+
+    :param chunks: An iterable of text chunks.
+    :param max_token_size: Maximum size (in characters) of the
+        buffered input that cannot be tokenized yet.  When the buffer
+        exceeds the limit,
+        :class:`~sqlparse.exceptions.StreamLimitExceededError` is
+        raised instead of accumulating more input without bounds.
+    :param max_statement_size: Maximum size (in characters) of a
+        single not yet completed statement.  When a statement exceeds
+        the limit,
+        :class:`~sqlparse.exceptions.StreamLimitExceededError` is
+        raised.
+    :returns: A generator of :class:`~sqlparse.sql.Statement`
+        instances.
+    """
+    return engine.streaming.iter_statements(
+        chunks, max_token_size, max_statement_size)
 
 
 def format(sql: str, encoding: str | None = None, **options: Any) -> str:
