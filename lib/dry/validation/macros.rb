@@ -97,5 +97,38 @@ module Dry
     Macros.register(:acceptance) do
       key.failure(:acceptance, key: key_name) unless values[key_name].equal?(true)
     end
+
+    interval_overlap = proc do |macro:|
+      options = macro.args[0] || EMPTY_HASH
+      root = path.to_a
+      records = values[root]
+
+      checker = Macros::IntervalOverlap.new(root: root, records: records, result: result, **options)
+      conflict = checker.call
+
+      if conflict
+        first, second = conflict
+        first_path = [*root, first.index]
+        second_path = [*root, second.index]
+        message = checker.message
+
+        key(first_path).failure(message, other_index: second.index)
+        key(second_path).failure(message, other_index: first.index)
+      end
+    end
+
+    # Interval overlap macros
+    #
+    # @example
+    #   rule(:bookings).validate(non_overlapping: {
+    #     group_by: :resource_id,
+    #     start_field: :starts_at,
+    #     end_field: :ends_at,
+    #     endpoints: :right_open
+    #   })
+    #
+    # @api public
+    Macros.register(:non_overlapping, &interval_overlap)
+    Macros.register(:interval_overlap, &interval_overlap)
   end
 end
