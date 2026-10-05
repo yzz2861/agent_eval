@@ -475,6 +475,14 @@ class Money
 
   alias split allocate
 
+  # Allocates the amount while respecting per-part weight, minimum and maximum constraints.
+  #
+  # @param [Array<Hash>] parts Per-part :weight, :min and :max constraints.
+  #
+  # @return [Array<Money>]
+  # @raise [ArgumentError] If the constraints are invalid or infeasible.
+  def allocate_with_constraints: (Array[Hash[Symbol, Numeric?]] parts) -> Array[Money]
+
   # Round the monetary amount to smallest unit of coinage.
   #
   # @note

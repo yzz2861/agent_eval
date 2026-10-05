@@ -581,6 +581,45 @@ class Money
 
   alias split allocate
 
+  # Splits the amount in parts while respecting per-part weight, minimum and
+  # maximum constraints. Parts that hit a boundary are fixed and the remaining
+  # amount is redistributed proportionally over the other parts, so the result
+  # is not simply a clamped proportional split. The returned amounts always sum
+  # to the original amount.
+  #
+  # Each part is a Hash of options expressed in the currency's minor unit:
+  #   :weight [Numeric] Relative share when the part is free (default 1).
+  #   :min    [Integer] Minimum amount the part must receive (default 0).
+  #   :max    [Integer] Maximum amount the part may receive (default none).
+  #
+  # Zero-weight parts do not participate in proportional sharing and receive
+  # their :min, even if they could hold more. When every weight is zero, the
+  # parts without a :max split any remainder evenly; if no part can grow and
+  # the minimums do not already sum to the total, an error is raised. Integer
+  # remainders go to the parts with the largest fractional share, earlier
+  # parts winning ties. Negative amounts are split by magnitude and negated,
+  # so :min/:max always refer to non-negative magnitudes.
+  #
+  # @param [Array<Hash>] parts Per-part :weight, :min and :max constraints.
+  #
+  # @return [Array<Money>]
+  #
+  # @example
+  #   Money.new(100, "USD").allocate_with_constraints(
+  #     [{ weight: 1, max: 10 }, { weight: 1 }, { weight: 1 }]
+  #   ).map(&:fractional) #=> [10, 45, 45]
+  #
+  # @raise [ArgumentError] If the constraints are invalid or infeasible.
+  def allocate_with_constraints(parts)
+    amount = fractional
+    if amount.is_a?(BigDecimal) && amount.to_r.denominator != 1
+      amount = amount.round(0, self.class.rounding_mode)
+    end
+
+    amounts = Money::Allocation.generate_with_constraints(amount, parts)
+    amounts.map { |value| dup_with(fractional: value) }
+  end
+
   # Round the monetary amount to smallest unit of coinage.
   #
   # @note
