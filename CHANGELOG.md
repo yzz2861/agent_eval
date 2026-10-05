@@ -9,6 +9,8 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ### Added
 
+- New Container.override for scoped overrides, especially useful in tests. Within the block, overridden keys resolve to their substitutes and any other resolved component is rebuilt (and memoized for the rest of the block) on top of them, so already-memoized dependent components pick up the substitutes too. The container's own registry and memoized components are never mutated and keep serving code outside the block. Overrides are thread-local, can be nested (exiting a nested override restores the enclosing override's components), and accept nil and false as substitutes.
+
 - The Zeitwerk plugin accepts an `enable_reloading:` option, which enables reloading on the loader ahead of `setup`, so Zeitwerk tracks the constants it defines and they can be unloaded later. Applied from the plugin's `after(:configure)` hook, so it is in time whether the loader is set up by the plugin or by the integrating library. (@afomera in #297)
 
 ### Changed

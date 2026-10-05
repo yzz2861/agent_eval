@@ -489,8 +489,82 @@ module Dry
           self
         end
 
+        # Resolves components with the given substitutes in place for the duration of
+        # the block
+        #
+        # Within the block, resolving an overridden key returns its substitute, and
+        # resolving any other component rebuilds it (memoizing the rebuild for the rest
+        # of the block), so components depending on the overridden keys are re-created
+        # on top of the substitutes, even when they were already built and memoized
+        # before the block began.
+        #
+        # The container itself is never mutated: its memoized components are left
+        # untouched and keep serving code running outside the block, and everything
+        # rebuilt within the block is discarded when the block exits. Overrides are
+        # thread-local and can be nested; when a nested override exits, the enclosing
+        # override's components are used again.
+        #
+        # This is especially useful in tests, as a scoped alternative to stubbing (see
+        # dry/system/stubs).
+        #
+        # @example Override a single key
+        #   MyContainer.override("http.client", FakeClient.new) do
+        #     MyContainer["http.client"]  # => the FakeClient instance
+        #     MyContainer["users.create"] # => rebuilt on top of the FakeClient instance
+        #   end
+        #
+        #   MyContainer["users.create"] # => the originally memoized component
+        #
+        # @example Override multiple keys at once
+        #   MyContainer.override("http.client" => fake_client, "logger" => fake_logger) do
+        #     # ...
+        #   end
+        #
+        # @param key_or_substitutes [String, Symbol, Hash] the key to override, or a
+        #   hash of keys to their substitutes
+        # @param substitute [Object] the substitute to resolve for the key
+        #   (nil and false are valid substitutes)
+        #
+        # @return [Object] the block's return value
+        #
         # @api public
-        def resolve(key)
+        def override(key_or_substitutes, substitute = Undefined, &block)
+          raise ArgumentError, "a block is required" unless block
+
+          substitutes =
+            if key_or_substitutes.is_a?(Hash)
+              unless substitute.equal?(Undefined)
+                raise ArgumentError,
+                      "provide either a key and a substitute, or a hash of substitutes"
+              end
+
+              key_or_substitutes
+            else
+              if substitute.equal?(Undefined)
+                raise ArgumentError,
+                      "a substitute is required (nil and false are valid substitutes)"
+              end
+
+              {key_or_substitutes => substitute}
+            end
+
+          scope = OverrideScope.new(self, substitutes, parent: OverrideScope.current_for(self))
+
+          OverrideScope.push(self, scope)
+
+          begin
+            yield
+          ensure
+            OverrideScope.pop(self)
+          end
+        end
+
+        # @api public
+        def resolve(key, &block)
+          if (scope = OverrideScope.current_for(self))
+            return scope.resolve(key, &block)
+          end
+
           load_component(key) unless finalized?
 
           super
