@@ -15,6 +15,7 @@ content type.
 * [`Authorization`][authentication] allows you to automatically add an Authorization header to your requests.
 * [`UrlEncoded`][url_encoded] converts a `Faraday::Request#body` hash of key/value pairs into a url-encoded request body.
 * [`Json Request`][json-request] converts a `Faraday::Request#body` hash of key/value pairs into a JSON request body.
+* [`Batch`][batch] wraps several requests into one `multipart/mixed` message and correlates the sub-responses by Content-ID.
 * [`Instrumentation`][instrumentation] allows to instrument requests using different tools.
 
 
@@ -31,6 +32,7 @@ before returning it.
 [authentication]:       middleware/included/authentication.md
 [url_encoded]:          middleware/included/url-encoding
 [json-request]:         middleware/included/json#json-requests
+[batch]:                middleware/included/batch
 [instrumentation]:      middleware/included/instrumentation
 [json-response]:        middleware/included/json#json-responses
 [logger]:               middleware/included/logging
