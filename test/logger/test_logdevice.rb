@@ -19,6 +19,26 @@ class TestLogDevice < Test::Unit::TestCase
     end
   end
 
+  class ShortWriteIO
+    attr_reader :write_count
+
+    def initialize(io)
+      @io = io
+      @write_count = 0
+    end
+
+    def write(message)
+      @write_count += 1
+      length = [message.bytesize, 1].min
+      @io.write(message.byteslice(0, length))
+      length
+    end
+
+    def close
+      @io.close unless @io.closed?
+    end
+  end
+
   def setup
     @top_dir = File.expand_path('../../lib', __dir__)
     @tempfile = Tempfile.new("logger")
@@ -120,6 +140,32 @@ class TestLogDevice < Test::Unit::TestCase
       $stderr, stderr = stderr, $stderr
     end
     assert_equal "log writing failed. disk is full\n", stderr
+  end
+
+  def test_write_retries_short_writes
+    r, w = IO.pipe
+    io = ShortWriteIO.new(w)
+    logdev = d(io)
+
+    logdev.write("abc")
+    w.close
+
+    assert_equal(3, io.write_count)
+    assert_equal("abc", r.read)
+    r.close
+  end
+
+  def test_write_batch_retries_short_writes
+    r, w = IO.pipe
+    io = ShortWriteIO.new(w)
+    logdev = d(io)
+
+    logdev.write_batch("abc")
+    w.close
+
+    assert_equal(3, io.write_count)
+    assert_equal("abc", r.read)
+    r.close
   end
 
   def test_close
@@ -371,6 +417,25 @@ class TestLogDevice < Test::Unit::TestCase
     File.unlink(logfile0)
     File.unlink(logfile1)
     File.unlink(logfile2)
+  end
+
+  def test_write_batch_is_not_split_by_size_shift
+    File.write(@filename, '')
+    logdev = d(@filename, shift_age: 2, shift_size: 10, skip_header: true)
+    begin
+      logdev.write_batch('abcdefghij')
+
+      assert_equal('abcdefghij', File.read(@filename))
+      assert_file.not_exist?(@filename + '.0')
+
+      logdev.write_batch('klmnopqrst')
+
+      assert_equal('klmnopqrst', File.read(@filename))
+      assert_equal('abcdefghij', File.read(@filename + '.0'))
+    ensure
+      logdev.close
+      File.unlink(@filename + '.0') if File.exist?(@filename + '.0')
+    end
   end
 
   def test_shifting_age_variants

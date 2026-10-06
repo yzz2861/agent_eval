@@ -2,9 +2,51 @@
 # frozen_string_literal: false
 require 'logger'
 require 'tempfile'
+require 'stringio'
 
 class TestLogger < Test::Unit::TestCase
   include Logger::Severity
+
+  class CountingIO < StringIO
+    attr_reader :write_count
+
+    def initialize(*)#:nodoc:
+      super
+      @write_count = 0
+    end
+
+    def write(message)#:nodoc:
+      @write_count += 1
+      super(message)
+    end
+  end
+
+  class GatedShortWriteIO
+    def initialize(start, hold)
+      @buffer = +''
+      @start = start
+      @hold = hold
+      @first_write = true
+    end
+
+    def write(message)
+      if @first_write
+        @start << :started
+        @hold.pop
+        @first_write = false
+      end
+      length = [message.bytesize, 1].min
+      @buffer << message.byteslice(0, length)
+      length
+    end
+
+    def close
+    end
+
+    def string
+      @buffer
+    end
+  end
 
   def setup
     @logger = Logger.new(nil)
@@ -422,6 +464,233 @@ class TestLogger < Test::Unit::TestCase
     file = Regexp.quote(__FILE__)
     assert_warning('') do
       good_logger.level
+    end
+  end
+
+  def test_batch_submits_entries_as_one_write
+    io = CountingIO.new
+    logger = Logger.new(io, formatter: lambda {|severity, time, progname, message|
+      "#{message}\n"
+    })
+
+    result = logger.batch do
+      logger.info('first')
+      logger.info('second')
+    end
+
+    assert_equal("first\nsecond\n", io.string)
+    assert_equal(1, io.write_count)
+    assert_equal(true, result)
+  end
+
+  def test_batch_keeps_ordinary_add_writes_separate
+    io = CountingIO.new
+    logger = Logger.new(io, formatter: lambda {|severity, time, progname, message|
+      "#{message}\n"
+    })
+
+    logger.info('first')
+    logger.info('second')
+
+    assert_equal("first\nsecond\n", io.string)
+    assert_equal(2, io.write_count)
+  end
+
+  def test_batch_does_not_evaluate_filtered_messages
+    logger = Logger.new(nil)
+    logger.level = ERROR
+    evaluated = false
+
+    logger.batch do
+      logger.info { evaluated = true }
+    end
+
+    assert_equal(false, evaluated)
+  end
+
+  def test_batch_discards_entries_and_reraises_on_error_by_default
+    io = CountingIO.new
+    logger = Logger.new(io)
+
+    assert_raise(RuntimeError) do
+      logger.batch do
+        logger.info('before failure')
+        raise('failed block')
+      end
+    end
+
+    assert_equal('', io.string)
+    assert_equal(0, io.write_count)
+  end
+
+  def test_batch_marks_entries_and_commits_on_error
+    io = CountingIO.new
+    logger = Logger.new(io)
+
+    assert_raise(RuntimeError) do
+      logger.batch(on_error: :mark) do
+        logger.info('before failure')
+        raise('failed block')
+      end
+    end
+
+    assert_match(/before failure/, io.string)
+    assert_match(/RuntimeError: failed block/, io.string)
+    assert_equal(1, io.write_count)
+  end
+
+  def test_successful_nested_batch_keeps_enclosing_order
+    io = CountingIO.new
+    logger = Logger.new(io, formatter: lambda {|severity, time, progname, message|
+      "#{message}\n"
+    })
+
+    logger.batch do
+      logger.info('outer-before')
+      logger.batch do
+        logger.info('inner-1')
+        logger.info('inner-2')
+      end
+      logger.info('outer-after')
+    end
+
+    assert_equal("outer-before\ninner-1\ninner-2\nouter-after\n", io.string)
+    assert_equal(1, io.write_count)
+  end
+
+  def test_failed_nested_batch_can_be_marked_while_outer_continues
+    io = CountingIO.new
+    logger = Logger.new(io, formatter: lambda {|severity, time, progname, message|
+      "#{message}\n"
+    })
+
+    logger.batch do
+      logger.info('outer-before')
+      begin
+        logger.batch(on_error: :mark) do
+          logger.info('inner')
+          raise('inner failure')
+        end
+      rescue RuntimeError
+      end
+      logger.info('outer-after')
+    end
+
+    assert_equal("outer-before\ninner\nRuntimeError: inner failure\nouter-after\n",
+                 io.string)
+    assert_equal(2, io.write_count)
+  end
+
+  def test_failed_nested_mark_checkpoint_remains_when_enclosing_batch_fails
+    io = CountingIO.new
+    logger = Logger.new(io, formatter: lambda {|severity, time, progname, message|
+      "#{message}\n"
+    })
+
+    assert_raise(RuntimeError) do
+      logger.batch do
+        logger.info('outer')
+        begin
+          logger.batch(on_error: :mark) do
+            logger.info('inner')
+            raise('inner failure')
+          end
+        rescue RuntimeError
+        end
+        raise('outer failure')
+      end
+    end
+
+    assert_equal("outer\ninner\nRuntimeError: inner failure\n", io.string)
+    assert_equal(1, io.write_count)
+  end
+
+  def test_batch_enforces_buffer_limit
+    io = CountingIO.new
+    logger = Logger.new(io, formatter: lambda {|severity, time, progname, message|
+      "#{message}\n"
+    })
+
+    error = assert_raise(Logger::BatchBufferOverflow) do
+      logger.batch(max_bytes: 4) do
+        logger.info('a')
+        logger.info('bb')
+      end
+    end
+
+    assert_equal(4, error.limit)
+    assert_equal('', io.string)
+  end
+
+  def test_batch_limit_marker_is_submitted_even_when_limit_is_exceeded
+    io = CountingIO.new
+    logger = Logger.new(io)
+
+    assert_raise(Logger::BatchBufferOverflow) do
+      logger.batch(on_error: :mark, max_bytes: 2) do
+        logger.info('a')
+        logger.info('bb')
+      end
+    end
+
+    assert_match(/a/, io.string)
+    assert_match(/Logger::BatchBufferOverflow/, io.string)
+    assert_equal(1, io.write_count)
+  end
+
+  def test_batch_rejects_invalid_arguments
+    logger = Logger.new(nil)
+
+    assert_raise(ArgumentError) { logger.batch(on_error: :invalid) {} }
+    assert_raise(ArgumentError) { logger.batch(max_bytes: -1) {} }
+    assert_raise(ArgumentError) { logger.batch(max_bytes: 1.5) {} }
+  end
+
+  def test_batch_order_with_two_controlled_threads_and_short_writes
+    start = Queue.new
+    hold = Queue.new
+    io = GatedShortWriteIO.new(start, hold)
+    logger = Logger.new(io, formatter: lambda {|severity, time, progname, message|
+      "#{message}\n"
+    })
+    ready = Queue.new
+
+    first = Thread.new do
+      logger.batch do
+        logger.info('T1-1')
+        logger.info('T1-2')
+        ready << :first
+      end
+    end
+
+    assert_equal(:first, ready.pop)
+    second = Thread.new do
+      logger.batch do
+        logger.info('T2-1')
+        logger.info('T2-2')
+        ready << :second
+      end
+    end
+
+    assert_equal(:second, ready.pop)
+    assert_equal(:started, start.pop)
+    wait_until_thread_is_blocked_in_log_device(first)
+    hold << :go
+    second.join(2)
+    first.join(2)
+
+    assert_equal(false, first.alive?)
+    assert_equal(false, second.alive?)
+    assert_equal("T1-1\nT1-2\nT2-1\nT2-2\n", io.string)
+  end
+
+  private
+
+  def wait_until_thread_is_blocked_in_log_device(thread)
+    deadline = Time.now + 2
+    until thread.status == 'sleep'
+      flunk('thread did not block') if Time.now >= deadline
+      Thread.pass
     end
   end
 end

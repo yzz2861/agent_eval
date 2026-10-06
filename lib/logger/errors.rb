@@ -6,4 +6,14 @@ class Logger
   end
   class ShiftingError < Error # :nodoc:
   end
+
+  # Raised when a buffered logging block exceeds its configured size limit.
+  class BatchBufferOverflow < Error
+    def initialize(limit = nil)
+      @limit = limit
+      super("log batch buffer exceeds #{limit} bytes")
+    end
+
+    attr_reader :limit
+  end
 end

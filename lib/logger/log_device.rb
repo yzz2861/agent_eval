@@ -27,10 +27,17 @@ class Logger
     def write(message)
       handle_write_errors("writing") do
         synchronize do
-          if @shift_age and @dev.respond_to?(:stat)
-            handle_write_errors("shifting") {check_shift_log}
-          end
-          handle_write_errors("writing") {@dev.write(message)}
+          prepare_write
+          write_all(message)
+        end
+      end
+    end
+
+    def write_batch(message)
+      handle_write_errors("writing") do
+        synchronize do
+          prepare_write(message.bytesize)
+          write_all(message)
         end
       end
     end
@@ -159,10 +166,30 @@ class Logger
       ) if file.size == 0
     end
 
-    def check_shift_log
+    def prepare_write(message_bytesize = nil)
+      if @shift_age and @dev.respond_to?(:stat)
+        handle_write_errors("shifting") do
+          check_shift_log(message_bytesize)
+        end
+      end
+    end
+
+    def write_all(message)
+      return @dev.write(message) unless message.is_a?(String)
+
+      written = 0
+      while written < message.bytesize
+        result = @dev.write(message.byteslice(written, message.bytesize - written))
+        return result unless result.is_a?(Integer) && result > 0
+        written += result
+      end
+      written
+    end
+
+    def check_shift_log(message_bytesize = nil)
       if @shift_age.is_a?(Integer)
         # Note: always returns false if '0'.
-        if @filename && (@shift_age > 0) && (@dev.stat.size > @shift_size)
+        if @filename && (@shift_age > 0) && need_size_shift?(message_bytesize)
           lock_shift_log { shift_log_age }
         end
       else
@@ -171,6 +198,14 @@ class Logger
           @next_rotate_time = next_rotate_time(now, @shift_age)
           lock_shift_log { shift_log_period(previous_period_end(now, @shift_age)) }
         end
+      end
+    end
+
+    def need_size_shift?(message_bytesize)
+      if message_bytesize
+        @dev.stat.size + message_bytesize > @shift_size
+      else
+        @dev.stat.size > @shift_size
       end
     end
 

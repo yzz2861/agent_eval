@@ -607,6 +607,7 @@ class Logger
     self.formatter = formatter
     @logdev = nil
     @level_override = {}
+    @log_batches = {}
     return unless logdev
     case logdev
     when File::NULL
@@ -701,11 +702,70 @@ class Logger
         progname = @progname
       end
     end
-    @logdev.write(
-      format_message(format_severity(severity), Time.now, progname, message))
+    entry = format_message(format_severity(severity), Time.now, progname, message)
+    if batch = current_log_batch
+      batch.add(entry)
+    else
+      @logdev.write(entry)
+    end
     true
   end
   alias log add
+
+  # Buffers log entries written in the block and submits them together when
+  # the block returns successfully.
+  #
+  # Entries are filtered normally, and a message block is evaluated only when
+  # its severity is enabled. Nested successful blocks are appended to their
+  # enclosing block in call order; an enclosing block is committed only after
+  # it returns successfully.
+  #
+  # +on_error+ controls an exception raised by the block:
+  #
+  # - +:discard+ (the default) discards entries collected by the failed block
+  #   and reraises the exception.
+  # - +:mark+ (alias +:mark_and_commit+) appends an +ERROR+ marker, submits the
+  #   collected entries, and reraises the exception. In a nested block this
+  #   is a checkpoint: the enclosing block's earlier entries are included in
+  #   the same continuous submission, and only entries after the checkpoint
+  #   remain buffered.
+  #
+  # +max_bytes+ limits the number of formatted bytes that may be buffered.
+  # A limit of +nil+ means unlimited. Exceeding the limit raises
+  # Logger::BatchBufferOverflow.
+  def batch(on_error: :discard, max_bytes: nil)
+    unless [:discard, :mark, :mark_and_commit].include?(on_error)
+      raise ArgumentError, "on_error must be :discard or :mark"
+    end
+    unless max_bytes.nil? || (max_bytes.is_a?(Integer) && max_bytes >= 0)
+      raise ArgumentError, "max_bytes must be nil or a non-negative Integer"
+    end
+
+    parent = current_log_batch
+    batch = LogBatch.new(parent ? parent.nested_limit(max_bytes) : max_bytes)
+    log_batch_stack << batch
+
+    begin
+      yield
+    rescue Exception => error
+      log_batch_stack.pop
+      clear_log_batch_stack if log_batch_stack.empty?
+      if on_error == :mark || on_error == :mark_and_commit
+        if @logdev && ERROR >= level
+          marker = "#{error.class}: #{error.message}"
+          batch.mark(format_message(format_severity(ERROR), Time.now, @progname, marker))
+        end
+        commit_failed_log_batch(batch, parent)
+      end
+      raise
+    else
+      log_batch_stack.pop
+      clear_log_batch_stack if log_batch_stack.empty?
+      commit_log_batch(batch, parent)
+      true
+    end
+  end
+  alias log_batch batch
 
   # Writes the given +msg+ to the log with no formatting;
   # returns the number of characters written,
@@ -719,7 +779,13 @@ class Logger
   #   My message.
   #
   def <<(msg)
-    @logdev&.write(msg)
+    return nil if @logdev.nil?
+    if batch = current_log_batch
+      batch.add(msg)
+      msg.bytesize
+    else
+      @logdev.write(msg)
+    end
   end
 
   # Equivalent to calling #add with severity <tt>Logger::DEBUG</tt>.
@@ -773,6 +839,108 @@ private
 
   # \Severity label for logging (max 5 chars).
   SEV_LABEL = %w(DEBUG INFO WARN ERROR FATAL ANY).freeze
+
+  class LogBatch
+    attr_reader :bytesize, :max_bytes
+
+    def initialize(max_bytes)
+      @messages = []
+      @bytesize = 0
+      @max_bytes = max_bytes
+    end
+
+    def add(message)
+      check_limit(message.bytesize)
+      append_without_limit(message)
+    end
+
+    def append(batch)
+      batch.messages.each do |message|
+        add(message)
+      end
+    end
+
+    def mark(message)
+      append_without_limit(message)
+    end
+
+    def join
+      messages.join
+    end
+
+    def clear
+      @messages.clear
+      @bytesize = 0
+    end
+
+    def present?
+      !messages.empty?
+    end
+
+    def nested_limit(max_bytes)
+      available = @max_bytes && @max_bytes - @bytesize
+      return max_bytes if available.nil?
+      return available if max_bytes.nil?
+      [max_bytes, available].min
+    end
+
+    protected
+
+    attr_reader :messages
+
+    private
+
+    def check_limit(additional_bytesize)
+      return if @max_bytes.nil?
+      if @bytesize + additional_bytesize > @max_bytes
+        raise BatchBufferOverflow.new(@max_bytes)
+      end
+    end
+
+    def append_without_limit(message)
+      @messages << message
+      @bytesize += message.bytesize
+    end
+  end
+  private_constant :LogBatch
+
+  def current_log_batch
+    log_batch_stack.last
+  end
+
+  def log_batch_stack
+    @log_batches ||= {}
+    @log_batches[Fiber.current] ||= []
+  end
+
+  def clear_log_batch_stack
+    @log_batches.delete(Fiber.current)
+  end
+
+  def commit_log_batch(batch, parent)
+    return unless batch.present?
+    parent ? parent.append(batch) : write_log_batch(batch.join)
+  end
+
+  def commit_failed_log_batch(batch, parent)
+    return unless @logdev && batch.present?
+    if parent
+      batches = log_batch_stack.dup
+      message = (batches.map(&:join) + [batch.join]).join
+      write_log_batch(message)
+      batches.each(&:clear)
+    else
+      write_log_batch(batch.join)
+    end
+  end
+
+  def write_log_batch(message)
+    if @logdev.respond_to?(:write_batch)
+      @logdev.write_batch(message)
+    else
+      @logdev.write(message)
+    end
+  end
 
   def format_severity(severity)
     SEV_LABEL[severity] || 'ANY'
