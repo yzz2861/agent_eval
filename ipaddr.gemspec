@@ -29,7 +29,7 @@ Both IPv4 and IPv6 are supported.
   spec.homepage      = "https://github.com/ruby/ipaddr"
   spec.licenses      = ["Ruby", "BSD-2-Clause"]
 
-  spec.files         = ["LICENSE.txt", "README.md", "lib/ipaddr.rb"]
+  spec.files         = ["LICENSE.txt", "README.md", "lib/ipaddr.rb", "lib/ipaddr/prefix_table.rb"]
   spec.require_paths = ["lib"]
 
   spec.required_ruby_version = ">= 2.4"

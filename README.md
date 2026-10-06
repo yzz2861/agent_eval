@@ -46,6 +46,32 @@ ipaddr3 = IPAddr.new "192.168.2.0/24"
 p ipaddr3                   #=> #<IPAddr: IPv4:192.168.2.0/255.255.255.0>
 ```
 
+## Longest prefix match
+
+`IPAddr::PrefixTable` (require `ipaddr/prefix_table`) keeps an updatable
+set of prefix rules and answers which rule is the most specific match
+for an address.  IPv4 and IPv6 rules (including their default routes)
+are kept independent, each rule carries caller data plus an explicit
+priority for ties on the same prefix, and lookups never cache, so
+deleting a rule immediately falls back to the right ancestor rule.
+
+```ruby
+require 'ipaddr/prefix_table'
+
+table = IPAddr::PrefixTable.new
+table.add("0.0.0.0/0", :v4_default)
+table.add("10.0.0.0/8", :corp)
+id = table.add("10.1.2.0/24", :dmz, priority: 10)
+
+match = table.lookup("10.1.2.9")
+match.prefix          #=> #<IPAddr: IPv4:10.1.2.0/255.255.255.0>
+match.rule_id         #=> id
+match.data            #=> :dmz
+match.nodes_visited   #=> 25 (trie nodes touched, not table size)
+
+table.delete(id)      # lookups now fall back to the 10.0.0.0/8 rule
+```
+
 ## Alternative
 
 The [ipaddress](https://rubygems.org/gems/ipaddress) gem is a popular,
