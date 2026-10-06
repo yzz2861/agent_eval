@@ -27,6 +27,44 @@ the children and only then look at the node itself. While traversing, all
 rules are tested in the order in which they are defined. If a rule matches, the
 corresponding tree is _replaced_ by whatever the action block returns.
 
+h3. Repeated transformation
+
+<code>#apply</code> performs exactly one traversal. The replacement returned by
+a rule is not matched again during that same traversal, and neither is an
+ancestor revisited merely because a rule created a new parent.
+An existing parent still sees replacements made in its children during its
+post-order pass; repeated passes are required when a rule introduces new nodes.
+Use <code>#apply_repeatedly</code> when a simplification has to reach a fixpoint,
+for example when newly created constants must first be added together and the
+result must then allow a multiply-by-one rule to fire:
+
+<pre class="sh_ruby"><code>
+  transformer.apply_repeatedly(tree)
+</code></pre>
+
+Each invocation runs a complete depth-first, post-order pass, then starts over
+from the root while at least one rule matched. A normal return means a final
+verification pass matched no rule anywhere in the tree. Rule blocks added to an
+instance have precedence over class rules; rules defined directly by a subclass
+precede inherited rules, and newer rules precede older rules in the same scope.
+
+Rules are allowed to alternate between two forms or keep adding nodes, so the
+loop has a bounded amount of work:
+
+<pre class="sh_ruby"><code>
+  transformer.apply_repeatedly(
+    tree,
+    nil,
+    max_transformations: 1000
+  )
+</code></pre>
+
+The limit counts successful rule applications. When the next match would exceed
+it, Parslet raises
+<code>Parslet::Transform::RepeatedTransformLimit</code> without calling that
+rule or returning the partially transformed tree. The exception exposes the
+matching rule, its zero-based tree path, pass number, and counters.
+
 Here's another way of saying the same thing, perhaps more in line with what
 you need as a user of Parslet: <code>Parslet::Transform</code> is what allows
 you to transform the PORO-trees magically into a real abstract syntax tree.
@@ -285,4 +323,3 @@ also an entire page on the tricks useful in practice here: "Tricks":tricks.html.
 
 If not, please tell us about it. We'll include it in this documentation in no 
 time. 
-
