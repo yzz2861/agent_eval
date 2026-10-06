@@ -9,14 +9,19 @@
 
 struct _sqlite3Ruby {
     sqlite3 *db;
+    VALUE self;
     VALUE busy_handler;
     VALUE functions;
     VALUE collations;
     VALUE aggregators;
     VALUE trace_handler;
     VALUE authorizer;
+    VALUE preupdate_handler;
+    VALUE preupdate_exception;
+    VALUE preupdate_thread;
     int stmt_timeout;
     struct timespec stmt_deadline;
+    int preupdate_active;
     rb_pid_t owner;
     int flags;
 };
@@ -32,5 +37,6 @@ void set_sqlite3_func_result(sqlite3_context *ctx, VALUE result);
 
 sqlite3RubyPtr sqlite3_database_unwrap(VALUE database);
 VALUE sqlite3val2rb(sqlite3_value *val);
+void sqlite3_database_check_preupdate_reentry(sqlite3RubyPtr ctx);
 
 #endif

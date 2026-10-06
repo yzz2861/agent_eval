@@ -65,6 +65,7 @@ prepare(VALUE self, VALUE db, VALUE sql)
      * instance variable @connection. The struct pointer is guaranteed to be live because instance
      * variable will keep it from being GCed. */
     ctx->db = db_ctx;
+    sqlite3_database_check_preupdate_reentry(db_ctx);
 
 #ifdef HAVE_SQLITE3_PREPARE_V2
     status = sqlite3_prepare_v2(
@@ -97,6 +98,7 @@ sqlite3_rb_close(VALUE self)
     TypedData_Get_Struct(self, sqlite3StmtRuby, &statement_type, ctx);
 
     REQUIRE_OPEN_STMT(ctx);
+    sqlite3_database_check_preupdate_reentry(ctx->db);
 
     sqlite3_finalize(ctx->st);
     ctx->st = NULL;
@@ -132,6 +134,7 @@ step(VALUE self)
 
     REQUIRE_LIVE_DB(ctx);
     REQUIRE_OPEN_STMT(ctx);
+    sqlite3_database_check_preupdate_reentry(ctx->db);
 
     if (ctx->done_p) { return Qnil; }
 
@@ -140,7 +143,11 @@ step(VALUE self)
     stmt = ctx->st;
 
     value = sqlite3_step(stmt);
-    if (rb_errinfo() != Qnil) {
+    if (!NIL_P(ctx->db->preupdate_exception)) {
+        VALUE exception = ctx->db->preupdate_exception;
+        RB_OBJ_WRITE(ctx->db->self, &ctx->db->preupdate_exception, Qnil);
+        rb_exc_raise(exception);
+    } else if (rb_errinfo() != Qnil) {
         /* some user defined function was invoked as a callback during step and
          * it raised an exception that has been suppressed until step returns.
          * Now re-raise it. */
@@ -338,6 +345,7 @@ reset_bang(VALUE self)
 
     REQUIRE_LIVE_DB(ctx);
     REQUIRE_OPEN_STMT(ctx);
+    sqlite3_database_check_preupdate_reentry(ctx->db);
 
     sqlite3_reset(ctx->st);
 
@@ -360,6 +368,7 @@ clear_bindings_bang(VALUE self)
 
     REQUIRE_LIVE_DB(ctx);
     REQUIRE_OPEN_STMT(ctx);
+    sqlite3_database_check_preupdate_reentry(ctx->db);
 
     sqlite3_clear_bindings(ctx->st);
 

@@ -8,6 +8,8 @@ require "sqlite3/value"
 require "sqlite3/fork_safety"
 
 module SQLite3
+  PREUPDATE_HOOK_AVAILABLE = const_defined?(:PREUPDATE_HOOK)
+
   # == Overview
   #
   # The Database class encapsulates a single connection to a SQLite3 database.  Here's a
@@ -204,6 +206,14 @@ module SQLite3
     # occur, and returning 2 causes the access to be silently denied.
     def authorizer(&block)
       self.authorizer = block
+    end
+
+    unless method_defined?(:preupdate_hook)
+      # Raises consistently when the loaded SQLite library lacks the feature.
+      def preupdate_hook(*) # :nodoc:
+        raise UnsupportedException,
+          "sqlite3 was compiled without preupdate hook support"
+      end
     end
 
     # Returns a Statement object representing the given SQL. This does not
