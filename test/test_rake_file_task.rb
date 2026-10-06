@@ -73,6 +73,39 @@ class TestRakeFileTask < Rake::TestCase # :nodoc:
     assert t1.needed?, "Should need to rebuild old file because of new"
   end
 
+  def test_order_only_prerequisite_does_not_make_target_needed
+    now = Time.now
+    create_file("normal.h", now - 60)
+    create_file(OLDFILE, now)      # newer than the target
+    create_file(NEWFILE, now - 30) # up to date vs normal.h only
+
+    target = Rake.application.intern(FileTask, NEWFILE).enhance(["normal.h"])
+    target | [OLDFILE]
+
+    assert ! target.needed?,
+      "a newer order-only prerequisite must not force a rebuild"
+  ensure
+    delete_file("normal.h")
+    delete_file(OLDFILE)
+    delete_file(NEWFILE)
+  end
+
+  def test_normal_prerequisite_of_order_only_chain_does_not_make_needed
+    now = Time.now
+    create_file("normal.h", now)   # newer, but only reachable order-only
+    create_file(NEWFILE, now - 30)
+
+    file "order_dir" => ["normal.h"]
+    target = Rake.application.intern(FileTask, NEWFILE).enhance([])
+    target | ["order_dir"]
+
+    assert ! target.needed?,
+      "prerequisites of an order-only task must not force a rebuild"
+  ensure
+    delete_file("normal.h")
+    delete_file(NEWFILE)
+  end
+
   def test_file_depends_on_task_depend_on_file
     create_timed_files(OLDFILE, NEWFILE)
 

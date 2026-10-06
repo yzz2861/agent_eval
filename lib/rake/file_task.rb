@@ -32,16 +32,25 @@ module Rake
 
     private
 
-    # Are there any prerequisites with a later time than the given time stamp?
+    # Are there any normal prerequisites with a later time than the given
+    # time stamp?  Order-only prerequisites are not considered: they order
+    # the build but must never force a target to be rebuilt.
     def out_of_date?(stamp)
-      all_prerequisite_tasks.any? { |prereq|
-        prereq_task = application[prereq, @scope]
-        if prereq_task.instance_of?(Rake::FileTask)
-          prereq_task.timestamp > stamp || @application.options.build_all
+      stale_prerequisite?(self, stamp, {})
+    end
+
+    # Is a normal prerequisite of +task+ (transitively) newer than +stamp+?
+    def stale_prerequisite?(task, stamp, seen)
+      task.normal_prerequisite_tasks.any? do |prereq|
+        next false if seen[prereq.name]
+        seen[prereq.name] = true
+        later = if prereq.instance_of?(Rake::FileTask)
+          prereq.timestamp > stamp || @application.options.build_all
         else
-          prereq_task.timestamp > stamp
+          prereq.timestamp > stamp
         end
-      }
+        later || stale_prerequisite?(prereq, stamp, seen)
+      end
     end
 
     # ----------------------------------------------------------------

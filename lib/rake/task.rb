@@ -62,6 +62,12 @@ module Rake
       (prerequisites + order_only_prerequisites).map { |pre| lookup_prerequisite(pre) }
     end
 
+    # List of prerequisite tasks that are tracked for timestamps.  Unlike
+    # #prerequisite_tasks, order-only prerequisites are excluded.
+    def normal_prerequisite_tasks # :nodoc:
+      prerequisites.map { |pre| lookup_prerequisite(pre) }
+    end
+
     def lookup_prerequisite(prerequisite_name) # :nodoc:
       scoped_prerequisite_task = application[prerequisite_name, @scope]
       if scoped_prerequisite_task == self
