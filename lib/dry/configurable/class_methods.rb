@@ -11,6 +11,8 @@ module Dry
 
         subclass.instance_variable_set(:@__config_extension__, __config_extension__)
 
+        subclass.instance_variable_set(:@__profiles__, profiles.dup)
+
         new_settings = settings.dup
         subclass.instance_variable_set(:@__settings__, new_settings)
 
@@ -64,6 +66,80 @@ module Dry
       # @api public
       def config
         @__config__ ||= __config_build__
+      end
+
+      # Defines a named configuration profile.
+      #
+      # A profile holds overrides for the settings and may inherit from one or
+      # more other profiles. Base profiles are listed in priority order: an
+      # earlier parent takes precedence over a later parent. The effective
+      # precedence order is computed with C3 linearization; see
+      # {Profiles#lineage}.
+      #
+      # @example
+      #
+      #   class App
+      #     extend Dry::Configurable
+      #
+      #     setting :db
+      #     setting :cache, :memory
+      #
+      #     profile :development do
+      #       db "sqlite:memory"
+      #     end
+      #
+      #     profile :production, inherits: :development do
+      #       db "postgresql://prod"
+      #     end
+      #   end
+      #
+      # @param name [Symbol] the profile name
+      # @param inherits [Symbol, Array<Symbol>] one or more base profile names
+      # @yield block declaring setting overrides (see {ProfileDSL})
+      #
+      # @return [Dry::Configurable::Profile]
+      #
+      # @api public
+      def profile(name, inherits: EMPTY_ARRAY, &block)
+        parents = inherits.is_a?(::Array) ? inherits : [inherits]
+        profiles.register(name, parents, block, settings: settings)
+      end
+
+      # Returns the registry of named profiles defined on this class.
+      #
+      # @return [Profiles]
+      #
+      # @api public
+      def profiles
+        @__profiles__ ||= Profiles.new
+      end
+
+      # Builds and returns an independent configuration for the named profile.
+      #
+      # The returned {Config} is a fresh object: mutable values and nested
+      # configs are copied, so it is never shared with another profile or with
+      # the class-level {#config}.
+      #
+      # @param name [Symbol] the profile to resolve
+      #
+      # @return [Dry::Configurable::Config]
+      #
+      # @api public
+      def config_for(name)
+        profiles.build_config(name, settings, __config_extension__.config_class)
+      end
+      alias_method :profile_config, :config_for
+
+      # Returns the resolved inheritance order (C3 linearization) for the named
+      # profile, from highest precedence (the profile itself) to lowest.
+      #
+      # @param name [Symbol]
+      #
+      # @return [Array<Symbol>]
+      #
+      # @api public
+      def profile_lineage(name)
+        profiles.lineage(name)
       end
 
       # @api private

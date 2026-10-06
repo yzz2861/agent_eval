@@ -56,7 +56,7 @@ module Dry
           "#{root}/dry-configurable.rb",
           "#{root}/dry/configurable/{constants,errors,version}.rb"
         )
-        loader.inflector.inflect("dsl" => "DSL")
+        loader.inflector.inflect("dsl" => "DSL", "profile_dsl" => "ProfileDSL")
       end
     end
 

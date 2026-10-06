@@ -37,6 +37,22 @@ module Dry
         dup.tap { |config| config.instance_variable_set(:@_settings, settings) }
       end
 
+      # Assigns a setting's own declared default without running its constructor
+      # a second time. Used by named profiles to honor `restore_default!`.
+      #
+      # @api private
+      def _assign_default(name)
+        setting = _settings[name]
+        value = setting.to_value
+
+        unless value.equal?(Undefined)
+          _configured.add(name)
+          _values[name] = value
+        end
+
+        value
+      end
+
       # Get config value by a key
       #
       # @param [String,Symbol] name
