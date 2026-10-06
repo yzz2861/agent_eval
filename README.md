@@ -71,6 +71,7 @@ algorithms. The graph algorithms in RGL currently include:
 *   Topological Sort {RGL::TopsortIterator}
 *   Connected Components {RGL::Graph#each_connected_component}
 *   Strongly Connected Components {RGL::Graph#strongly_connected_components}
+*   Articulation Points, Bridges and Biconnected Components {RGL::Graph#biconnectivity}
 *   Transitive Closure {RGL::Graph#transitive_closure}
 *   Dijkstra's Shortest Path Algorithm {RGL::DijkstraAlgorithm}
 *   Bellman Ford Algorithm {RGL::BellmanFordAlgorithm}
