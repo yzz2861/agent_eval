@@ -254,6 +254,12 @@ MessagePack for Ruby provides a buffer API so that you can read or write data by
 This [MessagePack::Buffer](http://ruby.msgpack.org/MessagePack/Buffer.html) is backed with a fixed-length shared memory pool which is very fast for small data (<= 4KB),
 and has zero-copy capability which significantly affects performance to handle large binary data.
 
+## Binary views
+
+Set `binary_view: true` on an `Unpacker` to deserialize MessagePack bin fields as frozen `MessagePack::Unpacker::BinaryView` objects. Ordinary calls and text fields continue to return `String`. Views expose `bytesize`, `byteslice`/`slice`/`[]`, and `write_to(io)` for validation or forwarding without materializing another string.
+
+Zero copy is provided only when an entire bin field lies inside one internally mapped input chunk. Fields that span multiple `feed` calls, arrive through an IO, or land in internal buffers are handled by an explicit, contiguous fallback copy, reported by `zero_copy? == false`. A returned view keeps its bytes alive and unchanged even if the unpacker is fed more data, reset, the garbage collector runs, or the original input string is reused.
+
 ## How to build and run tests
 
 Before building msgpack, you need to install bundler and dependencies.

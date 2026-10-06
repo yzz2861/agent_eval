@@ -41,37 +41,39 @@ public class Decoder implements Iterator<IRubyObject> {
   private boolean symbolizeKeys;
   private boolean freeze;
   private boolean allowUnknownExt;
+  private boolean binaryView;
 
   public Decoder(Ruby runtime) {
-    this(runtime, null, new byte[] {}, 0, 0, false, false, false);
+    this(runtime, null, new byte[] {}, 0, 0, false, false, false, false);
   }
 
   public Decoder(Ruby runtime, Unpacker unpacker) {
-    this(runtime, unpacker, new byte[] {}, 0, 0, false, false, false);
+    this(runtime, unpacker, new byte[] {}, 0, 0, false, false, false, false);
   }
 
   public Decoder(Ruby runtime, byte[] bytes) {
-    this(runtime, null, bytes, 0, bytes.length, false, false, false);
+    this(runtime, null, bytes, 0, bytes.length, false, false, false, false);
   }
 
   public Decoder(Ruby runtime, Unpacker unpacker, byte[] bytes) {
-    this(runtime, unpacker, bytes, 0, bytes.length, false, false, false);
+    this(runtime, unpacker, bytes, 0, bytes.length, false, false, false, false);
   }
 
   public Decoder(Ruby runtime, Unpacker unpacker, byte[] bytes, boolean symbolizeKeys, boolean freeze, boolean allowUnknownExt) {
-    this(runtime, unpacker, bytes, 0, bytes.length, symbolizeKeys, freeze, allowUnknownExt);
+    this(runtime, unpacker, bytes, 0, bytes.length, symbolizeKeys, freeze, allowUnknownExt, false);
   }
 
   public Decoder(Ruby runtime, Unpacker unpacker, byte[] bytes, int offset, int length) {
-    this(runtime, unpacker, bytes, offset, length, false, false, false);
+    this(runtime, unpacker, bytes, offset, length, false, false, false, false);
   }
 
-  public Decoder(Ruby runtime, Unpacker unpacker, byte[] bytes, int offset, int length, boolean symbolizeKeys, boolean freeze, boolean allowUnknownExt) {
+  public Decoder(Ruby runtime, Unpacker unpacker, byte[] bytes, int offset, int length, boolean symbolizeKeys, boolean freeze, boolean allowUnknownExt, boolean binaryView) {
     this.runtime = runtime;
     this.unpacker = unpacker;
     this.symbolizeKeys = symbolizeKeys;
     this.freeze = freeze;
     this.allowUnknownExt = allowUnknownExt;
+    this.binaryView = binaryView;
     this.binaryEncoding = runtime.getEncodingService().getAscii8bitEncoding();
     this.utf8Encoding = UTF8Encoding.INSTANCE;
     this.unpackErrorClass = runtime.getModule("MessagePack").getClass("UnpackError");
@@ -130,10 +132,20 @@ public class Decoder implements Iterator<IRubyObject> {
     byte[] bytes = readBytes(size);
     ByteList byteList = new ByteList(bytes, encoding);
     RubyString string = runtime.newString(byteList);
+    if (binaryView && encoding == binaryEncoding) {
+      string = (RubyString) wrapBinaryView(string);
+      return string;
+    }
     if (this.freeze) {
       string = runtime.freezeAndDedupString(string);
     }
     return string;
+  }
+
+  private IRubyObject wrapBinaryView(RubyString string) {
+    RubyModule unpackerClass = runtime.getModule("MessagePack").getClass("Unpacker");
+    RubyClass binaryViewClass = unpackerClass.getClass("BinaryView");
+    return binaryViewClass.newInstance(runtime.getCurrentContext(), string, runtime.getFalse());
   }
 
   private IRubyObject consumeArray(int size) {

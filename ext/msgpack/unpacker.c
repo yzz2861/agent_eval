@@ -17,6 +17,7 @@
  */
 
 #include "unpacker.h"
+#include "unpacker_class.h"
 #include "rmem.h"
 #include "extension_value_class.h"
 #include <assert.h>
@@ -332,6 +333,46 @@ static inline bool is_reading_map_key(msgpack_unpacker_t* uk)
     return false;
 }
 
+static VALUE new_binary_view(msgpack_unpacker_t* uk)
+{
+    VALUE klass = rb_const_get_at(cMessagePack_Unpacker, rb_intern("BinaryView"));
+    return rb_funcallv(klass, rb_intern("_native_alloc"), 0, NULL);
+}
+
+static VALUE finish_binary_view(VALUE view, bool zero_copy)
+{
+    VALUE argv[1] = { zero_copy ? Qtrue : Qfalse };
+    return rb_funcallv(view, rb_intern("_native_finish"), 1, argv);
+}
+
+static VALUE read_binary_view(msgpack_unpacker_t* uk, size_t length)
+{
+    bool zero_copy = false;
+    VALUE view = new_binary_view(uk);
+
+    if(length <= msgpack_buffer_top_readable_size(UNPACKER_BUFFER_(uk)) &&
+            uk->buffer.head->mapped_string != NO_MAPPED_STRING) {
+        size_t offset = uk->buffer.read_buffer - uk->buffer.head->first;
+        VALUE string = rb_str_substr(uk->buffer.head->mapped_string, offset, length);
+        rb_str_replace(view, string);
+        zero_copy = true;
+        _msgpack_buffer_consumed(UNPACKER_BUFFER_(uk), length);
+    } else {
+        if(!msgpack_buffer_ensure_readable(UNPACKER_BUFFER_(uk), length)) {
+            rb_raise(rb_eEOFError, "end of buffer reached");
+        }
+        size_t remaining = length;
+        while(remaining > 0) {
+            size_t available = msgpack_buffer_top_readable_size(UNPACKER_BUFFER_(uk));
+            rb_str_cat(view, uk->buffer.read_buffer, available);
+            _msgpack_buffer_consumed(UNPACKER_BUFFER_(uk), available);
+            remaining -= available;
+        }
+    }
+
+    return finish_binary_view(view, zero_copy);
+}
+
 static int read_raw_body_cont(msgpack_unpacker_t* uk)
 {
     size_t length = uk->reading_raw_remaining;
@@ -409,6 +450,12 @@ static inline int read_raw_body_begin(msgpack_unpacker_t* uk, int raw_type)
 
     /* try optimized read */
     size_t length = uk->reading_raw_remaining;
+    if(raw_type == RAW_TYPE_BINARY && uk->binary_view) {
+        VALUE view = read_binary_view(uk, length);
+        uk->reading_raw_remaining = 0;
+        return object_complete(uk, view);
+    }
+
     if(length <= msgpack_buffer_top_readable_size(UNPACKER_BUFFER_(uk))) {
         int ret;
         if ((uk->optimized_symbol_ext_type && uk->symbol_ext_type == raw_type)) {

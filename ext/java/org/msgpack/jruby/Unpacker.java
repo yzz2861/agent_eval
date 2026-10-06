@@ -36,6 +36,7 @@ public class Unpacker extends RubyObject {
   private boolean symbolizeKeys;
   private boolean freeze;
   private boolean allowUnknownExt;
+  private boolean binaryView;
 
   public Unpacker(Ruby runtime, RubyClass type) {
     this(runtime, type, new ExtensionRegistry());
@@ -60,6 +61,7 @@ public class Unpacker extends RubyObject {
     symbolizeKeys = false;
     allowUnknownExt = false;
     freeze = false;
+    binaryView = false;
 
     IRubyObject io = null;
     RubyHash options = null;
@@ -90,6 +92,10 @@ public class Unpacker extends RubyObject {
       if (au != null) {
         allowUnknownExt = au.isTrue();
       }
+      IRubyObject bv = options.fastARef(runtime.newSymbol("binary_view"));
+      if (bv != null) {
+        binaryView = bv.isTrue();
+      }
 
     }
 
@@ -119,6 +125,11 @@ public class Unpacker extends RubyObject {
   @JRubyMethod(name = "allow_unknown_ext?")
   public IRubyObject isAllowUnknownExt(ThreadContext ctx) {
     return allowUnknownExt ? ctx.runtime.getTrue() : ctx.runtime.getFalse();
+  }
+
+  @JRubyMethod(name = "binary_view?")
+  public IRubyObject isBinaryView(ThreadContext ctx) {
+    return binaryView ? ctx.runtime.getTrue() : ctx.runtime.getFalse();
   }
 
   @JRubyMethod(name = "registered_types_internal", visibility = PRIVATE)
@@ -160,7 +171,7 @@ public class Unpacker extends RubyObject {
     if (limit == -1) {
       limit = byteList.length() - offset;
     }
-    Decoder decoder = new Decoder(ctx.runtime, this, byteList.unsafeBytes(), byteList.begin() + offset, limit, symbolizeKeys, freeze, allowUnknownExt);
+    Decoder decoder = new Decoder(ctx.runtime, this, byteList.unsafeBytes(), byteList.begin() + offset, limit, symbolizeKeys, freeze, allowUnknownExt, binaryView);
     try {
       data = null;
       data = decoder.next();
@@ -190,7 +201,7 @@ public class Unpacker extends RubyObject {
   public IRubyObject feed(ThreadContext ctx, IRubyObject data) {
     ByteList byteList = data.asString().getByteList();
     if (decoder == null) {
-      decoder = new Decoder(ctx.runtime, this, byteList.unsafeBytes(), byteList.begin(), byteList.length(), symbolizeKeys, freeze, allowUnknownExt);
+      decoder = new Decoder(ctx.runtime, this, byteList.unsafeBytes(), byteList.begin(), byteList.length(), symbolizeKeys, freeze, allowUnknownExt, binaryView);
     } else {
       decoder.feed(byteList.unsafeBytes(), byteList.begin(), byteList.length());
     }
@@ -326,7 +337,7 @@ public class Unpacker extends RubyObject {
     ByteList byteList = str.getByteList();
     this.stream = stream;
     this.decoder = null;
-    this.decoder = new Decoder(ctx.runtime, this, byteList.unsafeBytes(), byteList.begin(), byteList.length(), symbolizeKeys, freeze, allowUnknownExt);
+    this.decoder = new Decoder(ctx.runtime, this, byteList.unsafeBytes(), byteList.begin(), byteList.length(), symbolizeKeys, freeze, allowUnknownExt, binaryView);
     return getStream(ctx);
   }
 

@@ -22,6 +22,7 @@ module MessagePack
     # * *:freeze* freeze the deserialized objects. Can allow string deduplication and some allocation elision.
     # * *:key_cache* Enable caching of map keys, this can improve performance significantly if the same map keys are frequently encountered, but also degrade performance if that's not the case.
     # * *:allow_unknown_ext* allow to deserialize ext type object with unknown type id as ExtensionValue instance. Otherwise (by default), unpacker throws UnknownExtTypeError.
+    # * *:binary_view* return bin fields as frozen MessagePack::Unpacker::BinaryView objects instead of String objects. Text (str) fields still return String. A view supports byteslice/slice/[] for ranged reads and write_to(io). Views are zero-copy only when the complete bin field is contained in one internally mapped input chunk; fields split across feed calls, IO reads, or internal allocations return a view whose zero_copy? is false and own a contiguous copy. Existing views remain valid after more feed calls, reset, GC, or reuse of the original Ruby string.
     #
     # See also Buffer#initialize for other options.
     #
@@ -86,6 +87,14 @@ module MessagePack
     # @return [Object] deserialized object
     #
     def read
+    end
+
+    #
+    # Returns true when this unpacker deserializes bin fields as BinaryView objects.
+    #
+    # @return [Boolean]
+    #
+    def binary_view?
     end
 
     alias unpack read
