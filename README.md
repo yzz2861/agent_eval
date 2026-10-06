@@ -228,6 +228,27 @@ If a value contains a `$` and it is not intended to be a variable, wrap it in si
 PASSWORD='pas$word'
 ```
 
+### Parameter Expansion
+
+In addition to plain `$VAR` and `${VAR}`, dotenv supports shell-style parameter expansion in unquoted or double-quoted values. An empty string is distinct from an unset variable:
+
+| Expression          | Expands to                                                        |
+| ------------------- | ----------------------------------------------------------------- |
+| `${VAR:-default}`   | `default` when `VAR` is unset or empty, otherwise `VAR`           |
+| `${VAR-default}`    | `default` only when `VAR` is unset; an empty `VAR` stays empty     |
+| `${VAR:+alternate}` | `alternate` when `VAR` is set and non-empty, otherwise nothing    |
+| `${VAR+alternate}`  | `alternate` when `VAR` is set (even when empty), otherwise nothing |
+| `${VAR:?message}`   | raises the `message` when `VAR` is unset or empty, otherwise `VAR` |
+| `${VAR?message}`    | raises the `message` only when `VAR` is unset, otherwise `VAR`    |
+
+```shell
+HOST=${HOST:-localhost}
+URL="postgres://${USER:-deploy}@${HOST}:${PORT:+5432}"
+API_KEY=${API_KEY:?API_KEY is required}
+```
+
+Default and alternate values may reference other variables or command substitutions. Only the branch that is selected is expanded, so commands and variables in a branch that is not used are never evaluated. Escaped dollar signs (`\$`) are left literal as usual, and single quoted values are never expanded. Expansion is recursive and capped at a fixed depth; when the limit or a required variable error is reached, the error message includes the line and column of the offending expression.
+
 ### Comments
 
 Comments may be added to your file as such:

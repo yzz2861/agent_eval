@@ -8,10 +8,9 @@ module Dotenv
   # Parses the `.env` file format into key/value pairs.
   # It allows for variable substitutions, command substitutions, and exporting of variables.
   class Parser
-    @substitutions = [
-      Dotenv::Substitutions::Command,
-      Dotenv::Substitutions::Variable
-    ]
+    # Additional substitutions run after the built-in variable/parameter
+    # expansion. Each object must respond to `call(value, hash)`.
+    @substitutions = []
 
     LINE = /
       (?:^|\A)                # beginning of line
@@ -43,11 +42,13 @@ module Dotenv
       end
     end
 
-    def initialize(string, overwrite: false)
+    # @param env [#key?, #[]] read-only environment view used for lookups
+    def initialize(string, overwrite: false, env: ENV)
       # Convert line breaks to same format
       @string = string.gsub(/\r\n?/, "\n")
       @hash = {}
       @overwrite = overwrite
+      @env = env
     end
 
     def call
@@ -56,14 +57,16 @@ module Dotenv
 
         if existing?(match[:key])
           # Use value from already defined variable
-          @hash[match[:key]] = ENV[match[:key]]
+          @hash[match[:key]] = @env[match[:key]]
         elsif match[:export] && !match[:value]
           # Check for exported variable with no value
           if !@hash.member?(match[:key])
             raise FormatError, "Line #{match.to_s.inspect} has an unset variable"
           end
         else
-          @hash[match[:key]] = parse_value(match[:value] || "")
+          raw_value = match[:value] || ""
+          value_offset = match[:value] ? match.begin(:value) : 0
+          @hash[match[:key]] = parse_value(raw_value, value_offset)
         end
       end
 
@@ -74,11 +77,12 @@ module Dotenv
 
     # Determine if a variable is already defined and should not be overwritten.
     def existing?(key)
-      !@overwrite && key != "DOTENV_LINEBREAK_MODE" && ENV.key?(key)
+      !@overwrite && key != "DOTENV_LINEBREAK_MODE" && @env.key?(key)
     end
 
-    def parse_value(value)
+    def parse_value(value, value_offset)
       # Remove surrounding quotes
+      raw_value = value
       value = value.strip.sub(QUOTED_STRING, '\2')
       maybe_quote = Regexp.last_match(1)
 
@@ -88,10 +92,23 @@ module Dotenv
       # Unescape characters and performs substitutions unless value is single quoted
       if maybe_quote != "'"
         value = unescape_characters(value)
+        value = Dotenv::Substitutions::Variable.call(
+          value,
+          @hash,
+          view: @env,
+          source: @string,
+          base_offset: content_offset(raw_value, value_offset, maybe_quote)
+        )
         self.class.substitutions.each { |proc| value = proc.call(value, @hash) }
       end
 
       value
+    end
+
+    # Character offset of the parsed value body inside the full source.
+    def content_offset(raw_value, value_offset, quote)
+      stripped_offset = raw_value.index(/\S/) || 0
+      value_offset + stripped_offset + (quote ? 1 : 0)
     end
 
     def unescape_characters(value)
