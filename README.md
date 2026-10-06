@@ -74,6 +74,7 @@ algorithms. The graph algorithms in RGL currently include:
 *   Transitive Closure {RGL::Graph#transitive_closure}
 *   Dijkstra's Shortest Path Algorithm {RGL::DijkstraAlgorithm}
 *   Bellman Ford Algorithm {RGL::BellmanFordAlgorithm}
+*   Pareto-Optimal (Multi-Objective) Simple Paths {RGL::Graph#pareto_shortest_paths}
 
 ### Data Structures
 
