@@ -660,11 +660,42 @@ memused(VALUE self)
 }
 #endif
 
+/* call-seq: stmt.reprepare_count
+ *
+ * Return the number of times that the statement has been automatically
+ * reprepared by SQLite (for example because the schema changed). Returns 0
+ * when the loaded SQLite library does not expose statement status counters.
+ */
+static VALUE
+reprepare_count(VALUE self)
+{
+    sqlite3StmtRubyPtr ctx;
+    TypedData_Get_Struct(self, sqlite3StmtRuby, &statement_type, ctx);
+
+    REQUIRE_LIVE_DB(ctx);
+    REQUIRE_OPEN_STMT(ctx);
+
+#ifdef SQLITE_STMTSTATUS_REPREPARE
+    return INT2NUM(sqlite3_stmt_status(ctx->st, SQLITE_STMTSTATUS_REPREPARE, 0));
+#else
+    return INT2NUM(0);
+#endif
+}
+
 #ifdef HAVE_SQLITE3_COLUMN_DATABASE_NAME
+
+static VALUE
+column_metadata_string(const char *name)
+{
+    return name ? rb_utf8_str_new_cstr(name) : Qnil;
+}
 
 /* call-seq: stmt.database_name(column_index)
  *
- * Return the database name for the column at +column_index+
+ * Return the name of the database from which the column at
+ * +column_index+ originates, or nil when the column is an expression or the
+ * origin cannot be determined. Requires a SQLite library built with column
+ * metadata support (SQLITE_ENABLE_COLUMN_METADATA).
  */
 static VALUE
 database_name(VALUE self, VALUE index)
@@ -675,8 +706,56 @@ database_name(VALUE self, VALUE index)
     REQUIRE_LIVE_DB(ctx);
     REQUIRE_OPEN_STMT(ctx);
 
-    return SQLITE3_UTF8_STR_NEW2(
+    return column_metadata_string(
                sqlite3_column_database_name(ctx->st, NUM2INT(index)));
+}
+
+#endif
+
+#ifdef HAVE_SQLITE3_COLUMN_TABLE_NAME
+
+/* call-seq: stmt.table_name(column_index)
+ *
+ * Return the name of the table from which the column at +column_index+
+ * originates, or nil when the column is an expression or the origin cannot
+ * be determined. Requires a SQLite library built with column metadata support
+ * (SQLITE_ENABLE_COLUMN_METADATA).
+ */
+static VALUE
+table_name(VALUE self, VALUE index)
+{
+    sqlite3StmtRubyPtr ctx;
+    TypedData_Get_Struct(self, sqlite3StmtRuby, &statement_type, ctx);
+
+    REQUIRE_LIVE_DB(ctx);
+    REQUIRE_OPEN_STMT(ctx);
+
+    return column_metadata_string(
+               sqlite3_column_table_name(ctx->st, NUM2INT(index)));
+}
+
+#endif
+
+#ifdef HAVE_SQLITE3_COLUMN_ORIGIN_NAME
+
+/* call-seq: stmt.origin_name(column_index)
+ *
+ * Return the original (unaliased) name of the column at +column_index+, or
+ * nil when the column is an expression or the origin cannot be determined.
+ * Requires a SQLite library built with column metadata support
+ * (SQLITE_ENABLE_COLUMN_METADATA).
+ */
+static VALUE
+origin_name(VALUE self, VALUE index)
+{
+    sqlite3StmtRubyPtr ctx;
+    TypedData_Get_Struct(self, sqlite3StmtRuby, &statement_type, ctx);
+
+    REQUIRE_LIVE_DB(ctx);
+    REQUIRE_OPEN_STMT(ctx);
+
+    return column_metadata_string(
+               sqlite3_column_origin_name(ctx->st, NUM2INT(index)));
 }
 
 #endif
@@ -744,11 +823,18 @@ init_sqlite3_statement(void)
 #ifdef HAVE_SQLITE3_COLUMN_DATABASE_NAME
     rb_define_method(cSqlite3Statement, "database_name", database_name, 1);
 #endif
+#ifdef HAVE_SQLITE3_COLUMN_TABLE_NAME
+    rb_define_method(cSqlite3Statement, "table_name", table_name, 1);
+#endif
+#ifdef HAVE_SQLITE3_COLUMN_ORIGIN_NAME
+    rb_define_method(cSqlite3Statement, "origin_name", origin_name, 1);
+#endif
 #ifdef SQLITE_STMTSTATUS_MEMUSED
     rb_define_method(cSqlite3Statement, "memused", memused, 0);
 #endif
 
     rb_define_private_method(cSqlite3Statement, "prepare", prepare, 2);
+    rb_define_private_method(cSqlite3Statement, "reprepare_count", reprepare_count, 0);
     rb_define_private_method(cSqlite3Statement, "stats_as_hash", stats_as_hash, 0);
     rb_define_private_method(cSqlite3Statement, "stat_for", stat_for, 1);
 }

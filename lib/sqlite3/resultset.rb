@@ -81,6 +81,12 @@ module SQLite3
       @stmt.columns
     end
 
+    # Returns column metadata as an array of position-ordered hashes, one per
+    # result column. See Statement#column_metadata for the hash contents.
+    def column_metadata
+      @stmt.column_metadata
+    end
+
     # Return the next row as a hash
     def next_hash
       row = @stmt.step

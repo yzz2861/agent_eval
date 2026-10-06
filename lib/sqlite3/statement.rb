@@ -14,6 +14,35 @@ module SQLite3
   class Statement
     include Enumerable
 
+    class << self
+      # Whether the loaded SQLite library supports column origin metadata (it
+      # was built with +SQLITE_ENABLE_COLUMN_METADATA+). When this is false,
+      # #column_metadata still reports the display name, but +database+,
+      # +table+ and +column+ are always nil.
+      def column_metadata_supported?
+        return @column_metadata_supported unless @column_metadata_supported.nil?
+
+        @column_metadata_supported = probe_column_metadata_support
+      end
+
+      private
+
+      # The only reliable way to detect a library built without
+      # SQLITE_ENABLE_COLUMN_METADATA is to ask for the origin of a known
+      # table column: such a library always returns NULL, even though the
+      # functions are present at link time.
+      def probe_column_metadata_support
+        SQLite3::Database.new(":memory:") do |db|
+          db.execute("CREATE TABLE sqlite3_ruby_column_metadata_probe (id INTEGER PRIMARY KEY)")
+          db.prepare("SELECT id FROM sqlite3_ruby_column_metadata_probe") do |stmt|
+            stmt.respond_to?(:database_name) && !stmt.database_name(0).nil?
+          end
+        end
+      rescue StandardError
+        false
+      end
+    end
+
     # This is any text that followed the first valid SQL statement in the text
     # with which the statement was initialized. If there was no trailing text,
     # this will be the empty string.
@@ -33,6 +62,8 @@ module SQLite3
       @connection = db
       @columns = nil
       @types = nil
+      @column_metadata = nil
+      @metadata_reprepare_count = nil
       @remainder = prepare db, sql
     end
 
@@ -130,11 +161,12 @@ module SQLite3
       !done?
     end
 
-    # Return an array of the column names for this statement. Note that this
-    # may execute the statement in order to obtain the metadata; this makes it
-    # a (potentially) expensive operation.
+    # Return an array of the display column names for this statement, in
+    # column order. This is the name used in the result set (the alias if one
+    # was given). Note that this may execute the statement in order to obtain
+    # the metadata; this makes it a (potentially) expensive operation.
     def columns
-      get_metadata unless @columns
+      get_metadata if metadata_stale?
       @columns
     end
 
@@ -151,8 +183,32 @@ module SQLite3
     # makes it a (potentially) expensive operation.
     def types
       must_be_open!
-      get_metadata unless @types
+      get_metadata if metadata_stale?
       @types
+    end
+
+    # Return column metadata for this statement as an array of hashes in
+    # column order (one hash per result column). Each hash contains:
+    #
+    # - +name+: the display name of the result column (the alias, if given)
+    # - +database+: the schema name of the originating database, or nil
+    # - +table+: the name of the originating table, or nil
+    # - +column+: the original (unaliased) column name, or nil
+    #
+    # The origin keys are nil for expressions, literals and other columns for
+    # which SQLite cannot determine the source; they are never guessed. Views
+    # resolve to the underlying table when SQLite is able to do so.
+    #
+    # If the loaded SQLite library was built without column metadata support,
+    # use Statement.column_metadata_supported? to detect that case; the origin
+    # keys are then always nil.
+    #
+    # Note that this may execute the statement in order to obtain the metadata;
+    # this makes it a (potentially) expensive operation.
+    def column_metadata
+      must_be_open!
+      get_metadata if metadata_stale?
+      @column_metadata
     end
 
     # Performs a sanity check to ensure that the statement is not
@@ -192,17 +248,40 @@ module SQLite3
 
     private
 
+    # Metadata is cached, but SQLite may transparently reprepare the
+    # statement (for example after a schema change). The reprepare counter is
+    # snapshotted when the metadata is gathered and used to invalidate the
+    # cache.
+    def metadata_stale?
+      @columns.nil? || @metadata_reprepare_count != reprepare_count
+    end
+
     # A convenience method for obtaining the metadata about the query. Note
     # that this will actually execute the SQL, which means it can be a
     # (potentially) expensive operation.
     def get_metadata
-      @columns = Array.new(column_count) do |column|
-        column_name column
+      count = column_count
+      origins_supported = self.class.column_metadata_supported?
+      @column_metadata = Array.new(count) do |column|
+        metadata = {
+          name: column_name(column),
+          database: nil,
+          table: nil,
+          column: nil
+        }
+        if origins_supported
+          metadata[:database] = database_name(column)
+          metadata[:table] = table_name(column)
+          metadata[:column] = origin_name(column)
+        end
+        metadata.freeze
       end
-      @types = Array.new(column_count) do |column|
-        val = column_decltype(column)
-        val&.downcase
+      @column_metadata.freeze
+      @columns = @column_metadata.map { |metadata| metadata[:name] }
+      @types = Array.new(count) do |column|
+        column_decltype(column)&.downcase
       end
+      @metadata_reprepare_count = reprepare_count
     end
   end
 end
