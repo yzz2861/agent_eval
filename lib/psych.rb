@@ -28,6 +28,7 @@ require_relative 'psych/json/tree_builder'
 require_relative 'psych/json/stream'
 require_relative 'psych/handlers/document_stream'
 require_relative 'psych/class_loader'
+require_relative 'psych/source_map'
 
 ###
 # = Overview
@@ -276,6 +277,23 @@ module Psych
   end
 
   ###
+  # Works like unsafe_load, but also returns a Psych::SourceMap that can
+  # explain where each loaded value originated.
+  def self.unsafe_load_with_source yaml, filename: nil, fallback: false,
+                                  symbolize_names: false, freeze: false,
+                                  strict_integer: false, parse_symbols: true
+    result = parse(yaml, filename: filename)
+    return [fallback, nil] unless result
+    result.to_ruby_with_source(
+      filename: source_filename(yaml, filename),
+      symbolize_names: symbolize_names,
+      freeze: freeze,
+      strict_integer: strict_integer,
+      parse_symbols: parse_symbols
+    )
+  end
+
+  ###
   # Safely load the yaml string in +yaml+.  By default, only the following
   # classes are allowed to be deserialized:
   #
@@ -328,12 +346,58 @@ module Psych
                                                permitted_symbols.map(&:to_s))
     scanner      = ScalarScanner.new class_loader, strict_integer: strict_integer, parse_symbols: parse_symbols
     visitor = if aliases
+                Visitors::ToRuby.new(scanner, class_loader,
+                                     symbolize_names: symbolize_names,
+                                     freeze: freeze)
+              else
+                Visitors::NoAliasRuby.new(scanner, class_loader,
+                                          symbolize_names: symbolize_names,
+                                          freeze: freeze)
+              end
+    result = visitor.accept result
+    result
+  end
+
+  ###
+  # Works like safe_load, but also returns a Psych::SourceMap with the
+  # declaration, alias, and merge history for queried output paths.
+  def self.safe_load_with_source yaml, permitted_classes: [],
+                                 permitted_symbols: [], aliases: false,
+                                 filename: nil, fallback: nil,
+                                 symbolize_names: false, freeze: false,
+                                 strict_integer: false, parse_symbols: true
+    result = parse(yaml, filename: filename)
+    return [fallback, nil] unless result
+
+    class_loader = ClassLoader::Restricted.new(permitted_classes.map(&:to_s),
+                                               permitted_symbols.map(&:to_s))
+    scanner = ScalarScanner.new class_loader,
+                                strict_integer: strict_integer,
+                                parse_symbols: parse_symbols
+    visitor = if aliases
                 Visitors::ToRuby.new scanner, class_loader, symbolize_names: symbolize_names, freeze: freeze
               else
                 Visitors::NoAliasRuby.new scanner, class_loader, symbolize_names: symbolize_names, freeze: freeze
               end
-    result = visitor.accept result
-    result
+    ruby = visitor.accept result
+    sources = SourceMap.new(result,
+                           filename: source_filename(yaml, filename),
+                           symbolize_names: symbolize_names,
+                           scanner: scanner,
+                           class_loader: class_loader)
+    [ruby, sources]
+  end
+
+  def self.load_with_source_map(*args, **kwargs, &block)
+    load_with_source(*args, **kwargs, &block)
+  end
+
+  def self.safe_load_with_source_map(*args, **kwargs, &block)
+    safe_load_with_source(*args, **kwargs, &block)
+  end
+
+  def self.unsafe_load_with_source_map(*args, **kwargs, &block)
+    unsafe_load_with_source(*args, **kwargs, &block)
   end
 
   ###
@@ -376,6 +440,26 @@ module Psych
                     freeze: freeze,
                     strict_integer: strict_integer,
                     parse_symbols: parse_symbols
+  end
+
+  ###
+  # Works like load, but also returns a Psych::SourceMap that maps output
+  # paths back to YAML declarations and merge precedence.
+  def self.load_with_source yaml, permitted_classes: [Symbol],
+                            permitted_symbols: [], aliases: false,
+                            filename: nil, fallback: nil,
+                            symbolize_names: false, freeze: false,
+                            strict_integer: false, parse_symbols: true
+    safe_load_with_source yaml,
+                          permitted_classes: permitted_classes,
+                          permitted_symbols: permitted_symbols,
+                          aliases: aliases,
+                          filename: filename,
+                          fallback: fallback,
+                          symbolize_names: symbolize_names,
+                          freeze: freeze,
+                          strict_integer: strict_integer,
+                          parse_symbols: parse_symbols
   end
 
   ###
@@ -697,6 +781,13 @@ module Psych
     }
   end
 
+  # Same as unsafe_load_file, but returns the loaded value and its source map.
+  def self.unsafe_load_file_with_source filename, **kwargs
+    File.open(filename, 'r:bom|utf-8') {
+      |f| self.unsafe_load_with_source(f, filename: filename, **kwargs)
+    }
+  end
+
   ###
   # Safely loads the document contained in +filename+.  Returns the yaml contained in
   # +filename+ as a Ruby object, or if the file is empty, it returns
@@ -708,6 +799,13 @@ module Psych
     }
   end
 
+  # Same as safe_load_file, but returns the loaded value and its source map.
+  def self.safe_load_file_with_source filename, **kwargs
+    File.open(filename, 'r:bom|utf-8') {
+      |f| self.safe_load_with_source(f, filename: filename, **kwargs)
+    }
+  end
+
   ###
   # Loads the document contained in +filename+.  Returns the yaml contained in
   # +filename+ as a Ruby object, or if the file is empty, it returns
@@ -716,6 +814,13 @@ module Psych
   def self.load_file filename, **kwargs
     File.open(filename, 'r:bom|utf-8') { |f|
       self.load f, filename: filename, **kwargs
+    }
+  end
+
+  # Same as load_file, but returns the loaded value and its source map.
+  def self.load_file_with_source filename, **kwargs
+    File.open(filename, 'r:bom|utf-8') {
+      |f| self.load_with_source(f, filename: filename, **kwargs)
     }
   end
 
@@ -789,6 +894,11 @@ module Psych
   self.dump_tags = {}
   self.domain_types = {}
   # :startdoc:
+
+  def self.source_filename(yaml, filename)
+    filename || (yaml.respond_to?(:path) ? yaml.path : "<unknown>")
+  end
+  private_class_method :source_filename
 end
 
 require_relative 'psych/core_ext'

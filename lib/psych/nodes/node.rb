@@ -51,6 +51,31 @@ module Psych
       alias :transform :to_ruby
 
       ###
+      # Convert this node to Ruby and return the value together with a
+      # Psych::SourceMap.
+      def to_ruby_with_source(filename: nil, symbolize_names: false,
+                             freeze: false, strict_integer: false,
+                             parse_symbols: true)
+        class_loader = ClassLoader.new
+        scanner = ScalarScanner.new class_loader,
+                                    strict_integer: strict_integer,
+                                    parse_symbols: parse_symbols
+        visitor = Visitors::ToRuby.new scanner, class_loader,
+                                       symbolize_names: symbolize_names,
+                                       freeze: freeze
+        value = visitor.accept(self)
+        sources = SourceMap.new(self,
+                               filename: filename,
+                               symbolize_names: symbolize_names,
+                               scanner: scanner,
+                               class_loader: class_loader,
+                               strict_integer: strict_integer,
+                               parse_symbols: parse_symbols)
+        [value, sources]
+      end
+      alias :transform_with_source :to_ruby_with_source
+
+      ###
       # Convert this node to YAML.
       #
       # See also Psych::Visitors::Emitter
