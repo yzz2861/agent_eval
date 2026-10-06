@@ -249,6 +249,54 @@ end
 
 As with `extract`, existing files at the destination will raise `Zip::DestinationExistsError` unless a block is passed to resolve the conflict (see [Existing Files](#existing-files) below). Symlink entries are always skipped (ignored, with a warning), rather than extracted.
 
+### Transactional extraction (safe bulk install)
+
+When you are installing the contents of an archive and need the whole tree
+to appear atomically, use `Zip::File#extract_transactionally` (or the
+class method form):
+
+```ruby
+Zip::File.extract_transactionally('foo.zip', '/path/to/destination')
+```
+
+The archive is first extracted into a private staging directory next to
+the destination, where every entry is checked. Only when all entries have
+been extracted and verified (CRC and uncompressed size) is the staged tree
+moved into place with an atomic rename. If any entry fails, the staging
+directory is removed and the destination is left exactly as it was, so a
+failed install never leaves a half-extracted tree behind.
+
+Before writing anything, the entry set is preflighted and the operation is
+rejected if:
+
+* two entries resolve to the same path;
+* two entries differ only in case while the destination filesystem is
+  case-insensitive (override with `case_sensitive: true/false` to treat
+  names as case-sensitive or always perform the check);
+* a file and a directory claim the same path, or an entry would be
+  written below a path claimed by a file or symlink;
+* an entry name is absolute, contains `..`, or otherwise escapes the destination;
+* a symlink entry points to an absolute target or a target that resolves
+  outside the destination.
+
+If the destination already exists:
+
+```ruby
+# Default: refuse to touch an existing destination.
+Zip::File.extract_transactionally('foo.zip', '/path/to/destination',
+                                  on_existing: :refuse)
+
+# Move the existing destination to a '.bak' backup, publish the new tree,
+# then delete the backup. If publishing fails, the backup is restored.
+Zip::File.extract_transactionally('foo.zip', '/path/to/destination',
+                                  on_existing: :backup_replace)
+```
+
+All failures raise subclasses of `Zip::TransactionalExtractionError`
+(for example `Zip::UnsafeEntryPathError`, `Zip::UnsafeSymlinkError`,
+`Zip::CaseFoldingConflictError`, `Zip::CRCError`,
+`Zip::TransactionalDestinationExistsError`, or `Zip::RollbackError`).
+
 ### Reading a Zip file with `Zip::InputStream`
 
 `Zip::InputStream` can be used for faster reading of zip file content because it does not read the Central directory up front.

@@ -201,6 +201,19 @@ module Zip
           zf.extract_all(destination_directory, &block)
         end
       end
+
+      # Transactionally extracts every entry in the zip archive
+      # `zip_file_name` into `destination_directory` and returns the
+      # destination path. See #extract_transactionally for details.
+      def extract_transactionally(zip_file_name, destination_directory,
+                                  on_existing: :refuse, case_sensitive: nil)
+        Zip::File.open(zip_file_name) do |zf|
+          zf.extract_transactionally(
+            destination_directory,
+            on_existing: on_existing, case_sensitive: case_sensitive
+          )
+        end
+      end
     end
 
     # Returns an input stream to the specified entry. If a block is passed
@@ -391,6 +404,56 @@ module Zip
       end
 
       self
+    end
+
+    # Extracts every entry in the archive into `destination_directory` as a
+    # single transaction and returns the destination path.
+    #
+    # Extraction happens in a private staging directory next to the
+    # destination. Nothing appears at the destination until every entry has
+    # been extracted and verified, at which point the staged tree is moved
+    # into place with an atomic rename. If any entry fails (because its name
+    # is unsafe, its CRC or size does not match, a filesystem operation
+    # fails, and so on), the staging directory is removed and the
+    # destination is left untouched. There is never a partially extracted
+    # tree visible at the destination.
+    #
+    # Before anything is written, the entry set is preflighted:
+    #
+    # * Duplicate entry paths are rejected.
+    # * Entries whose names differ only in case are rejected when the
+    #   destination filesystem is case-insensitive (pass
+    #   `case_sensitive: true` to treat names as case-sensitive and allow
+    #   them, or `case_sensitive: false` to always perform the check).
+    # * File/directory conflicts are rejected (e.g. an entry `a` and an
+    #   entry `a/b`, or `a` and `a/`).
+    # * Absolute paths, paths containing `..`, and other names that would
+    #   escape the destination are rejected.
+    # * Symlink entries whose targets are absolute or resolve lexically to
+    #   a location outside the destination are rejected.
+    #
+    # If the destination already exists:
+    #
+    # * `on_existing: :refuse` (the default) raises a
+    #   {Zip::TransactionalDestinationExistsError} without touching the
+    #   existing destination.
+    # * `on_existing: :backup_replace` moves the existing destination to a
+    #   `<destination>.<timestamp>.bak` backup, publishes the new tree, and
+    #   deletes the backup on success. If publishing fails, the backup is
+    #   moved back into place before the original error is re-raised; if
+    #   that restore also fails, a {Zip::RollbackError} is raised and the
+    #   backup is left on disk.
+    #
+    # All errors raised by this method are subclasses of
+    # {Zip::TransactionalExtractionError}, apart from invalid arguments.
+    def extract_transactionally(destination_directory,
+                                on_existing: :refuse, case_sensitive: nil)
+      TransactionalExtractor.new(
+        entries, destination_directory,
+        on_existing: on_existing,
+        case_sensitive: case_sensitive,
+        configure_entry: ->(entry) { apply_restore_options(entry) }
+      ).extract
     end
 
     # Commits changes that has been made since the previous commit to
