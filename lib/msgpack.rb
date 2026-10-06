@@ -13,6 +13,7 @@ require "msgpack/unpacker"
 require "msgpack/factory"
 require "msgpack/symbol"
 require "msgpack/core_ext"
+require "msgpack/str_to_bin_converter"
 require "msgpack/timestamp"
 require "msgpack/time"
 
@@ -43,6 +44,16 @@ module MessagePack
   end
   alias :dump :pack
 
+  def convert_str_to_bin(source, *paths, on_non_string: :raise, output: nil)
+    StrToBinConverter.convert(
+      source,
+      *paths,
+      on_non_string: on_non_string,
+      output: output,
+    )
+  end
+
   module_function :pack
   module_function :dump
+  module_function :convert_str_to_bin
 end

@@ -198,6 +198,29 @@ MessagePack::DefaultFactory.register_type(0x03, MyClass3)
 MessagePack.unpack(data_with_ext_typeid_03) #=> MyClass3 instance
 ```
 
+### Converting string fields to binary on the wire
+
+`MessagePack.convert_str_to_bin` (or `MessagePack::StrToBinConverter`) rewrites selected
+MessagePack string values as binary values without unpacking the complete message into Ruby
+objects. Map keys and array positions are represented separately. Values and extensions outside
+the declared paths are copied as bytes, so registered extension unpackers are not invoked.
+
+```ruby
+path = MessagePack::StrToBinConverter::Path
+  .map("record")
+  .index(0)
+  .map("payload")
+
+converter = MessagePack::StrToBinConverter.new(
+  path,
+  on_non_string: :skip, # or :raise (default)
+)
+
+result = converter.convert(wire_data)
+result.output     # converted wire data
+result.mismatches # paths, types, and byte offsets skipped by :skip
+```
+
 Alternatively, extension types can call the packer or unpacker recursively to generate the extension data:
 
 ```ruby
