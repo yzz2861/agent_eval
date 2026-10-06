@@ -1,0 +1,16 @@
+:mod:`webob.transcode` -- Streaming charset transcoding
+==========================================================
+
+.. automodule:: webob.transcode
+
+.. autoclass:: webob.transcode.StreamTranscoder
+   :members:
+
+.. autoclass:: webob.transcode.TranscodingAppIter
+   :members:
+
+.. autofunction:: webob.transcode.transcode_response
+
+.. autoclass:: webob.transcode.TranscodeMiddleware
+   :members:
+

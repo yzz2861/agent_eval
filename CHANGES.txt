@@ -47,6 +47,19 @@ Security Fix
 Feature
 ~~~~~~~
 
+- Add a new ``webob.transcode`` module providing explicit streaming
+   transcoding of response bodies between charsets: ``StreamTranscoder``
+   incrementally decodes from a source charset and re-encodes to a target
+   charset (handling BOMs, multi-byte characters split across chunks and
+   the final codec flush, with a caller-chosen error strategy),
+   ``TranscodingAppIter`` wraps a WSGI ``app_iter`` without buffering
+   and closes the wrapped iterable exactly once, ``transcode_response``
+   rewrites a ``Response`` in place (dropping the now-invalid
+   ``Content-Length``, ``ETag`` and ``Content-MD5`` headers and refusing
+   responses that carry a ``Content-Encoding``), and
+   ``TranscodeMiddleware`` applies it to a wrapped application without
+   iterating the body of ``HEAD`` responses.
+
 - Rename "master" git branch to "main"
 
 - Add support for Python 3.12.
