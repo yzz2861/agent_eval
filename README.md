@@ -270,6 +270,8 @@ doctype xml ISO-8859-1
   <?xml version="1.0" encoding="iso-8859-1" ?>
 ~~~
 
+Enable xml_namespaces together with the xml output format to resolve prefixed names instead of treating colons as literal HTML names. Default namespaces and prefix bindings follow their lexical XML scope, including rebound prefixes. Names supplied through splat attributes are resolved at render time; an unbound prefix raises before the current tag is written.
+
 XHTML DOCTYPES
 
 ~~~ slim
@@ -1007,6 +1009,7 @@ There are a lot of them but the good thing is, that Slim checks the configuratio
 | Boolean | :disable_escape | false | Disable automatic escaping of strings |
 | Boolean | :use_html_safe | false (true in Rails) | Use String#html_safe? from ActiveSupport (Works together with :disable_escape) |
 | Symbol | :format | :xhtml | HTML output format (Possible formats :html, :xhtml, :xml) |
+| Boolean | :xml_namespaces | false | Resolve XML namespace prefixes in tags and attributes |
 | String | :attr_quote | '"' | Character to wrap attributes in html (can be ' or ") |
 | Hash | :merge_attrs | \{'class' => ' '} | Joining character used if multiple html attributes are supplied (e.g. class="class1 class2") |
 | Array&lt;String&gt; | :hyphen_attrs | %w(data) | Attributes which will be hyphenated if a Hash is given (e.g. data={a_foo:1,b:2} will render as data-a_foo="1" data-b="2") |

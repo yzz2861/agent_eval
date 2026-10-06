@@ -20,7 +20,8 @@ module Slim
                      '#' => { attr: 'id' },
                      '.' => { attr: 'class' }
                    },
-                   splat_prefix: '*'
+                   splat_prefix: '*',
+                   xml_namespaces: false
 
     class SyntaxError < StandardError
       attr_reader :error, :file, :line, :lineno, :column
@@ -95,6 +96,7 @@ module Slim
     # @return [Array] Temple expression representing the code
     def call(str)
       result = [:multi]
+      @namespace_scopes = [xml_namespace_scope]
       reset(str.split(/\r?\n/), [result])
 
       parse_line while next_line
@@ -104,6 +106,22 @@ module Slim
     end
 
     protected
+
+    def xml_namespace_scope
+      if options[:xml_namespaces]
+        XMLNamespaces::Scope.new(nil => XMLNamespaces::UNBOUND_NAMESPACE,
+                                 'xml' => XMLNamespaces::XML_NAMESPACE)
+      end
+    end
+
+    def push_content_scope(content, scope = @namespace_scopes && @namespace_scopes.last)
+      @stacks << content
+      @namespace_scopes << scope if @namespace_scopes && scope
+    end
+
+    def pop_namespace_scope
+      @namespace_scopes.pop if @namespace_scopes
+    end
 
     def reset(lines = nil, stacks = nil)
       # Since you can indent however you like in Slim, we need to keep a list
@@ -130,6 +148,7 @@ module Slim
       @lineno = 0
       @lines = lines
       @line = @orig_line = nil
+      @namespace_scopes = nil if stacks.nil?
     end
 
     def next_line
@@ -175,7 +194,10 @@ module Slim
       else
         # This line was *not* indented more than the line before,
         # so we'll just forget about the stack that the previous line pushed.
-        @stacks.pop if expecting_indentation
+        if expecting_indentation
+          @stacks.pop
+          pop_namespace_scope
+        end
 
         # This line was deindented.
         # Now we're have to go through the all the indents and figure out
@@ -183,6 +205,7 @@ module Slim
         while indent < @indents.last && @indents.size > 1
           @indents.pop
           @stacks.pop
+          pop_namespace_scope
         end
 
         # This line's indentation happens to lie "between" two other line's
@@ -206,7 +229,7 @@ module Slim
         # HTML conditional comment
         block = [:multi]
         @stacks.last << [:html, :condcomment, $1, block]
-        @stacks << block
+        push_content_scope(block)
       when /\A\//
         # Slim comment
         parse_comment_block
@@ -221,14 +244,14 @@ module Slim
         # Inline html
         block = [:multi]
         @stacks.last << [:multi, [:slim, :interpolate, @line], block]
-        @stacks << block
+        push_content_scope(block)
       when /\A-/
         # Found a code block.
         # We expect the line to be broken or the next line to be indented.
         @line.slice!(0)
         block = [:multi]
         @stacks.last << [:slim, :control, parse_broken_line, block]
-        @stacks << block
+        push_content_scope(block)
       when /\A=(=?)([<>]*)/
         # Found an output block.
         # We expect the line to be broken or the next line to be indented.
@@ -239,7 +262,7 @@ module Slim
         @stacks.last << [:static, ' '] if leading_ws
         @stacks.last << [:slim, :output, $1.empty?, parse_broken_line, block]
         @stacks.last << [:static, ' '] if trailing_ws
-        @stacks << block
+        push_content_scope(block)
       when @embedded_re
         # Embedded template detected. It is treated as block.
         @line = $2
@@ -324,6 +347,84 @@ module Slim
       broken_line
     end
 
+    def validate_xml_tag(tag_name, attributes)
+      scope = @namespace_scopes&.last
+      return nil unless scope
+      return scope if tag_name == '*'
+
+      declarations = xml_declarations(attributes)
+      tag_scope = scope.child(declarations)
+
+      tag_key = xml_expanded_name(tag_name, tag_scope, false)
+      unless tag_name =~ /\A[^:]+(?::[^:]+)?\z/
+        syntax_error!("Invalid XML name '#{tag_name}'")
+      end
+      unless tag_key
+        prefix = tag_name.include?(':') ? tag_name.split(':', 2).first : nil
+        syntax_error!(prefix ? "Unbound XML namespace prefix '#{prefix}'" : 'Unbound default XML namespace')
+      end
+
+      expanded_attributes = {}
+      attributes[2..-1].each do |_, _, name, value|
+        if XMLNamespaces.declaration?(name)
+          prefix = XMLNamespaces.declaration_prefix(name)
+          key = [XMLNamespaces::XMLNS_NAMESPACE, prefix || 'xmlns']
+        else
+          key = xml_expanded_name(name, tag_scope, true)
+          unless name =~ /\A[^:]+(?::[^:]+)?\z/
+            syntax_error!("Invalid XML attribute name '#{name}'")
+          end
+          unless key
+            prefix = name.split(':', 2).first
+            syntax_error!("Unbound XML namespace prefix '#{prefix}'")
+          end
+        end
+
+        if expanded_attributes.key?(key)
+          raise Slim::DuplicateAttributeError, "Multiple #{name} attributes specified"
+        end
+        expanded_attributes[key] = name
+      end
+
+      tag_scope
+    end
+
+    def xml_declarations(attributes)
+      declarations = {}
+
+      attributes[2..-1].each do |_, _, name, value|
+        next unless XMLNamespaces.declaration?(name)
+
+        prefix = XMLNamespaces.declaration_prefix(name)
+        if prefix
+          unless prefix =~ /\A[^:]+\z/ && prefix !~ /\Axmlns\z/
+            syntax_error!("Invalid XML namespace prefix '#{prefix}'")
+          end
+        end
+
+        uri = XMLNamespaces.static_literal(value)
+        unless uri
+          if value == [:multi]
+            syntax_error!("Expected XML namespace URI for '#{name}'")
+          end
+          uri = XMLNamespaces::DYNAMIC_NAMESPACE
+        end
+
+        if prefix == 'xml' && uri != XMLNamespaces::XML_NAMESPACE && !uri.equal?(XMLNamespaces::DYNAMIC_NAMESPACE)
+          syntax_error!("XML namespace prefix 'xml' cannot be rebound")
+        end
+
+        declarations[prefix] = uri
+      end
+
+      declarations
+    end
+
+    def xml_expanded_name(name, scope, is_attribute)
+      return nil unless name =~ /\A[^:]+(?::[^:]+)?\z/
+      scope.static_resolve(name, is_attribute)
+    end
+
     def parse_tag(tag)
       if @tag_shortcut[tag]
         @line.slice!(0, tag.size) unless @attr_shortcut[tag]
@@ -358,6 +459,7 @@ module Slim
 
       parse_attributes(attributes)
 
+      tag_scope = validate_xml_tag(tag, attributes)
       tag = [:html, :tag, tag, attributes]
 
       @stacks.last << [:static, ' '] if leading_ws
@@ -380,9 +482,11 @@ module Slim
           content = [:multi]
           tag << content
           i = @stacks.size
-          @stacks << content
+          scope_i = @namespace_scopes && @namespace_scopes.size
+          push_content_scope(content, tag_scope)
           parse_tag($&)
           @stacks.delete_at(i)
+          @namespace_scopes.delete_at(scope_i) if scope_i && tag_scope
         end
       when /\A\s*=(=?)(['<>]*)/
         # Handle output code
@@ -392,7 +496,7 @@ module Slim
         @stacks.last.insert(-2, [:static, ' ']) if !leading_ws && $2.include?('<'.freeze)
         tag << [:slim, :output, $1 != '=', parse_broken_line, block]
         @stacks.last << [:static, ' '] if !trailing_ws && trailing_ws2
-        @stacks << block
+        push_content_scope(block, tag_scope)
       when /\A\s*\/\s*/
         # Closed tag. Do nothing
         @line = $'
@@ -401,7 +505,7 @@ module Slim
         # Empty content
         content = [:multi]
         tag << content
-        @stacks << content
+        push_content_scope(content, tag_scope)
       when /\A ?/
         # Text content
         tag << [:slim, :text, :inline, parse_text_block($', @orig_line.size - $'.size)]
