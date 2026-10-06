@@ -3,6 +3,7 @@
 require "sqlite3/constants"
 require "sqlite3/errors"
 require "sqlite3/pragmas"
+require "sqlite3/script"
 require "sqlite3/statement"
 require "sqlite3/value"
 require "sqlite3/fork_safety"
@@ -334,6 +335,41 @@ module SQLite3
       else
         exec_batch(sql, @results_as_hash)
       end
+    end
+
+    # Returns a SQLite3::Script iterator for one or more SQL statements.
+    #
+    # Statement boundaries are determined by SQLite's parser, so semicolons in
+    # trigger definitions, comments, and string literals are handled safely.
+    #
+    # SQLite3::Script#next_result executes the next statement and returns a
+    # ResultSet for statements that return rows, or the number of rows
+    # changed for statements that do not. Each call binds its own parameters
+    # to that statement only.
+    #
+    # If a block is given, the script is yielded and closed after the block.
+    # This method does not start or roll back a transaction; transaction
+    # statements in +sql+ retain their usual SQLite semantics.
+    def script(sql)
+      script = SQLite3::Script.new(self, sql)
+      return script unless block_given?
+
+      begin
+        yield script
+      ensure
+        script.close
+      end
+    end
+
+    # Without a block, returns the SQLite3::Script iterator for +sql+. With a
+    # block, each statement result is yielded and the script is closed after
+    # iteration. To bind independently, use #script and pass parameters to
+    # SQLite3::Script#next_result.
+    def execute_script(sql)
+      script = script(sql)
+      return script unless block_given?
+
+      script.each { |result| yield result }
     end
 
     # This is a convenience method for creating a statement, binding
