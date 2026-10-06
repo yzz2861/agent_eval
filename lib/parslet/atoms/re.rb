@@ -24,7 +24,7 @@ class Parslet::Atoms::Re < Parslet::Atoms::Base
   end
 
   def try(source, context, consume_all)
-    return succ(source.consume(1)) if source.matches?(@re)
+    return succ(source.consume(1)) if source.matches_single?(@re)
     
     # No string could be read
     return context.err(self, source, error_msgs[:premature]) \
@@ -38,4 +38,3 @@ class Parslet::Atoms::Re < Parslet::Atoms::Base
     match.inspect[1..-2]
   end
 end
-

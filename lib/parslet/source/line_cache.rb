@@ -13,6 +13,12 @@ class Parslet::Source
       @last_line_end = nil
     end
 
+    def initialize_copy(other)
+      super
+      @line_ends = other.instance_variable_get(:@line_ends).dup
+      @line_ends.extend(RangeSearch)
+    end
+
     # Returns a <line, column> tuple for the given input position. Input
     # position must be given as byte offset into original string. 
     #
@@ -52,6 +58,27 @@ class Parslet::Source
         @last_line_end = start_pos + buf.pos
         @line_ends << @last_line_end
       end
+    end
+
+    def replace_line_cache(start_pos, old_length, replacement)
+      @line_ends = @line_ends.dup
+      end_pos = start_pos + old_length
+      new_line_ends = []
+      scanner = StringScanner.new(replacement)
+      while scanner.skip_until(/\n/)
+        new_line_ends << start_pos + scanner.pos
+      end
+
+      preserved = @line_ends.map do |pos|
+        inside_replaced_range = old_length > 0 &&
+          pos >= start_pos && pos <= end_pos
+        next nil if inside_replaced_range
+        pos > end_pos ? pos - old_length + replacement.bytesize : pos
+      end.compact
+
+      @line_ends = (preserved + new_line_ends).sort
+      @line_ends.extend(RangeSearch)
+      @last_line_end = @line_ends.last
     end
   end
 

@@ -29,6 +29,29 @@ module Parslet
     def children
       @children ||= []
     end
+
+    def remap(source, delta, seen={})
+      return seen[self] if seen.key?(self)
+
+      remapped = self.class.allocate
+      seen[self] = remapped
+      remapped.instance_variable_set(
+        :@message,
+        Parslet::Atoms::Cache.remap(@message, source, delta, seen, true))
+      remapped.instance_variable_set(:@source, source)
+      pos = @pos
+      if pos.respond_to?(:bytepos)
+        pos = Parslet::Position.new(source.string, pos.bytepos + delta)
+      else
+        pos = pos + delta
+      end
+      remapped.instance_variable_set(:@pos, pos)
+      remapped.instance_variable_set(
+        :@children,
+        Parslet::Atoms::Cache.remap(children, source, delta, seen, true))
+      remapped.instance_variable_set(:@context, @context)
+      remapped
+    end
     
     # Appends 'at line LINE char CHAR' to the string given. Use +pos+ to
     # override the position of the +source+. This method returns an object

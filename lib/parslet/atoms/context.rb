@@ -14,6 +14,10 @@ module Parslet::Atoms
       @reporter = reporter
       @captures = Parslet::Scope.new
     end
+
+    def use_persistent_cache(cache)
+      @persistent_cache = cache
+    end
     
     # Caches a parse answer for obj at source.pos. Applying the same parslet
     # at one position of input always yields the same result, unless the input
@@ -25,26 +29,46 @@ module Parslet::Atoms
     #
     def try_with_cache(obj, source, consume_all)
       beg = source.bytepos
-        
-      # Not in cache yet? Return early.
-      unless entry = lookup(obj, beg)
+      frame = source.respond_to?(:push_observation_frame) ?
+        source.push_observation_frame :
+        Parslet::Atoms::Cache::UnknownSourceFrame.new
+
+      if @persistent_cache
+        persistent_entry = @persistent_cache.get(
+          obj, source, beg, consume_all, @captures, @reporter, frame)
+
+        if persistent_entry
+          result, advance = persistent_entry
+          source.bytepos = beg + advance
+          frame.close if frame
+          return result
+        end
         result = obj.try(source, self, consume_all)
-    
+        if obj.cached?
+          @persistent_cache.set(
+            obj, beg, consume_all, @captures, @reporter,
+            result, source.bytepos-beg, frame)
+        end
+      else
+        if entry = lookup(obj, beg)
+          result, advance = entry
+          source.bytepos = beg + advance
+          frame.close if frame
+          return result
+        end
+
+        result = obj.try(source, self, consume_all)
+
         if obj.cached?
           set obj, beg, [result, source.bytepos-beg]
         end
-        
-        return result
       end
 
-      # the condition in unless has returned true, so entry is not nil.
-      result, advance = entry
-
-      # The data we're skipping here has been read before. (since it is in 
-      # the cache) PLUS the actual contents are not interesting anymore since
-      # we know obj matches at beg. So skip reading.
-      source.bytepos = beg + advance
+      frame.close if frame
       return result
+    ensure
+      frame.close if frame && source.respond_to?(:observation_frame_active?) &&
+        source.observation_frame_active?(frame)
     end  
     
     # Report an error at a given position. 
@@ -99,5 +123,6 @@ module Parslet::Atoms
     def set(obj, pos, val)
       @cache[pos][obj.object_id] = val
     end
+
   end
 end

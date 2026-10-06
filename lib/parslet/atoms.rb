@@ -15,6 +15,7 @@ module Parslet::Atoms
   end
 
   require 'parslet/atoms/can_flatten'
+  require 'parslet/atoms/cache'
   require 'parslet/atoms/context'
   require 'parslet/atoms/dsl'
   require 'parslet/atoms/base'
