@@ -13,6 +13,10 @@ class Parslet::Atoms::Ignored < Parslet::Atoms::Base
     @parslet = parslet
   end
 
+  def has_cut?
+    parslet.has_cut?
+  end
+
   def apply(source, context, consume_all)
     success, _ = result = parslet.apply(source, context, consume_all)
 

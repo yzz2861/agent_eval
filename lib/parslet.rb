@@ -157,6 +157,21 @@ module Parslet
     Atoms::Str.new(str)
   end
   module_function :str
+
+  # Returns an atom that commits the parser to the current alternative.
+  # The atom itself always matches without consuming input; once it has
+  # been passed, a failure inside the same alternative will not backtrack
+  # into the other alternatives of that choice anymore. The commit only
+  # governs the innermost enclosing choice.
+  #
+  #   (str('include') >> cut >> filename) | assignment
+  #
+  # @return [Parslet::Atoms::Cut] a parslet atom
+  #
+  def cut
+    Atoms::Cut.new
+  end
+  module_function :cut
   
   # Returns an atom matching any character. It acts like the '.' (dot)
   # character in regular expressions.

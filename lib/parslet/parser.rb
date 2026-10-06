@@ -57,6 +57,10 @@ class Parslet::Parser < Parslet::Atoms::Base
       end
     end
   end
+
+  def has_cut?
+    root.has_cut?
+  end
   
   def try(source, context, consume_all)
     root.try(source, context, consume_all)

@@ -12,6 +12,10 @@ class Parslet::Atoms::Named < Parslet::Atoms::Base
 
     @parslet, @name = parslet, name
   end
+
+  def has_cut?
+    parslet.has_cut?
+  end
   
   def apply(source, context, consume_all)
     success, value = result = parslet.apply(source, context, consume_all)

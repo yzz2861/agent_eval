@@ -16,6 +16,11 @@ class Parslet::Atoms::Lookahead < Parslet::Atoms::Base
     @bound_parslet = bound_parslet
   end
 
+  def has_cut?
+    return @has_cut if defined?(@has_cut)
+    @has_cut = bound_parslet.has_cut?
+  end
+
   def error_msgs
     @error_msgs ||= {
       :positive => ["Input should start with ", bound_parslet],
@@ -27,7 +32,11 @@ class Parslet::Atoms::Lookahead < Parslet::Atoms::Base
     rewind_pos  = source.bytepos
     error_pos   = source.pos
 
-    success, _ = bound_parslet.apply(source, context, consume_all)
+    # Lookahead is speculation: commits crossed in here are confined to
+    # this region and must not leak into the enclosing parse.
+    success, _ = context.cut_shield {
+      bound_parslet.apply(source, context, consume_all)
+    }
     
     if positive
       return succ(nil) if success

@@ -4,6 +4,12 @@
   We're in maintenance mode! The community is really stepping up here though, sending
   interesting additions our way. Here's what has been merged this far: 
 
+  + Commit points: `cut` (Parslet.cut) commits the parser to the innermost
+    enclosing choice. Once passed, a failure will not backtrack into the
+    other alternatives of that choice, so error reports point at the real
+    problem. Sequences, rules, maybe and repeat propagate a committed
+    failure; lookaheads confine it. Grammars without `cut` are unaffected.
+
   + Specification for mixing parslet parsers (Artur Komarov).
 
   + Update to Github Actions CI/CD. I guess newer is better? (Matt Larraz).

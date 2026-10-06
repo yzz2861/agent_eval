@@ -22,6 +22,20 @@ class Parslet::Atoms::Entity < Parslet::Atoms::Base
   def try(source, context, consume_all)
     parslet.apply(source, context, consume_all)
   end
+
+  def has_cut?
+    return @has_cut if defined?(@has_cut)
+    # Guard against recursive rules: a cut atom is always reachable
+    # without following the recursion, so re-entering yields false.
+    return false if @computing_has_cut
+
+    begin
+      @computing_has_cut = true
+      @has_cut = parslet.has_cut?
+    ensure
+      @computing_has_cut = false
+    end
+  end
   
   def parslet
     return @parslet unless @parslet.nil?

@@ -22,6 +22,11 @@ class Parslet::Atoms::Repetition < Parslet::Atoms::Base
     @tag = tag
   end
 
+  def has_cut?
+    return @has_cut if defined?(@has_cut)
+    @has_cut = parslet.has_cut?
+  end
+
   def error_msgs
     @error_msgs ||= {
       minrep: "Expected at least #{min} of #{parslet.inspect}",
@@ -36,10 +41,19 @@ class Parslet::Atoms::Repetition < Parslet::Atoms::Base
     
     break_on = nil
     loop do
+      cut_checkpoint = context.cut_checkpoint
       success, value = parslet.apply(source, context, false)
 
-      break_on = value
-      break unless success
+      unless success
+        break_on = value
+
+        # A commit point was crossed during this attempt and its commit
+        # is still pending. The failure is final: propagate it instead of
+        # ending the repetition quietly.
+        return [false, break_on] if context.cut_since?(cut_checkpoint)
+
+        break
+      end
 
       occ += 1
       accum << value
@@ -84,4 +98,3 @@ class Parslet::Atoms::Repetition < Parslet::Atoms::Base
     parslet.to_s(prec) + minmax
   end
 end
-

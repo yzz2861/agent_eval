@@ -8,6 +8,12 @@ class Parslet::Atoms::Infix < Parslet::Atoms::Base
     @operations = operations
     @reducer = reducer || lambda { |left, op, right| {l: left, o: op, r: right} }
   end
+
+  def has_cut?
+    return @has_cut if defined?(@has_cut)
+    @has_cut = element.has_cut? ||
+      operations.any? { |op_atom, _, _| op_atom.has_cut? }
+  end
   
   def try(source, context, consume_all)
     return catch(:error) {

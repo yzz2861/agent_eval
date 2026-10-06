@@ -13,6 +13,8 @@ module Parslet::Atoms
       @cache = Hash.new { |h, k| h[k] = {} }
       @reporter = reporter
       @captures = Parslet::Scope.new
+      @cut_frames = []
+      @cut_sequence = 0
     end
     
     # Caches a parse answer for obj at source.pos. Applying the same parslet
@@ -86,6 +88,67 @@ module Parslet::Atoms
       yield
     ensure
       captures.pop
+    end
+
+    # --- Commit point (cut) support -------------------------------
+    #
+    # Each open alternative owns a frame on the cut frame stack. A commit
+    # point marks the innermost frame; the mark tells the owning
+    # alternative to stop trying its remaining alternatives. Frames are
+    # plain monotonic tokens (nil when unmarked), so marks can be
+    # checkpointed, compared and restored cheaply.
+
+    # Opens a new commit frame. Must be balanced with #pop_cut_frame.
+    #
+    def push_cut_frame
+      @cut_frames.push(nil)
+    end
+
+    # Closes the innermost commit frame, discarding its mark.
+    #
+    def pop_cut_frame
+      @cut_frames.pop
+    end
+
+    # Commits the innermost open choice (see Parslet::Atoms::Cut). Does
+    # nothing when no choice is open.
+    #
+    def cut!
+      return if @cut_frames.empty?
+
+      @cut_sequence += 1
+      @cut_frames[-1] = @cut_sequence
+    end
+
+    # True if the innermost open choice has been committed.
+    #
+    def cut_committed?
+      !@cut_frames.empty? && !@cut_frames.last.nil?
+    end
+
+    # Returns a token representing the current commit state. Use together
+    # with #cut_since? to detect commits that happened in the meantime.
+    #
+    def cut_checkpoint
+      @cut_sequence
+    end
+
+    # True if a commit point was crossed after the given checkpoint was
+    # taken and its mark is still pending in one of the currently open
+    # choices. Marks of choices that have been left since do not count.
+    #
+    def cut_since?(checkpoint)
+      @cut_frames.any? { |mark| mark && mark > checkpoint }
+    end
+
+    # Runs the block in a speculative region: commits crossed inside the
+    # block are confined to it and never leak into the enclosing parse.
+    #
+    def cut_shield
+      saved_frames = @cut_frames.dup
+      yield
+    ensure
+      @cut_frames.replace(saved_frames)
     end
     
   private 

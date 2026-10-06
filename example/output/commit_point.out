@@ -1,0 +1,23 @@
+Truncated input: "include \n"
+
+--- commit point OFF: the parser backtracks into `assignment` and
+    complains about a missing "=" - an unrelated error.
+Failed to match sequence ((DIRECTIVE / ASSIGNMENT) [\\n]?) at line 1 char 1.
+`- Expected one of [DIRECTIVE, ASSIGNMENT] at line 1 char 1.
+   |- Failed to match sequence ('include' SPACE file:FILENAME) at line 1 char 9.
+   |  `- Failed to match sequence ([\\w]{1, } ('.' [\\w]{1, }){0, }) at line 1 char 9.
+   |     `- Expected at least 1 of [\\w] at line 1 char 9.
+   |        `- Failed to match [\\w] at line 1 char 9.
+   `- Failed to match sequence (key:KEY '=' value:VALUE) at line 1 char 8.
+      `- Expected "=", but got " " at line 1 char 8.
+--- commit point ON: the choice is committed once `include ` has
+    been seen; the error points at the missing file name.
+Failed to match sequence ((DIRECTIVE / ASSIGNMENT) [\\n]?) at line 1 char 1.
+`- Failed to match sequence ('include' SPACE cut file:FILENAME) at line 1 char 9.
+   `- Failed to match sequence ([\\w]{1, } ('.' [\\w]{1, }){0, }) at line 1 char 9.
+      `- Expected at least 1 of [\\w] at line 1 char 9.
+         `- Failed to match [\\w] at line 1 char 9.
+--- Same parser instance, truncated input parsed twice with a
+    valid parse in between.
+valid parse in between still works: {file: "boot.cfg"@8}
+no residual commit state (identical error trees): true

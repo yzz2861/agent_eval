@@ -21,6 +21,11 @@ class Parslet::Atoms::Sequence < Parslet::Atoms::Base
   def >>(parslet)
     self.class.new(* @parslets+[parslet])
   end
+
+  def has_cut?
+    return @has_cut if defined?(@has_cut)
+    @has_cut = parslets.any? { |p| p.has_cut? }
+  end
   
   def try(source, context, consume_all)
     # Presize an array

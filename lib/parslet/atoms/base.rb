@@ -127,7 +127,16 @@ class Parslet::Atoms::Base
   # atoms are cached, so this always returns true, unless overridden.
   #
   def cached?
-    true
+    !has_cut?
+  end
+
+  # Returns true if this atom or one of its children contains a commit
+  # point (see Parslet::Atoms::Cut). Commit points are parse time side
+  # effects, so atoms containing them must never be served from the
+  # packrat cache. Grammars without commit points are unaffected.
+  #
+  def has_cut?
+    false
   end
 
   # Debug printing - in Treetop syntax. 
