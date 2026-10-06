@@ -39,4 +39,10 @@ describe :Hamster do
       expect(system(%{ruby -e "$:.unshift('#{hamster_lib_dir}'); require 'hamster/deque'; Hamster::Deque.new"})).to be(true)
     end
   end
+
+  describe :RangeMap do
+    it "can be loaded separately" do
+      expect(system(%{ruby -e "$:.unshift('#{hamster_lib_dir}'); require 'hamster/range_map'; Hamster::RangeMap.empty"})).to be(true)
+    end
+  end
 end
