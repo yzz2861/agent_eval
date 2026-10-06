@@ -134,6 +134,218 @@ describe MessagePack::Packer do
     packer.to_s.should == "\x81"
   end
 
+  describe 'streaming collections' do
+    class WriteOnlyIO
+      def initialize
+        @io = StringIO.new("".b)
+      end
+
+      def write(data)
+        @io.write(data)
+      end
+
+      def flush
+        @io.flush
+      end
+
+      def string
+        @io.string
+      end
+    end
+
+    class OnePassEnumerator
+      def initialize(values)
+        @values = values
+        @iterations = 0
+      end
+
+      def each
+        @iterations += 1
+        raise "enumerator was iterated more than once" if @iterations > 1
+        @values.each { |value| yield value }
+      end
+    end
+
+    def pack_streaming_array(values, output)
+      packer = output ? MessagePack::Packer.new(output) : MessagePack::Packer.new
+      packer.write_array do |array|
+        values.each { |value| array.write(value) }
+      end
+
+      if output
+        packer.flush
+        return output.string if output.is_a?(WriteOnlyIO)
+
+        output.rewind
+        output.read
+      else
+        packer.full_pack
+      end
+    end
+
+    header_cases = [
+      [0, "\x90", 1], [15, "\x9f", 1], [16, "\xdc", 3],
+      [65535, "\xdc", 3], [65536, "\xdd", 5],
+    ]
+    header_cases.each do |count, prefix, header_size|
+      it "encodes an array of #{count} with the #{header_size}-byte header on all outputs" do
+        values = Array.new(count)
+
+        [[nil, :buffer], [StringIO.new("".b), :seekable], [WriteOnlyIO.new, :stream]].each do |output, kind|
+          data = pack_streaming_array(values, output)
+          expect(data.getbyte(0)).to eq(prefix.getbyte(0))
+          expect(MessagePack.unpack(data)).to eq(values)
+          expect(data.bytesize).to eq(header_size + count)
+          expect(kind).not_to be_nil
+        end
+      end
+    end
+
+    it 'writes nested arrays and maps without buffering Ruby values' do
+      packer = MessagePack::Packer.new
+      packer.write_array do |array|
+        array.write(1)
+        array.write_array do |inner|
+          inner.write(2)
+          inner.write(3)
+        end
+      end
+      packer.write_map do |map|
+        map.write('answer')
+        map.write(42)
+        map.write('nested')
+        map.write_array do |inner|
+          inner.write(true)
+          inner.write(nil)
+        end
+        map.write('deeper')
+        map.write_map do |inner|
+          inner.write('ok')
+          inner.write(true)
+        end
+      end
+
+      data = packer.full_pack
+      unpacker = MessagePack::Unpacker.new
+      values = []
+      unpacker.feed(data)
+      unpacker.each { |value| values << value }
+      expect(values).to eq([[1, [2, 3]], {
+        'answer' => 42,
+        'nested' => [true, nil],
+        'deeper' => {'ok' => true},
+      }])
+    end
+
+    it 'streams an Enumerator without iterating it before writing' do
+      enumerator = OnePassEnumerator.new([10, 20, 30]).to_enum
+      io = WriteOnlyIO.new
+      packer = MessagePack::Packer.new(io)
+
+      packer.write_array(enumerator)
+      packer.flush
+
+      expect(MessagePack.unpack(io.string)).to eq([10, 20, 30])
+    end
+
+    it 'accepts pair enumerators for maps' do
+      io = WriteOnlyIO.new
+      MessagePack::Packer.new(io).write_map({a: 1, b: 2}.each)
+      expect(MessagePack.unpack(io.string)).to eq({'a' => 1, 'b' => 2})
+
+      io = WriteOnlyIO.new
+      MessagePack::Packer.new(io).write_map({a: 1, b: 2}.each_pair)
+      expect(MessagePack.unpack(io.string)).to eq({'a' => 1, 'b' => 2})
+    end
+
+    it 'accepts pair enumerators in nested maps' do
+      io = WriteOnlyIO.new
+      packer = MessagePack::Packer.new(io)
+      packer.write_array do |array|
+        array.write_map({a: 1, b: 2}.each_pair)
+      end
+      packer.flush
+      expect(MessagePack.unpack(io.string)).to eq([{'a' => 1, 'b' => 2}])
+    end
+
+    it 'rolls seekable output back when the collection raises' do
+      io = StringIO.new("".b)
+      packer = MessagePack::Packer.new(io)
+      packer.write('prefix')
+      expect {
+        packer.write_array do |array|
+          array.write(1)
+          raise 'boom'
+        end
+      }.to raise_error(RuntimeError, 'boom')
+      packer.flush
+      io.rewind
+      expect(io.read).to eq('prefix'.to_msgpack)
+    end
+
+    it 'does not commit a non-seekable stream until the whole collection succeeds' do
+      io = WriteOnlyIO.new
+      packer = MessagePack::Packer.new(io)
+      expect {
+        packer.write_array do |array|
+          array.write(1)
+          raise 'boom'
+        end
+      }.to raise_error(RuntimeError, 'boom')
+      packer.flush
+      expect(io.string).to eq("")
+    end
+
+    it 'does not pre-count or commit when a one-pass Enumerator raises' do
+      values = Object.new
+      def values.each
+        yield 1
+        raise 'stopped after one value'
+      end
+
+      io = WriteOnlyIO.new
+      expect {
+        MessagePack::Packer.new(io).write_array(values.to_enum)
+      }.to raise_error(RuntimeError, 'stopped after one value')
+      io.flush
+      expect(io.string).to eq("")
+    end
+
+    it 'does not commit a map missing its final value' do
+      io = WriteOnlyIO.new
+      packer = MessagePack::Packer.new(io)
+      expect {
+        packer.write_map { |map| map.write('key') }
+      }.to raise_error(ArgumentError, 'map collection is missing a value for its final key')
+      packer.flush
+      expect(io.string).to eq("")
+    end
+
+    it 'enforces the temporary size limit for non-seekable streams' do
+      io = WriteOnlyIO.new
+      packer = MessagePack::Packer.new(io)
+      expect {
+        packer.write_array(buffer_size: 8) do |array|
+          array.write('x' * 32)
+        end
+      }.to raise_error(MessagePack::Packer::CollectionBufferOverflowError)
+      packer.flush
+      expect(io.string).to eq("")
+    end
+
+    it 'accepts the limit from factory options' do
+      factory = MessagePack::Factory.new
+      io = WriteOnlyIO.new
+      expect {
+        factory.packer(io, collection_buffer_size: 8).write_array do |array|
+          array.write('x' * 32)
+        end
+      }.to raise_error(MessagePack::Packer::CollectionBufferOverflowError)
+      io.flush
+      expect(io.string).to eq("")
+    end
+  end
+
   it 'write_bin_header 0' do
     packer.write_bin_header(0)
     packer.to_s.should == "\xC4\x00"

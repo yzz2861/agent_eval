@@ -2,6 +2,16 @@ module MessagePack
   class Factory
     # see ext for other methods
 
+    alias_method :packer_without_streaming_collection_options, :packer
+
+    def packer(*args)
+      options = args.last.is_a?(Hash) ? args.last : {}
+      packer = packer_without_streaming_collection_options(*args)
+      packer.send(:collection_buffer_size=, options.fetch(:collection_buffer_size,
+                                                            Packer::DEFAULT_COLLECTION_BUFFER_SIZE))
+      packer
+    end
+
     def register_type(type, klass, options = { packer: :to_msgpack_ext, unpacker: :from_msgpack_ext })
       raise FrozenError, "can't modify frozen MessagePack::Factory" if frozen?
 

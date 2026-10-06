@@ -20,6 +20,8 @@ module MessagePack
     # Supported options:
     #
     # * *:compatibility_mode* serialize in older versions way, without str8 and bin types
+    # * *:collection_buffer_size* maximum number of bytes temporarily buffered for a streaming
+    #   collection written to a non-positionable IO (default 1 MiB, minimum 5 bytes)
     #
     # See also Buffer#initialize for other options.
     #
@@ -84,6 +86,61 @@ module MessagePack
     end
 
     alias pack write
+
+    #
+    # Serializes an Array immediately, or starts a streaming array.
+    #
+    # With no argument and a block, yields a collection writer. A positionable IO
+    # (responding to +seek+, +pos+, and +truncate+) receives a 5-byte placeholder and
+    # only the header is rewritten when the collection is closed. Other outputs buffer
+    # serialized bytes up to the collection buffer limit and write nothing until the
+    # whole collection is valid.
+    #
+    # An Enumerator is consumed once and streamed. This avoids materializing the array
+    # or iterating it twice to count its length.
+    #
+    # @param values [Array, Enumerator, nil]
+    # @param buffer_size [Integer, nil] per-call override for non-positionable IO
+    # @return [Packer, CollectionWriter] packer for block/enumerator form, writer when no block is given
+    #
+    def write_array(values = nil, buffer_size: nil)
+    end
+
+    #
+    # Serializes a Hash immediately, or starts a streaming map.
+    #
+    # The Enumerator form accepts either [key, value] pairs or key/value yielded by
+    # methods such as Hash#each_pair. The block form yields a collection writer on which
+    # keys and values alternate.
+    #
+    # @param pairs [Hash, Enumerator, nil]
+    # @param buffer_size [Integer, nil] per-call override for non-positionable IO
+    # @return [Packer, CollectionWriter] packer for block/enumerator form, writer when no block is given
+    #
+    def write_map(pairs = nil, buffer_size: nil)
+    end
+
+    #
+    # Starts an array whose length is not known in advance. Call #write on the returned
+    # writer for each element, then call #finish or #end_array.
+    #
+    # @param buffer_size [Integer, nil] temporary byte limit for non-positionable IO
+    # @return [CollectionWriter]
+    #
+    def begin_array(buffer_size: nil)
+    end
+    alias start_array begin_array
+
+    #
+    # Starts a map whose length is not known in advance. Keys and values must alternate;
+    # #add(key, value) is also available. Call #finish or #end_map when complete.
+    #
+    # @param buffer_size [Integer, nil] temporary byte limit for non-positionable IO
+    # @return [CollectionWriter]
+    #
+    def begin_map(buffer_size: nil)
+    end
+    alias start_map begin_map
 
     #
     # Serializes a nil object. Same as write(nil).
