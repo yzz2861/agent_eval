@@ -23,6 +23,7 @@ module Parslet::Atoms
   require 'parslet/atoms/lookahead'
   require 'parslet/atoms/alternative'
   require 'parslet/atoms/sequence'
+  require 'parslet/atoms/permutation'
   require 'parslet/atoms/repetition'
   require 'parslet/atoms/re'
   require 'parslet/atoms/str'

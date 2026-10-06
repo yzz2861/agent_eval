@@ -240,6 +240,27 @@ module Parslet
     Parslet::Atoms::Infix.new(element, operations, &reducer)
   end
   module_function :infix_expression
+
+  # Returns an atom matching named members in any order. Required members must
+  # all be present; optional members may be omitted, but each member can match
+  # at most once.
+  #
+  # Example:
+  #   permutation do |members|
+  #     members.required :where, str('where').as(:value)
+  #     members.optional :limit, str('limit').as(:value)
+  #   end
+  #
+  def permutation(&block)
+    Parslet::Atoms::Permutation.build(&block)
+  end
+  module_function :permutation
+
+  # Alias for #permutation for parsers that describe an unordered clause group.
+  def group(&block)
+    permutation(&block)
+  end
+  module_function :group
   
   # A special kind of atom that allows embedding whole treetop expressions
   # into parslet construction. 
