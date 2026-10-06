@@ -1,4 +1,5 @@
 require "hamster/immutable"
+require "hamster/edit_session"
 require "hamster/enumerable"
 require "hamster/hash"
 require "hamster/associable"
@@ -136,6 +137,30 @@ module Hamster
     end
     alias :<< :add
     alias :push :add
+
+    # Yield a temporary editor for batching many modifications. When the block
+    # exits normally, the editor is discarded and a single immutable {Vector}
+    # is returned. If the block raises an exception, this vector is left
+    # unchanged. The editor can only be used from the thread which created it
+    # and only while the block is running.
+    #
+    # @example
+    #   vector.edit do |editor|
+    #     1000.times { |index| editor.add(index) }
+    #   end
+    #
+    # @yield [Vector::Editor] temporary editor
+    # @return [Vector]
+    def edit
+      raise LocalJumpError, "a block is required" unless block_given?
+      editor = Editor.new(self)
+      begin
+        yield(editor)
+        editor.__send__(:result, self.class)
+      ensure
+        editor.__send__(:invalidate!)
+      end
+    end
 
     # Return a new `Vector` with a new value at the given `index`. If `index`
     # is greater than the length of the vector, the returned vector will be
@@ -1505,6 +1530,205 @@ module Hamster
         end
       end
     end
+
+    # Temporary, thread-confined editor returned by {Vector#edit}.
+    class Editor
+      def initialize(vector)
+        @source = vector
+        @root = vector.instance_variable_get(:@root)
+        @size = vector.size
+        @levels = vector.instance_variable_get(:@levels)
+        @session = EditSession.new([], Thread.current, true)
+        @changed = false
+      end
+
+      def add(item)
+        validate!
+        update_root!(@size, item)
+        self
+      end
+      alias :<< :add
+      alias :push :add
+
+      def put(index, item = yield(get(index)))
+        validate!
+        raise IndexError, "index #{index} outside of vector bounds" if index < -@size
+        index += @size if index < 0
+
+        if index > @size
+          (@size...index).each { |padding_index| update_root!(padding_index, nil) }
+          update_root!(index, item)
+        else
+          update_root!(index, item)
+        end
+        self
+      end
+      alias :set :put
+
+      def []=(index, item)
+        put(index, item)
+        item
+      end
+
+      def get(index)
+        validate!
+        return nil if @size == 0
+        index += @size if index < 0
+        return nil if index >= @size || index < 0
+        leaf_node_for!(@root, @levels * BITS_PER_LEVEL, index)[index & INDEX_MASK]
+      end
+      alias :at :get
+      alias :[] :get
+
+      def fetch(index, default = (missing_default = true))
+        validate!
+        if index >= -@size && index < @size
+          get(index)
+        elsif block_given?
+          yield(index)
+        elsif !missing_default
+          default
+        else
+          raise IndexError, "index #{index} outside of vector bounds"
+        end
+      end
+
+      def size
+        validate!
+        @size
+      end
+      alias :length :size
+
+      def empty?
+        validate!
+        @size == 0
+      end
+
+      def each(&block)
+        validate!
+        return enum_for(:each) unless block_given?
+        traverse_depth_first!(@root, @levels, &block)
+        self
+      end
+
+      def to_a
+        validate!
+        flatten_node!(@root, @levels * BITS_PER_LEVEL, [])
+      end
+      alias :to_ary :to_a
+
+      private
+      def invalidate!
+        @session.active = false
+      end
+
+      def result(klass)
+        validate!
+        return @source unless @changed
+        finish_nodes!
+        klass.alloc(@root, @size, @levels).immutable!
+      end
+
+      def update_root!(index, item)
+        while index >= (1 << (BITS_PER_LEVEL * (@levels + 1)))
+          @root = editable_node([@root])
+          @levels += 1
+        end
+
+        new_root, changed = update_node!(@root, @levels * BITS_PER_LEVEL, index, item)
+        if changed
+          @root = new_root
+          @size = index + 1 if index >= @size
+          @changed = true
+        end
+      end
+
+      def update_node!(node, bitshift, index, item)
+        slot_index = (index >> bitshift) & INDEX_MASK
+
+        if bitshift > 0
+          old_child = node[slot_index] || []
+          child, child_changed = update_node!(old_child, bitshift - BITS_PER_LEVEL, index, item)
+          if child_changed
+            node = editable_node(node)
+            node[slot_index] = child
+            return [node, true]
+          end
+          return [node, false]
+        end
+
+        existing_item = node[slot_index]
+        if existing_item.equal?(item)
+          [node, false]
+        else
+          node = editable_node(node)
+          node[slot_index] = item
+          [node, true]
+        end
+      end
+
+      def editable_node(node)
+        if owned?(node)
+          node
+        else
+          node.dup.tap do |copy|
+            copy.instance_variable_set(:@__hamster_editor__, @session)
+            @session.nodes << copy
+          end
+        end
+      end
+
+      def owned?(node)
+        node.instance_variable_defined?(:@__hamster_editor__) &&
+          node.instance_variable_get(:@__hamster_editor__).equal?(@session)
+      end
+
+      def leaf_node_for!(node, bitshift, index)
+        while bitshift > 0
+          node = node[(index >> bitshift) & INDEX_MASK]
+          bitshift -= BITS_PER_LEVEL
+        end
+        node
+      end
+
+      def traverse_depth_first!(node, level, &block)
+        return node.each(&block) if level == 0
+        node.each { |child| traverse_depth_first!(child, level - 1, &block) if child }
+      end
+
+      def flatten_node!(node, bitshift, result)
+        if bitshift == 0
+          result.concat(node)
+        else
+          node.each do |child|
+            flatten_node!(child, bitshift - BITS_PER_LEVEL, result) if child
+          end
+        end
+        result
+      end
+
+      def finish_nodes!
+        @session.nodes.each do |node|
+          node.remove_instance_variable(:@__hamster_editor__) if node.instance_variable_defined?(:@__hamster_editor__)
+        end
+        freeze_node!(@root)
+      end
+
+      def freeze_node!(node)
+        node.each { |child| freeze_node!(child) if child.is_a?(Array) }
+        node.freeze
+      end
+
+      def validate!
+        unless @session.active
+          raise RuntimeError, "editor can only be used while its edit block is running"
+        end
+        unless @session.thread.equal?(Thread.current)
+          raise ThreadError, "editor can only be used on the thread which created it"
+        end
+      end
+    end
+    private_constant :Editor
   end
 
   # The canonical empty `Vector`. Returned by `Vector[]` when

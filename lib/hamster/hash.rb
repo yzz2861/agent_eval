@@ -1,4 +1,5 @@
 require "hamster/immutable"
+require "hamster/edit_session"
 require "hamster/undefined"
 require "hamster/enumerable"
 require "hamster/trie"
@@ -263,6 +264,30 @@ module Hamster
         self
       else
         self.class.alloc(new_trie, @default)
+      end
+    end
+
+    # Yield a temporary editor for batching many modifications. When the block
+    # exits normally, the editor is discarded and a single immutable {Hash} is
+    # returned. If the block raises an exception, this hash is left unchanged.
+    # The editor can only be used from the thread which created it and only
+    # while the block is running.
+    #
+    # @example
+    #   hash.edit do |editor|
+    #     1000.times { |index| editor.put(index, index * 2) }
+    #   end
+    #
+    # @yield [Hash::Editor] temporary editor
+    # @return [Hash]
+    def edit
+      raise LocalJumpError, "a block is required" unless block_given?
+      editor = Editor.new(self)
+      begin
+        yield(editor)
+        editor.__send__(:result, self.class, @default)
+      ensure
+        editor.__send__(:invalidate!)
       end
     end
 
@@ -894,6 +919,134 @@ module Hamster
         self.class.alloc(trie, @default)
       end
     end
+
+    # Temporary, thread-confined editor returned by {Hash#edit}.
+    class Editor
+      def initialize(hash)
+        @source = hash
+        @default = hash.default_proc
+        @trie = hash.instance_variable_get(:@trie)
+        @session = EditSession.new([], Thread.current, true)
+        @changed = false
+      end
+
+      def put(key, value = yield(get(key)))
+        validate!
+        entry = @trie.get(key)
+        unless entry && entry[1].equal?(value)
+          editable_trie.edit_put(key, value, @session)
+          @changed = true
+        end
+        self
+      end
+      alias :store :put
+
+      def []=(key, value)
+        put(key, value)
+        value
+      end
+
+      def delete(key)
+        validate!
+        if @trie.key?(key)
+          editable_trie.edit_delete(key, @session)
+          @changed = true
+        end
+        self
+      end
+
+      def clear
+        validate!
+        @trie = Trie.new(0, 0, [], [], @session)
+        @session.nodes << @trie
+        @changed = true
+        self
+      end
+
+      def get(key)
+        validate!
+        entry = @trie.get(key)
+        if entry
+          entry[1]
+        elsif @default
+          @default.call(key)
+        end
+      end
+      alias :[] :get
+
+      def fetch(key, default = Undefined)
+        validate!
+        entry = @trie.get(key)
+        if entry
+          entry[1]
+        elsif block_given?
+          yield(key)
+        elsif default != Undefined
+          default
+        else
+          raise KeyError, "key not found: #{key.inspect}"
+        end
+      end
+
+      def key?(key)
+        validate!
+        @trie.key?(key)
+      end
+      alias :has_key? :key?
+      alias :include? :key?
+      alias :member? :key?
+
+      def size
+        validate!
+        @trie.size
+      end
+      alias :length :size
+
+      def empty?
+        validate!
+        @trie.empty?
+      end
+
+      def each(&block)
+        validate!
+        return enum_for(:each) unless block_given?
+        @trie.each(&block)
+        self
+      end
+      alias :each_pair :each
+
+      private
+      def invalidate!
+        @session.active = false
+      end
+
+      def result(klass, default)
+        validate!
+        return @source unless @changed
+
+        @session.nodes.each(&:finish_edit!)
+        if @trie.empty?
+          default ? klass.alloc(EmptyTrie, default).immutable! : klass.empty
+        else
+          klass.alloc(@trie, default).immutable!
+        end
+      end
+
+      def editable_trie
+        @trie = @trie.editable_copy(@session) unless @trie.owner.equal?(@session)
+        @trie
+      end
+
+      def validate!
+        unless @session.active
+          raise RuntimeError, "editor can only be used while its edit block is running"
+        end
+        unless @session.thread.equal?(Thread.current)
+          raise ThreadError, "editor can only be used on the thread which created it"
+        end
+      end
+    end
+    private_constant :Editor
   end
 
   # The canonical empty `Hash`. Returned by `Hash[]` when

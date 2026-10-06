@@ -10,12 +10,15 @@ module Hamster
     # Returns the number of key-value pairs in the trie.
     attr_reader :size
 
-    def initialize(significant_bits, size = 0, entries = [], children = [])
+    def initialize(significant_bits, size = 0, entries = [], children = [], owner = nil)
       @significant_bits = significant_bits
       @entries = entries
       @children = children
       @size = size
+      @owner = owner
     end
+
+    attr_reader :owner
 
     # Returns <tt>true</tt> if the trie contains no key-value pairs.
     def empty?
@@ -179,6 +182,80 @@ module Hamster
       self
     end
 
+    def editable_copy(owner)
+      return self if @owner.equal?(owner)
+      copy = Trie.new(@significant_bits, @size, @entries.dup, @children.dup, owner)
+      owner.nodes << copy
+      copy
+    end
+
+    def editable_new(significant_bits, owner)
+      node = Trie.new(significant_bits, 0, [], [], owner)
+      owner.nodes << node
+      node
+    end
+
+    def edit_put(key, value, owner)
+      raise RuntimeError, "editor is not valid on this thread" unless @owner.equal?(owner)
+
+      index = index_for(key)
+      entry = @entries[index]
+
+      if !entry
+        @size += 1
+        key = key.dup.freeze if key.is_a?(String) && !key.frozen?
+        @entries[index] = [key, value].freeze
+      elsif entry[0].eql?(key)
+        key = key.dup.freeze if key.is_a?(String) && !key.frozen?
+        @entries[index] = [key, value].freeze
+      else
+        child = @children[index]
+        if child
+          old_child_size = child.size
+          child = child.editable_copy(owner) unless child.owner.equal?(owner)
+          child.edit_put(key, value, owner)
+          @children[index] = child
+          @size += child.size - old_child_size
+        else
+          child = editable_new(@significant_bits + 5, owner)
+          child.edit_put(key, value, owner)
+          @children[index] = child
+          @size += 1
+        end
+      end
+
+      self
+    end
+
+    def edit_delete(key, owner)
+      raise RuntimeError, "editor is not valid on this thread" unless @owner.equal?(owner)
+
+      index = index_for(key)
+      entry = @entries[index]
+      if entry && entry[0].eql?(key)
+        remove_entry!(index, owner)
+        return self
+      end
+
+      child = @children[index]
+      if child
+        old_child_size = child.size
+        child = child.editable_copy(owner) unless child.owner.equal?(owner)
+        child.edit_delete(key, owner)
+        @size -= old_child_size - child.size
+        @children[index] = child.empty? ? nil : child
+      end
+
+      self
+    end
+
+    def finish_edit!
+      @owner = nil
+      @entries.freeze
+      @children.freeze
+      self
+    end
+
     # Retrieves the entry corresponding to the given key. If not found, returns <tt>nil</tt>.
     def get(key)
       index = index_for(key)
@@ -281,6 +358,19 @@ module Hamster
 
     protected
 
+    def first_entry!
+      @entries.each do |entry|
+        return entry if entry
+      end
+      @children.each do |child|
+        if child
+          entry = child.first_entry!
+          return entry if entry
+        end
+      end
+      nil
+    end
+
     # Returns a replacement instance after removing the specified key.
     # If not found, returns <tt>self</tt>.
     # If empty, returns <tt>nil</tt>.
@@ -323,6 +413,22 @@ module Hamster
     end
 
     private
+
+    def remove_entry!(index, owner)
+      child = @children[index]
+      if child
+        child = child.editable_copy(owner) unless child.owner.equal?(owner)
+        entry = child.first_entry!
+        if entry
+          child.edit_delete(entry[0], owner)
+          @entries[index] = entry
+          @children[index] = child.empty? ? nil : child
+        end
+      else
+        @entries[index] = nil
+      end
+      @size -= 1
+    end
 
     def index_for(key)
       (key.hash.abs >> @significant_bits) & 31
