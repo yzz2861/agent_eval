@@ -20,7 +20,9 @@ module Dotenv
           )
         /x
 
-        def call(value, env)
+        # @param fallback [Hash, nil] passed through to variable substitution
+        #   inside the command. Pass +nil+ to avoid reading the process +ENV+.
+        def call(value, env, fallback: ENV)
           # Process interpolated shell commands
           value.gsub(INTERPOLATED_SHELL_COMMAND) do |*|
             # Eliminate opening and closing parentheses
@@ -31,7 +33,7 @@ module Dotenv
               $LAST_MATCH_INFO[0][1..]
             else
               # Execute the command and return the value
-              `#{Variable.call(command, env)}`.chomp
+              `#{Variable.call(command, env, fallback: fallback)}`.chomp
             end
           end
         end

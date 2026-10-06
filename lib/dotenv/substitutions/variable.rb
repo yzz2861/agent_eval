@@ -18,14 +18,21 @@ module Dotenv
           \}?           # closing brace
         /xi
 
-        def call(value, env)
+        # Substitute variables in a value, looking them up in +env+.
+        #
+        # @param value [String] the value to substitute variables in
+        # @param env [Hash] the environment view to read variables from
+        # @param fallback [Hash, nil] where to look up variables missing from
+        #   +env+. Defaults to the process +ENV+. Pass +nil+ to resolve
+        #   variables only within +env+.
+        def call(value, env, fallback: ENV)
           value.gsub(VARIABLE) do |variable|
             match = $LAST_MATCH_INFO
 
             if match[1] == "\\"
               variable[1..]
             elsif match[3]
-              env[match[3]] || ENV[match[3]] || ""
+              env[match[3]] || fallback&.[](match[3]) || ""
             else
               variable
             end

@@ -272,6 +272,21 @@ Dotenv.parse(".env.local", ".env")
 
 This method returns a hash of the ENV var name/value pairs.
 
+### Spawning child processes
+
+To run child processes (e.g. several test backends, each with its own `.env` file) with their own environment without modifying the parent process `ENV`:
+
+```ruby
+env = Dotenv.spawn_env("backend.env",
+  inherit: %w[PATH HOME LANG],        # which parent variables to keep
+  override: { "PORT" => "3001", "DEBUG" => nil })
+
+spawn(env, "ruby", "server.rb")       # PORT=3001, DEBUG unset in the child
+env.summary # => { "added" => [...], "changed" => [...], "removed" => [...] }
+```
+
+The returned `Dotenv::SpawnEnv` is a `Hash` that can be passed directly to `Process.spawn`. A value is either a string, `nil` (explicitly deleted, so it is unset in the child even if the parent has it), or absent (not provided). `inherit` accepts `true` (all variables), `false` (none), an Array of names, or a Regexp. Variable expansion inside the files only reads from this environment view and never falls back to the host `ENV`. Keys that differ only in case are handled per platform (case-insensitive on Windows); pass `case_sensitive: true/false` to override. The `summary` only lists key names, never values, so it is safe to log without leaking secrets.
+
 ### Templates
 
 You can use the `-t` or `--template` flag on the dotenv cli to create a template of your `.env` file.

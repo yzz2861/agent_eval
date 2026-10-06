@@ -3,6 +3,7 @@ require "dotenv/parser"
 require "dotenv/environment"
 require "dotenv/missing_keys"
 require "dotenv/diff"
+require "dotenv/spawn_env"
 
 # Shim to load environment variables from `.env files into `ENV`.
 module Dotenv
@@ -129,6 +130,16 @@ module Dotenv
     ensure
       restore(diff.a, safe: true)
     end
+  end
+
+  # Build an environment Hash for spawning a child process, without
+  # modifying the parent process ENV. See Dotenv::SpawnEnv for details.
+  #
+  # @param filenames [Array<String>] .env files to layer on
+  # @param options [Hash] see Dotenv::SpawnEnv#initialize
+  # @return [Dotenv::SpawnEnv] a Hash suitable for +Process.spawn+
+  def spawn_env(*filenames, **options)
+    SpawnEnv.new(*filenames, **options)
   end
 
   def require_keys(*keys)
