@@ -10,10 +10,18 @@ module Dry
       attr_reader :default_undefined
 
       # @api private
-      def initialize(config_class: Configurable::Config, default_undefined: false)
+      attr_reader :secret_provider
+
+      # @api private
+      def initialize(
+        config_class: Configurable::Config,
+        default_undefined: false,
+        secret_provider: nil
+      )
         super()
         @config_class = config_class
         @default_undefined = default_undefined
+        @secret_provider = secret_provider
         freeze
       end
 

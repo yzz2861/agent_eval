@@ -8,7 +8,7 @@ module Dry
     class Setting
       include Dry::Equalizer(:name, :default, :constructor, :children, :options, inspect: false)
 
-      OPTIONS = %i[default reader constructor mutable cloneable settings config_class].freeze
+      OPTIONS = %i[default reader constructor mutable cloneable settings config_class secret].freeze
 
       DEFAULT_CONSTRUCTOR = -> v { v }.freeze
 
@@ -68,16 +68,36 @@ module Dry
       alias_method :cloneable?, :mutable?
 
       # @api private
+      def secret?
+        options[:secret].equal?(true)
+      end
+
+      # @api private
       def to_value
         if children.any?
-          (options[:config_class] || Config).new(children)
+          config_class = options[:config_class] || Config
+
+          if secret_provider.nil?
+            config_class.new(children)
+          else
+            config_class.new(children, secret_provider: secret_provider)
+          end
         else
           value = default
-          value = constructor.(value) unless value.eql?(Undefined)
+          value = constructor.(value) unless value.eql?(Undefined) || secret?
 
           mutable? ? value.dup : value
         end
       end
+
+      # @api private
+      def with_secret_provider(provider)
+        dup.tap { |setting| setting.instance_variable_set(:@secret_provider, provider) }
+      end
+
+      private
+
+      attr_reader :secret_provider
     end
   end
 end

@@ -11,6 +11,12 @@ module Dry
 
     FrozenConfigError = Class.new(Error)
 
+    SecretError = Class.new(Error)
+
+    SecretNotFoundError = Class.new(SecretError)
+
+    SecretReadError = Class.new(SecretError)
+
     AlreadyIncludedError = Class.new(Error)
     deprecate_constant(
       :AlreadyIncludedError,

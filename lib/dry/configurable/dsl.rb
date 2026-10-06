@@ -43,6 +43,27 @@ module Dry
 
         ensure_valid_options(options)
 
+        secret = options.delete(:secret)
+        default = self.default
+
+        if secret
+          raise ArgumentError, "secret settings cannot be nested" if block
+          raise ArgumentError, "secret settings cannot use constructors" if options.key?(:constructor)
+
+          options[:secret] = true
+          explicit_default = options.delete(:default)
+          options[:default] =
+            if explicit_default.is_a?(SecretRef)
+              explicit_default
+            elsif !explicit_default.nil? && !explicit_default.equal?(Undefined)
+              SecretRef.new(explicit_default)
+            elsif secret.equal?(true)
+              SecretRef.new(name.to_sym)
+            else
+              SecretRef.new(secret)
+            end
+        end
+
         options = {default: default, config_class: config_class, **options}
 
         node = [:setting, [name.to_sym, options]]

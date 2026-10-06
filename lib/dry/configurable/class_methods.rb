@@ -68,7 +68,14 @@ module Dry
 
       # @api private
       def __config_build__(settings = self.settings)
-        __config_extension__.config_class.new(settings)
+        config_class = __config_extension__.config_class
+        secret_provider = __config_extension__.secret_provider
+
+        if secret_provider.nil?
+          config_class.new(settings)
+        else
+          config_class.new(settings, secret_provider: secret_provider)
+        end
       end
 
       # @api private

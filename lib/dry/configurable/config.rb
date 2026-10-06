@@ -19,10 +19,11 @@ module Dry
       protected :_configured
 
       # @api private
-      def initialize(settings, values: {})
+      def initialize(settings, values: {}, secret_provider: nil)
         @_settings = settings
         @_values = values
         @_configured = Set.new
+        @_secret_provider = secret_provider
       end
 
       # @api private
@@ -30,6 +31,7 @@ module Dry
         super
         @_values = source.__send__(:dup_values)
         @_configured = source._configured.dup
+        @_secret_provider = source.__send__(:secret_provider)
       end
 
       # @api private
@@ -53,7 +55,7 @@ module Dry
           # Mutable settings may be configured after read
           _configured.add(name) if setting.cloneable?
 
-          setting.to_value.tap { |value|
+          setting.with_secret_provider(@_secret_provider).to_value.tap { |value|
             _values[name] = value
           }
         }
@@ -73,9 +75,16 @@ module Dry
           raise ArgumentError, "+#{name}+ is not a setting name"
         end
 
+        value = SecretRef.new(value) if setting.secret? && !value.is_a?(SecretRef)
+        value = setting.constructor.(value)
+
+        if setting.secret? && !value.is_a?(SecretRef)
+          raise ArgumentError, "+#{name}+ must be a secret reference"
+        end
+
         _configured.add(name)
 
-        _values[name] = setting.constructor.(value)
+        _values[name] = value
       end
 
       # Update config with new values
@@ -141,6 +150,35 @@ module Dry
       # @api public
       def to_h
         values.transform_values { |value| value.is_a?(self.class) ? value.to_h : value }
+      end
+
+      # Resolves a secret setting for the duration of the block only.
+      #
+      # The provider must respond to `#call(reference)` and return the secret or a resource that
+      # responds to `#close`. It may instead yield the secret or resource to the given block.
+      # The resolved value is not stored on the config.
+      #
+      # @raise [SecretNotFoundError] if the provider returns nil or raises KeyError
+      # @raise [SecretReadError] if retrieving the secret fails for any other reason
+      #
+      # @api public
+      def with_secret(name, provider = @_secret_provider, &block)
+        raise ArgumentError, "a block is required" unless block
+        raise ArgumentError, "a secret provider is required" if provider.nil?
+        unless provider.respond_to?(:call)
+          raise ArgumentError, "secret provider must respond to #call"
+        end
+
+        name = name.to_sym
+        setting = _settings[name]
+        raise ArgumentError, "+#{name}+ is not a setting name" unless setting
+
+        reference = self[name]
+        unless reference.is_a?(SecretRef)
+          raise SecretReadError, "+#{name}+ is not configured as a secret"
+        end
+
+        read_secret(name, reference, provider, &block)
       end
 
       # @api private
@@ -219,10 +257,87 @@ module Dry
 
       # @api private
       def pristine
-        self.class.new(_settings)
+        if secret_provider.nil?
+          self.class.new(_settings)
+        else
+          self.class.new(_settings, secret_provider: secret_provider)
+        end
       end
 
       private
+
+      attr_reader :secret_provider
+
+      def read_secret(name, reference, provider, &block)
+        if block_provider?(provider)
+          return call_block_provider(name, reference, provider, &block)
+        end
+
+        resource = retrieve_secret(name, reference, provider)
+
+        begin
+          yield resource
+        ensure
+          release_secret(resource, provider)
+        end
+      end
+
+      def call_block_provider(name, reference, provider, &block)
+        scope_entered = false
+        yielded = false
+
+        result = provider.call(reference) do |resource|
+          scope_entered = true
+          yielded = true
+          raise SecretNotFoundError, "secret +#{name}+ was not found" if resource.nil?
+
+          block.call(resource)
+        end
+        return result if yielded
+
+        raise SecretNotFoundError, "secret +#{name}+ was not found" if result.nil?
+
+        begin
+          block.call(result)
+        ensure
+          release_secret(result, provider)
+        end
+      rescue SecretNotFoundError
+        raise
+      rescue KeyError
+        raise if scope_entered
+        raise SecretNotFoundError, "secret +#{name}+ was not found", cause: nil
+      rescue StandardError
+        raise if scope_entered
+        raise SecretReadError, "failed to read secret +#{name}+", cause: nil
+      end
+
+      def retrieve_secret(name, reference, provider)
+        resource = provider.call(reference)
+
+        raise SecretNotFoundError, "secret +#{name}+ was not found" if resource.nil?
+
+        resource
+      rescue SecretNotFoundError
+        raise
+      rescue KeyError
+        raise SecretNotFoundError, "secret +#{name}+ was not found", cause: nil
+      rescue StandardError
+        raise SecretReadError, "failed to read secret +#{name}+", cause: nil
+      end
+
+      def release_secret(resource, provider)
+        if provider.respond_to?(:release)
+          provider.release(resource)
+        elsif resource.respond_to?(:close)
+          resource.close
+        end
+      end
+
+      def block_provider?(provider)
+        parameters = provider.method(:call).parameters
+        parameters.any? { |type, name| type == :block && name == :block }
+      end
 
       def to_data_attrs
         _values.each_with_object({}) do |(name, value), hsh|
