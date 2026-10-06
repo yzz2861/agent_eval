@@ -9,6 +9,8 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ### Added
 
+- Added `Config#to_shared_snapshot`, returning a deeply frozen, Ractor-shareable hash snapshot of the config's values. Basic containers and scalars are converted by default; other types require explicit caller-provided converters. Repeated references and cycles in the value graph are preserved, and the original config is never frozen or modified.
+
 ### Changed
 
 ### Deprecated

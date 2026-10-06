@@ -11,6 +11,8 @@ module Dry
 
     FrozenConfigError = Class.new(Error)
 
+    SnapshotError = Class.new(Error)
+
     AlreadyIncludedError = Class.new(Error)
     deprecate_constant(
       :AlreadyIncludedError,

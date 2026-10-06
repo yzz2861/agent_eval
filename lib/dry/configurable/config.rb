@@ -217,6 +217,43 @@ module Dry
         freeze
       end
 
+      # Returns a deeply frozen, Ractor-shareable snapshot of the config's values.
+      #
+      # The snapshot is a plain frozen Hash mapping setting names to converted
+      # values, with nested configs becoming nested hashes. It can be handed to
+      # another Ractor (e.g. via +Ractor.new(snapshot)+ or message passing) and
+      # read there safely.
+      #
+      # Basic containers (Array, Hash, Set) and scalars (nil, true, false,
+      # Integer, Float, Rational, Symbol, String) are converted by default.
+      # Values of any other type require an explicit converter keyed by class:
+      #
+      #   config.to_shared_snapshot(converters: {Money => ->(m) { [m.currency, m.cents] }})
+      #
+      # Converter outputs are themselves converted, so they must ultimately
+      # resolve to supported types. Arbitrary objects are never silently
+      # serialized.
+      #
+      # Building the snapshot copies values into new frozen containers; the
+      # original config and its values are never frozen or modified, so the
+      # config remains fully usable in the current Ractor. Repeated references
+      # and cycles within the value graph are preserved in the snapshot.
+      #
+      # Consider finalizing the config before snapshotting if other threads or
+      # Ractors may read the snapshot while the config is still being mutated.
+      #
+      # @param converters [Hash{Class => #call}] converters for custom value types
+      #
+      # @return [Hash{Symbol => Object}] frozen, Ractor-shareable snapshot
+      #
+      # @raise [SnapshotError] if a value has no applicable conversion rule,
+      #   with the message identifying the exact setting path
+      #
+      # @api public
+      def to_shared_snapshot(converters: {})
+        SharedSnapshot.call(self, converters: converters)
+      end
+
       # @api private
       def pristine
         self.class.new(_settings)
