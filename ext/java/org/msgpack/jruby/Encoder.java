@@ -19,6 +19,7 @@ import org.jruby.RubyString;
 import org.jruby.RubySymbol;
 import org.jruby.RubyArray;
 import org.jruby.RubyHash;
+import org.jruby.RubyClass;
 import org.jruby.RubyEncoding;
 import org.jruby.runtime.builtin.IRubyObject;
 import org.jruby.util.ByteList;
@@ -142,8 +143,15 @@ public class Encoder {
         appendString(((RubySymbol) object).asString());
       }
     } else if (object instanceof RubyArray) {
-      if (object.getType() == runtime.getArray() || !tryAppendWithExtTypeLookup(object)) {
-        appendArray((RubyArray) object);
+      RubyClass mapClass = runtime.getModule("MessagePack").getClass("Map");
+      if (mapClass.isInstance(object)) {
+        if (object.getType() == mapClass || !tryAppendWithExtTypeLookup(object)) {
+          appendMapPairs((RubyArray<?>) object);
+        } else {
+          appendArray((RubyArray<?>) object);
+        }
+      } else if (object.getType() == runtime.getArray() || !tryAppendWithExtTypeLookup(object)) {
+        appendArray((RubyArray<?>) object);
       }
     } else if (object instanceof RubyHash) {
       if (object.getType() == runtime.getHash() || !tryAppendWithExtTypeLookup(object)) {
@@ -340,6 +348,22 @@ public class Encoder {
     object.visitAll(visitor);
     if (visitor.remain != 0) {
       object.getRuntime().newConcurrencyError("Hash size changed while packing");
+    }
+  }
+
+  private void appendMapPairs(RubyArray<?> object) {
+    appendHashHeader(object.size());
+    for (int i = 0; i < object.size(); i++) {
+      IRubyObject pairObject = object.eltOk(i);
+      if (!(pairObject instanceof RubyArray)) {
+        throw runtime.newArgumentError("MessagePack::Map entries must be [key, value] pairs");
+      }
+      RubyArray<?> pair = (RubyArray<?>) pairObject;
+      if (pair.size() != 2) {
+        throw runtime.newArgumentError("MessagePack::Map entries must be [key, value] pairs");
+      }
+      appendObject(pair.eltOk(0));
+      appendObject(pair.eltOk(1));
     }
   }
 

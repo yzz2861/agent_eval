@@ -91,6 +91,32 @@ void msgpack_packer_write_hash_value(msgpack_packer_t* pk, VALUE v)
     rb_hash_foreach(v, write_hash_foreach, (VALUE) pk);
 }
 
+static VALUE ordered_map_class(void)
+{
+    VALUE messagepack = rb_const_get_at(rb_cObject, rb_intern("MessagePack"));
+    return rb_const_get_at(messagepack, rb_intern("Map"));
+}
+
+void msgpack_packer_write_map_pairs_value(msgpack_packer_t* pk, VALUE v)
+{
+    unsigned long len = RARRAY_LEN(v);
+    if(len > 0xffffffffUL) {
+        rb_raise(rb_eArgError, "map is too long to pack: %lu pairs should be <= %lu", len, 0xffffffffUL);
+    }
+
+    unsigned int len32 = (unsigned int)len;
+    msgpack_packer_write_map_header(pk, len32);
+
+    for(unsigned int i = 0; i < len32; ++i) {
+        VALUE pair = rb_ary_entry(v, i);
+        if(rb_type(pair) != T_ARRAY || RARRAY_LEN(pair) != 2) {
+            rb_raise(rb_eArgError, "MessagePack::Map entries must be [key, value] pairs");
+        }
+        msgpack_packer_write_value(pk, rb_ary_entry(pair, 0));
+        msgpack_packer_write_value(pk, rb_ary_entry(pair, 1));
+    }
+}
+
 struct msgpack_call_proc_args_t;
 typedef struct msgpack_call_proc_args_t msgpack_call_proc_args_t;
 struct msgpack_call_proc_args_t {
@@ -177,8 +203,14 @@ void msgpack_packer_write_value(msgpack_packer_t* pk, VALUE v)
         }
         break;
     case T_ARRAY:
-        if(rb_class_of(v) == rb_cArray || !msgpack_packer_try_write_with_ext_type_lookup(pk, v)) {
+        if(rb_class_of(v) == rb_cArray) {
             msgpack_packer_write_array_value(pk, v);
+        } else if(!msgpack_packer_try_write_with_ext_type_lookup(pk, v)) {
+            if(RTEST(rb_obj_is_kind_of(v, ordered_map_class()))) {
+                msgpack_packer_write_map_pairs_value(pk, v);
+            } else {
+                msgpack_packer_write_array_value(pk, v);
+            }
         }
         break;
     case T_HASH:
@@ -196,4 +228,3 @@ void msgpack_packer_write_value(msgpack_packer_t* pk, VALUE v)
         msgpack_packer_write_other_value(pk, v);
     }
 }
-

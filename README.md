@@ -111,6 +111,31 @@ end
 
 See [API reference](http://ruby.msgpack.org/MessagePack/Unpacker.html) for details.
 
+## Preserving map entries
+
+MessagePack maps may contain duplicate keys, compound keys (including arrays),
+or keys such as `1` and `1.0` which remain distinct on the wire. Ruby `Hash`
+cannot represent all of these entries, so `MessagePack::Map` stores the
+decoded map as an ordered array of `[key, value]` pairs.
+
+```ruby
+unpacker = MessagePack::Unpacker.new(preserve_maps: true)
+map = MessagePack.unpack(payload, preserve_maps: true)
+map.class # => MessagePack::Map
+map.to_a  # => [[key, value], ...]
+MessagePack.pack(map) # => emits the same ordered map entries
+```
+
+The same option can be passed to `Factory#unpacker` and `Factory#load`.
+Converting to a normal `Hash` requires an explicit duplicate-key strategy:
+
+```ruby
+map.to_h(:raise)
+map.to_h(:keep_first)
+map.to_h(:keep_last)
+map.to_h { |key, old_value, new_value| old_value + new_value }
+```
+
 ## Serializing and deserializing symbols
 
 By default, symbols are serialized as strings:

@@ -39,6 +39,7 @@ typedef struct {
     enum stack_type_t type;
     VALUE object;
     VALUE key;
+    bool preserve_map;
 } msgpack_unpacker_stack_entry_t;
 
 struct msgpack_unpacker_stack_t {
@@ -55,6 +56,7 @@ struct msgpack_unpacker_t {
 
     VALUE self;
     VALUE last_object;
+    VALUE map_class;
 
     VALUE reading_raw;
     size_t reading_raw_remaining;
@@ -65,6 +67,7 @@ struct msgpack_unpacker_t {
 
     int reading_raw_type;
     unsigned int head_byte;
+    bool pending_head_byte;
 
     /* options */
     int symbol_ext_type;
@@ -74,6 +77,7 @@ struct msgpack_unpacker_t {
     bool freeze: 1;
     bool allow_unknown_ext: 1;
     bool optimized_symbol_ext_type: 1;
+    bool preserve_maps: 1;
 };
 
 #define UNPACKER_BUFFER_(uk) (&(uk)->buffer)
@@ -89,6 +93,8 @@ void _msgpack_unpacker_destroy(msgpack_unpacker_t* uk);
 void msgpack_unpacker_mark(msgpack_unpacker_t* uk);
 
 void _msgpack_unpacker_reset(msgpack_unpacker_t* uk);
+
+void msgpack_unpacker_stack_free(msgpack_unpacker_stack_t* stack);
 
 static inline void msgpack_unpacker_set_symbolized_keys(msgpack_unpacker_t* uk, bool enable)
 {
@@ -110,6 +116,11 @@ static inline void msgpack_unpacker_set_allow_unknown_ext(msgpack_unpacker_t* uk
     uk->allow_unknown_ext = enable;
 }
 
+static inline void msgpack_unpacker_set_preserve_maps(msgpack_unpacker_t* uk, bool enable)
+{
+    uk->preserve_maps = enable;
+}
+
 static inline void msgpack_unpacker_stack_rewind(msgpack_unpacker_t* uk)
 {
     uk->stack.depth = uk->stack.floor;
@@ -128,6 +139,7 @@ static inline void msgpack_unpacker_stack_rewind(msgpack_unpacker_t* uk)
 
 int msgpack_unpacker_read(msgpack_unpacker_t* uk, size_t target_stack_depth);
 
+
 int msgpack_unpacker_skip(msgpack_unpacker_t* uk, size_t target_stack_depth);
 
 static inline VALUE msgpack_unpacker_get_last_object(msgpack_unpacker_t* uk)
@@ -142,4 +154,3 @@ int msgpack_unpacker_read_array_header(msgpack_unpacker_t* uk, uint32_t* result_
 int msgpack_unpacker_read_map_header(msgpack_unpacker_t* uk, uint32_t* result_size);
 
 #endif
-

@@ -500,8 +500,9 @@ void msgpack_packer_write_array_value(msgpack_packer_t* pk, VALUE v);
 
 void msgpack_packer_write_hash_value(msgpack_packer_t* pk, VALUE v);
 
+void msgpack_packer_write_map_pairs_value(msgpack_packer_t* pk, VALUE v);
+
 void msgpack_packer_write_value(msgpack_packer_t* pk, VALUE v);
 
 
 #endif
-

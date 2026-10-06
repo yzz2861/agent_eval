@@ -37,6 +37,10 @@ static VALUE sym_symbolize_keys;
 static VALUE sym_key_cache;
 static VALUE sym_freeze;
 static VALUE sym_allow_unknown_ext;
+static VALUE sym_preserve_maps;
+static VALUE sym_map_class;
+static VALUE sym_ordered_maps;
+static VALUE sym_preserve_duplicate_keys;
 
 static void Unpacker_free(void *ptr)
 {
@@ -140,6 +144,33 @@ VALUE MessagePack_Unpacker_initialize(int argc, VALUE* argv, VALUE self)
 
         v = rb_hash_aref(options, sym_allow_unknown_ext);
         msgpack_unpacker_set_allow_unknown_ext(uk, RTEST(v));
+
+        v = rb_hash_aref(options, sym_preserve_maps);
+        if(RTEST(v)) {
+            msgpack_unpacker_set_preserve_maps(uk, true);
+        }
+
+        v = rb_hash_aref(options, sym_ordered_maps);
+        if(RTEST(v)) {
+            msgpack_unpacker_set_preserve_maps(uk, true);
+        }
+
+        v = rb_hash_aref(options, sym_preserve_duplicate_keys);
+        if(RTEST(v)) {
+            msgpack_unpacker_set_preserve_maps(uk, true);
+        }
+
+        v = rb_hash_aref(options, sym_map_class);
+        if(v == Qtrue) {
+            msgpack_unpacker_set_preserve_maps(uk, true);
+        } else if(v != Qnil && v != Qfalse) {
+            uk->map_class = v;
+            msgpack_unpacker_set_preserve_maps(uk, true);
+        }
+
+        if(uk->preserve_maps && uk->map_class == Qnil) {
+            uk->map_class = rb_const_get_at(rb_const_get_at(rb_cObject, rb_intern("MessagePack")), rb_intern("Map"));
+        }
     }
 
     return self;
@@ -163,9 +194,23 @@ static VALUE Unpacker_allow_unknown_ext_p(VALUE self)
     return uk->allow_unknown_ext ? Qtrue : Qfalse;
 }
 
+static VALUE Unpacker_preserve_maps_p(VALUE self)
+{
+    msgpack_unpacker_t *uk = MessagePack_Unpacker_get(self);
+    return uk->preserve_maps ? Qtrue : Qfalse;
+}
+
+static VALUE Unpacker_map_class(VALUE self)
+{
+    msgpack_unpacker_t *uk = MessagePack_Unpacker_get(self);
+    return uk->map_class;
+}
+
 NORETURN(static void raise_unpacker_error(msgpack_unpacker_t *uk, int r))
 {
-    msgpack_unpacker_stack_rewind(uk);
+    if(r != PRIMITIVE_EOF) {
+        msgpack_unpacker_stack_rewind(uk);
+    }
     switch(r) {
     case PRIMITIVE_EOF:
         rb_raise(rb_eEOFError, "end of buffer reached");
@@ -420,6 +465,10 @@ void MessagePack_Unpacker_module_init(VALUE mMessagePack)
     sym_key_cache = ID2SYM(rb_intern("key_cache"));
     sym_freeze = ID2SYM(rb_intern("freeze"));
     sym_allow_unknown_ext = ID2SYM(rb_intern("allow_unknown_ext"));
+    sym_preserve_maps = ID2SYM(rb_intern("preserve_maps"));
+    sym_map_class = ID2SYM(rb_intern("map_class"));
+    sym_ordered_maps = ID2SYM(rb_intern("ordered_maps"));
+    sym_preserve_duplicate_keys = ID2SYM(rb_intern("preserve_duplicate_keys"));
 
     rb_define_alloc_func(cMessagePack_Unpacker, MessagePack_Unpacker_alloc);
 
@@ -427,6 +476,8 @@ void MessagePack_Unpacker_module_init(VALUE mMessagePack)
     rb_define_method(cMessagePack_Unpacker, "symbolize_keys?", Unpacker_symbolized_keys_p, 0);
     rb_define_method(cMessagePack_Unpacker, "freeze?", Unpacker_freeze_p, 0);
     rb_define_method(cMessagePack_Unpacker, "allow_unknown_ext?", Unpacker_allow_unknown_ext_p, 0);
+    rb_define_method(cMessagePack_Unpacker, "preserve_maps?", Unpacker_preserve_maps_p, 0);
+    rb_define_method(cMessagePack_Unpacker, "map_class", Unpacker_map_class, 0);
     rb_define_method(cMessagePack_Unpacker, "buffer", Unpacker_buffer, 0);
     rb_define_method(cMessagePack_Unpacker, "read", Unpacker_read, 0);
     rb_define_alias(cMessagePack_Unpacker, "unpack", "read");

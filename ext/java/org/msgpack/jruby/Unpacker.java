@@ -36,6 +36,8 @@ public class Unpacker extends RubyObject {
   private boolean symbolizeKeys;
   private boolean freeze;
   private boolean allowUnknownExt;
+  private boolean preserveMaps;
+  private RubyClass mapClass;
 
   public Unpacker(Ruby runtime, RubyClass type) {
     this(runtime, type, new ExtensionRegistry());
@@ -60,6 +62,8 @@ public class Unpacker extends RubyObject {
     symbolizeKeys = false;
     allowUnknownExt = false;
     freeze = false;
+    preserveMaps = false;
+    mapClass = null;
 
     IRubyObject io = null;
     RubyHash options = null;
@@ -91,6 +95,35 @@ public class Unpacker extends RubyObject {
         allowUnknownExt = au.isTrue();
       }
 
+      IRubyObject pm = options.fastARef(runtime.newSymbol("preserve_maps"));
+      if (pm != null) {
+        preserveMaps = pm.isTrue();
+      }
+
+      IRubyObject orderedMaps = options.fastARef(runtime.newSymbol("ordered_maps"));
+      if (orderedMaps != null) {
+        preserveMaps = orderedMaps.isTrue();
+      }
+
+      IRubyObject duplicateKeys = options.fastARef(runtime.newSymbol("preserve_duplicate_keys"));
+      if (duplicateKeys != null) {
+        preserveMaps = duplicateKeys.isTrue();
+      }
+
+      IRubyObject mapClassOption = options.fastARef(runtime.newSymbol("map_class"));
+      if (mapClassOption != null) {
+        if (mapClassOption instanceof RubyClass) {
+          preserveMaps = true;
+          mapClass = (RubyClass) mapClassOption;
+        } else {
+          preserveMaps = mapClassOption.isTrue();
+        }
+      }
+
+      if (preserveMaps && mapClass == null) {
+        mapClass = runtime.getModule("MessagePack").getClass("Map");
+      }
+
     }
 
     if (io != null && io != runtime.getNil()) {
@@ -119,6 +152,16 @@ public class Unpacker extends RubyObject {
   @JRubyMethod(name = "allow_unknown_ext?")
   public IRubyObject isAllowUnknownExt(ThreadContext ctx) {
     return allowUnknownExt ? ctx.runtime.getTrue() : ctx.runtime.getFalse();
+  }
+
+  @JRubyMethod(name = { "preserve_maps?" })
+  public IRubyObject isPreserveMaps(ThreadContext ctx) {
+    return preserveMaps ? ctx.runtime.getTrue() : ctx.runtime.getFalse();
+  }
+
+  @JRubyMethod
+  public IRubyObject map_class(ThreadContext ctx) {
+    return mapClass == null ? ctx.runtime.getNil() : mapClass;
   }
 
   @JRubyMethod(name = "registered_types_internal", visibility = PRIVATE)
@@ -160,7 +203,7 @@ public class Unpacker extends RubyObject {
     if (limit == -1) {
       limit = byteList.length() - offset;
     }
-    Decoder decoder = new Decoder(ctx.runtime, this, byteList.unsafeBytes(), byteList.begin() + offset, limit, symbolizeKeys, freeze, allowUnknownExt);
+    Decoder decoder = new Decoder(ctx.runtime, this, byteList.unsafeBytes(), byteList.begin() + offset, limit, symbolizeKeys, freeze, allowUnknownExt, preserveMaps, mapClass);
     try {
       data = null;
       data = decoder.next();
@@ -190,7 +233,7 @@ public class Unpacker extends RubyObject {
   public IRubyObject feed(ThreadContext ctx, IRubyObject data) {
     ByteList byteList = data.asString().getByteList();
     if (decoder == null) {
-      decoder = new Decoder(ctx.runtime, this, byteList.unsafeBytes(), byteList.begin(), byteList.length(), symbolizeKeys, freeze, allowUnknownExt);
+      decoder = new Decoder(ctx.runtime, this, byteList.unsafeBytes(), byteList.begin(), byteList.length(), symbolizeKeys, freeze, allowUnknownExt, preserveMaps, mapClass);
     } else {
       decoder.feed(byteList.unsafeBytes(), byteList.begin(), byteList.length());
     }
@@ -326,7 +369,9 @@ public class Unpacker extends RubyObject {
     ByteList byteList = str.getByteList();
     this.stream = stream;
     this.decoder = null;
-    this.decoder = new Decoder(ctx.runtime, this, byteList.unsafeBytes(), byteList.begin(), byteList.length(), symbolizeKeys, freeze, allowUnknownExt);
+    RubyClass decoderMapClass = mapClass == null ? ctx.runtime.getModule("MessagePack").getClass("Map") : mapClass;
+    this.decoder = new Decoder(ctx.runtime, this, byteList.unsafeBytes(), byteList.begin(), byteList.length(),
+      symbolizeKeys, freeze, allowUnknownExt, preserveMaps, decoderMapClass);
     return getStream(ctx);
   }
 

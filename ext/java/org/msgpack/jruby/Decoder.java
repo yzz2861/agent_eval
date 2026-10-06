@@ -17,6 +17,7 @@ import org.jruby.RubyHash;
 import org.jruby.RubyInteger;
 import org.jruby.exceptions.RaiseException;
 import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.runtime.Block;
 import org.jruby.util.ByteList;
 
 import org.jcodings.Encoding;
@@ -41,37 +42,50 @@ public class Decoder implements Iterator<IRubyObject> {
   private boolean symbolizeKeys;
   private boolean freeze;
   private boolean allowUnknownExt;
+  private boolean preserveMaps;
+  private RubyClass mapClass;
 
   public Decoder(Ruby runtime) {
-    this(runtime, null, new byte[] {}, 0, 0, false, false, false);
+    this(runtime, null, new byte[] {}, 0, 0, false, false, false, false);
   }
 
   public Decoder(Ruby runtime, Unpacker unpacker) {
-    this(runtime, unpacker, new byte[] {}, 0, 0, false, false, false);
+    this(runtime, unpacker, new byte[] {}, 0, 0, false, false, false, false);
   }
 
   public Decoder(Ruby runtime, byte[] bytes) {
-    this(runtime, null, bytes, 0, bytes.length, false, false, false);
+    this(runtime, null, bytes, 0, bytes.length, false, false, false, false);
   }
 
   public Decoder(Ruby runtime, Unpacker unpacker, byte[] bytes) {
-    this(runtime, unpacker, bytes, 0, bytes.length, false, false, false);
+    this(runtime, unpacker, bytes, 0, bytes.length, false, false, false, false);
   }
 
-  public Decoder(Ruby runtime, Unpacker unpacker, byte[] bytes, boolean symbolizeKeys, boolean freeze, boolean allowUnknownExt) {
-    this(runtime, unpacker, bytes, 0, bytes.length, symbolizeKeys, freeze, allowUnknownExt);
+  public Decoder(Ruby runtime, Unpacker unpacker, byte[] bytes, boolean symbolizeKeys,
+                 boolean freeze, boolean allowUnknownExt, boolean preserveMaps) {
+    this(runtime, unpacker, bytes, 0, bytes.length, symbolizeKeys, freeze, allowUnknownExt, preserveMaps);
   }
 
   public Decoder(Ruby runtime, Unpacker unpacker, byte[] bytes, int offset, int length) {
-    this(runtime, unpacker, bytes, offset, length, false, false, false);
+    this(runtime, unpacker, bytes, offset, length, false, false, false, false);
   }
 
-  public Decoder(Ruby runtime, Unpacker unpacker, byte[] bytes, int offset, int length, boolean symbolizeKeys, boolean freeze, boolean allowUnknownExt) {
+  public Decoder(Ruby runtime, Unpacker unpacker, byte[] bytes, int offset, int length,
+                 boolean symbolizeKeys, boolean freeze, boolean allowUnknownExt, boolean preserveMaps) {
+    this(runtime, unpacker, bytes, offset, length, symbolizeKeys, freeze, allowUnknownExt,
+      preserveMaps, runtime.getModule("MessagePack").getClass("Map"));
+  }
+
+  public Decoder(Ruby runtime, Unpacker unpacker, byte[] bytes, int offset, int length,
+                 boolean symbolizeKeys, boolean freeze, boolean allowUnknownExt,
+                 boolean preserveMaps, RubyClass mapClass) {
     this.runtime = runtime;
     this.unpacker = unpacker;
     this.symbolizeKeys = symbolizeKeys;
     this.freeze = freeze;
     this.allowUnknownExt = allowUnknownExt;
+    this.preserveMaps = preserveMaps;
+    this.mapClass = mapClass;
     this.binaryEncoding = runtime.getEncodingService().getAscii8bitEncoding();
     this.utf8Encoding = UTF8Encoding.INSTANCE;
     this.unpackErrorClass = runtime.getModule("MessagePack").getClass("UnpackError");
@@ -145,6 +159,24 @@ public class Decoder implements Iterator<IRubyObject> {
   }
 
   private IRubyObject consumeHash(int size) {
+    if (preserveMaps) {
+      RubyClass decoderMapClass = mapClass == null ? runtime.getModule("MessagePack").getClass("Map") : mapClass;
+      IRubyObject map = decoderMapClass.newInstance(runtime.getCurrentContext(),
+        new IRubyObject[] { RubyArray.newArray(runtime) }, Block.NULL_BLOCK);
+      for (int i = 0; i < size; i++) {
+        IRubyObject key = next();
+        if (key instanceof RubyString && symbolizeKeys) {
+          key = ((RubyString) key).intern();
+        }
+        RubyArray pair = RubyArray.newArray(runtime, new IRubyObject[] { key, next() });
+        if (this.freeze) {
+          pair.setFrozen(true);
+        }
+        map.callMethod(runtime.getCurrentContext(), "<<", pair);
+      }
+      return map;
+    }
+
     RubyHash hash = RubyHash.newHash(runtime);
     for (int i = 0; i < size; i++) {
       IRubyObject key = next();
