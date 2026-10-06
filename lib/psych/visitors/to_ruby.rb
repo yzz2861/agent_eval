@@ -16,9 +16,9 @@ module Psych
         DATA_INITIALIZE = Data.instance_method(:initialize)
       end
 
-      def self.create(symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true)
+      def self.create(symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true, schema: :compat)
         class_loader = ClassLoader.new
-        scanner      = ScalarScanner.new class_loader, strict_integer: strict_integer, parse_symbols: parse_symbols
+        scanner      = ScalarScanner.new class_loader, strict_integer: strict_integer, parse_symbols: parse_symbols, schema: schema
         new(scanner, class_loader, symbolize_names: symbolize_names, freeze: freeze)
       end
 
@@ -97,8 +97,16 @@ module Psych
           Rational(o.value)
         when "!ruby/class", "!ruby/module"
           resolve_class o.value
+        when "tag:yaml.org,2002:int", "!int"
+          @ss.tokenize_int o.value
         when "tag:yaml.org,2002:float", "!float"
-          Float(@ss.tokenize(o.value))
+          @ss.tokenize_float o.value
+        when "tag:yaml.org,2002:bool", "!bool"
+          @ss.tokenize_bool o.value
+        when "tag:yaml.org,2002:null", "!null"
+          @ss.tokenize_null o.value
+        when "tag:yaml.org,2002:timestamp", "!timestamp"
+          @ss.tokenize_timestamp o.value
         when "!ruby/regexp"
           klass = class_loader.regexp
           matches = /^\/(?<string>.*)\/(?<options>[mixn]*)$/m.match(o.value)

@@ -25,4 +25,12 @@ module Psych
       super "Tried to #{action} unspecified class: #{klass_name}"
     end
   end
+
+  # Raised when a scalar with an explicit tag does not match the grammar
+  # that the selected scalar schema defines for that tag.
+  class ScalarSchemaError < Exception
+    def initialize tag, value, schema
+      super "Scalar #{value.inspect} is not valid for #{tag} under the #{schema} schema"
+    end
+  end
 end

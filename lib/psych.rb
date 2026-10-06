@@ -263,16 +263,20 @@ module Psych
   #   Psych.unsafe_load("---\n foo: bar")                         # => {"foo"=>"bar"}
   #   Psych.unsafe_load("---\n foo: bar", symbolize_names: true)  # => {:foo=>"bar"}
   #
+  # The optional +schema+ keyword argument selects how untagged plain
+  # scalars are resolved.  See Psych.safe_load for the list of supported
+  # schemas.
+  #
   # Raises a TypeError when `yaml` parameter is NilClass
   #
   # NOTE: This method *should not* be used to parse untrusted documents, such as
   # YAML documents that are supplied via user input.  Instead, please use the
   # load method or the safe_load method.
   #
-  def self.unsafe_load yaml, filename: nil, fallback: false, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true
+  def self.unsafe_load yaml, filename: nil, fallback: false, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true, schema: :compat
     result = parse(yaml, filename: filename)
     return fallback unless result
-    result.to_ruby(symbolize_names: symbolize_names, freeze: freeze, strict_integer: strict_integer, parse_symbols: parse_symbols)
+    result.to_ruby(symbolize_names: symbolize_names, freeze: freeze, strict_integer: strict_integer, parse_symbols: parse_symbols, schema: schema)
   end
 
   ###
@@ -320,13 +324,33 @@ module Psych
   #   Psych.safe_load("---\n foo: bar")                         # => {"foo"=>"bar"}
   #   Psych.safe_load("---\n foo: bar", symbolize_names: true)  # => {:foo=>"bar"}
   #
-  def self.safe_load yaml, permitted_classes: [], permitted_symbols: [], aliases: false, filename: nil, fallback: nil, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true
+  # The optional +schema+ keyword argument selects how untagged plain
+  # scalars are resolved to Ruby objects:
+  #
+  # [+:compat+] YAML 1.1 style resolution, preserving Psych's historical
+  #             behavior (yes/no/on/off booleans, legacy octals,
+  #             timestamps, etc.).  This is the default.
+  # [+:core+]   The YAML 1.2 core schema: true/false booleans, decimal,
+  #             0o-prefixed octal and 0x-prefixed hexadecimal integers,
+  #             floats including .inf and .nan.  Date-like strings remain
+  #             strings.
+  # [+:json+]   The YAML 1.2 JSON schema: only null, true, false, JSON
+  #             style integers and floats.  Everything else (including
+  #             .inf, 0x and 0o integers and date-like strings) remains
+  #             a string.
+  #
+  # The schema applies uniformly to plain scalars, quoted scalars and
+  # scalars carrying an explicit tag: content that does not satisfy the
+  # grammar the selected schema defines for an explicit tag raises
+  # Psych::ScalarSchemaError.
+  #
+  def self.safe_load yaml, permitted_classes: [], permitted_symbols: [], aliases: false, filename: nil, fallback: nil, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true, schema: :compat
     result = parse(yaml, filename: filename)
     return fallback unless result
 
     class_loader = ClassLoader::Restricted.new(permitted_classes.map(&:to_s),
                                                permitted_symbols.map(&:to_s))
-    scanner      = ScalarScanner.new class_loader, strict_integer: strict_integer, parse_symbols: parse_symbols
+    scanner      = ScalarScanner.new class_loader, strict_integer: strict_integer, parse_symbols: parse_symbols, schema: schema
     visitor = if aliases
                 Visitors::ToRuby.new scanner, class_loader, symbolize_names: symbolize_names, freeze: freeze
               else
@@ -366,7 +390,7 @@ module Psych
   # Raises a TypeError when `yaml` parameter is NilClass.  This method is
   # similar to `safe_load` except that `Symbol` objects are allowed by default.
   #
-  def self.load yaml, permitted_classes: [Symbol], permitted_symbols: [], aliases: false, filename: nil, fallback: nil, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true
+  def self.load yaml, permitted_classes: [Symbol], permitted_symbols: [], aliases: false, filename: nil, fallback: nil, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true, schema: :compat
     safe_load yaml, permitted_classes: permitted_classes,
                     permitted_symbols: permitted_symbols,
                     aliases: aliases,
@@ -375,7 +399,8 @@ module Psych
                     symbolize_names: symbolize_names,
                     freeze: freeze,
                     strict_integer: strict_integer,
-                    parse_symbols: parse_symbols
+                    parse_symbols: parse_symbols,
+                    schema: schema
   end
 
   ###
@@ -668,11 +693,11 @@ module Psych
   #   end
   #   list # => ['foo', 'bar']
   #
-  def self.safe_load_stream yaml, filename: nil, permitted_classes: [], aliases: false
+  def self.safe_load_stream yaml, filename: nil, permitted_classes: [], aliases: false, schema: :compat
     documents = parse_stream(yaml, filename: filename).children.map do |child|
       stream = Psych::Nodes::Stream.new
       stream.children << child
-      safe_load(stream.to_yaml, permitted_classes: permitted_classes, aliases: aliases)
+      safe_load(stream.to_yaml, permitted_classes: permitted_classes, aliases: aliases, schema: schema)
     end
 
     if block_given?
