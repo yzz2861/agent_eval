@@ -206,6 +206,22 @@ module SQLite3
       self.authorizer = block
     end
 
+    # Temporarily sets +authorizer+ for the duration of the block. When the
+    # block exits, the authorizer that was previously active on the database
+    # is restored, including the absence of an authorizer.
+    def with_authorizer(authorizer = nil, &block)
+      raise ArgumentError, "a block is required" unless block_given?
+
+      authorizer = block if authorizer.nil?
+      previous_authorizer = current_authorizer
+      self.authorizer = authorizer
+      begin
+        yield
+      ensure
+        self.authorizer = previous_authorizer
+      end
+    end
+
     # Returns a Statement object representing the given SQL. This does not
     # execute the statement; it merely prepares the statement for execution.
     #

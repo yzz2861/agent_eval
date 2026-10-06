@@ -46,7 +46,12 @@ static VALUE
 allocate(VALUE klass)
 {
     sqlite3StmtRubyPtr ctx;
-    return TypedData_Make_Struct(klass, sqlite3StmtRuby, &statement_type, ctx);
+    VALUE object = TypedData_Make_Struct(klass, sqlite3StmtRuby, &statement_type, ctx);
+    ctx->st = NULL;
+    ctx->db = NULL;
+    ctx->authorizer_generation = 0;
+    ctx->done_p = 0;
+    return object;
 }
 
 static VALUE
@@ -54,6 +59,7 @@ prepare(VALUE self, VALUE db, VALUE sql)
 {
     sqlite3RubyPtr db_ctx = sqlite3_database_unwrap(db);
     sqlite3StmtRubyPtr ctx;
+    sqlite3_stmt *new_stmt = NULL;
     const char *tail = NULL;
     int status;
 
@@ -65,6 +71,7 @@ prepare(VALUE self, VALUE db, VALUE sql)
      * instance variable @connection. The struct pointer is guaranteed to be live because instance
      * variable will keep it from being GCed. */
     ctx->db = db_ctx;
+    ctx->done_p = 0;
 
 #ifdef HAVE_SQLITE3_PREPARE_V2
     status = sqlite3_prepare_v2(
@@ -74,12 +81,23 @@ prepare(VALUE self, VALUE db, VALUE sql)
                  db_ctx->db,
                  (const char *)StringValuePtr(sql),
                  (int)RSTRING_LEN(sql),
-                 &ctx->st,
+                 &new_stmt,
                  &tail
              );
 
+    if (status != SQLITE_OK) {
+        sqlite3_finalize(new_stmt);
+        rb_sqlite3_authorizer_raise_if_exception(db_ctx);
+        CHECK_PREPARE(db_ctx->db, status, StringValuePtr(sql));
+    }
+
+    if (ctx->st) {
+        sqlite3_finalize(ctx->st);
+    }
+    ctx->st = new_stmt;
     CHECK_PREPARE(db_ctx->db, status, StringValuePtr(sql));
     timespecclear(&db_ctx->stmt_deadline);
+    ctx->authorizer_generation = rb_sqlite3_authorizer_generation(db_ctx);
 
     return rb_utf8_str_new_cstr(tail);
 }
@@ -140,6 +158,7 @@ step(VALUE self)
     stmt = ctx->st;
 
     value = sqlite3_step(stmt);
+    rb_sqlite3_authorizer_raise_if_exception(ctx->db);
     if (rb_errinfo() != Qnil) {
         /* some user defined function was invoked as a callback during step and
          * it raised an exception that has been suppressed until step returns.
@@ -208,6 +227,14 @@ step(VALUE self)
     rb_obj_freeze(list);
 
     return list;
+}
+
+static VALUE
+authorizer_generation(VALUE self)
+{
+    sqlite3StmtRubyPtr ctx;
+    TypedData_Get_Struct(self, sqlite3StmtRuby, &statement_type, ctx);
+    return ULONG2NUM(ctx->authorizer_generation);
 }
 
 /* call-seq: stmt.bind_param(key, value)
@@ -733,6 +760,7 @@ init_sqlite3_statement(void)
     rb_define_method(cSqlite3Statement, "reset!", reset_bang, 0);
     rb_define_method(cSqlite3Statement, "clear_bindings!", clear_bindings_bang, 0);
     rb_define_method(cSqlite3Statement, "step", step, 0);
+    rb_define_private_method(cSqlite3Statement, "authorizer_generation", authorizer_generation, 0);
     rb_define_method(cSqlite3Statement, "done?", done_p, 0);
     rb_define_method(cSqlite3Statement, "column_count", column_count, 0);
     rb_define_method(cSqlite3Statement, "column_name", column_name, 1);

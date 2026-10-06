@@ -6,6 +6,7 @@
 struct _sqlite3StmtRuby {
     sqlite3_stmt *st;
     sqlite3Ruby *db;
+    unsigned long authorizer_generation;
     int done_p;
 };
 

@@ -31,9 +31,87 @@ module SQLite3
       sql = sql.encode(Encoding::UTF_8) if sql && sql.encoding != Encoding::UTF_8
 
       @connection = db
+      @sql = sql.dup.freeze
+      @bind_params = []
       @columns = nil
       @types = nil
       @remainder = prepare db, sql
+      @authorizer_generation = authorizer_generation
+    end
+
+    alias_method :native_bind_param, :bind_param
+    private :native_bind_param
+    alias_method :native_step, :step
+    private :native_step
+    alias_method :native_clear_bindings!, :clear_bindings!
+    private :native_clear_bindings!
+    alias_method :native_column_count, :column_count
+    private :native_column_count
+    alias_method :native_column_name, :column_name
+    private :native_column_name
+    alias_method :native_column_decltype, :column_decltype
+    private :native_column_decltype
+    alias_method :native_sql, :sql
+    private :native_sql
+    alias_method :native_expanded_sql, :expanded_sql
+    private :native_expanded_sql
+    if method_defined?(:database_name)
+      alias_method :native_database_name, :database_name
+      private :native_database_name
+    end
+
+    def bind_param(key, value)
+      bind_key = key.is_a?(String) ? key.dup.freeze : key
+      bind_value = duplicate_bind_value(value)
+      @bind_params << [bind_key, bind_value]
+      begin
+        native_bind_param(bind_key, bind_value)
+      rescue StandardError
+        @bind_params.pop
+        raise
+      end
+    end
+
+    def clear_bindings!
+      @bind_params.clear
+      native_clear_bindings!
+    end
+
+    def column_count
+      reprepare_for_current_authorizer if authorizer_stale?
+      native_column_count
+    end
+
+    def column_name(index)
+      reprepare_for_current_authorizer if authorizer_stale?
+      native_column_name(index)
+    end
+
+    def column_decltype(index)
+      reprepare_for_current_authorizer if authorizer_stale?
+      native_column_decltype(index)
+    end
+
+    def sql
+      reprepare_for_current_authorizer if authorizer_stale?
+      native_sql
+    end
+
+    def expanded_sql
+      reprepare_for_current_authorizer if authorizer_stale?
+      native_expanded_sql
+    end
+
+    if private_method_defined?(:native_database_name)
+      def database_name(index)
+        reprepare_for_current_authorizer if authorizer_stale?
+        native_database_name(index)
+      end
+    end
+
+    def step
+      reprepare_for_current_authorizer if authorizer_stale?
+      native_step
     end
 
     # Binds the given variables to the corresponding placeholders in the SQL
@@ -134,6 +212,7 @@ module SQLite3
     # may execute the statement in order to obtain the metadata; this makes it
     # a (potentially) expensive operation.
     def columns
+      reprepare_for_current_authorizer if authorizer_stale?
       get_metadata unless @columns
       @columns
     end
@@ -151,6 +230,7 @@ module SQLite3
     # makes it a (potentially) expensive operation.
     def types
       must_be_open!
+      reprepare_for_current_authorizer if authorizer_stale?
       get_metadata unless @types
       @types
     end
@@ -191,6 +271,22 @@ module SQLite3
     end
 
     private
+
+    def authorizer_stale?
+      !closed? && @authorizer_generation != @connection.send(:authorizer_generation)
+    end
+
+    def reprepare_for_current_authorizer
+      @columns = nil
+      @types = nil
+      @remainder = prepare(@connection, @sql)
+      @authorizer_generation = authorizer_generation
+      @bind_params.each { |key, value| native_bind_param(key, value) }
+    end
+
+    def duplicate_bind_value(value)
+      value.is_a?(String) ? value.dup : value
+    end
 
     # A convenience method for obtaining the metadata about the query. Note
     # that this will actually execute the SQL, which means it can be a

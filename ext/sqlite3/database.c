@@ -128,6 +128,7 @@ database_mark(void *ctx)
     rb_gc_mark(c->busy_handler);
     rb_gc_mark(c->trace_handler);
     rb_gc_mark(c->authorizer);
+    rb_gc_mark(c->authorizer_exception);
 
     rb_sqlite3_pin_array_and_contents(c->functions);
     pin_hash_and_contents(c->collations);
@@ -164,7 +165,16 @@ allocate(VALUE klass)
 {
     sqlite3RubyPtr ctx;
     VALUE object = TypedData_Make_Struct(klass, sqlite3Ruby, &database_type, ctx);
+    ctx->self = object;
     ctx->owner = getpid();
+    ctx->busy_handler = Qnil;
+    ctx->functions = Qnil;
+    ctx->collations = Qnil;
+    ctx->aggregators = Qnil;
+    ctx->trace_handler = Qnil;
+    ctx->authorizer = Qnil;
+    ctx->authorizer_exception = Qnil;
+    ctx->authorizer_generation = 0;
     return object;
 }
 
@@ -720,6 +730,18 @@ changes(VALUE self)
     return INT2NUM(sqlite3_changes(ctx->db));
 }
 
+typedef struct {
+    VALUE authorizer;
+    VALUE *argv;
+} rb_sqlite3_auth_args;
+
+static VALUE
+rb_sqlite3_auth_call(VALUE args_value)
+{
+    rb_sqlite3_auth_args *args = (rb_sqlite3_auth_args *)args_value;
+    return rb_funcallv(args->authorizer, rb_intern("call"), 5, args->argv);
+}
+
 static int
 rb_sqlite3_auth(
     void *ctx,
@@ -735,13 +757,45 @@ rb_sqlite3_auth(
     VALUE b      = _b ? rb_str_new2(_b) : Qnil;
     VALUE c      = _c ? rb_str_new2(_c) : Qnil;
     VALUE d      = _d ? rb_str_new2(_d) : Qnil;
-    VALUE result = rb_funcall(db_ctx->authorizer, rb_intern("call"), 5, action, a, b, c, d);
+    VALUE argv[5] = { action, a, b, c, d };
+    rb_sqlite3_auth_args args = { .authorizer = db_ctx->authorizer, .argv = argv };
+    int exception_status = 0;
+    VALUE result;
+
+    if (!NIL_P(db_ctx->authorizer_exception)) {
+        return SQLITE_DENY;
+    }
+
+    result = rb_protect(rb_sqlite3_auth_call, (VALUE)&args, &exception_status);
+
+    if (exception_status) {
+        VALUE exception = rb_errinfo();
+        rb_set_errinfo(Qnil);
+        if (NIL_P(db_ctx->authorizer_exception)) {
+            RB_OBJ_WRITE(db_ctx->self, &db_ctx->authorizer_exception, exception);
+        }
+        return SQLITE_DENY;
+    }
 
     if (T_FIXNUM == TYPE(result)) { return (int)NUM2INT(result); }
     if (Qtrue == result) { return SQLITE_OK; }
     if (Qfalse == result) { return SQLITE_DENY; }
 
     return SQLITE_IGNORE;
+}
+
+unsigned long
+rb_sqlite3_authorizer_generation(sqlite3RubyPtr ctx)
+{
+    return ctx->authorizer_generation;
+}
+
+void
+rb_sqlite3_authorizer_raise_if_exception(sqlite3RubyPtr ctx)
+{
+    if (!NIL_P(ctx->authorizer_exception)) {
+        rb_exc_raise(ctx->authorizer_exception);
+    }
 }
 
 /* call-seq: set_authorizer = auth
@@ -769,9 +823,27 @@ set_authorizer(VALUE self, VALUE authorizer)
 
     CHECK(ctx->db, status);
 
+    ctx->authorizer_generation++;
     RB_OBJ_WRITE(self, &ctx->authorizer, authorizer);
+    RB_OBJ_WRITE(self, &ctx->authorizer_exception, Qnil);
 
     return self;
+}
+
+static VALUE
+authorizer_generation(VALUE self)
+{
+    sqlite3RubyPtr ctx;
+    TypedData_Get_Struct(self, sqlite3Ruby, &database_type, ctx);
+    return ULONG2NUM(ctx->authorizer_generation);
+}
+
+static VALUE
+current_authorizer(VALUE self)
+{
+    sqlite3RubyPtr ctx;
+    TypedData_Get_Struct(self, sqlite3Ruby, &database_type, ctx);
+    return ctx->authorizer;
 }
 
 /* call-seq: db.busy_timeout = ms
@@ -1000,6 +1072,7 @@ exec_batch(VALUE self, VALUE sql, VALUE results_as_hash)
                               &errMsg);
     }
 
+    rb_sqlite3_authorizer_raise_if_exception(ctx);
     CHECK_MSG(ctx->db, status, errMsg);
 
     return callback_ary;
@@ -1087,6 +1160,8 @@ init_sqlite3_database(void)
     rb_define_method(cSqlite3Database, "complete?", complete_p, 1);
     rb_define_method(cSqlite3Database, "changes", changes, 0);
     rb_define_method(cSqlite3Database, "authorizer=", set_authorizer, 1);
+    rb_define_private_method(cSqlite3Database, "authorizer_generation", authorizer_generation, 0);
+    rb_define_private_method(cSqlite3Database, "current_authorizer", current_authorizer, 0);
     rb_define_method(cSqlite3Database, "busy_handler", busy_handler, -1);
     rb_define_method(cSqlite3Database, "busy_timeout=", set_busy_timeout, 1);
 #ifndef SQLITE_OMIT_PROGRESS_CALLBACK

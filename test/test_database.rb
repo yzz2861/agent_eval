@@ -738,6 +738,133 @@ module SQLite3
       s&.close
     end
 
+    def test_authorizer_scope_reprepares_prepared_statement
+      @db.execute("create table secrets (id integer primary key, value text)")
+      @db.execute("insert into secrets (value) values ('topsecret')")
+      statement = @db.prepare("select value from secrets where id = ?")
+
+      assert_equal [["topsecret"]], statement.execute!(1)
+
+      @db.with_authorizer(deny_table("secrets")) do
+        assert_raises(SQLite3::AuthorizationException) do
+          statement.execute!(1)
+        end
+      end
+
+      assert_equal [["topsecret"]], statement.execute!(1)
+    ensure
+      statement&.close
+    end
+
+    def test_authorizer_scope_restores_nested_authorizer
+      calls = []
+      outer = ->(action, table, *) { calls << [:outer, table]; 0 }
+      inner = ->(action, table, *) { calls << [:inner, table]; 0 }
+
+      @db.with_authorizer(outer) do
+        @db.execute("select 1")
+        @db.with_authorizer(inner) do
+          @db.execute("select 2")
+        end
+        @db.execute("select 3")
+      end
+
+      assert_equal [:outer, :inner, :outer], calls.map(&:first)
+    ensure
+      @db.authorizer = nil
+    end
+
+    def test_authorizer_scope_covers_views_and_triggers
+      @db.execute("create table secrets (id integer primary key, value text)")
+      @db.execute("create table audit (note text)")
+      @db.execute("create view secret_view as select * from secrets")
+      @db.execute("create trigger secret_audit after insert on secrets " \
+                 "begin insert into audit (note) values ('inserted'); end")
+      view = @db.prepare("select value from secret_view")
+      trigger = @db.prepare("insert into secrets (value) values (?)")
+      authorizer = deny_table("secrets", "secret_view", "audit")
+
+      @db.with_authorizer(authorizer) do
+        assert_raises(SQLite3::AuthorizationException) { view.execute! }
+        assert_raises(SQLite3::AuthorizationException) { trigger.execute!("denied") }
+      end
+
+      assert_equal 0, @db.get_first_value("select count(*) from audit")
+      view.execute!
+      trigger.execute!("allowed")
+      assert_equal 1, @db.get_first_value("select count(*) from audit")
+    ensure
+      view&.close
+      trigger&.close
+    end
+
+    def test_authorizer_scope_covers_automatic_reprepare
+      mode = :allow
+      authorizer = ->(action, table, *) do
+        next 1 if mode == :deny && table == "secrets"
+
+        0
+      end
+
+      with_database_file do |path|
+        admin = nil
+        database = nil
+        statement = nil
+        begin
+          admin = SQLite3::Database.new(path)
+          database = SQLite3::Database.new(path)
+          database.execute("create table secrets (value text)")
+          database.execute("insert into secrets values ('before')")
+          database.authorizer = authorizer
+          statement = database.prepare("select * from secrets")
+
+          assert_equal [["before"]], statement.execute!
+          admin.execute("alter table secrets add column added text")
+
+          mode = :deny
+          assert_raises(SQLite3::AuthorizationException) do
+            statement.execute!
+          end
+        ensure
+          statement&.close
+          database&.close
+          admin&.close
+        end
+      end
+    end
+
+    def test_authorizer_callback_exception_denies_later_statement
+      calls = 0
+      authorizer = ->(*) do
+        calls += 1
+        raise "authorization failed" if calls == 1
+        0
+      end
+
+      @db.with_authorizer(authorizer) do
+        assert_raises(RuntimeError) { @db.execute("select 1") }
+        assert_raises(RuntimeError) { @db.execute("select 2") }
+      end
+
+      assert_equal [[3]], @db.execute("select 3")
+    end
+
+    def test_prepared_statement_metadata_uses_current_authorizer_scope
+      @db.execute("create table secrets (value text)")
+      statement = @db.prepare("select value from secrets")
+      statement.execute!
+
+      @db.with_authorizer(deny_table("secrets")) do
+        assert_raises(SQLite3::AuthorizationException) do
+          statement.columns
+        end
+      end
+
+      assert_equal ["value"], statement.columns
+    ensure
+      statement&.close
+    end
+
     def test_close_with_open_statements
       s = @db.prepare("select 'foo'")
       assert_nothing_raised do # formerly raised SQLite3::BusyException
@@ -980,6 +1107,19 @@ module SQLite3
       skip("dbstat not supported") unless SQLite3::SQLITE_PACKAGED_LIBRARIES
 
       assert_nothing_raised { @db.execute("select * from dbstat") }
+    end
+
+    private
+
+    def deny_table(*denied_tables)
+      ->(action, table, *) { denied_tables.include?(table) ? 1 : 0 }
+    end
+
+    def with_database_file
+      path = File.join(Dir.pwd, "sqlite3-authorizer-#{Process.pid}-#{object_id}.sqlite3")
+      yield path
+    ensure
+      File.unlink(path) if File.exist?(path)
     end
   end
 end

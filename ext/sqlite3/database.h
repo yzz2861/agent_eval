@@ -8,6 +8,7 @@
 #define SQLITE3_RB_DATABASE_DISCARDED 0x02
 
 struct _sqlite3Ruby {
+    VALUE self;
     sqlite3 *db;
     VALUE busy_handler;
     VALUE functions;
@@ -15,6 +16,8 @@ struct _sqlite3Ruby {
     VALUE aggregators;
     VALUE trace_handler;
     VALUE authorizer;
+    VALUE authorizer_exception;
+    unsigned long authorizer_generation;
     int stmt_timeout;
     struct timespec stmt_deadline;
     rb_pid_t owner;
@@ -32,5 +35,7 @@ void set_sqlite3_func_result(sqlite3_context *ctx, VALUE result);
 
 sqlite3RubyPtr sqlite3_database_unwrap(VALUE database);
 VALUE sqlite3val2rb(sqlite3_value *val);
+unsigned long rb_sqlite3_authorizer_generation(sqlite3RubyPtr ctx);
+void rb_sqlite3_authorizer_raise_if_exception(sqlite3RubyPtr ctx);
 
 #endif
