@@ -122,6 +122,25 @@ counters.put(:odds, &:next)         # => {:odds => 1, :evens => 0}
 This is just the beginning; see the [API documentation][HASH-DOC] for details on all `Hash` methods.
 
 
+<h2>OrderedHash</h2>
+
+`OrderedHash` keeps the insertion order of key/value pairs while retaining
+constant-time key lookup. Updating an existing key leaves its position
+unchanged; deleting a key and inserting it again moves it to the end.
+
+``` ruby
+fields = Hamster::OrderedHash[name: "Simon", gender: :male]
+fields.to_a                          # => [[:name, "Simon"], [:gender, :male]]
+fields.put(:name, "James").to_a      # => [[:name, "James"], [:gender, :male]]
+fields.delete(:name).put(:name, "Jim").to_a
+# => [[:gender, :male], [:name, "Jim"]]
+```
+
+When merging, keys already present keep their receiver position, while new
+keys are appended in the order yielded by the source collection. Like other
+Hamster collections, every version remains usable after later updates.
+
+
 <h2>Vector <span style="font-size:0.7em">(<a href="http://rubydoc.info/github/hamstergem/hamster/master/Hamster/Vector">API Documentation</a>)</span></h2>
 
 A `Vector` is an integer-indexed collection much like an immutable `Array`. Examples:
