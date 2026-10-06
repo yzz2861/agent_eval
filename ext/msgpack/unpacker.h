@@ -57,6 +57,7 @@ struct msgpack_unpacker_t {
     VALUE last_object;
 
     VALUE reading_raw;
+    VALUE streaming_fiber;
     size_t reading_raw_remaining;
 
     VALUE buffer_ref;
@@ -74,6 +75,7 @@ struct msgpack_unpacker_t {
     bool freeze: 1;
     bool allow_unknown_ext: 1;
     bool optimized_symbol_ext_type: 1;
+    bool streaming_skipping: 1;
 };
 
 #define UNPACKER_BUFFER_(uk) (&(uk)->buffer)
@@ -142,4 +144,3 @@ int msgpack_unpacker_read_array_header(msgpack_unpacker_t* uk, uint32_t* result_
 int msgpack_unpacker_read_map_header(msgpack_unpacker_t* uk, uint32_t* result_size);
 
 #endif
-

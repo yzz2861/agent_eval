@@ -77,6 +77,7 @@ module MessagePack
     # * *:unpacker* specify symbol or proc object for unpacker
     # * *:optimized_symbols_parsing* specify true to use the optimized symbols parsing (not supported on JRuby now)
     # * *recursive* specify true to receive the packer or unpacker as argument to generate the extension body manually.
+    # * *streaming* specify true to pass a read-only handle scoped to the extension payload to the unpacker.
     #
     def register_type(type, klass, options={})
     end

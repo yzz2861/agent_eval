@@ -142,7 +142,7 @@ public class Unpacker extends RubyObject {
       extModule = (RubyModule)mod;
     }
 
-    registry.put(extModule, (int) typeId, false, null, proc);
+    registry.put(extModule, (int) typeId, false, false, null, proc);
     return runtime.getNil();
   }
 
@@ -189,16 +189,23 @@ public class Unpacker extends RubyObject {
   @JRubyMethod(required = 1, name = "feed", alias = { "feed_reference" })
   public IRubyObject feed(ThreadContext ctx, IRubyObject data) {
     ByteList byteList = data.asString().getByteList();
-    if (decoder == null) {
-      decoder = new Decoder(ctx.runtime, this, byteList.unsafeBytes(), byteList.begin(), byteList.length(), symbolizeKeys, freeze, allowUnknownExt);
-    } else {
-      decoder.feed(byteList.unsafeBytes(), byteList.begin(), byteList.length());
-    }
+    ensureDecoder(ctx);
+    decoder.feed(byteList.unsafeBytes(), byteList.begin(), byteList.length());
     return this;
+  }
+
+  private void ensureDecoder(ThreadContext ctx) {
+    if (decoder == null) {
+      decoder = new Decoder(ctx.runtime, this, new byte[] {}, symbolizeKeys, freeze, allowUnknownExt);
+    }
   }
 
   @JRubyMethod(name = "full_unpack")
   public IRubyObject fullUnpack(ThreadContext ctx) {
+    ensureDecoder(ctx);
+    if (!decoder.hasNext()) {
+      throw ctx.runtime.newEOFError();
+    }
     return decoder.next();
   }
 
@@ -246,11 +253,31 @@ public class Unpacker extends RubyObject {
     return ctx.runtime.getNil();
   }
 
+  @JRubyMethod(name = "read_extension_payload_chunk", required = 1, visibility = PRIVATE)
+  public IRubyObject readExtensionPayloadChunk(ThreadContext ctx, IRubyObject length) {
+    if (decoder == null) {
+      return ctx.runtime.getNil();
+    }
+    return decoder.readExtensionPayloadChunk(ctx, RubyNumeric.fix2int(length));
+  }
+
+  @JRubyMethod(name = "skip_extension_payload_chunk", required = 1, visibility = PRIVATE)
+  public IRubyObject skipExtensionPayloadChunk(ThreadContext ctx, IRubyObject length) {
+    if (decoder == null) {
+      return ctx.runtime.newFixnum(0);
+    }
+    return ctx.runtime.newFixnum(decoder.skipExtensionPayloadChunk(RubyNumeric.fix2int(length)));
+  }
+
+  @JRubyMethod(name = "assert_extension_payload_length", required = 1, visibility = PRIVATE)
+  public IRubyObject assertExtensionPayloadLength(ThreadContext ctx, IRubyObject length) {
+    decoder.assertExtensionPayloadLength(RubyNumeric.fix2int(length));
+    return ctx.runtime.getNil();
+  }
+
   @JRubyMethod(name = "read", alias = { "unpack" })
   public IRubyObject read(ThreadContext ctx) {
-    if (decoder == null) {
-      throw ctx.runtime.newEOFError();
-    }
+    ensureDecoder(ctx);
     try {
       return decoder.next();
     } catch (RaiseException re) {

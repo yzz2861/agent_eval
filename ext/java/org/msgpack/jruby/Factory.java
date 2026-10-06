@@ -102,14 +102,20 @@ public class Factory extends RubyObject {
     RubyModule extModule = (RubyModule) mod;
 
     boolean recursive = false;
+    boolean streaming = false;
     if (options != null) {
       IRubyObject recursiveExtensionArg = options.fastARef(runtime.newSymbol("recursive"));
       if (recursiveExtensionArg != null && recursiveExtensionArg.isTrue()) {
         recursive = true;
       }
+
+      IRubyObject streamingExtensionArg = options.fastARef(runtime.newSymbol("streaming"));
+      if (streamingExtensionArg != null && streamingExtensionArg.isTrue()) {
+        streaming = true;
+      }
     }
 
-    extensionRegistry.put(extModule, (int) typeId, recursive, packerProc, unpackerProc);
+    extensionRegistry.put(extModule, (int) typeId, recursive, streaming, packerProc, unpackerProc);
 
     if (extModule == runtime.getSymbol()) {
       hasSymbolExtType = packerProc != null && !packerProc.isNil();

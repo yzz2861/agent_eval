@@ -253,6 +253,9 @@ static VALUE Factory_register_type_internal(VALUE self, VALUE rb_ext_type, VALUE
         if(RTEST(rb_hash_aref(options, ID2SYM(rb_intern("recursive"))))) {
             flags |= MSGPACK_EXT_RECURSIVE;
         }
+        if(RTEST(rb_hash_aref(options, ID2SYM(rb_intern("streaming"))))) {
+            flags |= MSGPACK_EXT_STREAMING;
+        }
     }
 
     msgpack_packer_ext_registry_put(self, &fc->pkrg, ext_module, ext_type, flags, packer_proc);

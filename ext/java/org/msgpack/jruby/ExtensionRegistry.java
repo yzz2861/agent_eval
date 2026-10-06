@@ -54,8 +54,8 @@ public class ExtensionRegistry {
     return hash;
   }
 
-  public void put(RubyModule mod, int typeId, boolean recursive, IRubyObject packerProc, IRubyObject unpackerProc) {
-    ExtensionEntry entry = new ExtensionEntry(mod, typeId, recursive, packerProc, unpackerProc);
+  public void put(RubyModule mod, int typeId, boolean recursive, boolean streaming, IRubyObject packerProc, IRubyObject unpackerProc) {
+    ExtensionEntry entry = new ExtensionEntry(mod, typeId, recursive, streaming, packerProc, unpackerProc);
     extensionsByModule.put(mod, entry);
     extensionsByTypeId[typeId + 128] = entry;
     extensionsByAncestor.clear();
@@ -113,13 +113,15 @@ public class ExtensionRegistry {
     private final RubyModule mod;
     private final int typeId;
     private final boolean recursive;
+    private final boolean streaming;
     private final IRubyObject packerProc;
     private final IRubyObject unpackerProc;
 
-    public ExtensionEntry(RubyModule mod, int typeId, boolean recursive, IRubyObject packerProc, IRubyObject unpackerProc) {
+    public ExtensionEntry(RubyModule mod, int typeId, boolean recursive, boolean streaming, IRubyObject packerProc, IRubyObject unpackerProc) {
       this.mod = mod;
       this.typeId = typeId;
       this.recursive = recursive;
+      this.streaming = streaming;
       this.packerProc = packerProc;
       this.unpackerProc = unpackerProc;
     }
@@ -134,6 +136,10 @@ public class ExtensionRegistry {
 
     public boolean isRecursive() {
       return recursive;
+    }
+
+    public boolean isStreaming() {
+      return streaming;
     }
 
     public boolean hasPacker() {

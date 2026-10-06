@@ -372,6 +372,27 @@ static VALUE Unpacker_register_type_internal(VALUE self, VALUE rb_ext_type, VALU
     return Qnil;
 }
 
+static VALUE Unpacker_consume_extension_payload(VALUE self, VALUE length)
+{
+    msgpack_unpacker_t *uk = MessagePack_Unpacker_get(self);
+    unsigned long consumed = NUM2ULONG(length);
+    if(consumed > uk->reading_raw_remaining) {
+        rb_raise(rb_eRuntimeError, "extension payload reader exceeded its declared length");
+    }
+    uk->reading_raw_remaining -= consumed;
+    return Qnil;
+}
+
+static VALUE Unpacker_skip_extension_payload_chunk(VALUE self, VALUE length)
+{
+    msgpack_unpacker_t *uk = MessagePack_Unpacker_get(self);
+    size_t requested = NUM2ULONG(length);
+    size_t available = requested < uk->reading_raw_remaining ? requested : uk->reading_raw_remaining;
+    size_t skipped = msgpack_buffer_skip_nonblock(UNPACKER_BUFFER_(uk), available);
+    uk->reading_raw_remaining -= skipped;
+    return SIZET2NUM(skipped);
+}
+
 static VALUE Unpacker_full_unpack(VALUE self)
 {
     msgpack_unpacker_t *uk = MessagePack_Unpacker_get(self);
@@ -442,6 +463,8 @@ void MessagePack_Unpacker_module_init(VALUE mMessagePack)
 
     rb_define_private_method(cMessagePack_Unpacker, "registered_types_internal", Unpacker_registered_types_internal, 0);
     rb_define_private_method(cMessagePack_Unpacker, "register_type_internal", Unpacker_register_type_internal, 3);
+    rb_define_private_method(cMessagePack_Unpacker, "consume_extension_payload", Unpacker_consume_extension_payload, 1);
+    rb_define_private_method(cMessagePack_Unpacker, "skip_extension_payload_chunk", Unpacker_skip_extension_payload_chunk, 1);
 
     rb_define_method(cMessagePack_Unpacker, "full_unpack", Unpacker_full_unpack, 0);
 }

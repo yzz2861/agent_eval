@@ -220,6 +220,30 @@ factory.register_type(
 factory.load(factory.dump(Point.new(12, 34))) # => #<struct Point x=12, y=34>
 ```
 
+For extension payloads that must be decoded incrementally, pass `streaming: true`.
+The unpacker receives a read-only handle scoped to exactly the extension payload:
+
+```ruby
+factory.register_type(
+  0x04,
+  MyCompressedType,
+  streaming: true,
+  unpacker: ->(payload) {
+    chunks = []
+    until payload.eof?
+      chunk = payload.read(4096)
+      chunks << chunk if chunk
+    end
+    MyCompressedType.decode(chunks.join)
+  },
+)
+```
+
+If the complete extension has not been fed yet, `read` returns `nil` and the next
+`Unpacker#read` raises the usual temporary `EOFError`. The handle cannot read
+bytes from the following MessagePack object. Returning from the unpacker early
+discards any unread payload bytes before the next object is decoded.
+
 ## Pooling
 
 Creating `Packer` and `Unpacker` objects is expensive. For best performance it is preferable to re-use these objects.

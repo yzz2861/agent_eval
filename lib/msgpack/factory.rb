@@ -2,6 +2,8 @@ module MessagePack
   class Factory
     # see ext for other methods
 
+    STREAMING_UNPACKER_WAIT = ExtensionPayloadReader::WAIT
+
     def register_type(type, klass, options = { packer: :to_msgpack_ext, unpacker: :from_msgpack_ext })
       raise FrozenError, "can't modify frozen MessagePack::Factory" if frozen?
 
@@ -36,6 +38,19 @@ module MessagePack
             raise ::TypeError, "expected :unpacker argument to be a callable object, got: #{unpacker.inspect}"
           end
         end
+      end
+
+      if options && options[:streaming]
+        if options[:recursive]
+          raise ArgumentError, "streaming extension unpackers cannot be recursive"
+        end
+
+        unpacker = options[:unpacker]
+        if unpacker.nil?
+          raise ArgumentError, "streaming extension unpackers must respond to #call"
+        end
+
+        options[:unpacker] = streaming_unpacker(unpacker)
       end
 
       register_type_internal(type, klass, options)
@@ -99,6 +114,30 @@ module MessagePack
         raise ArgumentError, "class or type id"
       end
     end
+
+    def streaming_unpacker(decoder)
+      proc do |unpacker, length|
+        reader = ExtensionPayloadReader.new(unpacker, length)
+        fiber = Fiber.new do
+          begin
+            result = decoder.call(reader)
+          rescue Exception
+            reader.discard_available
+            raise
+          end
+          reader.finish
+          result
+        end
+
+        result = fiber.resume
+        if result.equal?(STREAMING_UNPACKER_WAIT)
+          unpacker.instance_variable_set(:@_streaming_extension_fiber, fiber)
+        end
+        result
+      end
+    end
+
+    private :streaming_unpacker
 
     def load(src, param = nil)
       unpacker = nil

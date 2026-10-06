@@ -38,6 +38,9 @@ public class Decoder implements Iterator<IRubyObject> {
 
   private Unpacker unpacker;
   private ByteBuffer buffer;
+  private IRubyObject streamingFiber;
+  private int streamingRemaining;
+  private boolean streamingSkipping;
   private boolean symbolizeKeys;
   private boolean freeze;
   private boolean allowUnknownExt;
@@ -111,6 +114,9 @@ public class Decoder implements Iterator<IRubyObject> {
 
   public void reset() {
     buffer = null;
+    streamingFiber = null;
+    streamingRemaining = 0;
+    streamingSkipping = false;
   }
 
   public int offset() {
@@ -167,11 +173,14 @@ public class Decoder implements Iterator<IRubyObject> {
       ExtensionRegistry.ExtensionEntry entry = unpacker.lookupExtensionByTypeId(type);
       if (entry != null) {
         IRubyObject proc = entry.getUnpackerProc();
-        if (entry.isRecursive()) {
+        ThreadContext ctx = runtime.getCurrentContext();
+        if (entry.isStreaming()) {
+          return consumeStreamingExtension(proc, size, ctx);
+        } else if (entry.isRecursive()) {
           return proc.callMethod(runtime.getCurrentContext(), "call", unpacker);
         } else {
           ByteList byteList = new ByteList(readBytes(size), runtime.getEncodingService().getAscii8bitEncoding());
-          return proc.callMethod(runtime.getCurrentContext(), "call", runtime.newString(byteList));
+          return proc.callMethod(ctx, "call", runtime.newString(byteList));
         }
       }
     }
@@ -189,6 +198,86 @@ public class Decoder implements Iterator<IRubyObject> {
     return payload;
   }
 
+  private IRubyObject waitMarker(ThreadContext ctx) {
+    return runtime.getModule("MessagePack").getClass("ExtensionPayloadReader").callMethod(ctx, "const_get", runtime.newSymbol("WAIT"));
+  }
+
+  private boolean isWaitMarker(ThreadContext ctx, IRubyObject result) {
+    return result.callMethod(ctx, "equal?", waitMarker(ctx)).isTrue();
+  }
+
+  private IRubyObject consumeStreamingExtension(IRubyObject proc, int size, ThreadContext ctx) {
+    streamingRemaining = size;
+    try {
+      IRubyObject result = proc.callMethod(ctx, "call", unpacker, runtime.newFixnum(size));
+      if (isWaitMarker(ctx, result)) {
+        streamingFiber = unpacker.callMethod(ctx, "instance_variable_get", runtime.newString("@_streaming_extension_fiber"));
+        return result;
+      }
+      streamingRemaining = 0;
+      return result;
+    } catch (RaiseException re) {
+      streamingFiber = null;
+      streamingSkipping = true;
+      throw re;
+    }
+  }
+
+  private IRubyObject resumeStreamingExtension(ThreadContext ctx) {
+    try {
+      IRubyObject result = streamingFiber.callMethod(ctx, "resume");
+      if (isWaitMarker(ctx, result)) {
+        return result;
+      }
+      streamingFiber = null;
+      streamingRemaining = 0;
+      streamingSkipping = false;
+      return result;
+    } catch (RaiseException re) {
+      streamingFiber = null;
+      streamingSkipping = true;
+      throw re;
+    }
+  }
+
+  private IRubyObject skipStreamingExtension(ThreadContext ctx) {
+    int available = Math.min(streamingRemaining, buffer.remaining());
+    buffer.position(buffer.position() + available);
+    streamingRemaining -= available;
+    if (streamingRemaining > 0) {
+      return waitMarker(ctx);
+    }
+    streamingSkipping = false;
+    return consumeNext();
+  }
+
+  public IRubyObject readExtensionPayloadChunk(ThreadContext ctx, int length) {
+    if (streamingRemaining == 0 || length == 0) {
+      return length == 0 ? runtime.newString() : runtime.getNil();
+    }
+    int available = Math.min(streamingRemaining, Math.min(length, buffer.remaining()));
+    if (available == 0) {
+      return runtime.getNil();
+    }
+    byte[] bytes = new byte[available];
+    buffer.get(bytes);
+    streamingRemaining -= available;
+    return runtime.newString(new ByteList(bytes, binaryEncoding));
+  }
+
+  public int skipExtensionPayloadChunk(int length) {
+    int available = Math.min(streamingRemaining, Math.min(length, buffer.remaining()));
+    buffer.position(buffer.position() + available);
+    streamingRemaining -= available;
+    return available;
+  }
+
+  public void assertExtensionPayloadLength(int length) {
+    if (length > streamingRemaining) {
+      throw runtime.newRuntimeError("extension payload reader exceeded its declared length");
+    }
+  }
+
   @Override
   public void remove() {
     throw new UnsupportedOperationException();
@@ -196,7 +285,7 @@ public class Decoder implements Iterator<IRubyObject> {
 
   @Override
   public boolean hasNext() {
-    return buffer.remaining() > 0;
+    return buffer != null && buffer.remaining() > 0;
   }
 
   public IRubyObject read_array_header() {
@@ -213,6 +302,16 @@ public class Decoder implements Iterator<IRubyObject> {
       throw runtime.newRaiseException(unexpectedTypeErrorClass, "unexpected type");
     } catch (RaiseException re) {
       buffer.position(position);
+      throw re;
+    } catch (RaiseException re) {
+      if (!(streamingFiber != null || streamingSkipping)) {
+        buffer.position(position);
+      }
+      throw re;
+    } catch (RaiseException re) {
+      if (streamingFiber == null && !streamingSkipping) {
+        buffer.position(position);
+      }
       throw re;
     } catch (BufferUnderflowException bue) {
       buffer.position(position);
@@ -232,9 +331,6 @@ public class Decoder implements Iterator<IRubyObject> {
         return runtime.newFixnum(getUnsignedInt());
       }
       throw runtime.newRaiseException(unexpectedTypeErrorClass, "unexpected type");
-    } catch (RaiseException re) {
-      buffer.position(position);
-      throw re;
     } catch (BufferUnderflowException bue) {
       buffer.position(position);
       throw runtime.newRaiseException(underflowErrorClass, "Not enough bytes available");
@@ -243,7 +339,29 @@ public class Decoder implements Iterator<IRubyObject> {
 
   @Override
   public IRubyObject next() {
-    IRubyObject next = consumeNext();
+    ThreadContext ctx = runtime.getCurrentContext();
+    IRubyObject next;
+    if (streamingFiber != null) {
+      next = resumeStreamingExtension(ctx);
+    } else if (streamingSkipping) {
+      next = skipStreamingExtension(ctx);
+    } else {
+      int position = buffer == null ? 0 : buffer.position();
+      try {
+        next = consumeNext();
+      } catch (RaiseException re) {
+        if (streamingFiber != null || streamingSkipping) {
+          throw re;
+        }
+        if (buffer != null) {
+          buffer.position(position);
+        }
+        throw re;
+      }
+    }
+    if (isWaitMarker(ctx, next)) {
+      throw runtime.newRaiseException(underflowErrorClass, "Not enough bytes available");
+    }
     if (freeze) {
       next.setFrozen(true);
     }
@@ -251,6 +369,9 @@ public class Decoder implements Iterator<IRubyObject> {
   }
 
   private IRubyObject consumeNext() {
+    if (buffer == null || !buffer.hasRemaining()) {
+      throw runtime.newRaiseException(underflowErrorClass, "Not enough bytes available");
+    }
     int position = buffer.position();
     try {
       byte b = buffer.get();
@@ -304,9 +425,6 @@ public class Decoder implements Iterator<IRubyObject> {
       }
       buffer.position(position);
       throw runtime.newRaiseException(malformedFormatErrorClass, "Illegal byte sequence");
-    } catch (RaiseException re) {
-      buffer.position(position);
-      throw re;
     } catch (BufferUnderflowException bue) {
       buffer.position(position);
       throw runtime.newRaiseException(underflowErrorClass, "Not enough bytes available");

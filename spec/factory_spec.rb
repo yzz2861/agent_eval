@@ -509,6 +509,178 @@ describe MessagePack::Factory do
     end
   end
 
+  describe '#register_type with streaming: true' do
+    let(:streaming_class) { Class.new }
+
+    it 'streams an extension payload without reading past its declared boundary' do
+      chunks = []
+      factory = described_class.new
+      factory.register_type(0x01, streaming_class, packer: nil, streaming: true,
+        unpacker: ->(reader) {
+          until reader.eof?
+            chunk = reader.read(1)
+            chunks << chunk
+            raise "unpacker exposed the next object" if chunk.bytes.first == 42
+          end
+          chunks.join
+        })
+      factory.register_type(0x02, Class.new, packer: nil, streaming: true,
+        unpacker: ->(reader) {
+          payload = +''
+          payload << reader.read(1) until reader.eof?
+          [:second, payload]
+        })
+
+      payload =
+        MessagePack::ExtensionValue.new(0x01, 'abc').to_msgpack +
+        MessagePack::ExtensionValue.new(0x02, 'de').to_msgpack +
+        MessagePack.pack(42)
+      unpacker = factory.unpacker
+      objects = []
+
+      payload.each_byte do |byte|
+        unpacker.feed(byte.chr.b)
+        begin
+          objects << unpacker.read
+        rescue EOFError
+        end
+      end
+
+      expect(objects).to eq(['abc', [:second, 'de'], 42])
+      expect(chunks).to eq(%w[a b c])
+    end
+
+    it 'keeps the string codec available' do
+      factory = described_class.new
+      factory.register_type(0x03, streaming_class,
+        packer: ->(_) { 'payload' },
+        unpacker: ->(payload) { [:string, payload] })
+
+      expect(factory.load(factory.dump(streaming_class.new))).to eq([:string, 'payload'])
+    end
+
+    it 'reports missing data as temporary EOF and resumes after feeding more bytes' do
+      read_sizes = []
+      factory = described_class.new
+      factory.register_type(0x04, streaming_class, packer: nil, streaming: true,
+        unpacker: ->(reader) {
+          result = +''
+          until reader.eof?
+            chunk = reader.readpartial(2)
+            read_sizes << chunk.bytesize
+            result << chunk
+          end
+          result
+        })
+
+      payload = MessagePack::ExtensionValue.new(0x04, 'abcdefgh').to_msgpack
+      unpacker = factory.unpacker
+      temporary_eofs = 0
+      object = nil
+
+      payload.each_byte do |byte|
+        unpacker.feed(byte.chr.b)
+        begin
+          object = unpacker.read
+        rescue EOFError
+          temporary_eofs += 1
+        end
+      end
+
+      expect(object).to eq('abcdefgh')
+      expect(temporary_eofs).to be > 1
+      expect(read_sizes).to all(eq(1))
+
+      chunked_unpacker = factory.unpacker
+      chunked_object = nil
+      payload.each_char.each_slice(3) do |slice|
+        chunked_unpacker.feed(slice.join)
+        begin
+          chunked_object = chunked_unpacker.read
+        rescue EOFError
+        end
+      end
+      expect(chunked_object).to eq('abcdefgh')
+    end
+
+    it 'cleans up the declared payload when the codec returns early' do
+      reader_ref = nil
+      factory = described_class.new
+      factory.register_type(0x05, streaming_class, packer: nil, streaming: true,
+        unpacker: ->(reader) {
+          reader_ref = reader
+          reader.read(2)
+          :early
+        })
+
+      payload =
+        MessagePack::ExtensionValue.new(0x05, 'abcdef').to_msgpack +
+        MessagePack.pack(7)
+      unpacker = factory.unpacker
+      objects = []
+
+      payload.each_byte do |byte|
+        unpacker.feed(byte.chr.b)
+        begin
+          objects << unpacker.read
+        rescue EOFError
+        end
+      end
+
+      expect(objects).to eq([:early, 7])
+      expect(reader_ref).to be_closed
+    end
+
+    it 'remains at the object boundary when the codec raises' do
+      factory = described_class.new
+      factory.register_type(0x06, streaming_class, packer: nil, streaming: true,
+        unpacker: ->(reader) {
+          reader.read(2)
+          raise 'streaming codec failure'
+        })
+
+      payload =
+        MessagePack::ExtensionValue.new(0x06, 'abcdef').to_msgpack +
+        MessagePack.pack(8)
+      unpacker = factory.unpacker
+      errors = 0
+      object = nil
+
+      payload.each_byte do |byte|
+        unpacker.feed(byte.chr.b)
+        begin
+          object = unpacker.read
+        rescue EOFError
+        rescue RuntimeError => error
+          raise error unless error.message == 'streaming codec failure'
+          errors += 1
+        end
+      end
+
+      expect(errors).to eq(1)
+      expect(object).to eq(8)
+      unpacker.reset
+      unpacker.feed(MessagePack.pack(9))
+      expect(unpacker.read).to eq(9)
+    end
+
+    it 'does not let the handle read beyond the extension length' do
+      factory = described_class.new
+      reader_ref = nil
+      factory.register_type(0x07, streaming_class, packer: nil, streaming: true,
+        unpacker: ->(reader) {
+          reader_ref = reader
+          reader.read(10)
+        })
+
+      unpacker = factory.unpacker
+      unpacker.feed(MessagePack::ExtensionValue.new(0x07, 'ab').to_msgpack + MessagePack.pack(42))
+
+      expect(unpacker.read).to eq('ab')
+      expect { reader_ref.read(1) }.to raise_error(EOFError)
+    end
+  end
+
   describe 'the special treatment of symbols with ext type' do
     def roundtrip(object, options = nil)
       subject.load(subject.dump(object), options)
