@@ -100,6 +100,34 @@ module Dry
         self
       end
 
+      # Restores the setting with the given name to its default value.
+      #
+      # This is deliberately distinct from both leaving a setting untouched
+      # and explicitly assigning +nil+: any previously assigned value
+      # (including +nil+) is discarded, the setting is no longer considered
+      # configured, and the next read regenerates the default (a fresh copy
+      # for mutable defaults, a new nested config for nested settings).
+      #
+      # @param [String, Symbol] name
+      #
+      # @return [Config]
+      #
+      # @api public
+      def restore_default(name)
+        raise FrozenConfigError, "Cannot modify frozen config" if frozen?
+
+        name = name.to_sym
+
+        unless _settings[name]
+          raise ArgumentError, "+#{name}+ is not a setting name"
+        end
+
+        _configured.delete(name)
+        _values.delete(name)
+
+        self
+      end
+
       # Returns true if the value for the given key has been set on this config.
       #
       # For simple values, this returns true if the value has been explicitly assigned.

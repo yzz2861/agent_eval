@@ -9,6 +9,9 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ### Added
 
+- Added named configuration profiles with multiple inheritance. `profile :name, inherits: %i[...]` defines a reusable bundle of configuration changes, `config_for(:name)` builds a fresh, independent config for it, and `profile_order(:name)` exposes the C3-linearized inheritance order. Diamonds apply shared ancestors exactly once; contradictory precedence constraints raise `ProfileLinearizationError`, cycles raise `CyclicProfileInheritanceError`, and unknown profiles raise `UnknownProfileError`.
+- Added `Config#restore_default`, which discards any assigned value (including an explicit `nil`) and restores the setting's declared default.
+
 ### Changed
 
 ### Deprecated

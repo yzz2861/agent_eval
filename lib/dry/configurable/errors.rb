@@ -11,6 +11,12 @@ module Dry
 
     FrozenConfigError = Class.new(Error)
 
+    UnknownProfileError = Class.new(Error)
+
+    CyclicProfileInheritanceError = Class.new(Error)
+
+    ProfileLinearizationError = Class.new(Error)
+
     AlreadyIncludedError = Class.new(Error)
     deprecate_constant(
       :AlreadyIncludedError,
