@@ -1,7 +1,14 @@
-require "dotenv/version"
-require "dotenv/parser"
-require "dotenv/environment"
 require "dotenv/missing_keys"
+require "dotenv/version"
+require "dotenv/source"
+require "dotenv/parser"
+require "dotenv/definition"
+require "dotenv/lazy_parser"
+require "dotenv/definition_set"
+require "dotenv/circular_reference_error"
+require "dotenv/lazy_resolver"
+require "dotenv/lazy_loader"
+require "dotenv/environment"
 require "dotenv/diff"
 
 # Shim to load environment variables from `.env files into `ENV`.
@@ -15,7 +22,17 @@ module Dotenv
   attr_accessor :instrumenter
 
   # Loads environment variables from one or more `.env` files. See `#parse` for more details.
-  def load(*filenames, overwrite: false, ignore: true)
+  def load(*filenames, overwrite: false, ignore: true, lazy: false)
+    if lazy
+      instrumenter = ->(name, payload = {}, &block) { instrument(name, payload, &block) }
+      return lazy_loader(
+        *filenames,
+        overwrite: overwrite,
+        ignore: ignore,
+        instrumenter: instrumenter
+      ).apply.applied
+    end
+
     parse(*filenames, overwrite: overwrite, ignore: ignore) do |env|
       instrument(:load, env: env) do |payload|
         update(env, overwrite: overwrite)
@@ -47,8 +64,13 @@ module Dotenv
   # @param ignore [Boolean] Ignore non-existent files
   # @param block [Proc] Block to yield for each parsed `Dotenv::Environment`
   # @return [Hash] parsed key/value pairs
-  def parse(*filenames, overwrite: false, ignore: true, &block)
+  def parse(*filenames, overwrite: false, ignore: true, lazy: false, &block)
     filenames << ".env" if filenames.empty?
+    if lazy
+      env = lazy_loader(*filenames, overwrite: overwrite, ignore: ignore).resolve.resolved
+      return block ? block.call(env) : env
+    end
+
     filenames = filenames.reverse if overwrite
 
     filenames.reduce({}) do |hash, filename|
@@ -61,6 +83,22 @@ module Dotenv
 
       hash.merge! env || {}
     end
+  end
+
+  # Build a loader whose read, parse, resolve, and apply stages can be inspected separately.
+  def lazy_loader(*filenames, overwrite: false, ignore: true, instrumenter: nil)
+    filenames << ".env" if filenames.empty?
+    LazyLoader.new(filenames, overwrite: overwrite, ignore: ignore, instrumenter: instrumenter)
+  end
+
+  # Parse files with deferred variable resolution without modifying ENV.
+  def lazy_parse(*filenames, overwrite: false, ignore: true)
+    parse(*filenames, overwrite: overwrite, ignore: ignore, lazy: true)
+  end
+
+  # Load files with deferred variable resolution into ENV.
+  def lazy_load(*filenames, overwrite: false, ignore: true)
+    load(*filenames, overwrite: overwrite, ignore: ignore, lazy: true)
   end
 
   # Save the current `ENV` to be restored later

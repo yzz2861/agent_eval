@@ -335,6 +335,45 @@ describe Dotenv do
     end
   end
 
+  describe "lazy mode" do
+    let(:files) do
+      [fixture_path("lazy_forward_a.env").to_s, fixture_path("lazy_forward_b.env").to_s]
+    end
+
+    it "parses forward references without applying them to ENV" do
+      result = Dotenv.parse(*files, lazy: true)
+
+      expect(result["LAZY_A"]).to eq("resolved")
+      expect(result["LAZY_COMMAND"]).to eq("from-b")
+      expect(ENV["LAZY_A"]).to be_nil
+    end
+
+    it "loads forward references after all definitions are resolved" do
+      result = Dotenv.load(*files, lazy: true)
+
+      expect(result["LAZY_A"]).to eq("resolved")
+      expect(ENV["LAZY_A"]).to eq("resolved")
+    end
+
+    it "keeps existing process values by default and empty values distinct from missing" do
+      ENV["LAZY_A"] = ""
+      ENV["LAZY_B"] = "process"
+
+      result = Dotenv.parse(*files, lazy: true)
+
+      expect(result["LAZY_A"]).to eq("")
+      expect(result["LAZY_B"]).to eq("process")
+    end
+
+    it "applies file values over process values with overwrite: true" do
+      ENV["LAZY_A"] = "process"
+
+      result = Dotenv.parse(*files, overwrite: true, lazy: true)
+
+      expect(result["LAZY_A"]).to eq("resolved")
+    end
+  end
+
   describe "Unicode" do
     subject { fixture_path("bom.env") }
 

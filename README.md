@@ -228,6 +228,35 @@ If a value contains a `$` and it is not intended to be a variable, wrap it in si
 PASSWORD='pas$word'
 ```
 
+### Deferred Variable Resolution
+
+Variables can reference definitions from a file that is loaded later. Pass `lazy: true` to collect
+all file definitions and overrides first, resolve variable references against the final
+definitions, and only then apply the result to `ENV`:
+
+```ruby
+Dotenv.load("config/env.env", "config/defaults.env", lazy: true)
+```
+
+With deferred resolution, files are read in the order passed and later files override earlier
+files. Existing process variables still have precedence unless `overwrite: true` is used. A present
+but empty process variable is treated as defined, so references resolve to `""` rather than
+falling back to a file value. Self references and cycles raise `Dotenv::CircularReferenceError`
+with the complete variable chain.
+
+The read, parse/collection, resolve, and apply stages can be inspected independently:
+
+```ruby
+loader = Dotenv.lazy_loader("config/env.env", "config/defaults.env")
+loader.read       # source files and their raw contents
+loader.parse      # definitions, sources, lines, and override history
+loader.resolve    # resolved values without modifying ENV
+loader.apply      # writes resolved values to ENV
+```
+
+Only the final definition of each variable is resolved, so command substitutions in overridden
+definitions are not executed.
+
 ### Comments
 
 Comments may be added to your file as such:
