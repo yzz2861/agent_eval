@@ -1,5 +1,10 @@
 # Liquid Change Log
 
+## Unreleased
+
+* Add Liquid::SourceEditor, a source-span-preserving parse mode with a local
+  edit interface for renaming variables by binding.
+
 ## 5.14.0
 
 * Avoid materializing integer ranges in `for` and `tablerow` loops, and account for each visited range item [Ian Ker-Seymer]
