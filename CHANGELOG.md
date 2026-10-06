@@ -1,5 +1,11 @@
 # sqlite3-ruby Changelog
 
+## Unreleased
+
+### Added
+
+- Add `Database#serialize` and `Database.deserialize` for transferring an in-memory database as a binary image. Deserialization copies the input string and gives read/write databases a separate resizable buffer.
+
 ## 2.9.6 / 2026-08-11
 
 ### Security / Stability

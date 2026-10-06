@@ -239,6 +239,157 @@ rb_sqlite3_open_v2(VALUE self, VALUE file, VALUE mode, VALUE zvfs)
     return self;
 }
 
+#if defined(HAVE_SQLITE3_SERIALIZE) && defined(HAVE_SQLITE3_DESERIALIZE)
+struct serialize_string_args {
+    unsigned char *data;
+    sqlite3_int64 size;
+    VALUE string;
+};
+
+static VALUE
+serialize_string_protected(VALUE value)
+{
+    struct serialize_string_args *args = (struct serialize_string_args *)value;
+    args->string = rb_str_new((const char *)args->data, (long)args->size);
+    rb_enc_associate_index(args->string, rb_ascii8bit_encindex());
+    return Qnil;
+}
+
+static VALUE
+database_serialize(VALUE self, VALUE schema)
+{
+    sqlite3RubyPtr ctx;
+    sqlite3_int64 size = 0;
+    unsigned char *data;
+    struct serialize_string_args args;
+    int exception_state;
+
+    StringValue(schema);
+    TypedData_Get_Struct(self, sqlite3Ruby, &database_type, ctx);
+    REQUIRE_OPEN_DB(ctx);
+
+    data = sqlite3_serialize(
+               ctx->db,
+               RSTRING_LEN(schema) == 0 ? NULL : StringValueCStr(schema),
+               &size,
+               0
+           );
+
+    if (!data) {
+        int status = sqlite3_errcode(ctx->db);
+        if (status == SQLITE_OK) {
+            status = SQLITE_NOMEM;
+        }
+        CHECK(ctx->db, status);
+    }
+
+    if (size < 0 || size > LONG_MAX) {
+        sqlite3_free(data);
+        rb_raise(rb_eRangeError, "serialized database is too large");
+    }
+
+    args.data = data;
+    args.size = size;
+    args.string = Qnil;
+    rb_protect(serialize_string_protected, (VALUE)&args, &exception_state);
+    sqlite3_free(data);
+
+    if (exception_state) {
+        rb_jump_tag(exception_state);
+    }
+
+    return args.string;
+}
+
+static VALUE
+database_deserialize(VALUE self, VALUE schema, VALUE image, VALUE readonly)
+{
+    sqlite3RubyPtr ctx;
+    unsigned char *data;
+    sqlite3_int64 size;
+    unsigned int flags;
+    int status;
+
+    StringValue(schema);
+    StringValue(image);
+    TypedData_Get_Struct(self, sqlite3Ruby, &database_type, ctx);
+    REQUIRE_OPEN_DB(ctx);
+
+#ifdef HAVE_SQLITE3_NEXT_STMT
+    if (sqlite3_next_stmt(ctx->db, NULL) != NULL) {
+        rb_raise(rb_path2class("SQLite3::BusyException"),
+                 "cannot deserialize a database with prepared statements open");
+    }
+#endif
+
+    if (!sqlite3_get_autocommit(ctx->db)) {
+        rb_raise(rb_path2class("SQLite3::BusyException"),
+                 "cannot deserialize a database with an active transaction");
+    }
+
+    size = (sqlite3_int64)RSTRING_LEN(image);
+    if (size <= 0) {
+        rb_raise(rb_eArgError, "cannot deserialize an empty database image");
+    }
+
+    data = (unsigned char *)sqlite3_malloc64((sqlite3_uint64)size);
+    if (!data) {
+        rb_raise(rb_path2class("SQLite3::MemoryException"), "failed to allocate database image");
+    }
+
+    /* SQLite owns this copy. FREEONCLOSE releases it on failure or close, and
+     * RESIZEABLE allows SQLite to move it with sqlite3_realloc64(). The Ruby
+     * input string is never retained or used as database storage. */
+    memcpy(data, RSTRING_PTR(image), (size_t)size);
+
+    flags = SQLITE_DESERIALIZE_FREEONCLOSE;
+    if (RTEST(readonly)) {
+        flags |= SQLITE_DESERIALIZE_READONLY;
+    } else {
+        flags |= SQLITE_DESERIALIZE_RESIZEABLE;
+    }
+
+    status = sqlite3_deserialize(
+                 ctx->db,
+                 RSTRING_LEN(schema) == 0 ? NULL : StringValueCStr(schema),
+                 data,
+                 size,
+                 size,
+                 flags
+             );
+
+    if (status != SQLITE_OK) {
+        CHECK(ctx->db, status);
+    }
+
+    if (RSTRING_LEN(schema) == 0) {
+        status = sqlite3_exec(ctx->db, "SELECT 1 FROM sqlite_schema LIMIT 1", NULL, NULL, NULL);
+    } else {
+        char *sql = sqlite3_mprintf("SELECT 1 FROM \"%w\".sqlite_schema LIMIT 1",
+                                    StringValueCStr(schema));
+        if (!sql) {
+            CHECK(ctx->db, SQLITE_NOMEM);
+        }
+        status = sqlite3_exec(ctx->db, sql, NULL, NULL, NULL);
+        sqlite3_free(sql);
+    }
+
+    if (status != SQLITE_OK) {
+        char *msg = sqlite3_mprintf("%s", sqlite3_errmsg(ctx->db));
+        sqlite3_close_v2(ctx->db);
+        ctx->db = NULL;
+        CHECK_MSG(ctx->db, status, msg);
+    }
+
+    ctx->flags &= ~SQLITE3_RB_DATABASE_READONLY;
+    if (RTEST(readonly)) {
+        ctx->flags |= SQLITE3_RB_DATABASE_READONLY;
+    }
+
+    return self;
+}
+#endif
+
 static VALUE
 rb_sqlite3_disable_quirk_mode(VALUE self)
 {
@@ -1068,6 +1219,10 @@ init_sqlite3_database(void)
     rb_define_alloc_func(cSqlite3Database, allocate);
     rb_define_private_method(cSqlite3Database, "open_v2", rb_sqlite3_open_v2, 3);
     rb_define_private_method(cSqlite3Database, "open16", rb_sqlite3_open16, 1);
+#if defined(HAVE_SQLITE3_SERIALIZE) && defined(HAVE_SQLITE3_DESERIALIZE)
+    rb_define_private_method(cSqlite3Database, "serialize_native", database_serialize, 1);
+    rb_define_private_method(cSqlite3Database, "deserialize_native", database_deserialize, 3);
+#endif
     rb_define_method(cSqlite3Database, "collation", collation, 2);
     rb_define_method(cSqlite3Database, "close", sqlite3_rb_close, 0);
     rb_define_private_method(cSqlite3Database, "discard", sqlite3_rb_discard, 0);

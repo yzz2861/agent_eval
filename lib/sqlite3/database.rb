@@ -113,6 +113,29 @@ module SQLite3
       def quote(string)
         string.gsub("'", "''")
       end
+
+      # Open a read/write or read-only in-memory database from a binary
+      # database image returned by #serialize. The image is copied before the
+      # database is opened, so later changes to the string cannot affect the
+      # database. Read/write databases own a resizable copy of the image.
+      def deserialize(image, schema = "main", readonly: false)
+        unless private_method_defined?(:deserialize_native)
+          raise SQLite3::UnsupportedException, "sqlite3 serialization is not supported by this SQLite build"
+        end
+
+        database = allocate
+        database.send(:open_v2, ":memory:", Constants::Open::READWRITE, nil)
+
+        begin
+          database.send(:deserialize_native, schema.to_s, image, readonly)
+        rescue
+          database.close unless database.closed?
+          raise
+        end
+
+        database.send(:initialize_after_deserialize, readonly)
+        database
+      end
     end
 
     # A boolean that indicates whether rows in result sets should be returned
@@ -189,6 +212,30 @@ module SQLite3
           close
         end
       end
+    end
+
+    # Serialize the named schema as a binary SQLite database image. This does
+    # not create a temporary database file.
+    def serialize(schema = "main")
+      unless respond_to?(:serialize_native, true)
+        raise SQLite3::UnsupportedException, "sqlite3 serialization is not supported by this SQLite build"
+      end
+
+      serialize_native(schema.to_s)
+    end
+
+    # Replace the named schema with an in-memory database opened from +image+.
+    # The input string is copied; read/write databases own a separate,
+    # resizable buffer. All prepared statements for the connection must be
+    # closed and any transaction completed before calling this method.
+    def deserialize(image, schema = "main", readonly: false)
+      unless respond_to?(:deserialize_native, true)
+        raise SQLite3::UnsupportedException, "sqlite3 serialization is not supported by this SQLite build"
+      end
+
+      deserialize_native(schema.to_s, image, readonly)
+      @readonly = readonly
+      self
     end
 
     # call-seq: db.encoding
@@ -794,5 +841,16 @@ module SQLite3
         ResultSet.new(self, stmt)
       end
     end
+
+    def initialize_after_deserialize(readonly)
+      @progress_handler = nil
+      @collations = {}
+      @functions = []
+      @results_as_hash = false
+      @readonly = readonly
+      @default_transaction_mode = :deferred
+      ForkSafety.track(self)
+    end
+    private :initialize_after_deserialize
   end
 end

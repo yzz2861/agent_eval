@@ -137,6 +137,9 @@ module Sqlite3
         end
 
         have_func("sqlite3_prepare_v2")
+        have_func("sqlite3_next_stmt", "sqlite3.h")
+        have_func("sqlite3_serialize", "sqlite3.h")
+        have_func("sqlite3_deserialize", "sqlite3.h")
         have_func("sqlite3_db_name", "sqlite3.h") # v3.39.0
         have_func("sqlite3_error_offset", "sqlite3.h") # v3.38.0
 
