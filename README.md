@@ -1015,6 +1015,7 @@ There are a lot of them but the good thing is, that Slim checks the configuratio
 | Symbol | :js_wrapper | nil | Wrap javascript by :comment, :cdata or :both. You can also :guess the wrapper based on :format. |
 | Boolean | :pretty | false | Pretty HTML indenting, only block level tags are indented <b>(This is slower!)</b> |
 | String | :indent | '  ' | Indentation string |
+| Boolean | :omit_end_tags | false | Omit end tags allowed by the HTML specification (e.g. <code>&lt;/li&gt;</code>, <code>&lt;/td&gt;</code>) if the following output is known at compile time. Only active for :html format with pretty printing disabled, never inside SVG/MathML |
 | Boolean | :streaming | false (true in Rails, see below how to disable it!) | Enable output streaming, improves the perceived performance |
 | Class | :generator | Temple::Generators::StringBuffer/ RailsOutputBuffer | Temple code generator (default generator generates string buffer) |
 | String | :buffer | '_buf' ('@output_buffer' in Rails) | Variable used for buffer |

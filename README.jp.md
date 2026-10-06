@@ -979,6 +979,7 @@ end
 | Symbol | :js_wrapper | nil | :commentや :cdata , :both で JavaScript をラップします。:guess を指定することで :format オプションに基いて設定することもできます |
 | Boolean | :pretty | false | HTML を綺麗にインデントします。ブロック要素のタグでのみ、インデントされます。 <b>(遅くなります!)</b> |
 | String | :indent | '  ' | インデントに使用される文字列 |
+| Boolean | :omit_end_tags | false | 後続の出力がコンパイル時に確定できる場合に、HTML 仕様で許可された終了タグ (例: <code>&lt;/li&gt;</code>, <code>&lt;/td&gt;</code>) を省略します。:html フォーマットかつ pretty 印刷が無効な場合のみ有効で、SVG/MathML 内では適用されません |
 | Boolean | :streaming | false (Rails では true, 無効化するにはストリーミングを参照) | ストリーミング出力の有効化, 体感的なパフォーマンスの向上 |
 | Class | :generator | Temple::Generators::StringBuffer/ RailsOutputBuffer | Temple コードジェネレータ (デフォルトのジェネレータはStringバッファを生成します) |
 | String | :buffer | '_buf' (Rails では '@output_buffer') | バッファに使用される変数 |
