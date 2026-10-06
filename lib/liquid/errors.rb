@@ -56,4 +56,7 @@ module Liquid
   DisabledError         = Class.new(Error)
   InternalError         = Class.new(Error)
   TemplateEncodingError = Class.new(Error)
+  EditError             = Class.new(Error)
+  OverlappingEditError  = Class.new(EditError)
+  EditConflictError     = Class.new(EditError)
 end

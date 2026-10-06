@@ -17,6 +17,7 @@ module Liquid
   class Template
     attr_accessor :root, :name
     attr_reader :resource_limits, :warnings
+    attr_reader :source
 
     attr_reader :profiler
 
@@ -103,8 +104,34 @@ module Liquid
         raise TemplateEncodingError, parse_context.locale.t("errors.syntax.invalid_template_encoding")
       end
 
-      tokenizer     = parse_context.new_tokenizer(source, start_line_number: @line_numbers && 1)
+      # Keep an independent, mutable copy so that whitespace trimming during
+      # parsing can never mutate the caller's string, and so source-preserving
+      # edits can reconstruct the template byte for byte.
+      @source       = source.dup
+      tokenizer     = parse_context.new_tokenizer(@source, start_line_number: @line_numbers && 1)
       @root         = Document.parse(tokenizer, parse_context)
+      @source_map   = nil
+      self
+    end
+
+    # Builds (or returns the cached) SourceMap for this template. Source maps
+    # are computed lazily so normal rendering pays no cost. Pass `rebuild: true`
+    # to force regeneration after external changes.
+    def source_map(rebuild: false)
+      @source_map = nil if rebuild
+      @source_map ||= SourceMap.new(@source, environment: @environment)
+    end
+
+    # Returns a SourceEditor for local, source-preserving edits.
+    def source_editor
+      SourceEditor.new(self, environment: @environment)
+    end
+
+    # Renames the variable binding visible at `at_byte` (or the only binding
+    # named `name` at the document root) without reformatting the template. The
+    # edited template is re-parsed and returned in place (self).
+    def rename_variable(name, new_name, at_byte: nil)
+      source_editor.rename_variable(name, new_name, at_byte: at_byte)
       self
     end
 
@@ -217,6 +244,12 @@ module Liquid
     end
 
     private
+
+    # Used by SourceEditor to replace the source after a validated local edit,
+    # then re-run the normal parser so subsequent renders and edits reflect it.
+    def reparse_from(new_source, options = @options || {})
+      parse(new_source, options)
+    end
 
     def configure_options(options)
       if (profiling = options[:profile])
