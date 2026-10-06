@@ -49,6 +49,12 @@ class Parslet::Parser
         (positive ? '&' : '!') <<
         bound_parslet.accept(self)
       end
+
+      # Commit points have no counterpart in the Citrus/Treetop dialects.
+      def visit_cut
+        raise NotImplementedError,
+          "Cannot export a commit point (#cut) to a Citrus/Treetop grammar."
+      end
     end
 
     class Treetop < Citrus
@@ -159,4 +165,3 @@ class Parslet::Parser
       pretty_print(self.class.name, root)
   end
 end
-

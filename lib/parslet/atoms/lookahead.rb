@@ -26,8 +26,16 @@ class Parslet::Atoms::Lookahead < Parslet::Atoms::Base
   def try(source, context, consume_all)
     rewind_pos  = source.bytepos
     error_pos   = source.pos
+    # A lookahead is pure speculation: cuts fired inside it must never
+    # reach the surrounding parse, whatever the outcome.
+    frames      = context.choice_frame_stack
 
-    success, _ = bound_parslet.apply(source, context, consume_all)
+    success, _ = context.speculative_region do |region|
+      # Lookaheads never keep their speculation, so cuts observed inside
+      # are always voided for replay purposes.
+      region[:voided] = true
+      bound_parslet.apply(source, context, consume_all)
+    end
     
     if positive
       return succ(nil) if success
@@ -41,6 +49,7 @@ class Parslet::Atoms::Lookahead < Parslet::Atoms::Base
   # Lookaheads NEVER consume their input, even on success, that's why. 
   ensure 
     source.bytepos = rewind_pos
+    context.choice_frame_stack = frames
   end
   
   precedence LOOKAHEAD

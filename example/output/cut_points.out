@@ -1,0 +1,18 @@
+========================================================================
+WITHOUT a cut: every alternative is still tried
+========================================================================
+Expected one of [INCLUDE_DIRECTIVE, IDENTIFIER] at line 1 char 1.
+|- Failed to match sequence ('include' ' ' '"' file:FILENAME '"') at line 1 char 9.
+|  `- Premature end of input at line 1 char 9.
+`- Extra input after last repetition at line 1 char 8.
+   `- Failed to match [[:alnum:]] at line 1 char 8.
+========================================================================
+WITH a cut: the include directive was committed
+========================================================================
+Failed to match sequence ('include' ' ' ↑ '"' file:FILENAME '"') at line 1 char 9.
+`- Premature end of input at line 1 char 9.
+========================================================================
+REUSING THE SAME PARSER INSTANCE TWICE
+========================================================================
+parse of the other branch after a committed failure: {name: "ordinary"@0}
+error trees of two runs identical? true

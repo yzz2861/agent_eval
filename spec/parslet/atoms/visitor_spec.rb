@@ -19,6 +19,14 @@ describe Parslet::Atoms do
       
       parslet.accept(visitor)
     end 
+  end 
+  describe Parslet::Atoms::Cut do
+    let(:parslet) { Parslet::Atoms::Cut.new }
+    it "should call back visitor" do
+      visitor.should_receive(:visit_cut).with_no_args.once
+
+      parslet.accept(visitor)
+    end
   end
   describe Parslet::Atoms::Sequence do
     let(:parslet) { str('a') >> str('b') }

@@ -201,6 +201,21 @@ module Parslet
   end
   module_function :dynamic
 
+  # Returns a commit point (cut) atom. Once a cut is reached inside one
+  # alternative of a choice, that alternative is committed and later
+  # alternatives are no longer tried. The cut affects only the innermost
+  # enclosing alternative and is contained by repetitions and lookaheads.
+  #
+  # This is the same atom produced by {Atoms::DSL#cut};
+  #   str('a') >> cut >> str('b')
+  # is equivalent to:
+  #   str('a').cut >> str('b')
+  #
+  def cut
+    Parslet::Atoms::Cut.new
+  end
+  module_function :cut
+
   # Returns a parslet atom that parses infix expressions. Operations are 
   # specified as a list of <atom, precedence, associativity> tuples, where 
   # atom is simply the parslet atom that matches an operator, precedence is 

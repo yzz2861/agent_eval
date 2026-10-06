@@ -78,6 +78,21 @@ module Parslet::Atoms::DSL
     Parslet::Atoms::Lookahead.new(self, false)
   end
 
+  # Marks a commit point (cut) after the current parslet. Once the preceding
+  # part of an alternative has matched up to this point, that alternative is
+  # committed: should the remainder of the alternative fail, no later
+  # alternative is tried. 
+  #
+  # The cut affects only the innermost enclosing alternative and is contained
+  # by repetitions (including #maybe) and lookaheads. 
+  #
+  # Example: 
+  #   (str('def ') >> cut >> identifier) | expression
+  #
+  def cut
+    self >> Parslet::Atoms::Cut.new
+  end
+
   # Tests for presence of a parslet atom in the input stream without consuming
   # it. 
   # 

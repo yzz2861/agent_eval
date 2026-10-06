@@ -36,10 +36,21 @@ class Parslet::Atoms::Repetition < Parslet::Atoms::Base
     
     break_on = nil
     loop do
-      success, value = parslet.apply(source, context, false)
+      # Each iteration is speculative until it succeeds: a cut reached in
+      # a failing attempt (in particular the final attempt that ends the
+      # loop) must not survive into the rest of the parse.
+      frames = context.choice_frame_stack
+      success, value = context.speculative_region do |region|
+        outcome = parslet.apply(source, context, false)
+        region[:voided] = true unless outcome.first
+        outcome
+      end
 
       break_on = value
-      break unless success
+      unless success
+        context.choice_frame_stack = frames
+        break
+      end
 
       occ += 1
       accum << value
@@ -84,4 +95,3 @@ class Parslet::Atoms::Repetition < Parslet::Atoms::Base
     parslet.to_s(prec) + minmax
   end
 end
-

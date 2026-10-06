@@ -78,6 +78,14 @@ module Parslet::Atoms
       visitor.visit_re(match)
     end
   end
+
+  class Cut
+    # Call back visitors #visit_cut method. Cuts have no children and are
+    # not expressible in every export dialect.
+    def accept(visitor)
+      visitor.visit_cut
+    end
+  end
 end
 
 class Parslet::Parser

@@ -4,6 +4,13 @@
   We're in maintenance mode! The community is really stepping up here though, sending
   interesting additions our way. Here's what has been merged this far: 
 
+  + Commit points (#cut / Parslet.cut): once a cut has been reached in an
+    alternative branch, that branch is committed and later alternatives are
+    no longer tried. Cuts are scoped to their enclosing choice and bounded
+    by repetitions (.maybe included) and lookaheads, so speculative
+    attempts never leak state into the following parse. Grammar parsers
+    that do not use cuts are unchanged.
+
   + Specification for mixing parslet parsers (Artur Komarov).
 
   + Update to Github Actions CI/CD. I guess newer is better? (Matt Larraz).

@@ -29,17 +29,28 @@ class Parslet::Atoms::Alternative < Parslet::Atoms::Base
     self.class.new(*@alternatives + [parslet])
   end
 
+  # Marks this atom as owning a choice frame, which Parslet::Atoms::Context
+  # pushes around both evaluation and packrat replay of the alternative.
+  def choice_frame?
+    true
+  end
+
   def error_msg
     @error_msg ||= "Expected one of #{alternatives.inspect}"
   end
 
   def try(source, context, consume_all)
-    errors = alternatives.map { |a|
+    errors = []
+    alternatives.each { |a|
       success, value = result = a.apply(source, context, consume_all)
       return result if success
-      
-      # Aggregate all errors
-      value
+
+      # A cut fired inside this branch, committing the choice. Report the
+      # failure of the committed branch directly; do not try the remaining
+      # alternatives nor wrap it in the combined error message.
+      return result if context.choice_committed?
+
+      errors << value
     }
     
     # If we reach this point, all alternatives have failed. 
