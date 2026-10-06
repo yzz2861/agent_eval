@@ -23,6 +23,7 @@ require_relative 'psych/parser'
 require_relative 'psych/omap'
 require_relative 'psych/set'
 require_relative 'psych/coder'
+require_relative 'psych/unknown_tag'
 require_relative 'psych/stream'
 require_relative 'psych/json/tree_builder'
 require_relative 'psych/json/stream'
@@ -320,7 +321,25 @@ module Psych
   #   Psych.safe_load("---\n foo: bar")                         # => {"foo"=>"bar"}
   #   Psych.safe_load("---\n foo: bar", symbolize_names: true)  # => {:foo=>"bar"}
   #
-  def self.safe_load yaml, permitted_classes: [], permitted_symbols: [], aliases: false, filename: nil, fallback: nil, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true
+  # When the optional +preserve_unknown_tags+ keyword argument is set to a
+  # true value, tags that psych does not recognize -- foreign tags defined
+  # by other languages or systems, as well as tags naming classes that are
+  # not in +permitted_classes+ -- are preserved instead of being silently
+  # dropped or raising Psych::DisallowedClass.  Such nodes are returned as
+  # Psych::UnknownTag value objects that keep the original tag and the
+  # plain Ruby content (a String, Array or Hash).  No constant lookup is
+  # performed and no user constructor is called for these nodes, so
+  # documents can be inspected, modified and dumped back with their
+  # original tags intact:
+  #
+  #   yaml = "--- !python/tuple [1, 2]\n"
+  #   obj = Psych.safe_load yaml, preserve_unknown_tags: true
+  #   obj.tag          # => "!python/tuple"
+  #   obj.value        # => [1, 2]
+  #   obj.value << 3
+  #   Psych.dump obj   # => "--- !python/tuple\n- 1\n- 2\n- 3\n"
+  #
+  def self.safe_load yaml, permitted_classes: [], permitted_symbols: [], aliases: false, filename: nil, fallback: nil, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true, preserve_unknown_tags: false
     result = parse(yaml, filename: filename)
     return fallback unless result
 
@@ -328,9 +347,9 @@ module Psych
                                                permitted_symbols.map(&:to_s))
     scanner      = ScalarScanner.new class_loader, strict_integer: strict_integer, parse_symbols: parse_symbols
     visitor = if aliases
-                Visitors::ToRuby.new scanner, class_loader, symbolize_names: symbolize_names, freeze: freeze
+                Visitors::ToRuby.new scanner, class_loader, symbolize_names: symbolize_names, freeze: freeze, preserve_unknown_tags: preserve_unknown_tags
               else
-                Visitors::NoAliasRuby.new scanner, class_loader, symbolize_names: symbolize_names, freeze: freeze
+                Visitors::NoAliasRuby.new scanner, class_loader, symbolize_names: symbolize_names, freeze: freeze, preserve_unknown_tags: preserve_unknown_tags
               end
     result = visitor.accept result
     result
@@ -366,7 +385,7 @@ module Psych
   # Raises a TypeError when `yaml` parameter is NilClass.  This method is
   # similar to `safe_load` except that `Symbol` objects are allowed by default.
   #
-  def self.load yaml, permitted_classes: [Symbol], permitted_symbols: [], aliases: false, filename: nil, fallback: nil, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true
+  def self.load yaml, permitted_classes: [Symbol], permitted_symbols: [], aliases: false, filename: nil, fallback: nil, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true, preserve_unknown_tags: false
     safe_load yaml, permitted_classes: permitted_classes,
                     permitted_symbols: permitted_symbols,
                     aliases: aliases,
@@ -375,7 +394,8 @@ module Psych
                     symbolize_names: symbolize_names,
                     freeze: freeze,
                     strict_integer: strict_integer,
-                    parse_symbols: parse_symbols
+                    parse_symbols: parse_symbols,
+                    preserve_unknown_tags: preserve_unknown_tags
   end
 
   ###

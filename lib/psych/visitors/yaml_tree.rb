@@ -2,6 +2,7 @@
 require_relative '../tree_builder'
 require_relative '../scalar_scanner'
 require_relative '../class_loader'
+require_relative '../unknown_tag'
 
 module Psych
   module Visitors
@@ -139,6 +140,26 @@ module Psych
 
         o.each { |k,v| visit_Hash k => v }
         @emitter.end_sequence
+      end
+
+      def visit_Psych_UnknownTag o
+        case value = o.value
+        when ::Hash
+          register(o, @emitter.start_mapping(nil, o.tag, false, Nodes::Mapping::BLOCK))
+          value.each do |k, v|
+            accept(@stringify_names && Symbol === k ? k.to_s : k)
+            accept v
+          end
+          @emitter.end_mapping
+        when ::Array
+          register(o, @emitter.start_sequence(nil, o.tag, false, Nodes::Sequence::BLOCK))
+          value.each { |c| accept c }
+          @emitter.end_sequence
+        when ::String
+          register(o, @emitter.scalar(value, nil, o.tag, false, false, Nodes::Scalar::ANY))
+        else
+          register(o, @emitter.scalar(value.to_s, nil, o.tag, false, false, Nodes::Scalar::ANY))
+        end
       end
 
       def visit_Encoding o
@@ -584,6 +605,7 @@ module Psych
         String => true,
         Array => true,
         Hash => true,
+        Psych::UnknownTag => true,
       }.compare_by_identity.freeze
 
       def initialize emitter, ss, options

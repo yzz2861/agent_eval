@@ -2,6 +2,7 @@
 require_relative '../scalar_scanner'
 require_relative '../class_loader'
 require_relative '../exception'
+require_relative '../unknown_tag'
 
 unless defined?(Regexp::NOENCODING)
   Regexp::NOENCODING = 32
@@ -16,15 +17,15 @@ module Psych
         DATA_INITIALIZE = Data.instance_method(:initialize)
       end
 
-      def self.create(symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true)
+      def self.create(symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true, preserve_unknown_tags: false)
         class_loader = ClassLoader.new
         scanner      = ScalarScanner.new class_loader, strict_integer: strict_integer, parse_symbols: parse_symbols
-        new(scanner, class_loader, symbolize_names: symbolize_names, freeze: freeze)
+        new(scanner, class_loader, symbolize_names: symbolize_names, freeze: freeze, preserve_unknown_tags: preserve_unknown_tags)
       end
 
       attr_reader :class_loader
 
-      def initialize ss, class_loader, symbolize_names: false, freeze: false
+      def initialize ss, class_loader, symbolize_names: false, freeze: false, preserve_unknown_tags: false
         super()
         @st = {}
         @ss = ss
@@ -33,6 +34,7 @@ module Psych
         @class_loader = class_loader
         @symbolize_names = symbolize_names
         @freeze = freeze
+        @preserve_unknown_tags = preserve_unknown_tags
       end
 
       def accept target
@@ -63,6 +65,10 @@ module Psych
           end
 
           return instance
+        end
+
+        if @preserve_unknown_tags && o.quoted && o.tag && foreign_tag?(o.tag)
+          return UnknownTag.new(o.tag, o.value)
         end
 
         return o.value if o.quoted
@@ -125,8 +131,15 @@ module Psych
         when /^!ruby\/sym(bol)?:?(.*)?$/
           class_loader.symbolize o.value
         else
-          @ss.tokenize o.value
+          if @preserve_unknown_tags && foreign_tag?(o.tag)
+            UnknownTag.new o.tag, o.value
+          else
+            @ss.tokenize o.value
+          end
         end
+      rescue DisallowedClass
+        raise unless @preserve_unknown_tags && o.tag
+        UnknownTag.new o.tag, o.value
       end
       private :deserialize
 
@@ -162,8 +175,15 @@ module Psych
           o.children.each { |c| list.push accept c }
           list
         else
-          register_empty(o)
+          if @preserve_unknown_tags && !core_tag?(o.tag)
+            preserve_unknown_sequence o
+          else
+            register_empty(o)
+          end
         end
+      rescue DisallowedClass
+        raise unless @preserve_unknown_tags && o.tag
+        preserve_unknown_sequence o
       end
 
       def visit_Psych_Nodes_Mapping o
@@ -342,8 +362,15 @@ module Psych
           end
 
         else
-          revive_hash(register(o, {}), o)
+          if @preserve_unknown_tags && !core_tag?(o.tag)
+            preserve_unknown_mapping o
+          else
+            revive_hash(register(o, {}), o)
+          end
         end
+      rescue DisallowedClass
+        raise unless @preserve_unknown_tags && o.tag
+        preserve_unknown_mapping o
       end
 
       def visit_Psych_Nodes_Document o
@@ -369,6 +396,35 @@ module Psych
         list = register(object, [])
         object.children.each { |c| list.push accept c }
         list
+      end
+
+      # Core YAML tags are always handled by psych itself; anything else
+      # (tags defined by other languages or systems) is foreign and may be
+      # preserved opaquely when +preserve_unknown_tags+ is enabled.
+      def foreign_tag? tag
+        !(core_tag?(tag) || tag.start_with?('!ruby/'))
+      end
+
+      def core_tag? tag
+        tag.start_with?('tag:yaml.org,2002:')
+      end
+
+      # Wrap the children of an unknown tagged sequence in an UnknownTag
+      # without resolving the tag.  The object is registered before its
+      # children are walked so that anchors and aliases keep referring to
+      # the same shared object.
+      def preserve_unknown_sequence o
+        unknown = register(o, UnknownTag.new(o.tag, []))
+        o.children.each { |c| unknown.value.push accept c }
+        unknown
+      end
+
+      # Wrap the children of an unknown tagged mapping in an UnknownTag
+      # without resolving the tag.  See preserve_unknown_sequence.
+      def preserve_unknown_mapping o
+        unknown = register(o, UnknownTag.new(o.tag, {}))
+        revive_hash(unknown.value, o)
+        unknown
       end
 
       def allocate_anon_data node, members
