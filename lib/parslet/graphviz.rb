@@ -55,6 +55,10 @@ module Parslet
     def visit_lookahead(positive, atom)
       recurse atom, parent
     end
+    def visit_permutation(members)
+      p = parent
+      members.each { |member| recurse member.parslet, p }
+    end
     def visit_re(regexp)
       # downwards node(regexp.object_id, label: escape("re(#{regexp.inspect})"))
     end

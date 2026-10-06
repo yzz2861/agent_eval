@@ -49,6 +49,11 @@ class Parslet::Parser
         (positive ? '&' : '!') <<
         bound_parslet.accept(self)
       end
+      def visit_permutation(members)
+        '(' <<
+        members.map { |member| member.parslet.accept(self) }.join(' / ') <<
+        ')'
+      end
     end
 
     class Treetop < Citrus
@@ -159,4 +164,3 @@ class Parslet::Parser
       pretty_print(self.class.name, root)
   end
 end
-

@@ -201,6 +201,24 @@ module Parslet
   end
   module_function :dynamic
 
+  # Matches named members in any order. Required members must appear once, and
+  # optional members may appear zero or one time. #group is an alias that is
+  # useful when describing a statement group.
+  #
+  # Example:
+  #   permutation do |group|
+  #     group.required :a, str('a')
+  #     group.optional :b, str('b')
+  #   end
+  #
+  def permutation(*members, &block)
+    Parslet::Atoms::Permutation.new(*members, &block)
+  end
+  module_function :permutation
+
+  alias_method :group, :permutation
+  module_function :group
+
   # Returns a parslet atom that parses infix expressions. Operations are 
   # specified as a list of <atom, precedence, associativity> tuples, where 
   # atom is simply the parslet atom that matches an operator, precedence is 

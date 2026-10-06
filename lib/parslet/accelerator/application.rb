@@ -40,6 +40,13 @@ module Parslet::Accelerator
     def visit_str(str)
       transform Parslet::Atoms::Str.new(str)
     end
+    def visit_permutation(members)
+      transformed = members.map do |member|
+        Parslet::Atoms::Permutation::Member.new(
+          member.name, member.parslet.accept(self), member.required)
+      end
+      transform Parslet::Atoms::Permutation.new(*transformed)
+    end
 
     def transform atom
       @rules.each do |expr, action|

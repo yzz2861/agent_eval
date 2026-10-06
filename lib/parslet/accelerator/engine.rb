@@ -63,6 +63,9 @@ module Parslet::Accelerator
           @engine.try_bind(bind_cond, str) }
       end
     end
+    def visit_permutation(members)
+      false
+    end
 
     def match(type_tag)
       expr_tag = @expr.type

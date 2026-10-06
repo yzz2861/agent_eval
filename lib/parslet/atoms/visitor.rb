@@ -78,6 +78,17 @@ module Parslet::Atoms
       visitor.visit_re(match)
     end
   end
+
+  class Permutation
+    def accept(visitor)
+      if visitor.respond_to?(:visit_permutation)
+        visitor.visit_permutation(members)
+      else
+        raise NotImplementedError,
+          "No #visit_permutation method on #{visitor.class.name}."
+      end
+    end
+  end
 end
 
 class Parslet::Parser

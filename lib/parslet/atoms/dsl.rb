@@ -109,4 +109,14 @@ module Parslet::Atoms::DSL
   def capture(name)
     Parslet::Atoms::Capture.new(self, name)
   end
+
+  # Builds a required member specification for a permutation group.
+  def required(name)
+    Parslet::Atoms::Permutation::Member.new(name, self, true)
+  end
+
+  # Builds an optional member specification for a permutation group.
+  def optional(name)
+    Parslet::Atoms::Permutation::Member.new(name, self, false)
+  end
 end
