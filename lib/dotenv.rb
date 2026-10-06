@@ -1,6 +1,7 @@
 require "dotenv/version"
 require "dotenv/parser"
 require "dotenv/environment"
+require "dotenv/spawn_environment"
 require "dotenv/missing_keys"
 require "dotenv/diff"
 
@@ -61,6 +62,33 @@ module Dotenv
 
       hash.merge! env || {}
     end
+  end
+
+  # Build an environment mapping for a child process without modifying ENV.
+  #
+  # @param filenames [String, Array<String>] Files to parse, in overlay order
+  # @param inherit [:all, :none, Array<String>] Parent variables to inherit
+  # @param overrides [Hash] Explicit values; nil deletes, "" sets an empty value
+  # @param source [Hash] Parent environment, defaults to ENV
+  # @param case_sensitive [true, false, :platform] Key matching platform rule
+  # @param ignore [Boolean] Ignore non-existent files
+  # @return [Dotenv::SpawnEnvironment] Hash usable with Process.spawn
+  def spawn_env(
+    *filenames,
+    inherit: :all,
+    overrides: {},
+    source: ENV,
+    case_sensitive: :platform,
+    ignore: true
+  )
+    SpawnEnvironmentBuilder.new(
+      *filenames,
+      inherit: inherit,
+      overrides: overrides,
+      source: source,
+      case_sensitive: case_sensitive,
+      ignore: ignore
+    ).build
   end
 
   # Save the current `ENV` to be restored later

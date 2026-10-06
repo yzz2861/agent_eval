@@ -261,6 +261,29 @@ Dotenv.require_keys("SERVICE_APP_ID", "SERVICE_KEY", "SERVICE_SECRET")
 
 If any of the configuration keys above are not set, your application will raise an error during initialization. This method is preferred because it prevents runtime errors in a production application due to improper configuration.
 
+### Spawning Processes
+
+Build an environment mapping for a child process without changing the parent process's `ENV`. Files are merged in order, later files win, and explicit overrides are applied last. The returned hash can be passed directly to `Process.spawn` or methods built on it.
+
+```ruby
+child_env = Dotenv.spawn_env(
+  ".env.test-1",
+  inherit: ["PATH", "HOME"],
+  overrides: {
+    "PORT" => "3001",
+    "EMPTY_VALUE" => "",
+    "REMOVED_VALUE" => nil
+  }
+)
+
+pid = Process.spawn(child_env, "ruby", "server.rb")
+Process.wait(pid)
+```
+
+`inherit` accepts `:all` (the default), `:none`, or a list of parent variable names. An empty string sets the variable to `""`, `nil` deletes it, and an unprovided key is absent from the child environment. Variable and `$(command)` substitutions can only see inherited variables, values from earlier files, and values from the current file.
+
+`case_sensitive` accepts `true`, `false`, or `:platform` (the default), which follows the native platform rule. `child_env.summary` reports only key names for `added`, `changed`, `unchanged`, `removed`, `deleted`, `empty`, inherited keys, and case-only key conflicts; it never contains variable values.
+
 ### Parsing
 
 To parse a list of env files for programmatic inspection without modifying the ENV:

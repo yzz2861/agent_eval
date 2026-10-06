@@ -43,9 +43,10 @@ module Dotenv
       end
     end
 
-    def initialize(string, overwrite: false)
+    def initialize(string, overwrite: false, env: ENV)
       # Convert line breaks to same format
       @string = string.gsub(/\r\n?/, "\n")
+      @environment = env.to_h
       @hash = {}
       @overwrite = overwrite
     end
@@ -54,16 +55,18 @@ module Dotenv
       @string.scan(LINE) do
         match = $LAST_MATCH_INFO
 
-        if existing?(match[:key])
+        key = match[:key]
+
+        if existing?(key)
           # Use value from already defined variable
-          @hash[match[:key]] = ENV[match[:key]]
+          @hash[key] = current_environment[key]
         elsif match[:export] && !match[:value]
           # Check for exported variable with no value
-          if !@hash.member?(match[:key])
+          if !@hash.member?(key) && !@environment.member?(key)
             raise FormatError, "Line #{match.to_s.inspect} has an unset variable"
           end
         else
-          @hash[match[:key]] = parse_value(match[:value] || "")
+          @hash[key] = parse_value(match[:value] || "")
         end
       end
 
@@ -74,7 +77,7 @@ module Dotenv
 
     # Determine if a variable is already defined and should not be overwritten.
     def existing?(key)
-      !@overwrite && key != "DOTENV_LINEBREAK_MODE" && ENV.key?(key)
+      !@overwrite && key != "DOTENV_LINEBREAK_MODE" && @environment.key?(key)
     end
 
     def parse_value(value)
@@ -88,7 +91,9 @@ module Dotenv
       # Unescape characters and performs substitutions unless value is single quoted
       if maybe_quote != "'"
         value = unescape_characters(value)
-        self.class.substitutions.each { |proc| value = proc.call(value, @hash) }
+        self.class.substitutions.each do |substitution|
+          value = substitution.call(value, current_environment, nil)
+        end
       end
 
       value
@@ -99,11 +104,17 @@ module Dotenv
     end
 
     def expand_newlines(value)
-      if (@hash["DOTENV_LINEBREAK_MODE"] || ENV["DOTENV_LINEBREAK_MODE"]) == "legacy"
+      linebreak_mode = @hash["DOTENV_LINEBREAK_MODE"] || @environment["DOTENV_LINEBREAK_MODE"]
+
+      if linebreak_mode == "legacy"
         value.gsub('\n', "\n").gsub('\r', "\r")
       else
         value.gsub('\n', "\\\\\\n").gsub('\r', "\\\\\\r")
       end
+    end
+
+    def current_environment
+      @environment.merge(@hash)
     end
   end
 end
