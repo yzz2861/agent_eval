@@ -660,11 +660,32 @@ memused(VALUE self)
 }
 #endif
 
+/*
+ * The column origin metadata functions (sqlite3_column_database_name,
+ * sqlite3_column_table_name, sqlite3_column_origin_name) are only declared
+ * when SQLite was compiled with SQLITE_ENABLE_COLUMN_METADATA, and they may
+ * return NULL when SQLite cannot determine the origin of an expression
+ * column, so NULL must be converted to nil rather than passed to
+ * rb_utf8_str_new_cstr (which dereferences the pointer and segfaults).
+ */
+#if defined(HAVE_SQLITE3_COLUMN_DATABASE_NAME) || defined(HAVE_SQLITE3_COLUMN_TABLE_NAME) || defined(HAVE_SQLITE3_COLUMN_ORIGIN_NAME)
+static VALUE
+column_origin_string(const char *name)
+{
+    return name ? interned_utf8_cstr(name) : Qnil;
+}
+#endif
+
 #ifdef HAVE_SQLITE3_COLUMN_DATABASE_NAME
 
 /* call-seq: stmt.database_name(column_index)
  *
- * Return the database name for the column at +column_index+
+ * Return the name of the database from which the result column at
+ * +column_index+ originates. Returns nil if the column is an expression or
+ * if SQLite cannot determine the origin.
+ *
+ * This method is only available when SQLite was compiled with
+ * SQLITE_ENABLE_COLUMN_METADATA (see SQLite3::Statement.column_metadata?).
  */
 static VALUE
 database_name(VALUE self, VALUE index)
@@ -675,11 +696,81 @@ database_name(VALUE self, VALUE index)
     REQUIRE_LIVE_DB(ctx);
     REQUIRE_OPEN_STMT(ctx);
 
-    return SQLITE3_UTF8_STR_NEW2(
+    return column_origin_string(
                sqlite3_column_database_name(ctx->st, NUM2INT(index)));
 }
-
 #endif
+
+#ifdef HAVE_SQLITE3_COLUMN_TABLE_NAME
+/* call-seq: stmt.table_name(column_index)
+ *
+ * Return the name of the table from which the result column at
+ * +column_index+ originates. Returns nil if the column is an expression or
+ * if SQLite cannot determine the origin.
+ *
+ * This method is only available when SQLite was compiled with
+ * SQLITE_ENABLE_COLUMN_METADATA (see SQLite3::Statement.column_metadata?).
+ */
+static VALUE
+table_name(VALUE self, VALUE index)
+{
+    sqlite3StmtRubyPtr ctx;
+    TypedData_Get_Struct(self, sqlite3StmtRuby, &statement_type, ctx);
+
+    REQUIRE_LIVE_DB(ctx);
+    REQUIRE_OPEN_STMT(ctx);
+
+    return column_origin_string(
+               sqlite3_column_table_name(ctx->st, NUM2INT(index)));
+}
+#endif
+
+#ifdef HAVE_SQLITE3_COLUMN_ORIGIN_NAME
+/* call-seq: stmt.origin_name(column_index)
+ *
+ * Return the original name (before any AS alias) of the column at
+ * +column_index+ in the table it originates from. Returns nil if the column
+ * is an expression or if SQLite cannot determine the origin.
+ *
+ * This method is only available when SQLite was compiled with
+ * SQLITE_ENABLE_COLUMN_METADATA (see SQLite3::Statement.column_metadata?).
+ */
+static VALUE
+origin_name(VALUE self, VALUE index)
+{
+    sqlite3StmtRubyPtr ctx;
+    TypedData_Get_Struct(self, sqlite3StmtRuby, &statement_type, ctx);
+
+    REQUIRE_LIVE_DB(ctx);
+    REQUIRE_OPEN_STMT(ctx);
+
+    return column_origin_string(
+               sqlite3_column_origin_name(ctx->st, NUM2INT(index)));
+}
+#endif
+
+/* call-seq: stmt.reprepare_count
+ *
+ * Return the cumulative number of times SQLite has automatically
+ * re-prepared this statement (for example because the schema changed since
+ * it was prepared). This is used internally to invalidate cached column
+ * metadata so that it always reflects the current statement.
+ */
+static VALUE
+reprepare_count(VALUE self)
+{
+    sqlite3StmtRubyPtr ctx;
+    TypedData_Get_Struct(self, sqlite3StmtRuby, &statement_type, ctx);
+
+    REQUIRE_LIVE_DB(ctx);
+    REQUIRE_OPEN_STMT(ctx);
+
+#ifdef SQLITE_STMTSTATUS_REPREPARE
+    return INT2NUM(sqlite3_stmt_status(ctx->st, SQLITE_STMTSTATUS_REPREPARE, 0));
+#else
+    return INT2FIX(0);
+#endif
+}
 
 /* call-seq: stmt.sql
  *
@@ -744,6 +835,19 @@ init_sqlite3_statement(void)
 #ifdef HAVE_SQLITE3_COLUMN_DATABASE_NAME
     rb_define_method(cSqlite3Statement, "database_name", database_name, 1);
 #endif
+#ifdef HAVE_SQLITE3_COLUMN_TABLE_NAME
+    rb_define_method(cSqlite3Statement, "table_name", table_name, 1);
+#endif
+#ifdef HAVE_SQLITE3_COLUMN_ORIGIN_NAME
+    rb_define_method(cSqlite3Statement, "origin_name", origin_name, 1);
+#endif
+#if defined(HAVE_SQLITE3_COLUMN_DATABASE_NAME) && defined(HAVE_SQLITE3_COLUMN_TABLE_NAME) && defined(HAVE_SQLITE3_COLUMN_ORIGIN_NAME)
+    /* True when SQLite was compiled with SQLITE_ENABLE_COLUMN_METADATA, so
+     * the column origin introspection methods return real values instead of
+     * nil. See Statement.column_metadata?. */
+    rb_define_const(cSqlite3Statement, "COLUMN_METADATA_ENABLED", Qtrue);
+#endif
+    rb_define_private_method(cSqlite3Statement, "reprepare_count", reprepare_count, 0);
 #ifdef SQLITE_STMTSTATUS_MEMUSED
     rb_define_method(cSqlite3Statement, "memused", memused, 0);
 #endif

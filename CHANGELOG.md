@@ -1,5 +1,13 @@
 # sqlite3-ruby Changelog
 
+## Unreleased
+
+### Added
+
+- `SQLite3::Statement#columns_metadata` and `SQLite3::ResultSet#columns_metadata` return an array of `SQLite3::ColumnMetadata`, ordered by column position. Each entry exposes the result column's `display_name`, and — when SQLite can determine it — the originating `database_name`, `table_name`, and `origin_name` (the table column name before any `AS` alias). Expressions, literals, and other columns with no determinable origin report `nil` for the three origin fields instead of guessing.
+- `SQLite3::Statement.column_metadata?` (and the `SQLite3::Statement::COLUMN_METADATA_ENABLED` constant) reports whether the loaded SQLite was built with `SQLITE_ENABLE_COLUMN_METADATA`. On such builds, `Statement#database_name` no longer segfaults when asked about an expression column (it now returns `nil`), and `#table_name` and `#origin_name` are also available.
+- Cached column metadata (names, types, and origins) is automatically refreshed after SQLite re-prepares a statement due to a schema change, so it stays consistent with the current result columns.
+
 ## 2.9.6 / 2026-08-11
 
 ### Security / Stability

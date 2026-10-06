@@ -59,6 +59,7 @@ Gem::Specification.new do |s|
     "ext/sqlite3/statement.h",
     "ext/sqlite3/timespec.h",
     "lib/sqlite3.rb",
+    "lib/sqlite3/column_metadata.rb",
     "lib/sqlite3/constants.rb",
     "lib/sqlite3/database.rb",
     "lib/sqlite3/errors.rb",

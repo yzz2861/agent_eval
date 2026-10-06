@@ -129,6 +129,8 @@ module Sqlite3
         have_func("sqlite3_initialize")
         have_func("sqlite3_backup_init")
         have_func("sqlite3_column_database_name")
+        have_func("sqlite3_column_table_name")
+        have_func("sqlite3_column_origin_name")
         have_func("sqlite3_enable_load_extension")
         have_func("sqlite3_load_extension")
 

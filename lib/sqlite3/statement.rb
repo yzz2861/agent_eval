@@ -1,4 +1,5 @@
 require "sqlite3/errors"
+require "sqlite3/column_metadata"
 require "sqlite3/resultset"
 
 class String
@@ -13,6 +14,25 @@ module SQLite3
   # via the Database#prepare method.
   class Statement
     include Enumerable
+
+    # Whether the loaded SQLite library was compiled with
+    # +SQLITE_ENABLE_COLUMN_METADATA+, which is required to determine the
+    # database, table, and origin column of result columns. When this is
+    # +false+, #columns_metadata still works but always reports +nil+ for the
+    # three origin fields.
+    unless const_defined?(:COLUMN_METADATA_ENABLED, false)
+      COLUMN_METADATA_ENABLED = false
+    end
+
+    # call-seq: Statement.column_metadata? -> true or false
+    #
+    # Returns +true+ when the loaded SQLite library can report the database,
+    # table, and origin column of result columns (i.e. it was built with
+    # +SQLITE_ENABLE_COLUMN_METADATA+). When +false+, #columns_metadata
+    # reports +nil+ for those origin fields instead of guessing.
+    def self.column_metadata?
+      COLUMN_METADATA_ENABLED
+    end
 
     # This is any text that followed the first valid SQL statement in the text
     # with which the statement was initialized. If there was no trailing text,
@@ -32,7 +52,9 @@ module SQLite3
 
       @connection = db
       @columns = nil
+      @columns_metadata = nil
       @types = nil
+      @metadata_reprepare_count = nil
       @remainder = prepare db, sql
     end
 
@@ -134,8 +156,26 @@ module SQLite3
     # may execute the statement in order to obtain the metadata; this makes it
     # a (potentially) expensive operation.
     def columns
-      get_metadata unless @columns
+      must_be_open!
+      refresh_metadata if stale_metadata?
       @columns
+    end
+
+    # Return an array of ColumnMetadata, one per result column, ordered by
+    # column position. Each entry carries the +display_name+ (the result-set
+    # column name, honoring any +AS+ alias) plus the +database_name+,
+    # +table_name+, and +origin_name+ when SQLite can determine the
+    # originating table column; otherwise those fields are +nil+. The values
+    # are never guessed.
+    #
+    # See ColumnMetadata for field semantics and
+    # Statement.column_metadata? for the capability check. Note that this may
+    # execute the statement in order to obtain the metadata; this makes it a
+    # (potentially) expensive operation.
+    def columns_metadata
+      must_be_open!
+      refresh_metadata if stale_metadata?
+      @columns_metadata
     end
 
     def each
@@ -151,7 +191,7 @@ module SQLite3
     # makes it a (potentially) expensive operation.
     def types
       must_be_open!
-      get_metadata unless @types
+      refresh_metadata if stale_metadata?
       @types
     end
 
@@ -195,14 +235,57 @@ module SQLite3
     # A convenience method for obtaining the metadata about the query. Note
     # that this will actually execute the SQL, which means it can be a
     # (potentially) expensive operation.
-    def get_metadata
-      @columns = Array.new(column_count) do |column|
-        column_name column
+    #
+    # SQLite transparently re-prepares a statement when the schema changed
+    # since it was prepared; the reprepare counter is snapshotted when the
+    # cache is built and compared on every read so stale metadata is rebuilt
+    # instead of being served.
+    def stale_metadata?
+      @metadata_reprepare_count.nil? ||
+        @metadata_reprepare_count != reprepare_count
+    end
+
+    def refresh_metadata
+      count = column_count
+      @columns = Array.new(count)
+      @columns_metadata = Array.new(count)
+      @types = Array.new(count)
+
+      count.times do |column|
+        display_name = column_name(column)
+        @columns[column] = display_name
+        @columns_metadata[column] = build_column_metadata(column, display_name)
+        declared_type = column_decltype(column)
+        @types[column] = declared_type&.downcase
       end
-      @types = Array.new(column_count) do |column|
-        val = column_decltype(column)
-        val&.downcase
+
+      @columns_metadata.freeze
+      @metadata_reprepare_count = reprepare_count
+    end
+
+    # Collect the origin metadata for one column without guessing: only the
+    # values SQLite reports are used, anything it cannot determine becomes
+    # nil. On builds without SQLITE_ENABLE_COLUMN_METADATA the native methods
+    # are absent, so all origin fields are nil.
+    def build_column_metadata(column, display_name)
+      if column_metadata_supported?
+        database = database_name(column)
+        table = table_name(column)
+        origin = origin_name(column)
+      else
+        database = table = origin = nil
       end
+
+      ColumnMetadata.new(
+        display_name: display_name,
+        database_name: database,
+        table_name: table,
+        origin_name: origin
+      ).freeze
+    end
+
+    def column_metadata_supported?
+      COLUMN_METADATA_ENABLED
     end
   end
 end
