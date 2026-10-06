@@ -77,11 +77,12 @@ algorithms. The graph algorithms in RGL currently include:
 
 ### Data Structures
 
-RGL currently provides two graph classes that implement a generalized
-adjacency list and an edge list adaptor.
+RGL provides graph classes for a generalized adjacency list and an edge list
+adaptor, along with a dynamic reachability index.
 
 *   {RGL::AdjacencyGraph}
 *   {RGL::ImplicitGraph}
+*   {RGL::ReachabilityIndex}
 
 The AdjacencyGraph class is the general-purpose _Swiss Army knife_ of graph
 classes. It is highly parameterized so that it can be optimized for different
