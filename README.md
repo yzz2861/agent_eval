@@ -72,6 +72,7 @@ algorithms. The graph algorithms in RGL currently include:
 *   Connected Components {RGL::Graph#each_connected_component}
 *   Strongly Connected Components {RGL::Graph#strongly_connected_components}
 *   Transitive Closure {RGL::Graph#transitive_closure}
+*   Dominators and Dominance Frontiers {RGL::Graph#dominator_analysis}
 *   Dijkstra's Shortest Path Algorithm {RGL::DijkstraAlgorithm}
 *   Bellman Ford Algorithm {RGL::BellmanFordAlgorithm}
 
@@ -174,6 +175,14 @@ Check whether a path exists between vertices 1 and 5
     irb> require 'rgl/path'
     irb> dg.path?(1, 5)
     true
+
+Find which nodes always precede another node from a specified entry:
+
+    irb> require 'rgl/dominators'
+    irb> dominators = dg.dominator_analysis(1)
+    irb> dominators.immediate_dominators
+    irb> dominators.dominates?(check_step, target_step)
+    irb> dominators.dominance_frontier(check_step)
 
 *Topological sort* is implemented as an iterator:
 
