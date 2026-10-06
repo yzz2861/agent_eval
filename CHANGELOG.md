@@ -1,5 +1,12 @@
 # sqlite3-ruby Changelog
 
+## Unreleased
+
+### Added
+
+- Add support for defining SQL window functions in Ruby. `Database#create_window_function` and `Database#create_window_function_handler` register a window function backed by `sqlite3_create_window_function`. In addition to the `step` and `finalize` callbacks of plain aggregates, handler instances must implement `inverse` (called with the same arguments as `step` when a row leaves the window frame, so sliding frames are maintained incrementally) and `value` (reads the current value once per output row without destroying the aggregator). Each partition and each use of the function within a query gets an independent handler instance, which is released when the partition completes, when a callback raises, or when the statement is closed early.
+
+
 ## 2.9.6 / 2026-08-11
 
 ### Security / Stability

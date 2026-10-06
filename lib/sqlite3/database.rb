@@ -625,6 +625,129 @@ module SQLite3
       self
     end
 
+    # Creates a new window function for use in SQL statements. Window
+    # functions are evaluated once per row of the result set, over the rows
+    # of the "window frame" defined by the OVER clause of the query.
+    #
+    # The new function will be added as +name+, with the given +arity+. (For
+    # variable arity functions, use -1 for the arity.)
+    #
+    # The block must define the following four callbacks, each of which is
+    # invoked on a dedicated instance per window partition, so multiple
+    # partitions and multiple uses of the function in one query each have
+    # independent state:
+    #
+    # +step+::     called for each row that enters the window frame, with the
+    #              function's arguments.
+    # +inverse+::  called for each row that leaves the window frame, with the
+    #              same arguments as the matching +step+ call. It must undo
+    #              the effect of that +step+ call. This is what allows sqlite
+    #              to maintain a sliding window incrementally instead of
+    #              recomputing every frame from scratch.
+    # +value+::    called to read the current value of the window function
+    #              without destroying the aggregator. It is called once per
+    #              output row, and the same instance keeps accumulating
+    #              afterwards.
+    # +finalize+:: called exactly once per partition, when the partition is
+    #              complete (also when the statement is interrupted or closed
+    #              early). Its return value is the function's result for the
+    #              last row of the partition.
+    #
+    # A reference to the block will be kept for the lifetime of the database
+    # object.
+    #
+    # Example: a moving weighted average
+    #
+    #   db.create_window_function("wavg", 2) do
+    #     step do |value, weight|
+    #       @weighted_sum = (@weighted_sum || 0) + value * weight
+    #       @weight_sum   = (@weight_sum   || 0) + weight
+    #     end
+    #
+    #     inverse do |value, weight|
+    #       @weighted_sum -= value * weight
+    #       @weight_sum   -= weight
+    #     end
+    #
+    #     value do
+    #       @weight_sum.to_f.zero? ? nil : @weighted_sum.to_f / @weight_sum
+    #     end
+    #
+    #     finalize do
+    #       value
+    #     end
+    #   end
+    #
+    #   db.execute("select wavg(x, w) over (order by id rows between 2 preceding and current row) from t")
+    #
+    # See also #create_window_function_handler for a more object-oriented
+    # approach.
+    def create_window_function(name, arity, &block)
+      raise ArgumentError, "a block is required to define a window function" unless block
+
+      proxy = Class.new do
+        @name = name
+        @arity = arity
+
+        def self.name
+          @name
+        end
+
+        def self.arity
+          @arity
+        end
+
+        def self.step(&block)
+          define_method(:step, &block)
+        end
+
+        def self.inverse(&block)
+          define_method(:inverse, &block)
+        end
+
+        def self.value(&block)
+          define_method(:value, &block)
+        end
+
+        def self.finalize(&block)
+          define_method(:finalize, &block)
+        end
+      end
+
+      proxy.instance_eval(&block)
+
+      missing = [:step, :inverse, :value, :finalize].reject { |m| proxy.method_defined?(m) }
+      unless missing.empty?
+        raise ArgumentError, "missing window function callbacks: #{missing.join(', ')}"
+      end
+
+      define_window_function2(proxy, name)
+      self
+    end
+
+    # This is another approach to creating a window function (see
+    # #create_window_function). Instead of specifying the name, arity, and
+    # callbacks inline, you specify a factory object (the "handler") that
+    # knows how to obtain all of that information. The handler should respond
+    # to the following messages:
+    #
+    # +arity+:: corresponds to the +arity+ parameter of #create_window_function.
+    #           This message is optional, and if the handler does not respond
+    #           to it, the function will have an arity of -1.
+    # +name+:: this is the name of the function. The handler _must_ implement
+    #          this message.
+    # +new+::  this must be implemented by the handler. It should return a new
+    #          instance of the object that will handle a specific invocation
+    #          of the function.
+    #
+    # The handler instance (the object returned by the +new+ message,
+    # described above), must respond to +step+, +inverse+, +value+, and
+    # +finalize+, as documented for #create_window_function.
+    def create_window_function_handler(handler)
+      define_window_function2(handler, handler.name)
+      self
+    end
+
     # Begins a new transaction. Note that nested transactions are not allowed
     # by SQLite, so attempting to nest a transaction will result in a runtime
     # exception.

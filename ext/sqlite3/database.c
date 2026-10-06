@@ -1080,6 +1080,9 @@ init_sqlite3_database(void)
     /* public "define_aggregator" is now a shim around define_aggregator2
      * implemented in Ruby */
     rb_define_private_method(cSqlite3Database, "define_aggregator2", rb_sqlite3_define_aggregator2, 2);
+    /* public "create_window_function" is a shim around define_window_function2
+     * implemented in Ruby */
+    rb_define_private_method(cSqlite3Database, "define_window_function2", rb_sqlite3_define_window_function2, 2);
     rb_define_private_method(cSqlite3Database, "disable_quirk_mode", rb_sqlite3_disable_quirk_mode, 0);
     rb_define_method(cSqlite3Database, "interrupt", interrupt, 0);
     rb_define_method(cSqlite3Database, "errmsg", errmsg, 0);
