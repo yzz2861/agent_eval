@@ -48,6 +48,19 @@ module Dry
         self
       end
 
+      # Define a collection of independently named configuration members
+      #
+      # @return [Dry::Configurable::Config]
+      #
+      # @api public
+      def members(name, &block)
+        raise ArgumentError, "members requires a block" unless block
+
+        setting(name) do
+          member(&block)
+        end
+      end
+
       # Returns the defined settings for the class.
       #
       # @return [Settings]

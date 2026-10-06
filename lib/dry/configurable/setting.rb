@@ -6,7 +6,9 @@ module Dry
     #
     # @api public
     class Setting
-      include Dry::Equalizer(:name, :default, :constructor, :children, :options, inspect: false)
+      include Dry::Equalizer(
+        :name, :default, :constructor, :children, :member_settings, :options, inspect: false
+      )
 
       OPTIONS = %i[default reader constructor mutable cloneable settings config_class].freeze
 
@@ -30,6 +32,9 @@ module Dry
       attr_reader :children
 
       # @api public
+      attr_reader :member_settings
+
+      # @api public
       attr_reader :options
 
       # @api private
@@ -43,16 +48,18 @@ module Dry
         default:,
         constructor: DEFAULT_CONSTRUCTOR,
         children: EMPTY_ARRAY,
+        member_settings: EMPTY_ARRAY,
         **options
       )
         @name = name
         @default = default
-        @mutable = children.any? || options.fetch(:mutable) {
+        @mutable = children.any? || member_settings.any? || options.fetch(:mutable) {
           # Allow `cloneable` as an option alias for `mutable`
           options.fetch(:cloneable) { Setting.mutable_value?(default) }
         }
         @constructor = constructor
         @children = children
+        @member_settings = member_settings
         @options = options
       end
 
@@ -69,7 +76,12 @@ module Dry
 
       # @api private
       def to_value
-        if children.any?
+        if member_settings.any?
+          MemberCollection.new(
+            member_settings,
+            config_class: options.fetch(:config_class, Config)
+          )
+        elsif children.any?
           (options[:config_class] || Config).new(children)
         else
           value = default

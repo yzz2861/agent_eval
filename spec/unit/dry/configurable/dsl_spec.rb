@@ -91,4 +91,22 @@ RSpec.describe Dry::Configurable::DSL do
     expect(setting.children.to_a[0].children.to_a[0].name).to be(:user)
     expect(setting.children.to_a[0].children.to_a[1].name).to be(:pass)
   end
+
+  it "compiles a member schema separately from a nested setting" do
+    compiled_setting = dsl.setting(:connections) do
+      member do
+        setting :host
+        setting :port, default: 5432
+      end
+    end
+
+    expect(compiled_setting.name).to be(:connections)
+    expect(compiled_setting.children).to be_empty
+    expect(compiled_setting.member_settings.keys).to eql(%i[host port])
+  end
+
+  it "rejects member declarations outside a member-enabled setting block" do
+    expect { dsl.member { setting :host } }
+      .to raise_error(ArgumentError, "member can only be declared directly within a setting block")
+  end
 end

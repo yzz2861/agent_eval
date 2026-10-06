@@ -14,6 +14,9 @@ module Dry
       attr_reader :settings
 
       # @api private
+      attr_accessor :missing_setting_error_class
+
+      # @api private
       def initialize(settings = EMPTY_ARRAY)
         @settings = settings.each_with_object({}) { |s, m| m[s.name] = s }
       end
@@ -22,6 +25,7 @@ module Dry
       private def initialize_copy(source)
         @settings = source.settings.dup
         @data_class = nil
+        @missing_setting_error_class = source.missing_setting_error_class
       end
 
       # @api private

@@ -18,10 +18,10 @@ module Dry
 
       attr_reader :options
 
-      def initialize(**options, &block)
+      def initialize(member_allowed: false, **options, &block)
         @compiler = Compiler.new
         @ast = []
-        @options = options
+        @options = options.merge(member_allowed: member_allowed)
         instance_exec(&block) if block
       end
 
@@ -31,6 +31,8 @@ module Dry
       # @api private
       # @return Setting
       def setting(name, **options, &block)
+        member_allowed = options.delete(:member_allowed) { true }
+
         unless VALID_NAME.match?(name.to_s)
           raise ArgumentError, "#{name} is not a valid setting name"
         end
@@ -48,10 +50,36 @@ module Dry
         node = [:setting, [name.to_sym, options]]
 
         if block
-          ast << [:nested, [node, DSL.new(**@options, &block).ast]]
+          child_ast = DSL.new(**@options, member_allowed: member_allowed, &block).ast
+          member_node = child_ast.first if child_ast.one? && child_ast.first.first == :member
+
+          if child_ast.any? { |child_node| child_node.first == :member } && member_node.nil?
+            raise ArgumentError, "member cannot be mixed with other settings"
+          end
+
+          if member_node
+            ast << [:member_setting, [node, member_node.last]]
+          else
+            ast << [:nested, [node, child_ast]]
+          end
         else
           ast << node
         end
+
+        compiler.visit(ast.last)
+      end
+
+      # Registers a member schema and compiles it into settings
+      #
+      # @api private
+      def member(&block)
+        raise ArgumentError, "member requires a block" unless block
+
+        unless @options.fetch(:member_allowed, false)
+          raise ArgumentError, "member can only be declared directly within a setting block"
+        end
+
+        ast << [:member, DSL.new(**@options, member_allowed: false, &block).ast]
 
         compiler.visit(ast.last)
       end

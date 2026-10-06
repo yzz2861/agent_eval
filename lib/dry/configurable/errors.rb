@@ -11,6 +11,14 @@ module Dry
 
     FrozenConfigError = Class.new(Error)
 
+    UnknownMemberError = Class.new(ArgumentError)
+
+    class UnknownMemberFieldError < ArgumentError
+      def initialize(name)
+        super("+#{name}+ is not a member field name")
+      end
+    end
+
     AlreadyIncludedError = Class.new(Error)
     deprecate_constant(
       :AlreadyIncludedError,

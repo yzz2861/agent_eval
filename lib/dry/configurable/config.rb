@@ -37,6 +37,19 @@ module Dry
         dup.tap { |config| config.instance_variable_set(:@_settings, settings) }
       end
 
+      # @api private
+      def clone(freeze: nil)
+        copy = super
+        if copy.frozen?
+          copy.values.each_value do |value|
+            case value
+            when self.class, MemberCollection then value.finalize!
+            end
+          end
+        end
+        copy
+      end
+
       # Get config value by a key
       #
       # @param [String,Symbol] name
@@ -46,7 +59,7 @@ module Dry
         name = name.to_sym
 
         unless (setting = _settings[name])
-          raise ArgumentError, "+#{name}+ is not a setting name"
+          raise_missing_setting_error(name)
         end
 
         _values.fetch(name) {
@@ -70,12 +83,20 @@ module Dry
         name = name.to_sym
 
         unless (setting = _settings[name])
-          raise ArgumentError, "+#{name}+ is not a setting name"
+          raise_missing_setting_error(name)
         end
 
         _configured.add(name)
 
-        _values[name] = setting.constructor.(value)
+        if setting.member_settings.any?
+          unless value.respond_to?(:to_hash)
+            raise ArgumentError, "#{value.inspect} is not a valid setting value"
+          end
+
+          self[name].update(value.to_hash)
+        else
+          _values[name] = setting.constructor.(value)
+        end
       end
 
       # Update config with new values
@@ -87,7 +108,10 @@ module Dry
       # @api public
       def update(values)
         values.each do |key, value|
-          if self[key].is_a?(self.class)
+          case self[key]
+          when MemberCollection
+            self[key].update(value)
+          when self.class
             unless value.respond_to?(:to_hash)
               raise ArgumentError, "#{value.inspect} is not a valid setting value"
             end
@@ -140,7 +164,13 @@ module Dry
       #
       # @api public
       def to_h
-        values.transform_values { |value| value.is_a?(self.class) ? value.to_h : value }
+        values.transform_values do |value|
+          case value
+          when self.class then value.to_h
+          when MemberCollection then value.to_h
+          else value
+          end
+        end
       end
 
       # @api private
@@ -200,10 +230,9 @@ module Dry
         return self if frozen?
 
         values.each_value do |value|
-          if value.is_a?(self.class)
-            value.finalize!(freeze_values: freeze_values)
-          elsif freeze_values
-            value.freeze
+          case value
+          when self.class, MemberCollection then value.finalize!(freeze_values: freeze_values)
+          else value.freeze if freeze_values
           end
         end
 
@@ -226,16 +255,17 @@ module Dry
 
       def to_data_attrs
         _values.each_with_object({}) do |(name, value), hsh|
-          hsh[name] = value.is_a?(self.class) ? value.to_data : value
+          hsh[name] =
+            case value
+            when self.class then value.to_data
+            when MemberCollection then value.to_data
+            else value
+            end
         end
       end
 
       def method_missing(name, *args)
         setting_name = setting_name_from_method(name)
-        setting = _settings[setting_name]
-
-        super unless setting
-
         if name.end_with?("=")
           self[setting_name] = args[0]
         else
@@ -255,6 +285,16 @@ module Dry
         _values.each_with_object({}) { |(key, val), dup_hsh|
           dup_hsh[key] = _settings[key].cloneable? ? val.dup : val
         }
+      end
+
+      def raise_missing_setting_error(name)
+        error_class = _settings.missing_setting_error_class || ArgumentError
+
+        if error_class.equal?(ArgumentError)
+          raise ArgumentError, "+#{name}+ is not a setting name"
+        else
+          raise error_class, name
+        end
       end
     end
   end
