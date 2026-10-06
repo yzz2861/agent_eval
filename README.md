@@ -1014,6 +1014,7 @@ There are a lot of them but the good thing is, that Slim checks the configuratio
 | Boolean | :sort_attrs | true | Sort attributes by name |
 | Symbol | :js_wrapper | nil | Wrap javascript by :comment, :cdata or :both. You can also :guess the wrapper based on :format. |
 | Boolean | :pretty | false | Pretty HTML indenting, only block level tags are indented <b>(This is slower!)</b> |
+| Boolean | :omit_end_tags | false | Omit optional HTML end tags (e.g. \</li>, \</td>, \</tr>) to reduce output size. Only active with :format => :html and disabled in pretty mode. Never applied inside SVG/MathML. See "Optional end tag omission" |
 | String | :indent | '  ' | Indentation string |
 | Boolean | :streaming | false (true in Rails, see below how to disable it!) | Enable output streaming, improves the perceived performance |
 | Class | :generator | Temple::Generators::StringBuffer/ RailsOutputBuffer | Temple code generator (default generator generates string buffer) |
@@ -1022,6 +1023,37 @@ There are a lot of them but the good thing is, that Slim checks the configuratio
 
 There are more options which are supported by the Temple filters but which are not exposed and are not officially supported. You
 have to take a look at the Slim and Temple code for that.
+
+### Optional end tag omission
+
+If you generate HTML emails or static pages and want to reduce the output size, you can enable
+the option `:omit_end_tags`. Slim then omits end tags at compile time where the HTML
+specification makes them optional (e.g. \</li>, \</dt>, \</dd>, \</p>, \</option>, \</tr>, \</td>, \</th>,
+\</thead>, \</tbody>, \</tfoot>):
+
+~~~ ruby
+Slim::Engine.set_options format: :html, omit_end_tags: true
+~~~
+
+~~~ slim
+ul
+  li one
+  li two
+~~~
+
+renders as `<ul><li>one<li>two</ul>` instead of `<ul><li>one</li><li>two</li></ul>`.
+
+The optimization is applied to the compiled template, not to the rendered output, and an end
+tag is only omitted if the compiler can prove that the HTML parser builds the same DOM tree:
+
+* The element must be followed by a static HTML start tag which is allowed to follow it
+  directly (e.g. `li` after `li`), or it must be the last statically known content of a
+  static parent element ("no more content in the parent element").
+* Anything the compiler cannot prove keeps the end tag: dynamic output, control code
+  (if/loops), text, whitespace, comments and raw HTML interpolation all count as barriers.
+* Nothing is omitted in XML/XHTML mode, in pretty printing mode (the injected whitespace
+  would be assigned to a different node by the parser) or inside foreign content
+  (SVG/MathML).
 
 ### Option priority and inheritance
 

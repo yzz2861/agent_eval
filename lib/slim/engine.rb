@@ -13,6 +13,7 @@ module Slim
                    sort_attrs: true,
                    format: :xhtml,
                    attr_quote: '"',
+                   omit_end_tags: false,
                    merge_attrs: {'class' => ' '},
                    generator: Temple::Generators::StringBuffer,
                    default_tag: 'div'
@@ -30,6 +31,7 @@ module Slim
     html :AttributeMerger
     use Slim::CodeAttributes
     use(:AttributeRemover) { Temple::HTML::AttributeRemover.new(remove_empty_attrs: options[:merge_attrs].keys) }
+    use Slim::EndTagOmission
     html :Pretty
     filter :Ambles
     filter :Escapable
