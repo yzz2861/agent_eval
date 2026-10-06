@@ -44,6 +44,12 @@ describe "dotenv binary" do
     expect(ENV).to have_key("QUOTED")
   end
 
+  it "enables lazy resolution with --lazy" do
+    cli = Dotenv::CLI.new(["--lazy", "-f", "plain.env"])
+
+    expect(cli.lazy).to be(true)
+  end
+
   it "does not consume non-dotenv flags by accident" do
     cli = Dotenv::CLI.new(["-f", "plain.env", "foo", "--switch"])
 

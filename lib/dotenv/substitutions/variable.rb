@@ -8,16 +8,16 @@ module Dotenv
     #   URL="https://$HOST"
     #
     module Variable
-      class << self
-        VARIABLE = /
-          (\\)?         # is it escaped with a backslash?
-          (\$)          # literal $
-          (?!\()        # shouldn't be followed by parenthesis
-          \{?           # allow brace wrapping
-          ([A-Z0-9_]+)? # optional alpha nums
-          \}?           # closing brace
-        /xi
+      VARIABLE = /
+        (\\)?         # is it escaped with a backslash?
+        (\$)          # literal $
+        (?!\()        # shouldn't be followed by parenthesis
+        \{?           # allow brace wrapping
+        ([A-Z0-9_]+)? # optional alpha nums
+        \}?           # closing brace
+      /xi
 
+      class << self
         def call(value, env)
           value.gsub(VARIABLE) do |variable|
             match = $LAST_MATCH_INFO

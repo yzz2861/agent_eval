@@ -7,19 +7,19 @@ module Dotenv
     #   SHA=$(git rev-parse HEAD)
     #
     module Command
-      class << self
-        INTERPOLATED_SHELL_COMMAND = /
-          (?<backslash>\\)?   # is it escaped with a backslash?
-          \$                  # literal $
-          (?<cmd>             # collect command content for eval
-            \(                # require opening paren
-            (?:[^()]|\g<cmd>)+  # allow any number of non-parens, or balanced
-                              # parens (by nesting the <cmd> expression
-                              # recursively)
-            \)                # require closing paren
-          )
-        /x
+      INTERPOLATED_SHELL_COMMAND = /
+        (?<backslash>\\)?   # is it escaped with a backslash?
+        \$                  # literal $
+        (?<cmd>             # collect command content for eval
+          \(                # require opening paren
+          (?:[^()]|\g<cmd>)+  # allow any number of non-parens, or balanced
+                            # parens (by nesting the <cmd> expression
+                            # recursively)
+          \)                # require closing paren
+        )
+      /x
 
+      class << self
         def call(value, env)
           # Process interpolated shell commands
           value.gsub(INTERPOLATED_SHELL_COMMAND) do |*|

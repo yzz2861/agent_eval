@@ -6,13 +6,14 @@ require "optparse"
 module Dotenv
   # The `dotenv` command line interface. Run `$ dotenv --help` to see usage.
   class CLI < OptionParser
-    attr_reader :argv, :filenames, :overwrite
+    attr_reader :argv, :filenames, :overwrite, :lazy
 
     def initialize(argv = [])
       @argv = argv.dup
       @filenames = []
       @ignore = false
       @overwrite = false
+      @lazy = false
 
       super("Usage: dotenv [options]")
       separator ""
@@ -29,6 +30,10 @@ module Dotenv
         @overwrite = true
       end
       on("--overload") { @overwrite = true }
+
+      on("-l", "--lazy", "collect files before resolving variable references") do
+        @lazy = true
+      end
 
       on("-h", "--help", "Display help") do
         puts self
@@ -49,7 +54,7 @@ module Dotenv
     end
 
     def run
-      Dotenv.load(*@filenames, overwrite: @overwrite, ignore: @ignore)
+      Dotenv.load(*@filenames, overwrite: @overwrite, ignore: @ignore, lazy: @lazy)
     rescue Errno::ENOENT => e
       abort e.message
     else

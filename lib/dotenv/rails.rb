@@ -13,14 +13,18 @@ Dotenv.instrumenter = ActiveSupport::Notifications
 ActiveSupport::Notifications.subscribe("load.dotenv") do |*args|
   if defined?(Spring) && Spring.respond_to?(:watch)
     event = ActiveSupport::Notifications::Event.new(*args)
-    Spring.watch event.payload[:env].filename if Rails.application
+    Spring.watch(event.payload[:env].filename) if Rails.application && event.payload[:env].filename
   end
 end
 
 module Dotenv
   # Rails integration for using Dotenv to load ENV variables from a file
   class Rails < ::Rails::Railtie
-    delegate :files, :files=, :overwrite, :overwrite=, :autorestore, :autorestore=, :logger, to: "config.dotenv"
+    delegate(
+      :files, :files=, :overwrite, :overwrite=, :lazy, :lazy=,
+      :autorestore, :autorestore=, :logger,
+      to: "config.dotenv"
+    )
 
     def initialize
       super
@@ -28,6 +32,7 @@ module Dotenv
         # Rails.logger is not available yet, so we'll save log messages and replay them when it is
         logger: Dotenv::ReplayLogger.new,
         overwrite: false,
+        lazy: false,
         files: [
           ".env.#{env}.local",
           (".env.local" unless env.test?),
@@ -43,12 +48,16 @@ module Dotenv
     # This will get called during the `before_configuration` callback, but you
     # can manually call `Dotenv::Rails.load` if you needed it sooner.
     def load
-      Dotenv.load(*files.map { |file| root.join(file).to_s }, overwrite: overwrite)
+      options = {overwrite: overwrite}
+      options[:lazy] = true if lazy
+      Dotenv.load(*files.map { |file| root.join(file).to_s }, **options)
     end
 
     def overload
       deprecator.warn("Dotenv::Rails.overload is deprecated. Set `Dotenv::Rails.overwrite = true` and call Dotenv::Rails.load instead.")
-      Dotenv.load(*files.map { |file| root.join(file).to_s }, overwrite: true)
+      options = {overwrite: true}
+      options[:lazy] = true if lazy
+      Dotenv.load(*files.map { |file| root.join(file).to_s }, **options)
     end
 
     # Internal: `Rails.root` is nil in Rails 4.1 before the application is

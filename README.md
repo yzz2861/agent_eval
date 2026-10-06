@@ -57,6 +57,33 @@ require 'dotenv'
 Dotenv.load('file1.env', 'file2.env')
 ```
 
+### Lazy Resolution
+
+The default load mode resolves variable and command substitutions while each file is being read. Pass `lazy: true` to instead collect every definition and override first, then resolve references against the final definitions:
+
+```ruby
+Dotenv.load('.env.local', '.env', lazy: true)
+```
+
+Files are listed from highest precedence to lowest. In lazy mode:
+
+* Existing `ENV` values win by default, including values explicitly set to an empty string.
+* A file value overrides `ENV` when `overwrite: true` is used.
+* An empty value is defined and is not treated the same as a missing reference.
+* Definitions that lose precedence do not run command substitutions or trigger other substitution behavior.
+
+The load can also be inspected in separate stages:
+
+```ruby
+loader      = Dotenv.lazy_loader('.env.local', '.env')
+sources     = loader.read
+definitions = loader.parse
+values      = loader.resolve
+loader.apply
+```
+
+Circular references raise `Dotenv::CircularDependencyError` and include the complete variable chain, for example `A -> B -> A`.
+
 ### Autorestore in tests
 
 Since 3.0, dotenv in a Rails app will automatically restore `ENV` after each test. This means you can modify `ENV` in your tests without fear of leaking state to other tests. It works with both `ActiveSupport::TestCase` and `Rspec`.
@@ -184,6 +211,7 @@ Available options:
 
 * `Dotenv::Rails.files` - list of files to be loaded, in order of precedence.
 * `Dotenv::Rails.overwrite` - Overwrite existing `ENV` variables with contents of `.env*` files
+* `Dotenv::Rails.lazy` - Collect all files before resolving variable references
 * `Dotenv::Rails.logger` - The logger to use for dotenv's logging. Defaults to `Rails.logger`
 * `Dotenv::Rails.autorestore` - Enable or disable [autorestore](#autorestore-in-tests)
 

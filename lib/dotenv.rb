@@ -1,6 +1,12 @@
 require "dotenv/version"
+require "dotenv/circular_dependency_error"
+require "dotenv/definition"
 require "dotenv/parser"
+require "dotenv/raw_parser"
 require "dotenv/environment"
+require "dotenv/definition_set"
+require "dotenv/resolver"
+require "dotenv/lazy_loader"
 require "dotenv/missing_keys"
 require "dotenv/diff"
 
@@ -15,7 +21,9 @@ module Dotenv
   attr_accessor :instrumenter
 
   # Loads environment variables from one or more `.env` files. See `#parse` for more details.
-  def load(*filenames, overwrite: false, ignore: true)
+  def load(*filenames, overwrite: false, ignore: true, lazy: false)
+    return lazy_load(*filenames, overwrite: overwrite, ignore: ignore) if lazy
+
     parse(*filenames, overwrite: overwrite, ignore: ignore) do |env|
       instrument(:load, env: env) do |payload|
         update(env, overwrite: overwrite)
@@ -47,7 +55,9 @@ module Dotenv
   # @param ignore [Boolean] Ignore non-existent files
   # @param block [Proc] Block to yield for each parsed `Dotenv::Environment`
   # @return [Hash] parsed key/value pairs
-  def parse(*filenames, overwrite: false, ignore: true, &block)
+  def parse(*filenames, overwrite: false, ignore: true, lazy: false, &block)
+    return lazy_parse(*filenames, overwrite: overwrite, ignore: ignore) if lazy
+
     filenames << ".env" if filenames.empty?
     filenames = filenames.reverse if overwrite
 
@@ -61,6 +71,27 @@ module Dotenv
 
       hash.merge! env || {}
     end
+  end
+
+  # Read .env files without parsing or applying them.
+  def read(*filenames, overwrite: false, ignore: true)
+    lazy_loader(*filenames, overwrite: overwrite, ignore: ignore).read
+  end
+
+  # Collect all definitions and overrides without resolving variable references.
+  def definitions(*filenames, overwrite: false, ignore: true)
+    lazy_loader(*filenames, overwrite: overwrite, ignore: ignore).parse
+  end
+
+  # Collect definitions and resolve all variable references.
+  def resolve(*filenames, overwrite: false, ignore: true)
+    lazy_loader(*filenames, overwrite: overwrite, ignore: ignore).resolve
+  end
+
+  # Return the lazy loader so each stage can be called and inspected separately.
+  def lazy_loader(*filenames, overwrite: false, ignore: true)
+    filenames << ".env" if filenames.empty?
+    LazyLoader.new(filenames, overwrite: overwrite, ignore: ignore)
   end
 
   # Save the current `ENV` to be restored later
@@ -146,6 +177,19 @@ module Dotenv
       block&.call payload
     end
   end
+
+  def lazy_load(*filenames, overwrite:, ignore:)
+    loader = lazy_loader(*filenames, overwrite: overwrite, ignore: ignore)
+    env = loader.resolve
+    instrument(:load, env: env) do
+      update(env, overwrite: overwrite)
+    end
+  end
+
+  def lazy_parse(*filenames, overwrite:, ignore:)
+    lazy_loader(*filenames, overwrite: overwrite, ignore: ignore).resolve
+  end
+
 end
 
 require "dotenv/rails" if defined?(Rails::Railtie)
