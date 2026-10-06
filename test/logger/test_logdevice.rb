@@ -6,6 +6,24 @@ require 'tmpdir'
 require 'pathname'
 
 class TestLogDevice < Test::Unit::TestCase
+  class ShortWriteIO
+    attr_reader :buffer
+
+    def initialize(chunk_size)
+      @chunk_size = chunk_size
+      @buffer = String.new(encoding: Encoding::BINARY)
+    end
+
+    def write(message)
+      length = [@chunk_size, message.bytesize].min
+      @buffer << message.byteslice(0, length)
+      length
+    end
+
+    def close
+    end
+  end
+
   class LogExcnRaiser
     def write(*arg)
       raise 'disk is full'
@@ -120,6 +138,16 @@ class TestLogDevice < Test::Unit::TestCase
       $stderr, stderr = stderr, $stderr
     end
     assert_equal "log writing failed. disk is full\n", stderr
+  end
+
+  def test_write_with_short_writes
+    io = ShortWriteIO.new(3)
+    logdev = d(io)
+    logdev.write("hello")
+    logdev.write("\u4e16\u754c")
+    logdev.close
+
+    assert_equal("hello\u4e16\u754c".bytes, io.buffer.bytes)
   end
 
   def test_close

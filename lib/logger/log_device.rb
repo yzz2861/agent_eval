@@ -30,7 +30,18 @@ class Logger
           if @shift_age and @dev.respond_to?(:stat)
             handle_write_errors("shifting") {check_shift_log}
           end
-          handle_write_errors("writing") {@dev.write(message)}
+          write_message(message)
+        end
+      end
+    end
+
+    def write_batch(messages)
+      handle_write_errors("writing") do
+        synchronize do
+          if @shift_age and @dev.respond_to?(:stat)
+            handle_write_errors("shifting") {check_shift_log(messages.bytesize)}
+          end
+          write_message(messages)
         end
       end
     end
@@ -159,10 +170,31 @@ class Logger
       ) if file.size == 0
     end
 
-    def check_shift_log
+    def write_message(message)
+      handle_write_errors("writing") do
+        offset = 0
+        while offset < message.bytesize
+          remaining = message.byteslice(offset, message.bytesize - offset)
+          written = @dev.write(remaining)
+          unless written.is_a?(Integer)
+            break
+          end
+          if written <= 0 || written > remaining.bytesize
+            raise IOError, 'log write returned an invalid length'
+          end
+          offset += written
+        end
+      end
+    end
+
+    def check_shift_log(group_size = nil)
       if @shift_age.is_a?(Integer)
         # Note: always returns false if '0'.
-        if @filename && (@shift_age > 0) && (@dev.stat.size > @shift_size)
+        current_size = @dev.stat.size
+        group_fits = group_size.nil? || current_size == 0 ||
+          current_size + group_size <= @shift_size
+        if @filename && (@shift_age > 0) &&
+           (!group_fits || current_size > @shift_size)
           lock_shift_log { shift_log_age }
         end
       else

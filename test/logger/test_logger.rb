@@ -354,6 +354,53 @@ class TestLogger < Test::Unit::TestCase
     end
   end
 
+  class CountingIO
+    attr_reader :buffer, :write_count
+
+    def initialize
+      @buffer = String.new
+      @write_count = 0
+    end
+
+    def write(message)
+      @buffer << message
+      @write_count += 1
+      message.bytesize
+    end
+
+    def close
+    end
+  end
+
+  class ShortWriteIO
+    attr_reader :buffer, :write_count
+    attr_accessor :before_first_write
+
+    def initialize(chunk_size = 3, before_first_write: nil)
+      @chunk_size = chunk_size
+      @before_first_write = before_first_write
+      @buffer = String.new.force_encoding(Encoding::BINARY)
+      @write_count = 0
+    end
+
+    def write(message)
+      callback = @before_first_write
+      @before_first_write = nil
+      callback.call if callback
+      length = message.bytesize < @chunk_size ? message.bytesize : @chunk_size
+      @buffer << message.byteslice(0, length)
+      @write_count += 1
+      length
+    end
+
+    def close
+    end
+  end
+
+  def simple_formatter
+    proc {|severity, _, _, message| "#{severity}:#{message}\n"}
+  end
+
   def test_format
     logger = Logger.new(nil)
     log = log_add(logger, INFO, "msg\n")
@@ -390,6 +437,211 @@ class TestLogger < Test::Unit::TestCase
     assert_equal("msg2\n\n", msg)
   end
 
+  def test_batch_writes_collected_messages_as_one_group
+    io = CountingIO.new
+    logger = Logger.new(io, formatter: simple_formatter)
+
+    assert_equal(true, logger.batch do
+      logger.info("one")
+      logger.info("two")
+    end)
+
+    assert_equal("INFO:one\nINFO:two\n", io.buffer)
+    assert_equal(1, io.write_count)
+  end
+
+  def test_batch_filters_messages_without_evaluating_blocks
+    io = CountingIO.new
+    logger = Logger.new(io, level: WARN, formatter: simple_formatter)
+    evaluated = false
+
+    logger.batch do
+      logger.debug { evaluated = true }
+      logger.warn("kept")
+    end
+
+    assert_equal("WARN:kept\n", io.buffer)
+    assert_equal(false, evaluated)
+  end
+
+  def test_batch_discards_messages_when_block_raises
+    io = CountingIO.new
+    logger = Logger.new(io, formatter: simple_formatter)
+
+    result = logger.batch do
+      logger.info("before")
+      raise MyError, "boom"
+    end
+
+    assert_equal(false, result)
+    assert_equal("", io.buffer)
+  end
+
+  def test_batch_marks_and_commits_messages_when_block_raises
+    io = CountingIO.new
+    logger = Logger.new(io, formatter: simple_formatter)
+
+    result = logger.batch(on_error: :mark_and_commit) do
+      logger.info("before")
+      raise MyError, "boom"
+    end
+
+    assert_equal(true, result)
+    assert_equal("INFO:before\nERROR:log batch aborted: TestLogger::MyError: boom\n",
+                 io.buffer)
+    assert_equal(1, io.write_count)
+  end
+
+  def test_batch_max_bytes
+    io = CountingIO.new
+    logger = Logger.new(io, batch_max_bytes: 8, formatter: simple_formatter)
+
+    assert_raise(Logger::LogBatch::BufferOverflow) do
+      logger.batch do
+        logger.info("one")
+        logger.info("two")
+      end
+    end
+    assert_equal("", io.buffer)
+
+    assert_raise(ArgumentError) { logger.batch(max_bytes: 0) {} }
+  end
+
+  def test_nested_batch_preserves_child_order_and_commits_with_parent
+    io = CountingIO.new
+    logger = Logger.new(io, formatter: simple_formatter)
+
+    logger.batch do
+      logger.info("outer-1")
+      logger.batch do
+        logger.info("inner-1")
+        logger.batch { logger.info("inner-2") }
+        logger.info("inner-3")
+      end
+      logger.info("outer-2")
+    end
+
+    assert_equal(["INFO:outer-1", "INFO:inner-1", "INFO:inner-2",
+                  "INFO:inner-3", "INFO:outer-2"], io.buffer.lines(chomp: true))
+    assert_equal(1, io.write_count)
+  end
+
+  def test_nested_batch_failure_policy
+    io = CountingIO.new
+    logger = Logger.new(io, formatter: simple_formatter)
+
+    logger.batch do
+      logger.info("outer")
+      logger.batch do
+        logger.info("discarded-inner")
+        raise MyError, "discard"
+      end
+      logger.batch(on_error: :mark) do
+        logger.info("kept-inner")
+        raise MyError, "mark"
+      end
+    end
+
+    assert_equal(["INFO:outer", "INFO:kept-inner",
+                  "ERROR:log batch aborted: TestLogger::MyError: mark"],
+                 io.buffer.lines(chomp: true))
+  end
+
+  def test_batch_with_return_still_commits
+    io = CountingIO.new
+    logger = Logger.new(io, formatter: simple_formatter)
+
+    result = batch_with_return(logger)
+
+    assert_equal(true, result)
+    assert_equal("INFO:before-return\n", io.buffer)
+  end
+
+  def test_batch_requires_block_and_valid_policy
+    logger = Logger.new(nil)
+    assert_raise(ArgumentError) { logger.batch }
+    assert_raise(ArgumentError) { logger.batch(on_error: :unknown) {} }
+  end
+
+  def test_batch_without_device_does_not_evaluate_filtered_messages
+    logger = Logger.new(nil)
+    evaluated = false
+
+    logger.batch do
+      logger.debug { evaluated = true }
+    end
+
+    assert_equal(false, evaluated)
+  end
+
+  def test_batch_with_two_controlled_threads_and_short_writes
+    io = ShortWriteIO.new(3)
+    logger = Logger.new(Logger::LogDevice.new(io), formatter: simple_formatter)
+    a_started = Thread::Queue.new
+    a_continue = Thread::Queue.new
+    b_started = Thread::Queue.new
+    b_queued = Thread::Queue.new
+    b_ready = Thread::Queue.new
+    b_continue = Thread::Queue.new
+    io.before_first_write = proc do
+      a_started << nil
+      a_continue.pop
+    end
+
+    thread_a = Thread.new do
+      logger.batch do
+        logger.info("a1")
+        logger.info("a2")
+      end
+    end
+    a_started.pop
+    thread_b = Thread.new do
+      b_queued << nil
+      b_ready.pop
+      logger.batch do
+        logger.info("b1")
+        logger.info("b2")
+      end
+    end
+    b_queued.pop
+    a_continue << nil
+    thread_a.join
+    io.before_first_write = proc do
+      b_started << nil
+      b_continue.pop
+    end
+    b_ready << nil
+    b_started.pop
+    b_continue << nil
+    thread_b.join
+    logger.close
+
+    assert_equal("INFO:a1\nINFO:a2\nINFO:b1\nINFO:b2\n", io.buffer)
+    assert_equal(12, io.write_count)
+  ensure
+    io.instance_variable_set(:@before_first_write, nil) if defined?(io)
+  end
+
+  def test_batch_group_is_not_split_by_size_rotation
+    Tempfile.create([File.basename(__FILE__), '.log']) do |file|
+      file.close
+      filename = file.path
+      File.write(filename, "old\n")
+      logger = Logger.new(filename, 1, 5, skip_header: true,
+                          formatter: simple_formatter)
+
+      logger.batch do
+        logger.info("one")
+        logger.info("two")
+      end
+      logger.close
+
+      assert_equal("INFO:one\nINFO:two\n", File.read(filename))
+      assert_equal("old\n", File.read("#{filename}.0"))
+      File.unlink("#{filename}.0")
+    end
+  end
+
   class CustomLogger < Logger
     def level
       INFO
@@ -422,6 +674,15 @@ class TestLogger < Test::Unit::TestCase
     file = Regexp.quote(__FILE__)
     assert_warning('') do
       good_logger.level
+    end
+  end
+
+  private
+
+  def batch_with_return(logger)
+    logger.batch do
+      logger.info("before-return")
+      return true
     end
   end
 end

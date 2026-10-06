@@ -596,10 +596,14 @@ class Logger
   #   when creating a new log file. The default is +false+, meaning
   #   the header will be written as usual.
   #
+  # - +batch_max_bytes+: sets the default maximum number of bytes buffered by
+  #   #batch; default is +nil+ (no limit).
+  #
   def initialize(logdev, shift_age = 0, shift_size = 1048576, level: DEBUG,
                  progname: nil, formatter: nil, datetime_format: nil,
                  binmode: false, shift_period_suffix: '%Y%m%d',
-                 reraise_write_errors: [], skip_header: false)
+                 reraise_write_errors: [], skip_header: false,
+                 batch_max_bytes: nil)
     self.level = level
     self.progname = progname
     @default_formatter = Formatter.new
@@ -607,6 +611,7 @@ class Logger
     self.formatter = formatter
     @logdev = nil
     @level_override = {}
+    @batch_max_bytes = validate_batch_max_bytes(batch_max_bytes)
     return unless logdev
     case logdev
     when File::NULL
@@ -687,7 +692,7 @@ class Logger
   #
   def add(severity, message = nil, progname = nil)
     severity ||= UNKNOWN
-    if @logdev.nil? or severity < level
+    if @logdev.nil? || severity < level
       return true
     end
     if progname.nil?
@@ -701,8 +706,13 @@ class Logger
         progname = @progname
       end
     end
-    @logdev.write(
-      format_message(format_severity(severity), Time.now, progname, message))
+    formatted_message = format_message(
+      format_severity(severity), Time.now, progname, message)
+    if active_batch
+      active_batch.add(formatted_message)
+    else
+      @logdev.write(formatted_message)
+    end
     true
   end
   alias log add
@@ -719,7 +729,61 @@ class Logger
   #   My message.
   #
   def <<(msg)
-    @logdev&.write(msg)
+    if active_batch
+      active_batch.add(msg)
+    else
+      @logdev&.write(msg)
+    end
+  end
+
+  # Buffers all log entries written in the block and writes them as one
+  # continuous group when the block succeeds.
+  #
+  # +on_error+ chooses what happens when the block raises:
+  #
+  # - +:discard+ (default): discards the buffered entries.
+  # - +:mark_and_commit+ (or +:mark+): appends an ERROR marker and commits the
+  #   buffered entries.
+  #
+  # +max_bytes+ limits the buffered group size in bytes. A nested batch is
+  # buffered as a contiguous child of its parent and keeps its call order.
+  #
+  # Returns +true+ when the group is committed and +false+ when discarded.
+  def batch(on_error: :discard, max_bytes: @batch_max_bytes)
+    raise ArgumentError, 'a block is required' unless block_given?
+    mark_on_error =
+      case on_error
+      when :discard
+        false
+      when :mark, :mark_and_commit
+        true
+      else
+        raise ArgumentError, "unknown on_error: #{on_error.inspect}"
+      end
+    max_bytes = validate_batch_max_bytes(max_bytes)
+
+    current_batch = LogBatch.new(max_bytes)
+    stack = batch_stack
+    parent_batch = stack.last
+    stack.push(current_batch)
+    error = nil
+    committed = false
+    begin
+      yield
+    rescue StandardError => error
+      raise if error.is_a?(LogBatch::BufferOverflow)
+      if mark_on_error
+        marker = format_message(
+          format_severity(ERROR), Time.now, @progname,
+          "log batch aborted: #{error.class}: #{error.message}")
+        current_batch.add_marker(marker)
+      end
+    ensure
+      stack.pop
+      committed =
+        finish_batch(current_batch, parent_batch, error)
+    end
+    committed
   end
 
   # Equivalent to calling #add with severity <tt>Logger::DEBUG</tt>.
@@ -798,5 +862,87 @@ private
 
   def format_message(severity, datetime, progname, msg)
     (@formatter || @default_formatter).call(severity, datetime, progname, msg)
+  end
+
+  def active_batch
+    batch_stack.last
+  end
+
+  def batch_stack
+    Thread.current[:logger_batches] ||= {}
+    Thread.current[:logger_batches][object_id] ||= []
+  end
+
+  def validate_batch_max_bytes(max_bytes)
+    unless max_bytes.nil? || (max_bytes.is_a?(Numeric) && max_bytes > 0)
+      raise ArgumentError, 'max_bytes must be nil or a positive number'
+    end
+    max_bytes
+  end
+
+  def finalize_batch(current_batch, parent_batch, error)
+    return false if error && !current_batch.committed?
+    if parent_batch
+      current_batch.transfer_to(parent_batch)
+    elsif @logdev && !current_batch.empty?
+      messages = current_batch.messages
+      if @logdev.respond_to?(:write_batch)
+        @logdev.write_batch(messages)
+      else
+        @logdev.write(messages)
+      end
+    end
+    true
+  end
+
+  def finish_batch(current_batch, parent_batch, error)
+    if error || $!.nil?
+      finalize_batch(current_batch, parent_batch, error)
+    else
+      false
+    end
+  end
+
+  class LogBatch # :nodoc: all
+    class BufferOverflow < Logger::Error
+    end
+
+    attr_reader :messages
+
+    def initialize(max_bytes)
+      @max_bytes = max_bytes
+      @messages = String.new
+    end
+
+    def add(message)
+      ensure_capacity(message.bytesize)
+      @messages << message
+    end
+
+    def add_marker(message)
+      @messages << message
+      @committed = true
+    end
+
+    def transfer_to(parent)
+      parent.add(@messages) unless empty?
+    end
+
+    def empty?
+      @messages.empty?
+    end
+
+    def committed?
+      @committed == true
+    end
+
+    private
+
+    def ensure_capacity(bytesize)
+      return unless @max_bytes
+      if @messages.bytesize + bytesize > @max_bytes
+        raise BufferOverflow, "logger batch exceeds #{@max_bytes} bytes"
+      end
+    end
   end
 end
