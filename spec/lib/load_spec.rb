@@ -16,6 +16,12 @@ describe :Hamster do
     end
   end
 
+  describe :Multiset do
+    it "can be loaded separately" do
+      expect(system(%{ruby -e "$:.unshift('#{hamster_lib_dir}'); require 'hamster/multiset'; Hamster::Multiset.new"})).to be(true)
+    end
+  end
+
   describe :Vector do
     it "can be loaded separately" do
       expect(system(%{ruby -e "$:.unshift('#{hamster_lib_dir}'); require 'hamster/vector'; Hamster::Vector.new"})).to be(true)

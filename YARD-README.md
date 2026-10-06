@@ -3,8 +3,8 @@ Hamster
 
 Efficient, immutable, and thread-safe collection classes for Ruby.
 
-Hamster provides 6 [Persistent Data
-Structures][PDS]: {Hamster::Hash Hash}, {Hamster::Vector Vector}, {Hamster::Set Set}, {Hamster::SortedSet SortedSet}, {Hamster::List List}, and {Hamster::Deque Deque} (which works as an immutable queue or stack).
+Hamster provides 7 [Persistent Data
+Structures][PDS]: {Hamster::Hash Hash}, {Hamster::Vector Vector}, {Hamster::Set Set}, {Hamster::Multiset Multiset}, {Hamster::SortedSet SortedSet}, {Hamster::List List}, and {Hamster::Deque Deque} (which works as an immutable queue or stack).
 
 Hamster collections are **immutable**. Whenever you modify a Hamster
 collection, the original is preserved and a modified copy is returned. This
@@ -45,6 +45,7 @@ Or if you prefer to only pull in certain collection types:
 require "hamster/hash"
 require "hamster/vector"
 require "hamster/set"
+require "hamster/multiset"
 require "hamster/sorted_set"
 require "hamster/list"
 require "hamster/deque"
@@ -141,6 +142,32 @@ Like most Hamster methods, the set-theoretic methods `#union`, `#intersection`, 
 
 See the {Hamster::Set API documentation} for details on all `Set` methods.
 
+<h2>Multiset <span style="font-size:0.7em">({Hamster::Multiset API Documentation})</span></h2>
+
+A `Multiset` keeps a non-negative integer multiplicity for each distinct value.
+`#size` counts all occurrences, while `#distinct_size` counts distinct values.
+Values reaching count zero are removed, and only explicit expanded iteration
+via `#each` yields one item per occurrence.
+
+``` ruby
+left = Hamster::Multiset[:red, :red, :blue]
+right = Hamster::Multiset[:red, :green, :green]
+
+left.count(:red)       # => 2
+left.size              # => 3
+left.distinct_size     # => 2
+
+left + right           # red: 3, blue: 1, green: 2
+left | right           # red: 2, blue: 1, green: 2
+left & right           # red: 1
+left - right           # red: 1, blue: 1
+```
+
+Multiset sum (`#+`) adds multiplicities. Union (`#|`) takes the maximum
+multiplicity, intersection (`#&`) takes the minimum, and difference (`#-`)
+subtracts and truncates at zero. Counts must always be non-negative integers.
+
+See the {Hamster::Multiset API documentation} for details on all `Multiset` methods.
 
 <h2>SortedSet <span style="font-size:0.7em">({Hamster::SortedSet API Documentation})</span></h2>
 
