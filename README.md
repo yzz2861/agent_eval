@@ -299,6 +299,40 @@ end
 ```
 
 ## Signature Validation
+## SAML ECP Profile (PAOS Binding)
+
+Non-browser clients can use the SAML 2.0 Enhanced Client or Proxy (ECP) profile.
+The toolkit provides an independent entry point for this binding that reuses the
+standard AuthnRequest builder and the SAML Response validation:
+
+```ruby
+# SP side: build the PAOS SOAP envelope that carries the AuthnRequest
+ecp_request = OneLogin::RubySaml::EcpRequest.new
+soap_envelope = ecp_request.create(saml_settings, :RelayState => "opaque-data")
+
+# The ECP client posts the envelope to the IdP and returns the IdP SOAP response.
+# The SP validates it, checking the SOAP processing model and that the
+# responseConsumerURL of the ECP Response header matches the Assertion Consumer
+# Service URL declared by the SP (the value sent by the client is never used
+# as a redirect target).
+ecp_response = OneLogin::RubySaml::EcpResponse.new(
+  soap_response,
+  :settings => saml_settings,
+  :matches_request_id => ecp_request.request_id
+)
+
+if ecp_response.is_valid?
+  session[:nameid] = ecp_response.name_id
+  # The RelayState is echoed back as opaque data; never use it to take
+  # trust decisions.
+  relay_state = ecp_response.relay_state
+end
+```
+
+SOAP header blocks flagged with `mustUnderstand` that are not understood by the
+SP are rejected, and identity data (`name_id`, `attributes`) is only exposed
+when the ECP response validated successfully.
+
 
 Ruby SAML allows different ways to validate the signature of the SAMLResponse:
 - You can provide the IdP X.509 public certificate at the `idp_cert` setting.

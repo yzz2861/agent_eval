@@ -18,6 +18,12 @@ module OneLogin
       ASSERTION = "urn:oasis:names:tc:SAML:2.0:assertion".freeze
       PROTOCOL  = "urn:oasis:names:tc:SAML:2.0:protocol".freeze
 
+      SOAP_ENV_NAMESPACE = "http://schemas.xmlsoap.org/soap/envelope/".freeze
+      SOAP_ACTOR_NEXT    = "http://schemas.xmlsoap.org/soap/actor/next".freeze
+      PAOS_NAMESPACE     = "urn:liberty:paos:2003-08".freeze
+      PAOS_BINDING       = "urn:oasis:names:tc:SAML:2.0:bindings:PAOS".freeze
+      ECP_NAMESPACE      = "urn:oasis:names:tc:SAML:2.0:profiles:SSO:ecp".freeze
+
       BASE64_FORMAT = %r{\A([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?\Z}
 
       # @return [Nokogiri::XML::Schema] Gets the schema object of the SAML 2.0 Protocol schema
