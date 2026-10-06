@@ -5,6 +5,7 @@ require "pry"
 require "rspec"
 require "hamster/hash"
 require "hamster/set"
+require "hamster/multiset"
 require "hamster/vector"
 require "hamster/sorted_set"
 require "hamster/list"
@@ -15,6 +16,7 @@ V = Hamster::Vector
 L = Hamster::List
 H = Hamster::Hash
 S = Hamster::Set
+MS = Hamster::Multiset
 SS = Hamster::SortedSet
 D = Hamster::Deque
 EmptyList = Hamster::EmptyList

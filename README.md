@@ -16,7 +16,7 @@ Hamster
 Efficient, immutable, and thread-safe collection classes for Ruby.
 
 Hamster provides 6 [Persistent Data
-Structures][PDS]: [`Hash`][HASH-DOC], [`Vector`][VECTOR-DOC], [`Set`][SET-DOC], [`SortedSet`][SORTED-SET-DOC], [`List`][LIST-DOC], and [`Deque`][DEQUE-DOC] (which works as an immutable queue or stack).
+Structures][PDS]: [`Hash`][HASH-DOC], [`Vector`][VECTOR-DOC], [`Set`][SET-DOC], [`Multiset`][MULTISET-DOC], [`SortedSet`][SORTED-SET-DOC], [`List`][LIST-DOC], and [`Deque`][DEQUE-DOC] (which works as an immutable queue or stack).
 
 Hamster collections are **immutable**. Whenever you modify a Hamster
 collection, the original is preserved and a modified copy is returned. This
@@ -42,6 +42,7 @@ process "infinitely large" lists.
 [PDS]: http://en.wikipedia.org/wiki/Persistent_data_structure
 [HASH-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/Hash
 [SET-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/Set
+[MULTISET-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/Multiset
 [VECTOR-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/Vector
 [LIST-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/List
 [SORTED-SET-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/SortedSet
@@ -159,6 +160,32 @@ set.intersection([:red, :blue, :pink])   # => Hamster::Set[:red, :blue]
 Like most Hamster methods, the set-theoretic methods `#union`, `#intersection`, `#difference`, and `#exclusion` (aliased as `#|`, `#&`, `#-`, and `#^`) all work with regular Ruby collections, or indeed any `Enumerable` object. So just like all the other Hamster collections, `Hamster::Set` can easily be used in combination with "ordinary" Ruby code.
 
 See the [API documentation][SET-DOC] for details on all `Set` methods.
+
+
+<h2>Multiset <span style="font-size:0.7em">(<a href="http://rubydoc.info/github/hamstergem/hamster/master/Hamster/Multiset">API Documentation</a>)</span></h2>
+
+A `Multiset` (or "bag") is like a `Set`, but instead of merging duplicates it
+remembers how many times each value occurs. That makes it handy for things like
+comparing two batches of line items:
+
+``` ruby
+ordered = Hamster::Multiset[:apple, :apple, :apple, :pear]
+shipped = Hamster::Multiset[:apple, :pear, :pear]
+ordered - shipped          # => Hamster::Multiset[:apple => 2]
+shipped - ordered          # => Hamster::Multiset[:pear => 1]
+ordered.multiplicity(:apple) # => 3
+ordered.size               # => 4  (total occurrences)
+ordered.distinct_count     # => 2  (distinct values)
+```
+
+Bulk operations follow clear multiplicity rules: `#sum` (`#+`) adds counts,
+`#union` (`#|`) keeps the maximum, `#intersection` (`#&`) keeps the minimum,
+and `#difference` (`#-`) subtracts, truncated at zero. Counts are stored as
+plain Integers keyed by value, so a value occurring a billion times still takes
+a single entry; only explicit enumeration (`#each`, `#to_a`) expands
+occurrences one by one.
+
+See the [API documentation][MULTISET-DOC] for details on all `Multiset` methods.
 
 
 <h2>SortedSet <span style="font-size:0.7em">(<a href="http://rubydoc.info/github/hamstergem/hamster/master/Hamster/SortedSet">API Documentation</a>)</span></h2>
