@@ -82,6 +82,66 @@ TomlRB.dump(hash)
 # => "title = \"wow!\"\n[awesome]\nothers = false\nyou = true\n"
 ```
 
+Layered Configuration Merge
+---------------------------
+
+TomlRB.merge merges configuration hashes from lowest to highest
+precedence. Tables are merged deeply. Plain arrays are replaced as a whole,
+while arrays of tables can be declared as member collections.
+
+```ruby
+base = TomlRB.parse(<<~TOML)
+  [[services]]
+  name = "api"
+  port = 80
+
+  [[services]]
+  name = "web"
+  port = 8080
+TOML
+
+environment = TomlRB.parse(<<~TOML)
+  [[services]]
+  name = "api"
+  port = 8081
+
+  [[services]]
+  name = "worker"
+  port = 9000
+TOML
+
+local = {
+  "services" => [
+    TomlRB.delete_member("name", "web"),
+    {"name" => "api", "debug" => true},
+    {"name" => "admin", "port" => 7000}
+  ]
+}
+
+merged = TomlRB.merge(
+  base,
+  environment,
+  local,
+  array_tables: {"services" => "name"}
+)
+# services are, in order: api, worker, admin
+```
+
+- array_tables maps a table path, such as "services" or [:app, :services],
+  to the field that identifies each member, such as "name".
+- Matching members are merged in place. New members are appended. Use
+  TomlRB.delete_member(identity_key, identity_value) in a higher layer to
+  remove a member.
+- Use TomlRB::DELETE as a scalar or nested-table value to delete that key.
+  The object is provided by Ruby, so it cannot equal a value parsed from TOML.
+- Do not use either deletion operation in a plain array; those arrays are
+  replaced wholesale.
+- Missing identities, repeated identities and table/scalar incompatibilities
+  raise TomlRB::MergeConflictError.
+- The merger returns a new hash and does not modify the input layers.
+- TomlRB.dump(merged) writes each surviving member once as [[services]], so
+  the merged result remains valid TOML.
+
 Conformance
 -----------
 

@@ -7,6 +7,7 @@ require_relative "toml-rb/inline_table"
 require_relative "toml-rb/keyvalue"
 require_relative "toml-rb/parser"
 require_relative "toml-rb/dumper"
+require_relative "toml-rb/merger"
 
 module TomlRB
   # Public: Returns a hash from *TomlRB* content.
@@ -86,5 +87,27 @@ module TomlRB
   # Returns a TomlRB string representing the hash.
   def self.dump(hash)
     Dumper.new(hash).toml_str
+  end
+
+  # Public: Merges layered configuration hashes.
+  #
+  # layers       - Configuration hashes, from lowest to highest precedence.
+  # :array_tables - Map of array table paths to their member identity field.
+  #
+  # Returns a new merged Hash. Input hashes are not modified.
+  # Raises TomlRB::MergeConflictError for missing or duplicate identities or
+  # incompatible type changes.
+  def self.merge(*layers, array_tables: {})
+    Merger.new(array_tables).merge(layers)
+  end
+
+  def self.merge_configs(*layers, array_tables: {})
+    merge(*layers, array_tables: array_tables)
+  end
+
+  # Public: Returns an operation that deletes one member of a declared array
+  # table. Put the returned object in the higher-precedence layer's array.
+  def self.delete_member(identity_key, identity_value)
+    DeleteMember.new(identity_key, identity_value)
   end
 end
