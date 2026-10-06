@@ -1,0 +1,30 @@
+1) identifier | keyword (wide branch first):
+  Shadow check of [a-z] [a-z0-9_]{0, } / 'if'
+    alphabet: ["i", "f", "x"], max length: 2, 13 input(s) examined
+    1 shadowing witness(es) found:
+      input "if":
+        branch 0 ([a-z] [a-z0-9_]{0, }) consumes 2 char(s) -- ordered choice stops here
+        branch 1 ('if') consumes 2 char(s) -- would match, but is never reached
+    note: results are bounded to the alphabet and length above; finding no witness here does not prove the grammar unambiguous.
+  recheck: recheck of "if": choice consumes 2 char(s) (analysis said 2) -- consistent
+
+2) keyword | identifier (branches swapped):
+  Shadow check of 'if' / [a-z] [a-z0-9_]{0, }
+    alphabet: ["i", "f", "x"], max length: 2, 13 input(s) examined
+    1 shadowing witness(es) found:
+      input "if":
+        branch 0 ('if') consumes 2 char(s) -- ordered choice stops here
+        branch 1 ([a-z] [a-z0-9_]{0, }) consumes 2 char(s) -- would match, but is never reached
+    note: results are bounded to the alphabet and length above; finding no witness here does not prove the grammar unambiguous.
+  recheck: recheck of "if": choice consumes 2 char(s) (analysis said 2) -- consistent
+
+3) (keyword + boundary guard) | identifier:
+  Shadow check of 'if' ![a-z0-9_] / [a-z] [a-z0-9_]{0, }
+    alphabet: ["i", "f", "x"], max length: 2, 13 input(s) examined
+    1 shadowing witness(es) found:
+      input "if":
+        branch 0 ('if' ![a-z0-9_]) consumes 2 char(s) -- ordered choice stops here
+        branch 1 ([a-z] [a-z0-9_]{0, }) consumes 2 char(s) -- would match, but is never reached
+    note: results are bounded to the alphabet and length above; finding no witness here does not prove the grammar unambiguous.
+  recheck: recheck of "if": choice consumes 2 char(s) (analysis said 2) -- consistent
+
