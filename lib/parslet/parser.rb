@@ -59,7 +59,11 @@ class Parslet::Parser < Parslet::Atoms::Base
   end
   
   def try(source, context, consume_all)
-    root.try(source, context, consume_all)
+    if root.respond_to?(:left_recursive?) && root.left_recursive?
+      root.apply(source, context, consume_all)
+    else
+      root.try(source, context, consume_all)
+    end
   end
   
   def to_s_inner(prec)

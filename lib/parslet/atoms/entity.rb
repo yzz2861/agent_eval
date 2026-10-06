@@ -10,17 +10,24 @@
 #
 class Parslet::Atoms::Entity < Parslet::Atoms::Base
   attr_reader :name, :block
-  def initialize(name, label=nil, &block)
+  def initialize(name, label=nil, left_recursive: false, &block)
     super()
     
     @name = name
     @label = label
+    @left_recursive = left_recursive
     @block = block
     @parslet = nil
   end
 
   def try(source, context, consume_all)
-    parslet.apply(source, context, consume_all)
+    context.attempt_rule(self, source) do
+      parslet.apply(source, context, consume_all)
+    end
+  end
+
+  def left_recursive?
+    @left_recursive
   end
   
   def parslet

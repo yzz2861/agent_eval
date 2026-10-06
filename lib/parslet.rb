@@ -99,6 +99,13 @@ module Parslet
     #     root :twobar
     #   end
     #
+    # Mark a rule as +left_recursive: true+ to support direct or indirect
+    # left-recursive definitions:
+    #
+    #   rule(:expression, left_recursive: true) do
+    #     expression >> str('+') >> term | term
+    #   end
+    #
     def rule(name, opts={}, &definition)
       undef_method name if method_defined? name
       define_method(name) do
@@ -110,7 +117,13 @@ module Parslet
           self.instance_eval(&definition)
         }
         
-        @rules[name] = Atoms::Entity.new(name, opts[:label], &definition_closure)
+        left_recursive = opts[:left_recursive] || opts[:left_recursion]
+        @rules[name] = Atoms::Entity.new(
+          name,
+          opts[:label],
+          left_recursive: left_recursive,
+          &definition_closure
+        )
       end
     end
   end
