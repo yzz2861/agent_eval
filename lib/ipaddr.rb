@@ -100,6 +100,245 @@ class IPAddr
   # Raised when the address is an invalid length.
   class InvalidPrefixError < InvalidAddressError; end
 
+  # A dynamic longest prefix match table for IPv4 and IPv6 prefixes.
+  #
+  # Rules are identified by a caller supplied +id+, may carry arbitrary
+  # +data+, and may declare an integer +priority+ when several rules share
+  # the same prefix.  A longer prefix always wins; among rules on that same
+  # prefix, the highest priority wins.  Rules with equal priority keep the
+  # order in which their ids were first inserted.
+  class PrefixTable
+    # A rule stored in a PrefixTable.
+    Rule = Struct.new(:id, :family, :prefix, :prefix_length, :priority,
+                      :data, :sequence)
+
+    # The result of a successful PrefixTable lookup.
+    Match = Struct.new(:rule_id, :family, :prefix, :prefix_length,
+                       :priority, :data, :visited_nodes)
+
+    # @api private
+    class Node
+      attr_reader :rule_ids
+      attr_accessor :zero, :one
+
+      def initialize
+        @rule_ids = []
+        @zero = nil
+        @one = nil
+      end
+
+      def empty?
+        @rule_ids.empty? && @zero.nil? && @one.nil?
+      end
+
+      def child(bit)
+        bit.zero? ? @zero : @one
+      end
+
+      def set_child(bit, node)
+        if bit.zero?
+          @zero = node
+        else
+          @one = node
+        end
+      end
+    end
+
+    include Enumerable
+
+    def initialize
+      @roots = {
+        Socket::AF_INET => Node.new,
+        Socket::AF_INET6 => Node.new
+      }
+      @rules = {}
+      @sequence = 0
+    end
+
+    # Adds or replaces a rule.  A new rule id is placed after existing
+    # equal-priority rules.  Replacing an existing id keeps its original
+    # place in that tie order.
+    def add(prefix, id, data = nil, priority: 0)
+      unless priority.is_a?(Integer)
+        raise ArgumentError, "priority must be an integer"
+      end
+
+      network = coerce_prefix(prefix)
+      key = rule_key(network)
+      existing = @rules[id]
+
+      if existing && existing[:key] != key
+        raise ArgumentError,
+              "rule #{id.inspect} already exists at #{existing[:rule].prefix}"
+      end
+
+      sequence = existing ? existing[:sequence] : @sequence
+      rule = Rule.new(id, network.family, network.cidr, network.prefix,
+                      priority, data, sequence)
+      node = node_for(network, create: true)
+
+      if existing.nil?
+        node.rule_ids << id
+        @sequence += 1
+      end
+
+      @rules[id] = {key: key, sequence: sequence, rule: rule}
+      sort_rules(node)
+      rule.freeze
+    end
+
+    # Deletes the rule with the given id and returns it, or nil if no such
+    # rule exists.  Empty trie nodes are pruned, so a later lookup falls
+    # through to the closest surviving ancestor.
+    def delete(id)
+      entry = @rules.delete(id)
+      return nil unless entry
+
+      network = coerce_prefix(entry[:rule].prefix)
+      node = root_for(network)
+      path = []
+
+      network.prefix.times do |depth|
+        bit = bit_at(network.to_i, depth, max_prefix_length(network))
+        child = node.child(bit)
+        path << [node, bit]
+        node = child
+      end
+
+      node.rule_ids.delete(id)
+
+      while node.empty? && !path.empty?
+        parent, bit = path.pop
+        parent.set_child(bit, nil) if parent.child(bit).equal?(node)
+        node = parent
+      end
+
+      entry[:rule]
+    end
+
+    # Returns the best match for an address.  The result exposes the hit
+    # prefix, rule id, caller data, priority, and the number of trie nodes
+    # visited.  Returns nil when no rule matches.
+    def lookup(address)
+      address = coerce_address(address)
+      node = root_for(address)
+      best_id = node.rule_ids.first
+      visited = 1
+
+      max_length = max_prefix_length(address)
+
+      max_length.times do |depth|
+        break unless node
+
+        bit = bit_at(address.to_i, depth, max_length)
+        node = node.child(bit)
+        break unless node
+
+        visited += 1
+        best_id = node.rule_ids.first unless node.rule_ids.empty?
+      end
+
+      return nil unless best_id
+
+      rule = @rules.fetch(best_id)[:rule]
+      Match.new(rule.id, rule.family, rule.prefix, rule.prefix_length,
+                rule.priority, rule.data, visited).freeze
+    end
+
+    # Yields each rule in insertion order.
+    def each
+      return enum_for(:each) unless block_given?
+
+      @rules.values.sort_by { |entry| entry[:sequence] }.each do |entry|
+        yield entry[:rule]
+      end
+    end
+
+    def size
+      @rules.size
+    end
+    alias length size
+
+    # Returns the number of trie nodes currently retained by both address
+    # families.  This is mainly useful for tests and diagnostics.
+    def node_count
+      count = 0
+      stack = @roots.values.dup
+
+      while (node = stack.pop)
+        count += 1
+        stack << node.zero if node.zero
+        stack << node.one if node.one
+      end
+
+      count
+    end
+
+    private
+
+    def coerce_prefix(prefix)
+      network = case prefix
+                when IPAddr
+                  prefix.mask(prefix.prefix)
+                else
+                  IPAddr.new(prefix)
+                end
+      raise AddressFamilyError, "unsupported address family" unless root_for(network)
+      network
+    end
+
+    def coerce_address(address)
+      case address
+      when IPAddr
+        address
+      else
+        IPAddr.new(address)
+      end
+    end
+
+    def root_for(address)
+      @roots[address.family]
+    end
+
+    def max_prefix_length(address)
+      address.ipv4? ? 32 : 128
+    end
+
+    def bit_at(value, depth, max_length)
+      (value >> (max_length - depth - 1)) & 1
+    end
+
+    def rule_key(network)
+      [network.family, network.prefix, network.to_i]
+    end
+
+    def node_for(network, create: false)
+      node = root_for(network)
+      max_length = max_prefix_length(network)
+
+      network.prefix.times do |depth|
+        bit = bit_at(network.to_i, depth, max_length)
+        child = node.child(bit)
+
+        unless child
+          child = Node.new
+          node.set_child(bit, child) if create
+        end
+
+        node = child
+      end
+
+      node
+    end
+
+    def sort_rules(node)
+      node.rule_ids.sort_by! do |id|
+        entry = @rules.fetch(id)
+        [-entry[:rule].priority, entry[:sequence]]
+      end
+    end
+  end
+
   # Returns the address family of this IP address.
   attr_reader :family
 
