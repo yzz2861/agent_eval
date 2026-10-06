@@ -723,3 +723,210 @@ class TC_Operator < Test::Unit::TestCase
     assert_equal('invalid address: INVALID', e.message)
   end
 end
+
+class TC_CIDRSet < Test::Unit::TestCase
+  def test_normalize_drops_contained_and_duplicates
+    set = IPAddr::CIDRSet.new(["10.2.0.0/16", "10.0.0.0/8", "10.1.0.0/16", "10.0.0.0/8"])
+    assert_equal(["10.0.0.0/8"], set.to_a.map(&:cidr))
+  end
+
+  def test_normalize_merges_adjacent_siblings
+    set = IPAddr::CIDRSet.new(["192.0.2.192/26", "192.0.2.0/26", "192.0.2.128/26", "192.0.2.64/26"])
+    assert_equal(["192.0.2.0/24"], set.to_a.map(&:cidr))
+
+    set = IPAddr::CIDRSet.new(["2001:db8::/33", "2001:db8:8000::/33"])
+    assert_equal(["2001:db8::/32"], set.to_a.map(&:cidr))
+  end
+
+  def test_normalize_keeps_unmergeable_blocks
+    set = IPAddr::CIDRSet.new(["192.0.2.0/25", "192.0.2.192/26"])
+    assert_equal(["192.0.2.0/25", "192.0.2.192/26"], set.to_a.map(&:cidr))
+
+    set = IPAddr::CIDRSet.new(["192.0.2.0/24", "192.0.2.2/32"])
+    assert_equal(["192.0.2.0/24"], set.to_a.map(&:cidr))
+  end
+
+  def test_empty_set
+    set = IPAddr::CIDRSet.new
+    assert_equal(true, set.empty?)
+    assert_equal(0, set.size)
+    assert_equal([], set.to_a)
+    assert_equal(false, set.include?("192.0.2.1"))
+  end
+
+  def test_union
+    a = IPAddr::CIDRSet.new(["192.0.2.0/25"])
+    b = IPAddr::CIDRSet.new(["192.0.2.128/25"])
+    assert_equal(["192.0.2.0/24"], (a | b).to_a.map(&:cidr))
+    assert_equal(["192.0.2.0/24"], (a + b).to_a.map(&:cidr))
+    assert_equal(["192.0.2.0/24"], a.union(b).to_a.map(&:cidr))
+  end
+
+  def test_intersection
+    a = IPAddr::CIDRSet.new(["10.0.0.0/8", "2001:db8::/32"])
+    b = IPAddr::CIDRSet.new(["10.1.0.0/16", "10.2.0.0/16", "192.168.0.0/16", "2001:db8:1::/48"])
+    assert_equal(["10.1.0.0/16", "10.2.0.0/16", "2001:db8:1::/48"], (a & b).to_a.map(&:cidr))
+    assert_equal(IPAddr::CIDRSet.new, a & ["192.0.2.0/24"])
+  end
+
+  def test_difference_may_produce_multiple_prefixes
+    set = IPAddr::CIDRSet.new(["10.0.0.0/8"]) - ["10.1.2.0/24"]
+    assert_equal(%w[
+      10.0.0.0/16 10.1.0.0/23 10.1.3.0/24 10.1.4.0/22
+      10.1.8.0/21 10.1.16.0/20 10.1.32.0/19 10.1.64.0/18
+      10.1.128.0/17 10.2.0.0/15 10.4.0.0/14 10.8.0.0/13
+      10.16.0.0/12 10.32.0.0/11 10.64.0.0/10 10.128.0.0/9
+    ], set.to_a.map(&:cidr))
+  end
+
+  def test_difference_at_boundaries
+    set = IPAddr::CIDRSet.new(["192.0.2.0/24"]) - "192.0.2.0/32"
+    assert_equal(%w[
+      192.0.2.1/32 192.0.2.2/31 192.0.2.4/30 192.0.2.8/29
+      192.0.2.16/28 192.0.2.32/27 192.0.2.64/26 192.0.2.128/25
+    ], set.to_a.map(&:cidr))
+    assert_equal(false, set.include?("192.0.2.0"))
+    assert_equal(true, set.include?("192.0.2.1"))
+    assert_equal(true, set.include?("192.0.2.255"))
+
+    set = IPAddr::CIDRSet.new(["192.0.2.0/24"]) - "192.0.2.255/32"
+    assert_equal(%w[
+      192.0.2.0/25 192.0.2.128/26 192.0.2.192/27 192.0.2.224/28
+      192.0.2.240/29 192.0.2.248/30 192.0.2.252/31 192.0.2.254/32
+    ], set.to_a.map(&:cidr))
+    assert_equal(true, set.include?("192.0.2.0"))
+    assert_equal(true, set.include?("192.0.2.254"))
+    assert_equal(false, set.include?("192.0.2.255"))
+
+    set = IPAddr::CIDRSet.new(["192.0.2.0/24"]) - ["192.0.2.0/25", "192.0.2.128/25"]
+    assert_equal(true, set.empty?)
+  end
+
+  def test_difference_disjoint_is_unchanged
+    a = IPAddr::CIDRSet.new(["10.0.0.0/8"])
+    assert_equal(a, a - ["192.0.2.0/24"])
+    assert_equal(a, a - ["2001:db8::/32"])
+  end
+
+  def test_ipv4_mapped_classification
+    set = IPAddr::CIDRSet.new(["::ffff:10.0.0.0/104"])
+    assert_equal(["::ffff:10.0.0.0/104"], set.to_a.map(&:cidr))
+    assert_equal(true, set.to_a[0].ipv6?)
+    assert_equal(true, set.include?("::ffff:10.0.0.1"))
+    assert_equal(false, set.include?("10.0.0.1"))
+
+    set = IPAddr::CIDRSet.new(["::ffff:10.0.0.0/104"], ipv4_mapped: :ipv4)
+    assert_equal(["10.0.0.0/8"], set.to_a.map(&:cidr))
+    assert_equal(true, set.include?("10.0.0.1"))
+    assert_equal(true, set.include?("::ffff:10.0.0.1"))
+
+    set = IPAddr::CIDRSet.new(["::ffff:10.0.0.0/104", "10.1.0.0/16"], ipv4_mapped: :ipv4)
+    assert_equal(["10.0.0.0/8"], set.to_a.map(&:cidr))
+
+    assert_raise(ArgumentError) { IPAddr::CIDRSet.new([], ipv4_mapped: :yes) }
+  end
+
+  def test_include
+    set = IPAddr::CIDRSet.new(["192.0.2.0/24", "2001:db8::/32"])
+    assert_equal(true, set.include?("192.0.2.42"))
+    assert_equal(true, set.include?(IPAddr.new("192.0.2.42")))
+    assert_equal(true, set === "192.0.2.42")
+    assert_equal(true, set.cover?("2001:db8:dead:beef::1"))
+    assert_equal(false, set.include?("192.0.3.1"))
+    assert_equal(false, set.include?("2001:db9::1"))
+    assert_equal(false, set.include?("10.0.0.1"))
+  end
+
+  def test_enumerable
+    set = IPAddr::CIDRSet.new(["192.0.2.0/25", "2001:db8::/48"])
+    assert_equal(2, set.size)
+    assert_equal(2, set.count)
+    assert_equal(["192.0.2.0/25", "2001:db8::/48"], set.map(&:cidr))
+    assert_kind_of(Enumerator, set.each)
+  end
+
+  def test_small_ipv4_ranges_cross_checked_per_address
+    # All prefixes nested in 192.0.2.0/28, paired exhaustively.
+    nested = (28..32).flat_map { |len|
+      step = 1 << (32 - len)
+      (0...16).step(step).map { |o| "192.0.2.#{o}/#{len}" }
+    }
+    nested.each do |pa|
+      nested.each do |pb|
+        assert_set_ops([pa], [pb])
+      end
+    end
+
+    # Random draws from all prefixes inside 192.0.2.0/24.
+    prefixes = (24..32).flat_map { |len|
+      step = 1 << (32 - len)
+      (0...256).step(step).map { |o| "192.0.2.#{o}/#{len}" }
+    }
+    rng = Random.new(20261007)
+    200.times do
+      assert_set_ops(prefixes.sample(3, random: rng), prefixes.sample(3, random: rng))
+    end
+  end
+
+  def test_large_ipv6_difference_stays_compact
+    set = IPAddr::CIDRSet.new(["2001:db8::/32"]) -
+          ["2001:db8:1::/64", "2001:db8:2:3::/64", "2001:db8:ffff::/64"]
+    # The result must stay a handful of prefixes, never one entry per
+    # address, and cover exactly 2**96 - 3 * 2**64 addresses.
+    assert_equal(78, set.size)
+    assert_equal(true, set.to_a.all?(&:ipv6?))
+    assert_equal((1 << 96) - 3 * (1 << 64), set.to_a.sum { |c| 1 << (128 - c.prefix) })
+
+    assert_equal(false, set.include?("2001:db8:1::"))
+    assert_equal(false, set.include?("2001:db8:1:0:ffff:ffff:ffff:ffff"))
+    assert_equal(true, set.include?("2001:db8:0:ffff:ffff:ffff:ffff:ffff"))
+    assert_equal(true, set.include?("2001:db8:1:1::"))
+    assert_equal(true, set.include?("2001:db8:2::"))
+
+    assert_equal(false, set.include?("2001:db8:2:3::"))
+    assert_equal(false, set.include?("2001:db8:2:3:ffff:ffff:ffff:ffff"))
+    assert_equal(true, set.include?("2001:db8:2:2:ffff:ffff:ffff:ffff"))
+    assert_equal(true, set.include?("2001:db8:2:4::"))
+
+    assert_equal(false, set.include?("2001:db8:ffff::"))
+    assert_equal(false, set.include?("2001:db8:ffff:0:ffff:ffff:ffff:ffff"))
+    assert_equal(true, set.include?("2001:db8:ffff:1::"))
+    assert_equal(true, set.include?("2001:db8:fffe:ffff:ffff:ffff:ffff:ffff"))
+
+    assert_equal(false, set.include?("2001:db9::"))
+    assert_equal(false, set.include?("2001:db7:ffff:ffff:ffff:ffff:ffff:ffff"))
+  end
+
+  private
+
+  def assert_set_ops(cidrs_a, cidrs_b)
+    a = IPAddr::CIDRSet.new(cidrs_a)
+    b = IPAddr::CIDRSet.new(cidrs_b)
+    ref_a = expand_cidrs(cidrs_a)
+    ref_b = expand_cidrs(cidrs_b)
+    assert_addresses((ref_a | ref_b).sort, a | b, "union of #{cidrs_a} and #{cidrs_b}")
+    assert_addresses(ref_a & ref_b, a & b, "intersection of #{cidrs_a} and #{cidrs_b}")
+    assert_addresses(ref_a - ref_b, a - b, "difference of #{cidrs_a} and #{cidrs_b}")
+    assert_addresses(ref_b - ref_a, b - a, "difference of #{cidrs_b} and #{cidrs_a}")
+  end
+
+  def assert_addresses(expected, set, label)
+    got = expand_set(set)
+    assert(expected == got,
+           "#{label}: expected #{expected.size} addresses, got #{set.to_a.map(&:cidr)}")
+  end
+
+  def expand_cidrs(cidrs)
+    cidrs.flat_map { |c| expand_ipaddr(IPAddr.new(c)) }.sort.uniq
+  end
+
+  def expand_set(set)
+    set.flat_map { |cidr| expand_ipaddr(cidr) }.sort
+  end
+
+  def expand_ipaddr(ip)
+    bits = ip.ipv4? ? 32 : 128
+    first = ip.to_i
+    (first..first + (1 << (bits - ip.prefix)) - 1).to_a
+  end
+end

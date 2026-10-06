@@ -849,6 +849,259 @@ class IPAddr
 
 end
 
+class IPAddr
+  # IPAddr::CIDRSet represents a set of IP networks as a normalized
+  # collection of CIDR prefixes.  Prefixes are stored as prefixes and
+  # never expanded into individual addresses, so even an IPv6 range
+  # covering astronomical numbers of addresses costs only a handful of
+  # entries.  This makes the class suitable for network access rules
+  # of the form "this whole range, minus a few exceptions".
+  #
+  # IPv4 and IPv6 prefixes are tracked separately.  Whether an
+  # IPv4-mapped (or IPv4-compatible) IPv6 prefix such as
+  # "::ffff:10.0.0.0/104" is classified as IPv4 is controlled by the
+  # +ipv4_mapped+ option.
+  #
+  # A set is always kept normalized: prefixes contained in other
+  # prefixes are dropped, and adjacent siblings that can be expressed
+  # exactly as a single shorter prefix are merged.
+  #
+  # == Example
+  #
+  #   allow = IPAddr::CIDRSet.new(["192.0.2.0/24", "2001:db8::/32"])
+  #   deny  = IPAddr::CIDRSet.new(["192.0.2.8/29"])
+  #
+  #   net = allow - deny
+  #   net.to_a.map(&:cidr)
+  #     #=> ["192.0.2.0/29", "192.0.2.16/28", "192.0.2.32/27",
+  #     #    "192.0.2.64/26", "192.0.2.128/25", "2001:db8::/32"]
+  #   net.include?("192.0.2.8")   #=> false
+  #   net.include?("192.0.2.16")  #=> true
+  class CIDRSet
+    include Enumerable
+
+    # Creates a CIDR set from +cidrs+, an enumerable of prefixes each
+    # given as an IPAddr or a string like "192.0.2.0/24".  A single
+    # IPAddr or string may be passed directly instead of an enumerable.
+    # A bare address without a prefix length is treated as a host
+    # prefix (/32 or /128).
+    #
+    # The +ipv4_mapped+ keyword decides how IPv4-mapped and
+    # IPv4-compatible IPv6 prefixes are classified: +:ipv6+ (the
+    # default) keeps them as IPv6, while +:ipv4+ converts them to
+    # native IPv4 prefixes.
+    def initialize(cidrs = [], ipv4_mapped: :ipv6)
+      case ipv4_mapped
+      when :ipv4, :ipv6
+        @ipv4_mapped = ipv4_mapped
+      else
+        raise ArgumentError, "ipv4_mapped must be :ipv4 or :ipv6"
+      end
+      cidrs = [cidrs] if cidrs.is_a?(IPAddr) || cidrs.is_a?(String)
+      v4 = []
+      v6 = []
+      cidrs.each do |cidr|
+        addr, prefix, bits = coerce_prefix(cidr)
+        (bits == 32 ? v4 : v6) << [addr, prefix]
+      end
+      @v4 = normalize(v4, 32)
+      @v6 = normalize(v6, 128)
+    end
+
+    # Returns true if the set contains no prefix.
+    def empty?
+      @v4.empty? && @v6.empty?
+    end
+
+    # Returns the number of normalized prefixes in the set.
+    def size
+      @v4.size + @v6.size
+    end
+
+    # Calls the block once for each normalized prefix in the set,
+    # IPv4 prefixes first, each in ascending address order.
+    def each
+      return enum_for(:each) unless block_given?
+      @v4.each { |addr, prefix| yield to_ipaddr(addr, prefix, Socket::AF_INET) }
+      @v6.each { |addr, prefix| yield to_ipaddr(addr, prefix, Socket::AF_INET6) }
+      self
+    end
+
+    # Returns true if the set contains the given IP address, given as
+    # an IPAddr or a string.  IPv4-mapped IPv6 addresses are looked up
+    # according to the +ipv4_mapped+ option of the set.
+    def include?(addr)
+      ip = addr.is_a?(IPAddr) ? addr : IPAddr.new(addr)
+      ip = ip.native if @ipv4_mapped == :ipv4
+      probe = ip.to_i
+      blocks, bits = ip.ipv4? ? [@v4, 32] : [@v6, 128]
+      i = blocks.bsearch_index { |first, prefix| first + (1 << (bits - prefix)) - 1 >= probe }
+      !i.nil? && blocks[i][0] <= probe
+    end
+    alias cover? include?
+    alias === include?
+
+    # Returns a new set that is the union of this set and +other+,
+    # which may be another CIDRSet, an enumerable of prefixes, or a
+    # single prefix.
+    def union(other)
+      other = coerce_set(other)
+      build(normalize(@v4 + other.v4_blocks, 32),
+            normalize(@v6 + other.v6_blocks, 128))
+    end
+    alias | union
+    alias + union
+
+    # Returns a new set that is the intersection of this set and
+    # +other+.
+    def intersection(other)
+      other = coerce_set(other)
+      build(normalize(intersect(@v4, other.v4_blocks, 32), 32),
+            normalize(intersect(@v6, other.v6_blocks, 128), 128))
+    end
+    alias & intersection
+
+    # Returns a new set that is the difference of this set and
+    # +other+.  Removing a small subnet from a bigger one yields as
+    # many prefixes as needed to cover the remainder exactly.
+    def difference(other)
+      other = coerce_set(other)
+      v4 = @v4
+      other.v4_blocks.each do |b|
+        v4 = v4.flat_map { |a| subtract(a, b, 32) }
+      end
+      v6 = @v6
+      other.v6_blocks.each do |b|
+        v6 = v6.flat_map { |a| subtract(a, b, 128) }
+      end
+      build(normalize(v4, 32), normalize(v6, 128))
+    end
+    alias - difference
+
+    # Returns true if the two sets cover exactly the same addresses.
+    def ==(other)
+      other.is_a?(CIDRSet) && @v4 == other.v4_blocks && @v6 == other.v6_blocks
+    end
+
+    def eql?(other)
+      self == other
+    end
+
+    def hash
+      [@v4, @v6].hash
+    end
+
+    def inspect
+      "#<#{self.class}: #{map(&:cidr).join(', ')}>"
+    end
+    alias to_s inspect
+
+    protected
+
+    def v4_blocks # :nodoc:
+      @v4
+    end
+
+    def v6_blocks # :nodoc:
+      @v6
+    end
+
+    private
+
+    def coerce_prefix(cidr)
+      ip = cidr.is_a?(IPAddr) ? cidr : IPAddr.new(cidr)
+      ip = ip.native if @ipv4_mapped == :ipv4
+      bits = ip.ipv4? ? 32 : 128
+      prefix = ip.prefix
+      [ip.to_i & ~((1 << (bits - prefix)) - 1), prefix, bits]
+    end
+
+    def coerce_set(other)
+      other.is_a?(CIDRSet) ? other : CIDRSet.new(other, ipv4_mapped: @ipv4_mapped)
+    end
+
+    def build(v4, v6)
+      set = self.class.new([], ipv4_mapped: @ipv4_mapped)
+      set.instance_variable_set(:@v4, v4)
+      set.instance_variable_set(:@v6, v6)
+      set
+    end
+
+    def to_ipaddr(addr, prefix, family)
+      IPAddr.new(addr, family).mask(prefix)
+    end
+
+    # Sorts blocks, drops duplicates and blocks contained in others,
+    # and merges adjacent siblings into shorter prefixes.  Each block
+    # is a [network address, prefix length] pair.
+    def normalize(blocks, bits)
+      blocks = blocks.sort_by { |addr, prefix| [addr, prefix] }
+      kept = []
+      max_end = -1
+      blocks.each do |addr, prefix|
+        last = addr + (1 << (bits - prefix)) - 1
+        next if last <= max_end
+        kept << [addr, prefix]
+        max_end = last
+      end
+      merged = []
+      kept.each do |addr, prefix|
+        loop do
+          break if merged.empty?
+          prev_addr, prev_prefix = merged[-1]
+          break unless prev_prefix == prefix
+          size = 1 << (bits - prefix)
+          break unless prev_addr + size == addr && (prev_addr & (size * 2 - 1)) == 0
+          addr = prev_addr
+          prefix -= 1
+          merged.pop
+        end
+        merged << [addr, prefix]
+      end
+      merged
+    end
+
+    # Both block lists must be normalized.  Two CIDR blocks either are
+    # disjoint or one contains the other, so each overlap contributes
+    # the more specific block.
+    def intersect(a_blocks, b_blocks, bits)
+      result = []
+      b_blocks.each do |b|
+        b_first, b_prefix = b
+        b_last = b_first + (1 << (bits - b_prefix)) - 1
+        a_blocks.each do |a|
+          a_first, a_prefix = a
+          a_last = a_first + (1 << (bits - a_prefix)) - 1
+          next if a_last < b_first
+          break if a_first > b_last
+          result << (a_prefix >= b_prefix ? a : b)
+        end
+      end
+      result
+    end
+
+    # Subtracts block +b+ from block +a+, returning the list of blocks
+    # covering the remainder.  When +a+ strictly contains +b+, the
+    # remainder is the chain of sibling blocks along the path from +a+
+    # down to +b+, so no boundary address is lost.
+    def subtract(a, b, bits)
+      a_first, a_prefix = a
+      b_first, b_prefix = b
+      a_last = a_first + (1 << (bits - a_prefix)) - 1
+      b_last = b_first + (1 << (bits - b_prefix)) - 1
+      return [a] if b_first > a_last || b_last < a_first
+      return [] if b_first <= a_first && b_last >= a_last
+      result = []
+      (a_prefix...b_prefix).each do |p|
+        q = p + 1
+        size = 1 << (bits - q)
+        result << [(b_first & ~(size - 1)) ^ size, q]
+      end
+      result
+    end
+  end
+end
+
 unless Socket.const_defined? :AF_INET6
   class Socket < BasicSocket
     # IPv6 protocol family

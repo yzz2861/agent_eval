@@ -46,6 +46,35 @@ ipaddr3 = IPAddr.new "192.168.2.0/24"
 p ipaddr3                   #=> #<IPAddr: IPv4:192.168.2.0/255.255.255.0>
 ```
 
+### CIDR sets
+
+`IPAddr::CIDRSet` keeps a set of networks as a normalized collection
+of CIDR prefixes instead of expanding them into individual addresses,
+so it handles IPv6 ranges of any size.  It is handy for network access
+rules of the form "this whole range, minus a few exceptions":
+
+```ruby
+require 'ipaddr'
+
+allow = IPAddr::CIDRSet.new(["192.0.2.0/24", "2001:db8::/32"])
+deny  = IPAddr::CIDRSet.new(["192.0.2.8/29"])
+
+net = allow - deny
+net.to_a.map(&:cidr)
+  #=> ["192.0.2.0/29", "192.0.2.16/28", "192.0.2.32/27",
+  #    "192.0.2.64/26", "192.0.2.128/25", "2001:db8::/32"]
+
+net.include?("192.0.2.8")   #=> false
+net.include?("192.0.2.16")  #=> true
+```
+
+Sets support `|` (union), `&` (intersection) and `-` (difference).
+Output is always normalized: prefixes contained in others are dropped
+and adjacent siblings are merged into shorter prefixes.  IPv4 and IPv6
+prefixes are tracked separately; pass `ipv4_mapped: :ipv4` to classify
+IPv4-mapped IPv6 prefixes such as "::ffff:10.0.0.0/104" as IPv4
+(the default is `:ipv6`).
+
 ## Alternative
 
 The [ipaddress](https://rubygems.org/gems/ipaddress) gem is a popular,
