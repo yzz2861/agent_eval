@@ -170,6 +170,17 @@ module Parslet
   end
   module_function :any
   
+  # Returns an atom matching one lexical token. A block can impose an
+  # additional condition on the token, including its value:
+  #
+  #   token(:keyword, 'if')
+  #   token(:keyword) { |token| token.value.start_with?('if') }
+  #
+  def token(type, value=Atoms::Token::UNSET, &condition)
+    Atoms::Token.new(type, value, &condition)
+  end
+  module_function :token
+
   # Introduces a new capture scope. This means that all old captures stay
   # accessible, but new values stored will only be available during the block
   # given and the old values will be restored after the block. 
@@ -302,6 +313,7 @@ end
 require 'parslet/slice'
 require 'parslet/cause'
 require 'parslet/source'
+require 'parslet/source/token'
 require 'parslet/atoms'
 require 'parslet/pattern'
 require 'parslet/pattern/binding'

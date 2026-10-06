@@ -30,10 +30,25 @@ class Parslet::Slice
   # Construct a slice using a string, an offset and an optional line cache. 
   # The line cache should be able to answer to the #line_and_column message. 
   #
-  def initialize(position, string, line_cache=nil)
+  def initialize(position, string, line_cache=nil, token=nil)
     @position = position
     @str = string
     @line_cache = line_cache
+    @token = token
+  end
+
+  attr_reader :token
+
+  def type
+    token && token.type
+  end
+
+  def value
+    token && token.value
+  end
+
+  def range
+    token && token.range
   end
 
   def offset

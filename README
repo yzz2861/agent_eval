@@ -22,6 +22,23 @@ SYNOPSIS
   str('foo').
     parse('foo') # => "foo"@0
 
+  # or it can parse tokens produced by your own lexer
+  source = '価格 = 42 # yen'
+  def byte_range(source, lexeme)
+    start = source[0, source.index(lexeme)].bytesize
+    start...(start + lexeme.bytesize)
+  end
+  tokens = [
+    { type: :identifier, value: :price, range: byte_range(source, '価格') },
+    { type: :operator,   value: '=',      range: byte_range(source, '=') },
+    { type: :number,     value: 42,       range: byte_range(source, '42') }
+  ]
+  grammar = token(:identifier) >> token(:operator, '=') >> token(:number)
+  grammar.parse(Parslet::TokenSource.new(source, tokens))
+
+  # ranges are byte offsets into the original source. Gaps are allowed for
+  # whitespace and comments, while overlapping or unordered ranges raise.
+
   # it matches character sets
   match['abc'].parse('a') # => "a"@0
   match['abc'].parse('b') # => "b"@0
