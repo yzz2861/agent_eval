@@ -54,6 +54,16 @@ module Parslet
     def chars_left
       @str.rest_size
     end
+    
+    # Like #chars_left, but used only to construct error messages.
+    # Incremental parsing (see Parslet::Incremental) does not track input
+    # dependencies for calls to this method, since its result can never
+    # influence whether a parse succeeds or fails -- only how a failure is
+    # described.
+    #
+    def diagnostic_chars_left
+      chars_left
+    end
 
     # Returns how many chars there are between current position and the 
     # string given. If the string given doesn't occur in the source, then 

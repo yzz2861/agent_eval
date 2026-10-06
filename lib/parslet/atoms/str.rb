@@ -26,7 +26,7 @@ class Parslet::Atoms::Str < Parslet::Atoms::Base
     
     # Input ending early:
     return context.err(self, source, error_msgs[:premature]) \
-      if source.chars_left<@len
+      if source.diagnostic_chars_left<@len
     
     # Expected something, but got something else instead:  
     error_pos = source.pos  
@@ -39,4 +39,3 @@ class Parslet::Atoms::Str < Parslet::Atoms::Base
     "'#{str}'"
   end
 end
-

@@ -1,0 +1,16 @@
+edit                                 hits  misses    full   saved invalidated  shifted  result
+----------------------------------------------------------------------------------------------------
+replace a number (substitution)         6      44     260   83.1%          43      216  ok
+insert a line in the middle            13      57     299   80.9%          18      200  ok
+delete that line again                  9       8     260   96.9%          47      210  ok
+append a line at end of input           7      55     300   81.7%          15        0  ok
+insert a line at start of input         9      48     340   85.9%           0      300  ok
+replace a value by a longer one         9      60     357   83.2%          46      113  ok
+introduce multibyte characters         14      38     357   89.4%          38       54  ok
+break the syntax (parse fails)          7      26     163   84.0%          27      195  ParseFailed (same position)
+repair the syntax                      12      32     357   91.0%          30      191  ok
+delete the final newline               10       8     356   97.8%           9        7  ok
+restore the final newline               8      16     357   95.5%          15        0  ok
+----------------------------------------------------------------------------------------------------
+Every incremental result (including failure positions) was verified
+to be identical to a full reparse of the edited text.

@@ -4,6 +4,13 @@
   We're in maintenance mode! The community is really stepping up here though, sending
   interesting additions our way. Here's what has been merged this far: 
 
+  + Incremental parsing: Parslet::Incremental::Session keeps a persistent
+    packrat memo table across interval edits (insertions, deletions,
+    replacements) and reuses exactly those results the edit could not have
+    influenced -- lookahead, failed alternatives and end-of-input checks
+    included. Results are identical to full reparses, failure positions
+    included, and cache hit statistics are exposed for inspection.
+
   + Specification for mixing parslet parsers (Artur Komarov).
 
   + Update to Github Actions CI/CD. I guess newer is better? (Matt Larraz).

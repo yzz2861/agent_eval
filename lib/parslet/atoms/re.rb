@@ -28,7 +28,7 @@ class Parslet::Atoms::Re < Parslet::Atoms::Base
     
     # No string could be read
     return context.err(self, source, error_msgs[:premature]) \
-      if source.chars_left < 1
+      if source.diagnostic_chars_left < 1
         
     # No match
     return context.err(self, source, error_msgs[:failed])
@@ -38,4 +38,3 @@ class Parslet::Atoms::Re < Parslet::Atoms::Base
     match.inspect[1..-2]
   end
 end
-
