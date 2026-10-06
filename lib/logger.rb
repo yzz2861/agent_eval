@@ -16,6 +16,7 @@ require 'rbconfig'
 
 require_relative 'logger/version'
 require_relative 'logger/formatter'
+require_relative 'logger/rfc5424_formatter'
 require_relative 'logger/log_device'
 require_relative 'logger/severity'
 require_relative 'logger/errors'
@@ -596,10 +597,14 @@ class Logger
   #   when creating a new log file. The default is +false+, meaning
   #   the header will be written as usual.
   #
+  # - +framing+: Use +:octet_counting+ to prefix each entry with its byte
+  #   length, as used by RFC 6587 TCP syslog transport. The default is
+  #   +nil+, which preserves ordinary Logger framing.
+  #
   def initialize(logdev, shift_age = 0, shift_size = 1048576, level: DEBUG,
                  progname: nil, formatter: nil, datetime_format: nil,
                  binmode: false, shift_period_suffix: '%Y%m%d',
-                 reraise_write_errors: [], skip_header: false)
+                 reraise_write_errors: [], skip_header: false, framing: nil)
     self.level = level
     self.progname = progname
     @default_formatter = Formatter.new
@@ -619,7 +624,8 @@ class Logger
         shift_period_suffix: shift_period_suffix,
         binmode: binmode,
         reraise_write_errors: reraise_write_errors,
-        skip_header: skip_header)
+        skip_header: skip_header,
+        framing: framing)
     end
   end
 
@@ -652,9 +658,10 @@ class Logger
   #   #  "E, [2022-05-12T14:21:27.596726 #22428] ERROR -- : one\n",
   #   #  "E, [2022-05-12T14:23:05.847241 #22428] ERROR -- : three\n"]
   #
-  def reopen(logdev = nil, shift_age = nil, shift_size = nil, shift_period_suffix: nil, binmode: nil)
+  def reopen(logdev = nil, shift_age = nil, shift_size = nil, shift_period_suffix: nil, binmode: nil, framing: nil)
     @logdev&.reopen(logdev, shift_age: shift_age, shift_size: shift_size,
-                    shift_period_suffix: shift_period_suffix, binmode: binmode)
+                    shift_period_suffix: shift_period_suffix, binmode: binmode,
+                    framing: framing)
     self
   end
 

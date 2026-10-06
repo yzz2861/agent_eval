@@ -13,14 +13,18 @@ class Logger
 
     def initialize(
       log = nil, shift_age: nil, shift_size: nil, shift_period_suffix: nil,
-      binmode: false, reraise_write_errors: [], skip_header: false
+      binmode: false, reraise_write_errors: [], skip_header: false, framing: nil
     )
       @dev = @filename = @shift_age = @shift_size = @shift_period_suffix = nil
       @binmode = binmode
       @reraise_write_errors = reraise_write_errors
       @skip_header = skip_header
+      @framing = validate_framing(framing)
+      @binmode = true if octet_counting?
+      @skip_header = true if octet_counting?
       mon_initialize
       set_dev(log)
+      enable_dev_sync if octet_counting?
       set_file(shift_age, shift_size, shift_period_suffix) if @filename
     end
 
@@ -30,7 +34,13 @@ class Logger
           if @shift_age and @dev.respond_to?(:stat)
             handle_write_errors("shifting") {check_shift_log}
           end
-          handle_write_errors("writing") {@dev.write(message)}
+          handle_write_errors("writing") do
+            if octet_counting?
+              write_octet_counting_frame(message)
+            else
+              @dev.write(message)
+            end
+          end
         end
       end
     end
@@ -45,10 +55,14 @@ class Logger
       end
     end
 
-    def reopen(log = nil, shift_age: nil, shift_size: nil, shift_period_suffix: nil, binmode: nil)
+    def reopen(log = nil, shift_age: nil, shift_size: nil,
+               shift_period_suffix: nil, binmode: nil, framing: nil)
       # reopen the same filename if no argument, do nothing for IO
       log ||= @filename if @filename
       @binmode = binmode unless binmode.nil?
+      @framing = validate_framing(framing) unless framing.nil?
+      @binmode = true if octet_counting?
+      @skip_header = true if octet_counting?
       if log
         synchronize do
           if @filename and @dev
@@ -56,6 +70,7 @@ class Logger
             @filename = nil
           end
           set_dev(log)
+          enable_dev_sync if octet_counting?
           set_file(shift_age, shift_size, shift_period_suffix) if @filename
         end
       end
@@ -87,6 +102,40 @@ class Logger
         @dev = open_logfile(log)
         @filename = log
       end
+    end
+
+    def octet_counting?
+      @framing == :octet_counting
+    end
+
+    def validate_framing(framing)
+      return nil if framing.nil? || framing == false
+      return :octet_counting if framing.to_s.tr("-", "_") == "octet_counting"
+
+      raise ArgumentError, "invalid log framing: #{framing.inspect}"
+    end
+
+    def enable_dev_sync
+      @dev.sync = true if @dev.respond_to?(:sync=)
+      @dev.binmode if @dev.respond_to?(:binmode)
+    end
+
+    def write_octet_counting_frame(message)
+      frame = "#{message.bytesize} #{message}".b
+      total_bytesize = frame.bytesize
+
+      until frame.empty?
+        written = @dev.write(frame)
+        unless written.is_a?(Integer) && written > 0
+          raise IOError, "log writing failed before all bytes were written"
+        end
+        if written > frame.bytesize
+          raise IOError, "log device reported #{written} bytes written from #{frame.bytesize}"
+        end
+        frame = frame.byteslice(written, frame.bytesize - written).to_s
+      end
+
+      total_bytesize
     end
 
     def set_file(shift_age, shift_size, shift_period_suffix)
@@ -248,6 +297,16 @@ class Logger
         end
       end
       return true
+    end
+  end
+
+  # Device wrapper that uses RFC 6587 octet-counting TCP framing.
+  # Pass an already connected TCPSocket, or another IO that implements
+  # partial writes, as the first argument.
+  class OctetCountingLogDevice < LogDevice
+    def initialize(log = nil, **options)
+      options[:framing] = :octet_counting
+      super(log, **options)
     end
   end
 end
