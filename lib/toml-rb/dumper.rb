@@ -112,7 +112,9 @@ module TomlRB
     end
 
     def to_toml(obj)
-      if obj.is_a?(LocalDate)
+      if obj.is_a?(Temporal::Value)
+        obj.to_s
+      elsif obj.is_a?(LocalDate)
         obj.strftime("%Y-%m-%d")
       elsif obj.is_a?(LocalTime)
         obj.strftime("%H:%M:%S") + sec_fraction(obj)

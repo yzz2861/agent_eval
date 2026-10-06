@@ -10,15 +10,15 @@ module TomlRB
     MULTILINE_LITERAL = /(?:[^'\x00-\x08\x0b-\x1f\x7f]|\r\n|'{1,2}(?!'))*(?:'{0,2}(?='''))?/
     # A UTF-8 regexp raises Encoding::CompatibilityError on binary input with high bytes.
     COMMENT = /[^\x00-\x08\x0a-\x1f\x7f]*/u
-    DATETIME = /(\d{4})-(\d\d)-(\d\d)(?:[Tt ]([0-2]\d):([0-6]\d)(?::([0-6]\d)(?:\.(\d{1,9})\d*)?)?([Zz]|[+-]\d\d:\d\d)?)?/
-    TIME = /([0-2]\d):([0-6]\d)(?::([0-6]\d)(?:\.(\d{1,9})\d*)?)?/
+    DATETIME = /(\d{4})-(\d\d)-(\d\d)(?:[Tt ]([0-2]\d):([0-6]\d)(?::([0-6]\d)(?:\.(\d+))?)?([Zz]|[+-]\d\d:\d\d)?)?/
+    TIME = /([0-2]\d):([0-6]\d)(?::([0-6]\d)(?:\.(\d+))?)?/
     PREFIXED_INTEGER = /0x[0-9a-fA-F](?:_?[0-9a-fA-F])*|0o[0-7](?:_?[0-7])*|0b[01](?:_?[01])*/
     DECIMAL = /[+-]?(?:0|[1-9](?:_?\d)*)(\.\d(?:_?\d)*(?:[eE][+-]?\d(?:_?\d)*)?|[eE][+-]?\d(?:_?\d)*)?/
     MAX_NESTING = 100
 
     attr_reader :hash
 
-    def initialize(content, symbolize_keys: false)
+    def initialize(content, symbolize_keys: false, exact_time_values: false)
       @hash = {}
       # Tables and arrays of tables that headers or dotted keys made, by identity:
       # :implicit (super-table of a header), :explicit (header) or :dotted (dotted key).
@@ -26,6 +26,7 @@ module TomlRB
       @tables = {}.compare_by_identity
       @current = @hash
       @symbolize_keys = symbolize_keys
+      @exact_time_values = exact_time_values
       @depth = 0
 
       begin
@@ -189,16 +190,31 @@ module TomlRB
 
       year, mon, day, hour, min, sec, sec_frac, offset = @scanner.values_at(1, 2, 3, 4, 5, 6, 7, 8)
       if hour.nil?
-        DatetimeParser.local_date(year, mon, day)
+        temporal? ? DatetimeParser.local_date_value(year, mon, day) : DatetimeParser.local_date(year, mon, day)
       elsif offset
-        DatetimeParser.offset_datetime(year, mon, day, hour, min, sec, sec_frac, offset)
+        if temporal?
+          DatetimeParser.offset_datetime_value(year, mon, day, hour, min, sec, sec_frac, offset)
+        else
+          DatetimeParser.offset_datetime(year, mon, day, hour, min, sec, sec_frac, offset)
+        end
       else
-        DatetimeParser.local_datetime(year, mon, day, hour, min, sec, sec_frac)
+        if temporal?
+          DatetimeParser.local_datetime_value(year, mon, day, hour, min, sec, sec_frac)
+        else
+          DatetimeParser.local_datetime(year, mon, day, hour, min, sec, sec_frac)
+        end
       end
     end
 
     def local_time
-      DatetimeParser.local_time(*@scanner.values_at(1, 2, 3, 4)) if @scanner.skip(TIME)
+      return unless @scanner.skip(TIME)
+
+      values = @scanner.values_at(1, 2, 3, 4)
+      temporal? ? DatetimeParser.local_time_value(*values) : DatetimeParser.local_time(*values)
+    end
+
+    def temporal?
+      @exact_time_values
     end
 
     def number

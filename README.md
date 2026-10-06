@@ -56,6 +56,14 @@ times = <<-EOS
 EOS
 TomlRB.parse(times).transform_values(&:class)
 # => {"odt"=>Time, "ldt"=>TomlRB::LocalDateTime, "ld"=>TomlRB::LocalDate, "lt"=>TomlRB::LocalTime}
+
+# Pass exact_time_values: true to retain values with more than nanosecond precision
+# and to keep local values free of an assumed UTC offset.
+values = TomlRB.parse(times, exact_time_values: true)
+values["lt"].class # => TomlRB::Temporal::LocalTime
+values["ldt"].to_time(timezone: "+08:00", precision: 9, rounding: :raise)
+# Offset datetimes do not need a timezone, but still require a precision policy.
+values["odt"].to_time(precision: 9, rounding: :down)
 ```
 
 Dumper Usage

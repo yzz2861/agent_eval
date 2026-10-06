@@ -33,8 +33,12 @@ module TomlRB
   # Returns a Ruby hash representation of the content according to TomlRB spec.
   # Raises ValueOverwriteError if a key is overwritten.
   # Raises ParseError if the content has invalid TomlRB.
-  def self.parse(content, symbolize_keys: false)
-    Parser.new(content, symbolize_keys: symbolize_keys).hash
+  def self.parse(content, symbolize_keys: false, exact_time_values: false)
+    Parser.new(
+      content,
+      symbolize_keys: symbolize_keys,
+      exact_time_values: exact_time_values
+    ).hash
   end
 
   # Public: Returns a hash from a *TomlRB* file.
@@ -57,8 +61,12 @@ module TomlRB
   # Raises ParseError if the content has invalid TomlRB.
   # Raises Errno::ENOENT if the file cannot be found.
   # Raises Errno::EACCES if the file cannot be accessed.
-  def self.load_file(path, symbolize_keys: false)
-    TomlRB.parse(File.read(path, encoding: "UTF-8"), symbolize_keys: symbolize_keys)
+  def self.load_file(path, symbolize_keys: false, exact_time_values: false)
+    TomlRB.parse(
+      File.read(path, encoding: "UTF-8"),
+      symbolize_keys: symbolize_keys,
+      exact_time_values: exact_time_values
+    )
   end
 
   # Public: Returns a *TomlRB* string from a Ruby Hash.
