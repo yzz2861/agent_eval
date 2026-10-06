@@ -897,3 +897,266 @@ unless Socket.const_defined? :AF_INET6
     end
   end
 end
+
+# CIDRSet is a set of IP network prefixes (CIDR blocks) built on top
+# of IPAddr.  It is meant for network access rules of the shape
+# "this range, minus a few exceptions": blocks are stored as address
+# intervals rather than individual addresses, so even an IPv6 /32
+# costs only a handful of intervals and memory usage stays
+# proportional to the number of prefixes, never to the number of
+# addresses.
+#
+# IPv4 and IPv6 blocks are tracked separately.  Whether an
+# IPv4-mapped IPv6 address such as "::ffff:192.0.2.1" counts as IPv4
+# is decided by the explicit +ipv4_mapped+ option.
+#
+#   set = IPAddr::CIDRSet.new(%w[10.0.0.0/8 192.168.0.0/16])
+#   set -= IPAddr::CIDRSet.new("10.1.2.0/24")
+#   set.include?("10.1.2.3")  #=> false
+#   set.include?("10.1.3.3")  #=> true
+#   set.to_a                  #=> normalized blocks: contained entries
+#                             #   removed, exactly mergeable neighbors
+#                             #   combined
+class IPAddr::CIDRSet
+  include Enumerable
+
+  # Creates a CIDR set from +cidrs+, which may be a single CIDR (an
+  # IPAddr or a string) or an enumerable of them.  Anything accepted
+  # by IPAddr.new works, and host bits are ignored: "10.1.2.3/24"
+  # adds the whole 10.1.2.0/24 block.
+  #
+  # The +ipv4_mapped+ keyword decides how IPv4-mapped IPv6 addresses
+  # are classified: with +:ipv6+ (the default) they stay in the IPv6
+  # space, with +:ipv4+ they are converted to native IPv4 blocks.
+  def initialize(cidrs = [], ipv4_mapped: :ipv6)
+    unless ipv4_mapped == :ipv4 || ipv4_mapped == :ipv6
+      raise ArgumentError, "ipv4_mapped must be :ipv4 or :ipv6"
+    end
+    @ipv4_mapped = ipv4_mapped
+    @v4_intervals = [] # sorted, disjoint, non-adjacent [first, last]
+    @v6_intervals = []
+    case cidrs
+    when IPAddr, String
+      add(cidrs)
+    else
+      cidrs.each { |cidr| add(cidr) }
+    end
+  end
+
+  # Adds +cidr+ (an IPAddr or a string) to the set and returns self.
+  def add(cidr)
+    ip = classify(cidr)
+    range = ip.to_range
+    interval = [[range.first.to_i, range.last.to_i]]
+    if ip.ipv4?
+      @v4_intervals = merge_interval_lists(@v4_intervals, interval)
+    else
+      @v6_intervals = merge_interval_lists(@v6_intervals, interval)
+    end
+    self
+  end
+  alias << add
+
+  # Returns a new set containing the blocks of both sets.  +other+
+  # may be another CIDRSet, or anything accepted by .new.
+  def union(other)
+    other = coerce_set(other)
+    build(merge_interval_lists(@v4_intervals, other.v4_intervals),
+          merge_interval_lists(@v6_intervals, other.v6_intervals))
+  end
+  alias | union
+  alias + union
+
+  # Returns a new set containing only the address space present in
+  # both sets.
+  def intersection(other)
+    other = coerce_set(other)
+    build(intersect_interval_lists(@v4_intervals, other.v4_intervals),
+          intersect_interval_lists(@v6_intervals, other.v6_intervals))
+  end
+  alias & intersection
+
+  # Returns a new set with the address space of +other+ removed.
+  # Removing a small subnet from a larger block may produce several
+  # result blocks.
+  def difference(other)
+    other = coerce_set(other)
+    build(subtract_interval_lists(@v4_intervals, other.v4_intervals),
+          subtract_interval_lists(@v6_intervals, other.v6_intervals))
+  end
+  alias - difference
+
+  # Returns the normalized CIDR blocks of the set as an array of
+  # IPAddr, IPv4 first, each in network/prefix form.  Contained
+  # entries are removed and adjacent prefixes that merge exactly are
+  # combined.
+  def to_a
+    ipv4 + ipv6
+  end
+
+  # Returns the normalized IPv4 blocks of the set.
+  def ipv4
+    intervals_to_cidrs(@v4_intervals, 32, Socket::AF_INET)
+  end
+
+  # Returns the normalized IPv6 blocks of the set.
+  def ipv6
+    intervals_to_cidrs(@v6_intervals, 128, Socket::AF_INET6)
+  end
+
+  # Iterates over the normalized CIDR blocks.
+  def each(&block)
+    return to_enum(:each) unless block_given?
+    to_a.each(&block)
+  end
+
+  # Returns the number of normalized CIDR blocks in the set.
+  def size
+    to_a.size
+  end
+
+  # Returns true if the set contains no address space.
+  def empty?
+    @v4_intervals.empty? && @v6_intervals.empty?
+  end
+
+  # Returns true if +addr+ (an IPAddr or a string) is fully covered
+  # by the set.  A plain host address is covered when it falls within
+  # one of the blocks; a block is covered when a single block of the
+  # set contains it entirely.
+  def include?(addr)
+    ip = classify(addr)
+    range = ip.to_range
+    first = range.first.to_i
+    last = range.last.to_i
+    intervals = ip.ipv4? ? @v4_intervals : @v6_intervals
+    candidate = intervals.bsearch { |(_, interval_last)| interval_last >= last }
+    !candidate.nil? && candidate[0] <= first
+  end
+
+  def ==(other)
+    other.is_a?(IPAddr::CIDRSet) &&
+      @v4_intervals == other.v4_intervals &&
+      @v6_intervals == other.v6_intervals
+  end
+
+  def inspect
+    blocks = to_a.map(&:cidr).join(', ')
+    "#<#{self.class}: #{blocks}>"
+  end
+
+  protected
+
+  attr_reader :v4_intervals, :v6_intervals
+
+  private
+
+  def initialize_copy(other)
+    super
+    @v4_intervals = other.v4_intervals.map(&:dup)
+    @v6_intervals = other.v6_intervals.map(&:dup)
+  end
+
+  def classify(cidr)
+    ip = cidr.is_a?(IPAddr) ? cidr : IPAddr.new(cidr)
+    if @ipv4_mapped == :ipv4 && ip.ipv6? && ip.ipv4_mapped?
+      ip = ip.native
+    end
+    ip
+  end
+
+  def coerce_set(other)
+    case other
+    when IPAddr::CIDRSet
+      other
+    else
+      self.class.new(other, ipv4_mapped: @ipv4_mapped)
+    end
+  end
+
+  def build(v4_intervals, v6_intervals)
+    result = self.class.new([], ipv4_mapped: @ipv4_mapped)
+    result.instance_variable_set(:@v4_intervals, v4_intervals)
+    result.instance_variable_set(:@v6_intervals, v6_intervals)
+    result
+  end
+
+  # Merges two sorted, disjoint, non-adjacent interval lists into a
+  # single canonical list, combining overlapping and adjacent
+  # intervals.
+  def merge_interval_lists(list_a, list_b)
+    result = []
+    i = j = 0
+    current = nil
+    while i < list_a.length || j < list_b.length
+      if j >= list_b.length || (i < list_a.length && list_a[i][0] <= list_b[j][0])
+        nxt = list_a[i]
+        i += 1
+      else
+        nxt = list_b[j]
+        j += 1
+      end
+      if current && nxt[0] <= current[1] + 1
+        current[1] = nxt[1] if nxt[1] > current[1]
+      else
+        current = nxt.dup
+        result << current
+      end
+    end
+    result
+  end
+
+  # Returns the intervals present in both sorted interval lists.
+  def intersect_interval_lists(list_a, list_b)
+    result = []
+    i = j = 0
+    while i < list_a.length && j < list_b.length
+      first = [list_a[i][0], list_b[j][0]].max
+      last = [list_a[i][1], list_b[j][1]].min
+      result << [first, last] if first <= last
+      if list_a[i][1] < list_b[j][1]
+        i += 1
+      else
+        j += 1
+      end
+    end
+    result
+  end
+
+  # Returns the intervals of list_a with the intervals of list_b
+  # removed.  Both lists must be sorted and disjoint.
+  def subtract_interval_lists(list_a, list_b)
+    result = []
+    j = 0
+    list_a.each do |first, last|
+      j += 1 while j < list_b.length && list_b[j][1] < first
+      k = j
+      while k < list_b.length && list_b[k][0] <= last
+        cut_first, cut_last = list_b[k]
+        result << [first, cut_first - 1] if cut_first > first
+        first = cut_last + 1
+        break if first > last
+        k += 1
+      end
+      result << [first, last] if first <= last
+    end
+    result
+  end
+
+  # Decomposes each interval into the minimal list of CIDR blocks.
+  def intervals_to_cidrs(intervals, bits, family)
+    result = []
+    intervals.each do |first, last|
+      while first <= last
+        # largest block aligned at +first+ ...
+        align = first.zero? ? bits : (first & -first).bit_length - 1
+        # ... that still fits in the remaining space
+        fit = (last - first + 1).bit_length - 1
+        size = align < fit ? align : fit
+        result << IPAddr.new(first, family).mask(bits - size)
+        first += 1 << size
+      end
+    end
+    result
+  end
+end

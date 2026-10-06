@@ -46,6 +46,30 @@ ipaddr3 = IPAddr.new "192.168.2.0/24"
 p ipaddr3                   #=> #<IPAddr: IPv4:192.168.2.0/255.255.255.0>
 ```
 
+## CIDR sets
+
+`IPAddr::CIDRSet` represents a set of network prefixes for rules of
+the shape "this range, minus a few exceptions".  Blocks are stored as
+address intervals rather than individual addresses, so even an IPv6
+/32 costs only a handful of intervals: memory usage stays
+proportional to the number of prefixes, never to the number of
+addresses.  IPv4 and IPv6 blocks are tracked separately; whether an
+IPv4-mapped IPv6 address counts as IPv4 is decided by the explicit
+`ipv4_mapped:` option (`:ipv6` by default, `:ipv4` to convert).
+
+```ruby
+require 'ipaddr'
+
+set = IPAddr::CIDRSet.new(%w[10.0.0.0/8 192.168.0.0/16])
+set -= IPAddr::CIDRSet.new("10.1.2.0/24")   # union: |, intersection: &, difference: -
+
+set.include?("10.1.2.3")    #=> false
+set.include?("10.1.3.3")    #=> true
+
+set.to_a.map(&:cidr)        #=> normalized blocks: contained entries removed,
+                            #   exactly mergeable neighbors combined
+```
+
 ## Alternative
 
 The [ipaddress](https://rubygems.org/gems/ipaddress) gem is a popular,
