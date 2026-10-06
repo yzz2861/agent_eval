@@ -43,6 +43,34 @@ error_log = Logger.new(STDERR)
 error_log = error_log.error("fatal error")
 ```
 
+### RFC 5424 over TCP
+
+The gem includes optional RFC 5424 and RFC 6587 support. The formatter builds
+the syslog message without manual string concatenation, and `SyslogDevice`
+adds TCP octet-counting framing:
+
+```ruby
+require 'logger'
+
+formatter = Logger::RFC5424Formatter.new(
+  app_name: 'billing',
+  procid: Process.pid,
+  msgid: 'payment',
+  structured_data: {
+    'meta@1234' => {
+      'request_id' => 'abc',
+      'detail' => 'quote: ", backslash: \\, bracket: ]'
+    }
+  }
+)
+device = Logger::SyslogDevice.new(tcp_socket)
+logger = Logger.new(device, formatter: formatter)
+logger.info('charged ¥100')
+```
+
+Per-message metadata can be supplied with
+`Logger::RFC5424Formatter::Message`.
+
 ## Development
 
 After checking out the repo, run the following to install dependencies.

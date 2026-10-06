@@ -17,7 +17,9 @@ require 'rbconfig'
 require_relative 'logger/version'
 require_relative 'logger/formatter'
 require_relative 'logger/log_device'
+require_relative 'logger/rfc5424_formatter'
 require_relative 'logger/severity'
+require_relative 'logger/syslog_device'
 require_relative 'logger/errors'
 
 # \Class \Logger provides a simple but sophisticated logging utility that
