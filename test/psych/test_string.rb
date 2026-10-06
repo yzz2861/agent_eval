@@ -137,6 +137,108 @@ module Psych
       end
     end
 
+    def test_string_style_literal_preserves_whitespace_bytes
+      strings = [
+        "  leading space\n",
+        "trailing space  \n",
+        "whitespace-only line\n \nlast\n",
+        "blank line\n\nlast\n",
+        "no final line break\nlast",
+        "two final line breaks\n\n",
+        "three final line breaks\n\n\n",
+        "line with\n\ttab\n",
+        "\twhitespace-only line with tab\n",
+      ]
+
+      strings.each do |string|
+        yaml = Psych.dump(string, string_style: :literal)
+        assert_include yaml, '|'
+        assert_equal string.b, Psych.load(yaml).b
+      end
+    end
+
+    def test_string_style_folded_folds_only_without_newlines
+      folded = "one two three four five six seven eight nine ten"
+      yaml = Psych.dump(folded, string_style: :folded, line_width: 20)
+      assert_match(/\A--- >-\n(?:  .+\n){3}\z/, yaml)
+      assert_equal folded, Psych.load(yaml)
+
+      literal = "folded cannot preserve\nthis original newline"
+      yaml = Psych.dump(literal, string_style: :folded, line_width: 20)
+      assert_match(/--- \|-\n/, yaml)
+      assert_not_include yaml, ">"
+      assert_equal literal.b, Psych.load(yaml).b
+    end
+
+    def test_string_style_folded_does_not_hard_wrap_long_words
+      string = "aaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbb"
+      yaml = Psych.dump(string, string_style: :folded, line_width: 10)
+      assert_include yaml, "  aaaaaaaaaaaaaaaaaaaa\n"
+      assert_equal string, Psych.load(yaml)
+    end
+
+    def test_string_style_folded_respects_unlimited_line_width
+      string = "one two three four five six seven eight nine ten"
+      yaml = Psych.dump(string, string_style: :folded, line_width: -1)
+      assert_equal "--- >-\n  #{string}\n", yaml
+      assert_equal string, Psych.load(yaml)
+    end
+
+    def test_string_style_works_with_anchors_and_nesting
+      stream = Psych::Nodes::Stream.new
+      document = Psych::Nodes::Document.new
+      mapping = Psych::Nodes::Mapping.new
+      key = Psych::Nodes::Scalar.new("text")
+      value = Psych::Nodes::Scalar.new(
+        "line one\nline two", "note", nil, true, true, Psych::Nodes::Scalar::LITERAL
+      )
+      value.instance_variable_set(:@preferred_string_style, Psych::Nodes::Scalar::LITERAL)
+      mapping.children.concat([key, value])
+      key.instance_variable_set(:@psych_parent, mapping)
+      value.instance_variable_set(:@psych_parent, mapping)
+      mapping.instance_variable_set(:@psych_parent, document)
+      document.children << mapping
+      stream.children << document
+
+      yaml = Psych::Visitors::BlockScalar.rewrite(
+        stream.yaml,
+        stream,
+        nil,
+        false,
+        Psych::Nodes::Scalar::LITERAL,
+        2
+      )
+
+      assert_equal "---\ntext: &note |-\n    line one\n    line two\n", yaml
+    end
+
+    def test_string_style_falls_back_for_carriage_return
+      string = "line one\rline two"
+      yaml = Psych.dump(string, string_style: :literal)
+      assert_not_include yaml, "|"
+      assert_equal string, Psych.load(yaml)
+    end
+
+    def test_invalid_string_style
+      error = assert_raise(ArgumentError) do
+        Psych.dump("x", string_style: :double)
+      end
+      assert_match(/string_style/, error.message)
+    end
+
+    def test_string_style_accepts_scalar_constants
+      string = "line one\nline two"
+      yaml = Psych.dump(string, string_style: Psych::Nodes::Scalar::LITERAL)
+      assert_include yaml, "|-"
+      assert_equal string, Psych.load(yaml)
+    end
+
+    def test_string_style_handles_multibyte_character_positions
+      string = "é"
+      yaml = Psych.dump(string, string_style: :literal, line_width: 1)
+      assert_equal string, Psych.load(yaml)
+    end
+
     def test_cycle_x
       str = X.new 'abc'
       assert_cycle str

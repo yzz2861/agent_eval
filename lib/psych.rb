@@ -480,10 +480,20 @@ module Psych
   #                           otherwise option is ignored.
   #
   #                           Default: <tt>2</tt>.
-  # [<tt>:line_width</tt>]    Max character to wrap line at.
+  # [<tt>:line_width</tt>]    Preferred line width for folded strings.
   #                           For unlimited line width use <tt>-1</tt>.
   #
-  #                           Default: <tt>0</tt> (meaning "wrap at 81").
+  #                           Default: <tt>0</tt> (meaning "wrap at 81") for
+  #                           normal output; no fold is attempted if there is no
+  #                           suitable fold point.
+  # [<tt>:string_style</tt>] Preferred style for strings.  Use <tt>:literal</tt>
+  #                           (or <tt>Psych::Nodes::Scalar::LITERAL</tt>) for
+  #                           +|+ blocks, or <tt>:folded</tt> (or
+  #                           <tt>Psych::Nodes::Scalar::FOLDED</tt>) for +>+
+  #                           blocks.  Folded style falls back to literal when
+  #                           folding cannot preserve the original bytes.
+  #
+  #                           Default: <tt>nil</tt> (use Psych's existing style).
   # [<tt>:canonical</tt>]     Write "canonical" YAML form (very verbose, yet
   #                           strictly formal).
   #
@@ -520,8 +530,31 @@ module Psych
 
     visitor = Psych::Visitors::YAMLTree.create options
     visitor << o
-    visitor.tree.yaml io, options
+    yaml = visitor.tree.yaml(nil, visitor.string_style ? emit_options_without_line_width(options) : options)
+    if visitor.string_style
+      yaml = Psych::Visitors::BlockScalar.rewrite(
+        yaml,
+        visitor.tree,
+        visitor.line_width,
+        visitor.line_width_unlimited,
+        visitor.string_style,
+        visitor.indentation
+      )
+    end
+
+    if io
+      io.write(yaml)
+      io
+    else
+      yaml
+    end
   end
+
+  def self.emit_options_without_line_width options
+    return options unless options.key?(:line_width)
+    options.reject { |key, _| key == :line_width }
+  end
+  private_class_method :emit_options_without_line_width
 
   ###
   # call-seq:
@@ -561,10 +594,20 @@ module Psych
   #                           otherwise option is ignored.
   #
   #                           Default: <tt>2</tt>.
-  # [<tt>:line_width</tt>]    Max character to wrap line at.
+  # [<tt>:line_width</tt>]    Preferred line width for folded strings.
   #                           For unlimited line width use <tt>-1</tt>.
   #
-  #                           Default: <tt>0</tt> (meaning "wrap at 81").
+  #                           Default: <tt>0</tt> (meaning "wrap at 81") for
+  #                           normal output; no fold is attempted if there is no
+  #                           suitable fold point.
+  # [<tt>:string_style</tt>] Preferred style for strings.  Use <tt>:literal</tt>
+  #                           (or <tt>Psych::Nodes::Scalar::LITERAL</tt>) for
+  #                           +|+ blocks, or <tt>:folded</tt> (or
+  #                           <tt>Psych::Nodes::Scalar::FOLDED</tt>) for +>+
+  #                           blocks.  Folded style falls back to literal when
+  #                           folding cannot preserve the original bytes.
+  #
+  #                           Default: <tt>nil</tt> (use Psych's existing style).
   # [<tt>:canonical</tt>]     Write "canonical" YAML form (very verbose, yet
   #                           strictly formal).
   #
@@ -601,7 +644,24 @@ module Psych
 
     visitor = Psych::Visitors::RestrictedYAMLTree.create options
     visitor << o
-    visitor.tree.yaml io, options
+    yaml = visitor.tree.yaml(nil, visitor.string_style ? emit_options_without_line_width(options) : options)
+    if visitor.string_style
+      yaml = Psych::Visitors::BlockScalar.rewrite(
+        yaml,
+        visitor.tree,
+        visitor.line_width,
+        visitor.line_width_unlimited,
+        visitor.string_style,
+        visitor.indentation
+      )
+    end
+
+    if io
+      io.write(yaml)
+      io
+    else
+      yaml
+    end
   end
 
   ###

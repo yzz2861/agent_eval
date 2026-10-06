@@ -2,6 +2,7 @@
 require_relative '../tree_builder'
 require_relative '../scalar_scanner'
 require_relative '../class_loader'
+require_relative 'block_scalar'
 
 module Psych
   module Visitors
@@ -37,7 +38,7 @@ module Psych
         end
       end
 
-      attr_reader :started, :finished
+      attr_reader :started, :finished, :line_width, :line_width_unlimited, :string_style, :indentation
       alias :finished? :finished
       alias :started? :started
 
@@ -57,14 +58,28 @@ module Psych
         @ss         = ss
         @options    = options
         @line_width = options[:line_width]
+        @line_width_unlimited = false
         if @line_width && @line_width < 0
           if @line_width == -1
             # Treat -1 as unlimited line-width, same as libyaml does.
             @line_width = nil
+            @line_width_unlimited = true
           else
             fail(ArgumentError, "Invalid line_width #{@line_width}, must be non-negative or -1 for unlimited.")
           end
         end
+        @string_style =
+          case options[:string_style]
+          when nil, Nodes::Scalar::ANY
+            nil
+          when :literal, Nodes::Scalar::LITERAL
+            Nodes::Scalar::LITERAL
+          when :folded, Nodes::Scalar::FOLDED
+            Nodes::Scalar::FOLDED
+          else
+            raise(ArgumentError, "Invalid string_style #{options[:string_style].inspect}, must be :literal or :folded.")
+          end
+        @indentation = options[:indentation] || 2
         @stringify_names = options[:stringify_names]
         @coders     = []
 
@@ -293,7 +308,9 @@ module Psych
         style = Nodes::Scalar::PLAIN
         tag   = nil
 
+        string_style_preference = @string_style
         if binary?(o)
+          string_style_preference = nil
           o     = [o].pack('m0')
           tag   = '!binary' # FIXME: change to below when syck is removed
           #tag   = 'tag:yaml.org,2002:binary'
@@ -301,7 +318,9 @@ module Psych
           plain = false
           quote = false
         elsif o.match?(/\n(?!\Z)/)  # match \n except blank line at the end of string
-          style = Nodes::Scalar::LITERAL
+          style = preferred_string_style(o) || Nodes::Scalar::LITERAL
+        elsif @string_style && !o.empty?
+          style = preferred_string_style(o)
         elsif o == '<<'
           style = Nodes::Scalar::SINGLE_QUOTED
           tag   = 'tag:yaml.org,2002:str'
@@ -326,14 +345,17 @@ module Psych
             plain = false
             quote = false
           end
-          @emitter.scalar o, nil, tag, plain, quote, style
+          node = @emitter.scalar o, nil, tag, plain, quote, style
+          mark_string_style(node, string_style_preference)
+          node
         else
           maptag = '!ruby/string'.dup
           maptag << ":#{o.class}" unless o.class == ::String
 
           register o, @emitter.start_mapping(nil, maptag, false, Nodes::Mapping::BLOCK)
           @emitter.scalar 'str', nil, nil, true, false, Nodes::Scalar::ANY
-          @emitter.scalar o, nil, tag, plain, quote, style
+          node = @emitter.scalar o, nil, tag, plain, quote, style
+          mark_string_style(node, string_style_preference)
 
           dump_ivars o
 
@@ -363,7 +385,9 @@ module Psych
         if o.class == ::Hash
           register(o, @emitter.start_mapping(nil, nil, true, Psych::Nodes::Mapping::BLOCK))
           o.each do |k,v|
-            accept(@stringify_names && Symbol === k ? k.to_s : k)
+            without_string_style do
+              accept(@stringify_names && Symbol === k ? k.to_s : k)
+            end
             accept v
           end
           @emitter.end_mapping
@@ -376,7 +400,9 @@ module Psych
         register(o, @emitter.start_mapping(nil, '!set', false, Psych::Nodes::Mapping::BLOCK))
 
         o.each do |k,v|
-          accept(@stringify_names && Symbol === k ? k.to_s : k)
+          without_string_style do
+            accept(@stringify_names && Symbol === k ? k.to_s : k)
+          end
           accept v
         end
 
@@ -422,6 +448,29 @@ module Psych
       end
 
       private
+
+      def preferred_string_style string
+        return nil unless @string_style
+        return @string_style unless @string_style == Nodes::Scalar::FOLDED
+
+        if string.include?("\n")
+          Nodes::Scalar::LITERAL
+        else
+          Nodes::Scalar::FOLDED
+        end
+      end
+
+      def without_string_style
+        string_style = @string_style
+        @string_style = nil
+        yield
+      ensure
+        @string_style = string_style
+      end
+
+      def mark_string_style node, style
+        node.instance_variable_set(:@preferred_string_style, style) if node.respond_to?(:instance_variable_set)
+      end
 
       def binary? string
         string.encoding == Encoding::ASCII_8BIT && !string.ascii_only?
@@ -478,7 +527,7 @@ module Psych
           accept 'elements'
           @emitter.start_mapping nil, nil, true, Nodes::Mapping::BLOCK
           o.each do |k,v|
-            accept k
+            without_string_style { accept k }
             accept v
           end
           @emitter.end_mapping
@@ -489,7 +538,7 @@ module Psych
           node = @emitter.start_mapping(nil, tag, false, Psych::Nodes::Mapping::BLOCK)
           register(o, node)
           o.each do |k,v|
-            accept k
+            without_string_style { accept k }
             accept v
           end
           @emitter.end_mapping
@@ -557,7 +606,7 @@ module Psych
         when :map
           register o, @emitter.start_mapping(nil, c.tag, c.implicit, c.style)
           c.map.each do |k,v|
-            accept k
+            without_string_style { accept k }
             accept v
           end
           @emitter.end_mapping
