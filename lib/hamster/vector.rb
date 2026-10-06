@@ -2,6 +2,7 @@ require "hamster/immutable"
 require "hamster/enumerable"
 require "hamster/hash"
 require "hamster/associable"
+require "hamster/transient"
 
 module Hamster
   # A `Vector` is an ordered, integer-indexed collection of objects. Like
@@ -387,6 +388,44 @@ module Hamster
     def pop
       return self if @size == 0
       replace_suffix(@size-1, [])
+    end
+
+    # Yield a transient, mutable "editor" (a {TransientVector}) which starts
+    # out with the same contents as this `Vector`, and return a new immutable
+    # `Vector` reflecting all the changes made inside the block. This
+    # `Vector` is not modified.
+    #
+    # When many updates are made in a row, this is much more efficient than
+    # chaining calls like `#put`, `#add` and `#pop`, because the editor
+    # reuses the nodes which are private to the editing session instead of
+    # copying the update path for every single change. Nodes shared with
+    # existing (immutable) vectors are never modified.
+    #
+    # The editor is only valid inside the block, and only on the thread where
+    # `#mutate` was called. Using it after the block has exited (for example
+    # through a saved reference) or from another thread raises
+    # {TransientError}. If the block raises an exception, no changes are
+    # kept and this `Vector` is left unchanged.
+    #
+    # @example
+    #   vector = Hamster::Vector["A", "B", "C"]
+    #   vector.mutate do |m|
+    #     m.set(0, "a")
+    #     m.push("D")
+    #   end
+    #   # => Hamster::Vector["a", "B", "C", "D"]
+    #
+    # @yield [editor] A transient, mutable editor for this `Vector`
+    # @return [Vector]
+    def mutate
+      editor = TransientVector.new(self)
+      begin
+        yield editor
+        result = editor.persist!
+      ensure
+        editor.invalidate!
+      end
+      result
     end
 
     # Return a new `Vector` with `object` inserted before the first element,

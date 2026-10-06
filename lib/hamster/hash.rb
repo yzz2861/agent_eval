@@ -5,6 +5,7 @@ require "hamster/trie"
 require "hamster/set"
 require "hamster/vector"
 require "hamster/associable"
+require "hamster/transient"
 
 module Hamster
   # A `Hamster::Hash` maps a set of unique keys to corresponding values, much
@@ -316,6 +317,44 @@ module Hamster
     # @return [Hash]
     def delete(key)
       derive_new_hash(@trie.delete(key))
+    end
+
+    # Yield a transient, mutable "editor" (a {TransientHash}) which starts
+    # out with the same contents as this `Hash`, and return a new immutable
+    # `Hash` reflecting all the changes made inside the block. This `Hash`
+    # is not modified.
+    #
+    # When many updates are made in a row, this is much more efficient than
+    # chaining calls like `#put` and `#delete`, because the editor reuses
+    # the nodes which are private to the editing session instead of copying
+    # the update path for every single change. Nodes shared with existing
+    # (immutable) hashes are never modified.
+    #
+    # The editor is only valid inside the block, and only on the thread where
+    # `#mutate` was called. Using it after the block has exited (for example
+    # through a saved reference) or from another thread raises
+    # {TransientError}. If the block raises an exception, no changes are
+    # kept and this `Hash` is left unchanged.
+    #
+    # @example
+    #   hash = Hamster::Hash["A" => 1, "B" => 2]
+    #   hash.mutate do |m|
+    #     m.put("C", 3)
+    #     m.delete("A")
+    #   end
+    #   # => Hamster::Hash["B" => 2, "C" => 3]
+    #
+    # @yield [editor] A transient, mutable editor for this `Hash`
+    # @return [Hash]
+    def mutate
+      editor = TransientHash.new(self)
+      begin
+        yield editor
+        result = editor.persist!
+      ensure
+        editor.invalidate!
+      end
+      result
     end
 
     # Call the block once for each key/value pair in this `Hash`, passing the key/value

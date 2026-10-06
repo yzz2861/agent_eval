@@ -121,6 +121,20 @@ counters.put(:odds, &:next)         # => {:odds => 1, :evens => 0}
 
 This is just the beginning; see the [API documentation][HASH-DOC] for details on all `Hash` methods.
 
+When you need to apply many updates at once, `Hash#mutate` yields a
+transient, mutable editor and returns a single immutable `Hash` with all
+the changes, without allocating an intermediate `Hash` for every step:
+
+``` ruby
+Hamster::Hash[a: 1, b: 2].mutate do |m|
+  m.put(:c, 3)
+  m.delete(:a)
+end                                 # => Hamster::Hash[:b => 2, :c => 3]
+```
+
+The editor is only valid inside the block, on the thread where `#mutate`
+was called; the original hash is never modified.
+
 
 <h2>Vector <span style="font-size:0.7em">(<a href="http://rubydoc.info/github/hamstergem/hamster/master/Hamster/Vector">API Documentation</a>)</span></h2>
 
@@ -140,6 +154,16 @@ Other `Array`-like methods like `#select`, `#map`, `#shuffle`, `#uniq`, `#revers
 `#rotate`, `#flatten`, `#sort`, `#sort_by`, `#take`, `#drop`, `#take_while`,
 `#drop_while`, `#fill`, `#product`, and `#transpose` are also supported. See the
 [API documentation][VECTOR-DOC] for details on all `Vector` methods.
+
+Like `Hash#mutate`, `Vector#mutate` applies many updates through a
+transient, mutable editor and returns a single immutable `Vector`:
+
+``` ruby
+Hamster::Vector[1, 2, 3].mutate do |m|
+  m.set(0, :a)
+  m.push(4)
+end                                 # => Hamster::Vector[:a, 2, 3, 4]
+```
 
 
 <h2>Set <span style="font-size:0.7em">(<a href="http://rubydoc.info/github/hamstergem/hamster/master/Hamster/Set">API Documentation</a>)</span></h2>

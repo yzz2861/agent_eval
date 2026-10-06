@@ -179,6 +179,84 @@ module Hamster
       self
     end
 
+    # The following 3 methods support transient, in-place editing sessions
+    # (see `Hash#mutate` and `Hamster::TransientHash`). They make it
+    # possible to perform many updates while allocating as few intermediate
+    # nodes as possible.
+    #
+    # `owned` is an identity-keyed `Hash` which records the nodes that
+    # belong to the current editing session. Any node not in `owned` may be
+    # shared with other (immutable) hashes and must never be modified.
+    #
+    # @private
+
+    # Returns `self` if this node is owned by the current editing session.
+    # Otherwise returns a session-owned shallow copy: the `@entries` and
+    # `@children` arrays are duplicated so they can be modified in place,
+    # while child nodes remain shared (and will be copied on first write).
+    def editable_copy(owned)
+      if owned.key?(self)
+        self
+      else
+        copy = Trie.new(@significant_bits, @size, @entries.dup, @children.dup)
+        owned[copy] = true
+        copy
+      end
+    end
+
+    # In-place variant of `#put` for transient editing. `self` must be owned
+    # by the editing session (see `#editable_copy`).
+    def transient_put!(key, value, owned)
+      index = index_for(key)
+      entry = @entries[index]
+      if !entry
+        @size += 1
+        key = key.dup.freeze if key.is_a?(String) && !key.frozen?
+        @entries[index] = [key, value].freeze
+      elsif entry[0].eql?(key)
+        key = key.dup.freeze if key.is_a?(String) && !key.frozen?
+        @entries[index] = [key, value].freeze
+      else
+        child = @children[index]
+        if child
+          child = child.editable_copy(owned)
+          @children[index] = child
+          old_child_size = child.size
+          child.transient_put!(key, value, owned)
+          @size += child.size - old_child_size
+        else
+          child = Trie.new(@significant_bits + 5)
+          owned[child] = true
+          @children[index] = child
+          child.transient_put!(key, value, owned)
+          @size += 1
+        end
+      end
+      self
+    end
+
+    # In-place variant of `#delete` for transient editing. `self` must be
+    # owned by the editing session. Unlike `#delete`, nodes left empty are
+    # not compacted away; this does not affect correctness.
+    def transient_delete!(key, owned)
+      index = index_for(key)
+      entry = @entries[index]
+      if entry && entry[0].eql?(key)
+        @entries[index] = nil
+        @size -= 1
+      else
+        child = @children[index]
+        if child
+          child = child.editable_copy(owned)
+          @children[index] = child
+          old_child_size = child.size
+          child.transient_delete!(key, owned)
+          @size -= old_child_size - child.size
+        end
+      end
+      self
+    end
+
     # Retrieves the entry corresponding to the given key. If not found, returns <tt>nil</tt>.
     def get(key)
       index = index_for(key)
