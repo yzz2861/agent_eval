@@ -439,6 +439,225 @@ class IPAddr
     return self.clone.set(@addr & IN4MASK, Socket::AF_INET)
   end
 
+  # RFC 6052 describes the IPv4/IPv6 translation transport-independent
+  # address mapping used by NAT64.  A translator is bound to the
+  # deployment-specific prefix, so IPv6 addresses are never interpreted as
+  # translated addresses merely because their final four bytes look like an
+  # IPv4 address.
+  #
+  # Allowed deployment prefix lengths are 32, 40, 48, 56, 64, and 96 bits.
+  # The default is the well-known prefix 64:ff9b::/96.
+  #
+  #   translator = IPAddr::RFC6052.new
+  #   translator.translate(IPAddr.new("192.0.2.1"))
+  #   #=> #<IPAddr: IPv6:0064:ff9b:0000:.../ffff:...>
+  #   translator.translate(IPAddr.new("64:ff9b::192.0.2.1"))
+  #   #=> #<IPAddr: IPv4:192.0.2.1/255.255.255.255>
+  class RFC6052
+    # Prefix lengths permitted by RFC 6052 section 2.2.
+    PREFIX_LENGTHS = [32, 40, 48, 56, 64, 96].freeze
+
+    # The RFC 6052 well-known prefix.
+    WELL_KNOWN_PREFIX = "64:ff9b::/96".freeze
+
+    # Base class for RFC 6052 translator errors.
+    class Error < IPAddr::Error; end
+
+    # Raised when the deployment prefix is not a valid RFC 6052 prefix.
+    class InvalidPrefixError < IPAddr::InvalidPrefixError; end
+
+    # Raised when an IPv6 address does not contain a valid mapped IPv4
+    # address for the configured prefix.
+    class NotMappedError < Error; end
+
+    # Raised when an address range requires more than one IP prefix.
+    class MultiplePrefixesError < Error; end
+
+    # Returns the configured deployment prefix.
+    attr_reader :prefix
+
+    # Returns the configured deployment prefix length.
+    attr_reader :prefix_length
+
+    # Creates a translator using an IPv6 prefix given as a String or an
+    # IPAddr.  The prefix length must be one of PREFIX_LENGTHS.
+    def initialize(prefix = WELL_KNOWN_PREFIX)
+      prefix = IPAddr.new(prefix) if prefix.is_a?(String)
+      unless prefix.is_a?(IPAddr)
+        raise TypeError, "prefix must be an IPAddr or String: #{prefix.inspect}"
+      end
+      unless prefix.ipv6?
+        raise AddressFamilyError, "RFC 6052 prefix must be IPv6: #{prefix.cidr}"
+      end
+
+      @prefix_length = prefix.prefix
+      unless PREFIX_LENGTHS.include?(@prefix_length)
+        raise InvalidPrefixError,
+          "RFC 6052 prefix length must be one of #{PREFIX_LENGTHS.join(', ')}: #{@prefix_length}"
+      end
+
+      @prefix_mask = ((IN6MASK >> (128 - @prefix_length)) << (128 - @prefix_length))
+      unless (prefix.to_i & @prefix_mask) == prefix.to_i
+        raise InvalidPrefixError, "RFC 6052 prefix is not a network prefix: #{prefix.cidr}"
+      end
+
+      @prefix = prefix.dup
+      @prefix_base = @prefix.to_i
+      if @prefix_length < 96
+        gap_length = 96 - @prefix_length
+        @reserved_mask = ((1 << gap_length) - 1) << 32
+      else
+        @reserved_mask = 0
+      end
+    end
+
+    # Translates an IPv4 address or network to IPv6, or an IPv6 address or
+    # network belonging to this prefix to IPv4.
+    def translate(address)
+      address = coerce_address(address)
+      if address.ipv4?
+        to_ipv6(address)
+      else
+        to_ipv4(address)
+      end
+    end
+
+    # Returns the single IPv6 or IPv4 prefix exactly representing the given
+    # address, network, or address Range.  Raises MultiplePrefixesError if
+    # the range cannot be represented by one prefix.
+    def translate_prefix(address)
+      prefixes = translate_prefixes(address)
+      if prefixes.length != 1
+        raise MultiplePrefixesError,
+          "address range cannot be represented by a single prefix"
+      end
+      prefixes.first
+    end
+
+    # Returns an Array of IPv6 prefixes exactly covering the translated IPv4
+    # address, network, or IPv4 address Range.  A CIDR network always maps
+    # to one prefix; an arbitrary range can map to several prefixes.
+    def translate_prefixes(address)
+      if address.is_a?(Range)
+        first = coerce_address(address.first)
+        last = coerce_address(address.last)
+        end_address = address.exclude_end? ? last.to_i - 1 : last.to_i
+        unless first.ipv4? && last.ipv4? &&
+            first.prefix == 32 && last.prefix == 32 &&
+            first.to_i <= end_address
+          raise NotMappedError, "RFC 6052 range translation supports only IPv4 host addresses"
+        end
+
+        cidr_ranges(first.to_i, end_address, 32).map {
+          |network_address, network_prefix|
+          network = IPAddr.new(network_address, Socket::AF_INET)
+          network = network.mask(network_prefix)
+          to_ipv6(network)
+        }
+      else
+        [translate(address)]
+      end
+    end
+
+    # Maps an IPv4 address or CIDR network to an IPv6 address or network.
+    def to_ipv6(address)
+      address = coerce_address(address)
+      unless address.ipv4?
+        raise AddressFamilyError, "not an IPv4 address: #{address}"
+      end
+
+      network = address.mask(address.prefix)
+      synthesized = @prefix_base | network.to_i
+      result = IPAddr.new(synthesized, Socket::AF_INET6)
+      result = result.mask(96 + network.prefix)
+      result
+    end
+
+    # Recovers an IPv4 address or CIDR network from an IPv6 address or
+    # network.  The input must belong to the configured deployment prefix,
+    # and all reserved suffix bits must be zero.
+    def to_ipv4(address)
+      address = coerce_address(address)
+      unless address.ipv6?
+        raise AddressFamilyError, "not an IPv6 address: #{address}"
+      end
+      unless address.zone_id.nil?
+        raise NotMappedError, "scoped IPv6 address is not an RFC 6052 mapping: #{address}"
+      end
+
+      network_prefix = address.prefix
+      if network_prefix < @prefix_length
+        raise NotMappedError,
+          "IPv6 prefix #{address.cidr} is shorter than #{@prefix.cidr}"
+      end
+      if network_prefix < 96
+        raise NotMappedError,
+          "IPv6 prefix #{address.cidr} cannot exactly represent mapped IPv4 addresses"
+      end
+      if (address.to_i & @prefix_mask) != @prefix_base
+        raise NotMappedError,
+          "#{address.cidr} does not belong to RFC 6052 prefix #{@prefix.cidr}"
+      end
+      if (address.to_i & @reserved_mask) != 0
+        raise NotMappedError,
+          "#{address.cidr} has nonzero reserved suffix bits for #{@prefix.cidr}"
+      end
+
+      ipv4_prefix = network_prefix - 96
+      result = IPAddr.new(address.to_i & IN4MASK, Socket::AF_INET)
+      result = result.mask(ipv4_prefix)
+      result
+    end
+
+    alias encode to_ipv6
+    alias decode to_ipv4
+
+    # Returns true when the other translator uses the same deployment prefix.
+    def ==(other)
+      other.is_a?(RFC6052) &&
+        other.prefix_length == @prefix_length &&
+        other.prefix.to_i == @prefix_base
+    end
+
+    alias eql? ==
+
+    def hash
+      [@prefix_base, @prefix_length].hash
+    end
+
+    private
+
+    def coerce_address(address)
+      case address
+      when String
+        IPAddr.new(address)
+      when IPAddr
+        address
+      else
+        raise TypeError, "address must be an IPAddr or String: #{address.inspect}"
+      end
+    end
+
+    def cidr_ranges(start_address, end_address, length)
+      ranges = []
+      while start_address <= end_address
+        maximum_by_range = (end_address - start_address + 1).bit_length - 1
+        if start_address.zero?
+          maximum_by_alignment = length
+        else
+          maximum_by_alignment = (start_address & -start_address).bit_length - 1
+        end
+        block_length = [maximum_by_range, maximum_by_alignment].min
+        ranges << [start_address, length - block_length]
+        start_address += 1 << block_length
+      end
+      ranges
+    end
+  end
+
+  # Common name for the RFC 6052 address translator.
+  NAT64 = RFC6052
+
   # Returns a string for DNS reverse lookup.  It returns a string in
   # RFC3172 form for an IPv6 address.
   def reverse

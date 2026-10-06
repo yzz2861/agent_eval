@@ -722,4 +722,176 @@ class TC_Operator < Test::Unit::TestCase
     end
     assert_equal('invalid address: INVALID', e.message)
   end
+
+end
+
+class TC_RFC6052 < Test::Unit::TestCase
+  RFC6052_VECTORS = {
+    32 => ["2001:db8::/32", "2001:db8::c000:201"],
+    40 => ["2001:db8:100::/40", "2001:db8:100::c000:201"],
+    48 => ["2001:db8:102::/48", "2001:db8:102::c000:201"],
+    56 => ["2001:db8:102:300::/56", "2001:db8:102:300::c000:201"],
+    64 => ["2001:db8:102:300::/64", "2001:db8:102:300::c000:201"],
+    96 => ["2001:db8:102:300:400:500::/96", "2001:db8:102:300:400:500:c000:201"],
+  }.freeze
+
+  def test_standard_address_vectors_for_every_allowed_prefix_length
+    RFC6052_VECTORS.each do |prefix_length, (prefix, synthesized)|
+      translator = IPAddr::RFC6052.new(prefix)
+      mapped = translator.translate(IPAddr.new("192.0.2.1"))
+
+      assert_equal(synthesized, mapped.to_s)
+      assert_equal(128, mapped.prefix)
+      assert_equal("192.0.2.1", translator.translate(mapped).to_s)
+      assert_equal(32, translator.translate(mapped).prefix)
+    end
+  end
+
+  def test_well_known_prefix_is_default
+    translator = IPAddr::RFC6052.new
+
+    assert_equal("64:ff9b::/96", translator.prefix.cidr)
+    assert_equal(96, translator.prefix_length)
+    assert_equal("64:ff9b::c000:201",
+                 translator.translate("192.0.2.1").to_s)
+    assert_equal("198.51.100.2",
+                 translator.translate("64:ff9b::c633:6402").to_s)
+    assert_equal(translator, IPAddr::NAT64.new)
+  end
+
+  def test_only_standard_prefix_lengths_are_allowed
+    [0, 31, 41, 65, 95, 97, 127, 128].each do |prefix_length|
+      assert_raise(IPAddr::RFC6052::InvalidPrefixError) do
+        IPAddr::RFC6052.new("2001:db8::/#{prefix_length}")
+      end
+    end
+  end
+
+  def test_prefix_must_be_ipv6_and_canonical
+    assert_raise(IPAddr::AddressFamilyError) do
+      IPAddr::RFC6052.new("192.0.2.0/24")
+    end
+    assert_raise(TypeError) do
+      IPAddr::RFC6052.new(0x64ff9b00000000000000000000000000)
+    end
+  end
+
+  def test_reverse_translation_checks_configured_prefix
+    translator = IPAddr::RFC6052.new("2001:db8:1:2:3::/96")
+
+    assert_equal("192.0.2.1",
+                 translator.translate("2001:db8:1:2:3::c000:201").to_s)
+    assert_raise(IPAddr::RFC6052::NotMappedError) do
+      translator.translate("64:ff9b::192.0.2.1")
+    end
+  end
+
+  def test_reverse_translation_checks_reserved_zero_positions
+    wkp = IPAddr::RFC6052.new("64:ff9b::/96")
+
+    assert_raise(IPAddr::RFC6052::NotMappedError) do
+      wkp.to_ipv4(IPAddr.new("64:ff9b::1:192.0.2.1"))
+    end
+    assert_raise(IPAddr::RFC6052::NotMappedError) do
+      wkp.to_ipv4(IPAddr.new("64:ff9b:1::192.0.2.1"))
+    end
+
+    translator = IPAddr::RFC6052.new("2001:db8::/32")
+    assert_equal("192.0.2.1",
+                 translator.translate("2001:db8::c000:201").to_s)
+    assert_raise(IPAddr::RFC6052::NotMappedError) do
+      translator.translate("2001:db8:0:1::c000:201")
+    end
+    assert_raise(IPAddr::RFC6052::NotMappedError) do
+      translator.translate("2001:db8::1:c000:201")
+    end
+  end
+
+  def test_last_four_bytes_are_not_enough_for_reverse_translation
+    translator = IPAddr::RFC6052.new("64:ff9b::/96")
+
+    assert_raise(IPAddr::RFC6052::NotMappedError) do
+      translator.translate("2001:db8::c000:201")
+    end
+    assert_equal(IPAddr.new("192.0.2.1"),
+                 IPAddr.new("::ffff:192.0.2.1").native)
+  end
+
+  def test_ipv4_network_translation_has_exact_prefix
+    translator = IPAddr::RFC6052.new
+
+    [
+      ["0.0.0.0/0", "64:ff9b::/96"],
+      ["128.0.0.0/1", "64:ff9b::8000:0/97"],
+      ["192.0.2.0/24", "64:ff9b::c000:200/120"],
+      ["192.0.2.0/31", "64:ff9b::c000:200/127"],
+      ["192.0.2.1/32", "64:ff9b::c000:201/128"],
+    ].each do |ipv4_network, ipv6_network|
+      mapped = translator.translate(IPAddr.new(ipv4_network))
+
+      assert_equal(ipv6_network, mapped.cidr)
+      assert_equal(ipv4_network, translator.translate(mapped).cidr)
+    end
+  end
+
+  def test_network_translation_for_short_deployment_prefixes
+    translator = IPAddr::RFC6052.new("2001:db8::/64")
+    network = translator.translate(IPAddr.new("192.0.2.0/24"))
+
+    assert_equal("2001:db8::c000:200/120", network.cidr)
+    assert_equal("192.0.2.0/24", translator.translate(network).cidr)
+    assert_equal("0.0.0.0/0",
+                 translator.translate(IPAddr.new("2001:db8::/96")).cidr)
+
+    assert_raise(IPAddr::RFC6052::NotMappedError) do
+      translator.translate(IPAddr.new("2001:db8::/64"))
+    end
+    assert_raise(IPAddr::RFC6052::NotMappedError) do
+      translator.translate(IPAddr.new("2001:db8::/65"))
+    end
+  end
+
+  def test_reverse_network_prefixes_must_be_aligned
+    translator = IPAddr::RFC6052.new("64:ff9b::/96")
+
+    assert_equal("192.0.2.0/24",
+                 translator.translate(
+                   IPAddr.new("64:ff9b::c000:200/120")
+                 ).cidr)
+    assert_equal("0.0.0.0/4",
+                 translator.translate(IPAddr.new("64:ff9b::/100")).cidr)
+  end
+
+  def test_range_translation_returns_exact_prefix_set
+    translator = IPAddr::RFC6052.new
+
+    prefixes = translator.translate_prefixes(
+      IPAddr.new("192.0.2.0")..IPAddr.new("192.0.2.3")
+    ).map(&:cidr)
+    assert_equal(["64:ff9b::c000:200/126"], prefixes)
+
+    prefixes = translator.translate_prefixes(
+      IPAddr.new("192.0.2.1")..IPAddr.new("192.0.2.4")
+    ).map(&:cidr)
+    assert_equal([
+      "64:ff9b::c000:201/128",
+      "64:ff9b::c000:202/127",
+      "64:ff9b::c000:204/128",
+    ], prefixes)
+
+    assert_equal("64:ff9b::c000:200/126",
+                 translator.translate_prefix(
+                   IPAddr.new("192.0.2.0")...IPAddr.new("192.0.2.4")
+                 ).cidr)
+    assert_raise(IPAddr::RFC6052::MultiplePrefixesError) do
+      translator.translate_prefix(
+        IPAddr.new("192.0.2.1")..IPAddr.new("192.0.2.4")
+      )
+    end
+    assert_raise(IPAddr::RFC6052::NotMappedError) do
+      translator.translate_prefixes(
+        IPAddr.new("192.0.2.0")...IPAddr.new("192.0.2.0")
+      )
+    end
+  end
 end
