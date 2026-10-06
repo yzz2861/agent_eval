@@ -3,8 +3,8 @@ Hamster
 
 Efficient, immutable, and thread-safe collection classes for Ruby.
 
-Hamster provides 6 [Persistent Data
-Structures][PDS]: {Hamster::Hash Hash}, {Hamster::Vector Vector}, {Hamster::Set Set}, {Hamster::SortedSet SortedSet}, {Hamster::List List}, and {Hamster::Deque Deque} (which works as an immutable queue or stack).
+Hamster provides 7 [Persistent Data
+Structures][PDS]: {Hamster::Hash Hash}, {Hamster::BiMap BiMap}, {Hamster::Vector Vector}, {Hamster::Set Set}, {Hamster::SortedSet SortedSet}, {Hamster::List List}, and {Hamster::Deque Deque} (which works as an immutable queue or stack).
 
 Hamster collections are **immutable**. Whenever you modify a Hamster
 collection, the original is preserved and a modified copy is returned. This
@@ -43,6 +43,7 @@ Or if you prefer to only pull in certain collection types:
 
 ``` ruby
 require "hamster/hash"
+require "hamster/bi_map"
 require "hamster/vector"
 require "hamster/set"
 require "hamster/sorted_set"
@@ -101,6 +102,22 @@ counters.put(:odds, &:next)         # => {:odds => 1, :evens => 0}
 ```
 
 This is just the beginning; see the {Hamster::Hash API documentation} for details on all `Hash` methods.
+
+
+<h2>BiMap <span style="font-size:0.7em">({Hamster::BiMap API Documentation})</span></h2>
+
+A `BiMap` keeps a one-to-one mapping and supports lookup from either side:
+
+``` ruby
+users = Hamster::BiMap["alice" => 1, "bob" => 2]
+users["alice"]          # => 1
+users.inverse[2]         # => "bob"
+
+swapped = users.put_all([["alice", 2], ["bob", 1]])
+swapped.inverse[1]       # => "bob"
+```
+
+A normal `put` raises `Hamster::BiMap::DuplicateValueError` if another key already owns the value. Use `force_put` to replace that relationship explicitly. `inverse` returns a view sharing the same storage, and `inverse.inverse` returns the original map.
 
 
 <h2>Vector <span style="font-size:0.7em">({Hamster::Vector API Documentation})</span></h2>

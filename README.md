@@ -15,8 +15,8 @@ Hamster
 
 Efficient, immutable, and thread-safe collection classes for Ruby.
 
-Hamster provides 6 [Persistent Data
-Structures][PDS]: [`Hash`][HASH-DOC], [`Vector`][VECTOR-DOC], [`Set`][SET-DOC], [`SortedSet`][SORTED-SET-DOC], [`List`][LIST-DOC], and [`Deque`][DEQUE-DOC] (which works as an immutable queue or stack).
+Hamster provides 7 [Persistent Data
+Structures][PDS]: [`Hash`][HASH-DOC], [`BiMap`][BIMAP-DOC], [`Vector`][VECTOR-DOC], [`Set`][SET-DOC], [`SortedSet`][SORTED-SET-DOC], [`List`][LIST-DOC], and [`Deque`][DEQUE-DOC] (which works as an immutable queue or stack).
 
 Hamster collections are **immutable**. Whenever you modify a Hamster
 collection, the original is preserved and a modified copy is returned. This
@@ -41,6 +41,7 @@ process "infinitely large" lists.
 
 [PDS]: http://en.wikipedia.org/wiki/Persistent_data_structure
 [HASH-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/Hash
+[BIMAP-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/BiMap
 [SET-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/Set
 [VECTOR-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/Vector
 [LIST-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/List
@@ -61,6 +62,7 @@ Or if you prefer to only pull in certain collection types:
 
 ``` ruby
 require "hamster/hash"
+require "hamster/bi_map"
 require "hamster/vector"
 require "hamster/set"
 require "hamster/sorted_set"
@@ -120,6 +122,22 @@ counters.put(:odds, &:next)         # => {:odds => 1, :evens => 0}
 ```
 
 This is just the beginning; see the [API documentation][HASH-DOC] for details on all `Hash` methods.
+
+
+<h2>BiMap <span style="font-size:0.7em">(<a href="http://rubydoc.info/github/hamstergem/hamster/master/Hamster/BiMap">API Documentation</a>)</span></h2>
+
+A `BiMap` keeps a one-to-one mapping and supports lookup from either side:
+
+``` ruby
+users = Hamster::BiMap["alice" => 1, "bob" => 2]
+users["alice"]          # => 1
+users.inverse[2]         # => "bob"
+
+swapped = users.put_all([["alice", 2], ["bob", 1]])
+swapped.inverse[1]       # => "bob"
+```
+
+A normal `put` raises `Hamster::BiMap::DuplicateValueError` if another key already owns the value. Use `force_put` to replace that relationship explicitly. `inverse` returns a view sharing the same storage, and `inverse.inverse` returns the original map.
 
 
 <h2>Vector <span style="font-size:0.7em">(<a href="http://rubydoc.info/github/hamstergem/hamster/master/Hamster/Vector">API Documentation</a>)</span></h2>

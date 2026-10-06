@@ -4,6 +4,7 @@ CodeClimate::TestReporter.start
 require "pry"
 require "rspec"
 require "hamster/hash"
+require "hamster/bi_map"
 require "hamster/set"
 require "hamster/vector"
 require "hamster/sorted_set"
