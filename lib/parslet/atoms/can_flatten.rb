@@ -76,6 +76,7 @@ module Parslet::Atoms
 
       # Maybe classes are not equal, but both are stringlike?
       if l.respond_to?(:to_str) && r.respond_to?(:to_str)
+        return l + r if l.respond_to?(:to_slice) && r.respond_to?(:to_slice)
         # if we're merging a String with a Slice, the slice wins. 
         return r if r.respond_to? :to_slice
         return l if l.respond_to? :to_slice

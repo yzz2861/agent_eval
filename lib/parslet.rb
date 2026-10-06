@@ -169,6 +169,23 @@ module Parslet
     Atoms::Re.new('.')
   end
   module_function :any
+
+  # Returns an atom matching one lexical token. When +type+ is given, it must
+  # match the token type using Ruby's +#===+ operator. The optional block is
+  # called with the token value and may also inspect the token itself.
+  #
+  #   token(:identifier)
+  #   token(:number) { |value| value > 0 }
+  #   token { |value, token| token.type == :keyword && value == 'if' }
+  #
+  # Parse a token stream together with its original source text:
+  #
+  #   parser.parse(tokens, source: source)
+  #
+  def token(type=nil, &condition)
+    Atoms::Token.new(type, &condition)
+  end
+  module_function :token
   
   # Introduces a new capture scope. This means that all old captures stay
   # accessible, but new values stored will only be available during the block
@@ -300,8 +317,10 @@ module Parslet
 end
 
 require 'parslet/slice'
+require 'parslet/token'
 require 'parslet/cause'
 require 'parslet/source'
+require 'parslet/source/token_source'
 require 'parslet/atoms'
 require 'parslet/pattern'
 require 'parslet/pattern/binding'

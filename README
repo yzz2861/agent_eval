@@ -51,6 +51,25 @@ SYNOPSIS
   # and then
   Smalltalk.new.parse('smalltalk')
 
+  # parslet can also consume tokens produced by a separate lexer
+  source = '漢字 = 42'
+  tokens = [
+    [:identifier, '漢字', 0...6],
+    [:keyword, '=', 7...8],
+    [:number, 42, 9...11]
+  ]
+
+  parser = token(:identifier).as(:name) >>
+    token(:keyword) { |value| value == '=' } >>
+    token(:number) { |value| value > 0 }.as(:value)
+  parser.parse(tokens, source: source)
+
+  # Token ranges are byte offsets into the original source. Pass the source
+  # so slices and error line/column information point at the original text.
+  # Whitespace and comments can be skipped by the lexer; ranges keep their
+  # source positions. Ranges must be ordered, non-empty, non-overlapping and
+  # inside the source.
+
 FEATURES
 
   * Tools for every part of the parser chain

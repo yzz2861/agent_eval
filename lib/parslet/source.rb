@@ -90,7 +90,7 @@ module Parslet
     # given by #pos. 
     #
     def line_and_column(position=nil)
-      @line_cache.line_and_column(position || self.bytepos)
+      @line_cache.line_and_column(position || self.bytepos, @str.string)
     end
   end
 end

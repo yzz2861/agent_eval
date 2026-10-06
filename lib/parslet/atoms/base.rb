@@ -15,7 +15,8 @@ class Parslet::Atoms::Base
   # and return a result. If the parse fails, a Parslet::ParseFailed exception
   # will be thrown. 
   #
-  # @param io [String, Source] input for the parse process
+  # @param io [String, Source, Array] input for the parse process
+  # @option options [String] :source Original source text when parsing tokens.
   # @option options [Parslet::ErrorReporter] :reporter error reporter to use, 
   #   defaults to Parslet::ErrorReporter::Tree 
   # @option options [Boolean] :prefix Should a prefix match be accepted? 
@@ -24,9 +25,14 @@ class Parslet::Atoms::Base
   #   tree
   #
   def parse(io, options={})
-    source = io.respond_to?(:line_and_column) ? 
-      io : 
+    source = if options[:tokens] || io.is_a?(Array)
+      tokens = options[:tokens] || io
+      Parslet::TokenSource.new(tokens, options[:source])
+    elsif io.respond_to?(:line_and_column)
+      io
+    else
       Parslet::Source.new(io)
+    end
 
     # Try to cheat. Assuming that we'll be able to parse the input, don't 
     # run error reporting code. 

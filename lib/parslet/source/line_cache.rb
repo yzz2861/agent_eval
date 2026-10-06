@@ -16,7 +16,7 @@ class Parslet::Source
     # Returns a <line, column> tuple for the given input position. Input
     # position must be given as byte offset into original string. 
     #
-    def line_and_column(pos)
+    def line_and_column(pos, source=nil)
       pos = pos.bytepos if pos.respond_to? :bytepos
       eol_idx = @line_ends.lbound(pos)
 
@@ -24,12 +24,12 @@ class Parslet::Source
         # eol_idx points to the offset that ends the current line.
         # Let's try to find the offset that starts it: 
         offset = eol_idx>0 && @line_ends[eol_idx-1] || 0
-        return [eol_idx+1, pos-offset+1]
+        return [eol_idx+1, character_column(source, offset, pos)]
       else
         # eol_idx is nil, that means that we're beyond the last line end that
         # we know about. Pretend for now that we're just on the last line.
         offset = @line_ends.last || 0
-        return [@line_ends.size+1, pos-offset+1]
+        return [@line_ends.size+1, character_column(source, offset, pos)]
       end
     end
 
@@ -52,6 +52,13 @@ class Parslet::Source
         @last_line_end = start_pos + buf.pos
         @line_ends << @last_line_end
       end
+    end
+
+  private
+
+    def character_column(source, line_start, pos)
+      return pos - line_start + 1 unless source
+      source.byteslice(line_start, pos - line_start).length + 1
     end
   end
 

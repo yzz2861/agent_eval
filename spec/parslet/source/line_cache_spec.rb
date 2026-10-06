@@ -70,5 +70,11 @@ describe Parslet::Source::LineCache do
       end
     end
   end
-end
 
+  it "counts multibyte columns as characters when source is available" do
+    cache = described_class.new
+    cache.scan_for_line_endings(0, "漢字 x")
+
+    cache.line_and_column(6, "漢字 x").should == [1, 3]
+  end
+end
