@@ -57,6 +57,15 @@ describe Parslet::Source do
         source.chars_until("\n").should == 100
       end
     end
+    describe "<- #string" do
+      it "returns the entire original input" do
+        source.string.should == str
+      end
+      it "is unaffected by the parse position" do
+        source.consume(50)
+        source.string.should == str
+      end
+    end
     describe "<- #column & #line" do
       subject { source.line_and_column }
   

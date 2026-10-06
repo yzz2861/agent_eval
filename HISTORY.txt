@@ -4,6 +4,11 @@
   We're in maintenance mode! The community is really stepping up here though, sending
   interesting additions our way. Here's what has been merged this far: 
 
+  + Indentation sensitive layout support (Parslet::Layout): composable
+    enter/same/exit layout events for grammars, with blank line and comment
+    skipping, bracket-suspended layout, tab policies and backtracking-safe
+    layout state. See example/indented_config.rb.
+
   + Specification for mixing parslet parsers (Artur Komarov).
 
   + Update to Github Actions CI/CD. I guess newer is better? (Matt Larraz).

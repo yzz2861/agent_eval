@@ -85,6 +85,15 @@ module Parslet
     rescue RangeError
     end
 
+    # Returns the entire wrapped input string, regardless of the current 
+    # parse position. Useful for atoms that need to look at the input 
+    # outside of the current position, like indentation sensitive layout 
+    # analysis (see Parslet::Layout). 
+    #
+    def string
+      @str.string
+    end
+
     # Returns a <line, column> tuple for the given position. If no position is
     # given, line/column information is returned for the current position
     # given by #pos. 

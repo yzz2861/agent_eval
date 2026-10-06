@@ -1,0 +1,5 @@
+{"server" =>
+  {"host" => "example.com",
+   "ports" => [80, 443],
+   "options" => {"retry" => 3, "tags" => ["alpha", "beta"]}},
+ "db" => {"host" => "localhost", "port" => 5432}}

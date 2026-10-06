@@ -77,6 +77,15 @@ module Parslet::Atoms
     #   context.captures[:foobar] # => returns capture :foobar
     #
     attr_reader :captures
+
+    # Drops all cached parse results. Atoms that carry their own state
+    # (like the indentation stack of Parslet::Layout) must call this when
+    # their state changes, since cached results computed under the old
+    # state would otherwise be reused incorrectly.
+    #
+    def reset_cache!
+      @cache.clear
+    end
     
     # Starts a new scope. Use the #scope method of Parslet::Atoms::DSL
     # to call this. 
