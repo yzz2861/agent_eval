@@ -78,6 +78,11 @@ module MessagePack
     # * *:optimized_symbols_parsing* specify true to use the optimized symbols parsing (not supported on JRuby now)
     # * *recursive* specify true to receive the packer or unpacker as argument to generate the extension body manually.
     #
+    # Unpackers created by the factory accept +ordered_maps: true+ to decode maps as
+    # MessagePack::Map. The ordered container preserves duplicate and composite keys;
+    # call MessagePack::Map#to_h with +:first+, +:last+, or +:raise+ to choose how
+    # conflicts are represented in an ordinary Hash.
+    #
     def register_type(type, klass, options={})
     end
 

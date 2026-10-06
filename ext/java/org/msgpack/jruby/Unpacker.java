@@ -35,6 +35,8 @@ public class Unpacker extends RubyObject {
   private final RubyClass underflowErrorClass;
   private boolean symbolizeKeys;
   private boolean freeze;
+  private boolean orderedMaps;
+  private IRubyObject mapClass;
   private boolean allowUnknownExt;
 
   public Unpacker(Ruby runtime, RubyClass type) {
@@ -60,6 +62,8 @@ public class Unpacker extends RubyObject {
     symbolizeKeys = false;
     allowUnknownExt = false;
     freeze = false;
+    orderedMaps = false;
+    mapClass = runtime.getNil();
 
     IRubyObject io = null;
     RubyHash options = null;
@@ -85,6 +89,20 @@ public class Unpacker extends RubyObject {
       IRubyObject f = options.fastARef(runtime.newSymbol("freeze"));
       if (f != null) {
         freeze = f.isTrue();
+      }
+      IRubyObject om = options.fastARef(runtime.newSymbol("ordered_maps"));
+      if (om != null) {
+        orderedMaps = om.isTrue();
+      }
+      IRubyObject mapClass = options.fastARef(runtime.newSymbol("map_class"));
+      if (mapClass != null && !mapClass.isNil()) {
+        IRubyObject expectedMapClass = runtime.getModule("MessagePack").getClass("Map");
+        IRubyObject inheritance = mapClass.callMethod(ctx, "<=", expectedMapClass);
+        if (!inheritance.isTrue()) {
+          throw runtime.newArgumentError("map_class only supports MessagePack::Map");
+        }
+        orderedMaps = true;
+        this.mapClass = mapClass;
       }
       IRubyObject au = options.fastARef(runtime.newSymbol("allow_unknown_ext"));
       if (au != null) {
@@ -114,6 +132,11 @@ public class Unpacker extends RubyObject {
   @JRubyMethod(name = "freeze?")
   public IRubyObject isFreeze(ThreadContext ctx) {
     return freeze ? ctx.runtime.getTrue() : ctx.runtime.getFalse();
+  }
+
+  @JRubyMethod(name = "ordered_maps?")
+  public IRubyObject isOrderedMaps(ThreadContext ctx) {
+    return orderedMaps ? ctx.runtime.getTrue() : ctx.runtime.getFalse();
   }
 
   @JRubyMethod(name = "allow_unknown_ext?")
@@ -160,7 +183,7 @@ public class Unpacker extends RubyObject {
     if (limit == -1) {
       limit = byteList.length() - offset;
     }
-    Decoder decoder = new Decoder(ctx.runtime, this, byteList.unsafeBytes(), byteList.begin() + offset, limit, symbolizeKeys, freeze, allowUnknownExt);
+    Decoder decoder = new Decoder(ctx.runtime, this, byteList.unsafeBytes(), byteList.begin() + offset, limit, symbolizeKeys, freeze, orderedMaps, mapClass, allowUnknownExt);
     try {
       data = null;
       data = decoder.next();
@@ -190,7 +213,7 @@ public class Unpacker extends RubyObject {
   public IRubyObject feed(ThreadContext ctx, IRubyObject data) {
     ByteList byteList = data.asString().getByteList();
     if (decoder == null) {
-      decoder = new Decoder(ctx.runtime, this, byteList.unsafeBytes(), byteList.begin(), byteList.length(), symbolizeKeys, freeze, allowUnknownExt);
+      decoder = new Decoder(ctx.runtime, this, byteList.unsafeBytes(), byteList.begin(), byteList.length(), symbolizeKeys, freeze, orderedMaps, mapClass, allowUnknownExt);
     } else {
       decoder.feed(byteList.unsafeBytes(), byteList.begin(), byteList.length());
     }
@@ -326,7 +349,7 @@ public class Unpacker extends RubyObject {
     ByteList byteList = str.getByteList();
     this.stream = stream;
     this.decoder = null;
-    this.decoder = new Decoder(ctx.runtime, this, byteList.unsafeBytes(), byteList.begin(), byteList.length(), symbolizeKeys, freeze, allowUnknownExt);
+    this.decoder = new Decoder(ctx.runtime, this, byteList.unsafeBytes(), byteList.begin(), byteList.length(), symbolizeKeys, freeze, orderedMaps, mapClass, allowUnknownExt);
     return getStream(ctx);
   }
 

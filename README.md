@@ -111,6 +111,24 @@ end
 
 See [API reference](http://ruby.msgpack.org/MessagePack/Unpacker.html) for details.
 
+### Preserving duplicate map keys
+
+MessagePack maps are sequences of key-value pairs. Ruby hashes cannot represent every
+valid sequence because duplicate keys collapse to one entry. Pass `ordered_maps: true`
+to decode maps as `MessagePack::Map`, which also preserves distinct key identities such
+as `1` and `1.0` instead of relying on Hash construction:
+
+```ruby
+factory = MessagePack::Factory.new
+payload = factory.dump(MessagePack::Map.new([["a", 1], ["a", 2], [1, :int], [1.0, :float]]))
+map = factory.load(payload, ordered_maps: true)
+map.pairs # => [["a", 1], ["a", 2], [1, :int], [1.0, :float]]
+map.to_h(:last)
+```
+
+Converting to a `Hash` requires an explicit conflict strategy: `:first`, `:last`, or
+`:raise`. `MessagePack::Map` encodes back to a MessagePack map without collapsing entries.
+
 ## Serializing and deserializing symbols
 
 By default, symbols are serialized as strings:

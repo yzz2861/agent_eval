@@ -66,6 +66,22 @@ static int16_t INITIAL_BUFFER_CAPACITY_MAX = SHRT_MAX;
 
 static msgpack_rmem_t s_stack_rmem;
 
+static VALUE MessagePack_Map_class(void)
+{
+    VALUE message_pack = rb_const_get_at(rb_cObject, rb_intern("MessagePack"));
+    return rb_const_get_at(message_pack, rb_intern("Map"));
+}
+
+static inline VALUE MessagePack_Map_new(void)
+{
+    return rb_funcall(MessagePack_Map_class(), rb_intern("new"), 0);
+}
+
+static inline void MessagePack_Map_add(VALUE map, VALUE key, VALUE value)
+{
+    rb_funcall(map, rb_intern("add"), 2, key, value);
+}
+
 #if !defined(HAVE_RB_HASH_NEW_CAPA)
 static inline VALUE rb_hash_new_capa_inline(long capa)
 {
@@ -125,6 +141,7 @@ void _msgpack_unpacker_init(msgpack_unpacker_t* uk)
 
     uk->last_object = Qnil;
     uk->reading_raw = Qnil;
+    uk->map_class = Qnil;
 }
 
 void _msgpack_unpacker_destroy(msgpack_unpacker_t* uk)
@@ -155,6 +172,7 @@ void msgpack_unpacker_mark(msgpack_unpacker_t* uk)
 {
     rb_gc_mark(uk->last_object);
     rb_gc_mark(uk->reading_raw);
+    rb_gc_mark(uk->map_class);
     msgpack_unpacker_mark_stack(&uk->stack);
     msgpack_unpacker_mark_key_cache(&uk->key_cache);
     /* See MessagePack_Buffer_wrap */
@@ -204,7 +222,11 @@ static inline void reset_head_byte(msgpack_unpacker_t* uk)
 static inline int object_complete(msgpack_unpacker_t* uk, VALUE object)
 {
     if(uk->freeze) {
-        rb_obj_freeze(object);
+        if(rb_obj_is_kind_of(object, MessagePack_Map_class())) {
+            rb_funcall(object, rb_intern("freeze"), 0);
+        } else {
+            rb_obj_freeze(object);
+        }
     }
 
     uk->last_object = object;
@@ -325,11 +347,27 @@ static inline bool is_reading_map_key(msgpack_unpacker_t* uk)
 {
     if(uk->stack.depth > 0) {
         msgpack_unpacker_stack_entry_t* top = _msgpack_unpacker_stack_entry_top(uk);
-        if(top->type == STACK_TYPE_MAP_KEY) {
+        if(top->type == STACK_TYPE_MAP_KEY || top->type == STACK_TYPE_ORDERED_MAP_KEY) {
             return true;
         }
     }
     return false;
+}
+
+static inline VALUE new_map_object(msgpack_unpacker_t* uk, size_t count)
+{
+    if(uk->map_class_set) {
+        return rb_funcall(uk->map_class, rb_intern("new"), 0);
+    }
+    if(uk->ordered_maps) {
+        return MessagePack_Map_new();
+    }
+    return rb_hash_new_capa(initial_buffer_size(count));
+}
+
+static inline enum stack_type_t map_key_stack_type(msgpack_unpacker_t* uk)
+{
+    return (uk->ordered_maps || uk->map_class_set) ? STACK_TYPE_ORDERED_MAP_KEY : STACK_TYPE_MAP_KEY;
 }
 
 static int read_raw_body_cont(msgpack_unpacker_t* uk)
@@ -415,8 +453,10 @@ static inline int read_raw_body_begin(msgpack_unpacker_t* uk, int raw_type)
             VALUE symbol = msgpack_buffer_read_top_as_symbol(UNPACKER_BUFFER_(uk), length, raw_type != RAW_TYPE_BINARY);
             ret = object_complete_frozen(uk, symbol);
         } else if (is_reading_map_key(uk) && raw_type == RAW_TYPE_STRING) {
-           /* don't use zerocopy for hash keys but get a frozen string directly
-            * because rb_hash_aset freezes keys and it causes copying */
+            msgpack_unpacker_stack_entry_t* map_top = _msgpack_unpacker_stack_entry_top(uk);
+            bool ordered_map = map_top->type == STACK_TYPE_ORDERED_MAP_KEY;
+            /* don't use zerocopy for hash keys but get a frozen string directly
+             * because rb_hash_aset freezes keys and it causes copying */
             VALUE key;
             if (uk->symbolize_keys) {
                 if (uk->use_key_cache) {
@@ -425,8 +465,11 @@ static inline int read_raw_body_begin(msgpack_unpacker_t* uk, int raw_type)
                     key = msgpack_buffer_read_top_as_symbol(UNPACKER_BUFFER_(uk), length, true);
                 }
                 ret = object_complete_frozen(uk, key);
+            } else if (ordered_map && !uk->freeze) {
+                key = msgpack_buffer_read_top_as_string(UNPACKER_BUFFER_(uk), length, false, true);
+                ret = object_complete(uk, key);
             } else {
-                if (uk->use_key_cache) {
+                if (uk->use_key_cache && (!ordered_map || uk->freeze)) {
                     key = msgpack_buffer_read_top_as_interned_string(UNPACKER_BUFFER_(uk), &uk->key_cache, length);
                 } else {
                     key = msgpack_buffer_read_top_as_string(UNPACKER_BUFFER_(uk), length, true, true);
@@ -486,9 +529,9 @@ static int read_primitive(msgpack_unpacker_t* uk)
     SWITCH_RANGE(b, 0x80, 0x8f)  // FixMap
         int count = b & 0x0f;
         if(count == 0) {
-            return object_complete(uk, rb_hash_new());
+            return object_complete(uk, new_map_object(uk, count));
         }
-        return _msgpack_unpacker_stack_push(uk, STACK_TYPE_MAP_KEY, count*2, rb_hash_new_capa(initial_buffer_size(count)));
+        return _msgpack_unpacker_stack_push(uk, map_key_stack_type(uk), count*2, new_map_object(uk, count));
 
     SWITCH_RANGE(b, 0xc0, 0xdf)  // Variable
         switch(b) {
@@ -729,9 +772,9 @@ static int read_primitive(msgpack_unpacker_t* uk)
                 READ_CAST_BLOCK_OR_RETURN_EOF(cb, uk, 2);
                 size_t count = _msgpack_be16(cb.u16);
                 if(count == 0) {
-                    return object_complete(uk, rb_hash_new());
+                    return object_complete(uk, new_map_object(uk, count));
                 }
-                return _msgpack_unpacker_stack_push(uk, STACK_TYPE_MAP_KEY, count*2, rb_hash_new_capa(initial_buffer_size(count)));
+                return _msgpack_unpacker_stack_push(uk, map_key_stack_type(uk), count*2, new_map_object(uk, count));
             }
 
         case 0xdf:  // map 32
@@ -739,9 +782,9 @@ static int read_primitive(msgpack_unpacker_t* uk)
                 READ_CAST_BLOCK_OR_RETURN_EOF(cb, uk, 4);
                 size_t count = _msgpack_be32(cb.u32);
                 if(count == 0) {
-                    return object_complete(uk, rb_hash_new());
+                    return object_complete(uk, new_map_object(uk, count));
                 }
-                return _msgpack_unpacker_stack_push(uk, STACK_TYPE_MAP_KEY, count*2, rb_hash_new_capa(initial_buffer_size(count)));
+                return _msgpack_unpacker_stack_push(uk, map_key_stack_type(uk), count*2, new_map_object(uk, count));
             }
 
         default:
@@ -844,6 +887,10 @@ int msgpack_unpacker_read(msgpack_unpacker_t* uk, size_t target_stack_depth)
                 top->key = uk->last_object;
                 top->type = STACK_TYPE_MAP_VALUE;
                 break;
+            case STACK_TYPE_ORDERED_MAP_KEY:
+                top->key = uk->last_object;
+                top->type = STACK_TYPE_ORDERED_MAP_VALUE;
+                break;
             case STACK_TYPE_MAP_VALUE:
                 if(uk->symbolize_keys && rb_type(top->key) == T_STRING) {
                     /* here uses rb_str_intern instead of rb_intern so that Ruby VM can GC unused symbols */
@@ -852,6 +899,14 @@ int msgpack_unpacker_read(msgpack_unpacker_t* uk, size_t target_stack_depth)
                     rb_hash_aset(top->object, top->key, uk->last_object);
                 }
                 top->type = STACK_TYPE_MAP_KEY;
+                break;
+            case STACK_TYPE_ORDERED_MAP_VALUE:
+                if(uk->symbolize_keys && rb_type(top->key) == T_STRING) {
+                    top->key = rb_str_intern(top->key);
+                }
+                MessagePack_Map_add(top->object, top->key, uk->last_object);
+                top->key = Qnil;
+                top->type = STACK_TYPE_ORDERED_MAP_KEY;
                 break;
             case STACK_TYPE_RECURSIVE:
                 STACK_FREE(uk);

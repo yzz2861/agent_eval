@@ -21,6 +21,8 @@ module MessagePack
     # * *:symbolize_keys* deserialize keys of Hash objects as Symbol instead of String
     # * *:freeze* freeze the deserialized objects. Can allow string deduplication and some allocation elision.
     # * *:key_cache* Enable caching of map keys, this can improve performance significantly if the same map keys are frequently encountered, but also degrade performance if that's not the case.
+    # * *:ordered_maps* deserialize maps as MessagePack::Map, retaining every key-value pair in protocol order even when keys collide in Ruby Hash semantics.
+    # * *:map_class* currently accepts MessagePack::Map as an explicit alternative to *:ordered_maps*.
     # * *:allow_unknown_ext* allow to deserialize ext type object with unknown type id as ExtensionValue instance. Otherwise (by default), unpacker throws UnknownExtTypeError.
     #
     # See also Buffer#initialize for other options.

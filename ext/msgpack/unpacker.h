@@ -31,6 +31,8 @@ enum stack_type_t {
     STACK_TYPE_ARRAY,
     STACK_TYPE_MAP_KEY,
     STACK_TYPE_MAP_VALUE,
+    STACK_TYPE_ORDERED_MAP_KEY,
+    STACK_TYPE_ORDERED_MAP_VALUE,
     STACK_TYPE_RECURSIVE,
 };
 
@@ -55,6 +57,7 @@ struct msgpack_unpacker_t {
 
     VALUE self;
     VALUE last_object;
+    VALUE map_class;
 
     VALUE reading_raw;
     size_t reading_raw_remaining;
@@ -72,6 +75,8 @@ struct msgpack_unpacker_t {
     bool use_key_cache: 1;
     bool symbolize_keys: 1;
     bool freeze: 1;
+    bool ordered_maps: 1;
+    bool map_class_set: 1;
     bool allow_unknown_ext: 1;
     bool optimized_symbol_ext_type: 1;
 };
@@ -103,6 +108,16 @@ static inline void msgpack_unpacker_set_key_cache(msgpack_unpacker_t* uk, bool e
 static inline void msgpack_unpacker_set_freeze(msgpack_unpacker_t* uk, bool enable)
 {
     uk->freeze = enable;
+}
+
+static inline void msgpack_unpacker_set_ordered_maps(msgpack_unpacker_t* uk, bool enable)
+{
+    uk->ordered_maps = enable;
+}
+
+static inline void msgpack_unpacker_set_map_class_set(msgpack_unpacker_t* uk, bool enable)
+{
+    uk->map_class_set = enable;
 }
 
 static inline void msgpack_unpacker_set_allow_unknown_ext(msgpack_unpacker_t* uk, bool enable)
@@ -142,4 +157,3 @@ int msgpack_unpacker_read_array_header(msgpack_unpacker_t* uk, uint32_t* result_
 int msgpack_unpacker_read_map_header(msgpack_unpacker_t* uk, uint32_t* result_size);
 
 #endif
-
