@@ -28,6 +28,7 @@ require_relative 'psych/json/tree_builder'
 require_relative 'psych/json/stream'
 require_relative 'psych/handlers/document_stream'
 require_relative 'psych/class_loader'
+require_relative 'psych/alias_expander'
 
 ###
 # = Overview
@@ -265,13 +266,23 @@ module Psych
   #
   # Raises a TypeError when `yaml` parameter is NilClass
   #
+  # Aliases are loaded as shared references by default, so two aliases to
+  # the same anchor deserialize to the same Ruby object.  Passing
+  # <tt>aliases: :expand</tt> expands every alias into an independent,
+  # deep copy of the anchored value instead.  Expansion is bounded by
+  # +max_expanded_nodes+ and +max_expanded_string_bytes+, and aliases that
+  # would expand along their own expansion path raise Psych::CircularAlias.
+  #
   # NOTE: This method *should not* be used to parse untrusted documents, such as
   # YAML documents that are supplied via user input.  Instead, please use the
   # load method or the safe_load method.
   #
-  def self.unsafe_load yaml, filename: nil, fallback: false, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true
+  def self.unsafe_load yaml, filename: nil, fallback: false, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true, aliases: true, max_expanded_nodes: AliasExpander::DEFAULT_MAX_NODES, max_expanded_string_bytes: AliasExpander::DEFAULT_MAX_STRING_BYTES
     result = parse(yaml, filename: filename)
     return fallback unless result
+    if aliases == :expand
+      result = AliasExpander.expand(result, max_nodes: max_expanded_nodes, max_string_bytes: max_expanded_string_bytes)
+    end
     result.to_ruby(symbolize_names: symbolize_names, freeze: freeze, strict_integer: strict_integer, parse_symbols: parse_symbols)
   end
 
@@ -305,6 +316,16 @@ module Psych
   #   Psych.safe_load yaml               # => raises an exception
   #   Psych.safe_load yaml, aliases: true # => loads the aliases
   #
+  # Passing <tt>aliases: :expand</tt> instead expands every alias into an
+  # independent, deep copy of the anchored value, so the loaded objects are
+  # never shared between alias sites.  Expansion is performed on the parse
+  # tree before any Ruby objects are constructed and is bounded by the
+  # +max_expanded_nodes+ and +max_expanded_string_bytes+ keyword arguments,
+  # which limit the number of nodes and the total string bytes produced by
+  # alias expansion.  Aliases that would expand along their own expansion
+  # path raise Psych::CircularAlias.  Merge keys are expanded by the same
+  # rules, and the +permitted_classes+ restrictions are unchanged.
+  #
   # A Psych::DisallowedClass exception will be raised if the yaml contains a
   # class that isn't in the +permitted_classes+ list.
   #
@@ -320,9 +341,13 @@ module Psych
   #   Psych.safe_load("---\n foo: bar")                         # => {"foo"=>"bar"}
   #   Psych.safe_load("---\n foo: bar", symbolize_names: true)  # => {:foo=>"bar"}
   #
-  def self.safe_load yaml, permitted_classes: [], permitted_symbols: [], aliases: false, filename: nil, fallback: nil, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true
+  def self.safe_load yaml, permitted_classes: [], permitted_symbols: [], aliases: false, filename: nil, fallback: nil, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true, max_expanded_nodes: AliasExpander::DEFAULT_MAX_NODES, max_expanded_string_bytes: AliasExpander::DEFAULT_MAX_STRING_BYTES
     result = parse(yaml, filename: filename)
     return fallback unless result
+
+    if aliases == :expand
+      result = AliasExpander.expand(result, max_nodes: max_expanded_nodes, max_string_bytes: max_expanded_string_bytes)
+    end
 
     class_loader = ClassLoader::Restricted.new(permitted_classes.map(&:to_s),
                                                permitted_symbols.map(&:to_s))
@@ -366,7 +391,7 @@ module Psych
   # Raises a TypeError when `yaml` parameter is NilClass.  This method is
   # similar to `safe_load` except that `Symbol` objects are allowed by default.
   #
-  def self.load yaml, permitted_classes: [Symbol], permitted_symbols: [], aliases: false, filename: nil, fallback: nil, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true
+  def self.load yaml, permitted_classes: [Symbol], permitted_symbols: [], aliases: false, filename: nil, fallback: nil, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true, max_expanded_nodes: AliasExpander::DEFAULT_MAX_NODES, max_expanded_string_bytes: AliasExpander::DEFAULT_MAX_STRING_BYTES
     safe_load yaml, permitted_classes: permitted_classes,
                     permitted_symbols: permitted_symbols,
                     aliases: aliases,
@@ -375,7 +400,9 @@ module Psych
                     symbolize_names: symbolize_names,
                     freeze: freeze,
                     strict_integer: strict_integer,
-                    parse_symbols: parse_symbols
+                    parse_symbols: parse_symbols,
+                    max_expanded_nodes: max_expanded_nodes,
+                    max_expanded_string_bytes: max_expanded_string_bytes
   end
 
   ###

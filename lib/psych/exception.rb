@@ -20,6 +20,16 @@ module Psych
     end
   end
 
+  # Subclasses `BadAlias` for backwards compatibility
+  class CircularAlias < BadAlias
+    def initialize anchor_name
+      super "Alias expansion would follow a cycle involving anchor: #{anchor_name}"
+    end
+  end
+
+  class AliasExpansionLimitExceeded < Exception
+  end
+
   class DisallowedClass < Exception
     def initialize action, klass_name
       super "Tried to #{action} unspecified class: #{klass_name}"
