@@ -14,4 +14,8 @@ module TomlRB
       super("Key #{key.inspect} is defined more than once")
     end
   end
+
+  # Layered configuration merge error
+  class MergeConflict < Error
+  end
 end

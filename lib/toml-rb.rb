@@ -7,6 +7,7 @@ require_relative "toml-rb/inline_table"
 require_relative "toml-rb/keyvalue"
 require_relative "toml-rb/parser"
 require_relative "toml-rb/dumper"
+require_relative "toml-rb/merger"
 
 module TomlRB
   # Public: Returns a hash from *TomlRB* content.

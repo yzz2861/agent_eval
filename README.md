@@ -82,6 +82,55 @@ TomlRB.dump(hash)
 # => "title = \"wow!\"\n[awesome]\nothers = false\nyou = true\n"
 ```
 
+Layered Merge Usage
+-------------------
+
+`TomlRB.layered_merge` merges lower-priority layers into higher-priority layers.
+Hash tables are merged recursively, ordinary arrays are replaced as whole
+values, and declared arrays of tables are matched member by member.
+
+```ruby
+base = {
+  "services" => [
+    {"name" => "database", "port" => 5432},
+    {"name" => "cache", "port" => 6379}
+  ]
+}
+
+environment = {
+  "services" => [
+    {"name" => "database", "host" => "db.internal"},
+    {"name" => "worker", "port" => 9000}
+  ]
+}
+
+local = {
+  "services" => [
+    TomlRB.delete_member("cache"),
+    {"name" => "debug", "port" => 9100}
+  ]
+}
+
+TomlRB.layered_merge(
+  base,
+  environment,
+  local,
+  table_arrays: {"services" => "name"}
+)
+# Service order is: database, worker, debug. Existing members keep their
+# position; new members are appended in the order later layers introduce them.
+```
+
+Nested array-table paths may be dot-separated strings or arrays. Identity fields
+must contain a scalar. Missing identities, duplicate identities in one layer,
+and table/scalar type swaps raise `TomlRB::MergeConflict`.
+
+Use `TomlRB::DELETE` to remove a key or table. `TomlRB.delete_member(identity)`
+returns a dedicated object, so deletion can never collide with a string, symbol,
+or other ordinary TOML business value. Merge always returns a new Hash and does
+not mutate any input layer. `TomlRB.merge` and the `array_tables:` alias are also
+available.
+
 Conformance
 -----------
 
