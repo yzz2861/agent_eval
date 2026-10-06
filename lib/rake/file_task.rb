@@ -34,7 +34,7 @@ module Rake
 
     # Are there any prerequisites with a later time than the given time stamp?
     def out_of_date?(stamp)
-      all_prerequisite_tasks.any? { |prereq|
+      prerequisite_tasks_for_timestamp.any? { |prereq|
         prereq_task = application[prereq, @scope]
         if prereq_task.instance_of?(Rake::FileTask)
           prereq_task.timestamp > stamp || @application.options.build_all
@@ -43,6 +43,24 @@ module Rake
         end
       }
     end
+
+    def prerequisite_tasks_for_timestamp # :nodoc:
+      collect_prerequisite_tasks_for_timestamp(prerequisites, {})
+    end
+    private :prerequisite_tasks_for_timestamp
+
+    def collect_prerequisite_tasks_for_timestamp(names, seen) # :nodoc:
+      names.flat_map do |name|
+        next [] if seen[name]
+
+        seen[name] = true
+        prerequisite = lookup_prerequisite(name)
+        [prerequisite].concat(
+          collect_prerequisite_tasks_for_timestamp(
+            prerequisite.prerequisites, seen))
+      end
+    end
+    private :collect_prerequisite_tasks_for_timestamp
 
     # ----------------------------------------------------------------
     # Task class methods.

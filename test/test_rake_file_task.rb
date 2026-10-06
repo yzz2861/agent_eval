@@ -135,6 +135,21 @@ class TestRakeFileTask < Rake::TestCase # :nodoc:
     delete_file "new"
   end
 
+  def test_needed_eh_transitive_dependency
+    create_file "target", Time.now - 10
+    create_file "middle", Time.now - 20
+    create_file "source", Time.now
+
+    file "middle" => "source"
+    file "target" => "middle"
+
+    assert Task["target"].needed?
+  ensure
+    delete_file "target"
+    delete_file "middle"
+    delete_file "source"
+  end
+
   def test_needed_eh_exists
     name = "dummy"
     file name
