@@ -75,6 +75,40 @@ pk.write_array_header(2).write(e1).write(e2).flush
 
 See [API reference](http://ruby.msgpack.org/MessagePack/Packer.html) for details.
 
+### Serializing collections of unknown size
+
+When elements come from a one-shot enumerator (e.g. batched query results),
+the collection size is not known when the header must be written.
+`write_streaming_array` and `write_streaming_map` append elements one by one
+and finalize the header when the block returns, without retaining the
+elements as Ruby objects:
+
+```ruby
+# serialize an array whose size is unknown upfront
+pk = MessagePack::Packer.new(io)
+pk.write_streaming_array do |array|
+  batch_results.each { |row| array.write(row) } # or array << row
+end
+
+pk.write_streaming_map do |map|
+  map.write_pair("key", value) # or map.write(k); map.write(v)
+end
+```
+
+Nested streaming collections are supported via `write_streaming_array` /
+`write_streaming_map` on the yielded writer. The behavior depends on the
+destination:
+
+* a seekable IO (File, StringIO) reserves a 32-bit header and patches it in
+  place on commit; if the block raises, the IO is rewound and truncated to
+  its previous position,
+* any other stream stages the serialized bytes in a temporary file (bounded
+  memory) and appends a minimal-width header plus the staged bytes on
+  commit; if the block raises, nothing is written to the stream.
+
+A map commit fails with `MessagePack::StreamingWriter::IncompleteMapError`
+if a key is left without a value.
+
 ## Deserializing objects
 
 Use `MessagePack.unpack`:

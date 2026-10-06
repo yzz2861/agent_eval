@@ -10,6 +10,7 @@ end
 require "msgpack/buffer"
 require "msgpack/packer"
 require "msgpack/unpacker"
+require "msgpack/streaming_writer"
 require "msgpack/factory"
 require "msgpack/symbol"
 require "msgpack/core_ext"
