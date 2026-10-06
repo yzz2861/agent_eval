@@ -1,5 +1,6 @@
 require "dotenv/substitutions/variable"
-require "dotenv/substitutions/command" if RUBY_VERSION > "1.8.7"
+require "dotenv/substitutions/command"
+require "dotenv/command_policy"
 
 module Dotenv
   # Error raised when encountering a syntax error while parsing a .env file.
@@ -43,27 +44,36 @@ module Dotenv
       end
     end
 
-    def initialize(string, overwrite: false)
+    def initialize(string, overwrite: false, command_policy: nil, filename: nil, staged: nil)
       # Convert line breaks to same format
       @string = string.gsub(/\r\n?/, "\n")
       @hash = {}
       @overwrite = overwrite
+      @command_policy = CommandPolicy.coerce(command_policy)
+      @filename = filename
+      @staged = staged
     end
 
     def call
+      # Offsets where each line starts, used to report command locations.
+      line_starts = [0]
+      @string.enum_for(:scan, /\n/).each { line_starts << $LAST_MATCH_INFO.end(0) }
+
       @string.scan(LINE) do
         match = $LAST_MATCH_INFO
+        offset = match.begin(:key)
+        line_number = (line_starts.bsearch_index { |position| position > offset } || line_starts.length)
 
         if existing?(match[:key])
           # Use value from already defined variable
-          @hash[match[:key]] = ENV[match[:key]]
+          @hash[match[:key]] = existing_value(match[:key])
         elsif match[:export] && !match[:value]
           # Check for exported variable with no value
           if !@hash.member?(match[:key])
             raise FormatError, "Line #{match.to_s.inspect} has an unset variable"
           end
         else
-          @hash[match[:key]] = parse_value(match[:value] || "")
+          @hash[match[:key]] = parse_value(match[:value] || "", line_number)
         end
       end
 
@@ -74,10 +84,19 @@ module Dotenv
 
     # Determine if a variable is already defined and should not be overwritten.
     def existing?(key)
-      !@overwrite && key != "DOTENV_LINEBREAK_MODE" && ENV.key?(key)
+      return false if @overwrite
+      key != "DOTENV_LINEBREAK_MODE" &&
+        (ENV.key?(key) || (@staged && @staged.key?(key)))
     end
 
-    def parse_value(value)
+    # Value carried by a variable already present in `ENV` or staged by an
+    # earlier file in the same load.
+    def existing_value(key)
+      return ENV[key] if ENV.key?(key)
+      @staged&.[](key)
+    end
+
+    def parse_value(value, line_number = nil)
       # Remove surrounding quotes
       value = value.strip.sub(QUOTED_STRING, '\2')
       maybe_quote = Regexp.last_match(1)
@@ -87,8 +106,21 @@ module Dotenv
 
       # Unescape characters and performs substitutions unless value is single quoted
       if maybe_quote != "'"
+        # Keep escaped parens intact until command substitution resolves them.
+        value = Substitutions::Command.protect_escaped_parens(value)
         value = unescape_characters(value)
-        self.class.substitutions.each { |proc| value = proc.call(value, @hash) }
+
+        location = CommandLocation.new(filename: @filename, line: line_number)
+        view = ENV.to_h.merge(@staged || {}).merge(@hash).freeze
+
+        self.class.substitutions.each do |proc|
+          value =
+            if proc == Substitutions::Command
+              proc.call(value, view, policy: @command_policy, location: location, view: view)
+            else
+              proc.call(value, view)
+            end
+        end
       end
 
       value

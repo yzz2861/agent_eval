@@ -255,11 +255,11 @@ one more line")
 
   if RUBY_VERSION > "1.8.7"
     it "parses shell commands interpolated in $()" do
-      expect(env("echo=$(echo hello)")).to eql("echo" => "hello")
+      expect(env("echo=$(echo hello)", command_policy: :shell)).to eql("echo" => "hello")
     end
 
     it "allows balanced parentheses within interpolated shell commands" do
-      expect(env('echo=$(echo "$(echo "$(echo "$(echo hello)")")")'))
+      expect(env('echo=$(echo "$(echo "$(echo "$(echo hello)")")")', command_policy: :shell))
         .to eql("echo" => "hello")
     end
 
@@ -269,16 +269,18 @@ one more line")
     end
 
     it "is not thrown off by quotes in interpolated shell commands" do
-      expect(env('interp=$(echo "Quotes won\'t be a problem")')["interp"])
+      expect(env('interp=$(echo "Quotes won\'t be a problem")', command_policy: :shell)["interp"])
         .to eql("Quotes won't be a problem")
     end
 
     it "handles parentheses in variables in commands" do
-      expect(env("FOO='passwo(rd'\nBAR=$(echo '$FOO')")).to eql("FOO" => "passwo(rd", "BAR" => "passwo(rd")
+      expect(env("FOO='passwo(rd'\nBAR=$(echo '$FOO')", command_policy: :shell))
+        .to eql("FOO" => "passwo(rd", "BAR" => "passwo(rd")
     end
 
     it "handles command to variable to command chain" do
-      expect(env("FOO=$(echo bar)\nBAR=$(echo $FOO)")).to eql("FOO" => "bar", "BAR" => "bar")
+      expect(env("FOO=$(echo bar)\nBAR=$(echo $FOO)", command_policy: :shell))
+        .to eql("FOO" => "bar", "BAR" => "bar")
     end
 
     it "supports carriage return" do
@@ -306,7 +308,7 @@ one more line")
     if (!defined?(RUBY_ENGINE) || RUBY_ENGINE != "jruby") &&
         !defined?(Rubinius)
       it "substitutes shell variables within interpolated shell commands" do
-        expect(env(%(VAR1=var1\ninterp=$(echo "VAR1 is $VAR1")))["interp"])
+        expect(env(%(VAR1=var1\ninterp=$(echo "VAR1 is $VAR1")), command_policy: :shell)["interp"])
           .to eql("VAR1 is var1")
       end
     end
@@ -315,5 +317,161 @@ one more line")
   it "returns existing value for redefined variable" do
     ENV["FOO"] = "existing"
     expect(env("FOO=bar")).to eql("FOO" => "existing")
+  end
+
+  describe "command policies" do
+    # Executor that records every invocation: [command, view, location]
+    class RecordingExecutor
+      attr_reader :calls
+
+      def initialize(results = {})
+        @results = results
+        @calls = []
+      end
+
+      def call(command, view, location)
+        raise "view must be frozen" unless view.frozen?
+        @calls << [command, view.dup, location]
+        if @results.key?(command)
+          @results[command]
+        else
+          Dotenv::CommandResult.success("<#{command}>")
+        end
+      end
+    end
+
+    it "defaults to disabling command substitution" do
+      expect { env("FOO=$(echo hi)") }
+        .to raise_error(Dotenv::CommandNotAllowedError, /disabled.*\$\(echo hi\)/)
+    end
+
+    it "explicit :disabled policy raises and never invokes a command" do
+      executor = RecordingExecutor.new
+      expect do
+        env("FOO=$(echo hi)", command_policy: executor) # sanity: callable works
+      end.not_to raise_error
+      expect(executor.calls.length).to eq(1)
+
+      expect { env("FOO=$(echo hi)", command_policy: :disabled) }
+        .to raise_error(Dotenv::CommandNotAllowedError)
+    end
+
+    it "keeps command syntax literal with the :literal policy and executes nothing" do
+      executor = RecordingExecutor.new
+      expect(env('FOO=pre-$(echo hi)-post', command_policy: :literal))
+        .to eql("FOO" => "pre-$(echo hi)-post")
+      expect(executor.calls).to be_empty
+    end
+
+    it "keeps nested commands literal without execution" do
+      expect(env('FOO=a$(outer $(inner))b', command_policy: :literal))
+        .to eql("FOO" => "a$(outer $(inner))b")
+    end
+
+    it "passes command text, a frozen variable view, and source location to the executor" do
+      executor = RecordingExecutor.new
+      source = "NAME=world\nGREETING=$(hello $NAME)"
+      env(source, command_policy: executor, filename: "/path/to/.env")
+
+      expect(executor.calls.length).to eq(1)
+      command, view, location = executor.calls.first
+      expect(command).to eq("hello $NAME")
+      expect(view).to be_a(Hash)
+      expect(view).to include("NAME" => "world")
+      expect(location).to have_attributes(filename: "/path/to/.env", line: 2)
+    end
+
+    it "substitutes the executor result into the value" do
+      executor = RecordingExecutor.new("whoami" => "alice")
+      expect(env('URL="postgres://$(whoami)@db"', command_policy: executor))
+        .to eql("URL" => "postgres://alice@db")
+    end
+
+    it "accepts a plain return value from the executor" do
+      executor = ->(command, _view, _location) { "got:#{command}" }
+      expect(env("FOO=$(x)", command_policy: executor))
+        .to eql("FOO" => "got:x")
+    end
+
+    it "resolves nested commands inner-most first" do
+      order = []
+      executor = lambda do |command, _view, _location|
+        order << command
+        Dotenv::CommandResult.success("[#{command}]")
+      end
+
+      result = env("FOO=$(outer $(inner one) $(inner two))", command_policy: executor)["FOO"]
+
+      expect(order).to eq(["inner one", "inner two", "outer [inner one] [inner two]"])
+      expect(result).to eq("[outer [inner one] [inner two]]")
+    end
+
+    it "does not evaluate commands inside branches that are not reached" do
+      executor = RecordingExecutor.new
+      # single quoted values are never evaluated
+      expect(env("FOO='$(not run)'\nBAR=$(run)", command_policy: executor))
+        .to eql("FOO" => "$(not run)", "BAR" => "<run>")
+
+      commands = executor.calls.map(&:first)
+      expect(commands).to eq(["run"])
+      expect(commands).not_to include("not run")
+    end
+
+    it "leaves escaped commands literal and does not execute them" do
+      executor = RecordingExecutor.new
+      expect(env('FOO=x\$(not run)y', command_policy: executor))
+        .to eql("FOO" => "x$(not run)y")
+      expect(executor.calls.map(&:first)).to eq([])
+    end
+
+    it "handles escaped parens as literal parens in executor command text" do
+      executor = RecordingExecutor.new
+      env('FOO=$(echo a\(b\)c)', command_policy: executor)
+
+      expect(executor.calls.length).to eq(1)
+      expect(executor.calls.first[0]).to eq("echo a(b)c")
+    end
+
+    it "keeps escaped parens literal under the :literal policy" do
+      source = "FOO=$(echo a\\(b)\\)c)"
+      expect(env(source, command_policy: :literal)["FOO"])
+        .to eq("$(echo a(b))c)")
+    end
+
+    it "raises CommandExecutionError when the executor returns a failure" do
+      executor = ->(command, _view, _location) { Dotenv::CommandResult.failure("boom: #{command}") }
+      expect { env("FOO=$(boom)", command_policy: executor) }
+        .to raise_error(Dotenv::CommandExecutionError, /boom: boom/)
+    end
+
+    it "wraps exceptions raised by the executor and never falls back to a shell" do
+      executor = ->(_command, _view, _location) { raise "nope" }
+      expect { env("FOO=$(x)", command_policy: executor) }
+        .to raise_error(Dotenv::CommandExecutionError, /nope/)
+    end
+
+    it "rejects invalid policies" do
+      expect { env("FOO=x", command_policy: :nope) }
+        .to raise_error(ArgumentError, /Unknown command policy/)
+      expect { env("FOO=x", command_policy: 123) }
+        .to raise_error(ArgumentError, /Invalid command policy/)
+    end
+
+    it "reports the line of a command inside a multi-line value" do
+      executor = RecordingExecutor.new
+      source = "FOO=\"line one\\nline two\"\nBAR=$(later)"
+      env(source, command_policy: executor, filename: ".env")
+
+      expect(executor.calls.first[2].line).to eq(2)
+    end
+
+    it "treats escaped commands as literal under every non-disabled policy" do
+      executor = RecordingExecutor.new
+
+      expect(env('FOO=a\$(x)b', command_policy: :shell)).to eql("FOO" => "a$(x)b")
+      expect(env('FOO=a\$(x)b', command_policy: :literal)).to eql("FOO" => "a$(x)b")
+      expect(env('FOO=a\$(x)b', command_policy: executor)).to eql("FOO" => "a$(x)b")
+      expect(executor.calls).to be_empty
+    end
   end
 end

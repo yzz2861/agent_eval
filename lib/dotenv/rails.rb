@@ -20,7 +20,8 @@ end
 module Dotenv
   # Rails integration for using Dotenv to load ENV variables from a file
   class Rails < ::Rails::Railtie
-    delegate :files, :files=, :overwrite, :overwrite=, :autorestore, :autorestore=, :logger, to: "config.dotenv"
+    delegate :files, :files=, :overwrite, :overwrite=, :autorestore, :autorestore=, :command_policy,
+      :command_policy=, :logger, to: "config.dotenv"
 
     def initialize
       super
@@ -28,6 +29,7 @@ module Dotenv
         # Rails.logger is not available yet, so we'll save log messages and replay them when it is
         logger: Dotenv::ReplayLogger.new,
         overwrite: false,
+        command_policy: :disabled,
         files: [
           ".env.#{env}.local",
           (".env.local" unless env.test?),
@@ -43,12 +45,20 @@ module Dotenv
     # This will get called during the `before_configuration` callback, but you
     # can manually call `Dotenv::Rails.load` if you needed it sooner.
     def load
-      Dotenv.load(*files.map { |file| root.join(file).to_s }, overwrite: overwrite)
+      Dotenv.load(
+        *files.map { |file| root.join(file).to_s },
+        overwrite: overwrite,
+        command_policy: command_policy
+      )
     end
 
     def overload
       deprecator.warn("Dotenv::Rails.overload is deprecated. Set `Dotenv::Rails.overwrite = true` and call Dotenv::Rails.load instead.")
-      Dotenv.load(*files.map { |file| root.join(file).to_s }, overwrite: true)
+      Dotenv.load(
+        *files.map { |file| root.join(file).to_s },
+        overwrite: true,
+        command_policy: command_policy
+      )
     end
 
     # Internal: `Rails.root` is nil in Rails 4.1 before the application is

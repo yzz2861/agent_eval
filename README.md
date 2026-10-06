@@ -208,7 +208,46 @@ PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\nHkVN9...\n-----END DSA PRIVATE KEY
 
 ### Command Substitution
 
-You need to add the output of a command in one of your variables? Simply add it with `$(your_command)`:
+Command substitution runs code, so it is disabled by default whenever `.env` files come from an untrusted deploy input. You opt in to a per-load **command policy** when calling `Dotenv.load` or `Dotenv.parse`:
+
+```ruby
+Dotenv.load(".env", command_policy: :shell) # or :disabled (default), :literal, or a callable
+```
+
+| Policy | Behavior for `$(...)` |
+| --- | --- |
+| `:disabled` (default) | Raises `Dotenv::CommandNotAllowedError`. Nothing is executed and `ENV` is left untouched. |
+| `:literal` | The substitution is kept verbatim (e.g. `$(whoami)` stays in the value). Nothing is executed. |
+| `:shell` | Executed with the system shell, matching the historical dotenv behavior. |
+| a callable | Your executor is called; the system shell is never used as a fallback. |
+
+#### Callable executors
+
+An executor is any object responding to `call(command, view, location)`:
+
+* `command` is the raw command text. Nested commands are resolved inner-most first before the outer command is invoked.
+* `view` is a frozen, read-only hash of every variable visible at that point (the current file merged over variables staged from earlier files and `ENV`).
+* `location` is a `Dotenv::CommandLocation` with `filename` and `line`.
+
+Return a `Dotenv::CommandResult` to report an explicit outcome. Any other return value is used verbatim as the substitution. The shell is never invoked, even on failure.
+
+```ruby
+executor = lambda do |command, view, location|
+  case command
+  when "whoami" then Dotenv::CommandResult.success(view["DEPLOY_USER"])
+  else
+    Dotenv::CommandResult.failure("Command #{command.inspect} is not allowed at #{location}")
+  end
+end
+
+Dotenv.load(".env", command_policy: executor)
+```
+
+Escaped substitutions such as `\$(never run)` stay literal under every policy, and single quoted values are never evaluated.
+
+All files in a load are parsed completely before `ENV` is updated, so when any command is disabled or fails, none of the configuration from that load is applied.
+
+With the `:shell` policy you can add the output of a command with `$(your_command)`:
 
 ```shell
 DATABASE_URL="postgres://$(whoami)@localhost/my_database"

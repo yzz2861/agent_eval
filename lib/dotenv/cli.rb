@@ -6,13 +6,14 @@ require "optparse"
 module Dotenv
   # The `dotenv` command line interface. Run `$ dotenv --help` to see usage.
   class CLI < OptionParser
-    attr_reader :argv, :filenames, :overwrite
+    attr_reader :argv, :filenames, :overwrite, :command_policy
 
     def initialize(argv = [])
       @argv = argv.dup
       @filenames = []
       @ignore = false
       @overwrite = false
+      @command_policy = :disabled
 
       super("Usage: dotenv [options]")
       separator ""
@@ -29,6 +30,10 @@ module Dotenv
         @overwrite = true
       end
       on("--overload") { @overwrite = true }
+
+      on("--allow-commands", "execute $(...) substitutions with the system shell") do
+        @command_policy = :shell
+      end
 
       on("-h", "--help", "Display help") do
         puts self
@@ -49,7 +54,14 @@ module Dotenv
     end
 
     def run
-      Dotenv.load(*@filenames, overwrite: @overwrite, ignore: @ignore)
+      Dotenv.load(
+        *@filenames,
+        overwrite: @overwrite,
+        ignore: @ignore,
+        command_policy: @command_policy
+      )
+    rescue Dotenv::CommandNotAllowedError, Dotenv::CommandExecutionError => e
+      abort e.message
     rescue Errno::ENOENT => e
       abort e.message
     else

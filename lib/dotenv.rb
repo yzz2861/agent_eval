@@ -1,6 +1,7 @@
 require "dotenv/version"
 require "dotenv/parser"
 require "dotenv/environment"
+require "dotenv/command_policy"
 require "dotenv/missing_keys"
 require "dotenv/diff"
 
@@ -15,28 +16,53 @@ module Dotenv
   attr_accessor :instrumenter
 
   # Loads environment variables from one or more `.env` files. See `#parse` for more details.
-  def load(*filenames, overwrite: false, ignore: true)
-    parse(*filenames, overwrite: overwrite, ignore: ignore) do |env|
-      instrument(:load, env: env) do |payload|
-        update(env, overwrite: overwrite)
+  #
+  # Every file is parsed completely (which is when command substitutions run)
+  # before `ENV` is touched, so a failing command never leaves partially loaded
+  # configuration in `ENV`.
+  def load(*filenames, overwrite: false, ignore: true, command_policy: nil)
+    policy = CommandPolicy.coerce(command_policy)
+    filenames << ".env" if filenames.empty?
+    # Process the highest priority file last so it wins (or first, when not
+    # overwriting), matching the historical ordering.
+    filenames = filenames.reverse if overwrite
+
+    staged = {}
+
+    filenames.each do |filename|
+      begin
+        env = Environment.new(
+          File.expand_path(filename),
+          overwrite: overwrite,
+          command_policy: policy,
+          staged: staged
+        )
+      rescue Errno::ENOENT, Errno::EISDIR
+        raise unless ignore
+        next
       end
+
+      instrument(:load, env: env) {}
+      stage!(staged, env, overwrite)
     end
+
+    update(staged, overwrite: overwrite) unless staged.empty?
   end
 
   # Same as `#load`, but raises Errno::ENOENT if any files don't exist
-  def load!(*filenames)
-    load(*filenames, ignore: false)
+  def load!(*filenames, **options)
+    load(*filenames, **options, ignore: false)
   end
 
   # same as `#load`, but will overwrite existing values in `ENV`
-  def overwrite(*filenames)
-    load(*filenames, overwrite: true)
+  def overwrite(*filenames, **options)
+    load(*filenames, **options, overwrite: true)
   end
   alias_method :overload, :overwrite
 
   # same as `#overwrite`, but raises Errno::ENOENT if any files don't exist
-  def overwrite!(*filenames)
-    load(*filenames, overwrite: true, ignore: false)
+  def overwrite!(*filenames, **options)
+    load(*filenames, **options, overwrite: true, ignore: false)
   end
   alias_method :overload!, :overwrite!
 
@@ -47,13 +73,18 @@ module Dotenv
   # @param ignore [Boolean] Ignore non-existent files
   # @param block [Proc] Block to yield for each parsed `Dotenv::Environment`
   # @return [Hash] parsed key/value pairs
-  def parse(*filenames, overwrite: false, ignore: true, &block)
+  def parse(*filenames, overwrite: false, ignore: true, command_policy: nil, &block)
+    policy = CommandPolicy.coerce(command_policy)
     filenames << ".env" if filenames.empty?
     filenames = filenames.reverse if overwrite
 
     filenames.reduce({}) do |hash, filename|
       begin
-        env = Environment.new(File.expand_path(filename), overwrite: overwrite)
+        env = Environment.new(
+          File.expand_path(filename),
+          overwrite: overwrite,
+          command_policy: policy
+        )
         env = block.call(env) if block
       rescue Errno::ENOENT, Errno::EISDIR
         raise unless ignore
@@ -62,6 +93,20 @@ module Dotenv
       hash.merge! env || {}
     end
   end
+
+  # Merge a parsed file into the staging hash used while loading, honoring
+  # `overwrite` and keys already present in the real `ENV`.
+  def stage!(staged, env, overwrite)
+    env.each do |key, value|
+      if overwrite
+        staged[key] = value
+      elsif !staged.key?(key) && !ENV.key?(key)
+        staged[key] = value
+      end
+    end
+    staged
+  end
+  private :stage!
 
   # Save the current `ENV` to be restored later
   def save

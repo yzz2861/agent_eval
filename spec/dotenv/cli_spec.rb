@@ -34,6 +34,21 @@ describe "dotenv binary" do
     end.not_to raise_error
   end
 
+  it "refuses command substitutions unless --allow-commands is given" do
+    require "tempfile"
+    file = Tempfile.new(["dotenv", ".env"])
+    file.write("GREETING=$(echo hi)\n")
+    file.close
+
+    expect { capture_output { run("-f", file.path) } }.to raise_error(SystemExit)
+    expect(ENV).not_to have_key("GREETING")
+
+    run("--allow-commands", "-f", file.path)
+    expect(ENV["GREETING"]).to eq("hi")
+  ensure
+    file&.unlink
+  end
+
   it "loads from multiple files specified by -f" do
     expect(ENV).not_to have_key("PLAIN")
     expect(ENV).not_to have_key("QUOTED")

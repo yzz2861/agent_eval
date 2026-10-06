@@ -92,7 +92,8 @@ describe Dotenv do
     it_behaves_like "load"
 
     it "initializes the Environment with overwrite: false" do
-      expect(Dotenv::Environment).to receive(:new).with(anything, overwrite: false)
+      expect(Dotenv::Environment).to receive(:new)
+        .with(anything, overwrite: false, command_policy: an_instance_of(Dotenv::CommandPolicy), staged: an_instance_of(Hash))
         .and_call_original
       subject
     end
@@ -146,7 +147,8 @@ describe Dotenv do
     it_behaves_like "load"
 
     it "initializes Environment with overwrite: false" do
-      expect(Dotenv::Environment).to receive(:new).with(anything, overwrite: false)
+      expect(Dotenv::Environment).to receive(:new)
+        .with(anything, overwrite: false, command_policy: an_instance_of(Dotenv::CommandPolicy), staged: an_instance_of(Hash))
         .and_call_original
       subject
     end
@@ -167,7 +169,8 @@ describe Dotenv do
     it_behaves_like "overwrite"
 
     it "initializes the Environment overwrite: true" do
-      expect(Dotenv::Environment).to receive(:new).with(anything, overwrite: true)
+      expect(Dotenv::Environment).to receive(:new)
+        .with(anything, overwrite: true, command_policy: an_instance_of(Dotenv::CommandPolicy), staged: an_instance_of(Hash))
         .and_call_original
       subject
     end
@@ -204,7 +207,8 @@ describe Dotenv do
     it_behaves_like "overwrite"
 
     it "initializes the Environment with overwrite: true" do
-      expect(Dotenv::Environment).to receive(:new).with(anything, overwrite: true)
+      expect(Dotenv::Environment).to receive(:new)
+        .with(anything, overwrite: true, command_policy: an_instance_of(Dotenv::CommandPolicy), staged: an_instance_of(Hash))
         .and_call_original
       subject
     end
@@ -321,7 +325,8 @@ describe Dotenv do
     end
 
     it "initializes the Environment with overwrite: false" do
-      expect(Dotenv::Environment).to receive(:new).with(anything, overwrite: false)
+      expect(Dotenv::Environment).to receive(:new)
+        .with(anything, overwrite: false, command_policy: an_instance_of(Dotenv::CommandPolicy))
       subject
     end
 
@@ -332,6 +337,180 @@ describe Dotenv do
         expect { subject }.not_to raise_error
         expect(subject).to eq({})
       end
+    end
+  end
+
+  describe "command policies" do
+    require "tempfile"
+
+    def write_env(contents)
+      file = Tempfile.new(["dotenv", ".env"])
+      file.write(contents)
+      file.close
+      file.path
+    end
+
+    # Local executor that records calls instead of touching a system shell.
+    def counting_executor(fail_on: nil)
+      calls = []
+      executor = lambda do |command, view, location|
+        calls << [command, view, location]
+        if fail_on && command.include?(fail_on)
+          Dotenv::CommandResult.failure("refused: #{command}")
+        else
+          Dotenv::CommandResult.success("out:#{command}")
+        end
+      end
+      [executor, calls]
+    end
+
+    it "uses the caller executor for load and never the system shell" do
+      executor, calls = counting_executor
+      path = write_env("GREETING=$(hello world)\nNAME=$(whoami)")
+
+      result = Dotenv.load(path, command_policy: executor)
+
+      expect(calls.map(&:first)).to eq(["hello world", "whoami"])
+      expect(ENV["GREETING"]).to eq("out:hello world")
+      expect(ENV["NAME"]).to eq("out:whoami")
+      expect(result).to eq("GREETING" => "out:hello world", "NAME" => "out:whoami")
+    end
+
+    it "passes the file location for every command" do
+      executor, calls = counting_executor
+      path = write_env("A=$(a)\n# comment\nB=$(b)")
+
+      Dotenv.load(path, command_policy: executor)
+
+      expect(calls.map { |_c, _v, l| [l.filename, l.line] }).to eq([[path, 1], [path, 3]])
+    end
+
+    it "does not write any ENV keys when a command is disabled" do
+      path = write_env("FIRST=one\nSECOND=$(echo nope)\nTHIRD=three")
+
+      expect { Dotenv.load(path, command_policy: :disabled) }
+        .to raise_error(Dotenv::CommandNotAllowedError)
+
+      expect(ENV["FIRST"]).to be_nil
+      expect(ENV["SECOND"]).to be_nil
+      expect(ENV["THIRD"]).to be_nil
+    end
+
+    it "does not write the first half of the file when a later command fails" do
+      executor, calls = counting_executor(fail_on: "nope")
+      path = write_env("FIRST=$(ok)\nSECOND=$(nope)\nTHIRD=three")
+
+      expect { Dotenv.load(path, command_policy: executor) }
+        .to raise_error(Dotenv::CommandExecutionError, /refused/)
+
+      expect(ENV["FIRST"]).to be_nil
+      expect(ENV["SECOND"]).to be_nil
+      expect(ENV["THIRD"]).to be_nil
+      expect(calls.map(&:first)).to eq(["ok", "nope"])
+    end
+
+    it "does not write earlier files when a later file fails" do
+      executor, _calls = counting_executor(fail_on: "nope")
+      good = write_env("EARLY=yes")
+      bad = write_env("LATE=$(nope)")
+
+      expect { Dotenv.load(good, bad, command_policy: executor) }
+        .to raise_error(Dotenv::CommandExecutionError)
+
+      expect(ENV["EARLY"]).to be_nil
+      expect(ENV["LATE"]).to be_nil
+    end
+
+    it "keeps commands literal and executes nothing" do
+      executor, calls = counting_executor
+      path = write_env('X=pre-$(echo hi)-post')
+
+      Dotenv.load(path, command_policy: :literal)
+
+      expect(ENV["X"]).to eq("pre-$(echo hi)-post")
+      expect(calls).to be_empty
+    end
+
+    it "applies the policy independently per load" do
+      literal = write_env("A=$(x)")
+      executor, calls = counting_executor
+      disabled = write_env("B=$(y)")
+
+      Dotenv.load(literal, command_policy: :literal)
+      expect { Dotenv.load(disabled, command_policy: :disabled) }
+        .to raise_error(Dotenv::CommandNotAllowedError)
+      Dotenv.load(write_env("C=$(z)"), command_policy: executor)
+
+      expect(ENV["A"]).to eq("$(x)")
+      expect(ENV["B"]).to be_nil
+      expect(ENV["C"]).to eq("out:z")
+      expect(calls.map(&:first)).to eq(["z"])
+    end
+
+    it "exposes variables from the same load to the executor view" do
+      executor, calls = counting_executor
+      path = write_env("NAME=world\nGREETING=$(hello $NAME)")
+
+      Dotenv.load(path, command_policy: executor)
+
+      expect(calls.first[1]["NAME"]).to eq("world")
+    end
+
+    it "lets the first listed file win with overwrite and still evaluates later files" do
+      executor, calls = counting_executor
+      first = write_env("KEY=$(low)")
+      second = write_env("KEY=$(high)")
+
+      result = Dotenv.overwrite(first, second, command_policy: executor)
+
+      expect(ENV["KEY"]).to eq("out:low")
+      expect(result).to eq("KEY" => "out:low")
+      expect(calls.map(&:first)).to eq(["high", "low"])
+    end
+
+    it "keeps the first file value when not overwriting across files" do
+      executor, _calls = counting_executor
+      first = write_env("KEY=first")
+      second = write_env("KEY=$(ignored)")
+
+      result = Dotenv.load(first, second, command_policy: executor)
+
+      expect(ENV["KEY"]).to eq("first")
+      expect(result).to eq("KEY" => "first")
+    end
+
+    it "reuses variables staged from an earlier file in a later command view" do
+      executor, calls = counting_executor
+      first = write_env("SHARED=from-first")
+      second = write_env("DERIVED=$(build $SHARED)")
+
+      Dotenv.load(first, second, command_policy: executor)
+
+      expect(calls.first[0]).to eq("build $SHARED")
+      expect(calls.first[1]["SHARED"]).to eq("from-first")
+      expect(ENV["DERIVED"]).to eq("out:build from-first")
+    end
+
+    it "does not execute branches in files that are skipped" do
+      executor, calls = counting_executor
+
+      Dotenv.load(".doesnotexist", command_policy: executor, ignore: true)
+
+      expect(calls).to be_empty
+    end
+
+    it "honors the policy through Dotenv.parse without touching ENV" do
+      executor, calls = counting_executor
+      path = write_env("A=$(a)")
+
+      parsed = Dotenv.parse(path, command_policy: executor)
+
+      expect(parsed).to eq("A" => "out:a")
+      expect(ENV["A"]).to be_nil
+      expect(calls.map(&:first)).to eq(["a"])
+
+      expect { Dotenv.parse(write_env("B=$(b)"), command_policy: :disabled) }
+        .to raise_error(Dotenv::CommandNotAllowedError)
     end
   end
 
