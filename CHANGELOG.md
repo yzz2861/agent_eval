@@ -1,5 +1,11 @@
 # sqlite3-ruby Changelog
 
+## Unreleased
+
+### Added
+
+- Add `Database#create_window_function_handler` for defining SQL window functions in Ruby. The handler instance responds to `step` (row enters the frame), `inverse` (row leaves the frame), `value` (read the current value without finalizing) and `finalize` (called exactly once per evaluation, also on statement reset or early close), enabling incremental sliding-window statistics such as moving weighted averages or multiset counts that cannot be expressed with the built-in aggregate functions.
+
 ## 2.9.6 / 2026-08-11
 
 ### Security / Stability

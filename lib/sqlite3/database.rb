@@ -579,6 +579,83 @@ module SQLite3
       self
     end
 
+    # Creates a new window function for use in SQL statements. Window
+    # functions are evaluated over a sliding window frame of rows (see the
+    # SQLite documentation for SELECT window functions), which makes them
+    # suitable for moving statistics that the built-in aggregate functions
+    # cannot express.
+    #
+    # The +handler+ is a factory object, just like for
+    # #create_aggregate_handler. It must respond to +name+ and +new+, and
+    # may optionally respond to +arity+ (defaulting to -1, i.e. variable
+    # arity).
+    #
+    # The object returned by +handler.new+ must respond to the following
+    # messages:
+    #
+    # +step+::     called once for each row that enters the window frame,
+    #              with the function's arguments.
+    # +inverse+::  called once for each row that leaves the window frame,
+    #              with the same arguments the corresponding +step+ call
+    #              received. It must undo the effect of that +step+ call on
+    #              the instance state. This is what allows SQLite to slide
+    #              the frame in O(1) per row instead of recomputing the
+    #              whole frame.
+    # +value+::    called to read the current value of the function for the
+    #              row currently being emitted. It takes no arguments and
+    #              returns the current value. It may be called any number of
+    #              times per frame and must not modify or destroy the
+    #              instance state.
+    # +finalize+:: called exactly once when the evaluation of the function
+    #              is finished (also when the statement is reset or closed
+    #              early). It takes no arguments and returns the final
+    #              value.
+    #
+    # SQLite keeps a separate handler instance for every invocation of the
+    # function with a distinct window definition and resets the frame state
+    # per partition, so a single instance never has to serve multiple
+    # partitions or windows at the same time.
+    #
+    # Example, a recency-weighted moving average:
+    #
+    #   class WeightedMovingAverage
+    #     def self.name; "wma"; end
+    #     def self.arity; 1; end
+    #
+    #     def initialize
+    #       @count = 0
+    #       @total = 0.0    # sum of the values in the frame
+    #       @weighted = 0.0 # sum of position * value, oldest has position 1
+    #     end
+    #
+    #     def step(x)
+    #       @weighted += (@count + 1) * x
+    #       @total += x
+    #       @count += 1
+    #     end
+    #
+    #     def inverse(x)
+    #       @weighted -= @total
+    #       @total -= x
+    #       @count -= 1
+    #     end
+    #
+    #     def value
+    #       @count.zero? ? nil : @weighted / (@count * (@count + 1) / 2.0)
+    #     end
+    #
+    #     def finalize
+    #       value
+    #     end
+    #   end
+    #
+    #   db.create_window_function_handler(WeightedMovingAverage)
+    #   db.execute("SELECT id, wma(x) OVER (ORDER BY id ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) FROM t")
+    def create_window_function_handler(handler)
+      define_window_function(handler, handler.name)
+      self
+    end
+
     # Define an aggregate function named +name+ using a object template
     # object +aggregator+. +aggregator+ must respond to +step+ and +finalize+.
     # +step+ will be called with row information and +finalize+ must return the

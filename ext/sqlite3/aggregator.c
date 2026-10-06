@@ -114,7 +114,8 @@ rb_sqlite3_aggregate_instance_destroy(sqlite3_context *ctx)
 }
 
 static void
-rb_sqlite3_aggregator_step(sqlite3_context *ctx, int argc, sqlite3_value **argv)
+rb_sqlite3_aggregator_step_or_inverse(sqlite3_context *ctx, int argc,
+                                      sqlite3_value **argv, ID method)
 {
     VALUE inst = rb_sqlite3_aggregate_instance(ctx);
     VALUE handler_instance = rb_iv_get(inst, "-handler_instance");
@@ -141,12 +142,55 @@ rb_sqlite3_aggregator_step(sqlite3_context *ctx, int argc, sqlite3_value **argv)
         }
     }
     rb_sqlite3_protected_funcall(
-        handler_instance, rb_intern("step"), argc, params, &exc_status);
+        handler_instance, method, argc, params, &exc_status);
     if (argc > 1) {
         ALLOCV_END(params_handle);
     }
 
     rb_iv_set(inst, "-exc_status", INT2NUM(exc_status));
+}
+
+static void
+rb_sqlite3_aggregator_step(sqlite3_context *ctx, int argc, sqlite3_value **argv)
+{
+    rb_sqlite3_aggregator_step_or_inverse(ctx, argc, argv, rb_intern("step"));
+}
+
+/* xInverse of a window function: called once for each row that leaves the
+ * window frame. The handler instance must undo the effect that the
+ * corresponding step call had on its state. */
+static void
+rb_sqlite3_aggregator_inverse(sqlite3_context *ctx, int argc, sqlite3_value **argv)
+{
+    rb_sqlite3_aggregator_step_or_inverse(ctx, argc, argv, rb_intern("inverse"));
+}
+
+/* xValue of a window function: called (possibly many times per aggregate
+ * context) to read the current value of the window function without
+ * finalizing it. The instance must NOT be destroyed here; that only happens
+ * in xFinal, which sqlite calls exactly once per context, even when the
+ * statement is reset or closed early. */
+static void
+rb_sqlite3_aggregator_value(sqlite3_context *ctx)
+{
+    VALUE inst = rb_sqlite3_aggregate_instance(ctx);
+    VALUE handler_instance = rb_iv_get(inst, "-handler_instance");
+    int exc_status = NUM2INT(rb_iv_get(inst, "-exc_status"));
+
+    if (!exc_status) {
+        VALUE result = rb_sqlite3_protected_funcall(
+                           handler_instance, rb_intern("value"), 0, NULL, &exc_status);
+        rb_iv_set(inst, "-exc_status", INT2NUM(exc_status));
+        if (!exc_status) {
+            set_sqlite3_func_result(ctx, result);
+            return;
+        }
+    }
+
+    /* the user should never see this, as Statement.step() will pick up the
+     * outstanding exception and raise it instead of generating a new one
+     * for SQLITE_ERROR with message "Ruby Exception occurred" */
+    sqlite3_result_error(ctx, "Ruby Exception occurred", -1);
 }
 
 /* we assume that this function is only called once per execution context */
@@ -175,38 +219,10 @@ rb_sqlite3_aggregator_final(sqlite3_context *ctx)
     rb_sqlite3_aggregate_instance_destroy(ctx);
 }
 
-/* call-seq: define_aggregator2(aggregator)
- *
- * Define an aggregate function according to a factory object (the "handler")
- * that knows how to obtain to all the information. The handler must provide
- * the following class methods:
- *
- * +arity+:: corresponds to the +arity+ parameter of #create_aggregate. This
- *           message is optional, and if the handler does not respond to it,
- *           the function will have an arity of -1.
- * +name+:: this is the name of the function. The handler _must_ implement
- *          this message.
- * +new+:: this must be implemented by the handler. It should return a new
- *         instance of the object that will handle a specific invocation of
- *         the function.
- *
- * The handler instance (the object returned by the +new+ message, described
- * above), must respond to the following messages:
- *
- * +step+:: this is the method that will be called for each step of the
- *          aggregate function's evaluation. It should take parameters according
- *          to the *arity* definition.
- * +finalize+:: this is the method that will be called to finalize the
- *              aggregate function's evaluation. It should not take arguments.
- *
- * Note the difference between this function and #create_aggregate_handler
- * is that no FunctionProxy ("ctx") object is involved. This manifests in two
- * ways: The return value of the aggregate function is the return value of
- * +finalize+ and neither +step+ nor +finalize+ take an additional "ctx"
- * parameter.
- */
-VALUE
-rb_sqlite3_define_aggregator2(VALUE self, VALUE aggregator, VALUE ruby_name)
+/* shared implementation of define_aggregator2 and define_window_function */
+static VALUE
+rb_sqlite3_define_aggregator_impl(VALUE self, VALUE aggregator, VALUE ruby_name,
+                                  int as_window_function)
 {
     /* define_aggregator is added as a method to SQLite3::Database in database.c */
     sqlite3RubyPtr ctx = sqlite3_database_unwrap(self);
@@ -243,16 +259,36 @@ rb_sqlite3_define_aggregator2(VALUE self, VALUE aggregator, VALUE ruby_name)
     rb_iv_set(aw, "-handler_klass", aggregator);
     rb_iv_set(aw, "-instances", rb_ary_new());
 
-    status = sqlite3_create_function(
-                 ctx->db,
-                 StringValueCStr(ruby_name),
-                 arity,
-                 SQLITE_UTF8,
-                 (void *)aw,
-                 NULL,
-                 rb_sqlite3_aggregator_step,
-                 rb_sqlite3_aggregator_final
-             );
+    if (as_window_function) {
+#if SQLITE_VERSION_NUMBER >= 3025000
+        status = sqlite3_create_window_function(
+                     ctx->db,
+                     StringValueCStr(ruby_name),
+                     arity,
+                     SQLITE_UTF8,
+                     (void *)aw,
+                     rb_sqlite3_aggregator_step,
+                     rb_sqlite3_aggregator_final,
+                     rb_sqlite3_aggregator_value,
+                     rb_sqlite3_aggregator_inverse,
+                     NULL
+                 );
+#else
+        rb_raise(rb_eNotImpError,
+                 "window functions require SQLite 3.25.0 or newer");
+#endif
+    } else {
+        status = sqlite3_create_function(
+                     ctx->db,
+                     StringValueCStr(ruby_name),
+                     arity,
+                     SQLITE_UTF8,
+                     (void *)aw,
+                     NULL,
+                     rb_sqlite3_aggregator_step,
+                     rb_sqlite3_aggregator_final
+                 );
+    }
 
     CHECK(ctx->db, status);
 
@@ -260,6 +296,100 @@ rb_sqlite3_define_aggregator2(VALUE self, VALUE aggregator, VALUE ruby_name)
     RB_OBJ_WRITE(self, &ctx->aggregators, aggregators);
 
     return self;
+}
+
+/* call-seq: define_aggregator2(aggregator)
+ *
+ * Define an aggregate function according to a factory object (the "handler")
+ * that knows how to obtain to all the information. The handler must provide
+ * the following class methods:
+ *
+ * +arity+:: corresponds to the +arity+ parameter of #create_aggregate. This
+ *           message is optional, and if the handler does not respond to it,
+ *           the function will have an arity of -1.
+ * +name+:: this is the name of the function. The handler _must_ implement
+ *          this message.
+ * +new+:: this must be implemented by the handler. It should return a new
+ *         instance of the object that will handle a specific invocation of
+ *         the function.
+ *
+ * The handler instance (the object returned by the +new+ message, described
+ * above), must respond to the following messages:
+ *
+ * +step+:: this is the method that will be called for each step of the
+ *          aggregate function's evaluation. It should take parameters according
+ *          to the *arity* definition.
+ * +finalize+:: this is the method that will be called to finalize the
+ *              aggregate function's evaluation. It should not take arguments.
+ *
+ * Note the difference between this function and #create_aggregate_handler
+ * is that no FunctionProxy ("ctx") object is involved. This manifests in two
+ * ways: The return value of the aggregate function is the return value of
+ * +finalize+ and neither +step+ nor +finalize+ take an additional "ctx"
+ * parameter.
+ */
+VALUE
+rb_sqlite3_define_aggregator2(VALUE self, VALUE aggregator, VALUE ruby_name)
+{
+    return rb_sqlite3_define_aggregator_impl(self, aggregator, ruby_name, 0);
+}
+
+/* call-seq: define_window_function(handler, name)
+ *
+ * Define a window function according to a factory object (the "handler").
+ * The handler must provide the same class methods as for
+ * define_aggregator2 (+name+, +new+ and optionally +arity+).
+ *
+ * The handler instance (the object returned by the +new+ message) must
+ * respond to the following messages:
+ *
+ * +step+::     called for each row that enters the window frame. Takes
+ *              parameters according to the arity definition.
+ * +inverse+::  called for each row that leaves the window frame. Takes the
+ *              same parameters as +step+ and must undo the effect the
+ *              corresponding +step+ call had on the instance state.
+ * +value+::    called to read the current value of the window function.
+ *              Takes no arguments and returns the current value. It may be
+ *              called any number of times and must not destroy the state.
+ * +finalize+:: called exactly once at the end of the window function's
+ *              evaluation. Takes no arguments and returns the final value.
+ *
+ * Note that sqlite keeps a separate aggregate context (and therefore a
+ * separate handler instance) for every invocation of the function with a
+ * distinct window definition, and resets the frame state per partition, so
+ * a single instance never has to serve multiple partitions or windows at
+ * the same time.
+ */
+VALUE
+rb_sqlite3_define_window_function(VALUE self, VALUE aggregator, VALUE ruby_name)
+{
+    return rb_sqlite3_define_aggregator_impl(self, aggregator, ruby_name, 1);
+}
+
+/* call-seq: aggregate_instance_count
+ *
+ * The number of aggregate and window function handler instances that are
+ * currently in flight for this database. Returns to zero once all
+ * statements using them have finished, been reset or been closed. Mainly
+ * useful for debugging and in the test suite. */
+VALUE
+rb_sqlite3_aggregate_instance_count(VALUE self)
+{
+    sqlite3RubyPtr ctx = sqlite3_database_unwrap(self);
+    VALUE aggregators = ctx->aggregators;
+    long i;
+    long count = 0;
+
+    if (NIL_P(aggregators) || !aggregators) {
+        return INT2NUM(0);
+    }
+
+    for (i = 0; i < RARRAY_LEN(aggregators); i++) {
+        VALUE instances = rb_iv_get(RARRAY_AREF(aggregators, i), "-instances");
+        count += RARRAY_LEN(instances);
+    }
+
+    return LONG2NUM(count);
 }
 
 void

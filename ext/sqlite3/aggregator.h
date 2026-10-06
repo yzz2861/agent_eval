@@ -4,6 +4,8 @@
 #include <sqlite3_ruby.h>
 
 VALUE rb_sqlite3_define_aggregator2(VALUE self, VALUE aggregator, VALUE ruby_name);
+VALUE rb_sqlite3_define_window_function(VALUE self, VALUE aggregator, VALUE ruby_name);
+VALUE rb_sqlite3_aggregate_instance_count(VALUE self);
 
 void rb_sqlite3_aggregator_init(void);
 
