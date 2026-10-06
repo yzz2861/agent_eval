@@ -849,6 +849,189 @@ class IPAddr
 
 end
 
+class IPAddr
+  # IPAddr::NAT64 translates between IPv4 and IPv6 addresses as
+  # specified by RFC 6052 ("IPv6 Addressing of IPv4/IPv6 Translators").
+  #
+  # An instance is bound to one explicitly declared IPv6 prefix (a
+  # Network-Specific Prefix, or the Well-Known Prefix 64:ff9b::/96) and
+  # translates addresses against that prefix only.  It never guesses
+  # whether an arbitrary IPv6 address embeds an IPv4 address.
+  #
+  # == Example
+  #
+  #   require 'ipaddr'
+  #
+  #   nat64 = IPAddr::NAT64.new("64:ff9b::/96")  # or IPAddr::NAT64.well_known
+  #
+  #   v6 = nat64.embed("192.0.2.33")
+  #   p v6.to_s                 #=> "64:ff9b::c000:221"
+  #
+  #   v4 = nat64.extract(v6)
+  #   p v4.to_s                 #=> "192.0.2.33"
+  #
+  #   p nat64.embed_prefix("192.0.2.0/24").map(&:cidr)  #=> ["64:ff9b::c000:200/120"]
+  class NAT64
+    # Prefix lengths permitted by RFC 6052 Section 2.2.
+    ALLOWED_PREFIX_LENGTHS = [32, 40, 48, 56, 64, 96].freeze
+
+    # The Well-Known Prefix defined by RFC 6052 Section 2.1.
+    WELL_KNOWN_PREFIX = "64:ff9b::/96"
+
+    # Raised when an address cannot be translated, e.g. an IPv6 address
+    # outside the NAT64 prefix, one whose reserved bits are not zero, or
+    # an IPv4 network that no single IPv6 prefix can exactly cover.
+    class Error < IPAddr::Error; end
+
+    # Returns an IPAddr::NAT64 bound to the Well-Known Prefix
+    # 64:ff9b::/96.
+    def self.well_known
+      new(WELL_KNOWN_PREFIX)
+    end
+
+    # The IPv6 prefix of this translator as an IPAddr.
+    attr_reader :prefix
+
+    # The prefix length in bits.
+    attr_reader :prefix_length
+
+    # Creates a translator for the given IPv6 prefix, which may be an
+    # IPAddr or a string such as "64:ff9b::/96".  The prefix length must
+    # be one of 32, 40, 48, 56, 64 or 96 (RFC 6052 Section 2.2).
+    def initialize(prefix)
+      addr = prefix.is_a?(IPAddr) ? prefix : IPAddr.new(String(prefix))
+      unless addr.ipv6?
+        raise InvalidPrefixError, "NAT64 prefix must be an IPv6 prefix: #{prefix.inspect}"
+      end
+      @prefix_length = addr.prefix
+      unless ALLOWED_PREFIX_LENGTHS.include?(@prefix_length)
+        raise InvalidPrefixError,
+              "invalid NAT64 prefix length #{@prefix_length} " +              "(must be one of #{ALLOWED_PREFIX_LENGTHS.join(', ')})"
+      end
+      @prefix = addr.mask(@prefix_length)
+      @prefix_int = @prefix.to_i
+      @prefix_mask = IN6MASK ^ (IN6MASK >> @prefix_length)
+      # Bits between the embedded IPv4 address and the end of the
+      # address, which RFC 6052 requires to be zero.  The reserved
+      # "u" octet (bits 64-71) only exists for prefix lengths <= 64.
+      @suffix_length = @prefix_length == 96 ? 0 : 88 - @prefix_length
+    end
+
+    # Translates an IPv4 host address into the IPv6 address it maps to
+    # within the NAT64 prefix.  Accepts an IPAddr or a String.  Use
+    # #embed_prefix to translate an IPv4 network.
+    def embed(ipv4)
+      addr = coerce_ipv4(ipv4)
+      unless addr.prefix == 32
+        raise Error, "expected an IPv4 host address but got #{addr.cidr}; use #embed_prefix for networks"
+      end
+      IPAddr.new(embed_int(addr.to_i), Socket::AF_INET6)
+    end
+    alias to_ipv6 embed
+
+    # Translates an IPv6 address back to the embedded IPv4 address.
+    # Accepts an IPAddr or a String.
+    #
+    # The address must belong to the NAT64 prefix and have all reserved
+    # bits (the "u" octet and the suffix) set to zero, as RFC 6052
+    # requires; otherwise an IPAddr::NAT64::Error is raised.
+    def extract(ipv6)
+      addr = ipv6.is_a?(IPAddr) ? ipv6 : IPAddr.new(String(ipv6))
+      unless addr.ipv6?
+        raise Error, "expected an IPv6 address: #{ipv6.inspect}"
+      end
+      v6 = addr.to_i
+      unless (v6 & @prefix_mask) == @prefix_int
+        raise Error, "#{addr} is not within NAT64 prefix #{@prefix.cidr}"
+      end
+      if @prefix_length <= 64 && ((v6 >> 56) & 0xff) != 0
+        raise Error, "#{addr} has a non-zero reserved octet (bits 64-71); not an RFC 6052 translation"
+      end
+      if @suffix_length > 0 && (v6 & (IN6MASK >> (128 - @suffix_length))) != 0
+        raise Error, "#{addr} has non-zero suffix bits; not an RFC 6052 translation"
+      end
+      IPAddr.new(extract_int(v6), Socket::AF_INET)
+    end
+    alias to_ipv4 extract
+
+    # Translates an IPv4 network into the set of IPv6 prefixes that
+    # exactly cover the translated addresses, returned as an Array of
+    # IPAddr.  Accepts an IPAddr or a String.
+    #
+    # The exact coverage is a single prefix when the NAT64 prefix
+    # length is 96 or the network is a single host.  Otherwise the zero
+    # suffix required by RFC 6052 makes the translated set inexpressible
+    # as one IPv6 prefix, and an IPAddr::NAT64::Error is raised saying
+    # so explicitly.
+    def embed_prefix(ipv4_network)
+      addr = coerce_ipv4(ipv4_network)
+      plen4 = addr.prefix
+      if plen4 == 32
+        return [IPAddr.new(embed_int(addr.to_i), Socket::AF_INET6).mask(128)]
+      end
+      if @suffix_length == 0
+        return [IPAddr.new(embed_int(addr.to_i), Socket::AF_INET6).mask(96 + plen4)]
+      end
+      raise Error,
+            "IPv4 network #{addr.cidr} cannot be expressed as a single IPv6 prefix " +            "within #{@prefix.cidr}: RFC 6052 translation yields #{1 << (32 - plen4)} " +            "addresses sharing no single prefix because the #{@suffix_length}-bit " +            "suffix must stay zero"
+    end
+
+    # Returns the prefix in CIDR notation.
+    def to_s
+      @prefix.cidr
+    end
+
+    # Returns a string containing a human-readable representation of
+    # the translator.
+    def inspect
+      "#<IPAddr::NAT64: #{@prefix.cidr}>"
+    end
+
+    private
+
+    def coerce_ipv4(ipv4)
+      addr = ipv4.is_a?(IPAddr) ? ipv4 : IPAddr.new(String(ipv4))
+      unless addr.ipv4?
+        raise Error, "expected an IPv4 address: #{ipv4.inspect}"
+      end
+      addr
+    end
+
+    # Embeds a 32-bit IPv4 integer into the NAT64 prefix (RFC 6052
+    # Section 2.2).  For prefix lengths below 64 the IPv4 bits are
+    # split around the reserved "u" octet (bits 64-71).
+    def embed_int(v4)
+      case @prefix_length
+      when 96
+        @prefix_int | v4
+      when 64
+        @prefix_int | (v4 << 24)
+      else
+        low = 32 - (64 - @prefix_length)
+        @prefix_int |
+          ((v4 >> low) << 64) |
+          ((v4 & (IN4MASK >> (32 - low))) << @suffix_length)
+      end
+    end
+
+    # The inverse of #embed_int.  Reserved bits must have been
+    # validated beforehand.
+    def extract_int(v6)
+      case @prefix_length
+      when 96
+        v6 & IN4MASK
+      when 64
+        (v6 >> 24) & IN4MASK
+      else
+        high = 64 - @prefix_length
+        low = 32 - high
+        (((v6 >> 64) & (IN4MASK >> (32 - high))) << low) |
+          ((v6 >> @suffix_length) & (IN4MASK >> (32 - low)))
+      end
+    end
+  end
+end
+
 unless Socket.const_defined? :AF_INET6
   class Socket < BasicSocket
     # IPv6 protocol family

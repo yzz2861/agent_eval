@@ -1,3 +1,8 @@
+Unreleased
+----------
+
+- Add IPAddr::NAT64 for RFC 6052 IPv4/IPv6 address translation against a declared NAT64 prefix
+
 1.2.9
 -----
 

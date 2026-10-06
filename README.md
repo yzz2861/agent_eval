@@ -46,6 +46,25 @@ ipaddr3 = IPAddr.new "192.168.2.0/24"
 p ipaddr3                   #=> #<IPAddr: IPv4:192.168.2.0/255.255.255.0>
 ```
 
+### NAT64 (RFC 6052) translation
+
+IPAddr::NAT64 translates between IPv4 and IPv6 addresses against an
+explicitly declared NAT64 prefix, covering every prefix length allowed
+by RFC 6052 (32, 40, 48, 56, 64 and 96):
+
+    nat64 = IPAddr::NAT64.new("64:ff9b::/96")  # or IPAddr::NAT64.well_known
+
+    nat64.embed("192.0.2.33").to_s           #=> "64:ff9b::c000:221"
+    nat64.extract("64:ff9b::c000:221").to_s  #=> "192.0.2.33"
+
+    # Reverse translation validates prefix membership and the reserved
+    # bits (the "u" octet and the suffix), and rejects anything else:
+    nat64.extract("64:ff9c::c000:221")       #=> raises IPAddr::NAT64::Error
+
+    # IPv4 networks map to the exactly covering IPv6 prefix set, or raise
+    # if no single prefix can express the translation:
+    nat64.embed_prefix("192.0.2.0/24").map(&:cidr)  #=> ["64:ff9b::c000:200/120"]
+
 ## Alternative
 
 The [ipaddress](https://rubygems.org/gems/ipaddress) gem is a popular,
