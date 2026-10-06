@@ -16,9 +16,9 @@ module Psych
         DATA_INITIALIZE = Data.instance_method(:initialize)
       end
 
-      def self.create(symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true)
+      def self.create(symbolize_names: false, freeze: false, scalar_schema: ScalarScanner::COMPAT_SCALAR_SCHEMA, strict_integer: false, parse_symbols: true)
         class_loader = ClassLoader.new
-        scanner      = ScalarScanner.new class_loader, strict_integer: strict_integer, parse_symbols: parse_symbols
+        scanner      = ScalarScanner.new class_loader, scalar_schema: scalar_schema, strict_integer: strict_integer, parse_symbols: parse_symbols
         new(scanner, class_loader, symbolize_names: symbolize_names, freeze: freeze)
       end
 
@@ -65,12 +65,15 @@ module Psych
           return instance
         end
 
+        return o.value if o.quoted && o.tag.nil?
+        return @ss.tokenize(o.value) if o.tag.nil?
         return o.value if o.quoted
-        return @ss.tokenize(o.value) unless o.tag
+        if o.tag == '!binary' || o.tag == 'tag:yaml.org,2002:binary'
+          return @ss.yaml12_scalar_schema? ? @ss.tokenize_tagged(o.value, o.tag) : o.value.unpack('m').first
+        end
+        return @ss.tokenize_tagged(o.value, o.tag) if @ss.standard_scalar_tag?(o.tag)
 
         case o.tag
-        when '!binary', 'tag:yaml.org,2002:binary'
-          o.value.unpack('m').first
         when /^!(?:str|ruby\/string)(?::(.*))?$/, 'tag:yaml.org,2002:str'
           klass = resolve_subclass($1, String)
           if klass
@@ -97,8 +100,6 @@ module Psych
           Rational(o.value)
         when "!ruby/class", "!ruby/module"
           resolve_class o.value
-        when "tag:yaml.org,2002:float", "!float"
-          Float(@ss.tokenize(o.value))
         when "!ruby/regexp"
           klass = class_loader.regexp
           matches = /^\/(?<string>.*)\/(?<options>[mixn]*)$/m.match(o.value)

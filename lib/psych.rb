@@ -263,16 +263,21 @@ module Psych
   #   Psych.unsafe_load("---\n foo: bar")                         # => {"foo"=>"bar"}
   #   Psych.unsafe_load("---\n foo: bar", symbolize_names: true)  # => {:foo=>"bar"}
   #
+  # +scalar_schema+ selects implicit plain-scalar resolution for this call.
+  # Use +:compat+ for Psych's historical behavior, +:json+ for the YAML 1.2
+  # JSON schema, or +:core+ for the YAML 1.2 core schema.
+  #
   # Raises a TypeError when `yaml` parameter is NilClass
   #
   # NOTE: This method *should not* be used to parse untrusted documents, such as
   # YAML documents that are supplied via user input.  Instead, please use the
   # load method or the safe_load method.
   #
-  def self.unsafe_load yaml, filename: nil, fallback: false, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true
+  def self.unsafe_load yaml, filename: nil, fallback: false, symbolize_names: false, freeze: false, scalar_schema: ScalarScanner::COMPAT_SCALAR_SCHEMA, strict_integer: false, parse_symbols: true
+    ScalarScanner.validate_scalar_schema scalar_schema, strict_integer
     result = parse(yaml, filename: filename)
     return fallback unless result
-    result.to_ruby(symbolize_names: symbolize_names, freeze: freeze, strict_integer: strict_integer, parse_symbols: parse_symbols)
+    result.to_ruby(symbolize_names: symbolize_names, freeze: freeze, scalar_schema: scalar_schema, strict_integer: strict_integer, parse_symbols: parse_symbols)
   end
 
   ###
@@ -320,13 +325,19 @@ module Psych
   #   Psych.safe_load("---\n foo: bar")                         # => {"foo"=>"bar"}
   #   Psych.safe_load("---\n foo: bar", symbolize_names: true)  # => {:foo=>"bar"}
   #
-  def self.safe_load yaml, permitted_classes: [], permitted_symbols: [], aliases: false, filename: nil, fallback: nil, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true
+  # +scalar_schema+ selects implicit plain-scalar resolution for this call.
+  # Use +:compat+ for Psych's historical behavior, +:json+ for the YAML 1.2
+  # JSON schema, or +:core+ for the YAML 1.2 core schema. Explicit standard
+  # tags are validated against the selected schema.
+  #
+  def self.safe_load yaml, permitted_classes: [], permitted_symbols: [], aliases: false, filename: nil, fallback: nil, symbolize_names: false, freeze: false, scalar_schema: ScalarScanner::COMPAT_SCALAR_SCHEMA, strict_integer: false, parse_symbols: true
+    ScalarScanner.validate_scalar_schema scalar_schema, strict_integer
     result = parse(yaml, filename: filename)
     return fallback unless result
 
     class_loader = ClassLoader::Restricted.new(permitted_classes.map(&:to_s),
                                                permitted_symbols.map(&:to_s))
-    scanner      = ScalarScanner.new class_loader, strict_integer: strict_integer, parse_symbols: parse_symbols
+    scanner      = ScalarScanner.new class_loader, scalar_schema: scalar_schema, strict_integer: strict_integer, parse_symbols: parse_symbols
     visitor = if aliases
                 Visitors::ToRuby.new scanner, class_loader, symbolize_names: symbolize_names, freeze: freeze
               else
@@ -363,10 +374,14 @@ module Psych
   #   Psych.load("---\n foo: bar")                         # => {"foo"=>"bar"}
   #   Psych.load("---\n foo: bar", symbolize_names: true)  # => {:foo=>"bar"}
   #
+  # +scalar_schema+ selects implicit plain-scalar resolution for this call.
+  # Use +:compat+ for Psych's historical behavior, +:json+ for the YAML 1.2
+  # JSON schema, or +:core+ for the YAML 1.2 core schema.
+  #
   # Raises a TypeError when `yaml` parameter is NilClass.  This method is
   # similar to `safe_load` except that `Symbol` objects are allowed by default.
   #
-  def self.load yaml, permitted_classes: [Symbol], permitted_symbols: [], aliases: false, filename: nil, fallback: nil, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true
+  def self.load yaml, permitted_classes: [Symbol], permitted_symbols: [], aliases: false, filename: nil, fallback: nil, symbolize_names: false, freeze: false, scalar_schema: ScalarScanner::COMPAT_SCALAR_SCHEMA, strict_integer: false, parse_symbols: true
     safe_load yaml, permitted_classes: permitted_classes,
                     permitted_symbols: permitted_symbols,
                     aliases: aliases,
@@ -374,6 +389,7 @@ module Psych
                     fallback: fallback,
                     symbolize_names: symbolize_names,
                     freeze: freeze,
+                    scalar_schema: scalar_schema,
                     strict_integer: strict_integer,
                     parse_symbols: parse_symbols
   end
@@ -641,7 +657,11 @@ module Psych
   #   end
   #   list # => ['foo', 'bar']
   #
+  # Accepts the same loading options as Psych.load, including +scalar_schema+.
+  #
   def self.load_stream yaml, filename: nil, fallback: [], **kwargs
+    ScalarScanner.validate_scalar_schema(kwargs.fetch(:scalar_schema, ScalarScanner::COMPAT_SCALAR_SCHEMA),
+                                         kwargs.fetch(:strict_integer, false))
     result = if block_given?
                parse_stream(yaml, filename: filename) do |node|
                  yield node.to_ruby(**kwargs)
@@ -668,11 +688,24 @@ module Psych
   #   end
   #   list # => ['foo', 'bar']
   #
-  def self.safe_load_stream yaml, filename: nil, permitted_classes: [], aliases: false
-    documents = parse_stream(yaml, filename: filename).children.map do |child|
-      stream = Psych::Nodes::Stream.new
-      stream.children << child
-      safe_load(stream.to_yaml, permitted_classes: permitted_classes, aliases: aliases)
+  # Accepts the same loading options as Psych.safe_load, including
+  # +scalar_schema+.
+  #
+  def self.safe_load_stream yaml, filename: nil, permitted_classes: [], permitted_symbols: [], aliases: false, symbolize_names: false, freeze: false, scalar_schema: ScalarScanner::COMPAT_SCALAR_SCHEMA, strict_integer: false, parse_symbols: true
+    ScalarScanner.validate_scalar_schema scalar_schema, strict_integer
+    documents = parse_stream(yaml, filename: filename).children.map do |document|
+      class_loader = ClassLoader::Restricted.new(permitted_classes.map(&:to_s),
+                                                 permitted_symbols.map(&:to_s))
+      scanner = ScalarScanner.new(class_loader,
+                                  scalar_schema: scalar_schema,
+                                  strict_integer: strict_integer,
+                                  parse_symbols: parse_symbols)
+      visitor = if aliases
+                  Visitors::ToRuby.new(scanner, class_loader, symbolize_names: symbolize_names, freeze: freeze)
+                else
+                  Visitors::NoAliasRuby.new(scanner, class_loader, symbolize_names: symbolize_names, freeze: freeze)
+                end
+      visitor.accept(document)
     end
 
     if block_given?

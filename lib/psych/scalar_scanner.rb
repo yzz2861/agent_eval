@@ -4,6 +4,15 @@ module Psych
   ###
   # Scan scalars for built in types
   class ScalarScanner
+    def self.validate_scalar_schema scalar_schema, strict_integer = false
+      unless SCALAR_SCHEMAS.include?(scalar_schema)
+        raise ArgumentError, "invalid scalar schema #{scalar_schema.inspect}; expected one of #{SCALAR_SCHEMAS.map(&:inspect).join(", ")}"
+      end
+      if strict_integer && scalar_schema != COMPAT_SCALAR_SCHEMA
+        raise ArgumentError, "strict_integer can only be combined with scalar schema #{COMPAT_SCALAR_SCHEMA.inspect}"
+      end
+    end
+
     # Taken from http://yaml.org/type/timestamp.html
     TIME = /^-?\d{4}-\d{1,2}-\d{1,2}(?:[Tt]|\s+)\d{1,2}:\d\d:\d\d(?:\.\d*)?(?:\s*(?:Z|[-+]\d{1,2}:?(?:\d\d)?))?$/
 
@@ -38,17 +47,50 @@ module Psych
 
     attr_reader :class_loader
 
+    COMPAT_SCALAR_SCHEMA = :compat
+    JSON_SCALAR_SCHEMA = :json
+    CORE_SCALAR_SCHEMA = :core
+    SCALAR_SCHEMAS = [
+      COMPAT_SCALAR_SCHEMA,
+      JSON_SCALAR_SCHEMA,
+      CORE_SCALAR_SCHEMA,
+    ].freeze
+
+    YAML_12_NULL = /^(?:~|null|Null|NULL)$/
+    YAML_12_BOOLEAN_TRUE = /^(?:true|True|TRUE)$/
+    YAML_12_BOOLEAN_FALSE = /^(?:false|False|FALSE)$/
+    YAML_12_JSON_INTEGER = /^[-+]?(?:0|[1-9][0-9]*)$/
+    YAML_12_CORE_INTEGER = /^(?:[-+]?0o[0-7][0-7]*(?:_[0-7]+)*
+                               |[-+]?0x[0-9a-fA-F][0-9a-fA-F]*(?:_[0-9a-fA-F]+)*
+                               |[-+]?(?:0|[1-9][0-9]*(?:_[0-9]+)*))$/x
+    YAML_12_JSON_FLOAT = /^[-+]?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?$/
+    YAML_12_CORE_FLOAT = /^(?:[-+]?(?:(?:0|[1-9][0-9]*(?:_[0-9]+)*)(?:\.(?:[0-9][0-9]*(?:_[0-9]+)*)?)?
+                            |\.[0-9](?:_[0-9]+)*)(?:[eE][-+]?[0-9]+)?
+                           |[-+]?\.(?:inf|Inf|INF)
+                           |\.(?:nan|NaN|NAN))$/x
+
     # Create a new scanner
-    def initialize class_loader, strict_integer: false, parse_symbols: true
+    def initialize class_loader, scalar_schema: COMPAT_SCALAR_SCHEMA, strict_integer: false, parse_symbols: true
+      self.class.validate_scalar_schema scalar_schema, strict_integer
+
       @symbol_cache = {}
       @class_loader = class_loader
       @strict_integer = strict_integer
       @parse_symbols = parse_symbols
+      @scalar_schema = scalar_schema
     end
 
     # Tokenize +string+ returning the Ruby object
     def tokenize string
       return nil if string.empty?
+      if @scalar_schema == COMPAT_SCALAR_SCHEMA
+        return tokenize_compat(string)
+      else
+        return tokenize_yaml12(string)
+      end
+    end
+
+    def tokenize_compat string
       return @symbol_cache[string] if @symbol_cache.key?(string)
       integer_regex = @strict_integer ? INTEGER_STRICT : INTEGER_LEGACY
       # Check for a String type, being careful not to get caught by hash keys, hex values, and
@@ -116,6 +158,28 @@ module Psych
       end
     end
 
+    def tokenize_tagged string, tag
+      type = standard_scalar_tag(tag)
+      return tokenize(string) unless type
+
+      case @scalar_schema
+      when JSON_SCALAR_SCHEMA
+        tokenize_json_tag(string, type)
+      when CORE_SCALAR_SCHEMA
+        tokenize_core_tag(string, type)
+      else
+        tokenize_compat_tag(string, type)
+      end
+    end
+
+    def standard_scalar_tag? tag
+      !standard_scalar_tag(tag).nil?
+    end
+
+    def yaml12_scalar_schema?
+      @scalar_schema != COMPAT_SCALAR_SCHEMA
+    end
+
     ###
     # Parse and return an int from +string+
     def parse_int string
@@ -149,6 +213,143 @@ module Psych
       end
 
       klass.new(yy, m, dd, hh, mm, ss+us/(1_000_000r), offset)
+    end
+
+    private
+
+    def tokenize_yaml12 string
+      case @scalar_schema
+      when JSON_SCALAR_SCHEMA
+        tokenize_json_scalar string
+      when CORE_SCALAR_SCHEMA
+        tokenize_core_scalar string
+      end
+    end
+
+    def tokenize_json_scalar string
+      return nil if string.match?(YAML_12_NULL)
+      return true if string.match?(YAML_12_BOOLEAN_TRUE)
+      return false if string.match?(YAML_12_BOOLEAN_FALSE)
+      return parse_json_integer(string) if string.match?(YAML_12_JSON_INTEGER)
+      return parse_json_float(string) if string.match?(YAML_12_JSON_FLOAT)
+      string
+    end
+
+    def tokenize_core_scalar string
+      return nil if string.match?(YAML_12_NULL)
+      return true if string.match?(YAML_12_BOOLEAN_TRUE)
+      return false if string.match?(YAML_12_BOOLEAN_FALSE)
+      return parse_core_integer(string) if string.match?(YAML_12_CORE_INTEGER)
+      return parse_core_float(string) if string.match?(YAML_12_CORE_FLOAT)
+      string
+    end
+
+    def tokenize_json_tag string, type
+      case type
+      when 'str' then string
+      when 'null'
+        return nil if string.empty? || string.match?(YAML_12_NULL)
+        invalid_tag!(string, type)
+      when 'bool'
+        return true if string.match?(YAML_12_BOOLEAN_TRUE)
+        return false if string.match?(YAML_12_BOOLEAN_FALSE)
+        invalid_tag!(string, type)
+      when 'int'
+        return parse_json_integer(string) if string.match?(YAML_12_JSON_INTEGER)
+        invalid_tag!(string, type)
+      when 'float'
+        return parse_json_float(string) if string.match?(YAML_12_JSON_FLOAT)
+        invalid_tag!(string, type)
+      else
+        unsupported_tag!(type)
+      end
+    end
+
+    def tokenize_core_tag string, type
+      case type
+      when 'str' then string
+      when 'null'
+        return nil if string.empty? || string.match?(YAML_12_NULL)
+        invalid_tag!(string, type)
+      when 'bool'
+        return true if string.match?(YAML_12_BOOLEAN_TRUE)
+        return false if string.match?(YAML_12_BOOLEAN_FALSE)
+        invalid_tag!(string, type)
+      when 'int'
+        return parse_core_integer(string) if string.match?(YAML_12_CORE_INTEGER)
+        invalid_tag!(string, type)
+      when 'float'
+        return parse_core_float(string) if string.match?(YAML_12_CORE_FLOAT)
+        invalid_tag!(string, type)
+      else
+        unsupported_tag!(type)
+      end
+    end
+
+    def tokenize_compat_tag string, type
+      case type
+      when 'str' then string
+      when 'null'
+        return nil if string.empty? || tokenize_compat(string).nil?
+        invalid_tag!(string, type)
+      when 'bool'
+        tokenized = tokenize_compat(string)
+        tokenized.equal?(true) || tokenized.equal?(false) ? tokenized : invalid_tag!(string, type)
+      when 'int'
+        integer_regex = @strict_integer ? INTEGER_STRICT : INTEGER_LEGACY
+        string.match?(integer_regex) ? parse_int(string) : invalid_tag!(string, type)
+      when 'float'
+        tokenized = tokenize_compat(string)
+        tokenized.is_a?(Numeric) ? Float(tokenized) : invalid_tag!(string, type)
+      when 'timestamp'
+        tokenized = tokenize_compat(string)
+        tokenized.is_a?(Date) || tokenized.is_a?(Time) ? tokenized : invalid_tag!(string, type)
+      else
+        tokenize_compat(string)
+      end
+    end
+
+    def standard_scalar_tag tag
+      case tag
+      when 'tag:yaml.org,2002:str', '!str', '!!str' then 'str'
+      when 'tag:yaml.org,2002:null', '!null', '!!null' then 'null'
+      when 'tag:yaml.org,2002:bool', '!bool', '!!bool' then 'bool'
+      when 'tag:yaml.org,2002:int', '!int', '!!int' then 'int'
+      when 'tag:yaml.org,2002:float', '!float', '!!float' then 'float'
+      when 'tag:yaml.org,2002:timestamp', '!timestamp', '!!timestamp' then 'timestamp'
+      when 'tag:yaml.org,2002:binary', '!binary', '!!binary' then 'binary'
+      end
+    end
+
+    def parse_json_integer string
+      Integer(string)
+    end
+
+    def parse_core_integer string
+      Integer(string.delete('_'))
+    end
+
+    def parse_json_float string
+      Float(string)
+    end
+
+    def parse_core_float string
+      normalized = string.delete('_')
+      case normalized
+      when /^\+?\.(?:inf|Inf|INF)$/ then Float::INFINITY
+      when /^-\.(?:inf|Inf|INF)$/ then -Float::INFINITY
+      when /^\.(?:nan|NaN|NAN)$/ then Float::NAN
+      else
+        Float(normalized)
+      end
+    end
+
+    def invalid_tag! string, type
+      raise ArgumentError, "invalid #{type} scalar: #{string.inspect}"
+    end
+
+    def unsupported_tag! type
+      raise ArgumentError, "unsupported #{type} scalar in #{@scalar_schema.inspect} schema"
     end
   end
 end

@@ -44,9 +44,10 @@ module Psych
       ###
       # Convert this node to Ruby.
       #
-      # See also Psych::Visitors::ToRuby
-      def to_ruby(symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true)
-        Visitors::ToRuby.create(symbolize_names: symbolize_names, freeze: freeze, strict_integer: strict_integer, parse_symbols: parse_symbols).accept(self)
+      # See also Psych::Visitors::ToRuby. +scalar_schema+ may be +:compat+,
+      # +:json+, or +:core+ and applies only to this conversion.
+      def to_ruby(symbolize_names: false, freeze: false, scalar_schema: ScalarScanner::COMPAT_SCALAR_SCHEMA, strict_integer: false, parse_symbols: true)
+        Visitors::ToRuby.create(symbolize_names: symbolize_names, freeze: freeze, scalar_schema: scalar_schema, strict_integer: strict_integer, parse_symbols: parse_symbols).accept(self)
       end
       alias :transform :to_ruby
 
