@@ -14,7 +14,9 @@ module OneLogin
       @@uuid_generator = UUID.new if RUBY_VERSION < '1.9'
 
       BINDINGS = { :post => "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST".freeze,
-                   :redirect => "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect".freeze }.freeze
+                   :redirect => "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect".freeze,
+                   :paos => "urn:oasis:names:tc:SAML:2.0:bindings:PAOS".freeze,
+                   :soap => "urn:oasis:names:tc:SAML:2.0:bindings:SOAP".freeze }.freeze
       DSIG = "http://www.w3.org/2000/09/xmldsig#".freeze
       XENC = "http://www.w3.org/2001/04/xmlenc#".freeze
       DURATION_FORMAT = %r(^

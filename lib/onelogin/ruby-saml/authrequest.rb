@@ -181,7 +181,7 @@ module OneLogin
 
       def sign_document(document, settings)
         cert, private_key = settings.get_sp_signing_pair
-        if settings.idp_sso_service_binding == Utils::BINDINGS[:post] && settings.security[:authn_requests_signed] && private_key && cert
+        if [Utils::BINDINGS[:post], Utils::BINDINGS[:paos]].include?(settings.idp_sso_service_binding) && settings.security[:authn_requests_signed] && private_key && cert
           document.sign_document(private_key, cert, settings.security[:signature_method], settings.security[:digest_method])
         end
 
