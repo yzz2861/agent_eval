@@ -39,4 +39,10 @@ describe :Hamster do
       expect(system(%{ruby -e "$:.unshift('#{hamster_lib_dir}'); require 'hamster/deque'; Hamster::Deque.new"})).to be(true)
     end
   end
+
+  describe :PriorityQueue do
+    it "can be loaded separately" do
+      expect(system(%{ruby -e "$:.unshift('#{hamster_lib_dir}'); require 'hamster/priority_queue'; Hamster::PriorityQueue.empty"})).to be(true)
+    end
+  end
 end

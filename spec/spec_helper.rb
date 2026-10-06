@@ -9,6 +9,7 @@ require "hamster/vector"
 require "hamster/sorted_set"
 require "hamster/list"
 require "hamster/deque"
+require "hamster/priority_queue"
 require "hamster/core_ext"
 
 V = Hamster::Vector
@@ -17,6 +18,7 @@ H = Hamster::Hash
 S = Hamster::Set
 SS = Hamster::SortedSet
 D = Hamster::Deque
+PQ = Hamster::PriorityQueue
 EmptyList = Hamster::EmptyList
 
 Struct.new("Customer", :name, :address)
