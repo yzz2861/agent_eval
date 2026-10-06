@@ -1,5 +1,12 @@
 # sqlite3-ruby Changelog
 
+## Unreleased
+
+### Added
+
+- Add database image serialization: `Database#serialize` exports a named schema (default `main`) as a binary String, and `Database.deserialize` / `Database#deserialize` import such an image into an in-memory connection, either writable (and growable) or read-only. The image is always copied into sqlite-owned memory, so the caller's String is never shared with the database, and importing is refused with `SQLite3::BusyException` while statements are open.
+
+
 ## 2.9.6 / 2026-08-11
 
 ### Security / Stability

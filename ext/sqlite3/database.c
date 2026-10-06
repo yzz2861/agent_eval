@@ -1057,6 +1057,117 @@ rb_sqlite3_open16(VALUE self, VALUE file)
     return INT2NUM(status);
 }
 
+#ifdef HAVE_SQLITE3_SERIALIZE
+/* call-seq: db.serialize(schema = "main") -> String or nil
+ *
+ * Serializes the named schema into a binary String (an exact image of the
+ * database, the same format used by database files on disk). Returns +nil+
+ * if the schema contains no pages (e.g. a brand-new empty database).
+ *
+ * The returned String is owned by the caller: the image is copied out of
+ * SQLite-managed memory before this method returns, so later changes to the
+ * database do not affect it, and it may be freely stored, mutated, or
+ * passed to #deserialize (possibly on another connection).
+ */
+static VALUE
+rb_sqlite3_serialize(int argc, VALUE *argv, VALUE self)
+{
+    sqlite3RubyPtr ctx;
+    VALUE schema;
+    sqlite3_int64 size = 0;
+    unsigned char *image;
+    VALUE result;
+
+    TypedData_Get_Struct(self, sqlite3Ruby, &database_type, ctx);
+    REQUIRE_OPEN_DB(ctx);
+
+    rb_scan_args(argc, argv, "01", &schema);
+    if (NIL_P(schema)) { schema = rb_str_new_cstr("main"); }
+
+    image = sqlite3_serialize(ctx->db, StringValueCStr(schema), &size, 0);
+    if (!image) {
+        /* NULL means the schema has no pages to serialize. */
+        return Qnil;
+    }
+
+    result = rb_str_new((const char *)image, (long)size);
+    sqlite3_free(image);
+
+    return result;
+}
+#endif
+
+#ifdef HAVE_SQLITE3_DESERIALIZE
+/* call-seq: db.deserialize_internal(image, schema = "main", read_only = false) -> self
+ *
+ * Replaces the contents of the named schema of this (open) connection with
+ * the database contained in +image+, a binary String as returned by
+ * #serialize. When +read_only+ is true, the imported database rejects all
+ * writes; otherwise it may be modified and grow like an ordinary in-memory
+ * database.
+ *
+ * Memory ownership: +image+ is copied into SQLite-owned memory before this
+ * method returns, and that copy is released by SQLite when the connection
+ * is closed. The caller's String is never aliased, so it may be safely
+ * reused, mutated, frozen, moved by GC compaction, or garbage-collected
+ * after this call, and growth of a writable imported database never writes
+ * back into the caller's String.
+ *
+ * Raises SQLite3::BusyException if any statement is still open on this
+ * connection, or if sqlite itself reports the schema as busy.
+ */
+static VALUE
+rb_sqlite3_deserialize(int argc, VALUE *argv, VALUE self)
+{
+    sqlite3RubyPtr ctx;
+    VALUE image, schema, read_only;
+    unsigned char *buffer;
+    sqlite3_int64 size;
+    unsigned int flags = SQLITE_DESERIALIZE_FREEONCLOSE;
+    int status;
+
+    TypedData_Get_Struct(self, sqlite3Ruby, &database_type, ctx);
+    REQUIRE_OPEN_DB(ctx);
+
+    rb_scan_args(argc, argv, "12", &image, &schema, &read_only);
+    if (NIL_P(schema)) { schema = rb_str_new_cstr("main"); }
+
+    /* Deserializing swaps out the schema's underlying pager, which any
+     * live statement may still be pointing into; SQLite does not reliably
+     * guard against that, so refuse while statements are open. */
+    if (sqlite3_next_stmt(ctx->db, NULL)) {
+        rb_raise(rb_path2class("SQLite3::BusyException"),
+                 "cannot deserialize while statements are open");
+    }
+
+    StringValue(image);
+    size = (sqlite3_int64)RSTRING_LEN(image);
+
+    /* Hand SQLite its own private copy of the image, allocated with
+     * sqlite3_malloc64 so that SQLite may free/realloc it as needed. */
+    buffer = sqlite3_malloc64(size > 0 ? (sqlite3_uint64)size : 1);
+    if (!buffer) { rb_raise(rb_eNoMemError, "cannot allocate %lld bytes for database image", (long long)size); }
+    if (size > 0) { memcpy(buffer, RSTRING_PTR(image), (size_t)size); }
+
+    if (RTEST(read_only)) {
+        flags |= SQLITE_DESERIALIZE_READONLY;
+    } else {
+        flags |= SQLITE_DESERIALIZE_RESIZEABLE;
+    }
+
+    status = sqlite3_deserialize(ctx->db, StringValueCStr(schema), buffer, size, size, flags);
+    /* NB: on failure SQLite has already freed +buffer+ (FREEONCLOSE), so we
+     * must not free it again here. */
+    CHECK(ctx->db, status);
+
+    if (RTEST(read_only)) {
+        ctx->flags |= SQLITE3_RB_DATABASE_READONLY;
+    }
+
+    return self;
+}
+#endif
+
 void
 init_sqlite3_database(void)
 {
@@ -1096,6 +1207,13 @@ init_sqlite3_database(void)
     rb_define_method(cSqlite3Database, "transaction_active?", transaction_active_p, 0);
     rb_define_private_method(cSqlite3Database, "exec_batch", exec_batch, 2);
     rb_define_private_method(cSqlite3Database, "db_filename", db_filename, 1);
+
+#ifdef HAVE_SQLITE3_SERIALIZE
+    rb_define_method(cSqlite3Database, "serialize", rb_sqlite3_serialize, -1);
+#endif
+#ifdef HAVE_SQLITE3_DESERIALIZE
+    rb_define_private_method(cSqlite3Database, "deserialize_internal", rb_sqlite3_deserialize, -1);
+#endif
 
 #ifdef HAVE_SQLITE3_LOAD_EXTENSION
     rb_define_private_method(cSqlite3Database, "load_extension_internal", load_extension_internal, 1);

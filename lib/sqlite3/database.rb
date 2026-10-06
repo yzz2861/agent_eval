@@ -113,6 +113,35 @@ module SQLite3
       def quote(string)
         string.gsub("'", "''")
       end
+
+      if SQLite3::Database.private_method_defined?(:deserialize_internal)
+        # call-seq:
+        #   SQLite3::Database.deserialize(image, schema: "main", read_only: false, **options) -> Database
+        #
+        # Creates a new in-memory Database whose +schema+ is populated from
+        # +image+, a binary String previously returned by Database#serialize.
+        # No database files are involved; the image is copied into memory
+        # owned by SQLite, so the caller's String may be reused or collected
+        # afterwards.
+        #
+        # With <tt>read_only: true</tt> the imported database rejects all
+        # writes; otherwise it is fully writable and may grow beyond the
+        # original image size. Any additional +options+ are passed to
+        # Database#initialize.
+        #
+        #   image = source_db.serialize
+        #   db = SQLite3::Database.deserialize(image, read_only: true)
+        def deserialize(image, schema: "main", read_only: false, **options)
+          database = new(":memory:", **options)
+          begin
+            database.deserialize(image, schema, read_only)
+          rescue Exception
+            database.close
+            raise
+          end
+          database
+        end
+      end
     end
 
     # A boolean that indicates whether rows in result sets should be returned
@@ -684,6 +713,24 @@ module SQLite3
     # A helper to check before performing any operation
     def readonly?
       @readonly
+    end
+
+    if private_method_defined?(:deserialize_internal)
+      # call-seq: db.deserialize(image, schema = "main", read_only = false) -> db
+      #
+      # Replaces the contents of +schema+ on this connection with the
+      # database contained in +image+, a binary String as returned by
+      # #serialize. With +read_only+ the imported database rejects all
+      # writes; otherwise it is writable and may grow.
+      #
+      # The image is copied into SQLite-owned memory, so the caller's String
+      # never becomes shared, mutable state with the database.
+      def deserialize(image, schema = "main", read_only = false)
+        image = +"" if image.nil? # nil round-trips as an empty database
+        deserialize_internal(image, schema, read_only)
+        @readonly = true if read_only
+        self
+      end
     end
 
     # Sets a #busy_handler that releases the GVL between retries,
