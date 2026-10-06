@@ -180,4 +180,108 @@ describe Parslet::Transform do
       transform.apply('a', :foo => 'bar').should == 'bar'
     end
   end
+
+  describe "#apply_until_stable" do
+    context "chained rules" do
+      before(:each) do
+        transform.rule(:a => simple(:x)) { {b: x} }
+        transform.rule(:b => simple(:x)) { B.new(x) }
+      end
+
+      it "keeps #apply a single pass" do
+        transform.apply(:a => 1).should == {:b => 1}
+      end
+      it "repeats until no rule matches anymore" do
+        transform.apply_until_stable(:a => 1).should == B.new(1)
+      end
+      it "returns a tree that no rule applies to anymore" do
+        result = transform.apply_until_stable(:a => 1)
+        transform.apply(result).should == result
+      end
+      it "injects context into rule blocks" do
+        transform.rule(:c => simple(:x)) { foo }
+        transform.apply_until_stable({:c => 1}, :foo => 'bar').should == 'bar'
+      end
+    end
+
+    context "successive simplification (constant folding)" do
+      before(:each) do
+        transform.rule(:int => simple(:x)) { Integer(x) }
+        transform.rule(:plus => [simple(:a), simple(:b)]) { a + b }
+        transform.rule(:times => [simple(:a), 1]) { a }
+        transform.rule(:times => [1, simple(:a)]) { a }
+      end
+
+      it "adds constants and eliminates multiplication by one" do
+        tree = {:times => [{:plus => [{:int => '1'}, {:int => '2'}]}, {:int => '1'}]}
+        transform.apply_until_stable(tree).should == 3
+      end
+    end
+
+    context "replacement results that match again" do
+      before(:each) do
+        transform.rule(:int => simple(:x)) { {num: Integer(x)} }
+        transform.rule(:num => simple(:x)) { x }
+      end
+
+      it "needs several passes where #apply stops early" do
+        tree = {:neg => {:int => '1'}}
+        transform.apply(tree).should == {:neg => {:num => 1}}
+        transform.apply_until_stable(tree).should == {:neg => 1}
+      end
+    end
+
+    context "oscillating rules" do
+      before(:each) do
+        transform.rule(:x => simple(:v)) { {y: v} }
+        transform.rule(:y => simple(:v)) { {x: v} }
+      end
+
+      it "raises FixpointError when max_passes is exceeded" do
+        expect {
+          transform.apply_until_stable({:x => 1}, nil, :max_passes => 5)
+        }.to raise_error(Parslet::Transform::FixpointError) { |error|
+          error.passes.should == 5
+          error.path.should == []
+          error.pattern.should be_a(Parslet::Pattern)
+          error.message.should include('5 passes')
+        }
+      end
+    end
+
+    context "growing rules" do
+      before(:each) do
+        transform.rule(:grow => subtree(:v)) { {grow: [v, v]} }
+      end
+
+      it "raises FixpointError locating rule and tree path" do
+        expect {
+          transform.apply_until_stable({:root => [{:grow => 1}]}, nil, :max_applications => 3)
+        }.to raise_error(Parslet::Transform::FixpointError) { |error|
+          error.applications.should == 4
+          error.path.should == [:root, 0]
+          error.pattern.inspect.should include('grow')
+          error.message.should include('[:root, 0]')
+        }
+      end
+    end
+
+    context "rule precedence" do
+      class PrecedenceBase < Parslet::Transform
+        rule(:a => simple(:x)) { A.new(x) }
+      end
+
+      it "prefers inherited class rules over instance rules" do
+        t = PrecedenceBase.new
+        t.rule(:a => simple(:x)) { B.new(x) }
+        t.apply(:a => 1).should == A.new(1)
+        t.apply_until_stable(:a => 1).should == A.new(1)
+      end
+      it "prefers later defined rules within the same level" do
+        transform.rule(:a => simple(:x)) { A.new(x) }
+        transform.rule(:a => simple(:x)) { B.new(x) }
+        transform.apply_until_stable(:a => 1).should == B.new(1)
+      end
+    end
+  end
 end

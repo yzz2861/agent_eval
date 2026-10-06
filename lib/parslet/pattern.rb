@@ -23,6 +23,10 @@ class Parslet::Pattern
     @pattern = pattern
   end
 
+  def inspect
+    "Pattern(#{@pattern.inspect})"
+  end
+
   # Decides if the given subtree matches this pattern. Returns the bindings
   # made on a successful match or nil if the match fails. If you specify 
   # bindings to be a hash, the mappings in it will be treated like bindings

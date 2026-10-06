@@ -16,7 +16,9 @@ require 'parslet/pattern'
 #
 # You will not be able to create a loop, given that each node will be replaced
 # only once and then left alone. This means that the results of a replacement
-# will not be acted upon. 
+# will not be acted upon. If you need the rules to be applied over and over
+# again until the tree reaches a fixpoint (eg. for successive simplification
+# of an expression tree), use #apply_until_stable instead of #apply.
 #
 # Example: 
 #
@@ -116,6 +118,44 @@ class Parslet::Transform
   # context?
   include Parslet   
   
+  # Raised by #apply_until_stable when the tree does not reach a fixpoint
+  # within the configured work limits. Carries enough information to locate
+  # the problem: the rule (pattern and block) that fired last and the path
+  # from the tree root to the node it fired on. The half-transformed tree is
+  # never returned; it is discarded along with the exception.
+  #
+  class FixpointError < StandardError
+    # Pattern of the rule that was applied last before aborting.
+    attr_reader :pattern
+    # Block of the rule that was applied last before aborting.
+    attr_reader :block
+    # Path from the tree root to the node the last rule fired on; an array
+    # of hash keys and array indices.
+    attr_reader :path
+    # Number of completed rule-applying passes when the error was raised.
+    attr_reader :passes
+    # Total number of rule applications when the error was raised.
+    attr_reader :applications
+
+    def initialize(reason, pattern, block, path, passes, applications)
+      @pattern = pattern
+      @block = block
+      @path = path
+      @passes = passes
+      @applications = applications
+
+      location = block && block.source_location
+      origin = location ? " (defined at #{location.join(':')})" : ''
+
+      super(
+        "#{reason}. Last rule applied: #{pattern.inspect}#{origin}, " +
+        "at tree path #{path.inspect} " +
+        "(#{passes} passes, #{applications} rule applications so far). " +
+        "The partially transformed tree has been discarded."
+      )
+    end
+  end
+
   class << self
     # FIXME: Only do this for subclasses?
     include Parslet
@@ -182,19 +222,88 @@ class Parslet::Transform
   # @param context start context to inject into the bindings. 
   #
   def apply(obj, context=nil)
-    transform_elt(
-      case obj
-        when Hash
-          recurse_hash(obj, context)
-        when Array
-          recurse_array(obj, context)
-      else
-        obj
-      end, 
-      context
-    )
+    apply_at(obj, context, [], nil)
   end
-  
+
+  # Applies the transformation rules over and over again until the tree
+  # stops changing, ie. until a complete pass over the tree applies not a
+  # single rule anymore. When this method returns normally, the returned
+  # tree is therefore guaranteed to be a fixpoint of the rule set: no rule
+  # matches anywhere in it. In contrast to #apply (a single depth-first,
+  # post-order pass), this is the entry point to use for normalisation tasks
+  # like constant folding, where one simplification enables the next.
+  #
+  # Re-matching semantics: within one pass, the result of a replacement is
+  # left alone, exactly as in #apply. If any rule fired during a pass, the
+  # whole resulting tree is traversed again from the root (depth-first,
+  # post-order); nodes created by replacements and the parents of replaced
+  # nodes are reconsidered during that next pass.
+  #
+  # Rule precedence is the same as for #apply, since both draw from #rules:
+  # rules inherited from the class (and its ancestors) are tried before
+  # rules defined on the instance; within each of those two groups, a rule
+  # defined later takes precedence over rules defined earlier.
+  #
+  # Since rules may oscillate between two tree shapes or grow the tree on
+  # every application, termination cannot be guaranteed in general. Two work
+  # limits bound the effort:
+  #
+  # * <tt>:max_passes</tt> - how many passes that applied at least one rule
+  #   are tolerated (default: 100)
+  # * <tt>:max_applications</tt> - how many rule applications in total are
+  #   tolerated (default: 10_000)
+  #
+  # When a limit is exceeded, a Parslet::Transform::FixpointError is raised
+  # that pinpoints the last applied rule and its tree path; the partially
+  # transformed tree is discarded instead of being returned as if it were a
+  # success value.
+  #
+  #   transform.apply_until_stable(tree)
+  #   transform.apply_until_stable(tree, nil, :max_passes => 10)
+  #
+  # @param obj PORO ast to transform
+  # @param context start context to inject into the bindings.
+  # @param options [Hash] work limits :max_passes and :max_applications
+  #
+  def apply_until_stable(obj, context=nil, options={})
+    max_passes = options.fetch(:max_passes, 100)
+    max_applications = options.fetch(:max_applications, 10_000)
+
+    passes = 0
+    applications = 0
+    last_application = nil
+    current = obj
+
+    loop do
+      applied = false
+      observer = lambda do |pattern, block, path|
+        applied = true
+        applications += 1
+        last_application = [pattern, block, path]
+
+        if applications > max_applications
+          raise FixpointError.new(
+            "Exceeded the limit of #{max_applications} rule applications",
+            pattern, block, path, passes, applications)
+        end
+      end
+
+      current = apply_at(current, context, [], observer)
+
+      # A complete pass without a single rule application proves that no
+      # rule matches anywhere in the tree: current is a fixpoint.
+      return current unless applied
+
+      passes += 1
+      if passes >= max_passes
+        pattern, block, path = last_application
+        raise FixpointError.new(
+          "Exceeded the limit of #{max_passes} passes",
+          pattern, block, path, passes, applications)
+      end
+    end
+  end
+
   # Executes the block on the bindings obtained by Pattern#match, if such a match
   # can be made. Depending on the arity of the given block, it is called in 
   # one of two environments: the current one or a clean toplevel environment.
@@ -220,7 +329,10 @@ class Parslet::Transform
   end
   
   # Allow easy access to all rules, the ones defined in the instance and the 
-  # ones predefined in a subclass definition. 
+  # ones predefined in a subclass definition. Rules are tried in the order
+  # of this list: class level rules (inherited ones included) take
+  # precedence over instance level rules; within each level, rules defined
+  # later take precedence over rules defined earlier.
   #
   def rules 
     self.class.rules + @rules
@@ -228,9 +340,29 @@ class Parslet::Transform
   
   # @api private 
   #
-  def transform_elt(elt, context) 
+  def apply_at(obj, context, path, observer)
+    transform_elt(
+      case obj
+        when Hash
+          recurse_hash(obj, context, path, observer)
+        when Array
+          recurse_array(obj, context, path, observer)
+      else
+        obj
+      end, 
+      context,
+      path,
+      observer
+    )
+  end
+
+  # @api private 
+  #
+  def transform_elt(elt, context, path=[], observer=nil) 
     rules.each do |pattern, block|
       if bindings=pattern.match(elt, context)
+        observer.call(pattern, block, path) if observer
+
         # Produces transformed value
         return call_on_match(bindings, block)
       end
@@ -249,16 +381,18 @@ class Parslet::Transform
 
   # @api private 
   #
-  def recurse_hash(hsh, ctx) 
+  def recurse_hash(hsh, ctx, path=[], observer=nil) 
     hsh.inject({}) do |new_hsh, (k,v)|
-      new_hsh[k] = apply(v, ctx)
+      new_hsh[k] = apply_at(v, ctx, path + [k], observer)
       new_hsh
     end
   end
   # @api private 
   #
-  def recurse_array(ary, ctx) 
-    ary.map { |elt| apply(elt, ctx) }
+  def recurse_array(ary, ctx, path=[], observer=nil) 
+    ary.each_with_index.map do |elt, index|
+      apply_at(elt, ctx, path + [index], observer)
+    end
   end
 end
 

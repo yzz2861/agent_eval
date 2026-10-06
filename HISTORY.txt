@@ -4,6 +4,9 @@
   We're in maintenance mode! The community is really stepping up here though, sending
   interesting additions our way. Here's what has been merged this far: 
 
+  + Parslet::Transform#apply_until_stable: repeated rule application until a
+    fixpoint is reached, with bounded effort and precise error reporting.
+
   + Specification for mixing parslet parsers (Artur Komarov).
 
   + Update to Github Actions CI/CD. I guess newer is better? (Matt Larraz).
