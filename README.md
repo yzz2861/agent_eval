@@ -15,8 +15,8 @@ Hamster
 
 Efficient, immutable, and thread-safe collection classes for Ruby.
 
-Hamster provides 6 [Persistent Data
-Structures][PDS]: [`Hash`][HASH-DOC], [`Vector`][VECTOR-DOC], [`Set`][SET-DOC], [`SortedSet`][SORTED-SET-DOC], [`List`][LIST-DOC], and [`Deque`][DEQUE-DOC] (which works as an immutable queue or stack).
+Hamster provides 7 [Persistent Data
+Structures][PDS]: [`Hash`][HASH-DOC], [`Vector`][VECTOR-DOC], [`Set`][SET-DOC], [`SortedSet`][SORTED-SET-DOC], [`List`][LIST-DOC], [`Deque`][DEQUE-DOC] (which works as an immutable queue or stack), and [`IntervalMap`][INTERVAL-MAP-DOC] (which maps left-closed, right-open intervals to values).
 
 Hamster collections are **immutable**. Whenever you modify a Hamster
 collection, the original is preserved and a modified copy is returned. This
@@ -46,6 +46,7 @@ process "infinitely large" lists.
 [LIST-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/List
 [SORTED-SET-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/SortedSet
 [DEQUE-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/Deque
+[INTERVAL-MAP-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/IntervalMap
 
 
 Using
