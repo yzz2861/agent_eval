@@ -875,6 +875,18 @@ body
   h1 Welcome \#{current_user.name} to the show.
 ~~~
 
+## XML namespaces
+
+Enable `xml_namespaces` when a template emits XML and prefixed names should be resolved to a namespace URI instead of being treated as literal HTML names:
+
+~~~ slim
+feed(xmlns="urn:default" xmlns:a="urn:article")
+  a:item a:id="42"
+    title Hello
+~~~
+
+Namespace declarations apply to their element and descendants. A later declaration can locally rebind a prefix, and unprefixed attributes remain in no namespace. Dynamic splat tag names and attributes are resolved with the same scope before the current tag is emitted. Two attributes that expand to the same namespace URI and local name are rejected even when different prefixes are used.
+
 ## Embedded engines (Markdown, ...)
 
 Thanks to [Tilt](https://github.com/jeremyevans/tilt), Slim has extensive support for embedding other template engines.
@@ -1007,6 +1019,7 @@ There are a lot of them but the good thing is, that Slim checks the configuratio
 | Boolean | :disable_escape | false | Disable automatic escaping of strings |
 | Boolean | :use_html_safe | false (true in Rails) | Use String#html_safe? from ActiveSupport (Works together with :disable_escape) |
 | Symbol | :format | :xhtml | HTML output format (Possible formats :html, :xhtml, :xml) |
+| Boolean | :xml_namespaces | false | Resolve prefixed XML elements and attributes according to the current namespace scope |
 | String | :attr_quote | '"' | Character to wrap attributes in html (can be ' or ") |
 | Hash | :merge_attrs | \{'class' => ' '} | Joining character used if multiple html attributes are supplied (e.g. class="class1 class2") |
 | Array&lt;String&gt; | :hyphen_attrs | %w(data) | Attributes which will be hyphenated if a Hash is given (e.g. data={a_foo:1,b:2} will render as data-a_foo="1" data-b="2") |

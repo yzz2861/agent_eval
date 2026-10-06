@@ -15,13 +15,16 @@ module Slim
                    attr_quote: '"',
                    merge_attrs: {'class' => ' '},
                    generator: Temple::Generators::StringBuffer,
-                   default_tag: 'div'
+                   default_tag: 'div',
+                   xml_namespaces: false
 
     filter :Encoding
     filter :RemoveBOM
     use Slim::Parser
     use Slim::Embedded
     use Slim::Interpolation
+    use Slim::XMLNamespaces
+    use Slim::XMLSplatFilter
     use Slim::Splat::Filter
     use Slim::DoInserter
     use Slim::EndInserter
