@@ -47,6 +47,9 @@ Security Fix
 Feature
 ~~~~~~~
 
+- Add ``Response.transcode`` and ``transcode_app_iter`` for incremental,
+  streaming response charset conversion without buffering the response body.
+
 - Rename "master" git branch to "main"
 
 - Add support for Python 3.12.

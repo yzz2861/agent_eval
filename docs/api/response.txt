@@ -11,3 +11,6 @@ Response
    :members:
 .. autoclass:: webob.response.AppIterRange
    :members:
+.. autoclass:: webob.response.TranscodeAppIter
+   :members:
+.. autofunction:: webob.response.transcode_app_iter

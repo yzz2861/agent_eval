@@ -1,4 +1,5 @@
 from base64 import b64encode
+import codecs
 from datetime import timedelta
 from hashlib import md5
 import re
@@ -49,7 +50,7 @@ except ImportError:
     import json
 
 
-__all__ = ["Response"]
+__all__ = ["Response", "TranscodeAppIter", "transcode_app_iter"]
 
 _PARAM_RE = re.compile(r'([a-z0-9]+)=(?:"([^"]*)"|([a-z0-9_.-]*))', re.I)
 _OK_PARAM_RE = re.compile(r"^[a-z0-9_.-]+$", re.I)
@@ -1338,6 +1339,60 @@ class Response:
                 self.body = zlib.decompress(self.body, -15)
             self.content_encoding = None
 
+    def transcode(
+        self, source_charset=None, target_charset="UTF-8", errors="strict"
+    ):
+        """
+        Incrementally transcode the response body to another charset.
+
+        The underlying ``app_iter`` is not buffered or consumed by this
+        method. Callers must decode a ``Content-Encoded`` response first;
+        WebOb does not guess whether encoded bytes represent character data.
+        """
+
+        if self.content_encoding is not None:
+            raise ValueError(
+                "Cannot transcode a response with Content-Encoding %r; "
+                "decode or remove it first" % self.content_encoding
+            )
+
+        source_charset = source_charset or self.charset
+
+        if source_charset:
+            source_charset = source_charset.strip().strip('"')
+
+        if not source_charset:
+            raise ValueError("A source charset is required to transcode")
+
+        app_iter = TranscodeAppIter(
+            self._app_iter, source_charset, target_charset, errors
+        )
+
+        try:
+            self._headerlist[:] = [
+                (name, value)
+                for name, value in self._headerlist
+                if name.lower() not in ("content-length", "content-md5")
+                and not (
+                    name.lower() == "etag"
+                    and not value.lstrip().upper().startswith("W/")
+                )
+            ]
+            self._headers = None
+
+            if self.headers.get("Content-Type") is not None:
+                declared_charset = target_charset.replace("_", "-")
+
+                if declared_charset.lower() == "utf-8-sig":
+                    declared_charset = "UTF-8"
+
+                self.charset = declared_charset
+        except Exception:
+            app_iter.close()
+            raise
+
+        self._app_iter = app_iter
+
     def md5_etag(self, body=None, set_content_md5=False):
         """
         Generate an etag for the response object using an MD5 hash of
@@ -1530,6 +1585,84 @@ def iter_file(file, block_size=1 << 18):  # 256Kb
         if not data:
             break
         yield data
+
+
+class TranscodeAppIter:
+    """
+    Incrementally decode byte chunks and encode them using another charset.
+    """
+
+    def __init__(self, app_iter, source_charset, target_charset, errors="strict"):
+        close = getattr(app_iter, "close", None)
+        self._close = close if callable(close) else None
+        self._app_iter_close = None
+        self._closed = False
+
+        try:
+            self._decoder = codecs.getincrementaldecoder(source_charset)(errors)
+            self._encoder = codecs.getincrementalencoder(target_charset)(errors)
+            iterator = iter(app_iter)
+        except Exception:
+            self.close()
+            raise
+
+        self._app_iter = iterator
+
+        if iterator is not app_iter:
+            iterator_close = getattr(iterator, "close", None)
+
+            if callable(iterator_close):
+                self._app_iter_close = iterator_close
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._closed:
+            raise StopIteration
+
+        try:
+            while True:
+                try:
+                    chunk = next(self._app_iter)
+                except StopIteration:
+                    text = self._decoder.decode(b"", True)
+                    output = self._encoder.encode(text, True)
+                    self.close()
+
+                    if output:
+                        return output
+
+                    raise StopIteration
+
+                text = self._decoder.decode(chunk, False)
+                output = self._encoder.encode(text, False)
+
+                if output:
+                    return output
+        except Exception:
+            self.close()
+            raise
+
+    def close(self):
+        if self._closed:
+            return
+
+        self._closed = True
+
+        if self._close is not None:
+            self._close()
+
+        if self._app_iter_close is not None:
+            self._app_iter_close()
+
+
+def transcode_app_iter(
+    app_iter, source_charset, target_charset="UTF-8", errors="strict"
+):
+    """Return an incremental transcoding wrapper for ``app_iter``."""
+
+    return TranscodeAppIter(app_iter, source_charset, target_charset, errors)
 
 
 class ResponseBodyFile:

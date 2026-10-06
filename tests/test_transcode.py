@@ -1,5 +1,7 @@
+import pytest
+
 from webob.request import Request, Transcoder
-from webob.response import Response
+from webob.response import Response, TranscodeAppIter, transcode_app_iter
 from webob.util import text_
 
 t1 = (
@@ -76,3 +78,173 @@ def test_transcode_noop():
 def test_transcode_query_ascii():
     t = Transcoder("ascii")
     assert t.transcode_query("a") == "a"
+
+
+class OneShotAppIter:
+    def __init__(self, chunks):
+        self.chunks = chunks
+        self.closed = 0
+        self.iter_count = 0
+        self.chunks_read = 0
+
+    def __iter__(self):
+        if self.iter_count:
+            raise RuntimeError("app_iter can only be iterated once")
+        self.iter_count += 1
+
+        def iterator():
+            for chunk in self.chunks:
+                self.chunks_read += 1
+                yield chunk
+
+        return iterator()
+
+    def close(self):
+        self.closed += 1
+
+
+class FailingAppIter:
+    def __init__(self):
+        self.closed = 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        raise ValueError("boom")
+
+    def close(self):
+        self.closed += 1
+
+
+def byte_chunks(data):
+    return [bytes([byte]) for byte in data]
+
+
+def test_transcode_app_iter_incrementally_handles_split_multibyte_characters():
+    source = "世界，你好！"
+    app_iter = OneShotAppIter(byte_chunks(source.encode("utf-8")))
+    result = transcode_app_iter(app_iter, "utf-8", "utf-16")
+
+    assert isinstance(result, TranscodeAppIter)
+    assert b"".join(result).decode("utf-16") == source
+    assert app_iter.iter_count == 1
+    assert app_iter.chunks_read == len(byte_chunks(source.encode("utf-8")))
+
+    result.close()
+    assert app_iter.closed == 1
+
+
+def test_transcode_app_iter_decodes_and_encodes_boms():
+    source = b"\xef\xbb\xbf\xc3\xa9"
+    result = transcode_app_iter(byte_chunks(source), "utf-8-sig", "utf-16")
+
+    assert b"".join(result) == b"\xff\xfe\xe9\x00"
+
+
+def test_transcode_app_iter_flushes_encoder_on_completion():
+    result = transcode_app_iter([b"example", b".com"], "ascii", "idna")
+    assert b"".join(result) == b"example.com"
+
+
+def test_transcode_app_iter_error_policy_is_caller_selected():
+    result = transcode_app_iter(byte_chunks(b"\xffok"), "cp1251", "ascii", "replace")
+
+    assert b"".join(result) == b"?ok"
+
+
+def test_transcode_app_iter_closes_once_on_error():
+    app_iter = FailingAppIter()
+    result = transcode_app_iter(app_iter, "ascii")
+
+    with pytest.raises(ValueError):
+        next(result)
+
+    result.close()
+    result.close()
+    assert app_iter.closed == 1
+
+
+def test_transcode_app_iter_closes_once_on_early_close():
+    app_iter = OneShotAppIter([b"a", b"b"])
+    result = transcode_app_iter(app_iter, "ascii")
+
+    assert next(result) == b"a"
+    result.close()
+    result.close()
+
+    assert app_iter.closed == 1
+    with pytest.raises(StopIteration):
+        next(result)
+
+
+def test_response_transcode_does_not_consume_app_iter_or_buffer_chunks():
+    app_iter = OneShotAppIter(byte_chunks(b"\xef\xf0\xe8\xe2\xe5\xf2"))
+    response = Response(
+        headerlist=[
+            ("Content-Type", "text/plain; charset=windows-1251"),
+            ("Content-Length", "6"),
+            ("Content-MD5", "stale"),
+            ("ETag", 'W/"weak"'),
+        ],
+        app_iter=app_iter,
+    )
+
+    result = response.transcode()
+
+    assert result is None
+    assert app_iter.iter_count == 1
+    assert app_iter.chunks_read == 0
+    assert response.content_length is None
+    assert response.content_md5 is None
+    assert response.etag == "weak"
+    assert response.charset == "UTF-8"
+    assert response.body == "привет".encode("utf-8")
+    assert app_iter.closed == 1
+
+
+def test_response_transcode_rejects_content_encoding():
+    response = Response(app_iter=[b"abc"], content_encoding="gzip")
+
+    with pytest.raises(ValueError):
+        response.transcode("utf-8")
+
+
+def test_response_transcode_rejects_identity_content_encoding():
+    response = Response(app_iter=[b"abc"], content_encoding="identity")
+
+    with pytest.raises(ValueError):
+        response.transcode("utf-8")
+
+
+def test_response_transcode_invalid_charset_closes_source_once():
+    app_iter = OneShotAppIter([b"abc"])
+    response = Response(
+        headerlist=[
+            ("Content-Type", "text/plain; charset=utf-8"),
+            ("Content-Length", "3"),
+        ],
+        app_iter=app_iter,
+    )
+
+    with pytest.raises(LookupError):
+        response.transcode("utf-8", "not-a-charset")
+
+    assert app_iter.closed == 1
+    assert response.content_length == 3
+
+
+def test_response_transcode_head_does_not_iterate_body():
+    app_iter = OneShotAppIter([b"\xef\xf0"])
+    response = Response(
+        headerlist=[("Content-Type", "text/plain; charset=windows-1251")],
+        app_iter=app_iter,
+    )
+    response.transcode()
+
+    result = Request.blank("/", method="HEAD").get_response(response)
+
+    assert result.body == b""
+    assert app_iter.iter_count == 1
+    assert app_iter.chunks_read == 0
+    assert app_iter.closed == 1
