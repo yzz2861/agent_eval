@@ -184,6 +184,7 @@ Available options:
 
 * `Dotenv::Rails.files` - list of files to be loaded, in order of precedence.
 * `Dotenv::Rails.overwrite` - Overwrite existing `ENV` variables with contents of `.env*` files
+* `Dotenv::Rails.command_substitution` - Policy for `$(...)` substitutions: `:shell` (default), `:disabled`, `:literal`, or a callable executor
 * `Dotenv::Rails.logger` - The logger to use for dotenv's logging. Defaults to `Rails.logger`
 * `Dotenv::Rails.autorestore` - Enable or disable [autorestore](#autorestore-in-tests)
 
@@ -212,6 +213,36 @@ You need to add the output of a command in one of your variables? Simply add it 
 
 ```shell
 DATABASE_URL="postgres://$(whoami)@localhost/my_database"
+```
+
+Because `.env` files sometimes come from partially trusted deployment input, command execution is controlled by a **per-load command policy** passed with `command_substitution:`:
+
+* `:shell` _(default)_ - evaluates `$(...)` with the system shell, matching the historical behavior.
+* `:disabled` - raises `Dotenv::CommandExecutionError` as soon as a command substitution is encountered. Nothing is executed.
+* `:literal` - leaves `$(...)` text untouched in the value (variable substitution still happens around it).
+* Any object responding to `call(command, env, source)` - your own executor. It receives the command text, a frozen snapshot of the variables parsed so far, and a `Dotenv::SourceLocation` (`filename`, `line`, `key`). It must return a `String` or raise to fail the load. A failure is never retried in the system shell.
+
+```ruby
+# Refuse commands from deployment-provided files entirely
+Dotenv.load(".env", command_substitution: :disabled)
+
+# Keep the raw text instead of executing it
+Dotenv.load(".env", command_substitution: :literal)
+# => { "DATABASE_URL" => "postgres://$(whoami)@localhost/..." }
+
+# Provide a sandboxed, auditable executor
+executor = lambda do |command, env, source|
+  MySandbox.run(command, cwd: File.dirname(source.filename))
+end
+Dotenv.load(".env", command_substitution: executor)
+```
+
+The same policy applies at every nesting level, so nested commands (`$(a $(b))`) are resolved inner-first through your policy, escaped parentheses (`\$(...)`) stay literal, and variables referenced by a command are expanded in file declaration order. Loading is atomic: if any command fails or is disallowed, no key from that load is written to `ENV`.
+
+The CLI exposes the built-in policies with `--commands=shell|disabled|literal`:
+
+```shell
+$ dotenv --commands=disabled -f .env ./bin/start
 ```
 
 ### Variable Substitution

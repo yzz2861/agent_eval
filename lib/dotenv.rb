@@ -3,6 +3,8 @@ require "dotenv/parser"
 require "dotenv/environment"
 require "dotenv/missing_keys"
 require "dotenv/diff"
+require "dotenv/source_location"
+require "dotenv/command_execution_error"
 
 # Shim to load environment variables from `.env files into `ENV`.
 module Dotenv
@@ -15,12 +17,24 @@ module Dotenv
   attr_accessor :instrumenter
 
   # Loads environment variables from one or more `.env` files. See `#parse` for more details.
-  def load(*filenames, overwrite: false, ignore: true)
-    parse(*filenames, overwrite: overwrite, ignore: ignore) do |env|
-      instrument(:load, env: env) do |payload|
+  def load(*filenames, overwrite: false, ignore: true, command_substitution: :shell)
+    # Snapshot ENV so that a failure while parsing a later file (e.g. a
+    # disallowed or failing command) never leaves earlier files applied.
+    snapshot = ENV.to_h
+
+    parse(
+      *filenames,
+      overwrite: overwrite,
+      ignore: ignore,
+      command_substitution: command_substitution
+    ) do |env|
+      instrument(:load, env: env) do
         update(env, overwrite: overwrite)
       end
     end
+  rescue StandardError
+    ENV.replace(snapshot)
+    raise
   end
 
   # Same as `#load`, but raises Errno::ENOENT if any files don't exist
@@ -47,13 +61,23 @@ module Dotenv
   # @param ignore [Boolean] Ignore non-existent files
   # @param block [Proc] Block to yield for each parsed `Dotenv::Environment`
   # @return [Hash] parsed key/value pairs
-  def parse(*filenames, overwrite: false, ignore: true, &block)
+  def parse(
+    *filenames,
+    overwrite: false,
+    ignore: true,
+    command_substitution: :shell,
+    &block
+  )
     filenames << ".env" if filenames.empty?
     filenames = filenames.reverse if overwrite
 
     filenames.reduce({}) do |hash, filename|
       begin
-        env = Environment.new(File.expand_path(filename), overwrite: overwrite)
+        env = Environment.new(
+          File.expand_path(filename),
+          overwrite: overwrite,
+          command_substitution: command_substitution
+        )
         env = block.call(env) if block
       rescue Errno::ENOENT, Errno::EISDIR
         raise unless ignore

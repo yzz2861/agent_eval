@@ -44,6 +44,36 @@ describe "dotenv binary" do
     expect(ENV).to have_key("QUOTED")
   end
 
+  it "supports a literal command substitution policy" do
+    file = File.expand_path("../../tmp-commands.env", __FILE__)
+    File.write(file, "GREETING=$(echo hello)")
+
+    cli = Dotenv::CLI.new(["--commands=literal", "-f", file])
+    expect(cli.command_substitution).to eq(:literal)
+    capture_output { cli.run }
+    expect(ENV["GREETING"]).to eq("$(echo hello)")
+  ensure
+    File.delete(file) if File.exist?(file)
+  end
+
+  it "supports a disabled command substitution policy" do
+    file = File.expand_path("../../tmp-commands.env", __FILE__)
+    File.write(file, "GREETING=$(echo hello)")
+
+    cli = Dotenv::CLI.new(["--commands=disabled", "-f", file])
+    expect(cli.command_substitution).to eq(:disabled)
+    expect { capture_output { cli.run } }
+      .to raise_error(Dotenv::CommandExecutionError, /disabled/)
+  ensure
+    File.delete(file) if File.exist?(file)
+  end
+
+  it "rejects an unknown command policy" do
+    expect do
+      capture_output { Dotenv::CLI.new(["--commands=bogus"]) }
+    end.to raise_error(OptionParser::InvalidArgument)
+  end
+
   it "does not consume non-dotenv flags by accident" do
     cli = Dotenv::CLI.new(["-f", "plain.env", "foo", "--switch"])
 

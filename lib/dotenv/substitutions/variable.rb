@@ -18,7 +18,7 @@ module Dotenv
           \}?           # closing brace
         /xi
 
-        def call(value, env)
+        def call(value, env, policy: nil, source: nil)
           value.gsub(VARIABLE) do |variable|
             match = $LAST_MATCH_INFO
 

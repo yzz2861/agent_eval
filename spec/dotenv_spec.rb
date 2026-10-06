@@ -92,7 +92,8 @@ describe Dotenv do
     it_behaves_like "load"
 
     it "initializes the Environment with overwrite: false" do
-      expect(Dotenv::Environment).to receive(:new).with(anything, overwrite: false)
+      expect(Dotenv::Environment).to receive(:new)
+        .with(anything, overwrite: false, command_substitution: :shell)
         .and_call_original
       subject
     end
@@ -146,7 +147,8 @@ describe Dotenv do
     it_behaves_like "load"
 
     it "initializes Environment with overwrite: false" do
-      expect(Dotenv::Environment).to receive(:new).with(anything, overwrite: false)
+      expect(Dotenv::Environment).to receive(:new)
+        .with(anything, overwrite: false, command_substitution: :shell)
         .and_call_original
       subject
     end
@@ -167,7 +169,8 @@ describe Dotenv do
     it_behaves_like "overwrite"
 
     it "initializes the Environment overwrite: true" do
-      expect(Dotenv::Environment).to receive(:new).with(anything, overwrite: true)
+      expect(Dotenv::Environment).to receive(:new)
+        .with(anything, overwrite: true, command_substitution: :shell)
         .and_call_original
       subject
     end
@@ -204,7 +207,8 @@ describe Dotenv do
     it_behaves_like "overwrite"
 
     it "initializes the Environment with overwrite: true" do
-      expect(Dotenv::Environment).to receive(:new).with(anything, overwrite: true)
+      expect(Dotenv::Environment).to receive(:new)
+        .with(anything, overwrite: true, command_substitution: :shell)
         .and_call_original
       subject
     end
@@ -321,7 +325,8 @@ describe Dotenv do
     end
 
     it "initializes the Environment with overwrite: false" do
-      expect(Dotenv::Environment).to receive(:new).with(anything, overwrite: false)
+      expect(Dotenv::Environment).to receive(:new)
+        .with(anything, overwrite: false, command_substitution: :shell)
       subject
     end
 
@@ -421,6 +426,118 @@ describe Dotenv do
         Dotenv.update({"OPTION_A" => "updated"}, overwrite: true)
         expect(ENV["OPTION_A"]).to eq("updated")
       end
+    end
+  end
+
+  describe "command substitution policy" do
+    require "tempfile"
+
+    def write_env(contents)
+      file = Tempfile.new(["dotenv-policy", ".env"])
+      file.write(contents)
+      file.close
+      file.path
+    end
+
+    class CountingExecutor
+      attr_reader :calls
+
+      def initialize(responses = {})
+        @responses = responses
+        @calls = []
+      end
+
+      def call_count
+        @calls.size
+      end
+
+      def call(command, _env, _source)
+        @calls << command
+        raise "unexpected command: #{command}" unless @responses.key?(command)
+        @responses.fetch(command)
+      end
+    end
+
+    it "loads command output through the caller provided executor" do
+      executor = CountingExecutor.new("whoami" => "alice")
+      file = write_env("FOO=$(whoami)")
+
+      result = Dotenv.load(file, command_substitution: executor)
+
+      expect(result).to eq("FOO" => "alice")
+      expect(ENV["FOO"]).to eq("alice")
+      expect(executor.call_count).to eq(1)
+    ensure
+      File.unlink(file) if file
+    end
+
+    it "does not write the first half of a file when a later command fails" do
+      failing = Object.new
+      def failing.call(*) = raise("nope")
+      file = write_env("FIRST=one\nSECOND=$(bad-command)")
+
+      expect do
+        Dotenv.load(file, command_substitution: failing)
+      end.to raise_error(Dotenv::CommandExecutionError, /nope/)
+
+      expect(ENV).not_to have_key("FIRST")
+      expect(ENV).not_to have_key("SECOND")
+    ensure
+      File.unlink(file) if file
+    end
+
+    it "rolls back earlier files when a command in a later file fails" do
+      good = write_env("EARLY=yes")
+      bad = write_env("LATE=$(nope)")
+      executor = CountingExecutor.new
+
+      expect do
+        Dotenv.load(good, bad, command_substitution: executor)
+      end.to raise_error(Dotenv::CommandExecutionError)
+
+      expect(ENV).not_to have_key("EARLY")
+      expect(ENV).not_to have_key("LATE")
+      expect(executor.call_count).to eq(1)
+    ensure
+      File.unlink(good) if good
+      File.unlink(bad) if bad
+    end
+
+    it "restores pre-existing values on rollback" do
+      ENV["EARLY"] = "original"
+      good = write_env("EARLY=changed")
+      bad = write_env("LATE=$(nope)")
+      executor = CountingExecutor.new
+
+      expect do
+        Dotenv.load(good, bad, command_substitution: executor)
+      end.to raise_error(Dotenv::CommandExecutionError)
+
+      expect(ENV["EARLY"]).to eq("original")
+    ensure
+      ENV.delete("EARLY")
+      File.unlink(good) if good
+      File.unlink(bad) if bad
+    end
+
+    it "keeps disabled and literal loads free of any executor behavior" do
+      executor = CountingExecutor.new
+      disabled = write_env("A=$(one)\nB=\$(two)")
+      literal = write_env('C=$(three)')
+
+      expect do
+        Dotenv.load(disabled, command_substitution: :disabled)
+      end.to raise_error(Dotenv::CommandExecutionError)
+      expect(executor.call_count).to eq(0)
+      expect(ENV).not_to have_key("A")
+
+      expect(Dotenv.load(literal, command_substitution: :literal))
+        .to eq("C" => "$(three)")
+      expect(ENV["C"]).to eq("$(three)")
+      expect(executor.call_count).to eq(0)
+    ensure
+      File.unlink(disabled) if disabled
+      File.unlink(literal) if literal
     end
   end
 
