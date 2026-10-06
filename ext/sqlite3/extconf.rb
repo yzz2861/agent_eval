@@ -63,7 +63,8 @@ module Sqlite3
               "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1",
               "-DSQLITE_USE_URI=1",
               "-DSQLITE_ENABLE_DBPAGE_VTAB=1",
-              "-DSQLITE_ENABLE_DBSTAT_VTAB=1"
+              "-DSQLITE_ENABLE_DBSTAT_VTAB=1",
+              "-DSQLITE_ENABLE_PREUPDATE_HOOK=1"
             ]
             env["CFLAGS"] = [user_cflags, env["CFLAGS"], more_cflags].flatten.join(" ")
             recipe.configure_options += env.slice(*ENV_ALLOWLIST)
@@ -139,6 +140,13 @@ module Sqlite3
         have_func("sqlite3_prepare_v2")
         have_func("sqlite3_db_name", "sqlite3.h") # v3.39.0
         have_func("sqlite3_error_offset", "sqlite3.h") # v3.38.0
+
+        # sqlite3.h only declares the preupdate interfaces when
+        # SQLITE_ENABLE_PREUPDATE_HOOK is defined, so expose the declarations
+        # before probing; the probe fails to link if the library itself was
+        # not compiled with the feature.
+        append_cppflags("-DSQLITE_ENABLE_PREUPDATE_HOOK=1")
+        have_func("sqlite3_preupdate_hook", "sqlite3.h")
 
         have_type("sqlite3_int64", "sqlite3.h")
         have_type("sqlite3_uint64", "sqlite3.h")

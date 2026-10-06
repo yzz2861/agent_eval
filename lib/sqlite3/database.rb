@@ -3,6 +3,7 @@
 require "sqlite3/constants"
 require "sqlite3/errors"
 require "sqlite3/pragmas"
+require "sqlite3/preupdate_change"
 require "sqlite3/statement"
 require "sqlite3/value"
 require "sqlite3/fork_safety"
@@ -622,6 +623,57 @@ module SQLite3
         end
       end
       define_aggregator2(proxy, name)
+      self
+    end
+
+    # call-seq:
+    #    preupdate_hook { |change| ... }
+    #    preupdate_hook(callable)
+    #    preupdate_hook(nil)
+    #
+    # Installs (or removes) a hook that is invoked before each INSERT,
+    # UPDATE, or DELETE on a real table in this connection, including
+    # changes made by triggers. Unlike an ordinary update hook, the block
+    # receives a SQLite3::PreupdateChange describing the operation, the
+    # database and table names, the trigger depth, and a snapshot of both
+    # the old and the new row values.
+    #
+    # The column values are copied while the hook runs; the returned
+    # PreupdateChange is safe to keep and read later.
+    #
+    # The hook fires before the change is durable. Observing a change does
+    # not mean it was committed: the statement may still fail, and an
+    # enclosing transaction may still be rolled back.
+    #
+    # If the block raises, the exception is re-raised from the statement
+    # that triggered the hook once sqlite returns control. The row change
+    # that observed the exception is *not* rolled back automatically.
+    #
+    # The connection may not be used from inside the callback: preparing,
+    # stepping, or executing statements on the same connection raises
+    # SQLite3::Exception.
+    #
+    # Requires SQLite to be compiled with SQLITE_ENABLE_PREUPDATE_HOOK
+    # (the packaged sqlite builds enable it).
+    def preupdate_hook(callable = nil, &block)
+      unless respond_to?(:install_preupdate_hook, true)
+        raise NotImplementedError,
+          "preupdate hooks require SQLite compiled with SQLITE_ENABLE_PREUPDATE_HOOK"
+      end
+
+      handler = callable || block
+
+      if handler.nil?
+        install_preupdate_hook(nil)
+      else
+        wrapper = lambda do |op, database, table, depth, old_rowid, new_rowid, old_values, new_values|
+          handler.call(
+            PreupdateChange.new(op, database, table, depth, old_rowid, new_rowid, old_values, new_values)
+          )
+        end
+        install_preupdate_hook(wrapper)
+      end
+
       self
     end
 

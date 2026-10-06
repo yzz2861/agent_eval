@@ -1,5 +1,12 @@
 # sqlite3-ruby Changelog
 
+## Unreleased
+
+### Added
+
+- Add `Database#preupdate_hook`, which registers a callback invoked before each INSERT, UPDATE, or DELETE on a real table, including changes made by triggers. The block receives a `SQLite3::PreupdateChange` snapshot exposing the operation (`:insert`, `:update`, `:delete`), the database and table names, the trigger depth, the old and new rowids, and frozen arrays of the old and new column values. Values are copied out of sqlite's protected handles while the callback runs, so the snapshot remains safe to read afterwards. An exception raised by the callback is re-raised from the triggering statement once sqlite returns control (the observed change is not rolled back automatically, and an observed change may still be lost to a later rollback). Using the same connection from inside the callback raises `SQLite3::Exception`. Requires SQLite compiled with `SQLITE_ENABLE_PREUPDATE_HOOK`; the packaged sqlite builds now enable it.
+
+
 ## 2.9.6 / 2026-08-11
 
 ### Security / Stability

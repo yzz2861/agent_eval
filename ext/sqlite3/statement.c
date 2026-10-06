@@ -66,6 +66,11 @@ prepare(VALUE self, VALUE db, VALUE sql)
      * variable will keep it from being GCed. */
     ctx->db = db_ctx;
 
+    if (db_ctx->in_preupdate) {
+        rb_raise(rb_path2class("SQLite3::Exception"),
+                 "cannot prepare a statement on a database connection from within its preupdate hook callback");
+    }
+
 #ifdef HAVE_SQLITE3_PREPARE_V2
     status = sqlite3_prepare_v2(
 #else
@@ -132,6 +137,11 @@ step(VALUE self)
 
     REQUIRE_LIVE_DB(ctx);
     REQUIRE_OPEN_STMT(ctx);
+
+    if (ctx->db->in_preupdate) {
+        rb_raise(rb_path2class("SQLite3::Exception"),
+                 "cannot step a statement on a database connection from within its preupdate hook callback");
+    }
 
     if (ctx->done_p) { return Qnil; }
 

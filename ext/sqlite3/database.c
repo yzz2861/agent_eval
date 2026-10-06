@@ -128,6 +128,7 @@ database_mark(void *ctx)
     rb_gc_mark(c->busy_handler);
     rb_gc_mark(c->trace_handler);
     rb_gc_mark(c->authorizer);
+    rb_gc_mark(c->preupdate_hook);
 
     rb_sqlite3_pin_array_and_contents(c->functions);
     pin_hash_and_contents(c->collations);
@@ -355,6 +356,151 @@ trace(int argc, VALUE *argv, VALUE self)
 
     return self;
 }
+
+#ifdef HAVE_SQLITE3_PREUPDATE_HOOK
+typedef struct {
+    sqlite3RubyPtr ctx;
+    sqlite3 *db;
+    int op;
+    const char *db_name;
+    const char *table_name;
+    sqlite3_int64 old_rowid;
+    sqlite3_int64 new_rowid;
+} preupdate_callback_args_t;
+
+static VALUE
+preupdate_snapshot_column_values(sqlite3 *db, int count, int old_values)
+{
+    VALUE values = rb_ary_new2(count);
+    int i;
+
+    for (i = 0; i < count; i++) {
+        sqlite3_value *val = NULL;
+        int status;
+
+        if (old_values) {
+            status = sqlite3_preupdate_old(db, i, &val);
+        } else {
+            status = sqlite3_preupdate_new(db, i, &val);
+        }
+
+        if (status != SQLITE_OK || val == NULL) {
+            rb_raise(rb_path2class("SQLite3::Exception"),
+                     "could not read column %d of the row observed by the preupdate hook", i);
+        }
+
+        /* sqlite3val2rb copies the bytes out of the protected sqlite3_value,
+         * which sqlite destroys as soon as this callback returns. */
+        rb_ary_push(values, sqlite3val2rb(val));
+    }
+
+    return values;
+}
+
+static VALUE
+preupdate_snapshot_and_call(VALUE ptr)
+{
+    preupdate_callback_args_t *args = (preupdate_callback_args_t *)ptr;
+    sqlite3RubyPtr ctx = args->ctx;
+    int count = sqlite3_preupdate_count(args->db);
+    int depth = sqlite3_preupdate_depth(args->db);
+    VALUE op, old_rowid, new_rowid, old_values, new_values;
+
+    switch (args->op) {
+        case SQLITE_INSERT:
+            op = ID2SYM(rb_intern("insert"));
+            break;
+        case SQLITE_UPDATE:
+            op = ID2SYM(rb_intern("update"));
+            break;
+        case SQLITE_DELETE:
+            op = ID2SYM(rb_intern("delete"));
+            break;
+        default:
+            rb_raise(rb_path2class("SQLite3::Exception"),
+                     "unknown preupdate hook operation %d", args->op);
+    }
+
+    /* The rowid parameters are undefined for some operations; report nil
+     * instead of a meaningless value. */
+    old_rowid = (args->op == SQLITE_INSERT) ? Qnil : LL2NUM(args->old_rowid);
+    new_rowid = (args->op == SQLITE_DELETE) ? Qnil : LL2NUM(args->new_rowid);
+
+    old_values = (args->op == SQLITE_INSERT)
+                 ? Qnil
+                 : preupdate_snapshot_column_values(args->db, count, true);
+    new_values = (args->op == SQLITE_DELETE)
+                 ? Qnil
+                 : preupdate_snapshot_column_values(args->db, count, false);
+
+    rb_funcall(ctx->preupdate_hook, rb_intern("call"), 8,
+               op,
+               SQLITE3_UTF8_STR_NEW2(args->db_name),
+               SQLITE3_UTF8_STR_NEW2(args->table_name),
+               INT2FIX(depth),
+               old_rowid,
+               new_rowid,
+               old_values,
+               new_values);
+
+    return Qnil;
+}
+
+static void
+preupdatefunc(void *data, sqlite3 *db, int op, const char *db_name, const char *table_name,
+              sqlite3_int64 old_rowid, sqlite3_int64 new_rowid)
+{
+    sqlite3RubyPtr ctx = (sqlite3RubyPtr)data;
+    preupdate_callback_args_t args = {
+        .ctx = ctx,
+        .db = db,
+        .op = op,
+        .db_name = db_name,
+        .table_name = table_name,
+        .old_rowid = old_rowid,
+        .new_rowid = new_rowid,
+    };
+    int exc_status;
+
+    /* A previous row observed by this statement already raised; don't call
+     * the handler again and clobber the pending exception. */
+    if (rb_errinfo() != Qnil) { return; }
+
+    ctx->in_preupdate = 1;
+    rb_protect(preupdate_snapshot_and_call, (VALUE)&args, &exc_status);
+    ctx->in_preupdate = 0;
+
+    /* If the callback raised, the exception stays in rb_errinfo and is
+     * re-raised by Statement#step (or Database#exec_batch) once sqlite
+     * returns, matching the define_function behavior. The row change itself
+     * is not rolled back automatically. */
+}
+
+/* call-seq: install_preupdate_hook(callable)
+ *
+ * Installs (or removes, when +callable+ is +nil+) the low-level preupdate
+ * hook. Use Database#preupdate_hook instead, which wraps the raw callback
+ * arguments in a SQLite3::PreupdateChange value object.
+ */
+static VALUE
+install_preupdate_hook(VALUE self, VALUE hook)
+{
+    sqlite3RubyPtr ctx;
+
+    TypedData_Get_Struct(self, sqlite3Ruby, &database_type, ctx);
+    REQUIRE_OPEN_DB(ctx);
+
+    RB_OBJ_WRITE(self, &ctx->preupdate_hook, hook);
+
+    sqlite3_preupdate_hook(
+        ctx->db,
+        RTEST(hook) ? preupdatefunc : NULL,
+        (void *)ctx
+    );
+
+    return self;
+}
+#endif /* HAVE_SQLITE3_PREUPDATE_HOOK */
 
 static int
 rb_sqlite3_busy_handler(void *context, int count)
@@ -990,6 +1136,11 @@ exec_batch(VALUE self, VALUE sql, VALUE results_as_hash)
     TypedData_Get_Struct(self, sqlite3Ruby, &database_type, ctx);
     REQUIRE_OPEN_DB(ctx);
 
+    if (ctx->in_preupdate) {
+        rb_raise(rb_path2class("SQLite3::Exception"),
+                 "cannot execute statements on a database connection from within its preupdate hook callback");
+    }
+
     if (results_as_hash == Qtrue) {
         status = sqlite3_exec(ctx->db, StringValuePtr(sql), (sqlite3_callback)hash_callback_function,
                               (void *)callback_ary,
@@ -998,6 +1149,14 @@ exec_batch(VALUE self, VALUE sql, VALUE results_as_hash)
         status = sqlite3_exec(ctx->db, StringValuePtr(sql), (sqlite3_callback)regular_callback_function,
                               (void *)callback_ary,
                               &errMsg);
+    }
+
+    if (rb_errinfo() != Qnil) {
+        /* a preupdate hook (or other Ruby callback) raised during sqlite3_exec;
+         * re-raise the Ruby exception now that sqlite has returned. */
+        VALUE exception = rb_errinfo();
+        rb_set_errinfo(Qnil);
+        rb_exc_raise(exception);
     }
 
     CHECK_MSG(ctx->db, status, errMsg);
@@ -1074,6 +1233,9 @@ init_sqlite3_database(void)
     rb_define_method(cSqlite3Database, "closed?", closed_p, 0);
     rb_define_method(cSqlite3Database, "total_changes", total_changes, 0);
     rb_define_method(cSqlite3Database, "trace", trace, -1);
+#ifdef HAVE_SQLITE3_PREUPDATE_HOOK
+    rb_define_private_method(cSqlite3Database, "install_preupdate_hook", install_preupdate_hook, 1);
+#endif
     rb_define_method(cSqlite3Database, "last_insert_row_id", last_insert_row_id, 0);
     rb_define_method(cSqlite3Database, "define_function", define_function, 1);
     rb_define_method(cSqlite3Database, "define_function_with_flags", define_function_with_flags, 2);
