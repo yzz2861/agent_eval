@@ -10,6 +10,12 @@ describe :Hamster do
     end
   end
 
+  describe :OrderedHash do
+    it "can be loaded separately" do
+      expect(system(%{ruby -e "$:.unshift('#{hamster_lib_dir}'); require 'hamster/ordered_hash'; Hamster::OrderedHash.new"})).to be(true)
+    end
+  end
+
   describe :Set do
     it "can be loaded separately" do
       expect(system(%{ruby -e "$:.unshift('#{hamster_lib_dir}'); require 'hamster/set'; Hamster::Set.new"})).to be(true)
