@@ -387,6 +387,208 @@ RSpec.describe Dry::Configurable::Config do
     end
   end
 
+  describe "#to_ractor_snapshot" do
+    before do
+      klass.setting :db do
+        setting :host, default: "localhost"
+        setting :port, default: 5432
+        setting :ports, default: Set[5432]
+        setting :options, default: {pool: 5}
+        setting :tags, default: ["primary"]
+        setting :enabled, default: true
+      end
+    end
+
+    it "raises if the config is not finalized" do
+      expect { klass.config.to_ractor_snapshot }.to raise_error(
+        Dry::Configurable::FrozenConfigError,
+        /must be finalized/
+      )
+    end
+
+    it "builds a frozen shareable Data snapshot readable from another Ractor" do
+      klass.finalize!
+
+      snapshot = klass.config.to_ractor_snapshot
+      result = Ractor.new(snapshot) do |received|
+        [
+          Ractor.shareable?(received),
+          received.db.host,
+          received.db.port,
+          received.db.ports.to_a,
+          received.db.options,
+          received.db.tags,
+          received.db.enabled
+        ]
+      end.take
+
+      expect(snapshot).to be_frozen
+      expect(Ractor.shareable?(snapshot)).to be(true)
+      expect(result).to eq([
+        true,
+        "localhost",
+        5432,
+        [5432],
+        {pool: 5},
+        ["primary"],
+        true
+      ])
+    end
+
+    it "supports the library Undefined singleton" do
+      undefined_klass = Class.new do
+        extend Dry::Configurable(default_undefined: true)
+
+        setting :missing
+      end
+      undefined_klass.finalize!
+
+      snapshot = undefined_klass.config.to_ractor_snapshot
+
+      expect(snapshot.missing).to be(Dry::Configurable::Undefined)
+      expect(Ractor.new(snapshot) { |config|
+        config.missing.equal?(Dry::Configurable::Undefined)
+      }.take).to be(true)
+    end
+
+    it "does not freeze or rewrite the live config or its values" do
+      string = String.new("localhost")
+      tags = ["primary"]
+      options = {pool: 5}
+      ports = Set[5432]
+      klass.config.db.host = string
+      klass.config.db.tags = tags
+      klass.config.db.options = options
+      klass.config.db.ports = ports
+      klass.finalize!
+
+      klass.config.to_ractor_snapshot
+
+      expect(klass.config).to be_frozen
+      expect(klass.config.db).to be_frozen
+      expect(string).not_to be_frozen
+      expect(tags).not_to be_frozen
+      expect(options).not_to be_frozen
+      expect(ports).not_to be_frozen
+      expect(klass.config.db.tags).to equal(tags)
+      expect(klass.config.db.options).to equal(options)
+      expect(klass.config.db.ports).to equal(ports)
+    end
+
+    it "preserves duplicate references" do
+      shared = {name: "primary"}
+      klass.config.db.tags = [shared, shared]
+      klass.finalize!
+
+      snapshot = klass.config.to_ractor_snapshot
+      first = snapshot.db.tags[0]
+      second = snapshot.db.tags[1]
+
+      expect(first).to equal(second)
+      expect(Ractor.new(snapshot) { |config|
+        config.db.tags[0].equal?(config.db.tags[1])
+      }.take).to be(true)
+    end
+
+    it "preserves cycles through nested setting paths" do
+      database = {}
+      database[:self] = database
+      services = [database]
+      services << services
+      klass.config.db.tags = services
+      klass.finalize!
+
+      snapshot = klass.config.to_ractor_snapshot
+
+      expect(snapshot.db.tags[0][:self]).to equal(snapshot.db.tags[0])
+      expect(snapshot.db.tags[1]).to equal(snapshot.db.tags)
+      expect(Ractor.new(snapshot) { |config|
+        tags = config.db.tags
+        tags[0][:self].equal?(tags[0]) && tags[1].equal?(tags)
+      }.take).to be(true)
+    end
+
+    it "requires an explicit converter for unsupported values and reports the setting path" do
+      klass.setting :path, default: Pathname("tmp/db.sqlite")
+      klass.finalize!
+
+      expect { klass.config.to_ractor_snapshot }.to raise_error(
+        Dry::Configurable::RactorSnapshotError,
+        /Pathname at settings\.path: provide an explicit converter/
+      )
+    end
+
+    it "uses explicit converters and passes the setting path when accepted" do
+      seen_path = nil
+      klass.setting :path, default: Pathname("tmp/db.sqlite")
+      klass.finalize!
+
+      snapshot = klass.config.to_ractor_snapshot(
+        converters: {
+          Pathname => ->(path, path_setting) {
+            seen_path = path_setting
+            path.to_s.freeze
+          }
+        }
+      )
+
+      expect(snapshot.path).to eq("tmp/db.sqlite")
+      expect(seen_path).to eq(%i[path])
+    end
+
+    it "reports converter failures with the nested setting path" do
+      klass.setting :path, default: Pathname("tmp/db.sqlite")
+      klass.finalize!
+
+      expect do
+        klass.config.to_ractor_snapshot(
+          converters: {Pathname => ->(_) { raise "boom" }}
+        )
+      end.to raise_error(
+        Dry::Configurable::RactorSnapshotError,
+        /Converter failed at settings\.path: RuntimeError: boom/
+      )
+    end
+
+    it "rejects converter results that are not shareable" do
+      klass.setting :path, default: Pathname("tmp/db.sqlite")
+      klass.finalize!
+
+      expect do
+        klass.config.to_ractor_snapshot(
+          converters: {Pathname => ->(path) { path.to_s }}
+        )
+      end.to raise_error(
+        Dry::Configurable::RactorSnapshotError,
+        /Converter for settings\.path returned a non-shareable value: String/
+      )
+    end
+
+    it "rejects converter results that are shareable but not frozen" do
+      klass.setting :path, default: Pathname("tmp/db.sqlite")
+      klass.finalize!
+
+      expect do
+        klass.config.to_ractor_snapshot(
+          converters: {Pathname => ->(_) { Ractor.new {} }}
+        )
+      end.to raise_error(
+        Dry::Configurable::RactorSnapshotError,
+        /Converter for settings\.path returned a non-shareable value: Ractor/
+      )
+    end
+
+    it "reports unsupported nested hash keys with a setting path" do
+      klass.config.db.options = {Pathname("key") => 1}
+      klass.finalize!
+
+      expect { klass.config.to_ractor_snapshot }.to raise_error(
+        Dry::Configurable::RactorSnapshotError,
+        /hash key at settings\.db\.options\.key.*Pathname/m
+      )
+    end
+  end
+
   describe "#method_missing" do
     it "provides access to reader methods" do
       klass.setting :hello

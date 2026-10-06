@@ -9,6 +9,8 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ### Added
 
+- Added `Config#to_ractor_snapshot`, which builds a frozen, Ractor-shareable copy of finalized configuration without mutating the live config.
+
 ### Changed
 
 ### Deprecated

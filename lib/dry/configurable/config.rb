@@ -195,6 +195,30 @@ module Dry
         _settings.data_class.new(**to_data_attrs)
       end
 
+      # Returns a frozen, Ractor-shareable snapshot of the config's resolved values.
+      #
+      # Nested configs and basic containers (Hash, Array, and Set) are recursively rebuilt. Strings
+      # and basic scalars are accepted, while any other value requires a converter keyed by class.
+      # Converters may accept the value alone, or the value and its setting path, and must return
+      # a frozen, shareable value. Duplicate and cyclic container references are preserved in the
+      # rebuilt graph. The original configuration and its values are never deep-frozen or modified.
+      #
+      # @param converters [Hash{Class => #call}]
+      #
+      # @return [Data]
+      #
+      # @raise [FrozenConfigError] if the config is not yet finalized
+      # @raise [RactorSnapshotError] if a value cannot be converted into a shareable snapshot
+      #
+      # @api public
+      def to_ractor_snapshot(converters: {})
+        unless frozen?
+          raise FrozenConfigError, "config must be finalized before #to_ractor_snapshot can be called"
+        end
+
+        RactorSnapshot.call(self, converters)
+      end
+
       # @api public
       def finalize!(freeze_values: false)
         return self if frozen?
