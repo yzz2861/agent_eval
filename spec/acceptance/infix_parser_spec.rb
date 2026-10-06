@@ -119,3 +119,171 @@ Don't know what to do with "%" at line 1 char 2.
     end
   end
 end
+
+describe 'Unary and ternary operators' do
+  class QueryExpressionParser < Parslet::Parser
+    rule(:space) { match['\s'] }
+
+    def cts atom
+      atom >> space.repeat
+    end
+
+    rule(:integer) { cts match['0-9'].repeat(1) }
+
+    rule(:expression) { infix_expression(integer,
+      [cts(str('!=')), 3, :left],
+      [cts(str('!')), 5, :postfix],
+      [cts(str('-')), 4, :prefix],
+      [cts(str('-')), 2, :left],
+      [cts(str('+')), 2, :left],
+      [cts(str('^')), 6, :right],
+      [[cts(str('?')), cts(str(':'))], 1, :right]) }
+  end
+
+  let(:p) { QueryExpressionParser.new }
+  let(:e) { p.expression }
+
+  describe 'prefix operators' do
+    it 'reduce with nil on the missing side' do
+      e.should parse('-1').as(l: nil, o: '-', r: '1')
+    end
+    it 'nest towards the operand' do
+      e.should parse('--1').as(
+        l: nil, o: '-', r: {l: nil, o: '-', r: '1'})
+    end
+    it 'mix with binary operators on the same token' do
+      e.should parse('1--2').as(
+        l: '1', o: '-', r: {l: nil, o: '-', r: '2'})
+    end
+  end
+
+  describe 'prefix minus versus power' do
+    it 'gobbles the power expression when declared looser' do
+      e.should parse('-1^2').as(
+        l: nil, o: '-', r: {l: '1', o: '^', r: '2'})
+    end
+
+    context 'declared tighter than power' do
+      class TightPrefixParser < Parslet::Parser
+        rule(:expression) { infix_expression(match['0-9'].repeat(1),
+          [str('-'), 2, :prefix],
+          [str('^'), 1, :right]) }
+      end
+
+      it 'binds to the immediate operand only' do
+        TightPrefixParser.new.expression.should parse('-1^2').as(
+          l: {l: nil, o: '-', r: '1'}, o: '^', r: '2')
+      end
+    end
+  end
+
+  describe 'postfix operators' do
+    it 'reduce with nil on the missing side' do
+      e.should parse('1!').as(l: '1', o: '!', r: nil)
+    end
+    it 'chain towards the left' do
+      e.should parse('1!!').as(
+        l: {l: '1', o: '!', r: nil}, o: '!', r: nil)
+    end
+    it 'combine with prefix operators' do
+      e.should parse('-1!').as(
+        l: nil, o: '-', r: {l: '1', o: '!', r: nil})
+    end
+    it 'respect precedence against tighter binary operators' do
+      e.should parse('1^2!').as(
+        l: {l: '1', o: '^', r: '2'}, o: '!', r: nil)
+    end
+  end
+
+  describe 'operators sharing a prefix' do
+    it 'prefers the longer operator declared first' do
+      e.should parse('1!=2').as(l: '1', o: '!=', r: '2')
+    end
+    it 'still matches the shorter operator on its own' do
+      e.should parse('1!').as(l: '1', o: '!', r: nil)
+    end
+  end
+
+  describe 'ternary operators' do
+    it 'reduce condition, middle and right into a single node' do
+      e.should parse('1?2:3').as(
+        l: '1', o: '?', m: '2', s: ':', r: '3')
+    end
+    it 'nest right when declared right associative' do
+      e.should parse('1?2:3?4:5').as(
+        l: '1', o: '?', m: '2', s: ':',
+        r: {l: '3', o: '?', m: '4', s: ':', r: '5'})
+    end
+    it 'parse the middle as a full expression' do
+      e.should parse('1?2+3:4').as(
+        l: '1', o: '?', m: {l: '2', o: '+', r: '3'}, s: ':', r: '4')
+    end
+    it 'allow nested ternaries in the middle' do
+      e.should parse('1?2?3:4:5').as(
+        l: '1', o: '?',
+        m: {l: '2', o: '?', m: '3', s: ':', r: '4'},
+        s: ':', r: '5')
+    end
+    it 'combine with prefix operators' do
+      e.should parse('-1?2:3').as(
+        l: {l: nil, o: '-', r: '1'}, o: '?', m: '2', s: ':', r: '3')
+    end
+
+    context 'with a postfix operator sharing the opening token' do
+      class OptionalExpressionParser < Parslet::Parser
+        rule(:expression) { infix_expression(match['0-9'].repeat(1),
+          [[str('?'), str(':')], 1, :right],
+          [str('?'), 2, :postfix]) }
+      end
+      let(:o) { OptionalExpressionParser.new.expression }
+
+      it 'parses a complete ternary as ternary' do
+        o.should parse('1?2:3').as(
+          l: '1', o: '?', m: '2', s: ':', r: '3')
+      end
+      it 'rewinds a ternary without separator and tries the postfix' do
+        o.should parse('1?').as(l: '1', o: '?', r: nil)
+      end
+    end
+
+    describe 'incomplete ternary' do
+      it 'does not swallow the opening token' do
+        cause = catch_failed_parse {
+          e.parse('1?2') }
+
+        cause.ascii_tree.to_s.should == <<-ERROR
+Don't know what to do with "?2" at line 1 char 2.
+        ERROR
+      end
+    end
+  end
+
+  describe 'reducer block arities' do
+    class ShapeReducingParser < Parslet::Parser
+      rule(:top) { infix_expression(str('a'),
+        [str('!'), 3, :postfix],
+        [str('-'), 2, :prefix],
+        [[str('?'), str(':')], 1, :right]) { |*args| {:node => args} } }
+    end
+    let(:r) { ShapeReducingParser.new.top }
+
+    it 'calls prefix reductions with (nil, operator, operand)' do
+      r.parse('-a').should == {:node => [nil, '-', 'a']}
+    end
+    it 'calls postfix reductions with (operand, operator, nil)' do
+      r.parse('a!').should == {:node => ['a', '!', nil]}
+    end
+    it 'calls ternary reductions with all five parts' do
+      r.parse('a?a:a').should == {:node => ['a', '?', 'a', ':', 'a']}
+    end
+  end
+
+  describe 'invalid declarations' do
+    it 'rejects unknown associativity or kind markers' do
+      expect {
+        Parslet.infix_expression(
+          Parslet.str('a'), [Parslet.str('+'), 1, :bogus])
+      }.to raise_error(ArgumentError, /Unknown operator kind/)
+    end
+  end
+end

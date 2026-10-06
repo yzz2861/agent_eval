@@ -9,6 +9,11 @@
   + Update to Github Actions CI/CD. I guess newer is better? (Matt Larraz).
     Also includes testing on newer Ruby versions. 
 
+  + infix_expression now also accepts prefix ('-x'), postfix ('x!') and
+    ternary ('x ? y : z') operators in the same operator table, declared
+    through <operator, precedence, associativity> tuples like binary
+    operators.
+
 
 = 2.0 / 16Feb2020
 

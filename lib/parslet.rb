@@ -201,26 +201,50 @@ module Parslet
   end
   module_function :dynamic
 
-  # Returns a parslet atom that parses infix expressions. Operations are 
-  # specified as a list of <atom, precedence, associativity> tuples, where 
-  # atom is simply the parslet atom that matches an operator, precedence is 
-  # a number and associativity is either :left or :right. 
-  # 
+  # Returns a parslet atom that parses expressions. Operations are
+  # specified as a list of <operator, precedence, associativity> tuples,
+  # where the shape of the operator determines the kind of operation:
+  #
+  #   [atom, precedence, :left]                binary infix ('a + b')
+  #   [atom, precedence, :right]               binary infix ('a ** b')
+  #   [atom, precedence, :prefix]              prefix unary ('-a')
+  #   [atom, precedence, :postfix]             postfix unary ('a!')
+  #   [[atom, separator], precedence, :left]   ternary ('a ? b : c')
+  #   [[atom, separator], precedence, :right]
+  #
+  # atom is simply the parslet atom that matches the operator token; for
+  # ternary operators, a second atom matches the separator between the
+  # middle and the right subexpression. Precedence is a number and
+  # associativity is :left or :right where meaningful.
+  #
   # Higher precedence indicates that the operation should bind tighter than
-  # other operations with lower precedence. In common algebra, '+' has 
+  # other operations with lower precedence. In common algebra, '+' has
   # lower precedence than '*'. So you would have a precedence of 1 for '+' and
-  # a precedence of 2 for '*'. Only the order relation between these two 
-  # counts, so any number would work. 
+  # a precedence of 2 for '*'. Only the order relation between these two
+  # counts, so any number would work. The same relation decides how unary
+  # operators bind: declare prefix '-' looser than '**' and '-a**b' parses
+  # as '-(a**b)'; declare it tighter and you get '(-a)**b'.
   #
   # Associativity is what decides what interpretation to take for strings that
-  # are ambiguous like '1 + 2 + 3'. If '+' is specified as left associative, 
-  # the expression would be interpreted as '(1 + 2) + 3'. If right 
-  # associativity is chosen, it would be interpreted as '1 + (2 + 3)'. Note 
-  # that the hash trees output reflect that choice as well. 
+  # are ambiguous like '1 + 2 + 3'. If '+' is specified as left associative,
+  # the expression would be interpreted as '(1 + 2) + 3'. If right
+  # associativity is chosen, it would be interpreted as '1 + (2 + 3)'.
+  # Ternary operators nest the same way: right associative
+  # 'a ? b : c ? d : e' reads as 'a ? b : (c ? d : e)'. The middle
+  # subexpression of a ternary operator is always a full expression of its
+  # own. Note that the hash trees output reflect these choices as well.
   #
-  # An optional block can be provided in order to manipulate the generated tree.
-  # The block will be called on each operator and passed 3 arguments: the left
-  # operand, the operator, and the right operand.
+  # Operators are tried in declaration order, so when two operators share
+  # a common prefix ('!' and '!=', say), declare the longer one first. A
+  # ternary operator only consumes input if its opening token, its middle
+  # expression and its separator all match; otherwise the input is left
+  # untouched for the other operators in the table.
+  #
+  # An optional block can be provided in order to manipulate the generated
+  # tree. The block is called once per operation: with (left, operator,
+  # right) for binary operations, with (nil, operator, operand) for prefix
+  # and (operand, operator, nil) for postfix operations, and with
+  # (condition, operator, middle, separator, right) for ternary operations.
   #
   # Examples:
   #   infix_expression(integer, [add_op, 1, :left])
@@ -230,10 +254,16 @@ module Parslet
   #   # would parse '1 + 2 + 3' as:
   #   # { :plus => [1, { :plus => [2, 3] }] }
   #
+  #   infix_expression(integer,
+  #     [minus_op, 2, :prefix],
+  #     [[question_op, colon_op], 1, :right])
+  #   # would parse '-1 ? 2 : 3' as:
+  #   # { l: {l: nil, o: '-', r: '1'}, o: '?', m: '2', s: ':', r: '3' }
+  #
   # @param element [Parslet::Atoms::Base] elements that take the NUMBER position
   #    in the expression
-  # @param operations [Array<(Parslet::Atoms::Base, Integer, {:left, :right})>]
-  #  
+  # @param operations [Array] operator tuples as described above
+  #
   # @see Parslet::Atoms::Infix
   #
   def infix_expression(element, *operations, &reducer)
