@@ -4,6 +4,13 @@
   We're in maintenance mode! The community is really stepping up here though, sending
   interesting additions our way. Here's what has been merged this far: 
 
+  + Static grammar check: Parslet::Parser.grammar_check (and
+    Parslet.grammar_check) analyses a grammar without reading business
+    input and reports unbounded repetitions of nullable bodies and
+    non-consuming cycles between rules. Atoms created inside dynamic {} or
+    scope {} blocks are not executed; those spots are reported as warnings
+    naming the rule chain that could not be confirmed.
+
   + Specification for mixing parslet parsers (Artur Komarov).
 
   + Update to Github Actions CI/CD. I guess newer is better? (Matt Larraz).

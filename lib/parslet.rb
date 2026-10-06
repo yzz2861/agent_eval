@@ -101,6 +101,8 @@ module Parslet
     #
     def rule(name, opts={}, &definition)
       undef_method name if method_defined? name
+      (@parslet_rules ||= [])
+      @parslet_rules << name unless @parslet_rules.include?(name)
       define_method(name) do
         @rules ||= {}     # <name, rule> memoization
         return @rules[name] if @rules.has_key?(name)
@@ -307,5 +309,6 @@ require 'parslet/pattern'
 require 'parslet/pattern/binding'
 require 'parslet/transform'
 require 'parslet/parser'
+require 'parslet/grammar_check'
 require 'parslet/error_reporter'
 require 'parslet/scope'

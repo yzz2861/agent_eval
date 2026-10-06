@@ -61,6 +61,35 @@ FEATURES
   * Rspec testing support rig
   * Simply Ruby, composable and hackable
 
+STATIC GRAMMAR CHECK
+
+  A rule that matches the empty string inside an unbounded repetition (or
+  two rules that call each other without consuming a character first) only
+  shows up while parsing, typically as a hang on a specific input. Parslet
+  can check the grammar itself, without reading any business input:
+
+    class Mini < Parslet::Parser
+      rule(:space)   { match('[\\s]').repeat }
+      rule(:spaces?) { space.maybe }
+      rule(:item)    { spaces? >> str('a') }
+      rule(:list)    { item.repeat }
+      root(:list)
+    end
+
+    result = Mini.grammar_check       # static, reads no input
+    result.ok?                        # => true
+    result.report                     # => human readable findings
+
+    Mini.grammar_check!               # raises Parslet::GrammarError on
+                                      # a definite non-progressing loop
+
+  The check reports three kinds of problems: a repetition whose body can
+  match the empty string, a non-consuming cycle between declared rules and
+  (as warnings) places where a dynamic {} or scope {} atom makes the answer
+  unknowable statically. Dynamic blocks are never executed during the
+  check; every finding carries the chain of declared rules leading to the
+  construct.
+
 COMPATIBILITY
 
 This library is intended to work with Ruby variants >= 1.9. I've tested it on 
