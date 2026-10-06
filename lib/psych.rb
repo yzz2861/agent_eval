@@ -28,6 +28,7 @@ require_relative 'psych/json/tree_builder'
 require_relative 'psych/json/stream'
 require_relative 'psych/handlers/document_stream'
 require_relative 'psych/class_loader'
+require_relative 'psych/unknown_tag'
 
 ###
 # = Overview
@@ -308,6 +309,10 @@ module Psych
   # A Psych::DisallowedClass exception will be raised if the yaml contains a
   # class that isn't in the +permitted_classes+ list.
   #
+  # When +preserve_unknown_tags+ is true, unrecognized tags are retained in
+  # Psych::UnknownTag objects instead of being discarded. Permitted classes and
+  # built-in YAML tags continue to use their normal deserialization rules.
+  #
   # A Psych::AliasesNotEnabled exception will be raised if the yaml contains aliases
   # but the +aliases+ keyword argument is set to false.
   #
@@ -320,7 +325,7 @@ module Psych
   #   Psych.safe_load("---\n foo: bar")                         # => {"foo"=>"bar"}
   #   Psych.safe_load("---\n foo: bar", symbolize_names: true)  # => {:foo=>"bar"}
   #
-  def self.safe_load yaml, permitted_classes: [], permitted_symbols: [], aliases: false, filename: nil, fallback: nil, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true
+  def self.safe_load yaml, permitted_classes: [], permitted_symbols: [], aliases: false, filename: nil, fallback: nil, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true, preserve_unknown_tags: false
     result = parse(yaml, filename: filename)
     return fallback unless result
 
@@ -332,6 +337,7 @@ module Psych
               else
                 Visitors::NoAliasRuby.new scanner, class_loader, symbolize_names: symbolize_names, freeze: freeze
               end
+    visitor.preserve_unknown_tags = preserve_unknown_tags
     result = visitor.accept result
     result
   end
@@ -366,7 +372,7 @@ module Psych
   # Raises a TypeError when `yaml` parameter is NilClass.  This method is
   # similar to `safe_load` except that `Symbol` objects are allowed by default.
   #
-  def self.load yaml, permitted_classes: [Symbol], permitted_symbols: [], aliases: false, filename: nil, fallback: nil, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true
+  def self.load yaml, permitted_classes: [Symbol], permitted_symbols: [], aliases: false, filename: nil, fallback: nil, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true, preserve_unknown_tags: false
     safe_load yaml, permitted_classes: permitted_classes,
                     permitted_symbols: permitted_symbols,
                     aliases: aliases,
@@ -375,7 +381,8 @@ module Psych
                     symbolize_names: symbolize_names,
                     freeze: freeze,
                     strict_integer: strict_integer,
-                    parse_symbols: parse_symbols
+                    parse_symbols: parse_symbols,
+                    preserve_unknown_tags: preserve_unknown_tags
   end
 
   ###
@@ -668,11 +675,12 @@ module Psych
   #   end
   #   list # => ['foo', 'bar']
   #
-  def self.safe_load_stream yaml, filename: nil, permitted_classes: [], aliases: false
+  def self.safe_load_stream yaml, filename: nil, permitted_classes: [], aliases: false, preserve_unknown_tags: false
     documents = parse_stream(yaml, filename: filename).children.map do |child|
       stream = Psych::Nodes::Stream.new
       stream.children << child
-      safe_load(stream.to_yaml, permitted_classes: permitted_classes, aliases: aliases)
+      safe_load(stream.to_yaml, permitted_classes: permitted_classes, aliases: aliases,
+                preserve_unknown_tags: preserve_unknown_tags)
     end
 
     if block_given?

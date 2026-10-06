@@ -45,6 +45,7 @@ DESCRIPTION
     "lib/psych/omap.rb", "lib/psych/parser.rb", "lib/psych/scalar_scanner.rb",
     "lib/psych/set.rb", "lib/psych/stream.rb", "lib/psych/streaming.rb",
     "lib/psych/syntax_error.rb", "lib/psych/tree_builder.rb",
+    "lib/psych/unknown_tag.rb",
     "lib/psych/versions.rb", "lib/psych/visitors.rb",
     "lib/psych/visitors/depth_first.rb", "lib/psych/visitors/emitter.rb",
     "lib/psych/visitors/json_tree.rb", "lib/psych/visitors/to_ruby.rb",

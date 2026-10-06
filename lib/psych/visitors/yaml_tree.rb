@@ -2,6 +2,7 @@
 require_relative '../tree_builder'
 require_relative '../scalar_scanner'
 require_relative '../class_loader'
+require_relative '../unknown_tag'
 
 module Psych
   module Visitors
@@ -139,6 +140,10 @@ module Psych
 
         o.each { |k,v| visit_Hash k => v }
         @emitter.end_sequence
+      end
+
+      def visit_Psych_UnknownTag o
+        emit_unknown_tag(o)
       end
 
       def visit_Encoding o
@@ -423,6 +428,54 @@ module Psych
 
       private
 
+      def emit_unknown_tag o
+        node = case o.type
+        when :scalar
+          emit_unknown_scalar(o)
+        when :seq
+          @emitter.start_sequence(nil, o.tag, false, Nodes::Sequence::BLOCK)
+        else
+          @emitter.start_mapping(nil, o.tag, false, Nodes::Mapping::BLOCK)
+        end
+        register(o, node)
+
+        case o.type
+        when :seq
+          o.value.each { |item| accept item }
+          @emitter.end_sequence
+        when :map
+          o.value.each { |key, value| accept key; accept value }
+          @emitter.end_mapping
+        end
+
+        node
+      end
+
+      def emit_unknown_scalar o
+        value, style = scalar_payload(o.value)
+        @emitter.scalar(value, nil, o.tag, false, false, style)
+      end
+
+      def scalar_payload value
+        case value
+        when nil then ['', Nodes::Scalar::ANY]
+        when true then [value.inspect, Nodes::Scalar::ANY]
+        when false then [value.inspect, Nodes::Scalar::ANY]
+        when Symbol then [value.inspect, Nodes::Scalar::ANY]
+        when String
+          [value, Nodes::Scalar::ANY]
+        when Float then [float_value(value), Nodes::Scalar::ANY]
+        else [String(value), Nodes::Scalar::ANY]
+        end
+      end
+
+      def float_value value
+        return '.nan' if value.nan?
+        return value.infinite? > 0 ? '.inf' : '-.inf' if value.infinite?
+
+        value.to_s
+      end
+
       def binary? string
         string.encoding == Encoding::ASCII_8BIT && !string.ascii_only?
       end
@@ -584,6 +637,7 @@ module Psych
         String => true,
         Array => true,
         Hash => true,
+        Psych::UnknownTag => true,
       }.compare_by_identity.freeze
 
       def initialize emitter, ss, options
@@ -614,6 +668,25 @@ module Psych
       def visit_Symbol sym
         unless @permitted_classes[Symbol] || @permitted_symbols[sym]
           raise DisallowedClass.new('dump', "Symbol(#{sym.inspect})")
+        end
+
+        super
+      end
+
+      private
+
+      def emit_unknown_scalar o
+        case o.value
+        when nil, true, false, Integer, Float, String
+          # Core scalar classes are allowed by every RestrictedYAMLTree.
+        when Symbol
+          unless @permitted_classes[Symbol] || @permitted_symbols[o.value]
+            raise DisallowedClass.new('dump', "Symbol(#{o.value.inspect})")
+          end
+        else
+          unless @permitted_classes[o.value.class]
+            raise DisallowedClass.new('dump', o.value.class.name || o.value.class.inspect)
+          end
         end
 
         super

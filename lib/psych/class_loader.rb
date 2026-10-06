@@ -35,6 +35,10 @@ module Psych
       sym.to_sym
     end
 
+    def permitted_class? klassname
+      true
+    end
+
     constants.each do |const|
       konst = const_get const
       class_eval <<~RUBY, __FILE__, __LINE__ + 1
@@ -90,6 +94,10 @@ module Psych
         else
           raise DisallowedClass.new('load', 'Symbol')
         end
+      end
+
+      def permitted_class? klassname
+        @classes.include? klassname
       end
 
       private

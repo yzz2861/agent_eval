@@ -15,6 +15,7 @@ module Psych
       unless RUBY_VERSION < "3.2"
         DATA_INITIALIZE = Data.instance_method(:initialize)
       end
+      BUILTIN_SHORTHAND_TAGS = ['!binary', '!float', '!omap'].freeze
 
       def self.create(symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true)
         class_loader = ClassLoader.new
@@ -23,6 +24,7 @@ module Psych
       end
 
       attr_reader :class_loader
+      attr_writer :preserve_unknown_tags
 
       def initialize ss, class_loader, symbolize_names: false, freeze: false
         super()
@@ -33,6 +35,7 @@ module Psych
         @class_loader = class_loader
         @symbolize_names = symbolize_names
         @freeze = freeze
+        @preserve_unknown_tags = false
       end
 
       def accept target
@@ -48,13 +51,13 @@ module Psych
           end
         end
 
-        result = deduplicate(result).freeze if @freeze
+        result = freeze_result(result) if @freeze
         result
       end
 
       def deserialize o
         if klass = resolve_class(@load_tags[o.tag])
-          instance = klass.allocate
+          instance = register(o, klass.allocate)
 
           if instance.respond_to?(:init_with)
             coder = Psych::Coder.new(o.tag)
@@ -131,12 +134,19 @@ module Psych
       private :deserialize
 
       def visit_Psych_Nodes_Scalar o
-        register o, deserialize(o)
+        return preserve_unknown_scalar(o) if unknown_tag_node?(o.tag)
+
+        register o, preserving_unknown_tag(o) { deserialize(o) }
       end
 
       def visit_Psych_Nodes_Sequence o
+        return preserve_unknown_sequence(o) if unknown_tag_node?(o.tag)
+        register o, preserving_unknown_tag(o) { deserialize_sequence(o) }
+      end
+
+      def deserialize_sequence o
         if klass = resolve_class(@load_tags[o.tag])
-          instance = klass.allocate
+          instance = register(o, klass.allocate)
 
           if instance.respond_to?(:init_with)
             coder = Psych::Coder.new(o.tag)
@@ -166,7 +176,14 @@ module Psych
         end
       end
 
+      private :deserialize_sequence
+
       def visit_Psych_Nodes_Mapping o
+        return preserve_unknown_mapping(o) if unknown_tag_node?(o.tag)
+        register o, preserving_unknown_tag(o) { deserialize_mapping(o) }
+      end
+
+      def deserialize_mapping o
         if @load_tags[o.tag]
           return revive(resolve_class(@load_tags[o.tag]), o)
         end
@@ -346,6 +363,8 @@ module Psych
         end
       end
 
+      private :deserialize_mapping
+
       def visit_Psych_Nodes_Document o
         accept o.root
       end
@@ -359,6 +378,116 @@ module Psych
       end
 
       private
+
+      def freeze_result object
+        return object if object.frozen?
+
+        if object.is_a?(Psych::UnknownTag)
+          value = deduplicate(object.value)
+          freeze_value(value)
+          object.instance_variable_set(:@value, value)
+          object.freeze
+        else
+          deduplicate(object).freeze
+        end
+      end
+
+      def freeze_value object
+        case object
+        when Psych::UnknownTag
+          freeze_result(object)
+        when Hash
+          object.freeze
+          object.each_value { |value| freeze_value(value) }
+        when Array
+          object.freeze
+          object.each { |value| freeze_value(value) }
+        else
+          object.freeze
+        end
+      end
+
+      def preserve_unknown_tag? tag
+        @preserve_unknown_tags && tag
+      end
+
+      def safe_resolve_class klassname, tag
+        resolve_class(klassname)
+      rescue DisallowedClass
+        raise unless preserve_unknown_tag?(tag)
+
+        nil
+      end
+
+      def unknown_tag_node? tag
+        preserve_unknown_tag?(tag) &&
+          (registered_unknown_load_tag?(tag) || foreign_unknown_tag?(tag) ||
+           unknown_ruby_object_tag?(tag))
+      end
+
+      def registered_unknown_load_tag? tag
+        @load_tags.key?(tag) && !registered_domain_tag?(tag) &&
+          !class_loader.permitted_class?(@load_tags[tag])
+      end
+
+      def foreign_unknown_tag? tag
+        return false if @load_tags.key?(tag) || registered_domain_tag?(tag)
+
+        !tag.start_with?('tag:yaml.org,2002:') &&
+          !BUILTIN_SHORTHAND_TAGS.include?(tag) &&
+          !tag.start_with?('!ruby/')
+      end
+
+      def unknown_ruby_object_tag? tag
+        return false unless tag.match?(/\A!ruby\/object(?::.+)?\z/)
+
+        name = tag.sub(/\A!ruby\/object:?/, '')
+        name = 'Object' if name.empty?
+        !class_loader.permitted_class?(name)
+      end
+
+      def registered_domain_tag? tag
+        key = tag.sub(/^[!\/]*/, '').sub(/(,\d+)\//, '\1:')
+        key = "tag:#{key}" unless key.match?(/^(?:tag:|x-private)/)
+        @domain_types.key?(key)
+      end
+
+      def preserving_unknown_tag node
+        yield
+      rescue DisallowedClass
+        raise unless preserve_unknown_tag?(node.tag)
+
+        case node
+        when Nodes::Scalar
+          unknown_tag_value(node, @ss.tokenize(node.value))
+        when Nodes::Sequence
+          preserve_unknown_sequence(node)
+        else
+          preserve_unknown_mapping(node)
+        end
+      end
+
+      def preserve_unknown_scalar node
+        value = node.quoted ? node.value : @ss.tokenize(node.value)
+        unknown_tag_value(node, value)
+      end
+
+      def preserve_unknown_sequence node
+        list = unknown_tag_value(node, [])
+        node.children.each { |child| list.value.push accept(child) }
+        list
+      end
+
+      def preserve_unknown_mapping node
+        map = unknown_tag_value(node, {})
+        revive_hash(map.value, node)
+        map
+      end
+
+      def unknown_tag_value node, value
+        tagged = Psych::UnknownTag.new(node.tag, value)
+        register(node, tagged)
+      end
 
       def register node, object
         @st[node.anchor] = object if node.anchor
