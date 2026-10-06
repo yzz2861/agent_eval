@@ -9,6 +9,8 @@ and this project adheres to [Break Versioning](https://www.taoensso.com/break-ve
 
 ### Added
 
+- Added `setting_collection`, declaring a member settings template once and exposing a `SettingCollection` as the setting's value. Members are added by name at runtime (`config.connections.add(:primary)`), each getting an independent config built from the template, with support for member deletion, copying, pristine resets and finalization.
+
 ### Changed
 
 ### Deprecated

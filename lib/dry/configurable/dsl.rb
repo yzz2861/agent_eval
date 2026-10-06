@@ -31,15 +31,7 @@ module Dry
       # @api private
       # @return Setting
       def setting(name, **options, &block)
-        unless VALID_NAME.match?(name.to_s)
-          raise ArgumentError, "#{name} is not a valid setting name"
-        end
-
-        if DATA_RESERVED_NAMES.include?(name.to_sym)
-          raise ArgumentError,
-            "#{name.inspect} is not a valid setting name: it conflicts with a Data " \
-            "instance method, which would break Config#to_data"
-        end
+        ensure_valid_name(name)
 
         ensure_valid_options(options)
 
@@ -56,6 +48,31 @@ module Dry
         compiler.visit(ast.last)
       end
 
+      # Registers a named collection of member configs, all built from the
+      # settings declared in the block. Members are added by name at runtime
+      # (see SettingCollection), so their names don't need to be known here.
+      #
+      # @see ClassMethods.setting_collection
+      # @api private
+      # @return Setting
+      def setting_collection(name, **options, &block)
+        ensure_valid_name(name)
+
+        ensure_valid_options(options)
+
+        unless block
+          raise ArgumentError, "setting_collection requires a block of member settings"
+        end
+
+        options = {default: default, config_class: config_class, **options}
+
+        node = [:collection, [name.to_sym, options, DSL.new(**@options, &block).ast]]
+
+        ast << node
+
+        compiler.visit(ast.last)
+      end
+
       def config_class
         options[:config_class]
       end
@@ -65,6 +82,18 @@ module Dry
       end
 
       private
+
+      def ensure_valid_name(name)
+        unless VALID_NAME.match?(name.to_s)
+          raise ArgumentError, "#{name} is not a valid setting name"
+        end
+
+        if DATA_RESERVED_NAMES.include?(name.to_sym)
+          raise ArgumentError,
+            "#{name.inspect} is not a valid setting name: it conflicts with a Data " \
+            "instance method, which would break Config#to_data"
+        end
+      end
 
       def ensure_valid_options(options)
         return if options.none?

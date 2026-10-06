@@ -91,4 +91,23 @@ RSpec.describe Dry::Configurable::DSL do
     expect(setting.children.to_a[0].children.to_a[0].name).to be(:user)
     expect(setting.children.to_a[0].children.to_a[1].name).to be(:pass)
   end
+
+  it "compiles a setting collection with a member settings template" do
+    setting =
+      dsl.setting_collection(:connections) do
+        setting(:dsn)
+        setting(:pool_size, default: 5)
+      end
+
+    expect(setting.name).to be(:connections)
+    expect(setting).to be_collection
+    expect(setting.children.to_a.map(&:name)).to eql(%i[dsn pool_size])
+  end
+
+  it "requires a block for a setting collection" do
+    expect { dsl.setting_collection(:connections) }.to raise_error(
+      ArgumentError,
+      /requires a block/
+    )
+  end
 end

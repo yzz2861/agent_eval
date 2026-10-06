@@ -134,13 +134,19 @@ module Dry
       end
 
       # Returns config values as a hash, with nested values also converted from {Config} instances
-      # into hashes.
+      # into hashes. Setting collections are converted into hashes of member name to values hash.
       #
       # @return [Hash]
       #
       # @api public
       def to_h
-        values.transform_values { |value| value.is_a?(self.class) ? value.to_h : value }
+        values.transform_values { |value|
+          if value.is_a?(self.class) || value.is_a?(SettingCollection)
+            value.to_h
+          else
+            value
+          end
+        }
       end
 
       # @api private
@@ -202,6 +208,8 @@ module Dry
         values.each_value do |value|
           if value.is_a?(self.class)
             value.finalize!(freeze_values: freeze_values)
+          elsif value.is_a?(SettingCollection)
+            value.finalize!(freeze_values: freeze_values)
           elsif freeze_values
             value.freeze
           end
@@ -226,7 +234,12 @@ module Dry
 
       def to_data_attrs
         _values.each_with_object({}) do |(name, value), hsh|
-          hsh[name] = value.is_a?(self.class) ? value.to_data : value
+          hsh[name] =
+            if value.is_a?(self.class) || value.is_a?(SettingCollection)
+              value.to_data
+            else
+              value
+            end
         end
       end
 

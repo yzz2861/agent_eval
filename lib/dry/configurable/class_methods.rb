@@ -39,13 +39,41 @@ module Dry
       #
       # @api public
       def setting(...)
-        setting = __config_dsl__.setting(...)
+        __config_register__(__config_dsl__.setting(...))
+      end
 
-        settings << setting
-
-        __config_reader__.define(setting.name) if setting.reader?
-
-        self
+      # Add a named collection of member configs to the configuration
+      #
+      # The settings declared in the block become the template for each member.
+      # Members themselves are added by name at runtime, via the
+      # {SettingCollection} exposed as this setting's value:
+      #
+      # @example
+      #
+      #   class Service
+      #     extend Dry::Configurable
+      #
+      #     setting_collection :connections do
+      #       setting :dsn, constructor: ->(v) { v.to_s }
+      #       setting :pool_size, default: 5
+      #     end
+      #   end
+      #
+      #   Service.config.connections.add(:primary)
+      #   Service.config.connections.primary.dsn = "postgres://primary"
+      #
+      # @param [Mixed] name
+      #   The accessor key for the collection
+      # @param [Boolean] reader
+      #   Whether a reader accessor must be created
+      # @yield
+      #   A block declaring the member settings template.
+      #
+      # @return [Dry::Configurable::Config]
+      #
+      # @api public
+      def setting_collection(...)
+        __config_register__(__config_dsl__.setting_collection(...))
       end
 
       # Returns the defined settings for the class.
@@ -104,6 +132,15 @@ module Dry
 
             reader
           end
+      end
+
+      # @api private
+      def __config_register__(setting)
+        settings << setting
+
+        __config_reader__.define(setting.name) if setting.reader?
+
+        self
       end
     end
   end

@@ -11,6 +11,12 @@ module Dry
 
     FrozenConfigError = Class.new(Error)
 
+    # Raised when accessing or removing a member that was never added to a
+    # setting collection
+    #
+    # @api public
+    UnknownMemberError = Class.new(Error)
+
     AlreadyIncludedError = Class.new(Error)
     deprecate_constant(
       :AlreadyIncludedError,

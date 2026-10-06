@@ -61,6 +61,11 @@ module Dry
         options[:reader].equal?(true)
       end
 
+      # @api private
+      def collection?
+        options[:collection].equal?(true)
+      end
+
       # @api public
       def mutable?
         mutable
@@ -69,7 +74,9 @@ module Dry
 
       # @api private
       def to_value
-        if children.any?
+        if collection?
+          SettingCollection.new(children, config_class: options[:config_class] || Config)
+        elsif children.any?
           (options[:config_class] || Config).new(children)
         else
           value = default

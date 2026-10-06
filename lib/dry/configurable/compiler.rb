@@ -33,6 +33,13 @@ module Dry
 
         Setting.new(name, **opts, children: Settings.new(call(children)))
       end
+
+      # @api private
+      def visit_collection(node)
+        name, opts, children = node
+
+        Setting.new(name, **opts, children: Settings.new(call(children)), collection: true)
+      end
     end
   end
 end
