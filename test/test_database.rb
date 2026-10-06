@@ -193,6 +193,119 @@ module SQLite3
       assert_equal [0], @db.execute_batch(batch)
     end
 
+    def test_each_batch_result_yields_rows_or_changes_per_statement
+      results = []
+      @db.each_batch_result(<<-EOSQL) { |result| results << result }
+        CREATE TABLE items (id integer PRIMARY KEY, name string);
+        INSERT INTO items (name) VALUES ('foo'), ('bar');
+        SELECT name FROM items ORDER BY id;
+      EOSQL
+
+      assert_equal 3, results.length
+      assert_equal 0, results[0]
+      assert_equal 2, results[1]
+      assert_equal [["foo"], ["bar"]], results[2]
+    end
+
+    def test_each_batch_result_treats_trigger_body_as_one_statement
+      results = []
+      @db.each_batch_result(<<-EOSQL) { |result| results << result }
+        CREATE TABLE t (x);
+        CREATE TABLE log (y);
+        CREATE TRIGGER trg AFTER INSERT ON t BEGIN
+          INSERT INTO log VALUES (NEW.x);
+          INSERT INTO log VALUES (NEW.x + 100);
+        END;
+        INSERT INTO t VALUES (1);
+        SELECT y FROM log ORDER BY y;
+      EOSQL
+
+      assert_equal 5, results.length
+      assert_equal [[1], [101]], results.last
+    end
+
+    def test_each_batch_result_ignores_semicolons_in_strings_and_comments
+      results = []
+      @db.each_batch_result(<<-EOSQL) { |result| results << result }
+        -- a comment; with a semicolon
+        CREATE TABLE t (x); /* another; comment */
+        INSERT INTO t VALUES ('a;b');
+        SELECT x FROM t;
+        -- trailing comment only
+      EOSQL
+
+      assert_equal 3, results.length
+      assert_equal [["a;b"]], results.last
+    end
+
+    def test_each_batch_result_binds_params_per_statement
+      @db.execute("CREATE TABLE t (a)")
+      results = []
+      @db.each_batch_result(
+        "INSERT INTO t VALUES (?); INSERT INTO t VALUES (:x); SELECT a FROM t ORDER BY a",
+        [[1], {"x" => 2}]
+      ) { |result| results << result }
+
+      assert_equal [1, 1, [[1], [2]]], results
+    end
+
+    def test_each_batch_result_raises_on_missing_params_before_executing_statement
+      @db.execute("CREATE TABLE t (a)")
+      results = []
+      error = assert_raises(ArgumentError) do
+        @db.each_batch_result(
+          "INSERT INTO t VALUES (1); INSERT INTO t VALUES (?); INSERT INTO t VALUES (3)",
+          [[], []]
+        ) { |result| results << result }
+      end
+
+      assert_match(/statement 2/, error.message)
+      assert_equal [1], results
+      assert_equal [[1]], @db.execute("SELECT a FROM t")
+    end
+
+    def test_each_batch_result_raises_on_missing_named_param
+      error = assert_raises(ArgumentError) do
+        @db.each_batch_result("SELECT :x + :y", [[{"x" => 1}]]) { }
+      end
+
+      assert_match(/:y/, error.message)
+    end
+
+    def test_each_batch_result_break_stops_iteration_and_closes_statement
+      @db.execute("CREATE TABLE t (a)")
+      results = []
+      @db.each_batch_result(
+        "INSERT INTO t VALUES (1); INSERT INTO t VALUES (2); SELECT a FROM t"
+      ) do |result|
+        results << result
+        break
+      end
+
+      assert_equal [1], results
+      assert_equal [[1]], @db.execute("SELECT a FROM t")
+    end
+
+    def test_each_batch_result_failure_leaves_prior_statements_executed
+      @db.execute("CREATE TABLE t (a UNIQUE)")
+      @db.execute("INSERT INTO t VALUES (1)")
+
+      assert_raises(SQLite3::ConstraintException) do
+        @db.each_batch_result(
+          "INSERT INTO t VALUES (2); INSERT INTO t VALUES (1); INSERT INTO t VALUES (3)"
+        ) { }
+      end
+
+      assert_equal [[1], [2]], @db.execute("SELECT a FROM t ORDER BY a")
+    end
+
+    def test_each_batch_result_returns_enumerator_without_block
+      enum = @db.each_batch_result("SELECT 1; SELECT 2")
+
+      assert_kind_of Enumerator, enum
+      assert_equal [[[1]], [[2]]], enum.to_a
+    end
+
     def test_execute_batch2
       @db.results_as_hash = true
       return_value = @db.execute_batch2 <<-EOSQL

@@ -336,6 +336,74 @@ module SQLite3
       end
     end
 
+    # Executes each SQL statement in the given string in turn, yielding the
+    # outcome of every statement to the block, one at a time. Unlike
+    # #execute_batch (which only returns the result of the last statement),
+    # this makes it possible to consume the result of each statement in a
+    # script individually.
+    #
+    # Statement boundaries are determined by SQLite itself (via the tail
+    # pointer of the parser), not by splitting on semicolons, so semicolons
+    # inside string literals, comments, and trigger definitions are handled
+    # correctly.
+    #
+    # For statements that return rows (e.g. SELECT), the block receives an
+    # Array of rows. For all other statements, the block receives the number
+    # of rows affected by that statement (see #changes).
+    #
+    # Bind parameters are scoped per statement: +binds+ is an Array with one
+    # entry per statement, where each entry is an Array of positional values
+    # and/or a Hash of named parameters (see Statement#bind_params). If a
+    # statement does not receive enough parameters, an ArgumentError is
+    # raised before that statement is executed; statements before it have
+    # already been executed, statements after it have not.
+    #
+    # Each statement is prepared lazily, right before it runs, and its handle
+    # is closed as soon as its result has been consumed. If the block exits
+    # early (via +break+ or an exception), the current statement is closed
+    # and no further statements are prepared or executed.
+    #
+    # This method never opens, commits, or rolls back a transaction:
+    # statements run in whatever transaction context the caller has
+    # established. If a statement fails partway through the script, the
+    # effects of previously executed statements are left as-is; wrap the call
+    # in an explicit #transaction if you need all-or-nothing semantics.
+    #
+    # Returns an Enumerator when no block is given.
+    def each_batch_result(sql, binds = [])
+      return enum_for(:each_batch_result, sql, binds) unless block_given?
+
+      sql = sql.strip
+      index = 0
+      until sql.empty?
+        prepare(sql) do |stmt|
+          unless stmt.closed?
+            stmt_binds = binds[index]
+            stmt_binds = [] if stmt_binds.nil?
+            stmt_binds = [stmt_binds] unless stmt_binds.is_a?(Array)
+            validate_batch_bind_params(stmt, stmt_binds, index)
+            stmt.bind_params(stmt_binds)
+
+            if stmt.column_count > 0
+              rows = []
+              while (row = stmt.step)
+                rows << row
+              end
+              yield rows
+            else
+              stmt.step
+              yield changes
+            end
+
+            index += 1
+          end
+          sql = stmt.remainder.strip
+        end
+      end
+
+      nil
+    end
+
     # This is a convenience method for creating a statement, binding
     # parameters to it, and calling execute:
     #
@@ -793,6 +861,30 @@ module SQLite3
       else
         ResultSet.new(self, stmt)
       end
+    end
+
+    # Verifies that the given bind values fully cover the statement's
+    # parameters, raising ArgumentError before the statement is executed
+    # if anything is missing.
+    # :nodoc:
+    def validate_batch_bind_params stmt, stmt_binds, index
+      needed = stmt.bind_parameter_count
+      return if needed.zero?
+
+      positional = stmt_binds.count { |var| !var.is_a?(Hash) }
+      named_given = stmt_binds.select { |var| var.is_a?(Hash) }
+        .flat_map(&:keys)
+        .map { |key| key.to_s.sub(/\A:/, "") }
+      missing_named = stmt.named_params - named_given
+      covered = positional + (stmt.named_params & named_given).size
+      missing = needed - covered
+      return if missing <= 0
+
+      message = "missing #{missing} bind parameter(s) for statement #{index + 1} of batch"
+      unless missing_named.empty?
+        message += " (named: #{missing_named.map { |name| ":#{name}" }.join(", ")})"
+      end
+      raise ArgumentError, message
     end
   end
 end
