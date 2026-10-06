@@ -1,0 +1,54 @@
+========================================================================
+Order 1: keyword | identifier
+========================================================================
+Searched 40 input(s) (alphabet ["i", "f", "x"], max length 3).
+Found 4 shadowing witness(es):
+
+input "if":
+  branch 1 (keyword:KEYWORD) consumed 2 character(s)  <- wins (ordered choice)
+  branch 2 (identifier:IDENTIFIER) consumed 2 character(s)  <- shadowed (would consume the same amount)
+
+input "ifi":
+  branch 1 (keyword:KEYWORD) consumed 2 character(s)  <- wins (ordered choice)
+  branch 2 (identifier:IDENTIFIER) consumed 3 character(s)  <- shadowed (would consume MORE input)
+
+input "iff":
+  branch 1 (keyword:KEYWORD) consumed 2 character(s)  <- wins (ordered choice)
+  branch 2 (identifier:IDENTIFIER) consumed 3 character(s)  <- shadowed (would consume MORE input)
+
+input "ifx":
+  branch 1 (keyword:KEYWORD) consumed 2 character(s)  <- wins (ordered choice)
+  branch 2 (identifier:IDENTIFIER) consumed 3 character(s)  <- shadowed (would consume MORE input)
+
+All witnesses reproduce against the real atoms.
+
+Real parser on "ifx;" (keyword first):
+  Parslet::ParseFailed: Failed to match sequence (TOKEN ';') at line 1 char 3.
+Real parser on 'if;' (keyword first): {keyword: "if"@0}
+
+========================================================================
+Order 2: identifier | keyword (swapped)
+========================================================================
+Searched 40 input(s) (alphabet ["i", "f", "x"], max length 3).
+Found 4 shadowing witness(es):
+
+input "if":
+  branch 1 (identifier:IDENTIFIER) consumed 2 character(s)  <- wins (ordered choice)
+  branch 2 (keyword:KEYWORD) consumed 2 character(s)  <- shadowed (would consume the same amount)
+
+input "ifi":
+  branch 1 (identifier:IDENTIFIER) consumed 3 character(s)  <- wins (ordered choice)
+  branch 2 (keyword:KEYWORD) consumed 2 character(s)  <- shadowed (would consume less input)
+
+input "iff":
+  branch 1 (identifier:IDENTIFIER) consumed 3 character(s)  <- wins (ordered choice)
+  branch 2 (keyword:KEYWORD) consumed 2 character(s)  <- shadowed (would consume less input)
+
+input "ifx":
+  branch 1 (identifier:IDENTIFIER) consumed 3 character(s)  <- wins (ordered choice)
+  branch 2 (keyword:KEYWORD) consumed 2 character(s)  <- shadowed (would consume less input)
+
+All witnesses reproduce against the real atoms.
+
+Real parser on 'ifx;' (identifier first): {identifier: "ifx"@0}
+Real parser on 'if;' (identifier first): {identifier: "if"@0} (keyword branch never reached)
