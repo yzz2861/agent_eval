@@ -59,12 +59,15 @@ struct msgpack_unpacker_t {
     VALUE reading_raw;
     size_t reading_raw_remaining;
 
+    VALUE streaming_reader;
+
     VALUE buffer_ref;
 
     msgpack_unpacker_ext_registry_t *ext_registry;
 
     int reading_raw_type;
     unsigned int head_byte;
+    bool streaming_draining;
 
     /* options */
     int symbol_ext_type;
@@ -125,6 +128,7 @@ static inline void msgpack_unpacker_stack_rewind(msgpack_unpacker_t* uk)
 #define PRIMITIVE_UNEXPECTED_TYPE -4
 #define PRIMITIVE_UNEXPECTED_EXT_TYPE -5
 #define PRIMITIVE_RECURSIVE_RAISED -6
+#define PRIMITIVE_CONTINUE -7
 
 int msgpack_unpacker_read(msgpack_unpacker_t* uk, size_t target_stack_depth);
 
@@ -142,4 +146,3 @@ int msgpack_unpacker_read_array_header(msgpack_unpacker_t* uk, uint32_t* result_
 int msgpack_unpacker_read_map_header(msgpack_unpacker_t* uk, uint32_t* result_size);
 
 #endif
-

@@ -254,6 +254,129 @@ describe MessagePack::Factory do
       my.b.should == -1
     end
 
+    describe 'streaming unpacker' do
+      it 'streams bounded extension payloads without reading following objects' do
+        read_sizes = []
+        readers = []
+        unpacker = ->(io) do
+          readers << io
+          chunks = []
+          until io.eof?
+            chunk = io.readpartial(2)
+            read_sizes << chunk.bytesize
+            chunks << chunk
+          end
+          chunks.join
+        end
+
+        subject.register_type(1, String, packer: ->(value) { value }, streaming_unpacker: unpacker)
+        data =
+          MessagePack::ExtensionValue.new(1, 'abc').to_msgpack +
+          MessagePack::ExtensionValue.new(1, 'XYZW').to_msgpack +
+          43.chr
+
+        factory_unpacker = subject.unpacker
+        objects = []
+        data.each_byte do |byte|
+          factory_unpacker.feed(byte.chr)
+          begin
+            objects << factory_unpacker.read
+          rescue EOFError
+          end
+        end
+
+        expect(objects).to eq(['abc', 'XYZW', 43])
+        expect(read_sizes).to eq([1, 1, 1, 1, 1, 1, 1])
+        expect(readers).to all(be_closed)
+        expect(factory_unpacker.buffer.size).to eq(0)
+      end
+
+      it 'keeps missing data recoverable and drains after early return' do
+        subject.register_type(1, String,
+          packer: ->(value) { value },
+          streaming_unpacker: ->(io) { io.readpartial(3); :early }
+        )
+        data = MessagePack::ExtensionValue.new(1, 'abcdefghij').to_msgpack + 43.chr
+        unpacker = subject.unpacker
+
+        unpacker.feed(data[0, 6])
+        expect(unpacker.read).to eq(:early)
+
+        unpacker.feed(data[6, 6])
+        expect { unpacker.read }.to raise_error(EOFError)
+
+        unpacker.feed(data[12])
+        expect { unpacker.read }.to raise_error(EOFError)
+        unpacker.feed(data[13])
+        expect(unpacker.read).to eq(43)
+        expect(unpacker.buffer.size).to eq(0)
+      end
+
+      it 'defers decoder errors until the declared payload is drained' do
+        subject.register_type(1, String,
+          packer: ->(value) { value },
+          streaming_unpacker: ->(io) { raise 'boom' if io.read == 'abcdefghij' }
+        )
+        subject.register_type(2, String,
+          packer: ->(value) { value },
+          streaming_unpacker: ->(io) { io.read }
+        )
+        data =
+          MessagePack::ExtensionValue.new(1, 'abcdefghij').to_msgpack +
+          MessagePack::ExtensionValue.new(2, 'XYZW').to_msgpack +
+          43.chr
+        unpacker = subject.unpacker
+        objects = []
+        errors = []
+
+        data.each_byte do |byte|
+          unpacker.feed(byte.chr)
+          begin
+            objects << unpacker.read
+          rescue EOFError
+          rescue RuntimeError => error
+            errors << error.message
+          end
+        end
+
+        expect(errors).to eq(['boom'])
+        expect(objects).to eq(['XYZW', 43])
+        expect(unpacker.buffer.size).to eq(0)
+      end
+
+      it 'streams compressed payloads and keeps the string unpacker available' do
+        require 'zlib'
+
+        subject.register_type(7, String,
+          packer: ->(value) { Zlib.gzip(value) },
+          streaming_unpacker: ->(io) { Zlib::GzipReader.new(io).read }
+        )
+        subject.register_type(8, MyType,
+          packer: :to_msgpack_ext,
+          unpacker: :from_msgpack_ext
+        )
+
+        value = 'compressed' * 250
+        data = subject.dump(value) + subject.dump(MyType.new(1, 2))
+        unpacker = subject.unpacker
+        objects = []
+
+        data.each_byte do |byte|
+          unpacker.feed(byte.chr)
+          begin
+            objects << unpacker.read
+          rescue EOFError
+          end
+        end
+
+        expect(objects[0]).to eq(value)
+        expect(objects[1]).to be_a(MyType)
+        expect(objects[1].a).to eq(1)
+        expect(objects[1].b).to eq(2)
+      end
+
+    end
+
     it 'does not affect existent packer and unpackers' do
       subject.register_type(0x7f, ::MyType)
       packer = subject.packer

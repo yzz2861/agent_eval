@@ -220,6 +220,30 @@ factory.register_type(
 factory.load(factory.dump(Point.new(12, 34))) # => #<struct Point x=12, y=34>
 ```
 
+For extension payloads that are expensive or impossible to accumulate as one
+string (for example compressed data), pass a `streaming_unpacker`. It receives
+an IO-like reader that is bounded to exactly the current extension payload:
+
+```ruby
+require 'zlib'
+
+factory.register_type(
+  0x04,
+  Document,
+  packer: ->(document) { Zlib.gzip(document.body) },
+  streaming_unpacker: ->(reader) {
+    Zlib::GzipReader.new(reader).read
+  }
+)
+```
+
+`reader.read` and `reader.readpartial(length)` return only bytes from that
+extension. If an `Unpacker` has not received the whole payload yet, the read
+suspends the decoder and `Unpacker#read` raises `EOFError`; feeding more bytes
+and calling `read` again resumes it. When the decoder returns or raises, the
+unpacker skips any unread bytes in the declared payload before exposing the
+return value or error, so following MessagePack objects remain aligned.
+
 ## Pooling
 
 Creating `Packer` and `Unpacker` objects is expensive. For best performance it is preferable to re-use these objects.

@@ -75,6 +75,7 @@ module MessagePack
     #
     # * *:packer* specify symbol or proc object for packer
     # * *:unpacker* specify symbol or proc object for unpacker
+    # * *:streaming_unpacker* specify a callable object which receives an IO-like reader bounded to the current extension payload
     # * *:optimized_symbols_parsing* specify true to use the optimized symbols parsing (not supported on JRuby now)
     # * *recursive* specify true to receive the packer or unpacker as argument to generate the extension body manually.
     #

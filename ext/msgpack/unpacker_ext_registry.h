@@ -22,6 +22,7 @@
 #include "ruby.h"
 
 #define MSGPACK_EXT_RECURSIVE 0b0001
+#define MSGPACK_EXT_STREAMING 0b0010
 
 struct msgpack_unpacker_ext_registry_t;
 typedef struct msgpack_unpacker_ext_registry_t msgpack_unpacker_ext_registry_t;
@@ -46,15 +47,26 @@ void msgpack_unpacker_ext_registry_mark(msgpack_unpacker_ext_registry_t* ukrg);
 void msgpack_unpacker_ext_registry_put(VALUE owner, msgpack_unpacker_ext_registry_t** ukrg,
         VALUE ext_module, int ext_type, int flags, VALUE proc);
 
-static inline VALUE msgpack_unpacker_ext_registry_lookup(msgpack_unpacker_ext_registry_t* ukrg,
+static inline VALUE msgpack_unpacker_ext_registry_lookup_entry(msgpack_unpacker_ext_registry_t* ukrg,
         int ext_type, int* ext_flags_result)
 {
     if (ukrg) {
         VALUE entry = ukrg->array[ext_type + 128];
         if (entry != Qnil) {
             *ext_flags_result = FIX2INT(rb_ary_entry(entry, 2));
-            return rb_ary_entry(entry, 1);
+            return entry;
         }
+    }
+    *ext_flags_result = 0;
+    return Qnil;
+}
+
+static inline VALUE msgpack_unpacker_ext_registry_lookup(msgpack_unpacker_ext_registry_t* ukrg,
+        int ext_type, int* ext_flags_result)
+{
+    VALUE entry = msgpack_unpacker_ext_registry_lookup_entry(ukrg, ext_type, ext_flags_result);
+    if (entry != Qnil) {
+        return rb_ary_entry(entry, 1);
     }
     return Qnil;
 }

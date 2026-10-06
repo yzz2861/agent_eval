@@ -29,7 +29,7 @@ RUBY_FUNC_EXPORTED void Init_msgpack(void)
     MessagePack_Buffer_module_init(mMessagePack);
     MessagePack_Packer_module_init(mMessagePack);
     MessagePack_Unpacker_module_init(mMessagePack);
+    MessagePack_ExtensionPayloadReader_module_init(mMessagePack);
     MessagePack_Factory_module_init(mMessagePack);
     MessagePack_ExtensionValue_module_init(mMessagePack);
 }
-

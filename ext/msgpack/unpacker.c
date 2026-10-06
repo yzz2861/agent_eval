@@ -17,6 +17,7 @@
  */
 
 #include "unpacker.h"
+#include "unpacker_class.h"
 #include "rmem.h"
 #include "extension_value_class.h"
 #include <assert.h>
@@ -125,10 +126,14 @@ void _msgpack_unpacker_init(msgpack_unpacker_t* uk)
 
     uk->last_object = Qnil;
     uk->reading_raw = Qnil;
+    uk->streaming_reader = Qnil;
+    uk->reading_raw_remaining = 0;
+    uk->streaming_draining = false;
 }
 
 void _msgpack_unpacker_destroy(msgpack_unpacker_t* uk)
 {
+    MessagePack_ExtensionPayloadReader_reset(uk->streaming_reader);
     _msgpack_unpacker_free_stack(&uk->stack);
     msgpack_buffer_destroy(UNPACKER_BUFFER_(uk));
 }
@@ -155,6 +160,7 @@ void msgpack_unpacker_mark(msgpack_unpacker_t* uk)
 {
     rb_gc_mark(uk->last_object);
     rb_gc_mark(uk->reading_raw);
+    MessagePack_ExtensionPayloadReader_mark_reader(uk->streaming_reader);
     msgpack_unpacker_mark_stack(&uk->stack);
     msgpack_unpacker_mark_key_cache(&uk->key_cache);
     /* See MessagePack_Buffer_wrap */
@@ -174,6 +180,9 @@ void _msgpack_unpacker_reset(msgpack_unpacker_t* uk)
     uk->last_object = Qnil;
     uk->reading_raw = Qnil;
     uk->reading_raw_remaining = 0;
+    MessagePack_ExtensionPayloadReader_reset(uk->streaming_reader);
+    uk->streaming_reader = Qnil;
+    uk->streaming_draining = false;
 }
 
 
@@ -219,6 +228,111 @@ static inline int object_complete_frozen(msgpack_unpacker_t* uk, VALUE object)
     return PRIMITIVE_OBJECT_COMPLETE;
 }
 
+struct streaming_resume_args {
+    VALUE reader;
+};
+
+static VALUE streaming_resume_call(VALUE argument)
+{
+    struct streaming_resume_args *args = (struct streaming_resume_args *)argument;
+    return rb_funcall(args->reader, rb_intern("__resume__"), 0);
+}
+
+static void streaming_clear(msgpack_unpacker_t* uk, bool reset_reader, bool reset_reader_head)
+{
+    if (reset_reader) {
+        MessagePack_ExtensionPayloadReader_reset(uk->streaming_reader);
+    }
+    uk->streaming_reader = Qnil;
+    uk->streaming_draining = false;
+    uk->reading_raw_remaining = 0;
+    if (reset_reader_head) {
+        reset_head_byte(uk);
+    }
+}
+
+static size_t streaming_skip_buffered(msgpack_unpacker_t* uk)
+{
+    size_t remaining = uk->reading_raw_remaining;
+    if (remaining > 0) {
+        msgpack_buffer_t *buffer = UNPACKER_BUFFER_(uk);
+        size_t available = msgpack_buffer_all_readable_size(buffer);
+        if (available > 0) {
+            size_t skipped = msgpack_buffer_skip_nonblock(buffer, available < remaining ? available : remaining);
+            uk->reading_raw_remaining -= skipped;
+        }
+    }
+    return uk->reading_raw_remaining;
+}
+
+static int streaming_resume(msgpack_unpacker_t* uk)
+{
+    VALUE reader = uk->streaming_reader;
+    struct streaming_resume_args args = { .reader = reader };
+    int raised;
+    VALUE object = rb_protect(streaming_resume_call, (VALUE)&args, &raised);
+
+    if (raised) {
+        VALUE error = rb_errinfo();
+        uk->last_object = error;
+        uk->reading_raw_remaining = MessagePack_ExtensionPayloadReader_remaining(reader);
+        MessagePack_ExtensionPayloadReader_mark_closed(reader);
+        streaming_skip_buffered(uk);
+        if (uk->reading_raw_remaining > 0) {
+            uk->streaming_draining = true;
+        } else {
+            streaming_clear(uk, true, true);
+        }
+        return PRIMITIVE_RECURSIVE_RAISED;
+    }
+
+    if (MessagePack_ExtensionPayloadReader_pending(reader)) {
+        return PRIMITIVE_EOF;
+    }
+
+    int ret = object_complete(uk, object);
+    uk->reading_raw_remaining = MessagePack_ExtensionPayloadReader_remaining(reader);
+    MessagePack_ExtensionPayloadReader_mark_closed(reader);
+    streaming_skip_buffered(uk);
+    if (uk->reading_raw_remaining > 0) {
+        uk->streaming_draining = true;
+        return ret;
+    }
+    streaming_clear(uk, true, true);
+    return ret;
+}
+
+static int streaming_drain(msgpack_unpacker_t* uk)
+{
+    if (streaming_skip_buffered(uk) > 0) {
+        return PRIMITIVE_EOF;
+    }
+
+    size_t remaining = uk->reading_raw_remaining;
+    msgpack_buffer_t *buffer = UNPACKER_BUFFER_(uk);
+    if (remaining > 0 && msgpack_buffer_has_io(buffer)) {
+        if (msgpack_buffer_ensure_readable(buffer, remaining)) {
+            msgpack_buffer_skip_nonblock(buffer, remaining);
+            uk->reading_raw_remaining = 0;
+        }
+    }
+
+    if (uk->reading_raw_remaining > 0) {
+        return PRIMITIVE_EOF;
+    }
+
+    streaming_clear(uk, true, true);
+    return PRIMITIVE_CONTINUE;
+}
+
+static int read_streaming_ext(msgpack_unpacker_t* uk, int ext_type, VALUE decoder, size_t length)
+{
+    uk->reading_raw_remaining = length;
+    uk->streaming_reader = MessagePack_ExtensionPayloadReader_new(uk, decoder, length);
+    uk->streaming_draining = false;
+    return streaming_resume(uk);
+}
+
 static inline int object_complete_ext(msgpack_unpacker_t* uk, int ext_type, VALUE str)
 {
     if (uk->optimized_symbol_ext_type && ext_type == uk->symbol_ext_type) {
@@ -229,7 +343,12 @@ static inline int object_complete_ext(msgpack_unpacker_t* uk, int ext_type, VALU
     }
 
     int ext_flags;
-    VALUE proc = msgpack_unpacker_ext_registry_lookup(uk->ext_registry, ext_type, &ext_flags);
+    VALUE entry = msgpack_unpacker_ext_registry_lookup_entry(uk->ext_registry, ext_type, &ext_flags);
+    VALUE proc = entry == Qnil ? Qnil : rb_ary_entry(entry, 1);
+
+    if(proc != Qnil && (ext_flags & MSGPACK_EXT_STREAMING)) {
+        return read_streaming_ext(uk, ext_type, proc, str == Qnil ? 0 : RSTRING_LEN(str));
+    }
 
     if(proc != Qnil) {
         VALUE obj;
@@ -372,7 +491,11 @@ static inline int read_raw_body_begin(msgpack_unpacker_t* uk, int raw_type)
     VALUE proc;
 
     if(!(raw_type == RAW_TYPE_STRING || raw_type == RAW_TYPE_BINARY)) {
-        proc = msgpack_unpacker_ext_registry_lookup(uk->ext_registry, raw_type, &ext_flags);
+        VALUE entry = msgpack_unpacker_ext_registry_lookup_entry(uk->ext_registry, raw_type, &ext_flags);
+        proc = entry == Qnil ? Qnil : rb_ary_entry(entry, 1);
+        if(proc != Qnil && (ext_flags & MSGPACK_EXT_STREAMING)) {
+            return read_streaming_ext(uk, raw_type, proc, uk->reading_raw_remaining);
+        }
         if(proc != Qnil && ext_flags & MSGPACK_EXT_RECURSIVE) {
             VALUE obj;
             uk->last_object = Qnil;
@@ -454,6 +577,13 @@ static inline int read_raw_body_begin(msgpack_unpacker_t* uk, int raw_type)
 
 static int read_primitive(msgpack_unpacker_t* uk)
 {
+    if (!NIL_P(uk->streaming_reader)) {
+        if (uk->streaming_draining) {
+            return streaming_drain(uk);
+        }
+        return streaming_resume(uk);
+    }
+
     if(uk->reading_raw_remaining > 0) {
         return read_raw_body_cont(uk);
     }
@@ -817,6 +947,9 @@ int msgpack_unpacker_read(msgpack_unpacker_t* uk, size_t target_stack_depth)
     while(true) {
         int r = read_primitive(uk);
         if(r < 0) {
+            if (r == PRIMITIVE_CONTINUE) {
+                continue;
+            }
             if (r != PRIMITIVE_EOF) {
                 // We keep the stack on EOF as the parsing may be resumed.
                 STACK_FREE(uk);
@@ -878,6 +1011,9 @@ int msgpack_unpacker_skip(msgpack_unpacker_t* uk, size_t target_stack_depth)
     while(true) {
         int r = read_primitive(uk);
         if(r < 0) {
+            if (r == PRIMITIVE_CONTINUE) {
+                continue;
+            }
             STACK_FREE(uk);
             return r;
         }

@@ -32,6 +32,7 @@ static inline msgpack_unpacker_t *MessagePack_Unpacker_get(VALUE object) {
 }
 
 extern VALUE cMessagePack_Unpacker;
+extern VALUE cMessagePack_ExtensionPayloadReader;
 
 void MessagePack_Unpacker_module_init(VALUE mMessagePack);
 
@@ -39,5 +40,18 @@ VALUE MessagePack_Unpacker_alloc(VALUE klass);
 
 VALUE MessagePack_Unpacker_initialize(int argc, VALUE* argv, VALUE self);
 
-#endif
+VALUE MessagePack_ExtensionPayloadReader_new(msgpack_unpacker_t* uk, VALUE decoder, size_t remaining);
 
+void MessagePack_ExtensionPayloadReader_mark_reader(VALUE reader);
+
+void MessagePack_ExtensionPayloadReader_reset(VALUE reader);
+
+size_t MessagePack_ExtensionPayloadReader_remaining(VALUE reader);
+
+bool MessagePack_ExtensionPayloadReader_pending(VALUE reader);
+
+void MessagePack_ExtensionPayloadReader_mark_closed(VALUE reader);
+
+void MessagePack_ExtensionPayloadReader_module_init(VALUE mMessagePack);
+
+#endif

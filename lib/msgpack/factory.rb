@@ -7,6 +7,36 @@ module MessagePack
 
       if options
         options = options.dup
+        streaming_unpacker = options.delete(:streaming_unpacker) || options.delete(:stream_unpacker)
+        streaming = options.delete(:streaming)
+
+        if streaming == true && streaming_unpacker.nil?
+          streaming_unpacker = options[:unpacker]
+          options.delete(:unpacker)
+          if streaming_unpacker.nil?
+            raise ::ArgumentError, ":unpacker is required when :streaming is true"
+          end
+        elsif streaming == false || streaming.nil?
+          # Keep the regular string codec enabled when streaming is not requested.
+        elsif !streaming_unpacker
+          raise ::ArgumentError, ":streaming must be true or false"
+        end
+
+        if streaming == false && streaming_unpacker
+          raise ::ArgumentError, ":streaming_unpacker cannot be used with :streaming => false"
+        end
+
+        if streaming_unpacker || streaming == true
+          if RUBY_ENGINE == "jruby"
+            raise NotImplementedError, "streaming extension unpackers are not supported on JRuby yet"
+          end
+          unless streaming_unpacker.respond_to?(:call)
+            raise ::TypeError, "expected :streaming_unpacker argument to be a callable object, got: #{streaming_unpacker.inspect}"
+          end
+          options[:unpacker] = streaming_unpacker
+          options[:streaming] = true
+        end
+
         case packer = options[:packer]
         when nil, Proc
           # all good
@@ -25,12 +55,16 @@ module MessagePack
         case unpacker = options[:unpacker]
         when nil, Proc
           # all good
-        when String, Symbol
-          options[:unpacker] = klass.method(unpacker).to_proc
         when Method
-          options[:unpacker] = unpacker.to_proc
+          options[:unpacker] = unpacker.to_proc unless options[:streaming]
+        when String, Symbol
+          unless options[:streaming]
+            options[:unpacker] = klass.method(unpacker).to_proc
+          end
         else
-          if unpacker.respond_to?(:call)
+          if options[:streaming] || unpacker.respond_to?(:call)
+            # streaming callables are passed unchanged so they receive the
+            # bounded payload reader instead of a complete payload string.
             options[:unpacker] = unpacker.method(:call).to_proc
           else
             raise ::TypeError, "expected :unpacker argument to be a callable object, got: #{unpacker.inspect}"

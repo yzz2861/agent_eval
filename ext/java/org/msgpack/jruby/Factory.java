@@ -87,6 +87,10 @@ public class Factory extends RubyObject {
 
     Ruby runtime = ctx.runtime;
     RubyHash options = (RubyHash) opts;
+    IRubyObject streamingArg = options.fastARef(runtime.newSymbol("streaming"));
+    if (streamingArg != null && streamingArg.isTrue()) {
+      throw runtime.newNotImplementedError("streaming extension unpackers are not supported on JRuby yet");
+    }
 
     IRubyObject packerProc = options.fastARef(runtime.newSymbol("packer"));
     IRubyObject unpackerProc = options.fastARef(runtime.newSymbol("unpacker"));

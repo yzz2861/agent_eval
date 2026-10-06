@@ -22,6 +22,7 @@
 #include "factory_class.h"
 
 VALUE cMessagePack_Unpacker;
+VALUE cMessagePack_ExtensionPayloadReader;
 
 //static VALUE s_unpacker_value;
 //static msgpack_unpacker_t* s_unpacker;
@@ -37,6 +38,191 @@ static VALUE sym_symbolize_keys;
 static VALUE sym_key_cache;
 static VALUE sym_freeze;
 static VALUE sym_allow_unknown_ext;
+
+typedef struct {
+    msgpack_unpacker_t *unpacker;
+    VALUE decoder;
+    size_t remaining;
+    bool pending;
+    bool closed;
+} extension_payload_reader_t;
+
+static void extension_payload_reader_mark(void *ptr);
+static void extension_payload_reader_free(void *ptr);
+
+static const rb_data_type_t extension_payload_reader_data_type = {
+    .wrap_struct_name = "msgpack:extension_payload_reader",
+    .function = {
+        .dmark = extension_payload_reader_mark,
+        .dfree = extension_payload_reader_free,
+    },
+    .flags = RUBY_TYPED_FREE_IMMEDIATELY | RUBY_TYPED_WB_PROTECTED
+};
+
+static extension_payload_reader_t *extension_payload_reader_get(VALUE self)
+{
+    extension_payload_reader_t *reader;
+    TypedData_Get_Struct(self, extension_payload_reader_t, &extension_payload_reader_data_type, reader);
+    return reader;
+}
+
+static void extension_payload_reader_mark(void *ptr)
+{
+    extension_payload_reader_t *reader = ptr;
+    if (reader) {
+        rb_gc_mark(reader->decoder);
+    }
+}
+
+static void extension_payload_reader_free(void *ptr)
+{
+    extension_payload_reader_t *reader = ptr;
+    xfree(reader);
+}
+
+VALUE MessagePack_ExtensionPayloadReader_new(msgpack_unpacker_t* uk, VALUE decoder, size_t remaining)
+{
+    extension_payload_reader_t *reader;
+    VALUE self = TypedData_Make_Struct(cMessagePack_ExtensionPayloadReader,
+        extension_payload_reader_t, &extension_payload_reader_data_type, reader);
+
+    reader->unpacker = uk;
+    reader->decoder = decoder;
+    reader->remaining = remaining;
+    reader->pending = false;
+    reader->closed = false;
+
+    return self;
+}
+
+void MessagePack_ExtensionPayloadReader_reset(VALUE self)
+{
+    if (NIL_P(self)) {
+        return;
+    }
+    extension_payload_reader_t *reader = extension_payload_reader_get(self);
+    reader->unpacker = NULL;
+    reader->pending = false;
+    reader->closed = true;
+}
+
+size_t MessagePack_ExtensionPayloadReader_remaining(VALUE self)
+{
+    extension_payload_reader_t *reader = extension_payload_reader_get(self);
+    return reader->remaining;
+}
+
+bool MessagePack_ExtensionPayloadReader_pending(VALUE self)
+{
+    extension_payload_reader_t *reader = extension_payload_reader_get(self);
+    return reader->pending;
+}
+
+void MessagePack_ExtensionPayloadReader_mark_closed(VALUE self)
+{
+    extension_payload_reader_t *reader = extension_payload_reader_get(self);
+    reader->closed = true;
+    reader->pending = false;
+}
+
+void MessagePack_ExtensionPayloadReader_mark_reader(VALUE self)
+{
+    if (!NIL_P(self)) {
+        rb_gc_mark(self);
+    }
+}
+
+static VALUE extension_payload_reader_alloc(VALUE klass)
+{
+    extension_payload_reader_t *reader;
+    VALUE self = TypedData_Make_Struct(klass,
+        extension_payload_reader_t, &extension_payload_reader_data_type, reader);
+    reader->unpacker = NULL;
+    reader->decoder = Qnil;
+    reader->remaining = 0;
+    reader->pending = false;
+    reader->closed = false;
+    return self;
+}
+
+static void extension_payload_reader_check_open(extension_payload_reader_t *reader)
+{
+    if (reader->unpacker == NULL || reader->closed) {
+        rb_raise(rb_eIOError, "extension payload reader is closed");
+    }
+}
+
+static VALUE extension_payload_reader_read_available(VALUE self, VALUE requested)
+{
+    extension_payload_reader_t *reader = extension_payload_reader_get(self);
+    extension_payload_reader_check_open(reader);
+
+    long length = NUM2LONG(requested);
+    if (length < 0) {
+        rb_raise(rb_eArgError, "negative string size (or size too big)");
+    }
+
+    reader->pending = false;
+    if (reader->remaining == 0) {
+        return Qnil;
+    }
+
+    size_t read_size = (size_t) length;
+    if (read_size == 0 || read_size > reader->remaining) {
+        read_size = reader->remaining;
+    }
+
+    VALUE chunk = rb_str_buf_new(0);
+    msgpack_buffer_t *buffer = UNPACKER_BUFFER_(reader->unpacker);
+    size_t received;
+    if (msgpack_buffer_top_readable_size(buffer) > 0) {
+        received = msgpack_buffer_read_to_string_nonblock(buffer, chunk, read_size);
+    } else {
+        received = msgpack_buffer_read_to_string(buffer, chunk, read_size);
+    }
+
+    if (received == 0) {
+        reader->pending = true;
+        return rb_const_get_at(cMessagePack_ExtensionPayloadReader, rb_intern("WAIT"));
+    }
+
+    reader->remaining -= received;
+    reader->unpacker->reading_raw_remaining = reader->remaining;
+    return chunk;
+}
+
+static VALUE extension_payload_reader_remaining_p(VALUE self)
+{
+    extension_payload_reader_t *reader = extension_payload_reader_get(self);
+    return SIZET2NUM(reader->remaining);
+}
+
+static VALUE extension_payload_reader_pending_p(VALUE self)
+{
+    extension_payload_reader_t *reader = extension_payload_reader_get(self);
+    return reader->pending ? Qtrue : Qfalse;
+}
+
+static VALUE extension_payload_reader_closed_p(VALUE self)
+{
+    extension_payload_reader_t *reader = extension_payload_reader_get(self);
+    return reader->closed || reader->unpacker == NULL ? Qtrue : Qfalse;
+}
+
+static VALUE extension_payload_reader_close(VALUE self)
+{
+    extension_payload_reader_t *reader = extension_payload_reader_get(self);
+    extension_payload_reader_check_open(reader);
+    reader->closed = true;
+    reader->pending = false;
+    return Qnil;
+}
+
+static VALUE extension_payload_reader_decoder(VALUE self)
+{
+    extension_payload_reader_t *reader = extension_payload_reader_get(self);
+    return reader->decoder;
+}
 
 static void Unpacker_free(void *ptr)
 {
@@ -444,4 +630,17 @@ void MessagePack_Unpacker_module_init(VALUE mMessagePack)
     rb_define_private_method(cMessagePack_Unpacker, "register_type_internal", Unpacker_register_type_internal, 3);
 
     rb_define_method(cMessagePack_Unpacker, "full_unpack", Unpacker_full_unpack, 0);
+}
+
+void MessagePack_ExtensionPayloadReader_module_init(VALUE mMessagePack)
+{
+    cMessagePack_ExtensionPayloadReader = rb_define_class_under(mMessagePack, "ExtensionPayloadReader", rb_cObject);
+    rb_define_alloc_func(cMessagePack_ExtensionPayloadReader, extension_payload_reader_alloc);
+    rb_const_set(cMessagePack_ExtensionPayloadReader, rb_intern("WAIT"), ID2SYM(rb_intern("__msgpack_extension_payload_wait__")));
+    rb_define_private_method(cMessagePack_ExtensionPayloadReader, "__read_available__", extension_payload_reader_read_available, 1);
+    rb_define_private_method(cMessagePack_ExtensionPayloadReader, "__remaining__", extension_payload_reader_remaining_p, 0);
+    rb_define_private_method(cMessagePack_ExtensionPayloadReader, "__pending?__", extension_payload_reader_pending_p, 0);
+    rb_define_private_method(cMessagePack_ExtensionPayloadReader, "__closed?__", extension_payload_reader_closed_p, 0);
+    rb_define_private_method(cMessagePack_ExtensionPayloadReader, "__close__", extension_payload_reader_close, 0);
+    rb_define_private_method(cMessagePack_ExtensionPayloadReader, "__decoder__", extension_payload_reader_decoder, 0);
 }
