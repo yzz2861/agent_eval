@@ -28,6 +28,7 @@ require_relative 'psych/json/tree_builder'
 require_relative 'psych/json/stream'
 require_relative 'psych/handlers/document_stream'
 require_relative 'psych/class_loader'
+require_relative 'psych/provenance'
 
 ###
 # = Overview
