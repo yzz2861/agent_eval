@@ -165,6 +165,12 @@ allocate(VALUE klass)
     sqlite3RubyPtr ctx;
     VALUE object = TypedData_Make_Struct(klass, sqlite3Ruby, &database_type, ctx);
     ctx->owner = getpid();
+    ctx->busy_handler = Qnil;
+    ctx->functions = Qnil;
+    ctx->collations = Qnil;
+    ctx->aggregators = Qnil;
+    ctx->trace_handler = Qnil;
+    ctx->authorizer = Qnil;
     return object;
 }
 
@@ -720,6 +726,18 @@ changes(VALUE self)
     return INT2NUM(sqlite3_changes(ctx->db));
 }
 
+typedef struct {
+    VALUE authorizer;
+    VALUE args[5];
+} rb_sqlite3_auth_args_t;
+
+static VALUE
+rb_sqlite3_auth_call(VALUE data)
+{
+    rb_sqlite3_auth_args_t *auth_args = (rb_sqlite3_auth_args_t *)(void *)data;
+    return rb_funcallv(auth_args->authorizer, rb_intern("call"), 5, auth_args->args);
+}
+
 static int
 rb_sqlite3_auth(
     void *ctx,
@@ -730,18 +748,49 @@ rb_sqlite3_auth(
     const char *_d)
 {
     sqlite3RubyPtr db_ctx = (sqlite3RubyPtr)ctx;
+    int result_value;
+    rb_sqlite3_auth_args_t auth_args;
+    int exception_status = 0;
+    VALUE result;
+
+    if (db_ctx->authorizer_failed) { return SQLITE_DENY; }
+    if (NIL_P(db_ctx->authorizer)) { return SQLITE_OK; }
+
     VALUE action = INT2NUM(_action);
     VALUE a      = _a ? rb_str_new2(_a) : Qnil;
     VALUE b      = _b ? rb_str_new2(_b) : Qnil;
     VALUE c      = _c ? rb_str_new2(_c) : Qnil;
     VALUE d      = _d ? rb_str_new2(_d) : Qnil;
-    VALUE result = rb_funcall(db_ctx->authorizer, rb_intern("call"), 5, action, a, b, c, d);
 
-    if (T_FIXNUM == TYPE(result)) { return (int)NUM2INT(result); }
+    auth_args.authorizer = db_ctx->authorizer;
+    auth_args.args[0] = action;
+    auth_args.args[1] = a;
+    auth_args.args[2] = b;
+    auth_args.args[3] = c;
+    auth_args.args[4] = d;
+
+    result = rb_protect(rb_sqlite3_auth_call, (VALUE)&auth_args, &exception_status);
+
+    if (exception_status) {
+        db_ctx->authorizer_failed = 1;
+        return SQLITE_DENY;
+    }
+
+    if (T_FIXNUM == TYPE(result)) {
+        result_value = (int)NUM2INT(result);
+        if (result_value == SQLITE_OK || result_value == SQLITE_DENY ||
+                result_value == SQLITE_IGNORE) {
+            return result_value;
+        }
+        db_ctx->authorizer_failed = 1;
+        return SQLITE_DENY;
+    }
     if (Qtrue == result) { return SQLITE_OK; }
     if (Qfalse == result) { return SQLITE_DENY; }
+    if (NIL_P(result)) { return SQLITE_IGNORE; }
 
-    return SQLITE_IGNORE;
+    db_ctx->authorizer_failed = 1;
+    return SQLITE_DENY;
 }
 
 /* call-seq: set_authorizer = auth
@@ -749,10 +798,12 @@ rb_sqlite3_auth(
  * Set the authorizer for this database.  +auth+ must respond to +call+, and
  * +call+ must take 5 arguments.
  *
- * Installs (or removes) a block that will be invoked for every access
- * to the database. If the block returns 0 (or +true+), the statement
- * is allowed to proceed. Returning 1 or false causes an authorization error to
- * occur, and returning 2 or nil causes the access to be silently denied.
+ * Installs (or removes) an object responding to call that will be invoked for
+ * every authorized access to the database. Returning SQLITE_OK or true allows
+ * the statement, SQLITE_DENY or false rejects it, and SQLITE_IGNORE or nil
+ * silently denies the access. Any other result or a raised exception denies
+ * subsequent statements until the current scope exits or another authorizer is
+ * installed.
  */
 static VALUE
 set_authorizer(VALUE self, VALUE authorizer)
@@ -770,8 +821,84 @@ set_authorizer(VALUE self, VALUE authorizer)
     CHECK(ctx->db, status);
 
     RB_OBJ_WRITE(self, &ctx->authorizer, authorizer);
+    ctx->authorizer_failed = 0;
+    ctx->authorizer_version++;
 
     return self;
+}
+
+typedef struct {
+    VALUE database;
+    VALUE authorizer;
+    VALUE previous_authorizer;
+    int previous_failed;
+    unsigned long previous_version;
+} rb_sqlite3_authorizer_scope_t;
+
+static VALUE
+authorizer_scope_run(VALUE data)
+{
+    rb_sqlite3_authorizer_scope_t *scope = (rb_sqlite3_authorizer_scope_t *)(void *)data;
+    sqlite3RubyPtr ctx = sqlite3_database_unwrap(scope->database);
+    int status;
+
+    REQUIRE_OPEN_DB(ctx);
+    if (NIL_P(scope->authorizer)) {
+        rb_raise(rb_eArgError, "authorizer must not be nil");
+    }
+
+    scope->previous_authorizer = ctx->authorizer;
+    scope->previous_failed = ctx->authorizer_failed;
+    scope->previous_version = ctx->authorizer_version;
+
+    RB_OBJ_WRITE(scope->database, &ctx->authorizer, scope->authorizer);
+    ctx->authorizer_failed = 0;
+    ctx->authorizer_version++;
+
+    status = sqlite3_set_authorizer(ctx->db, rb_sqlite3_auth, (void *)ctx);
+    CHECK(ctx->db, status);
+
+    return rb_yield(Qnil);
+}
+
+static VALUE
+authorizer_scope_exit(VALUE data)
+{
+    rb_sqlite3_authorizer_scope_t *scope = (rb_sqlite3_authorizer_scope_t *)(void *)data;
+    sqlite3RubyPtr ctx = sqlite3_database_unwrap(scope->database);
+
+    if (ctx->db) {
+        int status;
+        RB_OBJ_WRITE(scope->database, &ctx->authorizer, scope->previous_authorizer);
+        ctx->authorizer_version = scope->previous_version;
+        ctx->authorizer_failed = scope->previous_failed ? 1 : 0;
+        status = sqlite3_set_authorizer(
+                     ctx->db,
+                     NIL_P(scope->previous_authorizer) ? NULL : rb_sqlite3_auth,
+                     (void *)ctx
+                 );
+        CHECK(ctx->db, status);
+    }
+
+    return Qnil;
+}
+
+static VALUE
+with_authorizer(VALUE self, VALUE authorizer)
+{
+    rb_sqlite3_authorizer_scope_t scope;
+
+    if (!rb_block_given_p()) {
+        rb_raise(rb_eArgError, "a block is required");
+    }
+
+    scope.database = self;
+    scope.authorizer = authorizer;
+    scope.previous_authorizer = Qnil;
+    scope.previous_failed = 0;
+    scope.previous_version = 0;
+
+    return rb_ensure(authorizer_scope_run, (VALUE)&scope, authorizer_scope_exit, (VALUE)&scope);
 }
 
 /* call-seq: db.busy_timeout = ms
@@ -1087,6 +1214,7 @@ init_sqlite3_database(void)
     rb_define_method(cSqlite3Database, "complete?", complete_p, 1);
     rb_define_method(cSqlite3Database, "changes", changes, 0);
     rb_define_method(cSqlite3Database, "authorizer=", set_authorizer, 1);
+    rb_define_private_method(cSqlite3Database, "with_authorizer_native", with_authorizer, 1);
     rb_define_method(cSqlite3Database, "busy_handler", busy_handler, -1);
     rb_define_method(cSqlite3Database, "busy_timeout=", set_busy_timeout, 1);
 #ifndef SQLITE_OMIT_PROGRESS_CALLBACK

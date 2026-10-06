@@ -15,6 +15,8 @@ struct _sqlite3Ruby {
     VALUE aggregators;
     VALUE trace_handler;
     VALUE authorizer;
+    unsigned long authorizer_version;
+    int authorizer_failed;
     int stmt_timeout;
     struct timespec stmt_deadline;
     rb_pid_t owner;

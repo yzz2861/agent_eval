@@ -33,6 +33,8 @@ module SQLite3
       @connection = db
       @columns = nil
       @types = nil
+      @bind_params = []
+      @sql = sql
       @remainder = prepare db, sql
     end
 
@@ -79,6 +81,14 @@ module SQLite3
       end
     end
 
+    def bind_param(key, value)
+      stored_value = bindable_value(value)
+      parameter_index = bind_param_native(key, stored_value)
+      @bind_params.reject! { |index, _value| index == parameter_index }
+      @bind_params << [parameter_index, stored_value]
+      self
+    end
+
     # Execute the statement. This creates a new ResultSet object for the
     # statement's virtual machine. If a block was given, the new ResultSet will
     # be yielded to it; otherwise, the ResultSet will be returned.
@@ -94,6 +104,7 @@ module SQLite3
     #
     # See also #bind_params, #execute!.
     def execute(*bind_vars)
+      reauthorize_if_stale!
       reset! if active? || done?
 
       bind_params(*bind_vars) unless bind_vars.empty?
@@ -163,6 +174,12 @@ module SQLite3
       end
     end
 
+    def clear_bindings!
+      clear_bindings_native!
+      @bind_params.clear
+      self
+    end
+
     # Returns a Hash containing information about the statement.
     # The contents of the hash are implementation specific and may change in
     # the future without notice. The hash includes information about internal
@@ -191,6 +208,18 @@ module SQLite3
     end
 
     private
+
+    def bindable_value(value)
+      value.is_a?(String) ? value.dup : value
+    end
+
+    def reauthorize_if_stale!
+      return unless reauthorize_native(@sql)
+
+      @columns = nil
+      @types = nil
+      @bind_params.each { |key, value| bind_param_native(key, value) }
+    end
 
     # A convenience method for obtaining the metadata about the query. Note
     # that this will actually execute the SQL, which means it can be a

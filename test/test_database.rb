@@ -12,6 +12,9 @@ module SQLite3
   class TestDatabase < SQLite3::TestCase
     attr_reader :db
 
+    SQLITE_INSERT = 18
+    SQLITE_READ = 20
+
     def setup
       @db = SQLite3::Database.new(":memory:")
       super
@@ -736,6 +739,196 @@ module SQLite3
       s = @db.prepare("select 'fooooo'")
     ensure
       s&.close
+    end
+
+    def test_with_authorizer_reauthorizes_prepared_statement
+      @db.execute "create table secrets (id integer, value text)"
+      @db.execute "insert into secrets values (1, 'hidden')"
+      statement = @db.prepare("select id, value from secrets where id = ?")
+
+      assert_equal [[1, "hidden"]], statement.execute!(1)
+
+      authorizer = proc do |action, table, column, _database, _trigger|
+        action == SQLITE_READ && table == "secrets" ? 1 : 0
+      end
+
+      @db.with_authorizer(authorizer) do
+        error = assert_raises(SQLite3::AuthorizationException) do
+          statement.execute!(1)
+        end
+        assert_match "secrets.id", error.message
+      end
+
+      assert_equal [[1, "hidden"]], statement.execute!(1)
+    ensure
+      statement&.close
+    end
+
+    def test_with_authorizer_rebinds_after_reauthorization
+      @db.execute "create table secrets (id integer, value text)"
+      @db.execute "insert into secrets values (1, 'hidden'), (2, 'visible')"
+      statement = @db.prepare("select value from secrets where id = ?")
+      statement.bind_param(1, 1)
+      statement.bind_param(1, 2)
+
+      @db.with_authorizer(proc { 0 }) do
+        assert_equal [["visible"]], statement.execute.to_a
+      end
+    ensure
+      statement&.close
+    end
+
+    def test_with_authorizer_reauthorizes_views
+      @db.execute "create table secrets (id integer, value text)"
+      @db.execute "create view secret_view as select * from secrets"
+      @db.execute "insert into secrets values (1, 'hidden')"
+      statement = @db.prepare("select * from secret_view")
+
+      assert_equal [[1, "hidden"]], statement.execute!
+
+      @db.with_authorizer(proc { |action, table| action == SQLITE_READ && table == "secrets" ? 1 : 0 }) do
+        assert_raises(SQLite3::AuthorizationException) do
+          statement.execute!
+        end
+      end
+    ensure
+      statement&.close
+    end
+
+    def test_with_authorizer_reauthorizes_triggers
+      @db.execute "create table accounts (id integer, balance integer)"
+      @db.execute "create table audit_log (id integer, balance integer)"
+      @db.execute <<~SQL
+        create trigger audit_accounts after update on accounts
+        begin
+          insert into audit_log values (new.id, new.balance);
+        end
+      SQL
+      @db.execute "insert into accounts values (1, 100)"
+      statement = @db.prepare("update accounts set balance = ? where id = ?")
+
+      authorizer = proc do |action, table, column, _database, _trigger|
+        action == SQLITE_INSERT && table == "audit_log" ? 1 : 0
+      end
+
+      @db.with_authorizer(authorizer) do
+        assert_raises(SQLite3::AuthorizationException) do
+          statement.execute!(200, 1)
+        end
+      end
+
+      statement.execute!(200, 1)
+      assert_equal [[1, 200]], @db.execute("select * from audit_log")
+    ensure
+      statement&.close
+    end
+
+    def test_with_authorizer_uses_current_policy_on_automatic_reprepare
+      @db.execute "create table secrets (id integer, value text)"
+      @db.execute "insert into secrets values (1, 'hidden')"
+      statement = @db.prepare("select value from secrets")
+      allowed = true
+      authorizer = proc do |action, table, column, _database, _trigger|
+        next 0 unless action == SQLITE_READ && table == "secrets"
+        allowed ? 0 : 1
+      end
+
+      @db.with_authorizer(authorizer) do
+        assert_equal [["hidden"]], statement.execute!
+        allowed = false
+        @db.execute "alter table secrets add column extra text"
+        assert_raises(SQLite3::AuthorizationException) do
+          statement.execute!
+        end
+      end
+    ensure
+      statement&.close
+    end
+
+    def test_with_authorizer_honors_ignore_policy
+      @db.execute "create table secrets (id integer, value text)"
+      @db.execute "insert into secrets values (1, 'hidden')"
+      statement = @db.prepare("select id, value from secrets")
+
+      @db.with_authorizer(proc { |action, table, column| action == SQLITE_READ && column == "value" ? 2 : 0 }) do
+        assert_equal [[1, nil]], statement.execute!
+      end
+
+      assert_equal [[1, "hidden"]], statement.execute!
+    ensure
+      statement&.close
+    end
+
+    def test_with_authorizer_can_be_nested_and_restores_policy
+      @db.execute "create table secrets (id integer, value text)"
+      @db.execute "insert into secrets values (1, 'hidden')"
+      statement = @db.prepare("select id, value from secrets")
+      outer = proc { |action, table, column| action == SQLITE_READ && column == "value" ? 2 : 0 }
+      inner = proc { 0 }
+
+      @db.with_authorizer(outer) do
+        assert_equal [[1, nil]], statement.execute!
+        @db.with_authorizer(inner) do
+          assert_equal [[1, "hidden"]], statement.execute!
+        end
+        assert_equal [[1, nil]], statement.execute!
+      end
+
+      assert_equal [[1, "hidden"]], statement.execute!
+    ensure
+      statement&.close
+    end
+
+    def test_with_authorizer_callback_exception_closes_until_scope_exit
+      @db.execute "create table secrets (id integer)"
+      @db.execute "insert into secrets values (1)"
+      statement = @db.prepare("select id from secrets")
+      calls = 0
+      authorizer = proc do |_action, _table, _column, _database, _trigger|
+        calls += 1
+        raise "authorizer failed"
+      end
+
+      @db.with_authorizer(authorizer) do
+        assert_raises(RuntimeError) do
+          statement.execute!
+        end
+        assert_raises(SQLite3::AuthorizationException) do
+          statement.execute!
+        end
+        assert_equal 1, calls
+      end
+
+      assert_equal [[1]], statement.execute!
+    ensure
+      statement&.close
+    end
+
+    def test_with_authorizer_requires_an_authorizer_and_block
+      assert_raises(ArgumentError) do
+        @db.with_authorizer(proc { 0 })
+      end
+
+      assert_raises(ArgumentError) do
+        @db.with_authorizer(nil) { }
+      end
+    end
+
+    def test_with_authorizer_invalid_callback_result_closes_until_scope_exit
+      statement = @db.prepare("select 1")
+
+      @db.with_authorizer(proc { "invalid" }) do
+        assert_raises(SQLite3::AuthorizationException) do
+          statement.execute!
+        end
+        assert_raises(SQLite3::AuthorizationException) do
+          @db.execute("select 2")
+        end
+      end
+
+      assert_equal [[1]], statement.execute!
+    ensure
+      statement&.close
     end
 
     def test_close_with_open_statements

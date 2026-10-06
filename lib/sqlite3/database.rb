@@ -199,11 +199,26 @@ module SQLite3
     end
 
     # Installs (or removes) a block that will be invoked for every access
-    # to the database. If the block returns 0 (or +nil+), the statement
-    # is allowed to proceed. Returning 1 causes an authorization error to
-    # occur, and returning 2 causes the access to be silently denied.
+    # to the database. If the block returns 0 or +true+, the statement is
+    # allowed to proceed. Returning 1 or +false+ causes an authorization error,
+    # and returning 2 or +nil+ silently denies the access.
     def authorizer(&block)
       self.authorizer = block
+    end
+
+    # Runs the given block with +authorizer+ installed. The previous authorizer
+    # is restored when the block exits, even if an exception is raised.
+    #
+    # Statements prepared before entering the block are recompiled with the
+    # scoped authorizer before they are executed or their result metadata is
+    # read. This also applies to statements that SQLite automatically
+    # reprepares after a schema change and to SQL that references views or
+    # triggers. If the authorizer raises, subsequent statements in the scope
+    # are denied until the scope exits.
+    def with_authorizer(authorizer)
+      raise ArgumentError, "a block is required" unless block_given?
+
+      with_authorizer_native(authorizer) { yield }
     end
 
     # Returns a Statement object representing the given SQL. This does not

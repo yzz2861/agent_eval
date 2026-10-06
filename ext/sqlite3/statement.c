@@ -80,8 +80,64 @@ prepare(VALUE self, VALUE db, VALUE sql)
 
     CHECK_PREPARE(db_ctx->db, status, StringValuePtr(sql));
     timespecclear(&db_ctx->stmt_deadline);
+    ctx->authorizer_version = db_ctx->authorizer_version;
 
     return rb_utf8_str_new_cstr(tail);
+}
+
+static VALUE
+reauthorize(VALUE self, VALUE sql)
+{
+    sqlite3RubyPtr db_ctx;
+    sqlite3StmtRubyPtr ctx;
+    sqlite3_stmt *old_stmt;
+    const char *tail = NULL;
+    int status;
+
+    TypedData_Get_Struct(self, sqlite3StmtRuby, &statement_type, ctx);
+    db_ctx = ctx->db;
+
+    REQUIRE_LIVE_DB(ctx);
+    REQUIRE_OPEN_STMT(ctx);
+
+    if (ctx->authorizer_version == db_ctx->authorizer_version) { return Qfalse; }
+
+    StringValue(sql);
+    sqlite3_reset(ctx->st);
+    old_stmt = ctx->st;
+    ctx->st = NULL;
+
+#ifdef HAVE_SQLITE3_PREPARE_V2
+    status = sqlite3_prepare_v2(
+#else
+    status = sqlite3_prepare(
+#endif
+                 db_ctx->db,
+                 (const char *)StringValuePtr(sql),
+                 (int)RSTRING_LEN(sql),
+                 &ctx->st,
+                 &tail
+             );
+
+    if (status != SQLITE_OK) {
+        ctx->st = old_stmt;
+        if (rb_errinfo() != Qnil) { rb_exc_raise(rb_errinfo()); }
+        CHECK_PREPARE(db_ctx->db, status, StringValuePtr(sql));
+    }
+
+    sqlite3_finalize(old_stmt);
+    ctx->authorizer_version = db_ctx->authorizer_version;
+    ctx->done_p = 0;
+
+    return Qtrue;
+}
+
+static void
+ensure_current_authorizer(VALUE self, sqlite3StmtRubyPtr ctx)
+{
+    if (ctx->authorizer_version != ctx->db->authorizer_version) {
+        rb_funcall(self, rb_intern("reauthorize_if_stale!"), 0);
+    }
 }
 
 /* call-seq: stmt.close
@@ -134,6 +190,7 @@ step(VALUE self)
     REQUIRE_OPEN_STMT(ctx);
 
     if (ctx->done_p) { return Qnil; }
+    ensure_current_authorizer(self, ctx);
 
     internal_encoding = rb_default_internal_encoding();
 
@@ -321,7 +378,7 @@ bind_param(VALUE self, VALUE key, VALUE value)
 
     CHECK(sqlite3_db_handle(ctx->st), status);
 
-    return self;
+    return INT2NUM(index);
 }
 
 /* call-seq: stmt.reset!
@@ -395,6 +452,7 @@ column_count(VALUE self)
     REQUIRE_LIVE_DB(ctx);
     REQUIRE_OPEN_STMT(ctx);
 
+    ensure_current_authorizer(self, ctx);
     return INT2NUM(sqlite3_column_count(ctx->st));
 }
 
@@ -428,6 +486,7 @@ column_name(VALUE self, VALUE index)
     REQUIRE_LIVE_DB(ctx);
     REQUIRE_OPEN_STMT(ctx);
 
+    ensure_current_authorizer(self, ctx);
     name = sqlite3_column_name(ctx->st, (int)NUM2INT(index));
 
     VALUE ret = Qnil;
@@ -453,6 +512,7 @@ column_decltype(VALUE self, VALUE index)
     REQUIRE_LIVE_DB(ctx);
     REQUIRE_OPEN_STMT(ctx);
 
+    ensure_current_authorizer(self, ctx);
     name = sqlite3_column_decltype(ctx->st, (int)NUM2INT(index));
 
     if (name) { return rb_str_new2(name); }
@@ -675,6 +735,7 @@ database_name(VALUE self, VALUE index)
     REQUIRE_LIVE_DB(ctx);
     REQUIRE_OPEN_STMT(ctx);
 
+    ensure_current_authorizer(self, ctx);
     return SQLITE3_UTF8_STR_NEW2(
                sqlite3_column_database_name(ctx->st, NUM2INT(index)));
 }
@@ -714,6 +775,7 @@ get_expanded_sql(VALUE self)
     REQUIRE_LIVE_DB(ctx);
     REQUIRE_OPEN_STMT(ctx);
 
+    ensure_current_authorizer(self, ctx);
     expanded_sql = sqlite3_expanded_sql(ctx->st);
     rb_expanded_sql = rb_obj_freeze(SQLITE3_UTF8_STR_NEW2(expanded_sql));
     sqlite3_free(expanded_sql);
@@ -729,9 +791,9 @@ init_sqlite3_statement(void)
     rb_define_alloc_func(cSqlite3Statement, allocate);
     rb_define_method(cSqlite3Statement, "close", sqlite3_rb_close, 0);
     rb_define_method(cSqlite3Statement, "closed?", closed_p, 0);
-    rb_define_method(cSqlite3Statement, "bind_param", bind_param, 2);
+    rb_define_private_method(cSqlite3Statement, "bind_param_native", bind_param, 2);
     rb_define_method(cSqlite3Statement, "reset!", reset_bang, 0);
-    rb_define_method(cSqlite3Statement, "clear_bindings!", clear_bindings_bang, 0);
+    rb_define_private_method(cSqlite3Statement, "clear_bindings_native!", clear_bindings_bang, 0);
     rb_define_method(cSqlite3Statement, "step", step, 0);
     rb_define_method(cSqlite3Statement, "done?", done_p, 0);
     rb_define_method(cSqlite3Statement, "column_count", column_count, 0);
@@ -749,6 +811,7 @@ init_sqlite3_statement(void)
 #endif
 
     rb_define_private_method(cSqlite3Statement, "prepare", prepare, 2);
+    rb_define_private_method(cSqlite3Statement, "reauthorize_native", reauthorize, 1);
     rb_define_private_method(cSqlite3Statement, "stats_as_hash", stats_as_hash, 0);
     rb_define_private_method(cSqlite3Statement, "stat_for", stat_for, 1);
 }
