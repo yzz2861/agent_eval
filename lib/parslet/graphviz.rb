@@ -24,7 +24,7 @@ module Parslet
     def visit_parser(root)
       recurse root, node('parser')
     end
-    def visit_entity(name, block)
+    def visit_entity(name, block, entity=nil)
       s = node(name)
 
       downwards s

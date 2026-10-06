@@ -18,7 +18,7 @@ class Parslet::Parser
         match.to_s
       end
 
-      def visit_entity(name, block)
+      def visit_entity(name, block, entity=nil)
         context.deferred(name, block)
 
         "(#{context.mangle_name(name)})"
@@ -159,4 +159,3 @@ class Parslet::Parser
       pretty_print(self.class.name, root)
   end
 end
-

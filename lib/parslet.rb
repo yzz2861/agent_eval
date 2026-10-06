@@ -99,6 +99,13 @@ module Parslet
     #     root :twobar
     #   end
     #
+    # Pass <code>left_recursive: true</code> to allow a rule that begins by
+    # invoking itself, directly or through other rules:
+    #
+    #   rule(:expr, left_recursive: true) do
+    #     (expr.as(:left) >> str('+') >> term.as(:right)).as(:add) | term
+    #   end
+    #
     def rule(name, opts={}, &definition)
       undef_method name if method_defined? name
       define_method(name) do
@@ -110,7 +117,13 @@ module Parslet
           self.instance_eval(&definition)
         }
         
-        @rules[name] = Atoms::Entity.new(name, opts[:label], &definition_closure)
+        @rules[name] = Atoms::Entity.new(
+          self,
+          name,
+          opts[:label],
+          opts.fetch(:left_recursive, opts.fetch(:left_recursion, false)),
+          &definition_closure
+        )
       end
     end
   end

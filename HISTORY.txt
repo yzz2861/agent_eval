@@ -8,6 +8,8 @@
 
   + Update to Github Actions CI/CD. I guess newer is better? (Matt Larraz).
     Also includes testing on newer Ruby versions. 
+  + Explicitly opt into direct and indirect left-recursive rules with
+    `rule(:name, left_recursive: true)`.
 
 
 = 2.0 / 16Feb2020

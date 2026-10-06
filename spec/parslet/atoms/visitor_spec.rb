@@ -55,7 +55,7 @@ describe Parslet::Atoms do
   describe Parslet::Atoms::Entity do
     let(:parslet) { Parslet::Atoms::Entity.new('foo', &lambda {}) }
     it "should call back visitor" do
-      visitor.should_receive(:visit_entity).with('foo', Proc).once
+      visitor.should_receive(:visit_entity).with('foo', Proc, Parslet::Atoms::Entity).once
       
       parslet.accept(visitor)
     end 

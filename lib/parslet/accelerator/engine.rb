@@ -12,7 +12,7 @@ module Parslet::Accelerator
     def visit_parser(root)
       false
     end
-    def visit_entity(name, block)
+    def visit_entity(name, block, entity=nil)
       false
     end
     def visit_named(name, atom)

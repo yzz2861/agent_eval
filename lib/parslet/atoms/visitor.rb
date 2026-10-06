@@ -22,7 +22,7 @@ module Parslet::Atoms
     # example. 
     #
     def accept(visitor)
-      visitor.visit_entity(name, block)
+      visitor.visit_entity(name, block, self)
     end
   end
   

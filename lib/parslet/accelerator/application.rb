@@ -14,8 +14,15 @@ module Parslet::Accelerator
     def visit_parser(root)
       transform root.accept(self)
     end
-    def visit_entity(name, block)
-      transform Parslet::Atoms::Entity.new(name) { block.call.accept(self) }
+    def visit_entity(name, block, entity)
+      definition = proc { block.call.accept(self) }
+      transform Parslet::Atoms::Entity.new(
+        entity.owner,
+        name,
+        entity.label,
+        entity.left_recursive,
+        &definition
+      )
     end
     def visit_named(name, atom)
       transform Parslet::Atoms::Named.new(atom.accept(self), name)
