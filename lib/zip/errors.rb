@@ -152,4 +152,92 @@ module Zip
         'uncompress it. Please use `Zip::File` instead of `Zip::InputStream`.'
     end
   end
+
+  # Error raised when two or more entries in an archive would write to the
+  # same destination path.
+  class DuplicateEntryError < Error
+    # Create a new DuplicateEntryError for the given destination path.
+    def initialize(path)
+      super()
+      @path = path
+    end
+
+    # The message returned by this error.
+    def message
+      "Duplicate entry path in archive: '#{@path}'."
+    end
+  end
+
+  # Error raised when two entries in an archive have paths that collide on a
+  # case-insensitive filesystem.
+  class CaseInsensitiveMatchError < Error
+    # Create a new CaseInsensitiveMatchError for the two clashing paths.
+    def initialize(first, second)
+      super()
+      @first = first
+      @second = second
+    end
+
+    # The message returned by this error.
+    def message
+      "'#{@first}' and '#{@second}' collide on a case-insensitive filesystem."
+    end
+  end
+
+  # Error raised when an entry is a file where another entry is a directory
+  # (or vice-versa), so the tree cannot be represented on disk.
+  class EntryConflictError < Error
+    # Create a new EntryConflictError with the given details.
+    def initialize(entry, conflict)
+      super()
+      @entry = entry
+      @conflict = conflict
+    end
+
+    # The message returned by this error.
+    def message
+      "Entry '#{@entry}' conflicts with '#{@conflict}'."
+    end
+  end
+
+  # Error raised when a symlink entry points outside of the extraction
+  # directory (absolute target or escape via other symlink entries).
+  class SymlinkEscapeError < Error
+    # Create a new SymlinkEscapeError for the named link and target.
+    def initialize(name, target)
+      super()
+      @name = name
+      @target = target
+    end
+
+    # The message returned by this error.
+    def message
+      "Symlink '#{@name}' points outside of the extraction directory " \
+        "(target: '#{@target}')."
+    end
+  end
+
+  # Error raised when the CRC of an extracted entry does not match the CRC
+  # recorded in the archive.
+  class CRCError < Error
+    # Create a new CRCError for the named entry.
+    def initialize(name, expected, actual)
+      super()
+      @name = name
+      @expected = expected
+      @actual = actual
+    end
+
+    # The message returned by this error.
+    def message
+      "CRC mismatch while extracting '#{@name}': expected " \
+        "#{format('%08x', @expected)}, got #{format('%08x', @actual)}."
+    end
+  end
+
+  # Error raised when a transactional extraction fails while publishing the
+  # staged result to its destination, and the original destination could not
+  # be fully restored.
+  class PublishError < Error
+  end
 end

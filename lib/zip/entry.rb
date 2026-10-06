@@ -310,7 +310,7 @@ module Zip
     # directory would mask that. Bulk operations such as `extract_all`,
     # which have no such earlier-entry to skip past, opt into this.
     def extract(entry_path = @name, destination_directory: '.',
-                create_parent_directories: false, &block)
+                create_parent_directories: false, verify_crc: false, &block)
       dest_dir = ::File.absolute_path(destination_directory || '.')
       extract_path = ::File.absolute_path(::File.join(dest_dir, entry_path))
 
@@ -325,7 +325,7 @@ module Zip
 
       ::FileUtils.mkdir_p(::File.dirname(extract_path)) if create_parent_directories && file?
 
-      __send__(:"create_#{ftype}", extract_path, &block)
+      __send__(:"create_#{ftype}", extract_path, { verify_crc: verify_crc }, &block)
       self
     end
 
@@ -776,17 +776,21 @@ module Zip
       warn 'WARNING: invalid date/time in zip entry.' if ::Zip.warn_invalid_date
     end
 
-    def create_file(dest_path, _continue_on_exists_proc = proc { Zip.continue_on_exists_proc })
+    def create_file(dest_path, options = {},
+                    _continue_on_exists_proc = proc { Zip.continue_on_exists_proc })
+      verify_crc = options.fetch(:verify_crc, false)
       if ::File.exist?(dest_path) && !yield(self, dest_path)
         raise DestinationExistsError, dest_path
       end
 
+      computed_crc = 0
       ::File.open(dest_path, 'wb') do |os|
         get_input_stream do |is|
           bytes_written = 0
           warned = false
           while (buf = is.sysread(Decompressor::CHUNK_SIZE))
             os << buf
+            computed_crc = ::Zlib.crc32(buf, computed_crc) if verify_crc
             bytes_written += buf.bytesize
             next unless bytes_written > size && !warned
 
@@ -799,10 +803,14 @@ module Zip
         end
       end
 
+      if verify_crc && crc != 0 && computed_crc != crc
+        raise CRCError.new(name, crc, computed_crc)
+      end
+
       set_extra_attributes_on_path(dest_path)
     end
 
-    def create_directory(dest_path)
+    def create_directory(dest_path, _options = {})
       return if ::File.directory?(dest_path)
 
       if ::File.exist?(dest_path)
@@ -816,7 +824,7 @@ module Zip
     end
 
     # BUG: create_symlink() does not use &block
-    def create_symlink(dest_path)
+    def create_symlink(dest_path, _options = {})
       # TODO: Symlinks pose security challenges. Symlink support temporarily
       # removed in view of https://github.com/rubyzip/rubyzip/issues/369 .
       warn "WARNING: skipped symlink '#{dest_path}'."

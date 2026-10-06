@@ -201,6 +201,43 @@ module Zip
           zf.extract_all(destination_directory, &block)
         end
       end
+
+      # Extracts every entry in the zip archive +zip_file_name+ into
+      # +destination_directory+ transactionally: the archive is extracted and
+      # verified in a private staging directory first, and the result is only
+      # published to +destination_directory+ if every entry succeeded. If any
+      # entry fails (an invalid path, a CRC mismatch, an I/O error, ...) then
+      # the staging directory is discarded and +destination_directory+ is left
+      # exactly as it was.
+      #
+      # Before extraction every entry is checked for:
+      # - duplicate destination paths,
+      # - paths that only differ in case (case-insensitive filesystem
+      #   collisions),
+      # - file/directory type conflicts,
+      # - absolute paths or +..+ components that would escape the destination,
+      # - symlink entries (including chains of symlink entries) that resolve
+      #   outside the destination.
+      #
+      # If +destination_directory+ already exists then, by default,
+      # Zip::DestinationExistsError is raised and nothing is extracted. Pass
+      # +on_exist: :backup+ to move the existing destination aside first (it
+      # is restored if the publish step fails) and remove it once the new
+      # extraction has been published successfully.
+      #
+      # Returns the path to +destination_directory+.
+      def transactional_extract(zip_file_name, destination_directory,
+                                on_exist: :raise,
+                                restore_ownership: DEFAULT_RESTORE_OPTIONS[:restore_ownership],
+                                restore_permissions: DEFAULT_RESTORE_OPTIONS[:restore_permissions],
+                                restore_times: DEFAULT_RESTORE_OPTIONS[:restore_times])
+        Zip::File.open(zip_file_name) do |zf|
+          zf.transactional_extract(destination_directory, on_exist: on_exist,
+                                   restore_ownership: restore_ownership,
+                                   restore_permissions: restore_permissions,
+                                   restore_times: restore_times)
+        end
+      end
     end
 
     # Returns an input stream to the specified entry. If a block is passed
@@ -391,6 +428,22 @@ module Zip
       end
 
       self
+    end
+
+    # Extracts every entry in this archive into +destination_directory+
+    # transactionally. See Zip::File.transactional_extract for the full
+    # description of the preflight checks and the +on_exist+ strategies.
+    #
+    # Returns the path to +destination_directory+.
+    def transactional_extract(destination_directory, on_exist: :raise,
+                              restore_ownership: @restore_ownership,
+                              restore_permissions: @restore_permissions,
+                              restore_times: @restore_times)
+      TransactionalExtractor.extract(entries, destination_directory,
+                                     on_exist: on_exist,
+                                     restore_ownership: restore_ownership,
+                                     restore_permissions: restore_permissions,
+                                     restore_times: restore_times)
     end
 
     # Commits changes that has been made since the previous commit to
