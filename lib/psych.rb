@@ -484,6 +484,19 @@ module Psych
   #                           For unlimited line width use <tt>-1</tt>.
   #
   #                           Default: <tt>0</tt> (meaning "wrap at 81").
+  # [<tt>:string_style</tt>]  Preferred block scalar style for multi-line
+  #                           strings, either <tt>:literal</tt> (<tt>|</tt>)
+  #                           or <tt>:folded</tt> (<tt>></tt>).  The
+  #                           preference is only honored when the chosen
+  #                           style preserves the string byte-for-byte;
+  #                           otherwise Psych falls back from folded to
+  #                           literal, and finally to a double-quoted
+  #                           scalar.  <tt>:line_width</tt> stays a hint:
+  #                           lines that cannot be folded safely are kept
+  #                           long rather than truncated.
+  #
+  #                           Default: <tt>nil</tt> (multi-line strings use
+  #                           the literal style).
   # [<tt>:canonical</tt>]     Write "canonical" YAML form (very verbose, yet
   #                           strictly formal).
   #
@@ -565,6 +578,19 @@ module Psych
   #                           For unlimited line width use <tt>-1</tt>.
   #
   #                           Default: <tt>0</tt> (meaning "wrap at 81").
+  # [<tt>:string_style</tt>]  Preferred block scalar style for multi-line
+  #                           strings, either <tt>:literal</tt> (<tt>|</tt>)
+  #                           or <tt>:folded</tt> (<tt>></tt>).  The
+  #                           preference is only honored when the chosen
+  #                           style preserves the string byte-for-byte;
+  #                           otherwise Psych falls back from folded to
+  #                           literal, and finally to a double-quoted
+  #                           scalar.  <tt>:line_width</tt> stays a hint:
+  #                           lines that cannot be folded safely are kept
+  #                           long rather than truncated.
+  #
+  #                           Default: <tt>nil</tt> (multi-line strings use
+  #                           the literal style).
   # [<tt>:canonical</tt>]     Write "canonical" YAML form (very verbose, yet
   #                           strictly formal).
   #

@@ -65,6 +65,10 @@ module Psych
             fail(ArgumentError, "Invalid line_width #{@line_width}, must be non-negative or -1 for unlimited.")
           end
         end
+        @string_style = options[:string_style]
+        unless @string_style.nil? || @string_style == :literal || @string_style == :folded
+          fail(ArgumentError, "Invalid string_style #{@string_style.inspect}, must be :literal or :folded.")
+        end
         @stringify_names = options[:stringify_names]
         @coders     = []
 
@@ -301,7 +305,7 @@ module Psych
           plain = false
           quote = false
         elsif o.match?(/\n(?!\Z)/)  # match \n except blank line at the end of string
-          style = Nodes::Scalar::LITERAL
+          style = block_scalar_style(o)
         elsif o == '<<'
           style = Nodes::Scalar::SINGLE_QUOTED
           tag   = 'tag:yaml.org,2002:str'
@@ -310,7 +314,7 @@ module Psych
         elsif o == 'y' || o == 'Y' || o == 'n' || o == 'N'
           style = Nodes::Scalar::DOUBLE_QUOTED
         elsif @line_width && o.length > @line_width
-          style = Nodes::Scalar::FOLDED
+          style = @string_style ? block_scalar_style(o) : Nodes::Scalar::FOLDED
         elsif o.match?(/^[^[:word:]][^"]*$/)
           style = Nodes::Scalar::DOUBLE_QUOTED
         elsif not String === @ss.tokenize(o) or /\A0[0-7]*[89]/.match?(o)
@@ -422,6 +426,46 @@ module Psych
       end
 
       private
+
+      # Choose a scalar style for +string+ that keeps its exact bytes when
+      # the document is read back, honoring the caller's +:string_style+
+      # preference.  A folded scalar is only used when every line folds
+      # safely; otherwise the literal style is tried, and when no block
+      # scalar can represent the string visibly, a double-quoted scalar is
+      # used so the value is never silently altered.
+      def block_scalar_style string
+        case @string_style
+        when :folded
+          if fold_scalar_safe? string
+            Nodes::Scalar::FOLDED
+          elsif literal_scalar_safe? string
+            Nodes::Scalar::LITERAL
+          else
+            Nodes::Scalar::DOUBLE_QUOTED
+          end
+        when :literal
+          literal_scalar_safe?(string) ? Nodes::Scalar::LITERAL : Nodes::Scalar::DOUBLE_QUOTED
+        else
+          Nodes::Scalar::LITERAL
+        end
+      end
+
+      # Block scalars cannot visibly represent tabs, carriage returns,
+      # control characters, or trailing whitespace (including lines that
+      # contain only whitespace), so strings containing any of those must
+      # use a quoted style to preserve their exact bytes.
+      def literal_scalar_safe? string
+        !string.match?(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\r\t\u0085]/) &&
+          !string.match?(/ \n| \z/)
+      end
+
+      # Folded scalars additionally keep lines that begin with a space
+      # verbatim instead of folding them, which reads ambiguously next to
+      # folded lines, so such strings are better served by the literal
+      # style.
+      def fold_scalar_safe? string
+        literal_scalar_safe?(string) && !string.match?(/^ /)
+      end
 
       def binary? string
         string.encoding == Encoding::ASCII_8BIT && !string.ascii_only?
