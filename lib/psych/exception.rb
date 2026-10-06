@@ -6,6 +6,18 @@ module Psych
   class BadAlias < Exception
   end
 
+  class AliasCycle < BadAlias
+    def initialize anchor_name
+      super "An alias created a cycle through anchor: #{anchor_name}"
+    end
+  end
+
+  class AliasExpansionLimit < Exception
+    def initialize message
+      super message
+    end
+  end
+
   # Subclasses `BadAlias` for backwards compatibility
   class AliasesNotEnabled < BadAlias
     def initialize

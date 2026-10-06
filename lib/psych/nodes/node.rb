@@ -45,8 +45,21 @@ module Psych
       # Convert this node to Ruby.
       #
       # See also Psych::Visitors::ToRuby
-      def to_ruby(symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true)
-        Visitors::ToRuby.create(symbolize_names: symbolize_names, freeze: freeze, strict_integer: strict_integer, parse_symbols: parse_symbols).accept(self)
+      def to_ruby(symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true,
+                  aliases: true, **alias_options)
+        Psych.validate_alias_mode(aliases)
+        node = if aliases == :expand
+                 Psych::AliasExpander.expand(self, **alias_options)
+               elsif alias_options.any?
+                 raise ArgumentError, "alias expansion options require aliases: :expand"
+               else
+                 self
+               end
+
+        visitor = Visitors::ToRuby.create(symbolize_names: symbolize_names, freeze: freeze,
+                                          strict_integer: strict_integer,
+                                          parse_symbols: parse_symbols, aliases: aliases)
+        visitor.accept(node)
       end
       alias :transform :to_ruby
 

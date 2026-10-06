@@ -16,10 +16,14 @@ module Psych
         DATA_INITIALIZE = Data.instance_method(:initialize)
       end
 
-      def self.create(symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true)
+      def self.create(symbolize_names: false, freeze: false, strict_integer: false,
+                      parse_symbols: true, aliases: true)
         class_loader = ClassLoader.new
-        scanner      = ScalarScanner.new class_loader, strict_integer: strict_integer, parse_symbols: parse_symbols
-        new(scanner, class_loader, symbolize_names: symbolize_names, freeze: freeze)
+        scanner      = ScalarScanner.new(class_loader, strict_integer: strict_integer,
+                                         parse_symbols: parse_symbols)
+        visitor_class = aliases ? self : NoAliasRuby
+        visitor_class.new(scanner, class_loader, symbolize_names: symbolize_names,
+                          freeze: freeze)
       end
 
       attr_reader :class_loader

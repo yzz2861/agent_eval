@@ -28,6 +28,7 @@ require_relative 'psych/json/tree_builder'
 require_relative 'psych/json/stream'
 require_relative 'psych/handlers/document_stream'
 require_relative 'psych/class_loader'
+require_relative 'psych/alias_expander'
 
 ###
 # = Overview
@@ -236,6 +237,12 @@ module Psych
   # The version of libyaml Psych is using
   LIBYAML_VERSION = Psych.libyaml_version.join('.').freeze
 
+  def self.validate_alias_mode aliases
+    return aliases if aliases == true || aliases == false || aliases == :expand
+
+    raise ArgumentError, "aliases must be true, false, or :expand"
+  end
+
   ###
   # Load +yaml+ in to a Ruby data structure.  If multiple documents are
   # provided, the object contained in the first document will be returned.
@@ -269,10 +276,14 @@ module Psych
   # YAML documents that are supplied via user input.  Instead, please use the
   # load method or the safe_load method.
   #
-  def self.unsafe_load yaml, filename: nil, fallback: false, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true
+  def self.unsafe_load yaml, filename: nil, fallback: false, symbolize_names: false,
+                       freeze: false, strict_integer: false, parse_symbols: true,
+                       aliases: true, **alias_options
+    validate_alias_mode(aliases)
     result = parse(yaml, filename: filename)
     return fallback unless result
-    result.to_ruby(symbolize_names: symbolize_names, freeze: freeze, strict_integer: strict_integer, parse_symbols: parse_symbols)
+    result.to_ruby(symbolize_names: symbolize_names, freeze: freeze, strict_integer: strict_integer,
+                   parse_symbols: parse_symbols, aliases: aliases, **alias_options)
   end
 
   ###
@@ -305,6 +316,12 @@ module Psych
   #   Psych.safe_load yaml               # => raises an exception
   #   Psych.safe_load yaml, aliases: true # => loads the aliases
   #
+  # Use <tt>aliases: :expand</tt> to replace each alias with an independent
+  # copy of its anchored value.  Repeated references are supported, while an
+  # alias that points back to the current expansion path raises
+  # Psych::AliasCycle.  +max_expanded_nodes+ and +max_expanded_bytes+ bound the
+  # expansion and are checked before Ruby values are built.
+  #
   # A Psych::DisallowedClass exception will be raised if the yaml contains a
   # class that isn't in the +permitted_classes+ list.
   #
@@ -320,17 +337,29 @@ module Psych
   #   Psych.safe_load("---\n foo: bar")                         # => {"foo"=>"bar"}
   #   Psych.safe_load("---\n foo: bar", symbolize_names: true)  # => {:foo=>"bar"}
   #
-  def self.safe_load yaml, permitted_classes: [], permitted_symbols: [], aliases: false, filename: nil, fallback: nil, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true
+  def self.safe_load yaml, permitted_classes: [], permitted_symbols: [], aliases: false,
+                    filename: nil, fallback: nil, symbolize_names: false, freeze: false,
+                    strict_integer: false, parse_symbols: true, **alias_options
+    validate_alias_mode(aliases)
     result = parse(yaml, filename: filename)
     return fallback unless result
 
+    if aliases == :expand
+      result = AliasExpander.expand(result, **alias_options)
+    elsif alias_options.any?
+      raise ArgumentError, "alias expansion options require aliases: :expand"
+    end
+
     class_loader = ClassLoader::Restricted.new(permitted_classes.map(&:to_s),
                                                permitted_symbols.map(&:to_s))
-    scanner      = ScalarScanner.new class_loader, strict_integer: strict_integer, parse_symbols: parse_symbols
-    visitor = if aliases
-                Visitors::ToRuby.new scanner, class_loader, symbolize_names: symbolize_names, freeze: freeze
+    scanner      = ScalarScanner.new(class_loader, strict_integer: strict_integer,
+                                     parse_symbols: parse_symbols)
+    visitor = if aliases == :expand || aliases == true
+                Visitors::ToRuby.new(scanner, class_loader,
+                                     symbolize_names: symbolize_names, freeze: freeze)
               else
-                Visitors::NoAliasRuby.new scanner, class_loader, symbolize_names: symbolize_names, freeze: freeze
+                Visitors::NoAliasRuby.new(scanner, class_loader,
+                                          symbolize_names: symbolize_names, freeze: freeze)
               end
     result = visitor.accept result
     result
@@ -366,7 +395,10 @@ module Psych
   # Raises a TypeError when `yaml` parameter is NilClass.  This method is
   # similar to `safe_load` except that `Symbol` objects are allowed by default.
   #
-  def self.load yaml, permitted_classes: [Symbol], permitted_symbols: [], aliases: false, filename: nil, fallback: nil, symbolize_names: false, freeze: false, strict_integer: false, parse_symbols: true
+  def self.load yaml, permitted_classes: [Symbol], permitted_symbols: [], aliases: false,
+               filename: nil, fallback: nil, symbolize_names: false, freeze: false,
+               strict_integer: false, parse_symbols: true, **alias_options
+    validate_alias_mode(aliases)
     safe_load yaml, permitted_classes: permitted_classes,
                     permitted_symbols: permitted_symbols,
                     aliases: aliases,
@@ -375,7 +407,8 @@ module Psych
                     symbolize_names: symbolize_names,
                     freeze: freeze,
                     strict_integer: strict_integer,
-                    parse_symbols: parse_symbols
+                    parse_symbols: parse_symbols,
+                    **alias_options
   end
 
   ###
@@ -668,11 +701,13 @@ module Psych
   #   end
   #   list # => ['foo', 'bar']
   #
-  def self.safe_load_stream yaml, filename: nil, permitted_classes: [], aliases: false
+  def self.safe_load_stream yaml, filename: nil, permitted_classes: [], aliases: false,
+                            **alias_options
     documents = parse_stream(yaml, filename: filename).children.map do |child|
       stream = Psych::Nodes::Stream.new
       stream.children << child
-      safe_load(stream.to_yaml, permitted_classes: permitted_classes, aliases: aliases)
+      safe_load(stream.to_yaml, permitted_classes: permitted_classes,
+                aliases: aliases, **alias_options)
     end
 
     if block_given?

@@ -34,6 +34,7 @@ DESCRIPTION
     "ext/psych/psych_to_ruby.c", "ext/psych/psych_to_ruby.h",
     "ext/psych/psych_yaml_tree.c", "ext/psych/psych_yaml_tree.h",
     "lib/psych.rb", "lib/psych/class_loader.rb", "lib/psych/coder.rb",
+    "lib/psych/alias_expander.rb",
     "lib/psych/core_ext.rb", "lib/psych/exception.rb", "lib/psych/handler.rb",
     "lib/psych/handlers/document_stream.rb", "lib/psych/handlers/recorder.rb",
     "lib/psych/json/ruby_events.rb", "lib/psych/json/stream.rb",
