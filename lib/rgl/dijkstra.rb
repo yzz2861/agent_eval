@@ -3,6 +3,7 @@
 require 'rgl/dijkstra_visitor'
 require 'rgl/edge_properties_map'
 require 'rgl/path_builder'
+require 'rgl/simple_paths'
 
 require 'pairing_heap'
 
