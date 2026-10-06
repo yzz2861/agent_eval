@@ -91,4 +91,18 @@ RSpec.describe Dry::Configurable::DSL do
     expect(setting.children.to_a[0].children.to_a[0].name).to be(:user)
     expect(setting.children.to_a[0].children.to_a[1].name).to be(:pass)
   end
+
+  it "compiles a secret setting" do
+    setting = dsl.setting(:password, default: "vault:db/password", secret: true)
+
+    expect(setting).to be_secret
+    expect(setting).not_to be_mutable
+    expect(setting.default).to eql("vault:db/password")
+  end
+
+  it "rejects nested settings under a secret setting" do
+    expect {
+      dsl.setting(:credentials, secret: true) { setting(:password) }
+    }.to raise_error(ArgumentError, /secret setting cannot have nested settings/)
+  end
 end

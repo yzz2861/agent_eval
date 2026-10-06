@@ -23,6 +23,15 @@ module Dry
         config.finalize!(freeze_values: freeze_values)
         self
       end
+
+      # Opens a {SecretScope} over the config for resolving secret settings.
+      #
+      # @see Config#with_secrets
+      #
+      # @api public
+      def with_secrets(provider, &block)
+        config.with_secrets(provider, &block)
+      end
     end
   end
 end

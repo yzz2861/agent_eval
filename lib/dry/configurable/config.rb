@@ -75,7 +75,7 @@ module Dry
 
         _configured.add(name)
 
-        _values[name] = setting.constructor.(value)
+        _values[name] = setting.secret? ? value : setting.constructor.(value)
       end
 
       # Update config with new values
@@ -141,6 +141,32 @@ module Dry
       # @api public
       def to_h
         values.transform_values { |value| value.is_a?(self.class) ? value.to_h : value }
+      end
+
+      # Opens a controlled scope in which secret settings are resolved through
+      # the given provider.
+      #
+      # The config keeps storing only secret *references*; resolved values are
+      # read from the yielded {SecretScope} and never cached on this config.
+      # The provider's resource is released when the block finishes.
+      #
+      # @param provider [#open,#read,#close]
+      #
+      # @yieldparam scope [SecretScope]
+      #
+      # @return [Object] the block's return value
+      #
+      # @example
+      #
+      #   setting :db_password, secret: true, default: "vault:db/password"
+      #
+      #   config.with_secrets(vault) do |secrets|
+      #     connect(password: secrets.db_password)
+      #   end
+      #
+      # @api public
+      def with_secrets(provider, &block)
+        SecretScope.open(self, provider, &block)
       end
 
       # @api private
