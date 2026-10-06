@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Changes
+
+- Dates and times are now exact value objects instead of Ruby `Time`
+  instances: `TomlRB::OffsetDateTime`, `TomlRB::LocalDateTime`,
+  `TomlRB::LocalDate` and `TomlRB::LocalTime`. They keep every parsed
+  component and every fractional second digit, including fractions longer
+  than the nine nanosecond digits a `Time` can represent.
+- `to_time` is the only way to get a Ruby `Time`, and it is explicit:
+  local dates, times and date-times require a `zone:` (`:utc`, `:local` or a
+  `'+HH:MM'` offset), and values with more than nine fraction digits require
+  a `rounding:` mode (`:truncate`/`:floor`, `:ceil` or `:round`). Missing
+  arguments raise `TomlRB::MissingTimeZoneError` or
+  `TomlRB::PrecisionError`.
+- Comparisons no longer treat zone-less values as UTC: local and offset
+  values are not comparable to each other, and offset date-times compare by
+  their real instant (so offsets that cross midnight stay equal).
+- The dumper round-trips the exact values, including long fractions and the
+  original offset spelling. Dumping plain Ruby `Time`, `Date` and
+  `DateTime` objects still works.
+
 ## v6.0.0 (2026-09-28)
 
 ### Breaking changes

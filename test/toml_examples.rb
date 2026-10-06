@@ -84,9 +84,9 @@ class TomlRB::Examples
         "False" => false
       },
       "datetime" => {
-        "key1" => Time.utc(1979, 5, 27, 7, 32, 0),
-        "key2" => Time.new(1979, 5, 27, 0, 32, 0, "-07:00"),
-        "key3" => Time.new(1979, 5, 27, 0, 32, 0.999999r, "-07:00")
+        "key1" => TomlRB::OffsetDateTime.new(1979, 5, 27, 7, 32, 0, nil, "Z"),
+        "key2" => TomlRB::OffsetDateTime.new(1979, 5, 27, 0, 32, 0, nil, "-07:00"),
+        "key3" => TomlRB::OffsetDateTime.new(1979, 5, 27, 0, 32, 0, "999999", "-07:00")
       },
       "array" => {
         "key1" => [1, 2, 3],
@@ -209,21 +209,21 @@ class TomlRB::Examples
         "bool2" => false
       },
       "offset-date-time" => {
-        "odt1" => Time.new(1979, 5, 27, 7, 32, 0, "+00:00"),
-        "odt2" => Time.new(1979, 5, 27, 0, 32, 0, "-07:00"),
-        "odt3" => Time.new(1979, 5, 27, 0, 32, 0.999999r, "-07:00"),
-        "odt4" => Time.new(1979, 5, 27, 7, 32, 0, "+00:00")
+        "odt1" => TomlRB::OffsetDateTime.new(1979, 5, 27, 7, 32, 0, nil, "Z"),
+        "odt2" => TomlRB::OffsetDateTime.new(1979, 5, 27, 0, 32, 0, nil, "-07:00"),
+        "odt3" => TomlRB::OffsetDateTime.new(1979, 5, 27, 0, 32, 0, "999999", "-07:00"),
+        "odt4" => TomlRB::OffsetDateTime.new(1979, 5, 27, 7, 32, 0, nil, "Z")
       },
       "local-date-time" => {
-        "ldt1" => Time.utc(1979, 5, 27, 7, 32, 0),
-        "ldt2" => Time.utc(1979, 5, 27, 0, 32, 0, 999999)
+        "ldt1" => TomlRB::LocalDateTime.new(1979, 5, 27, 7, 32, 0, nil),
+        "ldt2" => TomlRB::LocalDateTime.new(1979, 5, 27, 0, 32, 0, "999999")
       },
       "local-date" => {
-        "ld1" => Time.utc(1979, 5, 27)
+        "ld1" => TomlRB::LocalDate.new(1979, 5, 27)
       },
       "local-time" => {
-        "lt1" => Time.at(3600 * 7 + 60 * 32 + 0, 0),
-        "lt2" => Time.at(3600 * 0 + 60 * 32 + 0, 999999)
+        "lt1" => TomlRB::LocalTime.new(7, 32, 0, nil),
+        "lt2" => TomlRB::LocalTime.new(0, 32, 0, "999999")
       },
       "array" => {
         "arr1" => [1, 2, 3],
@@ -343,7 +343,7 @@ class TomlRB::Examples
         "name" => "Tom Preston-Werner",
         "organization" => "GitHub",
         "bio" => "GitHub Cofounder & CEO\nLikes tater tots and beer.",
-        "dob" => Time.utc(1979, 5, 27, 7, 32, 0)
+        "dob" => TomlRB::OffsetDateTime.new(1979, 5, 27, 7, 32, 0, nil, "Z")
       },
 
       "database" => {

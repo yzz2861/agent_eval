@@ -47,7 +47,7 @@ TomlRB.parse(stream)
 TomlRB.load_file(path, symbolize_keys: true) 
 # Works the same for TomlRB.parse
 
-# Local datetimes, dates and times are subclasses of Time. Offset datetimes are Time.
+# Dates and times are exact value objects, not Ruby Time objects.
 times = <<-EOS
   odt = 1979-05-27T07:32:00Z
   ldt = 1979-05-27T07:32:00
@@ -55,7 +55,27 @@ times = <<-EOS
   lt  = 07:32:00
 EOS
 TomlRB.parse(times).transform_values(&:class)
-# => {"odt"=>Time, "ldt"=>TomlRB::LocalDateTime, "ld"=>TomlRB::LocalDate, "lt"=>TomlRB::LocalTime}
+# => {"odt"=>TomlRB::OffsetDateTime, "ldt"=>TomlRB::LocalDateTime,
+#     "ld"=>TomlRB::LocalDate, "lt"=>TomlRB::LocalTime}
+#
+# Every fractional second digit is retained, even past the nine nanosecond
+# digits a Ruby Time can hold:
+parsed = TomlRB.parse("ts = 1979-05-27T07:32:00.123456789012")["ts"]
+parsed.fraction # => "123456789012"
+parsed.subsec   # => (30864197253/250000000000)
+#
+# Converting to a Time is explicit. Local values have no time zone, so the
+# caller must name one; when more than nine fraction digits are present, the
+# caller must also say how to round them to nanoseconds:
+parsed.to_time(zone: :utc, rounding: :truncate) # => 1979-05-27 07:32:00.123456789 UTC
+parsed.to_time(zone: "+09:00", rounding: :round)
+#
+# Offset date-times convert in their declared offset:
+TomlRB.parse("ts = 1979-05-27T00:32:00-07:00")["ts"].to_time
+# => 1979-05-27 00:32:00 -0700
+#
+# Local values are never compared as UTC: a local date-time is not equal to
+# an offset date-time, even when their wall-clock fields look the same.
 ```
 
 Dumper Usage

@@ -77,7 +77,7 @@ class TomlTest < Minitest::Test
         name: "Tom Preston-Werner",
         organization: "GitHub",
         bio: "GitHub Cofounder & CEO\nLikes tater tots and beer.",
-        dob: Time.utc(1979, 0o5, 27, 0o7, 32, 0o0)
+        dob: TomlRB::OffsetDateTime.new(1979, 5, 27, 7, 32, 0, nil, "Z")
       },
 
       database: {
@@ -135,38 +135,48 @@ class TomlTest < Minitest::Test
   def test_datetime_classes
     parsed = TomlRB.parse("odt = 1979-05-27T07:32:00Z\nldt = 1979-05-27T07:32:00\nld = 1979-05-27\nlt = 07:32:00")
 
-    assert_instance_of Time, parsed["odt"]
+    assert_instance_of TomlRB::OffsetDateTime, parsed["odt"]
     assert_instance_of TomlRB::LocalDateTime, parsed["ldt"]
     assert_instance_of TomlRB::LocalDate, parsed["ld"]
     assert_instance_of TomlRB::LocalTime, parsed["lt"]
 
     parsed = TomlRB.parse("odt = 1979-05-27T07:32Z\nldt = 2025-01-01T10:30\nlt = 10:30")
 
-    assert_instance_of Time, parsed["odt"]
+    assert_instance_of TomlRB::OffsetDateTime, parsed["odt"]
     assert_instance_of TomlRB::LocalDateTime, parsed["ldt"]
     assert_instance_of TomlRB::LocalTime, parsed["lt"]
-    assert_equal Time.utc(1979, 5, 27, 7, 32, 0), parsed["odt"]
-    assert_equal Time.utc(2025, 1, 1, 10, 30, 0), parsed["ldt"]
-    assert_equal Time.utc(1970, 1, 1, 10, 30, 0), parsed["lt"]
+    assert_equal Time.utc(1979, 5, 27, 7, 32, 0), parsed["odt"].to_time
+    assert_equal [2025, 1, 1, 10, 30, nil], [parsed["ldt"].year, parsed["ldt"].mon, parsed["ldt"].day,
+      parsed["ldt"].hour, parsed["ldt"].min, parsed["ldt"].sec]
+    assert_equal [10, 30, nil], [parsed["lt"].hour, parsed["lt"].min, parsed["lt"].sec]
+    refute parsed["ldt"].is_a?(Time)
+    refute parsed["ld"].is_a?(Time)
+    refute parsed["lt"].is_a?(Time)
   end
 
   def test_local_values_ignore_the_process_time_zone
-    toml = "a = 2021-03-14T02:30:00\nb = 2021-03-28T02:30:00\nc = 2021-09-05\n"
+    toml = "a = 2021-03-14T02:30:00\nb = 2021-03-28T02:30:00\nc = 2021-03-14\nd = 02:30:00\n"
     gaps = {
       "America/New_York" => [2021, 3, 14, 2, 30, 0],
       "Europe/Warsaw" => [2021, 3, 28, 2, 30, 0],
       "America/Santiago" => [2021, 9, 5, 0, 0, 0]
     }
-    wall_clock = ->(time) { [time.year, time.mon, time.day, time.hour, time.min, time.sec] }
+    expected = [[2021, 3, 14, 2, 30, 0], [2021, 3, 28, 2, 30, 0], [2021, 3, 14], [2, 30, 0]]
+    wall_clock = ->(value) {
+      value.is_a?(TomlRB::LocalTime) ? [value.hour, value.min, value.sec] :
+        value.is_a?(TomlRB::LocalDate) ? [value.year, value.mon, value.day] :
+          [value.year, value.mon, value.day, value.hour, value.min, value.sec]
+    }
     tz = ENV["TZ"]
 
+    parsed = TomlRB.parse(toml)
+    assert_equal expected, parsed.values.map(&wall_clock)
+    assert_equal toml, TomlRB.dump(parsed)
     gaps.each do |zone, gap|
       ENV["TZ"] = zone
       refute_equal gap, wall_clock.call(Time.local(*gap)), "Time.local keeps #{gap} in TZ=#{zone}"
-
-      parsed = TomlRB.parse(toml)
-      assert_equal gaps.values, parsed.values.map(&wall_clock), zone
-      assert_equal toml, TomlRB.dump(parsed), zone
+      assert_equal expected, TomlRB.parse(toml).values.map(&wall_clock), zone
+      assert_equal toml, TomlRB.dump(TomlRB.parse(toml)), zone
     end
   ensure
     ENV["TZ"] = tz

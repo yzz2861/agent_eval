@@ -275,7 +275,7 @@ class GrammarTest < Minitest::Test
 
     assert_equal([2.4, 4.72], value_of("[ 2.4, 4.72]"))
 
-    assert_equal([TomlRB::LocalTime.utc(1970, 1, 1, 12), 5], value_of("[12:00:00,5]"))
+    assert_equal([TomlRB::LocalTime.new(12, 0, 0, nil), 5], value_of("[12:00:00,5]"))
 
     assert_equal(%w[hey TomlRB], value_of('[ "hey", "TomlRB"]'))
 
@@ -309,27 +309,41 @@ class GrammarTest < Minitest::Test
   # Dates are really hard to test from JSON, due the imposibility to represent
   # datetimes without quotes.
   def test_datetime
-    assert_equal(Time.utc(1979, 5, 27, 7, 32, 0), value_of("1979-05-27T07:32:00Z"))
+    assert_equal(TomlRB::OffsetDateTime.new(1979, 5, 27, 7, 32, 0, nil, "Z"),
+      value_of("1979-05-27T07:32:00Z"))
 
-    assert_equal(Time.new(1979, 5, 27, 0, 32, 0, "-07:00"), value_of("1979-05-27T00:32:00-07:00"))
+    assert_equal(
+      TomlRB::OffsetDateTime.new(1979, 5, 27, 0, 32, 0, nil, "-07:00"),
+      value_of("1979-05-27T00:32:00-07:00")
+    )
 
-    assert_equal(Time.new(1979, 5, 27, 0, 32, 0.999999r, "-07:00"), value_of("1979-05-27T00:32:00.999999-07:00"))
+    assert_equal(TomlRB::OffsetDateTime.new(1979, 5, 27, 0, 32, 0, "999999", "-07:00"),
+      value_of("1979-05-27T00:32:00.999999-07:00"))
 
-    assert_equal(Time.utc(1979, 5, 27, 7, 32, 0), value_of("1979-05-27 07:32:00Z"))
+    assert_equal(TomlRB::OffsetDateTime.new(1979, 5, 27, 7, 32, 0, nil, "Z"),
+      value_of("1979-05-27 07:32:00Z"))
 
-    assert_equal(Time.utc(1979, 5, 27, 7, 32, 0), value_of("1979-05-27T07:32:00"))
+    assert_equal(TomlRB::LocalDateTime.new(1979, 5, 27, 7, 32, 0, nil),
+      value_of("1979-05-27T07:32:00"))
 
-    assert_equal(Time.utc(1979, 5, 27, 0, 32, 0, 999999), value_of("1979-05-27T00:32:00.999999"))
+    assert_equal(TomlRB::LocalDateTime.new(1979, 5, 27, 0, 32, 0, "999999"),
+      value_of("1979-05-27T00:32:00.999999"))
 
-    assert_equal(Time.utc(1979, 5, 27), value_of("1979-05-27"))
+    assert_equal(TomlRB::LocalDate.new(1979, 5, 27), value_of("1979-05-27"))
 
-    assert_equal(Time.at(3600 * 7 + 60 * 32), value_of("07:32:00"))
+    assert_equal(TomlRB::LocalTime.new(7, 32, 0, nil), value_of("07:32:00"))
 
-    assert_equal(Time.at(60 * 32, 999999), value_of("00:32:00.999999"))
+    assert_equal(TomlRB::LocalTime.new(0, 32, 0, "999999"), value_of("00:32:00.999999"))
 
-    assert_equal(Time.new(1979, 5, 27, 7, 32, 0, "-07:00"), value_of("1979-05-27T07:32-07:00"))
+    assert_equal(TomlRB::OffsetDateTime.new(1979, 5, 27, 7, 32, nil, nil, "-07:00"),
+      value_of("1979-05-27T07:32-07:00"))
 
-    assert_equal(Time.utc(1970, 1, 1, 10, 30, 45), value_of("10:30:45"))
+    assert_equal(TomlRB::LocalTime.new(10, 30, 45, nil), value_of("10:30:45"))
+
+    assert_equal(Time.utc(1979, 5, 27, 7, 32, 0), value_of("1979-05-27T07:32:00Z").to_time)
+    assert_equal(Time.utc(1979, 5, 27, 7, 32, 0), value_of("1979-05-27T07:32:00").to_time(zone: :utc))
+    assert_equal(Time.utc(1970, 1, 1, 0, 32, 0, 999999),
+      value_of("00:32:00.999999").to_time(zone: :utc))
 
     ["10:30.5", "2025-01-01T10:30.5", "1979-05-27T07:32.5Z", "1979-05-27T07:32.5-07:00"].each do |datetime|
       assert_raises TomlRB::ParseError do
@@ -342,35 +356,48 @@ class GrammarTest < Minitest::Test
     {
       "2025-01-01T10:30:00.123456Z" => 123_456_000,
       "2025-01-01T10:30:00.123456789Z" => 123_456_789,
-      "2025-01-01T10:30:00.123456789999Z" => 123_456_789,
+      "2025-01-01T10:30:00.123456789999Z" => "123456789999",
       "1979-05-27T00:32:00.999-07:00" => 999_000_000,
       "2025-01-01T10:30:00.123456" => 123_456_000,
       "2025-01-01T10:30:00.123456789" => 123_456_789,
-      "2025-01-01T10:30:00.123456789999" => 123_456_789,
+      "2025-01-01T10:30:00.123456789999" => "123456789999",
       "10:30:00.123456" => 123_456_000,
       "10:30:00.123456789" => 123_456_789,
-      "10:30:00.123456789999" => 123_456_789
+      "10:30:00.123456789999" => "123456789999"
     }.each do |datetime, nsec|
-      assert_equal nsec, value_of(datetime).nsec
+      value = value_of(datetime)
+      if nsec.is_a?(String)
+        assert_equal(nsec, value.fraction)
+        if value.is_a?(TomlRB::OffsetDateTime)
+          assert_raises(TomlRB::PrecisionError) { value.to_time }
+        else
+          assert_raises(TomlRB::PrecisionError) { value.to_time(zone: :utc) }
+        end
+      else
+        time = value.is_a?(TomlRB::OffsetDateTime) ? value.to_time : value.to_time(zone: :utc)
+        assert_equal(nsec, time.nsec)
+      end
     end
   end
 
   def test_datetime_boundaries
     {
-      "2000-02-29t23:59:59z" => Time.utc(2000, 2, 29, 23, 59, 59),
-      "2000-02-29t23:59:59+18:00" => Time.new(2000, 2, 29, 23, 59, 59, "+18:00"),
-      "2000-02-29T23:59:59-18:00" => Time.new(2000, 2, 29, 23, 59, 59, "-18:00"),
-      "2000-02-29t23:59:59" => TomlRB::LocalDateTime.utc(2000, 2, 29, 23, 59, 59),
-      "2000-02-29" => TomlRB::LocalDate.utc(2000, 2, 29),
-      "1582-10-10" => TomlRB::LocalDate.utc(1582, 10, 10),
-      "2016-12-31T23:59:60.5Z" => Time.utc(2016, 12, 31, 23, 59, 60.5r),
-      "2016-12-31T23:59:60.5" => TomlRB::LocalDateTime.utc(2016, 12, 31, 23, 59, 60.5r),
-      "23:59:60.5" => TomlRB::LocalTime.utc(1970, 1, 1, 23, 59, 60.5r)
+      "2000-02-29t23:59:59z" => TomlRB::OffsetDateTime.new(2000, 2, 29, 23, 59, 59, nil, "z"),
+      "2000-02-29t23:59:59+18:00" => TomlRB::OffsetDateTime.new(2000, 2, 29, 23, 59, 59, nil, "+18:00"),
+      "2000-02-29T23:59:59-18:00" => TomlRB::OffsetDateTime.new(2000, 2, 29, 23, 59, 59, nil, "-18:00"),
+      "2000-02-29t23:59:59" => TomlRB::LocalDateTime.new(2000, 2, 29, 23, 59, 59, nil),
+      "2000-02-29" => TomlRB::LocalDate.new(2000, 2, 29),
+      "1582-10-10" => TomlRB::LocalDate.new(1582, 10, 10),
+      "2016-12-31T23:59:60.5Z" => TomlRB::OffsetDateTime.new(2016, 12, 31, 23, 59, 60, "5", "Z"),
+      "2016-12-31T23:59:60.5" => TomlRB::LocalDateTime.new(2016, 12, 31, 23, 59, 60, "5"),
+      "23:59:60.5" => TomlRB::LocalTime.new(23, 59, 60, "5")
     }.each do |datetime, expected|
       actual = value_of(datetime)
       assert_equal expected, actual
       assert_instance_of expected.class, actual
     end
+
+    assert_equal Time.utc(2017, 1, 1, 0, 0, 0.5r), value_of("2016-12-31T23:59:60.5Z").to_time
   end
 
   def test_inline_table

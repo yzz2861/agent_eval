@@ -10,8 +10,8 @@ module TomlRB
     MULTILINE_LITERAL = /(?:[^'\x00-\x08\x0b-\x1f\x7f]|\r\n|'{1,2}(?!'))*(?:'{0,2}(?='''))?/
     # A UTF-8 regexp raises Encoding::CompatibilityError on binary input with high bytes.
     COMMENT = /[^\x00-\x08\x0a-\x1f\x7f]*/u
-    DATETIME = /(\d{4})-(\d\d)-(\d\d)(?:[Tt ]([0-2]\d):([0-6]\d)(?::([0-6]\d)(?:\.(\d{1,9})\d*)?)?([Zz]|[+-]\d\d:\d\d)?)?/
-    TIME = /([0-2]\d):([0-6]\d)(?::([0-6]\d)(?:\.(\d{1,9})\d*)?)?/
+    DATETIME = /(\d{4})-(\d\d)-(\d\d)(?:[Tt ]([0-2]\d):([0-6]\d)(?::([0-6]\d)(?:\.(\d+))?)?([Zz]|[+-]\d\d:\d\d)?)?/
+    TIME = /([0-2]\d):([0-6]\d)(?::([0-6]\d)(?:\.(\d+))?)?/
     PREFIXED_INTEGER = /0x[0-9a-fA-F](?:_?[0-9a-fA-F])*|0o[0-7](?:_?[0-7])*|0b[01](?:_?[01])*/
     DECIMAL = /[+-]?(?:0|[1-9](?:_?\d)*)(\.\d(?:_?\d)*(?:[eE][+-]?\d(?:_?\d)*)?|[eE][+-]?\d(?:_?\d)*)?/
     MAX_NESTING = 100
