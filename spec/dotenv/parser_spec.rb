@@ -316,4 +316,184 @@ one more line")
     ENV["FOO"] = "existing"
     expect(env("FOO=bar")).to eql("FOO" => "existing")
   end
+
+  describe "parameter expansion" do
+    describe "${VAR:-default}" do
+      it "uses the default when the variable is undefined" do
+        expect(env("BAR=${MISSING:-fallback}")).to eql("BAR" => "fallback")
+      end
+
+      it "uses the default when the variable is empty" do
+        expect(env("FOO=\nBAR=${FOO:-fallback}"))
+          .to eql("FOO" => "", "BAR" => "fallback")
+      end
+
+      it "uses the value when the variable is set" do
+        expect(env("FOO=bar\nBAR=${FOO:-fallback}"))
+          .to eql("FOO" => "bar", "BAR" => "bar")
+      end
+    end
+
+    describe "${VAR-default}" do
+      it "uses the default when the variable is undefined" do
+        expect(env("BAR=${MISSING-fallback}")).to eql("BAR" => "fallback")
+      end
+
+      it "keeps the empty string when the variable is empty" do
+        expect(env("FOO=\nBAR=${FOO-fallback}"))
+          .to eql("FOO" => "", "BAR" => "")
+      end
+
+      it "uses the value when the variable is set" do
+        expect(env("FOO=bar\nBAR=${FOO-fallback}"))
+          .to eql("FOO" => "bar", "BAR" => "bar")
+      end
+    end
+
+    describe "${VAR:+alternate}" do
+      it "expands to nothing when the variable is undefined" do
+        expect(env("BAR=${MISSING:+alternate}")).to eql("BAR" => "")
+      end
+
+      it "expands to nothing when the variable is empty" do
+        expect(env("FOO=\nBAR=${FOO:+alternate}"))
+          .to eql("FOO" => "", "BAR" => "")
+      end
+
+      it "uses the alternate when the variable is set" do
+        expect(env("FOO=bar\nBAR=${FOO:+alternate}"))
+          .to eql("FOO" => "bar", "BAR" => "alternate")
+      end
+    end
+
+    describe "${VAR+alternate}" do
+      it "expands to nothing when the variable is undefined" do
+        expect(env("BAR=${MISSING+alternate}")).to eql("BAR" => "")
+      end
+
+      it "uses the alternate when the variable is empty" do
+        expect(env("FOO=\nBAR=${FOO+alternate}"))
+          .to eql("FOO" => "", "BAR" => "alternate")
+      end
+
+      it "uses the alternate when the variable is set" do
+        expect(env("FOO=bar\nBAR=${FOO+alternate}"))
+          .to eql("FOO" => "bar", "BAR" => "alternate")
+      end
+    end
+
+    describe "${VAR:?message}" do
+      it "raises with the message when the variable is undefined" do
+        expect { env("BAR=${MISSING:?must be set}") }
+          .to raise_error(Dotenv::Substitutions::Variable::MissingVariableError,
+            "MISSING: must be set")
+      end
+
+      it "raises when the variable is empty" do
+        expect { env("FOO=\nBAR=${FOO:?must be set}") }
+          .to raise_error(Dotenv::Substitutions::Variable::MissingVariableError,
+            "FOO: must be set")
+      end
+
+      it "uses the value when the variable is set" do
+        expect(env("FOO=bar\nBAR=${FOO:?must be set}"))
+          .to eql("FOO" => "bar", "BAR" => "bar")
+      end
+
+      it "uses a default message when none is given" do
+        expect { env("BAR=${MISSING:?}") }
+          .to raise_error(Dotenv::Substitutions::Variable::MissingVariableError,
+            "MISSING: parameter not set or empty")
+      end
+    end
+
+    describe "${VAR?message}" do
+      it "raises with the message when the variable is undefined" do
+        expect { env("BAR=${MISSING?must be set}") }
+          .to raise_error(Dotenv::Substitutions::Variable::MissingVariableError,
+            "MISSING: must be set")
+      end
+
+      it "keeps the empty string when the variable is empty" do
+        expect(env("FOO=\nBAR=${FOO?must be set}"))
+          .to eql("FOO" => "", "BAR" => "")
+      end
+
+      it "uses the value when the variable is set" do
+        expect(env("FOO=bar\nBAR=${FOO?must be set}"))
+          .to eql("FOO" => "bar", "BAR" => "bar")
+      end
+
+      it "uses a default message when none is given" do
+        expect { env("BAR=${MISSING?}") }
+          .to raise_error(Dotenv::Substitutions::Variable::MissingVariableError,
+            "MISSING: parameter not set")
+      end
+    end
+
+    it "expands variables inside defaults" do
+      expect(env("FOO=from_var\nBAR=${MISSING:-$FOO}"))
+        .to eql("FOO" => "from_var", "BAR" => "from_var")
+    end
+
+    it "expands variables inside alternates" do
+      expect(env("FOO=bar\nALT=alternate\nBAR=${FOO:+$ALT}"))
+        .to eql("FOO" => "bar", "ALT" => "alternate", "BAR" => "alternate")
+    end
+
+    it "expands nested parameter expansions in defaults" do
+      expect(env("BAR=${MISSING:-${ALSO_MISSING:-nested}}"))
+        .to eql("BAR" => "nested")
+    end
+
+    it "reads variables from ENV" do
+      ENV["HOST"] = "example.com"
+      expect(env("URL=${HOST:-localhost}")).to eql("URL" => "example.com")
+      expect(env("URL=${MISSING_HOST:-localhost}")).to eql("URL" => "localhost")
+    end
+
+    it "does not share variables between parses" do
+      env("SHARED=defined")
+      expect(env("BAR=${SHARED:-fallback}")).to eql("BAR" => "fallback")
+    end
+
+    it "does not expand parameter expressions in single quoted values" do
+      expect(env("BAR='${MISSING:-fallback}'"))
+        .to eql("BAR" => "${MISSING:-fallback}")
+    end
+
+    it "does not expand escaped parameter expressions" do
+      expect(env('BAR=\${MISSING:-fallback}'))
+        .to eql("BAR" => "${MISSING:-fallback}")
+    end
+
+    it "only executes commands from the selected branch" do
+      Dir.mktmpdir do |dir|
+        path = File.join(dir, "executed")
+        expect(env("FOO=set\nBAR=${FOO:-$(touch #{path})}"))
+          .to eql("FOO" => "set", "BAR" => "set")
+        expect(File.exist?(path)).to be(false)
+
+        expect(env("BAR=${MISSING:-$(touch #{path})}")).to eql("BAR" => "")
+        expect(File.exist?(path)).to be(true)
+      end
+    end
+
+    it "executes commands in selected alternates" do
+      expect(env("FOO=set\nBAR=${FOO:+$(echo alternate)}"))
+        .to eql("FOO" => "set", "BAR" => "alternate")
+    end
+
+    it "raises with position diagnostics when nesting exceeds the depth limit" do
+      depth = Dotenv::Substitutions::Variable::MAX_DEPTH + 1
+      expression = "#{"${NESTED:-" * depth}bottom#{"}" * depth}"
+      expect { env("BAR=#{expression}") }
+        .to raise_error(Dotenv::Substitutions::Variable::ExpansionDepthError,
+          /deeper than 10 levels at offset \d+/)
+    end
+
+    it "allows nesting within the depth limit" do
+      expect(env("BAR=${A:-${B:-${C:-nested}}}")).to eql("BAR" => "nested")
+    end
+  end
 end

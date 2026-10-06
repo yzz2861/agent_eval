@@ -228,6 +228,19 @@ If a value contains a `$` and it is not intended to be a variable, wrap it in si
 PASSWORD='pas$word'
 ```
 
+Shell-style parameter expansion is also supported inside braces:
+
+```shell
+HOST=${APP_HOST:-localhost}    # default when APP_HOST is unset or empty
+PORT=${APP_PORT-3000}          # default only when APP_PORT is unset (empty string is kept)
+PROTO=${APP_HOST:+https}       # alternate when APP_HOST is set and not empty
+SCHEME=${APP_HOST+https}       # alternate when APP_HOST is set (even when empty)
+TOKEN=${API_TOKEN:?required}   # raises an error when API_TOKEN is unset or empty
+KEY=${API_KEY?required}        # raises an error only when API_KEY is unset
+```
+
+Defaults and alternates may reference other variables, including nested expansions like `${HOST:-${DEFAULT_HOST}}`. Only the selected branch is expanded, so commands in a skipped branch (e.g. `${HOST:-$(hostname)}` when `HOST` is set) are never executed. Nested expansions are limited to a depth of 10 and report the offending offset when exceeded.
+
 ### Comments
 
 Comments may be added to your file as such:

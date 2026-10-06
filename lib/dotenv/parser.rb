@@ -1,3 +1,4 @@
+require "English"
 require "dotenv/substitutions/variable"
 require "dotenv/substitutions/command" if RUBY_VERSION > "1.8.7"
 
