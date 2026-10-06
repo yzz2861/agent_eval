@@ -201,10 +201,22 @@ module Parslet
   end
   module_function :dynamic
 
-  # Returns a parslet atom that parses infix expressions. Operations are 
-  # specified as a list of <atom, precedence, associativity> tuples, where 
-  # atom is simply the parslet atom that matches an operator, precedence is 
-  # a number and associativity is either :left or :right. 
+  # Returns a parslet atom that parses expressions. Operations are
+  # specified as a list of tuples, where each tuple names the parslet atom
+  # (or atoms) that match an operator, a precedence number and an
+  # associativity. Besides binary infix operators, the same table accepts:
+  #
+  # * prefix operators, such as the unary minus in -x, declared with an
+  #   associativity of :prefix:
+  #     [minus, 4, :prefix]
+  # * postfix operators, such as the factorial in x!, declared as
+  #   :postfix:
+  #     [bang, 6, :postfix]
+  # * ternary operators, such as condition ? yes : no, declared with their
+  #   opening and closing atom in a four element tuple:
+  #     [question, colon, 1, :right]
+  #   The :right associativity gives the conventional nesting of the C
+  #   conditional, so a ? b ? c : d : e reads as a ? (b ? c : d) : e.
   # 
   # Higher precedence indicates that the operation should bind tighter than
   # other operations with lower precedence. In common algebra, '+' has 
@@ -216,11 +228,25 @@ module Parslet
   # are ambiguous like '1 + 2 + 3'. If '+' is specified as left associative, 
   # the expression would be interpreted as '(1 + 2) + 3'. If right 
   # associativity is chosen, it would be interpreted as '1 + (2 + 3)'. Note 
-  # that the hash trees output reflect that choice as well. 
+  # that the hash trees output reflect that choice as well. The precedence of
+  # a :prefix operator also fixes its relation to the binary operations: if
+  # unary '-' binds tighter than '**', -2**3 parses as (-2)**3, and if '**'
+  # binds tighter it parses as -(2**3).
+  #
+  # Operators sharing a prefix (for example a '?' opening a ternary and a
+  # '??' binary operator) are all probed at the same position; the longest
+  # match wins, so a shorter operator never consumes the shared characters
+  # prematurely. Ties are broken by precedence, then by postfix over infix
+  # over prefix, and finally by declaration order.
   #
   # An optional block can be provided in order to manipulate the generated tree.
   # The block will be called on each operator and passed 3 arguments: the left
   # operand, the operator, and the right operand.
+  # A block taking variable arguments (+|*args|+) is instead called for every
+  # fixity with two arguments (operator and operand) for prefix operations,
+  # two arguments (operand and operator) for postfix operations, three for
+  # binary operations and five (left operand, opening operator, middle
+  # expression, closing operator, right expression) for ternary operations.
   #
   # Examples:
   #   infix_expression(integer, [add_op, 1, :left])
@@ -230,9 +256,16 @@ module Parslet
   #   # would parse '1 + 2 + 3' as:
   #   # { :plus => [1, { :plus => [2, 3] }] }
   #
+  # Without a reducer block the generated tree uses :l/:o/:r hashes for
+  # binary nodes, an :o/:r hash for prefix nodes, an :l/:o hash for postfix
+  # nodes and an :l/:o/:m/:c/:r hash for ternary nodes (with :m the middle
+  # expression and :c the closing operator).
+  #
   # @param element [Parslet::Atoms::Base] elements that take the NUMBER position
   #    in the expression
-  # @param operations [Array<(Parslet::Atoms::Base, Integer, {:left, :right})>]
+  # @param operations [Array] list of <atom, Integer, {:left, :right,
+  #    :prefix, :postfix}> tuples, or <atom, atom, Integer, {:left,
+  #    :right}> tuples for ternary operators
   #  
   # @see Parslet::Atoms::Infix
   #
