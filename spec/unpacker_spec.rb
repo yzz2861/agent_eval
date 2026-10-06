@@ -1,6 +1,8 @@
 require 'stringio'
 require 'tempfile'
 require 'zlib'
+require 'json'
+require 'open3'
 
 require 'spec_helper'
 
@@ -11,6 +13,172 @@ describe MessagePack::Unpacker do
 
   let :packer do
     MessagePack::Packer.new
+  end
+
+  describe 'binary view mode' do
+    let(:data) { ('abcdefghij' * 500).b }
+    let(:payload) { MessagePack.dump(data) }
+    let(:unpacker) { MessagePack::Unpacker.new(binary_view: true) }
+
+    it 'keeps normal unpacking as strings' do
+      expect(unpacker.binary_view?).to be(true)
+      expect(MessagePack.unpack(payload)).to be_a(String)
+    end
+
+    it 'returns binary views with length and range reads' do
+      unpacker.feed(payload)
+      view = unpacker.read
+
+      expect(view).to be_a(MessagePack::BinaryView)
+      expect(view.bytesize).to eq(data.bytesize)
+      expect(view.length).to eq(data.bytesize)
+      expect(view).not_to be_empty
+      expect(view[2, 5]).to eq(data.byteslice(2, 5))
+      expect(view[2, 5]).to be_a(MessagePack::BinaryView)
+      expect(view[10..14]).to eq(data.byteslice(10..14))
+      expect(view[-1]).to eq(data[-1])
+      expect(view.each.to_a).to eq(data.bytes)
+      expect(view.to_s).to eq(data)
+      expect(view.to_s).to be_a(String)
+    end
+
+    it 'writes views and ranges to IO without exposing mutable storage' do
+      output = StringIO.new
+      unpacker.feed(payload)
+      view = unpacker.read
+
+      expect(view.write_to(output)).to eq(data.bytesize)
+      expect(output.string.b).to eq(data)
+
+      output.rewind
+      output.string.clear
+      view[100, 20].write_to(output)
+      expect(output.string.b).to eq(data.byteslice(100, 20))
+      expect(view).to be_frozen
+      expect(view.to_s).not_to be_frozen
+    end
+
+    it 'applies only to binary values' do
+      text = 'hello'
+      mixed = MessagePack.dump([text, text.b, 1, nil])
+      unpacker.feed(mixed)
+      string, binary, number, null_value = unpacker.read
+
+      expect(string).to be_a(String)
+      expect(binary).to be_a(MessagePack::BinaryView)
+      expect(number).to eq(1)
+      expect(null_value).to be_nil
+    end
+
+    it 'remains stable after more feed, reset, GC and input reuse' do
+      input = payload.dup
+      unpacker.feed(input)
+      view = unpacker.read
+
+      unpacker.feed(MessagePack.dump('next'.b))
+      unpacker.reset
+      input.replace(MessagePack.dump('replaced input'.b))
+      GC.start
+      GC.start(full_mark: true, immediate_mark: true, immediate_sweep: true)
+      GC.verify_compaction_references(expand_heap: true, toward: :empty) if GC.respond_to?(:verify_compaction_references)
+
+      expect(view.bytesize).to eq(data.bytesize)
+      expect(view.to_s).to eq(data)
+      expect { view.to_s << 'changed' }.not_to change { view.to_s }
+    end
+
+    it 'uses a copied view when a binary crosses input chunks' do
+      split = 10
+      unpacker.feed(payload.byteslice(0, split))
+      expect { unpacker.read }.to raise_error(EOFError)
+      unpacker.feed(payload.byteslice(split, payload.bytesize - split))
+      view = unpacker.read
+
+      expect(view).to be_a(MessagePack::BinaryView)
+      expect(view.to_s).to eq(data)
+      expect(view.zero_copy?).to eq(false)
+    end
+
+    it 'reports the option' do
+      expect(MessagePack::Unpacker.new(binary_view: true).binary_view?).to be(true)
+      expect(MessagePack::Unpacker.new.binary_view?).to be(false)
+    end
+
+    it 'works through a factory and handles empty binaries' do
+      factory = MessagePack::Factory.new
+      unpacker = factory.unpacker(binary_view: true)
+      unpacker.feed(MessagePack.dump(''.b))
+      view = unpacker.read
+
+      expect(view).to be_a(MessagePack::BinaryView)
+      expect(view).to be_empty
+      expect(view.bytesize).to eq(0)
+      expect(view.zero_copy?).to be(false)
+    end
+
+    if RUBY_ENGINE != 'jruby'
+      def object_dump(object)
+        JSON.parse(ObjectSpace.dump(object))
+      end
+
+      it 'shares storage for a binary contained in one input chunk' do
+        unpacker.feed(payload)
+        view = unpacker.read
+        storage = view.instance_variable_get(:@string)
+        dump = object_dump(storage)
+
+        expect(view.zero_copy?).to be(true)
+        expect(ObjectSpace.memsize_of(storage)).to be < data.bytesize
+        expect(dump['shared']).to be(true)
+        expect(dump['references']).to be_a(Array)
+      end
+
+      it 'keeps copied views independent from all input chunks' do
+        first = payload.byteslice(0, 10)
+        second = payload.byteslice(10, payload.bytesize - 10)
+        unpacker.feed(first)
+        expect { unpacker.read }.to raise_error(EOFError)
+        unpacker.feed(second)
+        view = unpacker.read
+
+        first.replace('x' * first.bytesize)
+        second.replace('y' * second.bytesize)
+        GC.start
+
+        expect(view.to_s).to eq(data)
+        expect(object_dump(view.instance_variable_get(:@string))['shared']).to be_nil
+      end
+
+      it 'holds chunk storage while the view is alive and releases it afterward' do
+        script = <<~RUBY
+          require 'objspace'
+          require 'json'
+          require 'msgpack'
+
+          marker = 'release-sentinel-031-' * 64
+          chunk = MessagePack.dump(marker.b)
+          unpacker = MessagePack::Unpacker.new(binary_view: true)
+          unpacker.feed(chunk)
+          view = unpacker.read
+          root = JSON.parse(ObjectSpace.dump(view.instance_variable_get(:@string))).fetch('references').first
+          print view.zero_copy? ? '1' : '0'
+
+          view = nil
+          chunk = nil
+          unpacker = nil
+          10.times { GC.start(full_mark: true, immediate_mark: true, immediate_sweep: true) }
+
+          found = ObjectSpace.each_object(String).any? do |string|
+            ObjectSpace.dump(string).include?('"address":"' + root + '"')
+          end
+          print(found ? '1' : '0')
+        RUBY
+
+        output, status = Open3.capture2(RbConfig.ruby, '-I', File.expand_path('../../lib', __dir__), '-e', script)
+        expect(status.success?).to be(true)
+        expect(output).to eq('10')
+      end
+    end
   end
 
   it 'gets options to specify how to unpack values' do

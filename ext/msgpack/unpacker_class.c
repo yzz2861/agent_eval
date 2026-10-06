@@ -22,6 +22,7 @@
 #include "factory_class.h"
 
 VALUE cMessagePack_Unpacker;
+VALUE cMessagePack_BinaryView;
 
 //static VALUE s_unpacker_value;
 //static msgpack_unpacker_t* s_unpacker;
@@ -37,6 +38,7 @@ static VALUE sym_symbolize_keys;
 static VALUE sym_key_cache;
 static VALUE sym_freeze;
 static VALUE sym_allow_unknown_ext;
+static VALUE sym_binary_view;
 
 static void Unpacker_free(void *ptr)
 {
@@ -140,6 +142,9 @@ VALUE MessagePack_Unpacker_initialize(int argc, VALUE* argv, VALUE self)
 
         v = rb_hash_aref(options, sym_allow_unknown_ext);
         msgpack_unpacker_set_allow_unknown_ext(uk, RTEST(v));
+
+        v = rb_hash_aref(options, sym_binary_view);
+        uk->binary_view = RTEST(v);
     }
 
     return self;
@@ -161,6 +166,12 @@ static VALUE Unpacker_allow_unknown_ext_p(VALUE self)
 {
     msgpack_unpacker_t *uk = MessagePack_Unpacker_get(self);
     return uk->allow_unknown_ext ? Qtrue : Qfalse;
+}
+
+static VALUE Unpacker_binary_view_p(VALUE self)
+{
+    msgpack_unpacker_t *uk = MessagePack_Unpacker_get(self);
+    return uk->binary_view ? Qtrue : Qfalse;
 }
 
 NORETURN(static void raise_unpacker_error(msgpack_unpacker_t *uk, int r))
@@ -420,6 +431,9 @@ void MessagePack_Unpacker_module_init(VALUE mMessagePack)
     sym_key_cache = ID2SYM(rb_intern("key_cache"));
     sym_freeze = ID2SYM(rb_intern("freeze"));
     sym_allow_unknown_ext = ID2SYM(rb_intern("allow_unknown_ext"));
+    sym_binary_view = ID2SYM(rb_intern("binary_view"));
+
+    cMessagePack_BinaryView = rb_define_class_under(mMessagePack, "BinaryView", rb_cObject);
 
     rb_define_alloc_func(cMessagePack_Unpacker, MessagePack_Unpacker_alloc);
 
@@ -427,6 +441,7 @@ void MessagePack_Unpacker_module_init(VALUE mMessagePack)
     rb_define_method(cMessagePack_Unpacker, "symbolize_keys?", Unpacker_symbolized_keys_p, 0);
     rb_define_method(cMessagePack_Unpacker, "freeze?", Unpacker_freeze_p, 0);
     rb_define_method(cMessagePack_Unpacker, "allow_unknown_ext?", Unpacker_allow_unknown_ext_p, 0);
+    rb_define_method(cMessagePack_Unpacker, "binary_view?", Unpacker_binary_view_p, 0);
     rb_define_method(cMessagePack_Unpacker, "buffer", Unpacker_buffer, 0);
     rb_define_method(cMessagePack_Unpacker, "read", Unpacker_read, 0);
     rb_define_alias(cMessagePack_Unpacker, "unpack", "read");

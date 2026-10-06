@@ -22,6 +22,7 @@ module MessagePack
     # * *:freeze* freeze the deserialized objects. Can allow string deduplication and some allocation elision.
     # * *:key_cache* Enable caching of map keys, this can improve performance significantly if the same map keys are frequently encountered, but also degrade performance if that's not the case.
     # * *:allow_unknown_ext* allow to deserialize ext type object with unknown type id as ExtensionValue instance. Otherwise (by default), unpacker throws UnknownExtTypeError.
+    # * *:binary_view* return MessagePack::BinaryView objects for binary data instead of String. String fields are still decoded as String.
     #
     # See also Buffer#initialize for other options.
     #
@@ -44,6 +45,14 @@ module MessagePack
     # @return nil
     #
     def register_type(type, klass, method_name, &block)
+    end
+
+    #
+    # Returns true when binary fields are decoded as MessagePack::BinaryView objects.
+    #
+    # @return [Boolean]
+    #
+    def binary_view?
     end
 
     #

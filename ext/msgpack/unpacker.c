@@ -65,6 +65,15 @@ static int RAW_TYPE_BINARY = 257;
 static int16_t INITIAL_BUFFER_CAPACITY_MAX = SHRT_MAX;
 
 static msgpack_rmem_t s_stack_rmem;
+static ID s_binary_view_initialize_internal;
+
+static VALUE make_binary_view(VALUE string, bool zero_copy)
+{
+    VALUE view = rb_obj_alloc(cMessagePack_BinaryView);
+    rb_funcall(view, s_binary_view_initialize_internal, 2,
+            string, zero_copy ? Qtrue : Qfalse);
+    return view;
+}
 
 #if !defined(HAVE_RB_HASH_NEW_CAPA)
 static inline VALUE rb_hash_new_capa_inline(long capa)
@@ -83,6 +92,7 @@ void msgpack_unpacker_static_init(void)
 {
     assert(sizeof(msgpack_unpacker_stack_entry_t) * MSGPACK_UNPACKER_STACK_CAPACITY <= MSGPACK_RMEM_PAGE_SIZE);
 
+    s_binary_view_initialize_internal = rb_intern("initialize_internal");
     msgpack_rmem_init(&s_stack_rmem);
 }
 
@@ -125,6 +135,7 @@ void _msgpack_unpacker_init(msgpack_unpacker_t* uk)
 
     uk->last_object = Qnil;
     uk->reading_raw = Qnil;
+    uk->binary_view = false;
 }
 
 void _msgpack_unpacker_destroy(msgpack_unpacker_t* uk)
@@ -336,6 +347,23 @@ static int read_raw_body_cont(msgpack_unpacker_t* uk)
 {
     size_t length = uk->reading_raw_remaining;
 
+    if(uk->binary_view && uk->reading_raw_type == RAW_TYPE_BINARY) {
+        if(uk->reading_raw == Qnil) {
+            uk->reading_raw = rb_str_buf_new(length);
+        }
+
+        if(!msgpack_buffer_read_all(UNPACKER_BUFFER_(uk), RSTRING_PTR(uk->reading_raw), length)) {
+            return PRIMITIVE_EOF;
+        }
+
+        rb_str_set_len(uk->reading_raw, length);
+        ENCODING_SET(uk->reading_raw, msgpack_rb_encindex_ascii8bit);
+        VALUE view = make_binary_view(uk->reading_raw, false);
+        uk->reading_raw = Qnil;
+        uk->reading_raw_remaining = 0;
+        return object_complete(uk, view);
+    }
+
     if(uk->reading_raw == Qnil) {
         size_t buffered_size = msgpack_buffer_all_readable_size(UNPACKER_BUFFER_(uk));
         uk->reading_raw = rb_str_buf_new(length > buffered_size ? buffered_size : length);
@@ -411,6 +439,19 @@ static inline int read_raw_body_begin(msgpack_unpacker_t* uk, int raw_type)
     size_t length = uk->reading_raw_remaining;
     if(length <= msgpack_buffer_top_readable_size(UNPACKER_BUFFER_(uk))) {
         int ret;
+        if (uk->binary_view && raw_type == RAW_TYPE_BINARY) {
+            bool zero_copy = length > 0 && UNPACKER_BUFFER_(uk)->head->mapped_string != NO_MAPPED_STRING;
+            VALUE string;
+            if(zero_copy) {
+                string = msgpack_buffer_read_top_as_string(UNPACKER_BUFFER_(uk), length, false, false);
+            } else {
+                string = rb_str_new(UNPACKER_BUFFER_(uk)->read_buffer, length);
+                _msgpack_buffer_consumed(UNPACKER_BUFFER_(uk), length);
+            }
+            ret = object_complete(uk, make_binary_view(string, zero_copy));
+            uk->reading_raw_remaining = 0;
+            return ret;
+        }
         if ((uk->optimized_symbol_ext_type && uk->symbol_ext_type == raw_type)) {
             VALUE symbol = msgpack_buffer_read_top_as_symbol(UNPACKER_BUFFER_(uk), length, raw_type != RAW_TYPE_BINARY);
             ret = object_complete_frozen(uk, symbol);

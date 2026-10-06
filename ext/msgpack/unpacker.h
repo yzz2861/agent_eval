@@ -27,6 +27,8 @@ struct msgpack_unpacker_t;
 typedef struct msgpack_unpacker_t msgpack_unpacker_t;
 typedef struct msgpack_unpacker_stack_t msgpack_unpacker_stack_t;
 
+extern VALUE cMessagePack_BinaryView;
+
 enum stack_type_t {
     STACK_TYPE_ARRAY,
     STACK_TYPE_MAP_KEY,
@@ -73,6 +75,7 @@ struct msgpack_unpacker_t {
     bool symbolize_keys: 1;
     bool freeze: 1;
     bool allow_unknown_ext: 1;
+    bool binary_view: 1;
     bool optimized_symbol_ext_type: 1;
 };
 
@@ -142,4 +145,3 @@ int msgpack_unpacker_read_array_header(msgpack_unpacker_t* uk, uint32_t* result_
 int msgpack_unpacker_read_map_header(msgpack_unpacker_t* uk, uint32_t* result_size);
 
 #endif
-

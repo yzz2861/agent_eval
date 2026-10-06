@@ -41,37 +41,39 @@ public class Decoder implements Iterator<IRubyObject> {
   private boolean symbolizeKeys;
   private boolean freeze;
   private boolean allowUnknownExt;
+  private boolean binaryView;
 
   public Decoder(Ruby runtime) {
-    this(runtime, null, new byte[] {}, 0, 0, false, false, false);
+    this(runtime, null, new byte[] {}, 0, 0, false, false, false, false);
   }
 
   public Decoder(Ruby runtime, Unpacker unpacker) {
-    this(runtime, unpacker, new byte[] {}, 0, 0, false, false, false);
+    this(runtime, unpacker, new byte[] {}, 0, 0, false, false, false, false);
   }
 
   public Decoder(Ruby runtime, byte[] bytes) {
-    this(runtime, null, bytes, 0, bytes.length, false, false, false);
+    this(runtime, null, bytes, 0, bytes.length, false, false, false, false);
   }
 
   public Decoder(Ruby runtime, Unpacker unpacker, byte[] bytes) {
-    this(runtime, unpacker, bytes, 0, bytes.length, false, false, false);
+    this(runtime, unpacker, bytes, 0, bytes.length, false, false, false, false);
   }
 
   public Decoder(Ruby runtime, Unpacker unpacker, byte[] bytes, boolean symbolizeKeys, boolean freeze, boolean allowUnknownExt) {
-    this(runtime, unpacker, bytes, 0, bytes.length, symbolizeKeys, freeze, allowUnknownExt);
+    this(runtime, unpacker, bytes, 0, bytes.length, symbolizeKeys, freeze, allowUnknownExt, false);
   }
 
   public Decoder(Ruby runtime, Unpacker unpacker, byte[] bytes, int offset, int length) {
-    this(runtime, unpacker, bytes, offset, length, false, false, false);
+    this(runtime, unpacker, bytes, offset, length, false, false, false, false);
   }
 
-  public Decoder(Ruby runtime, Unpacker unpacker, byte[] bytes, int offset, int length, boolean symbolizeKeys, boolean freeze, boolean allowUnknownExt) {
+  public Decoder(Ruby runtime, Unpacker unpacker, byte[] bytes, int offset, int length, boolean symbolizeKeys, boolean freeze, boolean allowUnknownExt, boolean binaryView) {
     this.runtime = runtime;
     this.unpacker = unpacker;
     this.symbolizeKeys = symbolizeKeys;
     this.freeze = freeze;
     this.allowUnknownExt = allowUnknownExt;
+    this.binaryView = binaryView;
     this.binaryEncoding = runtime.getEncodingService().getAscii8bitEncoding();
     this.utf8Encoding = UTF8Encoding.INSTANCE;
     this.unpackErrorClass = runtime.getModule("MessagePack").getClass("UnpackError");
@@ -127,11 +129,19 @@ public class Decoder implements Iterator<IRubyObject> {
   }
 
   private IRubyObject consumeString(int size, Encoding encoding) {
+    return consumeString(size, encoding, false);
+  }
+
+  private IRubyObject consumeString(int size, Encoding encoding, boolean binary) {
     byte[] bytes = readBytes(size);
     ByteList byteList = new ByteList(bytes, encoding);
     RubyString string = runtime.newString(byteList);
     if (this.freeze) {
       string = runtime.freezeAndDedupString(string);
+    }
+    if (binaryView && binary) {
+      RubyClass binaryViewClass = runtime.getModule("MessagePack").getClass("BinaryView");
+      return binaryViewClass.callMethod(runtime.getCurrentContext(), "new", new IRubyObject[] { string, runtime.getFalse() });
     }
     return string;
   }
@@ -264,9 +274,9 @@ public class Decoder implements Iterator<IRubyObject> {
         case NIL:      return runtime.getNil();
         case FALSE:    return runtime.getFalse();
         case TRUE:     return runtime.getTrue();
-        case BIN8:     return consumeString(buffer.get() & 0xff, binaryEncoding);
-        case BIN16:    return consumeString(buffer.getShort() & 0xffff, binaryEncoding);
-        case BIN32:    return consumeString(getUnsignedInt(), binaryEncoding);
+        case BIN8:     return consumeString(buffer.get() & 0xff, binaryEncoding, true);
+        case BIN16:    return consumeString(buffer.getShort() & 0xffff, binaryEncoding, true);
+        case BIN32:    return consumeString(getUnsignedInt(), binaryEncoding, true);
         case VAREXT8:  return consumeExtension(buffer.get() & 0xff);
         case VAREXT16: return consumeExtension(buffer.getShort() & 0xffff);
         case VAREXT32: return consumeExtension(getUnsignedInt());

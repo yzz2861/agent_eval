@@ -8,6 +8,7 @@ else
 end
 
 require "msgpack/buffer"
+require "msgpack/binary_view"
 require "msgpack/packer"
 require "msgpack/unpacker"
 require "msgpack/factory"
