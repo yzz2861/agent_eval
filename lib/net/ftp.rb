@@ -102,6 +102,10 @@ module Net
     # When +true+, the connection is in passive mode.  Default: +true+.
     attr_accessor :passive
 
+    # Controls use of the PRET command before data transfers.  +true+ forces
+    # PRET, +false+ disables it, and +:auto+ uses FEAT to negotiate PRET.
+    attr_reader :pret
+
     # When +true+, use the IP address in PASV responses.  Otherwise, it uses
     # the same IP address for the control connection.  Default: +false+.
     attr_accessor :use_pasv_ip
@@ -213,6 +217,9 @@ module Net
     # account::   Account information for ACCT.
     # passive::   When +true+, the connection is in passive mode. Default:
     #             +true+.
+    # pret::      Controls PRET use.  +true+ forces PRET, +false+ disables it,
+    #             and +:auto+ falls back only when the server explicitly does
+    #             not support PRET. Default: +false+.
     # open_timeout::  Number of seconds to wait for the connection to open.
     #                 See Net::FTP#open_timeout for details.  Default: +nil+.
     # read_timeout::  Number of seconds to wait for one block to be read.
@@ -293,6 +300,7 @@ module Net
       else
         @debug_mode = options[:debug_mode]
       end
+      self.pret = options.fetch(:pret, false)
       @debug_output = $stdout
       @resume = false
       @bare_sock = @sock = NullSocket.new
@@ -306,6 +314,16 @@ module Net
         if options[:username]
           login(options[:username], options[:password], options[:account])
         end
+      end
+    end
+
+    # Sets the PRET negotiation mode.  +true+ or +:enabled+ forces PRET,
+    # +false+ or +:disabled+ disables it, and +:auto+ negotiates it.
+    def pret=(value)
+      synchronize do
+        @pret = parse_pret_mode(value)
+        @pret_supported = nil
+        @prepared_transfer_command = nil
       end
     end
 
@@ -347,6 +365,71 @@ module Net
       end
     end
     private :with_binary
+
+    def parse_pret_mode(value)
+      case value
+      when true, :enabled
+        true
+      when false, :disabled
+        false
+      when :auto
+        :auto
+      else
+        raise ArgumentError, "pret must be true, false, or :auto"
+      end
+    end
+    private :parse_pret_mode
+
+    def reset_pret_preparation
+      @prepared_transfer_command = nil
+    end
+    private :reset_pret_preparation
+
+    def pret_transfer?(cmd)
+      cmd.match?(/\A(?:RETR|STOR|LIST|MLSD)(?:\s|\z)/)
+    end
+    private :pret_transfer?
+
+    def negotiate_pret
+      return unless @pret_supported.nil?
+
+      begin
+        @pret_supported = features.any? do |feature|
+          feature.match?(/\APRET(?:\s|\z)/i)
+        end
+      rescue FTPPermError => error
+        if error.message.match?(/\A50[02](?:\s|\z)/)
+          @pret_supported = false
+        else
+          raise
+        end
+      end
+    end
+    private :negotiate_pret
+
+    def prepare_transfer(cmd)
+      return unless @pret && pret_transfer?(cmd)
+
+      if @pret == :auto
+        negotiate_pret
+        return unless @pret_supported
+      elsif @pret_supported == false
+        return
+      end
+
+      begin
+        voidcmd("PRET #{cmd}")
+        @pret_supported = true
+        @prepared_transfer_command = cmd
+      rescue FTPPermError => error
+        if @pret == :auto && error.message.match?(/\A50[02](?:\s|\z)/)
+          @pret_supported = false
+          return
+        end
+        raise
+      end
+    end
+    private :prepare_transfer
 
     # Obsolete
     def return_code # :nodoc:
@@ -403,6 +486,8 @@ module Net
       debug_print "connect: #{host}:#{port}"
       synchronize do
         @host = host
+        @pret_supported = nil
+        reset_pret_preparation
         @bare_sock = open_socket(host, port)
         if @ssl_context
           begin
@@ -570,56 +655,61 @@ module Net
 
     # Constructs a connection for transferring data
     def transfercmd(cmd, rest_offset = nil) # :nodoc:
-      if @passive
-        host, port = makepasv
-        succeeded = false
-        begin
-          conn = open_socket(host, port)
-          if @resume and rest_offset
-            resp = sendcmd("REST " + rest_offset.to_s)
-            if !resp.start_with?("3")
+      begin
+        prepare_transfer(cmd)
+        if @passive
+          host, port = makepasv
+          succeeded = false
+          begin
+            conn = open_socket(host, port)
+            if @resume and rest_offset
+              resp = sendcmd("REST " + rest_offset.to_s)
+              if !resp.start_with?("3")
+                raise FTPReplyError, resp
+              end
+            end
+            resp = sendcmd(cmd)
+            # skip 2XX for some ftp servers
+            resp = getresp if resp.start_with?("2")
+            if !resp.start_with?("1")
               raise FTPReplyError, resp
             end
+            succeeded = true
+          ensure
+            conn&.close if !succeeded
           end
-          resp = sendcmd(cmd)
-          # skip 2XX for some ftp servers
-          resp = getresp if resp.start_with?("2")
-          if !resp.start_with?("1")
-            raise FTPReplyError, resp
-          end
-          succeeded = true
-        ensure
-          conn&.close if !succeeded
-        end
-      else
-        sock = makeport
-        begin
-          addr = sock.local_address
-          sendport(addr.ip_address, addr.ip_port)
-          if @resume and rest_offset
-            resp = sendcmd("REST " + rest_offset.to_s)
-            if !resp.start_with?("3")
+        else
+          sock = makeport
+          begin
+            addr = sock.local_address
+            sendport(addr.ip_address, addr.ip_port)
+            if @resume and rest_offset
+              resp = sendcmd("REST " + rest_offset.to_s)
+              if !resp.start_with?("3")
+                raise FTPReplyError, resp
+              end
+            end
+            resp = sendcmd(cmd)
+            # skip 2XX for some ftp servers
+            resp = getresp if resp.start_with?("2")
+            if !resp.start_with?("1")
               raise FTPReplyError, resp
             end
+            conn, = sock.accept
+            sock.shutdown(Socket::SHUT_WR) rescue nil
+            sock.read rescue nil
+          ensure
+            sock.close
           end
-          resp = sendcmd(cmd)
-          # skip 2XX for some ftp servers
-          resp = getresp if resp.start_with?("2")
-          if !resp.start_with?("1")
-            raise FTPReplyError, resp
-          end
-          conn, = sock.accept
-          sock.shutdown(Socket::SHUT_WR) rescue nil
-          sock.read rescue nil
-        ensure
-          sock.close
         end
-      end
-      if @private_data_connection
-        return BufferedSSLSocket.new(start_tls_session(conn),
-                                     read_timeout: @read_timeout)
-      else
-        return BufferedSocket.new(conn, read_timeout: @read_timeout)
+        if @private_data_connection
+          return BufferedSSLSocket.new(start_tls_session(conn),
+                                       read_timeout: @read_timeout)
+        else
+          return BufferedSocket.new(conn, read_timeout: @read_timeout)
+        end
+      ensure
+        reset_pret_preparation
       end
     end
     private :transfercmd
@@ -720,7 +810,7 @@ module Net
       synchronize do
         with_binary(true) do
           begin
-            conn = transfercmd(cmd)
+            conn = transfercmd(cmd, rest_offset)
             while buf = file.read(blocksize)
               conn.write(buf)
               yield(buf) if block_given?
@@ -1195,6 +1285,7 @@ module Net
       if dirname == ".."
         begin
           voidcmd("CDUP")
+          reset_pret_preparation
           return
         rescue FTPPermError => e
           if e.message[0, 3] != "500"
@@ -1204,6 +1295,7 @@ module Net
       end
       cmd = "CWD #{dirname}"
       voidcmd(cmd)
+      reset_pret_preparation
     end
 
     def get_body(resp) # :nodoc:

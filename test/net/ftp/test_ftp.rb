@@ -900,6 +900,379 @@ class FTPTest < Test::Unit::TestCase
     end
   end
 
+  def test_pret_commands_preserve_spaces
+    commands = []
+    binary_data = "\x00\x01".b
+    list_data = "-rw-r--r-- 1 user group 0 Jan 1  dir file\r\n"
+    mlsd_data = "Type=file; dir file\r\n"
+    stored_data = nil
+    server = create_ftp_server(nil, "127.0.0.1") { |sock|
+      pret_login(sock, commands)
+      4.times do
+        pret_passive_transfer(sock, commands) do |command, data|
+          stored_data = data if command.start_with?("STOR ")
+          case command
+          when "RETR dir/file name.bin"
+            binary_data
+          when "LIST dir name"
+            list_data
+          when "MLSD dir name"
+            mlsd_data
+          end
+        end
+      end
+    }
+    begin
+      ftp = Net::FTP.new("127.0.0.1", port: server.port,
+                         passive: true,
+                         pret: true)
+      ftp.read_timeout *= 5 if mjit_enabled?
+      ftp.login
+      received_data = +"".b
+      ftp.retrbinary("RETR dir/file name.bin", 1024) do |data|
+        received_data << data
+      end
+      ftp.storbinary("STOR dir/file name.bin", StringIO.new(binary_data), 1024)
+      assert_equal(["dir file"], ftp.list("dir name"))
+      entries = ftp.mlsd("dir name")
+      assert_equal(["dir file"], entries.map(&:pathname))
+      assert_equal(binary_data, received_data)
+      assert_equal(binary_data, stored_data)
+      assert_equal([
+        "PRET RETR dir/file name.bin",
+        "PASV",
+        "RETR dir/file name.bin",
+        "PRET STOR dir/file name.bin",
+        "PASV",
+        "STOR dir/file name.bin",
+        "PRET LIST dir name",
+        "PASV",
+        "LIST dir name",
+        "PRET MLSD dir name",
+        "PASV",
+        "MLSD dir name",
+      ], pret_commands(commands))
+    ensure
+      ftp.close if ftp
+      server.close
+    end
+  end
+
+  def test_pret_rest_order
+    commands = []
+    stored_data = nil
+    server = create_ftp_server(nil, "127.0.0.1") { |sock|
+      pret_login(sock, commands)
+      2.times do
+        pret_passive_transfer(sock, commands) do |command, data|
+          stored_data = data if command.start_with?("STOR ")
+          command.start_with?("RETR ") ? "a" * 1024 : "data\r\n"
+        end
+      end
+    }
+    begin
+      ftp = Net::FTP.new("127.0.0.1", port: server.port,
+                         passive: true,
+                         pret: true)
+      ftp.resume = true
+      ftp.login
+      ftp.retrbinary("RETR old file", 1024, 123) { }
+      ftp.storbinary("STOR new file", StringIO.new("a" * 1024), 1024, 456)
+      assert_equal([
+        "PRET RETR old file",
+        "PASV",
+        "REST 123",
+        "RETR old file",
+        "PRET STOR new file",
+        "PASV",
+        "REST 456",
+        "STOR new file",
+      ], pret_commands(commands))
+      assert_equal(1024 - 456, stored_data.bytesize)
+    ensure
+      ftp.close if ftp
+      server.close
+    end
+  end
+
+  def test_pret_auto_falls_back_when_unsupported
+    commands = []
+    server = create_ftp_server(nil, "127.0.0.1") { |sock|
+      pret_login(sock, commands)
+      commands.push(sock.gets)
+      sock.print("211-Features\r\n")
+      sock.print(" PRET\r\n")
+      sock.print("211 End\r\n")
+      pret_passive_transfer(sock, commands,
+                             "502 PRET not implemented\r\n")
+      pret_passive_transfer(sock, commands) { "data\r\n" }
+    }
+    begin
+      ftp = Net::FTP.new("127.0.0.1", port: server.port,
+                         passive: true,
+                         pret: :auto)
+      ftp.login
+      ftp.retrbinary("RETR first file", 1024) { }
+      ftp.retrbinary("RETR second file", 1024) { }
+      assert_equal([
+        "FEAT",
+        "PRET RETR first file",
+        "PASV",
+        "RETR first file",
+        "PASV",
+        "RETR second file",
+      ], pret_commands(commands))
+    ensure
+      ftp.close if ftp
+      server.close
+    end
+  end
+
+  def test_pret_auto_does_not_fallback_on_temporary_failure
+    commands = []
+    server = create_ftp_server(nil, "127.0.0.1") { |sock|
+      pret_login(sock, commands)
+      commands.push(sock.gets)
+      sock.print("421 Features temporarily unavailable\r\n")
+    }
+    begin
+      ftp = Net::FTP.new("127.0.0.1", port: server.port,
+                         passive: true,
+                         pret: :auto)
+      ftp.login
+      assert_raise(Net::FTPTempError) do
+        ftp.retrbinary("RETR temporary file", 1024) { }
+      end
+      assert_equal(["FEAT"], pret_commands(commands))
+    ensure
+      ftp.close if ftp
+      server.close
+    end
+  end
+
+  def test_pret_auto_does_not_fallback_on_temporary_prepare_failure
+    commands = []
+    server = create_ftp_server(nil, "127.0.0.1") { |sock|
+      pret_login(sock, commands)
+      commands.push(sock.gets)
+      sock.print("211-Features\r\n")
+      sock.print(" PRET\r\n")
+      sock.print("211 End\r\n")
+      command = sock.gets
+      commands.push(command)
+      sock.print("450 PRET temporarily unavailable\r\n")
+    }
+    begin
+      ftp = Net::FTP.new("127.0.0.1", port: server.port,
+                         passive: true,
+                         pret: :auto)
+      ftp.login
+      assert_raise(Net::FTPTempError) do
+        ftp.retrbinary("RETR temporary file", 1024) { }
+      end
+      assert_equal(["FEAT", "PRET RETR temporary file"], pret_commands(commands))
+    ensure
+      ftp.close if ftp
+      server.close
+    end
+  end
+
+  def test_pret_forced_does_not_fallback_when_unsupported
+    commands = []
+    server = create_ftp_server(nil, "127.0.0.1") { |sock|
+      pret_login(sock, commands)
+      command = sock.gets
+      commands.push(command)
+      sock.print("502 PRET not implemented\r\n")
+    }
+    begin
+      ftp = Net::FTP.new("127.0.0.1", port: server.port,
+                         passive: true,
+                         pret: true)
+      ftp.login
+      assert_raise(Net::FTPPermError) do
+        ftp.retrbinary("RETR forced file", 1024) { }
+      end
+      assert_equal(["PRET RETR forced file"], pret_commands(commands))
+    ensure
+      ftp.close if ftp
+      server.close
+    end
+  end
+
+  def test_pret_disabled
+    commands = []
+    server = create_ftp_server(nil, "127.0.0.1") { |sock|
+      pret_login(sock, commands)
+      pret_passive_transfer(sock, commands) { "data\r\n" }
+    }
+    begin
+      ftp = Net::FTP.new("127.0.0.1", port: server.port,
+                         passive: true,
+                         pret: false)
+      ftp.login
+      ftp.retrbinary("RETR disabled file", 1024) { }
+      assert_equal(["PASV", "RETR disabled file"], pret_commands(commands))
+    ensure
+      ftp.close if ftp
+      server.close
+    end
+  end
+
+  def test_pret_reconnect_rediscovers_support
+    first_commands = []
+    first_server = create_ftp_server(nil, "127.0.0.1") { |sock|
+      pret_login(sock, first_commands)
+      commands = first_commands
+      commands.push(sock.gets)
+      sock.print("211-Features\r\n")
+      sock.print(" UTF8\r\n")
+      sock.print("211 End\r\n")
+      pret_passive_transfer(sock, commands) { "data\r\n" }
+    }
+    ftp = Net::FTP.new("127.0.0.1", port: first_server.port,
+                       passive: true,
+                       pret: :auto)
+    begin
+      ftp.login
+      ftp.retrbinary("RETR first connection", 1024) { }
+      assert_equal(["FEAT", "PASV", "RETR first connection"],
+                   pret_commands(first_commands))
+      ftp.close
+      @thread.join
+    ensure
+      first_server.close
+    end
+
+    second_commands = []
+    second_server = create_ftp_server(nil, "127.0.0.1") { |sock|
+      pret_login(sock, second_commands)
+      commands = second_commands
+      commands.push(sock.gets)
+      sock.print("211-Features\r\n")
+      sock.print(" PRET\r\n")
+      sock.print("211 End\r\n")
+      pret_passive_transfer(sock, second_commands) { "data\r\n" }
+    }
+    begin
+      ftp.connect("127.0.0.1", second_server.port)
+      ftp.login
+      ftp.retrbinary("RETR second connection", 1024) { }
+      assert_equal(["FEAT", "PRET RETR second connection", "PASV",
+                    "RETR second connection"],
+                   pret_commands(second_commands))
+    ensure
+      ftp.close if ftp
+      second_server.close
+    end
+  end
+
+  def test_pret_chdir_prepares_again
+    commands = []
+    server = create_ftp_server(nil, "127.0.0.1") { |sock|
+      pret_login(sock, commands)
+      pret_passive_transfer(sock, commands) { "data\r\n" }
+      commands.push(sock.gets)
+      sock.print("250 Directory changed\r\n")
+      pret_passive_transfer(sock, commands) { "data\r\n" }
+    }
+    begin
+      ftp = Net::FTP.new("127.0.0.1", port: server.port,
+                         passive: true,
+                         pret: true)
+      ftp.login
+      ftp.retrbinary("RETR old dir file", 1024) { }
+      ftp.chdir("new dir")
+      ftp.retrbinary("RETR new dir file", 1024) { }
+      assert_equal([
+        "PRET RETR old dir file",
+        "PASV",
+        "RETR old dir file",
+        "CWD new dir",
+        "PRET RETR new dir file",
+        "PASV",
+        "RETR new dir file",
+      ], pret_commands(commands))
+    ensure
+      ftp.close if ftp
+      server.close
+    end
+  end
+
+  def test_pret_retried_after_data_connection_failure
+    commands = []
+    server = create_ftp_server(nil, "127.0.0.1") { |sock|
+      pret_login(sock, commands)
+      commands.push(sock.gets)
+      sock.print("200 PRET successful\r\n")
+      commands.push(sock.gets)
+      closed_data_server = TCPServer.new("127.0.0.1", 0)
+      closed_port = closed_data_server.local_address.ip_port
+      closed_data_server.close
+      sock.printf("227 Entering Passive Mode (127,0,0,1,%s).\r\n",
+                  closed_port.divmod(256).join(","))
+
+      commands.push(sock.gets)
+      sock.print("200 PRET successful\r\n")
+      commands.push(sock.gets)
+      data_server = create_data_connection_server(sock, "127.0.0.1")
+      command = sock.gets
+      commands.push(command)
+      sock.print("150 Opening BINARY mode data connection\r\n")
+      conn = data_server.accept
+      conn.print("data")
+      conn.shutdown(Socket::SHUT_WR)
+      conn.read rescue nil
+      conn.close
+      data_server.close
+      sock.print("226 Transfer complete\r\n")
+    }
+    begin
+      ftp = Net::FTP.new("127.0.0.1", port: server.port,
+                         passive: true,
+                         pret: true)
+      ftp.login
+      assert_raise(SystemCallError) do
+        ftp.retrbinary("RETR retry file", 1024) { }
+      end
+      received_data = +"".b
+      ftp.retrbinary("RETR retry file", 1024) do |data|
+        received_data << data
+      end
+      assert_equal("data", received_data)
+      assert_equal([
+        "PRET RETR retry file",
+        "PASV",
+        "PRET RETR retry file",
+        "PASV",
+        "RETR retry file",
+      ], pret_commands(commands))
+    ensure
+      ftp.close if ftp
+      server.close
+    end
+  end
+
+  def test_pret_rejects_newlines
+    ftp = Net::FTP.new(nil, passive: true, pret: true)
+    assert_raise(ArgumentError) do
+      ftp.retrbinary("RETR file\nname", 1024) { }
+    end
+    assert_raise(ArgumentError) do
+      ftp.list("dir\rname")
+    end
+  end
+
+  def test_pret_option
+    assert_equal(false, Net::FTP.new.pret)
+    assert_equal(true, Net::FTP.new(nil, pret: true).pret)
+    assert_equal(false, Net::FTP.new(nil, pret: false).pret)
+    assert_equal(:auto, Net::FTP.new(nil, pret: :auto).pret)
+    assert_raise(ArgumentError) do
+      Net::FTP.new(nil, pret: :required)
+    end
+  end
+
   def test_storbinary
     commands = []
     binary_data = (0..0xff).map {|i| i.chr}.join * 4 * 3
@@ -2754,8 +3127,8 @@ EOF
     end
   end
 
-  def create_data_connection_server(sock)
-    data_server = TCPServer.new(SERVER_ADDR, 0)
+  def create_data_connection_server(sock, addr = SERVER_ADDR)
+    data_server = TCPServer.new(addr, 0)
     port = data_server.local_address.ip_port
     if data_server.local_address.ipv4?
       sock.printf("227 Entering Passive Mode (127,0,0,1,%s).\r\n",
@@ -2766,6 +3139,81 @@ EOF
       flunk "Invalid local address"
     end
     return data_server
+  end
+
+  def pret_login(sock, commands)
+    sock.print("220 (test_ftp).\r\n")
+    commands.push(sock.gets)
+    sock.print("331 Please specify the password.\r\n")
+    commands.push(sock.gets)
+    sock.print("230 Login successful.\r\n")
+    commands.push(sock.gets)
+    sock.print("200 Switching to Binary mode.\r\n")
+  end
+
+  def pret_passive_transfer(sock, commands, pret_response = "200 PRET successful\r\n")
+    command = sock.gets
+    commands.push(command)
+    if command.start_with?("TYPE ")
+      sock.print("200 Type set\r\n")
+      command = sock.gets
+      commands.push(command)
+    end
+
+    if command.start_with?("PRET ")
+      sock.print(pret_response)
+      command = sock.gets
+      commands.push(command)
+    end
+
+    data_server = create_data_connection_server(sock, "127.0.0.1")
+
+    rest_offset = nil
+    until command =~ /\A(PASV|EPSV)\r\n/
+      flunk "PASV or EPSV expected"
+    end
+
+    loop do
+      command = sock.gets
+      commands.push(command)
+      if command.start_with?("REST ")
+        rest_offset = command[/\d+(?=\r\n\z)/].to_i
+        sock.print("350 Restarting at #{rest_offset}\r\n")
+      else
+        break
+      end
+    end
+
+    final_command = command.chomp
+    sock.print("150 Opening data connection\r\n")
+    conn = data_server.accept
+    begin
+      if final_command.start_with?("STOR ")
+        data = conn.read
+        yield(final_command, data) if block_given?
+      else
+        data = block_given? ? (yield(final_command, nil) || "data\r\n") : "data\r\n"
+        data = data.byteslice(rest_offset..-1) if rest_offset
+        conn.print(data)
+      end
+      conn.shutdown(Socket::SHUT_WR)
+      conn.read rescue nil
+    ensure
+      conn.close
+      data_server.close
+    end
+    sock.print("226 Transfer complete\r\n")
+    if final_command.start_with?("LIST ", "MLSD ")
+      commands.push(sock.gets)
+      sock.print("200 Switching to Binary mode.\r\n")
+    end
+    return data
+  end
+
+  def pret_commands(commands)
+    commands
+      .map { |command| command.chomp }
+      .grep(/\A(?:FEAT|PRET|PASV|EPSV|REST|RETR|STOR|LIST|MLSD|CWD)(?:\s|\z)/)
   end
 
   def chdir_to_tmpdir
