@@ -1,3 +1,6 @@
+=== Unreleased
+* Add Net::LDAP::LDIF, a streaming import/export layer for LDIF change records (add, delete, modify and moddn), with continuation lines, base64 and URL values, record-level controls, ordered modify groups, line folding and record/line-scoped parse errors.
+
 === Net::LDAP 0.20.0
 * Update test.yml by @HarlemSquirrel in #433
 * Add `ostruct` as a dependency to the gemspec by @Ivanov-Anton in #432
