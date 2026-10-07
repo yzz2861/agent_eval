@@ -377,6 +377,54 @@ module Hamster
       replace_suffix(index, suffix.tap { |a| a.shift })
     end
 
+    # Return a new `Vector` with the `length` items starting at `from`
+    # replaced by the items of `other`. `other` may be a `Vector` or any
+    # object convertible to an `Array` using `#to_a`. If `length` extends
+    # past the end of the vector, it is clamped. A `length` of 0 inserts
+    # `other` at `from` without removing anything.
+    #
+    # The result is built by joining three pieces -- the items before
+    # `from`, the replacement, and the items after `from + length` --
+    # directly on the trie structure, without flattening this vector to
+    # an `Array`. Whole subtrees which still fall on 32-item boundaries
+    # in the result are shared by reference. Only the following parts
+    # have to be rebuilt:
+    #
+    # * the spine of nodes leading down to the two cut points (a
+    #   logarithmic number of nodes),
+    # * the leaf containing each cut point,
+    # * the leaves after `from + length`, but only if the size of the
+    #   replaced segment changed (`length != other.size` modulo 32),
+    #   because the fixed 32-way grid requires every leaf to start on a
+    #   multiple of 32. Their items are still shared; only the small
+    #   node arrays are re-chunked.
+    #
+    # @example
+    #   Hamster::Vector[1, 2, 3, 4, 5].replace_range(1, 2, Hamster::Vector[:a, :b, :c])
+    #   # => Hamster::Vector[1, :a, :b, :c, 4, 5]
+    #   Hamster::Vector[1, 2, 3].replace_range(1, 0, [:a])
+    #   # => Hamster::Vector[1, :a, 2, 3]
+    #
+    # @param from [Integer] The index of the first item to replace. May be negative.
+    # @param length [Integer] How many items to replace
+    # @param other [Enumerable] The replacement items
+    # @return [Vector]
+    # @raise [IndexError] if `from` is out of bounds or `length` is negative
+    def replace_range(from, length, other)
+      raise IndexError, "index #{from} outside of vector bounds" if from < -@size
+      from += @size if from < 0
+      raise IndexError, "index #{from} outside of vector bounds" if from > @size
+      raise IndexError, "negative length #{length}" if length < 0
+      length = @size - from if from + length > @size
+
+      middle = other.is_a?(Vector) ? other : self.class.new(other.to_a)
+      new_size = @size - length + middle.size
+      forest = prefix_forest(from)
+      forest.concat(middle.decompose_to_forest)
+      forest.concat(suffix_forest(from + length))
+      build_from_forest(forest, new_size)
+    end
+
     # Return a new `Vector` with the last element removed. Return `self` if
     # empty.
     #
@@ -590,6 +638,11 @@ module Hamster
     # Return a new `Vector` built by concatenating this one with `other`. `other`
     # can be any object which is convertible to an `Array` using `#to_a`.
     #
+    # When `other` is also a `Vector`, the two tries are joined directly:
+    # whole subtrees which fall on 32-item boundaries in the result are shared
+    # by reference, and only the nodes along the seam (where the two vectors
+    # meet) are rebuilt. Neither vector is flattened to an `Array` first.
+    #
     # @example
     #   Hamster::Vector["A", "B", "C"] + ["D", "E"]
     #   # => Hamster::Vector["A", "B", "C", "D", "E"]
@@ -597,9 +650,13 @@ module Hamster
     # @param other [Enumerable] The collection to concatenate onto this vector
     # @return [Vector]
     def +(other)
-      other = other.to_a
-      other = other.dup if other.frozen?
-      replace_suffix(@size, other)
+      if other.is_a?(Vector)
+        concat_vector(other)
+      else
+        other = other.to_a
+        other = other.dup if other.frozen?
+        replace_suffix(@size, other)
+      end
     end
     alias :concat :+
 
@@ -1307,6 +1364,34 @@ module Hamster
 
     private
 
+    # Join this vector with another `Vector`, sharing trie structure. Whole
+    # subtrees of both vectors which fall on 32-item boundaries in the
+    # result are reused by reference; only nodes along the seam are rebuilt.
+    #
+    # @return [Vector]
+    # @private
+    def concat_vector(other)
+      return other if @size == 0
+      return self if other.size == 0
+      build_from_forest(decompose_to_forest.concat(other.decompose_to_forest),
+                        @size + other.size)
+    end
+
+    protected
+
+    # Break this vector's trie down into a "forest": a left-to-right list
+    # of `[height, node]` pairs. Every node is a full (completely populated)
+    # subtree, except possibly the final leaf. The concatenation of the
+    # items of all the trees is exactly the contents of this vector.
+    #
+    # @return [Array]
+    # @private
+    def decompose_to_forest
+      decompose_subtree(@root, @levels)
+    end
+
+    private
+
     def traverse_depth_first(node, level, &block)
       return node.each(&block) if level == 0
       node.each { |child| traverse_depth_first(child, level - 1, &block) }
@@ -1504,6 +1589,153 @@ module Hamster
           raise "Shouldn't happen"
         end
       end
+    end
+
+    # Return a forest (see #decompose_to_forest) covering the items of this
+    # vector at indexes `0...from`. The trees are shared with this vector,
+    # except possibly the last one, a partial leaf copied out of the leaf
+    # containing `from`.
+    #
+    # @private
+    def prefix_forest(from)
+      forest = []
+      node = @root
+      bitshift = @levels * BITS_PER_LEVEL
+      while bitshift > 0
+        slot = (from >> bitshift) & INDEX_MASK
+        level = bitshift / BITS_PER_LEVEL
+        node[0...slot].each { |child| forest << [level - 1, child] }
+        return forest if (from & ((1 << bitshift) - 1)) == 0
+        node = node[slot]
+        bitshift -= BITS_PER_LEVEL
+      end
+      leaf_end = from & INDEX_MASK
+      forest << [0, node[0...leaf_end]] if leaf_end > 0
+      forest
+    end
+
+    # Return a forest (see #decompose_to_forest) covering the items of this
+    # vector at indexes `from...@size`. The trees are shared with this
+    # vector, except possibly the first one, a partial leaf copied out of
+    # the leaf containing `from`.
+    #
+    # @private
+    def suffix_forest(from)
+      return decompose_to_forest if from == 0
+      return [] if from == @size
+      # descend to the leaf containing `from`, remembering the path
+      path = []
+      node = @root
+      bitshift = @levels * BITS_PER_LEVEL
+      while bitshift > 0
+        path << [node, bitshift]
+        node = node[(from >> bitshift) & INDEX_MASK]
+        bitshift -= BITS_PER_LEVEL
+      end
+      leaf_start = from & INDEX_MASK
+      # reuse the whole leaf when the cut lines up with its boundary
+      forest = [[0, leaf_start == 0 ? node : node[leaf_start..-1]]]
+      # walk back up, appending the siblings to the right of the path;
+      # the last sibling may be a partial subtree on the right spine, so
+      # it is broken down rather than reused whole
+      path.reverse_each do |parent, bits|
+        level = bits / BITS_PER_LEVEL
+        siblings = parent[((from >> bits) & INDEX_MASK) + 1..-1]
+        next if siblings.nil? || siblings.empty?
+        siblings[0..-2].each { |child| forest << [level - 1, child] }
+        decompose_subtree(siblings[-1], level - 1, forest)
+      end
+      forest
+    end
+
+    # Append the `[height, node]` pairs which make up the subtree rooted
+    # at `node` (a node at `level`) to `forest`, left to right. Every node
+    # emitted is a full subtree, except possibly the final leaf.
+    #
+    # @private
+    def decompose_subtree(node, level, forest = [])
+      while level > 0
+        node[0..-2].each { |child| forest << [level - 1, child] }
+        node = node[-1]
+        level -= 1
+      end
+      forest << [0, node] unless node.empty?
+      forest
+    end
+
+    # Build a new vector from a forest of `[height, node]` pairs (see
+    # #decompose_to_forest) holding `size` items in total. Trees which line
+    # up with the 32-item grid of the new vector are reused by reference;
+    # only nodes which straddle the seams between the original trees are
+    # rebuilt.
+    #
+    # @private
+    def build_from_forest(forest, size)
+      levels = 0
+      levels += 1 while size > (BLOCK_SIZE << (BITS_PER_LEVEL * levels))
+      root = size == 0 ? [].freeze : build_trie_node(forest, levels, size).freeze
+      self.class.alloc(root, size, levels)
+    end
+
+    # Consume trees from the front of `forest` to build a node at `level`,
+    # covering `count` items. If the front of the forest is exactly a full
+    # subtree of the required size, it is reused by reference.
+    #
+    # @private
+    def build_trie_node(forest, level, count)
+      if level > 0 && count == (BLOCK_SIZE << (BITS_PER_LEVEL * level))
+        height, node = forest.first
+        if height == level
+          forest.shift
+          return node
+        end
+      end
+      if level == 0
+        take_items(forest, count)
+      else
+        child_span = BLOCK_SIZE << (BITS_PER_LEVEL * (level - 1))
+        children = []
+        remaining = count
+        while remaining > 0
+          n = remaining < child_span ? remaining : child_span
+          children << build_trie_node(forest, level - 1, n)
+          remaining -= n
+        end
+        children.freeze
+      end
+    end
+
+    # Consume `count` items (at most one leaf's worth) from the front of
+    # `forest`, returning them as a single leaf node. Whole leaves are
+    # reused by reference; partial leaves are copied.
+    #
+    # @private
+    def take_items(forest, count)
+      height, node = forest.first
+      if height == 0 && node.size == count
+        forest.shift
+        return node
+      end
+      items = []
+      remaining = count
+      while remaining > 0
+        height, node = forest.first
+        if height > 0
+          # a subtree which straddles a seam: break it down into its
+          # children and put them back at the front of the forest
+          forest.shift
+          forest.unshift(*node.map { |child| [height - 1, child] })
+        elsif node.size <= remaining
+          items.concat(node)
+          forest.shift
+          remaining -= node.size
+        else
+          items.concat(node.first(remaining))
+          forest[0] = [0, node[remaining..-1]]
+          remaining = 0
+        end
+      end
+      items.freeze
     end
   end
 
