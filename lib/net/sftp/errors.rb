@@ -3,6 +3,12 @@ module Net; module SFTP
   # The base exception class for the SFTP system.
   class Exception < RuntimeError; end
 
+  # Raised when a checksum response cannot be interpreted safely.
+  class ChecksumProtocolError < Net::SFTP::Exception; end
+
+  # Raised when the server selects a checksum unsupported by this client.
+  class UnsupportedChecksumAlgorithm < Net::SFTP::Exception; end
+
   # A exception class for reporting a non-success result of an operation.
   class StatusException < Net::SFTP::Exception
 

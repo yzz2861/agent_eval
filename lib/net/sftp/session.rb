@@ -6,6 +6,7 @@ require 'net/sftp/request'
 require 'net/sftp/operations/dir'
 require 'net/sftp/operations/upload'
 require 'net/sftp/operations/download'
+require 'net/sftp/operations/checksum_download'
 require 'net/sftp/operations/file_factory'
 
 module Net; module SFTP
@@ -68,6 +69,9 @@ module Net; module SFTP
     # the server has not yet responded to will be represented here.
     attr_reader :pending_requests
 
+    # The extensions advertised by the server during protocol negotiation.
+    attr_reader :extensions
+
     # Creates a new Net::SFTP instance atop the given Net::SSH connection.
     # This will return immediately, before the SFTP connection has been properly
     # initialized. Once the connection is ready, the given block will be called.
@@ -82,6 +86,7 @@ module Net; module SFTP
       self.logger = session.logger
       @state      = :closed
       @pending_requests = {}
+      @extensions = {}
 
       connect(&block)
     end
@@ -126,6 +131,20 @@ module Net; module SFTP
         destination = local || StringIO.new
         result = download(remote, destination, options, &block).wait
         local ? result : destination.string
+      end
+
+      # Updates +local+ by comparing block checksums from the server's
+      # "check-file" extension and reading only blocks that differ. Returns
+      # immediately; run the event loop with #loop or ChecksumDownload#wait.
+      def checksum_download(remote, local, options={}, &block)
+        Operations::ChecksumDownload.new(self, local, remote, options, &block)
+      end
+
+      # Identical to #checksum_download, but blocks until the operation is
+      # complete. A final whole-file checksum determines whether the result is
+      # valid or should be retried.
+      def checksum_download!(remote, local, options={}, &block)
+        checksum_download(remote, local, options, &block).wait
       end
 
       # Returns an Net::SFTP::Operations::FileFactory instance, which can be used to
@@ -257,6 +276,18 @@ module Net; module SFTP
       #   data = sftp.read!(handle, 0, 1024)
       def read!(handle, offset, length, &callback)
         wait_for(read(handle, offset, length, &callback), :data)
+      end
+
+      # Requests checksums from the "check-file" SFTP extension. The server
+      # chooses the checksum algorithm and block layout; callers should
+      # validate the response rather than assuming their preferences were used.
+      def check_file(path, algorithms, offset, length, block_size, &callback)
+        request :check_file, path, algorithms, offset, length, block_size, &callback
+      end
+
+      # Identical to #check_file, but blocks until the server responds.
+      def check_file!(path, algorithms, offset, length, block_size, &callback)
+        wait_for(check_file(path, algorithms, offset, length, block_size, &callback))
       end
 
       # :call-seq:
@@ -927,11 +958,11 @@ module Net; module SFTP
         negotiated_version = [server_version, HIGHEST_PROTOCOL_VERSION_SUPPORTED].min
         info { "negotiated version is #{negotiated_version}" }
 
-        extensions = {}
+        @extensions = {}
         until packet.eof?
           name = packet.read_string
           data = packet.read_string
-          extensions[name] = data
+          @extensions[name] = data
         end
 
         @protocol = Protocol.load(self, negotiated_version)

@@ -31,8 +31,50 @@ module Net; module SFTP; module Protocol
       when FXP_DATA   then parse_data_packet(packet)
       when FXP_NAME   then parse_name_packet(packet)
       when FXP_ATTRS  then parse_attrs_packet(packet)
+      when FXP_EXTENDED_REPLY then parse_extended_reply_packet(packet)
       else raise NotImplementedError, "unknown packet type: #{packet.type}"
       end
+    end
+
+    # Sends a "check-file" extended request. The server is allowed to choose
+    # the algorithm and geometry actually used, subject to the client request.
+    def check_file(path, algorithms, offset, length, block_size)
+      send_request(FXP_EXTENDED,
+        :string, "check-file",
+        :string, path,
+        :string, algorithms,
+        :int64, offset,
+        :int64, block_size,
+        :int64, length)
+    end
+
+    # Parses a check-file extended reply. The fields remain in the same order
+    # used by the extension: algorithm, offset, end offset, block size, and
+    # checksums.
+    def parse_check_file_packet(packet)
+      algorithm = packet.read_string
+      offset = packet.read_int64
+      end_offset = packet.read_int64
+      block_size = packet.read_int64
+      checksums = []
+      packet.read_long.times { checksums << packet.read_string }
+      raise EOFError, "malformed check-file response" unless packet.eof?
+
+      {
+        :algorithm => algorithm,
+        :offset => offset,
+        :end_offset => end_offset,
+        :block_size => block_size,
+        :checksums => checksums
+      }
+    rescue EOFError
+      raise Net::SFTP::ChecksumProtocolError, "malformed check-file response"
+    end
+
+    # Generic extended replies are identified only by the pending request.
+    # The current extension client uses check-file, so delegate to its parser.
+    def parse_extended_reply_packet(packet)
+      parse_check_file_packet(packet)
     end
 
     private
