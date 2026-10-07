@@ -88,16 +88,36 @@ module Net
       include SSL
     end
 
+    require_relative "ftp/block_mode"
+
     # :stopdoc:
     VERSION = "0.3.9"
     FTP_PORT = 21
     CRLF = "\r\n"
     DEFAULT_BLOCKSIZE = BufferedIO::BUFSIZE
+    # Stream transfer mode (RFC 959, MODE S).  This is the default.
+    STREAM_MODE = "S"
+    # Block transfer mode (RFC 959, MODE B).
+    BLOCK_MODE = "B"
+    # File structure (RFC 959, STRU F).  This is the default.
+    FILE_STRUCTURE = "F"
+    # Record structure (RFC 959, STRU R).
+    RECORD_STRUCTURE = "R"
     @@default_passive = true
     # :startdoc:
 
     # When +true+, transfers are performed in binary mode.  Default: +true+.
     attr_reader :binary
+
+    # The transfer mode used for data connections, as set by the FTP MODE
+    # command.  Either Net::FTP::STREAM_MODE (the default) or
+    # Net::FTP::BLOCK_MODE.
+    attr_reader :transfer_mode
+
+    # The data structure used for transfers, as set by the FTP STRU
+    # command.  Either Net::FTP::FILE_STRUCTURE (the default) or
+    # Net::FTP::RECORD_STRUCTURE.
+    attr_reader :structure
 
     # When +true+, the connection is in passive mode.  Default: +true+.
     attr_accessor :passive
@@ -226,6 +246,10 @@ module Net
     #                connection.  Default: +false+.
     # debug_mode::  When +true+, all traffic to and from the server is
     #               written to +$stdout+.  Default: +false+.
+    # transfer_mode::  Transfer mode, "S" (stream, the default) or "B"
+    #                  (block).  See #transfer_mode=.
+    # structure::   Data structure, "F" (file, the default) or "R"
+    #               (record).  See #structure=.
     #
     def initialize(host = nil, user_or_options = {}, passwd = nil, acct = nil)
       super()
@@ -283,6 +307,9 @@ module Net
         @implicit_ftps = false
       end
       @binary = true
+      @transfer_mode = parse_transfer_mode(options[:transfer_mode])
+      @structure = parse_structure(options[:structure])
+      @transfer_active = false
       if options[:passive].nil?
         @passive = @@default_passive
       else
@@ -318,6 +345,87 @@ module Net
       end
     end
 
+    # Sets the transfer mode and, when logged in, sends the corresponding
+    # FTP MODE command.  +newmode+ must be Net::FTP::STREAM_MODE ("S") or
+    # Net::FTP::BLOCK_MODE ("B").  Compressed mode ("C") is not supported.
+    #
+    # The mode cannot be changed while a transfer is in progress.
+    def transfer_mode=(newmode)
+      newmode = parse_transfer_mode(newmode)
+      check_transfer_not_active("transfer mode")
+      if newmode != @transfer_mode
+        @transfer_mode = newmode
+        if @logged_in
+          voidcmd("MODE #{@transfer_mode}")
+        end
+      end
+    end
+
+    # Sets the data structure and, when logged in, sends the
+    # corresponding FTP STRU command.  +newstructure+ must be
+    # Net::FTP::FILE_STRUCTURE ("F") or Net::FTP::RECORD_STRUCTURE ("R").
+    # Page structure ("P") is not supported.
+    #
+    # The structure cannot be changed while a transfer is in progress.
+    def structure=(newstructure)
+      newstructure = parse_structure(newstructure)
+      check_transfer_not_active("structure")
+      if newstructure != @structure
+        @structure = newstructure
+        if @logged_in
+          voidcmd("STRU #{@structure}")
+        end
+      end
+    end
+
+    def block_mode? # :nodoc:
+      @transfer_mode == BLOCK_MODE
+    end
+    private :block_mode?
+
+    def record_structure? # :nodoc:
+      @structure == RECORD_STRUCTURE
+    end
+    private :record_structure?
+
+    def check_blocksize(blocksize) # :nodoc:
+      unless blocksize.is_a?(Integer) && blocksize > 0
+        raise ArgumentError, "blocksize must be a positive Integer"
+      end
+    end
+    private :check_blocksize
+
+    def check_transfer_not_active(what) # :nodoc:
+      if @transfer_active
+        raise FTPPermError, "cannot change #{what} during a transfer"
+      end
+    end
+    private :check_transfer_not_active
+
+    def parse_transfer_mode(mode) # :nodoc:
+      mode = STREAM_MODE if mode.nil?
+      mode = String(mode).upcase
+      unless [STREAM_MODE, BLOCK_MODE].include?(mode)
+        raise ArgumentError,
+              "unsupported transfer mode #{mode.inspect}: " \
+              "expected \"S\" (stream) or \"B\" (block)"
+      end
+      mode
+    end
+    private :parse_transfer_mode
+
+    def parse_structure(structure) # :nodoc:
+      structure = FILE_STRUCTURE if structure.nil?
+      structure = String(structure).upcase
+      unless [FILE_STRUCTURE, RECORD_STRUCTURE].include?(structure)
+        raise ArgumentError,
+              "unsupported structure #{structure.inspect}: " \
+              "expected \"F\" (file) or \"R\" (record)"
+      end
+      structure
+    end
+    private :parse_structure
+
     # Sends a command to destination host, with the current binary sendmode
     # type.
     #
@@ -347,6 +455,30 @@ module Net
       end
     end
     private :with_binary
+
+    def reject_block_mode_for_line_transfer(method_name) # :nodoc:
+      if block_mode?
+        raise FTPPermError,
+              "#{method_name} is not supported in block mode " \
+              "(MODE B); use retrbinary/retrrecords or " \
+              "storbinary/storrecords"
+      end
+    end
+    private :reject_block_mode_for_line_transfer
+
+    def require_record_transfer(method_name) # :nodoc:
+      unless block_mode?
+        raise FTPPermError,
+              "#{method_name} requires block mode " \
+              "(Net::FTP::BLOCK_MODE)"
+      end
+      unless record_structure?
+        raise FTPPermError,
+              "#{method_name} requires record structure " \
+              "(Net::FTP::RECORD_STRUCTURE)"
+      end
+    end
+    private :require_record_transfer
 
     # Obsolete
     def return_code # :nodoc:
@@ -654,6 +786,12 @@ module Net
       end
       @welcome = resp
       send_type_command
+      if @transfer_mode != STREAM_MODE
+        voidcmd("MODE #{@transfer_mode}")
+      end
+      if @structure != FILE_STRUCTURE
+        voidcmd("STRU #{@structure}")
+      end
       @logged_in = true
     end
 
@@ -664,12 +802,108 @@ module Net
     # (such as "RETR myfile").
     #
     def retrbinary(cmd, blocksize, rest_offset = nil) # :yield: data
+      check_blocksize(blocksize) if @transfer_mode == BLOCK_MODE
       synchronize do
         with_binary(true) do
+          conn = nil
           begin
             conn = transfercmd(cmd, rest_offset)
-            while data = conn.read(blocksize)
-              yield(data)
+            begin
+              @transfer_active = true
+              if block_mode?
+                decoder = BlockMode::Decoder.new
+                while data = conn.read(blocksize)
+                  decoder.feed(data) do |event|
+                    case event.type
+                    when :data
+                      # Block mode headers and framing are stripped, so
+                      # the caller only receives file contents.
+                      yield(event.payload) unless event.payload.empty?
+                    when :restart_marker
+                      # Restart markers are control information and must
+                      # never be delivered as file contents.
+                      debug_print("block mode: skip restart marker " \
+                                  "#{event.payload.inspect}")
+                    end
+                  end
+                end
+                decoder.finish
+              else
+                while data = conn.read(blocksize)
+                  yield(data)
+                end
+              end
+            ensure
+              @transfer_active = false
+            end
+            conn.shutdown(Socket::SHUT_WR) rescue nil
+            conn.read_timeout = 1
+            conn.read rescue nil
+          ensure
+            conn.close if conn
+          end
+          voidresp
+        end
+      end
+    end
+
+    #
+    # Puts the connection into block mode (MODE B) with record structure
+    # (STRU R), issues the given command (such as "RETR myfile") and
+    # yields Net::FTP::BlockMode::Event objects:
+    #
+    # - record events (<tt>event.record?</tt> is +true+) carry one
+    #   complete record in +event.payload+ (records may span blocks);
+    # - restart marker events (<tt>event.restart_marker?</tt> is +true+)
+    #   carry the printable marker and are never delivered as file data.
+    #
+    # Raises Net::FTPPermError unless block transfer mode and record
+    # structure are selected, and Net::FTPProtoError for truncated or
+    # otherwise invalid block framing.
+    #
+    def retrrecords(cmd, blocksize = DEFAULT_BLOCKSIZE,
+                    rest_offset = nil) # :yield: event
+      require_record_transfer("retrrecords")
+      check_blocksize(blocksize)
+      synchronize do
+        with_binary(true) do
+          conn = nil
+          begin
+            conn = transfercmd(cmd, rest_offset)
+            begin
+              @transfer_active = true
+              decoder = BlockMode::Decoder.new
+              pending = String.new.force_encoding(Encoding::ASCII_8BIT)
+              while data = conn.read(blocksize)
+                decoder.feed(data) do |event|
+                  case event.type
+                  when :data
+                    pending << event.payload
+                    if event.end_of_record?
+                      record = BlockMode::Event.new(type: :record,
+                                                    payload: pending)
+                      record.descriptor_flags =
+                        BlockMode::DESCRIPTOR_END_OF_RECORD
+                      yield(record)
+                      pending = String.new.force_encoding(Encoding::ASCII_8BIT)
+                    end
+                    if event.end_of_file? && !event.end_of_record? &&
+                       !pending.empty?
+                      raise FTPProtoError,
+                            "end of file reached without end of record"
+                    end
+                  when :restart_marker
+                    yield(event)
+                  end
+                end
+              end
+              decoder.finish
+              unless pending.empty?
+                raise FTPProtoError,
+                      "end of file reached without end of record"
+              end
+            ensure
+              @transfer_active = false
             end
             conn.shutdown(Socket::SHUT_WR) rescue nil
             conn.read_timeout = 1
@@ -690,6 +924,7 @@ module Net
     #
     def retrlines(cmd) # :yield: line
       synchronize do
+        reject_block_mode_for_line_transfer("retrlines")
         with_binary(false) do
           begin
             conn = transfercmd(cmd)
@@ -717,13 +952,29 @@ module Net
       if rest_offset
         file.seek(rest_offset, IO::SEEK_SET)
       end
+      check_blocksize(blocksize) if @transfer_mode == BLOCK_MODE
       synchronize do
         with_binary(true) do
           begin
             conn = transfercmd(cmd)
-            while buf = file.read(blocksize)
-              conn.write(buf)
-              yield(buf) if block_given?
+            begin
+              @transfer_active = true
+              if block_mode?
+                read_size = [blocksize, BlockMode::MAX_BLOCK_LENGTH].min
+                while buf = file.read(read_size)
+                  conn.write(BlockMode.encode_data(buf, 0))
+                  yield(buf) if block_given?
+                end
+                conn.write(BlockMode.encode_data(
+                  "", BlockMode::DESCRIPTOR_END_OF_FILE))
+              else
+                while buf = file.read(blocksize)
+                  conn.write(buf)
+                  yield(buf) if block_given?
+                end
+              end
+            ensure
+              @transfer_active = false
             end
             conn.shutdown(Socket::SHUT_WR) rescue nil
             conn.read_timeout = 1
@@ -744,6 +995,51 @@ module Net
     end
 
     #
+    # Puts the connection into block mode (MODE B) with record structure
+    # (STRU R), issues the given server-side command (such as
+    # "STOR myfile") and sends the records yielded by +records+ as bounded
+    # block mode blocks.  Records larger than +blocksize+ span multiple
+    # blocks, with the end of record flag set only on the last block of
+    # each record.  A restart marker can be inserted by yielding the
+    # Net::FTP::BlockMode::Event returned by
+    # Net::FTP::BlockMode.restart_marker.  The final block carries the end
+    # of file flag.
+    #
+    # Raises Net::FTPPermError unless block transfer mode and record
+    # structure are selected.
+    #
+    def storrecords(cmd, records, blocksize = DEFAULT_BLOCKSIZE, rest_offset = nil)
+      require_record_transfer("storrecords")
+      check_blocksize(blocksize)
+      synchronize do
+        with_binary(true) do
+          conn = nil
+          begin
+            conn = transfercmd(cmd, rest_offset)
+            begin
+              @transfer_active = true
+              read_size = [blocksize, BlockMode::MAX_BLOCK_LENGTH].min
+              BlockMode.encode_records(records, read_size) do |frame|
+                conn.write(frame)
+              end
+            ensure
+              @transfer_active = false
+            end
+            conn.shutdown(Socket::SHUT_WR) rescue nil
+            conn.read_timeout = 1
+            conn.read rescue nil
+          ensure
+            conn.close if conn
+          end
+          voidresp
+        end
+      end
+    rescue Errno::EPIPE
+      getresp
+      raise
+    end
+
+    #
     # Puts the connection into ASCII (text) mode, issues the given server-side
     # command (such as "STOR myfile"), and sends the contents of the file
     # named +file+ to the server, one line at a time. If the optional block is
@@ -751,6 +1047,7 @@ module Net
     #
     def storlines(cmd, file) # :yield: line
       synchronize do
+        reject_block_mode_for_line_transfer("storlines")
         with_binary(false) do
           begin
             conn = transfercmd(cmd)

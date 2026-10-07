@@ -2655,6 +2655,363 @@ EOF
     end
   end
 
+  def block_mode_server(commands, wire_writer: nil)
+    create_ftp_server do |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands.push(sock.gets) # USER
+      sock.print("331 Please specify the password.\r\n")
+      commands.push(sock.gets) # PASS
+      sock.print("230 Login successful.\r\n")
+      commands.push(sock.gets) # TYPE I
+      sock.print("200 Switching to Binary mode.\r\n")
+      commands.push(sock.gets) # MODE B
+      sock.print("200 Using block mode.\r\n")
+      commands.push(sock.gets) # STRU R
+      sock.print("200 Using record structure.\r\n")
+      line = sock.gets
+      commands.push(line) # PORT/EPRT
+      host, port = process_port_or_eprt(sock, line)
+      commands.push(sock.gets) # RETR/STOR
+      sock.print("150 Opening BLOCK mode data connection.\r\n")
+      conn = TCPSocket.new(host, port)
+      begin
+        wire_writer.call(conn)
+      ensure
+        conn.close
+      end
+      sock.print("226 Transfer complete.\r\n")
+    end
+  end
+
+  def block_mode_login(ftp, server)
+    ftp.connect(SERVER_ADDR, server.port)
+    ftp.login
+    ftp.transfer_mode = Net::FTP::BLOCK_MODE
+    ftp.structure = Net::FTP::RECORD_STRUCTURE
+  end
+
+  def test_retrbinary_block_mode_strips_framing_and_markers
+    commands = []
+    payload = (0..255).map(&:chr).join.b * 2
+    server = block_mode_server(commands) do |conn|
+      wire = String.new.b
+      wire << build_block_frame(0x00, payload.byteslice(0, 300))
+      wire << build_block_frame(0x10, "CHK1")
+      # write the marker split across a TCP boundary
+      conn.write(wire.byteslice(0, 50))
+      conn.write(wire.byteslice(50, wire.bytesize - 50))
+      conn.write(build_block_frame(0x80, payload.byteslice(300, 100)))
+      conn.write(build_block_frame(0xc0, ""))
+      conn.shutdown(Socket::SHUT_WR)
+      conn.read rescue nil
+    end
+    begin
+      ftp = Net::FTP.new
+      begin
+        block_mode_login(ftp, server)
+        assert_equal("TYPE I\r\n", commands[2])
+        assert_equal("MODE B\r\n", commands[3])
+        assert_equal("STRU R\r\n", commands[4])
+        received = String.new.b
+        ftp.retrbinary("RETR foo", 128) { |chunk| received << chunk }
+        assert_equal(payload.byteslice(0, 400), received)
+        assert_match(/\A(PORT|EPRT) /, commands[5])
+        assert_equal("RETR foo\r\n", commands[6])
+      ensure
+        ftp.close
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_retrrecords_block_mode_assembles_records
+    commands = []
+    server = block_mode_server(commands) do |conn|
+      records = ["first-record", "second-record-spanning-blocks", ""]
+      wire = String.new.b
+      offset = 0
+      wire << build_block_frame(0x00, records[0].byteslice(0, 5))
+      wire << build_block_frame(0x80, records[0].byteslice(5, 100))
+      wire << build_block_frame(0x10, "MARKER-9")
+      long = records[1]
+      wire << build_block_frame(0x00, long.byteslice(0, 7))
+      wire << build_block_frame(0x00, long.byteslice(7, 13))
+      wire << build_block_frame(0x80, long.byteslice(20, 100))
+      wire << build_block_frame(0xc0, "")
+      # feed byte by byte to prove TCP splitting is transparent
+      wire.each_byte { |b| conn.write(b.chr) }
+      conn.shutdown(Socket::SHUT_WR)
+      conn.read rescue nil
+    end
+    begin
+      ftp = Net::FTP.new
+      begin
+        block_mode_login(ftp, server)
+        events = []
+        ftp.retrrecords("RETR foo", 64) { |event| events << event }
+        types = events.map(&:type)
+        assert_equal([:record, :restart_marker, :record, :record], types)
+        assert_equal("first-record", events[0].payload)
+        assert_equal("MARKER-9", events[1].payload)
+        assert_equal("second-record-spanning-blocks", events[2].payload)
+        assert_equal("", events[3].payload)
+      ensure
+        ftp.close
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_retrbinary_block_mode_truncated_block
+    commands = []
+    server = block_mode_server(commands) do |conn|
+      conn.write([0x00, 0x00, 0x10].pack("C3") + "short".b)
+      conn.shutdown(Socket::SHUT_WR)
+    end
+    begin
+      ftp = Net::FTP.new
+      begin
+        block_mode_login(ftp, server)
+        assert_raise(Net::FTPProtoError) do
+          ftp.retrbinary("RETR foo", 64) {}
+        end
+      ensure
+        ftp.close
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_retrbinary_block_mode_closed_without_eof
+    commands = []
+    server = block_mode_server(commands) do |conn|
+      conn.write(build_block_frame(0x80, "record"))
+      conn.shutdown(Socket::SHUT_WR)
+    end
+    begin
+      ftp = Net::FTP.new
+      begin
+        block_mode_login(ftp, server)
+        assert_raise(Net::FTPProtoError) do
+          ftp.retrbinary("RETR foo", 64) {}
+        end
+      ensure
+        ftp.close
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_retrbinary_block_mode_data_after_eof
+    commands = []
+    server = block_mode_server(commands) do |conn|
+      conn.write(build_block_frame(0x40, ""))
+      conn.write(build_block_frame(0x00, "extra"))
+      conn.shutdown(Socket::SHUT_WR)
+    end
+    begin
+      ftp = Net::FTP.new
+      begin
+        block_mode_login(ftp, server)
+        assert_raise(Net::FTPProtoError) do
+          ftp.retrbinary("RETR foo", 64) {}
+        end
+      ensure
+        ftp.close
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_storbinary_block_mode_frames_upload
+    commands = []
+    uploaded = nil
+    server = block_mode_server(commands) do |conn|
+      uploaded = conn.read
+      conn.shutdown(Socket::SHUT_WR)
+    end
+    data = (0..255).map(&:chr).join.b
+    begin
+      ftp = Net::FTP.new
+      begin
+        block_mode_login(ftp, server)
+        ftp.storbinary("STOR foo", StringIO.new(data), 100)
+        frames = parse_block_frames(uploaded)
+        flags = frames.map(&:first)
+        assert(flags.last & 0x40 != 0)
+        assert_equal("", frames.last.last)
+        assert_equal(data, frames[0...-1].map { |_, p| p }.join.b)
+        assert(frames[0...-1].all? { |f, _| f == 0 })
+        assert_equal("STOR foo\r\n", commands[6])
+      ensure
+        ftp.close
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_storbinary_block_mode_empty_file
+    commands = []
+    uploaded = nil
+    server = block_mode_server(commands) do |conn|
+      uploaded = conn.read
+      conn.shutdown(Socket::SHUT_WR)
+    end
+    begin
+      ftp = Net::FTP.new
+      begin
+        block_mode_login(ftp, server)
+        ftp.storbinary("STOR foo", StringIO.new("".b), 100)
+        frames = parse_block_frames(uploaded)
+        assert_equal([[0x40, "".b]], frames)
+      ensure
+        ftp.close
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_storrecords_block_mode_upload
+    commands = []
+    uploaded = nil
+    server = block_mode_server(commands) do |conn|
+      uploaded = conn.read
+      conn.shutdown(Socket::SHUT_WR)
+    end
+    begin
+      ftp = Net::FTP.new
+      begin
+        block_mode_login(ftp, server)
+        records = ["abcdefghij", ""]
+        enum = [
+          Net::FTP::BlockMode.record(records[0]),
+          Net::FTP::BlockMode.restart_marker("R7"),
+          Net::FTP::BlockMode.record(records[1]),
+        ].each
+        ftp.storrecords("STOR foo", enum, 4)
+        frames = parse_block_frames(uploaded)
+        descriptors = frames.map(&:first)
+        # "abcdefghij" split into three bounded blocks, EOR on the last
+        assert_equal([0x00, 0x00, 0x80], descriptors[0, 3])
+        assert_equal("abcdefghij".b,
+                     frames[0, 3].map { |_, p| p }.join.b)
+        assert_equal([0x10, "R7".b], frames[3])
+        assert_equal([0x80, "".b], frames[4])
+        # EOF is merged into the final block (EOR + EOF)
+        assert_equal([0xc0, "".b], frames[5])
+        assert_equal("STOR foo\r\n", commands[6])
+      ensure
+        ftp.close
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_retrrecords_requires_block_mode
+    ftp = Net::FTP.new
+    assert_raise(Net::FTPPermError) do
+      ftp.retrrecords("RETR foo") {}
+    end
+  end
+
+  def test_storrecords_requires_record_structure
+    ftp = Net::FTP.new
+    ftp.instance_variable_set(:@transfer_mode, Net::FTP::BLOCK_MODE)
+    assert_raise(Net::FTPPermError) do
+      ftp.storrecords("STOR foo", ["x"].each)
+    end
+  end
+
+  def test_retrlines_rejected_in_block_mode
+    commands = []
+    server = create_ftp_server do |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands.push(sock.gets)
+      sock.print("331 Please specify the password.\r\n")
+      commands.push(sock.gets)
+      sock.print("230 Login successful.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 Binary mode.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 Block mode.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 Record structure.\r\n")
+    end
+    begin
+      ftp = Net::FTP.new
+      begin
+        block_mode_login(ftp, server)
+        assert_raise(Net::FTPPermError) do
+          ftp.retrlines("LIST") {}
+        end
+      ensure
+        ftp.close
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_default_transfer_mode_is_stream
+    ftp = Net::FTP.new
+    assert_equal(Net::FTP::STREAM_MODE, ftp.transfer_mode)
+    assert_equal(Net::FTP::FILE_STRUCTURE, ftp.structure)
+  end
+
+  def test_transfer_mode_validation
+    ftp = Net::FTP.new
+    assert_raise(ArgumentError) { ftp.transfer_mode = "C" }
+    assert_raise(ArgumentError) { ftp.structure = "P" }
+  end
+
+  def test_block_mode_requires_positive_blocksize
+    ftp = Net::FTP.new(nil, transfer_mode: "B", structure: "R")
+    assert_raise(ArgumentError) do
+      ftp.retrrecords("RETR foo", 0) {}
+    end
+    assert_raise(ArgumentError) do
+      ftp.storrecords("STOR foo", [].each, 0)
+    end
+  end
+
+  def test_login_options_send_mode_and_stru_commands
+    commands = []
+    server = create_ftp_server do |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands.push(sock.gets)
+      sock.print("331 Please specify the password.\r\n")
+      commands.push(sock.gets)
+      sock.print("230 Login successful.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 Binary mode.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 Block mode.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 Record structure.\r\n")
+    end
+    begin
+      ftp = Net::FTP.new(nil, transfer_mode: "B", structure: "R")
+      begin
+        ftp.connect(SERVER_ADDR, server.port)
+        ftp.login
+        assert_equal("MODE B\r\n", commands[3])
+        assert_equal("STRU R\r\n", commands[4])
+      ensure
+        ftp.close
+      end
+    ensure
+      server.close
+    end
+  end
+
   def test_debug_print
     [StringIO.new, Tempfile.new].each do |debug_stream|
       ftp = Net::FTP.new
@@ -2752,6 +3109,30 @@ EOF
     else
       flunk "PORT or EPRT expected"
     end
+  end
+
+  # Parses RFC 959 MODE B frames independently of the client codec,
+  # yielding [descriptor, payload] pairs until an end of file frame.
+  def parse_block_frames(data)
+    frames = []
+    offset = 0
+    until offset >= data.bytesize
+      raise "truncated block header" if data.bytesize - offset < 3
+      flags = data.getbyte(offset)
+      length = (data.getbyte(offset + 1) << 8) | data.getbyte(offset + 2)
+      offset += 3
+      raise "truncated block body" if data.bytesize - offset < length
+      payload = data.byteslice(offset, length)
+      offset += length
+      frames << [flags, payload]
+      break if (flags & 0x40) != 0
+    end
+    raise "extra data after EOF frame" if offset != data.bytesize
+    frames
+  end
+
+  def build_block_frame(flags, payload)
+    [flags, payload.bytesize].pack("Cn") << payload
   end
 
   def create_data_connection_server(sock)
