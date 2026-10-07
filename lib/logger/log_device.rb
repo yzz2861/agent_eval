@@ -13,24 +13,37 @@ class Logger
 
     def initialize(
       log = nil, shift_age: nil, shift_size: nil, shift_period_suffix: nil,
+      shift_period: nil, clock: nil,
       binmode: false, reraise_write_errors: [], skip_header: false
     )
       @dev = @filename = @shift_age = @shift_size = @shift_period_suffix = nil
+      @shift_period = @next_rotate_time = @current_period_end = @lock_path = nil
       @binmode = binmode
       @reraise_write_errors = reraise_write_errors
       @skip_header = skip_header
+      self.clock = clock
       mon_initialize
       set_dev(log)
-      set_file(shift_age, shift_size, shift_period_suffix) if @filename
+      if @filename
+        configure_file(shift_age, shift_size, shift_period_suffix, shift_period)
+      end
     end
 
     def write(message)
       handle_write_errors("writing") do
         synchronize do
-          if @shift_age and @dev.respond_to?(:stat)
-            handle_write_errors("shifting") {check_shift_log}
+          if @period_rotation && @dev.respond_to?(:stat)
+            with_combined_rotation_lock do
+              refresh_combined_dev
+              handle_write_errors("shifting") { check_combined_shift }
+              handle_write_errors("writing") { @dev.write(message) }
+            end
+          else
+            if @shift_age and @dev.respond_to?(:stat)
+              handle_write_errors("shifting") {check_shift_log}
+            end
+            handle_write_errors("writing") {@dev.write(message)}
           end
-          handle_write_errors("writing") {@dev.write(message)}
         end
       end
     end
@@ -45,7 +58,8 @@ class Logger
       end
     end
 
-    def reopen(log = nil, shift_age: nil, shift_size: nil, shift_period_suffix: nil, binmode: nil)
+    def reopen(log = nil, shift_age: nil, shift_size: nil, shift_period_suffix: nil,
+               shift_period: nil, clock: nil, binmode: nil)
       # reopen the same filename if no argument, do nothing for IO
       log ||= @filename if @filename
       @binmode = binmode unless binmode.nil?
@@ -55,8 +69,14 @@ class Logger
             @dev.close rescue nil # close only file opened by Logger
             @filename = nil
           end
+          self.clock = clock unless clock.nil?
           set_dev(log)
-          set_file(shift_age, shift_size, shift_period_suffix) if @filename
+          if @filename
+            configure_file(shift_age, shift_size, shift_period_suffix, shift_period)
+          else
+            @period_rotation = false
+            @lock_path = nil
+          end
         end
       end
       self
@@ -74,6 +94,9 @@ class Logger
       MODE_TO_OPEN = MODE | File::BINARY
     end
     MODE_TO_CREATE = MODE_TO_OPEN | File::CREAT | File::EXCL
+    COMBINED_MODE_TO_OPEN = MODE | File::BINARY
+    COMBINED_MODE_TO_CREATE = COMBINED_MODE_TO_OPEN | File::CREAT | File::EXCL
+    LOCK_MODE = File::WRONLY | File::CREAT | File::BINARY
 
     def set_dev(log)
       if log.respond_to?(:write) and log.respond_to?(:close)
@@ -89,15 +112,46 @@ class Logger
       end
     end
 
-    def set_file(shift_age, shift_size, shift_period_suffix)
+    def configure_file(shift_age, shift_size, shift_period_suffix, new_shift_period)
+      set_file(shift_age, shift_size, shift_period_suffix, new_shift_period)
+      reopen_combined_dev if @period_rotation
+    end
+
+    def set_file(shift_age, shift_size, shift_period_suffix, new_shift_period)
       @shift_age = shift_age || @shift_age || 7
       @shift_size = shift_size || @shift_size || 1048576
       @shift_period_suffix = shift_period_suffix || @shift_period_suffix || '%Y%m%d'
+      @shift_period = new_shift_period unless new_shift_period.nil?
 
-      unless @shift_age.is_a?(Integer)
-        base_time = @dev.respond_to?(:stat) ? @dev.stat.mtime : Time.now
+      if @shift_period
+        unless @shift_age.is_a?(Integer) && @shift_age > 0
+          raise ArgumentError, "shift_age must be a positive integer when shift_period is given"
+        end
+        unless %w[daily weekly monthly].include?(@shift_period.to_s)
+          raise ArgumentError, "invalid :shift_period #{@shift_period.inspect}, should be daily, weekly, or monthly"
+        end
+
+        @period_rotation = true
+        @lock_path = "#{@filename}.lock"
+        sync_period_schedule
+      elsif @shift_age.is_a?(Integer)
+        @period_rotation = false
+      else
+        @period_rotation = false
+        base_time = rotation_base_time
         @next_rotate_time = next_rotate_time(base_time, @shift_age)
       end
+    end
+
+    def clock=(clock)
+      if clock && !clock.respond_to?(:call)
+        raise ArgumentError, "clock must respond to #call"
+      end
+      @clock = clock
+    end
+
+    def current_time
+      @clock ? @clock.call : Time.now
     end
 
     if MODE_TO_OPEN == MODE
@@ -155,12 +209,14 @@ class Logger
 
     def add_log_header(file)
       file.write(
-        "# Logfile created on %s by %s\n" % [Time.now.to_s, Logger::ProgName]
+        "# Logfile created on %s by %s\n" % [current_time.to_s, Logger::ProgName]
       ) if file.size == 0
     end
 
     def check_shift_log
-      if @shift_age.is_a?(Integer)
+      if @period_rotation
+        # Combined period/size rotation is handled by #check_combined_shift.
+      elsif @shift_age.is_a?(Integer)
         # Note: always returns false if '0'.
         if @filename && (@shift_age > 0) && (@dev.stat.size > @shift_size)
           lock_shift_log { shift_log_age }
@@ -171,6 +227,138 @@ class Logger
           @next_rotate_time = next_rotate_time(now, @shift_age)
           lock_shift_log { shift_log_period(previous_period_end(now, @shift_age)) }
         end
+      end
+    end
+
+    def check_combined_shift
+      now = current_time
+      if now >= @next_rotate_time
+        if @dev.stat.size.zero?
+          sync_period_schedule(now)
+        else
+          shift_combined_log(@current_period_end)
+        end
+      elsif @dev.stat.size >= @shift_size
+        shift_combined_log(@current_period_end)
+      end
+    end
+
+    def with_combined_rotation_lock
+      File.open(@lock_path, LOCK_MODE) do |lock|
+        lock.flock(File::LOCK_EX)
+        yield
+      end
+    end
+
+    def refresh_combined_dev
+      current = begin
+        File.identical?(@filename, @dev)
+      rescue Errno::ENOENT
+        false
+      end
+      unless current
+        @dev.close rescue nil
+        @dev = create_combined_logfile(@filename)
+        sync_period_schedule
+      end
+    end
+
+    def rotation_base_time
+      if @dev.respond_to?(:stat) && !@dev.stat.size.zero?
+        @dev.stat.mtime
+      else
+        current_time
+      end
+    end
+
+    def sync_period_schedule(time = rotation_base_time)
+      @next_rotate_time = next_rotate_time(time, @shift_period)
+      @current_period_end = @next_rotate_time - 1
+    end
+
+    def shift_combined_log(period_end)
+      archive = next_combined_archive(period_end.strftime(@shift_period_suffix))
+      old_period_start = @next_rotate_time
+      old_period_end = @current_period_end
+      stat = @dev.stat
+      @dev.close rescue nil
+      File.rename(@filename, archive)
+      @dev = create_combined_logfile(@filename)
+      mode, uid, gid = stat.mode, stat.uid, stat.gid
+      begin
+        @dev.chmod(mode) if mode
+        mode = nil
+        @dev.chown(uid, gid)
+      rescue Errno::EPERM
+        if mode
+          # failed to chmod, probably nothing can do more.
+        elsif uid
+          uid = nil
+          retry # to change gid only
+        end
+      end
+      now = current_time
+      if now >= old_period_start
+        sync_period_schedule(now)
+      else
+        @next_rotate_time = old_period_start
+        @current_period_end = old_period_end
+      end
+      remove_old_combined_archives
+    end
+
+    def create_combined_logfile(filename, existing = File.exist?(filename))
+      begin
+        logdev = File.open(filename, COMBINED_MODE_TO_CREATE)
+      rescue Errno::EEXIST
+        logdev = File.open(filename, COMBINED_MODE_TO_OPEN)
+      end
+      prepare_combined_logfile(logdev, existing)
+    end
+
+    def prepare_combined_logfile(logdev, existing = false)
+      logdev.flock(File::LOCK_EX)
+      logdev.sync = true
+      logdev.binmode if @binmode
+      add_log_header(logdev) unless @skip_header || existing
+      logdev.flock(File::LOCK_UN)
+      logdev
+    end
+
+    def next_combined_archive(suffix)
+      sequence = combined_archive_entries.map(&:last).max || 0
+      loop do
+        sequence += 1
+        archive = "#{@filename}.#{suffix}.#{format('%010d', sequence)}"
+        break archive unless FileTest.exist?(archive)
+      end
+    end
+
+    def reopen_combined_dev
+      current = @dev
+      existing = File.exist?(@filename)
+      @dev = create_combined_logfile(@filename, existing)
+      begin
+        current.close
+      rescue Errno::ENOENT
+      end
+    end
+
+    def remove_old_combined_archives
+      archives = combined_archive_entries.sort_by { |_, sequence| sequence }
+      excess = archives.size - @shift_age
+      excess.times do |index|
+        File.delete(archives[index].first)
+      end
+    end
+
+    def combined_archive_entries
+      pattern = /\A#{Regexp.escape(@filename)}\..+\.(\d+)\z/
+      directory = File.dirname(@filename)
+      Dir.children(directory).each_with_object([]) do |entry, archives|
+        path = File.join(directory, entry)
+        match = pattern.match(path)
+        archives << [path, match[1].to_i] if match
       end
     end
 

@@ -6,6 +6,12 @@ require 'tmpdir'
 require 'pathname'
 
 class TestLogDevice < Test::Unit::TestCase
+  Clock = Struct.new(:time) do
+    def call
+      time
+    end
+  end
+
   class LogExcnRaiser
     def write(*arg)
       raise 'disk is full'
@@ -160,6 +166,21 @@ class TestLogDevice < Test::Unit::TestCase
     ensure
       logdev.close
     end
+  end
+
+  def test_reopen_combined_file_to_io
+    r, w = IO.pipe
+    logdev = d(@filename, shift_age: 3, shift_size: 10,
+               shift_period: 'daily', skip_header: true)
+    logdev.write("file")
+    logdev.reopen(w)
+    logdev.write("io")
+    w.close
+    assert_equal("io", r.read)
+    r.close
+  ensure
+    logdev.close if logdev
+    r.close unless r.closed?
   end
 
   def test_reopen_file
@@ -498,6 +519,33 @@ class TestLogDevice < Test::Unit::TestCase
     ensure
       Dir.glob("#{@filename}.#{yyyymmdd}{,.[1-9]*}") do |filename|
         File.unlink(filename) if File.exist?(filename)
+      end
+    end
+  end
+
+  def test_combined_rotation_in_multiprocess
+    tmpfile = Tempfile.new([File.basename(__FILE__, '.*'), '_combined.log'])
+    logfile = tmpfile.path
+    tmpfile.close(true)
+    begin
+      stderr = run_children(2, [logfile], "#{<<-"begin;"}\n#{<<-'end;'}")
+      begin;
+        logger = Logger.new(ARGV[0], 100, 10, shift_period: 'daily')
+        10.times do
+          logger.info '0' * 15
+        end
+      end;
+      assert_no_match(/log shifting failed/, stderr)
+      assert_no_match(/log writing failed/, stderr)
+      assert_no_match(/log rotation inter-process lock failed/, stderr)
+      archives = Dir.children(File.dirname(logfile)).grep(/\A#{Regexp.escape(File.basename(logfile))}\..+\.\d+\z/)
+      assert_equal(20, archives.size)
+    ensure
+      File.unlink(logfile) if File.exist?(logfile)
+      File.unlink(logfile + '.lock') if File.exist?(logfile + '.lock')
+      Dir.children(File.dirname(logfile)).each do |entry|
+        next unless entry.start_with?(File.basename(logfile) + '.')
+        File.unlink(File.join(File.dirname(logfile), entry))
       end
     end
   end
@@ -956,6 +1004,162 @@ class TestLogDevice < Test::Unit::TestCase
       assert_match(/hello-1/, cont)
       assert_equal("2015-12-31", cont[/^[-\d]+/])
       assert_equal("20151231", log[/\d+\z/])
+    end
+  end if env_tz_works
+
+  def test_combined_period_and_size_rotation
+    Dir.mktmpdir do |tmpdir|
+      log = File.join(tmpdir, "log")
+      current_time = Time.mktime(2014, 1, 1, 23, 59, 59)
+      clock = -> { current_time }
+      dev = d(log, shift_age: 2, shift_size: 4, shift_period: 'daily',
+              clock: clock, skip_header: true)
+
+      dev.write("abc")
+      current_time = Time.mktime(2014, 1, 2, 0, 0, 0)
+      dev.write("de")
+
+      day1 = log + ".20140101.0000000001"
+      day2_first = log + ".20140102.0000000002"
+      day2_second = log + ".20140102.0000000003"
+      day3 = log + ".20140103.0000000004"
+
+      assert_file.exist?(day1)
+      assert_equal("abc", File.read(day1))
+      assert_equal("de", File.read(log))
+
+      dev.write("fghij")
+      current_time = Time.mktime(2014, 1, 2, 12, 0, 0)
+      dev.write("z")
+      dev.write("k")
+
+      assert_file.exist?(day2_first)
+      assert_file.not_exist?(log + ".20140102")
+      assert_equal("defghij", File.read(day2_first))
+      assert_equal("zk", File.read(log))
+
+      current_time = Time.mktime(2014, 1, 3, 0, 0, 0)
+      dev.write("l")
+      dev.write("mnop")
+      dev.write("q")
+      dev.write("r")
+
+      assert_file.not_exist?(day1)
+      assert_file.not_exist?(day2_first)
+      assert_file.exist?(day2_second)
+      assert_file.exist?(day3)
+      assert_equal("zk", File.read(day2_second))
+      assert_equal("lmnop", File.read(day3))
+      assert_equal("qr", File.read(log))
+    ensure
+      dev.close if dev
+    end
+  end
+
+  def test_combined_rotation_at_exact_size_boundary
+    Dir.mktmpdir do |tmpdir|
+      log = File.join(tmpdir, "log")
+      clock = Clock.new(Time.mktime(2014, 1, 1, 12, 0, 0))
+      dev = d(log, shift_age: 3, shift_size: 5, shift_period: 'daily',
+              clock: clock, skip_header: true)
+
+      dev.write("abcde")
+      assert_empty(Dir.glob(log + ".20*"))
+
+      dev.write("f")
+      archive = log + ".20140101.0000000001"
+      assert_file.exist?(archive)
+      assert_equal("abcde", File.read(archive))
+      assert_equal("f", File.read(log))
+    ensure
+      dev.close if dev
+    end
+  end
+
+  def test_combined_rotation_with_clock_rollback
+    Dir.mktmpdir do |tmpdir|
+      log = File.join(tmpdir, "log")
+      existing = log + ".20140102.0000000007"
+      File.write(existing, "old")
+      clock = Clock.new(Time.mktime(2014, 1, 2, 12, 0, 0))
+      dev = d(log, shift_age: 10, shift_size: 2, shift_period: 'daily',
+              clock: clock, skip_header: true)
+
+      dev.write("a")
+      clock.time = Time.mktime(2014, 1, 1, 12, 0, 0)
+      dev.write("bc")
+      dev.write("d")
+
+      rolled_back = log + ".20140102.0000000008"
+      assert_file.exist?(existing)
+      assert_file.exist?(rolled_back)
+      assert_equal("abc", File.read(rolled_back))
+      assert_equal("d", File.read(log))
+    ensure
+      dev.close if dev
+    end
+  end
+
+  def test_combined_rotation_between_logger_instances
+    Dir.mktmpdir do |tmpdir|
+      log = File.join(tmpdir, "log")
+      clock = Clock.new(Time.mktime(2014, 1, 1, 12, 0, 0))
+      options = {shift_age: 10, shift_size: 4, shift_period: 'daily',
+                 clock: clock, skip_header: true}
+      first = d(log, **options)
+      second = d(log, **options)
+
+      first.write("abcde")
+      second.write("f")
+      second.write("x")
+      first.write("abc")
+      second.write("z")
+
+      first_archive = log + ".20140101.0000000001"
+      second_archive = log + ".20140101.0000000002"
+      assert_file.exist?(first_archive)
+      assert_file.exist?(second_archive)
+      assert_equal("abcde", File.read(first_archive))
+      assert_equal("fxabc", File.read(second_archive))
+      assert_equal("z", File.read(log))
+    ensure
+      first.close if first
+      second.close if second
+    end
+  end
+
+  def test_combined_rotation_during_repeated_dst_wall_clock
+    Dir.mktmpdir do |tmpdir|
+      assert_in_out_err([{"TZ"=>"Europe/London"}, *%W"--disable=gems -I#{@top_dir} -rlogger -C#{tmpdir} -"], "#{<<-"begin;"}\n#{<<-'end;'}")
+      begin;
+        begin
+          module FakeTime
+            attr_accessor :now
+          end
+
+          class << Time
+            prepend FakeTime
+          end
+
+          log = "log"
+          Time.now = Time.mktime(2014, 10, 26, 1, 30, 0)
+          dev = Logger::LogDevice.new(log, shift_age: 10, shift_size: 3,
+                                     shift_period: 'daily', clock: -> { Time.now },
+                                     skip_header: true)
+        dev.write("abcd")
+        dev.write("f")
+        dev.write("ghij")
+        dev.write("l")
+        ensure
+          dev.close if dev
+        end
+      end;
+
+      log = File.join(tmpdir, "log")
+      archives = Dir.children(tmpdir).grep(/\Alog\.20141026\.\d+\z/).sort
+      assert_equal(%w[log.20141026.0000000001 log.20141026.0000000002], archives)
+      assert_equal("fghij", File.read(log + ".20141026.0000000002"))
+      assert_equal("l", File.read(log))
     end
   end if env_tz_works
 

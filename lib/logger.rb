@@ -308,6 +308,7 @@ require_relative 'logger/errors'
 #
 #   logger = Logger.new('t.log', 3)           # Three 1-megabyte files.
 #   logger = Logger.new('t.log', 5, 10485760) # Five 10-megabyte files.
+#   logger = Logger.new('t.log', 7, 10485760, shift_period: 'daily')
 #
 # For these examples, suppose:
 #
@@ -366,6 +367,28 @@ require_relative 'logger/errors'
 # +shift_period_suffix+;
 # see details and suggestions at
 # {Time#strftime}[https://docs.ruby-lang.org/en/master/Time.html#method-i-strftime].
+#
+# === Combined Period and Size Rotation
+#
+# To enable both periodic and size-based rotation, pass a positive integer
+# retention count as +shift_age+, a byte threshold as +shift_size+, and the
+# period as keyword +shift_period+:
+#
+#   logger = Logger.new('t.log', 7, 10485760, shift_period: 'daily')
+#
+# A rotation occurs when the period changes or the active file reaches the
+# size threshold before the next write. Several segments may therefore be
+# created in one period. Archives use both a period suffix and a globally
+# increasing zero-padded segment number, such as
+# <tt>t.log.20220509.0000000001</tt>; this avoids overwriting an existing
+# segment after a date change, clock move, or daylight-saving-time boundary.
+# Rotation checks, file renaming, and writes are coordinated among processes
+# with an advisory lock.
+#
+# The integer +shift_age+ applies to every combined-rotation archive, whether
+# it was produced by a period transition or by reaching the size threshold.
+# For example, <tt>shift_age: 3</tt> retains the three newest archives in
+# addition to the active log file.
 #
 class Logger
   _, name, rev = %w$Id$
@@ -589,6 +612,14 @@ class Logger
   #   for periodic log file rotation; default is <tt>'%Y%m%d'</tt>.
   #   See {Periodic Rotation}[rdoc-ref:Logger@Periodic+Rotation].
   #
+  # - +shift_period+: enables combined periodic and size-based rotation when
+  #   +shift_age+ is a positive integer; allowed values are <tt>'daily'</tt>,
+  #   <tt>'weekly'</tt>, and <tt>'monthly'</tt>.
+  #
+  # - +clock+: a callable used to get the current +Time+ for rotation
+  #   decisions; this is primarily useful for tests. The log entry timestamp
+  #   still uses the regular system clock.
+  #
   # - +reraise_write_errors+: An array of exception classes, which will
   #   be reraised if there is an error when writing to the log device.
   #   The default is to swallow all exceptions raised.
@@ -599,6 +630,7 @@ class Logger
   def initialize(logdev, shift_age = 0, shift_size = 1048576, level: DEBUG,
                  progname: nil, formatter: nil, datetime_format: nil,
                  binmode: false, shift_period_suffix: '%Y%m%d',
+                 shift_period: nil, clock: nil,
                  reraise_write_errors: [], skip_header: false)
     self.level = level
     self.progname = progname
@@ -617,6 +649,8 @@ class Logger
       @logdev = LogDevice.new(logdev, shift_age: shift_age,
         shift_size: shift_size,
         shift_period_suffix: shift_period_suffix,
+        shift_period: shift_period,
+        clock: clock,
         binmode: binmode,
         reraise_write_errors: reraise_write_errors,
         skip_header: skip_header)
@@ -652,9 +686,12 @@ class Logger
   #   #  "E, [2022-05-12T14:21:27.596726 #22428] ERROR -- : one\n",
   #   #  "E, [2022-05-12T14:23:05.847241 #22428] ERROR -- : three\n"]
   #
-  def reopen(logdev = nil, shift_age = nil, shift_size = nil, shift_period_suffix: nil, binmode: nil)
+  def reopen(logdev = nil, shift_age = nil, shift_size = nil,
+             shift_period_suffix: nil, shift_period: nil, clock: nil,
+             binmode: nil)
     @logdev&.reopen(logdev, shift_age: shift_age, shift_size: shift_size,
-                    shift_period_suffix: shift_period_suffix, binmode: binmode)
+                    shift_period_suffix: shift_period_suffix,
+                    shift_period: shift_period, clock: clock, binmode: binmode)
     self
   end
 
