@@ -324,10 +324,9 @@ require_relative 'version'
 # reference to that object only remains meaningful for the lifetime of
 # the object's process and the lifetime of the object within that
 # process.  A modified implementation is provided by DRb::TimerIdConv
-# in the file drb/timeridconv.rb.  This implementation retains a local
-# reference to all objects exported over dRuby for a configurable
-# period of time (defaulting to ten minutes), to prevent them being
-# garbage-collected within this time.  Another sample implementation
+# in the file drb/timeridconv.rb.  That implementation retains exported
+# objects while a client holds an active lease or while a call is in
+# progress.  Another sample implementation
 # is provided in sample/name.rb in the main dRuby distribution.  This
 # allows objects to specify their own id or "name".  A dRuby reference
 # can be made persistent across processes by having each process
@@ -341,6 +340,46 @@ module DRb
   # Error raised when an error occurs on the underlying communication
   # protocol.
   class DRbConnError < DRbError; end
+
+  # Error raised when a dRuby reference is expired, released, or otherwise
+  # no longer valid.
+  class DRbInvalidReferenceError < DRbError; end
+
+  # Represents a client-side lease for an exported dRuby object.
+  class DRbLease
+    TOKEN_MARKER = :__drb_lease_v1__
+    SERVICE_REF = :__drb_lease_service__
+
+    def initialize(service, token, expires_at)
+      @service = service
+      @token = token
+      @expires_at = expires_at
+    end
+
+    attr_reader :expires_at
+
+    def renew!
+      @expires_at = @service.renew_lease(@token)
+      self
+    end
+    alias renew renew!
+
+    def release
+      @service.release_lease(@token)
+    end
+    alias release! release
+
+    def _dump(limit)
+      Marshal.dump([@service.__drburi, @token, @expires_at])
+    end
+
+    def self._load(data)
+      uri, token, expires_at = Marshal.load(data)
+      service = DRbObject.new_with_uri(uri)
+      service.instance_variable_set(:@ref, SERVICE_REF)
+      new(service, token, expires_at)
+    end
+  end
 
   class DRbObjectSpace # :nodoc:
     # This is an internal class for DRbIdConv. This must not be used
@@ -638,17 +677,30 @@ module DRb
       raise(DRbConnError, $!.message, $!.backtrace)
     end
 
-    def recv_request(stream) # :nodoc:
-      ref = load(stream)
-      ro = DRb.to_obj(ref)
-      msg = load(stream)
+    def recv_request_ref(stream) # :nodoc:
+      load(stream)
+    end
+
+    def recv_request_message(stream) # :nodoc:
+      load(stream)
+    end
+
+    def recv_request_arguments(stream) # :nodoc:
       argc = load(stream)
       raise(DRbConnError, "too many arguments") if @argc_limit < argc
-      argv = Array.new(argc, nil)
-      argc.times do |n|
-        argv[n] = load(stream)
-      end
-      block = load(stream)
+      Array.new(argc) { load(stream) }
+    end
+
+    def recv_request_block(stream) # :nodoc:
+      load(stream)
+    end
+
+    def recv_request(stream, ref=nil) # :nodoc:
+      ref ||= recv_request_ref(stream)
+      msg = recv_request_message(stream)
+      argv = recv_request_arguments(stream)
+      block = recv_request_block(stream)
+      ro = DRb.to_obj(ref)
       return ro, msg, argv, block
     end
 
@@ -954,6 +1006,22 @@ module DRb
       @msg.recv_request(stream)
     end
 
+    def recv_request_raw_ref
+      @msg.recv_request_ref(stream)
+    end
+
+    def recv_request_message
+      @msg.recv_request_message(stream)
+    end
+
+    def recv_request_arguments
+      @msg.recv_request_arguments(stream)
+    end
+
+    def recv_request_block
+      @msg.recv_request_block(stream)
+    end
+
     # On the server side, send a reply to the client.
     def send_reply(succ, result)
       @msg.send_reply(stream, succ, result)
@@ -1136,6 +1204,11 @@ module DRb
     # Get the reference of the object, if local.
     def __drbref
       @ref
+    end
+
+    def __drb_lease
+      return nil unless @ref.is_a?(Array) && @ref.first == DRbLease::TOKEN_MARKER
+      DRbLease.new(self, @ref, @ref[3])
     end
 
     undef :to_s
@@ -1557,6 +1630,16 @@ module DRb
       @idconv.to_id(obj)
     end
 
+    def begin_invoke(ref)
+      return nil unless @idconv.respond_to?(:begin_call)
+      @idconv.begin_call(ref)
+    end
+
+    def end_invoke(guard)
+      return if guard.nil?
+      @idconv.end_call(guard)
+    end
+
     private
 
     def shutdown
@@ -1679,7 +1762,20 @@ module DRb
 
       private
       def init_with_client
-        obj, msg, argv, block = @client.recv_request
+        raw_ref = if @client.respond_to?(:recv_request_raw_ref)
+          @client.recv_request_raw_ref
+        end
+        if raw_ref.nil?
+          obj, msg, argv, block = @client.recv_request
+          Thread.current['DRb']['invoke_keepalives'] = []
+        else
+          msg = @client.recv_request_message
+          argv = @client.recv_request_arguments
+          block = @client.recv_request_block
+          obj = DRb.to_obj(raw_ref)
+          keepalive = @drb_server.begin_invoke(raw_ref)
+          Thread.current['DRb']['invoke_keepalives'] = [keepalive].compact
+        end
         @obj = obj
         @msg_id = msg.intern
         @argv = argv
@@ -1770,11 +1866,18 @@ module DRb
         loop do
           begin
             succ = false
-            invoke_method = InvokeMethod.new(self, client)
-            succ, result = invoke_method.perform
-            error_print(result) if !succ && verbose
-            unless DRbConnError === result && result.message == 'connection closed'
-              client.send_reply(succ, result)
+            Thread.current['DRb']['invoke_keepalives'] = []
+            begin
+              invoke_method = InvokeMethod.new(self, client)
+              succ, result = invoke_method.perform
+              error_print(result) if !succ && verbose
+              unless DRbConnError === result && result.message == 'connection closed'
+                client.send_reply(succ, result)
+              end
+            ensure
+              Thread.current['DRb']['invoke_keepalives'].reverse_each do |guard|
+                end_invoke(guard)
+              end
             end
           rescue Exception => e
             error_print(e) if verbose

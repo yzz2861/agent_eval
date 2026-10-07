@@ -1,74 +1,52 @@
 # frozen_string_literal: false
 require 'test/unit'
 require 'drb/timeridconv'
+require 'weakref'
 
 module DRbTests
 
 class TimerIdConvTest < Test::Unit::TestCase
-  def test_usecase_01
-    keeping = 0.1
-    idconv = DRb::TimerIdConv.new(keeping)
+  class Clock
+    attr_accessor :now
 
-    key = idconv.to_id(self)
-    assert_equal(key, self.__id__)
-    sleep(keeping)
-    assert_equal(idconv.to_id(false), false.__id__)
-    assert_equal(idconv.to_obj(key), self)
-    sleep(keeping)
-
-    assert_equal(idconv.to_obj(key), self)
-    sleep(keeping)
-
-    assert_equal(idconv.to_id(true), true.__id__)
-    sleep(keeping)
-
-    assert_raise do
-      assert_equal(idconv.to_obj(key), self)
-    end
-
-    assert_raise do
-      assert_equal(idconv.to_obj(false.__id__), false)
-    end
-
-    key = idconv.to_id(self)
-    assert_equal(key, self.__id__)
-    assert_equal(idconv.to_id(true), true.__id__)
-    sleep(keeping)
-    GC.start
-    sleep(keeping)
-    GC.start
-    assert_raise do
-      assert_equal(idconv.to_obj(key), self)
+    def initialize
+      @now = 0
     end
   end
 
-  def test_usecase_02
-    keeping = 0.1
-    idconv = DRb::TimerIdConv.new(keeping)
+  def setup
+    @clock = Clock.new
+    @idconv = DRb::TimerIdConv.new(10, @clock)
+  end
 
-    key = idconv.to_id(self)
-    assert_equal(key, self.__id__)
-    sleep(keeping)
-    GC.start
-    sleep(keeping)
-    GC.start
-    assert_raise do
-      assert_equal(idconv.to_obj(key), self)
-    end
-    GC.start
+  def test_lease_is_explicit_and_expires_on_server_clock
+    object = Object.new
+    token = @idconv.to_id(object)
 
-    key = idconv.to_id(self)
-    assert_equal(key, self.__id__)
-    sleep(keeping)
+    assert_equal(DRb::DRbLease::TOKEN_MARKER, token.first)
+    assert_equal(object.__id__, token[1])
+    assert_equal(10, token[3])
+    assert_equal(object, @idconv.to_obj(token))
+
+    @clock.now = 10
+    assert_raise(DRb::DRbInvalidReferenceError) { @idconv.to_obj(token) }
+  end
+
+  def test_expired_lease_does_not_keep_object
+    object = Object.new
+    token = @idconv.to_id(object)
+    weak = WeakRef.new(object)
+    object = nil
+
     GC.start
-    sleep(keeping)
+    assert_predicate(weak, :weakref_alive?)
+
+    @clock.now = 10
+    @idconv.instance_variable_get(:@holder).cleanup
     GC.start
-    assert_raise do
-      assert_equal(idconv.to_obj(key), self)
-    end
+    refute_predicate(weak, :weakref_alive?)
+    assert_raise(DRb::DRbInvalidReferenceError) { @idconv.to_obj(token) }
   end
 end
 
-
 end
-
