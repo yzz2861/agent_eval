@@ -19,6 +19,7 @@ class Rufus::Scheduler
   require 'rufus/scheduler/jobs_repeat'
   require 'rufus/scheduler/job_array'
   require 'rufus/scheduler/locks'
+  require 'rufus/scheduler/analysis'
 
   #
   # A common error class for rufus-scheduler
@@ -434,6 +435,46 @@ class Rufus::Scheduler
   def timeline(time0, time1)
 
     occurrences(time0, time1, :timeline)
+  end
+
+  # Offline capacity analysis.
+  #
+  # Given estimated work durations for the jobs and an observation
+  # window [ time0, time1 ), expands the occurrences of each job
+  # (following the real cron / every / interval semantics) and computes
+  # how many jobs may run concurrently.
+  #
+  # The durations argument maps jobs to their estimated work duration
+  # (in seconds or a duration string like "10m"). It may be a Hash
+  # keyed by job, job id, job name or tag (with a :default fallback),
+  # or a callable taking the job. Jobs without an entry are assumed
+  # to take no time (0 seconds).
+  #
+  # For interval jobs, the next start is computed from the estimated
+  # completion time of the previous occurrence (as happens at runtime
+  # with the mean work time).
+  #
+  # Options:
+  #
+  # * :max_expansions, the maximum number of occurrences to expand
+  #   (defaults to 10_000). When the limit is reached, the analysis
+  #   is incomplete: ConcurrencyAnalysis#complete? returns false and
+  #   #covered_until indicates the point until which the result holds.
+  #
+  # The analysis is read-only: it never triggers jobs and never
+  # modifies their next_time, remaining times, or any other state.
+  #
+  #   a = scheduler.concurrency_analysis(
+  #         Time.now, Time.now + 3600,
+  #         { 'batch' => '10m', :default => '30s' })
+  #   a.peak          # => 3
+  #   a.peak_windows  # => [ #<Window ...>, ... ]
+  #   a.contributors  # => [ job0, job2, ... ]
+  #   a.complete?     # => true
+  #
+  def concurrency_analysis(time0, time1, durations={}, opts={})
+
+    ConcurrencyAnalysis.new(self, time0, time1, durations, opts)
   end
 
   def on_error(job, err)

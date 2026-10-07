@@ -1153,6 +1153,32 @@ Please note that, for interval jobs, the ```#mean_work_time``` is used, so the r
 
 Like `#occurrences` but returns a list ```[ [ t0, job0 ], [ t1, job1 ], ... ]``` of time + job pairs.
 
+### Scheduler#concurrency_analysis(time0, time1, durations, opts={})
+
+Offline capacity analysis: estimates how many jobs may run concurrently within the observation window `[ time0, time1 )`.
+
+The `durations` argument provides the estimated work duration (seconds or a duration string like `"10m"`) for each job. It may be a Hash keyed by job, job id, job name or tag (with a `:default` fallback), or a callable taking the job. Jobs without an entry are assumed to take no time at all.
+
+```ruby
+a = scheduler.concurrency_analysis(
+      Time.now, Time.now + 3600,
+      { 'batch' => '10m', :default => '30s' },
+      :max_expansions => 20_000)
+
+a.peak          # => 3 (max jobs concurrently "running")
+a.peak_windows  # => [ #<Rufus::Scheduler::ConcurrencyAnalysis::Window ...>, ... ]
+                #     each window responds to #starts_at, #ends_at and #jobs
+a.contributors  # => [ job0, job2, ... ] jobs involved in the peak windows
+a.complete?     # => true (false when :max_expansions was reached)
+a.covered_until # => end of the window the result actually covers
+```
+
+Occurrences are expanded following the real scheduling semantics: cron points (time zone aware) for cron jobs, trigger to trigger for every jobs, and estimated end of work plus interval for interval jobs. Execution intervals are half-open: a job ending exactly when another one starts does not add to the concurrency.
+
+The expansion of occurrences is capped at `:max_expansions` (defaults to 10_000). When the cap is reached, `complete?` returns `false` and the result only holds up to `covered_until`, instead of silently presenting a partial window as a full one.
+
+The analysis is read-only: it never triggers jobs and never modifies their `next_time`, remaining `times` or any other piece of state.
+
 
 ## dealing with job errors
 
@@ -1795,4 +1821,3 @@ see [getting help](#getting-help) above.
 ## license
 
 MIT, see [LICENSE.txt](LICENSE.txt)
-
