@@ -34,6 +34,7 @@ class Net::LDAP
   class SearchScopeInvalidError < Error; end
   class ResponseTypeInvalidError < Error; end
   class ResponseMissingOrInvalidError < Error; end
+  class UnsupportedControlError < Error; end
   class EmptyDNError < Error; end
   class InvalidDNError < Error; end
   class HashTypeUnsupportedError < Error; end

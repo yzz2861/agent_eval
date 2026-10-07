@@ -80,6 +80,18 @@ class Net::LDAP::PDU
   # Returns RFC-2251 Controls if any.
   attr_reader :ldap_controls
   alias_method :result_controls, :ldap_controls
+
+  ##
+  # Returns the entry captured by an RFC 4527 pre-read control, or nil if
+  # the response did not contain one.
+  attr_reader :preread_entry
+  alias_method :pre_read_entry, :preread_entry
+
+  ##
+  # Returns the entry captured by an RFC 4527 post-read control, or nil if
+  # the response did not contain one.
+  attr_reader :postread_entry
+  alias_method :post_read_entry, :postread_entry
   # Messy. Does this functionality belong somewhere else?
 
   def initialize(ber_object)
@@ -159,6 +171,14 @@ class Net::LDAP::PDU
 
   def failure?
     !success?
+  end
+
+  ##
+  # Returns true when the server rejected the operation because the RFC
+  # 4528 assertion filter did not match the target entry (result code 121).
+  # The entry is left untouched in that case.
+  def assertion_failed?
+    result_code == Net::LDAP::ResultCodeAssertionFailed
   end
 
   ##
@@ -271,10 +291,80 @@ class Net::LDAP::PDU
         o.value = o.criticality
         o.criticality = false
       end
+
+      o.oid = oid_to_string(o.oid)
+      parse_read_entry_control(o)
+
       o
     end
   end
   private :parse_controls
+
+  # Parsed control OIDs come back as arrays of integer arcs, but the rest of
+  # the library works with dotted-decimal OID strings.
+  def oid_to_string(oid)
+    case oid
+    when String
+      oid
+    when Array
+      oid.join(".")
+    else
+      oid.to_s
+    end
+  end
+  private :oid_to_string
+
+  # Decodes the SearchResultEntry value carried by an RFC 4527 pre-read or
+  # post-read response control. Malformed control values are left in
+  # #result_controls rather than discarding the whole operation result.
+  def parse_read_entry_control(control)
+    case control.oid
+    when Net::LDAP::LDAPControls::PRE_READ
+      @preread_entry = parse_read_entry(control.value)
+    when Net::LDAP::LDAPControls::POST_READ
+      @postread_entry = parse_read_entry(control.value)
+    end
+  rescue Net::BER::BerError
+    nil
+  end
+  private :parse_read_entry_control
+
+  # An RFC 4527 control value is a SearchResultEntry wrapped in a
+  # context-specific [0] OCTET STRING. Depending on how deeply the BER
+  # reader has already recursed, we may receive either the raw wrapper bytes
+  # or the parsed structure.
+  def parse_read_entry(value)
+    return nil if value.nil? || value.empty?
+
+    entry_sequence =
+      if value.is_a?(String)
+        parsed = value.read_ber(Net::LDAP::AsnSyntax) rescue nil
+        return nil unless parsed.is_a?(Array)
+        locate_read_entry(parsed)
+      else
+        locate_read_entry(value)
+      end
+    return nil unless entry_sequence.is_a?(Array) && entry_sequence.length >= 2
+
+    entry = Net::LDAP::Entry.new(entry_sequence[0])
+    Array(entry_sequence[1]).each do |attribute_sequence|
+      entry[attribute_sequence[0]] = attribute_sequence[1]
+    end
+    entry
+  end
+  private :parse_read_entry
+
+  # The ReadEntryResponseValue wraps a SearchResultEntry in either an
+  # application [16] sequence or a context [0] wrapper, depending on the
+  # server implementation. Unwrap it if necessary.
+  def locate_read_entry(sequence)
+    identifier = sequence.ber_identifier if sequence.is_a?(Net::BER::BerIdentifiedArray)
+    return sequence if [0x30, 0x70].include?(identifier)
+
+    first = sequence.first
+    first.is_a?(Array) ? first : sequence
+  end
+  private :locate_read_entry
 
   # (provisional, must document)
   def parse_ldap_search_request(sequence)

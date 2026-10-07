@@ -324,8 +324,10 @@ class Net::LDAP
   }
 
   universal = {
-    constructed: {
+    :constructed => {
       107 => :string, # ExtendedResponse
+      16 => :array,   # SEQUENCE, e.g. SearchResultEntry inside RFC 4527 control values
+      17 => :array,   # SET of attribute values
     },
   }
 
@@ -383,6 +385,8 @@ class Net::LDAP
   ResultCodeObjectClassModsProhibited    = 69
   ResultCodeAffectsMultipleDSAs          = 71
   ResultCodeOther                        = 80
+  # http://tools.ietf.org/html/rfc4528#section-2.2
+  ResultCodeAssertionFailed              = 121
 
   # https://tools.ietf.org/html/rfc4511#appendix-A.1
   ResultCodesNonError = [
@@ -440,6 +444,7 @@ class Net::LDAP
     ResultCodeObjectClassModsProhibited    => "ObjectClass Modifications Prohibited",
     ResultCodeAffectsMultipleDSAs          => "Affects Multiple DSAs",
     ResultCodeOther                        => "Other",
+    ResultCodeAssertionFailed              => "Assertion Failed",
   }
 
   module LDAPControls
@@ -447,6 +452,11 @@ class Net::LDAP
     SORT_REQUEST  = "1.2.840.113556.1.4.473"
     SORT_RESPONSE = "1.2.840.113556.1.4.474"
     DELETE_TREE   = "1.2.840.113556.1.4.805"
+    # RFC 4528: Assertion Control
+    ASSERTION     = "1.3.6.1.1.12"
+    # RFC 4527: Pre-Read and Post-Read Entry Controls
+    PRE_READ      = "1.3.6.1.1.13.1"
+    POST_READ     = "1.3.6.1.1.13.2"
   end
 
   def self.result2string(code) #:nodoc:
@@ -671,6 +681,9 @@ class Net::LDAP
     os = OpenStruct.new
     if result.is_a?(Net::LDAP::PDU)
       os.extended_response = result.extended_response
+      os.assertion_failed = result.assertion_failed?
+      os.pre_read_entry = result.pre_read_entry
+      os.post_read_entry = result.post_read_entry
       result = result.result
     end
     if result.is_a?(Hash)

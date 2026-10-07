@@ -537,6 +537,76 @@ class Net::LDAP::Connection #:nodoc:
     :replace => 2,
   }
 
+  # RFC 4527 only permits the pre-read control on entry-update operations
+  # and the post-read control on operations whose entry exists afterwards.
+  # Delete therefore cannot carry a post-read control.
+  READ_CONTROLS_BY_OPERATION = { #:nodoc:
+    :modify => {
+      :request_tag => Net::LDAP::PDU::ModifyRequest,
+      :response_tag => Net::LDAP::PDU::ModifyResponse,
+      :pre_read => true,
+      :post_read => true,
+    },
+    :rename => {
+      :request_tag => Net::LDAP::PDU::ModifyRDNRequest,
+      :response_tag => Net::LDAP::PDU::ModifyRDNResponse,
+      :pre_read => true,
+      :post_read => true,
+    },
+    :delete => {
+      :request_tag => Net::LDAP::PDU::DeleteRequest,
+      :response_tag => Net::LDAP::PDU::DeleteResponse,
+      :pre_read => true,
+      :post_read => false,
+    },
+  }
+
+  # Encodes the RFC 4528 assertion filter and the RFC 4527 pre-/post-read
+  # controls alongside any caller-provided BER controls. +operation+ names
+  # the entry-update operation so disallowed control combinations fail before
+  # anything is sent to the server.
+  #
+  # Returns a BER controls string, or nil when there are no controls.
+  def encode_entry_update_controls(args, operation)
+    controls = Array(args[:controls]).dup
+    rules = READ_CONTROLS_BY_OPERATION.fetch(operation)
+
+    if args.key?(:assertion)
+      filter = args[:assertion]
+      filter = Net::LDAP::Filter.construct(filter) if filter.is_a?(String)
+      raise ArgumentError, "assertion must be a Net::LDAP::Filter or filter string" unless filter.is_a?(Net::LDAP::Filter)
+
+      critical = args.fetch(:assertion_critical, true) ? true : false
+      controls << [
+        Net::BER::BerIdentifiedOid.new(Net::LDAP::LDAPControls::ASSERTION).to_ber,
+        critical.to_ber,
+        filter.to_ber.to_s.to_ber,
+      ].to_ber_sequence
+    end
+
+    [
+      [:pre_read, Net::LDAP::LDAPControls::PRE_READ, rules[:pre_read]],
+      [:post_read, Net::LDAP::LDAPControls::POST_READ, rules[:post_read]],
+    ].each do |arg_name, oid, allowed|
+      next unless args.key?(arg_name)
+
+      unless allowed
+        raise Net::LDAP::UnsupportedControlError,
+              "#{oid} is not permitted on #{operation} operations"
+      end
+
+      attributes = Array(args[arg_name]).map { |attribute| attribute.to_s.to_ber }
+      controls << [
+        Net::BER::BerIdentifiedOid.new(oid).to_ber,
+        # RFC 4527 assigns no semantics to client criticality; always false.
+        false.to_ber,
+        attributes.to_ber_sequence.to_s.to_ber,
+      ].to_ber_sequence
+    end
+
+    controls.empty? ? nil : controls.to_ber_contextspecific(0)
+  end
+
   def self.modify_ops(operations)
     ops = []
     if operations
@@ -569,10 +639,7 @@ class Net::LDAP::Connection #:nodoc:
       ops.to_ber_sequence,
     ].to_ber_appsequence(Net::LDAP::PDU::ModifyRequest)
 
-    controls = args.fetch(:controls, nil)
-    unless controls.nil?
-      controls = controls.to_ber_contextspecific(0)
-    end
+    controls = encode_entry_update_controls(args, :modify)
 
     write(request, controls, message_id)
     pdu = queued_read(message_id)
@@ -674,7 +741,8 @@ class Net::LDAP::Connection #:nodoc:
     request    = [old_dn.to_ber, new_rdn.to_ber, delete_attrs.to_ber]
     request   << new_superior.to_ber_contextspecific(0) unless new_superior == nil
 
-    write(request.to_ber_appsequence(Net::LDAP::PDU::ModifyRDNRequest), nil, message_id)
+    controls = encode_entry_update_controls(args, :rename)
+    write(request.to_ber_appsequence(Net::LDAP::PDU::ModifyRDNRequest), controls, message_id)
     pdu = queued_read(message_id)
 
     if !pdu || pdu.app_tag != Net::LDAP::PDU::ModifyRDNResponse
@@ -689,9 +757,16 @@ class Net::LDAP::Connection #:nodoc:
   #++
   def delete(args)
     dn = args[:dn] or raise "Unable to delete empty DN"
-    controls   = args.include?(:control_codes) ? args[:control_codes].to_ber_control : nil #use nil so we can compact later
     message_id = next_msgid
     request    = dn.to_s.to_ber_application_string(Net::LDAP::PDU::DeleteRequest)
+
+    controls = if args.include?(:control_codes)
+                 # Legacy controls argument used by #delete_tree. Encode it
+                 # exactly as before.
+                 args[:control_codes].to_ber_control
+               else
+                 encode_entry_update_controls(args, :delete)
+               end
 
     write(request, controls, message_id)
     pdu = queued_read(message_id)
