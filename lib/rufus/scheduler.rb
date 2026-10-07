@@ -19,6 +19,7 @@ class Rufus::Scheduler
   require 'rufus/scheduler/jobs_repeat'
   require 'rufus/scheduler/job_array'
   require 'rufus/scheduler/locks'
+  require 'rufus/scheduler/debouncer'
 
   #
   # A common error class for rufus-scheduler
@@ -225,6 +226,12 @@ class Rufus::Scheduler
 
     do_schedule(:cron, cronline, callable, opts, opts[:job], block)
   end
+
+  def debouncer(opts={}, &block)
+
+    Rufus::Scheduler::Debouncer.new(self, opts, &block)
+  end
+  alias debounce debouncer
 
   def schedule_cron(cronline, callable=nil, opts={}, &block)
 
@@ -740,4 +747,3 @@ class Rufus::Scheduler
   def monow; self.class.monow; end
   def ltstamp; self.class.ltstamp; end
 end
-

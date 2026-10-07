@@ -197,6 +197,34 @@ Interval jobs trigger, execute and then trigger again after the interval elapsed
 
 Cron jobs are based on the venerable cron utility (```man 5 crontab```). They trigger following a pattern given in (almost) the same language cron uses.
 
+### debouncer / debounce
+
+External events can be grouped by key with a per-key quiet period. `quiet` is the idle time required before a batch runs; `max_wait` bounds the time from the first event in a round, so a continuous stream cannot postpone the run forever.
+
+```ruby
+debouncer =
+  scheduler.debouncer(
+    quiet: '500',
+    max_wait: '10s',
+    merge: ->(current, incoming) { Array(current) + Array(incoming) }
+  ) do |key, payload, batch|
+
+    # batch.first_event and batch.last_event are the bounding events.
+    # payload is the merge result for the whole round.
+  end
+
+debouncer.submit(:order, event1)
+debouncer.submit(:order, event2)
+```
+
+The merge callable is invoked as `merge(current_payload, incoming_payload)` in submission order. If it raises, the exception comes back from `submit`; the already accepted payload remains unchanged.
+
+A round is atomically claimed before its callback starts. Events submitted while that callback runs start the next round and cannot change the current callback's arguments.
+
+`flush(key)` claims a pending round for one key and runs it immediately; `flush` without a key does so for every pending key. `cancel(key)` and `cancel` perform the same atomic claim but discard the round instead of running it. They return the claimed batch (or batches) and `nil` / an empty array when there is nothing pending.
+
+When a timer becomes due concurrently with `flush` or `cancel`, whichever claims the round first owns those events. The loser observes no pending round and does not run or cancel the callback a second time.
+
 ### Chronic and "Wed at 2pm"
 
 By default, rufus-scheduler relies on Ruby to parse strings like "Wed at 2pm". But most of the time, when calling this on Thursday, the day before is "invoked". Relying on [Chronic](https://github.com/mojombo/chronic) might solve the issue.
@@ -1795,4 +1823,3 @@ see [getting help](#getting-help) above.
 ## license
 
 MIT, see [LICENSE.txt](LICENSE.txt)
-
