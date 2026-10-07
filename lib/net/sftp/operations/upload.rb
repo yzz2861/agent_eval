@@ -53,6 +53,32 @@ module Net; module SFTP; module Operations
   #   defaults to 32,000 bytes.
   # * <tt>:name</tt> - the filename to report to the progress monitor when
   #   an IO object is given as +local+. This defaults to "<memory>".
+  # * <tt>:sparse</tt> - either +true+, or a Hash of sparse options. When
+  #   enabled, the uploader scans the local source for runs of zero bytes
+  #   and skips sending them, issuing WRITE requests only for the data
+  #   extents. This reduces network traffic for sources with large zero
+  #   regions (like backup images); it does not, however, guarantee that
+  #   the server will allocate the skipped regions sparsely on disk. The
+  #   remote file is always opened with truncation, so overwriting an
+  #   existing remote file cannot leave stale bytes inside the skipped
+  #   holes, and when the local source ends with a skipped zero region the
+  #   remote logical size is forced to the correct value via FXP_FSETSTAT.
+  #   The following sub-options are supported when a Hash is given:
+  #
+  #   * <tt>:min_hole</tt> - the minimum number of consecutive zero bytes
+  #     that will be skipped; shorter runs are sent literally. Defaults to
+  #     32,768 bytes.
+  #   * <tt>:extents</tt> - an explicit list of <tt>[offset, length]</tt>
+  #     data extents to send, instead of scanning the source. Extents must
+  #     be sorted by offset, must not overlap, and must lie entirely within
+  #     the bounds of the local source. This requires a seekable source.
+  #
+  #   Sparse mode adds two progress events (see below): <tt>:skip</tt>,
+  #   which reports a zero region that was not sent, and <tt>:resize</tt>,
+  #   which reports the logical size the remote file is set to when it ends
+  #   with a skipped zero region. Together with <tt>:put</tt> (which reports
+  #   the bytes actually sent), these let observers track logical bytes and
+  #   sent bytes separately.
   #
   # == Progress Monitoring
   #
@@ -75,6 +101,15 @@ module Net; module SFTP; module Operations
   #     when :close then
   #       # args[0] : file metadata
   #       puts "finished with #{args[0].remote}"
+  #     when :skip then
+  #       # args[0] : file metadata
+  #       # args[1] : byte offset in remote file
+  #       # args[2] : length of the zero region that was skipped (sparse mode)
+  #       puts "skipping #{args[2]} zero bytes at #{args[1]}"
+  #     when :resize then
+  #       # args[0] : file metadata
+  #       # args[1] : logical size the remote file is set to (sparse mode)
+  #       puts "setting remote size to #{args[1]}"
   #     when :mkdir then
   #       # args[0] : remote path name
   #       puts "creating directory #{args[0]}"
@@ -227,10 +262,20 @@ module Net; module SFTP; module Operations
 
       # A simple struct for recording metadata about the file currently being
       # uploaded.
-      LiveFile = Struct.new(:local, :remote, :io, :size, :handle)
+      LiveFile = Struct.new(:local, :remote, :io, :size, :handle, :sparse)
+
+      # Internal state for a sparse upload. Tracks the scan position, the
+      # pending (not yet sent) data, and any in-progress zero run.
+      SparseState = Struct.new(:min_hole, :extents, :extent_index,
+        :extent_remaining, :pending, :pending_start, :zero_run, :in_hole,
+        :hole_start, :pos, :ready, :eof, :resize_to, :done, :tail_reported)
 
       # The default # of bytes to read from disk at a time.
       DEFAULT_READ_SIZE   = 32_000
+
+      # The default minimum number of consecutive zero bytes that sparse
+      # mode will skip instead of sending.
+      DEFAULT_MIN_HOLE_SIZE = 32_768
 
       # The number of readers to use when uploading a single file.
       SINGLE_FILE_READERS = 2
@@ -295,6 +340,7 @@ module Net; module SFTP; module Operations
         end
 
         metafile = LiveFile.new(name, remote, file, size)
+        prepare_sparse(metafile) if sparse_options
         update_progress(:open, metafile)
 
         request = sftp.open(remote, "w", &method(:on_open))
@@ -350,6 +396,17 @@ module Net; module SFTP; module Operations
         process_next_entry
       end
 
+      # Called when a +fsetstat+ request finishes. Raises StatusException if
+      # it failed, otherwise closes the file to finish the upload.
+      def on_fsetstat(response)
+        @active -= 1
+        file = response.request[:file]
+        raise StatusException.new(response, "fsetstat #{file.remote}") unless response.ok?
+
+        @active += 1
+        close_file(file)
+      end
+
       # Attempts to send the next chunk from the given file (where +file+ is
       # a LiveFile instance).
       def write_next_chunk(file)
@@ -357,20 +414,276 @@ module Net; module SFTP; module Operations
           process_next_entry
         else
           @active += 1
-          offset = file.io.pos
-          data = file.io.read(options[:read_size] || DEFAULT_READ_SIZE)
-          if data.nil?
-            update_progress(:close, file)
-            request = sftp.close(file.handle, &method(:on_close))
-            request[:file] = file
-            file.io.close
-            file.io = nil
-            @uploads.delete(file)
+          if file.sparse
+            write_next_sparse_chunk(file)
           else
-            update_progress(:put, file, offset, data)
-            request = sftp.write(file.handle, offset, data, &method(:on_write))
-            request[:file] = file
+            offset = file.io.pos
+            data = file.io.read(read_size)
+            if data.nil?
+              close_file(file)
+            else
+              update_progress(:put, file, offset, data)
+              request = sftp.write(file.handle, offset, data, &method(:on_write))
+              request[:file] = file
+            end
           end
+        end
+      end
+
+      # Sends the next data extent of a sparse upload, skipping any zero
+      # regions. When no data remains, the remote file is resized (if the
+      # tail was a skipped zero region) and then closed.
+      def write_next_sparse_chunk(file)
+        state = file.sparse
+        if state.done
+          @active -= 1
+          return
+        end
+
+        segment = next_data_segment(file)
+        if segment.nil?
+          state.done = true
+          if state.resize_to
+            update_progress(:resize, file, state.resize_to)
+            request = sftp.fsetstat(file.handle, {:size => state.resize_to}, &method(:on_fsetstat))
+            request[:file] = file
+          else
+            close_file(file)
+          end
+        else
+          offset, data = segment
+          update_progress(:put, file, offset, data)
+          request = sftp.write(file.handle, offset, data, &method(:on_write))
+          request[:file] = file
+        end
+      end
+
+      # Closes the remote file and the local source, and removes the file
+      # from the list of active uploads.
+      def close_file(file)
+        update_progress(:close, file)
+        request = sftp.close(file.handle, &method(:on_close))
+        request[:file] = file
+        file.io.close
+        file.io = nil
+        @uploads.delete(file)
+      end
+
+      # The normalized :sparse option value: nil when sparse mode is
+      # disabled, or a Hash of sparse sub-options.
+      def sparse_options
+        case value = options[:sparse]
+        when nil, false then nil
+        when true then {}
+        when Hash then value
+        else raise ArgumentError, ":sparse must be true or an options Hash"
+        end
+      end
+
+      # The number of bytes to read from the local source at a time.
+      def read_size
+        options[:read_size] || DEFAULT_READ_SIZE
+      end
+
+      # Initializes the sparse scan state for the given file.
+      def prepare_sparse(file)
+        min_hole = (sparse_options[:min_hole] || DEFAULT_MIN_HOLE_SIZE).to_i
+        raise ArgumentError, ":min_hole must be a positive integer" if min_hole <= 0
+
+        state = SparseState.new
+        state.min_hole = min_hole
+        state.pending = +""
+        state.pending_start = 0
+        state.zero_run = 0
+        state.in_hole = false
+        state.pos = 0
+        state.ready = []
+        state.eof = false
+
+        extents = sparse_options[:extents]
+        if extents
+          unless file.io.respond_to?(:seek)
+            raise ArgumentError, ":extents requires a seekable local source"
+          end
+          state.extents = validate_extents(extents, file.size)
+          state.extent_index = 0
+          state.extent_remaining = 0
+        end
+
+        file.sparse = state
+      end
+
+      # Validates a caller-provided extent table, returning a normalized
+      # list of [offset, length] pairs. Raises ArgumentError if the extents
+      # are unsorted, overlapping, or out of bounds.
+      def validate_extents(extents, size)
+        list = extents.map do |extent|
+          offset, length = extent
+          offset = Integer(offset)
+          length = Integer(length)
+          raise ArgumentError, "sparse extent offset must be non-negative" if offset < 0
+          raise ArgumentError, "sparse extent length must be positive" if length <= 0
+          raise ArgumentError, "sparse extent exceeds local size" if offset + length > size
+          [offset, length]
+        end
+
+        previous_end = 0
+        list.each do |offset, length|
+          if offset < previous_end
+            raise ArgumentError, "sparse extents must be sorted by offset and non-overlapping"
+          end
+          previous_end = offset + length
+        end
+
+        list
+      end
+
+      # Returns the next [offset, data] segment to send for a sparse
+      # upload, or nil when no data remains.
+      def next_data_segment(file)
+        if file.sparse.extents
+          next_extent_segment(file)
+        else
+          next_scanned_segment(file)
+        end
+      end
+
+      # Returns the next [offset, data] segment for a caller-provided
+      # extent table, seeking the local source between extents. Gaps
+      # between extents are reported via the :skip progress event.
+      def next_extent_segment(file)
+        state = file.sparse
+        loop do
+          if state.extent_remaining && state.extent_remaining > 0
+            offset = state.pos
+            data = file.io.read([read_size, state.extent_remaining].min)
+            raise IOError, "local source ended before all sparse extents were read" if data.nil?
+            state.pos += data.bytesize
+            state.extent_remaining -= data.bytesize
+            return [offset, data]
+          end
+
+          if state.extent_index >= state.extents.length
+            unless state.tail_reported
+              state.tail_reported = true
+              if state.pos < file.size
+                update_progress(:skip, file, state.pos, file.size - state.pos)
+                state.resize_to = file.size
+              end
+            end
+            return nil
+          end
+
+          offset, length = state.extents[state.extent_index]
+          state.extent_index += 1
+          update_progress(:skip, file, state.pos, offset - state.pos) if offset > state.pos
+          file.io.seek(offset)
+          state.pos = offset
+          state.extent_remaining = length
+        end
+      end
+
+      # Returns the next [offset, data] segment by scanning the local
+      # source for zero regions. Zero runs of at least :min_hole bytes are
+      # skipped (and reported via the :skip progress event); shorter runs
+      # are sent literally as part of the surrounding data.
+      def next_scanned_segment(file)
+        state = file.sparse
+        loop do
+          return state.ready.shift unless state.ready.empty?
+
+          if state.pending.bytesize >= read_size
+            segment = [state.pending_start, state.pending]
+            state.pending_start += state.pending.bytesize
+            state.pending = +""
+            return segment
+          end
+
+          break if state.eof
+
+          chunk = file.io.read(read_size)
+          if chunk.nil?
+            finalize_scan(file)
+          else
+            scan_chunk(file, chunk)
+          end
+        end
+        nil
+      end
+
+      # Scans a chunk of local data, splitting it into zero and non-zero
+      # runs. Zero runs that cross read-block boundaries are merged into a
+      # single hole.
+      def scan_chunk(file, chunk)
+        state = file.sparse
+        chunk = chunk.b
+        offset = state.pos
+        state.pos += chunk.bytesize
+        chunk.scan(/\x00+|[^\x00]+/) do |run|
+          if run.getbyte(0) == 0
+            consume_zeros(file, offset, run.bytesize)
+          else
+            consume_data(file, offset, run)
+          end
+          offset += run.bytesize
+        end
+      end
+
+      # Accumulates a run of zero bytes. When the run reaches :min_hole
+      # bytes, any pending data is flushed as a segment and the run becomes
+      # a skippable hole.
+      def consume_zeros(file, offset, length)
+        state = file.sparse
+        return if state.in_hole
+
+        state.zero_run += length
+        if state.zero_run >= state.min_hole
+          if state.pending.bytesize > 0
+            state.ready << [state.pending_start, state.pending]
+            state.pending = +""
+          end
+          state.in_hole = true
+          state.hole_start = offset + length - state.zero_run
+          state.zero_run = 0
+        end
+      end
+
+      # Accumulates a run of non-zero data, closing (and reporting) any
+      # in-progress hole first.
+      def consume_data(file, offset, data)
+        state = file.sparse
+        if state.in_hole
+          update_progress(:skip, file, state.hole_start, offset - state.hole_start)
+          state.in_hole = false
+          state.pending_start = offset
+        elsif state.zero_run > 0
+          state.pending << ("\x00".b * state.zero_run)
+          state.zero_run = 0
+        end
+        state.pending << data
+      end
+
+      # Handles the end of the local source for a scanned sparse upload: a
+      # trailing hole is reported and scheduled for a remote resize, and
+      # any remaining pending data is queued for sending.
+      def finalize_scan(file)
+        state = file.sparse
+        state.eof = true
+
+        if state.in_hole
+          update_progress(:skip, file, state.hole_start, state.pos - state.hole_start)
+          state.in_hole = false
+          state.resize_to = state.pos
+        end
+
+        if state.zero_run > 0
+          state.pending << ("\x00".b * state.zero_run)
+          state.zero_run = 0
+        end
+
+        if state.pending.bytesize > 0
+          state.ready << [state.pending_start, state.pending]
+          state.pending = +""
         end
       end
 
