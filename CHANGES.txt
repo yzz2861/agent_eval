@@ -1,5 +1,12 @@
 === 8.0.0 beta3
 
+  * Support CanonicalizeHostname (yes/always) with CanonicalDomains,
+    CanonicalizeMaxDots, CanonicalizePermittedCNAMEs and
+    CanonicalizeFallbackLocal: the ssh_config files are re-read for the
+    canonical host so Match/Host/Include conditions are re-evaluated, with
+    first-pass values taking precedence. The resolver can be injected via
+    Net::SSH::Config.for(..., resolver:) or the :canonicalize_resolver
+    start option. Match canonical/originalhost keywords are supported.
   * Verify @cert-authority host certificate constraints — principals (shell-glob, matching OpenSSH), validity window, host type, and critical options — instead of trusting any CA-signed certificate for any host [#1009]
 
 === 7.3.3

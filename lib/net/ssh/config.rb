@@ -1,3 +1,5 @@
+require 'net/ssh/config/host_canonicalizer'
+
 module Net
   module SSH
     # The Net::SSH::Config class is used to parse OpenSSH configuration files,
@@ -38,6 +40,14 @@ module Net
     # * UserKnownHostsFile => :user_known_hosts_file
     # * NumberOfPasswordPrompts => :number_of_password_prompts
     # * FingerprintHash => :fingerprint_hash
+    # * CanonicalizeHostname => enables the two-pass hostname canonicalization
+    #   flow (yes/no/always). The following directives are supported as well:
+    #   CanonicalDomains, CanonicalizeFallbackLocal, CanonicalizeMaxDots and
+    #   CanonicalizePermittedCNAMEs. The Match keywords "host",
+    #   "canonical" and "originalhost" are evaluated against the appropriate
+    #   name on each pass. A resolver can be injected via the resolver: option
+    #   of #for/#canonicalize (or the :canonicalize_resolver option of
+    #   Net::SSH.start) so that no real DNS access is required.
     #
     # Note that you will never need to use this class directly--you can control
     # whether the OpenSSH configuration files are read by passing the :config
@@ -65,10 +75,30 @@ module Net
         # given +files+ (defaulting to the list of files returned by
         # #default_files), translates the resulting hash into the options
         # recognized by Net::SSH, and returns them.
-        def for(host, files = expandable_default_files)
-          translate(files.inject({}) { |settings, file|
+        #
+        # When CanonicalizeHostname is enabled in the configuration, the
+        # files are parsed twice: first for the host as given, then for the
+        # canonical host returned by the resolver. Pass +resolver:+ to inject
+        # an object responding to #resolve (or a callable); by default a real
+        # DNS resolver is used.
+        def for(host, files = expandable_default_files, resolver: nil)
+          result = canonicalize(host, files, resolver: resolver)
+          options = translate(result.settings)
+          options[:host_name] = result.connection_host
+          options
+        end
+
+        # Performs the two-pass configuration load described for #for and
+        # returns a HostCanonicalizer result. The result exposes the original
+        # host, the host used for matching after canonicalization, the final
+        # connection host (considering HostName), the merged settings and the
+        # pass each final option originated from.
+        def canonicalize(host, files = expandable_default_files, resolver: nil)
+          files = Array(files)
+          initial_settings = files.inject({}) do |settings, file|
             load(file, host, settings)
-          })
+          end
+          HostCanonicalizer.new(host, initial_settings, files, resolver: resolver)
         end
 
         # Load the OpenSSH configuration settings in the given +file+ for the
@@ -77,7 +107,7 @@ module Net
         # ones. Returns a hash containing the OpenSSH options. (See
         # #translate for how to convert the OpenSSH options into Net::SSH
         # options.)
-        def load(path, host, settings = {}, base_dir = nil)
+        def load(path, host, settings = {}, base_dir = nil, original_host = host)
           file = File.expand_path(path)
           base_dir ||= File.dirname(file)
           return settings unless File.readable?(file)
@@ -125,7 +155,7 @@ module Net
               block_seen = true
               settings[key] = host
             elsif key == 'match'
-              block_matched = eval_match_conditions(value, host, settings)
+              block_matched = eval_match_conditions(value, host, settings, original_host)
               block_seen = true
             elsif !block_seen
               case key
@@ -133,7 +163,7 @@ module Net
                 (globals[key] ||= []) << value
               when 'include'
                 included_file_paths(base_dir, value).each do |file_path|
-                  globals = load(file_path, host, globals, base_dir)
+                  globals = load(file_path, host, globals, base_dir, original_host)
                 end
               else
                 globals[key] = value unless settings.key?(key)
@@ -144,7 +174,7 @@ module Net
                 (settings[key] ||= []) << value
               when 'include'
                 included_file_paths(base_dir, value).each do |file_path|
-                  settings = load(file_path, host, settings, base_dir)
+                  settings = load(file_path, host, settings, base_dir, original_host)
                 end
               else
                 settings[key] = value unless settings.key?(key)
@@ -360,42 +390,51 @@ module Net
         # Tokenize string into tokens.
         # A token is a word or a quoted sequence of words, separated by whitespaces.
         def tokenize_config_value(str)
-          str.scan(/([^"\s]+)?(?:"([^"]+)")?\s*/).map(&:join)
+          str.scan(/([^"\s]+)?(?:"([^"]+)")?\s*/).map(&:join).reject(&:empty?)
         end
 
-        def eval_match_conditions(condition, host, settings)
+        def eval_match_conditions(condition, host, settings, original_host = host)
           # Not using `\s` for whitespace matching as canonical
           # ssh_config parser implementation (OpenSSH) has specific character set.
           # Ref: https://github.com/openssh/openssh-portable/blob/2581333d564d8697837729b3d07d45738eaf5a54/misc.c#L237-L239
-          conditions = condition.split(/[ \t\r\n]+|(?<!=)=(?!=)/).reject(&:empty?)
-          return true if conditions == ["all"]
+          tokens = condition.split(/[ \t\r\n]+|(?<!=)=(?!=)/).reject(&:empty?)
+          return true if tokens == ["all"]
 
-          conditions = conditions.each_slice(2)
           condition_matches = []
-          conditions.each do |(kind, exprs)|
-            exprs = unquote(exprs)
+          index = 0
+          while index < tokens.length
+            kind = tokens[index].downcase
+            index += 1
 
-            case kind.downcase
+            case kind
             when "all"
               raise "all cannot be mixed with other conditions"
-            when "host"
-              if exprs.start_with?('!')
-                negated = true
-                exprs = exprs[1..-1]
-              else
-                negated = false
-              end
-              condition_met = false
-              exprs.split(",").each do |expr|
-                condition_met = condition_met || host =~ pattern2regex(expr)
-              end
-              condition_matches << (true && negated ^ condition_met)
-              # else
-              # warn "net-ssh: Unsupported expr in Match block: #{kind}"
+            when "host", "canonical"
+              condition_matches << patterns_match?(tokens[index], host)
+              index += 1
+            when "originalhost"
+              condition_matches << patterns_match?(tokens[index], original_host)
+              index += 1
+            else
+              # Unknown criteria (user, exec, ...) are not supported; an
+              # unsupported condition prevents the block from matching.
+              return false
             end
           end
 
           !condition_matches.empty? && condition_matches.all?
+        end
+
+        # Evaluates a comma separated list of ssh_config host patterns,
+        # honoring a leading "!" as negation for the whole list.
+        def patterns_match?(expressions, host)
+          return false if expressions.nil?
+          expressions = unquote(expressions)
+          negated = expressions.start_with?('!')
+          expressions = expressions[1..-1] if negated
+
+          matched = expressions.split(",").any? { |expr| host =~ pattern2regex(expr) }
+          negated ^ matched
         end
 
         def unquote(string)

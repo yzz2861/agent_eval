@@ -70,6 +70,7 @@ module Net
       append_all_supported_algorithms non_interactive password_prompt
       agent_socket_factory minimum_dh_bits verify_host_key
       fingerprint_hash check_host_ip pubkey_algorithms
+      canonicalize_resolver
     ]
 
     # The standard means of starting a new SSH connection. When used with a
@@ -106,6 +107,10 @@ module Net
     #   is set.)
     # * :check_host_ip => Also check IP address when connecting to remote host.
     #   Defaults to +true+.
+    # * :canonicalize_resolver => an object responding to #resolve (or a
+    #   callable) used when CanonicalizeHostname is enabled in ssh_config.
+    #   It receives each candidate host name and must return the canonical
+    #   name or nil; inject one in tests to avoid real DNS lookups.
     # * :compression => the compression algorithm to use, or +true+ to use
     #   whatever is supported.
     # * :compression_level => the compression level to use when sending data
@@ -228,7 +233,9 @@ module Net
       _sanitize_options(options)
 
       options[:user] = user if user
-      options = configuration_for(host, options.fetch(:config, true)).merge(options)
+      canonicalize_resolver = options.delete(:canonicalize_resolver)
+      options = configuration_for(host, options.fetch(:config, true),
+                                  canonicalize_resolver: canonicalize_resolver).merge(options)
       host = options.fetch(:host_name, host)
 
       options[:check_host_ip] = true unless options.key?(:check_host_ip)
@@ -281,14 +288,14 @@ module Net
     # to read.
     #
     # See Net::SSH::Config for the full description of all supported options.
-    def self.configuration_for(host, use_ssh_config)
+    def self.configuration_for(host, use_ssh_config, canonicalize_resolver: nil)
       files = case use_ssh_config
               when true then Net::SSH::Config.expandable_default_files
               when false, nil then return {}
               else Array(use_ssh_config)
               end
 
-      Net::SSH::Config.for(host, files)
+      Net::SSH::Config.for(host, files, resolver: canonicalize_resolver)
     end
 
     def self.assign_defaults(options)

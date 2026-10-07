@@ -18,6 +18,7 @@ lib/net/ssh/authentication/session.rb
 lib/net/ssh/buffer.rb
 lib/net/ssh/buffered_io.rb
 lib/net/ssh/config.rb
+lib/net/ssh/config/host_canonicalizer.rb
 lib/net/ssh/connection/channel.rb
 lib/net/ssh/connection/constants.rb
 lib/net/ssh/connection/session.rb
@@ -104,6 +105,7 @@ test/test_all.rb
 test/test_buffer.rb
 test/test_buffered_io.rb
 test/test_config.rb
+test/test_config_canonicalization.rb
 test/test_key_factory.rb
 test/transport/hmac/test_md5.rb
 test/transport/hmac/test_md5_96.rb
