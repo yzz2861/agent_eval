@@ -324,10 +324,10 @@ require_relative 'version'
 # reference to that object only remains meaningful for the lifetime of
 # the object's process and the lifetime of the object within that
 # process.  A modified implementation is provided by DRb::TimerIdConv
-# in the file drb/timeridconv.rb.  This implementation retains a local
-# reference to all objects exported over dRuby for a configurable
-# period of time (defaulting to ten minutes), to prevent them being
-# garbage-collected within this time.  Another sample implementation
+# in the file drb/timeridconv.rb.  That implementation grants explicit,
+# renewable client leases and retains an exported object only while one
+# of its leases is valid or a call started before expiry is in progress.
+# Another sample implementation
 # is provided in sample/name.rb in the main dRuby distribution.  This
 # allows objects to specify their own id or "name".  A dRuby reference
 # can be made persistent across processes by having each process
@@ -401,6 +401,12 @@ module DRb
     def to_id(obj)
       (nil == obj) ? nil : DRB_OBJECT_SPACE.to_id(obj)
     end
+
+    # Release references retained while an incoming call is being handled.
+    # Alternative id conversion implementations can override this method.
+    def finish_request(keepalives = nil)
+      keepalives&.each(&:finish)
+    end
   end
 
   # Mixin module making an object undumpable or unmarshallable.
@@ -419,6 +425,10 @@ module DRb
   # the context's current drb server but the context does not have one.
   # See #current_server.
   class DRbServerNotFound < DRbError; end
+
+  # Error raised when a reference no longer points to a live exported
+  # object.
+  class InvalidReferenceError < DRbError; end
 
   # Error raised by the DRbProtocol module when it cannot find any
   # protocol implementation support the scheme specified in a URI.
@@ -1568,6 +1578,7 @@ module DRb
           thread.kill unless thread == current # xxx: Thread#kill
         }
       end
+      @idconv.close if @idconv.respond_to?(:close)
       @thread.join unless @thread == current
     end
 
@@ -1695,6 +1706,10 @@ module DRb
         check_insecure_method
       end
 
+      def release
+        @obj = @argv = @block = @result = nil
+      end
+
       def block_yield(x)
         if x.size == 1 && x[0].class == Array
           x[0] = DRbArray.new(x[0])
@@ -1768,6 +1783,8 @@ module DRb
         end
         _last_invoke_method = nil
         loop do
+          keepalives = []
+          Thread.current['DRb']['keepalives'] = keepalives
           begin
             succ = false
             invoke_method = InvokeMethod.new(self, client)
@@ -1776,9 +1793,13 @@ module DRb
             unless DRbConnError === result && result.message == 'connection closed'
               client.send_reply(succ, result)
             end
+            result = nil
           rescue Exception => e
             error_print(e) if verbose
           ensure
+            Thread.current['DRb'].delete('keepalives')
+            @idconv.finish_request(keepalives)
+            invoke_method&.release
             _last_invoke_method = invoke_method
             client.close unless succ
             if Thread.current['DRb']['stop_service']

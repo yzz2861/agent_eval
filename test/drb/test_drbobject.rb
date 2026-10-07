@@ -51,12 +51,6 @@ class TestDRbObjectTimerIdConv < Test::Unit::TestCase
 
   def teardown
     super
-    # stop DRb::TimerIdConv::TimerHolder2#on_gc
-    @idconv.instance_eval do
-      @holder.instance_eval do
-        @expires = nil
-      end
-    end
     GC.start
   end
 end
