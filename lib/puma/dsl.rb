@@ -1494,6 +1494,45 @@ module Puma
       @options[:enable_keep_alives] = enabled
     end
 
+    # Enable parallel handling of pipelined +GET+ and +HEAD+ requests on an
+    # HTTP/1.1 connection. Other methods remain serial on that connection,
+    # and responses are still written in request order.
+    #
+    # The default is +false+.
+    #
+    # @example
+    #   http11_pipelining true
+    #
+    def http11_pipelining(enabled=true)
+      @options[:http11_pipelining] = enabled
+    end
+
+    # Maximum number of pipelined requests from one HTTP/1.1 connection whose
+    # applications may be active concurrently. Only +GET+ and +HEAD+ run in
+    # parallel; other methods wait for preceding work to finish.
+    #
+    # The default is +4+.
+    #
+    # @example
+    #   http11_pipeline_max_requests 8
+    #
+    def http11_pipeline_max_requests(count)
+      @options[:http11_pipeline_max_requests] = Integer(count)
+    end
+
+    # Maximum number of response bytes buffered for an HTTP/1.1 connection
+    # while waiting to write a response in request order. Streaming and other
+    # non-bufferable responses apply backpressure instead of being cached.
+    #
+    # The default is 64 KiB.
+    #
+    # @example
+    #   http11_pipeline_buffer_bytes 256 * 1024
+    #
+    def http11_pipeline_buffer_bytes(bytes)
+      @options[:http11_pipeline_buffer_bytes] = Integer(bytes)
+    end
+
     # When +false+, request headers with underscores in their names are discarded.
     # When such headers are present, their names are exposed in
     # +env["puma.underscore_headers"]+ for auditing. This value is

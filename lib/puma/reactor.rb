@@ -72,6 +72,32 @@ module Puma
       @thread&.join
     end
 
+    def remove(client)
+      @input << [:remove, client]
+      @selector.wakeup
+      true
+    rescue ClosedQueueError, IOError
+      false
+    end
+
+    def wakeup!(client)
+      result = @block.call(client)
+      if result == :wait
+        @selector.deregister client.to_io
+        @reactor_size -= 1
+        @timeouts.delete client
+        register(client)
+      elsif result == :readd
+        @selector.deregister client.to_io
+        @reactor_size -= 1
+        @timeouts.delete client
+      elsif result
+        @selector.deregister client.to_io
+        @reactor_size -= 1
+        @timeouts.delete client
+      end
+    end
+
     private
 
     def select_loop
@@ -80,9 +106,26 @@ module Puma
           # Wakeup any registered object that receives incoming data.
           # Block until the earliest timeout or Selector#wakeup is called.
           timeout = (earliest = @timeouts.first) && earliest.timeout
+          reregister = []
           @selector.select(timeout) do |monitor|
-            wakeup!(monitor.value)
+            client, monitor = monitor.value, nil
+            result = @block.call(client)
+            if result == :wait
+              @selector.deregister client.to_io
+              @reactor_size -= 1
+              @timeouts.delete client
+              reregister << client
+            elsif result == :readd
+              @selector.deregister client.to_io
+              @reactor_size -= 1
+              @timeouts.delete client
+            elsif result
+              @selector.deregister client.to_io
+              @reactor_size -= 1
+              @timeouts.delete client
+            end
           end
+          reregister.each { |client| register(client) }
 
           # Wakeup all objects that timed out.
           timed_out = @timeouts.take_while { |client| client.timeout == 0 }
@@ -91,7 +134,11 @@ module Puma
           unless @input.empty?
             until @input.empty?
               client = @input.pop
-              register(client) if client.io_ok?
+              if client.is_a?(Array) && client.first == :remove
+                deregister_client(client.last)
+              else
+                register(client) if client.io_ok?
+              end
             end
             @timeouts.sort_by!(&:timeout_at)
           end
@@ -118,14 +165,15 @@ module Puma
       # unreadable clients raise error when processed by NIO
     end
 
+    def deregister_client(client)
+      @selector.deregister client.to_io
+      @reactor_size -= 1
+      @timeouts.delete client
+    rescue ArgumentError, IOError
+      # Client was not registered or its IO has already been closed.
+    end
+
     # 'Wake up' a monitored object by calling the provided block.
     # Stop monitoring the object if the block returns `true`.
-    def wakeup!(client)
-      if @block.call client
-        @selector.deregister client.to_io
-        @reactor_size -= 1
-        @timeouts.delete client
-      end
-    end
   end
 end

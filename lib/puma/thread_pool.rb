@@ -363,6 +363,10 @@ module Puma
       self
     end
 
+    def wakeup
+      with_mutex { @not_empty.signal }
+    end
+
     def spawn_thread_if_needed # :nodoc:
       with_mutex do
         if @waiting < @todo.size and can_spawn_processor?

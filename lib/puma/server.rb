@@ -12,6 +12,7 @@ require_relative 'client'
 require_relative 'binder'
 require_relative 'util'
 require_relative 'response'
+require_relative 'http11_pipeline'
 require_relative 'configuration'
 require_relative 'cluster_accept_loop_delay'
 
@@ -108,6 +109,9 @@ module Puma
       @io_selector_backend       = @options[:io_selector_backend]
       @http_content_length_limit = @options[:http_content_length_limit]
       @allow_underscore_headers  = @options.fetch(:allow_underscore_headers, true)
+      @http11_pipelining         = @options[:http11_pipelining] == true
+      @pipeline_max_requests     = [1, Integer(@options[:http11_pipeline_max_requests] || 4)].max
+      @pipeline_buffer_bytes     = [0, Integer(@options[:http11_pipeline_buffer_bytes] || (64 * 1024))].max
       @cluster_accept_loop_delay = ClusterAcceptLoopDelay.new(
         workers: @options[:workers],
         max_delay: @options[:wait_for_less_busy_worker] || 0 # Real default is in Configuration::DEFAULTS, this is for unit testing
@@ -261,7 +265,11 @@ module Puma
       @status = :run
 
       @thread_pool = ThreadPool.new(thread_name, options, server: self) do |processor, client|
-        process_client(processor, client)
+        if client.is_a?(Http11Pipeline::PipelinedClient)
+          process_pipelined_client(processor, client)
+        else
+          process_client(processor, client)
+        end
       end
 
       if @queue_requests
@@ -321,9 +329,19 @@ module Puma
     # will wake up and again be checked to see if it's ready to be passed to the thread pool.
     def reactor_wakeup(client)
       shutdown = !@queue_requests
-      if client.try_to_finish || (shutdown && !client.can_close?)
-        @thread_pool << client
-      elsif shutdown || client.timeout == 0
+      if client.pipeline?
+        return handle_pipeline_wakeup(client, shutdown)
+      end
+
+      if client.try_to_finish
+        if http11_pipelining?(client)
+          start_http11_pipeline(client)
+        else
+          @thread_pool << client
+        end
+      elsif shutdown
+        client.timeout! if !client.can_close?
+      elsif client.timeout == 0
         client.timeout!
       else
         client.set_timeout(@first_data_timeout)
@@ -460,6 +478,30 @@ module Puma
       client
     end
 
+    def thread_pool_enqueue(work)
+      return unless work
+      @thread_pool << work unless shutting_down?
+    rescue RuntimeError
+      work.close if work.respond_to?(:close)
+    end
+
+    def wakeup_thread_pool
+      @thread_pool.wakeup
+    end
+
+    def add_client_to_reactor(client)
+      @reactor.add(client)
+    end
+
+    def remove_client_from_reactor(client)
+      @reactor.remove(client) if @reactor
+    end
+
+    def log_pipeline_error(error)
+      return unless error
+      @log_writer.debug_error(error)
+    end
+
     # :nodoc:
     def handle_check
       cmd = @check.sysread 1
@@ -495,7 +537,9 @@ module Puma
       requests = 0
 
       begin
-        if @queue_requests && !client.eagerly_finish
+        eagerly_finished = @http11_pipelining ? false : client.eagerly_finish
+
+        if @queue_requests && !eagerly_finished
 
           client.set_timeout(@first_data_timeout)
           if @reactor.add client
@@ -560,6 +604,57 @@ module Puma
 
         close_client_safely(client) if close_socket
       end
+    end
+
+    def process_pipelined_client(processor, request)
+      if request.error?
+        client_error(request.error, request, request.requests_served)
+      else
+        handle_request(processor, request, request.requests_served)
+      end
+    rescue StandardError => e
+      request.pipeline&.fail(e)
+    ensure
+      request.io_buffer.reset
+      request.close
+    end
+
+    def http11_pipelining?(client)
+      @http11_pipelining &&
+        @queue_requests &&
+        client.env[SERVER_PROTOCOL] == HTTP_11 &&
+        @enable_keep_alives
+    end
+
+    def start_http11_pipeline(client)
+      pipeline = Http11Pipeline.new(
+        client,
+        self,
+        max_requests: @pipeline_max_requests,
+        buffer_bytes: @pipeline_buffer_bytes
+      )
+      pipeline.start
+    end
+
+    def handle_pipeline_wakeup(client, shutdown)
+      if shutdown
+        client.pipeline.shutdown
+        return true
+      end
+
+      if client.try_to_finish
+        client.pipeline.request_ready
+      elsif client.timeout == 0
+        client.pipeline.fail
+        client.timeout!
+      else
+        client.set_timeout(@first_data_timeout)
+        false
+      end
+    rescue StandardError => e
+      client.pipeline&.fail(e)
+      close_client_safely(client)
+      true
     end
 
     # :nodoc:

@@ -35,6 +35,7 @@ class TestPumaServer < PumaTest
 
   def teardown
     @server.stop(true)
+    @pipeline_client_socket&.close
   end
 
   def server_run(**options, &block)
@@ -45,6 +46,28 @@ class TestPumaServer < PumaTest
     @server.run
   ensure
     @pool = @server.instance_variable_get(:@thread_pool)
+  end
+
+  def pipeline_server_run(**options, &block)
+    options[:log_writer] ||= @log_writer
+    options[:min_threads] ||= 2
+    @server = Puma::Server.new block || @app, @events, options
+    @server.run
+  ensure
+    @pool = @server.instance_variable_get(:@thread_pool)
+  end
+
+  def pipeline_request(request)
+    server_socket, @pipeline_client_socket = UNIXSocket.pair(:STREAM)
+    @pipeline_client_socket.extend(TestPuma::PumaSocketInclude)
+    client = Puma::Client.new(server_socket, @server.binder.proto_env)
+    client.env_set_http_version = @server.instance_variable_get(:@env_set_http_version)
+    client.http_content_length_limit = @server.options[:http_content_length_limit]
+    client.supported_http_methods = @server.instance_variable_get(:@supported_http_methods)
+    client.allow_underscore_headers = true
+    @pipeline_client_socket.send_http(request)
+    @server.instance_variable_get(:@thread_pool) << client
+    @pipeline_client_socket
   end
 
   def test_allow_underscore_headers_defaults_to_true_when_option_is_absent
@@ -854,6 +877,154 @@ class TestPumaServer < PumaTest
     # Assert the "connection: close" header is present with keep-alives disabled.
     assert_equal ["content-type: plain/text", "connection: close", "content-length: 6"], response.headers
     assert_equal "hello\n", response.body
+  end
+
+  def test_http11_pipelining_runs_get_and_head_requests_in_parallel_and_preserves_order
+    started = Queue.new
+    release_one = Queue.new
+    release_two = Queue.new
+    pipeline_server_run(http11_pipelining: true, http11_pipeline_max_requests: 2,
+                        min_threads: 4, max_threads: 4) do |env|
+      started << env['PATH_INFO']
+      (env['PATH_INFO'] == '/one' ? release_one : release_two).pop
+      [200, {'X-Request' => env['PATH_INFO'], 'X-Method' => env['REQUEST_METHOD']}, [env['PATH_INFO']]]
+    end
+
+    socket = pipeline_request "GET /one HTTP/1.1\r\nHost: test.com\r\n\r\n" \
+      "HEAD /two HTTP/1.1\r\nHost: test.com\r\n\r\n"
+
+    assert_equal '/one', started.pop
+    assert_equal '/two', started.pop
+
+    release_one << true
+    release_two << true
+
+    bytes = read_pipeline_bytes_until(socket, "x-request: /two\r\nx-method: HEAD\r\ncontent-length: 4\r\n\r\n")
+    first_status = bytes.index("HTTP/1.1")
+    second_status = bytes.index("HTTP/1.1", first_status + 1)
+    first_bytes = bytes.byteslice(0, second_status)
+    head_headers = bytes.byteslice(second_status..-1)
+
+    assert_includes first_bytes, "HTTP/1.1 200 OK\r\n"
+    assert_includes first_bytes, "x-request: /one\r\n"
+    assert_includes first_bytes, "/one"
+    assert_includes head_headers, "HTTP/1.1 200 OK\r\n"
+    assert_includes head_headers, "x-request: /two\r\n"
+    assert head_headers.end_with?("\r\n\r\n")
+  end
+
+  def test_http11_pipelining_keeps_other_methods_serial
+    started = Queue.new
+    release = Queue.new
+
+    pipeline_server_run(http11_pipelining: true, http11_pipeline_max_requests: 2, max_threads: 2) do |env|
+      started << env['PATH_INFO']
+      release.pop
+      [200, {'Content-Length' => '2'}, ['OK']]
+    end
+
+    socket = pipeline_request "GET /one HTTP/1.1\r\nHost: test.com\r\n\r\n" \
+      "POST /two HTTP/1.1\r\nHost: test.com\r\nContent-Length: 0\r\n\r\n" \
+      "GET /three HTTP/1.1\r\nHost: test.com\r\n\r\n"
+
+    assert_equal '/one', started.pop
+    release << true
+    assert_equal '/two', started.pop
+    sleep 0.05
+    assert_raises(ThreadError) { started.pop(true) }
+    release << true
+    assert_equal '/three', started.pop
+    release << true
+
+    socket.wait_readable(5)
+    bytes = socket.read_nonblock(4096)
+    assert_equal %w[OK OK OK], bytes.scan(/content-length: 2\r\n\r\n(.{2})/m).flatten
+  end
+
+  def test_http11_pipelining_does_not_buffer_streaming_body_and_preserves_order
+    started = Queue.new
+    release_one = Queue.new
+    release_two = Queue.new
+
+    pipeline_server_run(http11_pipelining: true, http11_pipeline_max_requests: 2,
+                        http11_pipeline_buffer_bytes: 32, min_threads: 3, max_threads: 3) do |env|
+      started << env['PATH_INFO']
+      (env['PATH_INFO'] == '/one' ? release_one : release_two).pop
+      response_body = Object.new
+      response_body.define_singleton_method(:each) do |&block|
+        block.call("start-#{env['PATH_INFO']}")
+        block.call('x' * 16)
+      end
+      [200, {'X-Request' => env['PATH_INFO'], 'Content-Length' => '26'}, response_body]
+    end
+
+    socket = pipeline_request "GET /one HTTP/1.1\r\nHost: test.com\r\n\r\n" \
+      "GET /two HTTP/1.1\r\nHost: test.com\r\n\r\n"
+
+    assert_equal '/one', started.pop
+    assert_equal '/two', started.pop
+
+    release_one << true
+
+    bytes = read_pipeline_bytes_until(socket, 'x' * 16)
+    assert bytes.include?('start-/one')
+    refute bytes.include?('start-/two')
+    sleep 0.1
+
+    release_two << true
+    sleep 0.1
+    bytes << read_pipeline_bytes_until(socket, 'start-/two', bytes)
+
+    first_part = bytes.split("x-request: /two", 2).first
+    assert first_part.include?('start-/one')
+
+    assert bytes.include?("x-request: /one\r\n")
+    assert bytes.include?('start-/one')
+    assert bytes.include?("x-request: /two\r\n")
+    assert bytes.include?('start-/two')
+    assert bytes.index('/one') < bytes.index('/two')
+  end
+
+  def read_pipeline_bytes_until(socket, marker, initial = +'')
+    bytes = initial.dup
+    deadline = Time.now + 5
+    until bytes.include?(marker) || Time.now > deadline
+      next unless socket.wait_readable(deadline - Time.now)
+
+      chunk = socket.read_nonblock(65536, exception: false)
+      break if chunk.nil?
+      next if chunk == :wait_readable
+      bytes << chunk
+    end
+    bytes
+  end
+
+  def test_http11_pipelining_closes_connection_and_cleans_queued_request
+    entered = Queue.new
+
+    pipeline_server_run(http11_pipelining: true, http11_pipeline_max_requests: 2,
+                        min_threads: 4, max_threads: 4) do |env|
+      entered << env['PATH_INFO']
+      if env['PATH_INFO'] == '/close'
+        [200, {'Content-Length' => '5'}, ['close']]
+      else
+        [200, {}, ['first']]
+      end
+    end
+
+    request = +"GET /first HTTP/1.1\r\nHost: test.com\r\n\r\n"
+    request << "GET /close HTTP/1.1\r\nHost: test.com\r\nConnection: close\r\n\r\n"
+    request << "GET /queued HTTP/1.1\r\nHost: test.com\r\n\r\n"
+    socket = pipeline_request(request)
+
+    assert_equal '/first', entered.pop
+    assert_equal '/close', entered.pop
+    bytes = read_pipeline_bytes_until(socket, "\r\n\r\nclose")
+    assert_includes bytes, 'connection: close'
+    assert bytes.end_with?('close')
+    sleep 0.1
+    assert_raises(EOFError) { socket.read_response }
+    assert_raises(ThreadError) { entered.pop(true) }
   end
 
   def test_http_10_keep_alive_with_body

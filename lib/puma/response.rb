@@ -63,7 +63,8 @@ module Puma
         env[EARLY_HINTS] = lambda { |headers|
           begin
             unless (str = str_early_hints headers).empty?
-              fast_write_str socket, "HTTP/1.1 103 Early Hints\r\n#{str}\r\n"
+              early_hint_socket = client.pipeline? ? client.pipeline.begin_early_hint(client) : socket
+              fast_write_str early_hint_socket, "HTTP/1.1 103 Early Hints\r\n#{str}\r\n"
             end
           rescue ConnectionError => e
             @log_writer.debug_error e
@@ -84,7 +85,7 @@ module Puma
         res_body = app_body
 
         # full hijack, app called env['rack.hijack']
-        return :async if client.hijacked
+        return client.pipeline? ? client.pipeline.async(client) : :async if client.hijacked
 
         status = status.to_i
 
@@ -214,11 +215,13 @@ module Puma
             io_buffer.append CONTENT_LENGTH_S, content_length.to_s, line_ending
           end
 
+          response_sink = response_sink(client, resp_info, body, content_length, false, !!response_hijack, io_buffer)
           io_buffer << LINE_END
-          fast_write_str socket, io_buffer.read_and_reset
+          fast_write_str response_sink, io_buffer.read_and_reset
+          response_sink.flush
 
           uncork_socket socket.flush
-          return keep_alive ? :keep_alive : :close
+          return finish_prepared_response(client, response_sink, keep_alive)
         end
       else
         if content_length
@@ -230,22 +233,45 @@ module Puma
         end
       end
 
+      response_sink = response_sink(client, resp_info, body, content_length, defined?(chunked) && chunked, !!response_hijack, io_buffer)
+
       io_buffer << line_ending
 
       # partial hijack, we write headers, then hand the socket to the app via
       # response_hijack.call
       if response_hijack
-        fast_write_str socket, io_buffer.read_and_reset
+        fast_write_str response_sink, io_buffer.read_and_reset
         uncork_socket socket.flush
         response_hijack.call socket
-        return :async
+        return client.pipeline? ? client.pipeline.async(client) : :async
       end
 
-      fast_write_response socket, body, io_buffer, chunked, content_length.to_i
+      fast_write_response response_sink, body, io_buffer, chunked, content_length.to_i
       body.close if close_body
 
       # if we're shutting down, close keep_alive connections
-      !shutting_down? && keep_alive ? :keep_alive : :close
+      finish_prepared_response(client, response_sink, keep_alive)
+    end
+
+    def response_sink(client, resp_info, body, content_length, chunked, response_hijack, io_buffer)
+      return client.io unless client.pipeline?
+
+      client.pipeline.begin_write(
+        client,
+        resp_info,
+        body,
+        content_length,
+        chunked,
+        response_hijack,
+        io_buffer
+      )
+    end
+
+    def finish_prepared_response(client, response_sink, keep_alive)
+      keep_alive = !shutting_down? && keep_alive
+      return keep_alive ? :keep_alive : :close unless client.pipeline?
+
+      client.pipeline.finish_write(client, keep_alive, response_sink)
     end
 
     # Used to write 'early hints', 'no body' responses, 'hijacked' responses,
@@ -290,6 +316,7 @@ module Puma
           while chunk = body.read(BODY_LEN_MAX)
             io_buffer.append chunk.bytesize.to_s(16), LINE_END, chunk, LINE_END
           end
+          fast_write_str socket, io_buffer.read_and_reset
           fast_write_str socket, CLOSE_CHUNKED
         else
           if content_length <= IO_BODY_MAX

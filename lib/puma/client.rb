@@ -74,13 +74,16 @@ module Puma
     EmptyBody = NullIO.new
 
     attr_reader :env, :to_io, :body, :io, :timeout_at, :ready, :hijacked,
-                :tempfile, :io_buffer, :http_content_length_limit_exceeded,
-                :requests_served, :error_status_code
+                :tempfile, :io_buffer, :http_content_length_limit,
+                :http_content_length_limit_exceeded, :requests_served,
+                :supported_http_methods, :allow_underscore_headers,
+                :error_status_code
 
     attr_writer :peerip, :http_content_length_limit, :supported_http_methods,
                 :allow_underscore_headers
 
     attr_accessor :remote_addr_header, :listener, :env_set_http_version
+    attr_accessor :pipeline
 
     def initialize(io, env=nil)
       @io = io
@@ -163,6 +166,7 @@ module Puma
     end
 
     def reset
+      pipeline = @pipeline
       @parser.reset
       @io_buffer.reset
       @read_header = true
@@ -175,6 +179,28 @@ module Puma
       @in_last_chunk = false
       @http_content_length_limit_exceeded = nil
       @error_status_code = nil
+      @pipeline = pipeline
+    end
+
+    def release_pipelined_request
+      @body = nil
+      @tempfile = nil
+    end
+
+    def reset_for_pipelined_request
+      remaining = @parser.body
+      remaining = nil if remaining.empty?
+      reset
+      @buffer = remaining
+    end
+
+    def release_after_pipelined_request_copy
+      @body = nil
+      @tempfile = nil
+    end
+
+    def pipeline?
+      !!@pipeline
     end
 
     # only used with back-to-back requests contained in the buffer

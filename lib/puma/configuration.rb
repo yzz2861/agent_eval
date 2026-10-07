@@ -145,6 +145,9 @@ module Puma
       first_data_timeout: 30,
       force_shutdown_after: -1,
       http_content_length_limit: nil,
+      http11_pipeline_buffer_bytes: 64 * 1024,
+      http11_pipeline_max_requests: 4,
+      http11_pipelining: false,
       # Number of seconds to wait until the next request before shutting down.
       idle_timeout: nil,
       io_selector_backend: :auto,
