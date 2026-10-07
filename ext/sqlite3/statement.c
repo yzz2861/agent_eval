@@ -119,6 +119,25 @@ closed_p(VALUE self)
     return Qfalse;
 }
 
+static int
+bind_parameter_index_for(sqlite3StmtRubyPtr ctx, VALUE key)
+{
+    int index;
+
+    switch (TYPE(key)) {
+        case T_SYMBOL:
+            key = rb_funcall(key, rb_intern("to_s"), 0);
+        case T_STRING:
+            if (RSTRING_PTR(key)[0] != ':') { key = rb_str_plus(rb_str_new2(":"), key); }
+            index = sqlite3_bind_parameter_index(ctx->st, StringValuePtr(key));
+            break;
+        default:
+            index = (int)NUM2INT(key);
+    }
+
+    return index;
+}
+
 static VALUE
 step(VALUE self)
 {
@@ -245,16 +264,7 @@ bind_param(VALUE self, VALUE key, VALUE value)
     REQUIRE_LIVE_DB(ctx);
     REQUIRE_OPEN_STMT(ctx);
 
-    switch (TYPE(key)) {
-        case T_SYMBOL:
-            key = rb_funcall(key, rb_intern("to_s"), 0);
-        case T_STRING:
-            if (RSTRING_PTR(key)[0] != ':') { key = rb_str_plus(rb_str_new2(":"), key); }
-            index = sqlite3_bind_parameter_index(ctx->st, StringValuePtr(key));
-            break;
-        default:
-            index = (int)NUM2INT(key);
-    }
+    index = bind_parameter_index_for(ctx, key);
 
     if (index == 0) {
         rb_raise(rb_path2class("SQLite3::Exception"), "no such bind parameter");
@@ -322,6 +332,88 @@ bind_param(VALUE self, VALUE key, VALUE value)
     CHECK(sqlite3_db_handle(ctx->st), status);
 
     return self;
+}
+
+/* call-seq:
+ *    stmt.bind_pointer(key, object, type)
+ *    stmt.bind_pointer(key, pointer)
+ *
+ * Binds +object+ to the named (or positional) placeholder as a typed SQLite
+ * pointer, tagged with +type+ (a String or Symbol). The wrapped object is
+ * kept alive until SQLite releases the pointer (on statement finalization,
+ * rebinding, or #clear_bindings!; note that #reset! keeps bindings).
+ *
+ * The pointer is not a serialization format: ordinary SQL sees the value as
+ * NULL, and the object can only be retrieved by a function that presents the
+ * matching type tag (see SQLite3::Pointer#fetch). The second form binds a
+ * pre-built SQLite3::Pointer directly.
+ *
+ * See also SQLite3::Pointer.
+ */
+static VALUE
+bind_pointer(int argc, VALUE *argv, VALUE self)
+{
+#ifdef HAVE_SQLITE3_POINTER_APIS
+    sqlite3StmtRubyPtr ctx;
+    sqlite3RbPointer *holder;
+    VALUE key, object, type, wrapper;
+    unsigned int refs_after_retain;
+    int status;
+    int index;
+
+    rb_scan_args(argc, argv, "21", &key, &object, &type);
+
+    TypedData_Get_Struct(self, sqlite3StmtRuby, &statement_type, ctx);
+
+    REQUIRE_LIVE_DB(ctx);
+    REQUIRE_OPEN_STMT(ctx);
+
+    index = bind_parameter_index_for(ctx, key);
+
+    if (index == 0) {
+        rb_raise(rb_path2class("SQLite3::Exception"), "no such bind parameter");
+    }
+
+    if (NIL_P(type)) {
+        if (!rb_obj_is_kind_of(object, cSqlite3Pointer)) {
+            rb_raise(rb_eTypeError, "no implicit conversion of %s into SQLite3::Pointer",
+                     rb_class2name(CLASS_OF(object)));
+        }
+        wrapper = object;
+    } else {
+        wrapper = rb_funcall(cSqlite3Pointer, rb_intern("new"), 2, object, type);
+    }
+
+    TypedData_Get_Struct(wrapper, sqlite3RbPointer, &rb_sqlite3_pointer_data_type, holder);
+
+    /* keep the wrapper alive until SQLite's destructor runs */
+    rb_sqlite3_pointer_retain(wrapper);
+    refs_after_retain = holder->refs;
+
+    status = sqlite3_bind_pointer(
+                 ctx->st,
+                 index,
+                 holder,
+                 holder->c_type,
+                 rb_sqlite3_pointer_sqlite_destructor
+             );
+
+    if (status != SQLITE_OK && holder->refs == refs_after_retain) {
+        /* SQLite documents that the destructor runs even when the bind
+         * fails, which already undid our retain; if it did not run, SQLite
+         * never took ownership and we must undo it ourselves. */
+        if (--holder->refs == 0) {
+            holder->released = 1;
+        }
+    }
+
+    CHECK(sqlite3_db_handle(ctx->st), status);
+
+    return self;
+#else
+    rb_raise(rb_eNotImpError,
+             "typed pointer binding requires SQLite >= 3.20.0");
+#endif
 }
 
 /* call-seq: stmt.reset!
@@ -730,6 +822,7 @@ init_sqlite3_statement(void)
     rb_define_method(cSqlite3Statement, "close", sqlite3_rb_close, 0);
     rb_define_method(cSqlite3Statement, "closed?", closed_p, 0);
     rb_define_method(cSqlite3Statement, "bind_param", bind_param, 2);
+    rb_define_method(cSqlite3Statement, "bind_pointer", bind_pointer, -1);
     rb_define_method(cSqlite3Statement, "reset!", reset_bang, 0);
     rb_define_method(cSqlite3Statement, "clear_bindings!", clear_bindings_bang, 0);
     rb_define_method(cSqlite3Statement, "step", step, 0);

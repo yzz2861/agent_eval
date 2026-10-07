@@ -462,6 +462,292 @@ last_insert_row_id(VALUE self)
     return LL2NUM(sqlite3_last_insert_rowid(ctx->db));
 }
 
+VALUE cSqlite3Pointer;
+
+static void
+pointer_mark(void *ptr)
+{
+    sqlite3RbPointer *holder = (sqlite3RbPointer *)ptr;
+
+    /* no dcompact function: marking here pins the objects, so the VALUEs
+     * cached in this struct stay valid across GC compaction. */
+    rb_gc_mark(holder->self);
+    rb_gc_mark(holder->object);
+    rb_gc_mark(holder->type);
+}
+
+static void
+pointer_deallocate(void *ptr)
+{
+    /* SQLite's destructor (rb_sqlite3_pointer_sqlite_destructor) never frees
+     * this struct, so this is the only place the memory is released. */
+    xfree(ptr);
+}
+
+static size_t
+pointer_memsize(const void *ptr)
+{
+    return ptr ? sizeof(sqlite3RbPointer) : 0;
+}
+
+const rb_data_type_t rb_sqlite3_pointer_data_type = {
+    "SQLite3::Pointer",
+    {
+        pointer_mark,
+        pointer_deallocate,
+        pointer_memsize,
+    },
+    0,
+    0,
+    RUBY_TYPED_FREE_IMMEDIATELY | RUBY_TYPED_WB_PROTECTED,
+};
+
+void
+rb_sqlite3_pointer_sqlite_destructor(void *ptr)
+{
+    sqlite3RbPointer *holder = (sqlite3RbPointer *)ptr;
+
+    /* called once per reference SQLite held; the holder is only dead when
+     * the last reference goes away */
+    if (holder->refs > 0 && --holder->refs == 0) {
+        holder->released = 1;
+    }
+}
+
+/* Wrappers SQLite may still dereference. The registry is what hands lifetime
+ * from SQLite back to the Ruby GC: an entry stays (pinning the wrapped
+ * object) until SQLite's destructor has run and a prune passes. */
+static VALUE pointer_registry;
+
+/* Canonical C copies of every type tag seen, because SQLite compares pointer
+ * types by pointer identity rather than by string content. Entries are
+ * intentionally never freed. */
+static st_table *pointer_type_tags;
+
+int
+rb_sqlite3_pointer_prune(void)
+{
+    long i;
+    int pruned = 0;
+
+    if (!pointer_registry) { return 0; }
+
+    for (i = RARRAY_LEN(pointer_registry) - 1; i >= 0; i--) {
+        VALUE wrapper = RARRAY_AREF(pointer_registry, i);
+        sqlite3RbPointer *holder;
+        TypedData_Get_Struct(wrapper, sqlite3RbPointer, &rb_sqlite3_pointer_data_type, holder);
+        if (holder->released) {
+            rb_ary_delete_at(pointer_registry, i);
+            pruned++;
+        }
+    }
+
+    return pruned;
+}
+
+void
+rb_sqlite3_pointer_retain(VALUE wrapper)
+{
+    sqlite3RbPointer *holder;
+
+    TypedData_Get_Struct(wrapper, sqlite3RbPointer, &rb_sqlite3_pointer_data_type, holder);
+
+    rb_sqlite3_pointer_prune();
+
+    /* invariant: the wrapper is in the registry iff refs > 0 */
+    if (holder->refs == 0) {
+        holder->released = 0;
+        rb_ary_push(pointer_registry, wrapper);
+    }
+    holder->refs++;
+}
+
+const char *
+rb_sqlite3_pointer_intern_type(VALUE type, VALUE *rb_type_out)
+{
+    VALUE str;
+    st_data_t existing;
+    char *copy;
+
+    if (SYMBOL_P(type)) {
+        type = rb_sym2str(type);
+    }
+    StringValue(type);
+    str = rb_str_new_frozen(type);
+
+    if (!pointer_type_tags) {
+        pointer_type_tags = st_init_strtable();
+    }
+
+    /* raises if the tag contains a null byte */
+    if (st_lookup(pointer_type_tags, (st_data_t)StringValueCStr(str), &existing)) {
+        if (rb_type_out) { *rb_type_out = str; }
+        return (const char *)existing;
+    }
+
+    copy = strdup(StringValueCStr(str));
+    st_insert(pointer_type_tags, (st_data_t)copy, (st_data_t)copy);
+
+    if (rb_type_out) { *rb_type_out = str; }
+    return copy;
+}
+
+struct pointer_lookup {
+    sqlite3_value *val;
+    VALUE found;
+};
+
+static int
+pointer_lookup_i(st_data_t key, st_data_t UNUSED(value), st_data_t arg)
+{
+#ifdef HAVE_SQLITE3_POINTER_APIS
+    struct pointer_lookup *lookup = (struct pointer_lookup *)arg;
+    void *ptr = sqlite3_value_pointer(lookup->val, (const char *)key);
+
+    if (ptr) {
+        sqlite3RbPointer *holder = (sqlite3RbPointer *)ptr;
+        lookup->found = holder->self;
+        return ST_STOP;
+    }
+#endif
+    return ST_CONTINUE;
+}
+
+VALUE
+rb_sqlite3_pointer_from_value(sqlite3_value *val)
+{
+#ifdef HAVE_SQLITE3_POINTER_APIS
+    struct pointer_lookup lookup;
+
+    if (!pointer_type_tags) { return Qnil; }
+
+    lookup.val = val;
+    lookup.found = Qnil;
+    st_foreach(pointer_type_tags, pointer_lookup_i, (st_data_t)&lookup);
+    return lookup.found;
+#else
+    return Qnil;
+#endif
+}
+
+static VALUE
+pointer_allocate(VALUE klass)
+{
+    sqlite3RbPointer *holder;
+    VALUE self = TypedData_Make_Struct(klass, sqlite3RbPointer, &rb_sqlite3_pointer_data_type, holder);
+
+    holder->self = self;
+    holder->object = Qnil;
+    holder->type = Qnil;
+    holder->c_type = NULL;
+    holder->refs = 0;
+    holder->released = 0;
+
+    return self;
+}
+
+/* call-seq: SQLite3::Pointer.new(object, type)
+ *
+ * Wraps +object+ so it can be passed through SQLite as a typed pointer (see
+ * Statement#bind_pointer). +type+ is a String or Symbol tag; functions
+ * receiving the pointer must ask for it by the same tag (see #fetch), and
+ * SQLite itself will only hand the pointer to code presenting a matching
+ * tag. The pointer is not a serialization format: to ordinary SQL the value
+ * is simply NULL.
+ */
+static VALUE
+pointer_initialize(VALUE self, VALUE object, VALUE type)
+{
+    sqlite3RbPointer *holder;
+    VALUE rb_type;
+
+    TypedData_Get_Struct(self, sqlite3RbPointer, &rb_sqlite3_pointer_data_type, holder);
+
+    holder->c_type = rb_sqlite3_pointer_intern_type(type, &rb_type);
+    RB_OBJ_WRITE(self, &holder->object, object);
+    RB_OBJ_WRITE(self, &holder->type, rb_type);
+
+    return self;
+}
+
+/* call-seq: pointer.fetch(type)
+ *
+ * Returns the wrapped object if +type+ matches the tag the pointer was
+ * created with, and +nil+ otherwise (including after the pointer has been
+ * released by SQLite). A mismatched tag never yields an object.
+ */
+static VALUE
+pointer_fetch(VALUE self, VALUE type)
+{
+    sqlite3RbPointer *holder;
+    const char *c_type;
+
+    TypedData_Get_Struct(self, sqlite3RbPointer, &rb_sqlite3_pointer_data_type, holder);
+
+    if (holder->released) { return Qnil; }
+
+    c_type = rb_sqlite3_pointer_intern_type(type, NULL);
+    if (c_type != holder->c_type) { return Qnil; }
+
+    return holder->object;
+}
+
+/* call-seq: pointer.type
+ *
+ * Returns the type tag the pointer was created with, as a frozen String.
+ */
+static VALUE
+pointer_type_reader(VALUE self)
+{
+    sqlite3RbPointer *holder;
+    TypedData_Get_Struct(self, sqlite3RbPointer, &rb_sqlite3_pointer_data_type, holder);
+    return holder->type;
+}
+
+/* call-seq: pointer.released?
+ *
+ * Returns true once SQLite has finished with the pointer (e.g. the statement
+ * was finalized, rebound, or cleared, or a result value was consumed).
+ */
+static VALUE
+pointer_released_p(VALUE self)
+{
+    sqlite3RbPointer *holder;
+    TypedData_Get_Struct(self, sqlite3RbPointer, &rb_sqlite3_pointer_data_type, holder);
+    return holder->released ? Qtrue : Qfalse;
+}
+
+/* call-seq: SQLite3::Pointer.prune_released!
+ *
+ * Drops references to pointers SQLite has already released, allowing them
+ * and their wrapped objects to be garbage collected. This happens
+ * automatically whenever a new pointer is bound or returned; calling it
+ * directly is only useful to prompt cleanup eagerly. Returns the number of
+ * references dropped.
+ */
+static VALUE
+pointer_prune_bang(VALUE UNUSED(klass))
+{
+    return INT2NUM(rb_sqlite3_pointer_prune());
+}
+
+void
+init_sqlite3_pointer(void)
+{
+    cSqlite3Pointer = rb_define_class_under(mSqlite3, "Pointer", rb_cObject);
+
+    rb_define_alloc_func(cSqlite3Pointer, pointer_allocate);
+    rb_define_method(cSqlite3Pointer, "initialize", pointer_initialize, 2);
+    rb_define_method(cSqlite3Pointer, "fetch", pointer_fetch, 1);
+    rb_define_method(cSqlite3Pointer, "type", pointer_type_reader, 0);
+    rb_define_method(cSqlite3Pointer, "released?", pointer_released_p, 0);
+    rb_define_singleton_method(cSqlite3Pointer, "prune_released!", pointer_prune_bang, 0);
+
+    pointer_registry = rb_ary_new();
+    rb_global_variable(&pointer_registry);
+    pointer_type_tags = st_init_strtable();
+}
+
 VALUE
 sqlite3val2rb(sqlite3_value *val)
 {
@@ -487,9 +773,13 @@ sqlite3val2rb(sqlite3_value *val)
             rb_obj_freeze(rb_val);
             break;
         }
-        case SQLITE_NULL:
-            rb_val = Qnil;
+        case SQLITE_NULL: {
+            /* a typed pointer reports as SQLITE_NULL; unwrap it if the type
+             * tag is one of ours, otherwise it stays invisible as nil */
+            VALUE pointer = rb_sqlite3_pointer_from_value(val);
+            rb_val = NIL_P(pointer) ? Qnil : pointer;
             break;
+        }
         default:
             rb_raise(rb_eRuntimeError, "bad type");
     }
@@ -540,6 +830,24 @@ set_sqlite3_func_result(sqlite3_context *ctx, VALUE result)
             }
             break;
         default:
+            if (rb_obj_is_kind_of(result, cSqlite3Pointer)) {
+#ifdef HAVE_SQLITE3_POINTER_APIS
+                sqlite3RbPointer *holder;
+                TypedData_Get_Struct(result, sqlite3RbPointer, &rb_sqlite3_pointer_data_type, holder);
+                /* keep the wrapper alive until SQLite's destructor runs */
+                rb_sqlite3_pointer_retain(result);
+                sqlite3_result_pointer(
+                    ctx,
+                    holder,
+                    holder->c_type,
+                    rb_sqlite3_pointer_sqlite_destructor
+                );
+                break;
+#else
+                rb_raise(rb_eNotImpError,
+                         "typed pointer results require SQLite >= 3.20.0");
+#endif
+            }
             rb_raise(rb_eRuntimeError, "can't return %s",
                      rb_class2name(CLASS_OF(result)));
     }

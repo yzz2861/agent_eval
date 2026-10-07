@@ -1,5 +1,12 @@
 # sqlite3-ruby Changelog
 
+## Unreleased
+
+### Added
+
+- Add typed pointer support, wrapping SQLite's `sqlite3_bind_pointer` / `sqlite3_result_pointer` / `sqlite3_value_pointer` APIs so Ruby objects can be passed safely between custom SQL functions on the same connection. `SQLite3::Pointer.new(object, type)` wraps an object with a type tag, `Statement#bind_pointer` binds it as a parameter, functions defined with `Database#define_function` receive pointer arguments as `SQLite3::Pointer` and may return one as a result, and `SQLite3::Pointer#fetch(type)` retrieves the wrapped object only when the tag matches. Pointer values appear as `NULL` to ordinary SQL, and the wrapped object is kept alive until SQLite releases the pointer (statement reset/rebind/finalize, result consumption, or connection close), after which `SQLite3::Pointer.prune_released!` (or the next pointer operation) drops the reference for the GC.
+
+
 ## 2.9.6 / 2026-08-11
 
 ### Security / Stability
