@@ -1,6 +1,7 @@
 require 'net/ssh/loggable'
 require 'net/ssh/connection/channel'
 require 'net/ssh/connection/constants'
+require 'net/ssh/connection/exec_result'
 require 'net/ssh/service/forward'
 require 'net/ssh/connection/keepalive'
 require 'net/ssh/connection/event_loop'
@@ -431,6 +432,67 @@ module Net
           channel[:result] &&= channel[:result].force_encoding("UTF-8") unless block
 
           StringWithExitstatus.new(channel[:result], status[:exit_code]) if channel[:result]
+        end
+
+        # Executes the given +command+, blocking until the remote command has
+        # finished and the channel is fully closed, and returns a structured
+        # Net::SSH::Connection::ExecResult. Unlike #exec!, stdout and stderr
+        # are collected separately, and the exit information (exit status,
+        # exit signal, or an explicit "unknown" state) is available on the
+        # result. This makes it suitable for automation that needs to tell
+        # "command rejected", "command exited non-zero", and "command killed
+        # by a signal" apart.
+        #
+        #   result = ssh.exec_capture("grep something /some/files")
+        #   if result.success?
+        #     puts result.stdout
+        #   elsif result.exit_known?
+        #     warn "exited with #{result.exit_status.inspect} / #{result.exit_signal.inspect}"
+        #   else
+        #     warn "exit information unknown"
+        #   end
+        #
+        # By default, stdout and stderr are each collected into a string of
+        # at most +max_capture_size+ bytes (see OutputCollector); pass
+        # +:stdout+ and/or +:stderr+ sinks (anything responding to #call or
+        # #<<, e.g. a proc or an IO) to stream the output elsewhere instead.
+        #
+        # The result is only complete once the channel has been closed; the
+        # exec confirmation, EOF, exit-status, exit-signal, and channel close
+        # events may legitimately arrive in different orders, and all output
+        # received before the close is captured, even when the command
+        # ultimately fails.
+        def exec_capture(command, stdout: nil, stderr: nil, max_capture_size: OutputCollector::DEFAULT_LIMIT)
+          stdout_sink = stdout || OutputCollector.new(max_capture_size)
+          stderr_sink = stderr || OutputCollector.new(max_capture_size)
+
+          [stdout_sink, stderr_sink].each do |sink|
+            unless sink.respond_to?(:call) || sink.respond_to?(:<<)
+              raise ArgumentError, "output sinks must respond to #call or #<<"
+            end
+          end
+
+          result = ExecResult.new(command, stdout_sink, stderr_sink)
+
+          channel = open_channel do |chan|
+            chan.exec(command) do |ch, success|
+              unless success
+                result.exec_rejected!
+                ch.close
+              end
+
+              ch.on_data { |_c, data| result.receive_stdout(data) }
+              ch.on_extended_data { |_c, _type, data| result.receive_stderr(data) }
+              ch.on_request("exit-status") { |_c, data| result.receive_exit_status(data.read_long) }
+              ch.on_request("exit-signal") { |_c, data| result.receive_exit_signal(data.read_string) }
+              ch.on_eof { |_c| result.receive_eof }
+              ch.on_close { |_c| result.receive_close }
+            end
+          end
+
+          channel.on_open_failed { |_ch, _code, _desc| result.exec_rejected! }
+          channel.wait
+          result
         end
 
         # Enqueues a message to be sent to the server as soon as the socket is
