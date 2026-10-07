@@ -98,6 +98,12 @@ module Net module SFTP
         EXCL   = 0x00000020
       end
 
+      # Version 4 of the protocol retained the version 1-3 open flags and
+      # added the text-mode flag.
+      module FV4
+        TEXT = 0x00000040
+      end
+
       # Version 5 of the open operation totally discarded the flags understood
       # by versions 1-4, and replaced them with these.
       module FV5
@@ -135,6 +141,20 @@ module Net module SFTP
       WRITE    = OpenFlags::FV5::WRITE_LOCK
       DELETE   = OpenFlags::FV5::DELETE_LOCK
       ADVISORY = OpenFlags::FV6::ADVISORY_LOCK
+    end
+
+    # Extension names that a server may advertise in the FXP_VERSION packet.
+    module Extensions
+      # Advertised by servers that support opening files in text mode (SFTP
+      # protocol version 4 and later). The extension value identifies the
+      # byte sequence used by the server to terminate logical lines on the
+      # wire (typically "\n").
+      NEWLINE = "newline"
+
+      # Advertised by servers that support the text-seek extended request,
+      # which positions an open text-mode handle at the beginning of a
+      # logical line.
+      TEXT_SEEK = "text-seek"
     end
 
     module ACE

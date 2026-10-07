@@ -20,6 +20,101 @@ class SessionTest < Net::SFTP::TestCase
     assert_equal version, sftp.protocol.version
   end
 
+  def test_version_and_extensions_advertised_by_server_should_be_recorded
+    expect_sftp_session :server_version => 4,
+      :extensions => { "text-seek" => "2", "newline" => "\n" }
+
+    assert_scripted_command do
+      assert_equal 4, sftp.version
+      assert_equal "2", sftp.extensions["text-seek"]
+      assert sftp.supports?("text-seek")
+      assert sftp.text_mode?
+    end
+  end
+
+  def test_old_server_should_report_no_text_mode_or_text_seek
+    expect_sftp_session :server_version => 3
+    assert_scripted_command do
+      assert_equal 3, sftp.version
+      assert !sftp.text_mode?
+      assert !sftp.supports?("text-seek")
+      assert_equal({}, sftp.extensions)
+    end
+  end
+
+  def test_v3_text_open_should_raise_not_supported_without_sending_packet
+    expect_sftp_session :server_version => 3
+    assert_scripted_command do
+      assert_raises(Net::SFTP::NotSupported) do
+        sftp.open!("/path/to/file", "r", :text => true)
+      end
+    end
+  end
+
+  def test_v4_text_seek_should_send_extended_packet_with_line_coordinates
+    expect_sftp_session :server_version => 4 do |channel|
+      channel.sends_packet(FXP_EXTENDED, :long, 0,
+        :string, "text-seek", :string, "handle", :int64, 17)
+      channel.gets_packet(FXP_STATUS, :long, 0, :long, 0)
+    end
+
+    response = assert_synchronous_command(:text_seek!, "handle", 17)
+    assert response.ok?
+  end
+
+  def test_v4_text_seek_failure_should_raise_status_exception
+    expect_sftp_session :server_version => 4 do |channel|
+      channel.sends_packet(FXP_EXTENDED, :long, 0,
+        :string, "text-seek", :string, "handle", :int64, 999)
+      channel.gets_packet(FXP_STATUS, :long, 0, :long, 4, :string, "bad line")
+    end
+
+    assert_scripted_command do
+      error = assert_raises(Net::SFTP::StatusException) do
+        sftp.text_seek!("handle", 999)
+      end
+      assert_equal 4, error.code
+    end
+  end
+
+  def test_v4_text_open_should_send_text_flag
+    expect_sftp_session :server_version => 4 do |channel|
+      channel.sends_packet(FXP_OPEN, :long, 0, :string, "/path/to/file",
+        :long, Net::SFTP::Constants::OpenFlags::FV1::READ |
+               Net::SFTP::Constants::OpenFlags::FV4::TEXT,
+        :long, 0, :byte, 1)
+      channel.gets_packet(FXP_HANDLE, :long, 0, :string, "handle")
+    end
+
+    handle = assert_synchronous_command(:open!, "/path/to/file", "r", :text => true)
+    assert_equal "handle", handle
+  end
+
+  def test_open_text_then_seek_line_drives_text_protocol_end_to_end
+    expect_sftp_session :server_version => 4,
+      :extensions => { "text-seek" => "", "newline" => "\n" } do |channel|
+      channel.sends_packet(FXP_OPEN, :long, 0, :string, "/data.txt",
+        :long, Net::SFTP::Constants::OpenFlags::FV1::READ |
+               Net::SFTP::Constants::OpenFlags::FV4::TEXT,
+        :long, 0, :byte, 1)
+      channel.gets_packet(FXP_HANDLE, :long, 0, :string, "h")
+      channel.sends_packet(FXP_EXTENDED, :long, 1,
+        :string, "text-seek", :string, "h", :int64, 2)
+      channel.gets_packet(FXP_STATUS, :long, 1, :long, 0)
+      channel.sends_packet(FXP_READ, :long, 2, :string, "h", :int64, 0, :long, 8192)
+      channel.gets_packet(FXP_DATA, :long, 2, :string, "two\n")
+      channel.sends_packet(FXP_CLOSE, :long, 3, :string, "h")
+      channel.gets_packet(FXP_STATUS, :long, 3, :long, 0)
+    end
+
+    assert_scripted_command do
+      file = sftp.file.open_text("/data.txt")
+      assert_equal 2, file.seek_line(2)
+      assert_equal "two\n", file.gets
+      file.close
+    end
+  end
+
 
   def test_v1_open_read_only_that_succeeds_should_invoke_callback
     expect_open("/path/to/file", "r", nil, :server_version => 1)

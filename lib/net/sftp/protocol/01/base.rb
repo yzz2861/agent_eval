@@ -71,6 +71,11 @@ module Net; module SFTP; module Protocol; module V01
     # parameter is a hash that is used to construct a new Attribute object,
     # to pass as part of the FXP_OPEN request.
     def open(path, flags, options)
+      if options[:text]
+        raise Net::SFTP::NotSupported,
+          "text mode requires SFTP protocol version 4 or greater (the server negotiated version #{version})"
+      end
+
       flags = normalize_open_flags(flags)
 
       if flags & (IO::WRONLY | IO::RDWR) != 0
@@ -223,6 +228,12 @@ module Net; module SFTP; module Protocol; module V01
     # NotImplementedError if called.
     def unblock(handle, offset, length)
       not_implemented! :unblock
+    end
+
+    # The text-seek extended request is not available in protocol versions
+    # prior to 4.
+    def text_seek(handle, line)
+      not_implemented! :text_seek
     end
 
     protected

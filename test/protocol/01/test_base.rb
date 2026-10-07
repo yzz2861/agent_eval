@@ -89,6 +89,17 @@ class Protocol::V01::TestBase < Net::SFTP::TestCase
     @base.open("/path/to/file", "r", :permissions => 0755)
   end
 
+  def test_open_in_text_mode_should_raise_not_supported
+    @session.expects(:send_packet).never
+    assert_raises(Net::SFTP::NotSupported) do
+      @base.open("/path/to/file", "r", :text => true)
+    end
+  end
+
+  def test_text_seek_should_raise_not_implemented
+    assert_raises(NotImplementedError) { @base.text_seek("handle", 0) }
+  end
+
   def test_close_should_send_close_packet
     @session.expects(:send_packet).with(FXP_CLOSE, :long, 0, :string, "handle")
     assert_equal 0, @base.close("handle")

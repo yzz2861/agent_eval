@@ -5,6 +5,7 @@ lib/net/sftp/operations/dir.rb
 lib/net/sftp/operations/download.rb
 lib/net/sftp/operations/file.rb
 lib/net/sftp/operations/file_factory.rb
+lib/net/sftp/operations/text_file.rb
 lib/net/sftp/operations/upload.rb
 lib/net/sftp/packet.rb
 lib/net/sftp/protocol/01/attributes.rb
@@ -46,6 +47,7 @@ test/test_dir.rb
 test/test_download.rb
 test/test_file.rb
 test/test_file_factory.rb
+test/test_text_file.rb
 test/test_packet.rb
 test/test_protocol.rb
 test/test_request.rb

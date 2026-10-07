@@ -3,6 +3,10 @@ module Net; module SFTP
   # The base exception class for the SFTP system.
   class Exception < RuntimeError; end
 
+  # Raised when the remote SFTP server does not support a capability that an
+  # operation requires, such as text-mode files or the text-seek extension.
+  class NotSupported < Net::SFTP::Exception; end
+
   # A exception class for reporting a non-success result of an operation.
   class StatusException < Net::SFTP::Exception
 

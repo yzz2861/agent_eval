@@ -7,6 +7,7 @@ require 'net/sftp/operations/dir'
 require 'net/sftp/operations/upload'
 require 'net/sftp/operations/download'
 require 'net/sftp/operations/file_factory'
+require 'net/sftp/operations/text_file'
 
 module Net; module SFTP
 
@@ -64,6 +65,15 @@ module Net; module SFTP
     # querying the protocol version in effect.
     attr_reader :protocol
 
+    # The SFTP protocol version negotiated with the server. This is nil
+    # until the connection has been opened.
+    attr_reader :version
+
+    # The hash of name/value extension pairs advertised by the server in
+    # its FXP_VERSION packet. This is empty until the connection has been
+    # opened.
+    attr_reader :extensions
+
     # The hash of pending requests. Any requests that have been sent and which
     # the server has not yet responded to will be represented here.
     attr_reader :pending_requests
@@ -77,11 +87,13 @@ module Net; module SFTP
     #   sftp.loop { sftp.opening? }
     def initialize(session, version = nil, &block)
       @session    = session
-      @version    = version
+      @requested_version = version
       @input      = Net::SSH::Buffer.new
       self.logger = session.logger
       @state      = :closed
       @pending_requests = {}
+      @version    = nil
+      @extensions = {}
 
       connect(&block)
     end
@@ -191,6 +203,31 @@ module Net; module SFTP
       #   handle = sftp.open!("/path/to/file")
       def open!(path, flags="r", options={}, &callback)
         wait_for(open(path, flags, options, &callback), :handle)
+      end
+
+      # :call-seq:
+      #   text_seek(handle, line) -> request
+      #   text_seek(handle, line) { |response| ... } -> request
+      #
+      # Sends the text-seek extended request for a file that was opened in
+      # text mode, positioning the server-side handle at the start of the
+      # given logical +line+ (0-based). Unlike a byte offset, the line
+      # number is interpreted in the server's logical line coordinate space,
+      # so it remains correct regardless of any client/server newline or
+      # charset translation.
+      #
+      # The server must have advertised the "text-seek" extension in its
+      # FXP_VERSION packet; see #supports?.
+      def text_seek(handle, line, &callback)
+        request :text_seek, handle, line, &callback
+      end
+
+      # Identical to #text_seek, but blocks until the server responds. It
+      # will raise a StatusException if the request was unsuccessful (for
+      # instance, if the line is past end of file). Otherwise, it returns
+      # the Response object.
+      def text_seek!(handle, line, &callback)
+        wait_for(text_seek(handle, line, &callback))
       end
 
       # :call-seq:
@@ -748,6 +785,20 @@ module Net; module SFTP
         !(open? || closed?)
       end
 
+      # Returns true if the server advertised the given extension in its
+      # FXP_VERSION packet. The extension name may be given as a string
+      # (e.g. "text-seek") or as a constant from
+      # Net::SFTP::Constants::Extensions.
+      def supports?(extension)
+        extensions.key?(extension)
+      end
+
+      # Returns true if the negotiated SFTP protocol version supports
+      # opening files in text mode (version 4 and later).
+      def text_mode?
+        !version.nil? && version >= 4
+      end
+
       # Attempts to establish an SFTP connection over the SSH session given when
       # this object was instantiated. If the object is already open, this will
       # simply execute the given block (if any), passing the SFTP session itself
@@ -774,6 +825,8 @@ module Net; module SFTP
           @channel = session.open_channel(&method(:when_channel_confirmed))
           @packet_length = nil
           @protocol = nil
+          @version = nil
+          @extensions = {}
           @on_ready = Array(block)
         else # opening
           @on_ready << block if block
@@ -878,7 +931,7 @@ module Net; module SFTP
         channel.on_close(&method(:when_channel_closed))
         channel.on_process(&method(:when_channel_polled))
 
-        send_packet(FXP_INIT, :long, @version || HIGHEST_PROTOCOL_VERSION_SUPPORTED)
+        send_packet(FXP_INIT, :long, @requested_version || HIGHEST_PROTOCOL_VERSION_SUPPORTED)
       end
 
       # Called when the SSH server closes the underlying channel.
@@ -934,6 +987,8 @@ module Net; module SFTP
           extensions[name] = data
         end
 
+        @version = negotiated_version
+        @extensions = extensions
         @protocol = Protocol.load(self, negotiated_version)
         @pending_requests = {}
 

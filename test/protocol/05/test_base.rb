@@ -9,6 +9,11 @@ class Protocol::V05::TestBase < Protocol::V04::TestBase
     assert_equal 5, @base.version
   end
 
+  undef test_open_in_text_mode_should_set_v4_text_flag
+  undef test_open_without_text_mode_should_not_set_text_flag
+  undef test_text_seek_should_send_extended_packet_with_line_as_uint64
+  undef test_text_seek_wire_bytes_use_extended_request_layout
+
   undef test_rename_should_ignore_flags_parameter
 
   def test_rename_should_send_rename_packet
@@ -52,6 +57,21 @@ class Protocol::V05::TestBase < Protocol::V04::TestBase
       :string, "/path/to/file", :long, ACE::Mask::READ_DATA | ACE::Mask::READ_ATTRIBUTES,
       :long, FV5::OPEN_EXISTING, :raw, attributes.new(:permissions => 0755).to_s)
     @base.open("/path/to/file", "r", :permissions => 0755)
+  end
+
+  def test_open_in_text_mode_should_set_v5_text_mode_flag
+    @session.expects(:send_packet).with(FXP_OPEN, :long, 0,
+      :string, "/path/to/file",
+      :long, ACE::Mask::READ_DATA | ACE::Mask::READ_ATTRIBUTES,
+      :long, FV5::OPEN_EXISTING | FV5::TEXT_MODE,
+      :raw, attributes.new.to_s)
+    @base.open("/path/to/file", "r", :text => true)
+  end
+
+  def test_text_seek_should_send_extended_packet
+    @session.expects(:send_packet).with(FXP_EXTENDED, :long, 0,
+      :string, "text-seek", :string, "handle", :int64, 42)
+    assert_equal 0, @base.text_seek("handle", 42)
   end
 
   private

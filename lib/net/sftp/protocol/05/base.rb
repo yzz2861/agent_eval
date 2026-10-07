@@ -33,6 +33,8 @@ module Net; module SFTP; module Protocol; module V05
     # parameter is a hash that is used to construct a new Attribute object,
     # to pass as part of the FXP_OPEN request.
     def open(path, flags, options)
+      options = options.dup
+      text_mode = options.delete(:text)
       flags = normalize_open_flags(flags)
 
       sftp_flags, desired_access = if flags & (IO::WRONLY | IO::RDWR) != 0
@@ -55,6 +57,8 @@ module Net; module SFTP; module Protocol; module V05
         else
           [FV5::OPEN_EXISTING, ACE::Mask::READ_DATA | ACE::Mask::READ_ATTRIBUTES]
         end
+
+      sftp_flags |= FV5::TEXT_MODE if text_mode
 
       attributes = attribute_factory.new(options)
 

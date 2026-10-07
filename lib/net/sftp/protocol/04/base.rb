@@ -15,11 +15,49 @@ module Net; module SFTP; module Protocol; module V04
   # You will almost certainly never need to use this driver directly. Please
   # see Net::SFTP::Session for the recommended interface.
   class Base < V03::Base
+    include Net::SFTP::Constants::Extensions
 
     # Returns the protocol version implemented by this driver. (4, in this
     # case)
     def version
       4
+    end
+
+    # Sends a FXP_OPEN packet to the server. In addition to the flags and
+    # options understood by protocol versions 1-3, the +options+ hash may
+    # contain a truthy +:text+ entry, which causes the file to be opened in
+    # text mode (SSH_FXF_TEXT). This is only supported in version 4 and
+    # later of the protocol.
+    def open(path, flags, options)
+      options = options.dup
+      text_mode = options.delete(:text)
+
+      flags = normalize_open_flags(flags)
+
+      if flags & (IO::WRONLY | IO::RDWR) != 0
+        sftp_flags = FV1::WRITE
+        sftp_flags |= FV1::READ if flags & IO::RDWR != 0
+        sftp_flags |= FV1::APPEND if flags & IO::APPEND != 0
+      else
+        sftp_flags = FV1::READ
+      end
+
+      sftp_flags |= FV1::CREAT if flags & IO::CREAT != 0
+      sftp_flags |= FV1::TRUNC if flags & IO::TRUNC != 0
+      sftp_flags |= FV1::EXCL  if flags & IO::EXCL  != 0
+      sftp_flags |= FV4::TEXT  if text_mode
+
+      attributes = attribute_factory.new(options)
+
+      send_request(FXP_OPEN, :string, path, :long, sftp_flags, :raw, attributes.to_s)
+    end
+
+    # Sends a text-seek FXP_EXTENDED packet for the given text-mode
+    # +handle+, asking the server to position the handle at the start of
+    # logical line +line+ (0-based). The server answers with a regular
+    # FXP_STATUS packet.
+    def text_seek(handle, line)
+      send_request(FXP_EXTENDED, :string, TEXT_SEEK, :string, handle, :int64, line)
     end
 
     # As of v4 of the SFTP protocol, the "longname" member was removed from the

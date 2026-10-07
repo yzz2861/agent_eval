@@ -45,7 +45,11 @@ class Net::SFTP::TestCase < Minitest::Test
         channel = session.opens_channel
         channel.sends_subsystem("sftp")
         channel.sends_packet(FXP_INIT, :long, opts[:client_version] || Net::SFTP::Session::HIGHEST_PROTOCOL_VERSION_SUPPORTED)
-        channel.gets_packet(FXP_VERSION, :long, opts[:server_version] || Net::SFTP::Session::HIGHEST_PROTOCOL_VERSION_SUPPORTED)
+        version_args = [:long, opts[:server_version] || Net::SFTP::Session::HIGHEST_PROTOCOL_VERSION_SUPPORTED]
+        (opts[:extensions] || {}).each do |name, value|
+          version_args.concat([:string, name, :string, value])
+        end
+        channel.gets_packet(FXP_VERSION, *version_args)
         yield channel if block_given?
       end
     end
