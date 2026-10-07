@@ -151,6 +151,8 @@ module Net; module SFTP; module Operations
       @progress = progress || options[:progress]
       @options = options
       @active = 0
+      @open_handles = 0
+      @directory_handles = 0
       @properties = options[:properties] || {}
 
       self.logger = sftp.logger
@@ -220,9 +222,9 @@ module Net; module SFTP; module Operations
       # The default read size.
       DEFAULT_READ_SIZE = 32_000
 
-      # The number of bytes to read at a time from remote files.
-      def read_size
-        options[:read_size] || DEFAULT_READ_SIZE
+      # The number of bytes to request from the remote file.
+      def read_size(entry)
+        sftp.limits.maximum_read_length(options[:read_size] || DEFAULT_READ_SIZE)
       end
 
       # The number of simultaneou SFTP requests to use to effect the download.
@@ -231,11 +233,28 @@ module Net; module SFTP; module Operations
         options[:requests] || (recursive? ? 16 : 2)
       end
 
+      def maximum_open_handles
+        desired = recursive? ? requests : 1
+        sftp.limits.maximum_open_handles(desired)
+      end
+
       # Enqueues as many files and directories from the stack as possible
       # (see #requests).
       def process_next_entry
+        blocked_directories = []
+
         while stack.any? && requests > @active
           entry = stack.shift
+          availability = reserve_handle(entry.directory)
+
+          if availability == :directory_budget
+            blocked_directories << entry
+            next
+          elsif availability == :handle_budget
+            stack.unshift(entry)
+            break
+          end
+
           @active += 1
 
           if entry.directory
@@ -248,6 +267,8 @@ module Net; module SFTP; module Operations
           end
         end
 
+        blocked_directories.reverse_each { |entry| stack.unshift(entry) }
+
         update_progress(:finish) if !active?
       end
 
@@ -256,7 +277,11 @@ module Net; module SFTP; module Operations
       # operation was successful.
       def on_opendir(response)
         entry = response.request[:entry]
-        raise  StatusException.new(response, "opendir #{entry.remote}") unless response.ok?
+        unless response.ok?
+          @open_handles -= 1
+          @directory_handles -= 1
+          raise  StatusException.new(response, "opendir #{entry.remote}")
+        end
         entry.handle = response[:handle]
         request = sftp.readdir(response[:handle], &method(:on_readdir))
         request[:parent] = entry
@@ -296,6 +321,8 @@ module Net; module SFTP; module Operations
       # Called when a directory handle is closed.
       def on_closedir(response)
         @active -= 1
+        @open_handles -= 1
+        @directory_handles -= 1
         entry = response.request[:parent]
         raise StatusException.new(response, "close #{entry.remote}") unless response.ok?
         process_next_entry
@@ -305,7 +332,10 @@ module Net; module SFTP; module Operations
       # to initiate the data transfer.
       def on_open(response)
         entry = response.request[:entry]
-        raise StatusException.new(response, "open #{entry.remote}") unless response.ok?
+        unless response.ok?
+          @open_handles -= 1
+          raise StatusException.new(response, "open #{entry.remote}")
+        end
 
         entry.handle = response[:handle]
         entry.sink = entry.local.respond_to?(:write) ? entry.local : ::File.open(entry.local, "wb")
@@ -316,7 +346,7 @@ module Net; module SFTP; module Operations
 
       # Initiates a read of the next #read_size bytes from the file.
       def download_next_chunk(entry)
-        request = sftp.read(entry.handle, entry.offset, read_size, &method(:on_read))
+        request = sftp.read(entry.handle, entry.offset, read_size(entry), &method(:on_read))
         request[:entry] = entry
         request[:offset] = entry.offset
       end
@@ -345,6 +375,7 @@ module Net; module SFTP; module Operations
       # Called when a file handle is closed.
       def on_close(response)
         @active -= 1
+        @open_handles -= 1
         entry = response.request[:entry]
         raise StatusException.new(response, "close #{entry.remote}") unless response.ok?
         process_next_entry
@@ -359,6 +390,22 @@ module Net; module SFTP; module Operations
         elsif progress.respond_to?(:call)
           progress.call(hook, self, *args)
         end
+      end
+
+      # Reserve a handle from the shared file/directory budget. Never allow
+      # waiting directories to consume the complete budget, leaving a slot
+      # for an ordinary file while another directory is being traversed.
+      def reserve_handle(directory)
+        return :handle_budget if @open_handles >= maximum_open_handles
+
+        directory_budget = [maximum_open_handles - 1, 1].max
+        if directory && @directory_handles >= directory_budget
+          return :directory_budget
+        end
+
+        @open_handles += 1
+        @directory_handles += 1 if directory
+        :reserved
       end
   end
 

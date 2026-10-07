@@ -1,5 +1,6 @@
 require 'net/ssh/loggable'
 require 'net/sftp/constants'
+require 'net/sftp/limits'
 
 module Net; module SFTP; module Protocol
 
@@ -31,11 +32,23 @@ module Net; module SFTP; module Protocol
       when FXP_DATA   then parse_data_packet(packet)
       when FXP_NAME   then parse_name_packet(packet)
       when FXP_ATTRS  then parse_attrs_packet(packet)
+      when FXP_EXTENDED_REPLY then parse_extended_reply_packet(packet)
       else raise NotImplementedError, "unknown packet type: #{packet.type}"
       end
     end
 
+    # Sends a FXP_EXTENDED request for the limits@openssh.com extension. The
+    # extension takes no request arguments.
+    def limits
+      send_request(FXP_EXTENDED, :string, Limits::EXTENSION_NAME)
+    end
+
     private
+      # Returns the extension-specific data from an extended reply, positioned
+      # immediately after the common request identifier.
+      def parse_extended_reply_packet(packet)
+        { :data => packet.remainder_as_buffer }
+      end
 
       # Send a new packet of the given type, and with the given data arguments.
       # A new request identifier will be allocated to this request, and will

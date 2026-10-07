@@ -1,6 +1,7 @@
 require 'net/ssh'
 require 'net/sftp/constants'
 require 'net/sftp/errors'
+require 'net/sftp/limits'
 require 'net/sftp/protocol'
 require 'net/sftp/request'
 require 'net/sftp/operations/dir'
@@ -64,6 +65,12 @@ module Net; module SFTP
     # querying the protocol version in effect.
     attr_reader :protocol
 
+    # The extension data advertised by the server in its FXP_VERSION packet.
+    attr_reader :extensions
+
+    # The negotiated transfer and open-handle limits.
+    attr_reader :limits
+
     # The hash of pending requests. Any requests that have been sent and which
     # the server has not yet responded to will be represented here.
     attr_reader :pending_requests
@@ -82,6 +89,8 @@ module Net; module SFTP
       self.logger = session.logger
       @state      = :closed
       @pending_requests = {}
+      @extensions = {}
+      @limits = Limits.default
 
       connect(&block)
     end
@@ -774,6 +783,8 @@ module Net; module SFTP
           @channel = session.open_channel(&method(:when_channel_confirmed))
           @packet_length = nil
           @protocol = nil
+          @extensions = {}
+          @limits = Limits.default
           @on_ready = Array(block)
         else # opening
           @on_ready << block if block
@@ -927,16 +938,36 @@ module Net; module SFTP
         negotiated_version = [server_version, HIGHEST_PROTOCOL_VERSION_SUPPORTED].min
         info { "negotiated version is #{negotiated_version}" }
 
-        extensions = {}
+        @extensions = {}
         until packet.eof?
           name = packet.read_string
           data = packet.read_string
-          extensions[name] = data
+          @extensions[name] = data
         end
 
         @protocol = Protocol.load(self, negotiated_version)
         @pending_requests = {}
 
+        if supports_limits_extension?
+          request(:limits, &method(:on_limits))
+        else
+          @limits = Limits.default
+          finish_open
+        end
+      end
+
+      # Called when the server replies to the limits@openssh.com request.
+      def on_limits(response)
+        raise StatusException.new(response, "limits") unless response.ok?
+        @limits = Limits.from_buffer(response[:data])
+        finish_open
+      end
+
+      def supports_limits_extension?
+        @extensions.key?(Limits::EXTENSION_NAME)
+      end
+
+      def finish_open
         @state = :open
         @on_ready.each { |callback| callback.call(self) }
         @on_ready = nil

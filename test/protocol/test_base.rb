@@ -35,6 +35,12 @@ class Protocol::TestBase < Net::SFTP::TestCase
     assert_equal :result, @base.parse(packet)
   end
 
+  def test_parse_extended_reply_should_return_data_after_request_id
+    packet = Net::SFTP::Packet.new(raw(:byte, FXP_EXTENDED_REPLY, :long, 0, :raw, "data"))
+    packet.read_long
+    assert_equal "data", @base.parse(packet)[:data].read
+  end
+
   def test_parse_with_unknown_packet_should_raise_exception
     packet = stub('packet', :type => FXP_WRITE)
     assert_raises(NotImplementedError) { @base.parse(packet) }

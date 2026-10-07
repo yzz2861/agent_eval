@@ -148,6 +148,7 @@ module Net; module SFTP; module Operations
       @options = options
       @properties = options[:properties] || {}
       @active = 0
+      @open_handles = 0
 
       self.logger = sftp.logger
 
@@ -164,9 +165,7 @@ module Net; module SFTP; module Operations
           sftp.mkdir(remote) do |response|
             @active -= 1
             raise StatusException.new(response, "mkdir `#{remote}'") unless response.ok?
-            (options[:requests] || RECURSIVE_READERS).to_i.times do
-              break unless process_next_entry
-            end
+            process_available_entries
           end
         else
           @active -= 1
@@ -238,6 +237,20 @@ module Net; module SFTP; module Operations
       # The number of readers to use when uploading a directory.
       RECURSIVE_READERS   = 16
 
+      def maximum_open_handles
+        desired = recursive? ? (options[:requests] || RECURSIVE_READERS) : 1
+        sftp.limits.maximum_open_handles(desired)
+      end
+
+      def process_available_entries
+        while process_next_entry
+        end
+      end
+
+      def write_size(file)
+        sftp.limits.maximum_write_length(file.handle, options[:read_size] || DEFAULT_READ_SIZE)
+      end
+
       # Examines the stack and determines what action to take. This is the
       # starting point of the state machine.
       def process_next_entry
@@ -268,7 +281,10 @@ module Net; module SFTP; module Operations
             request = sftp.mkdir(rpath, &method(:on_mkdir))
             request[:dir] = rpath
           else
-            open_file(lpath, rpath)
+            unless open_file(lpath, rpath)
+              @stack.last.unshift(entry)
+              return false
+            end
           end
         else
           open_file(@stack.pop.first, remote)
@@ -278,6 +294,8 @@ module Net; module SFTP; module Operations
 
       # Prepares to send +local+ to +remote+.
       def open_file(local, remote)
+        return false unless reserve_handle
+
         @active += 1
 
         if local.respond_to?(:read)
@@ -299,6 +317,7 @@ module Net; module SFTP; module Operations
 
         request = sftp.open(remote, "w", &method(:on_open))
         request[:file] = metafile
+        true
       end
 
       # Called when a +mkdir+ request finishes, successfully or otherwise.
@@ -318,7 +337,10 @@ module Net; module SFTP; module Operations
       def on_open(response)
         @active -= 1
         file = response.request[:file]
-        raise StatusException.new(response, "open #{file.remote}") unless response.ok?
+        unless response.ok?
+          @open_handles -= 1
+          raise StatusException.new(response, "open #{file.remote}")
+        end
 
         file.handle = response[:handle]
 
@@ -345,9 +367,10 @@ module Net; module SFTP; module Operations
       # state machine.
       def on_close(response)
         @active -= 1
+        @open_handles -= 1
         file = response.request[:file]
         raise StatusException.new(response, "close #{file.remote}") unless response.ok?
-        process_next_entry
+        process_available_entries
       end
 
       # Attempts to send the next chunk from the given file (where +file+ is
@@ -358,7 +381,7 @@ module Net; module SFTP; module Operations
         else
           @active += 1
           offset = file.io.pos
-          data = file.io.read(options[:read_size] || DEFAULT_READ_SIZE)
+          data = file.io.read(write_size(file))
           if data.nil?
             update_progress(:close, file)
             request = sftp.close(file.handle, &method(:on_close))
@@ -388,6 +411,13 @@ module Net; module SFTP; module Operations
           progress.send(on, self, *args)
         elsif progress.respond_to?(:call)
           progress.call(event, self, *args)
+        end
+      end
+
+      def reserve_handle
+        if @open_handles < maximum_open_handles
+          @open_handles += 1
+          true
         end
       end
   end

@@ -1,6 +1,7 @@
 CHANGELOG.rdoc
 lib/net/sftp/constants.rb
 lib/net/sftp/errors.rb
+lib/net/sftp/limits.rb
 lib/net/sftp/operations/dir.rb
 lib/net/sftp/operations/download.rb
 lib/net/sftp/operations/file.rb
