@@ -101,6 +101,11 @@ module XMLRPC # :nodoc:
       XMLRPC::Base64.decode(str)
     end
 
+    # Decodes the given +str+ and preserves it as XMLRPC::Base64
+    def self.base64_value(str)
+      XMLRPC::Base64.new(base64(str))
+    end
+
     # Converts the given +hash+ to a marshalled object.
     #
     # Returns the given +hash+ if an exception occurs.
@@ -154,6 +159,8 @@ module XMLRPC # :nodoc:
   module XMLParser
 
     class AbstractTreeParser
+
+      attr_writer :preserve_xmlrpc_types
 
       def parseMethodResponse(str)
         methodResponse_document(createCleanedTree(str))
@@ -289,8 +296,8 @@ module XMLRPC # :nodoc:
       def base64(node)
         nodeMustBe(node, "base64")
         #hasOnlyOneChild(node)
-
-        Convert.base64(text_zero_one(node))
+        content = text_zero_one(node)
+        preserve_xmlrpc_types? ? Convert.base64_value(content) : Convert.base64(content)
       end
 
       def member(node)
@@ -388,7 +395,11 @@ module XMLRPC # :nodoc:
           hash[n] = v
         end
 
-        Convert.struct(hash)
+        preserve_xmlrpc_types? ? hash : Convert.struct(hash)
+      end
+
+      def preserve_xmlrpc_types?
+        @preserve_xmlrpc_types == true
       end
 
 
@@ -447,8 +458,11 @@ module XMLRPC # :nodoc:
     end # module TreeParserMixin
 
     class AbstractStreamParser
+      attr_writer :preserve_xmlrpc_types
+
       def parseMethodResponse(str)
         parser = @parser_class.new
+        parser.preserve_xmlrpc_types = preserve_xmlrpc_types?
         parser.parse(str)
         raise "No valid method response!" if parser.method_name != nil
         if parser.fault != nil
@@ -464,9 +478,14 @@ module XMLRPC # :nodoc:
 
       def parseMethodCall(str)
         parser = @parser_class.new
+        parser.preserve_xmlrpc_types = preserve_xmlrpc_types?
         parser.parse(str)
         raise "No valid method call - missing method name!" if parser.method_name.nil?
         [parser.method_name, parser.params]
+      end
+
+      def preserve_xmlrpc_types?
+        @preserve_xmlrpc_types == true
       end
     end
 
@@ -475,8 +494,11 @@ module XMLRPC # :nodoc:
       attr_reader :method_name
       attr_reader :fault
 
+      attr_accessor :preserve_xmlrpc_types
+
       def initialize(*a)
         super(*a)
+        @preserve_xmlrpc_types = false
         @params = []
         @values = []
         @val_stack = []
@@ -527,7 +549,7 @@ module XMLRPC # :nodoc:
         when "dateTime.iso8601"
           @value = Convert.dateTime(@data)
         when "base64"
-          @value = Convert.base64(@data)
+          @value = @preserve_xmlrpc_types ? Convert.base64_value(@data) : Convert.base64(@data)
         when "value"
           @value = @data if @value.nil?
           @values << (@value == :nil ? nil : @value)
@@ -535,7 +557,7 @@ module XMLRPC # :nodoc:
           @value = @values
           @values = @val_stack.pop
         when "struct"
-          @value = Convert.struct(@struct)
+          @value = @preserve_xmlrpc_types ? @struct.dup : Convert.struct(@struct)
 
           @name = @names.pop
           @struct = @structs.pop
@@ -680,8 +702,7 @@ module XMLRPC # :nodoc:
       end
     end
 
-  end # module XMLParser
+end # module XMLParser
 
 
 end # module XMLRPC
-

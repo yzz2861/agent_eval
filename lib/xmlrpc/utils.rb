@@ -93,7 +93,7 @@ module XMLRPC # :nodoc:
 
     def parse_sig(sig)
       # sig is a String
-      if sig =~ /^\s*(\w+)\s+([^(]+)(\(([^)]*)\))?\s*$/
+      if sig =~ /^\s*([\w.]+)\s+([^(]+)(\(([^)]*)\))?\s*$/
         params = [$1]
         name   = $2.strip
         $4.split(",").each {|i| params << i.strip} if $4 != nil
@@ -169,4 +169,3 @@ module XMLRPC # :nodoc:
   end
 
 end # module XMLRPC
-

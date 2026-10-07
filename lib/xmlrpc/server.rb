@@ -19,18 +19,15 @@ module XMLRPC # :nodoc:
 # Do not use this server, as this is/should be an abstract class.
 #
 # === How the method to call is found
-# The arity (number of accepted arguments) of a handler (method or Proc
-# object) is compared to the given arguments submitted by the client for a
-# RPC, or Remote Procedure Call.
+# Handlers with a signature are dispatched by the XML-RPC types of the
+# arguments. Their return value is checked against the declared return type.
 #
-# A handler is only called if it accepts the number of arguments, otherwise
-# the search for another handler will go on. When at the end no handler was
-# found, the default_handler, XMLRPC::BasicServer#set_default_handler will be
-# called.
+# Handlers without a signature keep the legacy behavior and are dispatched by
+# the arity (number of accepted arguments) of the handler (method or Proc
+# object). When no handler was found, the default_handler,
+# XMLRPC::BasicServer#set_default_handler will be called.
 #
-# With this technique it is possible to do overloading by number of parameters, but
-# only for Proc handler, because you cannot define two methods of the same name in
-# the same class.
+# Signatures additionally make it possible to do overloading by XML-RPC type.
 class BasicServer
 
   include ParserWriterChooseMixin
@@ -44,6 +41,11 @@ class BasicServer
   ERR_MC_RECURSIVE_CALL     = 6
   ERR_MC_WRONG_PARAM_PARAMS = 7
   ERR_MC_EXPECTED_STRUCT    = 8
+  ERR_SIGNATURE_MISMATCH    = 9
+  ERR_SIGNATURE_AMBIGUOUS   = 10
+  ERR_RETURN_VALUE_MISMATCH = 11
+
+  SIGNATURE_TYPES = %w(int boolean double string dateTime.iso8601 base64 array struct).freeze
 
 
   # Creates a new XMLRPC::BasicServer instance, which should not be
@@ -70,10 +72,10 @@ class BasicServer
   # Adds +aBlock+ to the list of handlers, with +name+ as the name of
   # the method.
   #
-  # Parameters +signature+ and +help+ are used by the Introspection method if
-  # specified, where +signature+ is either an Array containing strings each
-  # representing a type of it's signature (the first is the return value) or
-  # an Array of Arrays if the method has multiple signatures.
+  # When +signature+ is specified, it is also enforced for incoming calls and
+  # for the return value. It is either an Array containing strings each
+  # representing a type of its signature (the first is the return value) or an
+  # Array of Arrays if the method has multiple signatures.
   #
   # Value type-names are "int, boolean, double, string, dateTime.iso8601,
   # base64, array, struct".
@@ -116,7 +118,8 @@ class BasicServer
   def add_handler(prefix, obj_or_signature=nil, help=nil, &block)
     if block_given?
       # proc-handler
-      @handler << [prefix, block, obj_or_signature, help]
+      signature = normalize_signatures(obj_or_signature) unless obj_or_signature.nil?
+      register_handler(prefix, block, signature, help)
     else
       if prefix.kind_of? String
         # class-handler
@@ -125,7 +128,13 @@ class BasicServer
       elsif prefix.kind_of? XMLRPC::Service::BasicInterface
         # class-handler with interface
         # add all methods
-        @handler += prefix.get_methods(obj_or_signature, @class_delim)
+        prefix.get_methods(obj_or_signature, @class_delim).each do |name, obj, sig, help|
+          if sig.nil?
+            @handler << [name, obj, nil, help]
+          else
+            register_handler(name, obj, normalize_signatures(sig), help)
+          end
+        end
       else
         raise ArgumentError, "Wrong type for parameter 'prefix'"
       end
@@ -246,23 +255,17 @@ class BasicServer
           end
         end
       end
-      methods
+      methods.uniq
     end
 
     add_handler("system.methodSignature", %w(array string), "Returns method signature") do |meth|
       sigs = []
       @handler.each do |name, obj, sig|
         if obj.kind_of? Proc and sig != nil and name == meth
-          if sig[0].kind_of? Array
-            # sig contains multiple signatures, e.g. [["array"], ["array", "string"]]
-            sig.each {|s| sigs << s}
-          else
-            # sig is a single signature, e.g. ["array"]
-            sigs << sig
-          end
+          sig.each { |one_signature| sigs << one_signature }
         end
       end
-      sigs.uniq! || sigs  # remove eventually duplicated signatures
+      sigs
     end
 
     add_handler("system.methodHelp", %w(string string), "Returns help on using this method") do |meth|
@@ -288,11 +291,180 @@ class BasicServer
 
   private
 
+  def register_handler(name, obj, signature, help)
+    replace_signed_handler(name, signature) unless signature.nil?
+    @handler << [name, obj, signature, help]
+  end
+
+  def parser
+    parser = super
+    parser.preserve_xmlrpc_types = true if parser.respond_to?(:preserve_xmlrpc_types=)
+    parser
+  end
+
+  def normalize_signatures(signature)
+    raise ArgumentError, "Wrong signature!" unless signature.is_a?(Array)
+
+    signatures = signature.first.kind_of?(Array) ? signature : [signature]
+    normalized = signatures.map do |one_signature|
+      unless one_signature.is_a?(Array) && !one_signature.empty?
+        raise ArgumentError, "Wrong signature!"
+      end
+      one_signature.map { |type| normalize_signature_type(type) }
+    end
+    normalized.uniq
+  end
+
+  def normalize_signature_type(type)
+    normalized = type.to_s
+    normalized = "dateTime.iso8601" if normalized == "dateTime"
+    unless SIGNATURE_TYPES.include?(normalized)
+      raise ArgumentError, "Unknown signature type #{type.inspect}"
+    end
+    normalized
+  end
+
+  def replace_signed_handler(name, signatures)
+    remaining = []
+
+    @handler.delete_if do |handler_name, handler_obj, handler_signature, handler_help|
+      next false unless handler_name == name && !handler_signature.nil?
+
+      overlapping = handler_signature & signatures
+      next false if overlapping.empty?
+
+      unmatched = handler_signature - signatures
+      remaining << [handler_name, handler_obj, unmatched, handler_help] unless unmatched.empty?
+      true
+    end
+
+    @handler.concat(remaining)
+  end
+
   def multicall_fault(nr, str)
     {"faultCode" => nr, "faultString" => str}
   end
 
   def dispatch(methodname, *args)
+    signed_handlers = signed_handlers(methodname)
+
+    unless signed_handlers.empty?
+      matching_handlers = signed_handlers.select do |obj, signature|
+        signature_matches?(signature, args)
+      end
+
+      if matching_handlers.size > 1
+        raise XMLRPC::FaultException.new(
+          ERR_SIGNATURE_AMBIGUOUS,
+          "Ambiguous method signature for method #{methodname}!"
+        )
+      end
+
+      if matching_handlers.size == 1
+        obj, signature = matching_handlers.first
+        ret = invoke_handler(obj, args)
+        verify_return_value(methodname, ret, signature)
+        return ret
+      end
+
+      raise XMLRPC::FaultException.new(
+        ERR_SIGNATURE_MISMATCH,
+        "No matching method signature for method #{methodname}!"
+      )
+    end
+
+    dispatch_by_arity(methodname, *legacy_xmlrpc_values(args))
+  end
+
+  def signed_handlers(methodname)
+    handlers = []
+
+    @handler.each do |name, obj, signature|
+      next if signature.nil?
+
+      if obj.kind_of? Proc
+        next unless methodname == name
+        signature.each { |one_signature| handlers << [obj, one_signature] }
+      elsif methodname =~ /^#{name}(.+)$/ && obj.respond_to?($1)
+        signature.each { |one_signature| handlers << [obj.method($1), one_signature] }
+      end
+    end
+
+    handlers
+  end
+
+  def signature_matches?(signature, args)
+    parameter_types = signature[1..-1]
+    return false unless parameter_types.size == args.size
+
+    parameter_types.zip(args).all? do |type, value|
+      value_matches_type?(value, type)
+    end
+  end
+
+  def verify_return_value(methodname, value, signature)
+    return_type = signature.first
+    return if value_matches_type?(value, return_type)
+
+    raise XMLRPC::FaultException.new(
+      ERR_RETURN_VALUE_MISMATCH,
+      "Return value of method #{methodname} does not match signature type #{return_type}!"
+    )
+  end
+
+  def value_matches_type?(value, type)
+    case type
+    when "int"
+      value.kind_of?(Integer) &&
+        (Config.enable_bigint? || (-(2**31)...(2**31)).include?(value))
+    when "boolean"
+      value.kind_of?(TrueClass) || value.kind_of?(FalseClass)
+    when "double"
+      value.kind_of?(Float)
+    when "string"
+      value.kind_of?(String)
+    when "dateTime.iso8601"
+      value.kind_of?(XMLRPC::DateTime)
+    when "base64"
+      value.kind_of?(XMLRPC::Base64)
+    when "array"
+      value.kind_of?(Array)
+    when "struct"
+      value.kind_of?(Hash)
+    else
+      false
+    end
+  end
+
+  def invoke_handler(obj, args)
+    if @service_hook.nil?
+      obj.call(*args)
+    else
+      @service_hook.call(obj, *args)
+    end
+  end
+
+  def legacy_xmlrpc_values(values)
+    values.map { |value| legacy_xmlrpc_value(value) }
+  end
+
+  def legacy_xmlrpc_value(value)
+    case value
+    when XMLRPC::Base64
+      value.decoded
+    when Array
+      value.collect { |item| legacy_xmlrpc_value(item) }
+    when Hash
+      converted = value.each_with_object({}) do |(key, item), result|
+        result[key] = legacy_xmlrpc_value(item)
+      end
+      XMLRPC::Convert.struct(converted)
+    else
+      value
+    end
+  end
+
+  def dispatch_by_arity(methodname, *args)
     for name, obj in @handler
       if obj.kind_of? Proc
         next unless methodname == name
@@ -303,11 +475,7 @@ class BasicServer
       end
 
       if check_arity(obj, args.size)
-        if @service_hook.nil?
-          return obj.call(*args)
-        else
-          return @service_hook.call(obj, *args)
-        end
+        return invoke_handler(obj, args)
       end
     end
 
@@ -677,4 +845,3 @@ end # module XMLRPC
 = History
     $Id$
 =end
-
