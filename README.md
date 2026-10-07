@@ -48,6 +48,25 @@ JSON.generate(data)
 You can also use the `pretty_generate` method (which formats the output more
 verbosely and nicely).
 
+## Querying with JSONPath
+
+`JSON::JSONPath` extracts nodes from parsed JSON documents without
+evaluating any Ruby code. Compile an expression once and reuse it against
+as many documents as you like:
+
+```ruby
+path = JSON::JSONPath.new('$.store.book[?(@.price < 10)].title')
+path.query(JSON.parse(document)) # => [#<JSON::JSONPath::Match ...>, ...]
+```
+
+Each match carries both the selected value and its normalized path
+(e.g. `$['store']['book'][0]['title']`). The supported syntax is a strict
+subset of RFC 9535 (root, member and index selectors, wildcards, recursive
+descent, array slices, and filter expressions with boolean operators and
+comparisons); anything outside that subset raises
+`JSON::JSONPath::SyntaxError`. See the `JSON::JSONPath` documentation for
+the full grammar.
+
 ## Casting non native types
 
 JSON documents can only support Hashes, Arrays, Strings, Integers and Floats.
