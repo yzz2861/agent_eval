@@ -1417,6 +1417,45 @@ Rufus::Scheduler.s.every '10s' { puts "hello, world!" }
 ```
 
 
+## forking
+
+Ruby does not copy threads into a forked child process. A scheduler inherited from the parent therefore has no usable scheduler thread, work threads, queues, mutexes, or lock ownership.
+
+Until the child explicitly takes over the inherited scheduler, scheduling, triggering, joining, and shutting it down raise `Rufus::Scheduler::ForkedSchedulerError`. This prevents a child from shutting down the parent or releasing a lock owned by the parent.
+
+Call `#after_fork` in the child to rebuild the scheduler. It starts with an empty schedule by default:
+
+```ruby
+pid = fork do
+  scheduler.after_fork
+
+  # a fresh scheduler for this child process
+end
+```
+
+Pass `copy_jobs: true` (or `copy_schedule: true`) to re-register the job definitions that are still scheduled in the parent. Only definitions are copied. Running counts, locals, worker state, half-executed blocks, and process-local mutex ownership are not resumed. Copied jobs receive new ids, record the source id as `forked_from_job_id`, and belong to the child scheduler.
+
+```ruby
+pid = fork do
+  scheduler.after_fork(copy_jobs: true)
+
+  # every/cron/etc. definitions were re-registered for this child
+end
+```
+
+For the singleton scheduler, the child can call the class method directly:
+
+```ruby
+pid = fork do
+  Rufus::Scheduler.after_fork(copy_jobs: true)
+end
+```
+
+A copied `in` or `at` job whose time is already in the past is discarded according to the scheduler's normal `discard_past` behaviour. File locks are rebuilt; if the parent still owns a `lockfile`, the child scheduler does not start, and shutting down the child does not unlock the parent.
+
+Custom lock objects may implement `#after_fork`. When present, the child calls it and uses the returned lock as its own lock. Locks without `#after_fork` are reused as stateless protocol objects; they must not assume that inherited lock ownership survives `fork`.
+
+
 ## advanced lock schemes
 
 As seen above, rufus-scheduler proposes the [:lockfile](#lockfile--mylockfiletxt) system out of the box. If in a group of schedulers only one is supposed to run, the lockfile mechanism prevents schedulers that have not set/created the lockfile from running.
@@ -1772,9 +1811,18 @@ end
 
 (Written in reply to https://github.com/jmettraux/rufus-scheduler/issues/165 )
 
-There is the handy `rails server -d` that starts a development Rails as a daemon. The annoying thing is that the scheduler as seen above is started in the main process that then gets forked and daemonized. The rufus-scheduler thread (and any other thread) gets lost, no scheduling happens.
+There is the handy `rails server -d` that starts a development Rails as a daemon. The scheduler as seen above is then started in the parent process and the process gets forked. The rufus-scheduler thread (and any other thread) does not start again by itself in the child.
 
-I avoid running `-d` in development mode and bother about daemonizing only for production deployment.
+If the daemonization framework offers an after-fork hook, rebuild the scheduler there:
+
+```ruby
+# child process only
+Rufus::Scheduler.after_fork(copy_jobs: true)
+```
+
+Leave the default empty takeover (`Rufus::Scheduler.after_fork`) if the parent should keep running schedules and the child should start with none.
+
+Otherwise, I avoid running `-d` in development mode and daemonize the process with the service manager used in production.
 
 These are two well crafted articles on process daemonization, please read them:
 
@@ -1795,4 +1843,3 @@ see [getting help](#getting-help) above.
 ## license
 
 MIT, see [LICENSE.txt](LICENSE.txt)
-

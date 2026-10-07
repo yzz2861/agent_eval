@@ -36,6 +36,10 @@ class Rufus::Scheduler
   #
   class NotRunningError < Error; end
 
+  # For when a scheduler created in another process is used after a fork
+  #
+  class ForkedSchedulerError < Error; end
+
   #MIN_WORK_THREADS = 3
   MAX_WORK_THREADS = 28
 
@@ -47,6 +51,8 @@ class Rufus::Scheduler
   attr_reader :thread
   attr_reader :thread_key
   attr_reader :mutexes
+  attr_reader :pid
+  attr_reader :parent_pid
 
   #attr_accessor :min_work_threads
   attr_accessor :max_work_threads
@@ -58,6 +64,9 @@ class Rufus::Scheduler
   def initialize(opts={})
 
     @opts = opts
+
+    @pid = $$
+    @parent_pid = nil
 
     @started_at = nil
     @paused_at = nil
@@ -83,14 +92,8 @@ class Rufus::Scheduler
 
     @thread_key = "rufus_scheduler_#{self.object_id}"
 
-    @scheduler_lock =
-      if lockfile = opts[:lockfile]
-        Rufus::Scheduler::FileLock.new(lockfile)
-      else
-        opts[:scheduler_lock] || Rufus::Scheduler::NullLock.new
-      end
-
-    @trigger_lock = opts[:trigger_lock] || Rufus::Scheduler::NullLock.new
+    @scheduler_lock = build_scheduler_lock(opts)
+    @trigger_lock = build_trigger_lock(opts)
 
     # If we can't grab the @scheduler_lock, don't run.
     lock || return
@@ -109,6 +112,13 @@ class Rufus::Scheduler
   #
   def self.s(opts={}); singleton(opts); end
 
+  # Takes over the singleton scheduler in a forked child process.
+  #
+  def self.after_fork(opts={})
+
+    singleton.after_fork(opts)
+  end
+
   # Releasing the gem would probably require redirecting .start_new to
   # .new and emit a simple deprecation message.
   #
@@ -125,6 +135,55 @@ class Rufus::Scheduler
     @started_at ? EoTime.now - @started_at : nil
   end
 
+  # Returns true if this scheduler object was inherited through a fork.
+  #
+  def forked?
+
+    @pid != $$
+  end
+
+  # Raises if this scheduler object belongs to the parent process.
+  #
+  def ensure_current_process!
+
+    return unless forked?
+
+    fail ForkedSchedulerError.new(
+      "scheduler was started in PID #{@pid}, current PID is #{$$}; " +
+      "call #after_fork before using it in this process"
+    )
+  end
+
+  # Rebuilds a forked scheduler inside the child process. By default the child
+  # starts with an empty schedule. Set :copy_jobs (or :copy_schedule) to true
+  # to re-register the parent's currently scheduled job definitions.
+  #
+  def after_fork(copy_jobs=false, opts={})
+
+    if copy_jobs.is_a?(Hash)
+      opts = copy_jobs
+      copy_jobs = opts[:copy_jobs] || opts[:copy_schedule]
+    else
+      copy_jobs = opts[:copy_jobs] || opts[:copy_schedule] || copy_jobs
+    end
+
+    fail Error.new(
+      "#after_fork was called in PID #{$$}, the scheduler's original PID"
+    ) unless forked?
+
+    definitions = copy_jobs ? fork_job_definitions : []
+
+    reset_for_fork
+
+    return self unless lock
+
+    start
+
+    definitions.each { |d| register_fork_job_definition(d) }
+
+    self
+  end
+
   def around_trigger(job)
 
     yield
@@ -137,6 +196,7 @@ class Rufus::Scheduler
 
   def join(time_limit=nil)
 
+    ensure_current_process!
     fail NotRunningError.new('cannot join scheduler that is not running') \
       unless @thread
     fail ThreadError.new('scheduler thread cannot join itself') \
@@ -151,12 +211,12 @@ class Rufus::Scheduler
 
   def down?
 
-    ! @started_at
+    @started_at.nil? || forked?
   end
 
   def up?
 
-    !! @started_at
+    !! @started_at && ! forked?
   end
 
   def paused?
@@ -166,11 +226,13 @@ class Rufus::Scheduler
 
   def pause
 
+    ensure_current_process!
     @paused_at = EoTime.now
   end
 
   def resume(opts={})
 
+    ensure_current_process!
     dp = opts[:discard_past]
     jobs.each { |job| job.resume_discard_past = dp }
 
@@ -260,6 +322,7 @@ class Rufus::Scheduler
 
   def unschedule(job_or_job_id)
 
+    ensure_current_process!
     job, job_id = fetch(job_or_job_id)
 
     fail ArgumentError.new("no job found with id '#{job_id}'") unless job
@@ -345,6 +408,8 @@ class Rufus::Scheduler
   #
   def lock
 
+    ensure_current_process!
+
     @scheduler_lock.lock
   end
 
@@ -352,6 +417,7 @@ class Rufus::Scheduler
   #
   def unlock
 
+    ensure_current_process!
     @trigger_lock.unlock
     @scheduler_lock.unlock
   end
@@ -414,6 +480,8 @@ class Rufus::Scheduler
   end
 
   def occurrences(time0, time1, format=:per_job)
+
+    ensure_current_process!
 
     h = {}
 
@@ -513,6 +581,8 @@ class Rufus::Scheduler
 
   def shutdown(opt=nil)
 
+    ensure_current_process!
+
     opts =
       case opt
       when Symbol then { opt => true }
@@ -539,6 +609,107 @@ class Rufus::Scheduler
   alias stop shutdown
 
   protected
+
+  def build_scheduler_lock(opts)
+
+    if lockfile = opts[:lockfile]
+      Rufus::Scheduler::FileLock.new(lockfile)
+    else
+      opts[:scheduler_lock] || Rufus::Scheduler::NullLock.new
+    end
+  end
+
+  def build_trigger_lock(opts)
+
+    opts[:trigger_lock] || Rufus::Scheduler::NullLock.new
+  end
+
+  def refresh_fork_lock(lock)
+
+    lock.respond_to?(:after_fork) ? lock.after_fork : lock
+  end
+
+  def reset_for_fork
+
+    @jobs = JobArray.new
+    @mutexes = {}
+    @work_queue = Queue.new
+    @join_queue = Queue.new
+
+    @started_at = nil
+    @paused_at = nil
+    @thread = nil
+    @parent_pid = @pid
+    @pid = $$
+    @thread_key = "rufus_scheduler_#{object_id}_p#{$$}"
+
+    @scheduler_lock =
+      refresh_fork_lock(build_scheduler_lock(@opts))
+    @trigger_lock =
+      refresh_fork_lock(build_trigger_lock(@opts))
+  end
+
+  FORK_FIRST_KEYS = %i[ first first_time first_at first_in ].freeze
+  FORK_LAST_KEYS = %i[ last last_at last_in ].freeze
+
+  def fork_job_definitions
+
+    now = EoTime.now
+
+    jobs.each_with_object([]) do |job, a|
+
+      opts = job.opts.dup
+
+      opts.delete(:_t)
+      opts.delete(:locals)
+      opts.delete(:l)
+
+      if job.is_a?(OneTimeJob)
+
+        job_discard_past =
+          job.opts[:discard_past].nil? ?
+          discard_past :
+          job.opts[:discard_past]
+
+        next if job_discard_past && job.past?
+      end
+
+      opts[:mutex] =
+        Array(opts[:mutex]).collect do |m|
+          m.is_a?(Mutex) ? "__forked_mutex_#{m.object_id}" : m
+        end if opts[:mutex]
+
+      if job.is_a?(RepeatJob)
+
+        FORK_FIRST_KEYS.each { |k| opts.delete(k) }
+        FORK_LAST_KEYS.each { |k| opts.delete(k) }
+
+        next if job.last_at && job.last_at < now
+
+        opts[:first_at] = job.first_at if job.first_at && job.first_at > now
+        opts[:last_at] = job.last_at if job.last_at
+      end
+
+      opts[:forked_from_job_id] = job.id
+
+      a << { :job => job, :callable => job.handler, :opts => opts }
+    end
+  end
+
+  def register_fork_job_definition(definition)
+
+    job = definition[:job]
+    callable = definition[:callable]
+    opts = definition[:opts]
+
+    case job
+    when InJob then public_send(:in, job.original, callable, opts)
+    when AtJob then at(job.original, callable, opts)
+    when EveryJob then every(job.original, callable, opts)
+    when IntervalJob then interval(job.original, callable, opts)
+    when CronJob then cron(job.original, callable, opts)
+    end
+  end
 
   def join_shutdown(opts)
 
@@ -663,6 +834,49 @@ class Rufus::Scheduler
     @jobs.delete_unscheduled
   end
 
+  def start_work_thread
+
+    thread =
+      Thread.new do
+
+        ct = Thread.current
+
+        ct[:rufus_scheduler_job] = true
+        ct[thread_key] = true
+        ct[:rufus_scheduler_work_thread] = true
+
+        loop do
+
+          break if started_at == nil
+
+          job, time = work_queue.pop
+
+          break if job == :shutdown
+          break if started_at == nil
+
+          next if job.unscheduled_at
+
+          begin
+
+            (job.opts[:mutex] || []).reduce(
+              lambda { job.send(:trigger_now, time) }
+            ) do |b, m|
+              lambda { job.send(:mutex, m).synchronize { b.call } }
+            end.call
+
+          rescue Job::KillSignal
+
+            # simply go on looping
+          end
+        end
+      end
+
+    thread[thread_key] = true
+    thread[:rufus_scheduler_work_thread] = true
+
+    thread
+  end
+
   def trigger_jobs
 
     now = EoTime.now
@@ -698,6 +912,8 @@ class Rufus::Scheduler
   end
 
   def do_schedule(job_type, t, callable, opts, return_job_instance, block)
+
+    ensure_current_process!
 
     fail NotRunningError.new(
       'cannot schedule, scheduler is down or shutting down'
@@ -740,4 +956,3 @@ class Rufus::Scheduler
   def monow; self.class.monow; end
   def ltstamp; self.class.ltstamp; end
 end
-

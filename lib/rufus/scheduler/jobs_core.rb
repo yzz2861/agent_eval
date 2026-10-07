@@ -19,6 +19,8 @@ class Rufus::Scheduler::Job
   attr_reader :count
   attr_reader :last_work_time
   attr_reader :mean_work_time
+  attr_reader :scheduler
+  attr_reader :forked_from_job_id
 
   attr_accessor :name
 
@@ -74,6 +76,7 @@ class Rufus::Scheduler::Job
 
     @id = determine_id
     @name = opts[:name] || opts[:n]
+    @forked_from_job_id = opts[:forked_from_job_id]
 
     fail(
       ArgumentError, 'missing block or callable to schedule', caller[2..-1]
@@ -235,6 +238,8 @@ class Rufus::Scheduler::Job
 
   def do_call(time, do_rescue)
 
+    @scheduler.ensure_current_process!
+
     args = [ self, time ][0, @callable.arity]
 
     @scheduler.around_trigger(self) do
@@ -253,6 +258,8 @@ class Rufus::Scheduler::Job
   end
 
   def do_trigger(time)
+
+    @scheduler.ensure_current_process!
 
     return if (
       opts[:overlap] == false &&
@@ -309,69 +316,20 @@ class Rufus::Scheduler::Job
     callback(:on_post_trigger, time)
   end
 
-  def start_work_thread
-
-    thread =
-      Thread.new do
-
-        ct = Thread.current
-
-        ct[:rufus_scheduler_job] = true
-          # indicates that the thread is going to be assigned immediately
-
-        ct[@scheduler.thread_key] = true
-        ct[:rufus_scheduler_work_thread] = true
-
-        loop do
-
-          break if @scheduler.started_at == nil
-
-          job, time = @scheduler.work_queue.pop
-
-          break if job == :shutdown
-          break if @scheduler.started_at == nil
-
-          next if job.unscheduled_at
-
-          begin
-
-            (job.opts[:mutex] || []).reduce(
-              lambda { job.trigger_now(time) }
-            ) do |b, m|
-              lambda { mutex(m).synchronize { b.call } }
-            end.call
-
-          rescue KillSignal
-
-            # simply go on looping
-          end
-        end
-      end
-
-    thread[@scheduler.thread_key] = true
-    thread[:rufus_scheduler_work_thread] = true
-      #
-      # same as above (in the thead block),
-      # but since it has to be done as quickly as possible.
-      # So, whoever is running first (scheduler thread vs job thread)
-      # sets this information
-
-    thread
-  end
-
   def trigger_queue(time)
 
-    threads = @scheduler.work_threads
+    scheduler = @scheduler
+    threads = scheduler.work_threads
 
     vac = threads.select { |t| t[:rufus_scheduler_job] == nil }.size
-    que = @scheduler.work_queue.size
+    que = scheduler.work_queue.size
 
     cur = threads.size
-    max = @scheduler.max_work_threads
+    max = scheduler.max_work_threads
 
-    start_work_thread if vac - que < 1 && cur < max
+    scheduler.send(:start_work_thread) if vac - que < 1 && cur < max
 
-    @scheduler.work_queue << [ self, time ]
+    scheduler.work_queue << [ self, time ]
   end
 
   # Scheduler level < Job level < this resume()'s level
@@ -385,4 +343,3 @@ class Rufus::Scheduler::Job
     dp
   end
 end
-

@@ -2,6 +2,15 @@
 # CHANGELOG.md
 
 
+### unreleased
+
+* Add explicit Scheduler#after_fork lifecycle support after Process.fork
+* Reject inherited schedulers until the child rebuilds them
+* Let after_fork start empty or re-register currently scheduled job definitions
+* Record copied job parent ids as forked_from_job_id
+* Rebuild file locks and work threads in the child without touching the parent
+
+
 ### rufus-scheduler 3.9.2 - released 2024-09-04
 
 * For fugit >= 1.11.1
@@ -424,4 +433,3 @@
 ## initial release
 
 (was [openwferu-scheduler](https://rubygems.org/gems/openwferu-scheduler/versions) before that)
-

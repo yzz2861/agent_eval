@@ -13,6 +13,11 @@ class Rufus::Scheduler::NullLock
 
   def locked?; true; end
   def unlock; true; end
+
+  def after_fork
+
+    self.class.new
+  end
 end
 
 #
@@ -25,6 +30,11 @@ class Rufus::Scheduler::FileLock
   def initialize(path)
 
     @path = path.to_s
+  end
+
+  def after_fork
+
+    self.class.new(@path)
   end
 
   # Locking is successful if this Ruby process can create and lock
@@ -66,4 +76,3 @@ class Rufus::Scheduler::FileLock
     !! (@lockfile && @lockfile.flock(File::LOCK_NB | File::LOCK_EX))
   end
 end
-
