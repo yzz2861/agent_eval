@@ -23,6 +23,14 @@ module Net
         include Loggable
         include Constants
 
+        # The pseudo-algorithm names used to negotiate the OpenSSH "strict
+        # key exchange" extension (see the OpenSSH PROTOCOL document). When
+        # both sides advertise support, only key-exchange messages may be
+        # received while an exchange is in progress, and the packet sequence
+        # numbers are reset whenever a NEWKEYS message is sent or received.
+        STRICT_KEX_CLIENT = 'kex-strict-c-v00@openssh.com'
+        STRICT_KEX_SERVER = 'kex-strict-s-v00@openssh.com'
+
         # Define the default algorithms, in order of preference, supported by Net::SSH.
         DEFAULT_ALGORITHMS = {
           host_key: %w[ecdsa-sha2-nistp521-cert-v01@openssh.com
@@ -153,6 +161,16 @@ module Net
           (21..49).include?(packet.type)
         end
 
+        # Returns true if the given packet can be processed during a
+        # key-exchange when the strict key-exchange extension is in effect.
+        # Only KEXINIT, NEWKEYS and key-exchange method specific messages
+        # (30-49) are permitted; anything else must terminate the connection.
+        def self.strict_allowed_packet?(packet)
+          packet.type == KEXINIT ||
+          packet.type == NEWKEYS ||
+          (30..49).include?(packet.type)
+        end
+
         # Instantiates a new Algorithms object, and prepares the hash of preferred
         # algorithms based on the options parameter and the ALGORITHMS constant.
         def initialize(session, options = {})
@@ -161,6 +179,7 @@ module Net
           @options = options
           @algorithms = {}
           @pending = @initialized = false
+          @strict_kex = false
           @client_packet = @server_packet = nil
           prepare_preferred_algorithms!
         end
@@ -190,6 +209,8 @@ module Net
           info { "got KEXINIT from server" }
           @server_data = parse_server_algorithm_packet(packet)
           @server_packet = @server_data[:raw]
+          @strict_kex = @server_data[:kex].include?(STRICT_KEX_SERVER)
+          debug { "strict key exchange #{@strict_kex ? 'enabled' : 'not supported by server'}" }
           if !pending?
             send_kexinit
           else
@@ -212,11 +233,19 @@ module Net
           @pending
         end
 
+        # Returns true if the strict key-exchange extension was negotiated
+        # with the server, i.e. both sides advertised support for it in
+        # their KEXINIT packets.
+        def strict_kex?
+          @strict_kex
+        end
+
         # Returns true if no exchange is pending, and otherwise returns true or
         # false depending on whether the given packet is of a type that is allowed
         # during a key exchange.
         def allow?(packet)
-          !pending? || Algorithms.allowed_packet?(packet)
+          !pending? ||
+            (strict_kex? ? Algorithms.strict_allowed_packet?(packet) : Algorithms.allowed_packet?(packet))
         end
 
         # Returns true if the algorithms have been negotiated at all.
@@ -370,7 +399,7 @@ module Net
         # a KEXINIT packet to send to the server. It does not actually send it,
         # it simply builds the packet and returns it.
         def build_client_algorithm_packet
-          kex         = algorithms[:kex].join(",")
+          kex         = (algorithms[:kex] + [STRICT_KEX_CLIENT]).join(",")
           host_key    = algorithms[:host_key].join(",")
           encryption  = algorithms[:encryption].join(",")
           hmac        = algorithms[:hmac].join(",")

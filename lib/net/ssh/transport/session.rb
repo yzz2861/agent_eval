@@ -193,6 +193,11 @@ module Net
             packet = socket.next_packet(mode, options[:timeout])
             return nil if packet.nil?
 
+            if packet.type != DISCONNECT && algorithms.pending? && algorithms.strict_kex? &&
+               !Algorithms.strict_allowed_packet?(packet)
+              raise Net::SSH::Exception, "unexpected packet type #{packet.type} during strict key exchange"
+            end
+
             case packet.type
             when DISCONNECT
               raise Net::SSH::Disconnect, "disconnected: #{packet[:description]} (#{packet[:reason_code]})"
@@ -261,6 +266,20 @@ module Net
         # hmac algorithms to use when reading packets from the server.
         def configure_server(options = {})
           socket.server.set(options)
+        end
+
+        # Resets the packet sequence number of the client (outgoing) state
+        # to zero. Used by the strict key-exchange extension, which requires
+        # the sequence number to be reset when a NEWKEYS message is sent.
+        def reset_client_sequence_number
+          socket.client.reset_sequence_number!
+        end
+
+        # Resets the packet sequence number of the server (incoming) state
+        # to zero. Used by the strict key-exchange extension, which requires
+        # the sequence number to be reset when a NEWKEYS message is received.
+        def reset_server_sequence_number
+          socket.server.reset_sequence_number!
         end
 
         # Sets a new hint for the packet stream, which the packet stream may use

@@ -274,6 +274,66 @@ module Transport
       end
     end
 
+    def test_strict_allowed_packets
+      (0..255).each do |type|
+        packet = stub("packet", type: type)
+        case type
+        when 20, 21, 30..49 then assert(Net::SSH::Transport::Algorithms.strict_allowed_packet?(packet), "#{type} should be allowed during strict key exchange")
+        else assert(!Net::SSH::Transport::Algorithms.strict_allowed_packet?(packet), "#{type} should not be allowed during strict key exchange")
+        end
+      end
+    end
+
+    def test_strict_kex_should_be_disabled_by_default
+      assert !algorithms.strict_kex?
+    end
+
+    def test_strict_kex_should_be_enabled_when_server_advertises_support
+      kexinit kex: "diffie-hellman-group-exchange-sha256,kex-strict-s-v00@openssh.com"
+      transport.expect do |_t, buffer|
+        assert_kexinit(buffer)
+        install_mock_key_exchange(buffer)
+      end
+
+      install_mock_algorithm_lookups
+      algorithms.accept_kexinit(kexinit)
+
+      assert algorithms.strict_kex?
+    end
+
+    def test_strict_kex_should_not_be_enabled_when_server_does_not_advertise_support
+      transport.expect do |_t, buffer|
+        assert_kexinit(buffer)
+        install_mock_key_exchange(buffer)
+      end
+
+      install_mock_algorithm_lookups
+      algorithms.accept_kexinit(kexinit)
+
+      assert !algorithms.strict_kex?
+    end
+
+    def test_allow_when_pending_and_strict_kex_should_only_allow_kex_packets
+      kexinit kex: "diffie-hellman-group-exchange-sha256,kex-strict-s-v00@openssh.com"
+      transport.expect do |_t, buffer|
+        assert algorithms.pending?
+        assert algorithms.strict_kex?
+
+        (0..255).each do |type|
+          packet = stub("packet", type: type)
+          case type
+          when 20, 21, 30..49 then assert(algorithms.allow?(packet), "#{type} should be allowed during strict key exchange")
+          else assert(!algorithms.allow?(packet), "#{type} should not be allowed during strict key exchange")
+          end
+        end
+
+        install_mock_key_exchange(buffer)
+      end
+
+      install_mock_algorithm_lookups
+      algorithms.accept_kexinit(kexinit)
+    end
+
     def test_exchange_with_zlib_compression_enabled_sets_compression_to_standard
       algorithms compression: 'zlib'
 
@@ -430,7 +490,7 @@ module Transport
     def assert_kexinit(buffer, options = {})
       assert_equal KEXINIT, buffer.type
       assert_equal 16, buffer.read(16).length
-      assert_equal options[:kex] || (x25519_kex + ec_kex + %w[diffie-hellman-group-exchange-sha256 diffie-hellman-group14-sha256 diffie-hellman-group14-sha1]).join(','), buffer.read_string
+      assert_equal options[:kex] || (x25519_kex + ec_kex + %w[diffie-hellman-group-exchange-sha256 diffie-hellman-group14-sha256 diffie-hellman-group14-sha1 kex-strict-c-v00@openssh.com]).join(','), buffer.read_string
       assert_equal options[:host_key] || (ed_ec_host_keys + %w[ssh-rsa-cert-v01@openssh.com ssh-rsa-cert-v00@openssh.com ssh-rsa rsa-sha2-256 rsa-sha2-512]).join(','), buffer.read_string
       assert_equal options[:encryption_client] || "#{chacha_poly_cipher_str}aes256-ctr,aes192-ctr,aes128-ctr,aes256-gcm@openssh.com,aes128-gcm@openssh.com", buffer.read_string
       assert_equal options[:encryption_server] || "#{chacha_poly_cipher_str}aes256-ctr,aes192-ctr,aes128-ctr,aes256-gcm@openssh.com,aes128-gcm@openssh.com", buffer.read_string

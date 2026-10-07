@@ -97,6 +97,14 @@ module Net
           @blocks += (packet_length + 4) / @block_size
         end
 
+        # Resets the packet sequence number to zero. This is used to
+        # implement the OpenSSH "strict key exchange" extension, which
+        # requires the sequence number to be reset whenever a NEWKEYS
+        # message is sent or received.
+        def reset_sequence_number!
+          @sequence_number = 0
+        end
+
         # The compressor object to use when compressing data. This takes into account
         # the desired compression level.
         def compressor

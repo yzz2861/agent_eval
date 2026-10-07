@@ -118,10 +118,12 @@ module Net
             response = Net::SSH::Buffer.new
             response.write_byte(NEWKEYS)
             connection.send_message(response)
+            connection.reset_client_sequence_number if algorithms.strict_kex?
 
             # wait for the server's NEWKEYS message
             buffer = connection.next_message
             raise Net::SSH::Exception, 'expected NEWKEYS' unless buffer.type == NEWKEYS
+            connection.reset_server_sequence_number if algorithms.strict_kex?
           end
         end
       end
