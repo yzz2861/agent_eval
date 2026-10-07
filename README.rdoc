@@ -59,6 +59,32 @@ In a nutshell:
 
 For the full documentation, start with Net::SFTP::Session. Also see Net::SFTP::Operations::Upload, Net::SFTP::Operations::Download, Net::SFTP::Operations::FileFactory, Net::SFTP::Operations::File, and Net::SFTP::Operations::Dir.
 
+== RECURSIVE DOWNLOADS WITH UNSAFE REMOTE NAMES
+
+Two remote entries may have names that cannot coexist on the local host
+(names differing only by case or Unicode normalization, names containing
+invalid UTF-8, path separators, or platform reserved names). Recursive
+downloads therefore map every directory layer explicitly, before anything in
+that layer is written:
+
+  sftp.download!("/remote", "/local", :recursive => true,
+    :name_mapper => { :strategy => :escape })
+
+The default :reject strategy aborts the layer (and so never overwrites a
+local file); :escape percent-encodes problematic bytes reversibly, byte for
+byte, without using replacement characters. Collision checking uses an
+injectable name-equivalence callable so that foreign file system semantics
+can be emulated:
+
+  Net::SFTP::Operations::NameMapper::CASE_FOLD      # case insensitive
+  Net::SFTP::Operations::NameMapper::UNICODE_NFD    # HFS+ style NFD
+  Net::SFTP::Operations::NameMapper::CASE_FOLD_NFD
+
+A reverse-lookup manifest (default .net-sftp-name-map, configurable via
+:manifest_name) is written into the destination root; its name is part of
+the top-level collision check. See Net::SFTP::Operations::NameMapper and
+Net::SFTP::Operations::NameManifest.
+
 == REQUIREMENTS:
 
 * Net::SSH 2

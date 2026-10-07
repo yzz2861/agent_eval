@@ -5,6 +5,8 @@ lib/net/sftp/operations/dir.rb
 lib/net/sftp/operations/download.rb
 lib/net/sftp/operations/file.rb
 lib/net/sftp/operations/file_factory.rb
+lib/net/sftp/operations/name_manifest.rb
+lib/net/sftp/operations/name_mapper.rb
 lib/net/sftp/operations/upload.rb
 lib/net/sftp/packet.rb
 lib/net/sftp/protocol/01/attributes.rb

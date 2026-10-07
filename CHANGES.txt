@@ -1,3 +1,12 @@
+=== Unreleased
+
+* Recursive downloads now pass remote entry names through an explicit
+  NameMapper layer: names are mapped per directory before any local file is
+  written, with injectable name-equivalence rules (case folding, Unicode
+  normalization), a :reject or reversible :escape strategy, platform reserved
+  name protection, and a reverse-lookup manifest preserving original remote
+  bytes (invalid UTF-8 included).
+
 === 3.0.0
 
 * Pass protocol version via Net::SFTP.start [#107]

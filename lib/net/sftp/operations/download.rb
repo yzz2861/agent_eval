@@ -1,4 +1,7 @@
 require 'net/ssh/loggable'
+require 'net/sftp/errors'
+require 'net/sftp/operations/name_mapper'
+require 'net/sftp/operations/name_manifest'
 
 module Net; module SFTP; module Operations
 
@@ -43,7 +46,36 @@ module Net; module SFTP; module Operations
   # This will only work for single-file downloads. Trying to do so with
   # :recursive => true will cause an error.
   #
-  # The following options are supported:
+  # === Downloading directories with unsafe remote names
+  #
+  # A remote file system may allow several names that cannot coexist on the
+  # local host (names differing only by case, by Unicode normalization, or
+  # containing invalid UTF-8, path separators or platform reserved names).
+  # Recursive downloads therefore pass every directory layer through an
+  # explicit Net::SFTP::Operations::NameMapper. The original remote bytes are
+  # preserved as the identity of each entry and are recorded in a
+  # reverse-lookup manifest (see Net::SFTP::Operations::NameManifest).
+  #
+  # All names within a directory are validated together, and the contents of
+  # a directory are only written after the whole layer is known to be safe;
+  # consequently a rejected layer never overwrites or truncates an existing
+  # local file.
+  #
+  # Relevant options:
+  #
+  # * <tt>:name_mapper</tt> - a Net::SFTP::Operations::NameMapper instance,
+  #   or a hash of options used to construct one (the default rejects unsafe
+  #   names). Pass :strategy => :escape to percent-encode problematic bytes
+  #   reversibly instead. Pass <tt>:manifest_name => false</tt> to suppress
+  #   the manifest.
+  # * <tt>:name_equivalency</tt> - shortcut for the NameMapper
+  #   <tt>:equivalency</tt> option: a callable used to derive the collision
+  #   key of mapped names, allowing the behavior of foreign file systems
+  #   (case folding, Unicode normalization) to be emulated without relying
+  #   on the local host. See Net::SFTP::Operations::NameMapper::CASE_FOLD and
+  #   friends.
+  #
+# The following options are supported:
   #
   # * <tt>:progress</tt> - either a block or an object to act as a progress
   #   callback. See the discussion of "progress monitoring" below.
@@ -160,6 +192,7 @@ module Net; module SFTP; module Operations
       end
 
       @stack = [Entry.new(remote, local, recursive?)]
+      @manifest = build_manifest if recursive?
       process_next_entry
     end
 
@@ -204,7 +237,29 @@ module Net; module SFTP; module Operations
 
       # A simple struct for encapsulating information about a single remote
       # file or directory that needs to be downloaded.
-      Entry = Struct.new(:remote, :local, :directory, :size, :handle, :offset, :sink)
+      Entry = Struct.new(:remote, :local, :directory, :size, :handle, :offset, :sink, :relative, :pending_names)
+ 
+      # Builds the NameMapper used to translate remote entry names into
+      # locally representable names.
+      def name_mapper
+        @name_mapper ||= begin
+          given = options[:name_mapper]
+          if given.is_a?(NameMapper)
+            given
+          else
+            mapper_options = given.is_a?(Hash) ? given.dup : {}
+            mapper_options[:equivalency] ||= options[:name_equivalency] if options[:name_equivalency]
+            NameMapper.new(mapper_options)
+          end
+        end
+      end
+ 
+      # The reverse-lookup manifest accumulator for this download.
+      attr_reader :manifest
+ 
+      def build_manifest
+        NameManifest.new(name_mapper, local)
+      end
 
       #--
       # "ruby -w" hates private attributes, so we have to do these longhand
@@ -241,6 +296,7 @@ module Net; module SFTP; module Operations
           if entry.directory
             update_progress(:mkdir, entry.local)
             ::Dir.mkdir(entry.local) unless ::File.directory?(entry.local)
+            entry.pending_names = []
             request = sftp.opendir(entry.remote, &method(:on_opendir))
             request[:entry] = entry
           else
@@ -248,7 +304,20 @@ module Net; module SFTP; module Operations
           end
         end
 
-        update_progress(:finish) if !active?
+        if !active?
+          write_manifest!
+          update_progress(:finish)
+        end
+      end
+
+      # Persists the reverse-lookup manifest once every entry has been
+      # written. The manifest basename passed the top-level collision check
+      # along with all real remote entries.
+      def write_manifest!
+        return unless manifest && name_mapper.manifest_name
+        return if @manifest_written
+        @manifest_written = true
+        update_progress(:manifest, manifest.write!)
       end
 
       # Called when a remote directory is "opened" for reading, e.g. to
@@ -263,8 +332,9 @@ module Net; module SFTP; module Operations
       end
 
       # Called when the next batch of items is read from a directory on the
-      # remote server. If any items were read, they are added to the queue
-      # and #process_next_entry is called.
+      # remote server. Items are buffered until the full directory has been
+      # enumerated (EOF), at which point #on_closedir maps and commits the
+      # whole layer before any child entry is written.
       def on_readdir(response)
         entry = response.request[:parent]
         if response.eof?
@@ -274,16 +344,61 @@ module Net; module SFTP; module Operations
           raise StatusException.new(response, "readdir #{entry.remote}")
         else
           response[:names].each do |item|
-            next if item.name == "." || item.name == ".."
-            stack << Entry.new(::File.join(entry.remote, item.name), ::File.join(entry.local, item.name), item.directory?, item.attributes.size)
+            entry.pending_names << item
           end
-
-          # take this opportunity to enqueue more requests
-          process_next_entry
 
           request = sftp.readdir(entry.handle, &method(:on_readdir))
           request[:parent] = entry
         end
+      end
+
+      # Called when all entries of a remote directory have been enumerated.
+      # Maps the complete layer before anything within it is written:
+      # subdirectories are created and file open requests are enqueued only
+      # after every name in the layer passed validation and collision
+      # checking. The manifest name participates in the top-level check.
+      def commit_directory_layer(entry)
+        items = entry.pending_names
+        raw_names = items.reject { |item| item.name == "." || item.name == ".." }
+                          .map { |item| raw_name(item.name) }
+
+        top_level = entry.relative.nil?
+        mapped = name_mapper.map(raw_names, top_level)
+
+        items.each do |item|
+          next if item.name == "." || item.name == ".."
+          bytes = raw_name(item.name)
+          mapped_name = mapped.assoc(bytes).last
+          child_remote = join_remote(entry.remote, bytes)
+          child_local = ::File.join(entry.local, mapped_name)
+          child_relative = entry.relative.nil? ? mapped_name : ::File.join(entry.relative, mapped_name)
+
+          manifest.add(child_relative, child_remote, bytes, item.directory? ? :directory : :file)
+
+          if item.directory?
+            update_progress(:mkdir, child_local)
+            ::Dir.mkdir(child_local) unless ::File.directory?(child_local)
+          end
+
+          stack << Entry.new(child_remote, child_local, item.directory?, item.attributes.size, nil, nil, nil, child_relative, [])
+        end
+      end
+
+      # Remote names are opaque SFTP strings; keep them as raw bytes so that
+      # invalid UTF-8 remains the entry's identity rather than being scrubbed
+      # into replacement characters.
+      def raw_name(name)
+        String(name).dup.force_encoding(Encoding::ASCII_8BIT)
+      end
+
+      # Remote paths are defined by the SFTP protocol with "/" as the
+      # separator and must preserve raw bytes; never mix them with UTF-8
+      # local names through File.join (which may enforce encoding
+      # compatibility).
+      def join_remote(parent, name)
+        parent_bytes = String(parent).b
+        separator = parent_bytes.end_with?("/".b) ? String.new.force_encoding(Encoding::ASCII_8BIT) : "/".b
+        parent_bytes + separator + String(name).b
       end
 
       # Called when a file is to be opened for reading from the remote server.
@@ -298,6 +413,7 @@ module Net; module SFTP; module Operations
         @active -= 1
         entry = response.request[:parent]
         raise StatusException.new(response, "close #{entry.remote}") unless response.ok?
+        commit_directory_layer(entry)
         process_next_entry
       end
 
