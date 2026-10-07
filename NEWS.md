@@ -1,5 +1,14 @@
 # News
 
+## Unreleased
+
+### Improvement
+
+  * Added `DRb::PullEnumerator` and `DRb::RemoteEnumerable`
+    (`drb/pull_enumerator`): a batched pull-based enumerator proxy so
+    clients can consume large remote enumerations in bounded batches
+    instead of one round trip per element or one giant array.
+
 ## 2.2.3 - 2025-05-21
 
 ### Improvement
