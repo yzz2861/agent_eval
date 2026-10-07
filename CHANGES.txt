@@ -1,3 +1,13 @@
+=== unreleased
+
+* Recursive uploads can preserve symlinks and hard links with
+  <tt>:links => :preserve</tt>: symlinks are recreated verbatim (relative
+  targets are never followed), hard-linked files are uploaded once and
+  aliased remotely (with an opt-in degrade to independent uploads on
+  servers without hard-link support), and the whole transfer is driven by
+  an inspectable Net::SFTP::Operations::UploadPlan generated before
+  execution.
+
 === 3.0.0
 
 * Pass protocol version via Net::SFTP.start [#107]

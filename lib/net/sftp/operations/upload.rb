@@ -1,4 +1,5 @@
 require 'net/ssh/loggable'
+require 'net/sftp/operations/upload_plan'
 
 module Net; module SFTP; module Operations
 
@@ -53,6 +54,51 @@ module Net; module SFTP; module Operations
   #   defaults to 32,000 bytes.
   # * <tt>:name</tt> - the filename to report to the progress monitor when
   #   an IO object is given as +local+. This defaults to "<memory>".
+  # * <tt>:links</tt> - set to <tt>:preserve</tt> to keep symlinks and hard
+  #   links intact when uploading a directory tree. See "Link preservation"
+  #   below.
+  # * <tt>:hardlinks</tt> - what to do with hard-linked files when
+  #   <tt>:links => :preserve</tt> is in effect: <tt>:error</tt> (the
+  #   default) raises unless the server supports hard links (SFTP protocol
+  #   version 6+), and <tt>:upload</tt> explicitly degrades each alias to
+  #   an independently uploaded file.
+  # * <tt>:permissions</tt> - when preserving links, apply local permission
+  #   bits remotely after the content is in place (default true).
+  # * <tt>:remote_type</tt> - when preserving links, an optional callable
+  #   mapping a remote path to <tt>:file</tt>, <tt>:directory</tt>,
+  #   <tt>:symlink</tt> or +nil+, used to detect same-name type conflicts.
+  # * <tt>:on_conflict</tt> - when preserving links, <tt>:replace</tt> (the
+  #   default) removes a conflicting remote object before creating the new
+  #   one, while <tt>:error</tt> raises an UploadPlan::ConflictError before
+  #   anything is sent.
+  #
+  # == Link preservation and upload plans
+  #
+  # With <tt>:links => :preserve</tt>, a recursive upload first builds an
+  # explicit Net::SFTP::Operations::UploadPlan (available via #plan before
+  # the transfer is waited on): symlinks found via +lstat+ are recreated
+  # as symlinks with their target text kept verbatim (relative targets are
+  # never resolved), and files that share a local device+inode are
+  # uploaded once, with the remaining aliases created as remote hard
+  # links after the entity upload succeeds. A readable rendering of the
+  # plan looks like this:
+  #
+  #   uploader = sftp.upload("/home/website", "/var/www/site",
+  #                 :links => :preserve, :mkdir => true)
+  #   puts uploader.plan
+  #   # =>
+  #   # upload plan: /home/website -> /var/www/site (10 steps)
+  #   #    1. mkdir     /var/www/site (mode 0755)
+  #   #    2. upload    /home/website/index.html -> /var/www/site/index.html (812 bytes)  [after 1]
+  #   #    3. symlink   /var/www/site/latest -> logs/current.log  [after 1]
+  #   #    4. mkdir     /var/www/site/logs (mode 0755)  [after 1]
+  #   #    5. upload    /home/website/logs/current.log -> /var/www/site/logs/current.log (104 bytes)  [after 4]
+  #   #    6. hardlink  /var/www/site/logs/archive.log => /var/www/site/logs/current.log  [after 4, 5]
+  #   #    7. chmod     0644 /var/www/site/index.html  [after 2]
+  #   #    8. chmod     0644 /var/www/site/logs/current.log  [after 5]
+  #   #    9. chmod     0755 /var/www/site/logs  [after 4, 5, 6]
+  #   #   10. chmod     0755 /var/www/site  [after 1, 2, 3, 4, 5, 6]
+  #   uploader.wait
   #
   # == Progress Monitoring
   #
@@ -132,6 +178,11 @@ module Net; module SFTP; module Operations
     # The properties hash for this object
     attr_reader :properties
 
+    # The UploadPlan driving this upload, when <tt>:links => :preserve</tt>
+    # is in effect for a recursive upload; nil otherwise. The plan is fully
+    # built (and inspectable) before the transfer completes.
+    attr_reader :plan
+
     # Instantiates a new uploader process on top of the given SFTP session.
     # +local+ is either an IO object containing data to upload, or a string
     # identifying a file or directory on the local host. +remote+ is a string
@@ -153,6 +204,20 @@ module Net; module SFTP; module Operations
 
       @uploads = []
       @recursive = local.respond_to?(:read) ? false : ::File.directory?(local)
+
+      if recursive? && options[:links] == :preserve
+        @plan = UploadPlan.build(local, remote,
+          :mkdir       => options[:mkdir],
+          :permissions => options.has_key?(:permissions) ? options[:permissions] : true,
+          :hardlinks    => UploadPlan.resolve_hardlink_strategy(hardlinks_supported?, options[:hardlinks]),
+          :remote_type  => options[:remote_type],
+          :on_conflict  => options[:on_conflict] || :replace)
+        @executor = @plan.execute(sftp,
+          :requests  => options[:requests],
+          :read_size => options[:read_size],
+          :progress  => @progress)
+        return
+      end
 
       if recursive?
         @stack = [entries_for(local)]
@@ -188,19 +253,28 @@ module Net; module SFTP; module Operations
     # Returns true if the uploader is currently running. When this is false,
     # the uploader has finished processing.
     def active?
-      @active > 0 || @stack.any?
+      if @executor
+        @executor.active?
+      else
+        @active > 0 || @stack.any?
+      end
     end
 
     # Forces the transfer to stop.
     def abort!
-      @active = 0
-      @stack.clear
-      @uploads.clear
+      if @executor
+        @executor.abort!
+      else
+        @active = 0
+        @stack.clear
+        @uploads.clear
+      end
     end
 
     # Blocks until the upload has completed.
     def wait
       sftp.loop { active? }
+      @executor.raise_if_failed if @executor
       self
     end
 
@@ -378,6 +452,12 @@ module Net; module SFTP; module Operations
       # and '..' relative paths.
       def entries_for(local)
         ::Dir.entries(local).reject { |v| %w(. ..).include?(v) }
+      end
+
+      # Returns true if the negotiated SFTP protocol version supports
+      # hard links (version 6 and higher).
+      def hardlinks_supported?
+        sftp.protocol && sftp.protocol.respond_to?(:version) && sftp.protocol.version >= 6
       end
 
       # Attempts to notify the progress monitor (if one was given) about
