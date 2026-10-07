@@ -1,4 +1,6 @@
 require 'net/ssh/loggable'
+require 'net/ssh/authentication/agent_forward_policy'
+require 'net/ssh/authentication/agent_forwarder'
 
 module Net
   module SSH
@@ -409,16 +411,90 @@ module Net
           channel[:invisible] = true
 
           begin
-            agent = Authentication::Agent.connect(logger, session.options[:agent_socket_factory])
-            if (agent.socket.is_a? ::IO)
-              prepare_client(agent.socket, channel, :agent)
+            agent_socket = connect_agent_socket(session)
+            if policy = session.options[:agent_forward_policy]
+              upstream_socket = agent_socket
+              agent_socket = Authentication::AgentForwarder.new(
+                upstream_socket, policy, logger: logger, session_bind: agent_session_bind(session)
+              )
+              prepare_policy_client(agent_socket, upstream_socket, channel)
+            elsif (agent_socket.is_a? ::IO)
+              prepare_client(agent_socket, channel, :agent)
             else
-              prepare_simple_client(agent.socket, channel, :agent)
+              prepare_simple_client(agent_socket, channel, :agent)
             end
           rescue Exception => e
             error { "attempted to connect to agent but failed: #{e.class.name} (#{e.message})" }
             raise Net::SSH::ChannelOpenFailed.new(2, "could not connect to authentication agent")
           end
+        end
+
+        def connect_agent_socket(session)
+          Authentication::Agent.connect(
+            logger, session.options[:agent_socket_factory], session.options[:identity_agent]
+          ).socket
+        end
+
+        def prepare_policy_client(client, upstream, channel)
+          channel[:socket] = client
+
+          channel.on_data do |ch, data|
+            ch.debug { "data:#{data.length} on agent forwarded channel" }
+            ch[:socket].send(data)
+          end
+          channel.on_eof do |ch|
+            ch[:socket].shutdown(Socket::SHUT_WR)
+          rescue IOError, Errno::EPIPE, Errno::ENOTCONN
+            nil
+          end
+          channel.on_close do |ch|
+            ch[:socket].close unless ch[:socket].closed?
+            session.stop_listening_to(upstream) if upstream.is_a?(::IO)
+          end
+
+          if upstream.is_a?(::IO)
+            session.listen_to(upstream) do |socket|
+              data = socket.recv(8192)
+              if data && !data.empty?
+                client.fill(data)
+              else
+                client.close unless client.closed?
+                channel.close
+                session.stop_listening_to(socket)
+              end
+            end
+          end
+
+          channel.on_process do |ch|
+            next if upstream.is_a?(::IO)
+
+            data = upstream.read(8192)
+            if data
+              client.fill(data)
+            else
+              client.close unless client.closed?
+              ch.close
+            end
+          end
+
+          channel.on_process do |ch|
+            data = ch[:socket].read(8192)
+            ch.send_data(data) if data
+          end
+        end
+
+        def agent_session_bind(session)
+          return unless session.transport.algorithms.respond_to?(:server_key)
+
+          server_key = session.transport.algorithms.server_key
+          return unless server_key
+
+          {
+            session_id: session.transport.algorithms.session_id,
+            is_forwarding: true,
+            upstream_host_key: Net::SSH::Buffer.from(:key, server_key).to_s,
+            downstream_host_key: String.new
+          }
         end
       end
     end

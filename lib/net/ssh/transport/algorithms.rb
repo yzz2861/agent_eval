@@ -144,7 +144,7 @@ module Net
         attr_reader :algorithms
 
         # The session-id for this session, as decided during the initial key exchange.
-        attr_reader :session_id
+        attr_reader :session_id, :server_key
 
         # Returns true if the given packet can be processed during a key-exchange.
         def self.allowed_packet?(packet)
@@ -460,6 +460,7 @@ module Net
           secret   = result[:shared_secret].to_ssh
           hash     = result[:session_id]
           digester = result[:hashing_algorithm]
+          @server_key = result[:server_key]
 
           @session_id ||= hash
 
