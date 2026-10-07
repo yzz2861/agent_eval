@@ -14,6 +14,7 @@ lib/net/ssh/authentication/methods/keyboard_interactive.rb
 lib/net/ssh/authentication/methods/password.rb
 lib/net/ssh/authentication/methods/publickey.rb
 lib/net/ssh/authentication/pageant.rb
+lib/net/ssh/authentication/security_key.rb
 lib/net/ssh/authentication/session.rb
 lib/net/ssh/buffer.rb
 lib/net/ssh/buffered_io.rb
@@ -91,6 +92,7 @@ test/authentication/methods/test_password.rb
 test/authentication/methods/test_publickey.rb
 test/authentication/test_agent.rb
 test/authentication/test_key_manager.rb
+test/authentication/test_security_key.rb
 test/authentication/test_session.rb
 test/common.rb
 test/configs/eqsign
