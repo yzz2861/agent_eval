@@ -22,13 +22,30 @@ module XMLRPC # :nodoc:
   # and server.rb (class XMLRPC::BasicServer)
   module ParserWriterChooseMixin
 
+    # Returns the XMLRPC::TypeProfile of this instance, or +nil+ when the
+    # instance falls back to the global XMLRPC::Config flags.
+    attr_reader :type_profile
+
+    # Sets the instance-level XMLRPC::TypeProfile.
+    #
+    # The same profile is used by both the encoder (XMLRPC::Create) and the
+    # parser of this instance, so one explicit configuration controls which
+    # XML-RPC types may be sent and received. Other instances and the global
+    # XMLRPC::Config constants are not affected.
+    def type_profile=(profile)
+      @type_profile = profile
+      @create.type_profile = profile if @create
+      @parser.type_profile = profile if @parser and @parser.respond_to?(:type_profile=)
+      self
+    end
+
     # Sets the XMLWriter to use for generating XML output.
     #
     # Should be an instance of a class from module XMLRPC::XMLWriter.
     #
     # If this method is not called, then XMLRPC::Config.default_writer is used.
     def set_writer(writer)
-      @create = Create.new(writer)
+      @create = Create.new(writer, type_profile: @type_profile)
       self
     end
 
@@ -38,6 +55,7 @@ module XMLRPC # :nodoc:
     #
     # If this method is not called, then XMLRPC::Config.default_parser is used.
     def set_parser(parser)
+      parser.type_profile = @type_profile if @type_profile and parser.respond_to?(:type_profile=)
       @parser = parser
       self
     end
@@ -169,4 +187,3 @@ module XMLRPC # :nodoc:
   end
 
 end # module XMLRPC
-

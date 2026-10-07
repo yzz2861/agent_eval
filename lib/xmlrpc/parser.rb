@@ -8,6 +8,8 @@
 require "date"
 require "xmlrpc/base64"
 require "xmlrpc/datetime"
+require "bigdecimal"
+require "xmlrpc/type_profile"
 
 
 module XMLRPC # :nodoc:
@@ -59,6 +61,12 @@ module XMLRPC # :nodoc:
     # See also String.to_f
     def self.double(str)
       str.to_f
+    end
+
+    # Converts a String to a BigDecimal, preserving the exact decimal
+    # value (the String is never routed through a Float).
+    def self.decimal(str)
+      BigDecimal(str)
     end
 
     # Converts a the given +str+ to a +dateTime.iso8601+ formatted date.
@@ -153,7 +161,31 @@ module XMLRPC # :nodoc:
   # Parser for XML-RPC call and response
   module XMLParser
 
+    # Marks exceptions whose message already carries a value path. :nodoc:
+    PATH_ERROR_MARK = :@xmlrpc_value_path_error
+
+    # Returns a RuntimeError for +error+ whose message includes the +path+
+    # of the offending value, e.g. <tt>params[0]["key"][2]</tt>. If +error+
+    # already carries a value path it is returned unchanged, so errors from
+    # nested arrays/structs are not prefixed twice.
+    def self.value_error(path, error) # :nodoc:
+      return error if error.instance_variable_get(PATH_ERROR_MARK)
+      wrapped = RuntimeError.new("wrong value at #{path}: #{error.message}")
+      wrapped.instance_variable_set(PATH_ERROR_MARK, true)
+      wrapped.set_backtrace(error.backtrace)
+      wrapped
+    end
+
+    # Raises a RuntimeError with +message+ prefixed by the value +path+. :nodoc:
+    def self.raise_value_error(path, message)
+      raise value_error(path, RuntimeError.new(message))
+    end
+
     class AbstractTreeParser
+
+      # The XMLRPC::TypeProfile used by this parser, or +nil+ to fall back
+      # to the global XMLRPC::Config flags.
+      attr_accessor :type_profile
 
       def parseMethodResponse(str)
         methodResponse_document(createCleanedTree(str))
@@ -164,6 +196,33 @@ module XMLRPC # :nodoc:
       end
 
       private
+
+      def nil_allowed?
+        @type_profile ? @type_profile.nil_value? : Config.enable_nil_parser?
+      end
+
+      def big_integer_allowed?
+        @type_profile ? @type_profile.big_integer? : true
+      end
+
+      def decimal_allowed?
+        @type_profile ? @type_profile.decimal? : false
+      end
+
+      def preserve_unknown_extensions?
+        @type_profile ? @type_profile.preserve_unknown_extensions? : false
+      end
+
+      # Handles a tag which is not supported by the active type profile,
+      # either by raising or by keeping it as a controlled
+      # XMLRPC::UnknownValue. The tag name is never resolved to a class.
+      def unknown_extension(node)
+        if preserve_unknown_extensions?
+          XMLRPC::UnknownValue.new(node.nodeName, text_zero_one(node))
+        else
+          raise "wrong/unknown XML-RPC type '#{node.nodeName}'"
+        end
+      end
 
       # Removes all whitespaces but in the tags i4, i8, int, boolean....
       # and all comments
@@ -279,6 +338,13 @@ module XMLRPC # :nodoc:
         Convert.double(text(node.firstChild))
       end
 
+      def bigdecimal(node)
+        nodeMustBe(node, "bigdecimal")
+        hasOnlyOneChild(node)
+
+        Convert.decimal(text(node.firstChild))
+      end
+
       def dateTime(node)
         nodeMustBe(node, "dateTime.iso8601")
         hasOnlyOneChild(node)
@@ -293,11 +359,11 @@ module XMLRPC # :nodoc:
         Convert.base64(text_zero_one(node))
       end
 
-      def member(node)
+      def member(node, path)
         nodeMustBe(node, "member")
         assert( node.childNodes.to_a.size == 2 )
 
-        [ name(node[0]), value(node[1]) ]
+        [ name(node[0]), value(node[1], "#{path}[#{name(node[0]).inspect}]") ]
       end
 
       def name(node)
@@ -306,24 +372,24 @@ module XMLRPC # :nodoc:
         text_zero_one(node)
       end
 
-      def array(node)
+      def array(node, path)
         nodeMustBe(node, "array")
         hasOnlyOneChild(node, "data")
-        data(node.firstChild)
+        data(node.firstChild, path)
       end
 
-      def data(node)
+      def data(node, path)
         nodeMustBe(node, "data")
 
-        node.childNodes.to_a.collect do |val|
-          value(val)
+        node.childNodes.to_a.each_with_index.collect do |val, index|
+          value(val, "#{path}[#{index}]")
         end
       end
 
-      def param(node)
+      def param(node, path="params[0]")
         nodeMustBe(node, "param")
         hasOnlyOneChild(node, "value")
-        value(node.firstChild)
+        value(node.firstChild, path)
       end
 
       def methodResponse(node)
@@ -352,19 +418,19 @@ module XMLRPC # :nodoc:
         nodeMustBe(node, "params")
 
         if call
-          node.childNodes.to_a.collect do |n|
-            param(n)
+          node.childNodes.to_a.each_with_index.collect do |n, index|
+            param(n, "params[#{index}]")
           end
         else # response (only one param)
           hasOnlyOneChild(node)
-          param(node.firstChild)
+          param(node.firstChild, "params[0]")
         end
       end
 
       def fault(node)
         nodeMustBe(node, "fault")
         hasOnlyOneChild(node, "value")
-        f = value(node.firstChild)
+        f = value(node.firstChild, "fault")
         Convert.fault(f)
       end
 
@@ -379,12 +445,12 @@ module XMLRPC # :nodoc:
         node.nodeValue.to_s
       end
 
-      def struct(node)
+      def struct(node, path)
         nodeMustBe(node, "struct")
 
         hash = {}
         node.childNodes.to_a.each do |me|
-          n, v = member(me)
+          n, v = member(me, path)
           hash[n] = v
         end
 
@@ -392,7 +458,7 @@ module XMLRPC # :nodoc:
       end
 
 
-      def value(node)
+      def value(node, path="value")
         nodeMustBe(node, "value")
         nodes = node.childNodes.to_a.size
         if nodes == 0
@@ -408,27 +474,41 @@ module XMLRPC # :nodoc:
           text_zero_one(node)
         when :ELEMENT
           case child.nodeName
-          when "i4", "i8", "int"  then integer(child)
+          when "i4", "int"        then integer(child)
+          when "i8"
+            if big_integer_allowed?
+              integer(child)
+            else
+              unknown_extension(child)
+            end
           when "boolean"          then boolean(child)
           when "string"           then string(child)
           when "double"           then double(child)
+          when "bigdecimal"
+            if decimal_allowed?
+              bigdecimal(child)
+            else
+              unknown_extension(child)
+            end
           when "dateTime.iso8601" then dateTime(child)
           when "base64"           then base64(child)
-          when "struct"           then struct(child)
-          when "array"            then array(child)
+          when "struct"           then struct(child, path)
+          when "array"            then array(child, path)
           when "nil"
-            if Config.enable_nil_parser?
+            if nil_allowed?
               v_nil(child)
             else
-              raise "wrong/unknown XML-RPC type 'nil'"
+              unknown_extension(child)
             end
           else
-            raise "wrong/unknown XML-RPC type"
+            unknown_extension(child)
           end
         else
           raise "wrong type of node"
         end
 
+      rescue RuntimeError => e
+        raise XMLParser.value_error(path, e)
       end
 
       def methodCall(node)
@@ -447,8 +527,13 @@ module XMLRPC # :nodoc:
     end # module TreeParserMixin
 
     class AbstractStreamParser
+      # The XMLRPC::TypeProfile used by this parser, or +nil+ to fall back
+      # to the global XMLRPC::Config flags.
+      attr_accessor :type_profile
+
       def parseMethodResponse(str)
         parser = @parser_class.new
+        parser.type_profile = @type_profile if @type_profile
         parser.parse(str)
         raise "No valid method response!" if parser.method_name != nil
         if parser.fault != nil
@@ -464,6 +549,7 @@ module XMLRPC # :nodoc:
 
       def parseMethodCall(str)
         parser = @parser_class.new
+        parser.type_profile = @type_profile if @type_profile
         parser.parse(str)
         raise "No valid method call - missing method name!" if parser.method_name.nil?
         [parser.method_name, parser.params]
@@ -474,6 +560,10 @@ module XMLRPC # :nodoc:
       attr_reader :params
       attr_reader :method_name
       attr_reader :fault
+
+      # The XMLRPC::TypeProfile used by this parser, or +nil+ to fall back
+      # to the global XMLRPC::Config flags.
+      attr_accessor :type_profile
 
       def initialize(*a)
         super(*a)
@@ -491,25 +581,91 @@ module XMLRPC # :nodoc:
         @fault = nil
 
         @data = nil
+
+        @type_profile = nil
+        @containers = []
+        @path_root = "params[0]"
+        @in_value = false
+        @unknown_tag = nil
       end
+
+      private
+
+      def nil_allowed?
+        @type_profile ? @type_profile.nil_value? : Config.enable_nil_parser?
+      end
+
+      def big_integer_allowed?
+        @type_profile ? @type_profile.big_integer? : true
+      end
+
+      def decimal_allowed?
+        @type_profile ? @type_profile.decimal? : false
+      end
+
+      def preserve_unknown_extensions?
+        @type_profile ? @type_profile.preserve_unknown_extensions? : false
+      end
+
+      # Path of the value currently being decoded,
+      # e.g. <tt>params[0]["key"][2]</tt>.
+      def current_path
+        path = @path_root.dup
+        @containers.each do |kind, key|
+          case kind
+          when :array  then path << "[#{key}]"
+          when :struct then path << "[#{key.inspect}]"
+          end
+        end
+        path
+      end
+
+      public
 
       def startElement(name, attrs=[])
         @data = nil
         case name
         when "value"
           @value = nil
+          @in_value = true
         when "nil"
-          raise "wrong/unknown XML-RPC type 'nil'" unless Config.enable_nil_parser?
-          @value = :nil
+          if nil_allowed?
+            @value = :nil
+          elsif preserve_unknown_extensions?
+            @value = XMLRPC::UnknownValue.new("nil", nil)
+          else
+            XMLParser.raise_value_error(current_path, "wrong/unknown XML-RPC type 'nil'")
+          end
         when "array"
           @val_stack << @values
           @values = []
+          @containers << [:array, 0]
         when "struct"
           @names << @name
           @name = []
 
           @structs << @struct
           @struct = {}
+          @containers << [:struct, nil]
+        when "param"
+          @path_root = "params[#{@params.size}]"
+        when "fault"
+          @path_root = "fault"
+        when "methodCall", "methodResponse", "params", "data", "member",
+             "name", "methodName", "string", "i4", "int", "i8", "boolean",
+             "double", "dateTime.iso8601", "base64", "bigdecimal"
+          # known tag, nothing to do
+        else
+          # a tag not covered by the active type profile; it is rejected
+          # or kept as a controlled XMLRPC::UnknownValue, but never
+          # resolved to a Ruby class by name
+          if @type_profile and @in_value
+            if preserve_unknown_extensions?
+              @unknown_tag = name
+            else
+              XMLParser.raise_value_error(current_path, "wrong/unknown XML-RPC type '#{name}'")
+            end
+          end
         end
       end
 
@@ -518,12 +674,28 @@ module XMLRPC # :nodoc:
         case name
         when "string"
           @value = @data
-        when "i4", "i8", "int"
+        when "i4", "int"
           @value = Convert.int(@data)
+        when "i8"
+          if big_integer_allowed?
+            @value = Convert.int(@data)
+          elsif preserve_unknown_extensions?
+            @value = XMLRPC::UnknownValue.new("i8", @data)
+          else
+            XMLParser.raise_value_error(current_path, "wrong/unknown XML-RPC type 'i8'")
+          end
         when "boolean"
           @value = Convert.boolean(@data)
         when "double"
           @value = Convert.double(@data)
+        when "bigdecimal"
+          if decimal_allowed?
+            @value = Convert.decimal(@data)
+          elsif @type_profile and preserve_unknown_extensions?
+            @value = XMLRPC::UnknownValue.new("bigdecimal", @data)
+          elsif @type_profile
+            XMLParser.raise_value_error(current_path, "wrong/unknown XML-RPC type 'bigdecimal'")
+          end
         when "dateTime.iso8601"
           @value = Convert.dateTime(@data)
         when "base64"
@@ -531,16 +703,25 @@ module XMLRPC # :nodoc:
         when "value"
           @value = @data if @value.nil?
           @values << (@value == :nil ? nil : @value)
+          @in_value = false
+          if @containers.last and @containers.last[0] == :array
+            @containers.last[1] += 1
+          end
         when "array"
           @value = @values
           @values = @val_stack.pop
+          @containers.pop
         when "struct"
           @value = Convert.struct(@struct)
 
           @name = @names.pop
           @struct = @structs.pop
+          @containers.pop
         when "name"
           @name[0] = @data
+          if @containers.last and @containers.last[0] == :struct
+            @containers.last[1] = @data
+          end
         when "member"
           @struct[@name[0]] = @values.pop
 
@@ -553,9 +734,16 @@ module XMLRPC # :nodoc:
 
         when "methodName"
           @method_name = @data
+        else
+          if @unknown_tag and @unknown_tag == name
+            @value = XMLRPC::UnknownValue.new(name, @data)
+            @unknown_tag = nil
+          end
         end
 
         @data = nil
+      rescue RuntimeError => e
+        raise XMLParser.value_error(current_path, e)
       end
 
       def character(data)
@@ -684,4 +872,3 @@ module XMLRPC # :nodoc:
 
 
 end # module XMLRPC
-

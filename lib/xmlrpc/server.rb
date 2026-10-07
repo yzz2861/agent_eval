@@ -54,7 +54,12 @@ class BasicServer
   # The parameter +class_delim+ is used by add_handler, see
   # XMLRPC::BasicServer#add_handler, when an object is added as a handler, to
   # delimit the object-prefix and the method-name.
-  def initialize(class_delim=".")
+  #
+  # The optional keyword argument +type_profile+ accepts a
+  # XMLRPC::TypeProfile, which configures for this instance only which
+  # XML-RPC types the parser and encoder accept. When not given, the
+  # global XMLRPC::Config flags are used.
+  def initialize(class_delim=".", type_profile: nil)
     @handler = []
     @default_handler = nil
     @service_hook = nil
@@ -62,6 +67,7 @@ class BasicServer
     @class_delim = class_delim
     @create = nil
     @parser = nil
+    @type_profile = type_profile
 
     add_multicall     if Config.enable_multicall?
     add_introspection if Config.enable_introspection?
@@ -388,13 +394,13 @@ class CGIServer < BasicServer
   #
   # You can only create <b>one</b> XMLRPC::CGIServer instance, because more
   # than one makes no sense.
-  def CGIServer.new(*a)
-    @@obj = super(*a) if @@obj.nil?
+  def CGIServer.new(*a, **kw)
+    @@obj = super(*a, **kw) if @@obj.nil?
     @@obj
   end
 
-  def initialize(*a)
-    super(*a)
+  def initialize(*a, **kw)
+    super(*a, **kw)
   end
 
   # Call this after you have added all you handlers to the server.
@@ -539,8 +545,8 @@ class Server < WEBrickServlet
   #
   # All additionally provided parameters in <code>*a</code> are by-passed to
   # XMLRPC::BasicServer.new.
-  def initialize(port=8080, host="127.0.0.1", maxConnections=4, stdlog=$stdout, audit=true, debug=true, *a)
-    super(*a)
+  def initialize(port=8080, host="127.0.0.1", maxConnections=4, stdlog=$stdout, audit=true, debug=true, *a, **kw)
+    super(*a, **kw)
     require 'webrick'
     @server = WEBrick::HTTPServer.new(:Port => port, :BindAddress => host, :MaxClients => maxConnections,
                                       :Logger => WEBrick::Log.new(stdlog))
@@ -598,8 +604,8 @@ end
 #     trap("HUP") { httpserver.shutdown }   # use 1 instead of "HUP" on Windows
 #     httpserver.start
 class WEBrickServlet < BasicServer
-  def initialize(*a)
-    super
+  def initialize(*a, **kw)
+    super(*a, **kw)
     require "webrick/httpstatus"
     @valid_ip = nil
   end
@@ -677,4 +683,3 @@ end # module XMLRPC
 = History
     $Id$
 =end
-

@@ -7,6 +7,8 @@
 
 require "date"
 require "xmlrpc/base64"
+require "bigdecimal"
+require "xmlrpc/type_profile"
 
 module XMLRPC # :nodoc:
 
@@ -105,9 +107,14 @@ module XMLRPC # :nodoc:
   #
   class Create
 
-    def initialize(xml_writer = nil)
+    def initialize(xml_writer = nil, type_profile: nil)
       @writer = xml_writer || Config.default_writer.new
+      @type_profile = type_profile
     end
+
+    # The XMLRPC::TypeProfile used by this encoder, or +nil+ to fall back
+    # to the global XMLRPC::Config flags.
+    attr_accessor :type_profile
 
 
     def methodCall(name, *params)
@@ -117,8 +124,8 @@ module XMLRPC # :nodoc:
         raise ArgumentError, "Wrong XML-RPC method-name"
       end
 
-      parameter = params.collect do |param|
-        @writer.ele("param", conv2value(param))
+      parameter = params.each_with_index.collect do |param, index|
+        @writer.ele("param", conv2value(param, "params[#{index}]"))
       end
 
       tree = @writer.document(
@@ -147,8 +154,8 @@ module XMLRPC # :nodoc:
     def methodResponse(is_ret, *params)
 
       if is_ret
-        resp = params.collect do |param|
-          @writer.ele("param", conv2value(param))
+        resp = params.each_with_index.collect do |param, index|
+          @writer.ele("param", conv2value(param, "params[#{index}]"))
         end
 
         resp = [@writer.ele("params", *resp)]
@@ -156,7 +163,7 @@ module XMLRPC # :nodoc:
         if params.size != 1 or params[0] === XMLRPC::FaultException
           raise ArgumentError, "no valid fault-structure given"
         end
-        resp = @writer.ele("fault", conv2value(params[0].to_h))
+        resp = @writer.ele("fault", conv2value(params[0].to_h, "fault"))
       end
 
 
@@ -172,22 +179,39 @@ module XMLRPC # :nodoc:
 
     private
 
+    def nil_allowed?
+      @type_profile ? @type_profile.nil_value? : Config.enable_nil_create?
+    end
+
+    def big_integer_allowed?
+      @type_profile ? @type_profile.big_integer? : Config.enable_bigint?
+    end
+
+    def decimal_allowed?
+      @type_profile ? @type_profile.decimal? : false
+    end
+
+    def preserve_unknown_extensions?
+      @type_profile ? @type_profile.preserve_unknown_extensions? : false
+    end
+
     #
     # Converts a Ruby object into a XML-RPC <code><value></code> tag
     #
-    def conv2value(param) # :doc:
+    def conv2value(param, path = "value") # :doc:
 
         val = case param
         when Integer
-          # XML-RPC's int is 32bit int
-          if Config.enable_bigint?
+          # XML-RPC's int is 32bit int; the i8 extension holds 64bit ints.
+          # An out-of-range Integer is never squeezed into a smaller tag.
+          if param >= -(2**31) and param <= (2**31-1)
             @writer.tag("i4", param.to_s)
+          elsif big_integer_allowed? and param >= -(2**63) and param <= (2**63-1)
+            @writer.tag("i8", param.to_s)
+          elsif big_integer_allowed?
+            raise "Integer #{param} at #{path} is too big! Must be signed 64-bit integer!"
           else
-            if param >= -(2**31) and param <= (2**31-1)
-              @writer.tag("i4", param.to_s)
-            else
-              raise "Integer is too big! Must be signed 32-bit integer!"
-            end
+            raise "Integer #{param} at #{path} is too big! Must be signed 32-bit integer!"
           end
         when TrueClass, FalseClass
           @writer.tag("boolean", param ? "1" : "0")
@@ -199,22 +223,37 @@ module XMLRPC # :nodoc:
           @writer.tag("string", param)
 
         when NilClass
-          if Config.enable_nil_create?
+          if nil_allowed?
             @writer.ele("nil")
           else
-            raise "Wrong type NilClass. Not allowed!"
+            raise "Wrong type NilClass at #{path}. Not allowed!"
           end
 
         when Float
-          raise "Wrong value #{param}. Not allowed!" unless param.finite?
+          raise "Wrong value #{param} at #{path}. Not allowed!" unless param.finite?
           @writer.tag("double", param.to_s)
+
+        when BigDecimal
+          # exact decimal, never routed through Float
+          if decimal_allowed?
+            @writer.tag("bigdecimal", param.to_s("F"))
+          else
+            raise "Wrong type BigDecimal at #{path}. Not allowed!"
+          end
+
+        when XMLRPC::UnknownValue
+          if preserve_unknown_extensions?
+            @writer.tag(param.tag, param.content.to_s)
+          else
+            raise "Wrong type XMLRPC::UnknownValue at #{path}. Not allowed!"
+          end
 
         when Struct
           h = param.members.collect do |key|
             value = param[key]
             @writer.ele("member",
               @writer.tag("name", key.to_s),
-              conv2value(value)
+              conv2value(value, "#{path}[#{key.to_s.inspect}]")
             )
           end
 
@@ -224,14 +263,14 @@ module XMLRPC # :nodoc:
           h = param.collect do |key, value|
             @writer.ele("member",
               @writer.tag("name", key.to_s),
-              conv2value(value)
+              conv2value(value, "#{path}[#{key.inspect}]")
             )
           end
 
           @writer.ele("struct", *h)
 
         when Array
-          a = param.collect {|v| conv2value(v) }
+          a = param.each_with_index.collect {|v, i| conv2value(v, "#{path}[#{i}]") }
 
           @writer.ele("array",
             @writer.ele("data", *a)
@@ -256,18 +295,18 @@ module XMLRPC # :nodoc:
               val = param.instance_variable_get(v)
 
               if val.nil?
-                ret[name] = val if Config.enable_nil_create?
+                ret[name] = val if nil_allowed?
               else
                 ret[name] = val
               end
             }
-            return conv2value(ret)
+            return conv2value(ret, path)
           else
             ok, pa = wrong_type(param)
             if ok
-              return conv2value(pa)
+              return conv2value(pa, path)
             else
-              raise "Wrong type!"
+              raise "Wrong type #{param.class} at #{path}!"
             end
           end
         end
@@ -283,4 +322,3 @@ module XMLRPC # :nodoc:
   end # class Create
 
 end # module XMLRPC
-

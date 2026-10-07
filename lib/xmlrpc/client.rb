@@ -79,8 +79,13 @@ module XMLRPC # :nodoc:
     # If +use_ssl+ is set to +true+, communication over SSL is enabled.
     #
     # Parameter +timeout+ is the time to wait for a XML-RPC response, defaults to 30.
+    #
+    # The optional keyword argument +type_profile+ accepts a
+    # XMLRPC::TypeProfile, which configures for this instance only which
+    # XML-RPC types the encoder and parser accept. When not given, the
+    # global XMLRPC::Config flags are used.
     def initialize(host=nil, path=nil, port=nil, proxy_host=nil, proxy_port=nil,
-                   user=nil, password=nil, use_ssl=nil, timeout=nil)
+                   user=nil, password=nil, use_ssl=nil, timeout=nil, type_profile: nil)
 
       @http_header_extra = nil
       @http_last_response = nil
@@ -118,6 +123,7 @@ module XMLRPC # :nodoc:
 
       @parser = nil
       @create = nil
+      @type_profile = type_profile
     end
 
 
@@ -172,6 +178,7 @@ module XMLRPC # :nodoc:
     # * password
     # * use_ssl
     # * timeout
+    # * type_profile
     def new3(hash={})
 
       # convert all keys into lowercase strings
@@ -179,7 +186,7 @@ module XMLRPC # :nodoc:
       hash.each { |k,v| h[k.to_s.downcase] = v }
 
       self.new(h['host'], h['path'], h['port'], h['proxy_host'], h['proxy_port'], h['user'], h['password'],
-               h['use_ssl'], h['timeout'])
+               h['use_ssl'], h['timeout'], type_profile: h['type_profile'])
     end
 
     alias new_from_hash new3

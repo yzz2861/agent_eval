@@ -1,5 +1,24 @@
 # News
 
+## Unreleased
+
+### Improvements
+
+  * Added instance-level type profiles (`XMLRPC::TypeProfile`). A client or
+    server instance can now be configured with an explicit profile
+    (e.g. `XMLRPC::TypeProfile.standard` or `XMLRPC::TypeProfile.extended`)
+    that both its encoder and parser use, instead of changing the global
+    `XMLRPC::Config` constants.
+
+    The extended profile enables the `<nil/>`, `<i8>` (64-bit integers) and
+    `<bigdecimal>` (exact decimals via `BigDecimal`, never routed through
+    `Float`) extension types. Integers are tagged by range and peer
+    capability: out-of-range values are rejected instead of being squeezed
+    into `<i4>`. Unknown extension tags are rejected or kept as a controlled
+    `XMLRPC::UnknownValue` depending on the profile's `unknown_extension`
+    policy. Errors for values nested in arrays/structs carry the value path
+    (e.g. `params[0]["key"][2]`).
+
 ## 0.3.4
 
 ### Improvements
