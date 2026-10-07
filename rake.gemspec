@@ -68,6 +68,7 @@ Gem::Specification.new do |s|
     "lib/rake/late_time.rb",
     "lib/rake/linked_list.rb",
     "lib/rake/loaders/makefile.rb",
+    "lib/rake/multi_file_task.rb",
     "lib/rake/multi_task.rb",
     "lib/rake/name_space.rb",
     "lib/rake/options.rb",

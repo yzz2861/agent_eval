@@ -100,6 +100,23 @@ for creating +a.o+ and +b.o+ are not shown.
     sh "cc -o #{t.name} #{t.prerequisites.join(' ')}"
   end
 
+=== Tasks with Multiple File Outputs
+
+Use +multifile+ when one action creates multiple files. Declare all of the
+outputs, their common prerequisites, and the action that builds the entire
+group. Any declared output may be used as a prerequisite by another task.
+
+  multifile ["user.rb", "user_interface.rb"] => ["user.tmpl"] do |t|
+    t.outputs.each do |output|
+      # Generate output from user.tmpl.
+    end
+  end
+
+The whole group is rebuilt when any output is missing or when a common
+prerequisite is newer than the oldest output. Concurrent requests for
+different outputs execute the shared action only once. After the action runs,
+Rake verifies that every declared output exists.
+
 == Directory Tasks
 
 It is common to need to create directories upon demand.  The

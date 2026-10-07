@@ -21,9 +21,12 @@ module Rake
     end
 
     def define_task(task_class, *args, &block) # :nodoc:
+      original_scope = @scope
+      return define_multi_file_task(*args, &block) if
+        task_class.equal?(Rake::MultiFileTask)
+
       task_name, arg_names, deps, order_only = resolve_args(args)
 
-      original_scope = @scope
       if String === task_name and
          not task_class.ancestors.include? Rake::FileTask
         task_name, *definition_scope = *(task_name.split(":").reverse)
@@ -32,6 +35,10 @@ module Rake
 
       task_name = task_class.scope_name(@scope, task_name)
       task = intern(task_class, task_name)
+      if task.is_a?(Rake::MultiFileOutputTask)
+        fail "File task #{task_name.inspect} is already declared as an output " \
+             "of multi-file task #{task.multi_file_task.name.inspect}"
+      end
       task.set_arg_names(arg_names) unless arg_names.empty?
       if Rake::TaskManager.record_task_metadata
         add_location(task)
@@ -48,6 +55,77 @@ module Rake
     # create a task of the current type.
     def intern(task_class, task_name)
       @tasks[task_name.to_s] ||= task_class.new(task_name, self)
+    end
+
+    def define_multi_file_task(*args, &block) # :nodoc:
+      output_names, arg_names, deps, order_only = resolve_args(args)
+      output_names = Task.format_deps(output_names)
+
+      if output_names.empty?
+        fail ArgumentError, "Multi-file task must declare at least one output"
+      end
+
+      if output_names.uniq.length != output_names.length
+        fail ArgumentError,
+          "Multi-file task outputs must be unique: #{output_names.join(", ")}"
+      end
+
+      output_tasks = output_names.map do |output_name|
+        task = @tasks[output_name]
+        if task && !task.is_a?(Rake::MultiFileOutputTask)
+          fail "Multi-file output #{output_name.inspect} is already declared " \
+               "as a #{task.class.name.sub(/.*::/, "")}"
+        end
+        task ||= Rake::MultiFileOutputTask.new(output_name, self)
+        task
+      end
+
+      existing_groups = output_tasks.map(&:multi_file_task).compact.uniq
+      if existing_groups.length > 1
+        fail "Multi-file outputs #{output_names.join(", ")} are owned by " \
+             "different multi-file tasks"
+      end
+
+      group = existing_groups.first
+      if group
+        unless group.output_names.sort == output_names.sort
+          fail "Multi-file output #{output_names.first.inspect} is already " \
+               "declared with outputs #{group.output_names.join(", ")}"
+        end
+      else
+        group = Rake::MultiFileTask.new(output_names.join(", "), self)
+        group.output_names = output_names
+        group.output_tasks = output_tasks
+        output_tasks.each do |task|
+          task.multi_file_task = group
+          @tasks[task.name] ||= task
+        end
+      end
+
+      formatted_deps = Task.format_deps(deps)
+      if !arg_names.empty? || !group.arg_names.empty?
+        group.set_arg_names(arg_names)
+      end
+      output_tasks.each do |task|
+        task.set_arg_names(arg_names) unless arg_names.empty?
+        task.enhance(formatted_deps)
+        task | order_only unless order_only.nil?
+      end
+
+      if Rake::TaskManager.record_task_metadata
+        description = get_description
+        location = find_location
+        output_tasks.each do |task|
+          task.add_description(description)
+          task.locations << location if location
+        end
+        group.add_description(description)
+        group.locations << location if location
+      end
+
+      group.enhance(formatted_deps, &block)
+      group | order_only unless order_only.nil?
+      group
     end
 
     # Find a matching task for +task_name+.

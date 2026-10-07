@@ -77,6 +77,18 @@ module Rake
       Rake::FileTask.define_task(*args, &block)
     end
 
+    # Declare a task that creates a group of files with one action.
+    #
+    # Example:
+    #   multifile ["user.rb", "user_interface.rb"] => ["user.tmpl"] do |t|
+    #     t.outputs.each { |name| File.write(name, generate(name)) }
+    #   end
+    #
+    def multifile(*args, &block) # :doc:
+      Rake::MultiFileTask.define_task(*args, &block)
+    end
+    alias multi_file multifile
+
     # Declare a file creation task.
     # (Mainly used for the directory command).
     def file_create(*args, &block)
