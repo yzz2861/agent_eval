@@ -6,16 +6,25 @@ module Slim
     class Builder
       # https://html.spec.whatwg.org/multipage/syntax.html#attributes-2
       INVALID_ATTRIBUTE_NAME_REGEX = /[ \0"'>\/=]/
+      CONFLICT_POLICIES = [:reject, :first, :last].freeze
 
       def initialize(options)
         @options = options
         @attrs = {}
+        unless CONFLICT_POLICIES.include?(@options[:attr_conflict])
+          raise ArgumentError, "Unknown attribute conflict policy #{@options[:attr_conflict].inspect}"
+        end
+        @options[:merge_attrs].each do |name, policy|
+          unless String === policy || CONFLICT_POLICIES.include?(policy)
+            raise ArgumentError, "Unknown attribute conflict policy #{policy.inspect} for attribute #{name.inspect}"
+          end
+        end
       end
 
       def code_attr(name, escape, value)
-        if delim = @options[:merge_attrs][name]
-          value = Array === value ? value.join(delim) : value.to_s
-          attr(name, escape_html(escape, value)) unless value.empty?
+        value = value.first if Array === value && value.size == 1
+        if merge_attr?(name)
+          merge_code_attr(name, escape, value)
         elsif @options[:hyphen_attrs].include?(name) && Hash === value
           hyphen_attr(name, escape, value)
         elsif value != false && value != nil
@@ -30,17 +39,31 @@ module Slim
       end
 
       def attr(name, value)
+        name = name.to_s
         if name =~ INVALID_ATTRIBUTE_NAME_REGEX
           raise InvalidAttributeNameError, "Invalid attribute name '#{name}' was rendered"
         end
-        if @attrs[name]
-          if delim = @options[:merge_attrs][name]
-            @attrs[name] = @attrs[name].to_s + delim + value.to_s
-          else
-            raise("Multiple #{name} attributes specified")
-          end
+        return if String === attr_policy(name) && value.respond_to?(:empty?) && value.empty?
+        if @attrs.key?(name)
+          resolve_conflict(name, value)
         else
           @attrs[name] = value
+        end
+      end
+
+      def resolve_conflict(name, value)
+        existing = @attrs[name]
+        case attr_policy(name)
+          when :reject
+            raise "Multiple #{name} attributes specified"
+          when :first
+            # Keep the already stored first value
+          when :last
+            @attrs[name] = value
+          when String
+            @attrs[name] = existing.to_s + attr_policy(name) + value.to_s
+          else
+            raise ArgumentError, "Unknown attribute conflict policy #{attr_policy(name).inspect}"
         end
       end
 
@@ -71,6 +94,33 @@ module Slim
       end
 
       private
+
+      def attr_policy(name)
+        @options[:merge_attrs][name] || @options[:attr_conflict]
+      end
+
+      def merge_attr?(name)
+        @options[:merge_attrs].key?(name)
+      end
+
+      def merge_code_attr(name, escape, value)
+        policy = attr_policy(name)
+        if String === policy
+          if Array === value
+            value = value.flatten.map(&:to_s).reject(&:empty?).join(policy)
+          else
+            value = value.to_s
+          end
+          attr(name, escape_html(escape, value)) unless value.empty?
+        else
+          values = Array === value ? value.flatten : [value]
+          values.each do |part|
+            next if part == false || part.nil?
+            part = part.to_s
+            attr(name, escape_html(escape, part)) unless part.empty?
+          end
+        end
+      end
 
       # Captures block content using the appropriate capturing mechanism.
       #

@@ -273,4 +273,5 @@ p
 }
     assert_html '<p><img src="img.png" whatsthis?!="" /><img src="img.png" whatsthis?!="wtf" /></p>', source
   end
+
 end

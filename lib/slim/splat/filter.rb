@@ -4,6 +4,7 @@ module Slim
     # @api private
     class Filter < ::Slim::Filter
       define_options :merge_attrs, :attr_quote, :sort_attrs, :default_tag, :format, :disable_capture,
+                     attr_conflict: :reject,
                      hyphen_attrs: %w(data aria), use_html_safe: ''.respond_to?(:html_safe?),
                      hyphen_underscore_attrs: false
 
@@ -45,7 +46,7 @@ module Slim
       # @param [Array] attrs Array of temple expressions
       # @return [Array] Compiled temple expression
       def on_html_attrs(*attrs)
-        if attrs.any? { |attr| splat?(attr) }
+        if attrs.any? { |attr| splat?(attr) } || duplicate_attrs?(attrs)
           builder, block = make_builder(attrs)
           [:multi,
            block,
@@ -65,6 +66,18 @@ module Slim
            attr[3][0] == :slim && attr[3][1] == :attrvalue)
       end
 
+      # Detects attributes which collide after name normalization.
+      # Nested data/aria hashes are expanded at runtime, only collisions which
+      # are already visible at compile time are collected here.
+      def duplicate_attrs?(attrs)
+        names = Hash.new(0)
+        attrs.each do |attr|
+          next unless attr[0] == :html && attr[1] == :attr
+          names[attr[2].to_s] += 1
+        end
+        names.any? { |_, count| count > 1 }
+      end
+
       def make_builder(attrs)
         @splat_options ||= unique_name
         builder = unique_name
@@ -73,12 +86,12 @@ module Slim
           result <<
             if attr[0] == :html && attr[1] == :attr
               if attr[3][0] == :slim && attr[3][1] == :attrvalue
-                [:code, "#{builder}.code_attr(#{attr[2].inspect}, #{attr[3][2]}, (#{attr[3][3]}))"]
+                [:code, "#{builder}.code_attr(#{attr[2].inspect}, #{attr[3][2]}, [#{attr[3][3]}])"]
               else
                 tmp = unique_name
                 [:multi,
                  [:capture, tmp, compile(attr[3])],
-                 [:code, "#{builder}.attr(#{attr[2].inspect}, #{tmp})"]]
+                 [:code, "#{builder}.attr(#{attr[2].inspect}, (#{tmp}))"]]
               end
             elsif attr[0] == :slim && attr[1] == :splat
               [:code, "#{builder}.splat_attrs((#{attr[2]}))"]

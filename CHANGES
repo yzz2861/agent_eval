@@ -1,5 +1,6 @@
 5.2.2 (2026-07-24)
 
+  * Add configurable attribute conflict policies (:attr_conflict and symbol values in :merge_attrs: :reject, :first, :last)
   * Remove legacy less engine - #963
   * Add asciidoc engine - #973
   * Fix logic less condition for empty objects - #970

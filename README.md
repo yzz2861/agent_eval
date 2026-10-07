@@ -536,6 +536,30 @@ a class=["menu","highlight"]
 a class=:menu,:highlight
 ~~~
 
+#### Attribute conflict policies
+
+When the same final attribute name is supplied more than once on a tag (from literal attributes,
+conditional code attributes or splats, including nested `data`/`aria` hashes after expansion),
+the conflict is resolved according to the `:attr_conflict` option or the per-attribute value in
+`:merge_attrs`. The following policies are available:
+
+* `:reject` (default) raises an error when a conflict occurs.
+* `:first` keeps the first present value. `false` and `nil` never occupy the attribute name, so
+  the first present value wins.
+* `:last` keeps the last present value, again ignoring `false` and `nil`.
+* A string used as value in `:merge_attrs` joins all present values using it as delimiter
+  (e.g. the default `{'class' => ' '}`).
+
+~~~ ruby
+Slim::Engine.set_options attr_conflict: :last
+# or only for a specific attribute
+Slim::Engine.set_options merge_attrs: {'class' => ' ', 'id' => :first}
+~~~
+
+The rule is applied after attribute name normalization and nested `data`/`aria` expansion. The
+static compilation path and the runtime splat path behave identically: each Ruby expression is
+evaluated at most once and passed splat hashes are never modified.
+
 #### Splat attributes `*`
 
 The splat shortcut allows you to turn a hash into attribute/value pairs.
@@ -1008,7 +1032,8 @@ There are a lot of them but the good thing is, that Slim checks the configuratio
 | Boolean | :use_html_safe | false (true in Rails) | Use String#html_safe? from ActiveSupport (Works together with :disable_escape) |
 | Symbol | :format | :xhtml | HTML output format (Possible formats :html, :xhtml, :xml) |
 | String | :attr_quote | '"' | Character to wrap attributes in html (can be ' or ") |
-| Hash | :merge_attrs | \{'class' => ' '} | Joining character used if multiple html attributes are supplied (e.g. class="class1 class2") |
+| Hash | :merge_attrs | \{'class' => ' '} | Per attribute conflict rule. A String joins multiple values using it as delimiter (e.g. class="class1 class2"), a Symbol selects the policy :reject, :first or :last |
+| Symbol | :attr_conflict | :reject | Default conflict policy for attributes not listed in :merge_attrs (:reject, :first, :last) |
 | Array&lt;String&gt; | :hyphen_attrs | %w(data) | Attributes which will be hyphenated if a Hash is given (e.g. data={a_foo:1,b:2} will render as data-a_foo="1" data-b="2") |
 | Boolean | :hyphen_underscore_attrs | false | Attributes that have underscores in their names will be hyphenated (e.g. data={a_foo:1,b_bar:2} will render as data-a-foo="1" data-b-bar="2") |
 | Boolean | :sort_attrs | true | Sort attributes by name |
