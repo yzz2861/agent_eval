@@ -5,6 +5,7 @@ require "pry"
 require "rspec"
 require "hamster/hash"
 require "hamster/set"
+require "hamster/disjoint_set"
 require "hamster/vector"
 require "hamster/sorted_set"
 require "hamster/list"
@@ -17,6 +18,7 @@ H = Hamster::Hash
 S = Hamster::Set
 SS = Hamster::SortedSet
 D = Hamster::Deque
+DS = Hamster::DisjointSet
 EmptyList = Hamster::EmptyList
 
 Struct.new("Customer", :name, :address)
