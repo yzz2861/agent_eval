@@ -36,4 +36,9 @@ module Net; module SFTP
     end
 
   end
+
+  # Raised when the connection is lost before the server acknowledges a
+  # request. The remote operation may have completed, so callers must not
+  # assume it is safe to retry a write.
+  class IndeterminateStatusException < StatusException; end
 end; end

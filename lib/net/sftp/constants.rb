@@ -6,8 +6,6 @@ module Net module SFTP
   module Constants
 
     # The various packet types supported by SFTP protocol versions 1 through 6.
-    # The FXP_EXTENDED and FXP_EXTENDED_REPLY packet types are not currently
-    # understood by Net::SFTP.
     module PacketTypes
       FXP_INIT           = 1
       FXP_VERSION        = 2
@@ -51,6 +49,12 @@ module Net module SFTP
       OVERWRITE = 0x00000001
       ATOMIC    = 0x00000002
       NATIVE    = 0x00000004
+    end
+
+    # Extension names advertised by an SFTP server in the FXP_VERSION
+    # packet.
+    module Extensions
+      COPY_DATA = "copy-data"
     end
 
     # When an FXP_STATUS packet is received from the server, the +code+ will

@@ -225,6 +225,11 @@ module Net; module SFTP; module Protocol; module V01
       not_implemented! :unblock
     end
 
+    # The copy-data extension is not available in SFTP versions prior to 3.
+    def copy_data(*args)
+      not_implemented! :copy_data
+    end
+
     protected
 
       # A helper method for implementing wrappers for operations that are

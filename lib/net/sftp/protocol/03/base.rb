@@ -30,6 +30,18 @@ module Net; module SFTP; module Protocol; module V03
       send_request(FXP_SYMLINK, :string, path, :string, target)
     end
 
+    # Sends the copy-data extended request. A +length+ of zero requests a copy
+    # from +source_offset+ through the end of the source file.
+    def copy_data(source_handle, destination_handle, source_offset, destination_offset, length)
+      send_request(FXP_EXTENDED,
+        :string, Extensions::COPY_DATA,
+        :string, source_handle,
+        :int64, source_offset,
+        :int64, length,
+        :string, destination_handle,
+        :int64, destination_offset)
+    end
+
   end
 
 end; end; end; end

@@ -86,6 +86,18 @@ module Net; module SFTP
 
         callback.call(@response) if callback
       end
+
+      # Completes the request as FX_CONNECTION_LOST when the channel closes
+      # before a response was received. The result is explicitly marked
+      # indeterminate because a write may already have been executed by the
+      # server.
+      def respond_to_connection_loss! #:nodoc:
+        @response = Response.new(self,
+          :code => Net::SFTP::Constants::StatusCodes::FX_CONNECTION_LOST,
+          :message => "connection lost",
+          :indeterminate => true)
+        callback.call(@response) if callback
+      end
   end
 
 end; end

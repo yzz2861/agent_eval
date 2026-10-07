@@ -198,6 +198,10 @@ class Protocol::V01::TestBase < Net::SFTP::TestCase
     assert_raises(NotImplementedError) { @base.unblock("handle", 100, 200) }
   end
 
+  def test_copy_data_should_raise_not_implemented_error
+    assert_raises(NotImplementedError) { @base.copy_data("source", "destination", 0, 0, 0) }
+  end
+
   private
 
     def driver
