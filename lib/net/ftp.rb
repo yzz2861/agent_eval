@@ -1560,6 +1560,8 @@ module Net
   end
 end
 
+# Human-readable LIST parser for servers without MLSD support.
+require_relative "ftp/list_parser"
 
 # Documentation comments:
 #  - sourced from pickaxe and nutshell, with improvements (hopefully)

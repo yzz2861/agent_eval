@@ -1,0 +1,12 @@
+Directory DISK$USER:[BILL.PROJECT]
+
+README.TXT;1                   5/10          8-OCT-2026 09:30:16
+BUDGET.DIR;1                   1/2           1-OCT-2026 08:00
+NOTES PS.PS;2                  3/9           30-SEP-2026 22:00 [APPEND]
+OLD ARCHIVE.LIS;1
+                               4/8           <15-AUG-2026 10:00:00.00>
+LEAP DAY.TXT;3                2/4           29-FEB-2024 10:11:12
+
+Total of 5 files, 20/38 blocks
+Grand total of 2 directories, 30/60 blocks
+this vms line cannot be parsed

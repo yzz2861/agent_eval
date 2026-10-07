@@ -1,0 +1,13 @@
+ Volume in drive C is SYSTEM
+ Volume Serial Number is 1234-ABCD
+ Directory of C:\Users\bill
+
+10/01/2026  08:00 AM    <DIR>          docs
+09/30/2026  11:59 PM       12,345 report final.doc
+03/01/2020  12:00 AM       2,048 archive 2020.tar
+10/03/2026  02:00 PM    <JUNCTION>     link to stuff [D:\target dir\arrow -> name]
+11/12/2025  09:00 AM    <DIR>          future dir
+02/29/2024  10:11 AM              90 leap entry.txt
+               2 File(s)         14,483 bytes
+               2 Dir(s)   1,000,000,000 bytes free
+this line is not parseable at all

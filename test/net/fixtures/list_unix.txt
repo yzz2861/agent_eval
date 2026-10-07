@@ -1,0 +1,9 @@
+total 212
+drwxr-xr-x@  5 bill  staff     512 Oct  1 08:00 docs
+-rw-r--r--   1 bill  staff  12345 Sep 30 23:59 report final.doc
+lrwxr-xr-x   1 bill  staff      11 Oct  3 14:00 link to stuff -> target dir/arrow -> name
+-rw-r--r--   1 bill  staff    2048 Mar  1  2020 archive 2020.tar
+-rwsr-xr-x   1 root  staff   16384 Jan 15  2024 setuid tool
+drwxr-xr-x   2 bill  staff      64 Nov 12  2025 future dir
+crw-rw-rw-   1 root  wheel  0,   5 Jan  2  2023 dev/null
+some unrecognized junk line here
