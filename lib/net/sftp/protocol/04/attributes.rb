@@ -150,3 +150,5 @@ module Net; module SFTP; module Protocol; module V04
   end
 
 end ; end ; end ; end
+
+require 'net/sftp/protocol/04/acl_preview'

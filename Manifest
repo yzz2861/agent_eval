@@ -12,6 +12,7 @@ lib/net/sftp/protocol/01/base.rb
 lib/net/sftp/protocol/01/name.rb
 lib/net/sftp/protocol/02/base.rb
 lib/net/sftp/protocol/03/base.rb
+lib/net/sftp/protocol/04/acl_preview.rb
 lib/net/sftp/protocol/04/attributes.rb
 lib/net/sftp/protocol/04/base.rb
 lib/net/sftp/protocol/04/name.rb
@@ -34,6 +35,7 @@ test/protocol/01/test_base.rb
 test/protocol/01/test_name.rb
 test/protocol/02/test_base.rb
 test/protocol/03/test_base.rb
+test/protocol/04/test_acl_preview.rb
 test/protocol/04/test_attributes.rb
 test/protocol/04/test_base.rb
 test/protocol/04/test_name.rb
