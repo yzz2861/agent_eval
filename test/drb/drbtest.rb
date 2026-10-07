@@ -15,18 +15,20 @@ class DRbService
     DRb::ExtServManager.command[nm] = @@ruby + ["#{dir}/#{nm}"]
   end
 
-  %w(ut_drb.rb ut_array.rb ut_port.rb ut_large.rb ut_safe1.rb ut_eq.rb).each do |nm|
+  %w(ut_drb.rb ut_array.rb ut_port.rb ut_large.rb ut_safe1.rb ut_eq.rb
+     ut_exception_envelope.rb).each do |nm|
     add_service_command(nm)
   end
 
-  def initialize
+  def initialize(config={})
     @manager = DRb::ExtServManager.new
+    @config = config
     start
     @manager.uri = server.uri
   end
 
   def start
-    @server = DRb::DRbServer.new('druby://localhost:0', manager, {})
+    @server = DRb::DRbServer.new('druby://localhost:0', manager, @config)
   end
 
   attr_reader :manager

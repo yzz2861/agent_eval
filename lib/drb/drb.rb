@@ -342,6 +342,108 @@ module DRb
   # protocol.
   class DRbConnError < DRbError; end
 
+  # Error raised when a remote method call fails while exception envelope
+  # mode is enabled.
+  #
+  # The remote exception is never reconstructed.  Controlled information from
+  # the remote process is available through RemoteFailure#remote_class,
+  # RemoteFailure#remote_message, RemoteFailure#remote_backtrace, and
+  # RemoteFailure#remote_cause.
+  class RemoteFailure < DRbError
+    def self.from_envelope(payload) # :nodoc:
+      root = allocate
+      failure = root
+      seen = {}
+      depth = 0
+
+      loop do
+        unless payload.is_a?(Hash)
+          failure.send(:assign_envelope, 'Exception', '(invalid exception envelope)', [],
+                     nil, false, true)
+          break
+        end
+
+        if seen.key?(payload.object_id)
+          failure.send(:assign_envelope, 'Exception', '(exception cause repeated)', [],
+                     nil, false, true)
+          break
+        end
+        seen[payload.object_id] = true
+
+        failure.send(:assign_envelope, envelope_value(payload['class'], 'Exception'),
+                     envelope_value(payload['message'], '(exception message unavailable)'),
+                     envelope_array(payload['backtrace']),
+                     nil,
+                     payload['repeated'] == true,
+                     payload['truncated'] == true)
+
+        cause = payload['cause']
+        if depth >= DRbMessage::EXCEPTION_ENVELOPE_MAX_DEPTH
+          failure.send(:truncated!)
+          break
+        elsif cause.is_a?(Hash)
+          child = allocate
+          failure.send(:remote_cause=, child)
+          failure = child
+          payload = cause
+          depth += 1
+        else
+          break
+        end
+      end
+
+      root
+    end
+
+    def initialize(remote_class, message, backtrace, cause=nil, truncated=false)
+      assign_envelope(remote_class, message, backtrace, cause, false, truncated)
+      super("#{message} (#{remote_class})")
+    end
+
+    attr_reader :remote_class, :remote_message, :remote_backtrace,
+                :remote_cause
+
+    def repeated?
+      @repeated || (@remote_cause && @remote_cause.repeated?)
+    end
+
+    def truncated?
+      @truncated || (@remote_cause && @remote_cause.truncated?)
+    end
+
+    alias reason remote_class
+
+    def message
+      @remote_message + ' (' + @remote_class + ')'
+    end
+
+    def self.envelope_value(value, fallback)
+      value.is_a?(String) ? String.new(value) : fallback
+    end
+
+    def self.envelope_array(value)
+      return [] unless value.is_a?(Array)
+      value.select { |line| line.is_a?(String) }
+    end
+
+    private
+
+    attr_writer :remote_cause
+
+    def truncated!
+      @truncated = true
+    end
+
+    def assign_envelope(remote_class, message, backtrace, cause, repeated, truncated)
+      @remote_class = self.class.envelope_value(remote_class, 'Exception')
+      @remote_message = self.class.envelope_value(message, '(exception message unavailable)')
+      @remote_backtrace = backtrace
+      @remote_cause = cause
+      @repeated = repeated
+      @truncated = truncated
+    end
+  end
+
   class DRbObjectSpace # :nodoc:
     # This is an internal class for DRbIdConv. This must not be used
     # by users.
@@ -576,12 +678,22 @@ module DRb
   # The user does not have to directly deal with this object in
   # normal use.
   class DRbMessage
+    EXCEPTION_ENVELOPE_MARKER = '__drb_exception_envelope__'
+    EXCEPTION_ENVELOPE_VERSION = 1
+    EXCEPTION_ENVELOPE_MAX_DEPTH = 10
+    EXCEPTION_ENVELOPE_MAX_BYTES = 65536
+    EXCEPTION_ENVELOPE_TRUNCATED = '... (truncated)'
+    EXCEPTION_MESSAGE_UNAVAILABLE = '(exception message unavailable)'
+
     def initialize(config) # :nodoc:
       @load_limit = config[:load_limit]
       @argc_limit = config[:argc_limit]
+      @exception_envelope = config[:exception_envelope]
     end
 
     def dump(obj, error=false)  # :nodoc:
+      return dump_exception_envelope(obj) if error && @exception_envelope
+
       case obj
       when DRbUndumped
         obj = make_proxy(obj, error)
@@ -617,10 +729,11 @@ module DRb
       raise(DRbConnError, 'premature marshal format(can\'t read)') if str.size < sz
       DRb.mutex.synchronize do
         begin
-          Marshal::load(str)
+          obj = Marshal::load(str)
         rescue NameError, ArgumentError
-          DRbUnknown.new($!, str)
+          return DRbUnknown.new($!, str)
         end
+        exception_envelope?(obj) ? RemoteFailure.from_envelope(obj[EXCEPTION_ENVELOPE_MARKER]) : obj
       end
     end
 
@@ -665,6 +778,171 @@ module DRb
     end
 
     private
+
+    def dump_exception_envelope(error)
+      envelope = begin
+        build_exception_envelope(error,
+                                 EXCEPTION_ENVELOPE_MAX_DEPTH - 1,
+                                 EXCEPTION_ENVELOPE_MAX_BYTES - 2048,
+                                 { exception_id(error) => true })
+      rescue Exception
+        {
+          'class' => 'Exception',
+          'message' => '(exception envelope unavailable)',
+          'backtrace' => [EXCEPTION_ENVELOPE_TRUNCATED],
+          'cause' => nil,
+          'repeated' => false,
+          'truncated' => true
+        }
+      end
+      envelope['version'] = EXCEPTION_ENVELOPE_VERSION
+      str = Marshal::dump(EXCEPTION_ENVELOPE_MARKER => envelope)
+      [str.size].pack('N') + str
+    end
+
+    def exception_envelope?(obj)
+      obj.is_a?(Hash) && obj.size == 1 && obj.key?(EXCEPTION_ENVELOPE_MARKER)
+    end
+
+    def build_exception_envelope(error, depth, budget, seen)
+      budget -= 128
+      truncated = false
+
+      class_name, truncated_class = limit_string(exception_class_name(error), budget)
+      truncated ||= truncated_class
+      budget -= class_name.bytesize + 16
+
+      message, message_failed = exception_message(error)
+      truncated ||= message_failed
+      message, truncated_message = limit_string(message, budget)
+      truncated ||= truncated_message
+      budget -= message.bytesize + 16
+
+      backtrace, truncated_backtrace, budget = exception_backtrace(error, budget)
+      truncated ||= truncated_backtrace
+
+      cause = nil
+      repeated = false
+      if depth <= 0
+        truncated = true
+      else
+        cause, repeated, truncated_cause = exception_cause(error, depth - 1, budget, seen)
+        truncated ||= truncated_cause
+      end
+
+      {
+        'class' => class_name,
+        'message' => message,
+        'backtrace' => backtrace,
+        'cause' => cause,
+        'repeated' => repeated,
+        'truncated' => truncated
+      }
+    end
+
+    def exception_class_name(error)
+      klass = Exception.instance_method(:class).bind_call(error)
+      klass.name || Module.instance_method(:inspect).bind_call(klass)
+    rescue Exception
+      'Exception'
+    end
+
+    def exception_message(error)
+      [controlled_string(error.message, EXCEPTION_MESSAGE_UNAVAILABLE), false]
+    rescue Exception
+      [EXCEPTION_MESSAGE_UNAVAILABLE, true]
+    end
+
+    def exception_backtrace(error, budget)
+      budget -= 32
+      lines = []
+      truncated = false
+      value = begin
+        error.backtrace
+      rescue Exception
+        return [[EXCEPTION_ENVELOPE_TRUNCATED], true, budget]
+      end
+      return [[], false, budget] if value.nil?
+      return [[EXCEPTION_ENVELOPE_TRUNCATED], true, budget] unless value.is_a?(Array)
+
+      value.each do |line|
+        frame = controlled_string(line, '(backtrace frame unavailable)')
+        text, was_truncated = limit_string(frame, budget - 16)
+        cost = text.bytesize + 16
+        if cost > budget
+          lines << EXCEPTION_ENVELOPE_TRUNCATED
+          return [lines, true, 0]
+        end
+        lines << text
+        truncated ||= was_truncated
+        budget -= cost
+      end
+      [lines, truncated, budget]
+    rescue Exception
+      [[EXCEPTION_ENVELOPE_TRUNCATED], true, budget]
+    end
+
+    def exception_cause(error, depth, budget, seen)
+      build_exception_cause(error.cause, depth, budget, seen)
+    rescue Exception
+      [nil, false, true]
+    end
+
+    def build_exception_cause(cause, depth, budget, seen)
+      return [nil, false, false] unless Exception === cause
+
+      id = exception_id(cause)
+      if seen.key?(id)
+        class_name, = limit_string(exception_class_name(cause), [budget - 128, 1].max)
+        return [{
+          'class' => class_name,
+          'message' => '(exception cause repeated)',
+          'backtrace' => [],
+          'cause' => nil,
+          'repeated' => true,
+          'truncated' => false
+        }, true, false]
+      end
+      seen[id] = true
+
+      if budget < 192
+        return [nil, false, true]
+      end
+
+      [build_exception_envelope(cause, depth, budget, seen), false, false]
+    end
+
+    def exception_id(error)
+      Kernel.instance_method(:object_id).bind_call(error)
+    end
+
+    def limit_string(value, budget)
+      marker_size = EXCEPTION_ENVELOPE_TRUNCATED.bytesize
+      if value.bytesize <= budget
+        [value, false]
+      else
+        limit = budget - marker_size
+        text = +''
+        if limit > 0
+          value.each_char do |character|
+            break if text.bytesize + character.bytesize > limit
+            text << character
+          end
+        end
+        [text << EXCEPTION_ENVELOPE_TRUNCATED, true]
+      end
+    end
+
+    def controlled_string(value, fallback)
+      text = value.is_a?(String) ? String.new(value) : String.new(String(value))
+      unless text.valid_encoding?
+        text.encode!(Encoding::UTF_8, invalid: :replace, undef: :replace)
+      end
+      text
+    rescue Exception
+      fallback
+    end
+
     def make_proxy(obj, error=false) # :nodoc:
       if error
         DRbRemoteError.new(obj)
@@ -1171,6 +1449,8 @@ module DRb
         return result
       elsif DRbUnknown === result
         raise result
+      elsif RemoteFailure === result
+        raise result, result.message, caller
       else
         bt = self.class.prepare_backtrace(@uri, result)
         result.set_backtrace(bt + caller)
@@ -1424,6 +1704,7 @@ module DRb
         :tcp_acl => @@acl,
         :load_limit => @@load_limit,
         :argc_limit => @@argc_limit,
+        :exception_envelope => false,
       }
       default_config.update(hash)
     end
@@ -1457,6 +1738,11 @@ module DRb
     # :argc_limit :: the maximum number of arguments to a remote
     #                method accepted by the server.  Defaults to
     #                256.
+    # :exception_envelope :: when true, exceptions raised by remote
+    #                methods are serialized as controlled metadata instead
+    #                of being marshalled directly.  The client raises
+    #                DRb::RemoteFailure.  Enable it on both the client
+    #                and server.  Defaults to false.
     # The default values of these options can be modified on
     # a class-wide basis by the class methods #default_argc_limit,
     # #default_load_limit, #default_acl, #default_id_conv,

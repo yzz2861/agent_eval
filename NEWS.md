@@ -1,5 +1,14 @@
 # News
 
+## Unreleased
+
+### New features
+
+  * Added the opt-in `:exception_envelope` DRb configuration. When
+    enabled on both ends, remote exceptions are sent as controlled
+    metadata and raised locally as `DRb::RemoteFailure`, without
+    invoking custom Marshal hooks on the original exception.
+
 ## 2.2.3 - 2025-05-21
 
 ### Improvement
