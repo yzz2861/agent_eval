@@ -25,6 +25,11 @@ module Net
           # PubkeyAcceptedAlgorithms option from ssh_config file is implemented.
           attr_reader :pubkey_algorithms
 
+          # The signature algorithms the server accepts for publickey
+          # authentication, as reported by the "server-sig-algs" extension
+          # (RFC 8308), or nil if the server did not send that extension.
+          attr_reader :server_sig_algs
+
           # Instantiates a new authentication method.
           def initialize(session, options = {})
             @session = session
@@ -32,10 +37,13 @@ module Net
             @options = options
             @prompt = options[:password_prompt]
             @pubkey_algorithms = options[:pubkey_algorithms] \
-              || %w[rsa-sha2-256-cert-v01@openssh.com
+              || %w[rsa-sha2-512-cert-v01@openssh.com
+                    rsa-sha2-256-cert-v01@openssh.com
                     ssh-rsa-cert-v01@openssh.com
+                    rsa-sha2-512
                     rsa-sha2-256
                     ssh-rsa]
+            @server_sig_algs = options[:server_sig_algs]
             self.logger = session.logger
           end
 

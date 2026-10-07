@@ -8,6 +8,22 @@ module Net
       module Methods
         # Implements the "publickey" SSH authentication method.
         class Publickey < Abstract
+          # The signature algorithms that may be used with a certificate
+          # bearing an RSA key ("ssh-rsa-cert-v01@openssh.com"), mapped to the
+          # algorithm used to produce the signature itself.
+          RSA_CERT_SIGNATURE_ALGORITHMS = {
+            "rsa-sha2-512-cert-v01@openssh.com" => "rsa-sha2-512",
+            "rsa-sha2-256-cert-v01@openssh.com" => "rsa-sha2-256",
+            "ssh-rsa-cert-v01@openssh.com" => nil
+          }.freeze
+
+          # The signature algorithms that may be used with a bare RSA key
+          # ("ssh-rsa"); the same key can be used with each of them, so the
+          # choice cannot be derived from the key (or host key) type alone.
+          RSA_SIGNATURE_ALGORITHMS = RSA_CERT_SIGNATURE_ALGORITHMS.keys.map do |cert_alg|
+            cert_alg.sub(/-cert-v01@openssh\.com\z/, "")
+          end.freeze
+
           # Attempts to perform public-key authentication for the given
           # username, trying each identity known to the key manager. If any of
           # them succeed, returns +true+, otherwise returns +false+. This
@@ -94,34 +110,12 @@ module Net
           def authenticate_with(identity, next_service, username)
             type = identity.ssh_type
             if type == "ssh-rsa"
-              pubkey_algorithms.each do |pk_alg|
-                case pk_alg
-                when "rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"
-                  if authenticate_with_alg(identity, next_service, username, pk_alg, pk_alg)
-                    # success
-                    return true
-                  end
-                end
+              select_signature_algorithms(pubkey_algorithms & RSA_SIGNATURE_ALGORITHMS).each do |pk_alg|
+                return true if authenticate_with_alg(identity, next_service, username, pk_alg, pk_alg)
               end
             elsif type == "ssh-rsa-cert-v01@openssh.com"
-              pubkey_algorithms.each do |pk_alg|
-                case pk_alg
-                when "rsa-sha2-512-cert-v01@openssh.com"
-                  if authenticate_with_alg(identity, next_service, username, pk_alg, "rsa-sha2-512")
-                    # success
-                    return true
-                  end
-                when "rsa-sha2-256-cert-v01@openssh.com"
-                  if authenticate_with_alg(identity, next_service, username, pk_alg, "rsa-sha2-256")
-                    # success
-                    return true
-                  end
-                when "ssh-rsa-cert-v01@openssh.com"
-                  if authenticate_with_alg(identity, next_service, username, pk_alg)
-                    # success
-                    return true
-                  end
-                end
+              select_signature_algorithms(pubkey_algorithms & RSA_CERT_SIGNATURE_ALGORITHMS.keys).each do |pk_alg|
+                return true if authenticate_with_alg(identity, next_service, username, pk_alg, RSA_CERT_SIGNATURE_ALGORITHMS[pk_alg])
               end
             elsif authenticate_with_alg(identity, next_service, username, type)
               # success
@@ -129,6 +123,30 @@ module Net
             end
             # failure
             return false
+          end
+
+          private
+
+          # Narrows the candidate signature algorithms down to those the
+          # server also accepts, as reported by the "server-sig-algs"
+          # extension (RFC 8308). When the server did not send that extension,
+          # the candidates are returned unchanged, preserving the legacy
+          # trial-and-error behavior. When the extension was received but
+          # names none of the candidates, Net::SSH::Exception is raised
+          # explaining the mismatch.
+          def select_signature_algorithms(candidates)
+            return candidates if server_sig_algs.nil?
+
+            selected = candidates.select { |algorithm| server_sig_algs.include?(algorithm) }
+            if selected.empty?
+              raise Net::SSH::Exception,
+                    "could not settle on publickey signature algorithm\n" \
+                    "Server signature algorithms: #{server_sig_algs.join(',')}\n" \
+                    "Client signature algorithms: #{candidates.join(',')}"
+            end
+
+            debug { "server-sig-algs restricts signature algorithms to: #{selected.join(', ')}" }
+            selected
           end
         end
       end

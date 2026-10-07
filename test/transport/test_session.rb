@@ -254,6 +254,14 @@ module Transport
       assert_nil session.poll_message
     end
 
+    def test_poll_message_should_silently_handle_ext_info_packets
+      session!
+      packet = P(:byte, EXT_INFO, :raw, "lasdfalksdjfa;slkdfja;slkfjsdfaklsjdfa;df")
+      socket.expects(:next_packet).times(2).returns(packet, nil)
+      algorithms.expects(:parse_ext_info).with(packet)
+      assert_nil session.poll_message
+    end
+
     def test_poll_message_should_return_other_packets
       session!
       packet = P(:byte, SERVICE_ACCEPT, :string, "test")

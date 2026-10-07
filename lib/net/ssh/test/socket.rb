@@ -20,14 +20,19 @@ module Net
         # Create a new test socket. This will also instantiate a new Net::SSH::Test::Script
         # and seed it with the necessary events to power the initialization of the
         # connection.
-        def initialize
+        #
+        # The +server_kex+ parameter describes the kex algorithm list the
+        # scripted server advertises in its KEXINIT packet; it defaults to
+        # just the "test" algorithm. Use "test,ext-info-s" to script a server
+        # that supports RFC 8308 extension negotiation.
+        def initialize(server_kex: "test")
           extend(Net::SSH::Transport::PacketStream)
           super(+"SSH-2.0-Test\r\n")
 
           @script = Script.new
 
           script.sends(:kexinit)
-          script.gets(:kexinit, 1, 2, 3, 4, "test", "ssh-rsa", "none", "none", "none", "none", "none", "none", "", "", false)
+          script.gets(:kexinit, 1, 2, 3, 4, server_kex, "ssh-rsa", "none", "none", "none", "none", "none", "none", "", "", false)
           script.sends(:newkeys)
           script.gets(:newkeys)
         end

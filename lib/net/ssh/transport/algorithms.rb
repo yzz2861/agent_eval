@@ -42,7 +42,8 @@ module Net
                   ecdh-sha2-nistp256
                   diffie-hellman-group-exchange-sha256
                   diffie-hellman-group14-sha256
-                  diffie-hellman-group14-sha1],
+                  diffie-hellman-group14-sha1
+                  ext-info-c],
 
           encryption: %w[aes256-ctr
                          aes192-ctr
@@ -146,6 +147,11 @@ module Net
         # The session-id for this session, as decided during the initial key exchange.
         attr_reader :session_id
 
+        # The signature algorithms the server accepts for publickey
+        # authentication, as reported by the "server-sig-algs" extension
+        # (RFC 8308), or nil if the server did not send that extension.
+        attr_reader :server_sig_algs
+
         # Returns true if the given packet can be processed during a key-exchange.
         def self.allowed_packet?(packet)
           (1..4).include?(packet.type) ||
@@ -162,6 +168,8 @@ module Net
           @algorithms = {}
           @pending = @initialized = false
           @client_packet = @server_packet = nil
+          @server_sig_algs = nil
+          @ext_info_expected = false
           prepare_preferred_algorithms!
         end
 
@@ -233,7 +241,65 @@ module Net
           end
         end
 
+        # Parses an incoming SSH_MSG_EXT_INFO packet (RFC 8308). Such a packet
+        # is only honored once, immediately after the initial key exchange, and
+        # only when the server announced "ext-info-s" in its KEXINIT packet;
+        # packets arriving at any other time (including duplicates) are
+        # discarded, so that an out-of-phase message cannot change the
+        # authentication policy of an established session.
+        #
+        # Malformed packets (truncated or over-long extension names/values,
+        # duplicate extension names, or trailing garbage) raise
+        # Net::SSH::Exception.
+        def parse_ext_info(packet)
+          unless @ext_info_expected
+            lwarn { "discarding unexpected SSH_MSG_EXT_INFO packet" }
+            return
+          end
+          @ext_info_expected = false
+
+          count = packet.read_long
+          raise Net::SSH::Exception, "malformed EXT_INFO packet: missing extension count" if count.nil?
+
+          names = []
+          count.times do
+            name = read_ext_info_string(packet, "extension name")
+            value = read_ext_info_string(packet, "value of extension #{name}")
+
+            if names.include?(name)
+              raise Net::SSH::Exception, "malformed EXT_INFO packet: duplicate extension `#{name}'"
+            end
+            names << name
+
+            next unless name == "server-sig-algs"
+
+            @server_sig_algs = value.split(",")
+            debug { "server-sig-algs: #{@server_sig_algs.join(', ')}" }
+          end
+
+          unless packet.eof?
+            raise Net::SSH::Exception,
+                  "malformed EXT_INFO packet: #{packet.available} trailing byte(s)"
+          end
+        end
+
         private
+
+        # Reads a single string from an EXT_INFO packet, verifying that both
+        # the length prefix and the declared number of bytes are actually
+        # present in the packet.
+        def read_ext_info_string(packet, description)
+          if packet.available < 4
+            raise Net::SSH::Exception, "malformed EXT_INFO packet: truncated #{description}"
+          end
+
+          length = packet.read_long
+          if length > packet.available
+            raise Net::SSH::Exception, "malformed EXT_INFO packet: truncated #{description}"
+          end
+
+          packet.read(length)
+        end
 
         # Sends a KEXINIT packet to the server. If a server KEXINIT has already
         # been received, this will then invoke #proceed! to proceed with the key
@@ -446,6 +512,7 @@ module Net
         def exchange_keys
           debug { "exchanging keys" }
 
+          initial_kex = @session_id.nil?
           need_bytes = kex_byte_requirement
           algorithm = Kex::MAP[kex].new(self, session,
                                         client_version_string: Net::SSH::Transport::ServerVersion::PROTO_VERSION,
@@ -513,6 +580,11 @@ module Net
                                    max_blocks: options[:rekey_blocks_limit]
 
           @initialized = true
+
+          # The server may follow the initial key exchange with a single
+          # SSH_MSG_EXT_INFO packet, but only if it announced "ext-info-s"
+          # in its KEXINIT packet (RFC 8308).
+          @ext_info_expected = initial_kex && @server_data[:kex].include?("ext-info-s")
         end
 
         # Given the SSH name for some compression algorithm, return a normalized

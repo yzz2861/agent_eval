@@ -148,6 +148,55 @@ module Authentication
         assert subject(pubkey_algorithms: %w[rsa-sha2-256 ssh-rsa]).authenticate("ssh-connection", "jamis")
       end
 
+      def test_authenticate_with_server_sig_algs_only_tries_accepted_algorithms
+        key_manager.expects(:sign).with(&signature_parameters_with_alg(keys.first, "rsa-sha2-256")).returns("sig-one")
+
+        transport.expect do |t, packet|
+          assert_equal USERAUTH_REQUEST, packet.type
+          assert verify_userauth_request_packet(packet, keys.first, false, "rsa-sha2-256")
+          t.return(USERAUTH_PK_OK, :string, "rsa-sha2-256", :string, Net::SSH::Buffer.from(:key, keys.first))
+
+          t.expect do |t2, packet2|
+            assert_equal USERAUTH_REQUEST, packet2.type
+            assert verify_userauth_request_packet(packet2, keys.first, true, "rsa-sha2-256")
+            assert_equal "sig-one", packet2.read_string
+            t2.return(USERAUTH_SUCCESS)
+          end
+        end
+
+        assert subject(pubkey_algorithms: %w[rsa-sha2-512 rsa-sha2-256 ssh-rsa],
+                       server_sig_algs: %w[rsa-sha2-256]).authenticate("ssh-connection", "jamis")
+      end
+
+      def test_authenticate_with_server_sig_algs_ssh_rsa_only
+        key_manager.expects(:sign).with(&signature_parameters_with_alg(keys.first, "ssh-rsa")).returns("sig-one")
+
+        transport.expect do |t, packet|
+          assert_equal USERAUTH_REQUEST, packet.type
+          assert verify_userauth_request_packet(packet, keys.first, false, "ssh-rsa")
+          t.return(USERAUTH_PK_OK, :string, "ssh-rsa", :string, Net::SSH::Buffer.from(:key, keys.first))
+
+          t.expect do |t2, packet2|
+            assert_equal USERAUTH_REQUEST, packet2.type
+            assert verify_userauth_request_packet(packet2, keys.first, true, "ssh-rsa")
+            assert_equal "sig-one", packet2.read_string
+            t2.return(USERAUTH_SUCCESS)
+          end
+        end
+
+        assert subject(pubkey_algorithms: %w[rsa-sha2-512 rsa-sha2-256 ssh-rsa],
+                       server_sig_algs: %w[ssh-rsa]).authenticate("ssh-connection", "jamis")
+      end
+
+      def test_authenticate_with_server_sig_algs_without_common_algorithm_raises
+        error = assert_raises(Net::SSH::Exception) do
+          subject(pubkey_algorithms: %w[rsa-sha2-256 ssh-rsa],
+                  server_sig_algs: %w[rsa-sha2-512]).authenticate("ssh-connection", "jamis")
+        end
+        assert_match(/could not settle on publickey signature algorithm/, error.message)
+        assert_match(/rsa-sha2-512/, error.message)
+      end
+
       private
 
       def signature_parameters(key)

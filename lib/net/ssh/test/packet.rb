@@ -1,5 +1,6 @@
 require 'net/ssh/connection/constants'
 require 'net/ssh/transport/constants'
+require 'net/ssh/authentication/constants'
 
 module Net
   module SSH
@@ -17,6 +18,7 @@ module Net
       class Packet
         include Net::SSH::Transport::Constants
         include Net::SSH::Connection::Constants
+        include Net::SSH::Authentication::Constants
 
         # Register a custom channel request. extra_parts is an array of types
         # of extra parameters
@@ -74,6 +76,13 @@ module Net
                           string string string string string string string string string string
                           bool]
                      when NEWKEYS then []
+                     when EXT_INFO
+                       [:long] + %i[string string] * ((@data.length - 1) / 2)
+                     when SERVICE_REQUEST, SERVICE_ACCEPT then %i[string]
+                     when USERAUTH_REQUEST then []
+                     when USERAUTH_FAILURE then %i[string bool]
+                     when USERAUTH_PK_OK then %i[string string]
+                     when USERAUTH_SUCCESS then []
                      when CHANNEL_OPEN then %i[string long long long]
                      when CHANNEL_OPEN_CONFIRMATION then %i[long long long long]
                      when CHANNEL_DATA then %i[long string]
