@@ -1,5 +1,20 @@
 # sqlite3-ruby Changelog
 
+## Unreleased
+
+### Added
+
+- Add explicit WAL snapshot handles for long-running analyses that need to release a
+  connection mid-task and later resume the same read view. Database#snapshot captures a
+  SQLite3::Snapshot handle for the current read transaction, Database#open_snapshot
+  moves a later transaction (possibly on another connection to the same file) back to
+  that exact view, and SQLite3::Snapshot#free releases the handle. Snapshots require WAL
+  journal mode and an open transaction; rollback journal modes are rejected explicitly.
+  Opening a snapshot that was invalidated by a checkpoint or WAL recycling, or that
+  belongs to a different database, raises instead of silently reading the latest data.
+  Requires SQLite compiled with SQLITE_ENABLE_SNAPSHOT (now enabled for the packaged
+  and precompiled libraries); the API is only defined when available.
+
 ## 2.9.6 / 2026-08-11
 
 ### Security / Stability

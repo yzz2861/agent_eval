@@ -680,6 +680,65 @@ module SQLite3
       true
     end
 
+    if defined?(SQLite3::Snapshot)
+      # Captures an explicit snapshot handle for the current read transaction's
+      # view of +schema+ (default "main"), and returns a SQLite3::Snapshot.
+      #
+      # The handle allows a long-running analysis to release its transaction (or
+      # even close the connection) and later return to exactly the same WAL read
+      # view via #open_snapshot, possibly on a different connection to the same
+      # database file.
+      #
+      # Snapshots are only supported when the database is in WAL journal mode
+      # and a read transaction is open on +schema+ (that is, a SELECT has been
+      # issued inside the current transaction). Databases in a rollback journal
+      # mode are rejected explicitly. The returned handle should be released
+      # with SQLite3::Snapshot#free when it is no longer needed.
+      #
+      # This method is only defined when the underlying SQLite library was
+      # compiled with SQLITE_ENABLE_SNAPSHOT.
+      def snapshot(schema = "main")
+        mode = journal_mode
+        unless mode == "wal"
+          raise SQLite3::Exception,
+            "cannot capture a snapshot: snapshots require WAL journal mode (current journal_mode is #{mode.inspect})"
+        end
+        unless transaction_active?
+          raise SQLite3::Exception,
+            "cannot capture a snapshot: a transaction must be open (call #transaction or execute BEGIN first)"
+        end
+        snapshot_get(schema)
+      end
+
+      # Moves the current transaction's read view to the historical state
+      # recorded by +snapshot+ (a SQLite3::Snapshot previously returned by
+      # #snapshot). A transaction must be open before calling this method.
+      #
+      # If the snapshot can no longer be honored — because a checkpoint or WAL
+      # recycling removed the frames it refers to, or because it belongs to a
+      # different database — a SQLite3::SQLException is raised. The read view
+      # never silently falls back to the latest database state.
+      def open_snapshot(snapshot, schema = "main")
+        unless snapshot.is_a?(SQLite3::Snapshot)
+          raise TypeError, "expected a SQLite3::Snapshot, got #{snapshot.class}"
+        end
+        if snapshot.closed?
+          raise SQLite3::Exception, "cannot open a snapshot that has been freed"
+        end
+        mode = journal_mode
+        unless mode == "wal"
+          raise SQLite3::Exception,
+            "cannot open a snapshot: snapshots require WAL journal mode (current journal_mode is #{mode.inspect})"
+        end
+        unless transaction_active?
+          raise SQLite3::Exception,
+            "cannot open a snapshot: a transaction must be open (call #transaction or execute BEGIN first)"
+        end
+        snapshot_open(snapshot, schema)
+        true
+      end
+    end
+
     # Returns +true+ if the database has been open in readonly mode
     # A helper to check before performing any operation
     def readonly?
