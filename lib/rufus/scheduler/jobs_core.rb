@@ -8,6 +8,29 @@ class Rufus::Scheduler::Job
   #
   class KillSignal < StandardError; end
 
+  #
+  # The pending slot of a job with overlap: :latest.
+  # Keeps the time of the latest trigger that got coalesced into the slot
+  # and the count of triggers that got merged (replaced) since.
+  #
+  class PendingTrigger
+
+    attr_reader :time
+    attr_reader :merged
+
+    def initialize(time)
+
+      @time = time
+      @merged = 0
+    end
+
+    def merge(time)
+
+      @time = time
+      @merged += 1
+    end
+  end
+
   attr_reader :id
   attr_reader :opts
   attr_reader :original
@@ -93,6 +116,11 @@ class Rufus::Scheduler::Job
     if m = @opts[:mutex]
       @opts[:mutex] = Array(m)
     end
+
+    @latest_overlap = (@opts[:overlap].to_s == 'latest')
+    @overlap_mutex = Mutex.new
+    @latest_running = false
+    @latest_pending = nil
   end
 
   alias job_id id
@@ -140,6 +168,17 @@ class Rufus::Scheduler::Job
   def unschedule
 
     @unscheduled_at = EoTime.now
+
+    @overlap_mutex.synchronize { @latest_pending = nil } if @latest_overlap
+  end
+
+  # For jobs with overlap: :latest, returns the PendingTrigger currently
+  # sitting in the pending slot (responds to #time and #merged),
+  # else returns nil.
+  #
+  def pending_trigger
+
+    @overlap_mutex.synchronize { @latest_pending }
   end
 
   def threads
@@ -263,6 +302,8 @@ class Rufus::Scheduler::Job
       callback(:on_pre_trigger, time)
     ) == false
 
+    return if @latest_overlap && ! claim_latest_trigger(time)
+
     @count += 1
 
     if opts[:blocking]
@@ -296,9 +337,60 @@ class Rufus::Scheduler::Job
 
     post_trigger(time)
 
+    release_latest_trigger if @latest_overlap
+
     ct[:rufus_scheduler_job] = nil
     ct[:rufus_scheduler_time] = nil
     ct[:rufus_scheduler_timeout] = nil
+  end
+
+  # For overlap: :latest jobs. Returns true if the trigger may start
+  # a run right away. Returns false if a run is already in flight, in
+  # which case the trigger gets coalesced into the pending slot
+  # (a newer trigger replaces an older one and increments its #merged
+  # count).
+  #
+  def claim_latest_trigger(time)
+
+    @overlap_mutex.synchronize do
+
+      if @latest_running
+        if @latest_pending
+          @latest_pending.merge(time)
+        else
+          @latest_pending = PendingTrigger.new(time)
+        end
+        false
+      else
+        @latest_running = true
+        true
+      end
+    end
+  end
+
+  # For overlap: :latest jobs. Called when a run of the job is over.
+  # If a trigger is waiting in the pending slot, it gets queued for
+  # execution (via the work queue, not called directly, so that the
+  # current thread stack does not grow).
+  #
+  def release_latest_trigger
+
+    pending = nil
+
+    @overlap_mutex.synchronize do
+
+      pending = @latest_pending
+      @latest_pending = nil
+
+      @latest_running = false unless pending && @scheduler.started_at
+    end
+
+    return unless pending
+    return unless @scheduler.started_at
+
+    @count += 1
+
+    trigger_queue(pending.time)
   end
 
   def post_trigger(time)
@@ -385,4 +477,3 @@ class Rufus::Scheduler::Job
     dp
   end
 end
-

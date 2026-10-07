@@ -433,6 +433,28 @@ To prevent overlap, one can set `overlap: false`. Such a job will not trigger if
 
 The `:overlap` option is considered before the `:mutex` option when the scheduler is reviewing jobs for triggering.
 
+### overlap: :latest
+
+`overlap: false` drops any trigger that happens while an instance of the job is running. For repeat jobs (`every`, `interval`, `cron`), `overlap: :latest` coalesces those triggers instead: at most one instance of the job runs at any time and at most one trigger is kept in a "pending" slot. A trigger that arrives while the pending slot is occupied replaces its content.
+
+```ruby
+scheduler.every('7m', overlap: :latest) do
+  # refresh the cache, takes 10 minutes...
+end
+```
+
+The pending slot keeps the time of the latest trigger that was coalesced into it and the count of triggers that got merged (replaced) since it was filled. It can be inspected via `Job#pending_trigger`, which returns nil or an object responding to `#time` and `#merged`.
+
+When the current run ends, the pending trigger is queued for execution via the work queue (it is not executed recursively from within the current thread's stack). If no trigger is pending, the job simply goes back to waiting for its next scheduled trigger.
+
+Behaviour details:
+
+* `job.unschedule` clears the pending slot; once unscheduled, the job does not start its pending run
+* `job.pause` prevents new triggers from being claimed/coalesced; a trigger already sitting in the pending slot still runs when the current run ends
+* `job.resume` lets triggers be claimed/coalesced again
+* `scheduler.shutdown` unschedules all the jobs, clearing their pending slots; pending runs are not started once the scheduler is down
+* `job.trigger_off_schedule` (manual trigger) goes through the same coalescing: it starts a run immediately if the job is idle, else it is merged into the pending slot
+
 ### mutex: mutex_instance / mutex_name / array of mutexes
 
 When a job with a mutex triggers, the job's block is executed with the mutex around it, preventing other jobs with the same mutex from entering (it makes the other jobs wait until it exits the mutex).
@@ -1795,4 +1817,3 @@ see [getting help](#getting-help) above.
 ## license
 
 MIT, see [LICENSE.txt](LICENSE.txt)
-

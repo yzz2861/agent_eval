@@ -2,6 +2,11 @@
 # CHANGELOG.md
 
 
+### rufus-scheduler 3.9.3 - not yet released
+
+* Add overlap: :latest, coalesce triggers into a single pending run
+
+
 ### rufus-scheduler 3.9.2 - released 2024-09-04
 
 * For fugit >= 1.11.1
@@ -424,4 +429,3 @@
 ## initial release
 
 (was [openwferu-scheduler](https://rubygems.org/gems/openwferu-scheduler/versions) before that)
-
