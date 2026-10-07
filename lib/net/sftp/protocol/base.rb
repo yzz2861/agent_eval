@@ -31,8 +31,15 @@ module Net; module SFTP; module Protocol
       when FXP_DATA   then parse_data_packet(packet)
       when FXP_NAME   then parse_name_packet(packet)
       when FXP_ATTRS  then parse_attrs_packet(packet)
+      when FXP_EXTENDED_REPLY then parse_extended_reply_packet(packet)
       else raise NotImplementedError, "unknown packet type: #{packet.type}"
       end
+    end
+
+    # Sends an extended request to the server. The response is returned as
+    # either an FXP_STATUS or protocol-specific FXP_EXTENDED_REPLY packet.
+    def extended(name, *args)
+      send_request(FXP_EXTENDED, :string, name, *args.flat_map { |arg| [:string, arg] })
     end
 
     private
@@ -44,6 +51,10 @@ module Net; module SFTP; module Protocol
         @request_id_counter += 1
         session.send_packet(type, :long, @request_id_counter, *args)
         return @request_id_counter
+      end
+
+      def parse_extended_reply_packet(packet)
+        { :data => packet.remainder_as_buffer.read.to_s }
       end
   end
 

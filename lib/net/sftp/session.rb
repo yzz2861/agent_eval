@@ -4,6 +4,7 @@ require 'net/sftp/errors'
 require 'net/sftp/protocol'
 require 'net/sftp/request'
 require 'net/sftp/operations/dir'
+require 'net/sftp/operations/upload_plan'
 require 'net/sftp/operations/upload'
 require 'net/sftp/operations/download'
 require 'net/sftp/operations/file_factory'
@@ -64,6 +65,10 @@ module Net; module SFTP
     # querying the protocol version in effect.
     attr_reader :protocol
 
+    # The name/value extension pairs advertised by the server during
+    # protocol version negotiation.
+    attr_reader :extensions
+
     # The hash of pending requests. Any requests that have been sent and which
     # the server has not yet responded to will be represented here.
     attr_reader :pending_requests
@@ -82,6 +87,7 @@ module Net; module SFTP
       self.logger = session.logger
       @state      = :closed
       @pending_requests = {}
+      @extensions = {}
 
       connect(&block)
     end
@@ -667,6 +673,38 @@ module Net; module SFTP
       end
 
       # :call-seq:
+      #   hardlink(new_link_path, existing_path) -> request
+      #   hardlink(new_link_path, existing_path) { |response| ... } -> request
+      #
+      # Creates a hard link. SFTP 6 uses FXP_LINK; older negotiated sessions
+      # use a server-advertised extended request, normally
+      # "hardlink@openssh.com".
+      def hardlink(new_link_path, existing_path, &callback)
+        if protocol.version >= 6
+          link(new_link_path, existing_path, false, &callback)
+        else
+          extended(hard_link_extension_name, existing_path, new_link_path, &callback)
+        end
+      end
+
+      # Returns true when hard links can be created using either SFTP 6 or a
+      # hard-link extension advertised during version negotiation.
+      def hardlink_supported?
+        protocol.version >= 6 || extensions.key?(hard_link_extension_name)
+      end
+
+      # Identical to #hardlink, but blocks until the server responds.
+      def hardlink!(new_link_path, existing_path, &callback)
+        wait_for(hardlink(new_link_path, existing_path, &callback))
+      end
+
+      # Sends an FXP_EXTENDED request. Most callers should use a named wrapper
+      # such as #hardlink instead.
+      def extended(name, *args, &callback)
+        request :extended, name, *args, &callback
+      end
+
+      # :call-seq:
       #   block(handle, offset, length, mask) -> request
       #   block(handle, offset, length, mask) { |response| ... } -> request
       #
@@ -825,6 +863,10 @@ module Net; module SFTP
       # The input buffer used to accumulate packet data
       def input; @input; end
 
+      def hard_link_extension_name
+        extensions.keys.grep(/\Ahardlink(?:@[^@]+)?\z/i).first || "hardlink@openssh.com"
+      end
+
       # Create and enqueue a new SFTP request of the given type, with the
       # given arguments. Returns a new Request instance that encapsulates the
       # request.
@@ -927,11 +969,11 @@ module Net; module SFTP
         negotiated_version = [server_version, HIGHEST_PROTOCOL_VERSION_SUPPORTED].min
         info { "negotiated version is #{negotiated_version}" }
 
-        extensions = {}
+        @extensions = {}
         until packet.eof?
           name = packet.read_string
           data = packet.read_string
-          extensions[name] = data
+          @extensions[name] = data
         end
 
         @protocol = Protocol.load(self, negotiated_version)

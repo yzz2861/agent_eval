@@ -608,6 +608,29 @@ class SessionTest < Net::SFTP::TestCase
     assert_command_with_callback(:link, "/path/to/link", "/path/to/source", true)
   end
 
+  def test_v6_hardlink_should_send_link_packet_as_hard_link
+    expect_sftp_session :server_version => 6 do |channel|
+      channel.sends_packet(FXP_LINK, :long, 0, :string, "/path/to/link", :string, "/path/to/source", :bool, false)
+      channel.gets_packet(FXP_STATUS, :long, 0, :long, 0)
+    end
+
+    assert_command_with_callback(:hardlink, "/path/to/link", "/path/to/source")
+  end
+
+  def test_hardlink_supported_uses_negotiated_extensions
+    session = Net::SFTP::Session.allocate
+    session.instance_variable_set(:@extensions, { "hardlink@openssh.com" => "1" })
+    session.stubs(:protocol).returns(stub(:version => 3))
+    assert session.hardlink_supported?
+  end
+
+  def test_hardlink_unsupported_without_version_six_or_extension
+    session = Net::SFTP::Session.allocate
+    session.instance_variable_set(:@extensions, {})
+    session.stubs(:protocol).returns(stub(:version => 3))
+    assert !session.hardlink_supported?
+  end
+
   def test_link_bang_should_block_and_return_response
     expect_sftp_session :server_version => 6 do |channel|
       channel.sends_packet(FXP_LINK, :long, 0, :string, "/path/to/link", :string, "/path/to/source", :bool, true)

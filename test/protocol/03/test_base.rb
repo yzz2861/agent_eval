@@ -19,6 +19,12 @@ class Protocol::V03::TestBase < Protocol::V02::TestBase
     assert_equal 0, @base.symlink("/path/to/link", "/path/to/file")
   end
 
+  def test_extended_should_send_extended_packet
+    @session.expects(:send_packet).with(FXP_EXTENDED, :long, 0,
+      :string, "hardlink@openssh.com", :string, "/path/to/file", :string, "/path/to/link")
+    assert_equal 0, @base.extended("hardlink@openssh.com", "/path/to/file", "/path/to/link")
+  end
+
   private
 
     def driver

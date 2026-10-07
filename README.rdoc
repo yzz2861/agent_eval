@@ -59,6 +59,35 @@ In a nutshell:
 
 For the full documentation, start with Net::SFTP::Session. Also see Net::SFTP::Operations::Upload, Net::SFTP::Operations::Download, Net::SFTP::Operations::FileFactory, Net::SFTP::Operations::File, and Net::SFTP::Operations::Dir.
 
+== RECURSIVE UPLOADS AND LINKS
+
+Recursive uploads use lstat while scanning, so symbolic links are uploaded as
+links rather than copies of their targets. Relative and cyclic link targets
+are preserved verbatim. Regular files with the same local device and inode
+form a hard-link group; the first path is uploaded and every remaining alias
+is linked to it after that upload completes. Hard links require SFTP 6 or a
+negotiated hard-link extension. To copy aliases independently instead of
+failing, pass <tt>:on_unsupported_hard_links => :copy</tt>.
+
+Before requests are sent, the upload builds a dependency plan and checks
+remote path types. Directories are created first, permissions are applied
+last, and links are not created when their source entity fails. The plan is
+available on the returned uploader:
+
+  uploader = sftp.upload("local-tree", "/remote/tree", :mkdir => true)
+  puts uploader.plan
+  uploader.wait
+
+A concise plan looks like:
+
+  mkdir    /remote/tree
+  mkdir    /remote/tree/bin
+  upload   local-tree/bin/ruby -> /remote/tree/bin/ruby
+  hardlink /remote/tree/ruby => /remote/tree/bin/ruby
+  symlink  /remote/tree/relative -> ../bin/ruby
+  setstat  /remote/tree/bin mode 0755
+  setstat  /remote/tree mode 0755
+
 == REQUIREMENTS:
 
 * Net::SSH 2

@@ -36,4 +36,17 @@ module Net; module SFTP
     end
 
   end
+
+  # Raised before an upload begins when a remote path already exists with a
+  # type that does not match the corresponding local entry.
+  class RemoteTypeConflict < Net::SFTP::Exception
+    attr_reader :path, :local_type, :remote_type
+
+    def initialize(path, local_type, remote_type)
+      @path = path
+      @local_type = local_type
+      @remote_type = remote_type
+      super("remote #{remote_type} at #{path.inspect} conflicts with local #{local_type}")
+    end
+  end
 end; end

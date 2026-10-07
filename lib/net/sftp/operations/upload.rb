@@ -1,4 +1,5 @@
 require 'net/ssh/loggable'
+require 'net/sftp/operations/upload_plan'
 
 module Net; module SFTP; module Operations
 
@@ -53,6 +54,23 @@ module Net; module SFTP; module Operations
   #   defaults to 32,000 bytes.
   # * <tt>:name</tt> - the filename to report to the progress monitor when
   #   an IO object is given as +local+. This defaults to "<memory>".
+  # * <tt>:hard_links</tt> - set to <tt>:preserve</tt> (the default) to group
+  #   local regular files by lstat device/inode and create hard links on the
+  #   server. Set to <tt>:copy</tt> to upload each alias independently.
+  # * <tt>:on_unsupported_hard_links</tt> - set to <tt>:raise</tt> (the
+  #   default) to fail before execution when SFTP 6 or a negotiated hard-link
+  #   extension is unavailable. Set to <tt>:copy</tt> to explicitly degrade to
+  #   independent file uploads.
+  # * <tt>:preserve_permissions</tt> - defaults to true. Directories are
+  #   created with temporary owner-write permissions and their final
+  #   permissions are applied after their contents and links are in place.
+  #
+  # Recursive uploads always lstat local entries. Symbolic links are uploaded
+  # as symbolic links with the exact readlink target, including relative or
+  # cyclic targets, and are never traversed. Before requests are sent the
+  # recursive uploader builds an inspectable dependency plan available from
+  # #plan; the plan is also passed as <tt>options[:plan]</tt> when supplied by
+  # the caller.
   #
   # == Progress Monitoring
   #
@@ -129,6 +147,9 @@ module Net; module SFTP; module Operations
     # The SFTP session object used by this upload instance
     attr_reader :sftp
 
+    # The inspectable operation plan for recursive uploads.
+    attr_reader :plan
+
     # The properties hash for this object
     attr_reader :properties
 
@@ -152,26 +173,26 @@ module Net; module SFTP; module Operations
       self.logger = sftp.logger
 
       @uploads = []
-      @recursive = local.respond_to?(:read) ? false : ::File.directory?(local)
+      @recursive = if local.respond_to?(:read)
+        false
+      elsif ::File.symlink?(local)
+        true
+      else
+        ::File.directory?(local)
+      end
 
       if recursive?
-        @stack = [entries_for(local)]
-        @local_cwd = local
-        @remote_cwd = remote
-
-        @active += 1
-        if @options[:mkdir]
-          sftp.mkdir(remote) do |response|
-            @active -= 1
-            raise StatusException.new(response, "mkdir `#{remote}'") unless response.ok?
-            (options[:requests] || RECURSIVE_READERS).to_i.times do
-              break unless process_next_entry
-            end
-          end
-        else
-          @active -= 1
-          process_next_entry
-        end
+        @plan = options[:plan] || Plan.build(local, remote,
+          :create_root => options[:mkdir],
+          :preserve_permissions => options.fetch(:preserve_permissions, true),
+          :hard_links => options.fetch(:hard_links, :preserve))
+        @plan.operations.each { |operation| operation.status = :pending }
+        prepare_link_plan!
+        @failure = nil
+        @active_operations = 0
+        @preflight = @plan.operations.reject { |operation| operation.action == :remove }
+        @preflight = @preflight.map(&:remote).compact.uniq
+        start_preflight!
       else
         raise ArgumentError, "expected a file to upload" unless local.respond_to?(:read) || ::File.exist?(local)
         @stack = [[local]]
@@ -188,7 +209,8 @@ module Net; module SFTP; module Operations
     # Returns true if the uploader is currently running. When this is false,
     # the uploader has finished processing.
     def active?
-      @active > 0 || @stack.any?
+      @active > 0 || @stack.any? || (@preflight && @preflight.any?) ||
+        (@plan && @plan.operations.any? { |operation| %i(pending active).include?(operation.status) })
     end
 
     # Forces the transfer to stop.
@@ -196,11 +218,18 @@ module Net; module SFTP; module Operations
       @active = 0
       @stack.clear
       @uploads.clear
+      @preflight.clear if @preflight
+      if @plan
+        @plan.operations.each do |operation|
+          operation.status = :canceled if %i(pending active).include?(operation.status)
+        end
+      end
     end
 
     # Blocks until the upload has completed.
     def wait
       sftp.loop { active? }
+      raise @failure if @failure
       self
     end
 
@@ -237,6 +266,326 @@ module Net; module SFTP; module Operations
 
       # The number of readers to use when uploading a directory.
       RECURSIVE_READERS   = 16
+
+      def prepare_link_plan!
+        if @plan.operations.any? { |operation| operation.action == :symlink } && sftp.protocol.version < 3
+          raise NotImplementedError, "symbolic links require SFTP protocol version 3 or later"
+        end
+
+        hard_link_requested = @plan.operations.any? { |operation| operation.action == :hardlink }
+        return unless hard_link_requested
+        return if sftp.hardlink_supported?
+
+        case options.fetch(:on_unsupported_hard_links, :raise)
+        when :copy
+          @plan = @plan.without_hard_links
+        when :raise, :error
+          raise NotImplementedError, "hard links require SFTP protocol version 6 or a hard-link extension"
+        else
+          raise ArgumentError, "unsupported hard link fallback: #{options[:on_unsupported_hard_links].inspect}"
+        end
+      end
+
+      def start_preflight!
+        @existing_directories = []
+        @preflight.each do |path|
+          @active += 1
+          request = sftp.lstat(path, &method(:on_preflight))
+          request[:remote] = path
+        end
+      end
+
+      def on_preflight(response)
+        @active -= 1
+        path = response.request[:remote]
+        @preflight.delete(path)
+
+        if response.ok?
+          verify_remote_type!(path, response[:attrs])
+        elsif check_operation?(path) && [Response::FX_NO_SUCH_FILE, Response::FX_NO_SUCH_PATH].include?(response.code)
+          fail_plan!(Net::SFTP::Exception.new("remote directory does not exist: #{path}"))
+        elsif ![Response::FX_NO_SUCH_FILE, Response::FX_NO_SUCH_PATH].include?(response.code)
+          fail_plan!(StatusException.new(response, "lstat #{path}"))
+        end
+
+        finish_preflight! if @preflight.empty?
+      end
+
+      def finish_preflight!
+        return if @failure
+        @plan.operations.each do |operation|
+          operation.status = :succeeded if operation.action == :check
+          operation.status = :succeeded if operation.action == :mkdir && @existing_directories.include?(operation.remote)
+        end
+        pump_planned_operations!
+      end
+
+      def verify_remote_type!(path, attrs)
+        primary_actions = %i(check mkdir upload symlink hardlink)
+        operation = @plan.operations.find do |candidate|
+          candidate.remote == path && primary_actions.include?(candidate.action)
+        end || @plan.operations.find { |candidate| candidate.remote == path }
+        expected = expected_remote_type(operation)
+        actual = remote_type(attrs)
+
+        if actual && expected && actual != expected
+          raise RemoteTypeConflict.new(path, expected, actual)
+        end
+
+        if actual == :directory
+          @existing_directories << path
+        elsif (actual == :symlink && operation.action == :symlink) ||
+              (actual == :regular && operation.action == :hardlink)
+          remove = @plan.operations.find do |candidate|
+            candidate.action == :remove && candidate.remote == path && candidate.condition
+          end
+          remove.status = :pending if remove
+        end
+      rescue RemoteTypeConflict => conflict
+        fail_plan!(conflict)
+      end
+
+      def expected_remote_type(operation)
+        case operation.action
+        when :mkdir, :check then :directory
+        when :symlink then :symlink
+        when :hardlink then :regular
+        when :upload then local_remote_type(::File.lstat(operation.local))
+        when :setstat then local_remote_type(::File.lstat(operation.local))
+        end
+      end
+
+      def check_operation?(path)
+        @plan.operations.any? { |operation| operation.action == :check && operation.remote == path }
+      end
+
+      def local_remote_type(stat)
+        return :regular if stat.file?
+        stat.ftype.to_sym
+      end
+
+      def remote_type(attrs)
+        if attrs.permissions
+          attrs.symbolic_type
+        elsif attrs.respond_to?(:attributes) && attrs.attributes.key?(:type)
+          type_from_attributes(attrs)
+        end
+      end
+
+      def type_from_attributes(attrs)
+        case attrs.attributes[:type]
+        when attrs.class::T_DIRECTORY then :directory
+        when attrs.class::T_SYMLINK then :symlink
+        when attrs.class::T_REGULAR then :regular
+        when attrs.class::T_SOCKET then :socket
+        when attrs.class::T_BLOCK_DEVICE then :block_device
+        when attrs.class::T_CHAR_DEVICE then :char_device
+        when attrs.class::T_FIFO then :fifo
+        when attrs.class::T_SPECIAL then :special
+        else :unknown
+        end
+      end
+
+      def pump_planned_operations!
+        return if @failure
+
+        while @active_operations < recursive_requests
+          operation = next_ready_operation
+          break unless operation
+          start_planned_operation(operation)
+        end
+
+        if @plan.operations.none? { |operation| %i(pending active).include?(operation.status) }
+          raise @failure if @failure
+          update_progress(:finish)
+        end
+      end
+
+      def next_ready_operation
+        @plan.operations.find do |operation|
+          operation.status == :pending && operation.depends_on.all? do |dependency|
+            dependency = @plan.operations.find { |candidate| candidate.id == dependency }
+            !dependency || %i(succeeded skipped).include?(dependency.status)
+          end
+        end
+      end
+
+      def start_planned_operation(operation)
+        case operation.action
+        when :check
+          operation.status = :succeeded
+          pump_planned_operations!
+        when :mkdir
+          operation.status = :active
+          @active_operations += 1
+          @active += 1
+          update_progress(:mkdir, operation.remote)
+          request = sftp.mkdir(operation.remote, :permissions => 0o700, &method(:on_planned_mkdir))
+          request[:operation] = operation
+        when :upload
+          open_planned_file(operation)
+        when :symlink
+          run_simple_operation(operation) { create_symlink(operation.remote, operation.target) }
+        when :hardlink
+          run_simple_operation(operation) { sftp.hardlink(operation.remote, operation.target, &method(:on_simple_operation)) }
+        when :remove
+          run_simple_operation(operation) { sftp.remove(operation.remote, &method(:on_simple_operation)) }
+        when :setstat
+          run_simple_operation(operation) do
+            sftp.setstat(operation.remote, :permissions => operation.mode, &method(:on_simple_operation))
+          end
+        end
+      end
+
+      def create_symlink(remote, target)
+        if sftp.protocol.version >= 6
+          sftp.link(remote, target, true, &method(:on_simple_operation))
+        else
+          sftp.symlink(target, remote, &method(:on_simple_operation))
+        end
+      end
+
+      def run_simple_operation(operation)
+        operation.status = :active
+        @active_operations += 1
+        @active += 1
+        request = yield
+        request[:operation] = operation
+        request
+      end
+
+      def recursive_requests
+        (options[:requests] || RECURSIVE_READERS).to_i
+      end
+
+      def open_planned_file(operation)
+        file = ::File.open(operation.local, "rb")
+        metafile = LiveFile.new(operation.local, operation.remote, file, file.stat.size)
+        update_progress(:open, metafile)
+        request = run_simple_operation(operation) do
+          request = sftp.open(operation.remote, "w", &method(:on_planned_open))
+          request
+        end
+        request[:file] = metafile
+      rescue => error
+        file&.close unless file.respond_to?(:closed?) && file.closed?
+        fail_operation!(operation, error)
+        pump_planned_operations!
+      end
+
+      def complete_operation!(operation, error=nil)
+        @active_operations -= 1
+        if error
+          fail_operation!(operation, error)
+        else
+          operation.status = :succeeded
+        end
+        pump_planned_operations!
+      end
+
+      def fail_operation!(operation, error)
+        operation.status = :failed
+        @failure ||= error
+        dependent_ids(operation.id).each do |dependent_id|
+          dependent = @plan.operations.find { |candidate| candidate.id == dependent_id }
+          dependent.status = :canceled
+        end
+      end
+
+      def fail_plan!(error)
+        @failure ||= error
+        @plan.operations.each do |operation|
+          operation.status = :failed if operation.status == :pending
+        end
+      end
+
+      def dependent_ids(failed_id)
+        result = []
+        frontier = [failed_id]
+        until frontier.empty?
+          current = frontier.shift
+          @plan.operations.each do |operation|
+            next if result.include?(operation.id) || frontier.include?(operation.id)
+            if operation.depends_on.include?(current)
+              result << operation.id
+              frontier << operation.id
+            end
+          end
+        end
+        result
+      end
+
+      def on_planned_mkdir(response)
+        @active -= 1
+        operation = response.request[:operation]
+        error = response.ok? ? nil : StatusException.new(response, "mkdir #{operation.remote}")
+        complete_operation!(operation, error)
+      end
+
+      def on_simple_operation(response)
+        @active -= 1
+        operation = response.request[:operation]
+        error = response.ok? ? nil : StatusException.new(response, "#{operation.action} #{operation.remote}")
+        complete_operation!(operation, error)
+      end
+
+      def on_planned_open(response)
+        @active -= 1
+        file = response.request[:file]
+        operation = response.request[:operation]
+        if response.ok?
+          file.handle = response[:handle]
+          @uploads << file
+          write_planned_chunk(file, operation)
+        else
+          file.io.close unless file.io.nil?
+          complete_operation!(operation, StatusException.new(response, "open #{file.remote}"))
+        end
+      end
+
+      def on_planned_write(response)
+        @active -= 1
+        file = response.request[:file]
+        operation = response.request[:operation]
+        if response.ok?
+          write_planned_chunk(file, operation)
+        else
+          complete_operation!(operation, StatusException.new(response, "write #{file.remote}"))
+        end
+      end
+
+      def on_planned_close(response)
+        @active -= 1
+        file = response.request[:file]
+        operation = response.request[:operation]
+        error = response.ok? ? nil : StatusException.new(response, "close #{file.remote}")
+        complete_operation!(operation, error)
+      end
+
+      def write_planned_chunk(file, operation)
+        if file.io.nil?
+          pump_planned_operations!
+          return
+        end
+
+        @active += 1
+        offset = file.io.pos
+        data = file.io.read(options[:read_size] || DEFAULT_READ_SIZE)
+        if data.nil?
+          update_progress(:close, file)
+          request = sftp.close(file.handle, &method(:on_planned_close))
+          request[:file] = file
+          request[:operation] = operation
+          file.io.close
+          file.io = nil
+          @uploads.delete(file)
+        else
+          update_progress(:put, file, offset, data)
+          request = sftp.write(file.handle, offset, data, &method(:on_planned_write))
+          request[:file] = file
+          request[:operation] = operation
+        end
+      end
 
       # Examines the stack and determines what action to take. This is the
       # starting point of the state machine.
