@@ -19,6 +19,8 @@ require 'socket'
 
 require_relative 'ber'
 require_relative 'ldap/pdu'
+require_relative 'ldap/error'
+require_relative 'ldap/vlv'
 require_relative 'ldap/filter'
 require_relative 'ldap/dataset'
 require_relative 'ldap/password'
@@ -26,7 +28,6 @@ require_relative 'ldap/entry'
 require_relative 'ldap/instrumentation'
 require_relative 'ldap/connection'
 require_relative 'ldap/version'
-require_relative 'ldap/error'
 require_relative 'ldap/auth_adapter'
 require_relative 'ldap/auth_adapter/simple'
 require_relative 'ldap/auth_adapter/sasl'
@@ -375,6 +376,8 @@ class Net::LDAP
   ResultCodeBusy                         = 51
   ResultCodeUnavailable                  = 52
   ResultCodeUnwillingToPerform           = 53
+  ResultCodeSortControlMissing           = 60
+  ResultCodeOffsetRangeError             = 61
   ResultCodeNamingViolation              = 64
   ResultCodeObjectClassViolation         = 65
   ResultCodeNotAllowedOnNonLeaf          = 66
@@ -432,6 +435,8 @@ class Net::LDAP
     ResultCodeBusy                         => "Busy",
     ResultCodeUnavailable                  => "Unavailable",
     ResultCodeUnwillingToPerform           => "Unwilling to perform",
+    ResultCodeSortControlMissing           => "Sort control missing",
+    ResultCodeOffsetRangeError             => "Offset range error",
     ResultCodeNamingViolation              => "Naming Violation",
     ResultCodeObjectClassViolation         => "Object Class Violation",
     ResultCodeNotAllowedOnNonLeaf          => "Not Allowed On Non-Leaf",
@@ -446,6 +451,8 @@ class Net::LDAP
     PAGED_RESULTS = "1.2.840.113556.1.4.319" # Microsoft evil from RFC 2696
     SORT_REQUEST  = "1.2.840.113556.1.4.473"
     SORT_RESPONSE = "1.2.840.113556.1.4.474"
+    VLV_REQUEST   = "2.16.840.1.113730.3.4.9"
+    VLV_RESPONSE  = "2.16.840.1.113730.3.4.10"
     DELETE_TREE   = "1.2.840.113556.1.4.805"
   end
 
@@ -801,6 +808,95 @@ class Net::LDAP
       end
     end
   end
+
+  # Searches a Virtual List View window. VLV must be combined with a
+  # server-side sort definition. Give :offset for a 1-based position, or
+  # :sort_value to locate an entry by its sorted value. :before_count and
+  # :after_count select entries on either side of the located entry.
+  #
+  # The returned Net::LDAP::VirtualListView::Result includes the window and
+  # target_position, estimated_content_count, and an opaque context. The
+  # estimate describes only that server response and must not be cached as an
+  # exact total. A context can only be reused with the same server, base,
+  # filter, and sort definition.
+  #
+  # Raises Net::LDAP::ServerSortError, Net::LDAP::VirtualListViewError, or
+  # Net::LDAP::SearchError for the corresponding server-side failure. An
+  # empty window is still a successful result.
+  def search_vlv(args = {})
+    args = args.dup
+    args[:base] ||= @base
+    args[:filter] ||= Net::LDAP::Filter.eq("objectClass", "*")
+
+    sort = args.fetch(:sort_controls, args[:sort_control])
+    raise ArgumentError, "VLV requires server-side sort controls" unless sort
+    if args[:controls] || args[:control_codes]
+      raise ArgumentError, "custom controls cannot be combined with VLV"
+    end
+
+    sort_definitions = VirtualListView.normalize_sort_definitions(sort)
+    filter = VirtualListView.canonical_filter(args[:filter])
+    server = @hosts || [[@host, @port]]
+
+    has_sort_value = args.key?(:sort_value) || args.key?(:value)
+    unless args.key?(:offset) ^ has_sort_value
+      raise ArgumentError, "specify either :offset or :sort_value"
+    end
+
+    before_count = (args[:before_count] || args[:before] || 0).to_i
+    after_count = (args[:after_count] || args[:after] || 0).to_i
+    raise ArgumentError, "before_count cannot be negative" if before_count.negative?
+    raise ArgumentError, "after_count cannot be negative" if after_count.negative?
+
+    context = args[:vlv_context] || args.delete(:context)
+    if context
+      context.validate!(
+        server: server,
+        base: args[:base],
+        filter: filter,
+        sort_definitions: sort_definitions
+      )
+    else
+      context = VirtualListView::Context.new(
+        server: server,
+        base: args[:base],
+        filter: filter,
+        sort_definitions: sort_definitions
+      )
+    end
+
+    args[:sort_controls] = sort_definitions
+    args[:filter] = filter
+    args[:vlv_context] = context
+    args[:before_count] = before_count
+    args[:after_count] = after_count
+    args[:sort_value] = args.fetch(:sort_value, args[:value]) if has_sort_value
+    args[:paged_searches_supported] = false
+
+    instrument "search_vlv.net_ldap", args do
+      begin
+        result = use_connection(args) do |conn|
+          conn.search(args) do |entry|
+            yield entry if block_given?
+          end
+        end
+
+        unless result.is_a?(VirtualListView::Result)
+          @result = result
+          raise Net::LDAP::SearchError.new(
+            Net::LDAP.result2string(result.result_code), result
+          )
+        end
+
+        @result = result.result
+        result
+      rescue Net::LDAP::OperationError
+        @result = $!.result
+        raise
+      end
+    end
+  end
+  alias_method :search_virtual_list_view, :search_vlv
 
   # #bind connects to an LDAP server and requests authentication based on
   # the <tt>:auth</tt> parameter passed to #open or #new. It takes no

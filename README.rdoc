@@ -29,6 +29,31 @@ See {Net::LDAP on rubydoc.info}[https://www.rubydoc.info/github/ruby-ldap/ruby-n
 
 Net::LDAP requires a Ruby 2.0.0 compatible interpreter or better.
 
+== Virtual List View
+
+Use +#search_vlv+ to jump into a server-sorted result set without reading
+preceding pages. It requires the LDAP server-side sort control:
+
+  result = ldap.search_vlv(
+    base: "ou=People,dc=example,dc=org",
+    filter: "(objectClass=person)",
+    sort_control: "sn",
+    offset: 500,
+    before_count: 5,
+    after_count: 10
+  )
+
+Use +:sort_value+ instead of +:offset+ to locate by a value in the sort key.
+The returned object is the window entries and exposes +actual_position+,
++estimated_size+, and an opaque +context_id+ on +context+. Reuse that context only for
+follow-up searches with the same server, base, filter, and sort definition;
+start a new search after changing any of them. +estimated_size+ is the
+server's estimate for that response, not a permanently exact total.
+
+Sort failures, VLV control failures, and ordinary search failures raise
++Net::LDAP::ServerSortError+, +Net::LDAP::VirtualListViewError+, and
++Net::LDAP::SearchError+, respectively. An empty window is still success.
+
 == Install
 
 Net::LDAP is a pure Ruby library. It does not require any external libraries.

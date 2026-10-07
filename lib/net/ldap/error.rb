@@ -46,4 +46,22 @@ class Net::LDAP
   class FilterTypeUnknownError < Error; end
   class FilterSyntaxInvalidError < Error; end
   class EntryOverflowError < Error; end
+
+  class OperationError < Error
+    attr_reader :result
+
+    def initialize(message = nil, result = nil)
+      @result = result
+      super(message)
+    end
+  end
+
+  class SearchError < OperationError; end
+
+  class ControlError < OperationError; end
+  class ServerSortError < ControlError; end
+  class VirtualListViewError < ControlError
+    attr_accessor :code
+  end
+  class InvalidVirtualListViewContextError < Error; end
 end

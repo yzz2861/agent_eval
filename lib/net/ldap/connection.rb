@@ -292,19 +292,19 @@ class Net::LDAP::Connection #:nodoc:
   # or
   # :sort_control => ["givenname","sn"] #multiple strings or arrays
   #
-  def encode_sort_controls(sort_definitions)
+  def encode_sort_controls(sort_definitions, critical = false)
     return sort_definitions unless sort_definitions
 
     sort_control_values = sort_definitions.map do |control|
       control = Array(control) # if there is only an attribute name as a string then infer the orderinrule and reverseorder
-      control[0] = String(control[0]).to_ber,
-      control[1] = String(control[1]).to_ber,
-      control[2] = (control[2] == true).to_ber
-      control.to_ber_sequence
+      value = [String(control[0]).to_ber]
+      value << String(control[1]).to_ber unless control[1].nil? || String(control[1]).empty?
+      value << (control[2] == true).to_ber if control[2] == true
+      value.to_ber_sequence
     end
     [
       Net::LDAP::LDAPControls::SORT_REQUEST.to_ber,
-      false.to_ber,
+      critical.to_ber,
       sort_control_values.to_ber_sequence.to_s.to_ber,
     ].to_ber_sequence
   end
@@ -349,6 +349,15 @@ class Net::LDAP::Connection #:nodoc:
     time   = args[:time].to_i
     paged  = args[:paged_searches_supported]
     sort   = args.fetch(:sort_controls, false)
+    vlv_context = args[:vlv_context] || args[:context]
+    if vlv_context
+      raise ArgumentError, "VLV requires server-side sort controls" unless sort
+      if args[:controls] || args[:control_codes]
+        raise ArgumentError, "custom controls cannot be combined with VLV"
+      end
+
+      paged = false
+    end
 
     # arg validation
     raise ArgumentError, "search base is required" unless base
@@ -359,7 +368,7 @@ class Net::LDAP::Connection #:nodoc:
     # arg transforms
     filter = Net::LDAP::Filter.construct(filter) if filter.is_a?(String)
     ber_attrs = attrs.map { |attr| attr.to_s.to_ber }
-    ber_sort  = encode_sort_controls(sort)
+    ber_sort  = encode_sort_controls(sort, vlv_context ? true : false)
 
     # An interesting value for the size limit would be close to A/D's
     # built-in page limit of 1000 records, but openLDAP newer than version
@@ -384,6 +393,7 @@ class Net::LDAP::Connection #:nodoc:
     rfc2696_cookie = [126, ""]
     result_pdu = nil
     n_results = 0
+    vlv_entries = []
 
     message_id = next_msgid
 
@@ -408,6 +418,7 @@ class Net::LDAP::Connection #:nodoc:
                           size
                         end
         end
+        query_limit = 0 if vlv_context
 
         request = [
           base.to_ber,
@@ -432,8 +443,13 @@ class Net::LDAP::Connection #:nodoc:
             # Criticality MUST be false to interoperate with normal LDAPs.
             false.to_ber,
             rfc2696_cookie.map(&:to_ber).to_ber_sequence.to_s.to_ber,
-          ].to_ber_sequence if paged
+          ].to_ber_sequence if paged && !vlv_context
         controls << ber_sort if ber_sort
+        if vlv_context
+          controls << Net::LDAP::VirtualListView.encode_request_control(
+            **vlv_request_args(args, vlv_context)
+          )
+        end
         if controls.empty? && user_controls.empty?
           controls = nil
         else
@@ -450,6 +466,7 @@ class Net::LDAP::Connection #:nodoc:
           case pdu.app_tag
           when Net::LDAP::PDU::SearchReturnedData
             n_results += 1
+            vlv_entries << pdu.search_entry if vlv_context
             yield pdu.search_entry if block_given?
           when Net::LDAP::PDU::SearchResultReferral
             if refs
@@ -516,7 +533,11 @@ class Net::LDAP::Connection #:nodoc:
       # track total result count
       payload[:result_count] = n_results
 
-      result_pdu || OpenStruct.new(:status => :failure, :result_code => Net::LDAP::ResultCodeOperationsError, :message => "Invalid search")
+      if vlv_context
+        Net::LDAP::VirtualListView.interpret(result_pdu, vlv_context, vlv_entries)
+      else
+        result_pdu || OpenStruct.new(:status => :failure, :result_code => Net::LDAP::ResultCodeOperationsError, :message => "Invalid search")
+      end
     end # instrument
   ensure
 
@@ -530,6 +551,23 @@ class Net::LDAP::Connection #:nodoc:
                  message_id: message_id, messages: messages
     end
   end
+
+  def vlv_request_args(args, context)
+    request_args = {
+      before_count: (args[:before_count] || args[:before] || 0).to_i,
+      after_count: (args[:after_count] || args[:after] || 0).to_i,
+      context: context,
+    }
+
+    if args.key?(:offset)
+      request_args[:offset] = args[:offset].to_i
+    else
+      request_args[:sort_value] = args.fetch(:sort_value, args[:value])
+    end
+
+    request_args
+  end
+  private :vlv_request_args
 
   MODIFY_OPERATIONS = { #:nodoc:
     :add => 0,
