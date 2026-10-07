@@ -74,6 +74,7 @@ module Net
           @channel_id_counter = -1
           @channels = Hash.new(NilChannel.new(self))
           @listeners = { transport.socket => nil }
+          @pending_output_listeners = []
           @pending_requests = []
           @channel_open_handlers = {}
           @on_global_request = {}
@@ -126,6 +127,7 @@ module Net
           rescue Net::SSH::Disconnect
             raise unless channels.empty?
           end
+          @forward.shutdown! if @forward
           transport.close
         end
 
@@ -134,6 +136,7 @@ module Net
         # when the connection needs to close but you don't know the status of the
         # underlying protocol's state).
         def shutdown!
+          @forward.shutdown! if @forward
           transport.shutdown!
         end
 
@@ -247,6 +250,7 @@ module Net
         # event multiplexing
         def ev_preprocess(&block)
           dispatch_incoming_packets(raise_disconnect_errors: false)
+          flush_pending_output_listeners
           each_channel { |id, channel| channel.process unless channel.local_closed? }
         end
 
@@ -486,6 +490,13 @@ module Net
         # event loop will no longer monitor it.
         def stop_listening_to(io)
           listeners.delete(io)
+          @pending_output_listeners.delete(io)
+        end
+
+        # Registers a forwarded IO whose buffered output can be flushed
+        # immediately after incoming packets are dispatched.
+        def register_pending_output_listener(io)
+          @pending_output_listeners << io unless @pending_output_listeners.include?(io)
         end
 
         # Returns a reference to the Net::SSH::Service::Forward service, which can
@@ -557,6 +568,12 @@ module Net
         # the counter.
         def get_next_channel_id
           @channel_id_counter += 1
+        end
+
+        def flush_pending_output_listeners
+          @pending_output_listeners.each do |listener|
+            listener.send_pending if listener.respond_to?(:pending_write?) && listener.pending_write?
+          end
         end
 
         def force_channel_cleanup_on_close

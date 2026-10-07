@@ -1,5 +1,6 @@
 require 'net/ssh/buffer'
 require 'net/ssh/loggable'
+require 'socket'
 
 module Net
   module SSH
@@ -119,6 +120,17 @@ module Net
         end
       end
 
+      def write_shutdown?
+        @write_shutdown == true
+      end
+
+      def shutdown_write
+        return if write_shutdown?
+
+        shutdown(Socket::SHUT_WR)
+        @write_shutdown = true
+      end
+
       public # these methods are primarily for use in tests
 
       def write_buffer # :nodoc:
@@ -150,6 +162,7 @@ module Net
         @input_errors = []
         @output = Net::SSH::Buffer.new
         @output_errors = []
+        @write_shutdown = false
       end
     end
 

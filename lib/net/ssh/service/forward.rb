@@ -1,3 +1,5 @@
+require 'socket'
+
 require 'net/ssh/loggable'
 
 module Net
@@ -29,8 +31,10 @@ module Net
           @local_forwarded_ports = {}
           @agent_forwarded = false
           @local_forwarded_sockets = {}
+          @remote_forwarded_sockets = {}
 
           session.on_open_channel('forwarded-tcpip', &method(:forwarded_tcpip))
+          session.on_open_channel('forwarded-streamlocal@openssh.com', &method(:forwarded_streamlocal))
           session.on_open_channel('auth-agent', &method(:auth_agent_channel))
           session.on_open_channel('auth-agent@openssh.com', &method(:auth_agent_channel))
         end
@@ -169,6 +173,56 @@ module Net
         # is an array of Unix domain socket file paths.
         def active_local_sockets
           @local_forwarded_sockets.keys
+        end
+
+        # Requests that connections to the given Unix domain socket on the
+        # server be forwarded to the given Unix domain socket on the local
+        # host. The mapping is recorded only after the server confirms that it
+        # is listening, so a rejected request never appears as active.
+        #
+        # Cancelling a forwarding does not close channels already accepted by
+        # the server. Those channels continue until either side closes them.
+        #
+        #   ssh.forward.remote_socket('/tmp/remote.sock', '/tmp/local.sock')
+        def remote_socket(remote_socket_path, local_socket_path)
+          session.send_global_request("streamlocal-forward@openssh.com", :string, nil, :string, remote_socket_path) do |success, _response|
+            if success
+              debug { "remote socket forward from #{remote_socket_path} to #{local_socket_path} established" }
+              @remote_forwarded_sockets[remote_socket_path] = local_socket_path
+            else
+              error { "remote socket forwarding request failed" }
+              raise Net::SSH::Exception, "remote socket forwarding request failed"
+            end
+          end
+
+          remote_socket_path
+        end
+
+        # Requests that a remote forwarded Unix domain socket be cancelled.
+        # Connections already accepted for this socket are not closed.
+        #
+        #   ssh.forward.cancel_remote_socket('/tmp/remote.sock')
+        def cancel_remote_socket(remote_socket_path)
+          session.send_global_request("cancel-streamlocal-forward@openssh.com", :string, nil, :string, remote_socket_path) do |success, _response|
+            if success
+              @remote_forwarded_sockets.delete(remote_socket_path)
+            else
+              raise Net::SSH::Exception, "could not cancel remote socket forward request on " + remote_socket_path
+            end
+          end
+        end
+
+        # Returns all active Unix domain sockets forwarded from the server to
+        # the local host.
+        def active_remote_sockets
+          @remote_forwarded_sockets.keys
+        end
+
+        # Removes the client-side record of remote forwarding state. The SSH
+        # transport itself is closed separately by the connection session.
+        def shutdown!
+          @remote_forwarded_ports.clear
+          @remote_forwarded_sockets.clear
         end
 
         # Requests that all connections on the given remote-port be forwarded via
@@ -318,7 +372,9 @@ module Net
           client.logger = logger
 
           session.listen_to(client)
+          session.register_pending_output_listener(client)
           channel[:socket] = client
+          channel[:remote_eof] = false
 
           channel.on_data do |ch, data|
             debug { "data:#{data.length} on #{type} forwarded channel" }
@@ -327,29 +383,20 @@ module Net
 
           channel.on_eof do |ch|
             debug { "eof #{type} on #{type} forwarded channel" }
-            begin
-              ch[:socket].send_pending
-              ch[:socket].shutdown Socket::SHUT_WR
-            rescue IOError => e
-              if e.message =~ /closed/ then
-                debug { "epipe in on_eof => shallowing exception:#{e}" }
-              else
-                raise
-              end
-            rescue Errno::EPIPE => e
-              debug { "epipe in on_eof => shallowing exception:#{e}" }
-            rescue Errno::ENOTCONN => e
-              debug { "enotconn in on_eof => shallowing exception:#{e}" }
-            end
+            ch[:remote_eof] = true
           end
 
           channel.on_close do |ch|
             debug { "closing #{type} forwarded channel" }
-            ch[:socket].close if !client.closed?
+            ch[:socket].close unless client.closed?
             session.stop_listening_to(ch[:socket])
           end
 
           channel.on_process do |ch|
+            if ch[:remote_eof] && !ch[:socket].pending_write?
+              shutdown_socket_write_now(ch[:socket])
+            end
+
             if ch[:socket].closed?
               ch.info { "#{type} forwarded connection closed" }
               ch.close
@@ -359,6 +406,16 @@ module Net
               ch.send_data(data)
             end
           end
+        end
+
+        def shutdown_socket_write_now(socket)
+          socket.shutdown_write unless socket.closed?
+        rescue IOError => e
+          raise unless e.message =~ /closed/
+
+          debug { "socket already closed while shutting down write side: #{e}" }
+        rescue Errno::EPIPE, Errno::ENOTCONN => e
+          debug { "socket disconnected while shutting down write side: #{e}" }
         end
 
         # not a real socket, so use a simpler behaviour
@@ -388,19 +445,38 @@ module Net
           originator_address = packet.read_string
           originator_port    = packet.read_long
 
-          puts "REMOTE 0: #{connected_port} #{connected_address} #{originator_address} #{originator_port}"
           remote = @remote_forwarded_ports[[connected_port, connected_address]]
           if remote.nil?
             raise Net::SSH::ChannelOpenFailed.new(1, "unknown request from remote forwarded connection on #{connected_address}:#{connected_port}")
           end
 
-          puts "REMOTE: #{remote.host} #{remote.port}"
           client = TCPSocket.new(remote.host, remote.port)
           info { "connected #{connected_address}:#{connected_port} originator #{originator_address}:#{originator_port}" }
 
           prepare_client(client, channel, :remote)
         rescue SocketError => err
           raise Net::SSH::ChannelOpenFailed.new(2, "could not connect to remote host (#{remote.host}:#{remote.port}): #{err.message}")
+        end
+
+        # The callback used when a new "forwarded-streamlocal@openssh.com"
+        # channel is requested by the server. This opens the local Unix domain
+        # socket that was registered when the forwarding was established.
+        def forwarded_streamlocal(_session, channel, packet)
+          socket_path = packet.read_string
+          _reserved = packet.read_string
+          _reserved_port = packet.read_long
+
+          local_socket_path = @remote_forwarded_sockets[socket_path]
+          if local_socket_path.nil?
+            raise Net::SSH::ChannelOpenFailed.new(1, "unknown request from remote forwarded socket " + socket_path)
+          end
+
+          client = UNIXSocket.open(local_socket_path)
+          info { "connected remote socket #{socket_path} to local socket #{local_socket_path}" }
+
+          prepare_client(client, channel, :remote)
+        rescue SystemCallError => err
+          raise Net::SSH::ChannelOpenFailed.new(2, "could not connect to local socket (#{local_socket_path}): #{err.message}")
         end
 
         # The callback used when an auth-agent channel is requested by the server.
