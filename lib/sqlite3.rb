@@ -7,6 +7,7 @@ rescue LoadError
 end
 
 require "sqlite3/database"
+require "sqlite3/snapshot"
 require "sqlite3/version"
 
 module SQLite3

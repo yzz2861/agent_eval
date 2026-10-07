@@ -115,6 +115,9 @@ module SQLite3
       ROW = 100
       # sqlite_step() has finished executing
       DONE = 101
+
+      # Snapshot has been invalidated by a checkpoint or WAL recycling
+      ERROR_SNAPSHOT = 769
     end
 
     #

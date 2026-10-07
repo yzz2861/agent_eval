@@ -222,6 +222,13 @@ module SQLite3
       end
     end
 
+    # Captures a SQLite WAL snapshot inside an existing read transaction. The snapshot handle
+    # remains valid independently of this connection and must be released with
+    # SQLite3::Snapshot#release.
+    def snapshot(schema = "main")
+      SQLite3::Snapshot.capture(self, schema)
+    end
+
     # Returns the filename for the database named +db_name+.  +db_name+ defaults
     # to "main".  Main return `nil` or an empty string if the database is
     # temporary or in-memory.

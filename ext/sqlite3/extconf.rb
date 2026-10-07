@@ -63,7 +63,8 @@ module Sqlite3
               "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1",
               "-DSQLITE_USE_URI=1",
               "-DSQLITE_ENABLE_DBPAGE_VTAB=1",
-              "-DSQLITE_ENABLE_DBSTAT_VTAB=1"
+              "-DSQLITE_ENABLE_DBSTAT_VTAB=1",
+              "-DSQLITE_ENABLE_SNAPSHOT=1"
             ]
             env["CFLAGS"] = [user_cflags, env["CFLAGS"], more_cflags].flatten.join(" ")
             recipe.configure_options += env.slice(*ENV_ALLOWLIST)
@@ -131,6 +132,20 @@ module Sqlite3
         have_func("sqlite3_column_database_name")
         have_func("sqlite3_enable_load_extension")
         have_func("sqlite3_load_extension")
+        snapshot_functions = [
+          "sqlite3_snapshot_get",
+          "sqlite3_snapshot_open",
+          "sqlite3_snapshot_free"
+        ]
+        snapshots_supported = snapshot_functions.all? do |function|
+          have_func(function, "sqlite3.h")
+        end
+
+        unless snapshots_supported
+          snapshot_functions.each do |function|
+            $defs.delete("-DHAVE_#{function.upcase}")
+          end
+        end
 
         unless have_func("sqlite3_open_v2") # https://www.sqlite.org/releaselog/3_5_0.html
           abort("\nPlease use a version of SQLite3 >= 3.5.0\n\n")

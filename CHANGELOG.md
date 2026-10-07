@@ -1,5 +1,14 @@
 # sqlite3-ruby Changelog
 
+## Next / unreleased
+
+### Added
+
+- Add `SQLite3::Snapshot` and `Database#snapshot` for explicit WAL snapshot capture, reopening,
+  and release.
+- Invalid snapshots raise instead of silently reading the latest data, and snapshots can only be
+  reopened on their original persistent database file.
+
 ## 2.9.6 / 2026-08-11
 
 ### Security / Stability
