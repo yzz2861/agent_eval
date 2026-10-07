@@ -43,5 +43,12 @@ class Logger
       end
       Time.mktime(t.year, t.month, t.mday, 23, 59, 59)
     end
+
+    # Returns the end of the period that +now+ belongs to, as opposed
+    # to previous_period_end, which returns the end of the period
+    # before +now+.
+    def current_period_end(now, shift_age)
+      previous_period_end(next_rotate_time(now, shift_age), shift_age)
+    end
   end
 end

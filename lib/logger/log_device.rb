@@ -13,15 +13,17 @@ class Logger
 
     def initialize(
       log = nil, shift_age: nil, shift_size: nil, shift_period_suffix: nil,
-      binmode: false, reraise_write_errors: [], skip_header: false
+      shift_keep: nil, binmode: false, reraise_write_errors: [], skip_header: false,
+      clock: nil
     )
-      @dev = @filename = @shift_age = @shift_size = @shift_period_suffix = nil
+      @dev = @filename = @shift_age = @shift_size = @shift_period_suffix = @shift_keep = nil
+      @clock = clock || -> { Time.now }
       @binmode = binmode
       @reraise_write_errors = reraise_write_errors
       @skip_header = skip_header
       mon_initialize
       set_dev(log)
-      set_file(shift_age, shift_size, shift_period_suffix) if @filename
+      set_file(shift_age, shift_size, shift_period_suffix, shift_keep) if @filename
     end
 
     def write(message)
@@ -45,7 +47,7 @@ class Logger
       end
     end
 
-    def reopen(log = nil, shift_age: nil, shift_size: nil, shift_period_suffix: nil, binmode: nil)
+    def reopen(log = nil, shift_age: nil, shift_size: nil, shift_period_suffix: nil, shift_keep: nil, binmode: nil)
       # reopen the same filename if no argument, do nothing for IO
       log ||= @filename if @filename
       @binmode = binmode unless binmode.nil?
@@ -56,7 +58,7 @@ class Logger
             @filename = nil
           end
           set_dev(log)
-          set_file(shift_age, shift_size, shift_period_suffix) if @filename
+          set_file(shift_age, shift_size, shift_period_suffix, shift_keep) if @filename
         end
       end
       self
@@ -89,15 +91,31 @@ class Logger
       end
     end
 
-    def set_file(shift_age, shift_size, shift_period_suffix)
+    def set_file(shift_age, shift_size, shift_period_suffix, shift_keep)
       @shift_age = shift_age || @shift_age || 7
-      @shift_size = shift_size || @shift_size || 1048576
       @shift_period_suffix = shift_period_suffix || @shift_period_suffix || '%Y%m%d'
+      unless shift_keep.nil?
+        if shift_keep.is_a?(Integer) and shift_keep >= 0
+          @shift_keep = shift_keep
+        else
+          raise ArgumentError, "invalid :shift_keep #{shift_keep.inspect}, should be a non-negative Integer"
+        end
+      end
 
-      unless @shift_age.is_a?(Integer)
-        base_time = @dev.respond_to?(:stat) ? @dev.stat.mtime : Time.now
+      if @shift_age.is_a?(Integer)
+        @shift_size = shift_size || @shift_size || 1048576
+      else
+        # Periodic rotation.  An explicitly given +shift_size+ enables
+        # combined rotation: the log also shifts when the active file
+        # grows beyond +shift_size+ within the current period.
+        @shift_size = shift_size || @shift_size
+        base_time = @dev.respond_to?(:stat) ? @dev.stat.mtime : current_time
         @next_rotate_time = next_rotate_time(base_time, @shift_age)
       end
+    end
+
+    def current_time
+      @clock.call
     end
 
     if MODE_TO_OPEN == MODE
@@ -155,7 +173,7 @@ class Logger
 
     def add_log_header(file)
       file.write(
-        "# Logfile created on %s by %s\n" % [Time.now.to_s, Logger::ProgName]
+        "# Logfile created on %s by %s\n" % [current_time.to_s, Logger::ProgName]
       ) if file.size == 0
     end
 
@@ -166,10 +184,16 @@ class Logger
           lock_shift_log { shift_log_age }
         end
       else
-        now = Time.now
+        now = current_time
         if now >= @next_rotate_time
           @next_rotate_time = next_rotate_time(now, @shift_age)
           lock_shift_log { shift_log_period(previous_period_end(now, @shift_age)) }
+        elsif @shift_size && (@dev.stat.size > @shift_size)
+          # Combined rotation: the active file outgrew +shift_size+ before
+          # the period ended.  Archive it as the next segment of the
+          # current period; +current_period_end+ names the period that
+          # +now+ belongs to, so segments never claim a future period.
+          lock_shift_log { shift_log_period(current_period_end(now, @shift_age)) }
         end
       end
     end
@@ -227,6 +251,37 @@ class Logger
         end
       end
       shift_log_file(age_file)
+      prune_shifted_logs
+    end
+
+    # Keeps at most @shift_keep archived files, regardless of whether they
+    # were created by periodic or by size-based shifting.  Oldest archives
+    # (by mtime, with the path as a deterministic tie-break) are removed.
+    def prune_shifted_logs
+      return unless @shift_keep
+      filename = @filename.to_s
+      dir = File.dirname(filename)
+      prefix = File.basename(filename) + '.'
+      archives = Dir.children(dir).map {|name|
+        next unless name.start_with?(prefix)
+        path = File.join(dir, name)
+        path unless File.directory?(path)
+      }.compact
+      return if archives.size <= @shift_keep
+      archives.sort_by! {|path|
+        begin
+          [File.mtime(path), path]
+        rescue SystemCallError
+          [Time.at(0), path]
+        end
+      }
+      archives.shift(archives.size - @shift_keep).each do |path|
+        begin
+          File.unlink(path)
+        rescue SystemCallError
+          # already removed, possibly by another process pruning as well
+        end
+      end
     end
 
     def shift_log_file(shifted)

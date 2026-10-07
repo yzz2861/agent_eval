@@ -367,6 +367,49 @@ require_relative 'logger/errors'
 # see details and suggestions at
 # {Time#strftime}[https://docs.ruby-lang.org/en/master/Time.html#method-i-strftime].
 #
+# === Combined Periodic and Size-Based Rotation
+#
+# For both periodic and size-based rotation at the same time,
+# call Logger.new with:
+#
+# - Argument +logdev+ as a file path.
+# - Argument +shift_age+ as a string period indicator.
+# - Argument +shift_size+ as a positive integer.
+#
+# Example:
+#
+#   logger = Logger.new('t.log', 'daily', 1048576)
+#
+# The log file is rotated at each period boundary (as with periodic
+# rotation), and also whenever the active file grows beyond
+# +shift_size+ bytes within the current period.  The size check runs
+# before each entry is written, and rotation happens only when the
+# file size strictly exceeds +shift_size+; a file whose size is exactly
+# +shift_size+ is not yet rotated.
+#
+# All rotated files share one naming scheme, whichever condition
+# triggered the rotation: the first segment of a period is named with
+# the period suffix (e.g. +t.log.20261007+), and each further segment
+# of the same period gets the next free numeric index
+# (+t.log.20261007.1+, +t.log.20261007.2+, ...).  The index is chosen
+# by checking which files actually exist on disk while holding an
+# inter-process file lock, so concurrent Logger instances -- in this
+# process or others -- never overwrite each other's segments, even if
+# the system clock jumps backwards.
+#
+# Use keyword argument +shift_keep+ to bound the total number of
+# archived files kept; after each rotation the oldest archives
+# (by modification time) are deleted until at most +shift_keep+
+# remain, regardless of whether they were created by periodic or
+# size-based rotation:
+#
+#   logger = Logger.new('t.log', 'daily', 1048576, shift_keep: 30)
+#
+# Keyword argument +clock+ may be a callable returning the current
+# time; it defaults to <tt>-> { Time.now }</tt> and exists mainly to
+# make rotation behavior testable without waiting for real time to
+# pass.
+#
 class Logger
   _, name, rev = %w$Id$
   if name
@@ -531,7 +574,7 @@ class Logger
   def fatal!; self.level = FATAL; end
 
   # :call-seq:
-  #    Logger.new(logdev, shift_age = 0, shift_size = 1048576, **options)
+ #    Logger.new(logdev, shift_age = 0, shift_size = 1048576, **options)
   #
   # With the single argument +logdev+,
   # returns a new logger with all default options:
@@ -555,9 +598,12 @@ class Logger
   # - A string period indicator.
   #   See {Periodic Rotation}[rdoc-ref:Logger@Periodic+Rotation].
   #
-  # Argument +shift_size+ is the maximum size (in bytes) of each log file.
-  # See {Size-Based Rotation}[rdoc-ref:Logger@Size-Based+Rotation].
-  #
+# Argument +shift_size+ is the maximum size (in bytes) of each log file.
+# See {Size-Based Rotation}[rdoc-ref:Logger@Size-Based+Rotation].
+# When +shift_age+ is a period indicator, an explicitly given
+# +shift_size+ enables combined rotation.
+# See {Combined Periodic and Size-Based Rotation}[rdoc-ref:Logger@Combined+Periodic+and+Size-Based+Rotation].
+#
   # Examples:
   #
   #   Logger.new('t.log')
@@ -585,21 +631,28 @@ class Logger
   # - +binmode+: sets whether the logger writes in binary mode;
   #   default is +false+.
   #
-  # - +shift_period_suffix+: sets the format for the filename suffix
-  #   for periodic log file rotation; default is <tt>'%Y%m%d'</tt>.
-  #   See {Periodic Rotation}[rdoc-ref:Logger@Periodic+Rotation].
-  #
-  # - +reraise_write_errors+: An array of exception classes, which will
+# - +shift_period_suffix+: sets the format for the filename suffix
+#   for periodic log file rotation; default is <tt>'%Y%m%d'</tt>.
+#   See {Periodic Rotation}[rdoc-ref:Logger@Periodic+Rotation].
+#
+# - +shift_keep+: sets the maximum number of archived log files kept
+#   by periodic or combined rotation; default is +nil+ (keep all).
+#   See {Combined Periodic and Size-Based Rotation}[rdoc-ref:Logger@Combined+Periodic+and+Size-Based+Rotation].
+#
+# - +clock+: a callable returning the current time, used to decide
+#   when periodic rotation is due; default is <tt>-> { Time.now }</tt>.
+#
+# - +reraise_write_errors+: An array of exception classes, which will
   #   be reraised if there is an error when writing to the log device.
   #   The default is to swallow all exceptions raised.
   # - +skip_header+: If +true+, prevents the logger from writing a header
   #   when creating a new log file. The default is +false+, meaning
   #   the header will be written as usual.
   #
-  def initialize(logdev, shift_age = 0, shift_size = 1048576, level: DEBUG,
+  def initialize(logdev, shift_age = 0, shift_size = nil, level: DEBUG,
                  progname: nil, formatter: nil, datetime_format: nil,
-                 binmode: false, shift_period_suffix: '%Y%m%d',
-                 reraise_write_errors: [], skip_header: false)
+                 binmode: false, shift_period_suffix: '%Y%m%d', shift_keep: nil,
+                 reraise_write_errors: [], skip_header: false, clock: nil)
     self.level = level
     self.progname = progname
     @default_formatter = Formatter.new
@@ -617,9 +670,11 @@ class Logger
       @logdev = LogDevice.new(logdev, shift_age: shift_age,
         shift_size: shift_size,
         shift_period_suffix: shift_period_suffix,
+        shift_keep: shift_keep,
         binmode: binmode,
         reraise_write_errors: reraise_write_errors,
-        skip_header: skip_header)
+        skip_header: skip_header,
+        clock: clock)
     end
   end
 
@@ -652,9 +707,9 @@ class Logger
   #   #  "E, [2022-05-12T14:21:27.596726 #22428] ERROR -- : one\n",
   #   #  "E, [2022-05-12T14:23:05.847241 #22428] ERROR -- : three\n"]
   #
-  def reopen(logdev = nil, shift_age = nil, shift_size = nil, shift_period_suffix: nil, binmode: nil)
+  def reopen(logdev = nil, shift_age = nil, shift_size = nil, shift_period_suffix: nil, shift_keep: nil, binmode: nil)
     @logdev&.reopen(logdev, shift_age: shift_age, shift_size: shift_size,
-                    shift_period_suffix: shift_period_suffix, binmode: binmode)
+                    shift_period_suffix: shift_period_suffix, shift_keep: shift_keep, binmode: binmode)
     self
   end
 

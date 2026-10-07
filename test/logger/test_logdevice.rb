@@ -959,6 +959,317 @@ class TestLogDevice < Test::Unit::TestCase
     end
   end if env_tz_works
 
+  # A mutable, injectable time source for rotation tests, so that
+  # period boundaries can be crossed without waiting for real time.
+  class FakeClock
+    attr_accessor :now
+
+    def initialize(now)
+      @now = now
+    end
+
+    def call
+      @now
+    end
+  end
+
+  def prepare_log_file(log, mtime)
+    File.open(log, 'w') {}
+    File.utime(mtime, mtime, log)
+  end
+
+  # Dir.glob with an absolute pattern does not work in every test
+  # environment, so list archive files (log.<suffix>...) directly.
+  def log_archives(log)
+    dir = File.dirname(log)
+    prefix = File.basename(log) + '.'
+    Dir.children(dir).select {|name|
+      name.start_with?(prefix)
+    }.map {|name|
+      File.join(dir, name)
+    }.reject {|path|
+      File.directory?(path)
+    }.sort
+  end
+
+  # The active log file plus all of its archives.
+  def log_files(log)
+    dir = File.dirname(log)
+    base = File.basename(log)
+    Dir.children(dir).select {|name|
+      name == base || name.start_with?(base + '.')
+    }.map {|name|
+      File.join(dir, name)
+    }
+  end
+
+  def test_combined_rotation_size_within_period
+    Dir.mktmpdir do |dir|
+      log = File.join(dir, 'app.log')
+      clock = FakeClock.new(Time.mktime(2014, 1, 2, 10, 0, 0))
+      prepare_log_file(log, clock.now)
+      dev = Logger::LogDevice.new(log, shift_age: 'daily', shift_size: 30,
+                                  skip_header: true, clock: clock)
+      begin
+        dev.write('1' * 21)
+        dev.write('1' * 21) # 42 bytes, exceeds 30; rotated before next write
+        assert_file.not_exist?("#{log}.20140102")
+        dev.write('2' * 21)
+        assert_file.exist?("#{log}.20140102")
+        assert_equal('1' * 42, File.read("#{log}.20140102"))
+        assert_file.not_exist?("#{log}.20140102.1")
+        dev.write('2' * 21) # 42 bytes again
+        dev.write('3' * 21)
+        assert_file.exist?("#{log}.20140102.1")
+        assert_equal('2' * 42, File.read("#{log}.20140102.1"))
+        assert_equal('3' * 21, File.read(log))
+      ensure
+        dev.close
+      end
+    end
+  end
+
+  def test_combined_rotation_period_does_not_overwrite_segments
+    Dir.mktmpdir do |dir|
+      log = File.join(dir, 'app.log')
+      clock = FakeClock.new(Time.mktime(2014, 1, 2, 10, 0, 0))
+      prepare_log_file(log, clock.now)
+      dev = Logger::LogDevice.new(log, shift_age: 'daily', shift_size: 30,
+                                  skip_header: true, clock: clock)
+      begin
+        dev.write('1' * 21)
+        dev.write('1' * 21)
+        dev.write('2' * 21) # rotates: log.20140102
+        dev.write('2' * 21)
+        dev.write('3' * 21) # rotates: log.20140102.1
+        assert_equal('1' * 42, File.read("#{log}.20140102"))
+        assert_equal('2' * 42, File.read("#{log}.20140102.1"))
+        # Cross into the next day; the last segment of 2014-01-02 must
+        # land on the next free index instead of clobbering .20140102.
+        clock.now = Time.mktime(2014, 1, 3, 9, 0, 0)
+        dev.write('4' * 21)
+        assert_file.exist?("#{log}.20140102.2")
+        assert_equal('3' * 21, File.read("#{log}.20140102.2"))
+        assert_equal('1' * 42, File.read("#{log}.20140102"))
+        assert_equal('2' * 42, File.read("#{log}.20140102.1"))
+        # Size rotation in the new period uses the new day's suffix.
+        dev.write('4' * 21)
+        dev.write('5' * 21)
+        assert_file.exist?("#{log}.20140103")
+        assert_equal('4' * 42, File.read("#{log}.20140103"))
+        assert_equal('5' * 21, File.read(log))
+      ensure
+        dev.close
+      end
+    end
+  end
+
+  def test_combined_rotation_exact_size_boundary
+    Dir.mktmpdir do |dir|
+      log = File.join(dir, 'app.log')
+      clock = FakeClock.new(Time.mktime(2014, 1, 2, 10, 0, 0))
+      prepare_log_file(log, clock.now)
+      dev = Logger::LogDevice.new(log, shift_age: 'daily', shift_size: 42,
+                                  skip_header: true, clock: clock)
+      begin
+        dev.write('1' * 21)
+        dev.write('1' * 21) # exactly 42 bytes == shift_size
+        dev.write('2' * 21) # no rotation yet: 42 is not > 42
+        assert_file.not_exist?("#{log}.20140102")
+        assert_equal('1' * 42 + '2' * 21, File.read(log))
+        dev.write('3' * 21) # now 63 > 42, so this write rotates first
+        assert_file.exist?("#{log}.20140102")
+        assert_equal('1' * 42 + '2' * 21, File.read("#{log}.20140102"))
+        assert_equal('3' * 21, File.read(log))
+      ensure
+        dev.close
+      end
+    end
+  end
+
+  def test_combined_rotation_clock_rollback
+    Dir.mktmpdir do |dir|
+      log = File.join(dir, 'app.log')
+      clock = FakeClock.new(Time.mktime(2014, 1, 2, 10, 0, 0))
+      prepare_log_file(log, clock.now)
+      dev = Logger::LogDevice.new(log, shift_age: 'daily', shift_size: 30,
+                                  skip_header: true, clock: clock)
+      begin
+        dev.write('1' * 21)
+        dev.write('1' * 21)
+        dev.write('2' * 21) # size rotation -> log.20140102
+        clock.now = Time.mktime(2014, 1, 3, 9, 0, 0)
+        dev.write('3' * 21) # period rotation -> log.20140102.1
+        assert_equal('1' * 42, File.read("#{log}.20140102"))
+        assert_equal('2' * 21, File.read("#{log}.20140102.1"))
+        # The clock jumps backwards: no period rotation may happen,
+        # and later segments must not overwrite the existing ones.
+        clock.now = Time.mktime(2014, 1, 2, 15, 0, 0)
+        dev.write('4' * 21)
+        assert_file.not_exist?("#{log}.20140102.2")
+        dev.write('4' * 21) # size rotation with the rolled-back date
+        assert_file.exist?("#{log}.20140102.2")
+        assert_equal('3' * 21 + '4' * 21, File.read("#{log}.20140102.2"))
+        dev.write('5' * 21)
+        assert_equal('1' * 42, File.read("#{log}.20140102"))
+        assert_equal('2' * 21, File.read("#{log}.20140102.1"))
+        assert_equal('4' * 21 + '5' * 21, File.read(log))
+      ensure
+        dev.close
+      end
+    end
+  end
+
+  def test_combined_rotation_shift_keep_prunes_all_archives
+    Dir.mktmpdir do |dir|
+      log = File.join(dir, 'app.log')
+      clock = FakeClock.new(Time.mktime(2014, 1, 2, 10, 0, 0))
+      prepare_log_file(log, clock.now)
+      dev = Logger::LogDevice.new(log, shift_age: 'daily', shift_size: 30,
+                                  shift_keep: 3, skip_header: true, clock: clock)
+      begin
+        # Three size-based segments with increasing mtimes.
+        dev.write('1' * 21)
+        dev.write('1' * 21)
+        File.utime(Time.mktime(2014, 1, 2, 10, 0, 0), Time.mktime(2014, 1, 2, 10, 0, 0), log)
+        dev.write('x') # rotates -> log.20140102
+        dev.write('2' * 21)
+        dev.write('2' * 21)
+        File.utime(Time.mktime(2014, 1, 2, 11, 0, 0), Time.mktime(2014, 1, 2, 11, 0, 0), log)
+        dev.write('x') # rotates -> log.20140102.1
+        dev.write('3' * 21)
+        dev.write('3' * 21)
+        File.utime(Time.mktime(2014, 1, 2, 12, 0, 0), Time.mktime(2014, 1, 2, 12, 0, 0), log)
+        dev.write('x') # rotates -> log.20140102.2
+        assert_file.exist?("#{log}.20140102")
+        assert_file.exist?("#{log}.20140102.1")
+        assert_file.exist?("#{log}.20140102.2")
+        # A period-based archive competes for the same retention budget:
+        # crossing midnight rotates into the next free index and prunes
+        # the oldest remaining archive, whichever rotation made it.
+        clock.now = Time.mktime(2014, 1, 3, 9, 0, 0)
+        File.utime(clock.now, clock.now, log)
+        dev.write('4' * 21) # period rotation -> log.20140102.3, prunes .20140102
+        assert_file.exist?("#{log}.20140102.3")
+        assert_file.not_exist?("#{log}.20140102")
+        assert_equal(["#{log}.20140102.1", "#{log}.20140102.2", "#{log}.20140102.3"], log_archives(log))
+      ensure
+        dev.close
+      end
+    end
+  end
+
+  def test_combined_rotation_multi_instance
+    Dir.mktmpdir do |dir|
+      log = File.join(dir, 'app.log')
+      clock = FakeClock.new(Time.mktime(2014, 1, 2, 10, 0, 0))
+      prepare_log_file(log, clock.now)
+      opt = {shift_age: 'daily', shift_size: 30, skip_header: true, clock: clock}
+      dev1 = Logger::LogDevice.new(log, **opt)
+      dev2 = Logger::LogDevice.new(log, **opt)
+      begin
+        dev1.write('1' * 21)
+        dev1.write('1' * 21) # 42 bytes, over the limit
+        dev2.write('2' * 21) # dev2 rotates first -> log.20140102
+        dev1.write('1' * 21) # dev1 notices the shift and reopens
+        dev2.write('2' * 21) # dev2 rotates again -> log.20140102.1
+        assert_equal('1' * 42, File.read("#{log}.20140102"))
+        assert_equal('2' * 21 + '1' * 21, File.read("#{log}.20140102.1"))
+        assert_equal('2' * 21, File.read(log))
+        # Nothing was lost, duplicated, or overwritten.
+        total = log_files(log).map {|path| File.read(path) }.join
+        assert_equal(5, total.scan('1').size / 21 + total.scan('2').size / 21)
+        assert_equal(3, log_files(log).size)
+      ensure
+        dev1.close
+        dev2.close
+      end
+    end
+  end
+
+  def test_combined_rotation_dst_change
+    Dir.mktmpdir do |dir|
+      log = File.join(dir, 'app.log')
+      prev_tz = ENV['TZ']
+      ENV['TZ'] = 'Europe/London'
+      begin
+        # 2014-03-30 is the 23-hour day (clocks spring forward).
+        clock = FakeClock.new(Time.mktime(2014, 3, 30, 0, 1, 1))
+        prepare_log_file(log, clock.now)
+        dev = Logger::LogDevice.new(log, shift_age: 'daily', shift_size: 30,
+                                    skip_header: true, clock: clock)
+        begin
+          dev.write('1' * 21)
+          dev.write('1' * 21)
+          dev.write('2' * 21) # size rotation -> log.20140330
+          assert_file.exist?("#{log}.20140330")
+          clock.now = Time.mktime(2014, 3, 31, 0, 1, 1)
+          dev.write('3' * 21) # period rotation -> log.20140330.1
+          assert_file.exist?("#{log}.20140330.1")
+          assert_equal('1' * 42, File.read("#{log}.20140330"))
+          assert_equal('2' * 21, File.read("#{log}.20140330.1"))
+          assert_equal('3' * 21, File.read(log))
+        ensure
+          dev.close
+        end
+      ensure
+        ENV['TZ'] = prev_tz
+      end
+    end
+  end if env_tz_works
+
+  def test_periodic_rotation_without_shift_size_ignores_size
+    Dir.mktmpdir do |dir|
+      log = File.join(dir, 'app.log')
+      clock = FakeClock.new(Time.mktime(2014, 1, 2, 10, 0, 0))
+      prepare_log_file(log, clock.now)
+      dev = Logger::LogDevice.new(log, shift_age: 'daily',
+                                  skip_header: true, clock: clock)
+      begin
+        dev.write('1' * 10_000) # far beyond any default shift_size
+        assert_file.not_exist?("#{log}.20140102")
+        clock.now = Time.mktime(2014, 1, 3, 9, 0, 0)
+        dev.write('2' * 21)
+        assert_file.exist?("#{log}.20140102")
+      ensure
+        dev.close
+      end
+    end
+  end
+
+  def test_shift_keep_validation
+    assert_raise(ArgumentError) do
+      Logger::LogDevice.new(@filename, shift_age: 'daily', shift_keep: -1)
+    end
+    assert_raise(ArgumentError) do
+      Logger::LogDevice.new(@filename, shift_age: 'daily', shift_keep: '2')
+    end
+  end
+
+  def test_combined_rotation_via_logger
+    Dir.mktmpdir do |dir|
+      log = File.join(dir, 'app.log')
+      clock = FakeClock.new(Time.mktime(2014, 1, 2, 10, 0, 0))
+      prepare_log_file(log, clock.now)
+      logger = Logger.new(log, 'daily', 100, shift_keep: 2,
+                          skip_header: true, clock: clock)
+      begin
+        4.times { logger.info('x' * 100) } # each entry exceeds shift_size
+        archives = log_archives(log)
+        assert_equal(2, archives.size) # rotated, and pruned down to shift_keep
+        assert(archives.all? {|path| File.basename(path).start_with?('app.log.20140102') })
+        clock.now = Time.mktime(2014, 1, 3, 9, 0, 0)
+        File.utime(clock.now, clock.now, log)
+        4.times { logger.info('y' * 100) }
+        archives = log_archives(log)
+        assert_equal(2, archives.size)
+        assert(archives.all? {|path| File.basename(path).start_with?('app.log.2014') })
+      ensure
+        logger.close
+      end
+    end
+  end
+
   private
 
   def run_children(n, args, src)
