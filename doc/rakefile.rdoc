@@ -124,6 +124,32 @@ both prerequisites and actions can be added later.  For example ...
     cp Dir["standard_data/*.data"], "testdata"
   end
 
+== Multi-Output File Tasks
+
+Some tools produce several files in a single run.  A code generator,
+for example, might write both a Ruby source file and its interface
+documentation together.  Wrapping each output in its own +file+ task
+would run the generator once per output.
+
+The +multifile+ method declares a group of files that are all created
+by a single action.  All products of the group share the same
+prerequisites and the same action:
+
+  multifile ["model.rb", "model.rdoc"] => ["model.src"] do |t|
+    sh "generate #{t.prerequisites.first}"
+  end
+
+The whole group is rebuilt whenever any product is missing, or when a
+shared prerequisite is newer than any of the products.  Any product may
+be used as a prerequisite of other tasks; no matter which product is
+asked for (even concurrently from a +multitask+), the action runs only
+once.  After the action has run, every declared product must exist,
+otherwise an error is raised and the group is not considered complete.
+
+A file that is a product of a multi-output task may not also be
+declared as a plain +file+ or +task+ target (and vice versa); such
+conflicts are reported as errors.
+
 == Tasks with Parallel Prerequisites
 
 Rake allows parallel execution of prerequisites using the following syntax:

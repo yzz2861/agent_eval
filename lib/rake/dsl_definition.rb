@@ -77,6 +77,27 @@ module Rake
       Rake::FileTask.define_task(*args, &block)
     end
 
+    # Declare a multi-output file task: a group of files that are all
+    # created by a single action, such as a code generator that writes
+    # several files in one run.
+    #
+    # All products share the same prerequisites and the same action.
+    # The whole group is rebuilt whenever any product is missing or a
+    # shared prerequisite is newer than any product.  No matter which
+    # product is asked for (even concurrently), the action runs only
+    # once, and afterwards every declared product must exist.
+    #
+    # Example:
+    #   multifile ["parser.rb", "parser.output"] => ["parser.y"] do |t|
+    #     sh "yacc #{t.prerequisites.first}"
+    #   end
+    #
+    # Any product may be used as a prerequisite of other tasks.
+    #
+    def multifile(*args, &block) # :doc:
+      Rake::MultiFileTask.define_task(*args, &block)
+    end
+
     # Declare a file creation task.
     # (Mainly used for the directory command).
     def file_create(*args, &block)

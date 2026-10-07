@@ -1,4 +1,6 @@
 # frozen_string_literal: true
+require_relative "multi_file_task"
+
 module Rake
 
   # The TaskManager module is a mixin for managing tasks.
@@ -30,8 +32,14 @@ module Rake
         @scope = Scope.make(*(definition_scope + @scope.to_a))
       end
 
+      if task_class <= Rake::MultiFileTask
+        return define_multi_file_task(task_class, task_name, arg_names,
+                                      deps, order_only, &block)
+      end
+
       task_name = task_class.scope_name(@scope, task_name)
       task = intern(task_class, task_name)
+      check_multi_file_product_conflict(task_name, task)
       task.set_arg_names(arg_names) unless arg_names.empty?
       if Rake::TaskManager.record_task_metadata
         add_location(task)
@@ -43,6 +51,59 @@ module Rake
     ensure
       @scope = original_scope
     end
+
+    # Define a group of files that are all produced by a single action.
+    # Each declared product is registered as its own task, so any of
+    # them can be used as a prerequisite of other tasks.  Returns the
+    # list of product tasks.
+    def define_multi_file_task(task_class, task_name, arg_names, deps, order_only, &block) # :nodoc:
+      names = task_name.respond_to?(:to_ary) ? task_name.to_ary : [task_name]
+      names = names.flatten.map { |n| task_class.scope_name(@scope, n).to_s }
+      if names.empty?
+        fail Rake::TaskArgumentError,
+          "A multi-output task must declare at least one product"
+      end
+
+      description = get_description if Rake::TaskManager.record_task_metadata
+      group = Rake::MultiFileTask::Group.new(self)
+      names.map do |name|
+        if (existing = @tasks[name])
+          fail "Cannot declare \"#{name}\" as a product of a multi-output task: " +
+            product_conflict_reason(existing)
+        end
+        task = task_class.new(name, self)
+        @tasks[name] = task
+        group.add_member(task)
+        task.set_arg_names(arg_names) unless arg_names.empty?
+        if Rake::TaskManager.record_task_metadata
+          add_location(task)
+          task.add_description(description)
+        end
+        task.enhance(Task.format_deps(deps), &block)
+        task | order_only unless order_only.nil?
+        task
+      end
+    end
+    private :define_multi_file_task
+
+    # A name already owned by a multi-output task may not be redefined
+    # as another kind of task.
+    def check_multi_file_product_conflict(task_name, task) # :nodoc:
+      return unless Rake::MultiFileTask === task
+      fail "Cannot define \"#{task_name}\": it is already a product of the " +
+        "multi-output task [#{task.group.names.join(', ')}]"
+    end
+    private :check_multi_file_product_conflict
+
+    def product_conflict_reason(existing) # :nodoc:
+      if Rake::MultiFileTask === existing
+        "it is already a product of the multi-output task " +
+          "[#{existing.group.names.join(', ')}]"
+      else
+        "it is already defined as a #{existing.class}"
+      end
+    end
+    private :product_conflict_reason
 
     # Lookup a task.  Return an existing task if found, otherwise
     # create a task of the current type.
