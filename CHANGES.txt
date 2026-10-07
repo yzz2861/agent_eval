@@ -1,5 +1,9 @@
 === 8.0.0 beta3
 
+  * Support OpenSSH reverse streamlocal forwarding (forward.remote_socket / cancel_remote_socket):
+    request streamlocal-forward@openssh.com listeners and accept forwarded-streamlocal@openssh.com channels
+  * Fix forwarded-channel half-close truncating unsent data: flush pending output before shutdown(SHUT_WR)
+
   * Verify @cert-authority host certificate constraints — principals (shell-glob, matching OpenSSH), validity window, host type, and critical options — instead of trusting any CA-signed certificate for any host [#1009]
 
 === 7.3.3
