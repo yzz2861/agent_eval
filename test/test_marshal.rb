@@ -60,7 +60,7 @@ class Test_Marshal < Test::Unit::TestCase
       :aSymbol, :anotherSym            # symbols (-> string)
     ]
     v3_exp = [
-      "\001"*1000,
+      XMLRPC::Base64.new("\001"*1000),
       "aSymbol", "anotherSym"
     ]
     person = Person.new("Michael")

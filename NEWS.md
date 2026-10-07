@@ -1,5 +1,19 @@
 # News
 
+## 0.3.5
+
+### Improvements
+
+  * Added optional enforcement of method signatures:
+    `XMLRPC::BasicServer.new(enforce_signatures: true)` dispatches calls
+    according to the XML-RPC types of the parameters, validates return
+    values and raises distinct faults for signature mismatch, ambiguous
+    signatures and wrong return types. The legacy arity-only dispatch
+    remains the default.
+  * Parsed `<base64>` values are now returned as `XMLRPC::Base64` instances
+    instead of plain strings, so they can be distinguished from
+    `<string>` values during signature checks.
+
 ## 0.3.4
 
 ### Improvements

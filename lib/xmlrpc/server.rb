@@ -44,6 +44,9 @@ class BasicServer
   ERR_MC_RECURSIVE_CALL     = 6
   ERR_MC_WRONG_PARAM_PARAMS = 7
   ERR_MC_EXPECTED_STRUCT    = 8
+  ERR_SIGNATURE_MISMATCH    = 9
+  ERR_SIGNATURE_AMBIGUOUS   = 10
+  ERR_RETURN_TYPE_MISMATCH  = 11
 
 
   # Creates a new XMLRPC::BasicServer instance, which should not be
@@ -54,10 +57,21 @@ class BasicServer
   # The parameter +class_delim+ is used by add_handler, see
   # XMLRPC::BasicServer#add_handler, when an object is added as a handler, to
   # delimit the object-prefix and the method-name.
-  def initialize(class_delim=".")
+  #
+  # When +enforce_signatures+ is +true+, handlers registered with a
+  # +signature+ are actually executed according to that signature: the
+  # XML-RPC types of the request parameters are used to select one of the
+  # registered signatures, and the return value is checked against the
+  # declared return type. Calls that match no signature raise an
+  # XMLRPC::FaultException with fault code ERR_SIGNATURE_MISMATCH, calls that
+  # match more than one signature raise ERR_SIGNATURE_AMBIGUOUS and a wrong
+  # return value raises ERR_RETURN_TYPE_MISMATCH. The default (+false+) keeps
+  # the legacy arity-only dispatch.
+  def initialize(class_delim=".", enforce_signatures: false)
     @handler = []
     @default_handler = nil
     @service_hook = nil
+    @enforce_signatures = enforce_signatures
 
     @class_delim = class_delim
     @create = nil
@@ -65,6 +79,12 @@ class BasicServer
 
     add_multicall     if Config.enable_multicall?
     add_introspection if Config.enable_introspection?
+  end
+
+  # Returns whether signatures declared with add_handler are enforced on
+  # incoming calls and return values.
+  def enforce_signatures?
+    @enforce_signatures
   end
 
   # Adds +aBlock+ to the list of handlers, with +name+ as the name of
@@ -93,6 +113,15 @@ class BasicServer
   #
   # In the case of <code>b==0</code> the client gets an object back of type
   # XMLRPC::FaultException that has a +faultCode+ and +faultString+ field.
+  #
+  # If the server was created with <tt>enforce_signatures: true</tt>, then
+  # +signature+ is not only used for introspection, but also to dispatch the
+  # call and to validate the return value: when several signatures are given,
+  # the XML-RPC types of the parameters determine which one is used. The
+  # recognized type-names are +int+, +double+, +boolean+, +string+, +base64+,
+  # +dateTime.iso8601+ (aliases +i4+, +i8+ and +dateTime+), +array+ and
+  # +struct+. Types are matched strictly, e.g. a string parameter does not
+  # match an +int+ signature merely because String responds to #to_i.
   #
   # This is the second form of ((<add_handler|XMLRPC::BasicServer#add_handler>)).
   # To add an object write:
@@ -253,13 +282,7 @@ class BasicServer
       sigs = []
       @handler.each do |name, obj, sig|
         if obj.kind_of? Proc and sig != nil and name == meth
-          if sig[0].kind_of? Array
-            # sig contains multiple signatures, e.g. [["array"], ["array", "string"]]
-            sig.each {|s| sigs << s}
-          else
-            # sig is a single signature, e.g. ["array"]
-            sigs << sig
-          end
+          normalize_signatures(sig).each {|s| sigs << s}
         end
       end
       sigs.uniq! || sigs  # remove eventually duplicated signatures
@@ -293,7 +316,15 @@ class BasicServer
   end
 
   def dispatch(methodname, *args)
-    for name, obj in @handler
+    if @enforce_signatures
+      dispatch_by_signature(methodname, args)
+    else
+      dispatch_by_arity(methodname, args)
+    end
+  end
+
+  def dispatch_by_arity(methodname, args)
+    @handler.each do |name, obj|
       if obj.kind_of? Proc
         next unless methodname == name
       else
@@ -303,14 +334,93 @@ class BasicServer
       end
 
       if check_arity(obj, args.size)
-        if @service_hook.nil?
-          return obj.call(*args)
-        else
-          return @service_hook.call(obj, *args)
-        end
+        return invoke(obj, args)
       end
     end
 
+    missing_method(methodname, args)
+  end
+
+  def dispatch_by_signature(methodname, args)
+    candidates = []
+    method_registered = false
+
+    @handler.each_with_index do |(name, obj, sig), entry_index|
+      if obj.kind_of? Proc
+        next unless methodname == name
+      else
+        next unless methodname =~ /^#{name}(.+)$/
+        next unless obj.respond_to? $1
+        obj = obj.method($1)
+      end
+      method_registered = true
+
+      sigs = sig.nil? ? [nil] : normalize_signatures(sig)
+
+      sigs.each do |signature|
+        if signature.nil?
+          next unless check_arity(obj, args.size)
+        else
+          next unless signature.size == args.size + 1
+          next unless signature[1..-1].zip(args).all? {|type, arg| value_has_type?(arg, type)}
+        end
+        candidates << [entry_index, signature, obj]
+      end
+    end
+
+    if candidates.empty?
+      if method_registered
+        given = args.collect {|arg| xmlrpc_type_name(arg)}.join(", ")
+        raise XMLRPC::FaultException.new(
+          ERR_SIGNATURE_MISMATCH,
+          "Parameters (#{given}) match no signature of method #{methodname}!"
+        )
+      else
+        missing_method(methodname, args)
+      end
+    else
+      # Re-registering the same signature overrides the earlier handler.
+      deduped = []
+      candidates.reverse_each do |candidate|
+        key = candidate[1].nil? ? [:untyped, candidate[0]] : candidate[1]
+        deduped << candidate unless deduped.any? {|c|
+          (c[1].nil? ? [:untyped, c[0]] : c[1]) == key
+        }
+      end
+      candidates = deduped.reverse
+
+      if candidates.size > 1
+        given = args.collect {|arg| xmlrpc_type_name(arg)}.join(", ")
+        raise XMLRPC::FaultException.new(
+          ERR_SIGNATURE_AMBIGUOUS,
+          "Call to method #{methodname} with parameters (#{given}) matches more than one signature!"
+        )
+      end
+
+      _, signature, obj = candidates.first
+      result = invoke(obj, args)
+
+      if signature and not value_has_type?(result, signature.first)
+        got = xmlrpc_type_name(result)
+        raise XMLRPC::FaultException.new(
+          ERR_RETURN_TYPE_MISMATCH,
+          "Method #{methodname} returned #{got}, but expected #{signature.first}!"
+        )
+      end
+
+      result
+    end
+  end
+
+  def invoke(obj, args)
+    if @service_hook.nil?
+      obj.call(*args)
+    else
+      @service_hook.call(obj, *args)
+    end
+  end
+
+  def missing_method(methodname, args)
     if @default_handler.nil?
       raise XMLRPC::FaultException.new(ERR_METHOD_MISSING, "Method #{methodname} missing or wrong number of parameters!")
     else
@@ -318,6 +428,60 @@ class BasicServer
     end
   end
 
+  # Returns the signatures of a handler as an Array of Arrays, each starting
+  # with the return type. Type aliases are replaced by their canonical name.
+  def normalize_signatures(sig)
+    sigs = sig[0].kind_of?(Array) ? sig : [sig]
+    sigs.collect {|s| s.collect {|type| canonical_type_name(type)}}
+  end
+
+  def canonical_type_name(type)
+    case type
+    when "i4", "i8", "int" then "int"
+    when "dateTime", "dateTime.iso8601" then "dateTime.iso8601"
+    else type
+    end
+  end
+
+  # Checks whether +value+ has exactly the XML-RPC type +type+. No implicit
+  # conversions (e.g. String#to_i or Integer#to_f) are performed.
+  def value_has_type?(value, type)
+    case canonical_type_name(type)
+    when "int"             then value.kind_of?(Integer)
+    when "double"          then value.kind_of?(Float)
+    when "boolean"         then value == true or value == false
+    when "string"          then value.kind_of?(String)
+    when "base64"          then value.kind_of?(XMLRPC::Base64)
+    when "dateTime.iso8601"
+      value.kind_of?(XMLRPC::DateTime) or value.kind_of?(Time) or value.kind_of?(Date)
+    when "array"           then value.kind_of?(Array)
+    when "struct"          then value.kind_of?(Hash) or value.kind_of?(Struct)
+    else false
+    end
+  end
+
+  def xmlrpc_type_name(value)
+    case value
+    when TrueClass, FalseClass
+      "boolean"
+    when XMLRPC::Base64
+      "base64"
+    when XMLRPC::DateTime, Time, Date
+      "dateTime.iso8601"
+    when Hash, Struct
+      "struct"
+    when Array
+      "array"
+    when Float
+      "double"
+    when Integer
+      "int"
+    when String
+      "string"
+    else
+      value.class.name
+    end
+  end
 
   # Returns +true+, if the arity of +obj+ matches +n_args+
   def check_arity(obj, n_args)
@@ -388,13 +552,13 @@ class CGIServer < BasicServer
   #
   # You can only create <b>one</b> XMLRPC::CGIServer instance, because more
   # than one makes no sense.
-  def CGIServer.new(*a)
-    @@obj = super(*a) if @@obj.nil?
+  def CGIServer.new(*a, **kw)
+    @@obj = super(*a, **kw) if @@obj.nil?
     @@obj
   end
 
-  def initialize(*a)
-    super(*a)
+  def initialize(*a, **kw)
+    super(*a, **kw)
   end
 
   # Call this after you have added all you handlers to the server.
@@ -539,8 +703,8 @@ class Server < WEBrickServlet
   #
   # All additionally provided parameters in <code>*a</code> are by-passed to
   # XMLRPC::BasicServer.new.
-  def initialize(port=8080, host="127.0.0.1", maxConnections=4, stdlog=$stdout, audit=true, debug=true, *a)
-    super(*a)
+  def initialize(port=8080, host="127.0.0.1", maxConnections=4, stdlog=$stdout, audit=true, debug=true, *a, **kw)
+    super(*a, **kw)
     require 'webrick'
     @server = WEBrick::HTTPServer.new(:Port => port, :BindAddress => host, :MaxClients => maxConnections,
                                       :Logger => WEBrick::Log.new(stdlog))
@@ -598,8 +762,8 @@ end
 #     trap("HUP") { httpserver.shutdown }   # use 1 instead of "HUP" on Windows
 #     httpserver.start
 class WEBrickServlet < BasicServer
-  def initialize(*a)
-    super
+  def initialize(*a, **kw)
+    super(*a, **kw)
     require "webrick/httpstatus"
     @valid_ip = nil
   end

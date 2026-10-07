@@ -96,9 +96,11 @@ module XMLRPC # :nodoc:
       end
     end
 
-    # Decodes the given +str+ using XMLRPC::Base64.decode
+    # Decodes the given +str+ using XMLRPC::Base64.decode and wraps the
+    # result in an XMLRPC::Base64 instance, so that a parsed
+    # <code><base64></code> value can be distinguished from a plain string.
     def self.base64(str)
-      XMLRPC::Base64.decode(str)
+      XMLRPC::Base64.new(XMLRPC::Base64.decode(str))
     end
 
     # Converts the given +hash+ to a marshalled object.
