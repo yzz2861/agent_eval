@@ -669,7 +669,12 @@ module DRb
       if error
         DRbRemoteError.new(obj)
       else
-        DRbObject.new(obj)
+        if DRbCapabilityMarker === obj
+          DRb::DRbCapabilityMarker.instance_method(:__drb_make_proxy).
+            bind_call(obj)
+        else
+          DRbObject.new(obj)
+        end
       end
     end
   end
@@ -1488,6 +1493,8 @@ module DRb
 
       @front = front
       @idconv = @config[:idconv]
+      @capability_registry = DRb::CapabilityRegistry.new
+      @capability_registry.server_uri = @uri
 
       @grp = ThreadGroup.new
       @thread = run
@@ -1513,6 +1520,10 @@ module DRb
 
     # The configuration of this DRbServer
     attr_reader :config
+
+    # The DRb::CapabilityRegistry holding capabilities exported by this
+    # server.  Capability state is authoritative on the server side.
+    attr_reader :capability_registry
 
     # Set whether to operate in verbose mode.
     #
@@ -1548,6 +1559,7 @@ module DRb
     def to_obj(ref)
       return front if ref.nil?
       return front[ref.to_s] if DRbURIOption === ref
+      return @capability_registry.to_obj(ref) if DRbCapabilityRef === ref
       @idconv.to_obj(ref)
     end
 
@@ -1985,3 +1997,5 @@ end
 DRbObject = DRb::DRbObject
 DRbUndumped = DRb::DRbUndumped
 DRbIdConv = DRb::DRbIdConv
+
+require_relative 'capability'

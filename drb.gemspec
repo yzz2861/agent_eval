@@ -26,6 +26,7 @@ Gem::Specification.new do |spec|
     drb.gemspec
     lib/drb.rb
     lib/drb/acl.rb
+    lib/drb/capability.rb
     lib/drb/drb.rb
     lib/drb/eq.rb
     lib/drb/extserv.rb

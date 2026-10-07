@@ -84,6 +84,55 @@ When using DRb, try to avoid exposing it over the network if possible. If this
 isn't possible and you need to expose DRb to the world, you *must* configure an
 appropriate security policy with +DRb::ACL+.
 
+## Capability proxies
+
+When one internal object must be shared with several background components
+that should each see a different interface, DRb.publish creates an
+optional *capability*: a reference that may call only a server-declared
+allow-list of methods.  The capability table is stored in the server, so
+editing fields on the client-side stub never widens the interface.
+
+Server:
+
+    require 'drb'
+
+    class Vault
+      include DRb::DRbUndumped
+      def open; :opened; end
+      def close; :closed; end
+      def admin_reset; :reset; end
+    end
+
+    vault = Vault.new
+    # A tiny front object that hands out the capability.
+    front = Object.new
+    front.define_singleton_method(:vault_view) do
+      DRb.publish(vault, [:open, :close]).proxy
+    end
+    DRb.start_service('druby://localhost:0', front)
+
+    grant = DRb.publish(vault, [:open, :close])
+    proxy = grant.proxy             # hand this stub to a component
+
+    view = proxy.derive([:open])    # strictly weaker, independently revocable
+    grant.revoke                    # old references now fail with
+                                    # DRb::DRbCapabilityRevoked
+
+Client:
+
+    proxy.open                      # => :opened
+    proxy.admin_reset               # denied (DRbCapabilityDenied remotely)
+    proxy.send(:admin_reset)        # indirect entries share the allow-list
+    proxy.respond_to?(:open)        # => true
+    proxy.respond_to?(:admin_reset) # => false
+
+Return values can be packaged per method with the +policies+ argument:
+:copy forces a marshalled copy, :reference returns an unrestricted
+DRbObject, and an Array or Hash of method names wraps the returned object
+in another capability.  Capabilities reuse the normal dRuby transport;
+they do not change dRuby's Marshal usage and are not a general defense
+against connecting untrusted peers.
+
 ## Development
 
 After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake test` to run the tests. You can also run `bin/console` for an interactive prompt that will allow you to experiment.
