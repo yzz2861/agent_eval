@@ -30,6 +30,7 @@ require_relative 'ldap/error'
 require_relative 'ldap/auth_adapter'
 require_relative 'ldap/auth_adapter/simple'
 require_relative 'ldap/auth_adapter/sasl'
+require_relative 'ldap/control'
 
 Net::LDAP::AuthAdapter.register([:simple, :anon, :anonymous], Net::LDAP::AuthAdapter::Simple)
 Net::LDAP::AuthAdapter.register(:sasl, Net::LDAP::AuthAdapter::Sasl)
@@ -383,6 +384,8 @@ class Net::LDAP
   ResultCodeObjectClassModsProhibited    = 69
   ResultCodeAffectsMultipleDSAs          = 71
   ResultCodeOther                        = 80
+  # http://tools.ietf.org/html/rfc4528#section-3
+  ResultCodeAssertionFailed              = 122
 
   # https://tools.ietf.org/html/rfc4511#appendix-A.1
   ResultCodesNonError = [
@@ -447,6 +450,11 @@ class Net::LDAP
     SORT_REQUEST  = "1.2.840.113556.1.4.473"
     SORT_RESPONSE = "1.2.840.113556.1.4.474"
     DELETE_TREE   = "1.2.840.113556.1.4.805"
+    # RFC 4528: LDAP Assertion Control
+    ASSERTION = "1.3.6.1.1.12"
+    # RFC 4527: Read Entry Controls
+    PRE_READ_ENTRY  = "1.3.6.1.1.13.1"
+    POST_READ_ENTRY = "1.3.6.1.1.13.2"
   end
 
   def self.result2string(code) #:nodoc:
@@ -671,6 +679,10 @@ class Net::LDAP
     os = OpenStruct.new
     if result.is_a?(Net::LDAP::PDU)
       os.extended_response = result.extended_response
+      # RFC 4528 / RFC 4527 details for write operations.
+      os.assertion_failed = result.assertion_failed?
+      os.pre_read_entry = result.pre_read_entry
+      os.post_read_entry = result.post_read_entry
       result = result.result
     end
     if result.is_a?(Hash)
@@ -1052,6 +1064,23 @@ class Net::LDAP
   # call are not interleaved with other modification-requests received
   # simultaneously by the server. It bears repeating that this concurrency
   # does _not_ imply transactional atomicity, which LDAP does not provide.
+  #
+  # #modify also accepts the following optional entry-guarding controls,
+  # all sent on the same request (no separate search is performed):
+  # :assertion :: a Net::LDAP::Filter (or filter String) evaluated by the
+  #   server against the entry atomically with the modification per
+  #   {RFC 4528}[https://tools.ietf.org/html/rfc4528]. The operation is
+  #   skipped with result code 122 (assertionFailed) when it does not
+  #   match. Code 12 (unavailableCriticalExtension) means the server does
+  #   not support the critical control and nothing was changed.
+  # :pre_read :: per {RFC 4527}[https://tools.ietf.org/html/rfc4527],
+  #   return the entry as read by the server immediately before applying
+  #   the modification. Give +true+ for all user attributes, an attribute
+  #   name, or an Array of attribute names. The entry is available from
+  #   #get_operation_result as +pre_read_entry+.
+  # :post_read :: like :pre_read, but returns the entry as the server
+  #   finally wrote it, available as +post_read_entry+. An assertion
+  #   failure is reported as +assertion_failed+ on the operation result.
   def modify(args)
     instrument "modify.net_ldap", args do |payload|
       @result = use_connection(args) do |conn|
@@ -1151,7 +1180,9 @@ class Net::LDAP
 
   # Rename an entry on the remote DIS by changing the last RDN of its DN.
   #
-  # _Documentation_ _stub_
+  # Supports the same +:assertion+, +:pre_read+, and +:post_read+ options
+  # as #modify (RFC 4528 and RFC 4527). The post-read entry reflects the
+  # entry under its new DN.
   def rename(args)
     instrument "rename.net_ldap", args do |payload|
       @result = use_connection(args) do |conn|
@@ -1165,6 +1196,11 @@ class Net::LDAP
   # Delete an entry from the LDAP directory. Takes a hash of arguments. The
   # only supported argument is :dn, which must give the complete DN of the
   # entry to be deleted.
+  #
+  # Supports +:assertion+ (RFC 4528) and +:pre_read+ (RFC 4527) so the
+  # delete can be guarded and the entry's previous contents retrieved.
+  # +:post_read+ is not valid for delete and raises Net::LDAP::ControlError
+  # before anything is sent.
   #
   # Returns True or False to indicate whether the delete succeeded. Extended
   # status information is available by calling #get_operation_result.

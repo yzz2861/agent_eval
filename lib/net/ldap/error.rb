@@ -46,4 +46,11 @@ class Net::LDAP
   class FilterTypeUnknownError < Error; end
   class FilterSyntaxInvalidError < Error; end
   class EntryOverflowError < Error; end
+  # Raised when a control is not valid for the requested operation per the
+  # RFC that defines it (e.g. post-read on delete).
+  class ControlError < Error; end
+  # Raised when a critical control is absent from a successful server
+  # response, meaning the server executed the operation without honoring
+  # an explicitly-requested critical guarantee.
+  class CriticalControlMissingError < ControlError; end
 end

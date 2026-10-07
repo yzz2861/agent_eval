@@ -552,6 +552,33 @@ class Net::LDAP::Connection #:nodoc:
     ops
   end
 
+  # Internal: Build and validate the normalized RFC 4528/4527 controls
+  # requested for a write operation. Illegal control/operation
+  # combinations raise Net::LDAP::ControlError before anything is sent.
+  def requested_controls(args, operation)
+    request = Net::LDAP::Control.requested(args)
+    Net::LDAP::Control.validate_for_operation!(request, operation)
+    request
+  end
+  private :requested_controls
+
+  # Internal: Encode the normalized controls together with any
+  # pre-encoded (:controls) or legacy tuple (:control_codes) controls
+  # supplied by the caller. Returns the BER controls field, or nil.
+  def encode_request_controls(args, request, legacy_tuples = nil)
+    extra = Array(args[:controls])
+    if legacy_tuples
+      tuples = legacy_tuples.first.is_a?(Array) ? legacy_tuples : [legacy_tuples]
+      tuples.each do |oid, criticality, value|
+        control = [oid.to_ber, (criticality == true).to_ber]
+        control << value unless value.nil?
+        extra << control.to_ber_sequence
+      end
+    end
+    Net::LDAP::Control.encode_controls(request, extra)
+  end
+  private :encode_request_controls
+
   #--
   # TODO: need to support a time limit, in case the server fails to respond.
   # TODO: We're throwing an exception here on empty DN. Should return a
@@ -563,16 +590,14 @@ class Net::LDAP::Connection #:nodoc:
     modify_dn = args[:dn] or raise "Unable to modify empty DN"
     ops = self.class.modify_ops args[:operations]
 
+    controls_request = requested_controls(args, :modify)
     message_id = next_msgid
     request    = [
       modify_dn.to_ber,
       ops.to_ber_sequence,
     ].to_ber_appsequence(Net::LDAP::PDU::ModifyRequest)
 
-    controls = args.fetch(:controls, nil)
-    unless controls.nil?
-      controls = controls.to_ber_contextspecific(0)
-    end
+    controls = encode_request_controls(args, controls_request)
 
     write(request, controls, message_id)
     pdu = queued_read(message_id)
@@ -581,6 +606,7 @@ class Net::LDAP::Connection #:nodoc:
       raise Net::LDAP::ResponseMissingOrInvalidError, "response missing or invalid"
     end
 
+    Net::LDAP::Control.verify_response!(controls_request, pdu)
     pdu
   end
 
@@ -670,17 +696,20 @@ class Net::LDAP::Connection #:nodoc:
     delete_attrs = args[:delete_attributes] ? true : false
     new_superior = args[:new_superior]
 
+    controls_request = requested_controls(args, :rename)
+    controls = encode_request_controls(args, controls_request)
     message_id = next_msgid
     request    = [old_dn.to_ber, new_rdn.to_ber, delete_attrs.to_ber]
     request   << new_superior.to_ber_contextspecific(0) unless new_superior == nil
 
-    write(request.to_ber_appsequence(Net::LDAP::PDU::ModifyRDNRequest), nil, message_id)
+    write(request.to_ber_appsequence(Net::LDAP::PDU::ModifyRDNRequest), controls, message_id)
     pdu = queued_read(message_id)
 
     if !pdu || pdu.app_tag != Net::LDAP::PDU::ModifyRDNResponse
       raise Net::LDAP::ResponseMissingOrInvalidError.new "response missing or invalid"
     end
 
+    Net::LDAP::Control.verify_response!(controls_request, pdu)
     pdu
   end
 
@@ -689,7 +718,9 @@ class Net::LDAP::Connection #:nodoc:
   #++
   def delete(args)
     dn = args[:dn] or raise "Unable to delete empty DN"
-    controls   = args.include?(:control_codes) ? args[:control_codes].to_ber_control : nil #use nil so we can compact later
+    controls_request = requested_controls(args, :delete)
+    legacy_controls = args.include?(:control_codes) ? args[:control_codes] : nil
+    controls = encode_request_controls(args, controls_request, legacy_controls)
     message_id = next_msgid
     request    = dn.to_s.to_ber_application_string(Net::LDAP::PDU::DeleteRequest)
 
@@ -700,6 +731,7 @@ class Net::LDAP::Connection #:nodoc:
       raise Net::LDAP::ResponseMissingOrInvalidError, "response missing or invalid"
     end
 
+    Net::LDAP::Control.verify_response!(controls_request, pdu)
     pdu
   end
 

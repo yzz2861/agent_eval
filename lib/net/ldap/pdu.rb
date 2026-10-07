@@ -162,6 +162,43 @@ class Net::LDAP::PDU
   end
 
   ##
+  # True when the server refused the operation because the RFC 4528
+  # Assertion Control did not match the target entry (result code 122,
+  # assertionFailed). The entry was not modified.
+  def assertion_failed?
+    result_code == Net::LDAP::ResultCodeAssertionFailed
+  end
+
+  ##
+  # The Net::LDAP::Entry captured by an RFC 4527 Pre-Read response
+  # control (1.3.6.1.1.13.1), or nil if no such control was returned.
+  def pre_read_entry
+    @pre_read_entry ||= Net::LDAP::Control.read_entry(
+      result_control(Net::LDAP::LDAPControls::PRE_READ_ENTRY))
+  end
+
+  ##
+  # The Net::LDAP::Entry captured by an RFC 4527 Post-Read response
+  # control (1.3.6.1.1.13.2), or nil if no such control was returned.
+  def post_read_entry
+    @post_read_entry ||= Net::LDAP::Control.read_entry(
+      result_control(Net::LDAP::LDAPControls::POST_READ_ENTRY))
+  end
+
+  ##
+  # The decoded RFC 4528 Assertion response control, if the server sent
+  # one. Normally assertion failure is reported solely with the
+  # assertionFailed (122) result code, so this is usually nil.
+  def assertion_control
+    result_control(Net::LDAP::LDAPControls::ASSERTION)
+  end
+
+  def result_control(oid)
+    @ldap_controls.find { |control| control.oid == oid }
+  end
+  private :result_control
+
+  ##
   # Return serverSaslCreds, which are only present in BindResponse packets.
   #--
   # Messy. Does this functionality belong somewhere else? We ought to
