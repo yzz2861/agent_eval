@@ -93,6 +93,11 @@ module Net
     FTP_PORT = 21
     CRLF = "\r\n"
     DEFAULT_BLOCKSIZE = BufferedIO::BUFSIZE
+    # RFC 7151: the argument of the HOST command is a host name, an IPv4
+    # address, or an IPv6 address enclosed in square brackets, just like
+    # the host part of a URI.  Anything else (in particular CR, LF, or
+    # whitespace) is rejected to prevent FTP command injection.
+    VIRTUAL_HOST_PATTERN = /\A(?:[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*\.?|\[[0-9A-Fa-f:.]+\])\z/
     @@default_passive = true
     # :startdoc:
 
@@ -118,6 +123,26 @@ module Net
     # Sets or retrieves the +resume+ status, which decides whether incomplete
     # transfers are resumed or restarted.  Default: +false+.
     attr_accessor :resume
+
+    # The virtual host name selected with the HOST command (RFC 7151),
+    # or +nil+ when no virtual host is configured.  See #virtual_host= and
+    # the +virtual_host+ option of FTP.new.
+    attr_reader :virtual_host
+
+    # Sets the virtual host name to select with the HOST command (RFC 7151)
+    # on subsequent connections.  The virtual host cannot be changed while
+    # a connection is open, because the HOST command is only valid before
+    # authentication; configure it before calling #connect (or close the
+    # current connection first) so that the new host is selected explicitly
+    # on the next connection instead of being switched silently mid-session.
+    def virtual_host=(host)
+      if @logged_in || !closed?
+        raise FTPConnectionError,
+              "cannot change the virtual host on an open connection"
+      end
+      validate_virtual_host(host) if host
+      @virtual_host = host
+    end
 
     # Number of seconds to wait for the connection to open. Any number
     # may be used, including Floats for fractional seconds. If the FTP
@@ -211,6 +236,15 @@ module Net
     #             "anonymous@" is used as a password.
     # password::  Password for login.
     # account::   Account information for ACCT.
+    # virtual_host::  Virtual host name to select with the HOST command
+    #                 (RFC 7151) after connecting (and after the TLS
+    #                 handshake when +ssl+ is used), before logging in.
+    #                 When +ssl+ is used, the virtual host is also used
+    #                 for TLS SNI and certificate verification in place
+    #                 of the connection address.  If the server rejects
+    #                 the HOST command, an exception is raised and no
+    #                 credentials are sent to the default virtual host.
+    #                 Default: +nil+ (no HOST command is sent).
     # passive::   When +true+, the connection is in passive mode. Default:
     #             +true+.
     # open_timeout::  Number of seconds to wait for the connection to open.
@@ -297,6 +331,8 @@ module Net
       @resume = false
       @bare_sock = @sock = NullSocket.new
       @logged_in = false
+      @virtual_host = options[:virtual_host]
+      validate_virtual_host(@virtual_host) if @virtual_host
       @open_timeout = options[:open_timeout]
       @ssl_handshake_timeout = options[:ssl_handshake_timeout]
       @read_timeout = options[:read_timeout] || 60
@@ -379,7 +415,7 @@ module Net
     def start_tls_session(sock)
       ssl_sock = SSLSocket.new(sock, @ssl_context)
       ssl_sock.sync_close = true
-      ssl_sock.hostname = @host if ssl_sock.respond_to? :hostname=
+      ssl_sock.hostname = tls_hostname if ssl_sock.respond_to? :hostname=
       if @ssl_session &&
           Process.clock_gettime(Process::CLOCK_REALTIME) < @ssl_session.time.to_f + @ssl_session.timeout
         # ProFTPD returns 425 for data connections if session is not reused.
@@ -387,11 +423,40 @@ module Net
       end
       ssl_socket_connect(ssl_sock, @ssl_handshake_timeout || @open_timeout)
       if @ssl_context.verify_mode != VERIFY_NONE
-        ssl_sock.post_connection_check(@host)
+        ssl_sock.post_connection_check(tls_hostname)
       end
       return ssl_sock
     end
     private :start_tls_session
+
+    # The host name used for TLS SNI and certificate verification.  This
+    # is intentionally separate from both the connection address and the
+    # HOST command target: the certificate is expected to be issued for
+    # the virtual host when one is configured, so it takes precedence,
+    # and the connection address is only used as a fallback.
+    def tls_hostname # :nodoc:
+      @virtual_host || @host
+    end
+    private :tls_hostname
+
+    # Checks that +host+ is usable as the argument of the HOST command
+    # (RFC 7151) and cannot smuggle additional FTP commands into the
+    # control connection.
+    def validate_virtual_host(host) # :nodoc:
+      unless VIRTUAL_HOST_PATTERN.match?(host)
+        raise ArgumentError, "invalid virtual host name: #{host.inspect}"
+      end
+    end
+    private :validate_virtual_host
+
+    # Sends the HOST command (RFC 7151) to select the configured virtual
+    # host.  If the server rejects the virtual host, an exception is
+    # raised and the caller must not proceed to authentication, so that
+    # credentials are not sent to the default virtual host.
+    def send_host_command # :nodoc:
+      voidcmd("HOST #{@virtual_host}")
+    end
+    private :send_host_command
 
     #
     # Establishes an FTP connection to host, optionally overriding the default
@@ -399,10 +464,25 @@ module Net
     # connection through a SOCKS proxy. Raises an exception (typically
     # <tt>Errno::ECONNREFUSED</tt>) if the connection cannot be established.
     #
+    # If a virtual host is configured (see the +virtual_host+ option of
+    # FTP.new), the HOST command (RFC 7151) is sent after the greeting and,
+    # for explicit or implicit FTPS, after the TLS handshake, so that the
+    # virtual host is selected before any authentication takes place.  The
+    # HOST command is sent again on every reconnection, and server state
+    # from a previous connection is not carried over.
+    #
+    # Raises Net::FTPConnectionError if the connection is still logged in;
+    # close it first instead of silently switching to another host.
+    #
     def connect(host, port = FTP_PORT)
       debug_print "connect: #{host}:#{port}"
       synchronize do
+        if @logged_in
+          raise FTPConnectionError,
+                "already logged in; close the connection before connecting to another host"
+        end
         @host = host
+        @welcome = nil
         @bare_sock = open_socket(host, port)
         if @ssl_context
           begin
@@ -422,6 +502,7 @@ module Net
         else
           set_socket(BufferedSocket.new(@bare_sock, read_timeout: @read_timeout))
         end
+        send_host_command if @virtual_host
       end
     end
 
@@ -1395,6 +1476,7 @@ module Net
     # a new connection with #connect.
     #
     def close
+      @logged_in = false
       if @sock and not @sock.closed?
         begin
           @sock.shutdown(Socket::SHUT_WR) rescue nil

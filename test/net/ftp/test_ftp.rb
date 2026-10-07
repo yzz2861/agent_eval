@@ -246,9 +246,221 @@ class FTPTest < Test::Unit::TestCase
     end
   end
 
-  def test_s_open
+  def test_login_with_virtual_host
     commands = []
     server = create_ftp_server { |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands.push(sock.gets)
+      sock.print("220 Host set.\r\n")
+      commands.push(sock.gets)
+      sock.print("331 Please specify the password.\r\n")
+      commands.push(sock.gets)
+      sock.print("230 Login successful.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 Switching to Binary mode.\r\n")
+    }
+    begin
+      begin
+        ftp = Net::FTP.new(SERVER_ADDR,
+                           port: server.port,
+                           virtual_host: "ftp.example.com",
+                           username: "foo",
+                           password: "bar")
+        assert_equal("HOST ftp.example.com\r\n", commands.shift)
+        assert_equal("USER foo\r\n", commands.shift)
+        assert_equal("PASS bar\r\n", commands.shift)
+        assert_equal("TYPE I\r\n", commands.shift)
+        assert_equal(nil, commands.shift)
+        assert_equal("ftp.example.com", ftp.virtual_host)
+      ensure
+        ftp.close if ftp
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_virtual_host_rejected_no_password_sent
+    commands = []
+    server = create_ftp_server { |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands.push(sock.gets)
+      sock.print("504 Unknown virtual host.\r\n")
+    }
+    begin
+      begin
+        ftp = nil
+        assert_raise(Net::FTPPermError) do
+          ftp = Net::FTP.new(SERVER_ADDR,
+                             port: server.port,
+                             virtual_host: "no-such.example.com",
+                             username: "foo",
+                             password: "bar")
+        end
+        # the HOST command was rejected, so USER/PASS must not be sent
+        # to the default virtual host
+        assert_equal("HOST no-such.example.com\r\n", commands.shift)
+        assert_equal(nil, commands.shift)
+      ensure
+        ftp.close if ftp
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_virtual_host_invalid
+    assert_raise(ArgumentError) do
+      Net::FTP.new(nil, virtual_host: "ftp.example.com\r\nUSER root")
+    end
+    assert_raise(ArgumentError) do
+      Net::FTP.new(nil, virtual_host: "ftp.example.com DELE x")
+    end
+    assert_raise(ArgumentError) do
+      Net::FTP.new(nil, virtual_host: "")
+    end
+    ftp = Net::FTP.new
+    assert_raise(ArgumentError) do
+      ftp.virtual_host = "ftp.example.com\r\nUSER root"
+    end
+    assert_nothing_raised do
+      ftp.virtual_host = "ftp.example.com"
+      ftp.virtual_host = "[2001:db8::1]"
+      ftp.virtual_host = nil
+    end
+  end
+
+  def test_virtual_host_cannot_change_while_logged_in
+    commands = []
+    server = create_ftp_server { |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands.push(sock.gets)
+      sock.print("220 Host set.\r\n")
+      commands.push(sock.gets)
+      sock.print("331 Please specify the password.\r\n")
+      commands.push(sock.gets)
+      sock.print("230 Login successful.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 Switching to Binary mode.\r\n")
+    }
+    begin
+      begin
+        ftp = Net::FTP.new(SERVER_ADDR,
+                           port: server.port,
+                           virtual_host: "ftp.example.com")
+        ftp.login
+        assert_raise(Net::FTPConnectionError) do
+          ftp.virtual_host = "other.example.com"
+        end
+        assert_raise(Net::FTPConnectionError) do
+          ftp.connect(SERVER_ADDR, server.port)
+        end
+        assert_equal("ftp.example.com", ftp.virtual_host)
+      ensure
+        ftp.close if ftp
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_virtual_host_resent_after_reconnect
+    commands = []
+    server = TCPServer.new(SERVER_ADDR, 0)
+    port = server.addr[1]
+    @thread = Thread.start do
+      2.times do
+        sock = server.accept
+        begin
+          sock.print("220 (test_ftp).\r\n")
+          commands.push(sock.gets)
+          sock.print("220 Host set.\r\n")
+        ensure
+          sock.close
+        end
+      end
+    end
+    begin
+      begin
+        ftp = Net::FTP.new(SERVER_ADDR,
+                           port: port,
+                           virtual_host: "ftp.example.com")
+        assert_equal("HOST ftp.example.com\r\n", commands.shift)
+        ftp.close
+        ftp.connect(SERVER_ADDR, port)
+        assert_equal("HOST ftp.example.com\r\n", commands.shift)
+        assert_equal(nil, commands.shift)
+      ensure
+        ftp.close if ftp
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_explicit_tls_with_virtual_host
+    return unless defined?(OpenSSL)
+
+    commands = []
+    server = create_ftp_server { |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands.push(sock.gets)
+      sock.print("234 AUTH success.\r\n")
+      ctx = OpenSSL::SSL::SSLContext.new
+      ctx.ca_file = CA_FILE
+      ctx.key = File.open(SERVER_KEY) { |f|
+        OpenSSL::PKey::RSA.new(f)
+      }
+      ctx.cert = File.open(SERVER_CERT) { |f|
+        OpenSSL::X509::Certificate.new(f)
+      }
+      sock = OpenSSL::SSL::SSLSocket.new(sock, ctx)
+      sock.sync_close = true
+      sock.accept
+      commands.push(sock.gets)
+      sock.print("200 PSBZ success.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 PROT success.\r\n")
+      commands.push(sock.gets)
+      sock.print("220 Host set.\r\n")
+      commands.push(sock.gets)
+      sock.print("331 Please specify the password.\r\n")
+      commands.push(sock.gets)
+      sock.print("230 Login successful.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 Switching to Binary mode.\r\n")
+    }
+    begin
+      begin
+        # connect by IP address; TLS SNI and certificate verification
+        # use the virtual host name instead
+        ftp = Net::FTP.new(SERVER_ADDR,
+                           port: server.port,
+                           ssl: { ca_file: CA_FILE },
+                           virtual_host: SERVER_NAME)
+        ftp.read_timeout *= 5 if mjit_enabled? # for --jit-wait
+        assert_equal("AUTH TLS\r\n", commands.shift)
+        assert_equal("PBSZ 0\r\n", commands.shift)
+        assert_equal("PROT P\r\n", commands.shift)
+        assert_equal("HOST #{SERVER_NAME}\r\n", commands.shift)
+        ftp.login
+        assert_match(/\AUSER /, commands.shift)
+        assert_match(/\APASS /, commands.shift)
+        assert_equal("TYPE I\r\n", commands.shift)
+        assert_equal(nil, commands.shift)
+      rescue RuntimeError, LoadError
+        # skip (require openssl)
+      ensure
+        ftp.close if ftp
+      end
+    ensure
+      server.close
+    end
+  end
+
+ def test_s_open
+   commands = []
+   server = create_ftp_server { |sock|
       sock.print("220 (test_ftp).\r\n")
       commands.push(sock.gets)
       sock.print("331 Please specify the password.\r\n")
