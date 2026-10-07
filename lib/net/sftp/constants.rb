@@ -44,6 +44,11 @@ module Net module SFTP
       FXP_EXTENDED_REPLY = 201
     end
 
+    # Names of SFTP protocol extensions negotiated in FXP_VERSION.
+    module Extensions
+      COPY_DATA = "copy-data"
+    end
+
     # Beginning in version 5 of the protocol, Net::SFTP::Session#rename accepts
     # an optional +flags+ argument that must be either 0 or a combination of
     # these constants.

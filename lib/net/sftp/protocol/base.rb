@@ -35,6 +35,18 @@ module Net; module SFTP; module Protocol
       end
     end
 
+      # Sends the copy-data extended request. A copy length of 0 requests all
+      # bytes from the source offset through the end of the source file.
+      def copy_data(read_handle, write_handle, read_offset, write_offset, copy_length=0)
+        send_request(FXP_EXTENDED,
+        :string, Net::SFTP::Constants::Extensions::COPY_DATA,
+        :string, read_handle,
+        :string, write_handle,
+        :int64, read_offset,
+        :int64, write_offset,
+        :int64, copy_length)
+    end
+
     private
 
       # Send a new packet of the given type, and with the given data arguments.

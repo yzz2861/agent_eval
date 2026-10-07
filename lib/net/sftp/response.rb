@@ -28,12 +28,17 @@ module Net; module SFTP
     # The textual message for this response (possibly blank)
     attr_reader :message
 
+    # Whether the result is known. Server status responses are definitive;
+    # locally generated connection-lost responses are not.
+    attr_reader :determinate
+
     # Create a new Response object for the given Net::SFTP::Request instance,
     # and with the given data. If there is no :code key in the data, the
     # code is assumed to be FX_OK.
     def initialize(request, data={}) #:nodoc:
       @request, @data = request, data
       @code, @message = data[:code] || FX_OK, data[:message]
+      @determinate = data.key?(:determinate) ? data[:determinate] : true
     end
 
     # Retrieve the data item with the given +key+. The key is converted to a
@@ -62,6 +67,11 @@ module Net; module SFTP
     # Returns +true+ if the status code is FX_EOF; +false+ otherwise.
     def eof?
       code == FX_EOF
+    end
+
+    # Returns +true+ when the operation reached a definitive outcome.
+    def determinate?
+      @determinate
     end
 
     #--

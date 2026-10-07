@@ -35,5 +35,10 @@ module Net; module SFTP
       m << " (#{code}, #{description.inspect})"
     end
 
+    # Returns whether the server gave a definitive response.
+    def determinate?
+      response.determinate?
+    end
+
   end
 end; end

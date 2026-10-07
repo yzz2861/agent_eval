@@ -3,6 +3,7 @@ require 'net/sftp/constants'
 require 'net/sftp/errors'
 require 'net/sftp/protocol'
 require 'net/sftp/request'
+require 'net/sftp/response'
 require 'net/sftp/operations/dir'
 require 'net/sftp/operations/upload'
 require 'net/sftp/operations/download'
@@ -45,6 +46,7 @@ module Net; module SFTP
   class Session
     include Net::SSH::Loggable
     include Net::SFTP::Constants::PacketTypes
+    include Net::SFTP::Constants::StatusCodes
 
     # The highest protocol version supported by the Net::SFTP library.
     HIGHEST_PROTOCOL_VERSION_SUPPORTED = 6
@@ -68,6 +70,10 @@ module Net; module SFTP
     # the server has not yet responded to will be represented here.
     attr_reader :pending_requests
 
+    # The hash of SFTP extensions advertised by the server during protocol
+    # version negotiation, keyed by extension name.
+    attr_reader :extensions
+
     # Creates a new Net::SFTP instance atop the given Net::SSH connection.
     # This will return immediately, before the SFTP connection has been properly
     # initialized. Once the connection is ready, the given block will be called.
@@ -82,6 +88,8 @@ module Net; module SFTP
       self.logger = session.logger
       @state      = :closed
       @pending_requests = {}
+      @handles = {}
+      @extensions = {}
 
       connect(&block)
     end
@@ -282,6 +290,73 @@ module Net; module SFTP
       #   sftp.write!(handle, 0, "hello, world!\n")
       def write!(handle, offset, data, &callback)
         wait_for(write(handle, offset, data, &callback))
+      end
+
+      # :call-seq:
+      #   copy_data(source_handle, target_handle, source_offset, target_offset, length=nil, options={}) -> request
+      #
+      # Requests a server-side byte-range copy using the +copy-data+ SFTP
+      # extension. If +length+ is +nil+ or 0, bytes are copied from
+      # +source_offset+ through the end of the source file. Both handles must
+      # have been opened by this session.
+      # Same-handle overlapping ranges are rejected because copy-data does not
+      # promise memmove ordering. Pass +:allow_overlap => true+ to the bang
+      # method when the server extension is trusted for such a copy.
+      #
+      # This method never performs a client-side read/write fallback. Use
+      # #copy_data! with +:fallback => true+ to request that behavior
+      # explicitly.
+      def copy_data(source_handle, target_handle, source_offset, target_offset, length=nil, options={}, &callback)
+        allow_overlap = options.fetch(:allow_overlap, false)
+        copy_length = validate_copy_data!(source_handle, target_handle, source_offset, target_offset, length, allow_overlap)
+        unless supports_copy_data?
+          raise Net::SFTP::Exception, "server does not support the copy-data extension"
+        end
+
+        request :copy_data, source_handle, target_handle, source_offset, target_offset, copy_length, &callback
+      end
+
+      # Performs a server-side #copy_data operation and blocks until the
+      # server responds. Pass +:fallback => true+ to perform a bounded,
+      # client-side read/write copy only when the server did not negotiate
+      # the extension or definitively replies FX_OP_UNSUPPORTED. Connection
+      # loss is never retried because the write outcome is unknown.
+      #
+      # +:read_size+ bounds each fallback read (default 32 KiB).
+      # +:allow_overlap => true+ permits a native same-file overlap; the
+      # fallback cannot emulate memmove and still rejects overlapping ranges.
+      def copy_data!(source_handle, target_handle, source_offset, target_offset, length=nil, options={}, &callback)
+        fallback = options.fetch(:fallback, false)
+        allow_overlap = options.fetch(:allow_overlap, false)
+        validate_copy_fallback_options!(options)
+        copy_length = validate_copy_data!(source_handle, target_handle, source_offset, target_offset, length, allow_overlap)
+        source = @handles[source_handle]
+        target = @handles[target_handle]
+
+        unless supports_copy_data?
+          if fallback
+            return copy_data_fallback(source, target, source_handle, target_handle,
+              source_offset, target_offset, copy_length, options, callback)
+          else
+            raise Net::SFTP::Exception, "server does not support the copy-data extension"
+          end
+        end
+
+        native_options = { :allow_overlap => allow_overlap }
+        native_callback = callback unless fallback
+        request = copy_data(source_handle, target_handle, source_offset, target_offset,
+          length, native_options, &native_callback)
+        request.wait
+        response = request.response
+
+        if !response.ok? && fallback && response.code == FX_OP_UNSUPPORTED
+          copy_data_fallback(source, target, source_handle, target_handle,
+            source_offset, target_offset, copy_length, options, callback)
+        elsif !response.ok?
+          raise StatusException.new(response)
+        else
+          response
+        end
       end
 
       # :call-seq:
@@ -737,6 +812,16 @@ module Net; module SFTP
         state == :open
       end
 
+      # Returns +true+ if the server advertised the named SFTP extension.
+      def supports_extension?(name)
+        extensions.key?(name)
+      end
+
+      # Returns +true+ if the server advertised the +copy-data+ extension.
+      def supports_copy_data?
+        supports_extension?(Constants::Extensions::COPY_DATA)
+      end
+
       # Returns true if the connection has been closed.
       def closed?
         state == :closed
@@ -774,6 +859,8 @@ module Net; module SFTP
           @channel = session.open_channel(&method(:when_channel_confirmed))
           @packet_length = nil
           @protocol = nil
+          @handles = {}
+          @extensions = {}
           @on_ready = Array(block)
         else # opening
           @on_ready << block if block
@@ -829,9 +916,11 @@ module Net; module SFTP
       # given arguments. Returns a new Request instance that encapsulates the
       # request.
       def request(type, *args, &callback)
+        callback = track_request(type, args, callback)
         request = Request.new(self, type, protocol.send(type, *args), &callback)
         info { "sending #{type} packet (#{request.id})" }
         pending_requests[request.id] = request
+        request
       end
 
       # Waits for the given request to complete. If the response is
@@ -886,6 +975,16 @@ module Net; module SFTP
         debug { "sftp channel closed" }
         @channel = nil
         @state = :closed
+        @handles.clear
+
+        pending = pending_requests.dup
+        pending_requests.clear
+        pending.each_value do |request|
+          request.respond_with_data(
+            :code => FX_CONNECTION_LOST,
+            :message => "connection lost",
+            :determinate => false)
+        end
       end
 
       # Called whenever Net::SSH polls the SFTP channel for pending activity.
@@ -936,6 +1035,8 @@ module Net; module SFTP
 
         @protocol = Protocol.load(self, negotiated_version)
         @pending_requests = {}
+        @handles = {}
+        @extensions = extensions
 
         @state = :open
         @on_ready.each { |callback| callback.call(self) }
@@ -948,6 +1049,133 @@ module Net; module SFTP
         id = packet.read_long
         request = pending_requests.delete(id) or raise Net::SFTP::Exception, "no such request `#{id}'"
         request.respond_to(packet)
+      end
+
+      def track_request(type, args, callback)
+        case type
+        when :open
+          track_handle_response(callback, args[0], :file)
+        when :opendir
+          track_handle_response(callback, args[0], :directory)
+        when :close
+          lambda do |response|
+            @handles.delete(args[0]) if response.ok?
+            callback.call(response) if callback
+          end
+        else
+          callback
+        end
+      end
+
+      def track_handle_response(callback, path, handle_type)
+        lambda do |response|
+          if response.ok?
+            @handles[response[:handle]] = { :path => path, :type => handle_type }
+          end
+          callback.call(response) if callback
+        end
+      end
+
+      def validate_copy_data!(source_handle, target_handle, source_offset, target_offset, length, allow_overlap=false)
+        raise Net::SFTP::Exception, "session is not open" unless open?
+        source = validate_copy_handle!(source_handle, "source")
+        target = validate_copy_handle!(target_handle, "target")
+        validate_uint64!(source_offset, "source_offset")
+        validate_uint64!(target_offset, "target_offset")
+
+        copy_length = if length.nil? || length == 0
+          0
+        else
+          validate_uint64!(length, "length")
+          length
+        end
+
+        if source[:path] == target[:path]
+          overlapping = copy_length == 0 || ranges_overlap?(source_offset, target_offset, copy_length)
+          if overlapping && !allow_overlap
+            raise ArgumentError, "overlapping source and destination ranges are not supported"
+          end
+        end
+
+        copy_length
+      end
+
+      def validate_copy_handle!(handle, role)
+        unless handle.is_a?(String) && !handle.empty?
+          raise ArgumentError, "#{role} handle must be a non-empty string"
+        end
+
+        record = @handles[handle]
+        unless record
+          raise ArgumentError, "#{role} handle was not opened by this SFTP session"
+        end
+        unless record[:type] == :file
+          raise ArgumentError, "#{role} handle is not a file handle"
+        end
+
+        record
+      end
+
+      def validate_uint64!(value, name)
+        unless value.is_a?(Integer) && value >= 0 && value <= 0xffffffffffffffff
+          raise ArgumentError, "#{name} must be an unsigned 64-bit integer"
+        end
+      end
+
+      def ranges_overlap?(source_offset, target_offset, length)
+        source_offset < target_offset + length && target_offset < source_offset + length
+      end
+
+      def validate_copy_fallback_options!(options)
+        read_size = options.fetch(:read_size, 32768)
+        unless read_size.is_a?(Integer) && read_size > 0 && read_size <= 0xffffffff
+          raise ArgumentError, "read_size must be a positive 32-bit integer"
+        end
+      end
+
+      def copy_data_fallback(source, target, source_handle, target_handle, source_offset, target_offset, length, options, callback)
+        read_size = options.fetch(:read_size, 32768)
+
+        copy_length = length.nil? || length == 0 ? 0 : length
+        if source[:path] == target[:path] &&
+           (copy_length == 0 || ranges_overlap?(source_offset, target_offset, copy_length))
+          raise ArgumentError, "client fallback cannot copy overlapping ranges in the same file"
+        end
+
+        offset = source_offset
+        remaining = copy_length.zero? ? nil : copy_length
+        copied = 0
+
+        until false
+          request_length = remaining ? [remaining, read_size].min : read_size
+          data = read!(source_handle, offset, request_length)
+          break if data.nil? || data.empty?
+
+          chunk_length = data.bytesize
+          if remaining && chunk_length < request_length
+            raise EOFError, "unexpected end of source file after #{copied} bytes"
+          end
+
+          write!(target_handle, target_offset + copied, data)
+          copied += chunk_length
+          offset += chunk_length
+
+          if remaining
+            remaining -= chunk_length
+            break if remaining.zero?
+          elsif chunk_length < request_length
+            break
+          end
+        end
+
+        if remaining && remaining > 0
+          raise EOFError, "unexpected end of source file after #{copied} bytes"
+        end
+
+        request = Request.new(self, :copy_data_fallback, nil)
+        response = Response.new(request, :code => FX_OK, :bytes_copied => copied)
+        callback.call(response) if callback
+        response
       end
   end
 

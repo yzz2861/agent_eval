@@ -86,6 +86,13 @@ module Net; module SFTP
 
         callback.call(@response) if callback
       end
+
+      # Completes the request without a server packet.
+      def respond_with_data(data) #:nodoc:
+        data[:type] ||= Constants::PacketTypes::FXP_STATUS
+        @response = Response.new(self, data)
+        callback.call(@response) if callback
+      end
   end
 
 end; end
