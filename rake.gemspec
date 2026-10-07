@@ -51,6 +51,7 @@ Gem::Specification.new do |s|
     "lib/rake/application.rb",
     "lib/rake/backtrace.rb",
     "lib/rake/clean.rb",
+    "lib/rake/content_file_task.rb",
     "lib/rake/cloneable.rb",
     "lib/rake/cpu_counter.rb",
     "lib/rake/default_loader.rb",

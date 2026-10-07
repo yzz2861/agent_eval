@@ -124,6 +124,26 @@ both prerequisites and actions can be added later.  For example ...
     cp Dir["standard_data/*.data"], "testdata"
   end
 
+== Content File Tasks
+
+Use +content_file+ when file timestamps may be restored or otherwise become
+unreliable. Declare the input files, environment variables and parameters
+that participate in the signature, and change +action_version+ whenever the
+Ruby action changes:
+
+  content_file "config.json",
+    inputs: %w[config.template defaults.yml],
+    env: %w[TARGET_ENV],
+    params: { format: "json" },
+    action_version: 1 do |t|
+    # generate t.name
+  end
+
+The signature includes each path and its type, so missing files, symlink
+target changes, missing parameters and empty strings have distinct results.
+Rake records the signature only after the action succeeds and the target
+passes validation; rewriting the target externally forces a rebuild.
+
 == Tasks with Parallel Prerequisites
 
 Rake allows parallel execution of prerequisites using the following syntax:

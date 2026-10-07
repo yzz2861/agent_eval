@@ -83,6 +83,55 @@ module Rake
       Rake::FileCreationTask.define_task(*args, &block)
     end
 
+    # Declare a file task whose freshness is determined by a content signature.
+    #
+    # +inputs+ are signed and also used as regular prerequisites. +env+ names
+    # environment variables, +params+ signs static parameters, and
+    # +action_version+ must be changed when the task action changes.
+    #
+    # Example:
+    #   content_file "app.tar.gz",
+    #     inputs: FileList["lib/**/*.rb"],
+    #     env: %w[TARGET],
+    #     params: { compression: "gzip" },
+    #     action_version: 1 do |t|
+    #     sh "tar", "-czf", t.name, "lib"
+    #   end
+    #
+    def content_file(task_name, *args, action_version:, inputs: [], env: [],
+                     environment: nil, params: nil, parameters: nil,
+                     dependencies: [], signature_file: nil,
+                     verify: nil, &block)
+      prerequisites = Array(inputs).map { |path| Rake.from_pathname(path).to_s } |
+                      Array(dependencies).map { |path| Rake.from_pathname(path).to_s }
+
+      task_args = args.dup
+      task = if prerequisites.empty?
+               Rake::ContentFileTask.define_task(task_name, *task_args, &block)
+             else
+               if task_args.empty?
+                 Rake::ContentFileTask.define_task(
+                   task_name => prerequisites, &block
+                 )
+               else
+                 argument_names = task_args.pop
+                 Rake::ContentFileTask.define_task(
+                   task_name, *task_args, argument_names => prerequisites, &block
+                 )
+               end
+             end
+
+      task.configure(
+        action_version: action_version,
+        inputs: inputs,
+        env: env,
+        environment: environment,
+        params: parameters || params,
+        signature_file: signature_file,
+        verify: verify
+      )
+    end
+
     # Declare a set of files tasks to create the given directories on
     # demand.
     #

@@ -20,6 +20,11 @@ file task (Rake::FileTask) ::
   Because normal Tasks always have the current time as timestamp, a FileTask
   that has a normal Task prerequisite will always execute.
 
+content file task (Rake::ContentFileTask) ::
+  A content file task stores a signature of its target, declared input
+  files, environment variables, parameters, and action version. It ignores
+  modification times when deciding whether to rebuild.
+
 invoke ::
   When a task is invoked, first we check to see if it has been invoked before.
   If it has been, then nothing else is done.  If this is the first time it has
