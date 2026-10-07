@@ -8,6 +8,8 @@
 require "date"
 require "xmlrpc/base64"
 require "xmlrpc/datetime"
+require "xmlrpc/decimal"
+require "xmlrpc/type_profile"
 
 
 module XMLRPC # :nodoc:
@@ -153,7 +155,37 @@ module XMLRPC # :nodoc:
   # Parser for XML-RPC call and response
   module XMLParser
 
+    # Shared helpers for parsers that accept an optional
+    # XMLRPC::TypeProfile. When no profile is set, the global
+    # XMLRPC::Config flags and the historic defaults apply.
+    module ProfileAware
+
+      # The XMLRPC::TypeProfile of this parser, or +nil+ when the global
+      # XMLRPC::Config flags are used.
+      attr_accessor :type_profile
+
+      private
+
+      def profile_allow_nil?
+        @type_profile ? @type_profile.allow_nil? : Config.enable_nil_parser?
+      end
+
+      def profile_allow_i8?
+        @type_profile ? @type_profile.allow_i8? : true
+      end
+
+      def profile_allow_decimal?
+        @type_profile ? @type_profile.allow_decimal? : false
+      end
+
+      def profile_keep_unknown?
+        @type_profile ? @type_profile.keep_unknown_extension? : false
+      end
+
+    end
+
     class AbstractTreeParser
+      include ProfileAware
 
       def parseMethodResponse(str)
         methodResponse_document(createCleanedTree(str))
@@ -243,34 +275,62 @@ module XMLRPC # :nodoc:
       end
 
 
-      def integer(node)
+      def integer(node, path)
         #TODO: check string for float because to_i returnsa
         #      0 when wrong string
-         nodeMustBe(node, %w(i4 i8 int))
+         nodeMustBe(node, %w(i4 int))
         hasOnlyOneChild(node)
 
         Convert.int(text(node.firstChild))
       end
 
-      def boolean(node)
+      def integer8(node, path)
+        nodeMustBe(node, "i8")
+        unless profile_allow_i8?
+          raise "wrong/unknown XML-RPC type 'i8' at #{path}"
+        end
+        hasOnlyOneChild(node)
+
+        Convert.int(text(node.firstChild))
+      end
+
+      def decimal(node, path)
+        nodeMustBe(node, "decimal")
+        unless profile_allow_decimal?
+          raise "wrong/unknown XML-RPC type 'decimal' at #{path}"
+        end
+        hasOnlyOneChild(node)
+
+        begin
+          XMLRPC::Decimal.new(text(node.firstChild))
+        rescue ArgumentError => e
+          raise ArgumentError, "#{e.message} (at #{path})"
+        end
+      end
+
+      def boolean(node, path)
         nodeMustBe(node, "boolean")
         hasOnlyOneChild(node)
 
-        Convert.boolean(text(node.firstChild))
+        begin
+          Convert.boolean(text(node.firstChild))
+        rescue RuntimeError => e
+          raise "#{e.message} (at #{path})"
+        end
       end
 
-      def v_nil(node)
+      def v_nil(node, path)
         nodeMustBe(node, "nil")
         assert( node.childNodes.to_a.size == 0 )
         nil
       end
 
-      def string(node)
+      def string(node, path)
         nodeMustBe(node, "string")
         text_zero_one(node)
       end
 
-      def double(node)
+      def double(node, path)
         #TODO: check string for float because to_f returnsa
         #      0.0 when wrong string
         nodeMustBe(node, "double")
@@ -279,25 +339,30 @@ module XMLRPC # :nodoc:
         Convert.double(text(node.firstChild))
       end
 
-      def dateTime(node)
+      def dateTime(node, path)
         nodeMustBe(node, "dateTime.iso8601")
         hasOnlyOneChild(node)
 
-        Convert.dateTime( text(node.firstChild) )
+        begin
+          Convert.dateTime( text(node.firstChild) )
+        rescue RuntimeError => e
+          raise "#{e.message} (at #{path})"
+        end
       end
 
-      def base64(node)
+      def base64(node, path)
         nodeMustBe(node, "base64")
         #hasOnlyOneChild(node)
 
         Convert.base64(text_zero_one(node))
       end
 
-      def member(node)
+      def member(node, path)
         nodeMustBe(node, "member")
         assert( node.childNodes.to_a.size == 2 )
 
-        [ name(node[0]), value(node[1]) ]
+        n = name(node[0])
+        [ n, value(node[1], "#{path}[#{n.inspect}]") ]
       end
 
       def name(node)
@@ -306,17 +371,17 @@ module XMLRPC # :nodoc:
         text_zero_one(node)
       end
 
-      def array(node)
+      def array(node, path)
         nodeMustBe(node, "array")
         hasOnlyOneChild(node, "data")
-        data(node.firstChild)
+        data(node.firstChild, path)
       end
 
-      def data(node)
+      def data(node, path)
         nodeMustBe(node, "data")
 
-        node.childNodes.to_a.collect do |val|
-          value(val)
+        node.childNodes.to_a.each_with_index.collect do |val, i|
+          value(val, "#{path}[#{i}]")
         end
       end
 
@@ -379,12 +444,12 @@ module XMLRPC # :nodoc:
         node.nodeValue.to_s
       end
 
-      def struct(node)
+      def struct(node, path)
         nodeMustBe(node, "struct")
 
         hash = {}
         node.childNodes.to_a.each do |me|
-          n, v = member(me)
+          n, v = member(me, path)
           hash[n] = v
         end
 
@@ -392,7 +457,7 @@ module XMLRPC # :nodoc:
       end
 
 
-      def value(node)
+      def value(node, path="$")
         nodeMustBe(node, "value")
         nodes = node.childNodes.to_a.size
         if nodes == 0
@@ -408,22 +473,28 @@ module XMLRPC # :nodoc:
           text_zero_one(node)
         when :ELEMENT
           case child.nodeName
-          when "i4", "i8", "int"  then integer(child)
-          when "boolean"          then boolean(child)
-          when "string"           then string(child)
-          when "double"           then double(child)
-          when "dateTime.iso8601" then dateTime(child)
-          when "base64"           then base64(child)
-          when "struct"           then struct(child)
-          when "array"            then array(child)
+          when "i4", "int"        then integer(child, path)
+          when "i8"               then integer8(child, path)
+          when "decimal"          then decimal(child, path)
+          when "boolean"          then boolean(child, path)
+          when "string"           then string(child, path)
+          when "double"           then double(child, path)
+          when "dateTime.iso8601" then dateTime(child, path)
+          when "base64"           then base64(child, path)
+          when "struct"           then struct(child, path)
+          when "array"            then array(child, path)
           when "nil"
-            if Config.enable_nil_parser?
-              v_nil(child)
+            if profile_allow_nil?
+              v_nil(child, path)
             else
-              raise "wrong/unknown XML-RPC type 'nil'"
+              raise "wrong/unknown XML-RPC type 'nil' at #{path}"
             end
           else
-            raise "wrong/unknown XML-RPC type"
+            if profile_keep_unknown?
+              XMLRPC::UnknownValue.new(child.nodeName, text_zero_one(child))
+            else
+              raise "wrong/unknown XML-RPC type '#{child.nodeName}' at #{path}"
+            end
           end
         else
           raise "wrong type of node"
@@ -447,8 +518,13 @@ module XMLRPC # :nodoc:
     end # module TreeParserMixin
 
     class AbstractStreamParser
+      # The XMLRPC::TypeProfile of this parser, or +nil+ when the global
+      # XMLRPC::Config flags are used.
+      attr_accessor :type_profile
+
       def parseMethodResponse(str)
         parser = @parser_class.new
+        parser.type_profile = @type_profile
         parser.parse(str)
         raise "No valid method response!" if parser.method_name != nil
         if parser.fault != nil
@@ -464,6 +540,7 @@ module XMLRPC # :nodoc:
 
       def parseMethodCall(str)
         parser = @parser_class.new
+        parser.type_profile = @type_profile
         parser.parse(str)
         raise "No valid method call - missing method name!" if parser.method_name.nil?
         [parser.method_name, parser.params]
@@ -471,6 +548,16 @@ module XMLRPC # :nodoc:
     end
 
     module StreamParserMixin
+      include ProfileAware
+
+      # Element names this parser knows about. Anything else is an
+      # unknown extension tag.
+      KNOWN_ELEMENT_NAMES = %w(
+        methodCall methodResponse methodName params param fault
+        value array data struct member name string
+        i4 i8 int boolean double decimal dateTime.iso8601 base64 nil
+      ).freeze
+
       attr_reader :params
       attr_reader :method_name
       attr_reader :fault
@@ -491,6 +578,9 @@ module XMLRPC # :nodoc:
         @fault = nil
 
         @data = nil
+
+        @containers = []
+        @extension_tags = []
       end
 
       def startElement(name, attrs=[])
@@ -499,17 +589,29 @@ module XMLRPC # :nodoc:
         when "value"
           @value = nil
         when "nil"
-          raise "wrong/unknown XML-RPC type 'nil'" unless Config.enable_nil_parser?
+          unless profile_allow_nil?
+            raise "wrong/unknown XML-RPC type 'nil' at #{current_path}"
+          end
           @value = :nil
         when "array"
           @val_stack << @values
           @values = []
+          @containers << [:array, 0]
         when "struct"
           @names << @name
           @name = []
 
           @structs << @struct
           @struct = {}
+          @containers << [:struct, nil]
+        else
+          if unknown_extension_tag?(name) and @type_profile
+            if profile_keep_unknown?
+              @extension_tags << name
+            else
+              raise "wrong/unknown XML-RPC type '#{name}' at #{current_path}"
+            end
+          end
         end
       end
 
@@ -518,29 +620,53 @@ module XMLRPC # :nodoc:
         case name
         when "string"
           @value = @data
-        when "i4", "i8", "int"
-          @value = Convert.int(@data)
+        when "i4", "int"
+          @value = convert_scalar { Convert.int(@data) }
+        when "i8"
+          if profile_allow_i8?
+            @value = convert_scalar { Convert.int(@data) }
+          else
+            raise "wrong/unknown XML-RPC type 'i8' at #{current_path}"
+          end
+        when "decimal"
+          if @type_profile
+            if profile_allow_decimal?
+              # exact decimal, never converted through Float
+              @value = convert_scalar { XMLRPC::Decimal.new(@data) }
+            else
+              raise "wrong/unknown XML-RPC type 'decimal' at #{current_path}"
+            end
+          end
+          # legacy mode: ignore the tag, the value falls back to its text
         when "boolean"
-          @value = Convert.boolean(@data)
+          @value = convert_scalar { Convert.boolean(@data) }
         when "double"
-          @value = Convert.double(@data)
+          @value = convert_scalar { Convert.double(@data) }
         when "dateTime.iso8601"
-          @value = Convert.dateTime(@data)
+          @value = convert_scalar { Convert.dateTime(@data) }
         when "base64"
           @value = Convert.base64(@data)
         when "value"
           @value = @data if @value.nil?
           @values << (@value == :nil ? nil : @value)
+          if @containers.last and @containers.last[0] == :array
+            @containers.last[1] += 1
+          end
         when "array"
           @value = @values
           @values = @val_stack.pop
+          @containers.pop
         when "struct"
           @value = Convert.struct(@struct)
 
           @name = @names.pop
           @struct = @structs.pop
+          @containers.pop
         when "name"
           @name[0] = @data
+          if @containers.last and @containers.last[0] == :struct
+            @containers.last[1] = @data
+          end
         when "member"
           @struct[@name[0]] = @values.pop
 
@@ -553,10 +679,43 @@ module XMLRPC # :nodoc:
 
         when "methodName"
           @method_name = @data
+        else
+          if @extension_tags.last == name
+            @extension_tags.pop
+            @value = XMLRPC::UnknownValue.new(name, @data)
+          end
         end
 
         @data = nil
       end
+
+      private
+
+      def unknown_extension_tag?(name)
+        !KNOWN_ELEMENT_NAMES.include?(name)
+      end
+
+      # Re-raises a conversion failure with the path of the value.
+      def convert_scalar
+        yield
+      rescue RuntimeError, ArgumentError => e
+        raise e.class, "#{e.message} (at #{current_path})"
+      end
+
+      # Path of the value currently being parsed, e.g. $["key"][2].
+      def current_path
+        path = "$"
+        @containers.each do |type, key|
+          if type == :array
+            path += "[#{key}]"
+          else
+            path += "[#{key.to_s.inspect}]"
+          end
+        end
+        path
+      end
+
+      public
 
       def character(data)
         if @data
@@ -684,4 +843,3 @@ module XMLRPC # :nodoc:
 
 
 end # module XMLRPC
-

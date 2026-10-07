@@ -7,6 +7,8 @@
 
 require "date"
 require "xmlrpc/base64"
+require "xmlrpc/decimal"
+require "xmlrpc/type_profile"
 
 module XMLRPC # :nodoc:
 
@@ -105,9 +107,20 @@ module XMLRPC # :nodoc:
   #
   class Create
 
-    def initialize(xml_writer = nil)
+    # Creates a new XMLRPC::Create instance.
+    #
+    # +xml_writer+ is an instance of a class from module XMLRPC::XMLWriter.
+    #
+    # When +type_profile+ (an XMLRPC::TypeProfile) is given, the encoder
+    # follows that profile instead of the global XMLRPC::Config flags.
+    def initialize(xml_writer = nil, type_profile: nil)
       @writer = xml_writer || Config.default_writer.new
+      @type_profile = type_profile
     end
+
+    # The XMLRPC::TypeProfile of this encoder, or +nil+ when the global
+    # XMLRPC::Config flags are used.
+    attr_accessor :type_profile
 
 
     def methodCall(name, *params)
@@ -172,23 +185,54 @@ module XMLRPC # :nodoc:
 
     private
 
+    def profile_allow_i8?
+      @type_profile ? @type_profile.allow_i8? : Config.enable_bigint?
+    end
+
+    def profile_allow_nil?
+      @type_profile ? @type_profile.allow_nil? : Config.enable_nil_create?
+    end
+
+    def profile_allow_decimal?
+      @type_profile ? @type_profile.allow_decimal? : false
+    end
+
+    def encode_integer(param, path)
+      if @type_profile
+        tag = @type_profile.integer_tag(param)
+        if tag.nil?
+          limit = @type_profile.allow_i8? ? "signed 64-bit" : "signed 32-bit"
+          raise "Integer #{param} at #{path} is too big! Must be #{limit} integer!"
+        end
+        @writer.tag(tag, param.to_s)
+      else
+        # legacy behavior driven by XMLRPC::Config
+        if Config.enable_bigint?
+          @writer.tag("i4", param.to_s)
+        else
+          if param >= -(2**31) and param <= (2**31-1)
+            @writer.tag("i4", param.to_s)
+          else
+            raise "Integer #{param} at #{path} is too big! Must be signed 32-bit integer!"
+          end
+        end
+      end
+    end
+
     #
     # Converts a Ruby object into a XML-RPC <code><value></code> tag
     #
-    def conv2value(param) # :doc:
+    def conv2value(param, path="$") # :doc:
+
+        if defined?(BigDecimal) and param.is_a?(BigDecimal)
+          # exact decimal, never converted through Float
+          param = XMLRPC::Decimal.new(param.to_s("F"))
+        end
 
         val = case param
         when Integer
-          # XML-RPC's int is 32bit int
-          if Config.enable_bigint?
-            @writer.tag("i4", param.to_s)
-          else
-            if param >= -(2**31) and param <= (2**31-1)
-              @writer.tag("i4", param.to_s)
-            else
-              raise "Integer is too big! Must be signed 32-bit integer!"
-            end
-          end
+          encode_integer(param, path)
+
         when TrueClass, FalseClass
           @writer.tag("boolean", param ? "1" : "0")
 
@@ -199,14 +243,25 @@ module XMLRPC # :nodoc:
           @writer.tag("string", param)
 
         when NilClass
-          if Config.enable_nil_create?
+          if profile_allow_nil?
             @writer.ele("nil")
           else
-            raise "Wrong type NilClass. Not allowed!"
+            raise "Wrong type NilClass at #{path}. Not allowed!"
+          end
+
+        when XMLRPC::Decimal
+          if @type_profile
+            if profile_allow_decimal?
+              @writer.tag("decimal", param.to_s)
+            else
+              raise "Wrong type XMLRPC::Decimal at #{path}. Not allowed!"
+            end
+          else
+            return conv_fallback(param, path)
           end
 
         when Float
-          raise "Wrong value #{param}. Not allowed!" unless param.finite?
+          raise "Wrong value #{param} at #{path}. Not allowed!" unless param.finite?
           @writer.tag("double", param.to_s)
 
         when Struct
@@ -214,7 +269,7 @@ module XMLRPC # :nodoc:
             value = param[key]
             @writer.ele("member",
               @writer.tag("name", key.to_s),
-              conv2value(value)
+              conv2value(value, "#{path}[#{key.to_s.inspect}]")
             )
           end
 
@@ -224,14 +279,14 @@ module XMLRPC # :nodoc:
           h = param.collect do |key, value|
             @writer.ele("member",
               @writer.tag("name", key.to_s),
-              conv2value(value)
+              conv2value(value, "#{path}[#{key.to_s.inspect}]")
             )
           end
 
           @writer.ele("struct", *h)
 
         when Array
-          a = param.collect {|v| conv2value(v) }
+          a = param.each_with_index.collect {|v, i| conv2value(v, "#{path}[#{i}]") }
 
           @writer.ele("array",
             @writer.ele("data", *a)
@@ -248,31 +303,35 @@ module XMLRPC # :nodoc:
           @writer.tag("base64", param.encoded)
 
         else
-          if Config.enable_marshalling? and param.class.included_modules.include? XMLRPC::Marshallable
-            # convert Ruby object into Hash
-            ret = {"___class___" => param.class.name}
-            param.instance_variables.each {|v|
-              name = v[1..-1]
-              val = param.instance_variable_get(v)
-
-              if val.nil?
-                ret[name] = val if Config.enable_nil_create?
-              else
-                ret[name] = val
-              end
-            }
-            return conv2value(ret)
-          else
-            ok, pa = wrong_type(param)
-            if ok
-              return conv2value(pa)
-            else
-              raise "Wrong type!"
-            end
-          end
+          return conv_fallback(param, path)
         end
 
         @writer.ele("value", val)
+    end
+
+    def conv_fallback(param, path)
+      if Config.enable_marshalling? and param.class.included_modules.include? XMLRPC::Marshallable
+        # convert Ruby object into Hash
+        ret = {"___class___" => param.class.name}
+        param.instance_variables.each {|v|
+          name = v[1..-1]
+          val = param.instance_variable_get(v)
+
+          if val.nil?
+            ret[name] = val if profile_allow_nil?
+          else
+            ret[name] = val
+          end
+        }
+        conv2value(ret, path)
+      else
+        ok, pa = wrong_type(param)
+        if ok
+          conv2value(pa, path)
+        else
+          raise "Wrong type #{param.class} at #{path}!"
+        end
+      end
     end
 
     def wrong_type(value)
@@ -283,4 +342,3 @@ module XMLRPC # :nodoc:
   end # class Create
 
 end # module XMLRPC
-

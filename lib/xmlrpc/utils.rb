@@ -4,6 +4,8 @@
 #
 # $Id$
 #
+require "xmlrpc/type_profile"
+
 module XMLRPC # :nodoc:
 
 
@@ -22,13 +24,17 @@ module XMLRPC # :nodoc:
   # and server.rb (class XMLRPC::BasicServer)
   module ParserWriterChooseMixin
 
+    # The XMLRPC::TypeProfile of this instance, or +nil+ when the global
+    # XMLRPC::Config flags are used.
+    attr_reader :type_profile
+
     # Sets the XMLWriter to use for generating XML output.
     #
     # Should be an instance of a class from module XMLRPC::XMLWriter.
     #
     # If this method is not called, then XMLRPC::Config.default_writer is used.
     def set_writer(writer)
-      @create = Create.new(writer)
+      @create = Create.new(writer, type_profile: @type_profile)
       self
     end
 
@@ -38,7 +44,26 @@ module XMLRPC # :nodoc:
     #
     # If this method is not called, then XMLRPC::Config.default_parser is used.
     def set_parser(parser)
+      parser.type_profile = @type_profile if @type_profile and
+        parser.respond_to?(:type_profile=)
       @parser = parser
+      self
+    end
+
+    # Sets the XMLRPC::TypeProfile of this instance.
+    #
+    # The same profile object is given to both the encoder
+    # (XMLRPC::Create) and the parser, so that both directions agree on
+    # the accepted types without touching the global XMLRPC::Config
+    # constants. Pass +nil+ to return to the global XMLRPC::Config flags.
+    def set_type_profile(profile)
+      unless profile.nil? or profile.is_a?(XMLRPC::TypeProfile)
+        raise ArgumentError, "expected an XMLRPC::TypeProfile, got #{profile.class}"
+      end
+      @type_profile = profile
+      @create.type_profile = profile if @create
+      @parser.type_profile = profile if @parser and
+        @parser.respond_to?(:type_profile=)
       self
     end
 
@@ -169,4 +194,3 @@ module XMLRPC # :nodoc:
   end
 
 end # module XMLRPC
-

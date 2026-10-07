@@ -118,6 +118,7 @@ module XMLRPC # :nodoc:
 
       @parser = nil
       @create = nil
+      @type_profile = nil
     end
 
 

@@ -40,6 +40,7 @@ module XMLRPC # :nodoc:
     end # class self
 
     def initialize( parser = nil, writer = nil )
+      @type_profile = nil
       set_parser( parser )
       set_writer( writer )
     end

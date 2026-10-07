@@ -1,5 +1,30 @@
 # News
 
+## Unreleased
+
+### Improvements
+
+  * Added instance-level type profiles (`XMLRPC::TypeProfile`) for
+    clients and servers. `set_type_profile` gives the encoder and the
+    parser of one instance the same explicit configuration, without
+    mutating the global `XMLRPC::Config` constants. Predefined profiles:
+    `XMLRPC::TypeProfile::STANDARD` and `XMLRPC::TypeProfile::EXTENDED`
+    (i8, nil and decimal extensions).
+
+  * Integers are encoded as `i4` or `i8` depending on their range and
+    the profile's capabilities; out-of-range integers are never stuffed
+    into `i4`.
+
+  * Added exact decimal values (`XMLRPC::Decimal`) via the `decimal`
+    extension tag; they are never converted through `Float`.
+
+  * Unknown extension tags are rejected or kept as controlled
+    `XMLRPC::UnknownValue` values, depending on the profile. They are
+    never instantiated as arbitrary Ruby classes.
+
+  * Encoding and parsing errors in nested arrays/structs now report the
+    path of the offending value, e.g. `$["key"][2]`.
+
 ## 0.3.4
 
 ### Improvements

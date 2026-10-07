@@ -62,6 +62,7 @@ class BasicServer
     @class_delim = class_delim
     @create = nil
     @parser = nil
+    @type_profile = nil
 
     add_multicall     if Config.enable_multicall?
     add_introspection if Config.enable_introspection?
@@ -677,4 +678,3 @@ end # module XMLRPC
 = History
     $Id$
 =end
-
