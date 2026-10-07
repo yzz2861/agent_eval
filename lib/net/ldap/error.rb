@@ -46,4 +46,26 @@ class Net::LDAP
   class FilterTypeUnknownError < Error; end
   class FilterSyntaxInvalidError < Error; end
   class EntryOverflowError < Error; end
+
+  # Raised for LDAP transaction (RFC 5805) failures: nested transactions,
+  # a server refusing to start a transaction, or a commit that the server
+  # rejected. When the commit was rejected, #operation identifies the
+  # update request that failed (a Net::LDAP::Transaction::Operation) and
+  # #controls carries the update controls the server returned for it.
+  class TransactionError < Error
+    attr_reader :operation, :controls, :result_code
+
+    def initialize(message = nil, operation: nil, controls: nil, result_code: nil)
+      @operation = operation
+      @controls = controls
+      @result_code = result_code
+      super(message)
+    end
+  end
+
+  # Raised when the connection was lost after the End Transaction (commit)
+  # request was sent but before its response arrived. The transaction may
+  # or may not have been committed by the server; the block is never
+  # replayed automatically.
+  class TransactionResultUnknownError < TransactionError; end
 end

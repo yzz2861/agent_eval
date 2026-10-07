@@ -27,6 +27,7 @@ require_relative 'ldap/instrumentation'
 require_relative 'ldap/connection'
 require_relative 'ldap/version'
 require_relative 'ldap/error'
+require_relative 'ldap/transaction'
 require_relative 'ldap/auth_adapter'
 require_relative 'ldap/auth_adapter/simple'
 require_relative 'ldap/auth_adapter/sasl'
@@ -342,6 +343,8 @@ class Net::LDAP
   StartTlsOid = '1.3.6.1.4.1.1466.20037'
   PasswdModifyOid = '1.3.6.1.4.1.4203.1.11.1'
   WhoamiOid = '1.3.6.1.4.1.4203.1.11.3'
+  StartTransactionOid = '1.3.6.1.1.21.1' # RFC 5805 section 2.1
+  EndTransactionOid = '1.3.6.1.1.21.3'   # RFC 5805 section 2.3
 
   # https://tools.ietf.org/html/rfc4511#section-4.1.9
   # https://tools.ietf.org/html/rfc4511#appendix-A
@@ -447,6 +450,7 @@ class Net::LDAP
     SORT_REQUEST  = "1.2.840.113556.1.4.473"
     SORT_RESPONSE = "1.2.840.113556.1.4.474"
     DELETE_TREE   = "1.2.840.113556.1.4.805"
+    TRANSACTION_SPEC = "1.3.6.1.1.21.2" # RFC 5805 section 2.2
   end
 
   def self.result2string(code) #:nodoc:
@@ -567,6 +571,9 @@ class Net::LDAP
     # our internal methods will connect using it, or else they will create
     # their own.
     @open_connection = nil
+
+    # Set while a transaction started by #transaction is in progress.
+    @transaction = nil
   end
 
   # Convenience method to specify authentication credentials to the LDAP
@@ -1198,6 +1205,82 @@ class Net::LDAP
       delete(args.merge(:control_codes => [[Net::LDAP::LDAPControls::DELETE_TREE, true]]))
     else
       recursive_delete(args)
+    end
+  end
+
+  # Performs a sequence of update operations inside an LDAP transaction
+  # (RFC 5805) on directory servers that support it.
+  #
+  # The transaction is started with a Start Transaction extended request,
+  # every update operation sent through the yielded transaction object
+  # carries the Transaction Specification control with the identifier
+  # returned by the server, and the transaction is finished with an End
+  # Transaction extended request. Everything runs on a single connection,
+  # which is reserved for the exclusive use of the transaction while the
+  # block runs: any attempt to use the same connection from another
+  # thread raises Net::LDAP::TransactionError.
+  #
+  #  ldap.transaction do |txn|
+  #    txn.add(:dn => user_dn, :attributes => attrs)
+  #    txn.modify(:dn => user_dn, :operations => [[:add, :mail, mail]])
+  #    txn.rename(:olddn => user_dn, :newrdn => "uid=new")
+  #  end
+  #
+  # Only operations invoked on the yielded transaction object take part
+  # in the transaction. If the block raises, the transaction is cancelled
+  # (End Transaction with commit=FALSE) on a best-effort basis and the
+  # original exception is re-raised. Nested transactions are rejected
+  # before any protocol traffic for a second transaction is generated.
+  #
+  # Returns true when the transaction was committed. Raises
+  # Net::LDAP::TransactionError when the server rejects the commit; the
+  # error identifies the failed update operation and carries the update
+  # controls returned with the commit response. Raises
+  # Net::LDAP::TransactionResultUnknownError when the connection is lost
+  # after the commit request was sent; in that case the outcome is
+  # unknown and the block is never replayed.
+  def transaction
+    raise ArgumentError, "Net::LDAP#transaction requires a block" unless block_given?
+    if @transaction
+      raise Net::LDAP::TransactionError, "nested transactions are not supported"
+    end
+
+    if @open_connection
+      connection = @open_connection
+      close_connection = false
+    else
+      connection = new_connection
+      close_connection = true
+      bind_result = connection.bind(@auth)
+      unless bind_result.result_code == Net::LDAP::ResultCodeSuccess
+        connection.close
+        @result = bind_result
+        return false
+      end
+    end
+
+    txn = Net::LDAP::Transaction.new(connection)
+    @transaction = txn
+
+    begin
+      instrument "transaction.net_ldap" do |payload|
+        connection.transaction_lock do
+          txn.start
+          begin
+            yield txn
+          rescue Exception
+            txn.attempt_abort
+            raise
+          end
+          txn.commit if txn.active?
+        end
+        payload[:committed] = txn.committed?
+        txn.committed?
+      end
+    ensure
+      @result = txn.result if txn.result
+      @transaction = nil
+      connection.close if close_connection
     end
   end
 

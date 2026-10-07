@@ -26,6 +26,37 @@ class Net::LDAP::Connection #:nodoc:
     yield self if block_given?
   end
 
+  # Internal: Reserves this connection for the exclusive use of a single
+  # transaction for the duration of the block. While the lock is held,
+  # any use of this connection from another thread raises
+  # Net::LDAP::TransactionError (see #check_transaction_lock!). Nested
+  # or concurrent attempts to start a second transaction on the same
+  # connection are rejected before any protocol traffic is generated.
+  def transaction_lock
+    @transaction_mutex ||= Mutex.new
+    unless @transaction_mutex.try_lock
+      raise Net::LDAP::TransactionError,
+            "a transaction is already in progress on this connection"
+    end
+
+    begin
+      yield
+    ensure
+      @transaction_mutex.unlock
+    end
+  end
+
+  # Internal: Raises Net::LDAP::TransactionError when this connection is
+  # reserved by a transaction owned by another thread.
+  def check_transaction_lock!
+    if defined?(@transaction_mutex) && @transaction_mutex &&
+       @transaction_mutex.locked? && !@transaction_mutex.owned?
+      raise Net::LDAP::TransactionError,
+            "connection is reserved by a transaction running on another thread"
+    end
+  end
+  private :check_transaction_lock!
+
   def socket_class=(socket_class)
     @socket_class = socket_class
   end
@@ -195,6 +226,8 @@ class Net::LDAP::Connection #:nodoc:
   #
   # Returns a Net::LDAP::PDU object or nil.
   def queued_read(message_id)
+    check_transaction_lock!
+
     if pdu = message_queue[message_id].shift
       return pdu
     end
@@ -261,6 +294,8 @@ class Net::LDAP::Connection #:nodoc:
   # Returns the return value from writing to the connection, which in some
   # cases is the Integer number of bytes written to the socket.
   def write(request, controls = nil, message_id = next_msgid)
+    check_transaction_lock!
+
     instrument "write.net_ldap_connection" do |payload|
       packet = [message_id.to_ber, request, controls].compact.to_ber_sequence
       payload[:content_length] = socket.write(packet)
@@ -629,6 +664,63 @@ class Net::LDAP::Connection #:nodoc:
     pdu
   end
 
+  ##
+  # Start Transaction
+  #
+  # https://www.rfc-editor.org/rfc/rfc5805#section-2.1
+  #
+  # A Start Transaction Request is an ExtendedRequest with a requestName
+  # of 1.3.6.1.1.21.1 and no requestValue. The response carries the
+  # transaction identifier in its responseValue.
+  def start_transaction
+    message_id = next_msgid
+    request    = [
+      Net::LDAP::StartTransactionOid.to_ber_contextspecific(0),
+    ].to_ber_appsequence(Net::LDAP::PDU::ExtendedRequest)
+
+    write(request, nil, message_id)
+    pdu = queued_read(message_id)
+
+    if !pdu || pdu.app_tag != Net::LDAP::PDU::ExtendedResponse
+      raise Net::LDAP::ResponseMissingOrInvalidError, "response missing or invalid"
+    end
+
+    pdu
+  end
+
+  ##
+  # End Transaction
+  #
+  # https://www.rfc-editor.org/rfc/rfc5805#section-2.3
+  #
+  # EndTxnRequestValue ::= SEQUENCE {
+  #      commit          BOOLEAN DEFAULT TRUE,
+  #      identifier      OCTET STRING }
+  #
+  # Returns the End Transaction Response PDU, or nil when the response
+  # was lost, in which case the transaction outcome is unknown.
+  def end_transaction(commit, identifier)
+    message_id = next_msgid
+
+    value = []
+    value << commit.to_ber unless commit # commit DEFAULT TRUE is omitted
+    value << identifier.to_ber
+
+    request = [
+      Net::LDAP::EndTransactionOid.to_ber_contextspecific(0),
+      value.to_ber_sequence.to_ber_contextspecific(1),
+    ].to_ber_appsequence(Net::LDAP::PDU::ExtendedRequest)
+
+    write(request, nil, message_id)
+    pdu = queued_read(message_id)
+
+    if pdu && pdu.app_tag != Net::LDAP::PDU::ExtendedResponse
+      raise Net::LDAP::ResponseTypeInvalidError, "invalid response-type in end transaction: #{pdu.app_tag}"
+    end
+
+    pdu
+  end
+
   #--
   # TODO: need to support a time limit, in case the server fails to respond.
   # Unlike other operation-methods in this class, we return a result hash
@@ -674,7 +766,12 @@ class Net::LDAP::Connection #:nodoc:
     request    = [old_dn.to_ber, new_rdn.to_ber, delete_attrs.to_ber]
     request   << new_superior.to_ber_contextspecific(0) unless new_superior == nil
 
-    write(request.to_ber_appsequence(Net::LDAP::PDU::ModifyRDNRequest), nil, message_id)
+    controls = args.fetch(:controls, nil)
+    unless controls.nil?
+      controls = controls.to_ber_contextspecific(0)
+    end
+
+    write(request.to_ber_appsequence(Net::LDAP::PDU::ModifyRDNRequest), controls, message_id)
     pdu = queued_read(message_id)
 
     if !pdu || pdu.app_tag != Net::LDAP::PDU::ModifyRDNResponse
@@ -689,7 +786,9 @@ class Net::LDAP::Connection #:nodoc:
   #++
   def delete(args)
     dn = args[:dn] or raise "Unable to delete empty DN"
-    controls   = args.include?(:control_codes) ? args[:control_codes].to_ber_control : nil #use nil so we can compact later
+    controls   = args.fetch(:controls, nil)
+    controls   = controls.to_ber_contextspecific(0) unless controls.nil?
+    controls ||= args[:control_codes].to_ber_control if args.include?(:control_codes)
     message_id = next_msgid
     request    = dn.to_s.to_ber_application_string(Net::LDAP::PDU::DeleteRequest)
 
