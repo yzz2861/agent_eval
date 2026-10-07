@@ -224,6 +224,7 @@ step(VALUE self)
  * - String with Encoding::ASCII_8BIT (a.k.a. BINARY) → BLOB
  * - String with Encoding::UTF_16LE or Encoding::UTF_16BE → TEXT (bound as UTF-16)
  * - String (all other encodings) → TEXT (re-encoded to UTF-8 if necessary)
+ * - SQLite3::Pointer → opaque pointer (SQLite NULL storage class)
  * - Any other type → raises RuntimeError
  *
  * Note: if you have a string with only ASCII characters but ASCII-8BIT
@@ -258,6 +259,11 @@ bind_param(VALUE self, VALUE key, VALUE value)
 
     if (index == 0) {
         rb_raise(rb_path2class("SQLite3::Exception"), "no such bind parameter");
+    }
+
+    if (sqlite3_ruby_pointer_wrap(value, ctx->st, index, &status)) {
+        CHECK(sqlite3_db_handle(ctx->st), status);
+        return self;
     }
 
     switch (TYPE(value)) {

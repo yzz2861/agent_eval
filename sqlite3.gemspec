@@ -53,6 +53,8 @@ Gem::Specification.new do |s|
     "ext/sqlite3/exception.c",
     "ext/sqlite3/exception.h",
     "ext/sqlite3/extconf.rb",
+    "ext/sqlite3/pointer.c",
+    "ext/sqlite3/pointer.h",
     "ext/sqlite3/sqlite3.c",
     "ext/sqlite3/sqlite3_ruby.h",
     "ext/sqlite3/statement.c",
@@ -64,6 +66,7 @@ Gem::Specification.new do |s|
     "lib/sqlite3/errors.rb",
     "lib/sqlite3/fork_safety.rb",
     "lib/sqlite3/pragmas.rb",
+    "lib/sqlite3/pointer.rb",
     "lib/sqlite3/resultset.rb",
     "lib/sqlite3/statement.rb",
     "lib/sqlite3/value.rb",
@@ -78,6 +81,7 @@ Gem::Specification.new do |s|
     "ext/sqlite3/backup.c",
     "ext/sqlite3/database.c",
     "ext/sqlite3/exception.c",
+    "ext/sqlite3/pointer.c",
     "ext/sqlite3/sqlite3.c",
     "ext/sqlite3/statement.c"
   ]

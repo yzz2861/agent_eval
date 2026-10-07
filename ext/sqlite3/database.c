@@ -466,6 +466,9 @@ VALUE
 sqlite3val2rb(sqlite3_value *val)
 {
     VALUE rb_val;
+    VALUE pointer = sqlite3_ruby_value_pointer(val);
+
+    if (pointer != Qundef) { return pointer; }
 
     switch (sqlite3_value_type(val)) {
         case SQLITE_INTEGER:
@@ -500,6 +503,13 @@ sqlite3val2rb(sqlite3_value *val)
 void
 set_sqlite3_func_result(sqlite3_context *ctx, VALUE result)
 {
+#ifdef HAVE_SQLITE3_BIND_POINTER
+    if (rb_obj_is_kind_of(result, cSqlite3Pointer)) {
+        sqlite3_ruby_pointer_result(result, ctx);
+        return;
+    }
+#endif
+
     switch (TYPE(result)) {
         case T_NIL:
             sqlite3_result_null(ctx);
@@ -605,18 +615,27 @@ define_function_with_flags(VALUE self, VALUE name, VALUE flags)
 {
     sqlite3RubyPtr ctx;
     VALUE block, functions;
-    int status;
+    int status, c_flags;
 
     TypedData_Get_Struct(self, sqlite3Ruby, &database_type, ctx);
     REQUIRE_OPEN_DB(ctx);
 
     block = rb_block_proc();
 
+#ifdef SQLITE_SUBTYPE
+    c_flags = NUM2INT(flags) | SQLITE_SUBTYPE;
+#else
+    c_flags = NUM2INT(flags);
+#endif
+#ifdef SQLITE_RESULT_SUBTYPE
+    c_flags |= SQLITE_RESULT_SUBTYPE;
+#endif
+
     status = sqlite3_create_function(
                  ctx->db,
                  StringValuePtr(name),
                  rb_proc_arity(block),
-                 NUM2INT(flags),
+                 c_flags,
                  (void *)block,
                  rb_sqlite3_func,
                  NULL,

@@ -192,6 +192,7 @@ Init_sqlite3_native(void)
 #endif
 
     init_sqlite3_constants();
+    init_sqlite3_pointer();
     init_sqlite3_database();
     init_sqlite3_statement();
 #ifdef HAVE_SQLITE3_BACKUP_INIT

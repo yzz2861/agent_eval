@@ -52,6 +52,7 @@ module SQLite3
     # - String with Encoding::UTF_16LE
     #   or Encoding::UTF_16BE            → TEXT (bound as UTF-16)
     # - String (all other encodings)     → TEXT (re-encoded to UTF-8 if needed)
+    # - SQLite3::Pointer                 → opaque typed pointer (NULL to SQL)
     # - Any other type                   → raises RuntimeError
     #
     # Note: a String with Encoding::ASCII_8BIT (BINARY) is always bound as a

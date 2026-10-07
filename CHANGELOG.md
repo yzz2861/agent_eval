@@ -1,5 +1,11 @@
 # sqlite3-ruby Changelog
 
+## Unreleased
+
+### Added
+
+- Add `SQLite3::Pointer` for passing a typed Ruby object between application-defined SQL functions through SQLite's pointer passing interface. The value has SQL NULL storage class, cannot be serialized into tables, and is only returned to Ruby callers that request the matching type label. Statement reset, rebinding, statement close, connection close, and function result ownership are handled through reference-counted GC-safe holders.
+
 ## 2.9.6 / 2026-08-11
 
 ### Security / Stability
