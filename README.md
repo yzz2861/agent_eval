@@ -209,6 +209,15 @@ The equals sign tells Slim it's a Ruby call that produces output to add to the b
 
 If your line ends with comma `,` (e.g because of a method call) you don't need the additional backslash before the linebreak. For trailing or leading whitespace the modifiers `>` and `<` are supported.
 
+The expression also continues on the following lines while a Ruby structure is left open, so strings, regular expressions and heredocs can be written naturally. A heredoc ends before the line following its terminator, so a tag can follow right after:
+
+~~~ slim
+= render <<~EOS
+  some text
+  EOS
+p Next paragraph
+~~~
+
 * Output with trailing white space `=>`. Same as the single equals sign (`=`), except that it adds a trailing white space.
 * Output with leading white space `=<`. Same as the single equals sign (`=`), except that it adds a leading white space.
 
@@ -498,6 +507,16 @@ a href==action_path(:start)
 ~~~
 
 You can also break ruby attributes with backslash `\` or trailing `,` as described for control sections.
+Just like output expressions, attribute values continue on the following lines while a Ruby structure
+(parentheses, string, regular expression, heredoc, ...) is left open:
+
+~~~ slim
+p(id="marvin"
+  data=<<~EOS.chomp
+    some text
+  EOS
+  class="martian") Text
+~~~
 
 #### Boolean attributes
 

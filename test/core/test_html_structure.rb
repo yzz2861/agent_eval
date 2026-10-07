@@ -537,6 +537,46 @@ p<id=id_helper
     end
   end
 
+  def test_multiline_attributes_with_heredoc
+    source = %q{
+p(id="marvin"
+  data=<<~EOS.chomp
+    some text
+  EOS
+  class="martian") Text
+}
+    assert_html '<p class="martian" data="some text" id="marvin">Text</p>', source
+  end
+
+  def test_attribute_with_nested_string_interpolation
+    source = %q{
+p[data-x="hello #{"wor" + "ld"}"]
+}
+    assert_html '<p data-x="hello world"></p>', source
+  end
+
+  def test_attribute_with_regexp
+    source = %q{
+p[data-x=/\d{2} [a-z]+/]
+}
+    assert_html '<p data-x="(?-mix:\d{2} [a-z]+)"></p>', source
+  end
+
+  def test_attribute_with_regexp_containing_delimiter
+    source = %q{
+p[data-x=/\]/]
+}
+    assert_html '<p data-x="(?-mix:\])"></p>', source
+  end
+
+  def test_multiline_attribute_with_comment
+    source = %q{
+p[data-x=[1, # first
+  2]]
+}
+    assert_html '<p data-x="[1, 2]"></p>', source
+  end
+
   def test_multiline_attributes_with_nested_text_and_extra_indentation
     source = %q{
 li< id="myid"

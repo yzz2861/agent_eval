@@ -74,7 +74,43 @@ p
   img src=[hash[1] + hash[2]
 }
 
-    assert_syntax_error "Expected closing delimiter ]\n  (__TEMPLATE__), Line 3, Column 28\n    img src=[hash[1] + hash[2]\n                              ^\n", source
+    assert_syntax_error "Expected closing delimiter ]\n  (__TEMPLATE__), Line 3, Column 10\n    img src=[hash[1] + hash[2]\n            ^\n", source
+  end
+
+  def test_unterminated_heredoc
+    source = %q{
+= render <<~EOS
+p This is not the heredoc terminator
+}
+
+    assert_syntax_error "Unterminated heredoc <<~EOS\n  (__TEMPLATE__), Line 2, Column 9\n    = render <<~EOS\n             ^\n", source
+  end
+
+  def test_unclosed_attribute_value
+    source = %q!
+p(title={foo
+p Next
+!
+
+    assert_syntax_error "Expected closing delimiter }\n  (__TEMPLATE__), Line 2, Column 8\n    p(title={foo\n            ^\n", source
+  end
+
+  def test_unterminated_string_in_attribute
+    source = %q{
+p(title=("foo
+p Next
+}
+
+    assert_syntax_error "Unterminated string literal\n  (__TEMPLATE__), Line 2, Column 9\n    p(title=(\"foo\n             ^\n", source
+  end
+
+  def test_unterminated_regexp_in_output
+    source = %q{
+= foo.gsub /abc
+p Next
+}
+
+    assert_syntax_error "Unterminated regexp literal\n  (__TEMPLATE__), Line 2, Column 11\n    = foo.gsub /abc\n               ^\n", source
   end
 
   def test_invalid_empty_attribute

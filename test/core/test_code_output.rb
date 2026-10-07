@@ -165,4 +165,55 @@ p
 
     assert_html '<p>Hello World from @env</p>', source
   end
+
+  def test_render_with_heredoc
+    source = %q{
+= <<~EOS
+  hello
+  EOS
+p Next
+}
+
+    assert_html "hello\n<p>Next</p>", source
+  end
+
+  def test_render_with_heredoc_and_arguments
+    source = %q{
+p = message(<<~EOS.chomp, 'Ruby!')
+  Hello
+  EOS
+p Next
+}
+
+    assert_html '<p>Hello Ruby!</p><p>Next</p>', source
+  end
+
+  def test_render_with_multiline_string
+    source = %q{
+= "hello
+  world"
+p Next
+}
+
+    assert_html "hello\n  world<p>Next</p>", source
+  end
+
+  def test_render_with_multiline_arguments
+    source = %q{
+p = message("Hello",
+            "Ruby!")
+p Next
+}
+
+    assert_html '<p>Hello Ruby!</p><p>Next</p>', source
+  end
+
+  def test_render_with_regexp
+    source = %q{
+= /a{2} b/.source
+p Next
+}
+
+    assert_html 'a{2} b<p>Next</p>', source
+  end
 end

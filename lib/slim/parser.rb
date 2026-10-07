@@ -1,4 +1,6 @@
 # frozen_string_literal: true
+require 'ripper'
+
 module Slim
   # Parses Slim code and transforms it to a Temple expression
   # @api private
@@ -316,12 +318,27 @@ module Slim
     end
 
     def parse_broken_line
-      broken_line = @line.strip
-      while broken_line =~ /[,\\]\Z/
-        expect_next_line
-        broken_line << "\n" << @line
+      code = @line.strip
+      start_lineno = @lineno
+      start_column = @orig_line.size - @line.lstrip.size
+      code_lines = [code]
+      source_lines = [@orig_line]
+      loop do
+        offset, opener, heredoc = ruby_code_end_offset(code, nil, true)
+        if opener
+          unclosed_ruby_code!(opener, code_lines, source_lines, start_lineno, start_column) if @lines.empty?
+          next_line
+          code_lines << @line
+          source_lines << @orig_line
+          code = "#{code}\n#{@line}"
+        else
+          code = code.byteslice(0...offset) if offset
+          # The code generator appends tokens after the expression, so a
+          # heredoc terminator must be followed by a newline of its own
+          code = "#{code}\n" if heredoc
+          return code
+        end
       end
-      broken_line
     end
 
     def parse_tag(tag)
@@ -468,31 +485,127 @@ module Slim
     end
 
     def parse_ruby_code(outer_delimiter)
-      code, count, delimiter, close_delimiter = ''.dup, 0, nil, nil
-
-      # Attribute ends with space or attribute delimiter
-      end_re = /\A[\s#{Regexp.escape outer_delimiter.to_s}]/
-
-      until @line.empty? || (count == 0 && @line =~ end_re)
-        if @line =~ /\A[,\\]\Z/
-          code << @line << "\n"
-          expect_next_line
+      start_lineno = @lineno
+      start_column = @orig_line.size - @line.size
+      code_lines = [code = @line]
+      source_lines = [@orig_line]
+      loop do
+        offset, opener, heredoc = ruby_code_end_offset(code, outer_delimiter)
+        if opener
+          unclosed_ruby_code!(opener, code_lines, source_lines, start_lineno, start_column) if @lines.empty?
+          next_line
+          code_lines << @line
+          source_lines << @orig_line
+          code = "#{code}\n#{@line}"
         else
-          if count > 0
-            if @line[0] == delimiter[0]
-              count += 1
-            elsif @line[0] == close_delimiter[0]
-              count -= 1
-            end
-          elsif @line =~ @code_attr_delims_re
-            count = 1
-            delimiter, close_delimiter = $&, @code_attr_delims[$&]
+          if offset
+            @line = code.byteslice(offset..-1) || ''.dup
+            code = code.byteslice(0...offset)
+          else
+            @line = ''.dup
           end
-          code << @line.slice!(0)
+          # The code generator appends tokens after the expression, so a
+          # heredoc terminator must be followed by a newline of its own
+          code = "#{code}\n" if heredoc
+          return code
         end
       end
-      syntax_error!("Expected closing delimiter #{close_delimiter}") if count != 0
-      code
+    end
+
+    # Finds the end of the Ruby expression at the beginning of +code+.
+    # Ruby's own lexer (Ripper) is used so that delimiters inside strings,
+    # regular expressions, comments and heredocs are not mistaken for
+    # expression boundaries.
+    #
+    # Returns [offset, nil, heredoc] if the expression ends at the byte
+    # offset (the terminating whitespace or +outer_delimiter+ is not
+    # included), [nil, nil, heredoc] if the whole of +code+ is the
+    # expression, or [nil, opener, heredoc] if the expression is
+    # incomplete and more input is required. +opener+ describes the
+    # unclosed structure and is :continuation if the line simply ends
+    # with ',' or '\'. +heredoc+ is true if the code contains a heredoc.
+    def ruby_code_end_offset(code, outer_delimiter, eol_only = false)
+      stack = []
+      heredocs = []
+      heredoc = false
+      line_offsets = nil
+      prev_token = nil
+      tokens = Ripper.lex(code)
+      tokens.each do |(lineno, column), type, token, _state|
+        if stack.empty? && heredocs.empty?
+          # A space only terminates the expression if it does not belong to
+          # the indentation of a continued line
+          if type == :on_nl ||
+             (!eol_only && type == :on_sp && !token.include?("\n") && !(prev_token && prev_token.include?("\n"))) ||
+             (!eol_only && outer_delimiter && token == outer_delimiter)
+            line_offsets ||= ruby_line_offsets(code)
+            return [line_offsets[lineno - 1] + column, nil]
+          end
+        end
+
+        case type
+        when :on_lparen
+          stack << [type, token, lineno, column, ')']
+        when :on_lbracket
+          stack << [type, token, lineno, column, ']']
+        when :on_lbrace, :on_tlambeg, :on_embexpr_beg
+          stack << [type, token, lineno, column, '}']
+        when :on_symbeg
+          # Only quoted symbols (:"...") are closed by a string end token
+          stack << [type, token, lineno, column, nil] if token.size > 1
+        when :on_tstring_beg, :on_regexp_beg, :on_words_beg, :on_qwords_beg,
+             :on_symbols_beg, :on_qsymbols_beg, :on_backtick, :on_embdoc_beg
+          stack << [type, token, lineno, column, nil]
+        when :on_heredoc_beg
+          # Heredoc bodies start after the current line, so they are
+          # tracked separately from the nested structures on the line itself
+          heredoc = true
+          heredocs << [type, token, lineno, column, nil]
+        when :on_heredoc_end
+          heredocs.pop
+        when :on_rparen, :on_rbracket, :on_rbrace, :on_tstring_end, :on_regexp_end,
+             :on_embexpr_end, :on_embdoc_end
+          stack.pop
+        end
+        prev_token = token
+      end
+
+      opener = heredocs.first || stack.last
+      return [nil, opener, heredoc] if opener
+      return [nil, :continuation, heredoc] if code =~ /[,\\]\s*\Z/
+      [nil, nil, heredoc]
+    end
+
+    # Byte offsets of the beginning of each line in +code+
+    def ruby_line_offsets(code)
+      offsets = [0]
+      code.bytes.each_with_index do |byte, index|
+        offsets << index + 1 if byte == 0x0A
+      end
+      offsets
+    end
+
+    # Raises a syntax error for an unclosed Ruby structure, pointing at
+    # the beginning of the structure rather than at a later line
+    def unclosed_ruby_code!(opener, code_lines, source_lines, start_lineno, start_column)
+      syntax_error!('Unexpected end of file') if opener == :continuation
+      type, token, lineno, column, closer = opener
+      message =
+        case type
+        when :on_lparen, :on_lbracket, :on_lbrace, :on_tlambeg, :on_embexpr_beg
+          "Expected closing delimiter #{closer}"
+        when :on_regexp_beg
+          'Unterminated regexp literal'
+        when :on_heredoc_beg
+          "Unterminated heredoc #{token}"
+        when :on_embdoc_beg
+          'Unterminated embedded document'
+        else
+          'Unterminated string literal'
+        end
+      column = code_lines[lineno - 1].byteslice(0...column).to_s.size
+      column += start_column if lineno == 1
+      syntax_error_at!(message, source_lines[lineno - 1], start_lineno + lineno - 1, column)
     end
 
     def parse_quoted_attribute(quote)
@@ -518,12 +631,17 @@ module Slim
 
     # Helper for raising exceptions
     def syntax_error!(message)
-      raise SyntaxError.new(message, options[:file], @orig_line, @lineno,
-                            @orig_line && @line ? @orig_line.size - @line.size : 0)
+      syntax_error_at!(message, @orig_line, @lineno,
+                       @orig_line && @line ? @orig_line.size - @line.size : 0)
+    end
+
+    # Helper for raising exceptions at an explicit location
+    def syntax_error_at!(message, line, lineno, column)
+      raise SyntaxError.new(message, options[:file], line, lineno, column)
     rescue SyntaxError => ex
       # HACK: Manipulate stacktrace for Rails and other frameworks
       # to find the right file.
-      ex.backtrace.unshift "#{options[:file]}:#{@lineno}"
+      ex.backtrace.unshift "#{options[:file]}:#{lineno}"
       raise
     end
 
