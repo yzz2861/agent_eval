@@ -297,6 +297,8 @@ module Net
       @resume = false
       @bare_sock = @sock = NullSocket.new
       @logged_in = false
+      @current_transfer = nil
+      @transfer_mutex = Mutex.new
       @open_timeout = options[:open_timeout]
       @ssl_handshake_timeout = options[:ssl_handshake_timeout]
       @read_timeout = options[:read_timeout] || 60
@@ -624,6 +626,52 @@ module Net
     end
     private :transfercmd
 
+    # Registers and returns a TransferHandle for a new transfer.  The
+    # handle is unregistered again by finish_transfer.
+    def start_transfer # :nodoc:
+      handle = TransferHandle.new(self)
+      @transfer_mutex.synchronize { @current_transfer = handle }
+      return handle
+    end
+    private :start_transfer
+
+    def finish_transfer(handle) # :nodoc:
+      @transfer_mutex.synchronize do
+        @current_transfer = nil if @current_transfer.equal?(handle)
+      end
+    end
+    private :finish_transfer
+
+    # Sends the ABOR command to abort the in-progress transfer.  On a
+    # plain control connection ABOR is sent as TCP urgent (out-of-band)
+    # data so that the server notices it while a transfer is in progress.
+    # Out-of-band data cannot be sent through a TLS session, so on a TLS
+    # control connection ABOR is sent in-band instead.
+    def send_abor # :nodoc:
+      debug_print "put: ABOR"
+      if defined?(BufferedSSLSocket) && @sock.is_a?(BufferedSSLSocket)
+        @sock.write("ABOR" + CRLF)
+      else
+        @sock.send("ABOR" + CRLF, Socket::MSG_OOB)
+      end
+    end
+    private :send_abor
+
+    # Reads a single reply from the control connection, waiting at most
+    # +timeout+ seconds for it to arrive.
+    def control_reply(timeout) # :nodoc:
+      old_timeout = @sock.read_timeout
+      @sock.read_timeout = timeout
+      begin
+        @last_response = getmultiline
+        @last_response_code = @last_response[0, 3]
+        return @last_response
+      ensure
+        @sock.read_timeout = old_timeout
+      end
+    end
+    private :control_reply
+
     #
     # Logs in to the remote host.  The session must have been
     # previously connected.  If +user+ is the string "anonymous" and
@@ -666,18 +714,39 @@ module Net
     def retrbinary(cmd, blocksize, rest_offset = nil) # :yield: data
       synchronize do
         with_binary(true) do
+          handle = start_transfer
           begin
-            conn = transfercmd(cmd, rest_offset)
-            while data = conn.read(blocksize)
-              yield(data)
+            begin
+              conn = transfercmd(cmd, rest_offset)
+              handle.attach(conn)
+              begin
+                while !handle.cancel_requested? && (data = conn.read(blocksize))
+                  yield(data)
+                end
+                unless handle.cancel_requested?
+                  conn.shutdown(Socket::SHUT_WR) rescue nil
+                  conn.read_timeout = 1
+                  conn.read rescue nil
+                end
+              rescue IOError, SystemCallError, SocketError
+                # Cancelling a transfer closes the data connection from
+                # another thread to unblock the transfer; the resulting
+                # error is expected and dealt with by realigning the
+                # control connection below.
+                raise unless handle.cancel_requested?
+              ensure
+                handle.close_data_socket
+              end
+              if handle.cancel_requested?
+                handle.realign_control_connection
+                raise TransferCancelled, handle
+              end
+              voidresp
+            ensure
+              handle.conclude($!)
+              finish_transfer(handle)
             end
-            conn.shutdown(Socket::SHUT_WR) rescue nil
-            conn.read_timeout = 1
-            conn.read rescue nil
-          ensure
-            conn.close if conn
           end
-          voidresp
         end
       end
     end
@@ -691,18 +760,35 @@ module Net
     def retrlines(cmd) # :yield: line
       synchronize do
         with_binary(false) do
+          handle = start_transfer
           begin
-            conn = transfercmd(cmd)
-            while line = conn.gets
-              yield(line.sub(/\r?\n\z/, ""), !line.match(/\n\z/).nil?)
+            begin
+              conn = transfercmd(cmd)
+              handle.attach(conn)
+              begin
+                while !handle.cancel_requested? && (line = conn.gets)
+                  yield(line.sub(/\r?\n\z/, ""), !line.match(/\n\z/).nil?)
+                end
+                unless handle.cancel_requested?
+                  conn.shutdown(Socket::SHUT_WR) rescue nil
+                  conn.read_timeout = 1
+                  conn.read rescue nil
+                end
+              rescue IOError, SystemCallError, SocketError
+                raise unless handle.cancel_requested?
+              ensure
+                handle.close_data_socket
+              end
+              if handle.cancel_requested?
+                handle.realign_control_connection
+                raise TransferCancelled, handle
+              end
+              voidresp
+            ensure
+              handle.conclude($!)
+              finish_transfer(handle)
             end
-            conn.shutdown(Socket::SHUT_WR) rescue nil
-            conn.read_timeout = 1
-            conn.read rescue nil
-          ensure
-            conn.close if conn
           end
-          voidresp
         end
       end
     end
@@ -719,19 +805,36 @@ module Net
       end
       synchronize do
         with_binary(true) do
+          handle = start_transfer
           begin
-            conn = transfercmd(cmd)
-            while buf = file.read(blocksize)
-              conn.write(buf)
-              yield(buf) if block_given?
+            begin
+              conn = transfercmd(cmd)
+              handle.attach(conn)
+              begin
+                while !handle.cancel_requested? && (buf = file.read(blocksize))
+                  conn.write(buf)
+                  yield(buf) if block_given?
+                end
+                unless handle.cancel_requested?
+                  conn.shutdown(Socket::SHUT_WR) rescue nil
+                  conn.read_timeout = 1
+                  conn.read rescue nil
+                end
+              rescue IOError, SystemCallError, SocketError
+                raise unless handle.cancel_requested?
+              ensure
+                handle.close_data_socket
+              end
+              if handle.cancel_requested?
+                handle.realign_control_connection
+                raise TransferCancelled, handle
+              end
+              voidresp
+            ensure
+              handle.conclude($!)
+              finish_transfer(handle)
             end
-            conn.shutdown(Socket::SHUT_WR) rescue nil
-            conn.read_timeout = 1
-            conn.read rescue nil
-          ensure
-            conn.close if conn
           end
-          voidresp
         end
       end
     rescue Errno::EPIPE
@@ -752,22 +855,39 @@ module Net
     def storlines(cmd, file) # :yield: line
       synchronize do
         with_binary(false) do
+          handle = start_transfer
           begin
-            conn = transfercmd(cmd)
-            while buf = file.gets
-              if buf[-2, 2] != CRLF
-                buf = buf.chomp + CRLF
+            begin
+              conn = transfercmd(cmd)
+              handle.attach(conn)
+              begin
+                while !handle.cancel_requested? && (buf = file.gets)
+                  if buf[-2, 2] != CRLF
+                    buf = buf.chomp + CRLF
+                  end
+                  conn.write(buf)
+                  yield(buf) if block_given?
+                end
+                unless handle.cancel_requested?
+                  conn.shutdown(Socket::SHUT_WR) rescue nil
+                  conn.read_timeout = 1
+                  conn.read rescue nil
+                end
+              rescue IOError, SystemCallError, SocketError
+                raise unless handle.cancel_requested?
+              ensure
+                handle.close_data_socket
               end
-              conn.write(buf)
-              yield(buf) if block_given?
+              if handle.cancel_requested?
+                handle.realign_control_connection
+                raise TransferCancelled, handle
+              end
+              getresp # The response might be important when connected to a mainframe
+            ensure
+              handle.conclude($!)
+              finish_transfer(handle)
             end
-            conn.shutdown(Socket::SHUT_WR) rescue nil
-            conn.read_timeout = 1
-            conn.read rescue nil
-          ensure
-            conn.close if conn
           end
-          getresp # The response might be important when connected to a mainframe
         end
       end
     rescue Errno::EPIPE
@@ -1278,6 +1398,26 @@ module Net
     end
 
     #
+    # Returns the TransferHandle for the data transfer currently in
+    # progress, or +nil+ when no transfer is in progress.
+    #
+    # The handle allows a transfer to be cancelled from another thread
+    # while the control connection remains usable:
+    #
+    #   Thread.new { ftp.getbinaryfile("bigfile") }
+    #   sleep 1
+    #   ftp.current_transfer&.cancel
+    #
+    # Unlike calling #abort to interrupt a transfer running in another
+    # thread, cancelling through the handle does not read the
+    # control connection concurrently; the thread performing the transfer
+    # sends ABOR and resynchronizes the control connection itself.
+    #
+    def current_transfer
+      @transfer_mutex.synchronize { @current_transfer }
+    end
+
+    #
     # Aborts the previous command (ABOR command).
     #
     def abort
@@ -1487,6 +1627,244 @@ module Net
     #
     def debug_print(msg)
       @debug_output << msg + "\n" if @debug_mode && @debug_output
+    end
+
+    #
+    # Exception raised in the thread performing a data transfer when the
+    # transfer is cancelled through its TransferHandle.  See
+    # FTP#current_transfer.
+    #
+    class TransferCancelled < FTPError
+      # The TransferHandle of the cancelled transfer.
+      attr_reader :handle
+
+      def initialize(handle) # :nodoc:
+        @handle = handle
+        if handle.desynchronized?
+          super("transfer cancelled; the control connection could not be " \
+                "resynchronized and was closed")
+        else
+          super("transfer cancelled")
+        end
+      end
+    end
+
+    #
+    # A TransferHandle represents a data transfer in progress and allows
+    # it to be cancelled, typically from another thread.  Use
+    # FTP#current_transfer to obtain the handle of the running transfer.
+    #
+    # The handle centralizes everything cancellation needs: it owns the
+    # data socket, and it drives the ABOR exchange and the control
+    # connection replies.  #cancel only records the request and closes the
+    # data socket to unblock the transfer; the thread performing the
+    # transfer then sends ABOR and resynchronizes the control connection,
+    # so the control connection is never read concurrently.
+    #
+    # After a cancellation the control connection stays usable when the
+    # final state is <tt>:cancelled</tt>.  If the server replies cannot be
+    # matched to the expected ABOR/NOOP sequence, the control connection
+    # is closed and the final state is <tt>:desynchronized</tt>.
+    #
+    class TransferHandle
+      # The error that terminated the transfer, if any: a data connection
+      # error, or the error that prevented control connection
+      # resynchronization.
+      attr_reader :error
+
+      def initialize(ftp) # :nodoc:
+        @ftp = ftp
+        @state = :active
+        @cancel_requested = false
+        @data_sock = nil
+        @error = nil
+        @lock = Mutex.new
+        @cond = ConditionVariable.new
+      end
+
+      # Returns the state of the transfer, one of:
+      #
+      # [:active]         the transfer is in progress.
+      # [:cancelling]     cancellation was requested, but the control
+      #                   connection has not been resynchronized yet.
+      # [:cancelled]      the transfer was cancelled and the control
+      #                   connection was resynchronized; it remains usable.
+      # [:completed]      the transfer completed normally; a concurrent
+      #                   cancellation request came too late.
+      # [:failed]         the transfer failed with an error (see #error).
+      # [:desynchronized] the transfer was cancelled, but the control
+      #                   connection could not be resynchronized within
+      #                   FTP#read_timeout seconds and was closed.
+      def state
+        @lock.synchronize { @state }
+      end
+
+      # Returns +true+ if cancellation of this transfer was requested.
+      def cancel_requested?
+        @lock.synchronize { @cancel_requested }
+      end
+
+      # Requests cancellation of the transfer.  May be called from any
+      # thread and returns immediately; the transfer itself is aborted by
+      # the thread performing it, which raises Net::FTP::TransferCancelled
+      # once the control connection has been dealt with.
+      #
+      # Returns +false+ without doing anything if the transfer already
+      # reached a terminal state or cancellation was already requested.
+      def cancel
+        sock = nil
+        @lock.synchronize do
+          return false if terminal_state? || @cancel_requested
+          @cancel_requested = true
+          @state = :cancelling
+          sock = @data_sock
+        end
+        # Closing the data socket unblocks a read or write in the
+        # transfer thread; the control connection is left alone here.
+        sock&.close rescue nil
+        return true
+      end
+
+      # Waits until the transfer reaches a terminal state and returns
+      # +true+.  Returns +false+ if +timeout+ seconds elapse first.
+      def wait(timeout = nil)
+        @lock.synchronize do
+          deadline = timeout &&
+            Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+          until terminal_state?
+            remaining = deadline && deadline -
+              Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            return false if remaining && remaining <= 0
+            @cond.wait(@lock, remaining)
+          end
+          return true
+        end
+      end
+
+      # Returns +true+ if the transfer reached a terminal state, i.e. its
+      # state is not <tt>:active</tt> or <tt>:cancelling</tt>.
+      def terminal?
+        @lock.synchronize { terminal_state? }
+      end
+
+      # Returns +true+ if the transfer was cancelled and the control
+      # connection remains usable.
+      def cancelled?
+        state == :cancelled
+      end
+
+      # Returns +true+ if the transfer completed normally.
+      def completed?
+        state == :completed
+      end
+
+      # Returns +true+ if the transfer failed with an error.
+      def failed?
+        state == :failed
+      end
+
+      # Returns +true+ if the transfer was cancelled but the control
+      # connection could not be resynchronized and was closed.
+      def desynchronized?
+        state == :desynchronized
+      end
+
+      def attach(sock) # :nodoc:
+        close = false
+        @lock.synchronize do
+          @data_sock = sock
+          close = @cancel_requested
+        end
+        # Cancellation may have been requested before the data connection
+        # was established.
+        close_data_socket if close
+      end
+
+      def close_data_socket # :nodoc:
+        sock = @lock.synchronize {
+          data_sock = @data_sock
+          @data_sock = nil
+          data_sock
+        }
+        sock&.close rescue nil
+      end
+
+      # Marks the transfer as completed or failed, unless it already
+      # reached a terminal state.  Called by the transfer methods with the
+      # exception being propagated, if any.
+      def conclude(error) # :nodoc:
+        @lock.synchronize do
+          if !terminal_state?
+            @state = error ? :failed : :completed
+            @error = error
+            @cond.broadcast
+          end
+        end
+      end
+
+      # Aborts the transfer on the server and resynchronizes the control
+      # connection.  Called by the transfer thread, which holds the FTP
+      # monitor, so the control connection is only ever read here.
+      #
+      # ABOR is sent first, followed by NOOP as an in-band marker.  The
+      # transfer's 426 and the ABOR confirmation (226, or 225 when no
+      # transfer was in progress anymore) may arrive in any combination
+      # before the NOOP marker reply; waiting for the marker reply drains
+      # them all, regardless of whether the transfer completed or errored
+      # concurrently with the cancellation.  The wait is bounded by
+      # FTP#read_timeout; if the replies do not match the expected
+      # sequence in time, the control connection cannot be trusted
+      # anymore and is closed.
+      def realign_control_connection # :nodoc:
+        ftp = @ftp
+        begin
+          ftp.__send__(:send_abor)
+          ftp.__send__(:putline, "NOOP")
+          deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) +
+            (ftp.read_timeout || 60)
+          loop do
+            remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            if remaining <= 0
+              raise Net::FTPProtoError,
+                    "timed out waiting for the control connection " \
+                    "to resynchronize"
+            end
+            resp = ftp.__send__(:control_reply, remaining)
+            case resp[0, 3]
+            when "426", "225", "226"
+              # 426: the transfer was aborted.  226/225: ABOR was
+              # processed.  Keep reading until the NOOP marker reply
+              # confirms the control connection is back in sync.
+            when "200"
+              break
+            else
+              raise Net::FTPProtoError, resp
+            end
+          end
+        rescue => e
+          @lock.synchronize do
+            @state = :desynchronized
+            @error = e
+            @cond.broadcast
+          end
+          ftp.close
+          # Mark the connection as unusable, so that further commands
+          # fail with FTPConnectionError instead of IOError.
+          ftp.set_socket(NullSocket.new, false)
+        else
+          @lock.synchronize do
+            @state = :cancelled
+            @cond.broadcast
+          end
+        end
+        return nil
+      end
+
+      private
+
+      def terminal_state?
+        @state != :active && @state != :cancelling
+      end
     end
 
     # :stopdoc:
