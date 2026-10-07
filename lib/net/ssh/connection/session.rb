@@ -1,6 +1,7 @@
 require 'net/ssh/loggable'
 require 'net/ssh/connection/channel'
 require 'net/ssh/connection/constants'
+require 'net/ssh/connection/exec_result'
 require 'net/ssh/service/forward'
 require 'net/ssh/connection/keepalive'
 require 'net/ssh/connection/event_loop'
@@ -433,6 +434,65 @@ module Net
           StringWithExitstatus.new(channel[:result], status[:exit_code]) if channel[:result]
         end
 
+        # Executes +command+ on the remote server, blocking until the
+        # command's channel has fully closed, and returns a
+        # Net::SSH::Connection::ExecResult describing the outcome.
+        #
+        # Unlike #exec!, stdout and stderr are collected separately, and
+        # the result records exactly how the command terminated: a
+        # non-zero exit status, termination by a signal, rejection of the
+        # exec request by the server, or an explicitly unknown exit state
+        # when the channel closes before any exit information arrives.
+        #
+        #   result = ssh.exec_capture("grep something /some/files")
+        #   if result.success?
+        #     puts result.stdout
+        #   else
+        #     warn "#{result.status}: #{result.stderr}"
+        #   end
+        #
+        # Output can be redirected to caller-provided sinks via the
+        # +stdout+ and +stderr+ options. A sink may be any object
+        # responding to << (e.g. a String or an IO), or a callable
+        # invoked with each data chunk as it arrives:
+        #
+        #   ssh.exec_capture("make", stdout: $stdout, stderr: ->(data) { log(data) })
+        #
+        # When a stream has no custom sink, its output is collected into
+        # the result, capped at +limit+ bytes (default
+        # ExecResult::DEFAULT_OUTPUT_LIMIT); excess output is discarded
+        # and the result is flagged with ExecResult#truncated?.
+        #
+        # The command is only considered finished once the channel has
+        # closed, since the exec confirmation, EOF, exit-status,
+        # exit-signal and channel close messages may legitimately arrive
+        # in different orders. Output received before a failure is always
+        # available on the returned result.
+        def exec_capture(command, stdout: nil, stderr: nil, limit: ExecResult::DEFAULT_OUTPUT_LIMIT)
+          result = ExecResult.new(command)
+          stdout_sink = exec_capture_sink(stdout) || proc { |data| result.append_output(:stdout, data, limit) }
+          stderr_sink = exec_capture_sink(stderr) || proc { |data| result.append_output(:stderr, data, limit) }
+
+          channel = open_channel do |ch|
+            ch.exec(command) do |ch2, confirmed|
+              unless confirmed
+                result.reject!
+                ch2.close
+                next
+              end
+
+              ch2.on_data { |_c, data| stdout_sink.call(data) }
+              ch2.on_extended_data { |_c, _type, data| stderr_sink.call(data) }
+              ch2.on_request("exit-status") { |_c, data| result.record_exit_status(data.read_long) }
+              ch2.on_request("exit-signal") { |_c, data| result.record_exit_signal(data.read_string) }
+            end
+          end
+
+          channel.on_open_failed { |*_args| result.reject! }
+          channel.wait
+          result
+        end
+
         # Enqueues a message to be sent to the server as soon as the socket is
         # available for writing. Most programs will never need to call this, but
         # if you are implementing an extension to the SSH protocol, or if you
@@ -534,6 +594,16 @@ module Net
         end
 
         private
+
+        # Normalizes a caller-provided exec_capture output sink into a
+        # callable accepting a single data chunk. Returns nil when no
+        # custom sink was given.
+        def exec_capture_sink(sink)
+          return nil if sink.nil?
+          return sink if sink.respond_to?(:call)
+
+          proc { |data| sink << data }
+        end
 
         # iterate channels with the posibility of callbacks opening new channels during the iteration
         def each_channel(&block)
