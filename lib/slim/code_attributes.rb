@@ -48,8 +48,9 @@ module Slim
     # @param [String] code Ruby code
     # @return [Array] Compiled temple expression
     def on_slim_attrvalue(escape, code)
-      # We perform attribute merging on Array values
-      if delimiter = options[:merge_attrs][@attr]
+      # We perform attribute merging on Array values, false and nil are not effective
+      case rule = options[:merge_attrs][@attr]
+      when String
         tmp = unique_name
         [:multi,
          [:code, "#{tmp} = #{code}"],
@@ -58,10 +59,18 @@ module Slim
            [:code, "#{tmp} = #{tmp}.flatten"],
            [:code, "#{tmp}.map!(&:to_s)"],
            [:code, "#{tmp}.reject!(&:empty?)"],
-           [:escape, escape, [:dynamic, "#{tmp}.join(#{delimiter.inspect})"]]],
-          [:escape, escape, [:dynamic, tmp]]]]
-      else
+           [:escape, escape, [:dynamic, "#{tmp}.join(#{rule.inspect})"]]],
+          [:if, tmp,
+           [:escape, escape, [:dynamic, tmp]]]]]
+      when nil
         [:escape, escape, [:dynamic, code]]
+      else
+        # Attribute with :first, :last or :reject conflict rule
+        tmp = unique_name
+        [:multi,
+         [:code, "#{tmp} = #{code}"],
+         [:if, tmp,
+          [:escape, escape, [:dynamic, tmp]]]]
       end
     end
   end

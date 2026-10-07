@@ -27,9 +27,9 @@ module Slim
     use Slim::EndInserter
     use Slim::Controls
     html :AttributeSorter
-    html :AttributeMerger
+    use Slim::AttributeMerger
     use Slim::CodeAttributes
-    use(:AttributeRemover) { Temple::HTML::AttributeRemover.new(remove_empty_attrs: options[:merge_attrs].keys) }
+    use(:AttributeRemover) { Temple::HTML::AttributeRemover.new(remove_empty_attrs: options[:merge_attrs].reject {|_, v| v == :reject }.keys) }
     html :Pretty
     filter :Ambles
     filter :Escapable

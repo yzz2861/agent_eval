@@ -536,6 +536,31 @@ a class=["menu","highlight"]
 a class=:menu,:highlight
 ~~~
 
+#### Attribute conflict rules
+
+The `:merge_attrs` option also configures how conflicts between multiple attributes of the same name are resolved.
+The attribute name may map to a `String` delimiter (values are merged as shown above) or to one of the
+following rules:
+
+* `:reject` - raise an error if the attribute is specified multiple times (default for unlisted attributes)
+* `:first` - the first effective value wins
+* `:last` - the last effective value wins
+
+~~~ ruby
+Slim::Engine.set_options merge_attrs: {'class' => ' ', 'id' => :first, 'data-turbo' => :last}
+~~~
+
+The rules are applied after attribute name normalization and expansion of nested `data`/`aria` hashes, so they
+are configured with the final attribute name (e.g. `data-x`). Values of `false` and `nil` are not effective and
+never occupy the attribute name. The same rules are used for statically compiled attributes and for runtime
+splat attributes.
+
+~~~ slim
+p id="alpha" *{id: 'beta'} Text
+~~~
+
+renders `<p id="alpha">Text</p>` with `{'id' => :first}` and `<p id="beta">Text</p>` with `{'id' => :last}`.
+
 #### Splat attributes `*`
 
 The splat shortcut allows you to turn a hash into attribute/value pairs.
@@ -1008,7 +1033,7 @@ There are a lot of them but the good thing is, that Slim checks the configuratio
 | Boolean | :use_html_safe | false (true in Rails) | Use String#html_safe? from ActiveSupport (Works together with :disable_escape) |
 | Symbol | :format | :xhtml | HTML output format (Possible formats :html, :xhtml, :xml) |
 | String | :attr_quote | '"' | Character to wrap attributes in html (can be ' or ") |
-| Hash | :merge_attrs | \{'class' => ' '} | Joining character used if multiple html attributes are supplied (e.g. class="class1 class2") |
+| Hash | :merge_attrs | \{'class' => ' '} | Conflict rule used if multiple html attributes are supplied: String delimiter to join the values (e.g. class="class1 class2"), :first or :last to keep the first/last effective value, :reject to raise an error (default) |
 | Array&lt;String&gt; | :hyphen_attrs | %w(data) | Attributes which will be hyphenated if a Hash is given (e.g. data={a_foo:1,b:2} will render as data-a_foo="1" data-b="2") |
 | Boolean | :hyphen_underscore_attrs | false | Attributes that have underscores in their names will be hyphenated (e.g. data={a_foo:1,b_bar:2} will render as data-a-foo="1" data-b-bar="2") |
 | Boolean | :sort_attrs | true | Sort attributes by name |

@@ -246,7 +246,130 @@ a class=true
 a class=false
 }
 
-    assert_html '<a class="true false"></a><a class="false true"></a><a class="true"></a><a class="false"></a>', source
+    assert_html '<a class="true"></a><a class="true"></a><a class="true"></a><a></a>', source
+  end
+
+  def test_attribute_conflict_reject
+    source = %q{
+#alpha id="beta" Test it
+}
+    assert_raises(Temple::FilterError) { render(source, merge_attrs: {'id' => :reject}) }
+  end
+
+  def test_attribute_conflict_reject_splat
+    source = %q{
+p *{id: 'alpha'} *{id: 'beta'} Test it
+}
+    assert_runtime_error 'Multiple id attributes specified', source, merge_attrs: {'id' => :reject}
+  end
+
+  def test_attribute_conflict_reject_boolean_attribute
+    source = %q{
+option(selected) Text
+}
+    assert_html '<option selected="">Text</option>', source, merge_attrs: {'selected' => :reject}
+  end
+
+  def test_attribute_conflict_invalid_rule
+    assert_raises(ArgumentError) { render('p id="alpha" Test it', merge_attrs: {'id' => :invalid}) }
+  end
+
+  def test_attribute_conflict_first_static
+    opts = {merge_attrs: {'id' => :first}}
+    assert_html '<p id="alpha">Test it</p>', 'p id="alpha" id="beta" Test it', opts
+    assert_html '<p id="alpha">Test it</p>', 'p id="alpha" id=1+1 Test it', opts
+    assert_html '<p id="2">Test it</p>', 'p id=1+1 id="beta" Test it', opts
+    assert_html '<p id="a">Test it</p>', 'p id="a" id=1+1 id="c" Test it', opts
+  end
+
+  def test_attribute_conflict_first_static_ignores_false_and_nil
+    opts = {merge_attrs: {'id' => :first}}
+    assert_html '<p id="beta">Test it</p>', 'p id=false id="beta" Test it', opts
+    assert_html '<p id="beta">Test it</p>', 'p id=nil id="beta" Test it', opts
+    assert_html '<p id="alpha">Test it</p>', 'p id="alpha" id=false Test it', opts
+  end
+
+  def test_attribute_conflict_last_static
+    opts = {merge_attrs: {'id' => :last}}
+    assert_html '<p id="beta">Test it</p>', 'p id="alpha" id="beta" Test it', opts
+    assert_html '<p id="2">Test it</p>', 'p id="alpha" id=1+1 Test it', opts
+    assert_html '<p id="c">Test it</p>', 'p id="a" id=1+1 id="c" Test it', opts
+  end
+
+  def test_attribute_conflict_last_static_ignores_false_and_nil
+    opts = {merge_attrs: {'id' => :last}}
+    assert_html '<p id="alpha">Test it</p>', 'p id="alpha" id=false Test it', opts
+    assert_html '<p id="alpha">Test it</p>', 'p id="alpha" id=nil id=false Test it', opts
+    assert_html '<p>Test it</p>', 'p id=false id=nil Test it', opts
+  end
+
+  def test_attribute_conflict_splat
+    first = {merge_attrs: {'id' => :first}}
+    last = {merge_attrs: {'id' => :last}}
+    assert_html '<p id="alpha">Test it</p>', 'p *{id: "alpha"} *{id: "beta"} Test it', first
+    assert_html '<p id="beta">Test it</p>', 'p *{id: "alpha"} *{id: "beta"} Test it', last
+    assert_html '<p id="alpha">Test it</p>', 'p id="alpha" *{id: "beta"} Test it', first
+    assert_html '<p id="beta">Test it</p>', 'p id="alpha" *{id: "beta"} Test it', last
+    assert_html '<p id="alpha">Test it</p>', 'p *{id: "alpha"} id="beta" Test it', first
+    assert_html '<p id="beta">Test it</p>', 'p *{id: "alpha"} id="beta" Test it', last
+  end
+
+  def test_attribute_conflict_splat_ignores_false_and_nil
+    assert_html '<p id="beta">Test it</p>', 'p *{id: false} *{id: "beta"} Test it', merge_attrs: {'id' => :first}
+    assert_html '<p id="alpha">Test it</p>', 'p *{id: "alpha"} *{id: nil} Test it', merge_attrs: {'id' => :last}
+  end
+
+  def test_attribute_conflict_three_sources
+    source = 'p id="alpha" id=1+1 *{id: "gamma"} Test it'
+    assert_html '<p id="alpha">Test it</p>', source, merge_attrs: {'id' => :first}
+    assert_html '<p id="gamma">Test it</p>', source, merge_attrs: {'id' => :last}
+    assert_html '<p id="gamma">Test it</p>', 'p id=false id="beta" *{id: false} *{id: "gamma"} Test it', merge_attrs: {'id' => :last}
+    assert_html '<p id="beta">Test it</p>', 'p id=false id="beta" *{id: false} Test it', merge_attrs: {'id' => :first}
+  end
+
+  def test_attribute_conflict_hyphenated
+    assert_html '<p data-x="b">Test it</p>', 'p data={x: "a"} *{data: {x: "b"}} Test it', merge_attrs: {'data-x' => :last}
+    assert_html '<p data-x="b">Test it</p>', 'p data-x="a" data={x: "b"} Test it', merge_attrs: {'data-x' => :last}
+    assert_html '<p data-x="a">Test it</p>', 'p data={x: "a"} *{data: {x: "b"}} Test it', merge_attrs: {'data-x' => :first}
+    assert_html '<p data-a-b="1">Test it</p>', 'p data={a: {b: 1}} *{data: {a: {b: 2}}} Test it', merge_attrs: {'data-a-b' => :first}
+    assert_html '<p data-x="b">Test it</p>', 'p data={x: false} *{data: {x: "b"}} Test it', merge_attrs: {'data-x' => :first}
+    assert_html '<p aria-label="b">Test it</p>', 'p aria={label: "a"} *{aria: {label: "b"}} Test it', merge_attrs: {'aria-label' => :last}
+  end
+
+  def test_attribute_conflict_hyphenated_underscore
+    assert_html '<p data-x-y="b">Test it</p>', 'p *{data: {x_y: "a"}} *{data: {x_y: "b"}} Test it',
+                merge_attrs: {'data-x-y' => :last}, hyphen_underscore_attrs: true
+  end
+
+  def test_attribute_conflict_escaping
+    assert_html '<p id="c&lt;d">Test it</p>', 'p id="a<b" id="c<d" Test it', merge_attrs: {'id' => :last}
+    assert_html '<p id="a&lt;b">Test it</p>', 'p id="a<b" *{id: "c<d"} Test it', merge_attrs: {'id' => :first}
+    assert_html '<p class="a&lt;b c&lt;d">Test it</p>', 'p class="a<b" *{class: "c<d"} Test it'
+    assert_html '<p id="&lt;script&gt;do_something_evil();&lt;/script&gt;">Test it</p>',
+                'p id=evil_method id="beta" Test it', merge_attrs: {'id' => :first}
+  end
+
+  def test_attribute_conflict_evaluated_once
+    assert_html '<p id="1">Test it</p>', 'p id=succ_x id="beta" Test it', merge_attrs: {'id' => :first}
+    assert_equal 1, @env.x
+  end
+
+  def test_attribute_conflict_evaluated_once_last
+    assert_html '<p id="beta">Test it</p>', 'p id=succ_x id="beta" Test it', merge_attrs: {'id' => :last}
+    assert_equal 1, @env.x
+  end
+
+  def test_attribute_conflict_splat_evaluated_once
+    assert_html '<p id="alpha">Test it</p>', 'p *{id: "alpha"} id=succ_x Test it', merge_attrs: {'id' => :first}
+    assert_equal 1, @env.x
+  end
+
+  def test_attribute_conflict_splat_hash_not_modified
+    hash = {id: 'alpha', data: {x: 1}.freeze, class: ['a', ['b']].freeze}.freeze
+    assert_html '<p class="a b" data-x="1" id="alpha">Test it</p>', 'p *attrs Test it', locals: {attrs: hash}
+    assert_equal({id: 'alpha', data: {x: 1}, class: ['a', ['b']]}, hash)
+    assert_html '<p id="alpha">Test it</p>', 'p id="beta" *attrs Test it',
+                merge_attrs: {'id' => :last}, locals: {attrs: {id: 'alpha'}.freeze}
   end
 
   def test_static_empty_attribute

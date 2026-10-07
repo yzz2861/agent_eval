@@ -524,6 +524,23 @@ a class=["menu","highlight"]
 a class=:menu,:highlight
 ~~~
 
+#### 属性の競合ルール
+
+`:merge_attrs` オプションでは、同名の属性が複数指定された場合の競合解決方法も設定できます。
+属性名には `String` の区切り文字 (上記のように値が結合されます) または以下のルールを指定できます。
+
+* `:reject` - 属性が複数指定された場合にエラーを発生させます (未指定の属性のデフォルト)
+* `:first` - 最初の有効な値が使われます
+* `:last` - 最後の有効な値が使われます
+
+~~~ ruby
+Slim::Engine.set_options merge_attrs: {'class' => ' ', 'id' => :first, 'data-turbo' => :last}
+~~~
+
+ルールは属性名の正規化と入れ子の `data`/`aria` ハッシュの展開の後に適用されるため、最終的な属性名
+(例: `data-x`) で設定します。`false` と `nil` は有効な値ではなく、属性名を占有しません。同じルールが
+静的にコンパイルされる属性と実行時のスプラット属性の両方に適用されます。
+
 #### アスタリスク属性 `*`
 
 アスタリスクによってハッシュを属性/値のペアとして使うことができます。
@@ -973,7 +990,7 @@ end
 | Boolean | :use_html_safe | false (Rails では true) | ActiveSupport の String# html_safe? を使う (:disable_escape と一緒に機能する) |
 | Symbol | :format | :xhtml | HTML の出力フォーマット (対応フォーマット :html, :xhtml, :xml) |
 | String | :attr_quote |  '"'  | HTML の属性を囲む文字 (' または " が可能) |
-| Hash | :merge_attrs | \{'class' => ' '} | 複数の html 属性が与えられたときに, 結合に使われる文字 (例: class="class1 class2") |
+| Hash | :merge_attrs | \{'class' => ' '} | 複数の html 属性が与えられたときの競合ルール: 値を結合する String の区切り文字 (例: class="class1 class2"), 最初/最後の有効な値を使う :first/:last, エラーを発生させる :reject (デフォルト) |
 | Array&lt;String&gt; | :hyphen_attrs | %w(data) | 属性にハッシュが与えられたとき, ハイフンで区切られます。(例: data={a:1, b:2} は data-a="1" data-b="2" のように) |
 | Boolean | :sort_attrs | true | 名前順に属性をソート |
 | Symbol | :js_wrapper | nil | :commentや :cdata , :both で JavaScript をラップします。:guess を指定することで :format オプションに基いて設定することもできます |

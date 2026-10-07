@@ -13,12 +13,14 @@ module Slim
       end
 
       def code_attr(name, escape, value)
-        if delim = @options[:merge_attrs][name]
-          value = Array === value ? value.join(delim) : value.to_s
+        # false and nil are not effective values and never occupy the attribute name
+        return if value == false || value == nil
+        if (delim = @options[:merge_attrs][name]) && String === delim
+          value = Array === value ? value.flatten.map(&:to_s).reject(&:empty?).join(delim) : value.to_s
           attr(name, escape_html(escape, value)) unless value.empty?
         elsif @options[:hyphen_attrs].include?(name) && Hash === value
           hyphen_attr(name, escape, value)
-        elsif value != false && value != nil
+        else
           attr(name, escape_html(escape, value))
         end
       end
@@ -33,9 +35,14 @@ module Slim
         if name =~ INVALID_ATTRIBUTE_NAME_REGEX
           raise InvalidAttributeNameError, "Invalid attribute name '#{name}' was rendered"
         end
-        if @attrs[name]
-          if delim = @options[:merge_attrs][name]
-            @attrs[name] = @attrs[name].to_s + delim + value.to_s
+        if @attrs.key?(name)
+          case rule = @options[:merge_attrs][name]
+          when String
+            @attrs[name] = @attrs[name].to_s + rule + value.to_s
+          when :first
+            # Keep the first effective value
+          when :last
+            @attrs[name] = value
           else
             raise("Multiple #{name} attributes specified")
           end
@@ -101,7 +108,9 @@ module Slim
             end
           end
         else
-          attr(name, escape_html(escape, value))
+          # The conflict rules apply to the final attribute name,
+          # after name normalization and nested hash expansion
+          code_attr(name, escape, value)
         end
       end
 
