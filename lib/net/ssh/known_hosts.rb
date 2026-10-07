@@ -146,6 +146,8 @@ module Net
                           ecdsa-sha2-nistp521]
 
       SUPPORTED_TYPE.push('ssh-ed25519') if Net::SSH::Authentication::ED25519Loader::LOADED
+      SUPPORTED_TYPE.push('sk-ssh-ed25519@openssh.com') if Net::SSH::Authentication::ED25519Loader::LOADED
+      SUPPORTED_TYPE.push('sk-ecdsa-sha2-nistp256@openssh.com')
 
       class << self
         # Searches all known host files (see KnownHosts.hostfiles) for all keys

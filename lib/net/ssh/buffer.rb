@@ -2,6 +2,7 @@ require 'net/ssh/transport/openssl'
 
 require 'net/ssh/authentication/certificate'
 require 'net/ssh/authentication/ed25519_loader'
+require 'net/ssh/authentication/security_key'
 
 module Net
   module SSH
@@ -336,8 +337,13 @@ module Net
         when /^ssh-ed25519$/
           Net::SSH::Authentication::ED25519Loader.raiseUnlessLoaded("unsupported key type `#{type}'")
           key = Net::SSH::Authentication::ED25519::PubKey.read_keyblob(self)
+        when /^sk-ssh-ed25519@openssh\.com$/
+          Net::SSH::Authentication::ED25519Loader.raiseUnlessLoaded("unsupported key type `#{type}'")
+          key = Net::SSH::Authentication::SecurityKey::Ed25519PubKey.read_keyblob(self)
         when /^ecdsa\-sha2\-(\w*)$/
           key = OpenSSL::PKey::EC.read_keyblob($1, self)
+        when /^sk-ecdsa\-sha2\-(\w+)@openssh\.com$/
+          key = Net::SSH::Authentication::SecurityKey::ECDSAPubKey.read_keyblob(self)
         else
           raise NotImplementedError, "unsupported key type `#{type}'"
         end

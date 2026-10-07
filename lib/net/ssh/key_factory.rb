@@ -1,4 +1,5 @@
 require 'net/ssh/transport/openssl'
+require 'net/ssh/buffer'
 require 'net/ssh/prompt'
 
 require 'net/ssh/authentication/ed25519_loader'
@@ -92,7 +93,7 @@ module Net
           blob = nil
           begin
             blob = fields.shift
-          end while !blob.nil? && !/^(ssh-(rsa|dss|ed25519)|ecdsa-sha2-nistp\d+)(-cert-v01@openssh\.com)?$/.match(blob)
+          end while !blob.nil? && !/^(ssh-(rsa|dss|ed25519)|ecdsa-sha2-nistp\d+|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com)(-cert-v01@openssh\.com)?$/.match(blob)
           blob = fields.shift
 
           raise Net::SSH::Exception, "public key at #{filename} is not valid" if blob.nil?

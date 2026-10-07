@@ -104,7 +104,13 @@ module Net
 
             server_key = result[:server_key]
             server_sig = result[:server_sig]
-            unless connection.host_key_verifier.verify_signature { server_key.ssh_do_verify(server_sig, hash, host_key: algorithms.host_key) }
+            verify_options = { host_key: algorithms.host_key }
+            if server_key.is_a?(Net::SSH::Authentication::SecurityKey::PubKey)
+              options = connection.options
+              verify_options[:user_presence_required] = options[:security_key_user_presence_required] if options.key?(:security_key_user_presence_required)
+              verify_options[:user_verification_required] = options[:security_key_user_verification_required] if options.key?(:security_key_user_verification_required)
+            end
+            unless connection.host_key_verifier.verify_signature { server_key.ssh_do_verify(server_sig, hash, verify_options) }
               raise Net::SSH::Exception, 'could not verify server signature'
             end
 
