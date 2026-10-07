@@ -19,6 +19,10 @@ module Authentication
           def sess.next_message
             transport.next_message
           end
+          sess.stubs(:public_key_attempted?).returns(false)
+          sess.stubs(:public_key_attempt!)
+          sess.stubs(:public_key_accepted?).returns(false)
+          sess.stubs(:accept_public_key)
           sess
         end
       end

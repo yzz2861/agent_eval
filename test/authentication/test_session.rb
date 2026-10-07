@@ -1,10 +1,14 @@
 require_relative '../common'
+require 'logger'
 require 'net/ssh/authentication/session'
 
 module Authentication
   class TestSession < NetSSHTest
     include Net::SSH::Transport::Constants
     include Net::SSH::Authentication::Constants
+
+    USERAUTH_INFO_REQUEST = 60
+    USERAUTH_INFO_RESPONSE = 61
 
     def test_constructor_should_set_defaults
       assert_equal %w[none publickey password keyboard-interactive], session.auth_methods
@@ -48,6 +52,146 @@ module Authentication
       Net::SSH::Authentication::Methods::None.any_instance.expects(:authenticate).with("next service", "username", "password").returns(false)
 
       assert_equal false, session.authenticate("next service", "username", "password")
+    end
+
+    def test_authenticate_continues_after_partial_public_key_success_with_keyboard_interactive
+      prompt = MockPrompt.new
+      prompt.expects(:_ask).with("Verification code:", anything, false).returns("one-time-code")
+
+      transport.expect do |t, packet|
+        assert_service_request(packet)
+        t.return(SERVICE_ACCEPT)
+
+        t.expect do |_t2, public_key_packet|
+          assert_public_key_request(public_key_packet, first_public_key, signed: false)
+          t.return(USERAUTH_PK_OK)
+
+          t.expect do |_t3, signed_public_key_packet|
+            assert_public_key_request(signed_public_key_packet, first_public_key, signed: true)
+            t.return(USERAUTH_FAILURE, :string, "keyboard-interactive", :bool, true)
+
+            t.expect do |_t4, keyboard_packet|
+              assert_keyboard_interactive_request(keyboard_packet)
+              t.return(USERAUTH_INFO_REQUEST, :string, "Verification", :string, "", :string, "",
+                      :long, 1, :string, "Verification code:", :bool, false)
+
+              t.expect do |_t5, response_packet|
+                assert_info_response(response_packet, "one-time-code")
+                t.return(USERAUTH_SUCCESS)
+              end
+            end
+          end
+        end
+      end
+
+      options = {
+        auth_methods: %w[publickey keyboard-interactive],
+        key_data: [first_private_key.to_pem],
+        pubkey_algorithms: %w[ssh-rsa],
+        password_prompt: prompt
+      }
+
+      assert session(options).authenticate("next service", "username")
+      assert_equal %w[publickey], session(options).accepted_auth_methods
+      assert transport.hints[:authenticated]
+    end
+
+    def test_authenticate_tries_a_second_public_key_after_the_first_is_partially_accepted
+      transport.expect do |t, packet|
+        assert_service_request(packet)
+        t.return(SERVICE_ACCEPT)
+
+        t.expect do |_t2, public_key_packet|
+          assert_public_key_request(public_key_packet, first_public_key, signed: false)
+          t.return(USERAUTH_PK_OK)
+
+          t.expect do |_t3, signed_public_key_packet|
+            assert_public_key_request(signed_public_key_packet, first_public_key, signed: true)
+            t.return(USERAUTH_FAILURE, :string, "publickey", :bool, true)
+
+            t.expect do |_t4, second_public_key_packet|
+              assert_public_key_request(second_public_key_packet, second_public_key, signed: false)
+              t.return(USERAUTH_PK_OK)
+
+              t.expect do |_t5, signed_second_public_key_packet|
+                assert_public_key_request(signed_second_public_key_packet, second_public_key, signed: true)
+                t.return(USERAUTH_SUCCESS)
+              end
+            end
+          end
+        end
+      end
+
+      options = {
+        auth_methods: %w[publickey],
+        key_data: [first_private_key.to_pem, second_private_key.to_pem],
+        pubkey_algorithms: %w[ssh-rsa]
+      }
+
+      assert session(options).authenticate("next service", "username")
+      assert_equal %w[publickey], session(options).accepted_auth_methods
+      assert session(options).public_key_accepted?(first_public_key)
+      assert transport.hints[:authenticated]
+    end
+
+    def test_authenticate_stops_when_the_server_repeats_methods_without_progress
+      log = StringIO.new
+      options = {
+        auth_methods: %w[keyboard-interactive],
+        non_interactive: true,
+        logger: Logger.new(log)
+      }
+
+      transport(options).expect do |t, packet|
+        assert_service_request(packet)
+        t.return(SERVICE_ACCEPT)
+
+        t.expect do |_t2, first_keyboard_packet|
+          assert_keyboard_interactive_request(first_keyboard_packet)
+          t.return(USERAUTH_FAILURE, :string, "keyboard-interactive", :bool, true)
+
+          t.expect do |_t3, second_keyboard_packet|
+            assert_keyboard_interactive_request(second_keyboard_packet)
+            t.return(USERAUTH_FAILURE, :string, "keyboard-interactive", :bool, true)
+          end
+        end
+      end
+
+      assert_equal false, session(options).authenticate("next service", "username", "secret-value")
+      assert_match "stopped at stage 2", log.string
+      assert_match "accepted factors: keyboard-interactive", log.string
+      assert_match "no progress was made", log.string
+      refute_match "secret-value", log.string
+    end
+
+    def test_authenticate_does_not_replay_a_partially_accepted_public_key
+      log = StringIO.new
+      options = {
+        auth_methods: %w[publickey],
+        key_data: [first_private_key.to_pem],
+        pubkey_algorithms: %w[ssh-rsa],
+        logger: Logger.new(log)
+      }
+
+      transport(options).expect do |t, packet|
+        assert_service_request(packet)
+        t.return(SERVICE_ACCEPT)
+
+        t.expect do |_t2, public_key_packet|
+          assert_public_key_request(public_key_packet, first_public_key, signed: false)
+          t.return(USERAUTH_PK_OK)
+
+          t.expect do |_t3, signed_public_key_packet|
+            assert_public_key_request(signed_public_key_packet, first_public_key, signed: true)
+            t.return(USERAUTH_FAILURE, :string, "publickey", :bool, true)
+          end
+        end
+      end
+
+      assert_equal false, session(options).authenticate("next service", "username")
+      assert_match "stopped at stage 2", log.string
+      assert_match "accepted factors: publickey", log.string
+      refute_match first_private_key.to_pem, log.string
     end
 
     def test_next_message_should_silently_handle_USERAUTH_BANNER_packets
@@ -109,7 +253,7 @@ module Authentication
       end
 
       transport.expect do |t, packet|
-        assert_public_key_request default_public_key, packet
+        assert_public_key_request(packet, default_public_key, signed: false)
         t.return(USERAUTH_FAILURE, :string, "publickey")
       end
 
@@ -134,7 +278,7 @@ module Authentication
       end
 
       transport.expect do |t, packet|
-        assert_public_key_request custom_public_key, packet
+        assert_public_key_request(packet, custom_public_key, signed: false)
         t.return(USERAUTH_FAILURE, :string, "publickey")
       end
 
@@ -158,7 +302,7 @@ module Authentication
       end
 
       transport.expect do |t, packet|
-        assert_public_key_request custom_public_key, packet
+        assert_public_key_request(packet, custom_public_key, signed: false)
         t.return(USERAUTH_FAILURE, :string, "publickey")
       end
 
@@ -183,14 +327,56 @@ module Authentication
       assert_equal "none", packet.read_string
     end
 
-    def assert_public_key_request(public_key, packet)
+    def assert_service_request(packet)
+      assert_equal SERVICE_REQUEST, packet.type
+      assert_equal "ssh-userauth", packet.read_string
+    end
+
+    def assert_public_key_request(packet, public_key_or_pem, signed:)
+      public_key = if public_key_or_pem.is_a?(String)
+                     OpenSSL::PKey.read(public_key_or_pem).public_key
+                   else
+                     public_key_or_pem
+                   end
+
       assert_equal "username", packet.read_string
       assert_equal "next service", packet.read_string
       assert_equal "publickey", packet.read_string
-      assert_equal false, packet.read_bool
+      assert_equal signed, packet.read_bool
       assert_equal "ssh-rsa", packet.read_string
-      key_in_packet = Net::SSH::Buffer.new(packet.read_string).read_key
-      assert_equal public_key, key_in_packet.to_pem
+      assert_equal public_key.to_blob, Net::SSH::Buffer.new(packet.read_string).read_key.to_blob
+      packet.read_string if signed
+    end
+
+    def assert_keyboard_interactive_request(packet)
+      assert_equal USERAUTH_REQUEST, packet.type
+      assert_equal "username", packet.read_string
+      assert_equal "next service", packet.read_string
+      assert_equal "keyboard-interactive", packet.read_string
+      assert_equal "", packet.read_string
+      assert_equal "", packet.read_string
+    end
+
+    def assert_info_response(packet, response)
+      assert_equal USERAUTH_INFO_RESPONSE, packet.type
+      assert_equal 1, packet.read_long
+      assert_equal response, packet.read_string
+    end
+
+    def first_private_key
+      @first_private_key ||= OpenSSL::PKey::RSA.new(2048)
+    end
+
+    def second_private_key
+      @second_private_key ||= OpenSSL::PKey::RSA.new(2048)
+    end
+
+    def first_public_key
+      first_private_key.public_key
+    end
+
+    def second_public_key
+      second_private_key.public_key
     end
 
     def file_on_filesystem(name, contents)

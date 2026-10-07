@@ -15,6 +15,7 @@ module NetSSH
 
     def test_close_transport_when_authentication_fails
       authentication_session.expects(authenticate: false)
+      authentication_session.stubs(failure_message: "authentication failed (stopped at stage 1)")
 
       transport_session.expects(:close).at_least_once
 

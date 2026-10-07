@@ -51,6 +51,8 @@ module Net
             when USERAUTH_FAILURE
               info { "hostbased failed (#{identity.fingerprint})" }
 
+              return :partial_success if message[:partial_success]
+
               raise Net::SSH::Authentication::DisallowedMethod unless
                 message[:authentications].split(/,/).include? 'hostbased'
 

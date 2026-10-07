@@ -1,4 +1,5 @@
 require 'net/ssh/loggable'
+require 'set'
 require 'net/ssh/transport/constants'
 require 'net/ssh/authentication/constants'
 require 'net/ssh/authentication/key_manager'
@@ -11,10 +12,6 @@ require 'net/ssh/authentication/methods/keyboard_interactive'
 module Net
   module SSH
     module Authentication
-      # Raised if the current authentication method is not allowed
-      class DisallowedMethod < Net::SSH::Exception
-      end
-
       # Represents an authentication session. It manages the authentication of
       # a user over an established connection (the "transport" object, see
       # Net::SSH::Transport::Session).
@@ -36,6 +33,12 @@ module Net
         # the list of authentication methods that are allowed
         attr_reader :allowed_auth_methods
 
+        # authentication methods that the server has accepted so far
+        attr_reader :accepted_auth_methods
+
+        # the last authentication failure message, without credentials
+        attr_reader :failure_message
+
         # a hash of options, given at construction time
         attr_reader :options
 
@@ -49,6 +52,10 @@ module Net
           @options = options
 
           @allowed_auth_methods = @auth_methods
+          @accepted_auth_methods = []
+          @attempted_public_keys = Set.new
+          @accepted_public_keys = Set.new
+          @failure_message = nil
         end
 
         # Attempts to authenticate the given user, in preparation for the next
@@ -56,6 +63,7 @@ module Net
         # authenticating the user, and false otherwise.
         def authenticate(next_service, username, password = nil)
           debug { "beginning authentication of `#{username}'" }
+          @failure_message = nil
 
           transport.send_message(transport.service_request("ssh-userauth"))
           expect_message(SERVICE_ACCEPT)
@@ -68,29 +76,46 @@ module Net
           default_keys.each { |key| key_manager.add(key) } unless options.key?(:keys) || options.key?(:key_data)
 
           attempted = []
+          exhausted_auth_methods = Set.new
 
-          @auth_methods.each do |name|
-            next unless @allowed_auth_methods.include?(name)
+          loop do
+            name = next_auth_method(exhausted_auth_methods)
+            unless name
+              fail_authentication(attempted)
+              return false
+            end
 
             attempted << name
-
             debug { "trying #{name}" }
+
             begin
-              auth_class = Methods.const_get(name.split(/\W+/).map { |p| p.capitalize }.join)
-              method = auth_class.new(self,
-                                      key_manager: key_manager, password_prompt: options[:password_prompt],
-                                      pubkey_algorithms: options[:pubkey_algorithms] || nil)
+              method = build_auth_method(name, key_manager)
             rescue NameError
               debug {"Mechanism #{name} was requested, but isn't a known type.  Ignoring it."}
+              exhausted_auth_methods << name
               next
             end
 
-            return true if method.authenticate(next_service, username, password)
+            progress = authentication_progress
+            result = method.authenticate(next_service, username, password)
+
+            case result
+            when true
+              return true
+            when :partial_success
+              unless make_authentication_progress?(name, progress)
+                fail_authentication(attempted, "no progress was made")
+                return false
+              end
+              exhausted_auth_methods.clear
+              password = nil unless name == "publickey"
+            else
+              exhausted_auth_methods << name
+            end
           rescue Net::SSH::Authentication::DisallowedMethod
+            exhausted_auth_methods << name
           end
 
-          error { "all authorization methods failed (tried #{attempted.join(', ')})" }
-          return false
         ensure
           key_manager.finish if key_manager
         end
@@ -110,6 +135,7 @@ module Net
             when USERAUTH_FAILURE
               @allowed_auth_methods = packet[:authentications].split(/,/)
               debug { "allowed methods: #{packet[:authentications]}" }
+              debug { "partial success: #{packet[:partial_success]}" }
               return packet
 
             when USERAUTH_METHOD_RANGE, SERVICE_ACCEPT
@@ -134,7 +160,73 @@ module Net
           message
         end
 
+        def public_key_attempted?(identity, algorithm)
+          @attempted_public_keys.include?([identity.fingerprint, algorithm])
+        end
+
+        def public_key_attempt!(identity, algorithm)
+          @attempted_public_keys << [identity.fingerprint, algorithm]
+        end
+
+        def public_key_accepted?(identity)
+          @accepted_public_keys.include?(identity.fingerprint)
+        end
+
+        def accept_public_key(identity)
+          @accepted_public_keys << identity.fingerprint
+        end
+
         private
+
+        def fail_authentication(attempted, reason = nil)
+          @failure_message = authentication_failure_message(attempted, reason) if reason
+          @failure_message ||= authentication_failure_message(attempted)
+          error { @failure_message }
+        end
+
+        def next_auth_method(exhausted_auth_methods)
+          @auth_methods.find do |name|
+            @allowed_auth_methods.include?(name) && !exhausted_auth_methods.include?(name)
+          end
+        end
+
+        def build_auth_method(name, key_manager)
+          auth_class = Methods.const_get(name.split(/\W+/).map { |p| p.capitalize }.join)
+          auth_class.new(self,
+                         key_manager: key_manager, password_prompt: options[:password_prompt],
+                         pubkey_algorithms: options[:pubkey_algorithms] || nil)
+        end
+
+        def authentication_progress
+          [@accepted_public_keys.dup, @attempted_public_keys.dup]
+        end
+
+        def make_authentication_progress?(name, previous_progress)
+          before_accepted_keys, before_attempted_keys = previous_progress
+          method_was_accepted = name != "publickey" && @accepted_auth_methods.include?(name)
+          @accepted_auth_methods << name unless method_was_accepted
+
+          !method_was_accepted ||
+            @accepted_public_keys != before_accepted_keys ||
+            @attempted_public_keys != before_attempted_keys
+        end
+
+        def authentication_failure_message(attempted, reason = "no usable authentication methods remain")
+          stage = accepted_factor_count + 1
+          details = ["stopped at stage #{stage}", reason]
+          details << "accepted factors: #{accepted_factor_names.join(', ')}" unless accepted_factor_names.empty?
+          details << "remaining methods: #{allowed_auth_methods.join(', ')}" unless allowed_auth_methods.empty?
+          details << "tried: #{attempted.join(', ')}" unless attempted.empty?
+          "authentication failed (#{details.join('; ')})"
+        end
+
+        def accepted_factor_count
+          @accepted_public_keys.length + (accepted_auth_methods - ["publickey"]).length
+        end
+
+        def accepted_factor_names
+          ["publickey"] * @accepted_public_keys.length + (accepted_auth_methods - ["publickey"])
+        end
 
         # Returns an array of paths to the key files usually defined
         # by system default.

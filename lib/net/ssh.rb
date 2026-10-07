@@ -268,7 +268,8 @@ module Net
         end
       else
         transport.close
-        raise AuthenticationFailed, "Authentication failed for user #{user}@#{host}"
+        details = auth.failure_message || "Authentication failed for user #{user}@#{host}"
+        raise AuthenticationFailed, "Authentication failed for user #{user}@#{host}: #{details}"
       end
     end
 

@@ -27,6 +27,8 @@ module Net
               when USERAUTH_FAILURE
                 debug { "keyboard-interactive failed" }
 
+                return :partial_success if message[:partial_success]
+
                 raise Net::SSH::Authentication::DisallowedMethod unless
                   message[:authentications].split(/,/).include? 'keyboard-interactive'
 

@@ -16,13 +16,28 @@ module Net
             return false unless key_manager
 
             key_manager.each_identity do |identity|
-              return true if authenticate_with(identity, next_service, username)
+              next if session.public_key_accepted?(identity)
+
+              result = authenticate_with(identity, next_service, username)
+              return result unless result == false
             end
 
-            return false
+            false
           end
 
           private
+
+          def authentication_failure_result(message, identity)
+            if message[:partial_success]
+              session.accept_public_key(identity)
+              return :partial_success
+            end
+
+            raise Net::SSH::Authentication::DisallowedMethod unless
+              message[:authentications].split(/,/).include? 'publickey'
+
+            false
+          end
 
           # Builds a packet that contains the request formatted for sending
           # a public-key request to the server.
@@ -44,7 +59,10 @@ module Net
           end
 
           def authenticate_with_alg(identity, next_service, username, alg, sig_alg = nil)
+            return false if session.public_key_attempted?(identity, alg)
+
             debug { "trying publickey (#{identity.fingerprint}) alg #{alg}" }
+            session.public_key_attempt!(identity, alg)
             send_request(identity, username, next_service, alg)
 
             message = session.next_message
@@ -68,17 +86,18 @@ module Net
                 return true
               when USERAUTH_FAILURE
                 debug { "publickey failed (#{identity.fingerprint})" }
-
-                raise Net::SSH::Authentication::DisallowedMethod unless
-                  message[:authentications].split(/,/).include? 'publickey'
-
-                return false
+                return authentication_failure_result(message, identity)
               else
                 raise Net::SSH::Exception,
                       "unexpected server response to USERAUTH_REQUEST: #{message.type} (#{message.inspect})"
               end
 
             when USERAUTH_FAILURE
+              if message[:partial_success]
+                session.accept_public_key(identity)
+                return :partial_success
+              end
+
               return false
             when USERAUTH_SUCCESS
               return true
@@ -97,35 +116,27 @@ module Net
               pubkey_algorithms.each do |pk_alg|
                 case pk_alg
                 when "rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"
-                  if authenticate_with_alg(identity, next_service, username, pk_alg, pk_alg)
-                    # success
-                    return true
-                  end
+                  result = authenticate_with_alg(identity, next_service, username, pk_alg, pk_alg)
+                  return result unless result == false
                 end
               end
             elsif type == "ssh-rsa-cert-v01@openssh.com"
               pubkey_algorithms.each do |pk_alg|
                 case pk_alg
                 when "rsa-sha2-512-cert-v01@openssh.com"
-                  if authenticate_with_alg(identity, next_service, username, pk_alg, "rsa-sha2-512")
-                    # success
-                    return true
-                  end
+                  result = authenticate_with_alg(identity, next_service, username, pk_alg, "rsa-sha2-512")
+                  return result unless result == false
                 when "rsa-sha2-256-cert-v01@openssh.com"
-                  if authenticate_with_alg(identity, next_service, username, pk_alg, "rsa-sha2-256")
-                    # success
-                    return true
-                  end
+                  result = authenticate_with_alg(identity, next_service, username, pk_alg, "rsa-sha2-256")
+                  return result unless result == false
                 when "ssh-rsa-cert-v01@openssh.com"
-                  if authenticate_with_alg(identity, next_service, username, pk_alg)
-                    # success
-                    return true
-                  end
+                  result = authenticate_with_alg(identity, next_service, username, pk_alg)
+                  return result unless result == false
                 end
               end
-            elsif authenticate_with_alg(identity, next_service, username, type)
-              # success
-              return true
+            else
+              result = authenticate_with_alg(identity, next_service, username, type)
+              return result unless result == false
             end
             # failure
             return false

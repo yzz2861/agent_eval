@@ -19,6 +19,8 @@ module Net
             when USERAUTH_FAILURE
               debug { "none failed" }
 
+              return :partial_success if message[:partial_success]
+
               raise Net::SSH::Authentication::DisallowedMethod unless
                 message[:authentications].split(/,/).include? 'none'
 

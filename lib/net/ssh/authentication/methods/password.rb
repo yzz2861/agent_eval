@@ -26,6 +26,8 @@ module Net
               if message.type == USERAUTH_FAILURE
                 debug { "password failed" }
 
+                return :partial_success if message[:partial_success]
+
                 raise Net::SSH::Authentication::DisallowedMethod unless
                   message[:authentications].split(/,/).include? 'password'
 

@@ -7,6 +7,10 @@ module Net
   module SSH
     module Authentication
       module Methods
+        # Raised if the current authentication method is not allowed by the server.
+        class DisallowedMethod < Net::SSH::Exception
+        end
+
         # The base class of all user authentication methods. It provides a few
         # bits of common functionality.
         class Abstract
@@ -74,6 +78,8 @@ module Net
           attr_reader :prompt
         end
       end
+
+      DisallowedMethod = Methods::DisallowedMethod
     end
   end
 end
