@@ -155,11 +155,14 @@ module Puma
       # requests.
       max_io_threads: 0,
       max_keep_alive: 999,
+      max_pipelined_requests: 4,
       max_threads: Puma.mri? ? 5 : 16,
       min_threads: 0,
       mode: :http,
       mutate_stdout_and_stderr_to_sync_on_write: true,
       out_of_band: [],
+      parallel_pipelining: false,
+      pipelined_buffer_bytes: 64 * 1024,
       # Number of seconds for another request within a persistent session.
       persistent_timeout: 65, # PUMA_PERSISTENT_TIMEOUT
       prune_bundler: false,

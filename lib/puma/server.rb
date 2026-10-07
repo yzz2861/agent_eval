@@ -13,6 +13,7 @@ require_relative 'binder'
 require_relative 'util'
 require_relative 'response'
 require_relative 'configuration'
+require_relative 'http_pipeline'
 require_relative 'cluster_accept_loop_delay'
 
 require 'socket'
@@ -102,6 +103,13 @@ module Puma
       @min_threads               = @options[:min_threads]
       @max_threads               = @options[:max_threads]
       @queue_requests            = @options[:queue_requests]
+      @parallel_pipelining       = @options[:parallel_pipelining] && @queue_requests
+      @max_pipelined_requests    = Integer(@options[:max_pipelined_requests] || 4)
+      @pipelined_buffer_bytes    = Integer(@options[:pipelined_buffer_bytes] || 64 * 1024)
+      if @parallel_pipelining &&
+          (@max_pipelined_requests <= 0 || @pipelined_buffer_bytes <= 0)
+        raise ArgumentError, "max_pipelined_requests and pipelined_buffer_bytes must be positive"
+      end
       @max_keep_alive            = @options[:max_keep_alive]
       @enable_keep_alives        = @options[:enable_keep_alives]
       @enable_keep_alives      &&= @queue_requests
@@ -260,8 +268,8 @@ module Puma
 
       @status = :run
 
-      @thread_pool = ThreadPool.new(thread_name, options, server: self) do |processor, client|
-        process_client(processor, client)
+      @thread_pool = ThreadPool.new(thread_name, options, server: self) do |processor, work|
+        process_work(processor, work)
       end
 
       if @queue_requests
@@ -324,12 +332,28 @@ module Puma
       if client.try_to_finish || (shutdown && !client.can_close?)
         @thread_pool << client
       elsif shutdown || client.timeout == 0
-        client.timeout!
+        if client.pipeline
+          if client.pipeline.timeout!
+            return true
+          else
+            client.set_timeout(@persistent_timeout)
+            return false
+          end
+        else
+          client.timeout!
+        end
       else
         client.set_timeout(@first_data_timeout)
         false
       end
     rescue StandardError => e
+      if client.pipeline
+        if e.is_a?(EOFError) || e.is_a?(ConnectionError)
+          client.pipeline.parser_finished
+          return true
+        end
+        client.pipeline.parser_finished
+      end
       client_error(e, client)
       close_client_safely(client)
       true
@@ -508,6 +532,11 @@ module Puma
           client.finish(@first_data_timeout)
         end
 
+        if parallel_pipelining?(client)
+          close_socket = false
+          return process_pipelined_client(processor, client)
+        end
+
         can_loop = true
         while can_loop
           can_loop = false
@@ -556,9 +585,167 @@ module Puma
         # The ensure tries to close +client+ down
         requests > 0
       ensure
-        client.io_buffer.reset
+        client.io_buffer&.reset
 
-        close_client_safely(client) if close_socket
+        close_client_safely(client) if close_socket && !client.pipeline
+      end
+    end
+
+    def process_work(processor, work)
+      if work.respond_to?(:process)
+        work.process(self, processor)
+      elsif work.respond_to?(:pipeline) && work.pipeline
+        process_pipelined_client(processor, work)
+      else
+        process_client(processor, work)
+      end
+    end
+
+    def parallel_pipelining?(client)
+      @parallel_pipelining && (client.pipeline || client.env[SERVER_PROTOCOL] == HTTP_11)
+    end
+
+    def process_pipelined_client(processor, client)
+      pipeline = client.pipeline ||= begin
+        pipe = HttpPipeline.new(
+          client,
+          max_requests: @max_pipelined_requests,
+          buffer_bytes: @pipelined_buffer_bytes
+        )
+        pipe.on_continue { |continuation| @thread_pool << continuation }
+        pipe.on_close { close_client_safely(client) }
+        pipe
+      end
+
+      dispatch_available_pipeline_requests(client, pipeline)
+      false
+    rescue HttpParserError => e
+      dispatch_pipeline_parse_error(client, pipeline, e)
+      false
+    rescue StandardError
+      pipeline&.mark_closed
+      raise
+    end
+
+    def dispatch_available_pipeline_requests(client, pipeline)
+      loop do
+        unless client.ready
+          next_ready = if client.has_back_to_back_requests?
+            with_force_shutdown(client) { client.process_back_to_back_requests }
+          else
+            with_force_shutdown(client) { client.finish(@first_data_timeout) }
+          end
+          next_ready
+        end
+
+        request = pipeline.build_request(client)
+        @requests_count += 1
+        enqueue_pipeline_work(request)
+
+        exclusive = request.exclusive?
+        terminal = request.close_request?
+        client.reset
+
+        if terminal
+          pipeline.parser_finished
+          return
+        end
+
+        if exclusive
+          pipeline.continuation?(client)
+          return
+        end
+
+        unless pipeline.can_parse?
+          pipeline.continuation?(client)
+          return
+        end
+
+        next_ready = if client.has_back_to_back_requests?
+          with_force_shutdown(client) { client.process_back_to_back_requests }
+        else
+          with_force_shutdown(client) { client.eagerly_finish }
+        end
+
+        unless next_ready
+          wait_for_pipeline_request(client, pipeline)
+          return
+        end
+      end
+    end
+
+    def wait_for_pipeline_request(client, pipeline)
+      client.set_timeout(@persistent_timeout)
+      if @reactor.add(client)
+        pipeline.parser_waiting
+      else
+        pipeline.mark_closed
+      end
+    end
+
+    def enqueue_pipeline_work(work)
+      @thread_pool.with_mutex do
+        if shutting_down?
+          work.close
+          work.pipeline.cancel(work)
+          return false
+        end
+      end
+      @thread_pool << work
+      true
+    end
+
+    def dispatch_pipeline_parse_error(client, pipeline, error)
+      if pipeline
+        status = error.is_a?(HttpParserError501) ? 501 : 400
+        work = pipeline.build_error_response(error, status)
+        enqueue_pipeline_work(work)
+        pipeline.parser_finished
+      else
+        client_error(error, client)
+        close_client_safely(client)
+      end
+    end
+
+    def process_pipelined_request(processor, request)
+      request.pipeline.wait_to_run(request)
+      result = handle_request(processor, request, request.requests_served)
+
+      if result == :async
+        request.io.async_response unless request.hijacked?
+      else
+        request.io.end_response(result == :keep_alive)
+        request.pipeline.parser_finished if result == :close
+      end
+
+      request.pipeline.request_completed(request, result)
+      request.pipeline.request_completed_after_output
+    rescue Exception => error
+      request.io.fail_response
+      request.pipeline.request_failed(request, response_started: request.io.response_started?)
+      raise unless error.is_a?(ConnectionError)
+    ensure
+      request.tempfile_close
+    end
+
+    def process_pipelined_error_response(_processor, work)
+      env = work.env
+      env[SERVER_PROTOCOL] = HTTP_11
+      env[HTTP_CONNECTION] = CLOSE
+      keep_alive = nil
+
+      begin
+        status, headers, body = lowlevel_error(work.error, env, work.status)
+        work.io.begin_response
+        prepare_response(status, headers, body, work.requests_served, work)
+        keep_alive = false
+      rescue StandardError
+        work.io.fail_response
+        work.pipeline.mark_closed
+      ensure
+        work.io_buffer.reset
+        work.io.end_response(keep_alive) rescue nil if keep_alive
+        work.pipeline.error_response_completed(work, false)
       end
     end
 

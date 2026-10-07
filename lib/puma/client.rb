@@ -80,7 +80,7 @@ module Puma
     attr_writer :peerip, :http_content_length_limit, :supported_http_methods,
                 :allow_underscore_headers
 
-    attr_accessor :remote_addr_header, :listener, :env_set_http_version
+    attr_accessor :remote_addr_header, :listener, :env_set_http_version, :pipeline
 
     def initialize(io, env=nil)
       @io = io
@@ -164,6 +164,7 @@ module Puma
 
     def reset
       @parser.reset
+      @io_buffer = IOBuffer.new if @io_buffer.nil?
       @io_buffer.reset
       @read_header = true
       @read_proxy = !!@expect_proxy_proto && @requests_served.zero?
@@ -200,6 +201,15 @@ module Puma
         @io.close
       rescue IOError, Errno::EBADF
       end
+    end
+
+    def detach_for_pipeline(pipeline, sequence, buffer_bytes)
+      request = HttpPipeline::Request.new(self, pipeline, sequence, buffer_bytes)
+      @env = nil
+      @body = nil
+      @tempfile = nil
+      @io_buffer = nil
+      request
     end
 
     def tempfile_close

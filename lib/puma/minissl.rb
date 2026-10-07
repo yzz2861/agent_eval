@@ -25,6 +25,7 @@ module Puma
         @engine = engine
         @peercert = nil
         @reuse = nil
+        @engine_mutex = Mutex.new
       end
 
       # @!attribute [r] to_io
@@ -58,18 +59,20 @@ module Puma
       private :bad_tlsv1_3?
 
       def readpartial(size)
-        while true
-          output = @engine.read
-          return output if output
+        @engine_mutex.synchronize do
+          while true
+            output = @engine.read
+            return output if output
 
-          data = @socket.readpartial(size)
-          @engine.inject(data)
-          output = @engine.read
+            data = @socket.readpartial(size)
+            @engine.inject(data)
+            output = @engine.read
 
-          return output if output
+            return output if output
 
-          while neg_data = @engine.extract
-            @socket.write neg_data
+            while neg_data = @engine.extract
+              @socket.write neg_data
+            end
           end
         end
       end
@@ -83,6 +86,7 @@ module Puma
       end
 
       def read_nonblock(size, *_)
+        @engine_mutex.synchronize do
         # *_ is to deal with keyword args that were added
         # at some point (and being used in the wild)
         while true
@@ -115,9 +119,11 @@ module Puma
             @socket.write neg_data
           end
         end
+        end
       end
 
       def write(data)
+        @engine_mutex.synchronize do
         return 0 if data.empty?
 
         data_size = data.bytesize
@@ -136,7 +142,8 @@ module Puma
 
           return data_size if need == 0
 
-          data = data.byteslice(wrote..-1)
+            data = data.byteslice(wrote..-1)
+          end
         end
       end
 

@@ -1494,6 +1494,38 @@ module Puma
       @options[:enable_keep_alives] = enabled
     end
 
+    # Enable parallel application dispatch for pipelined HTTP/1.1 GET and
+    # HEAD requests on one connection. Other methods remain serialized and
+    # responses are always written in the original request order.
+    #
+    # @example
+    #   parallel_pipelining true
+    #
+    def parallel_pipelining(enabled = true)
+      @options[:parallel_pipelining] = enabled
+    end
+
+    # Maximum number of in-flight pipelined requests accepted from one
+    # connection. Additional pipelined bytes remain in the read path and apply
+    # backpressure instead of creating an unbounded amount of request state.
+    #
+    # @example
+    #   max_pipelined_requests 8
+    #
+    def max_pipelined_requests(number)
+      @options[:max_pipelined_requests] = Integer(number)
+    end
+
+    # Maximum bytes accumulated while writing one pipelined response. Body
+    # chunks larger than the limit are streamed rather than accumulated.
+    #
+    # @example
+    #   pipelined_buffer_bytes 32 * 1024
+    #
+    def pipelined_buffer_bytes(bytes)
+      @options[:pipelined_buffer_bytes] = Integer(bytes)
+    end
+
     # When +false+, request headers with underscores in their names are discarded.
     # When such headers are present, their names are exposed in
     # +env["puma.underscore_headers"]+ for auditing. This value is

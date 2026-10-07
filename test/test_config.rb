@@ -1267,6 +1267,28 @@ class TestConfigFileWithFakeEnv < PumaTest
     assert_equal conf.options[:enable_keep_alives], false
   end
 
+  def test_parallel_pipelining_defaults_to_false
+    conf = Puma::Configuration.new
+    conf.clamp
+
+    assert_equal false, conf.options[:parallel_pipelining]
+    assert_equal 4, conf.options[:max_pipelined_requests]
+    assert_equal 65_536, conf.options[:pipelined_buffer_bytes]
+  end
+
+  def test_parallel_pipelining_options
+    conf = Puma::Configuration.new do |c|
+      c.parallel_pipelining true
+      c.max_pipelined_requests 8
+      c.pipelined_buffer_bytes 32 * 1024
+    end
+    conf.clamp
+
+    assert_equal true, conf.options[:parallel_pipelining]
+    assert_equal 8, conf.options[:max_pipelined_requests]
+    assert_equal 32_768, conf.options[:pipelined_buffer_bytes]
+  end
+
   def test_on_booted_deprecated_alias_works
     ran = false
     err = capture_io do

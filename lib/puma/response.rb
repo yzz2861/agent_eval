@@ -285,14 +285,18 @@ module Puma
     # @raise [ConnectionError]
     #
     def fast_write_response(socket, body, io_buffer, chunked, content_length)
+      buffer_limit = socket.respond_to?(:buffer_limit) ? socket.buffer_limit : IO_BUFFER_LEN_MAX
+      body_limit = socket.respond_to?(:buffer_limit) ? socket.buffer_limit : BODY_LEN_MAX
+      io_body_limit = socket.respond_to?(:buffer_limit) ? socket.buffer_limit : IO_BODY_MAX
       if body.is_a?(::File) && body.respond_to?(:read)
         if chunked  # would this ever happen?
           while chunk = body.read(BODY_LEN_MAX)
             io_buffer.append chunk.bytesize.to_s(16), LINE_END, chunk, LINE_END
+            fast_write_str socket, io_buffer.read_and_reset
           end
           fast_write_str socket, CLOSE_CHUNKED
         else
-          if content_length <= IO_BODY_MAX
+          if content_length <= io_body_limit
             io_buffer.write body.read(content_length)
             fast_write_str socket, io_buffer.read_and_reset
           else
@@ -305,7 +309,7 @@ module Puma
         # using body_first = body.first causes issues?
         body.each { |str| body_first ||= str }
 
-        if body_first.is_a?(::String) && body_first.bytesize < BODY_LEN_MAX
+        if body_first.is_a?(::String) && body_first.bytesize < body_limit
           # smaller body, write to io_buffer first
           io_buffer.write body_first
           fast_write_str socket, io_buffer.read_and_reset
@@ -321,7 +325,7 @@ module Puma
           body.each do |part|
             next if (byte_size = part.bytesize).zero?
             io_buffer.append byte_size.to_s(16), LINE_END, part, LINE_END
-            if io_buffer.length > IO_BUFFER_LEN_MAX
+            if io_buffer.length > buffer_limit
               fast_write_str socket, io_buffer.read_and_reset
             end
           end
@@ -330,7 +334,7 @@ module Puma
           body.each do |part|
             next if part.bytesize.zero?
             io_buffer.write part
-            if io_buffer.length > IO_BUFFER_LEN_MAX
+            if io_buffer.length > buffer_limit
               fast_write_str socket, io_buffer.read_and_reset
             end
           end
