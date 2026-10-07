@@ -93,6 +93,19 @@ module Net
     FTP_PORT = 21
     CRLF = "\r\n"
     DEFAULT_BLOCKSIZE = BufferedIO::BUFSIZE
+    # Hex digest lengths (in characters) of well-known HASH algorithms.
+    HASH_DIGEST_LENGTHS = {
+      "CRC32" => 8,
+      "MD5" => 32,
+      "SHA-1" => 40,
+      "SHA-224" => 56,
+      "SHA-256" => 64,
+      "SHA-384" => 96,
+      "SHA-512" => 128,
+    }.freeze
+    # Guard against absurdly long digests from algorithms that are not
+    # listed in HASH_DIGEST_LENGTHS.
+    MAX_HASH_DIGEST_LENGTH = 512
     @@default_passive = true
     # :startdoc:
 
@@ -297,6 +310,7 @@ module Net
       @resume = false
       @bare_sock = @sock = NullSocket.new
       @logged_in = false
+      reset_hash_state
       @open_timeout = options[:open_timeout]
       @ssl_handshake_timeout = options[:ssl_handshake_timeout]
       @read_timeout = options[:read_timeout] || 60
@@ -403,6 +417,7 @@ module Net
       debug_print "connect: #{host}:#{port}"
       synchronize do
         @host = host
+        reset_hash_state
         @bare_sock = open_socket(host, port)
         if @ssl_context
           begin
@@ -1389,6 +1404,236 @@ module Net
 
       voidcmd(cmd)
     end
+
+    #
+    # HashResult represents the result of a HASH command: the hash
+    # +algorithm+ that was used, the exact byte +range+ of the remote
+    # file the +digest+ covers, the +digest+ itself (hexadecimal), and
+    # the +filename+ of the remote file as reported by the server.
+    #
+    class HashResult
+      attr_reader :algorithm, :range, :digest, :filename
+
+      def initialize(algorithm, range, digest, filename)
+        @algorithm = algorithm
+        @range = range
+        @digest = digest
+        @filename = filename
+      end
+
+      def ==(other)
+        other.is_a?(HashResult) &&
+          algorithm == other.algorithm &&
+          range == other.range &&
+          digest == other.digest &&
+          filename == other.filename
+      end
+    end
+
+    #
+    # Returns the digest of the remote +filename+ as a HashResult
+    # (HASH command).
+    #
+    # +algorithm+ may be a single algorithm name or an array of
+    # acceptable names (strongest preference first).  When given, an
+    # OPTS HASH command selects the first advertised algorithm the
+    # caller accepts; if the server rejects the selection the error is
+    # raised and there is no silent fallback to a weaker algorithm.
+    # When omitted, the server's default algorithm is used.
+    #
+    # +range+ may be a Range or a [start, end] pair of byte offsets to
+    # hash only part of the file (RANG command).  When omitted, the
+    # whole file is hashed.
+    #
+    # The algorithm, byte range, and digest in the server's response
+    # are verified against the request; a mismatch raises
+    # Net::FTPProtoError.
+    #
+    def hash(filename, algorithm: nil, range: nil)
+      if /[\r\n]/ =~ filename
+        raise ArgumentError, "filename must not contain CR or LF"
+      end
+      acceptable = normalize_hash_algorithms(algorithm)
+      byte_range = normalize_hash_range(range) if range
+      synchronize do
+        fetch_hash_feature
+        unless @hash_algorithms
+          raise FTPPermError, "502 HASH is not supported by the server"
+        end
+        if acceptable
+          wanted = acceptable.find do |name|
+            @hash_algorithms.any? {|adv| adv.casecmp?(name) }
+          end
+          unless wanted
+            raise FTPPermError,
+                  "504 none of #{acceptable.join(', ')} is supported by the server"
+          end
+          # Use the server's canonical spelling of the algorithm.
+          wanted = @hash_algorithms.find {|adv| adv.casecmp?(wanted) }
+          unless @hash_algorithm&.casecmp?(wanted)
+            voidcmd("OPTS HASH #{wanted}")
+            @hash_algorithm = wanted
+          end
+        end
+        voidcmd("RANG #{byte_range.begin}-#{byte_range.end}") if byte_range
+        resp = sendcmd("HASH #{filename}")
+        unless resp.start_with?("213")
+          raise FTPReplyError, resp
+        end
+        result = parse_hash_response(get_body(resp))
+        verify_hash_response(result, byte_range)
+        return result
+      end
+    end
+
+    #
+    # Returns the list of hash algorithms the server advertised for the
+    # HASH command in its FEAT response, or +nil+ when the server does
+    # not support HASH.  The FEAT response is fetched lazily and cached
+    # for the lifetime of the connection.
+    #
+    def hash_algorithms
+      synchronize do
+        fetch_hash_feature
+        @hash_algorithms&.dup
+      end
+    end
+
+    #
+    # Returns the server's default hash algorithm (the entry marked
+    # with "*" in the FEAT response), or +nil+ when it is unknown or
+    # HASH is not supported.
+    #
+    def default_hash_algorithm
+      synchronize do
+        fetch_hash_feature
+        @hash_default_algorithm
+      end
+    end
+
+    # Resets the per-connection HASH negotiation state.
+    def reset_hash_state # :nodoc:
+      @hash_feature_fetched = false
+      @hash_algorithms = nil
+      @hash_default_algorithm = nil
+      @hash_algorithm = nil
+    end
+    private :reset_hash_state
+
+    # Fetches and parses the HASH line of the FEAT response, once per
+    # connection.
+    def fetch_hash_feature # :nodoc:
+      return if @hash_feature_fetched
+      @hash_feature_fetched = true
+      begin
+        feats = features
+      rescue FTPReplyError, FTPPermError
+        feats = []
+      end
+      line = feats.find {|feat| /\AHASH[ \t]/i.match?(feat) }
+      return unless line
+      @hash_algorithms, @hash_default_algorithm = parse_hash_feature(line)
+      @hash_algorithms = nil if @hash_algorithms.empty?
+    end
+    private :fetch_hash_feature
+
+    # Parses a FEAT line such as "HASH SHA-256*;SHA-512;MD5;" into a
+    # list of algorithm names and the default (marked with "*").
+    def parse_hash_feature(line) # :nodoc:
+      spec = line.sub(/\AHASH[ \t]+/i, "")
+      algorithms = []
+      default = nil
+      spec.split(";").each do |entry|
+        entry = entry.strip
+        next if entry.empty?
+        if entry.end_with?("*")
+          entry = entry[0...-1].strip
+          default = entry unless entry.empty?
+        end
+        algorithms << entry unless entry.empty?
+      end
+      return algorithms, default
+    end
+    private :parse_hash_feature
+
+    def normalize_hash_algorithms(algorithm) # :nodoc:
+      return nil if algorithm.nil?
+      list = algorithm.is_a?(Array) ? algorithm : [algorithm]
+      if list.empty?
+        raise ArgumentError, "algorithm list must not be empty"
+      end
+      list.each do |name|
+        unless name.is_a?(String) && /\A[A-Za-z0-9][A-Za-z0-9._-]*\z/ =~ name
+          raise ArgumentError, "invalid hash algorithm name: #{name.inspect}"
+        end
+      end
+      list
+    end
+    private :normalize_hash_algorithms
+
+    def normalize_hash_range(range) # :nodoc:
+      case range
+      when Range
+        first = range.begin
+        last = range.end
+        raise ArgumentError, "range must have an end" if last.nil?
+        last -= 1 if range.exclude_end?
+      when Array
+        first, last = range
+      else
+        raise ArgumentError, "range must be a Range or an Array of [start, end]"
+      end
+      unless first.is_a?(Integer) && last.is_a?(Integer)
+        raise ArgumentError, "range bounds must be integers"
+      end
+      if first < 0 || last < first
+        raise ArgumentError, "invalid byte range #{first}-#{last}"
+      end
+      first..last
+    end
+    private :normalize_hash_range
+
+    # Parses the body of a 213 HASH response:
+    #   <algorithm> <start>-<end> <digest> <pathname>
+    # The pathname may contain spaces, so it is taken as the remainder
+    # of the line instead of splitting the response on whitespace.
+    def parse_hash_response(body) # :nodoc:
+      unless /\A(\S+) (\d+)-(\d+) (\S+) (.+)\z/ =~ body
+        raise FTPProtoError, "malformed HASH response: #{body.inspect}"
+      end
+      HashResult.new($1, Integer($2)..Integer($3), $4, $5)
+    end
+    private :parse_hash_response
+
+    def verify_hash_response(result, requested_range) # :nodoc:
+      if @hash_algorithm
+        unless result.algorithm.casecmp?(@hash_algorithm)
+          raise FTPProtoError,
+                "server answered with #{result.algorithm} instead of #{@hash_algorithm}"
+        end
+      elsif @hash_algorithms &&
+            !@hash_algorithms.any? {|adv| adv.casecmp?(result.algorithm) }
+        raise FTPProtoError,
+              "server answered with unadvertised algorithm #{result.algorithm}"
+      end
+      if requested_range && result.range != requested_range
+        raise FTPProtoError,
+              "server hashed range #{result.range} instead of #{requested_range}"
+      end
+      unless /\A[0-9a-fA-F]+\z/ =~ result.digest
+        raise FTPProtoError, "malformed digest in HASH response"
+      end
+      expected = HASH_DIGEST_LENGTHS[result.algorithm.upcase]
+      if expected
+        unless result.digest.length == expected
+          raise FTPProtoError,
+                "digest length #{result.digest.length} does not match #{result.algorithm} (#{expected})"
+        end
+      elsif result.digest.length > MAX_HASH_DIGEST_LENGTH
+        raise FTPProtoError, "digest in HASH response is too long"
+      end
+    end
+    private :verify_hash_response
 
     #
     # Closes the connection.  Further operations are impossible until you open
