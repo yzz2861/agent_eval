@@ -27,6 +27,8 @@ require_relative 'ldap/instrumentation'
 require_relative 'ldap/connection'
 require_relative 'ldap/version'
 require_relative 'ldap/error'
+require_relative 'ldap/ldap_url'
+require_relative 'ldap/referral_search'
 require_relative 'ldap/auth_adapter'
 require_relative 'ldap/auth_adapter/simple'
 require_relative 'ldap/auth_adapter/sasl'
@@ -741,6 +743,21 @@ class Net::LDAP
   # * :time (an integer restricting the maximum time in seconds allowed for a search. Default is zero, no time limit RFC 4511 4.5.1.5)
   # * :deref (one of: Net::LDAP::DerefAliases_Never, Net::LDAP::DerefAliases_Search,
   #   Net::LDAP::DerefAliases_Find, Net::LDAP::DerefAliases_Always. Default is Never.)
+  # * :follow_referrals (a boolean, defaults false). When true, referrals
+  #   returned by the server (both SearchResultReference continuations and a
+  #   final referral result) are chased across servers and the aggregated
+  #   outcome is returned as a Net::LDAP::ReferralSearchResult. The
+  #   following related options are recognized:
+  # * :referral_policy (a proc called for every discovered referral with
+  #   <tt>{url:, host:, port:, depth:}</tt>; return false or nil to skip the
+  #   referral, true to follow it anonymously, or an auth Hash to follow it
+  #   with those credentials. Defaults to anonymous binds. The current
+  #   connection's credentials are never reused implicitly.)
+  # * :max_referral_depth (maximum referral chain length, default 5)
+  # * :max_referrals (maximum total number of referrals followed, default 32)
+  # * :connection_factory (a callable receiving
+  #   <tt>(host, port, auth, scheme)</tt> and returning the client used to
+  #   search a referred server; defaults to a new Net::LDAP)
   #
   # #search queries the LDAP server and passes <i>each entry</i> to the
   # caller-supplied block, as an object of type Net::LDAP::Entry. If the
@@ -773,7 +790,11 @@ class Net::LDAP
   #      end
   #    end
   #  end
-  def search(args = {})
+  def search(args = {}, &block)
+    if args[:follow_referrals]
+      return referral_search(args, &block)
+    end
+
     unless args[:ignore_server_caps]
       args[:paged_searches_supported] = paged_searches_supported?
     end
@@ -1315,6 +1336,22 @@ class Net::LDAP
   end
 
   private
+
+  # Executes a referral-following search (see Net::LDAP::ReferralSearch) and
+  # reflects the aggregated outcome in #get_operation_result: a search is
+  # only successful when the root search and every followed referral branch
+  # completed without error.
+  def referral_search(args, &block)
+    result = Net::LDAP::ReferralSearch.new(self, args, encryption: @encryption).run(&block)
+    @result =
+      if result.success?
+        { :resultCode => Net::LDAP::ResultCodeSuccess }
+      else
+        first = result.failures.first
+        { :resultCode => first[:code], :errorMessage => first[:message] }
+      end
+    result
+  end
 
   # Yields an open connection if there is one, otherwise establishes a new
   # connection, binds, and yields it. If binding fails, it will return the
