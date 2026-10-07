@@ -8,6 +8,35 @@ class Net::LDAP::Connection #:nodoc:
 
   LdapVersion = 3
 
+  # BER syntax for the RFC 5805 Start/End Transaction response values. The
+  # transaction values are wrapped in OCTET STRINGs whose context tags are
+  # not covered by Net::LDAP::AsnSyntax, so they are parsed explicitly here.
+  #
+  # StartTransactionResponseValue ::= SEQUENCE {
+  #   responseName [10] OCTET STRING }
+  #
+  # EndTransactionResponseValue ::= SEQUENCE {
+  #   messageID [0] MessageID OPTIONAL,
+  #   updates   [1] SEQUENCE OF UpdateControl OPTIONAL }
+  #
+  # UpdateControl ::= SEQUENCE {
+  #   messageID MessageID,
+  #   controls  [0] Controls }
+  tx_primitive = { 0 => :integer, 1 => :boolean, 10 => :string }
+  tx_constructed = { 0 => :array, 1 => :array }
+  TransactionSyntax = Net::BER.compile_syntax(
+    :universal => {
+      :primitive => {
+        1 => :boolean, 2 => :integer, 4 => :string, 6 => :oid,
+      },
+      :constructed => { 16 => :array, 17 => :array },
+    },
+    :context_specific => {
+      :primitive => tx_primitive,
+      :constructed => tx_constructed,
+    }
+  )
+
   # Initialize a connection to an LDAP server
   #
   # :server
@@ -23,7 +52,36 @@ class Net::LDAP::Connection #:nodoc:
     # Allows tests to parameterize what socket class to use
     @socket_class = server.fetch(:socket_class, DefaultSocket)
 
+    # Set to a Net::LDAP::Transaction while an RFC 5805 transaction is open on
+    # this connection. #thread_owner records which thread pinned the
+    # connection; other threads are refused access for the lifetime of the
+    # transaction.
+    @transaction = nil
+    @thread_owner = nil
+
     yield self if block_given?
+  end
+
+  # Internal: The RFC 5805 transaction currently open on this connection, or
+  # nil when no transaction is in progress.
+  attr_reader :transaction
+
+  # Internal: True while a transaction is pinning this connection.
+  def transaction?
+    !@transaction.nil?
+  end
+
+  # Internal: Refuses the connection to any thread other than the one that
+  # opened the active transaction. Called by #write so an unrelated request
+  # can never be multiplexed onto a connection that is bound to a
+  # transaction.
+  def assert_transaction_owner!
+    return unless @transaction
+    unless Thread.current == @thread_owner
+      raise Net::LDAP::TransactionInProgressError,
+            "an LDAP transaction is in progress on this connection; " \
+            "operations inside the block must run on the originating thread"
+    end
   end
 
   def socket_class=(socket_class)
@@ -261,6 +319,7 @@ class Net::LDAP::Connection #:nodoc:
   # Returns the return value from writing to the connection, which in some
   # cases is the Integer number of bytes written to the socket.
   def write(request, controls = nil, message_id = next_msgid)
+    assert_transaction_owner!
     instrument "write.net_ldap_connection" do |payload|
       packet = [message_id.to_ber, request, controls].compact.to_ber_sequence
       payload[:content_length] = socket.write(packet)
@@ -569,10 +628,11 @@ class Net::LDAP::Connection #:nodoc:
       ops.to_ber_sequence,
     ].to_ber_appsequence(Net::LDAP::PDU::ModifyRequest)
 
-    controls = args.fetch(:controls, nil)
-    unless controls.nil?
-      controls = controls.to_ber_contextspecific(0)
-    end
+    controls = if transaction?
+                 with_transaction_controls(args.fetch(:controls, nil))
+               else
+                 args.fetch(:controls, nil)&.to_ber_contextspecific(0)
+               end
 
     write(request, controls, message_id)
     pdu = queued_read(message_id)
@@ -581,6 +641,7 @@ class Net::LDAP::Connection #:nodoc:
       raise Net::LDAP::ResponseMissingOrInvalidError, "response missing or invalid"
     end
 
+    record_transaction_operation(message_id, :modify, args, pdu)
     pdu
   end
 
@@ -646,10 +707,11 @@ class Net::LDAP::Connection #:nodoc:
     message_id = next_msgid
     request    = [add_dn.to_ber, add_attrs.to_ber_sequence].to_ber_appsequence(Net::LDAP::PDU::AddRequest)
 
-    controls = args.fetch(:controls, nil)
-    unless controls.nil?
-      controls = controls.to_ber_contextspecific(0)
-    end
+    controls = if transaction?
+                 with_transaction_controls(args.fetch(:controls, nil))
+               else
+                 args.fetch(:controls, nil)&.to_ber_contextspecific(0)
+               end
 
     write(request, controls, message_id)
     pdu = queued_read(message_id)
@@ -658,6 +720,7 @@ class Net::LDAP::Connection #:nodoc:
       raise Net::LDAP::ResponseMissingOrInvalidError, "response missing or invalid"
     end
 
+    record_transaction_operation(message_id, :add, args, pdu)
     pdu
   end
 
@@ -674,13 +737,16 @@ class Net::LDAP::Connection #:nodoc:
     request    = [old_dn.to_ber, new_rdn.to_ber, delete_attrs.to_ber]
     request   << new_superior.to_ber_contextspecific(0) unless new_superior == nil
 
-    write(request.to_ber_appsequence(Net::LDAP::PDU::ModifyRDNRequest), nil, message_id)
+    controls = with_transaction_controls(nil) if transaction?
+
+    write(request.to_ber_appsequence(Net::LDAP::PDU::ModifyRDNRequest), controls, message_id)
     pdu = queued_read(message_id)
 
     if !pdu || pdu.app_tag != Net::LDAP::PDU::ModifyRDNResponse
       raise Net::LDAP::ResponseMissingOrInvalidError.new "response missing or invalid"
     end
 
+    record_transaction_operation(message_id, :rename, args, pdu)
     pdu
   end
 
@@ -689,7 +755,12 @@ class Net::LDAP::Connection #:nodoc:
   #++
   def delete(args)
     dn = args[:dn] or raise "Unable to delete empty DN"
-    controls   = args.include?(:control_codes) ? args[:control_codes].to_ber_control : nil #use nil so we can compact later
+    if @transaction
+      user_controls = args.include?(:control_codes) ? args[:control_codes].to_ber_control : nil
+      controls = with_transaction_controls(user_controls)
+    else
+      controls = args.include?(:control_codes) ? args[:control_codes].to_ber_control : nil #use nil so we can compact later
+    end
     message_id = next_msgid
     request    = dn.to_s.to_ber_application_string(Net::LDAP::PDU::DeleteRequest)
 
@@ -700,6 +771,7 @@ class Net::LDAP::Connection #:nodoc:
       raise Net::LDAP::ResponseMissingOrInvalidError, "response missing or invalid"
     end
 
+    record_transaction_operation(message_id, :delete, args, pdu)
     pdu
   end
 
@@ -718,6 +790,231 @@ class Net::LDAP::Connection #:nodoc:
 
     pdu
   end
+
+  # Internal: Send the RFC 5805 Start Transaction extended request.
+  #
+  # Returns the newly opened Net::LDAP::Transaction, whose opaque server
+  # identifier will be attached to every subsequent update on this
+  # connection until #end_transaction is called.
+  def start_transaction
+    request = [
+      Net::LDAP::StartTransactionOid.to_ber_contextspecific(0),
+    ].to_ber_appsequence(Net::LDAP::PDU::ExtendedRequest)
+
+    message_id = next_msgid
+    write(request, nil, message_id)
+    pdu = queued_read(message_id)
+
+    if !pdu || pdu.app_tag != Net::LDAP::PDU::ExtendedResponse
+      raise Net::LDAP::ResponseMissingOrInvalidError,
+            "Start Transaction response missing or invalid"
+    end
+
+    unless pdu.success?
+      raise Net::LDAP::TransactionStartError,
+            "Start Transaction failed: #{pdu.error_message} (#{pdu.result_code})"
+    end
+
+    identifier = parse_start_transaction_identifier(pdu)
+    if identifier.nil?
+      raise Net::LDAP::TransactionStartError,
+            "Start Transaction response did not include a transaction identifier"
+    end
+
+    @transaction = Net::LDAP::Transaction.new(identifier, message_id)
+    @thread_owner = Thread.current
+    @transaction
+  end
+
+  # Internal: Send the RFC 5805 End Transaction extended request.
+  #
+  # commit :: +true+ commits the transaction, +false+ aborts (cancels) it.
+  #
+  # Returns the transaction with #end_pdu populated. Raises
+  # Net::LDAP::TransactionResultUnknownError if no End Transaction response
+  # is received; the caller must not replay the block in that case.
+  def end_transaction(commit)
+    transaction = @transaction
+    raise Net::LDAP::TransactionError, "no transaction is in progress" unless transaction
+
+    # EndTransactionRequestValue ::= SEQUENCE {
+    #   commit  BOOLEAN DEFAULT FALSE,
+    #   messageID MessageID }
+    #
+    # INTEGER has no context-specific BER helper in net-ber, so emit the
+    # [0] primitive tag byte explicitly around the INTEGER value bytes.
+    message_id_content = integer_content_bytes(transaction.start_message_id)
+    # BOOLEAN likewise has only the universal encoder; wrap its content in
+    # the [1] context-specific primitive tag.
+    commit_content = (commit ? "\xFF" : "\x00").b
+    request_value = [
+      [0x80, message_id_content.length].pack("CC") + message_id_content,
+      [0x81, 1].pack("CC") + commit_content,
+    ].to_ber_contextspecific(1)
+    request = [
+      Net::LDAP::EndTransactionOid.to_ber_contextspecific(0),
+      request_value,
+    ].to_ber_appsequence(Net::LDAP::PDU::ExtendedRequest)
+
+    message_id = next_msgid
+    transaction.end_message_id = message_id
+    write(request, nil, message_id)
+    pdu = queued_read(message_id)
+
+    if !pdu || pdu.app_tag != Net::LDAP::PDU::ExtendedResponse
+      raise Net::LDAP::TransactionResultUnknownError.new(
+        commit, transaction.operations
+      )
+    end
+
+    transaction.end_pdu = pdu
+    transaction
+  ensure
+    # The transaction is finished on the wire either way; release the
+    # connection for other (non-transaction) work.
+    @transaction = nil
+    @thread_owner = nil
+  end
+
+  # Internal: Extracts the opaque identifier out of a successful Start
+  # Transaction response.
+  #
+  # The response value is a SEQUENCE wrapping the identifier in a [10]
+  # context-specific OCTET STRING.
+  def parse_start_transaction_identifier(pdu)
+    value = pdu.extended_response
+    return nil if value.nil? || value.empty?
+
+    sequence = parse_transaction_value(value)
+    return nil unless sequence.is_a?(Array)
+
+    field = sequence.find do |element|
+      ber_tag(element) == 0x8a # responseName [10] OCTET STRING
+    end
+    field.nil? || field.empty? ? nil : field.to_s
+  end
+  private :parse_start_transaction_identifier
+
+  # Internal: Parses an End Transaction response value into the failed
+  # request message ids and the per-update controls returned by the server.
+  #
+  # Returns a Hash with :message_ids (Array of Integer) and :updates
+  # (Array of { :message_id => Integer, :controls => Array<OpenStruct> }).
+  def parse_end_transaction_value(pdu)
+    result = { :message_ids => [], :updates => [] }
+    value = pdu.extended_response
+    return result if value.nil? || value.empty?
+
+    sequence = parse_transaction_value(value)
+    return result unless sequence.is_a?(Array)
+
+    sequence.each do |field|
+      case ber_tag(field)
+      when 0x80, 0x02 # messageID [0] MessageID (or a parsed bare INTEGER)
+        result[:message_ids] << field.to_i
+      when 0xa1 # updates [1] SEQUENCE OF UpdateControl
+        Array(field).each do |update|
+          next unless update.is_a?(Array)
+
+          message_id = update.find { |element| element.is_a?(Integer) }
+          controls_field = update.find { |element| ber_tag(element) == 0xa0 }
+          controls = controls_field ? parse_transaction_controls(controls_field) : []
+          result[:updates] << { :message_id => message_id, :controls => controls }
+        end
+      else
+        next
+      end
+    end
+
+    result
+  end
+  private :parse_end_transaction_value
+
+  # Internal: Reads an RFC 5805 response value. Net::LDAP::PDU may already
+  # have decoded the outer context-specific wrappers with the generic LDAP
+  # syntax (yielding Arrays and Integers), or the value may still be a raw
+  # BER OCTET STRING when parsing a PDU built by other means; accept both.
+  def parse_transaction_value(value)
+    return value if value.is_a?(Array)
+
+    value.read_ber(TransactionSyntax)
+  rescue Net::BER::BerError
+    nil
+  end
+  private :parse_transaction_value
+
+  # Internal: Returns the raw BER tag byte of a parsed element. Elements
+  # decoded directly into Ruby Integers/Arrays (universal tags) report the
+  # corresponding universal tag.
+  def ber_tag(element)
+    if element.respond_to?(:ber_identifier)
+      element.ber_identifier
+    elsif element.is_a?(Integer)
+      0x02 # INTEGER
+    elsif element.is_a?(Array)
+      0x30 # SEQUENCE
+    end
+  end
+  private :ber_tag
+
+  # Internal: Converts a parsed RFC 4511 Controls sequence into the same
+  # OpenStruct representation used by Net::LDAP::PDU#parse_controls.
+  def parse_transaction_controls(sequence)
+    sequence = sequence.read_ber(TransactionSyntax) if sequence.is_a?(String)
+    Array(sequence).map do |control|
+      o = OpenStruct.new
+      o.oid, o.criticality, o.value = control[0], control[1], control[2]
+      if o.criticality && o.criticality.is_a?(String)
+        o.value = o.criticality
+        o.criticality = false
+      end
+      o
+    end
+  end
+  private :parse_transaction_controls
+
+  # Internal: BER-encodes the RFC 5805 transaction specification control for
+  # the open transaction. The criticality is always TRUE and the value is the
+  # opaque identifier returned by Start Transaction.
+  def transaction_control
+    [
+      Net::LDAP::LDAPControls::TRANSACTION_SPECIFICATION.to_ber,
+      true.to_ber,
+      @transaction.identifier.to_ber,
+    ].to_ber_sequence
+  end
+  private :transaction_control
+
+  # Internal: BER content bytes (tag and length excluded) for an Integer.
+  def integer_content_bytes(value)
+    encoded = value.to_ber
+    encoded.byteslice(2, encoded.bytesize - 2)
+  end
+  private :integer_content_bytes
+
+  # Internal: Builds the RFC 4511 controls field (a constructed [0]
+  # envelope wrapping a SEQUENCE OF Control) for the open transaction,
+  # prepending the transaction specification control to any user-supplied,
+  # already BER-encoded controls SEQUENCE. Returns nil outside a
+  # transaction.
+  def with_transaction_controls(user_controls)
+    return nil unless @transaction
+
+    controls = [transaction_control]
+    controls << user_controls unless user_controls.nil?
+    controls.to_ber_contextspecific(0)
+  end
+  private :with_transaction_controls
+
+  # Internal: Records an operation issued as part of the open transaction so
+  # the End Transaction response can be mapped back to it.
+  def record_transaction_operation(message_id, operation, args, pdu)
+    return unless @transaction
+
+    @transaction.record(message_id, operation, args)
+    @transaction.record_response(message_id, pdu)
+  end
+  private :record_transaction_operation
 
   # Internal: Returns a Socket like object used internally to communicate with
   # LDAP server.

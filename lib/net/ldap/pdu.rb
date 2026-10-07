@@ -195,12 +195,41 @@ class Net::LDAP::PDU
 
   def parse_extended_response(sequence)
     sequence.length.between?(3, 5) or raise Net::LDAP::PDU::Error, "Invalid LDAP result length."
+    # Per RFC 4511 section 4.12, an ExtendedResponse is the LDAPResult triad
+    # (resultCode, matchedDN, diagnosticMessage), an optional referral, then
+    # optional responseName [10] and responseValue [11]. Earlier revisions of
+    # this parser assumed the legacy ordering with the optional fields first,
+    # which still appears in synthetic parsed PDUs used by tests. Support
+    # both: locate the LDAPResult fields by type and the extensions by tag.
+    tagged = {}
+    sequence.each do |element|
+      tag = element.respond_to?(:ber_identifier) ? element.ber_identifier : nil
+      tagged[tag] = element if tag
+    end
+
+    # The generic BER syntax decodes responseName [10] as a relative OID
+    # (also an Integer). In the RFC layout the resultCode ENUMERATED is the
+    # first integer; the responseName comes last. A real LDAP result code is
+    # always a small value, so take the first small integer while ignoring
+    # relative-OID values.
+    integers = sequence.select { |element| element.is_a?(Integer) }
+    result_code_integer = integers.find { |value| value.between?(0, 127) } || integers.first
+    octet_strings = sequence.select do |element|
+      element.respond_to?(:ber_identifier) && element.ber_identifier == 0x04
+    end
+
     @ldap_result = {
-      :resultCode => sequence[0],
-      :matchedDN => sequence[1],
-      :errorMessage => sequence[2],
+      :resultCode => result_code_integer,
+      :matchedDN => octet_strings[0],
+      :errorMessage => octet_strings[1],
     }
-    @extended_response = sequence.length == 3 ? nil : sequence.last
+    @extended_response = tagged[0x8b] # responseValue [11]
+    if @extended_response.nil? && sequence.length > 3
+      # Legacy layout: [resultCode, matchedDN, errorMessage, responseName,
+      # responseValue] where the final element is the response value.
+      @extended_response = sequence.last
+    end
+    parse_search_referral(tagged[0xa3]) if tagged[0xa3] # referral [3]
   end
   private :parse_extended_response
 

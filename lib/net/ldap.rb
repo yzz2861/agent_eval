@@ -27,6 +27,7 @@ require_relative 'ldap/instrumentation'
 require_relative 'ldap/connection'
 require_relative 'ldap/version'
 require_relative 'ldap/error'
+require_relative 'ldap/transaction'
 require_relative 'ldap/auth_adapter'
 require_relative 'ldap/auth_adapter/simple'
 require_relative 'ldap/auth_adapter/sasl'
@@ -567,6 +568,11 @@ class Net::LDAP
     # our internal methods will connect using it, or else they will create
     # their own.
     @open_connection = nil
+
+    # Serializes RFC 5805 transactions so that two threads cannot start a
+    # transaction, or interfere with the pinned connection, at the same
+    # time.
+    @transaction_mutex = Mutex.new
   end
 
   # Convenience method to specify authentication credentials to the LDAP
@@ -720,6 +726,71 @@ class Net::LDAP
       ensure
         @open_connection.close if @open_connection
         @open_connection = nil
+      end
+    end
+  end
+
+  # Groups several update operations into a single server-side transaction
+  # using the LDAP Transactions extension (RFC 5805). The directory server
+  # must advertise support for the "1.3.6.1.1.21.1" extended operation.
+  #
+  # All operations issued inside the block (#add, #modify, #rename and
+  # #delete) are:
+  # * executed on a single connection, which is pinned for the whole block
+  #   and cannot be borrowed for unrelated work by another thread;
+  # * tagged with the RFC 5805 transaction specification control carrying
+  #   the identifier returned by Start Transaction.
+  #
+  # When the block returns normally, an End Transaction request with
+  # commit=TRUE is sent. The yielded/returned Net::LDAP::Transaction records
+  # each participating operation (with its message id and response) so that
+  # failures reported by the End Transaction response can be associated back
+  # to the original requests.
+  #
+  # If the block raises, an End Transaction request with commit=FALSE is
+  # sent to cancel the transaction, after which the original exception is
+  # re-raised.
+  #
+  # Nested #transaction calls are rejected with
+  # Net::LDAP::TransactionAlreadyActiveError before a second Start
+  # Transaction request is sent.
+  #
+  # If the connection drops (or the server otherwise does not answer) after
+  # End Transaction has been sent, a Net::LDAP::TransactionResultUnknownError
+  # is raised. The block is never replayed automatically: the server may
+  # already have applied or rolled back the updates.
+  #
+  # A failed commit raises Net::LDAP::TransactionCommitError, whose
+  # #failed_operations lists the block operations named by the response.
+  #
+  #  ldap.transaction do |txn|
+  #    ldap.add(:dn => dn1, :attributes => attrs1)
+  #    ldap.modify(:dn => dn2, :operations => ops)
+  #    ldap.rename(:olddn => dn3, :newrdn => "cn=New")
+  #  end
+  def transaction(args = {})
+    raise ArgumentError, "a block is required" unless block_given?
+
+    # Reject nesting before taking the mutex or sending any request, so a
+    # same-thread re-entry cannot produce a second Start Transaction
+    # extended request.
+    raise Net::LDAP::TransactionAlreadyActiveError,
+          "LDAP transactions cannot be nested" if @current_transaction
+
+    @transaction_mutex.synchronize do
+      begin_transaction(args) do |connection, txn|
+        @current_transaction = txn
+        begin
+          begin
+            yield txn
+          rescue Exception => block_error
+            abort_transaction(connection, txn, block_error)
+          end
+
+          commit_transaction(connection, txn)
+        ensure
+          @current_transaction = nil
+        end
       end
     end
   end
@@ -1316,12 +1387,134 @@ class Net::LDAP
 
   private
 
+  # Opens (or reuses) the connection for a transaction, sends Start
+  # Transaction, yields the pinned connection and transaction, and makes
+  # sure a privately opened connection is closed. The mutex is already held
+  # by #transaction.
+  def begin_transaction(args)
+    if @open_connection
+      txn = start_on_connection(@open_connection)
+      yield @open_connection, txn
+    else
+      connection = new_connection
+      bind_result = connection.bind(args[:auth] || @auth)
+      unless bind_result.result_code == Net::LDAP::ResultCodeSuccess
+        connection.close
+        @result = bind_result
+        raise Net::LDAP::TransactionStartError,
+              "bind failed before Start Transaction: #{bind_result.error_message}"
+      end
+
+      begin
+        txn = start_on_connection(connection)
+        # Pin this connection for every operation issued in the block; save
+        # and restore the surrounding value (normally nil) on exit.
+        previous_open_connection = @open_connection
+        @open_connection = connection
+        yield connection, txn
+      ensure
+        @open_connection = previous_open_connection
+        connection.close
+      end
+    end
+  end
+
+  # Sends Start Transaction on a connection that is exclusively ours for
+  # the duration of the block.
+  def start_on_connection(connection)
+    @result = connection.start_transaction
+  end
+
+  # Cancels the open transaction after the user block raised. The original
+  # exception is always re-raised; a missing/failed abort is attached to it
+  # but never masks it.
+  def abort_transaction(connection, txn, block_error)
+    begin
+      @result = connection.end_transaction(false)
+    rescue StandardError => abort_error
+      # A failed or unanswerable cancel must not mask the exception that
+      # triggered it; attach the abort error for diagnostics and re-raise.
+      block_error.instance_variable_set(:@ldap_abort_error, abort_error)
+      def block_error.ldap_abort_error
+        @ldap_abort_error
+      end
+    end
+    raise block_error
+  end
+
+  # Commits the transaction and associates any failures named in the End
+  # Transaction response with the operations issued in the block.
+  def commit_transaction(connection, txn)
+    # A missing response raises TransactionResultUnknownError, which
+    # preserves the unknown outcome without replaying the block; let it
+    # propagate.
+    @result = connection.end_transaction(true)
+
+    end_pdu = txn.end_pdu
+    unless end_pdu.success?
+      details = connection.send(:parse_end_transaction_value, end_pdu)
+      failed = correlate_transaction_failures(txn, details)
+      raise Net::LDAP::TransactionCommitError.new(
+        nil, :pdu => end_pdu, :failed_operations => failed
+      )
+    end
+
+    txn
+  end
+
+  # Builds the list of block operations referenced by a failed End
+  # Transaction response. The response may name a message id directly and/or
+  # wrap it in an UpdateControl carrying per-update response controls.
+  def correlate_transaction_failures(txn, details)
+    failed = []
+    correlated_message_ids = {}
+
+    details[:message_ids].each do |message_id|
+      operation = txn.operation_for(message_id)
+      next unless operation
+      next if correlated_message_ids[message_id]
+
+      correlated_message_ids[message_id] = true
+      failed << build_failed_operation(operation, message_id, [])
+    end
+
+    details[:updates].each do |update|
+      message_id = update[:message_id]
+      operation = message_id && txn.operation_for(message_id)
+      next unless operation
+
+      if correlated_message_ids[message_id]
+        # The same operation was named directly; attach the update controls.
+        existing = failed.find { |entry| entry[:message_id] == message_id }
+        existing[:controls] = update[:controls] if existing
+      else
+        correlated_message_ids[message_id] = true
+        failed << build_failed_operation(operation, message_id, update[:controls])
+      end
+    end
+
+    failed
+  end
+
+  def build_failed_operation(operation, message_id, controls)
+    {
+      :message_id => message_id,
+      :operation => operation[:operation],
+      :args => operation[:args],
+      :pdu => operation[:pdu],
+      :controls => controls,
+    }
+  end
+
   # Yields an open connection if there is one, otherwise establishes a new
   # connection, binds, and yields it. If binding fails, it will return the
   # result from that, and :use_connection: will not yield at all. If not
   # the return value is whatever is returned from the block.
   def use_connection(args)
     if @open_connection
+      # A transaction always runs on the connection opened/pinned by
+      # #begin_transaction; unrelated requests on it from another thread are
+      # refused by the connection itself.
       yield @open_connection
     else
       begin
