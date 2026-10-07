@@ -3111,6 +3111,749 @@ class Resolv
         end
       end
     end
+
+    ##
+    # Reads DNS master zone files.
+    #
+    # The reader parses zone text into [name, ttl, resource] tuples.  It does
+    # not open files itself; the +resolver+ passed to the constructor is
+    # responsible for resolving $INCLUDE references to zone text or an IO.
+
+    class ZoneReader
+      include Enumerable
+
+      ##
+      # Raised when zone text cannot be parsed.
+
+      class ParseError < ResolvError
+        attr_reader :file, :line, :column, :record
+
+        def initialize(message, file: nil, line: nil, column: nil, record: nil)
+          @file = file
+          @line = line
+          @column = column
+          @record = record
+          location = [file, line && "line #{line}", column && "column #{column}"].compact.join(":")
+          location = "(line #{line})" if file.nil? && line
+          message = location.empty? ? message : "#{message} at #{location}"
+          message = "#{message}; record: #{record}" if record
+          super(message)
+        end
+      end
+
+      TypeValues = { # :nodoc:
+        'A' => 1,
+        'NS' => 2,
+        'CNAME' => 5,
+        'SOA' => 6,
+        'PTR' => 12,
+        'HINFO' => 13,
+        'MINFO' => 14,
+        'MX' => 15,
+        'TXT' => 16,
+        'AAAA' => 28,
+        'SRV' => 33,
+        'CAA' => 257
+      }
+
+      ClassValues = { # :nodoc:
+        'IN' => 1,
+        'CH' => 3,
+        'HS' => 4
+      }
+
+      ##
+      # Creates a zone reader.
+      #
+      # +source+ may be a String containing zone text, an IO, or any object
+      # responding to #read.  +origin+ and +ttl+ supply initial values for
+      # $ORIGIN and $TTL.  +file+ identifies +source+ in error messages.  The
+      # optional +resolver+ receives +call(include_name, origin, ttl)+ for a
+      # $INCLUDE directive and must return zone text, an IO, or
+      # [source, file].
+
+      def initialize(source, default_origin = nil, default_ttl = nil,
+                     origin: nil, ttl: nil, file: nil, resolver: nil, &block)
+        @source = source
+        origin_value = origin || default_origin
+        if origin_value
+          origin_name = Name.create(origin_value)
+          @initial_origin = Name.new(origin_name.to_a, true)
+        else
+          @initial_origin = nil
+        end
+        @initial_ttl = ttl || default_ttl
+        @file = file || source_file(source)
+        @resolver = resolver || block
+        @included_sources = []
+      end
+
+      ##
+      # Iterates each [name, ttl, resource] tuple in the zone.
+
+      def each(&block)
+        return enum_for(__method__) unless block
+        read_source(@source, @file || :root, @file, @initial_origin, @initial_ttl, @included_sources, &block)
+      end
+
+      private
+
+      def source_file(source)
+        source.respond_to?(:path) ? source.path : nil
+      end
+
+      def source_text(source)
+        case source
+        when String
+          source
+        when nil
+          raise ParseError.new("$INCLUDE resolver returned nil")
+        else
+          unless source.respond_to?(:read)
+            raise ParseError.new("invalid zone source: #{source.inspect}", file: @file)
+          end
+          source.read.to_s
+        end
+      end
+
+      def read_source(source, source_identity, file, inherited_origin, inherited_ttl, included_sources)
+        if included_sources.include?(source_identity)
+          chain = (included_sources + [source_identity]).join(" -> ")
+          raise ParseError.new("$INCLUDE cycle detected: #{chain}", file: file)
+        end
+
+        origin = inherited_origin
+        ttl = inherited_ttl
+        owner = nil
+        active_sources = included_sources + [source_identity]
+
+        tokenize_lines(source_text(source), file).each do |logical_line|
+          tokens = logical_line[:tokens]
+          next if tokens.empty?
+
+          first = tokens.first
+          if first[:text].bytes == [92, 35]
+            parse_error("record owner or RFC 3597 TYPE token is required before \\#", file, logical_line, first)
+          elsif first[:text].start_with?('$')
+            directive = first[:text].upcase
+            args = tokens[1..-1]
+            case directive
+            when '$ORIGIN'
+              origin = parse_directive_name(args, origin, file, logical_line)
+            when '$TTL'
+              ttl = parse_directive_ttl(args, file, logical_line)
+            when '$INCLUDE'
+              read_include(args, origin, ttl, file, logical_line, active_sources) do |record|
+                yield record
+              end
+            else
+              parse_error("unknown directive #{first[:text]}", file, logical_line, first)
+            end
+            next
+          end
+
+          record = parse_record(tokens, origin, ttl, owner, file, logical_line)
+          owner = record[0]
+          origin = record[1]
+          ttl = record[2]
+          yield [record[0], record[2], record[3]]
+        end
+      end
+
+      def read_include(args, origin, ttl, parent_file, logical_line, included_sources)
+        include_token = args.first
+        parse_error("$INCLUDE requires a file name", parent_file, logical_line) unless include_token
+        if @resolver.nil?
+          parse_error("$INCLUDE is not supported without a resolver", parent_file, logical_line, include_token)
+        end
+
+        include_origin = args[1] ? qualify_name(args[1][:text], origin, parent_file, logical_line, args[1]) : origin
+        result = call_resolver(include_token[:text], include_origin, ttl)
+        child_source, child_file = resolve_included(result)
+        identity = child_file || include_token[:text]
+        if included_sources.include?(identity)
+          chain = (included_sources + [identity]).join(" -> ")
+          parse_error("$INCLUDE cycle detected: #{chain}", parent_file, logical_line, include_token)
+        end
+        read_source(child_source, identity, child_file || include_token[:text], include_origin, ttl, included_sources) do |record|
+          yield record
+        end
+      end
+
+      def call_resolver(name, origin, ttl)
+        args = [name, origin, ttl]
+        parameters = (@resolver.respond_to?(:parameters) ? @resolver : @resolver.method(:call)).parameters
+        count = parameters.count {|kind, _| [:req, :opt].include?(kind)}
+        count = args.length if parameters.any? {|kind, _| kind == :rest}
+        @resolver.call(*args.first(count))
+      end
+
+      def resolve_included(result)
+        case result
+        when Array
+          if result.length < 1 || result.length > 2
+            raise ParseError.new("$INCLUDE resolver must return source or [source, file]")
+          end
+          [result[0], result[1]]
+        else
+          [result, nil]
+        end
+      end
+
+      def tokenize_lines(text, file)
+        logical_lines = []
+        tokens = []
+        current = nil
+        depth = 0
+        quoted = false
+        escaped = false
+        leading_space = true
+        start_line = nil
+        start_column = nil
+        line = 1
+        column = 1
+
+        close_token = lambda do
+          if current
+            current[:text] = current[:text].b.force_encoding(text.encoding)
+            tokens << current
+            current = nil
+          end
+        end
+
+        flush = lambda do
+          close_token.call
+          unless tokens.empty?
+            logical_lines << {
+              line: start_line || tokens.first[:line],
+              column: start_column || tokens.first[:column],
+              owner_omitted: tokens.first[:column].to_i > 1,
+              tokens: tokens,
+              text: tokens.map {|token| token[:text]}.join(' ')
+            }
+          end
+          tokens = []
+          start_line = nil
+          start_column = nil
+          depth = 0
+          leading_space = true
+        end
+
+        in_comment = false
+        text = text.to_s
+        text.each_byte do |byte|
+          char = byte.chr
+
+          if escaped
+            current[:text] << char
+            escaped = false
+          elsif quoted
+            if byte == 92
+              current ||= {text: ''.b, line: line, column: column, quoted: true}
+              current[:text] << char
+              escaped = true
+            elsif byte == 34
+              close_token.call
+              quoted = false
+            else
+              current[:text] << char
+            end
+          elsif in_comment
+            if byte == 10
+              in_comment = false
+              close_token.call
+              if depth.zero?
+                flush.call
+              end
+              line += 1
+              column = 1
+              leading_space = true
+            end
+            column += 1 unless byte == 10
+            next
+          elsif byte == 92
+            current ||= {text: ''.b, line: line, column: column, quoted: false}
+            current[:text] << char
+            escaped = true
+          elsif byte == 34
+            close_token.call
+            current = {text: ''.b, line: line, column: column, quoted: true}
+            quoted = true
+          elsif byte == 59 && !quoted
+            close_token.call
+            in_comment = true
+          elsif byte == 40 && !quoted
+            close_token.call
+            depth += 1
+          elsif byte == 41 && !quoted
+            close_token.call
+            depth -= 1
+            parse_error("unbalanced parenthesis", file, {line: line, text: record_text(tokens)}) if depth < 0
+          elsif byte == 10
+            close_token.call
+            if depth.zero?
+              flush.call
+            end
+            line += 1
+            column = 1
+            leading_space = true
+            next
+          elsif byte == 13
+            # Handled together with the following LF when CRLF is used.
+          elsif byte == 32 || byte == 9
+            close_token.call
+          else
+            if current.nil?
+              current = {text: ''.b, line: line, column: column, quoted: false}
+              start_line ||= line
+              start_column ||= column
+            end
+            current[:text] << char
+          end
+
+          column += 1 unless byte == 10 || byte == 13
+          leading_space = false unless byte == 32 || byte == 9 || byte == 13 ||
+                                    byte == 40 || byte == 41 || byte == 59
+        end
+
+        parse_error("unterminated quoted string", file, {line: line, text: record_text(tokens)}) if quoted
+        parse_error("unterminated parenthesized list", file, {line: line, text: record_text(tokens)}) unless depth.zero?
+        flush.call
+        logical_lines
+      end
+
+      def record_text(tokens)
+        tokens.map {|token| token[:text]}.join(' ')
+      end
+
+      def parse_record(tokens, inherited_origin, inherited_ttl, last_owner, file, logical_line)
+        index = 0
+        if logical_line[:owner_omitted]
+          owner = last_owner
+          parse_error("record owner is required before an inherited record", file, logical_line) if owner.nil?
+        else
+          owner = parse_owner(tokens.first, inherited_origin, file, logical_line)
+          index += 1
+        end
+
+        ttl = inherited_ttl
+        record_class = nil
+        has_generic_marker = false
+        until index >= tokens.length
+          token = tokens[index]
+          text = token[:text]
+          if ttl_token?(text)
+            ttl = parse_ttl(text, file, logical_line, token)
+          elsif numeric_class?(text)
+            record_class = parse_class(text, file, logical_line, token)
+          elsif ClassValues.key?(text.upcase)
+            record_class = ClassValues[text.upcase]
+          else
+            break
+          end
+          index += 1
+        end
+        type_token = tokens[index]
+        parse_error("missing record type", file, logical_line) unless type_token
+        index += 1
+        if type_token[:text] =~ /\ATYPE(?:0x[0-9a-f]+|\d+)\z/i
+          while index < tokens.length &&
+                (numeric_class?(tokens[index][:text]) ||
+                 ClassValues.key?(tokens[index][:text].upcase) ||
+                 ttl_token?(tokens[index][:text]))
+            if numeric_class?(tokens[index][:text])
+              record_class = parse_class(tokens[index][:text], file, logical_line, tokens[index])
+            elsif ClassValues.key?(tokens[index][:text].upcase)
+              record_class = ClassValues[tokens[index][:text].upcase]
+            else
+              ttl = parse_ttl(tokens[index][:text], file, logical_line, tokens[index])
+            end
+            index += 1
+          end
+          if tokens[index] && tokens[index][:text].bytes == [92, 35]
+            has_generic_marker = true
+            index += 1
+          end
+        end
+
+        if !TypeValues.key?(type_token[:text].upcase) &&
+           type_token[:text] !~ /\ATYPE(?:0x[0-9a-f]+|\d+)\z/i
+          parse_error("unknown RR type #{type_token[:text]}", file, logical_line, type_token)
+        end
+
+        parse_error("missing TTL; use $TTL or an explicit TTL", file, logical_line) if ttl.nil?
+
+        class_value = record_class || Resource::IN::ClassValue
+        rdata_tokens = tokens[index..-1] || []
+        resource = build_resource(type_token, class_value, rdata_tokens, inherited_origin, file, logical_line,
+                                  has_generic_marker)
+        resource.instance_variable_set(:@ttl, ttl)
+        [owner, inherited_origin, ttl, resource]
+      end
+
+      def parse_owner(token, origin, file, logical_line)
+        text = token[:text]
+        parse_name_with_origin(text, origin, file, logical_line, token)
+      end
+
+      def parse_directive_name(args, origin, file, logical_line)
+        token = args.first
+        parse_error("$ORIGIN requires a domain name", file, logical_line) unless token
+        begin
+          name = create_name(token[:text])
+        rescue ArgumentError => e
+          parse_error(e.message, file, logical_line, token)
+        end
+        Name.new(name.to_a, true)
+      end
+
+      def parse_directive_ttl(args, file, logical_line)
+        token = args.first
+        parse_error("$TTL requires a TTL", file, logical_line) unless token
+        parse_ttl(token[:text], file, logical_line, token)
+      end
+
+      def qualify_name(text, origin, file, logical_line, token)
+        parse_name_with_origin(text, origin, file, logical_line, token)
+      end
+
+      def parse_name_with_origin(text, origin, file, logical_line, token)
+        return Name.new([], true) if text == '.'
+        begin
+          name = create_name(text)
+        rescue ArgumentError => e
+          parse_error(e.message, file, logical_line, token)
+        end
+        return name if name.absolute?
+        if text == '@'
+          return origin if origin
+        elsif origin
+          return Name.new(name.to_a + origin.to_a, true)
+        end
+        parse_error("relative domain name without $ORIGIN: #{text}", file, logical_line, token)
+      end
+
+      def qualify_text(text, origin)
+        name = name_from_text(text)
+        return name if name.absolute?
+        Name.new(name.to_a + origin.to_a, true)
+      end
+
+      def create_name(text)
+        name_from_text(text)
+      end
+
+      def name_from_text(text)
+        labels = []
+        current = ''.b
+        index = 0
+        bytes = text.b
+        quoted = false
+        escaped = false
+        while index < bytes.bytesize
+          byte = bytes.getbyte(index)
+          if escaped
+            if byte >= 48 && byte <= 57
+              digits = bytes.byteslice(index, 3)
+              if digits =~ /\A\d{3}\z/
+                value = digits.to_i
+                raise ArgumentError, "invalid decimal escape #{digits}" if value > 255
+                current << value.chr
+                index += 3
+              else
+                current << byte.chr
+              end
+            else
+              current << byte.chr
+            end
+            escaped = false
+          elsif byte == 92
+            escaped = true
+          elsif byte == 34
+            quoted = !quoted
+          elsif byte == 46 && !quoted
+            if index == 0
+              # Root name.
+            elsif current.empty?
+              raise ArgumentError, "empty label in domain name #{text.inspect}"
+            else
+              labels << current.dup.force_encoding(text.encoding)
+              current = ''.b
+            end
+          else
+            current << byte.chr
+          end
+          index += 1
+        end
+        raise ArgumentError, "unterminated escape in domain name #{text.inspect}" if escaped
+        absolute = text == '.' || (!quoted && bytes.bytesize > 0 && bytes.getbyte(-1) == 46)
+        if current.empty? && !labels.empty? && absolute
+          # Terminal dot after the final label.
+        elsif !current.empty?
+          labels << current.dup.force_encoding(text.encoding)
+        elsif text != '.' && !text.empty?
+          raise ArgumentError, "empty label in domain name #{text.inspect}"
+        end
+        Name.new(labels, absolute)
+      end
+
+      def ttl_token?(text)
+        parse_ttl_value(text) != nil
+      end
+
+      def numeric_class?(text)
+        text =~ /\ACLASS(?:0x[0-9a-f]+|\d+)\z/i
+      end
+
+      def parse_class(text, file, logical_line, token)
+        value = parse_number(text.sub(/\ACLASS/i, ''))
+        unless value && value >= 0 && value <= 65535
+          parse_error("invalid RR class #{text}", file, logical_line, token)
+        end
+        value
+      end
+
+      def parse_ttl(text, file, logical_line, token)
+        value = parse_ttl_value(text)
+        parse_error("invalid TTL #{text}", file, logical_line, token) if value.nil?
+        validate_ttl(value, file, logical_line, token)
+      end
+
+      def parse_ttl_value(text)
+        if text =~ /\A\d+\z/
+          text.to_i
+        elsif text =~ /\A(\d+[smhdwSMHDW])+\z/
+          units = {'s' => 1, 'm' => 60, 'h' => 3600, 'd' => 86400, 'w' => 604800}
+          text.scan(/(\d+)([smhdwSMHDW])/).inject(0) {|sum, (number, unit)| sum + number.to_i * units[unit.downcase]}
+        end
+      end
+
+      def validate_ttl(value, file, logical_line, token)
+        unless value.is_a?(Integer) && value >= 0 && value <= 0xffffffff
+          parse_error("TTL out of range: #{value}", file, logical_line, token)
+        end
+        value
+      end
+
+      def parse_number(text)
+        if text =~ /\A0x([0-9a-f]+)\z/i
+          $1.to_i(16)
+        elsif text =~ /\A\d+\z/
+          text.to_i
+        end
+      end
+
+      def parse_uint(text, bits, name, file, logical_line, token)
+        value = parse_number(text)
+        maximum = (1 << bits) - 1
+        unless value && value >= 0 && value <= maximum
+          parse_error("invalid #{name} #{text}", file, logical_line, token)
+        end
+        value
+      end
+
+      def build_resource(type_token, class_value, tokens, origin, file, logical_line, has_explicit_type=false)
+        type_text = type_token[:text].upcase
+        if type_text.start_with?('TYPE')
+          type_value = parse_number(type_text[4..-1])
+        else
+          type_value = TypeValues[type_text]
+        end
+        unless type_value && type_value >= 0 && type_value <= 65535
+          parse_error("unknown RR type #{type_token[:text]}", file, logical_line, type_token)
+        end
+
+        generic = has_explicit_type && type_token[:text] =~ /\ATYPE(?:0x[0-9a-f]+|\d+)\z/i
+        if generic
+          return build_generic(tokens, class_value, file, logical_line, type_token, type_value)
+        end
+
+        builder = resource_builder(type_value, class_value)
+        unless builder
+          parse_error("unknown RR type #{type_token[:text]}; use RFC 3597 \\# format", file, logical_line, type_token)
+        end
+        rdata = send(builder, tokens, origin, class_value, file, logical_line)
+        begin
+          builder_class(type_value, class_value).new(*rdata)
+        rescue ArgumentError => e
+          parse_error(e.message, file, logical_line, type_token)
+        end
+      end
+
+      def resource_builder(type_value, class_value)
+        return nil unless class_value == Resource::IN::ClassValue
+        case type_value
+        when 1, 11, 28, 33, 257
+        when 2, 5, 6, 12, 13, 14, 15, 16
+        else
+          return nil
+        end
+        "build_#{type_value}_rdata"
+      end
+
+      def builder_class(type_value, class_value)
+        case type_value
+        when 1 then Resource::IN::A
+        when 11 then Resource::IN::WKS
+        when 28 then Resource::IN::AAAA
+        when 33 then Resource::IN::SRV
+        when 257 then Resource::IN::CAA
+        else Resource.get_class(type_value, class_value)
+        end
+      end
+
+      def build_generic(tokens, class_value, file, logical_line, type_token, explicit_type)
+        type_value = explicit_type
+        length = tokens[0] && parse_number(tokens[0][:text])
+        unless type_value && length && type_value >= 0 && type_value <= 65535 &&
+               class_value >= 0 && class_value <= 65535
+          parse_error("invalid RFC 3597 record", file, logical_line, type_token)
+        end
+        data = decode_hex((tokens[1..-1] || []).map {|token| token[:text]}.join, file, logical_line, type_token)
+        unless data.bytesize == length
+          parse_error("RFC 3597 RDATA length #{data.bytesize} does not match #{length}", file, logical_line, type_token)
+        end
+        Resource::Generic.create(type_value, class_value).new(data.b)
+      end
+
+      def decode_hex(text, file=nil, logical_line=nil, token=nil)
+        text = text.delete(" ")
+        parse_error("invalid hex RDATA", file, logical_line, token) unless text =~ /\A(?:[0-9a-fA-F]{2})*\z/
+        [text].pack("H*")
+      end
+
+      def domain_token(token, origin, file, logical_line)
+        qualify_name(token[:text], origin, file, logical_line, token)
+      end
+
+      def require_count(tokens, count, file, logical_line)
+        return if tokens.length == count
+        parse_error("expected #{count} RDATA fields, got #{tokens.length}", file, logical_line)
+      end
+
+      def build_1_rdata(tokens, origin, class_value, file, logical_line)
+        require_count(tokens, 1, file, logical_line)
+        [tokens.first[:text]]
+      end
+
+      alias build_28_rdata build_1_rdata
+
+      def build_2_rdata(tokens, origin, class_value, file, logical_line)
+        require_count(tokens, 1, file, logical_line)
+        [domain_token(tokens.first, origin, file, logical_line)]
+      end
+
+      alias build_5_rdata build_2_rdata
+      alias build_12_rdata build_2_rdata
+
+      def build_6_rdata(tokens, origin, class_value, file, logical_line)
+        require_count(tokens, 7, file, logical_line)
+        mname = domain_token(tokens[0], origin, file, logical_line)
+        rname = domain_token(tokens[1], origin, file, logical_line)
+        numbers = tokens[2..6].map.with_index {|token, field_index|
+          value = field_index.zero? ? parse_uint(token[:text], 32, "SOA serial", file, logical_line, token) :
+                    parse_ttl(token[:text], file, logical_line, token)
+          value
+        }
+        [mname, rname, *numbers]
+      end
+
+      def build_13_rdata(tokens, origin, class_value, file, logical_line)
+        require_count(tokens, 2, file, logical_line)
+        [character_string(tokens[0], file, logical_line),
+         character_string(tokens[1], file, logical_line)]
+      end
+
+      def build_14_rdata(tokens, origin, class_value, file, logical_line)
+        require_count(tokens, 2, file, logical_line)
+        [domain_token(tokens[0], origin, file, logical_line),
+         domain_token(tokens[1], origin, file, logical_line)]
+      end
+
+      def build_15_rdata(tokens, origin, class_value, file, logical_line)
+        require_count(tokens, 2, file, logical_line)
+        [parse_uint(tokens[0][:text], 16, "MX preference", file, logical_line, tokens[0]),
+         domain_token(tokens[1], origin, file, logical_line)]
+      end
+
+      def build_16_rdata(tokens, origin, class_value, file, logical_line)
+        parse_error("TXT record requires data", file, logical_line) if tokens.empty?
+        tokens.map {|token|
+          string = character_string(token, file, logical_line)
+          if string.bytesize > 255
+            parse_error("character-string is too long (#{string.bytesize} bytes, max 255)", file, logical_line, token)
+          end
+          string
+        }
+      end
+
+      def build_11_rdata(tokens, origin, class_value, file, logical_line)
+        require_count(tokens, 3, file, logical_line)
+        bitmap = tokens[2][:text] =~ /\A\h*\z/ ? [tokens[2][:text]].pack("H*") : tokens[2][:text]
+        [tokens[0][:text], parse_uint(tokens[1][:text], 8, "WKS protocol", file, logical_line, tokens[1]), bitmap]
+      end
+
+      def build_33_rdata(tokens, origin, class_value, file, logical_line)
+        require_count(tokens, 4, file, logical_line)
+        [parse_uint(tokens[0][:text], 16, "SRV priority", file, logical_line, tokens[0]),
+         parse_uint(tokens[1][:text], 16, "SRV weight", file, logical_line, tokens[1]),
+         parse_uint(tokens[2][:text], 16, "SRV port", file, logical_line, tokens[2]),
+         domain_token(tokens[3], origin, file, logical_line)]
+      end
+
+      def build_257_rdata(tokens, origin, class_value, file, logical_line)
+        require_count(tokens, 3, file, logical_line)
+        [parse_uint(tokens[0][:text], 8, "CAA flags", file, logical_line, tokens[0]),
+         tokens[1][:text], string_value(tokens[2], file, logical_line)]
+      end
+
+      def character_string(token, file, logical_line)
+        string_value(token, file, logical_line)
+      end
+
+      def string_value(token, file=nil, logical_line=nil)
+        begin
+          unescape_text(token[:text], token[:quoted])
+        rescue ArgumentError => e
+          parse_error(e.message, file, logical_line, token)
+        end
+      end
+
+      def unescape_text(text, quoted)
+        result = ''.b
+        index = 0
+        while index < text.bytesize
+          byte = text.getbyte(index)
+          if byte == 92
+            next_byte = text.getbyte(index + 1)
+            if next_byte >= 48 && next_byte <= 57
+              digits = text.byteslice(index + 1, 3)
+              if digits =~ /\A\d{3}\z/
+                value = digits.to_i
+                raise ArgumentError, "invalid decimal escape #{digits}" if value > 255
+                result << value.chr
+                index += 4
+                next
+              end
+            end
+            result << next_byte.chr
+            index += 2
+          else
+            result << byte.chr
+            index += 1
+          end
+        end
+        result.force_encoding(text.encoding)
+        result
+      end
+
+      def parse_error(message, file, logical_line, token=nil)
+        line = token && token[:line] || logical_line && logical_line[:line]
+        column = token && token[:column] || logical_line && logical_line[:column]
+        record = logical_line && logical_line[:text]
+        raise ParseError.new(message, file: file, line: line, column: column, record: record)
+      end
+    end
   end
 
   ##
