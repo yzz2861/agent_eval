@@ -1,4 +1,5 @@
 require 'onelogin/ruby-saml/logging'
+require 'onelogin/ruby-saml/authn_context_policy'
 require 'onelogin/ruby-saml/saml_message'
 require 'onelogin/ruby-saml/authrequest'
 require 'onelogin/ruby-saml/logoutrequest'

@@ -1373,6 +1373,77 @@ class RubySamlTest < Minitest::Test
       end
     end
 
+    describe "#validate_authn_context" do
+      let(:comparator) do
+        ranks = {
+          "urn:oasis:names:tc:SAML:2.0:ac:classes:Password" => 1,
+          "local:second-factor" => 2
+        }
+        lambda { |actual, requested| ranks[actual].nil? || ranks[requested].nil? ? nil : ranks[actual] <=> ranks[requested] }
+      end
+
+      it "accepts an exact match to the requested class reference" do
+        settings.authn_context = "urn:oasis:names:tc:SAML:2.0:ac:classes:Password"
+        response_without_recipient.settings = settings
+
+        assert response_without_recipient.send(:validate_authn_context)
+        assert_empty response_without_recipient.errors
+      end
+
+      it "accepts minimum at the equality boundary" do
+        settings.authn_context = "urn:oasis:names:tc:SAML:2.0:ac:classes:Password"
+        settings.authn_context_comparison = "minimum"
+        settings.authn_context_comparator = comparator
+        response_without_recipient.settings = settings
+
+        assert response_without_recipient.send(:validate_authn_context)
+        assert_empty response_without_recipient.errors
+      end
+
+      it "rejects an exact response issued for a different request" do
+        settings.authn_context = "local:second-factor"
+        response_without_recipient.settings = settings
+
+        assert !response_without_recipient.send(:validate_authn_context)
+        assert_includes response_without_recipient.errors, "Response AuthnContext does not exactly match a requested AuthnContext"
+      end
+
+      it "rejects a response intended for a stronger request even when its signature is valid" do
+        response_without_recipient.stubs(:conditions).returns(nil)
+        response_without_recipient.stubs(:validate_subject_confirmation).returns(true)
+        settings.idp_cert_fingerprint = ruby_saml_cert_fingerprint
+        settings.authn_context = "local:second-factor"
+        settings.authn_context_comparison = "minimum"
+        settings.authn_context_comparator = comparator
+        response_without_recipient.settings = settings
+
+        assert !response_without_recipient.is_valid?
+        assert_includes response_without_recipient.errors, "Response AuthnContext is weaker than the minimum requested AuthnContext"
+      end
+
+      it "rejects a missing response authentication context" do
+        settings.authn_context = "local:second-factor"
+        settings.authn_context_comparison = "minimum"
+        settings.authn_context_comparator = comparator
+        response_no_authnstatement.settings = settings
+
+        assert !response_no_authnstatement.send(:validate_authn_context)
+        assert_includes response_no_authnstatement.errors, "Response must contain exactly one AuthnContext reference"
+      end
+
+      it "rejects multiple response authentication context candidates" do
+        settings.authn_context = "urn:oasis:names:tc:SAML:2.0:ac:classes:Password"
+        response_without_recipient.settings = settings
+        response_without_recipient.stubs(:authn_context_refs).returns([
+          ["class", "urn:oasis:names:tc:SAML:2.0:ac:classes:Password"],
+          ["class", "local:second-factor"]
+        ])
+
+        assert !response_without_recipient.send(:validate_authn_context)
+        assert_includes response_without_recipient.errors, "Response must contain exactly one AuthnContext reference"
+      end
+    end
+
     describe "#success" do
       it "find a status code that says success" do
         response.success?

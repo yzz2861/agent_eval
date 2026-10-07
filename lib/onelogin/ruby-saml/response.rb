@@ -38,7 +38,7 @@ module OneLogin
       # This is not a whitelist to allow people extending OneLogin::RubySaml:Response
       # and pass custom options
       AVAILABLE_OPTIONS = [
-        :allowed_clock_drift, :check_duplicated_attributes, :matches_request_id, :settings, :skip_audience, :skip_authnstatement, :skip_conditions,
+        :allowed_clock_drift, :authn_context_comparator, :check_duplicated_attributes, :matches_request_id, :settings, :skip_audience, :skip_authnstatement, :skip_conditions,
         :skip_destination, :skip_recipient_check, :skip_subject_confirmation
       ]
       # TODO: Update the comment on initialize to describe every option
@@ -220,7 +220,25 @@ module OneLogin
       # @return [String] AuthnContextClassRef value
       #
       def authn_context_class_ref
-        @authn_context_class_ref ||= Utils.element_text(xpath_first_from_signed_assertion('/a:AuthnStatement/a:AuthnContext/a:AuthnContextClassRef'))
+        @authn_context_class_ref ||= begin
+          class_ref = authn_context_class_refs.first
+          class_ref.nil? ? nil : class_ref.last
+        end
+      end
+
+      def authn_context_class_refs
+        @authn_context_class_refs ||= authn_context_refs('AuthnContextClassRef', 'class')
+      end
+
+      def authn_context_decl_ref
+        @authn_context_decl_ref ||= begin
+          decl_ref = authn_context_decl_refs.first
+          decl_ref.nil? ? nil : decl_ref.last
+        end
+      end
+
+      def authn_context_decl_refs
+        @authn_context_decl_refs ||= authn_context_refs('AuthnContextDeclRef', 'decl')
       end
 
       # Checks if the Status has the "Success" code
@@ -412,6 +430,7 @@ module OneLogin
           :validate_one_conditions,
           :validate_conditions,
           :validate_one_authnstatement,
+          :validate_authn_context,
           :validate_audience,
           :validate_destination,
           :validate_issuer,
@@ -711,6 +730,24 @@ module OneLogin
         end
 
         true
+      end
+
+      def validate_authn_context
+        class_refs = context_array(settings.authn_context, 'class')
+        decl_refs = context_array(settings.authn_context_decl_ref, 'decl')
+        requested_contexts = class_refs + decl_refs
+
+        return true if requested_contexts.empty?
+
+        policy = AuthnContextPolicy.new(
+          requested_contexts,
+          authn_context_refs,
+          settings.authn_context_comparison || 'exact',
+          options[:authn_context_comparator] || settings.authn_context_comparator
+        )
+
+        return true if policy.match?
+        append_error(policy.error)
       end
 
       # Validates the Conditions. (If the response was initialized with the :skip_conditions option, this validation is skipped,
@@ -1129,6 +1166,18 @@ module OneLogin
 
       def check_malformed_doc_enabled?
         check_malformed_doc?(settings)
+      end
+
+      def authn_context_refs(element_name = nil, type = nil)
+        return authn_context_class_refs + authn_context_decl_refs if element_name.nil?
+
+        nodes = xpath_from_signed_assertion("/a:AuthnStatement/a:AuthnContext/a:#{element_name}")
+        nodes.collect { |node| [type, Utils.element_text(node)] }
+      end
+
+      def context_array(values, type)
+        values = values.is_a?(Array) ? values : [values]
+        values.select { |value| !value.nil? && !value.to_s.strip.empty? }.collect { |value| [type, value.to_s] }
       end
     end
   end
