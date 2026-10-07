@@ -2,6 +2,14 @@
 
 * Pass protocol version via Net::SFTP.start [#107]
 * Net-ssh 6.0 support [#106]
+* Add Net::SFTP::Session#download_checked, a block-level synchronizing
+  download built on the "check-file" extension: only differing blocks are
+  transferred, and a final whole-content digest guards against remote
+  changes during the sync (reported as a retryable result). The server
+  extensions advertised during version negotiation are now exposed via
+  Net::SFTP::Session#extensions, and the low-level
+  Net::SFTP::Session#check_file/#check_file! operations send and parse
+  FXP_EXTENDED "check-file" requests.
 
 === 2.1.2 / 07 May 2013
 

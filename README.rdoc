@@ -35,6 +35,11 @@ In a nutshell:
     # download a file or directory from the remote host
     sftp.download!("/path/to/remote", "/path/to/local")
 
+    # refresh an existing local copy, transferring only the blocks that
+    # changed (requires a server with the "check-file" extension)
+    # result = sftp.download_checked("/path/to/remote", "/path/to/local")
+    # retry if result.retry?
+
     # grab data off the remote host directly to a buffer
     data = sftp.download!("/path/to/remote")
 

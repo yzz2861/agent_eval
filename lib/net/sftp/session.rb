@@ -6,6 +6,7 @@ require 'net/sftp/request'
 require 'net/sftp/operations/dir'
 require 'net/sftp/operations/upload'
 require 'net/sftp/operations/download'
+require 'net/sftp/operations/checked_download'
 require 'net/sftp/operations/file_factory'
 
 module Net; module SFTP
@@ -68,6 +69,11 @@ module Net; module SFTP
     # the server has not yet responded to will be represented here.
     attr_reader :pending_requests
 
+    # The hash of extensions that the server advertised during protocol
+    # version negotiation, mapping the extension name to its (extension-
+    # specific) data. Empty until the session has finished connecting.
+    attr_reader :extensions
+
     # Creates a new Net::SFTP instance atop the given Net::SSH connection.
     # This will return immediately, before the SFTP connection has been properly
     # initialized. Once the connection is ready, the given block will be called.
@@ -82,6 +88,7 @@ module Net; module SFTP
       self.logger = session.logger
       @state      = :closed
       @pending_requests = {}
+      @extensions = {}
 
       connect(&block)
     end
@@ -126,6 +133,42 @@ module Net; module SFTP
         destination = local || StringIO.new
         result = download(remote, destination, options, &block).wait
         local ? result : destination.string
+      end
+
+      # Performs a check-summed, block-level synchronization download of the
+      # remote file at +remote+ to the existing local file at +local+, using
+      # the "check-file" protocol extension. The remote file is split into
+      # blocks, the server hashes each block, and only the blocks whose
+      # hashes differ from the local file are actually downloaded. Once all
+      # differing blocks have been patched in, a final whole-content hash is
+      # requested and compared, to detect any changes the remote file
+      # underwent while the synchronization was in progress.
+      #
+      # The local file must already exist and be writable. The server must
+      # have advertised the "check-file" extension (see #extensions); if it
+      # did not, a Net::SFTP::Exception is raised.
+      #
+      # Returns a Net::SFTP::Operations::CheckedDownload::Result describing
+      # the outcome. If the remote (or local) file changed while the
+      # synchronization was running, the result has a status of :retry
+      # rather than :ok, and the operation may simply be attempted again.
+      #
+      #   result = sftp.download_checked("/remote/path", "/local/path")
+      #   retry if result.retry?
+      #
+      # The following options are supported:
+      #
+      # * <tt>:block_size</tt> - the size of the blocks to compare (defaults
+      #   to 256KB). A block size of zero compares the entire region as a
+      #   single block.
+      # * <tt>:start</tt> - the offset of the first byte to synchronize
+      #   (defaults to 0).
+      # * <tt>:length</tt> - the number of bytes to synchronize; zero (the
+      #   default) means "to end of file".
+      # * <tt>:algorithms</tt> - the hash algorithms to offer the server
+      #   (defaults to all algorithms the client can compute locally).
+      def download_checked(remote, local, options={})
+        Operations::CheckedDownload.new(self, remote, local, options).run
       end
 
       # Returns an Net::SFTP::Operations::FileFactory instance, which can be used to
@@ -720,6 +763,41 @@ module Net; module SFTP
         wait_for(unblock(handle, offset, length, &callback))
       end
 
+      # :call-seq:
+      #   check_file(handle, algorithms, start=0, length=0, block_size=0) -> request
+      #   check_file(handle, algorithms, start=0, length=0, block_size=0) { |response| ... } -> request
+      #
+      # Sends a "check-file" extension request to the server, asking it to
+      # hash the file identified by +handle+. +algorithms+ is an array of
+      # hash algorithm names the client can verify locally (e.g.
+      # <tt>["sha256", "md5"]</tt>); the server picks one of them.
+      # +start+ and +length+ select the region of the file to hash (a
+      # +length+ of zero means "to end of file"), and +block_size+ is the
+      # size of the blocks to hash individually (zero hashes the region as
+      # a single block).
+      #
+      # This requires the server to have advertised the "check-file"
+      # extension (see #extensions). Returns immediately with a Request
+      # object; the raw extension payload of the reply is available as the
+      # :extended_reply property of the response.
+      def check_file(handle, algorithms, start=0, length=0, block_size=0, &callback)
+        request(:check_file, handle, algorithms, start, length, block_size, &callback)
+      end
+
+      # Identical to #check_file, but blocks until the server responds, and
+      # parses the reply. Returns a hash with two keys: :algorithm (the name
+      # of the hash algorithm the server selected) and :hashes (an array of
+      # the raw digest strings, one per block). Raises a StatusException if
+      # the request was unsuccessful.
+      #
+      #   result = sftp.check_file!(handle, ["sha256"], 0, 0, 1024)
+      #   puts result[:algorithm]  #-> "sha256"
+      #   puts result[:hashes].length
+      def check_file!(handle, algorithms, start=0, length=0, block_size=0, &callback)
+        reply = wait_for(check_file(handle, algorithms, start, length, block_size, &callback), :extended_reply)
+        parse_check_file_reply(reply)
+      end
+
     public # miscellaneous methods
 
       # Closes the SFTP connection, but not the SSH connection. Blocks until the
@@ -771,10 +849,11 @@ module Net; module SFTP
           block.call(self) if block
         when :closed
           @state = :opening
-          @channel = session.open_channel(&method(:when_channel_confirmed))
-          @packet_length = nil
-          @protocol = nil
-          @on_ready = Array(block)
+         @channel = session.open_channel(&method(:when_channel_confirmed))
+         @packet_length = nil
+         @protocol = nil
+         @extensions = {}
+         @on_ready = Array(block)
         else # opening
           @on_ready << block if block
         end
@@ -851,6 +930,17 @@ module Net; module SFTP
         else
           request.response
         end
+      end
+
+      # Parses the raw payload of a "check-file" extension reply, which
+      # consists of the name of the hash algorithm the server selected,
+      # followed by one digest string per hashed block.
+      def parse_check_file_reply(reply)
+        buffer = Net::SSH::Buffer.new(reply)
+        hashes = []
+        algorithm = buffer.read_string
+        hashes << buffer.read_string until buffer.eof?
+        { :algorithm => algorithm, :hashes => hashes }
       end
 
       # Called when the SSH channel is confirmed as "open" by the server.
@@ -933,6 +1023,8 @@ module Net; module SFTP
           data = packet.read_string
           extensions[name] = data
         end
+
+        @extensions = extensions
 
         @protocol = Protocol.load(self, negotiated_version)
         @pending_requests = {}
