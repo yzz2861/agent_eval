@@ -1657,7 +1657,9 @@ module DRb
           @succ = false
         end
 
-        if @block
+        if @msg_id == DRbBatch::MESSAGE_ID
+          @result = perform_batch
+        elsif @block
           @result = perform_with_block
         else
           @result = perform_without_block
@@ -1720,6 +1722,10 @@ module DRb
           end
           block_value
         end
+      end
+
+      def perform_batch
+        DRbBatch::Executor.new(@drb_server).execute(@obj, @argv[0])
       end
 
       def perform_without_block
@@ -1979,6 +1985,8 @@ module DRb
     @server[uri]
   end
   module_function :fetch_server
+
+  autoload :DRbBatch, 'drb/batch'
 end
 
 # :stopdoc:

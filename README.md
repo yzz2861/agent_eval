@@ -75,6 +75,37 @@ timeserver = DRbObject.new_with_uri(SERVER_URI)
 puts timeserver.current_time
 ```
 
+### Batching remote calls
+
+A call chain such as `remote.get_account(id).profile.summary` normally
+takes one round trip per call.  `DRb::DRbBatch` submits the whole chain
+in a single request; later calls refer to earlier results through slot
+placeholders:
+
+```rb
+require 'drb/drb'
+
+DRb.start_service
+remote = DRbObject.new_with_uri(SERVER_URI)
+
+batch = DRb::DRbBatch.new(remote)
+account = batch.call(:get_account, 42)
+profile = batch.call_on(account, :profile)
+summary = batch.call_on(profile, :summary)
+ping    = batch.call(:heartbeat) # independent of the chain
+
+results = batch.commit           # one round trip
+results[summary]                 # => value of the last call
+results.outcome(ping).ok?        # => true
+```
+
+Slots are pure data, never evaluated as Ruby code on the server.
+Forward references, cyclic references and references to slots of other
+batches are rejected.  If a call fails, calls that depend on it are
+marked as skipped (keeping the original error) while independent
+branches still run.  Batches are not transactional: completed calls
+are not rolled back and failed calls are not replayed.
+
 #### Security
 
 As DRb allows remote clients to invoke arbitrary methods, it is not suitable to
