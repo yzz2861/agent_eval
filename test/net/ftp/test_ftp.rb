@@ -7,6 +7,49 @@ require "stringio"
 require "tempfile"
 require "tmpdir"
 
+class TransferTestFTP
+  attr_reader :commands
+  attr_accessor :response_timeout
+
+  def initialize(responses)
+    @responses = responses
+    @commands = []
+    @closed = false
+    @response_timeout = 60
+  end
+
+  def closed?
+    @closed
+  end
+
+  def send_abor_command
+    @commands << "ABOR\r\n"
+  end
+
+  def read_control_response
+    raise Net::ReadTimeout if @responses.empty?
+    @responses.shift
+  end
+
+  def control_response_ready?(timeout)
+    return true unless @responses.empty?
+    sleep(timeout)
+    false
+  end
+
+  def close_control_connection_with_error(*)
+    @closed = true
+  end
+
+  def close_control_connection_with_status(*)
+    @closed = true
+  end
+
+  def response_exception(response)
+    Net::FTPProtoError.new(response)
+  end
+end
+
 class FTPTest < Test::Unit::TestCase
   SERVER_NAME = "localhost"
   SERVER_ADDR =
@@ -1263,6 +1306,259 @@ EOF
     ensure
       server.close
     end
+  end
+
+  def test_retrbinary_cancel_then_noop_and_retry
+    commands = Queue.new
+    handle = nil
+    server = create_ftp_server do |sock|
+      sock.print("220 (test_ftp).\r\n")
+      sock.gets; sock.print("331 Please specify the password.\r\n")
+      sock.gets; sock.print("230 Login successful.\r\n")
+      sock.gets; sock.print("200 Switching to Binary mode.\r\n")
+
+      line = sock.gets
+      commands.push(line)
+      host, port = process_port_or_eprt(sock, line)
+      commands.push(sock.gets)
+      sock.print("150 Opening BINARY mode data connection.\r\n")
+      conn = TCPSocket.new(host, port)
+      begin
+        conn.write("abcdef")
+        commands.push(sock.gets)
+        sock.print("426 Connection closed; transfer aborted.\r\n")
+        sock.print("226 Abor command successful.\r\n")
+      ensure
+        conn.close
+      end
+
+      commands.push(sock.gets)
+      sock.print("200 NOOP command successful.\r\n")
+
+      line = sock.gets
+      commands.push(line)
+      host, port = process_port_or_eprt(sock, line)
+      commands.push(sock.gets)
+      sock.print("150 Opening BINARY mode data connection.\r\n")
+      conn = TCPSocket.new(host, port)
+      conn.write("second")
+      conn.shutdown(Socket::SHUT_WR)
+      conn.read rescue nil
+      conn.close
+      sock.print("226 Transfer complete.\r\n")
+    end
+
+    ftp = Net::FTP.new
+    ftp.connect(SERVER_ADDR, server.port)
+    ftp.login
+
+    thread = Thread.start do
+      ftp.retrbinary("RETR first", 1024) do |data, active_transfer|
+        handle = active_transfer
+        sleep(0.1)
+      end
+    rescue Net::FTPCancelError
+    end
+
+    sleep(0.01) until handle
+    assert_equal(true, handle.cancel)
+    assert_raise(Net::FTPCancelError) { thread.join }
+    assert_match(/\A(PORT|EPRT) /, commands.pop)
+    assert_equal("RETR first\r\n", commands.pop)
+    assert_equal("ABOR\r\n", commands.pop)
+
+    ftp.noop
+    assert_equal("200", ftp.last_response_code)
+    assert_equal("NOOP\r\n", commands.pop)
+
+    assert_equal("second", ftp.getbinaryfile("second", nil))
+    assert_match(/\A(PORT|EPRT) /, commands.pop)
+    assert_equal("RETR second\r\n", commands.pop)
+    assert_raise(ThreadError) { commands.pop(true) }
+  ensure
+    thread&.join
+    ftp&.close
+    server&.close
+  end
+
+  def test_retrbinary_cancel_with_225
+    commands = Queue.new
+    handle = nil
+    server = create_ftp_server do |sock|
+      sock.print("220 (test_ftp).\r\n")
+      sock.gets; sock.print("331 Please specify the password.\r\n")
+      sock.gets; sock.print("230 Login successful.\r\n")
+      sock.gets; sock.print("200 Switching to Binary mode.\r\n")
+
+      line = sock.gets
+      commands.push(line)
+      host, port = process_port_or_eprt(sock, line)
+      commands.push(sock.gets)
+      sock.print("150 Opening BINARY mode data connection.\r\n")
+      conn = TCPSocket.new(host, port)
+      commands.push(sock.gets)
+      sock.print("225 No transfer to abort.\r\n")
+      conn.close
+
+      commands.push(sock.gets)
+      sock.print("200 NOOP command successful.\r\n")
+    end
+
+    ftp = Net::FTP.new
+    ftp.connect(SERVER_ADDR, server.port)
+    ftp.login
+    thread = Thread.start do
+      ftp.retrbinary("RETR foo", 1024) do |_, active_transfer|
+        handle = active_transfer
+        sleep(0.1)
+      end
+    rescue Net::FTPCancelError
+    end
+
+    sleep(0.01) until handle
+    assert_equal(true, handle.cancel)
+    thread.join
+    ftp.noop
+    assert_equal("200", ftp.last_response_code)
+  ensure
+    ftp&.close
+    server&.close
+  end
+
+  def test_retrbinary_cancel_tls_then_noop_and_retry
+    return unless defined?(OpenSSL)
+
+    commands = Queue.new
+    handle = nil
+    server = TCPServer.new(SERVER_ADDR, 0)
+    @thread = Thread.start do
+      sock = server.accept
+      begin
+        sock.print("220 (test_ftp).\r\n")
+        sock.gets
+        sock.print("234 AUTH success.\r\n")
+        ctx = OpenSSL::SSL::SSLContext.new
+        ctx.ca_file = CA_FILE
+        ctx.key = File.open(SERVER_KEY) { |f| OpenSSL::PKey::RSA.new(f) }
+        ctx.cert = File.open(SERVER_CERT) { |f| OpenSSL::X509::Certificate.new(f) }
+        sock = OpenSSL::SSL::SSLSocket.new(sock, ctx)
+        sock.sync_close = true
+        sock.accept
+        sock.gets; sock.print("200 PBSZ success.\r\n")
+        sock.gets; sock.print("200 PROT success.\r\n")
+        sock.gets; sock.print("331 Please specify the password.\r\n")
+        sock.gets; sock.print("230 Login successful.\r\n")
+        sock.gets; sock.print("200 Switching to Binary mode.\r\n")
+
+        line = sock.gets
+        commands.push(line)
+        host, port = process_port_or_eprt(sock, line)
+        commands.push(sock.gets)
+        sock.print("150 Opening BINARY mode data connection.\r\n")
+        data_conn = TCPSocket.new(host, port)
+        data_conn = OpenSSL::SSL::SSLSocket.new(data_conn, ctx)
+        data_conn.sync_close = true
+        data_conn.accept
+        data_conn.write("abcdef")
+        commands.push(sock.gets)
+        sock.print("426 Connection closed; transfer aborted.\r\n")
+        sock.print("226 ABOR command successful.\r\n")
+        data_conn.close
+
+        commands.push(sock.gets)
+        sock.print("200 NOOP command successful.\r\n")
+
+        line = sock.gets
+        commands.push(line)
+        host, port = process_port_or_eprt(sock, line)
+        commands.push(sock.gets)
+        sock.print("150 Opening BINARY mode data connection.\r\n")
+        data_conn = TCPSocket.new(host, port)
+        data_conn = OpenSSL::SSL::SSLSocket.new(data_conn, ctx)
+        data_conn.sync_close = true
+        data_conn.accept
+        data_conn.write("second")
+        data_conn.close
+        sock.print("226 Transfer complete.\r\n")
+      rescue OpenSSL::SSL::SSLError, SystemCallError
+      ensure
+        sock.close rescue nil
+        server.close
+      end
+    end
+
+    ftp = Net::FTP.new(SERVER_NAME,
+                       port: server.port,
+                       ssl: { ca_file: CA_FILE },
+                       passive: false)
+    thread = Thread.start do
+      ftp.retrbinary("RETR first", 1024) do |_, active_transfer|
+        handle = active_transfer
+        sleep(0.1)
+      end
+    rescue Net::FTPCancelError
+    end
+
+    sleep(0.01) until handle
+    assert_equal(true, handle.cancel)
+    thread.join
+    ftp.noop
+    assert_equal("200", ftp.last_response_code)
+    assert_equal("second", ftp.getbinaryfile("second", nil))
+    assert_match(/\A(PORT|EPRT) /, commands.pop)
+    assert_equal("RETR first\r\n", commands.pop)
+    assert_equal("ABOR\r\n", commands.pop)
+    assert_equal("NOOP\r\n", commands.pop)
+    assert_match(/\A(PORT|EPRT) /, commands.pop)
+    assert_equal("RETR second\r\n", commands.pop)
+  ensure
+    thread&.join
+    ftp&.close
+    server&.close
+  end
+
+  def test_storbinary_data_error_aligns_control_connection
+    commands = Queue.new
+    server = create_ftp_server do |sock|
+      sock.print("220 (test_ftp).\r\n")
+      sock.gets; sock.print("331 Please specify the password.\r\n")
+      sock.gets; sock.print("230 Login successful.\r\n")
+      sock.gets; sock.print("200 Switching to Binary mode.\r\n")
+
+      line = sock.gets
+      commands.push(line)
+      host, port = process_port_or_eprt(sock, line)
+      commands.push(sock.gets)
+      sock.print("150 Opening BINARY mode data connection.\r\n")
+      conn = TCPSocket.new(host, port)
+      conn.read(1)
+      conn.setsockopt(Socket::SOL_SOCKET, Socket::SO_LINGER,
+                      [1, 0].pack("ii"))
+      conn.close
+      sock.print("426 Connection closed; transfer aborted.\r\n")
+      commands.push(sock.gets)
+      sock.print("225 Abor command successful.\r\n")
+
+      commands.push(sock.gets)
+      sock.print("200 NOOP command successful.\r\n")
+    end
+
+    ftp = Net::FTP.new
+    ftp.connect(SERVER_ADDR, server.port)
+    ftp.login
+    file = StringIO.new("x" * 1024 * 1024)
+    assert_raise(SystemCallError) do
+      ftp.storbinary("STOR foo", file, 1024)
+    end
+    ftp.noop
+    assert_equal("200", ftp.last_response_code)
+    assert_match(/\A(PORT|EPRT) /, commands.pop)
+    assert_equal("STOR foo\r\n", commands.pop)
+    assert_equal("ABOR\r\n", commands.pop)
+    assert_equal("NOOP\r\n", commands.pop)
+  ensure
+    ftp&.close
+    server&.close
   end
 
   def test_status
@@ -2669,6 +2965,85 @@ EOF
       debug_stream.rewind
       assert_equal(debug_stream.read, "Test\n")
     end
+  end
+
+  def test_transfer_abort_response_426_then_226
+    transfer, ftp = transfer_with_responses(
+      "426 Connection closed.\r\n",
+      "226 ABOR successful.\r\n")
+    assert_raise(Net::FTPCancelError) do
+      transfer.synchronize { transfer.send(:begin_abort) }
+      transfer.send(:read_abort_response)
+    end
+    assert_equal(false, ftp.closed?)
+    assert_equal("ABOR\r\n", ftp.commands.join)
+  end
+
+  def test_transfer_abort_response_225
+    transfer, ftp = transfer_with_responses(
+      "225 No transfer to abort.\r\n")
+    assert_raise(Net::FTPCancelError) do
+      transfer.synchronize { transfer.send(:begin_abort) }
+      transfer.send(:read_abort_response)
+    end
+    assert_equal(false, ftp.closed?)
+  end
+
+  def test_transfer_abort_response_226_requires_following_225
+    transfer, ftp = transfer_with_responses(
+      "226 Transfer complete.\r\n",
+      "200 NOOP OK.\r\n")
+    error = assert_raise(Net::FTPProtoError) do
+      transfer.synchronize { transfer.send(:begin_abort) }
+      transfer.send(:read_abort_response)
+    end
+    assert_equal(true, ftp.closed?)
+    assert_match(/200 NOOP/, error.message)
+  end
+
+  def test_transfer_abort_response_226_then_225
+    transfer, ftp = transfer_with_responses(
+      "226 Transfer complete.\r\n",
+      "225 ABOR successful.\r\n")
+    assert_raise(Net::FTPCancelError) do
+      transfer.synchronize { transfer.send(:begin_abort) }
+      transfer.send(:read_abort_response)
+    end
+    assert_equal(false, ftp.closed?)
+  end
+
+  def test_transfer_abort_response_226_without_225_closes_connection
+    transfer, ftp = transfer_with_responses(
+      "226 Transfer complete.\r\n")
+    error = assert_raise(Net::FTPProtoError) do
+      transfer.synchronize { transfer.send(:begin_abort) }
+      transfer.send(:read_abort_response)
+    end
+    assert_equal(true, ftp.closed?)
+    assert_match(/not aligned/, error.message)
+  end
+
+  def test_transfer_abort_response_timeout_closes_connection
+    transfer, ftp = transfer_with_responses
+    ftp.response_timeout = 0.01
+    error = assert_raise(Net::FTPConnectionError) do
+      transfer.synchronize { transfer.send(:begin_abort) }
+      transfer.send(:read_abort_response)
+    end
+    assert_equal(true, ftp.closed?)
+    assert_match(/waiting for ABOR response/, error.message)
+  end
+
+  private
+
+  def transfer_with_responses(*responses)
+    ftp = TransferTestFTP.new(responses)
+    transfer = Net::FTP::Transfer.new
+    transfer.instance_variable_set(:@ftp, ftp)
+    transfer.instance_variable_set(:@owner, Thread.current)
+    transfer.instance_variable_set(:@state, :active)
+    transfer.instance_variable_set(:@canceled, true)
+    [transfer, ftp]
   end
 
   private

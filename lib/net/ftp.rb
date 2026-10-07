@@ -33,6 +33,11 @@ module Net
   class FTPPermError < FTPError; end
   class FTPProtoError < FTPError; end
   class FTPConnectionError < FTPError; end
+  class FTPCancelError < FTPError
+    def initialize(message = "transfer canceled")
+      super
+    end
+  end
   # :startdoc:
 
   #
@@ -140,7 +145,7 @@ module Net
 
     # Setter for the read_timeout attribute.
     def read_timeout=(sec)
-      @sock.read_timeout = sec
+      @sock.read_timeout = sec unless @sock.closed?
       @read_timeout = sec
     end
 
@@ -296,6 +301,7 @@ module Net
       @debug_output = $stdout
       @resume = false
       @bare_sock = @sock = NullSocket.new
+      @active_transfers = []
       @logged_in = false
       @open_timeout = options[:open_timeout]
       @ssl_handshake_timeout = options[:ssl_handshake_timeout]
@@ -485,23 +491,61 @@ module Net
     end
     private :getmultiline
 
+    def record_response(resp)
+      @last_response = resp
+      @last_response_code = resp[0, 3]
+      resp
+    end
+    private :record_response
+
+    def response_exception(resp)
+      case resp[0, 3]
+      when /\A4/
+        FTPTempError.new(resp)
+      when /\A5/
+        FTPPermError.new(resp)
+      else
+        FTPProtoError.new(resp)
+      end
+    end
+    private :response_exception
+
+    def validate_response(resp, successful = /\A[123]/)
+      unless resp[0, 3].match?(successful)
+        raise response_exception(resp)
+      end
+      resp
+    end
+    private :validate_response
+
+    def close_control_connection
+      return if @sock.closed?
+      if @sock.respond_to?(:force_close)
+        @sock.force_close rescue nil
+      else
+        @sock.close rescue nil
+      end
+    end
+    private :close_control_connection
+
+    def close_control_connection_with_status(message)
+      debug_print(message)
+      close_control_connection
+    end
+
+    def close_control_connection_with_error(error, context)
+      close_control_connection_with_status(
+        "#{context}: #{error.class}: #{error.message}")
+    end
+    private :close_control_connection_with_status,
+            :close_control_connection_with_error
+
     # Receives a response from the destination host.
     #
     # Returns the response code or raises FTPTempError, FTPPermError, or
     # FTPProtoError
     def getresp # :nodoc:
-      @last_response = getmultiline
-      @last_response_code = @last_response[0, 3]
-      case @last_response_code
-      when /\A[123]/
-        return @last_response
-      when /\A4/
-        raise FTPTempError, @last_response
-      when /\A5/
-        raise FTPPermError, @last_response
-      else
-        raise FTPProtoError, @last_response
-      end
+      validate_response(record_response(getmultiline))
     end
     private :getresp
 
@@ -516,6 +560,51 @@ module Net
       end
     end
     private :voidresp
+
+    def activate_transfer(transfer)
+      synchronize do
+        if @active_transfers.include?(transfer)
+          raise FTPError, "another transfer is active"
+        end
+        @active_transfers.push(transfer)
+      end
+    end
+
+    def deactivate_transfer(transfer)
+      synchronize do
+        @active_transfers.delete(transfer)
+      end
+    end
+
+    def send_abor_command
+      line = "ABOR" + CRLF
+      debug_print "put: ABOR"
+      if @ssl_context
+        @sock.write(line)
+      else
+        @sock.send(line, Socket::MSG_OOB)
+      end
+    rescue EOFError, IOError, SystemCallError,
+           OpenSSL::SSL::SSLError => error
+      close_control_connection_with_error(error, "sending ABOR")
+      raise FTPConnectionError,
+            "sending ABOR: #{error.class}: #{error.message}"
+    end
+
+    def read_control_response
+      record_response(getmultiline)
+    end
+
+    def validate_control_response(resp)
+      validate_response(resp, /\A2/)
+    end
+
+    def control_response_ready?(timeout = 0.1)
+      @sock.response_ready?(timeout)
+    end
+    private :activate_transfer, :deactivate_transfer,
+            :send_abor_command, :read_control_response,
+            :validate_control_response, :control_response_ready?
 
     #
     # Sends a command and returns the response.
@@ -569,9 +658,11 @@ module Net
     private :makepasv
 
     # Constructs a connection for transferring data
-    def transfercmd(cmd, rest_offset = nil) # :nodoc:
+    def transfercmd(cmd, rest_offset = nil, transfer = nil) # :nodoc:
+      raise FTPCancelError if transfer&.canceled?
       if @passive
         host, port = makepasv
+        raise FTPCancelError if transfer&.canceled?
         succeeded = false
         begin
           conn = open_socket(host, port)
@@ -616,11 +707,17 @@ module Net
         end
       end
       if @private_data_connection
-        return BufferedSSLSocket.new(start_tls_session(conn),
-                                     read_timeout: @read_timeout)
+        socket = BufferedSSLSocket.new(start_tls_session(conn),
+                                       read_timeout: @read_timeout)
       else
-        return BufferedSocket.new(conn, read_timeout: @read_timeout)
+        socket = BufferedSocket.new(conn, read_timeout: @read_timeout)
       end
+      transfer&.activate(socket)
+      if transfer&.canceled?
+        socket.close rescue nil
+        raise FTPCancelError
+      end
+      return socket
     end
     private :transfercmd
 
@@ -663,21 +760,28 @@ module Net
     # chunks of +blocksize+ characters. Note that +cmd+ is a server command
     # (such as "RETR myfile").
     #
-    def retrbinary(cmd, blocksize, rest_offset = nil) # :yield: data
+    # +transfer+ is an optional handle used to cancel the operation.
+    # The block receives the handle as its second argument.
+    def retrbinary(cmd, blocksize, rest_offset = nil, transfer: nil) # :yield: data, transfer
+      transfer ||= Transfer.new
       synchronize do
         with_binary(true) do
+          transfer.bind(self)
           begin
-            conn = transfercmd(cmd, rest_offset)
-            while data = conn.read(blocksize)
-              yield(data)
+            conn = transfercmd(cmd, rest_offset, transfer)
+            begin
+              while data = conn.read(blocksize)
+                yield(data, transfer)
+              end
+              transfer.finish_data
+            ensure
+              transfer.close_data
             end
-            conn.shutdown(Socket::SHUT_WR) rescue nil
-            conn.read_timeout = 1
-            conn.read rescue nil
-          ensure
-            conn.close if conn
+            transfer.finish
           end
-          voidresp
+        rescue Exception => error
+          transfer.fail(error)
+          raise
         end
       end
     end
@@ -688,21 +792,30 @@ module Net
     # no block is given, prints the lines. Note that +cmd+ is a server command
     # (such as "RETR myfile").
     #
-    def retrlines(cmd) # :yield: line
+    # +transfer+ is an optional handle used to cancel the operation.
+    # The block receives the handle as its third argument.
+    def retrlines(cmd, transfer: nil) # :yield: line, newline, transfer
+      transfer ||= Transfer.new
       synchronize do
         with_binary(false) do
+          transfer.bind(self)
           begin
-            conn = transfercmd(cmd)
-            while line = conn.gets
-              yield(line.sub(/\r?\n\z/, ""), !line.match(/\n\z/).nil?)
+            conn = transfercmd(cmd, nil, transfer)
+            begin
+              while line = conn.gets
+                newline = !line.match(/\n\z/).nil?
+                line = line.sub(/\r?\n\z/, "")
+                yield(line, newline, transfer)
+              end
+              transfer.finish_data
+            ensure
+              transfer.close_data
             end
-            conn.shutdown(Socket::SHUT_WR) rescue nil
-            conn.read_timeout = 1
-            conn.read rescue nil
-          ensure
-            conn.close if conn
+            transfer.finish
           end
-          voidresp
+        rescue Exception => error
+          transfer.fail(error)
+          raise
         end
       end
     end
@@ -713,34 +826,34 @@ module Net
     # +file+ to the server. If the optional block is given, it also passes it
     # the data, in chunks of +blocksize+ characters.
     #
-    def storbinary(cmd, file, blocksize, rest_offset = nil) # :yield: data
+    # +transfer+ is an optional handle used to cancel the operation.
+    # The block receives the handle as its second argument.
+    def storbinary(cmd, file, blocksize, rest_offset = nil, transfer: nil) # :yield: data, transfer
+      transfer ||= Transfer.new
       if rest_offset
         file.seek(rest_offset, IO::SEEK_SET)
       end
       synchronize do
         with_binary(true) do
+          transfer.bind(self)
           begin
-            conn = transfercmd(cmd)
-            while buf = file.read(blocksize)
-              conn.write(buf)
-              yield(buf) if block_given?
+            conn = transfercmd(cmd, rest_offset, transfer)
+            begin
+              while buf = file.read(blocksize)
+                conn.write(buf)
+                yield(buf, transfer) if block_given?
+              end
+              transfer.finish_data
+            ensure
+              transfer.close_data
             end
-            conn.shutdown(Socket::SHUT_WR) rescue nil
-            conn.read_timeout = 1
-            conn.read rescue nil
-          ensure
-            conn.close if conn
+            transfer.finish
           end
-          voidresp
+        rescue Exception => error
+          transfer.fail(error)
+          raise
         end
       end
-    rescue Errno::EPIPE
-      # EPIPE, in this case, means that the data connection was unexpectedly
-      # terminated.  Rather than just raising EPIPE to the caller, check the
-      # response on the control connection.  If getresp doesn't raise a more
-      # appropriate exception, re-raise the original exception.
-      getresp
-      raise
     end
 
     #
@@ -749,34 +862,34 @@ module Net
     # named +file+ to the server, one line at a time. If the optional block is
     # given, it also passes it the lines.
     #
-    def storlines(cmd, file) # :yield: line
+    # +transfer+ is an optional handle used to cancel the operation.
+    # The block receives the handle as its second argument.
+    def storlines(cmd, file, transfer: nil) # :yield: line, transfer
+      transfer ||= Transfer.new
       synchronize do
         with_binary(false) do
+          transfer.bind(self)
           begin
-            conn = transfercmd(cmd)
-            while buf = file.gets
-              if buf[-2, 2] != CRLF
-                buf = buf.chomp + CRLF
+            conn = transfercmd(cmd, nil, transfer)
+            begin
+              while buf = file.gets
+                if buf[-2, 2] != CRLF
+                  buf = buf.chomp + CRLF
+                end
+                conn.write(buf)
+                yield(buf, transfer) if block_given?
               end
-              conn.write(buf)
-              yield(buf) if block_given?
+              transfer.finish_data
+            ensure
+              transfer.close_data
             end
-            conn.shutdown(Socket::SHUT_WR) rescue nil
-            conn.read_timeout = 1
-            conn.read rescue nil
-          ensure
-            conn.close if conn
+            transfer.finish
           end
-          getresp # The response might be important when connected to a mainframe
+        rescue Exception => error
+          transfer.fail(error)
+          raise
         end
       end
-    rescue Errno::EPIPE
-      # EPIPE, in this case, means that the data connection was unexpectedly
-      # terminated.  Rather than just raising EPIPE to the caller, check the
-      # response on the control connection.  If getresp doesn't raise a more
-      # appropriate exception, re-raise the original exception.
-      getresp
-      raise
     end
 
     #
@@ -785,8 +898,10 @@ module Net
     # If a block is supplied, it is passed the retrieved data in +blocksize+
     # chunks.
     #
+    # +transfer+ is an optional handle used to cancel the operation.
     def getbinaryfile(remotefile, localfile = File.basename(remotefile),
-                      blocksize = DEFAULT_BLOCKSIZE, &block) # :yield: data
+                      blocksize = DEFAULT_BLOCKSIZE,
+                      transfer: Transfer.new, &block) # :yield: data, transfer
       f = nil
       result = nil
       if localfile
@@ -802,9 +917,10 @@ module Net
       end
       begin
         f&.binmode
-        retrbinary("RETR #{remotefile}", blocksize, rest_offset) do |data|
+        retrbinary("RETR #{remotefile}", blocksize, rest_offset,
+                   transfer: transfer) do |data, active_transfer|
           f&.write(data)
-          block&.(data)
+          block&.(data, active_transfer)
           result&.concat(data)
         end
         return result
@@ -820,8 +936,9 @@ module Net
     # If a block is supplied, it is passed the retrieved data one
     # line at a time.
     #
+    # +transfer+ is an optional handle used to cancel the operation.
     def gettextfile(remotefile, localfile = File.basename(remotefile),
-                    &block) # :yield: line
+                    transfer: Transfer.new, &block) # :yield: line, newline, transfer
       f = nil
       result = nil
       if localfile
@@ -830,10 +947,10 @@ module Net
         result = String.new
       end
       begin
-        retrlines("RETR #{remotefile}") do |line, newline|
+        retrlines("RETR #{remotefile}", transfer: transfer) do |line, newline, active_transfer|
           l = newline ? line + "\n" : line
           f&.print(l)
-          block&.(line, newline)
+          block&.(line, newline, active_transfer)
           result&.concat(l)
         end
         return result
@@ -847,11 +964,14 @@ module Net
     # binary).  See #gettextfile and #getbinaryfile.
     #
     def get(remotefile, localfile = File.basename(remotefile),
-            blocksize = DEFAULT_BLOCKSIZE, &block) # :yield: data
+            blocksize = DEFAULT_BLOCKSIZE,
+            transfer: Transfer.new, &block) # :yield: data, transfer
       if @binary
-        getbinaryfile(remotefile, localfile, blocksize, &block)
+        getbinaryfile(remotefile, localfile, blocksize,
+                      transfer: transfer, &block)
       else
-        gettextfile(remotefile, localfile, &block)
+        gettextfile(remotefile, localfile,
+                    transfer: transfer, &block)
       end
     end
 
@@ -860,8 +980,10 @@ module Net
     # +remotefile+. If a block is supplied, calls it, passing in the transmitted
     # data in +blocksize+ chunks.
     #
+    # +transfer+ is an optional handle used to cancel the operation.
     def putbinaryfile(localfile, remotefile = File.basename(localfile),
-                      blocksize = DEFAULT_BLOCKSIZE, &block) # :yield: data
+                      blocksize = DEFAULT_BLOCKSIZE,
+                      transfer: Transfer.new, &block) # :yield: data, transfer
       if @resume
         begin
           rest_offset = size(remotefile)
@@ -875,9 +997,11 @@ module Net
       begin
         f.binmode
         if rest_offset
-          storbinary("APPE #{remotefile}", f, blocksize, rest_offset, &block)
+          storbinary("APPE #{remotefile}", f, blocksize, rest_offset,
+                     transfer: transfer, &block)
         else
-          storbinary("STOR #{remotefile}", f, blocksize, rest_offset, &block)
+          storbinary("STOR #{remotefile}", f, blocksize, rest_offset,
+                     transfer: transfer, &block)
         end
       ensure
         f.close
@@ -892,11 +1016,14 @@ module Net
     # Returns the response which will contain a job number if the user was communicating with a mainframe in ASCII mode
     # after issuing 'quote site filetype=jes'
     #
-    def puttextfile(localfile, remotefile = File.basename(localfile), &block) # :yield: line
+    # +transfer+ is an optional handle used to cancel the operation.
+    def puttextfile(localfile, remotefile = File.basename(localfile),
+                    transfer: Transfer.new, &block) # :yield: line, transfer
       f = File.open(localfile)
       response = ''
       begin
-        response = storlines("STOR #{remotefile}", f, &block)
+        response = storlines("STOR #{remotefile}", f,
+                             transfer: transfer, &block)
       ensure
         f.close
       end
@@ -908,11 +1035,14 @@ module Net
     # (text or binary).  See #puttextfile and #putbinaryfile.
     #
     def put(localfile, remotefile = File.basename(localfile),
-            blocksize = DEFAULT_BLOCKSIZE, &block)
+            blocksize = DEFAULT_BLOCKSIZE,
+            transfer: Transfer.new, &block)
       if @binary
-        putbinaryfile(localfile, remotefile, blocksize, &block)
+        putbinaryfile(localfile, remotefile, blocksize,
+                      transfer: transfer, &block)
       else
-        puttextfile(localfile, remotefile, &block)
+        puttextfile(localfile, remotefile,
+                    transfer: transfer, &block)
       end
     end
 
@@ -1281,14 +1411,20 @@ module Net
     # Aborts the previous command (ABOR command).
     #
     def abort
-      line = "ABOR" + CRLF
-      debug_print "put: ABOR"
-      @sock.send(line, Socket::MSG_OOB)
-      resp = getmultiline
-      unless ["426", "226", "225"].include?(resp[0, 3])
-        raise FTPProtoError, resp
+      transfer = synchronize { @active_transfers.last }
+      if transfer
+        transfer.cancel
+        return transfer.response
+      else
+        synchronize do
+          send_abor_command
+          resp = read_control_response
+          unless ["426", "226", "225"].include?(resp[0, 3])
+            raise FTPProtoError, resp
+          end
+          return resp
+        end
       end
-      return resp
     end
 
     #
@@ -1489,6 +1625,275 @@ module Net
       @debug_output << msg + "\n" if @debug_mode && @debug_output
     end
 
+    # A handle for an in-progress data transfer. Pass one using the
+    # transfer option of a transfer method, then call #cancel from another
+    # thread. The handle owns cancellation, the data socket, ABOR sequencing,
+    # and the transfer's final control responses so another thread cannot
+    # race the transfer thread for replies.
+    class Transfer
+      include MonitorMixin
+
+      attr_reader :response
+
+      def initialize
+        super
+        @state = :initialized
+        @owner = nil
+        @ftp = nil
+        @data = nil
+        @canceled = false
+        @abor_sent = false
+        @started = false
+        @data_finished = false
+        @response = nil
+        @condition = new_cond
+      end
+
+      # Returns whether cancellation has been requested.
+      def canceled?
+        synchronize { @canceled }
+      end
+
+      def finished?
+        synchronize { @state == :finished }
+      end
+
+      def bind(ftp)
+        synchronize do
+          raise FTPError, "transfer handle already used" unless @state == :initialized
+          @ftp = ftp
+          @ftp.send(:activate_transfer, self)
+          @owner = Thread.current
+          @state = :bound
+          @condition.broadcast
+        end
+      end
+
+      def activate(data)
+        synchronize do
+          @data = data
+          @state = :active
+          @started = true
+          @condition.broadcast
+        end
+      end
+
+      # Requests cancellation. Calling this from the transfer thread is
+      # cooperative: the current data operation is interrupted and ABOR is
+      # sent, but the exception is raised when the transfer loop resumes.
+      #
+      # Requests ABOR and waits until the control connection is realigned.
+      # Returns true when cancellation raced with the transfer, and false
+      # when the final transfer response was already consumed.
+      def cancel
+        owner_cancellation = false
+        synchronize do
+          return false if @state == :finished
+          @canceled = true
+          owner_cancellation = @owner == Thread.current
+          unless owner_cancellation
+            if @state == :bound
+              @condition.wait_until { @state != :bound }
+            end
+            interrupt_data if @started && !@data_finished
+            if [:active, :completing, :response_read].include?(@state)
+              begin_abort
+            end
+            @condition.wait_until { @state == :finished }
+          end
+        end
+        raise FTPCancelError if owner_cancellation
+        return !owner_cancellation && @state == :finished && @abor_sent
+      end
+
+      def finish_data
+        synchronize do
+          return if @canceled || @data_finished
+        end
+        begin
+          @data.shutdown(Socket::SHUT_WR) rescue nil
+          @data.read_timeout = 1 rescue nil
+          @data.read rescue nil
+        ensure
+          synchronize do
+            @data_finished = true
+            @condition.broadcast
+          end
+        end
+      end
+
+      def close_data
+        data = synchronize { @data }
+        return unless data
+        synchronize { @data = nil }
+        if @canceled
+          data.force_close
+        else
+          data.close
+        end
+      rescue IOError, SystemCallError, OpenSSL::SSL::SSLError
+      end
+
+      def finish
+        synchronize do
+          return if @state == :finished
+          @data_finished = true
+          @state = :completing
+        end
+        first = synchronize { @response }
+        unless synchronize { @canceled || @abor_sent }
+          first = read_control_response
+          synchronize do
+            @response = first
+            @state = :response_read
+            if @canceled
+              begin_abort
+            end
+          end
+        end
+        if synchronize { @abor_sent }
+          read_abort_response(first)
+        else
+          validate_normal_response(first)
+        end
+      ensure
+        done
+      end
+
+      def fail(error)
+        active = false
+        synchronize do
+          return if @state == :finished
+          if @canceled
+            @state = :completing
+            active = @started
+            if active && @response.nil?
+              begin_abort
+              @condition.broadcast
+            end
+          else
+            active = @response.nil? &&
+                     (@started || error.is_a?(LocalJumpError))
+            if active
+              interrupt_data
+              begin_abort
+            end
+          end
+        end
+        if active
+          if @canceled
+            read_abort_response
+          else
+            read_abort_response(nil, error)
+          end
+        end
+        done
+      rescue Exception
+        begin
+          done
+        ensure
+          raise
+        end
+      end
+
+      private
+
+      def interrupt_data
+        @data&.force_close
+        @data_finished = true
+      rescue IOError, SystemCallError, OpenSSL::SSL::SSLError
+      end
+
+      def begin_abort
+        return if @abor_sent
+        @abor_sent = true
+        @ftp.send(:send_abor_command)
+        @condition.broadcast
+      end
+
+      def read_abort_response(first = nil, original_error = nil)
+        first = (first || read_control_response).dup
+        synchronize do
+          @response = first
+          @state = :response_read
+        end
+        code = first[0, 3]
+
+        case code
+        when "225"
+          return finish_cancellation(original_error)
+        when "226"
+          unless response_ready?
+            misaligned!(first)
+          end
+          second = read_control_response
+          unless second.start_with?("225")
+            misaligned!("#{first}#{second}")
+          end
+          @response = @response + second
+          finish_cancellation(original_error)
+        when "426"
+          second = read_control_response
+          unless second.start_with?("225", "226")
+            misaligned!("#{first}#{second}")
+          end
+          @response = @response + second
+          return finish_cancellation(original_error)
+        when /\A[45]/
+          if response_ready?
+            second = read_control_response
+            if second.start_with?("225", "226")
+              @response = @response + second
+            else
+              misaligned!("#{first}#{second}")
+            end
+          else
+            misaligned!(first)
+          end
+          raise original_error || @ftp.send(:response_exception, first)
+        else
+          misaligned!(first)
+        end
+      end
+
+      def validate_normal_response(resp)
+        @ftp.send(:validate_control_response, resp)
+      end
+
+      def finish_cancellation(original_error)
+        raise original_error if original_error
+        raise FTPCancelError, "transfer canceled: #{@response.strip}" if @canceled
+      end
+
+      def response_ready?
+        @ftp.send(:control_response_ready?, 1)
+      end
+
+      def read_control_response
+        @ftp.send(:read_control_response)
+      rescue EOFError, IOError, SystemCallError,
+             OpenSSL::SSL::SSLError, Net::ReadTimeout => error
+        @ftp.send(:close_control_connection_with_error, error,
+                  "waiting for ABOR response")
+        raise FTPConnectionError,
+              "waiting for ABOR response: #{error.class}: #{error.message}"
+      end
+
+      def misaligned!(responses)
+        message = "control connection is not aligned after ABOR: #{responses.strip}"
+        @ftp.send(:close_control_connection_with_status, message)
+        raise FTPProtoError, message
+      end
+
+      def done
+        synchronize do
+          @ftp&.send(:deactivate_transfer, self)
+          @state = :finished
+          @condition.broadcast
+        end
+      end
+    end
+
     # :stopdoc:
     class NullSocket
       def read_timeout=(sec)
@@ -1538,6 +1943,21 @@ module Net
           raise EOFError, "end of file reached"
         end
         return line
+      end
+
+      def force_close
+        socket = @io
+        socket = socket.io while socket.respond_to?(:io, true)
+        socket.close
+      rescue IOError, SystemCallError
+      end
+
+      def response_ready?(timeout)
+        return true if rbuf_size > 0
+        if @io.respond_to?(:pending) && @io.pending > 0
+          return true
+        end
+        return !@io.to_io.wait_readable(timeout).nil?
       end
     end
 
