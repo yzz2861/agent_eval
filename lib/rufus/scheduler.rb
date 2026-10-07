@@ -17,6 +17,7 @@ class Rufus::Scheduler
   require 'rufus/scheduler/jobs_core'
   require 'rufus/scheduler/jobs_one_time'
   require 'rufus/scheduler/jobs_repeat'
+  require 'rufus/scheduler/concurrency_analyzer'
   require 'rufus/scheduler/job_array'
   require 'rufus/scheduler/locks'
 
@@ -436,6 +437,29 @@ class Rufus::Scheduler
     occurrences(time0, time1, :timeline)
   end
 
+  # Offline capacity analysis for repeat jobs.
+  #
+  # durations maps a job, job id, name, or class to the expected work
+  # duration (seconds or duration string). It may also be a callable or a
+  # single duration applied to all jobs.
+  #
+  # Job states and next trigger times are never modified. Interval jobs are
+  # expanded from each predicted completion and the result is marked
+  # incomplete when :max_expansions is reached.
+  #
+  def analyze_concurrency(time0, time1, durations, options={})
+
+    analysis_jobs =
+      jobs.select do |job|
+        job.is_a?(Rufus::Scheduler::RepeatJob) &&
+        ! job.paused?
+      end
+
+    Rufus::Scheduler::ConcurrencyAnalyzer.new(
+      analysis_jobs, time0, time1, durations, options
+    ).call
+  end
+
   def on_error(job, err)
 
     pre = err.object_id.to_s
@@ -740,4 +764,3 @@ class Rufus::Scheduler
   def monow; self.class.monow; end
   def ltstamp; self.class.ltstamp; end
 end
-

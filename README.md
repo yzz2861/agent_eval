@@ -1153,6 +1153,16 @@ Please note that, for interval jobs, the ```#mean_work_time``` is used, so the r
 
 Like `#occurrences` but returns a list ```[ [ t0, job0 ], [ t1, job1 ], ... ]``` of time + job pairs.
 
+### Scheduler#analyze_concurrency(time0, time1, durations, options={})
+
+Offline capacity analysis for repeat jobs. It does not trigger jobs and does not modify job states or their next trigger times.
+
+`durations` gives the expected execution duration for each job. It may be a number or duration string shared by every job, a callable receiving the job, or a hash keyed by job instance, id, name, or job type (`:every`, `:interval`, or `:cron`).
+
+The returned hash contains `:peak_concurrency`, `:peak_windows`, and the jobs contributing to each window. Every and cron starts advance on their own schedules, while interval starts advance from the predicted completion. Intervals are half-open: a run ending at exactly another run's start time does not count as overlap.
+
+`:max_expansions` bounds the total number of candidate starts examined. If the bound is reached, the result has `:complete => false` and lists `:truncated_jobs`, so its peak must not be interpreted as exact for the complete observation window.
+
 
 ## dealing with job errors
 
@@ -1795,4 +1805,3 @@ see [getting help](#getting-help) above.
 ## license
 
 MIT, see [LICENSE.txt](LICENSE.txt)
-
