@@ -294,19 +294,8 @@ class Net::LDAP::Connection #:nodoc:
   #
   def encode_sort_controls(sort_definitions)
     return sort_definitions unless sort_definitions
-
-    sort_control_values = sort_definitions.map do |control|
-      control = Array(control) # if there is only an attribute name as a string then infer the orderinrule and reverseorder
-      control[0] = String(control[0]).to_ber,
-      control[1] = String(control[1]).to_ber,
-      control[2] = (control[2] == true).to_ber
-      control.to_ber_sequence
-    end
-    [
-      Net::LDAP::LDAPControls::SORT_REQUEST.to_ber,
-      false.to_ber,
-      sort_control_values.to_ber_sequence.to_s.to_ber,
-    ].to_ber_sequence
+    Net::LDAP::VLV.encode_sort_control(sort_definitions,
+                                       false)
   end
 
   #--
@@ -349,6 +338,17 @@ class Net::LDAP::Connection #:nodoc:
     time   = args[:time].to_i
     paged  = args[:paged_searches_supported]
     sort   = args.fetch(:sort_controls, false)
+    vlv    = args[:vlv]
+
+    if vlv
+      # VLV is incompatible with RFC 2696 paging; the virtual list itself
+      # bounds the result set. Server-side sorting is mandatory alongside
+      # VLV.
+      paged = false
+      sort  = vlv.fetch(:sort) if vlv.key?(:sort)
+      raise ArgumentError, "VLV requires :sort_controls" unless sort
+      raise ArgumentError, "VLV requires :target" unless vlv[:target]
+    end
 
     # arg validation
     raise ArgumentError, "search base is required" unless base
@@ -359,7 +359,13 @@ class Net::LDAP::Connection #:nodoc:
     # arg transforms
     filter = Net::LDAP::Filter.construct(filter) if filter.is_a?(String)
     ber_attrs = attrs.map { |attr| attr.to_s.to_ber }
-    ber_sort  = encode_sort_controls(sort)
+    ber_sort  =
+      if vlv
+        Net::LDAP::VLV.encode_sort_control(
+          sort, vlv.fetch(:sort_criticality, true))
+      else
+        encode_sort_controls(sort)
+      end
 
     # An interesting value for the size limit would be close to A/D's
     # built-in page limit of 1000 records, but openLDAP newer than version
@@ -408,6 +414,9 @@ class Net::LDAP::Connection #:nodoc:
                           size
                         end
         end
+        # A VLV search has no caller size limit by default; bound the
+        # server-side work to the requested window (before + target + after).
+        query_limit = vlv[:before_count].to_i + vlv[:after_count].to_i + 1 if vlv && size.zero?
 
         request = [
           base.to_ber,
@@ -434,6 +443,10 @@ class Net::LDAP::Connection #:nodoc:
             rfc2696_cookie.map(&:to_ber).to_ber_sequence.to_s.to_ber,
           ].to_ber_sequence if paged
         controls << ber_sort if ber_sort
+        controls << Net::LDAP::VLV.encode_request_control(
+          vlv[:before_count], vlv[:after_count], vlv[:target],
+          vlv[:context_id], vlv.fetch(:criticality, true)
+        ) if vlv
         if controls.empty? && user_controls.empty?
           controls = nil
         else

@@ -27,6 +27,7 @@ require_relative 'ldap/instrumentation'
 require_relative 'ldap/connection'
 require_relative 'ldap/version'
 require_relative 'ldap/error'
+require_relative 'ldap/vlv'
 require_relative 'ldap/auth_adapter'
 require_relative 'ldap/auth_adapter/simple'
 require_relative 'ldap/auth_adapter/sasl'
@@ -446,6 +447,8 @@ class Net::LDAP
     PAGED_RESULTS = "1.2.840.113556.1.4.319" # Microsoft evil from RFC 2696
     SORT_REQUEST  = "1.2.840.113556.1.4.473"
     SORT_RESPONSE = "1.2.840.113556.1.4.474"
+    VLV_REQUEST  = "2.16.840.1.113730.3.4.9"
+    VLV_RESPONSE = "2.16.840.1.113730.3.4.10"
     DELETE_TREE   = "1.2.840.113556.1.4.805"
   end
 
@@ -800,6 +803,92 @@ class Net::LDAP
         @result.success?
       end
     end
+  end
+
+  # Search a small Virtual List View window from a server-sorted result
+  # set, without paging through the whole result set. VLV requires the
+  # server-side sort control (RFC 2891) and the Virtual List View controls
+  # (2.16.840.1.113730.3.4.9/10).
+  #
+  # Supported arguments:
+  # * :sort (required) - sort definitions, same format accepted by
+  #   #search's :sort_controls (an attribute name or
+  #   [attribute, matching_rule, reverse_order] tuples).
+  # * :offset - 1-based position in the sorted result set. Use this OR
+  #   :greater_than_or_equal.
+  # * :greater_than_or_equal - a sort value; the window starts at (or
+  #   before, via :before_count) the first entry >= this value.
+  # * :before_count - number of entries before the target to return
+  #   (default 0).
+  # * :after_count - number of entries after the target to return
+  #   (default 0).
+  # * :base, :filter, :attributes, :scope, :size etc. - same as #search.
+  # * :context - a Net::LDAP::VLV::Context returned by a previous window;
+  #   only valid against the same server, base, filter, and sort.
+  # * :criticality (default true) - criticality of the VLV control.
+  # * :sort_criticality (default true) - criticality of the sort control.
+  #
+  # Returns a Net::LDAP::VLV::Window. Its #entries hold the returned
+  # Net::LDAP::Entry objects; #target_position is the server-reported
+  # position; #estimated_content_count is the server's estimate of the
+  # result-set size (an estimate, not a permanent value); #context holds
+  # the opaque context for continuing the search.
+  #
+  # Failures are distinguished on the returned window via #status and the
+  # predicates #unsupported?, #search_failure?, #sort_failure?, and
+  # #vlv_failure?. An empty window with a successful status is reported via
+  # #empty_window?, not as an error.
+  #
+  # To scroll through several windows while reusing the server contextID,
+  # open a session with #vlv_session instead.
+  #
+  #  window = ldap.search_vlv(:sort => "sn", :greater_than_or_equal => "Smith",
+  #                           :before_count => 2, :after_count => 10,
+  #                           :base => "ou=people,dc=example,dc=com")
+  #  if window.success?
+  #    window.entries.each { |entry| puts entry.dn }
+  #  end
+  def search_vlv(args = {})
+    sort = args[:sort]
+    raise ArgumentError, "VLV requires a server-side sort definition" unless sort
+    base = args[:base] || @base
+    filter = Net::LDAP::VLV.canonical_filter(args[:filter])
+    normalized_sort = Net::LDAP::VLV.normalize_sort(sort)
+    raise ArgumentError, "VLV requires a server-side sort definition" if
+      normalized_sort.empty?
+
+    target = extract_vlv_target(args)
+    signature = Net::LDAP::VLV.signature(vlv_server_key, base, filter,
+                                        normalized_sort)
+
+    context = args[:context]
+    verify_vlv_context!(context, signature)
+
+    instrument "search_vlv.net_ldap", args do |payload|
+      window = vlv_search_raw(
+        args, args.fetch(:before_count, 0), args.fetch(:after_count, 0),
+        target, context, signature, normalized_sort,
+        args.fetch(:sort_criticality, true), args.fetch(:criticality, true)
+      )
+      @result = instance_variable_get(:@last_vlv_pdu)
+      payload[:window] = window
+      window
+    end
+  end
+
+  # Open a Net::LDAP::VLV::Session bound to the given server, base, filter,
+  # and sort definition. Each subsequent #at or #locate call continues the
+  # same server-side VLV context. Starting a different query requires a new
+  # session.
+  #
+  #  ldap.vlv_session(:sort => "sn", :base => base) do |vlv|
+  #    window = vlv.at(100, :before_count => 5, :after_count => 20)
+  #    next_window = vlv.at(window.target_position + 21)
+  #  end
+  def vlv_session(options = {})
+    session = Net::LDAP::VLV::Session.new(self, options)
+    return session unless block_given?
+    yield session
   end
 
   # #bind connects to an LDAP server and requests authentication based on
@@ -1302,6 +1391,15 @@ class Net::LDAP
     @server_caps[:supportedcontrol].include?(Net::LDAP::LDAPControls::PAGED_RESULTS)
   end
 
+  # True when the server advertises both the Virtual List View controls
+  # and the server-side sort control in its root DSE. VLV requires both.
+  def vlv_supported?
+    caps = search_root_dse
+    supported = caps[:supportedcontrol]
+    supported.include?(Net::LDAP::LDAPControls::VLV_REQUEST) &&
+      supported.include?(Net::LDAP::LDAPControls::SORT_REQUEST)
+  end
+
   # Mask auth password
   def inspect
     inspected = super
@@ -1315,6 +1413,80 @@ class Net::LDAP
   end
 
   private
+
+  # Build the VLV target CHOICE from caller arguments.
+  def extract_vlv_target(args)
+    if args.key?(:offset)
+      target = { :offset => args[:offset].to_i }
+      target[:content_count] = args[:content_count].to_i if
+        args.key?(:content_count)
+      target
+    elsif args.key?(:greater_than_or_equal)
+      { :greater_than_or_equal => args[:greater_than_or_equal] }
+    else
+      raise ArgumentError,
+            "VLV requires :offset or :greater_than_or_equal"
+    end
+  end
+  private :extract_vlv_target
+
+  # A contextID is only valid against the same server, base, filter, and
+  # sort definition. Refuse to send a stale contextID under a new query.
+  def verify_vlv_context!(context, signature)
+    return unless context
+    unless context.respond_to?(:id) && context.respond_to?(:signature)
+      raise Net::LDAP::VLV::ContextMismatchError,
+            "not a VLV context"
+    end
+    if context.signature != signature
+      raise Net::LDAP::VLV::ContextMismatchError,
+            "VLV contextID may only be reused with the same server, " \
+            "base, filter, and sort definition; start a new search"
+    end
+  end
+  private :verify_vlv_context!
+
+  # Identify the server connection a context belongs to. The auth identity
+  # is included so a context is never resumed against the same host while
+  # bound as a different principal.
+  def vlv_server_key
+    auth = @auth || {}
+    [@host, @port, auth[:username]]
+  end
+  private :vlv_server_key
+
+  # Perform one connection-level VLV search and wrap the outcome in a
+  # Net::LDAP::VLV::Window.
+  def vlv_search_raw(args, before_count, after_count, target,
+                     context, signature, sort, sort_criticality,
+                     criticality)
+    entries = []
+    search_args = args.reject { |key, _| key == :vlv }.dup
+    search_args[:base] ||= @base
+    search_args[:vlv] = {
+      :before_count     => before_count,
+      :after_count      => after_count,
+      :target           => target,
+      :context_id       => context && context.id,
+      :sort             => sort,
+      :sort_criticality => sort_criticality,
+      :criticality      => criticality,
+    }
+
+    pdu = use_connection(search_args) do |conn|
+      conn.search(search_args) do |entry|
+        entries << entry
+      end
+    end
+    @last_vlv_pdu = pdu
+
+    unless pdu.respond_to?(:result_controls)
+      raise Net::LDAP::ResponseMissingOrInvalidError,
+            "VLV search returned no result"
+    end
+
+    Net::LDAP::VLV.build_window(entries, pdu, sort, signature)
+  end
 
   # Yields an open connection if there is one, otherwise establishes a new
   # connection, binds, and yields it. If binding fails, it will return the
