@@ -1,4 +1,6 @@
 # frozen_string_literal: true
+require 'slim/ruby_lexer'
+
 module Slim
   # Parses Slim code and transforms it to a Temple expression
   # @api private
@@ -33,9 +35,23 @@ module Slim
         @column = column
       end
 
+      # Build an error for a line which may already have been consumed by the
+      # parser (e.g. the opener of an unclosed multi line expression).
+      # The column is absolute on the original line when `absolute` is set.
+      def self.at(error, file, source_lines, lineno, column, absolute = false)
+        ex = new(error, file, source_lines && source_lines[lineno - 1], lineno, column)
+        ex.instance_variable_set(:@absolute_column, absolute)
+        ex
+      end
+
       def to_s
-        line = @line.lstrip
-        column = @column + line.size - @line.size
+        if @absolute_column
+          line = @line
+          column = [@column, @line.size].min
+        else
+          line = @line.lstrip
+          column = [@column + line.size - @line.size, 0].max
+        end
         %{#{error}
   #{file}, Line #{lineno}, Column #{@column}
     #{line}
@@ -95,7 +111,9 @@ module Slim
     # @return [Array] Temple expression representing the code
     def call(str)
       result = [:multi]
-      reset(str.split(/\r?\n/), [result])
+      source = str.split(/\r?\n/)
+      reset(source.dup, [result]) # reset shifts this copy in place
+      @source_lines = source.dup
 
       parse_line while next_line
 
@@ -315,13 +333,54 @@ module Slim
       result
     end
 
+    # Parse a Ruby expression started on the current line, continuing on
+    # following physical lines whenever the expression is lexically open
+    # (unbalanced parentheses, strings, regular expressions, heredocs, a
+    # dangling operator or an explicit comma/backslash continuation).
+    #
+    # Template indentation is preserved by the caller: continuation lines
+    # are consumed here before the indentation based parser sees them.
+    #
+    # @return [String] the complete Ruby expression
     def parse_broken_line
-      broken_line = @line.strip
-      while broken_line =~ /[,\\]\Z/
-        expect_next_line
-        broken_line << "\n" << @line
+      indent = get_indent(@orig_line)
+      first = @line.strip
+      first_column = @orig_line.size - @line.lstrip.size
+      expression = RubyLexer::Expression.new(first, @lineno, first_column)
+      while expression.continues?
+        open = expression.first_open
+        next_line || ruby_syntax_error!(open)
+        continuation_indent = get_indent(@orig_line)
+        if expression.heredoc_pending_on_line?(expression.line_count)
+          # Heredoc bodies and terminators keep their physical indentation.
+          expression.add_line(@line, continuation_indent)
+        else
+          expression.add_line(@line.strip, continuation_indent - indent)
+        end
       end
-      broken_line
+      if expression.ends_with_heredoc? || expression.ends_with_comment?
+        expression.code + "\n"
+      else
+        expression.code
+      end
+    end
+
+    # Raise an error pointing at the beginning of the unclosed Ruby structure
+    # rather than at some later, otherwise valid tag.
+    def ruby_syntax_error!(open)
+      if open
+        lineno, column, description = open
+        message = "Unclosed #{description}"
+      else
+        lineno, column = @lineno, 0
+        message = 'Unexpected end of file'
+      end
+      begin
+        raise SyntaxError.at(message, options[:file], @source_lines, lineno, column, true)
+      rescue SyntaxError => ex
+        ex.backtrace.unshift "#{options[:file]}:#{lineno}"
+        raise
+      end
     end
 
     def parse_tag(tag)
@@ -468,52 +527,65 @@ module Slim
     end
 
     def parse_ruby_code(outer_delimiter)
-      code, count, delimiter, close_delimiter = ''.dup, 0, nil, nil
+      stop_chars = outer_delimiter ? [outer_delimiter] : []
+      column = @orig_line.size - @line.size
+      expression = RubyLexer::Expression.new(@line, @lineno, column, strip_backslash: true)
+      value_lines = []
+      explicit_continuation = false
 
-      # Attribute ends with space or attribute delimiter
-      end_re = /\A[\s#{Regexp.escape outer_delimiter.to_s}]/
-
-      until @line.empty? || (count == 0 && @line =~ end_re)
-        if @line =~ /\A[,\\]\Z/
-          code << @line << "\n"
-          expect_next_line
-        else
-          if count > 0
-            if @line[0] == delimiter[0]
-              count += 1
-            elsif @line[0] == close_delimiter[0]
-              count -= 1
-            end
-          elsif @line =~ @code_attr_delims_re
-            count = 1
-            delimiter, close_delimiter = $&, @code_attr_delims[$&]
-          end
-          code << @line.slice!(0)
+      loop do
+        # While consuming an explicit (backslash/comma) continuation the
+        # leading indentation belongs to the value, not to the template.
+        consuming_line = value_lines.size
+        end_column = expression.end_column_on_line(consuming_line, stop_chars,
+                                                   allow_leading_space: explicit_continuation)
+        if end_column
+          value_lines << @line[0, end_column]
+          @line = @line[end_column..] || ''.dup
+          return value_lines.join("\n")
         end
+
+        if !expression.continues?
+          value_lines << @line.dup
+          @line = ''.dup
+          return value_lines.join("\n")
+        end
+
+        explicit_continuation = expression.explicit_continuation?
+        open = expression.first_open
+        value_lines << @line
+        @line = ''.dup
+        unless next_line
+          # Let the attribute parser report an unclosed outer delimiter;
+          # only raise here for genuinely unclosed inner structures.
+          ruby_syntax_error!(open) if open
+          return value_lines.join("\n")
+        end
+        expression.add_line(@line, get_indent(@orig_line))
       end
-      syntax_error!("Expected closing delimiter #{close_delimiter}") if count != 0
-      code
     end
 
     def parse_quoted_attribute(quote)
-      value, count = ''.dup, 0
+      value = ''.dup
+      opening_column = @orig_line.size - @line.size - 1
+      scanner = RubyLexer::QuotedString.new(@line, @lineno, opening_column, quote)
 
-      until count == 0 && @line[0] == quote[0]
-        if @line =~ /\A(\\)?\Z/
-          value << ($1 ? ' ' : "\n")
-          expect_next_line
-        else
-          if @line[0] == '{'
-            count += 1
-          elsif @line[0] == '}'
-            count -= 1
-          end
-          value << @line.slice!(0)
+      loop do
+        end_column = scanner.closing_column(scanner.line_count - 1)
+        if end_column
+          value << @line[0, end_column]
+          @line = @line[(end_column + 1)..] || ''.dup
+          return value
         end
-      end
 
-      @line.slice!(0)
-      value
+        continuation = @line =~ /\\\s*\Z/
+        value << @line.sub(/\\\s*\Z/, '')
+        value << (continuation ? ' ' : "\n")
+        open = scanner.first_open
+        next_line || ruby_syntax_error!(open || [@lineno, opening_column, 'string literal'])
+        @line.lstrip!
+        scanner.add_line(@line, get_indent(@orig_line))
+      end
     end
 
     # Helper for raising exceptions

@@ -190,6 +190,11 @@ The leading `<` works like an implicit `|`:
 
 The dash denotes control code.  Examples of control code are loops and conditionals. `end` is forbidden behind `-`. Blocks are defined only by indentation.
 If your ruby code needs to use multiple lines, append a backslash `\` at the end of the lines. If your line ends with comma `,` (e.g because of a method call) you don't need the additional backslash before the linebreak.
+Ruby code which is not yet closed also continues automatically on the following
+lines: this covers open parentheses, strings, regular expressions, percent
+literals and heredocs. Delimiters appearing inside of strings, regular
+expressions, comments or heredocs are ignored, so you no longer have to escape
+them by hand.
 
 ~~~ slim
 body
@@ -208,6 +213,16 @@ The equals sign tells Slim it's a Ruby call that produces output to add to the b
 ~~~
 
 If your line ends with comma `,` (e.g because of a method call) you don't need the additional backslash before the linebreak. For trailing or leading whitespace the modifiers `>` and `<` are supported.
+As with control code, an output expression continues automatically while it is
+lexically open (unbalanced parentheses, an unfinished string, regular expression
+or heredoc), and delimiters inside those structures are recognized correctly:
+
+~~~ slim
+= users.map { |user|
+    data_for(user, /a\)b/) # the `)` inside the regexp is ignored
+  }.inspect
+p next-tag
+~~~
 
 * Output with trailing white space `=>`. Same as the single equals sign (`=`), except that it adds a trailing white space.
 * Output with leading white space `=<`. Same as the single equals sign (`=`), except that it adds a leading white space.
@@ -498,6 +513,14 @@ a href==action_path(:start)
 ~~~
 
 You can also break ruby attributes with backslash `\` or trailing `,` as described for control sections.
+A value which is lexically open (parentheses, strings, regular expressions,
+percent literals or heredocs) continues on the next physical line as well, and
+the matching delimiters are found with Ruby's own lexer. For example a regular
+expression containing a parenthesis does not confuse the parser anymore:
+
+~~~ slim
+div(data-pattern=/[)]/ data-next="x")
+~~~
 
 #### Boolean attributes
 

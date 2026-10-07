@@ -273,4 +273,54 @@ p
 }
     assert_html '<p><img src="img.png" whatsthis?!="" /><img src="img.png" whatsthis?!="wtf" /></p>', source
   end
+
+  def test_code_attribute_with_regexp_containing_delimiter
+    source = %q{
+div(data-pattern=/[)]/ data-title="x")
+}
+
+    assert_html '<div data-pattern="(?-mix:[)])" data-title="x"></div>', source
+  end
+
+  def test_code_attribute_with_escaped_delimiter_in_regexp
+    source = %q{
+div(data-pattern=/a\\)b/)
+}
+
+    assert_html '<div data-pattern="(?-mix:a\\)b)"></div>', source
+  end
+
+  def test_code_attribute_with_string_containing_delimiter
+    source = %q{
+div(data-x="a)b" data-y=2)
+}
+
+    assert_html '<div data-x="a)b" data-y="2"></div>', source
+  end
+
+  def test_code_attribute_multiline_parentheses
+    source = %q{
+div(data-value=message("Hello",
+                        "World"))
+}
+
+    assert_html '<div data-value="Hello World"></div>', source
+  end
+
+  def test_quoted_attribute_with_nested_interpolation
+    source = %q{
+div(data-x="a#{message("x", ")")}b")
+}
+
+    assert_html '<div data-x="ax )b"></div>', source
+  end
+
+  def test_quoted_attribute_multiline
+    source = %q{
+a(data-title="one \\
+  two")
+}
+
+    assert_html '<a data-title="one  two"></a>', source
+  end
 end

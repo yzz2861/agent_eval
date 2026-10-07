@@ -165,4 +165,74 @@ p
 
     assert_html '<p>Hello World from @env</p>', source
   end
+
+  def test_output_with_multiline_parentheses
+    source = %q{
+= message("Hello",
+          "Ruby!")
+p after
+}
+
+    assert_html 'Hello Ruby!<p>after</p>', source
+  end
+
+  def test_output_with_multiline_block
+    source = %q{
+= [1, 2, 3].inject(0) { |total,
+                       number| total + number }
+p after
+}
+
+    assert_html '6<p>after</p>', source
+  end
+
+  def test_output_with_regexp_containing_delimiters
+    source = %q{
+= /a\)b/.match('a)b')[0]
+p after
+}
+
+    assert_html 'a)b<p>after</p>', source
+  end
+
+  def test_output_with_multiline_string
+    source = %q{
+= "first line \n" \
+     "second line"
+p after
+}
+
+    assert_html "first line \nsecond line<p>after</p>", source
+  end
+
+  def test_output_with_nested_string_interpolation
+    source = %q{
+= "value is #{1 + (2)}"
+p after
+}
+
+    assert_html 'value is 3<p>after</p>', source
+  end
+
+  def test_output_with_heredoc
+    source = %q{
+= <<~TEXT
+    hello world
+  TEXT
+p after
+}
+
+    assert_html "hello world\n<p>after</p>", source
+  end
+
+  def test_output_ending_expression_keeps_following_tag
+    source = %q{
+= 1 + 2
+div
+  p nested
+p sibling
+}
+
+    assert_html '3<div><p>nested</p></div><p>sibling</p>', source
+  end
 end

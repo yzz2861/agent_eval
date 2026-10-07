@@ -65,7 +65,7 @@ p
   img(src="img.jpg
 }
 
-    assert_syntax_error "Unexpected end of file\n  (__TEMPLATE__), Line 3, Column 0\n    \n    ^\n", source
+    assert_syntax_error "Unclosed string literal\n  (__TEMPLATE__), Line 3, Column 10\n      img(src=\"img.jpg\n              ^\n", source
   end
 
   def test_expected_closing_attribute_delimiter
@@ -74,7 +74,7 @@ p
   img src=[hash[1] + hash[2]
 }
 
-    assert_syntax_error "Expected closing delimiter ]\n  (__TEMPLATE__), Line 3, Column 28\n    img src=[hash[1] + hash[2]\n                              ^\n", source
+    assert_syntax_error "Unclosed delimiter ]\n  (__TEMPLATE__), Line 3, Column 10\n      img src=[hash[1] + hash[2]\n              ^\n", source
   end
 
   def test_invalid_empty_attribute
@@ -144,5 +144,44 @@ div.#test
 }
 
     assert_syntax_error "Illegal shortcut\n  (__TEMPLATE__), Line 2, Column 3\n    div.#test\n       ^\n", source
+  end
+
+  def test_unclosed_regexp_in_output_points_at_regexp_start
+    source = %q{
+= value =~ /unterminated
+p never_reached
+}
+
+    assert_syntax_error "Unclosed regular expression\n  (__TEMPLATE__), Line 2, Column 11\n    = value =~ /unterminated\n               ^\n", source
+  end
+
+  def test_unclosed_paren_in_output_points_at_paren_start
+    source = %q{
+= foo(1,
+         2
+p never_reached
+}
+
+    assert_syntax_error "Unclosed delimiter )\n  (__TEMPLATE__), Line 2, Column 5\n    = foo(1,\n         ^\n", source
+  end
+
+  def test_unclosed_heredoc_points_at_introducer
+    source = %q{
+= <<~TEXT
+  body without terminator
+p never_reached
+}
+
+    assert_syntax_error "Unclosed heredoc TEXT\n  (__TEMPLATE__), Line 2, Column 2\n    = <<~TEXT\n      ^\n", source
+  end
+
+  def test_unclosed_regexp_in_attribute_points_at_regexp_start
+    source = %q{
+p
+  div(data-x=/unterminated
+    p never_reached
+}
+
+    assert_syntax_error "Unclosed regular expression\n  (__TEMPLATE__), Line 3, Column 13\n      div(data-x=/unterminated\n                 ^\n", source
   end
 end
