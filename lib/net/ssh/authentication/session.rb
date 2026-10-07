@@ -27,6 +27,14 @@ module Net
         include Constants
         include Transport::Constants
 
+        # The maximum number of passes over the authentication method list
+        # that will be attempted. Each new pass is only started when the
+        # previous one made progress (i.e. the server reported a partial
+        # success), so this is simply a safeguard against misbehaving
+        # servers that report partial success indefinitely without ever
+        # completing the authentication.
+        MAX_AUTH_PASSES = 16
+
         # transport layer abstraction
         attr_reader :transport
 
@@ -39,6 +47,11 @@ module Net
         # a hash of options, given at construction time
         attr_reader :options
 
+        # the list of authentication methods that the server has accepted
+        # so far as completed factors of a multi-factor authentication
+        # (i.e. methods that received a partial success)
+        attr_reader :authenticated_methods
+
         # Instantiates a new Authentication::Session object over the given
         # transport layer abstraction.
         def initialize(transport, options = {})
@@ -49,11 +62,25 @@ module Net
           @options = options
 
           @allowed_auth_methods = @auth_methods
+          @authenticated_methods = []
+          @partial_success = false
+          @current_auth_method = nil
+          @credential_attempts = {}
         end
 
         # Attempts to authenticate the given user, in preparation for the next
         # service request. Returns true if an authentication method succeeds in
         # authenticating the user, and false otherwise.
+        #
+        # Servers may require multiple authentication factors. When a method
+        # succeeds only partially, the server replies with USERAUTH_FAILURE
+        # whose partial_success flag is set, together with the list of methods
+        # that may continue the authentication. In that case the accepted
+        # factor is recorded (see #authenticated_methods) and further passes
+        # over the remaining methods are made, so that methods appearing
+        # earlier in the method list may be revisited in the new stage, and
+        # methods that can offer different credentials (e.g. publickey with
+        # a different key) may be attempted again.
         def authenticate(next_service, username, password = nil)
           debug { "beginning authentication of `#{username}'" }
 
@@ -68,31 +95,73 @@ module Net
           default_keys.each { |key| key_manager.add(key) } unless options.key?(:keys) || options.key?(:key_data)
 
           attempted = []
+          passes = 0
 
-          @auth_methods.each do |name|
-            next unless @allowed_auth_methods.include?(name)
+          loop do
+            passes += 1
+            progress = false
 
-            attempted << name
+            @auth_methods.each do |name|
+              next unless @allowed_auth_methods.include?(name)
 
-            debug { "trying #{name}" }
-            begin
-              auth_class = Methods.const_get(name.split(/\W+/).map { |p| p.capitalize }.join)
-              method = auth_class.new(self,
-                                      key_manager: key_manager, password_prompt: options[:password_prompt],
-                                      pubkey_algorithms: options[:pubkey_algorithms] || nil)
-            rescue NameError
-              debug {"Mechanism #{name} was requested, but isn't a known type.  Ignoring it."}
-              next
+              attempted << name
+
+              debug { "trying #{name}" }
+              begin
+                auth_class = Methods.const_get(name.split(/\W+/).map { |p| p.capitalize }.join)
+                method = auth_class.new(self,
+                                        key_manager: key_manager, password_prompt: options[:password_prompt],
+                                        pubkey_algorithms: options[:pubkey_algorithms] || nil)
+              rescue NameError
+                debug {"Mechanism #{name} was requested, but isn't a known type.  Ignoring it."}
+                next
+              end
+
+              @partial_success = false
+              @current_auth_method = name
+              begin
+                return true if method.authenticate(next_service, username, password)
+              rescue Net::SSH::Authentication::DisallowedMethod
+              ensure
+                @current_auth_method = nil
+              end
+
+              # A partial success means the server accepted this method as
+              # one factor of a multi-factor authentication, but requires
+              # additional factors before the login is complete, so another
+              # pass over the remaining methods is in order.
+              progress = true if @partial_success
             end
 
-            return true if method.authenticate(next_service, username, password)
-          rescue Net::SSH::Authentication::DisallowedMethod
+            break if !progress || passes >= MAX_AUTH_PASSES
           end
 
-          error { "all authorization methods failed (tried #{attempted.join(', ')})" }
+          if @authenticated_methods.empty?
+            error { "all authorization methods failed (tried #{attempted.uniq.join(', ')})" }
+          else
+            error do
+              "authentication incomplete: server accepted #{@authenticated_methods.join(' + ')} " \
+                "but requires additional factors (still allowed: #{@allowed_auth_methods.join(', ')}; " \
+                "tried #{attempted.uniq.join(', ')})"
+            end
+          end
           return false
         ensure
           key_manager.finish if key_manager
+        end
+
+        # Records that the given credential (identified by an opaque,
+        # non-secret identifier, such as a public key blob) is being used
+        # with the given authentication method. Returns true if this is the
+        # first attempt with this credential, and false if the same
+        # credential has already been tried with this method, in which case
+        # it should not be replayed.
+        def register_credential_attempt(method_name, credential_id)
+          attempts = (@credential_attempts[method_name] ||= [])
+          return false if attempts.include?(credential_id)
+
+          attempts << credential_id
+          true
         end
 
         # Blocks until a packet is received. It silently handles USERAUTH_BANNER
@@ -109,6 +178,7 @@ module Net
 
             when USERAUTH_FAILURE
               @allowed_auth_methods = packet[:authentications].split(/,/)
+              record_completed_factor if packet[:partial_success]
               debug { "allowed methods: #{packet[:authentications]}" }
               return packet
 
@@ -135,6 +205,21 @@ module Net
         end
 
         private
+
+        # Notes that the server accepted the method currently being
+        # attempted as one completed factor of a multi-factor
+        # authentication (a USERAUTH_FAILURE with the partial_success flag
+        # set). Subsequent failures within the same method attempt (for
+        # other credentials) no longer count as progress on their own.
+        def record_completed_factor
+          @partial_success = true
+
+          return unless @current_auth_method
+          return if @authenticated_methods.include?(@current_auth_method)
+
+          debug { "partial success with #{@current_auth_method}; additional authentication factors required" }
+          @authenticated_methods << @current_auth_method
+        end
 
         # Returns an array of paths to the key files usually defined
         # by system default.

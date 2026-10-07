@@ -1,5 +1,7 @@
 require_relative '../common'
 require 'net/ssh/authentication/session'
+require 'logger'
+require 'stringio'
 
 module Authentication
   class TestSession < NetSSHTest
@@ -165,6 +167,249 @@ module Authentication
       session(key_data: custom_private_key).authenticate("next service", "username")
     end
 
+    def test_authenticate_should_continue_with_next_method_after_partial_success
+      transport.expect do |t, packet|
+        assert_equal SERVICE_REQUEST, packet.type
+        t.return(SERVICE_ACCEPT)
+      end
+
+      transport.expect do |t, packet|
+        assert_none_request packet
+        t.return(USERAUTH_FAILURE, :string, "publickey,password", :bool, false)
+      end
+
+      transport.expect do |t, packet|
+        assert_public_key_request custom_public_key, packet
+        t.return(USERAUTH_PK_OK)
+      end
+
+      transport.expect do |t, packet|
+        assert_signed_public_key_request custom_public_key, packet
+        t.return(USERAUTH_FAILURE, :string, "password", :bool, true)
+      end
+
+      transport.expect do |t, packet|
+        assert_password_request "secret-password", packet
+        t.return(USERAUTH_SUCCESS)
+      end
+
+      assert session(key_data: custom_private_key).authenticate("next service", "username", "secret-password")
+      assert_equal %w[publickey], session.authenticated_methods
+    end
+
+    def test_authenticate_should_revisit_earlier_method_in_new_stage_after_partial_success
+      transport.expect do |t, packet|
+        assert_equal SERVICE_REQUEST, packet.type
+        t.return(SERVICE_ACCEPT)
+      end
+
+      transport.expect do |t, packet|
+        assert_none_request packet
+        t.return(USERAUTH_FAILURE, :string, "password", :bool, false)
+      end
+
+      transport.expect do |t, packet|
+        assert_password_request "secret-password", packet
+        t.return(USERAUTH_FAILURE, :string, "publickey", :bool, true)
+      end
+
+      # the server now wants publickey, which sorts before password in the
+      # method list, so a second pass is required to complete the login
+      transport.expect do |t, packet|
+        assert_public_key_request custom_public_key, packet
+        t.return(USERAUTH_PK_OK)
+      end
+
+      transport.expect do |t, packet|
+        assert_signed_public_key_request custom_public_key, packet
+        t.return(USERAUTH_SUCCESS)
+      end
+
+      assert session(key_data: custom_private_key).authenticate("next service", "username", "secret-password")
+      assert_equal %w[password], session.authenticated_methods
+    end
+
+    def test_authenticate_should_offer_second_key_after_partial_success_with_first_key
+      transport.expect do |t, packet|
+        assert_equal SERVICE_REQUEST, packet.type
+        t.return(SERVICE_ACCEPT)
+      end
+
+      transport.expect do |t, packet|
+        assert_none_request packet
+        t.return(USERAUTH_FAILURE, :string, "publickey", :bool, false)
+      end
+
+      transport.expect do |t, packet|
+        assert_public_key_request custom_public_key, packet
+        t.return(USERAUTH_PK_OK)
+      end
+
+      transport.expect do |t, packet|
+        assert_signed_public_key_request custom_public_key, packet
+        t.return(USERAUTH_FAILURE, :string, "publickey", :bool, true)
+      end
+
+      transport.expect do |t, packet|
+        assert_public_key_request default_public_key, packet
+        t.return(USERAUTH_PK_OK)
+      end
+
+      transport.expect do |t, packet|
+        assert_signed_public_key_request default_public_key, packet
+        t.return(USERAUTH_SUCCESS)
+      end
+
+      assert session(key_data: [custom_private_key, default_private_key]).authenticate("next service", "username")
+      assert_equal %w[publickey], session.authenticated_methods
+    end
+
+    def test_authenticate_should_not_replay_same_key_when_server_repeats_partial_success
+      transport.expect do |t, packet|
+        assert_equal SERVICE_REQUEST, packet.type
+        t.return(SERVICE_ACCEPT)
+      end
+
+      transport.expect do |t, packet|
+        assert_none_request packet
+        t.return(USERAUTH_FAILURE, :string, "publickey", :bool, false)
+      end
+
+      transport.expect do |t, packet|
+        assert_public_key_request custom_public_key, packet
+        t.return(USERAUTH_PK_OK)
+      end
+
+      transport.expect do |t, packet|
+        assert_signed_public_key_request custom_public_key, packet
+        t.return(USERAUTH_FAILURE, :string, "publickey", :bool, true)
+      end
+
+      # the server keeps offering "publickey" after a partial success, but
+      # the only key has already been tried, so no further packets may be
+      # sent (the mock transport raises on any unexpected packet)
+      assert_equal false, session(auth_methods: %w[none publickey], key_data: custom_private_key)
+                          .authenticate("next service", "username")
+      assert_equal %w[publickey], session.authenticated_methods
+    end
+
+    def test_authenticate_should_stop_when_server_reports_failures_without_partial_success
+      transport.expect do |t, packet|
+        assert_equal SERVICE_REQUEST, packet.type
+        t.return(SERVICE_ACCEPT)
+      end
+
+      transport.expect do |t, packet|
+        assert_none_request packet
+        t.return(USERAUTH_FAILURE, :string, "publickey", :bool, false)
+      end
+
+      transport.expect do |t, packet|
+        assert_public_key_request custom_public_key, packet
+        t.return(USERAUTH_FAILURE, :string, "publickey", :bool, false)
+      end
+
+      transport.expect do |t, packet|
+        assert_public_key_request default_public_key, packet
+        t.return(USERAUTH_FAILURE, :string, "publickey", :bool, false)
+      end
+
+      # the server keeps answering with the same method list and no partial
+      # success, so authentication must give up instead of looping
+      assert_equal false, session(auth_methods: %w[none publickey],
+                                  key_data: [custom_private_key, default_private_key])
+                          .authenticate("next service", "username")
+      assert_equal [], session.authenticated_methods
+    end
+
+    def test_authenticate_should_use_prompt_for_keyboard_interactive_factor
+      asked = []
+      prompt = MockPrompt.new
+      prompt.define_singleton_method(:_ask) do |message, _info, _echo|
+        asked << message
+        "123456"
+      end
+
+      transport.expect do |t, packet|
+        assert_equal SERVICE_REQUEST, packet.type
+        t.return(SERVICE_ACCEPT)
+      end
+
+      transport.expect do |t, packet|
+        assert_none_request packet
+        t.return(USERAUTH_FAILURE, :string, "publickey,keyboard-interactive", :bool, false)
+      end
+
+      transport.expect do |t, packet|
+        assert_public_key_request custom_public_key, packet
+        t.return(USERAUTH_PK_OK)
+      end
+
+      transport.expect do |t, packet|
+        assert_signed_public_key_request custom_public_key, packet
+        t.return(USERAUTH_FAILURE, :string, "keyboard-interactive", :bool, true)
+      end
+
+      transport.expect do |t, packet|
+        assert_keyboard_interactive_request packet
+        t.return(60, :string, "", :string, "", :string, "", :long, 1, :string, "OTP: ", :bool, false)
+      end
+
+      transport.expect do |t, packet|
+        assert_equal 61, packet.type
+        assert_equal 1, packet.read_long
+        assert_equal "123456", packet.read_string
+        t.return(USERAUTH_SUCCESS)
+      end
+
+      assert session(key_data: custom_private_key, password_prompt: prompt).authenticate("next service", "username")
+      assert_equal ["OTP: "], asked
+      assert_equal %w[publickey], session.authenticated_methods
+    end
+
+    def test_authenticate_failure_report_should_name_completed_stage_without_secrets
+      log = StringIO.new
+      logger = Logger.new(log)
+
+      # instantiate the session (and its transport) with the options before
+      # scripting the server, so that the memoized transport sees them
+      session(key_data: custom_private_key, non_interactive: true, logger: logger)
+
+      transport.expect do |t, packet|
+        assert_equal SERVICE_REQUEST, packet.type
+        t.return(SERVICE_ACCEPT)
+      end
+
+      transport.expect do |t, packet|
+        assert_none_request packet
+        t.return(USERAUTH_FAILURE, :string, "publickey,password", :bool, false)
+      end
+
+      transport.expect do |t, packet|
+        assert_public_key_request custom_public_key, packet
+        t.return(USERAUTH_PK_OK)
+      end
+
+      transport.expect do |t, packet|
+        assert_signed_public_key_request custom_public_key, packet
+        t.return(USERAUTH_FAILURE, :string, "password", :bool, true)
+      end
+
+      2.times do
+        transport.expect do |t, packet|
+          assert_password_request "secret-password", packet
+          t.return(USERAUTH_FAILURE, :string, "password", :bool, false)
+        end
+      end
+
+      assert_equal false, session(key_data: custom_private_key, non_interactive: true, logger: logger)
+                          .authenticate("next service", "username", "secret-password")
+      assert_equal %w[publickey], session.authenticated_methods
+      assert_match(/accepted publickey/, log.string)
+      assert_match(/password/, log.string)
+      refute_includes log.string, "secret-password"
+    end
+
     private
 
     def session(options = {})
@@ -191,6 +436,33 @@ module Authentication
       assert_equal "ssh-rsa", packet.read_string
       key_in_packet = Net::SSH::Buffer.new(packet.read_string).read_key
       assert_equal public_key, key_in_packet.to_pem
+    end
+
+    def assert_signed_public_key_request(public_key, packet)
+      assert_equal "username", packet.read_string
+      assert_equal "next service", packet.read_string
+      assert_equal "publickey", packet.read_string
+      assert_equal true, packet.read_bool
+      assert_equal "ssh-rsa", packet.read_string
+      key_in_packet = Net::SSH::Buffer.new(packet.read_string).read_key
+      assert_equal public_key, key_in_packet.to_pem
+      signature = Net::SSH::Buffer.new(packet.read_string)
+      assert_equal "ssh-rsa", signature.read_string
+      assert signature.read_string.length > 0
+    end
+
+    def assert_password_request(password, packet)
+      assert_equal "username", packet.read_string
+      assert_equal "next service", packet.read_string
+      assert_equal "password", packet.read_string
+      assert_equal false, packet.read_bool
+      assert_equal password, packet.read_string
+    end
+
+    def assert_keyboard_interactive_request(packet)
+      assert_equal "username", packet.read_string
+      assert_equal "next service", packet.read_string
+      assert_equal "keyboard-interactive", packet.read_string
     end
 
     def file_on_filesystem(name, contents)

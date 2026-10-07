@@ -12,10 +12,18 @@ module Net
           # username, trying each identity known to the key manager. If any of
           # them succeed, returns +true+, otherwise returns +false+. This
           # requires the presence of a key manager.
+          #
+          # Identities that have already been tried during this session (for
+          # instance during an earlier stage of a multi-factor
+          # authentication) are skipped, so that the same key is never
+          # replayed, while a different key may still be offered when the
+          # server asks for publickey again in a later stage.
           def authenticate(next_service, username, password = nil)
             return false unless key_manager
 
             key_manager.each_identity do |identity|
+              next unless session.register_credential_attempt("publickey", identity.to_blob)
+
               return true if authenticate_with(identity, next_service, username)
             end
 
