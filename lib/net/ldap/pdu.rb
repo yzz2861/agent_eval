@@ -75,6 +75,7 @@ class Net::LDAP::PDU
   attr_reader :search_parameters
   attr_reader :bind_parameters
   attr_reader :extended_response
+  attr_reader :intermediate_response
 
   ##
   # Returns RFC-2251 Controls if any.
@@ -122,6 +123,8 @@ class Net::LDAP::PDU
       parse_unbind_request(ber_object[1])
     when ExtendedResponse
       parse_extended_response(ber_object[1])
+    when IntermediateResponse
+      parse_intermediate_response(ber_object[1])
     else
       raise Error.new("unknown pdu-type: #{@app_tag}")
     end
@@ -204,6 +207,20 @@ class Net::LDAP::PDU
   end
   private :parse_extended_response
 
+  def parse_intermediate_response(sequence)
+    response = OpenStruct.new
+    response.name = nil
+    response.value = nil
+    sequence.each do |element|
+      tag = element.ber_identifier & 0x1f
+      response.name = element if tag == 0
+      response.value = element if tag.between?(1, 3)
+    end
+
+    @intermediate_response = response
+  end
+  private :parse_intermediate_response
+
   ##
   # A Bind Response may have an additional field, ID [7], serverSaslCreds,
   # per RFC 2251 pgh 4.2.3.
@@ -264,10 +281,50 @@ class Net::LDAP::PDU
   # may want to come back here and add support for some of more-widely used
   # controls. RFC-2696 is a good example.
   def parse_controls(sequence)
-    @ldap_controls = sequence.map do |control|
+    controls_syntax = Net::BER.compile_syntax(
+      universal: {
+        primitive: {
+          0 => :null,
+          1 => :boolean,
+          2 => :integer,
+          4 => :string,
+          5 => :null,
+          10 => :integer,
+        },
+        constructed: {
+          16 => :array,
+          17 => :array,
+        },
+      },
+      context_specific: {
+        primitive: {
+          0 => :string,
+          1 => :boolean,
+        },
+        constructed: {
+          0 => :array,
+        },
+      }
+    )
+    controls =
+      if sequence.respond_to?(:ber_identifier) && !sequence.is_a?(Array)
+        controls_io = StringIO.new(sequence.to_s)
+        result = []
+        while control = controls_io.read_ber(controls_syntax)
+          result << control
+        end
+        result
+      else
+        sequence
+      end
+
+    @ldap_controls = controls.map do |control|
       o = OpenStruct.new
       o.oid, o.criticality, o.value = control[0], control[1], control[2]
-      if o.criticality and o.criticality.is_a?(String)
+      if o.criticality.nil? && control.length == 2
+        o.value = control[1]
+        o.criticality = false
+      elsif o.criticality and o.criticality.is_a?(String)
         o.value = o.criticality
         o.criticality = false
       end

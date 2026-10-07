@@ -531,6 +531,16 @@ class Net::LDAP::Connection #:nodoc:
     end
   end
 
+  def sync(args = nil)
+    args ||= {}
+
+    instrument "sync.net_ldap_connection", args do |payload|
+      payload[:result] = Net::LDAP::Sync.new(self).run(args) do |event|
+        yield event if block_given?
+      end
+    end
+  end
+
   MODIFY_OPERATIONS = { #:nodoc:
     :add => 0,
     :delete => 1,

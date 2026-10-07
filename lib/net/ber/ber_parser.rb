@@ -33,7 +33,7 @@ module Net::BER::BERParser
     # the built-in syntax lookup table.
     #
     # This exceptionally clever bit of code is verrrry slow.
-    object_type = (syntax && syntax[id]) || BuiltinSyntax[id]
+    object_type = (id == 0 ? :null : nil) || (syntax && syntax[id]) || BuiltinSyntax[id]
 
     # == is expensive so sort this so the common cases are at the top.
     if object_type == :string
@@ -41,6 +41,7 @@ module Net::BER::BERParser
       s.ber_identifier = id
       s
     elsif object_type == :integer
+      raise Net::BER::BerError, "invalid integer value" if data.nil? || data.empty?
       neg = !(data.unpack("C").first & 0x80).zero?
       int = 0
 
@@ -134,6 +135,7 @@ module Net::BER::BERParser
   # inside of #read_ber, we no longer return it.
   def read_ber_length
     n = getbyte
+    raise Net::BER::BerError, "truncated BER length" if n.nil?
 
     if n <= 0x7f
       n

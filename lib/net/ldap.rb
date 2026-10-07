@@ -23,6 +23,7 @@ require_relative 'ldap/filter'
 require_relative 'ldap/dataset'
 require_relative 'ldap/password'
 require_relative 'ldap/entry'
+require_relative 'ldap/sync'
 require_relative 'ldap/instrumentation'
 require_relative 'ldap/connection'
 require_relative 'ldap/version'
@@ -293,6 +294,7 @@ class Net::LDAP
     15 => :array, # CompareResponse
     16 => :array, # AbandonRequest
     19 => :array, # SearchResultReferral
+    25 => :array, # IntermediateResponse
     24 => :array, # Unsolicited Notification
   }
   application = {
@@ -325,6 +327,8 @@ class Net::LDAP
 
   universal = {
     constructed: {
+      16 => :array,
+      17 => :array,
       107 => :string, # ExtendedResponse
     },
   }
@@ -383,6 +387,7 @@ class Net::LDAP
   ResultCodeObjectClassModsProhibited    = 69
   ResultCodeAffectsMultipleDSAs          = 71
   ResultCodeOther                        = 80
+  ResultCodeSyncRefreshRequired          = 4096
 
   # https://tools.ietf.org/html/rfc4511#appendix-A.1
   ResultCodesNonError = [
@@ -440,6 +445,7 @@ class Net::LDAP
     ResultCodeObjectClassModsProhibited    => "ObjectClass Modifications Prohibited",
     ResultCodeAffectsMultipleDSAs          => "Affects Multiple DSAs",
     ResultCodeOther                        => "Other",
+    ResultCodeSyncRefreshRequired          => "Content Synchronization Refresh Required",
   }
 
   module LDAPControls
@@ -447,6 +453,11 @@ class Net::LDAP
     SORT_REQUEST  = "1.2.840.113556.1.4.473"
     SORT_RESPONSE = "1.2.840.113556.1.4.474"
     DELETE_TREE   = "1.2.840.113556.1.4.805"
+
+    SYNC_REQUEST = "1.3.6.1.4.1.4203.1.9.1.1"
+    SYNC_STATE   = "1.3.6.1.4.1.4203.1.9.1.2"
+    SYNC_DONE    = "1.3.6.1.4.1.4203.1.9.1.3"
+    SYNC_INFO    = "1.3.6.1.4.1.4203.1.9.1.4"
   end
 
   def self.result2string(code) #:nodoc:
@@ -799,6 +810,20 @@ class Net::LDAP
       else
         @result.success?
       end
+    end
+  end
+
+  # Performs an RFC 4533 Content Synchronization search. Each protocol
+  # change is yielded as a Net::LDAP::Sync::Event. Cookies are delivered in
+  # the events and must only be persisted after that event and all preceding
+  # events have been applied successfully.
+  def sync(args = {}, &block)
+    instrument "sync.net_ldap", args do
+      @result = use_connection(args) do |conn|
+        conn.sync(args, &block)
+      end
+
+      @result.success?
     end
   end
 
