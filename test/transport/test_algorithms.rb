@@ -274,6 +274,115 @@ module Transport
       end
     end
 
+    def test_allowed_packets_strict_kex
+      (0..255).each do |type|
+        packet = stub("packet", type: type)
+        if (20..49).cover?(type)
+          assert(Net::SSH::Transport::Algorithms.allowed_packet_strict_kex?(packet), "#{type} should be allowed during initial strict key exchange")
+        else
+          assert(!Net::SSH::Transport::Algorithms.allowed_packet_strict_kex?(packet), "#{type} should not be allowed during initial strict key exchange")
+        end
+      end
+    end
+
+    def test_client_kexinit_should_advertise_strict_kex_support
+      transport.expect do |_t, buffer|
+        assert_kexinit(buffer)
+        install_mock_key_exchange(buffer)
+      end
+
+      install_mock_algorithm_lookups
+      algorithms.accept_kexinit(kexinit)
+
+      # the strict kex indicator is only advertised on the wire (checked by
+      # assert_kexinit above); it must not become a negotiable kex algorithm
+      assert !algorithms[:kex].include?('kex-strict-c-v00@openssh.com')
+    end
+
+    def test_strict_kex_enabled_when_server_advertises_support
+      kexinit kex: "diffie-hellman-group-exchange-sha256,diffie-hellman-group14-sha1,kex-strict-s-v00@openssh.com"
+      transport.expect do |_t, buffer|
+        assert_kexinit(buffer)
+        install_mock_key_exchange(buffer)
+      end
+
+      install_mock_algorithm_lookups
+      algorithms.accept_kexinit(kexinit)
+
+      assert algorithms.strict_kex?
+      assert_equal 1, transport.sequence_number_resets
+    end
+
+    def test_strict_kex_disabled_when_server_does_not_advertise_support
+      transport.expect do |_t, buffer|
+        assert_kexinit(buffer)
+        install_mock_key_exchange(buffer)
+      end
+
+      install_mock_algorithm_lookups
+      algorithms.accept_kexinit(kexinit)
+
+      assert !algorithms.strict_kex?
+      assert_equal 0, transport.sequence_number_resets
+    end
+
+    def test_strict_kex_violation_only_before_initial_exchange_completes
+      transport.expect!
+      algorithms.rekey!
+      algorithms.instance_variable_set(:@strict_kex, true)
+
+      (0..255).each do |type|
+        packet = stub("packet", type: type)
+        if (20..49).cover?(type)
+          assert(!algorithms.strict_kex_violation?(packet), "#{type} should not be a strict kex violation")
+        else
+          assert(algorithms.strict_kex_violation?(packet), "#{type} should be a strict kex violation")
+        end
+      end
+    end
+
+    def test_strict_kex_violation_is_relaxed_once_initial_exchange_completed
+      kexinit kex: "diffie-hellman-group-exchange-sha256,diffie-hellman-group14-sha1,kex-strict-s-v00@openssh.com"
+      transport.expect do |_t, buffer|
+        assert_kexinit(buffer)
+        install_mock_key_exchange(buffer)
+      end
+
+      install_mock_algorithm_lookups
+      algorithms.accept_kexinit(kexinit)
+      assert algorithms.strict_kex?
+
+      (0..255).each do |type|
+        packet = stub("packet", type: type)
+        assert(!algorithms.strict_kex_violation?(packet), "#{type} should not be a strict kex violation after the initial exchange")
+      end
+    end
+
+    def test_strict_kex_rekey_resets_sequence_numbers_on_every_exchange
+      kexinit kex: "diffie-hellman-group-exchange-sha256,diffie-hellman-group14-sha1,kex-strict-s-v00@openssh.com"
+      transport.expect do |_t, buffer|
+        assert_kexinit(buffer)
+        install_mock_key_exchange(buffer)
+      end
+
+      install_mock_algorithm_lookups
+      algorithms.accept_kexinit(kexinit)
+      assert_equal 1, transport.sequence_number_resets
+
+      # the first exchange consumed the packet; build a fresh one
+      @kexinit = nil
+      kexinit kex: "diffie-hellman-group-exchange-sha256,diffie-hellman-group14-sha1,kex-strict-s-v00@openssh.com"
+      transport.expect do |_t, buffer|
+        assert_kexinit(buffer)
+        install_mock_key_exchange(buffer)
+      end
+
+      install_mock_algorithm_lookups
+      algorithms.rekey!
+      algorithms.accept_kexinit(kexinit)
+      assert_equal 2, transport.sequence_number_resets
+    end
+
     def test_exchange_with_zlib_compression_enabled_sets_compression_to_standard
       algorithms compression: 'zlib'
 
@@ -430,7 +539,7 @@ module Transport
     def assert_kexinit(buffer, options = {})
       assert_equal KEXINIT, buffer.type
       assert_equal 16, buffer.read(16).length
-      assert_equal options[:kex] || (x25519_kex + ec_kex + %w[diffie-hellman-group-exchange-sha256 diffie-hellman-group14-sha256 diffie-hellman-group14-sha1]).join(','), buffer.read_string
+      assert_equal options[:kex] || (x25519_kex + ec_kex + %w[diffie-hellman-group-exchange-sha256 diffie-hellman-group14-sha256 diffie-hellman-group14-sha1 kex-strict-c-v00@openssh.com]).join(','), buffer.read_string
       assert_equal options[:host_key] || (ed_ec_host_keys + %w[ssh-rsa-cert-v01@openssh.com ssh-rsa-cert-v00@openssh.com ssh-rsa rsa-sha2-256 rsa-sha2-512]).join(','), buffer.read_string
       assert_equal options[:encryption_client] || "#{chacha_poly_cipher_str}aes256-ctr,aes192-ctr,aes128-ctr,aes256-gcm@openssh.com,aes128-gcm@openssh.com", buffer.read_string
       assert_equal options[:encryption_server] || "#{chacha_poly_cipher_str}aes256-ctr,aes192-ctr,aes128-ctr,aes256-gcm@openssh.com,aes128-gcm@openssh.com", buffer.read_string

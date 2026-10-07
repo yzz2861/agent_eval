@@ -1,5 +1,9 @@
 === 8.0.0 beta3
 
+  * Support OpenSSH strict key exchange (kex-strict-c/s-v00@openssh.com): advertise
+    support in KEXINIT, reject unexpected messages during the initial key exchange,
+    and reset packet sequence numbers at every NEWKEYS boundary when negotiated
+
   * Verify @cert-authority host certificate constraints — principals (shell-glob, matching OpenSSH), validity window, host type, and critical options — instead of trusting any CA-signed certificate for any host [#1009]
 
 === 7.3.3

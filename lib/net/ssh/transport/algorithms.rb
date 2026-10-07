@@ -102,6 +102,15 @@ module Net
           language: %w[]
         }.freeze
 
+        # The pseudo-algorithm names used to negotiate OpenSSH's "strict key
+        # exchange" extension (see the OpenSSH PROTOCOL file, and CVE-2023-48795
+        # for the attack it mitigates). When both sides advertise support, no
+        # extraneous messages are allowed during the initial key exchange, and
+        # the packet sequence numbers are reset to zero whenever NEWKEYS is
+        # exchanged.
+        KEX_STRICT_C = 'kex-strict-c-v00@openssh.com'
+        KEX_STRICT_S = 'kex-strict-s-v00@openssh.com'
+
         # The underlying transport layer session that supports this object
         attr_reader :session
 
@@ -153,6 +162,15 @@ module Net
           (21..49).include?(packet.type)
         end
 
+        # Returns true if the given packet can be processed during the initial
+        # key exchange when the strict key exchange extension is in effect. In
+        # that case only key exchange messages (KEXINIT, NEWKEYS and the key
+        # exchange method specific messages) are permitted; anything else is a
+        # protocol violation.
+        def self.allowed_packet_strict_kex?(packet)
+          (20..49).include?(packet.type)
+        end
+
         # Instantiates a new Algorithms object, and prepares the hash of preferred
         # algorithms based on the options parameter and the ALGORITHMS constant.
         def initialize(session, options = {})
@@ -161,6 +179,7 @@ module Net
           @options = options
           @algorithms = {}
           @pending = @initialized = false
+          @strict_kex = @initial_kex_done = false
           @client_packet = @server_packet = nil
           prepare_preferred_algorithms!
         end
@@ -190,6 +209,8 @@ module Net
           info { "got KEXINIT from server" }
           @server_data = parse_server_algorithm_packet(packet)
           @server_packet = @server_data[:raw]
+          @strict_kex = @server_data[:kex].include?(KEX_STRICT_S)
+          debug { @strict_kex ? "strict key exchange enabled" : "server does not support strict key exchange" }
           if !pending?
             send_kexinit
           else
@@ -217,6 +238,22 @@ module Net
         # during a key exchange.
         def allow?(packet)
           !pending? || Algorithms.allowed_packet?(packet)
+        end
+
+        # Returns true if the strict key exchange extension has been
+        # negotiated with the server (i.e. both sides advertised support for
+        # it in their KEXINIT packets).
+        def strict_kex?
+          @strict_kex
+        end
+
+        # Returns true if the given packet violates the strict key exchange
+        # message ordering rules. When strict kex is in effect, only key
+        # exchange messages may be received until the initial key exchange
+        # has completed; subsequent re-exchanges tolerate unrelated packets,
+        # since they may legitimately be in flight.
+        def strict_kex_violation?(packet)
+          strict_kex? && !@initial_kex_done && !Algorithms.allowed_packet_strict_kex?(packet)
         end
 
         # Returns true if the algorithms have been negotiated at all.
@@ -370,7 +407,7 @@ module Net
         # a KEXINIT packet to send to the server. It does not actually send it,
         # it simply builds the packet and returns it.
         def build_client_algorithm_packet
-          kex         = algorithms[:kex].join(",")
+          kex         = (algorithms[:kex] | [KEX_STRICT_C]).join(",")
           host_key    = algorithms[:host_key].join(",")
           encryption  = algorithms[:encryption].join(",")
           hmac        = algorithms[:hmac].join(",")
@@ -512,6 +549,12 @@ module Net
                                    max_packets: options[:rekey_packet_limit],
                                    max_blocks: options[:rekey_blocks_limit]
 
+          # When strict key exchange is in effect, the packet sequence
+          # numbers of both directions must be reset to zero every time
+          # NEWKEYS is exchanged (both the initial exchange and rekeys).
+          session.reset_sequence_numbers if @strict_kex
+
+          @initial_kex_done = true
           @initialized = true
         end
 

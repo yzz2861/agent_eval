@@ -103,6 +103,7 @@ class MockTransport < Net::SSH::Transport::Session
   attr_reader :client_options
   attr_reader :server_options
   attr_reader :hints, :queue
+  attr_reader :sequence_number_resets
 
   attr_accessor :mock_enqueue
 
@@ -116,6 +117,7 @@ class MockTransport < Net::SSH::Transport::Session
     @hints = {}
     @socket = options[:socket]
     @algorithms = OpenStruct.new(session_id: "abcxyz123")
+    @sequence_number_resets = 0
     verifier { |_data| true }
   end
 
@@ -171,6 +173,10 @@ class MockTransport < Net::SSH::Transport::Session
 
   def configure_server(options)
     @server_options = options
+  end
+
+  def reset_sequence_numbers
+    @sequence_number_resets += 1
   end
 
   def hint(name, value = true)

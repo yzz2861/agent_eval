@@ -193,6 +193,10 @@ module Net
             packet = socket.next_packet(mode, options[:timeout])
             return nil if packet.nil?
 
+            if algorithms.strict_kex_violation?(packet)
+              raise Net::SSH::Exception, "strict kex violation: unexpected packet type #{packet.type} during initial key exchange"
+            end
+
             case packet.type
             when DISCONNECT
               raise Net::SSH::Disconnect, "disconnected: #{packet[:description]} (#{packet[:reason_code]})"
@@ -208,6 +212,13 @@ module Net
 
             when KEXINIT
               algorithms.accept_kexinit(packet)
+
+            when NEWKEYS
+              if algorithms.strict_kex? && !algorithms.pending?
+                raise Net::SSH::Exception, "strict kex violation: unexpected NEWKEYS packet"
+              end
+
+              return packet
 
             else
               return packet if algorithms.allow?(packet)
@@ -261,6 +272,15 @@ module Net
         # hmac algorithms to use when reading packets from the server.
         def configure_server(options = {})
           socket.server.set(options)
+        end
+
+        # Resets the packet sequence numbers of both directions to zero. This
+        # is required by the strict key exchange extension
+        # (kex-strict-[cs]-v00@openssh.com), which resets the sequence numbers
+        # whenever NEWKEYS is exchanged.
+        def reset_sequence_numbers
+          socket.client.reset_sequence_number
+          socket.server.reset_sequence_number
         end
 
         # Sets a new hint for the packet stream, which the packet stream may use

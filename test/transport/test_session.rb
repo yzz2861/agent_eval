@@ -261,6 +261,46 @@ module Transport
       assert_equal packet, session.poll_message
     end
 
+    def test_poll_message_should_raise_on_strict_kex_violation
+      session!
+      packet = P(:byte, IGNORE, :string, "injected")
+      algorithms.stubs(:strict_kex_violation?).with(packet).returns(true)
+      socket.expects(:next_packet).returns(packet)
+      assert_raises(Net::SSH::Exception) { session.poll_message }
+    end
+
+    def test_poll_message_should_return_newkeys_when_kex_is_pending
+      session!
+      packet = P(:byte, NEWKEYS)
+      algorithms.stubs(strict_kex?: true, pending?: true)
+      socket.expects(:next_packet).returns(packet)
+      assert_equal packet, session.poll_message
+    end
+
+    def test_poll_message_should_raise_on_unexpected_newkeys_when_strict_kex
+      session!
+      packet = P(:byte, NEWKEYS)
+      algorithms.stubs(strict_kex?: true, pending?: false)
+      socket.expects(:next_packet).returns(packet)
+      assert_raises(Net::SSH::Exception) { session.poll_message }
+    end
+
+    def test_poll_message_should_return_newkeys_when_not_pending_and_not_strict_kex
+      session!
+      packet = P(:byte, NEWKEYS)
+      socket.expects(:next_packet).returns(packet)
+      assert_equal packet, session.poll_message
+    end
+
+    def test_reset_sequence_numbers_should_reset_client_and_server_states
+      session!
+      socket.client.increment(8)
+      socket.server.increment(8)
+      session.reset_sequence_numbers
+      assert_equal 0, socket.client.sequence_number
+      assert_equal 0, socket.server.sequence_number
+    end
+
     def test_poll_message_should_enqueue_packets_when_algorithm_disallows_packet
       session!
       packet = P(:byte, SERVICE_ACCEPT, :string, "test")
@@ -399,7 +439,8 @@ module Transport
     end
 
     def algorithms
-      @algorithms ||= stub("algorithms", initialized?: true, allow?: true, start: true)
+      @algorithms ||= stub("algorithms", initialized?: true, allow?: true, start: true,
+                                         pending?: false, strict_kex?: false, strict_kex_violation?: false)
     end
 
     def session(options = {})

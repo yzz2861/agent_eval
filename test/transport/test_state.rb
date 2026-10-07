@@ -55,6 +55,15 @@ module Transport
       assert_equal 134217728, state.max_blocks
     end
 
+    def test_reset_sequence_number_should_zero_only_the_sequence_number
+      state.increment(24)
+      state.increment(24)
+      assert_equal 2, state.sequence_number
+      state.reset_sequence_number
+      assert_equal 0, state.sequence_number
+      assert_equal 2, state.packets
+    end
+
     def test_set_should_set_variables_and_reset_counters
       state.expects(:reset!)
       state.set cipher: :a, hmac: :b, compression: :c,
