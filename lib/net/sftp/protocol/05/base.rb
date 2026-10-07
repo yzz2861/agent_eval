@@ -61,6 +61,19 @@ module Net; module SFTP; module Protocol; module V05
       send_request(FXP_OPEN, :string, path, :long, desired_access, :long, sftp_flags, :raw, attributes.to_s)
     end
 
+    # Sends a FXP_OPEN packet to the server, opening the file at +path+
+    # read-only and in text mode, as defined by version 5 of the protocol
+    # (read access plus the SSH_FXF_TEXT_MODE flag). The +options+ parameter
+    # is a hash used to construct an Attributes object for the request.
+    # Returns the new packet id.
+    def open_text(path, options={})
+      attributes = attribute_factory.new(options)
+      send_request(FXP_OPEN, :string, path,
+        :long, ACE::Mask::READ_DATA | ACE::Mask::READ_ATTRIBUTES,
+        :long, FV5::OPEN_EXISTING | FV5::TEXT_MODE,
+        :raw, attributes.to_s)
+    end
+
   end
 
 end; end; end; end

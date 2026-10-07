@@ -1,5 +1,9 @@
 === 3.0.0
 
+* Add text-mode file reads for SFTP v4+ servers that advertise the
+  "text-seek" extension: Net::SFTP::Operations::TextReader (via
+  Net::SFTP::Operations::FileFactory#open_text) positions the remote file
+  by logical line number instead of byte offset
 * Pass protocol version via Net::SFTP.start [#107]
 * Net-ssh 6.0 support [#106]
 

@@ -5,6 +5,7 @@ lib/net/sftp/operations/dir.rb
 lib/net/sftp/operations/download.rb
 lib/net/sftp/operations/file.rb
 lib/net/sftp/operations/file_factory.rb
+lib/net/sftp/operations/text_reader.rb
 lib/net/sftp/operations/upload.rb
 lib/net/sftp/packet.rb
 lib/net/sftp/protocol/01/attributes.rb
@@ -51,5 +52,6 @@ test/test_protocol.rb
 test/test_request.rb
 test/test_response.rb
 test/test_session.rb
+test/test_text_reader.rb
 test/test_upload.rb
 Manifest

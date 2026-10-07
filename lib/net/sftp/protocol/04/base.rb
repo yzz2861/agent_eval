@@ -64,6 +64,43 @@ module Net; module SFTP; module Protocol; module V04
       send_request(FXP_FSTAT, :string, handle, :long, flags || DEFAULT_FLAGS)
     end
 
+    # Sends a FXP_OPEN packet to the server, opening the file at +path+
+    # read-only and in text mode (SSH_FXF_TEXT), as defined by version 4 of
+    # the protocol. The +options+ parameter is a hash used to construct an
+    # Attributes object for the request. Returns the new packet id.
+    def open_text(path, options={})
+      attributes = attribute_factory.new(options)
+      send_request(FXP_OPEN, :string, path, :long, FV1::READ | FV1::TEXT, :raw, attributes.to_s)
+    end
+
+    # Sends a FXP_EXTENDED "text-seek" request to the server, asking for the
+    # byte offset of the start of line +line_number+ (zero-based) in the
+    # file identified by +handle+. The handle must have been opened in text
+    # mode (see #open_text), and the server must have advertised the
+    # "text-seek" extension during version negotiation. Returns the new
+    # packet id.
+    def text_seek(handle, line_number)
+      send_request(FXP_EXTENDED, :string, "text-seek", :string, handle, :int64, line_number)
+    end
+
+    # Parses incoming packets. In addition to the packet types understood by
+    # earlier protocol versions, version 4 understands FXP_EXTENDED_REPLY
+    # packets (used to answer "text-seek" requests).
+    def parse(packet)
+      if packet.type == FXP_EXTENDED_REPLY
+        parse_extended_reply_packet(packet)
+      else
+        super
+      end
+    end
+
+    # Parses a FXP_EXTENDED_REPLY packet and returns a hash with a single
+    # :offset key, referencing the byte offset returned by the server in
+    # response to a "text-seek" request.
+    def parse_extended_reply_packet(packet)
+      { :offset => packet.read_int64 }
+    end
+
     protected
 
       # The default flags used if the +flags+ parameter is nil for any of the

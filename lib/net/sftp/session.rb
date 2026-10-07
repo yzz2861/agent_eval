@@ -64,6 +64,13 @@ module Net; module SFTP
     # querying the protocol version in effect.
     attr_reader :protocol
 
+    # The hash of extensions advertised by the server in the FXP_VERSION
+    # packet, mapping extension names to their (string) data. This includes
+    # entries like "text-seek" (if the server supports line-based seeking
+    # in text files) and "newline" (the newline sequence the server uses
+    # for text files).
+    attr_reader :extensions
+
     # The hash of pending requests. Any requests that have been sent and which
     # the server has not yet responded to will be represented here.
     attr_reader :pending_requests
@@ -79,6 +86,7 @@ module Net; module SFTP
       @session    = session
       @version    = version
       @input      = Net::SSH::Buffer.new
+      @extensions = {}
       self.logger = session.logger
       @state      = :closed
       @pending_requests = {}
@@ -191,6 +199,57 @@ module Net; module SFTP
       #   handle = sftp.open!("/path/to/file")
       def open!(path, flags="r", options={}, &callback)
         wait_for(open(path, flags, options, &callback), :handle)
+      end
+
+      # :call-seq:
+      #   open_text(path, options={}) -> request
+      #   open_text(path, options={}) { |response| ... } -> request
+      #
+      # Opens a file on the remote server in text mode, read-only. This is
+      # only supported by servers implementing version 4 or newer of the
+      # SFTP protocol; older servers will cause a NotImplementedError to be
+      # raised. The +options+ parameter is a hash of attributes, as with
+      # #open.
+      #
+      # A handle obtained via #open_text may be used with #text_seek to
+      # position the file by logical line number, provided the server
+      # advertised the "text-seek" extension (see #extensions).
+      def open_text(path, options={}, &callback)
+        request :open_text, path, options, &callback
+      end
+
+      # Identical to #open_text, but blocks until the server responds. It
+      # will raise a StatusException if the request was unsuccessful.
+      # Otherwise, it will return the handle of the newly opened file.
+      #
+      #   handle = sftp.open_text!("/path/to/file")
+      def open_text!(path, options={}, &callback)
+        wait_for(open_text(path, options, &callback), :handle)
+      end
+
+      # :call-seq:
+      #   text_seek(handle, line_number) -> request
+      #   text_seek(handle, line_number) { |response| ... } -> request
+      #
+      # Sends a "text-seek" extended request to the server, asking for the
+      # byte offset of the start of the (zero-based) line +line_number+ in
+      # the file identified by +handle+. The handle must have been opened in
+      # text mode (see #open_text), and the server must have advertised the
+      # "text-seek" extension (see #extensions); otherwise a
+      # NotImplementedError (protocol versions before 4) or a
+      # StatusException (server refused the request) will be raised.
+      def text_seek(handle, line_number, &callback)
+        request :text_seek, handle, line_number, &callback
+      end
+
+      # Identical to #text_seek, but blocks until the server responds. It
+      # will raise a StatusException if the server could not (or would not)
+      # perform the seek. Otherwise, it returns the byte offset of the
+      # requested line, as reported by the server.
+      #
+      #   offset = sftp.text_seek!(handle, 42)
+      def text_seek!(handle, line_number, &callback)
+        wait_for(text_seek(handle, line_number, &callback), :offset)
       end
 
       # :call-seq:
@@ -933,6 +992,8 @@ module Net; module SFTP
           data = packet.read_string
           extensions[name] = data
         end
+
+        @extensions = extensions
 
         @protocol = Protocol.load(self, negotiated_version)
         @pending_requests = {}

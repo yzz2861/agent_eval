@@ -198,6 +198,14 @@ class Protocol::V01::TestBase < Net::SFTP::TestCase
     assert_raises(NotImplementedError) { @base.unblock("handle", 100, 200) }
   end
 
+  def test_open_text_should_raise_not_implemented_error
+    assert_raises(NotImplementedError) { @base.open_text("/path/to/file") }
+  end
+
+  def test_text_seek_should_raise_not_implemented_error
+    assert_raises(NotImplementedError) { @base.text_seek("handle", 5) }
+  end
+
   private
 
     def driver

@@ -54,6 +54,17 @@ class Protocol::V05::TestBase < Protocol::V04::TestBase
     @base.open("/path/to/file", "r", :permissions => 0755)
   end
 
+  undef test_open_text_should_send_open_packet_with_read_and_text_flags
+
+  def test_open_text_should_send_open_packet_with_read_access_and_text_mode_flag
+    @session.expects(:send_packet).with(FXP_OPEN, :long, 0,
+      :string, "/path/to/file",
+      :long, ACE::Mask::READ_DATA | ACE::Mask::READ_ATTRIBUTES,
+      :long, FV5::OPEN_EXISTING | FV5::TEXT_MODE,
+      :raw, attributes.new.to_s)
+    assert_equal 0, @base.open_text("/path/to/file")
+  end
+
   private
 
     def driver

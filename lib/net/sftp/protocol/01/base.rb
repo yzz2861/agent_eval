@@ -225,6 +225,18 @@ module Net; module SFTP; module Protocol; module V01
       not_implemented! :unblock
     end
 
+    # Not implemented in version 1 of the SFTP protocol. Raises a
+    # NotImplementedError if called.
+    def open_text(path, options={})
+      not_implemented! :open_text
+    end
+
+    # Not implemented in version 1 of the SFTP protocol. Raises a
+    # NotImplementedError if called.
+    def text_seek(handle, line_number)
+      not_implemented! :text_seek
+    end
+
     protected
 
       # A helper method for implementing wrappers for operations that are

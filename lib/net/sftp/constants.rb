@@ -96,6 +96,11 @@ module Net module SFTP
         CREAT  = 0x00000008
         TRUNC  = 0x00000010
         EXCL   = 0x00000020
+
+        # Only meaningful in version 4 of the protocol: requests that the
+        # file be opened in text mode, so that the server performs newline
+        # translation and permits text-seek requests on the handle.
+        TEXT   = 0x00000040
       end
 
       # Version 5 of the open operation totally discarded the flags understood

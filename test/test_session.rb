@@ -20,6 +20,73 @@ class SessionTest < Net::SFTP::TestCase
     assert_equal version, sftp.protocol.version
   end
 
+  def test_server_extensions_should_be_captured_during_version_negotiation
+    story do |session|
+      channel = session.opens_channel
+      channel.sends_subsystem("sftp")
+      channel.sends_packet(FXP_INIT, :long, Net::SFTP::Session::HIGHEST_PROTOCOL_VERSION_SUPPORTED)
+      channel.gets_packet(FXP_VERSION, :long, 4, :string, "text-seek", :string, "", :string, "newline", :string, "\r\n")
+    end
+
+    assert_scripted { sftp.connect! }
+    assert_equal 4, sftp.protocol.version
+    assert_equal({ "text-seek" => "", "newline" => "\r\n" }, sftp.extensions)
+  end
+
+  def test_server_without_extensions_should_report_empty_extensions
+    expect_sftp_session
+    assert_scripted { sftp.connect! }
+    assert_equal({}, sftp.extensions)
+  end
+
+  def test_v4_open_text_bang_should_send_read_and_text_flags_and_return_handle
+    expect_sftp_session :server_version => 4 do |channel|
+      channel.sends_packet(FXP_OPEN, :long, 0, :string, "/path/to/file", :long, FV1::READ | FV1::TEXT, :long, 0, :byte, 1)
+      channel.gets_packet(FXP_HANDLE, :long, 0, :string, "handle")
+    end
+
+    assert_scripted_command do
+      assert_equal "handle", sftp.open_text!("/path/to/file")
+    end
+  end
+
+  def test_v3_open_text_should_be_unimplemented
+    expect_sftp_session :server_version => 3
+    Net::SSH::Test::Extensions::IO.with_test_extension do
+      sftp.connect!
+      assert_raises(NotImplementedError) { sftp.open_text("/path/to/file") }
+    end
+  end
+
+  def test_v4_text_seek_bang_should_return_server_reported_offset
+    expect_sftp_session :server_version => 4 do |channel|
+      channel.sends_packet(FXP_EXTENDED, :long, 0, :string, "text-seek", :string, "handle", :int64, 42)
+      channel.gets_packet(FXP_EXTENDED_REPLY, :long, 0, :int64, 1234)
+    end
+
+    assert_scripted_command do
+      assert_equal 1234, sftp.text_seek!("handle", 42)
+    end
+  end
+
+  def test_v4_text_seek_bang_should_raise_status_exception_when_server_refuses
+    expect_sftp_session :server_version => 4 do |channel|
+      channel.sends_packet(FXP_EXTENDED, :long, 0, :string, "text-seek", :string, "handle", :int64, 42)
+      channel.gets_packet(FXP_STATUS, :long, 0, :long, 8)
+    end
+
+    assert_scripted_command do
+      assert_raises(Net::SFTP::StatusException) { sftp.text_seek!("handle", 42) }
+    end
+  end
+
+  def test_v3_text_seek_should_be_unimplemented
+    expect_sftp_session :server_version => 3
+    Net::SSH::Test::Extensions::IO.with_test_extension do
+      sftp.connect!
+      assert_raises(NotImplementedError) { sftp.text_seek("handle", 3) }
+    end
+  end
 
   def test_v1_open_read_only_that_succeeds_should_invoke_callback
     expect_open("/path/to/file", "r", nil, :server_version => 1)

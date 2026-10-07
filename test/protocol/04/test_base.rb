@@ -62,6 +62,36 @@ class Protocol::V04::TestBase < Protocol::V03::TestBase
     assert_equal 0, @base.stat("/path/to/file", 1234)
   end
 
+  undef test_open_text_should_raise_not_implemented_error
+  undef test_text_seek_should_raise_not_implemented_error
+
+  def test_open_text_should_send_open_packet_with_read_and_text_flags
+    @session.expects(:send_packet).with(FXP_OPEN, :long, 0,
+      :string, "/path/to/file", :long, FV1::READ | FV1::TEXT, :raw, attributes.new.to_s)
+    assert_equal 0, @base.open_text("/path/to/file")
+  end
+
+  def test_text_seek_should_send_extended_text_seek_packet
+    @session.expects(:send_packet).with(FXP_EXTENDED, :long, 0,
+      :string, "text-seek", :string, "handle", :int64, 42)
+    assert_equal 0, @base.text_seek("handle", 42)
+  end
+
+  def test_parse_extended_reply_packet_should_read_offset_from_packet
+    packet = Net::SSH::Buffer.from(:int64, 123456789)
+    assert_equal({ :offset => 123456789 }, @base.parse_extended_reply_packet(packet))
+  end
+
+  def test_parse_should_recognize_extended_reply_packets
+    packet = Net::SFTP::Packet.new(raw(:byte, FXP_EXTENDED_REPLY, :int64, 987))
+    assert_equal({ :offset => 987 }, @base.parse(packet))
+  end
+
+  def test_parse_should_still_recognize_non_extended_packets
+    packet = Net::SFTP::Packet.new(raw(:byte, FXP_HANDLE, :string, "handle"))
+    assert_equal({ :handle => "handle" }, @base.parse(packet))
+  end
+
   private
 
     def driver

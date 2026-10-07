@@ -1,5 +1,6 @@
 require 'net/ssh/loggable'
 require 'net/sftp/operations/file'
+require 'net/sftp/operations/text_reader'
 
 module Net; module SFTP; module Operations
 
@@ -48,6 +49,53 @@ module Net; module SFTP; module Operations
         end
       else
         return file
+      end
+    end
+
+    # :call-seq:
+    #   open_text(name) -> text_reader
+    #   open_text(name) { |reader| ... }
+    #
+    # Attempt to open a file on the remote server in text mode, returning a
+    # Net::SFTP::Operations::TextReader that allows the file to be read (and
+    # repositioned) by logical line number rather than by byte offset.
+    #
+    # This requires the server to implement version 4 or newer of the SFTP
+    # protocol, and to advertise the "text-seek" extension during version
+    # negotiation. If either requirement is not met, NotImplementedError is
+    # raised--line positions are never guessed from local byte counts.
+    #
+    # If a block is given, the new TextReader instance will be yielded to
+    # it, and closed automatically when the block terminates. Otherwise the
+    # object will be returned, and it is the caller's responsibility to
+    # close it.
+    #
+    #   sftp.file.open_text("/tmp/log.txt") do |reader|
+    #     reader.seek_line(1000)
+    #     reader.each_line { |line| process(line) }
+    #   end
+    def open_text(name, &block)
+      version = sftp.protocol.version
+      if version < 4
+        raise NotImplementedError, "text-mode reads require SFTP protocol version 4 or newer, but the server negotiated version #{version}"
+      end
+
+      extensions = sftp.extensions || {}
+      unless extensions.key?("text-seek")
+        raise NotImplementedError, 'the server did not advertise the "text-seek" extension, so line-based positioning is not supported'
+      end
+
+      handle = sftp.open_text!(name)
+      reader = Operations::TextReader.new(sftp, handle, extensions["newline"])
+
+      if block_given?
+        begin
+          yield reader
+        ensure
+          reader.close
+        end
+      else
+        return reader
       end
     end
 
