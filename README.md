@@ -48,6 +48,46 @@ JSON.generate(data)
 You can also use the `pretty_generate` method (which formats the output more
 verbosely and nicely).
 
+## JSONPath queries
+
+Compile an expression once and evaluate it independently against several parsed
+documents. The implementation is a pure-Ruby parser and evaluator; expressions
+are never passed to `Kernel#eval`.
+
+```ruby
+query = JSON.compile_json_path('$.store.book[?@.price < 10].title')
+query.values_at(JSON.parse(first_document))
+query.values_at(JSON.parse(second_document))
+```
+
+Each entry returned by `query` has both the selected value and its normalized
+path. `JSON.query_json_path(data, expression)` is available for one-off queries.
+
+```ruby
+result = JSON.query_json_path({ 'a' => [{ 'name' => 'x' }] }, "$.a[?@.name == 'x']")
+result.first.value # => {"name"=>"x"}
+result.first.path  # => "$['a'][0]"
+```
+
+Supported syntax is the JSONPath subset consisting of:
+
+- Root `$`, dot and quoted bracket members, and array indexes.
+- Wildcards `.*` and `[*]`, union selectors such as `[0,1]` or `['a','b']`.
+- Recursive descent (`..`) and slices `[start:stop:step]`, including negatives.
+- Filters with existence tests, `@` and `$` singular queries, parentheses,
+  `!`, `&&`, `||`, and comparisons `==`, `!=`, `<`, `<=`, `>`, and `>=`.
+- Double- and single-quoted member names with JSON-style escapes, including
+  non-ASCII and multibyte names.
+
+An existing member whose value is JSON `null` remains selectable and distinct
+from a missing member. In filters, `@.x == null` matches an existing `null`,
+`@.x != null` matches a present non-null value as well as a missing member,
+and existence (`@.x`) is a separate boolean test. Use
+`@.x && @.x != null` to require a present non-null member.
+
+Filter functions, regular expressions, and syntax outside the supported set
+raise `JSON::JSONPathError` at compile time.
+
 ## Casting non native types
 
 JSON documents can only support Hashes, Arrays, Strings, Integers and Floats.

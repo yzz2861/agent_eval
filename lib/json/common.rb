@@ -211,6 +211,8 @@ module JSON
     end
   end
 
+  require 'json/json_path'
+
   # Fragment of JSON document that is to be included as is:
   #   fragment = JSON::Fragment.new("[1, 2, 3]")
   #   JSON.generate({ count: 3, items: fragments })
@@ -307,6 +309,23 @@ module JSON
   # - Option +allow_nan+, if not provided, defaults to +true+.
   def parse!(source, **options)
     parse(source, max_nesting: false, allow_nan: true, **options)
+  end
+
+  # Compiles a JSONPath +expression+ without evaluating it.
+  # The returned JSON::JSONPath can be evaluated against many documents.
+  #
+  # Supported selectors are +$+, dot and quoted members, array indexes and
+  # unions, +*+, recursive descent +..+, slices, and filters containing
+  # +!+, +&&+, +||+, parentheses, +==+, +!=+, +<+, +<=+, +>+, +>=+, current
+  # +@+, and root +$+ queries.
+  def compile_json_path(expression)
+    JSONPath.new(expression)
+  end
+
+  # Evaluates a JSONPath +expression+ against parsed JSON data.
+  # Each result has a +value+ and a normalized +path+.
+  def query_json_path(data, expression)
+    JSONPath.new(expression).query(data)
   end
 
   # :call-seq:
