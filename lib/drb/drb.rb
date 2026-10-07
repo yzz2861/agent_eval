@@ -463,6 +463,254 @@ module DRb
     attr_reader :reason
   end
 
+  # A controlled, serializable snapshot of an exception raised on a
+  # remote server.
+  #
+  # When the :exception_envelope option is enabled on a DRbServer (see
+  # DRb::DRbServer#new), exceptions raised by remote calls are captured
+  # into an ExceptionEnvelope instead of being marshalled themselves.
+  # Only plain data is captured: the class name, the message, the
+  # backtrace and the cause chain of the exception.  The exception
+  # object itself is never marshalled, so its custom Marshal hooks
+  # (such as _dump or marshal_dump) are never run, and the client does
+  # not need the exception's class to be installed.  On the client
+  # side the envelope is turned into a DRb::RemoteFailure.
+  #
+  # Capture is defensive: if reading the message or the backtrace of
+  # the original exception itself raises, a fallback description is
+  # generated instead.  Cause chains are guarded against cyclic
+  # references and excessive depth, and the total size of the captured
+  # text is bounded; any truncation is recorded in #truncated and
+  # marked in the captured text with TRUNCATION_MARKER.
+  class ExceptionEnvelope
+    # Default maximum number of cause links followed.
+    DEFAULT_MAX_DEPTH = 8
+
+    # Default maximum total size, in bytes, of all captured strings.
+    DEFAULT_MAX_BYTES = 64 * 1024
+
+    # Default maximum number of backtrace lines captured per exception.
+    DEFAULT_MAX_BACKTRACE_LINES = 100
+
+    # Marker appended to (or standing in for) truncated text.
+    TRUNCATION_MARKER = '...[truncated]'
+
+    # The name of the remote exception's class, as a plain String.
+    attr_reader :class_name
+
+    # The remote exception's message, as a plain String.
+    attr_reader :message
+
+    # The remote exception's backtrace, an Array of plain Strings.
+    attr_reader :backtrace
+
+    # The captured cause, another ExceptionEnvelope, or nil.
+    attr_reader :cause
+
+    # Symbols describing any truncation that took place while
+    # capturing this exception and its cause chain: :message,
+    # :backtrace, :bytes, :cause_depth, :cause_cycle or
+    # :cause_unreadable.
+    attr_reader :truncated
+
+    def initialize(class_name, message, backtrace, cause, truncated) # :nodoc:
+      @class_name = class_name
+      @message = message
+      @backtrace = backtrace
+      @cause = cause
+      @truncated = truncated
+    end
+
+    # Was any part of this envelope (or its cause chain) truncated?
+    def truncated?
+      !@truncated.empty?
+    end
+
+    def to_s
+      "#{@message} (#{@class_name})"
+    end
+
+    # Capture +error+ into an ExceptionEnvelope.
+    #
+    # +options+ may be nil (defaults are used) or a Hash with any of
+    # the keys :max_depth, :max_bytes and :max_backtrace_lines.
+    def self.capture(error, options=nil)
+      options = {} unless Hash === options
+      state = {
+        :remaining => options[:max_bytes] || DEFAULT_MAX_BYTES,
+        :seen => {},
+      }
+      max_depth = options[:max_depth] || DEFAULT_MAX_DEPTH
+      max_lines = options[:max_backtrace_lines] || DEFAULT_MAX_BACKTRACE_LINES
+      build(error, max_depth, max_lines, state)
+    end
+
+    def self.build(error, depth_left, max_lines, state) # :nodoc:
+      class_name = safe_class_name(error)
+      if state[:seen][error.__id__]
+        return new(class_name,
+                   "(cyclic reference to #{class_name})",
+                   [], nil, [:cause_cycle])
+      end
+      state[:seen][error.__id__] = true
+
+      truncated = []
+
+      message = safe_message(error, class_name)
+      if message.bytesize > state[:remaining]
+        truncated << :message
+        message = truncate_to_budget(state, message)
+      else
+        state[:remaining] -= message.bytesize
+      end
+
+      backtrace = safe_backtrace(error)
+      if backtrace.size > max_lines
+        backtrace = backtrace.first(max_lines)
+        truncated << :backtrace
+      end
+      lines = []
+      backtrace.each do |line|
+        if state[:remaining] <= 0
+          truncated << :bytes
+          break
+        elsif line.bytesize > state[:remaining]
+          truncated << :bytes
+          lines << truncate_to_budget(state, line)
+          break
+        else
+          state[:remaining] -= line.bytesize
+          lines << line
+        end
+      end
+      if truncated.include?(:backtrace) || truncated.include?(:bytes)
+        lines << TRUNCATION_MARKER.dup
+      end
+      backtrace = lines
+
+      cause = nil
+      child = begin
+        error.cause
+      rescue Exception
+        truncated << :cause_unreadable
+        nil
+      end
+      if child
+        if depth_left <= 0
+          truncated << :cause_depth
+        else
+          cause = build(child, depth_left - 1, max_lines, state)
+        end
+      end
+
+      new(class_name, message, backtrace, cause, truncated)
+    end
+
+    # Truncate +str+ to the remaining byte budget, appending
+    # TRUNCATION_MARKER, and exhaust the budget.
+    def self.truncate_to_budget(state, str) # :nodoc:
+      room = state[:remaining] - TRUNCATION_MARKER.bytesize
+      state[:remaining] = 0
+      room > 0 ? str.byteslice(0, room).scrub << TRUNCATION_MARKER : TRUNCATION_MARKER.dup
+    end
+
+    def self.safe_class_name(error) # :nodoc:
+      klass = error.class
+      name = klass.name || klass.to_s
+      name.to_s
+    rescue Exception
+      '(unknown class)'
+    end
+
+    def self.safe_message(error, class_name) # :nodoc:
+      error.message.to_s
+    rescue Exception => e
+      "#{class_name}: message unavailable - #{e.class}"
+    end
+
+    def self.safe_backtrace(error) # :nodoc:
+      backtrace = error.backtrace
+      return [] unless Array === backtrace
+      backtrace.map { |line| safe_line(line) }
+    rescue Exception
+      []
+    end
+
+    def self.safe_line(line) # :nodoc:
+      line.to_s
+    rescue Exception
+      '(unprintable frame)'
+    end
+  end
+
+  # An exception raised on the client side for a remote business
+  # failure, when the server captured the failure as a
+  # DRb::ExceptionEnvelope (see the :exception_envelope option of
+  # DRb::DRbServer#new).
+  #
+  # RemoteFailure carries only controlled, plain data about the remote
+  # failure: the remote exception's class name, message, backtrace and
+  # cause chain (exposed through the standard Exception#cause).  It is
+  # deliberately distinct from DRb::DRbConnError, which signals a
+  # transport-level problem rather than a remote business failure.
+  class RemoteFailure < DRbError
+    # Marker line inserted into the backtrace between the remote
+    # frames and the local client-side frames, so the two stacks are
+    # never mistaken for one continuous stack.
+    REMOTE_LOCAL_BOUNDARY = '--- remote failure above / local call stack below ---'
+
+    # The class name of the remote exception, as a String.
+    attr_reader :remote_class_name
+
+    # The backtrace captured on the remote side, an Array of Strings.
+    attr_reader :remote_backtrace
+
+    def initialize(envelope) # :nodoc:
+      @envelope = envelope
+      @remote_class_name = envelope.class_name
+      @remote_backtrace = envelope.backtrace
+      super("#{envelope.message} (#{envelope.class_name})")
+      set_backtrace(envelope.backtrace)
+    end
+
+    # Symbols describing truncation applied when the remote failure
+    # was captured.  See DRb::ExceptionEnvelope#truncated.
+    def truncated
+      @envelope.truncated
+    end
+
+    # Was any part of the remote failure data truncated?
+    def truncated?
+      @envelope.truncated?
+    end
+
+    # Build a RemoteFailure (with its cause chain) from +envelope+ and
+    # raise it.  +uri+ is the remote server's URI and
+    # +local_backtrace+ the client-side call stack; a
+    # REMOTE_LOCAL_BOUNDARY marker line is kept between the remote and
+    # local frames.
+    def self.raise_from_envelope(envelope, uri, local_backtrace) # :nodoc:
+      failure = new(envelope)
+      remote_lines = envelope.backtrace.map { |line| "(#{uri}) #{line}" }
+      failure.set_backtrace(remote_lines + [REMOTE_LOCAL_BOUNDARY] + local_backtrace)
+      raise_chained(failure, envelope.cause)
+    end
+
+    def self.raise_chained(failure, cause_envelope) # :nodoc:
+      if cause_envelope
+        begin
+          raise_chained(new(cause_envelope), cause_envelope.cause)
+        rescue RemoteFailure
+          # Raising inside the rescue links failure.cause to the
+          # failure being rescued.
+          raise failure
+        end
+      else
+        raise failure
+      end
+    end
+  end
+
   # Class wrapping a marshalled object whose type is unknown locally.
   #
   # If an object is returned by a method invoked over drb, but the
@@ -1171,6 +1419,8 @@ module DRb
         return result
       elsif DRbUnknown === result
         raise result
+      elsif ExceptionEnvelope === result
+        RemoteFailure.raise_from_envelope(result, @uri, caller)
       else
         bt = self.class.prepare_backtrace(@uri, result)
         result.set_backtrace(bt + caller)
@@ -1376,6 +1626,7 @@ module DRb
     @@argc_limit = 256
     @@load_limit = 0xffffffff
     @@verbose = false
+    @@exception_envelope = false
 
     # Set the default value for the :argc_limit option.
     #
@@ -1417,6 +1668,13 @@ module DRb
       @@verbose
     end
 
+    # Set the default value for the :exception_envelope option.
+    #
+    # See #new().  The initial default value is false.
+    def self.default_exception_envelope(value)
+      @@exception_envelope = value
+    end
+
     def self.make_config(hash={})  # :nodoc:
       default_config = {
         :idconv => @@idconv,
@@ -1424,6 +1682,7 @@ module DRb
         :tcp_acl => @@acl,
         :load_limit => @@load_limit,
         :argc_limit => @@argc_limit,
+        :exception_envelope => @@exception_envelope,
       }
       default_config.update(hash)
     end
@@ -1457,10 +1716,22 @@ module DRb
     # :argc_limit :: the maximum number of arguments to a remote
     #                method accepted by the server.  Defaults to
     #                256.
+    # :exception_envelope :: if true, exceptions raised by remote
+    #                method calls are not marshalled themselves, but
+    #                captured as a DRb::ExceptionEnvelope carrying only
+    #                the class name, message, backtrace and cause chain
+    #                of the exception; the client then raises a
+    #                DRb::RemoteFailure.  Use this when clients may not
+    #                have the server's exception classes installed, or
+    #                when exception objects must not be marshalled at
+    #                all.  A Hash with the keys :max_depth, :max_bytes
+    #                and :max_backtrace_lines may be given instead of
+    #                true to tune the capture limits.  Defaults to
+    #                false, which preserves the traditional protocol.
     # The default values of these options can be modified on
     # a class-wide basis by the class methods #default_argc_limit,
     # #default_load_limit, #default_acl, #default_id_conv,
-    # and #verbose=
+    # #default_exception_envelope and #verbose=
     #
     # If +config_or_acl+ is not a hash, but is not nil, it is
     # assumed to be the access control list for this server.
@@ -1674,6 +1945,10 @@ module DRb
         raise
       rescue Exception
         @result = $!
+        if !DRbConnError === @result &&
+           (envelope = @drb_server.config[:exception_envelope])
+          @result = ExceptionEnvelope.capture(@result, envelope)
+        end
         return @succ, @result
       end
 

@@ -1,5 +1,13 @@
 # News
 
+## Unreleased
+
+### Improvement
+
+  * Added an opt-in exception envelope mode (`:exception_envelope`)
+    that sends remote failures as controlled plain data and raises
+    `DRb::RemoteFailure` on the client.
+
 ## 2.2.3 - 2025-05-21
 
 ### Improvement
