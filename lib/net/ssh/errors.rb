@@ -102,5 +102,11 @@ module Net
     # you want to proceed anyway, simply call the remember_host! method on the
     # exception, and then retry.
     class HostKeyUnknown < HostKeyError; end
+
+    # Raised when a server announces an additional host key via the
+    # hostkeys-00@openssh.com extension but fails to provide a valid
+    # session-bound proof of possession (hostkeys-prove-00@openssh.com)
+    # for every requested key.
+    class HostKeyProofFailed < HostKeyError; end
   end
 end

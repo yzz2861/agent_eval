@@ -20,6 +20,7 @@ lib/net/ssh/buffered_io.rb
 lib/net/ssh/config.rb
 lib/net/ssh/connection/channel.rb
 lib/net/ssh/connection/constants.rb
+lib/net/ssh/connection/hostkeys.rb
 lib/net/ssh/connection/session.rb
 lib/net/ssh/connection/term.rb
 lib/net/ssh/errors.rb

@@ -1,6 +1,7 @@
 require 'strscan'
 require 'openssl'
 require 'delegate'
+require 'tempfile'
 require 'net/ssh/buffer'
 require 'net/ssh/authentication/ed25519_loader'
 
@@ -192,6 +193,30 @@ module Net
             # try the next hostfile
           end
         end
+
+        # Atomically replaces, in the first user known-host file that contains
+        # an entry for +host+, the host keys listed in +remove_keys+ with the
+        # given +add_keys+. Only lines belonging to +host+ (hostname, aliases
+        # and port are all considered) are touched; entries for unrelated
+        # hosts, including hashed entries, are left byte-for-byte intact.
+        #
+        # Files that do not already contain a matching entry are skipped, so
+        # new keys are learned alongside an existing record rather than being
+        # scattered over every configured host file. Returns true when a file
+        # was updated.
+        def replace(host, add_keys, remove_keys, options = {})
+          hostfiles(options, :user).each do |file|
+            next unless File.readable?(file)
+
+            known_hosts = KnownHosts.new(file)
+            next unless known_hosts.keys_for(host, options).any?
+
+            known_hosts.replace_keys(host, Array(add_keys), Array(remove_keys))
+            return true
+          end
+
+          false
+        end
       end
 
       # The host-key file name that this KnownHosts instance will use to search
@@ -301,6 +326,151 @@ module Net
         File.open(source, "a") do |file|
           blob = [Net::SSH::Buffer.from(:key, key).to_s].pack("m*").gsub(/\s/, "")
           file.puts "#{host} #{key.ssh_type} #{blob}"
+        end
+      end
+
+      # Removes +remove_keys+ for the given +host+ from this file and appends
+      # +add_keys+, rewriting the file atomically. The original file is left
+      # untouched if no line needs to change or if the rewrite cannot be
+      # completed. See KnownHosts.replace for the host-matching semantics.
+      def replace_keys(host, add_keys, remove_keys = [])
+        add_keys = Array(add_keys)
+        remove_blobs = Array(remove_keys).map(&:to_blob)
+        entries = host.split(",")
+
+        kept_lines = []
+        removed = false
+
+        File.open(source) do |file|
+          file.each_line do |line|
+            parsed = parse_line(line)
+
+            if parsed && line_belongs_to_host?(parsed, entries) && remove_blobs.include?(parsed[:blob])
+              removed = true
+              next
+            end
+
+            kept_lines << line
+          end
+        end
+
+        present_blobs = kept_lines.filter_map { |line| (parse_line(line) || {})[:blob] }
+        keys_to_add = add_keys.reject { |key| present_blobs.include?(key.to_blob) }
+
+        return false unless removed || keys_to_add.any?
+
+        atomic_write(kept_lines, keys_to_add, host)
+        true
+      end
+
+      private
+
+      # Parses a single known-hosts line into its marker, host patterns, key
+      # type, raw public-key blob and key object. Returns nil for blank lines,
+      # comments, unsupported key types or malformed entries.
+      def parse_line(line)
+        fields = line.chomp.split(/\s+/)
+        return nil if fields.empty? || fields.first.start_with?('#')
+
+        if fields.first.start_with?('@')
+          marker = fields.shift
+          return nil unless %w[@cert-authority @revoked].include?(marker)
+        end
+
+        hosts, type, key_content = fields
+        return nil unless hosts && type && key_content && SUPPORTED_TYPE.include?(type)
+
+        blob = key_content.unpack1("m*")
+        key = Net::SSH::Buffer.new(blob).read_key
+
+        { marker: marker, hosts: hosts, type: type, blob: blob, key: key }
+      rescue StandardError
+        nil
+      end
+
+      # True when every host pattern in the parsed line refers to the logical
+      # host identified by +entries+ (the comma-separated hostname/IP and port
+      # string used for lookup). Requiring all patterns to match ensures a
+      # line shared with an unrelated alias or host is never deleted.
+      def line_belongs_to_host?(parsed, entries)
+        patterns = parsed[:hosts].split(',')
+        return false if patterns.empty?
+
+        patterns.all? { |pattern| pattern_matches_host?(pattern, entries) }
+      end
+
+      def pattern_matches_host?(pattern, entries)
+        if hashed_pattern?(pattern)
+          hashed_pattern_matches?(pattern, entries)
+        else
+          entries.any? { |entry| plain_pattern_matches_entry?(entry, pattern) }
+        end
+      end
+
+      # Port-aware counterpart of #match for plain-text host patterns. A
+      # pattern for the default port never matches a non-standard-port entry
+      # (and vice versa), so records such as "host" and "[host]:2222" stay
+      # independent.
+      def plain_pattern_matches_entry?(entry, pattern)
+        entry_host, entry_port = split_host_port(entry)
+        pattern_host, pattern_port = split_host_port(pattern)
+
+        # A plain pattern never matches a port-scoped entry and vice versa.
+        return false unless entry_port.nil? == pattern_port.nil?
+        return false if entry_port && entry_port != pattern_port
+
+        if pattern_host.include?('*') || pattern_host.include?('?')
+          match(entry_host, pattern_host)
+        else
+          entry_host == pattern_host
+        end
+      end
+
+      def split_host_port(value)
+        if value.start_with?('[') && value =~ /\A\[(.+)\]:(\d+)\z/
+          [Regexp.last_match(1), Regexp.last_match(2)]
+        elsif value.start_with?('[') && value =~ /\A\[(.+)\]\z/
+          [Regexp.last_match(1), nil]
+        else
+          [value, nil]
+        end
+      end
+
+      def hashed_pattern?(pattern)
+        pattern =~ /\A\|1(\|.+){2}\z/
+      end
+
+      def hashed_pattern_matches?(pattern, entries)
+        chunks = pattern.split(/\|/)
+        salt = chunks[2].unpack1("m")
+        expected = chunks[3]
+        digest = OpenSSL::Digest.new('sha1')
+
+        entries.any? do |entry|
+          hmac = OpenSSL::HMAC.digest(digest, salt, entry)
+          [hmac].pack("m").chomp == expected
+        end
+      end
+
+      # Rewrites the source file via a temporary file in the same directory
+      # and renames it into place, so a failure never leaves a truncated
+      # known-hosts file. Preserves the original file's permissions.
+      def atomic_write(kept_lines, keys_to_add, host)
+        File.open(source) do |existing|
+          mode = existing.lstat.mode & 0o777
+
+          Tempfile.create(File.basename(source), File.dirname(source)) do |temp|
+            temp.chmod(mode)
+            kept_lines.each { |line| temp.write(line) }
+
+            keys_to_add.each do |key|
+              blob = [Net::SSH::Buffer.from(:key, key).to_s].pack("m*").gsub(/\s/, "")
+              temp.puts "#{host} #{key.ssh_type} #{blob}"
+            end
+
+            temp.flush
+            File.rename(temp.path, source)
+          end
         end
       end
     end

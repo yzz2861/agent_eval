@@ -69,7 +69,7 @@ module Net
       max_win_size send_env set_env use_agent number_of_password_prompts
       append_all_supported_algorithms non_interactive password_prompt
       agent_socket_factory minimum_dh_bits verify_host_key
-      fingerprint_hash check_host_ip pubkey_algorithms
+      fingerprint_hash check_host_ip pubkey_algorithms update_host_keys
     ]
 
     # The standard means of starting a new SSH connection. When used with a
@@ -215,6 +215,17 @@ module Net
     #   given to +verify+ is a hash consisting of the +:key+, the +:key_blob+,
     #   the +:fingerprint+ and the +:session+. Returning true accepts the host key,
     #   returning false declines it and closes the connection.
+    # * :update_host_keys => when set to +:add+ or +:replace+, enables the
+    #   OpenSSH host-key rotation extension (hostkeys-00@openssh.com). After
+    #   authentication the server announces its host keys; every key that is not
+    #   already trusted is accepted only once the server proves possession of the
+    #   matching private key with a signature bound to this session
+    #   (hostkeys-prove-00@openssh.com). With +:add+ the verified new keys are
+    #   appended and existing keys are kept; with +:replace+ the announced keys
+    #   are removed for the current logical host and port before the verified
+    #   new keys are written. Only the first user known-hosts file that already
+    #   contains the host is rewritten, atomically; any other host or alias is
+    #   left untouched.
     # * :fingerprint_hash => 'MD5' or 'SHA256', defaults to 'SHA256'
     # If +user+ parameter is nil it defaults to USER from ssh_config, or
     # local username

@@ -1,6 +1,7 @@
 require 'net/ssh/loggable'
 require 'net/ssh/connection/channel'
 require 'net/ssh/connection/constants'
+require 'net/ssh/connection/hostkeys'
 require 'net/ssh/service/forward'
 require 'net/ssh/connection/keepalive'
 require 'net/ssh/connection/event_loop'
@@ -53,6 +54,10 @@ module Net
         # The list of callbacks for pending requests. See #send_global_request.
         attr_reader :pending_requests # :nodoc:
 
+        # The Hostkeys handler managing OpenSSH host-key rotation announcements
+        # and proofs (nil unless the :update_host_keys option is given).
+        attr_reader :hostkeys
+
         class NilChannel
           def initialize(session)
             @session = session
@@ -86,6 +91,8 @@ module Net
 
           @event_loop = options[:event_loop] || SingleSessionEventLoop.new
           @event_loop.register(self)
+
+          @hostkeys = Hostkeys.new(self) if options[:update_host_keys]
         end
 
         # Retrieves a custom property from this instance. This can be used to
