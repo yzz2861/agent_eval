@@ -33,7 +33,13 @@ module Net
   class FTPPermError < FTPError; end
   class FTPProtoError < FTPError; end
   class FTPConnectionError < FTPError; end
+  class FTPBlockError < FTPError; end
+  class FTPBlockProtocolError < FTPBlockError; end
+  class FTPBlockTruncated < FTPBlockError; end
+  class FTPBlockDataAfterEOF < FTPBlockError; end
   # :startdoc:
+
+require_relative "ftp/block_mode"
 
   #
   # This class implements the File Transfer Protocol.  If you have used a
@@ -93,11 +99,16 @@ module Net
     FTP_PORT = 21
     CRLF = "\r\n"
     DEFAULT_BLOCKSIZE = BufferedIO::BUFSIZE
+    TRANSFER_MODES = {:stream => "S", :block => "B"}
     @@default_passive = true
     # :startdoc:
 
     # When +true+, transfers are performed in binary mode.  Default: +true+.
     attr_reader :binary
+
+    # The FTP transmission mode for data transfers: +:stream+ (the default,
+    # MODE S) or +:block+ (MODE B, block mode).
+    attr_reader :transfer_mode
 
     # When +true+, the connection is in passive mode.  Default: +true+.
     attr_accessor :passive
@@ -213,6 +224,8 @@ module Net
     # account::   Account information for ACCT.
     # passive::   When +true+, the connection is in passive mode. Default:
     #             +true+.
+    # transfer_mode::  Data transmission mode.  +:stream+ (default, MODE S)
+    #                  or +:block+ (MODE B).  See #transfer_mode=.
     # open_timeout::  Number of seconds to wait for the connection to open.
     #                 See Net::FTP#open_timeout for details.  Default: +nil+.
     # read_timeout::  Number of seconds to wait for one block to be read.
@@ -283,6 +296,8 @@ module Net
         @implicit_ftps = false
       end
       @binary = true
+      self.transfer_mode = options[:transfer_mode] || :stream
+      @transferring = false
       if options[:passive].nil?
         @passive = @@default_passive
       else
@@ -331,6 +346,61 @@ module Net
       end
     end
     private :send_type_command
+
+    # Sets the FTP transmission mode for subsequent data transfers.
+    #
+    # +mode+ is +:stream+ for Stream Mode (MODE S, the protocol default and
+    # the default of this library) or +:block+ for Block Mode (MODE B).
+    #
+    # When connected and logged in, the corresponding MODE command is issued
+    # immediately.  Raises ArgumentError for an unknown mode and FTPError when
+    # a data transfer is in progress.
+    def transfer_mode=(mode)
+      mode = mode.to_sym if mode.respond_to?(:to_sym)
+      unless TRANSFER_MODES.key?(mode)
+        raise ArgumentError,
+              "unknown transfer mode #{mode.inspect} (expected :stream or :block)"
+      end
+      if @transferring
+        raise FTPError, "cannot change transfer mode during a data transfer"
+      end
+      return if mode == @transfer_mode
+      if @logged_in
+        voidcmd("MODE #{TRANSFER_MODES[mode]}")
+      end
+      @transfer_mode = mode
+    end
+
+    def send_mode_command # :nodoc:
+      voidcmd("MODE #{TRANSFER_MODES[@transfer_mode]}") unless stream_mode?
+    end
+    private :send_mode_command
+
+    def stream_mode? # :nodoc:
+      @transfer_mode == :stream
+    end
+    private :stream_mode?
+
+    def with_transfer_mode(mode) # :nodoc:
+      oldmode = @transfer_mode
+      self.transfer_mode = mode
+      begin
+        yield
+      ensure
+        self.transfer_mode = oldmode
+      end
+    end
+    private :with_transfer_mode
+
+    def transferring # :nodoc:
+      @transferring = true
+      begin
+        yield
+      ensure
+        @transferring = false
+      end
+    end
+    private :transferring
 
     # Toggles transfers in binary mode and yields to a block.
     # This preserves your current binary send mode, but allows a temporary
@@ -654,6 +724,7 @@ module Net
       end
       @welcome = resp
       send_type_command
+      send_mode_command
       @logged_in = true
     end
 
@@ -666,16 +737,26 @@ module Net
     def retrbinary(cmd, blocksize, rest_offset = nil) # :yield: data
       synchronize do
         with_binary(true) do
-          begin
-            conn = transfercmd(cmd, rest_offset)
-            while data = conn.read(blocksize)
-              yield(data)
+          transferring do
+            begin
+              conn = transfercmd(cmd, rest_offset)
+              if stream_mode?
+                while data = conn.read(blocksize)
+                  yield(data)
+                end
+              else
+                decoder = BlockMode::BlockDecoder.new(mode: :bytes)
+                decoder.feed_stream(conn) do |event, data|
+                  yield(data) if event == :data
+                end
+                decoder.finish
+              end
+              conn.shutdown(Socket::SHUT_WR) rescue nil
+              conn.read_timeout = 1
+              conn.read rescue nil
+            ensure
+              conn.close if conn
             end
-            conn.shutdown(Socket::SHUT_WR) rescue nil
-            conn.read_timeout = 1
-            conn.read rescue nil
-          ensure
-            conn.close if conn
           end
           voidresp
         end
@@ -690,6 +771,9 @@ module Net
     #
     def retrlines(cmd) # :yield: line
       synchronize do
+        unless stream_mode?
+          raise FTPError, "line oriented retrieval is unavailable in block mode"
+        end
         with_binary(false) do
           begin
             conn = transfercmd(cmd)
@@ -719,17 +803,30 @@ module Net
       end
       synchronize do
         with_binary(true) do
-          begin
-            conn = transfercmd(cmd)
-            while buf = file.read(blocksize)
-              conn.write(buf)
-              yield(buf) if block_given?
+          transferring do
+            begin
+              conn = transfercmd(cmd)
+              if stream_mode?
+                while buf = file.read(blocksize)
+                  conn.write(buf)
+                  yield(buf) if block_given?
+                end
+              else
+                bounded = [[blocksize || DEFAULT_BLOCKSIZE,
+                           BlockMode::MAX_BLOCK_SIZE].min, 1].max
+                encoder = BlockMode::BlockEncoder.new(conn, block_size: bounded)
+                while buf = file.read(blocksize || DEFAULT_BLOCKSIZE)
+                  encoder.write(buf)
+                  yield(buf) if block_given?
+                end
+                encoder.finish
+              end
+              conn.shutdown(Socket::SHUT_WR) rescue nil
+              conn.read_timeout = 1
+              conn.read rescue nil
+            ensure
+              conn.close if conn
             end
-            conn.shutdown(Socket::SHUT_WR) rescue nil
-            conn.read_timeout = 1
-            conn.read rescue nil
-          ensure
-            conn.close if conn
           end
           voidresp
         end
@@ -751,6 +848,9 @@ module Net
     #
     def storlines(cmd, file) # :yield: line
       synchronize do
+        unless stream_mode?
+          raise FTPError, "line oriented storage is unavailable in block mode"
+        end
         with_binary(false) do
           begin
             conn = transfercmd(cmd)
@@ -777,6 +877,118 @@ module Net
       # appropriate exception, re-raise the original exception.
       getresp
       raise
+    end
+
+    #
+    # Retrieves data in Block Mode (MODE B) after issuing +cmd+ (such as
+    # <tt>"RETR file"</tt>) and yields protocol events:
+    #
+    # - <tt>[:record, data]</tt> when +mode+ is +:records+ (the default):
+    #   records reassembled across blocks, excluding block headers and
+    #   restart markers.
+    # - <tt>[:data, data]</tt> when +mode+ is +:bytes+: file bytes only.
+    # - <tt>[:block, [descriptor, body]]</tt> when +mode+ is +:blocks+:
+    #   every data block as received.
+    # - <tt>[:restart_marker, marker]</tt> for restart markers, which are
+    #   never delivered as file content.
+    # - <tt>[:eof, nil]</tt> exactly once, when the end-of-data block arrives.
+    #
+    # The connection is switched to MODE B for this transfer regardless of
+    # #transfer_mode, and restored afterwards.  Truncated blocks, protocol
+    # violations, data after the end-of-data block, and a data connection
+    # that closes before the end-of-data block raise FTPBlockError subclasses.
+    #
+    def retrblocks(cmd, mode: :records, rest_offset: nil)
+      synchronize do
+        with_binary(true) do
+          with_transfer_mode(:block) do
+            transferring do
+              begin
+                conn = transfercmd(cmd, rest_offset)
+                decoder = BlockMode::BlockDecoder.new(mode: mode)
+                decoder.feed_stream(conn) do |event, data|
+                  yield(event, data)
+                end
+                decoder.finish
+                conn.shutdown(Socket::SHUT_WR) rescue nil
+                conn.read_timeout = 1
+                conn.read rescue nil
+              ensure
+                conn.close if conn
+              end
+              voidresp
+            end
+          end
+        end
+      end
+    end
+
+    #
+    # Stores data in Block Mode (MODE B) using +cmd+ (such as
+    # <tt>"STOR file"</tt>).  Each yielded element must be a pair of
+    # +[event, data]+ where +event+ is:
+    #
+    # - +:record+: stores one record, spanning bounded blocks as needed and
+    #   marked with end-of-record.
+    # - +:restart_marker+: inserts a restart marker (printable ASCII), which
+    #   is not part of the file data.
+    #
+    # +records+ may be any Enumerable, including an enumerator, so records
+    # can be generated lazily.  Every block body is at most +blocksize+
+    # bytes (capped at 65535), and the transfer always ends with an
+    # end-of-data block.
+    #
+    def storblocks(cmd, records, blocksize: DEFAULT_BLOCKSIZE, rest_offset: nil)
+      bounded = [[blocksize, BlockMode::MAX_BLOCK_SIZE].min, 1].max
+      synchronize do
+        with_binary(true) do
+          with_transfer_mode(:block) do
+            transferring do
+              begin
+                conn = transfercmd(cmd, rest_offset)
+                encoder = BlockMode::BlockEncoder.new(conn, block_size: bounded)
+                records.each do |event, data = nil|
+                  case event
+                  when :record
+                    encoder.write_record(data)
+                  when :restart_marker
+                    encoder.write_restart_marker(data)
+                  else
+                    raise ArgumentError,
+                          "unknown block event #{event.inspect}"
+                  end
+                  yield(event, data) if block_given?
+                end
+                encoder.finish
+                conn.shutdown(Socket::SHUT_WR) rescue nil
+                conn.read_timeout = 1
+                conn.read rescue nil
+              ensure
+                conn.close if conn
+              end
+              voidresp
+            end
+          end
+        end
+      end
+    rescue Errno::EPIPE
+      # EPIPE, in this case, means that the data connection was unexpectedly
+      # terminated.  Rather than just raising EPIPE to the caller, check the
+      # response on the control connection.  If getresp doesn't raise a more
+      # appropriate exception, re-raise the original exception.
+      getresp
+      raise
+    end
+
+    #
+    # Stores +records+ (an Enumerable of Strings, possibly an enumerator) in
+    # Block Mode using +cmd+.  This is a convenience wrapper around
+    # #storblocks for pure record uploads.
+    #
+    def storrecords(cmd, records, blocksize: DEFAULT_BLOCKSIZE, rest_offset: nil)
+      storblocks(cmd, records.lazy.map { |record| [:record, record] },
+                 blocksize: blocksize,
+                 rest_offset: rest_offset)
     end
 
     #
