@@ -502,6 +502,65 @@ class TestLDAPConnectionInstrumentation < Test::Unit::TestCase
     assert unread.empty?, "should not have any leftover unread messages"
   end
 
+  def test_search_collects_search_result_reference_and_final_referral_uris
+    reference_ber = Net::BER::BerIdentifiedArray.new([
+      "ldap://reference.example/dc=example,dc=org",
+    ])
+    reference_ber.ber_identifier = Net::LDAP::PDU::SearchResultReferral
+    reference = [1, reference_ber]
+
+    final_referral_ber = Net::BER::BerIdentifiedArray.new([
+      Net::LDAP::ResultCodeReferral,
+      "",
+      "",
+      ["ldap://final.example/dc=example,dc=org"],
+    ])
+    final_referral_ber.ber_identifier = Net::LDAP::PDU::SearchResult
+    final_referral = [1, final_referral_ber]
+
+    @tcp_socket.should_receive(:read_ber).and_return(reference)
+               .and_return(final_referral)
+
+    result = @connection.search(
+      filter: "(uid=user1)",
+      base: "dc=example,dc=org",
+      follow_referrals: true,
+    )
+
+    assert_equal(
+      [
+        "ldap://reference.example/dc=example,dc=org",
+        "ldap://final.example/dc=example,dc=org",
+      ],
+      result.referral_uris,
+    )
+  end
+
+  def test_search_preserves_repeated_referral_uris
+    uri = "ldap://reference.example/dc=example,dc=org"
+    reference_ber = Net::BER::BerIdentifiedArray.new([uri])
+    reference_ber.ber_identifier = Net::LDAP::PDU::SearchResultReferral
+
+    final_referral_ber = Net::BER::BerIdentifiedArray.new([
+      Net::LDAP::ResultCodeReferral,
+      "",
+      "",
+      [uri],
+    ])
+    final_referral_ber.ber_identifier = Net::LDAP::PDU::SearchResult
+
+    @tcp_socket.should_receive(:read_ber).and_return([1, reference_ber])
+               .and_return([1, final_referral_ber])
+
+    result = @connection.search(
+      filter: "(uid=user1)",
+      base: "dc=example,dc=org",
+      follow_referrals: true,
+    )
+
+    assert_equal [uri, uri], result.referral_uris
+  end
+
   def test_add_with_controls
     dacl_flag = 0x4 # DACL_SECURITY_INFORMATION
     control_values = [dacl_flag].map(&:to_ber).to_ber_sequence.to_s.to_ber

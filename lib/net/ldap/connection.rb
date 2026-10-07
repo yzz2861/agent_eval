@@ -339,7 +339,8 @@ class Net::LDAP::Connection #:nodoc:
     # references
     # refs:  https://tools.ietf.org/html/rfc4511#section-4.5.3
     # deref: https://tools.ietf.org/html/rfc4511#section-4.5.1.3
-    refs   = args[:return_referrals] == true
+    yield_referrals = args[:return_referrals] == true
+    collect_referrals = yield_referrals || args[:follow_referrals]
     deref  = args[:deref] || Net::LDAP::DerefAliases_Never
 
     # limiting, paging, sorting
@@ -395,7 +396,7 @@ class Net::LDAP::Connection #:nodoc:
                size:       size,
                time:       time,
                sort:       sort,
-               referrals:  refs,
+               referrals:  collect_referrals,
                deref:      deref,
                attributes: attrs do |payload|
       loop do
@@ -444,6 +445,7 @@ class Net::LDAP::Connection #:nodoc:
         write(request, controls, message_id)
 
         result_pdu = nil
+        referral_uris = []
         controls = []
 
         while pdu = queued_read(message_id)
@@ -452,17 +454,22 @@ class Net::LDAP::Connection #:nodoc:
             n_results += 1
             yield pdu.search_entry if block_given?
           when Net::LDAP::PDU::SearchResultReferral
-            if refs
-              if block_given?
-                se = Net::LDAP::Entry.new
-                se[:search_referrals] = (pdu.search_referrals || [])
-                yield se
-              end
+            if collect_referrals
+              referral_uris.concat(pdu.search_referrals || [])
+            end
+            if yield_referrals && block_given?
+              se = Net::LDAP::Entry.new
+              se[:search_referrals] = (pdu.search_referrals || [])
+              yield se
             end
           when Net::LDAP::PDU::SearchResult
             result_pdu = pdu
             controls = pdu.result_controls
-            if refs && pdu.result_code == Net::LDAP::ResultCodeReferral
+            if collect_referrals && pdu.result_code == Net::LDAP::ResultCodeReferral
+              referral_uris.concat(pdu.search_referrals || [])
+            end
+            result_pdu.referral_uris = referral_uris if collect_referrals
+            if yield_referrals && pdu.result_code == Net::LDAP::ResultCodeReferral
               if block_given?
                 se = Net::LDAP::Entry.new
                 se[:search_referrals] = (pdu.search_referrals || [])

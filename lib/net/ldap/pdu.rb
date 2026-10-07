@@ -72,6 +72,7 @@ class Net::LDAP::PDU
 
   attr_reader :search_entry
   attr_reader :search_referrals
+  attr_accessor :referral_uris
   attr_reader :search_parameters
   attr_reader :bind_parameters
   attr_reader :extended_response
@@ -253,6 +254,7 @@ class Net::LDAP::PDU
   # reasonable to the client.
   def parse_search_referral(uris)
     @search_referrals = uris
+    @referral_uris = Array(uris)
   end
   private :parse_search_referral
 

@@ -36,4 +36,46 @@ class TestSearch < Test::Unit::TestCase
     assert payload.key?(:filter)
     assert_equal "test", payload[:filter]
   end
+
+  def test_follow_referrals_returns_partial_results_and_failures
+    entry = Net::LDAP::Entry.new("cn=partial")
+    failure = {
+      reason: :search_failed,
+      uri: "ldap://other.example",
+      result_code: Net::LDAP::ResultCodeInvalidCredentials,
+    }
+    result = Net::LDAP::ReferralResult.new(
+      [entry],
+      OpenStruct.new(result_code: Net::LDAP::ResultCodeSuccess, error_message: ""),
+      [failure],
+      [],
+      1,
+    )
+    flexmock(Net::LDAP::ReferralSearch).new_instances.should_receive(:run)
+                                              .and_yield(entry)
+                                              .and_return(result)
+
+    returned_entries = @connection.search(follow_referrals: true)
+
+    assert_nil returned_entries
+    operation_result = @connection.get_operation_result
+    assert_equal [failure], operation_result.referral_failures
+    assert_equal [entry], operation_result.partial_results
+    assert_equal Net::LDAP::ResultCodeOther, operation_result.code
+  end
+
+  def test_follow_referrals_boolean_result_reflects_branch_failures
+    result = Net::LDAP::ReferralResult.new(
+      [],
+      OpenStruct.new(result_code: Net::LDAP::ResultCodeSuccess, error_message: ""),
+      [{ reason: :referral_denied }],
+      [],
+      0,
+    )
+    flexmock(Net::LDAP::ReferralSearch).new_instances.should_receive(:run).and_return(result)
+
+    refute @connection.search(follow_referrals: true, return_result: false)
+    assert_equal Net::LDAP::ResultCodeInsufficientAccessRights,
+                 @connection.get_operation_result.code
+  end
 end

@@ -16,6 +16,7 @@ module Net # :nodoc:
   end
 end
 require 'socket'
+require 'uri'
 
 require_relative 'ber'
 require_relative 'ldap/pdu'
@@ -669,6 +670,18 @@ class Net::LDAP
   def get_operation_result
     result = @result
     os = OpenStruct.new
+    if result.is_a?(Net::LDAP::ReferralResult)
+      os.code = referral_result_code(result)
+      os.error_message = result.error_message
+      if result.root_result.respond_to?(:result)
+        os.matched_dn = result.root_result.result[:matchedDN]
+      end
+      os.referral_failures = result.failures
+      os.referral_skipped = result.skipped
+      os.partial_results = result.entries
+      os.success = result.success?
+      return os
+    end
     if result.is_a?(Net::LDAP::PDU)
       os.extended_response = result.extended_response
       result = result.result
@@ -741,6 +754,11 @@ class Net::LDAP
   # * :time (an integer restricting the maximum time in seconds allowed for a search. Default is zero, no time limit RFC 4511 4.5.1.5)
   # * :deref (one of: Net::LDAP::DerefAliases_Never, Net::LDAP::DerefAliases_Search,
   #   Net::LDAP::DerefAliases_Find, Net::LDAP::DerefAliases_Always. Default is Never.)
+  # * :follow_referrals (true to anonymously follow referrals, or a callable that
+  #   receives a target context and returns true/false or connection options.
+  #   Defaults to false. The original search password is never sent to referrals.)
+  # * :max_referral_depth (maximum referral depth, default 10)
+  # * :max_referral_branches (maximum followed branches, default 10)
   #
   # #search queries the LDAP server and passes <i>each entry</i> to the
   # caller-supplied block, as an object of type Net::LDAP::Entry. If the
@@ -781,25 +799,54 @@ class Net::LDAP
     args[:base] ||= @base
     return_result_set = args[:return_result] != false
     result_set = return_result_set ? [] : nil
+    follow_options = Net::LDAP::ReferralSearch.options(args[:follow_referrals], args)
 
     instrument "search.net_ldap", args do |payload|
-      @result = use_connection(args) do |conn|
-        conn.search(args) do |entry|
+      if follow_options
+        @result = Net::LDAP::ReferralSearch.new(
+          self,
+          args,
+          follow_options,
+          method(:open_referral_connection),
+        ).run do |entry|
           result_set << entry if result_set
           yield entry if block_given?
         end
-      end
 
-      if return_result_set
-        unless @result.nil?
-          if ResultCodesSearchSuccess.include?(@result.result_code)
-            result_set
+        next @result.entries if return_result_set && @result.success?
+        next @result.success? unless return_result_set
+      else
+        @result = use_connection(args) do |conn|
+          conn.search(args) do |entry|
+            result_set << entry if result_set
+            yield entry if block_given?
           end
         end
-      else
-        @result.success?
+
+        if return_result_set
+          if @result && ResultCodesSearchSuccess.include?(@result.result_code)
+            result_set
+          end
+        else
+          @result.success?
+        end
       end
     end
+  end
+
+  def search_once(args = {})
+    entries = []
+    result = use_connection(args) do |conn|
+      conn.search(args) do |entry|
+        if entry.attribute_names == [:search_referrals]
+          yield entry if block_given?
+        else
+          entries << entry
+          yield entry if block_given?
+        end
+      end
+    end
+    [entries, result]
   end
 
   # #bind connects to an LDAP server and requests authentication based on
@@ -1316,6 +1363,36 @@ class Net::LDAP
 
   private
 
+  def open_referral_connection(options)
+    Net::LDAP.new(
+      host: options[:host],
+      port: options[:port],
+      auth: options.fetch(:auth, DefaultAuth),
+      encryption: options[:encryption],
+      instrumentation_service: @instrumentation_service,
+      connect_timeout: options[:connect_timeout] || @connect_timeout,
+    )
+  end
+
+  def referral_result_code(result)
+    root_code = result.result_code
+    return root_code if root_code && !ResultCodesSearchSuccess.include?(root_code)
+
+    if result.failures.any? { |failure| failure[:reason] == :referral_denied }
+      ResultCodeInsufficientAccessRights
+    elsif result.failures.any? { |failure| failure[:reason] == :invalid_referral_uri }
+      ResultCodeProtocolError
+    elsif result.failures.any? { |failure| failure[:reason].to_s =~ /max_/ }
+      ResultCodeAdminLimitExceeded
+    elsif !result.failures.empty?
+      ResultCodeOther
+    elsif root_code
+      root_code
+    else
+      ResultCodeUnavailable
+    end
+  end
+
   # Yields an open connection if there is one, otherwise establishes a new
   # connection, binds, and yields it. If binding fails, it will return the
   # result from that, and :use_connection: will not yield at all. If not
@@ -1382,5 +1459,7 @@ class Net::LDAP
     end
     true
   end
+
+require_relative 'ldap/referral_search'
 
 end # class LDAP
