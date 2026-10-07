@@ -16,6 +16,7 @@
 #
 
 require "socket"
+require "ipaddr"
 require "monitor"
 require "net/protocol"
 require "time"
@@ -93,6 +94,9 @@ module Net
     FTP_PORT = 21
     CRLF = "\r\n"
     DEFAULT_BLOCKSIZE = BufferedIO::BUFSIZE
+    TLS_HOSTNAME = /\A(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*
+                    [a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\z/x
+    VIRTUAL_HOST_LABEL = /\A(?:%[0-9a-fA-F]{2}|[a-z0-9\-_~!$&'()*+,;=])*\z/
     @@default_passive = true
     # :startdoc:
 
@@ -146,6 +150,15 @@ module Net
 
     # The server's welcome message.
     attr_reader :welcome
+
+    # The hostname or IP address used to establish the TCP connection.
+    attr_reader :host
+
+    # The hostname sent with the FTP HOST command (RFC 7151).
+    attr_reader :virtual_host
+
+    # The hostname used for TLS SNI and certificate verification.
+    attr_reader :ssl_hostname
 
     # The server's last response code.
     attr_reader :last_response_code
@@ -210,6 +223,12 @@ module Net
     #             "anonymous" and the +options+[:password] is +nil+,
     #             "anonymous@" is used as a password.
     # password::  Password for login.
+    # virtual_host:: The virtual host to select with HOST after TLS has been
+    #                established, if applicable, and before authentication.
+    #                This is independent of +host+.
+    # ssl_hostname:: The hostname used for TLS SNI and certificate
+    #                verification.  Defaults to +host+; this is independent
+    #                of +virtual_host+.
     # account::   Account information for ACCT.
     # passive::   When +true+, the connection is in passive mode. Default:
     #             +true+.
@@ -239,6 +258,7 @@ module Net
         options[:account] = acct
       end
       @host = nil
+      @virtual_host = validate_virtual_host(options[:virtual_host])
       if options[:ssl]
         unless defined?(OpenSSL::SSL)
           raise "SSL extension not installed"
@@ -259,6 +279,8 @@ module Net
         end
 
         @ssl_session = nil
+        @ssl_hostname = options[:ssl_hostname].nil? ? nil :
+          validate_ssl_hostname(options[:ssl_hostname])
         if options[:private_data_connection].nil?
           @private_data_connection = true
         else
@@ -271,6 +293,11 @@ module Net
         end
       else
         @ssl_context = nil
+        unless options[:ssl_hostname].nil?
+          raise ArgumentError,
+            "ssl_hostname can be set only when ssl is enabled"
+        end
+        @ssl_hostname = nil
         if options[:private_data_connection]
           raise ArgumentError,
             "private_data_connection can be set to true only when ssl is enabled"
@@ -297,6 +324,7 @@ module Net
       @resume = false
       @bare_sock = @sock = NullSocket.new
       @logged_in = false
+      @authentication_started = false
       @open_timeout = options[:open_timeout]
       @ssl_handshake_timeout = options[:ssl_handshake_timeout]
       @read_timeout = options[:read_timeout] || 60
@@ -379,7 +407,7 @@ module Net
     def start_tls_session(sock)
       ssl_sock = SSLSocket.new(sock, @ssl_context)
       ssl_sock.sync_close = true
-      ssl_sock.hostname = @host if ssl_sock.respond_to? :hostname=
+      ssl_sock.hostname = @ssl_hostname if ssl_sock.respond_to?(:hostname=)
       if @ssl_session &&
           Process.clock_gettime(Process::CLOCK_REALTIME) < @ssl_session.time.to_f + @ssl_session.timeout
         # ProFTPD returns 425 for data connections if session is not reused.
@@ -387,7 +415,7 @@ module Net
       end
       ssl_socket_connect(ssl_sock, @ssl_handshake_timeout || @open_timeout)
       if @ssl_context.verify_mode != VERIFY_NONE
-        ssl_sock.post_connection_check(@host)
+        ssl_sock.post_connection_check(@ssl_hostname)
       end
       return ssl_sock
     end
@@ -399,31 +427,155 @@ module Net
     # connection through a SOCKS proxy. Raises an exception (typically
     # <tt>Errno::ECONNREFUSED</tt>) if the connection cannot be established.
     #
-    def connect(host, port = FTP_PORT)
+    def connect(host, port = FTP_PORT, virtual_host: @virtual_host,
+                ssl_hostname: @ssl_hostname)
       debug_print "connect: #{host}:#{port}"
       synchronize do
+        unless closed?
+          raise FTPConnectionError, "already connected"
+        end
+        virtual_host = validate_virtual_host(virtual_host)
+        ssl_hostname = ssl_hostname.nil? ? nil :
+          validate_ssl_hostname(ssl_hostname)
+        if ssl_hostname && !@ssl_context
+          raise ArgumentError,
+            "ssl_hostname can be set only when ssl is enabled"
+        end
         @host = host
-        @bare_sock = open_socket(host, port)
-        if @ssl_context
-          begin
+        @virtual_host = virtual_host
+        @ssl_hostname = @ssl_context ? ssl_hostname || host : nil
+        @logged_in = false
+        @authentication_started = false
+        @welcome = nil
+        @last_response = nil
+        @last_response_code = nil
+        connected_socket = nil
+        begin
+          @bare_sock = open_socket(host, port)
+        rescue StandardError
+          @bare_sock = NullSocket.new
+          @sock = NullSocket.new
+          raise
+        end
+        begin
+          if @ssl_context
             unless @implicit_ftps
               set_socket(BufferedSocket.new(@bare_sock, read_timeout: @read_timeout))
               voidcmd("AUTH TLS")
             end
-            set_socket(BufferedSSLSocket.new(start_tls_session(@bare_sock), read_timeout: @read_timeout), @implicit_ftps)
+            connected_socket = BufferedSSLSocket.new(
+              start_tls_session(@bare_sock),
+              read_timeout: @read_timeout)
+            set_socket(connected_socket, @implicit_ftps)
+            select_virtual_host(virtual_host) if virtual_host
             if @private_data_connection
               voidcmd("PBSZ 0")
               voidcmd("PROT P")
             end
-          rescue OpenSSL::SSL::SSLError, OpenTimeout
-            @sock.close
-            raise
+          else
+            connected_socket = BufferedSocket.new(
+              @bare_sock, read_timeout: @read_timeout)
+            set_socket(connected_socket)
+            select_virtual_host(virtual_host) if virtual_host
           end
-        else
-          set_socket(BufferedSocket.new(@bare_sock, read_timeout: @read_timeout))
+        rescue StandardError
+          connected_socket&.close
+          @bare_sock.close unless connected_socket
+          @bare_sock = NullSocket.new
+          @sock = NullSocket.new
+          raise
         end
       end
     end
+
+    # Selects an FTP virtual host with HOST per RFC 7151.  HOST must be
+    # issued on the current connection before USER/PASS authentication.
+    def select_virtual_host(hostname)
+      synchronize do
+        if @logged_in || @authentication_started
+          raise FTPProtoError,
+            "HOST must be sent before authentication"
+        end
+        hostname = validate_virtual_host(hostname)
+        resp = sendcmd("HOST " + hostname)
+        unless resp.start_with?("220")
+          raise FTPReplyError, resp
+        end
+        @virtual_host = hostname
+        resp
+      end
+    end
+
+    def validate_virtual_host(hostname) # :nodoc:
+      return nil if hostname.nil?
+      unless hostname.is_a?(String)
+        raise ArgumentError, "invalid hostname: #{hostname.inspect}"
+      end
+      validate_virtual_hostname(hostname)
+      hostname
+    end
+    private :validate_virtual_host
+
+    def validate_ssl_hostname(hostname) # :nodoc:
+      unless hostname.is_a?(String)
+        raise ArgumentError, "invalid hostname: #{hostname.inspect}"
+      end
+      validate_tls_hostname(hostname)
+      hostname
+    end
+    private :validate_ssl_hostname
+
+    def validate_virtual_hostname(hostname) # :nodoc:
+      unless hostname.ascii_only? && hostname.bytesize.between?(1, 255) &&
+          hostname !~ /[[:cntrl:][:space:]]/
+        raise ArgumentError, "invalid hostname: #{hostname}"
+      end
+      if hostname.start_with?("[")
+        unless hostname.end_with?("]") &&
+            valid_ip_address?(hostname[1...-1], Socket::AF_INET6)
+          raise ArgumentError, "invalid hostname: #{hostname}"
+        end
+        return
+      end
+      if hostname.include?("]") || hostname.include?(":") ||
+          hostname.include?("@")
+        raise ArgumentError, "invalid hostname: #{hostname}"
+      end
+      if hostname.match?(/\A\d+(?:\.\d+)+\z/) &&
+          !valid_ip_address?(hostname, Socket::AF_INET)
+        raise ArgumentError, "invalid hostname: #{hostname}"
+      end
+      labels = hostname.sub(/\.\z/, "").split(".", -1)
+      if labels.empty? || labels.any? { |label|
+            label.empty? || label.bytesize > 63 ||
+              label !~ VIRTUAL_HOST_LABEL
+          }
+        raise ArgumentError, "invalid hostname: #{hostname}"
+      end
+    end
+    private :validate_virtual_hostname
+
+    def validate_tls_hostname(hostname) # :nodoc:
+      if valid_ip_address?(hostname, Socket::AF_INET) ||
+          valid_ip_address?(hostname, Socket::AF_INET6)
+        return
+      end
+      unless hostname.ascii_only? && hostname.bytesize.between?(1, 253) &&
+          hostname =~ TLS_HOSTNAME
+        raise ArgumentError, "invalid hostname: #{hostname}"
+      end
+    end
+    private :validate_tls_hostname
+
+    def valid_ip_address?(hostname, family) # :nodoc:
+      begin
+        IPAddr.new(hostname, family)
+        true
+      rescue IPAddr::Error
+        false
+      end
+    end
+    private :valid_ip_address?
 
     #
     # Set the socket used to connect to the FTP server.
@@ -639,6 +791,7 @@ module Net
 
       resp = ""
       synchronize do
+        @authentication_started = true
         resp = sendcmd('USER ' + user)
         if resp.start_with?("3")
           raise FTPReplyError, resp if passwd.nil?

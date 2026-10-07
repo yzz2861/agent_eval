@@ -3,6 +3,7 @@
 require "net/ftp"
 require "test/unit"
 require "ostruct"
+require "delegate"
 require "stringio"
 require "tempfile"
 require "tmpdir"
@@ -269,6 +270,176 @@ class FTPTest < Test::Unit::TestCase
     end
   end
 
+  def test_virtual_host_plain_sequence
+    commands = []
+    ftp, thread = create_ftp_socket_pair do |server|
+      server.print("220 (test_ftp).\r\n")
+      commands.push(server.gets)
+      server.print("220 Virtual host selected.\r\n")
+      commands.push(server.gets)
+      server.print("331 Please specify the password.\r\n")
+      commands.push(server.gets)
+      server.print("230 Login successful.\r\n")
+      commands.push(server.gets)
+      server.print("200 Switching to Binary mode.\r\n")
+    end
+    begin
+      ftp.connect("127.0.0.1", virtual_host: "files.example")
+      ftp.login("anonymous")
+      assert_equal("files.example", ftp.virtual_host)
+      assert_nil(ftp.ssl_hostname)
+      assert_equal("HOST files.example\r\n", commands.shift)
+      assert_equal("USER anonymous\r\n", commands.shift)
+      assert_equal("PASS anonymous@\r\n", commands.shift)
+      assert_equal("TYPE I\r\n", commands.shift)
+      assert_nil(commands.shift)
+    ensure
+      ftp.close if ftp
+      thread.join
+    end
+  end
+
+  def test_virtual_host_rejected_does_not_authenticate
+    commands = []
+    ftp, thread = create_ftp_socket_pair do |server|
+      server.print("220 (test_ftp).\r\n")
+      commands.push(server.gets)
+      server.print("504 Virtual host not available.\r\n")
+    end
+    begin
+      assert_raise(Net::FTPPermError) do
+        ftp.connect("127.0.0.1",
+                    virtual_host: "files.example")
+      end
+      assert_equal("HOST files.example\r\n", commands.shift)
+      assert_nil(commands.shift)
+      assert_equal(true, ftp.closed?)
+    ensure
+      ftp.close if ftp
+      thread.join
+    end
+  end
+
+  def test_virtual_host_validates_command_arguments
+    ftp = Net::FTP.new
+    assert_raise(ArgumentError) do
+      ftp.connect(SERVER_ADDR, 1, virtual_host: "files.example\r\nUSER x")
+    end
+    assert_raise(ArgumentError) do
+      ftp.connect(SERVER_ADDR, 1, virtual_host: "files.example USER x")
+    end
+    assert_raise(ArgumentError) do
+      Net::FTP.new(nil, virtual_host: "[192.0.2.1]")
+    end
+    assert_raise(ArgumentError) do
+      Net::FTP.new(nil, ssl_hostname: "localhost\r\n")
+    end
+    assert_raise(ArgumentError) do
+      Net::FTP.new(nil, ssl: false, ssl_hostname: "localhost")
+    end
+  end
+
+  def test_virtual_host_cannot_be_selected_after_user
+    commands = []
+    ftp, thread = create_ftp_socket_pair do |server|
+      server.print("220 (test_ftp).\r\n")
+      commands.push(server.gets)
+      server.print("331 Please specify the password.\r\n")
+    end
+    begin
+      ftp.connect("127.0.0.1")
+      assert_raise(Net::FTPReplyError) do
+        ftp.login("foo")
+      end
+      assert_raise(Net::FTPProtoError) do
+        ftp.select_virtual_host("files.example")
+      end
+      assert_equal("USER foo\r\n", commands.shift)
+      assert_nil(commands.shift)
+    ensure
+      ftp.close if ftp
+      thread.join
+    end
+  end
+
+  def test_virtual_host_cannot_change_after_login
+    commands = []
+    ftp, thread = create_ftp_socket_pair do |server|
+      server.print("220 (test_ftp).\r\n")
+      commands.push(server.gets)
+      server.print("220 Virtual host selected.\r\n")
+      commands.push(server.gets)
+      server.print("331 Please specify the password.\r\n")
+      commands.push(server.gets)
+      server.print("230 Login successful.\r\n")
+      commands.push(server.gets)
+      server.print("200 Switching to Binary mode.\r\n")
+    end
+    begin
+      ftp.connect("127.0.0.1", virtual_host: "a.example")
+      ftp.login("foo", "bar")
+      assert_raise(Net::FTPProtoError) do
+        ftp.select_virtual_host("b.example")
+      end
+      assert_equal("a.example", ftp.virtual_host)
+      assert_equal("HOST a.example\r\n", commands.shift)
+      assert_equal("USER foo\r\n", commands.shift)
+      assert_equal("PASS bar\r\n", commands.shift)
+      assert_equal("TYPE I\r\n", commands.shift)
+      assert_nil(commands.shift)
+    ensure
+      ftp.close if ftp
+      thread.join
+    end
+  end
+
+  def test_virtual_host_reselects_after_reconnect_and_requeries_features
+    commands = []
+    ftp = Net::FTP.new
+    server_sockets = []
+    client_sockets = []
+    threads = 2.times.map do
+      client_socket, server_socket = Socket.pair(:UNIX, :STREAM, 0)
+      client_sockets << client_socket
+      server_sockets << server_socket
+      Thread.start do
+        begin
+          host_name = server_sockets.index(server_socket).zero? ?
+            "a.example" : "b.example"
+          feature = host_name == "a.example" ? "A" : "B"
+          server_socket.print("220 (test_ftp).\r\n")
+          commands.push(server_socket.gets)
+          server_socket.print("220 Virtual host selected.\r\n")
+          commands.push(server_socket.gets)
+          server_socket.print("211-Features\r\n ")
+          server_socket.print(feature)
+          server_socket.print("\r\n211 End\r\n")
+          server_socket.read
+        ensure
+          server_socket.close
+        end
+      end
+    end
+    ftp.define_singleton_method(:open_socket) do |host, port|
+      client_sockets.shift
+    end
+    begin
+      ftp.connect("127.0.0.1", virtual_host: "a.example")
+      assert_equal(["A"], ftp.features)
+      ftp.close
+      ftp.connect("127.0.0.1", virtual_host: "b.example")
+      assert_equal(["B"], ftp.features)
+      assert_equal("HOST a.example\r\n", commands.shift)
+      assert_equal("FEAT\r\n", commands.shift)
+      assert_equal("HOST b.example\r\n", commands.shift)
+      assert_equal("FEAT\r\n", commands.shift)
+      assert_nil(commands.shift)
+    ensure
+      ftp.close if ftp
+      threads.each(&:join)
+    end
+  end
+
   def test_s_new_timeout_options
     ftp = Net::FTP.new
     assert_equal(nil, ftp.open_timeout)
@@ -277,6 +448,14 @@ class FTPTest < Test::Unit::TestCase
     ftp = Net::FTP.new(nil, open_timeout: 123, read_timeout: 234)
     assert_equal(123, ftp.open_timeout)
     assert_equal(234, ftp.read_timeout)
+  end
+
+  def test_initialize_positional_credentials_remain_supported
+    ftp = assert_nothing_raised do
+      Net::FTP.new(nil, "foo", "bar", "baz")
+    end
+    assert_nil(ftp.host)
+    assert_nil(ftp.virtual_host)
   end
 
   # TODO: How can we test open_timeout?  sleep before accept cannot delay
@@ -1826,6 +2005,53 @@ EOF
   end
 
   if defined?(OpenSSL::SSL)
+    def test_virtual_host_explicit_ftps_sequence
+      commands = []
+      sni_hostnames = []
+      ftp, thread = create_ftp_socket_pair(
+        tls: true,
+        sni_hostname: ->(value) { sni_hostnames.push(value) }
+      ) do |server|
+        server.print("220 (test_ftp).\r\n")
+        commands.push(server.gets)
+        server.print("234 AUTH success.\r\n")
+        commands.push(server.gets)
+        server.print("220 Virtual host selected.\r\n")
+        commands.push(server.gets)
+        server.print("200 PBSZ success.\r\n")
+        commands.push(server.gets)
+        server.print("200 PROT success.\r\n")
+        commands.push(server.gets)
+        server.print("331 Please specify the password.\r\n")
+        commands.push(server.gets)
+        server.print("230 Login successful.\r\n")
+        commands.push(server.gets)
+        server.print("200 Switching to Binary mode.\r\n")
+      end
+      begin
+        ftp.instance_variable_set(:@private_data_connection, true)
+        ftp.connect("127.0.0.1",
+                    virtual_host: "files.example",
+                    ssl_hostname: SERVER_NAME)
+        ftp.login("foo", "bar")
+        assert_equal("127.0.0.1", ftp.host)
+        assert_equal("files.example", ftp.virtual_host)
+        assert_equal(SERVER_NAME, ftp.ssl_hostname)
+        assert_equal([SERVER_NAME], sni_hostnames)
+        assert_equal("AUTH TLS\r\n", commands.shift)
+        assert_equal("HOST files.example\r\n", commands.shift)
+        assert_equal("PBSZ 0\r\n", commands.shift)
+        assert_equal("PROT P\r\n", commands.shift)
+        assert_equal("USER foo\r\n", commands.shift)
+        assert_equal("PASS bar\r\n", commands.shift)
+        assert_equal("TYPE I\r\n", commands.shift)
+        assert_nil(commands.shift)
+      ensure
+        ftp.close
+        thread.join
+      end
+    end
+
     def test_tls_unknown_ca
       assert_raise(OpenSSL::SSL::SSLError) do
         tls_test do |port|
@@ -2672,6 +2898,62 @@ EOF
   end
 
   private
+
+  class FakeSSLSocket < DelegateClass(Socket)
+    attr_accessor :session, :sync_close
+    attr_reader :hostname
+
+    def initialize(socket, sni_hostname_callback = nil)
+      super(socket)
+      @sni_hostname_callback = sni_hostname_callback
+    end
+
+    def hostname=(hostname)
+      @hostname = hostname
+      @sni_hostname_callback&.call(hostname)
+    end
+
+    def connect
+    end
+
+    def post_connection_check(hostname)
+      true
+    end
+
+    def stop
+      shutdown(Socket::SHUT_WR) rescue nil
+    end
+  end
+
+  FakeSSLSocketContext = Struct.new(:verify_mode)
+
+  def create_ftp_socket_pair(tls: false, sni_hostname: nil)
+    client_socket, server_socket = Socket.pair(:UNIX, :STREAM, 0)
+    ftp = Net::FTP.new
+    if tls
+      ftp.instance_variable_set(:@ssl_context,
+                               FakeSSLSocketContext.new(OpenSSL::SSL::VERIFY_NONE))
+      ftp.instance_variable_set(:@private_data_connection, false)
+      ftp.define_singleton_method(:start_tls_session) do |sock|
+        ssl_socket = FakeSSLSocket.new(sock, sni_hostname)
+        ssl_socket.hostname = ftp.ssl_hostname
+        ssl_socket
+      end
+    end
+    ftp.define_singleton_method(:open_socket) do |host, port|
+      client_socket
+    end
+    thread = Thread.start do
+      begin
+        yield(server_socket)
+        server_socket.shutdown(Socket::SHUT_WR) rescue nil
+        server_socket.read rescue nil
+      ensure
+        server_socket.close
+      end
+    end
+    return ftp, thread
+  end
 
   def create_ftp_server(sleep_time = nil, addr = SERVER_ADDR)
     server = TCPServer.new(addr, 0)
