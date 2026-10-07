@@ -72,23 +72,27 @@ module DRb
 
   class DRbObject # :nodoc:
     def self._load(s)
-      uri, ref = Marshal.load(s)
+      uri, ref, service_id = Marshal.load(s)
       if DRb.uri == uri
-        return ref ? DRb.to_obj(ref) : DRb.front
+        if ref && Array === ref && ref[0] == :DRbObject
+          return self.new_with(ref[1], ref[2], service_id)
+        end
+        service_ref = service_id ? [DRbServer::SERVICE_REF, service_id, ref] : ref
+        return ref ? DRb.to_obj(service_ref) : DRb.front
       end
 
-      self.new_with(DRb.uri, [:DRbObject, uri, ref])
+      self.new_with(DRb.uri, [:DRbObject, uri, ref], service_id)
     end
 
     def _dump(lv)
       if DRb.uri == @uri
         if Array === @ref && @ref[0] == :DRbObject
-          Marshal.dump([@ref[1], @ref[2]])
+          Marshal.dump([@ref[1], @ref[2], @service_id])
         else
-          Marshal.dump([@uri, @ref]) # ??
+          Marshal.dump([@uri, @ref, @service_id]) # ??
         end
       else
-        Marshal.dump([DRb.uri, [:DRbObject, @uri, @ref]])
+        Marshal.dump([DRb.uri, [:DRbObject, @uri, @ref], @service_id])
       end
     end
   end
@@ -158,4 +162,3 @@ a.ping(foo)
 
 DRb.thread.join
 =end
-
