@@ -33,6 +33,7 @@ module Net
   class FTPPermError < FTPError; end
   class FTPProtoError < FTPError; end
   class FTPConnectionError < FTPError; end
+  class FXPError < FTPError; end
   # :startdoc:
 
   #
@@ -184,6 +185,139 @@ module Net
         new(host, *args)
       end
     end
+
+    # The result of a server-to-server (FXP) transfer coordinated by
+    # FTP.fxp.  The preliminary (1xx) and final responses of both control
+    # connections are preserved separately.
+    class FXPResult
+      attr_reader :source_preliminary_response, :source_final_response,
+                  :target_preliminary_response, :target_final_response
+
+      def initialize(source_preliminary_response:, source_final_response:,
+                     target_preliminary_response:, target_final_response:)
+        @source_preliminary_response = source_preliminary_response
+        @source_final_response = source_final_response
+        @target_preliminary_response = target_preliminary_response
+        @target_final_response = target_final_response
+      end
+    end
+
+    #
+    # Coordinates a server-to-server (FXP) transfer between two logged-in
+    # FTP sessions, so that file data flows directly between the two
+    # servers without passing through this client.
+    #
+    # +source+ and +target+ are two logged-in Net::FTP instances.  The
+    # file +source_file+ on +source+ is copied to +target_file+ on
+    # +target+ (+target_file+ defaults to the basename of +source_file+).
+    #
+    # The +target+ server is put into passive mode and the +source+
+    # server is told to actively connect to it.  Only the data address
+    # that +target+ actually negotiates (its PASV/EPSV response) is
+    # relayed to +source+ in a PORT/EPRT command; no caller-supplied
+    # address is ever turned into a PORT command.  The negotiated address
+    # is relayed only after +address_policy+, a mandatory callable,
+    # approves it:
+    #
+    #   trusted = IPAddr.new("10.0.0.0/8")
+    #   Net::FTP.fxp(src, dst, "remote.bin",
+    #                address_policy: ->(host, port) { trusted.include?(host) })
+    #
+    # Both control connections are locked in a stable order for the whole
+    # coordination, so concurrent transfers in opposite directions between
+    # the same two sessions do not deadlock.
+    #
+    # On success an FXPResult with the preliminary and final responses of
+    # both servers is returned.  If either side fails after the transfer
+    # has started, the other side is sent ABOR and an FXPError is raised;
+    # the target may be left with a partial file.  STOR is never retried
+    # automatically.
+    #
+    def FTP.fxp(source, target, source_file, target_file = File.basename(source_file), address_policy:)
+      unless address_policy.respond_to?(:call)
+        raise ArgumentError,
+              "address_policy must be a callable approving the negotiated data address"
+      end
+      # Lock both control connections in a stable order so that
+      # simultaneous transfers in opposite directions between the same
+      # two sessions cannot deadlock.
+      first, second = [source, target].sort_by(&:object_id)
+      first.synchronize do
+        second.synchronize do
+          fxp_transfer(source, target, source_file, target_file, address_policy)
+        end
+      end
+    end
+
+    def FTP.fxp_transfer(source, target, source_file, target_file, address_policy) # :nodoc:
+      # The target listens; only the address it actually negotiated is
+      # relayed to the source, never a caller-supplied parameter.
+      host, port = target.send(:makepasv)
+      unless address_policy.call(host, port)
+        raise FXPError,
+              "data address #{host}:#{port} rejected by the address policy"
+      end
+      fxp_check_address_family(source, host)
+      source.send(:sendport, host, port)
+
+      target_preliminary = source_preliminary = nil
+      source.send(:with_binary, true) do
+        target.send(:with_binary, true) do
+          begin
+            target_preliminary = fxp_begin_transfer(target, "STOR #{target_file}")
+            source_preliminary = fxp_begin_transfer(source, "RETR #{source_file}")
+            # Read the source's final reply first: if the source failed,
+            # the target can still be aborted before waiting on its reply.
+            source_final = source.send(:getresp)
+            target_final = target.send(:getresp)
+            return FXPResult.new(
+              source_preliminary_response: source_preliminary,
+              source_final_response: source_final,
+              target_preliminary_response: target_preliminary,
+              target_final_response: target_final
+            )
+          rescue StandardError => error
+            # Stop the side that may still be transferring; the target
+            # may already hold a partial file.  STOR is never retried.
+            fxp_abort(source) if source_preliminary
+            fxp_abort(target) if target_preliminary
+            raise FXPError,
+                  "FXP transfer of #{source_file} failed: #{error.message.chomp} " \
+                  "(#{target_file} on the target may be a partial file; STOR is not retried)"
+          end
+        end
+      end
+    end
+    private_class_method :fxp_transfer
+
+    def FTP.fxp_begin_transfer(ftp, cmd) # :nodoc:
+      resp = ftp.send(:sendcmd, cmd)
+      # skip 2XX for some ftp servers (mirrors transfercmd)
+      resp = ftp.send(:getresp) if resp.start_with?("2")
+      unless resp.start_with?("1")
+        raise FTPReplyError, resp
+      end
+      resp
+    end
+    private_class_method :fxp_begin_transfer
+
+    def FTP.fxp_abort(ftp) # :nodoc:
+      ftp.send(:sendcmd, "ABOR")
+    rescue StandardError
+      # Best effort: the peer may already have finished or gone away.
+      nil
+    end
+    private_class_method :fxp_abort
+
+    def FTP.fxp_check_address_family(source, host) # :nodoc:
+      remote = source.instance_variable_get(:@bare_sock).remote_address
+      host_is_ipv4 = /\A\d{1,3}(\.\d{1,3}){3}\z/.match?(host)
+      if remote.ipv4? != host_is_ipv4
+        raise FXPError,
+              "cannot relay data address #{host} to a control connection of a different address family"
+      end
+    end
+    private_class_method :fxp_check_address_family
 
     # :call-seq:
     #    Net::FTP.new(host = nil, options = {})
