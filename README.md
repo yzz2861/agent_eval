@@ -139,6 +139,27 @@ posts_json.map! { |post_json| JSON::Fragment.new(post_json) }
 JSON.generate({ posts: posts_json, count: posts_json.count })
 ```
 
+## JSON Patch
+
+`JSON::Patch` implements the RFC 6902 operations `add`, `remove`, `replace`,
+`move`, `copy`, and `test`:
+
+```ruby
+require 'json/patch'
+
+document = { "items" => %w[a b c] }
+first_patch = [{ "op" => "remove", "path" => "/items/0" }]
+second_patch = [{ "op" => "replace", "path" => "/items/1", "value" => "B" }]
+
+result = JSON::Patch.relocate(document, first_patch, second_patch)
+result.success?   # => true
+result.patch      # => [{ "op" => "replace", "path" => "/items/1", "value" => "B" }]
+```
+
+When the second patch cannot be applied safely, `success?` is false and
+`conflicts` preserves the original zero-based operation index. No business merge
+rules are inferred.
+
 ## Pretty Printing
 
 `JSON.generate` always creates the shortest possible string representation of a
