@@ -54,6 +54,16 @@ module Net; module SFTP; module Operations
   # * <tt>:read_size</tt> - the maximum number of bytes to read at a time
   #   from the source. Increasing this value might improve throughput. It
   #   defaults to 32,000 bytes.
+  # * <tt>:read_window</tt> - the number of READ requests that may be in
+  #   flight concurrently for a single file. It defaults to 1, which reads
+  #   the file strictly sequentially, one request at a time. On high-latency
+  #   links, increasing this allows several requests to be outstanding at
+  #   once. Responses are reassembled by offset before they are written, so
+  #   the destination is always written sequentially, in order.
+  # * <tt>:read_buffer</tt> - the maximum number of received-but-not-yet-
+  #   written bytes to buffer when :read_window is greater than 1. New
+  #   requests are held back while this much data is waiting to be flushed
+  #   to the destination. It defaults to read_window * read_size.
   #
   # == Progress Monitoring
   #
@@ -71,8 +81,15 @@ module Net; module SFTP; module Operations
   #     when :get then
   #       # args[0] : file metadata
   #       # args[1] : byte offset in remote file
-  #       # args[2] : data that was received
+  #       # args[2] : data that was written
   #       puts "writing #{args[2].length} bytes to #{args[0].local} starting at #{args[1]}"
+  #     when :receive then
+  #       # args[0] : file metadata
+  #       # args[1] : byte offset in remote file
+  #       # args[2] : data that was received
+  #       # (only emitted when :read_window is greater than 1; chunks may
+  #       # arrive out of order, while :get always reports contiguous data)
+  #       puts "received #{args[2].length} bytes from #{args[0].remote} at #{args[1]}"
   #     when :close then
   #       # args[0] : file metadata
   #       puts "finished with #{args[0].remote}"
@@ -96,6 +113,10 @@ module Net; module SFTP; module Operations
   #
   #     def on_get(downloader, file, offset, data)
   #       puts "writing #{data.length} bytes to #{file.local} starting at #{offset}"
+  #     end
+  #
+  #     def on_receive(downloader, file, offset, data)
+  #       puts "received #{data.length} bytes from #{file.remote} starting at #{offset}"
   #     end
   #
   #     def on_close(downloader, file)
@@ -152,6 +173,7 @@ module Net; module SFTP; module Operations
       @options = options
       @active = 0
       @properties = options[:properties] || {}
+      @open_files = []
 
       self.logger = sftp.logger
 
@@ -179,6 +201,10 @@ module Net; module SFTP; module Operations
     def abort!
       @active = 0
       @stack.clear
+      @open_files.each do |entry|
+        entry.aborted = true
+        close_remote(entry)
+      end
     end
 
     # Runs the SSH event loop for as long as the downloader is active (see
@@ -204,7 +230,9 @@ module Net; module SFTP; module Operations
 
       # A simple struct for encapsulating information about a single remote
       # file or directory that needs to be downloaded.
-      Entry = Struct.new(:remote, :local, :directory, :size, :handle, :offset, :sink)
+      Entry = Struct.new(:remote, :local, :directory, :size, :handle, :offset, :sink,
+                         :next_offset, :pending, :buffered, :inflight, :holes,
+                         :eof_at, :error, :aborted, :close_requested)
 
       #--
       # "ruby -w" hates private attributes, so we have to do these longhand
@@ -223,6 +251,19 @@ module Net; module SFTP; module Operations
       # The number of bytes to read at a time from remote files.
       def read_size
         options[:read_size] || DEFAULT_READ_SIZE
+      end
+
+      # The number of READ requests that may be in flight concurrently for
+      # a single file. Defaults to 1, which preserves the traditional
+      # sequential read behavior.
+      def read_window
+        @read_window ||= [(options[:read_window] || 1).to_i, 1].max
+      end
+
+      # The maximum number of received-but-not-yet-written bytes to buffer
+      # when reading a file with a :read_window greater than 1.
+      def read_buffer
+        options[:read_buffer] || read_window * read_size
       end
 
       # The number of simultaneou SFTP requests to use to effect the download.
@@ -289,6 +330,7 @@ module Net; module SFTP; module Operations
       # Called when a file is to be opened for reading from the remote server.
       def open_file(entry)
         update_progress(:open, entry)
+        @open_files << entry
         request = sftp.open(entry.remote, &method(:on_open))
         request[:entry] = entry
       end
@@ -305,13 +347,28 @@ module Net; module SFTP; module Operations
       # to initiate the data transfer.
       def on_open(response)
         entry = response.request[:entry]
+
+        if entry.aborted
+          close_remote(entry, response[:handle]) if response.ok?
+          return
+        end
+
         raise StatusException.new(response, "open #{entry.remote}") unless response.ok?
 
         entry.handle = response[:handle]
         entry.sink = entry.local.respond_to?(:write) ? entry.local : ::File.open(entry.local, "wb")
         entry.offset = 0
 
-        download_next_chunk(entry)
+        if read_window > 1
+          entry.next_offset = 0
+          entry.pending = {}
+          entry.buffered = 0
+          entry.inflight = 0
+          entry.holes = []
+          fill_read_window(entry)
+        else
+          download_next_chunk(entry)
+        end
       end
 
       # Initiates a read of the next #read_size bytes from the file.
@@ -326,12 +383,12 @@ module Net; module SFTP; module Operations
       # next bit from the file. Otherwise the file will be closed.
       def on_read(response)
         entry = response.request[:entry]
+        return if entry.aborted
 
         if response.eof?
           update_progress(:close, entry)
           entry.sink.close
-          request = sftp.close(entry.handle, &method(:on_close))
-          request[:entry] = entry
+          close_remote(entry)
         elsif !response.ok?
           raise StatusException.new(response, "read #{entry.remote}")
         else
@@ -342,10 +399,126 @@ module Net; module SFTP; module Operations
         end
       end
 
+      # Keeps up to #read_window READ requests in flight for the given
+      # entry. Ranges left uncovered by short reads are re-requested first;
+      # then new sequential ranges are requested, unless the file's end is
+      # known or too much data is already waiting to be written out.
+      def fill_read_window(entry)
+        unless entry.aborted || entry.error
+          while entry.inflight < read_window
+            if entry.holes.any?
+              offset, length = entry.holes.shift
+            else
+              break if entry.buffered >= read_buffer
+              break if entry.eof_at && entry.next_offset >= entry.eof_at
+              offset, length = entry.next_offset, read_size
+              entry.next_offset += read_size
+            end
+            issue_parallel_read(entry, offset, length)
+          end
+        end
+
+        maybe_finish_entry(entry)
+      end
+
+      # Initiates a single parallel read of +length+ bytes at +offset+.
+      def issue_parallel_read(entry, offset, length)
+        entry.inflight += 1
+        request = sftp.read(entry.handle, offset, length, &method(:on_parallel_read))
+        request[:entry] = entry
+        request[:offset] = offset
+        request[:length] = length
+      end
+
+      # Called when a parallel read finishes. Chunks are reassembled by
+      # offset and only written to the sink in order; a short read is not
+      # EOF, so the uncovered tail is re-requested, and an early EOF does
+      # not complete the entry until all earlier ranges have arrived.
+      def on_parallel_read(response)
+        entry = response.request[:entry]
+        entry.inflight -= 1
+
+        unless entry.aborted || entry.error
+          if response.eof?
+            note_eof(entry, response.request[:offset])
+          elsif !response.ok?
+            entry.error = StatusException.new(response, "read #{entry.remote}")
+          else
+            data = response[:data]
+            offset = response.request[:offset]
+            if data.bytesize == 0
+              note_eof(entry, offset)
+            else
+              note_hole(entry, offset, data.bytesize, response.request[:length])
+              entry.pending[offset] = data
+              entry.buffered += data.bytesize
+              update_progress(:receive, entry, offset, data)
+              flush_pending(entry)
+            end
+          end
+        end
+
+        fill_read_window(entry)
+      end
+
+      # Records that the remote end reported EOF at the given offset.
+      def note_eof(entry, offset)
+        entry.eof_at = offset if entry.eof_at.nil? || offset < entry.eof_at
+      end
+
+      # After a short read of +received+ bytes at +offset+ (out of
+      # +requested+), schedules the still-uncovered tail to be requested
+      # again, capped at the known end of the file.
+      def note_hole(entry, offset, received, requested)
+        return if received >= requested
+        gap = requested - received
+        gap = entry.eof_at - offset - received if entry.eof_at && entry.eof_at - offset - received < gap
+        entry.holes << [offset + received, gap] if gap > 0
+      end
+
+      # Writes out any buffered chunks that are contiguous with the data
+      # already delivered to the sink.
+      def flush_pending(entry)
+        while (data = entry.pending.delete(entry.offset))
+          entry.buffered -= data.bytesize
+          update_progress(:get, entry, entry.offset, data)
+          entry.sink.write(data)
+          entry.offset += data.bytesize
+        end
+      end
+
+      # Closes the remote handle once the transfer of the entry is done
+      # (all requested ranges delivered up to EOF) or has failed and all
+      # in-flight requests have been drained or discarded.
+      def maybe_finish_entry(entry)
+        return if entry.close_requested || entry.inflight > 0
+
+        if entry.error || entry.aborted
+          close_remote(entry)
+        elsif entry.eof_at && entry.offset >= entry.eof_at
+          update_progress(:close, entry)
+          entry.sink.close
+          close_remote(entry)
+        end
+      end
+
+      # Sends a close request for the entry's remote handle, ensuring the
+      # handle is only ever closed once.
+      def close_remote(entry, handle=entry.handle)
+        return if entry.close_requested || handle.nil?
+        entry.close_requested = true
+        request = sftp.close(handle, &method(:on_close))
+        request[:entry] = entry
+      end
+
       # Called when a file handle is closed.
       def on_close(response)
-        @active -= 1
         entry = response.request[:entry]
+        @open_files.delete(entry)
+        return if entry.aborted
+
+        @active -= 1
+        raise entry.error if entry.error
         raise StatusException.new(response, "close #{entry.remote}") unless response.ok?
         process_next_entry
       end

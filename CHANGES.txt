@@ -1,3 +1,10 @@
+=== Unreleased
+
+* Add :read_window option to download, allowing multiple concurrent READ
+  requests per file on high-latency links, with offset-based reassembly,
+  a :read_buffer cap on undelivered data, and a :receive progress event
+  that distinguishes wire arrival from contiguous delivery
+
 === 3.0.0
 
 * Pass protocol version via Net::SFTP.start [#107]
