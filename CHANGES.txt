@@ -1,6 +1,7 @@
 === 8.0.0 beta3
 
   * Verify @cert-authority host certificate constraints — principals (shell-glob, matching OpenSSH), validity window, host type, and critical options — instead of trusting any CA-signed certificate for any host [#1009]
+  * Add per-session SSH agent forwarding policy for filtering visible identities and signature requests, with OpenSSH session-bind extension support when the local agent is compatible
 
 === 7.3.3
 

@@ -68,7 +68,7 @@ module Net
       host_name user properties passphrase keys_only max_pkt_size
       max_win_size send_env set_env use_agent number_of_password_prompts
       append_all_supported_algorithms non_interactive password_prompt
-      agent_socket_factory minimum_dh_bits verify_host_key
+      agent_socket_factory agent_forward_policy minimum_dh_bits verify_host_key
       fingerprint_hash check_host_ip pubkey_algorithms
     ]
 
@@ -205,6 +205,11 @@ module Net
     # * :agent_socket_factory => enables the user to pass a lambda/block that will serve as the socket factory
     #    Net::SSH.start(host,user,agent_socket_factory: ->{ UNIXSocket.open('/foo/bar') })
     #    example: ->{ UNIXSocket.open('/foo/bar')}
+    # * :agent_forward_policy => a per-session Net::SSH::Authentication::AgentForwardPolicy
+    #   used to filter forwarded agent identities and signature requests. When
+    #   unset, agent forwarding remains an unfiltered byte stream.
+    #   policy = Net::SSH::Authentication::AgentForwardPolicy.new(identities: authorized_public_keys)
+    #   Net::SSH.start(host, user, agent_forward_policy: policy)
     # * :verify_host_key => specify how strict host-key verification should be.
     #   In order of increasing strictness:
     #   * :never (very insecure) ::Net::SSH::Verifiers::Never

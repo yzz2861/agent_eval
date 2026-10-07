@@ -1,4 +1,6 @@
 require 'net/ssh/loggable'
+require 'net/ssh/authentication/agent_forward_policy'
+require 'net/ssh/service/forward/agent_proxy'
 
 module Net
   module SSH
@@ -410,7 +412,10 @@ module Net
 
           begin
             agent = Authentication::Agent.connect(logger, session.options[:agent_socket_factory])
-            if (agent.socket.is_a? ::IO)
+            policy = session.options[:agent_forward_policy]
+            if policy
+              prepare_policy_agent(session, channel, agent.socket, policy)
+            elsif agent.socket.is_a?(::IO)
               prepare_client(agent.socket, channel, :agent)
             else
               prepare_simple_client(agent.socket, channel, :agent)
@@ -419,6 +424,46 @@ module Net
             error { "attempted to connect to agent but failed: #{e.class.name} (#{e.message})" }
             raise Net::SSH::ChannelOpenFailed.new(2, "could not connect to authentication agent")
           end
+        end
+
+        def prepare_policy_agent(session, channel, agent_socket, policy)
+          proxy = AgentProxy.new(channel, agent_socket, policy,
+                                 session_binding: agent_session_binding(session),
+                                 logger: logger)
+          channel[:agent_proxy] = proxy
+          proxy.start
+
+          if agent_socket.is_a?(::IO)
+            agent_socket.extend(Net::SSH::BufferedIo)
+            agent_socket.extend(Net::SSH::ForwardedBufferedIo)
+            agent_socket.logger = logger
+
+            session.listen_to(agent_socket) do |socket|
+              if socket.fill.zero?
+                proxy.close
+              else
+                proxy.receive_agent_data(socket.read_available(8192))
+              end
+            end
+          else
+            channel.on_process { proxy.agent_readable? }
+          end
+
+          channel.on_close do
+            session.stop_listening_to(agent_socket) if agent_socket.is_a?(::IO)
+            proxy.close
+          end
+        end
+
+        def agent_session_binding(session)
+          algorithms = session.transport.algorithms
+          return nil unless algorithms.server_key_blob
+
+          {
+            host_key_algorithm: algorithms.host_key,
+            session_id: algorithms.session_id,
+            host_key_blob: algorithms.server_key_blob
+          }
         end
       end
     end

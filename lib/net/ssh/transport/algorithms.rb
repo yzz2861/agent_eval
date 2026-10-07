@@ -146,6 +146,9 @@ module Net
         # The session-id for this session, as decided during the initial key exchange.
         attr_reader :session_id
 
+        # The host key and blob received during the most recent key exchange.
+        attr_reader :server_key, :server_key_blob
+
         # Returns true if the given packet can be processed during a key-exchange.
         def self.allowed_packet?(packet)
           (1..4).include?(packet.type) ||
@@ -462,6 +465,8 @@ module Net
           digester = result[:hashing_algorithm]
 
           @session_id ||= hash
+          @server_key = result[:server_key]
+          @server_key_blob = result[:key_blob]
 
           key = Proc.new { |salt| digester.digest(secret + hash + salt + @session_id) }
 
