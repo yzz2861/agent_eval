@@ -48,6 +48,206 @@ module Hamster
     # @private
     BITS_PER_LEVEL = 5
 
+    # @private
+    class VectorChunk
+      attr_reader :vector, :offset, :length, :height
+
+      def initialize(vector, offset = 0, length = vector.size)
+        @vector = vector
+        @offset = offset
+        @length = length
+        @height = 0
+        freeze
+      end
+
+      def size
+        @length
+      end
+
+      def get(index)
+        @vector.get(@offset + index)
+      end
+
+      def put(index, item)
+        updated = @vector.send(:put_at, @offset + index, item)
+        return self if updated.equal?(@vector)
+
+        node = Rope.vector_node(updated)
+        if @offset.zero? && @length == @vector.size
+          node
+        else
+          Rope.slice_node(node, @offset, @length)
+        end
+      end
+
+      def slice(from, length)
+        return nil if length.zero?
+        return self if from.zero? && length == @length
+        VectorChunk.new(@vector, @offset + from, length)
+      end
+
+      def each(&block)
+        @vector.send(:range_each, @offset, @offset + @length - 1, &block)
+        self
+      end
+
+      def reverse_each(&block)
+        @vector.send(:range_reverse_each, @offset, @offset + @length - 1, &block)
+        self
+      end
+    end
+
+    # @private
+    RopeNode = Struct.new(:left, :right, :weight, :height) do
+      def size
+        weight + Rope.size(right)
+      end
+    end
+
+    # @private
+    module Rope
+      class << self
+        def concat(left, right)
+          join(left, right)
+        end
+
+        def vector_node(vector)
+          vector.send(:rope?) ? vector.instance_variable_get(:@root) : VectorChunk.new(vector)
+        end
+
+        def slice_node(node, from, length)
+          return nil if node.nil? || length.zero?
+          return node if from.zero? && length == size(node)
+
+          _, remainder = split(node, from)
+          prefix, _ = split(remainder, length)
+          prefix
+        end
+
+        def replace(node, index, item)
+          if node.is_a?(VectorChunk)
+            node.put(index, item)
+          elsif index < node.weight
+            replaced = replace(node.left, index, item)
+            replaced.equal?(node.left) ? node : make_node(replaced, node.right)
+          else
+            replaced = replace(node.right, index - node.weight, item)
+            replaced.equal?(node.right) ? node : make_node(node.left, replaced)
+          end
+        end
+
+        def split(node, index)
+          return [nil, nil] if node.nil?
+          return [node.slice(0, index), node.slice(index, node.length - index)] if node.is_a?(VectorChunk)
+
+          if index < node.weight
+            prefix, suffix = split(node.left, index)
+            [prefix, join(suffix, node.right)]
+          elsif index > node.weight
+            prefix, suffix = split(node.right, index - node.weight)
+            [join(node.left, prefix), suffix]
+          else
+            [node.left, node.right]
+          end
+        end
+
+        def join(left, right)
+          return right if left.nil?
+          return left if right.nil?
+
+          left_height = height(left)
+          right_height = height(right)
+
+          if left_height > right_height + 1
+            rebalance(make_node(left.left, join(left.right, right)))
+          elsif right_height > left_height + 1
+            rebalance(make_node(join(left, right.left), right.right))
+          else
+            make_node(left, right)
+          end
+        end
+
+        def each(node, &block)
+          return if node.nil?
+          if node.is_a?(VectorChunk)
+            node.each(&block)
+          else
+            each(node.left, &block)
+            each(node.right, &block)
+          end
+        end
+
+        def reverse_each(node, &block)
+          return if node.nil?
+          if node.is_a?(VectorChunk)
+            node.reverse_each(&block)
+          else
+            reverse_each(node.right, &block)
+            reverse_each(node.left, &block)
+          end
+        end
+
+        def flatten(node, result)
+          each(node) { |item| result << item }
+          result
+        end
+
+        def eql?(left, right)
+          left_items = Enumerator.new { |yielder| each(left) { |item| yielder << item } }
+          right_items = Enumerator.new { |yielder| each(right) { |item| yielder << item } }
+          loop do
+            return false unless left_items.next.eql?(right_items.next)
+          end
+          true
+        rescue StopIteration
+          size(left) == size(right)
+        end
+
+        def size(node)
+          node.nil? ? 0 : node.size
+        end
+
+        def height(node)
+          node.nil? ? 0 : node.height
+        end
+
+        private
+
+        def make_node(left, right)
+          RopeNode.new(left, right, size(left), 1 + [height(left), height(right)].max).freeze
+        end
+
+        def rebalance(node)
+          left_height = height(node.left)
+          right_height = height(node.right)
+
+          if left_height > right_height + 1
+            if height(node.left.left) >= height(node.left.right)
+              middle = node.left
+              make_node(middle.left, make_node(middle.right, node.right))
+            else
+              middle = node.left
+              inner = middle.right
+              make_node(make_node(middle.left, inner.left), make_node(inner.right, node.right))
+            end
+          elsif right_height > left_height + 1
+            if height(node.right.right) >= height(node.right.left)
+              middle = node.right
+              make_node(make_node(node.left, middle.left), middle.right)
+            else
+              middle = node.right
+              inner = middle.left
+              make_node(make_node(node.left, inner.left), make_node(inner.right, middle.right))
+            end
+          else
+            node
+          end
+        end
+      end
+    end
+
+    private_constant :VectorChunk, :RopeNode, :Rope
+
     # Return the number of items in this `Vector`
     # @return [Integer]
     attr_reader :size
@@ -132,6 +332,7 @@ module Hamster
     # @param item [Object] The object to insert at the end of the vector
     # @return [Vector]
     def add(item)
+      return alloc_rope(Rope.concat(@root, VectorChunk.new(self.class[item])), @size + 1) if rope?
       update_root(@size, item)
     end
     alias :<< :add
@@ -165,6 +366,7 @@ module Hamster
     # @param index [Integer] The index to update. May be negative.
     # @return [Vector]
     def put(index, item = yield(get(index)))
+      return put_rope(index, item) if rope?
       raise IndexError, "index #{index} outside of vector bounds" if index < -@size
       index += @size if index < 0
       if index > @size
@@ -214,6 +416,7 @@ module Hamster
       return nil if @size == 0
       index += @size if index < 0
       return nil if index >= @size || index < 0
+      return get_rope(index) if rope?
       leaf_node_for(@root, @levels * BITS_PER_LEVEL, index)[index & INDEX_MASK]
     end
     alias :at :get
@@ -347,17 +550,13 @@ module Hamster
       raise IndexError if index < -@size
       index += @size if index < 0
 
-      if index < @size
-        suffix = flatten_suffix(@root, @levels * BITS_PER_LEVEL, index, [])
-        suffix.unshift(*items)
-      elsif index == @size
-        suffix = items
-      else
-        suffix = Array.new(index - @size, nil).concat(items)
-        index = @size
-      end
+      return self if items.empty?
 
-      replace_suffix(index, suffix)
+      if index <= @size
+        splice(index, 0, self.class.new(items))
+      else
+        splice(@size, 0, self.class.new(Array.new(index - @size, nil).concat(items)))
+      end
     end
 
     # Return a new `Vector` with the element at `index` removed. If the given `index`
@@ -372,9 +571,7 @@ module Hamster
     def delete_at(index)
       return self if index >= @size || index < -@size
       index += @size if index < 0
-
-      suffix = flatten_suffix(@root, @levels * BITS_PER_LEVEL, index, [])
-      replace_suffix(index, suffix.tap { |a| a.shift })
+      splice(index, 1, self.class.empty)
     end
 
     # Return a new `Vector` with the last element removed. Return `self` if
@@ -386,6 +583,7 @@ module Hamster
     # @return [Vector]
     def pop
       return self if @size == 0
+      return splice(@size - 1, 1, self.class.empty) if rope?
       replace_suffix(@size-1, [])
     end
 
@@ -428,6 +626,10 @@ module Hamster
     # @return [self, Enumerator]
     def each(&block)
       return to_enum unless block_given?
+      if rope?
+        Rope.each(@root, &block)
+        return self
+      end
       traverse_depth_first(@root, @levels, &block)
       self
     end
@@ -445,6 +647,10 @@ module Hamster
     # @return [self]
     def reverse_each(&block)
       return enum_for(:reverse_each) unless block_given?
+      if rope?
+        Rope.reverse_each(@root, &block)
+        return self
+      end
       reverse_traverse_depth_first(@root, @levels, &block)
       self
     end
@@ -597,6 +803,7 @@ module Hamster
     # @param other [Enumerable] The collection to concatenate onto this vector
     # @return [Vector]
     def +(other)
+      return concat_vector(other) if other.is_a?(Vector)
       other = other.to_a
       other = other.dup if other.frozen?
       replace_suffix(@size, other)
@@ -690,6 +897,7 @@ module Hamster
       return self if n == 0
       return self.class.empty if n >= @size
       raise ArgumentError, "attempt to drop negative size" if n < 0
+      return subsequence(n, @size - n) if rope?
       self.class.new(flatten_suffix(@root, @levels * BITS_PER_LEVEL, n, []))
     end
 
@@ -702,6 +910,7 @@ module Hamster
     # @param n [Integer] The number of elements to retain
     # @return [Vector]
     def take(n)
+      return subsequence(0, n) if rope? && n < @size
       return self if n >= @size
       self.class.new(super)
     end
@@ -791,18 +1000,17 @@ module Hamster
       raise IndexError if index < -@size
       index += @size if index < 0
       length ||= @size - index # to the end of the array, if no length given
+      return self if length < 0
 
-      if index < @size
-        suffix = flatten_suffix(@root, @levels * BITS_PER_LEVEL, index, [])
-        suffix.fill(object, 0, length)
-      elsif index == @size
-        suffix = Array.new(length, object)
-      else
-        suffix = Array.new(index - @size, nil).concat(Array.new(length, object))
-        index = @size
+      if index <= @size
+        return self if length.zero?
+        removed_length = [length, @size - index].min
+        replacement = self.class.new(Array.new(length, object))
+        return splice(index, removed_length, replacement)
       end
 
-      replace_suffix(index, suffix)
+      suffix = Array.new(index - @size, nil).concat(Array.new(length, object))
+      replace_suffix(@size, suffix)
     end
 
     # When invoked with a block, yields all combinations of length `n` of items
@@ -1268,6 +1476,7 @@ module Hamster
     #
     # @return [Array]
     def to_a
+      return Rope.flatten(@root, []) if rope?
       if @levels == 0
         # When initializing a Vector with 32 or less items, we always make
         # sure @root is frozen, so we can return it directly here
@@ -1285,7 +1494,11 @@ module Hamster
     def eql?(other)
       return true if other.equal?(self)
       return false unless instance_of?(other.class) && @size == other.size
-      @root.eql?(other.instance_variable_get(:@root))
+      if rope? || other.send(:rope?)
+        Rope.eql?(to_rope_node, other.send(:to_rope_node))
+      else
+        @root.eql?(other.instance_variable_get(:@root))
+      end
     end
 
     # See `Object#hash`.
@@ -1315,6 +1528,52 @@ module Hamster
     def reverse_traverse_depth_first(node, level, &block)
       return node.reverse_each(&block) if level == 0
       node.reverse_each { |child| reverse_traverse_depth_first(child, level - 1, &block) }
+    end
+
+    def range_each(from, to, &block)
+      yield_range(@root, @levels * BITS_PER_LEVEL, from, to, &block)
+      self
+    end
+
+    def range_reverse_each(from, to, &block)
+      yield_reverse_range(@root, @levels * BITS_PER_LEVEL, from, to, &block)
+      self
+    end
+
+    def yield_range(node, bitshift, from, to, &block)
+      from_slot = (from >> bitshift) & INDEX_MASK
+      to_slot = (to >> bitshift) & INDEX_MASK
+
+      if bitshift.zero?
+        from_slot.upto(to_slot) { |index| yield(node[index]) }
+      elsif from_slot == to_slot
+        yield_range(node[from_slot], bitshift - BITS_PER_LEVEL, from, to, &block)
+      else
+        mask = (1 << bitshift) - 1
+        yield_range(node[from_slot], bitshift - BITS_PER_LEVEL, from, from | mask, &block)
+        (from_slot + 1).upto(to_slot - 1) do |slot|
+          traverse_depth_first(node[slot], (bitshift / BITS_PER_LEVEL) - 1, &block)
+        end
+        yield_range(node[to_slot], bitshift - BITS_PER_LEVEL, to & ~mask, to, &block)
+      end
+    end
+
+    def yield_reverse_range(node, bitshift, from, to, &block)
+      from_slot = (from >> bitshift) & INDEX_MASK
+      to_slot = (to >> bitshift) & INDEX_MASK
+
+      if bitshift.zero?
+        to_slot.downto(from_slot) { |index| yield(node[index]) }
+      elsif from_slot == to_slot
+        yield_reverse_range(node[from_slot], bitshift - BITS_PER_LEVEL, from, to, &block)
+      else
+        mask = (1 << bitshift) - 1
+        yield_reverse_range(node[to_slot], bitshift - BITS_PER_LEVEL, to & ~mask, to, &block)
+        (to_slot - 1).downto(from_slot + 1) do |slot|
+          reverse_traverse_depth_first(node[slot], (bitshift / BITS_PER_LEVEL) - 1, &block)
+        end
+        yield_reverse_range(node[from_slot], bitshift - BITS_PER_LEVEL, from, from | mask, &block)
+      end
     end
 
     def leaf_node_for(node, bitshift, index)
@@ -1403,7 +1662,76 @@ module Hamster
       return nil if from > @size || from < 0 || length < 0
       length = @size - from if @size < from + length
       return self.class.empty if length == 0
+      return alloc_rope(Rope.slice_node(@root, from, length), length) if rope?
       self.class.new(flatten_range(@root, @levels * BITS_PER_LEVEL, from, from + length - 1))
+    end
+
+    def concat_vector(other)
+      return self if other.empty?
+      return other.dup if empty?
+      alloc_rope(Rope.concat(to_rope_node, other.send(:to_rope_node)), @size + other.size)
+    end
+
+    def rope?
+      (@levels == 0 && @root.is_a?(RopeNode)) || @root.is_a?(VectorChunk)
+    end
+
+    def to_rope_node
+      rope? ? @root : VectorChunk.new(self)
+    end
+
+    def alloc_rope(root, size)
+      self.class.alloc(root, size, 0)
+    end
+
+    def get_rope(index)
+      node = @root
+      while node.is_a?(RopeNode)
+        if index < node.weight
+          node = node.left
+        else
+          index -= node.weight
+          node = node.right
+        end
+      end
+      node.get(index)
+    end
+
+    def put_at(index, item)
+      return Rope.replace(@root, index, item) if rope?
+      update_root(index, item)
+    end
+
+    def put_rope(index, item)
+      index += @size if index < 0
+      if index >= 0 && index < @size
+        new_root = Rope.replace(@root, index, item)
+        new_root.equal?(@root) ? self : alloc_rope(new_root, @size)
+      elsif index == @size
+        add(item)
+      elsif index > @size
+        padding = self.class.new(Array.new(index - @size, nil))
+        replacement = Rope.concat(VectorChunk.new(padding), VectorChunk.new(self.class[item]))
+        alloc_rope(Rope.concat(@root, replacement), index + 1)
+      else
+        raise IndexError, "index #{index} outside of vector bounds"
+      end
+    end
+
+    def splice(index, delete_length, replacement)
+      prefix = Rope.slice_node(to_rope_node, 0, index)
+      suffix_start = index + delete_length
+      suffix = Rope.slice_node(to_rope_node, suffix_start, @size - suffix_start)
+      new_size = index + replacement.size + (@size - suffix_start)
+      return self.class.empty if new_size.zero?
+
+      root = if replacement.empty?
+        prefix
+      else
+        Rope.concat(prefix, replacement.send(:to_rope_node))
+      end
+      root = Rope.concat(root, suffix)
+      alloc_rope(root, new_size)
     end
 
     def flatten_suffix(node, bitshift, from, result)
