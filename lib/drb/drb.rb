@@ -1767,26 +1767,32 @@ module DRb
           @exported_uri << client_uri unless @exported_uri.include?(client_uri)
         end
         _last_invoke_method = nil
-        loop do
-          begin
-            succ = false
-            invoke_method = InvokeMethod.new(self, client)
-            succ, result = invoke_method.perform
-            error_print(result) if !succ && verbose
-            unless DRbConnError === result && result.message == 'connection closed'
-              client.send_reply(succ, result)
+        begin
+          loop do
+            begin
+              succ = false
+              invoke_method = InvokeMethod.new(self, client)
+              succ, result = invoke_method.perform
+              error_print(result) if !succ && verbose
+              unless DRbConnError === result && result.message == 'connection closed'
+                client.send_reply(succ, result)
+              end
+            rescue Exception => e
+              error_print(e) if verbose
+            ensure
+              _last_invoke_method = invoke_method
+              client.close unless succ
+              if Thread.current['DRb']['stop_service']
+                shutdown
+                break
+              end
+              break unless succ
             end
-          rescue Exception => e
-            error_print(e) if verbose
-          ensure
-            _last_invoke_method = invoke_method
-            client.close unless succ
-            if Thread.current['DRb']['stop_service']
-              shutdown
-              break
-            end
-            break unless succ
           end
+        ensure
+          servers = Thread.current['DRb']['pull_enumerator_servers'] || []
+          servers.uniq.each { |server, id| server.close_cursor(id) }
+          client.close
         end
       end
     end

@@ -32,6 +32,7 @@ Gem::Specification.new do |spec|
     lib/drb/extservm.rb
     lib/drb/gw.rb
     lib/drb/observer.rb
+    lib/drb/pull_enumerator.rb
     lib/drb/ssl.rb
     lib/drb/timeridconv.rb
     lib/drb/unix.rb
