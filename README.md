@@ -244,6 +244,22 @@ response = OneLogin::RubySaml::Response.new(params[:SAMLResponse], {skip_recipie
 response = OneLogin::RubySaml::Response.new(params[:SAMLResponse], {skip_audience: true}) # skips audience check
 ```
 
+If the IdP issues assertions with the `holder-of-key` subject confirmation method, the toolkit
+can verify that the confirmed key material is the one the client proved to possess at the TLS
+layer. Extract the client certificate (or public key) from your TLS termination and pass it with
+the `:holder_of_key_certificate` option (an `OpenSSL::X509::Certificate`, an `OpenSSL::PKey`
+public key, or a PEM/DER string). The toolkit never reads certificates from HTTP headers: the
+application is responsible for authenticating the client key material first. A holder-of-key
+confirmation is only accepted when the method, `Recipient`, timings, request correlation and the
+key material referenced by the signed `SubjectConfirmationData` all match within the same
+`SubjectConfirmation` element; bearer confirmations keep working as before and require no extra
+configuration.
+
+```ruby
+client_cert = OpenSSL::X509::Certificate.new(request.env['SSL_CLIENT_CERT']) # already verified by the TLS layer
+response = OneLogin::RubySaml::Response.new(params[:SAMLResponse], {holder_of_key_certificate: client_cert})
+```
+
 All that's left is to wrap everything in a controller and reference it in the initialization and
 consumption URLs in OneLogin. A full controller example could look like this:
 

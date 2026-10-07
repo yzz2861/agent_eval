@@ -17,6 +17,8 @@ module OneLogin
       PROTOCOL  = "urn:oasis:names:tc:SAML:2.0:protocol"
       DSIG      = "http://www.w3.org/2000/09/xmldsig#"
       XENC      = "http://www.w3.org/2001/04/xmlenc#"
+      BEARER_CONFIRMATION_METHOD = "urn:oasis:names:tc:SAML:2.0:cm:bearer"
+      HOLDER_OF_KEY_CONFIRMATION_METHOD = "urn:oasis:names:tc:SAML:2.0:cm:holder-of-key"
       SAML_NAMESPACES = {
         "p" => PROTOCOL,
         "a" => ASSERTION
@@ -39,7 +41,7 @@ module OneLogin
       # and pass custom options
       AVAILABLE_OPTIONS = [
         :allowed_clock_drift, :check_duplicated_attributes, :matches_request_id, :settings, :skip_audience, :skip_authnstatement, :skip_conditions,
-        :skip_destination, :skip_recipient_check, :skip_subject_confirmation
+        :skip_destination, :skip_recipient_check, :skip_subject_confirmation, :holder_of_key_certificate
       ]
       # TODO: Update the comment on initialize to describe every option
 
@@ -52,6 +54,9 @@ module OneLogin
       #                          or skip the subject confirmation validation with the :skip_subject_confirmation option
       #                          or skip the recipient validation of the subject confirmation element with :skip_recipient_check option
       #                          or skip the audience validation with :skip_audience option
+      #                          or validate holder-of-key subject confirmations against client key material
+      #                          already verified at the TLS layer with the :holder_of_key_certificate option
+      #                          (an OpenSSL::X509::Certificate, an OpenSSL::PKey public key, or a PEM/DER string)
       #
       def initialize(response, options = {})
         raise ArgumentError.new("Response cannot be nil") if response.nil?
@@ -784,6 +789,10 @@ module OneLogin
       # timing validation are relaxed by the allowed_clock_drift value. If the response was initialized with the
       # :skip_subject_confirmation option, this validation is skipped)
       # There is also an optional Recipient check
+      # Subject confirmations with the holder-of-key method are only accepted when the response was initialized
+      # with the :holder_of_key_certificate option and the key material referenced by the SubjectConfirmationData
+      # matches the provided one. All the requirements (method, Recipient, timings, request correlation and key
+      # material) must be satisfied by the same SubjectConfirmation element.
       # If fails, the error is added to the errors array
       # @return [Boolean] True if a valid SubjectConfirmation, otherwise False if soft=True
       # @raise [ValidationError] if soft == false and validation fails
@@ -796,7 +805,8 @@ module OneLogin
 
         now = Time.now.utc
         subject_confirmation_nodes.each do |subject_confirmation|
-          if subject_confirmation.attributes.include? "Method" and subject_confirmation.attributes['Method'] != 'urn:oasis:names:tc:SAML:2.0:cm:bearer'
+          method = subject_confirmation.attributes['Method']
+          if method && method != BEARER_CONFIRMATION_METHOD && method != HOLDER_OF_KEY_CONFIRMATION_METHOD
             next
           end
 
@@ -814,6 +824,8 @@ module OneLogin
                   (attrs.include? "NotOnOrAfter" and now >= (parse_time(confirmation_data_node, "NotOnOrAfter") + allowed_clock_drift)) ||
                   (attrs.include? "Recipient" and !options[:skip_recipient_check] and settings and attrs['Recipient'] != settings.assertion_consumer_service_url)
 
+          next if method == HOLDER_OF_KEY_CONFIRMATION_METHOD && !validate_holder_of_key_confirmation(confirmation_data_node)
+
           valid_subject_confirmation = true
           break
         end
@@ -824,6 +836,128 @@ module OneLogin
         end
 
         true
+      end
+
+      # Validates that one of the ds:KeyInfo entries of the given SubjectConfirmationData element
+      # references the same key material as the one provided with the :holder_of_key_certificate option
+      # (which the application obtained from the TLS layer). The mere presence of a certificate or a
+      # key in the assertion is never enough: it must match the provided material.
+      # @param confirmation_data_node [REXML::Element] The SubjectConfirmationData element of a
+      #   holder-of-key SubjectConfirmation
+      # @return [Boolean] True if the referenced key material matches the provided one
+      #
+      def validate_holder_of_key_confirmation(confirmation_data_node)
+        expected_key = holder_of_key_public_key
+        return false if expected_key.nil?
+
+        key_info_nodes = REXML::XPath.match(
+          confirmation_data_node,
+          'ds:KeyInfo',
+          { "ds" => DSIG }
+        )
+
+        key_info_nodes.any? do |key_info_node|
+          holder_of_key_info_matches?(key_info_node, expected_key)
+        end
+      end
+
+      # Checks if a ds:KeyInfo element references the expected key material, either
+      # through a ds:X509Certificate entry or through a ds:RSAKeyValue entry
+      # @param key_info_node [REXML::Element] The ds:KeyInfo element
+      # @param expected_key [OpenSSL::PKey::PKey] The key material provided by the application
+      # @return [Boolean] True if the ds:KeyInfo element references the expected key material
+      #
+      def holder_of_key_info_matches?(key_info_node, expected_key)
+        x509_certificate_nodes = REXML::XPath.match(
+          key_info_node,
+          'ds:X509Data/ds:X509Certificate',
+          { "ds" => DSIG }
+        )
+        x509_certificate_nodes.each do |x509_certificate_node|
+          certificate = parse_x509_certificate(x509_certificate_node.text)
+          return true if certificate && public_keys_match?(certificate.public_key, expected_key)
+        end
+
+        rsa_key_value_nodes = REXML::XPath.match(
+          key_info_node,
+          'ds:KeyValue/ds:RSAKeyValue',
+          { "ds" => DSIG }
+        )
+        rsa_key_value_nodes.each do |rsa_key_value_node|
+          return true if rsa_key_value_matches?(rsa_key_value_node, expected_key)
+        end
+
+        false
+      end
+
+      # The public key material provided by the application through the
+      # :holder_of_key_certificate option, normalized to an OpenSSL public key
+      # @return [OpenSSL::PKey::PKey, nil] The public key, or nil if no valid material was provided
+      #
+      def holder_of_key_public_key
+        return @holder_of_key_public_key if defined?(@holder_of_key_public_key)
+
+        material = options[:holder_of_key_certificate]
+        @holder_of_key_public_key = case material
+        when nil
+          nil
+        when OpenSSL::X509::Certificate
+          material.public_key
+        when OpenSSL::PKey::PKey
+          material
+        when String
+          parse_holder_of_key_material(material)
+        end
+      end
+
+      # Parses a String with client key material (a certificate or a public key, PEM or DER encoded)
+      # @return [OpenSSL::PKey::PKey, nil] The public key, or nil if the material cannot be parsed
+      #
+      def parse_holder_of_key_material(material)
+        OpenSSL::X509::Certificate.new(material).public_key
+      rescue OpenSSL::X509::CertificateError
+        begin
+          OpenSSL::PKey::RSA.new(material)
+        rescue OpenSSL::PKey::PKeyError, OpenSSL::PKey::RSAError
+          nil
+        end
+      end
+
+      # @return [OpenSSL::X509::Certificate, nil] The certificate, or nil if it cannot be parsed
+      #
+      def parse_x509_certificate(base64_cert)
+        OpenSSL::X509::Certificate.new(Base64.decode64(base64_cert.to_s))
+      rescue OpenSSL::X509::CertificateError
+        nil
+      end
+
+      # Compares two public keys
+      # @return [Boolean] True if both keys are the same
+      #
+      def public_keys_match?(key, expected_key)
+        if key.is_a?(OpenSSL::PKey::RSA) && expected_key.is_a?(OpenSSL::PKey::RSA)
+          key.n == expected_key.n && key.e == expected_key.e
+        else
+          key.to_der == expected_key.to_der
+        end
+      rescue OpenSSL::PKey::PKeyError
+        false
+      end
+
+      # Checks if a ds:RSAKeyValue element describes the expected RSA key
+      # @return [Boolean] True if the modulus and the exponent match the expected key
+      #
+      def rsa_key_value_matches?(rsa_key_value_node, expected_key)
+        return false unless expected_key.is_a?(OpenSSL::PKey::RSA)
+
+        modulus_node = REXML::XPath.first(rsa_key_value_node, 'ds:Modulus', { "ds" => DSIG })
+        exponent_node = REXML::XPath.first(rsa_key_value_node, 'ds:Exponent', { "ds" => DSIG })
+        return false if modulus_node.nil? || exponent_node.nil?
+
+        modulus = OpenSSL::BN.new(Base64.decode64(modulus_node.text.to_s), 2)
+        exponent = OpenSSL::BN.new(Base64.decode64(exponent_node.text.to_s), 2)
+
+        modulus == expected_key.n && exponent == expected_key.e
       end
 
       # Validates the NameID element

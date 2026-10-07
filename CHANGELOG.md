@@ -1,5 +1,8 @@
 # Ruby SAML Changelog
 
+### Unreleased
+* Add holder-of-key subject confirmation validation: the new `:holder_of_key_certificate` response option lets applications provide client key material already verified at the TLS layer and have it matched against the signed `SubjectConfirmationData`
+
 ### 1.18.1  (Jul 29, 2025)
 * Fix vulnerability CVE-2025-54572 Prevent DOS due large SAML Message
 * Adapt tests to be able to execute signature validation sooner

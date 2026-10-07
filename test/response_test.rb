@@ -847,6 +847,111 @@ class RubySamlTest < Minitest::Test
       end
     end
 
+    describe "#validate_subject_confirmation with holder-of-key" do
+      let(:client_certificate) { OpenSSL::X509::Certificate.new(ruby_saml_cert_text2) }
+      let(:other_certificate) { OpenSSL::X509::Certificate.new(signature_1) }
+      let(:hok_settings) {
+        s = OneLogin::RubySaml::Settings.new
+        s.assertion_consumer_service_url = 'recipient'
+        s
+      }
+
+      def hok_response(document, options = {})
+        response = OneLogin::RubySaml::Response.new(read_response(document), options)
+        response.settings = hok_settings
+        response
+      end
+
+      it "return true when the holder-of-key certificate matches the provided one" do
+        response = hok_response("response_with_holder_of_key.xml.base64", :holder_of_key_certificate => client_certificate)
+        assert response.send(:validate_subject_confirmation)
+        assert_empty response.errors
+      end
+
+      it "return true when the certificate is provided as a PEM string" do
+        response = hok_response("response_with_holder_of_key.xml.base64", :holder_of_key_certificate => ruby_saml_cert_text2)
+        assert response.send(:validate_subject_confirmation)
+        assert_empty response.errors
+      end
+
+      it "return true when only the public key is provided" do
+        response = hok_response("response_with_holder_of_key.xml.base64", :holder_of_key_certificate => client_certificate.public_key)
+        assert response.send(:validate_subject_confirmation)
+        assert_empty response.errors
+      end
+
+      it "return true when the key is confirmed through a ds:RSAKeyValue entry" do
+        response = hok_response("response_with_holder_of_key_key_value.xml.base64", :holder_of_key_certificate => client_certificate)
+        assert response.send(:validate_subject_confirmation)
+        assert_empty response.errors
+      end
+
+      it "return false when the assertion carries a certificate but no key material is provided" do
+        response = hok_response("response_with_holder_of_key.xml.base64")
+        assert !response.send(:validate_subject_confirmation)
+        assert_includes response.errors, "A valid SubjectConfirmation was not found on this Response"
+      end
+
+      it "return false when the provided certificate was replaced by a different one" do
+        response = hok_response("response_with_holder_of_key.xml.base64", :holder_of_key_certificate => other_certificate)
+        assert !response.send(:validate_subject_confirmation)
+        assert_includes response.errors, "A valid SubjectConfirmation was not found on this Response"
+      end
+
+      it "return false when the provided key material cannot be parsed" do
+        response = hok_response("response_with_holder_of_key.xml.base64", :holder_of_key_certificate => "not-a-certificate")
+        assert !response.send(:validate_subject_confirmation)
+        assert_includes response.errors, "A valid SubjectConfirmation was not found on this Response"
+      end
+
+      it "return false when the key matches in one branch but the recipient matches in another branch" do
+        response = hok_response("response_with_holder_of_key_multiple.xml.base64", :holder_of_key_certificate => client_certificate)
+        assert !response.send(:validate_subject_confirmation)
+        assert_includes response.errors, "A valid SubjectConfirmation was not found on this Response"
+      end
+
+      it "return true when a bearer confirmation is valid even if the holder-of-key key does not match" do
+        response = hok_response("response_with_holder_of_key_and_bearer.xml.base64", :holder_of_key_certificate => client_certificate)
+        assert response.send(:validate_subject_confirmation)
+        assert_empty response.errors
+      end
+
+      it "return true when the skip_subject_confirmation option is passed" do
+        response = hok_response("response_with_holder_of_key.xml.base64", :skip_subject_confirmation => true)
+        Time.expects(:now).times(0) # ensures the test isn't run and thus Time.now.utc is never called within the test
+        assert response.send(:validate_subject_confirmation)
+        assert_empty response.errors
+      end
+
+      it "is valid when the response is fully validated with the matching certificate" do
+        settings = hok_settings
+        settings.idp_cert = ruby_saml_cert_text
+        response = OneLogin::RubySaml::Response.new(
+          read_response("response_with_holder_of_key.xml.base64"),
+          :settings => settings,
+          :holder_of_key_certificate => client_certificate,
+          :skip_destination => true,
+          :skip_audience => true
+        )
+        assert response.is_valid?(true)
+        assert_empty response.errors
+      end
+
+      it "is not valid when the response is fully validated with a replaced certificate" do
+        settings = hok_settings
+        settings.idp_cert = ruby_saml_cert_text
+        response = OneLogin::RubySaml::Response.new(
+          read_response("response_with_holder_of_key.xml.base64"),
+          :settings => settings,
+          :holder_of_key_certificate => other_certificate,
+          :skip_destination => true,
+          :skip_audience => true
+        )
+        assert !response.is_valid?(true)
+        assert_includes response.errors, "A valid SubjectConfirmation was not found on this Response"
+      end
+    end
+
     describe "#validate_session_expiration" do
       it "return true when the session has not expired" do
         response_valid_signed.settings = settings
