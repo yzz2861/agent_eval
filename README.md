@@ -84,6 +84,11 @@ When using DRb, try to avoid exposing it over the network if possible. If this
 isn't possible and you need to expose DRb to the world, you *must* configure an
 appropriate security policy with +DRb::ACL+.
 
+An optional capability proxy can publish a server-owned method allowlist and
+derive narrower, independently revocable proxies. It only constrains remote
+method dispatch; it does not make untrusted Marshal payloads safe or provide
+transport authentication.
+
 ## Development
 
 After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake test` to run the tests. You can also run `bin/console` for an interactive prompt that will allow you to experiment.

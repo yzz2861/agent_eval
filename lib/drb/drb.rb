@@ -43,6 +43,7 @@
 require 'socket'
 require 'io/wait' if RUBY_VERSION < '3.2'
 require 'monitor'
+require 'securerandom'
 require_relative 'eq'
 require_relative 'version'
 
@@ -285,6 +286,17 @@ require_relative 'version'
 # general, this mechanism should only be used alongside, rather than
 # as a replacement for, a good firewall.
 #
+# A server may additionally publish a capability proxy with
+# DRb::DRbServer#publish.  The server keeps the opaque capability token
+# and its allowed methods; changing a client proxy cannot grant extra
+# authority. Derived capabilities are separate grants and may be revoked
+# independently. Returned remote references can be copied, passed through,
+# or wrapped in another declared capability.
+#
+# Capabilities constrain remote method dispatch only. They do not make
+# Marshal safe for untrusted payloads, and do not replace transport
+# authentication, network controls, or application-level validation.
+#
 # == dRuby internals
 #
 # dRuby is implemented using three main components: a remote method
@@ -412,6 +424,57 @@ module DRb
   module DRbUndumped
     def _dump(dummy)  # :nodoc:
       raise TypeError, 'can\'t dump'
+    end
+  end
+
+  # Error raised when a capability proxy calls a method that its server-side
+  # grant does not allow, or when it uses a grant that has been revoked.
+  class DRbCapabilityError < SecurityError; end
+
+  class CapabilityRegistry # :nodoc:
+    include MonitorMixin
+
+    CAPABILITY_REF_MARKER = :__drb_capability_ref__
+
+    def initialize(server)
+      super()
+      @server = server
+      @capabilities = {}
+    end
+
+    attr_reader :server
+
+    def register(capability)
+      synchronize do
+        @capabilities[capability.token] ||= capability
+      end
+    end
+
+    def fetch(token)
+      synchronize do
+        @capabilities.fetch(token)
+      end
+    rescue KeyError
+      raise DRbCapabilityError, "capability is invalid or has been revoked"
+    end
+
+    def revoke(token)
+      synchronize do
+        !@capabilities.delete(token).nil?
+      end
+    end
+
+    def capability_ref?(ref)
+      Array === ref && ref.first == CAPABILITY_REF_MARKER
+    end
+
+    def to_obj(ref)
+      fetch(ref[1])
+    end
+
+    def to_id(capability)
+      register(capability)
+      [CAPABILITY_REF_MARKER, capability.token]
     end
   end
 
@@ -583,6 +646,10 @@ module DRb
 
     def dump(obj, error=false)  # :nodoc:
       case obj
+      when Capability
+        # Marshal through Capability#_dump below.
+      when DRbCapabilityError
+        # Keep the capability error type available to remote callers.
       when DRbUndumped
         obj = make_proxy(obj, error)
       when Object
@@ -1218,6 +1285,330 @@ module DRb
     end
   end
 
+  # A server-side grant for a restricted view of an object.
+  #
+  # The grant remains on the server. Only its opaque token is sent to clients,
+  # so editing client-side proxy state cannot add authority. See
+  # DRbServer#publish for the public entry point.
+  class Capability < DRbObject
+    DERIVE = :__drb_capability_derive__
+    REVOKE = :__drb_capability_revoke__
+
+    FORBIDDEN_METHODS = [
+      :send, :public_send, :__send__,
+      :method, :public_method, :singleton_method, :instance_method,
+      :methods, :public_methods, :protected_methods, :private_methods,
+      :singleton_methods, :respond_to?, :respond_to_missing?,
+      :instance_eval, :instance_exec, :class_eval, :class_exec,
+      :module_eval, :module_exec, :eval, :binding, :caller,
+      :define_method, :define_singleton_method, :method_missing,
+      :instance_variable_get, :instance_variable_set, :remove_instance_variable
+    ].freeze
+
+    def self._load(data)
+      uri, token, allowed_methods = Marshal.load(data)
+      allocate.tap do |capability|
+        capability.instance_variable_set(:@uri, uri)
+        capability.instance_variable_set(:@ref, [CapabilityRegistry::CAPABILITY_REF_MARKER, token])
+        capability.instance_variable_set(:@token, token)
+        capability.instance_variable_set(:@allowed_methods, allowed_methods || [])
+      end
+    end
+
+    def initialize(target, allowed_methods, returns: nil, registry: nil, token: nil)
+      @target = target
+      @registry = registry
+      @token = token || SecureRandom.hex(32)
+      @allowed_methods = normalize_allowed_methods(allowed_methods)
+      @return_policies = normalize_return_policies(returns || {})
+      validate_target_methods(@target, @allowed_methods)
+      @registry.register(self) if @registry
+    end
+
+    attr_reader :allowed_methods
+
+    def target # :nodoc:
+      @target
+    end
+
+    def token # :nodoc:
+      @token
+    end
+
+    def attach_to_registry(registry) # :nodoc:
+      @registry = registry
+      @registry.register(self)
+      self
+    end
+
+    def _dump(_limit)
+      if instance_variable_defined?(:@target)
+        @registry.register(self)
+        uri = @registry.server.uri
+      else
+        uri = @uri
+      end
+      Marshal.dump([uri, @token, @allowed_methods])
+    end
+
+    def __drbref
+      [CapabilityRegistry::CAPABILITY_REF_MARKER, @token]
+    end
+
+    def invoke(message_id, arguments, block)
+      ensure_active_grant if instance_variable_defined?(:@target)
+      case message_id
+      when DERIVE
+        derive_grant(arguments.first)
+      when REVOKE
+        @registry.revoke(@token)
+      when :respond_to?
+        public_only = arguments.size == 1 || arguments[1] == false
+        queried_method = arguments[0].to_sym
+        if queried_method == :derive || queried_method == :revoke!
+          public_only
+        else
+          public_only &&
+            !FORBIDDEN_METHODS.include?(queried_method) &&
+            @allowed_methods.include?(queried_method)
+        end
+      else
+        invoke_granted_method(message_id, arguments, block)
+      end
+    end
+
+    def invoke_granted_method(message_id, arguments, block)
+      raise(ArgumentError, "#{message_id.inspect} is not a symbol") unless Symbol === message_id
+      unless @allowed_methods.include?(message_id)
+        raise DRbCapabilityError, "method '#{message_id}' is not allowed by this capability"
+      end
+      raise DRbCapabilityError, "method '#{message_id}' cannot be called through a capability" if FORBIDDEN_METHODS.include?(message_id)
+
+      @registry.server.check_insecure_method(@target, message_id)
+      result = @target.public_send(message_id, *arguments, &block)
+      wrap_result(message_id, result)
+    end
+
+    def derive(allowed_methods)
+      if instance_variable_defined?(:@target)
+        invoke(DERIVE, [allowed_methods], nil)
+      else
+        method_missing(DERIVE, allowed_methods)
+      end
+    end
+
+    def revoke!
+      if instance_variable_defined?(:@target)
+        invoke(REVOKE, [], nil)
+      else
+        method_missing(REVOKE)
+      end
+    end
+
+    def respond_to?(message_id, include_all = false)
+      return false if include_all
+      return true if message_id == :derive || message_id == :revoke!
+      @allowed_methods.include?(message_id.to_sym)
+    end
+
+    def send(message_id, *arguments, &block)
+      symbol = check_client_method!(message_id)
+      method_missing(symbol, *arguments, &block)
+    end
+    class_eval do
+      original_verbose = $VERBOSE
+      $VERBOSE = nil
+      define_method(:public_send, instance_method(:send))
+      define_method(:__send__, instance_method(:send))
+    ensure
+      $VERBOSE = original_verbose
+    end
+
+    def method(*) # :nodoc:
+      raise DRbCapabilityError, "indirect method access is not allowed"
+    end
+    alias public_method method
+    alias singleton_method method
+
+    ruby2_keywords def method_missing(message_id, *arguments, &block) # :nodoc:
+      return invoke(message_id, arguments, block) if @target
+
+      succ, result = DRbObject.with_friend(@uri) do
+        DRbConn.open(@uri) do |connection|
+          connection.send_message(self, message_id, arguments, block)
+        end
+      end
+
+      if succ
+        result
+      elsif DRbUnknown === result
+        raise result
+      else
+        backtrace = DRbObject.prepare_backtrace(@uri, result)
+        result.set_backtrace(backtrace + caller)
+        raise result
+      end
+    end
+
+    private
+
+    def derive_grant(requested_methods)
+      requested = normalize_allowed_methods(requested_methods)
+      unless requested.all? { |method| @allowed_methods.include?(method) }
+        raise DRbCapabilityError, "a derived capability cannot allow more methods than its parent"
+      end
+
+      inherited_returns = @return_policies.select do |method, _policy|
+        requested.include?(method)
+      end
+      Capability.new(@target, requested, returns: inherited_returns, registry: @registry)
+    end
+
+    def ensure_active_grant
+      @registry.fetch(@token)
+    end
+
+    def check_client_method!(message_id)
+      symbol = message_id.to_sym
+      unless @allowed_methods.include?(symbol)
+        raise DRbCapabilityError, "method '#{symbol}' is not allowed by this capability"
+      end
+      symbol
+    end
+
+    def normalize_allowed_methods(methods)
+      normalized = Array(methods).map do |method|
+        symbol = method.to_sym
+        if FORBIDDEN_METHODS.include?(symbol) || symbol == DERIVE || symbol == REVOKE
+          raise ArgumentError, "method '#{symbol}' cannot be allowed by a capability"
+        end
+        symbol
+      end.uniq
+      normalized.freeze
+    end
+
+    def validate_target_methods(target, methods)
+      respond_to = Kernel.instance_method(:respond_to?)
+      private_methods = Kernel.instance_method(:private_methods)
+      protected_methods = Kernel.instance_method(:protected_methods)
+      methods.each do |method|
+        unless respond_to.bind_call(target, method, true) &&
+            !private_methods.bind_call(target).include?(method) &&
+            !protected_methods.bind_call(target).include?(method)
+          raise ArgumentError, "target does not define public method '#{method}'"
+        end
+      end
+    end
+
+    def normalize_return_policies(policies)
+      policies.each_with_object({}) do |(method, policy), result|
+        symbol = method.to_sym
+        unless @allowed_methods.include?(symbol)
+          raise ArgumentError, "return policy for undeclared method '#{symbol}'"
+        end
+        result[symbol] = normalize_return_policy(policy)
+      end.freeze
+    end
+
+    def normalize_return_policy(policy)
+      case policy
+      when :copy, :reference
+        policy
+      when Array
+        normalize_nested_return_policy(:allow => policy)
+      when Hash
+        normalize_nested_return_policy(policy)
+      else
+        raise ArgumentError, "unsupported return policy #{policy.inspect}"
+      end
+    end
+
+    def normalize_nested_return_policy(policy)
+      allowed = policy[:allow] || policy[:methods] or
+        raise ArgumentError, "capability return policy must declare allowed methods"
+      {
+        :allow => normalize_allowed_methods(allowed),
+        :returns => policy[:returns] || {}
+      }.freeze
+    end
+
+    def wrap_result(method, result)
+      return result if FORBIDDEN_METHODS.include?(method)
+
+      policy = @return_policies[method]
+      if Capability === result
+        wrap_capability_result(result, policy)
+      else
+        case policy
+        when nil
+          reject_remote_reference(result) unless marshal_safe?(result)
+          result
+        when :copy
+          raise DRbCapabilityError, "cannot copy a remote reference" unless marshal_safe?(result)
+          result
+        when :reference
+          DRbObject === result ? result : DRbObject.new(result)
+        else
+          wrap_new_capability(result, policy)
+        end
+      end
+    end
+
+    def wrap_capability_result(result, policy)
+      case policy
+      when :reference, nil
+        result
+      when :copy
+        raise DRbCapabilityError, "cannot copy a remote reference"
+      else
+        allowed = policy[:allow]
+        unless allowed.all? { |method| result.allowed_methods.include?(method) }
+          raise DRbCapabilityError, "return policy cannot broaden an existing capability"
+        end
+        Capability.new(result.target, allowed, :returns => policy[:returns], :registry => @registry)
+      end
+    end
+
+    def wrap_new_capability(result, policy)
+      Capability.new(result, policy[:allow], :returns => policy[:returns], :registry => @registry)
+    end
+
+    def reject_remote_reference(result)
+      return unless remote_reference?(result)
+      raise DRbCapabilityError, "remote return requires an explicit return policy"
+    end
+
+    def remote_reference?(value, seen = {})
+      return true unless Object === value
+      return false if value.nil? || value.is_a?(Numeric) || value.is_a?(Symbol) || value.is_a?(TrueClass) || value.is_a?(FalseClass)
+      key = value.object_id
+      return false if seen[key]
+      seen[key] = true
+
+      return true if value.is_a?(DRbObject) || value.is_a?(DRbUndumped)
+      case value
+      when Array
+        value.any? { |item| remote_reference?(item, seen) }
+      when Hash
+        value.any? { |entry_key, item| remote_reference?(entry_key, seen) || remote_reference?(item, seen) }
+      else
+        value.instance_variables.any? do |name|
+          remote_reference?(value.instance_variable_get(name), seen)
+        end
+      end
+    end
+
+    def marshal_safe?(value)
+      !remote_reference?(value) &&
+        begin
+          Marshal.dump(value)
+          true
+        rescue TypeError
+          false
+        end
+    end
+  end
+
   class ThreadObject
     include MonitorMixin
 
@@ -1488,6 +1879,8 @@ module DRb
 
       @front = front
       @idconv = @config[:idconv]
+      @capability_registry = CapabilityRegistry.new(self)
+      @front.attach_to_registry(@capability_registry) if Capability === @front
 
       @grp = ThreadGroup.new
       @thread = run
@@ -1513,6 +1906,16 @@ module DRb
 
     # The configuration of this DRbServer
     attr_reader :config
+
+    # Publish +object+ through a server-side capability grant.
+    #
+    # +methods+ is the initial public interface. +returns+ declares how values
+    # returned by allowed methods are exposed. By default marshalled values are
+    # copied, while values that require a remote reference must be declared
+    # explicitly with +:reference+ or a nested capability declaration.
+    def publish(object, methods, returns: nil)
+      Capability.new(object, methods, :returns => returns, :registry => @capability_registry)
+    end
 
     # Set whether to operate in verbose mode.
     #
@@ -1548,12 +1951,14 @@ module DRb
     def to_obj(ref)
       return front if ref.nil?
       return front[ref.to_s] if DRbURIOption === ref
+      return @capability_registry.to_obj(ref) if @capability_registry.capability_ref?(ref)
       @idconv.to_obj(ref)
     end
 
     # Convert a local object to a dRuby reference.
     def to_id(obj)
       return nil if obj.__id__ == front.__id__
+      return @capability_registry.to_id(obj) if Capability === obj
       @idconv.to_id(obj)
     end
 
@@ -1616,6 +2021,7 @@ module DRb
     def check_insecure_method(obj, msg_id)
       return true if Proc === obj && msg_id == :__drb_yield
       raise(ArgumentError, "#{any_to_s(msg_id)} is not a symbol") unless Symbol == msg_id.class
+      return true if Capability === obj
       raise(SecurityError, "insecure method '#{msg_id}'") if insecure_method?(msg_id)
 
       case obj
@@ -1650,30 +2056,32 @@ module DRb
       end
 
       def perform
+        @result = nil
+        @succ = false
         begin
           setup_message
-        ensure
-          @result = nil
-          @succ = false
-        end
 
-        if @block
-          @result = perform_with_block
-        else
-          @result = perform_without_block
-        end
-        @succ = true
-        case @result
-        when Array
-          if @msg_id == :to_ary
-            @result = DRbArray.new(@result)
+          if @block
+            @result = perform_with_block
+          else
+            @result = perform_without_block
           end
+          @succ = true
+          case @result
+          when Array
+            if @msg_id == :to_ary
+              @result = DRbArray.new(@result)
+            end
+          end
+        rescue NoMemoryError, SystemExit, SystemStackError
+          raise
+        rescue DRbCapabilityError
+          @result = $!
+        rescue SecurityError
+          raise
+        rescue Exception
+          @result = $!
         end
-        return @succ, @result
-      rescue NoMemoryError, SystemExit, SystemStackError, SecurityError
-        raise
-      rescue Exception
-        @result = $!
         return @succ, @result
       end
 
@@ -1703,35 +2111,48 @@ module DRb
       end
 
       def perform_with_block
-        @obj.__send__(@msg_id, *@argv) do |*x|
-          jump_error = nil
-          begin
-            block_value = block_yield(x)
-          rescue LocalJumpError
-            jump_error = $!
-          end
-          if jump_error
-            case jump_error.reason
-            when :break
-              break(jump_error.exit_value)
-            else
-              raise jump_error
+        invoke_target do
+          @obj.__send__(@msg_id, *@argv) do |*x|
+            jump_error = nil
+            begin
+              block_value = block_yield(x)
+            rescue LocalJumpError
+              jump_error = $!
             end
+            if jump_error
+              case jump_error.reason
+              when :break
+                break(jump_error.exit_value)
+              else
+                raise jump_error
+              end
+            end
+            block_value
           end
-          block_value
         end
       end
 
       def perform_without_block
-        if Proc === @obj && @msg_id == :__drb_yield
-          if @argv.size == 1
-            ary = @argv
+        invoke_target do
+          if Proc === @obj && @msg_id == :__drb_yield
+            if @argv.size == 1
+              ary = @argv
+            else
+              ary = [@argv]
+            end
+            ary.collect(&@obj)[0]
           else
-            ary = [@argv]
+            @obj.__send__(@msg_id, *@argv)
           end
-          ary.collect(&@obj)[0]
+        end
+      end
+
+      def invoke_target
+        if Capability === @obj
+          capability_block = @block ? proc { |*values| block_yield(values) } : nil
+          @obj.invoke(@msg_id, @argv, capability_block)
         else
-          @obj.__send__(@msg_id, *@argv)
+          yield
         end
       end
 
