@@ -1,4 +1,5 @@
 require 'net/ssh/loggable'
+require 'net/sftp/operations/name_mapper'
 
 module Net; module SFTP; module Operations
 
@@ -54,6 +55,16 @@ module Net; module SFTP; module Operations
   # * <tt>:read_size</tt> - the maximum number of bytes to read at a time
   #   from the source. Increasing this value might improve throughput. It
   #   defaults to 32,000 bytes.
+  # * <tt>:name_mapping</tt> - (recursive downloads only) controls how remote
+  #   entry names are mapped to local file names. Pass <tt>:reject</tt> or
+  #   <tt>:escape</tt> to use a Net::SFTP::Operations::NameMapper with that
+  #   strategy, a Hash of NameMapper options (e.g. <tt>{ :strategy =>
+  #   :escape, :equivalence => ->(name) { ... }, :manifest => "..." }</tt>),
+  #   or a preconfigured NameMapper instance. When enabled, all names of a
+  #   directory level are checked for collisions (under an injectable
+  #   name-equivalence function) before anything in that level is written,
+  #   and a manifest is recorded in each mapped directory so the original
+  #   remote names can be recovered. See NameMapper for details.
   #
   # == Progress Monitoring
   #
@@ -152,11 +163,15 @@ module Net; module SFTP; module Operations
       @options = options
       @active = 0
       @properties = options[:properties] || {}
+      @name_mapper = build_name_mapper(options[:name_mapping])
 
       self.logger = sftp.logger
 
       if recursive? && local.respond_to?(:write)
         raise ArgumentError, "cannot download a directory tree in-memory"
+      end
+      if @name_mapper && !recursive?
+        raise ArgumentError, ":name_mapping requires :recursive => true"
       end
 
       @stack = [Entry.new(remote, local, recursive?)]
@@ -204,7 +219,7 @@ module Net; module SFTP; module Operations
 
       # A simple struct for encapsulating information about a single remote
       # file or directory that needs to be downloaded.
-      Entry = Struct.new(:remote, :local, :directory, :size, :handle, :offset, :sink)
+      Entry = Struct.new(:remote, :local, :directory, :size, :handle, :offset, :sink, :pending)
 
       #--
       # "ruby -w" hates private attributes, so we have to do these longhand
@@ -216,6 +231,10 @@ module Net; module SFTP; module Operations
 
       # The progress handler for this instance. Possibly nil.
       def progress; @progress; end
+
+      # The NameMapper used to map remote entry names to local file names
+      # during recursive downloads, or nil if name mapping is disabled.
+      def name_mapper; @name_mapper; end
 
       # The default read size.
       DEFAULT_READ_SIZE = 32_000
@@ -268,6 +287,7 @@ module Net; module SFTP; module Operations
       def on_readdir(response)
         entry = response.request[:parent]
         if response.eof?
+          finalize_directory(entry) if name_mapper
           request = sftp.close(entry.handle, &method(:on_closedir))
           request[:parent] = entry
         elsif !response.ok?
@@ -275,7 +295,11 @@ module Net; module SFTP; module Operations
         else
           response[:names].each do |item|
             next if item.name == "." || item.name == ".."
-            stack << Entry.new(::File.join(entry.remote, item.name), ::File.join(entry.local, item.name), item.directory?, item.attributes.size)
+            if name_mapper
+              (entry.pending ||= []) << item
+            else
+              stack << Entry.new(::File.join(entry.remote, item.name), ::File.join(entry.local, item.name), item.directory?, item.attributes.size)
+            end
           end
 
           # take this opportunity to enqueue more requests
@@ -283,6 +307,40 @@ module Net; module SFTP; module Operations
 
           request = sftp.readdir(entry.handle, &method(:on_readdir))
           request[:parent] = entry
+        end
+      end
+
+      # Builds a NameMapper from the :name_mapping option, if given.
+      def build_name_mapper(setting)
+        case setting
+        when nil, false then nil
+        when NameMapper then setting
+        when Symbol then NameMapper.new(:strategy => setting)
+        when Hash then NameMapper.new(setting)
+        else
+          raise ArgumentError, "invalid :name_mapping option: #{setting.inspect}"
+        end
+      end
+
+      # Called when all entries of a remote directory have been read. Maps
+      # the collected remote names to safe local names (raising before
+      # anything in this directory level is written if the level cannot be
+      # mapped safely), records the manifest, and enqueues the mapped
+      # entries for download.
+      def finalize_directory(entry)
+        items = entry.pending || []
+        entry.pending = nil
+
+        names = items.map { |item| item.name.to_s.dup.force_encoding(Encoding::BINARY) }
+        mapping = name_mapper.map(names)
+        name_mapper.write_manifest(entry.local, mapping)
+
+        items_by_name = {}
+        items.each { |item| items_by_name[item.name.to_s.dup.force_encoding(Encoding::BINARY)] = item }
+
+        mapping.each do |remote_name, local_name|
+          item = items_by_name[remote_name]
+          stack << Entry.new(::File.join(entry.remote, remote_name), ::File.join(entry.local, local_name), item.directory?, item.attributes.size)
         end
       end
 

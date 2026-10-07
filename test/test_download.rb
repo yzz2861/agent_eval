@@ -1,4 +1,6 @@
 require "common"
+require "tmpdir"
+require "fileutils"
 
 class DownloadTest < Net::SFTP::TestCase
   FXP_DATA_CHUNK_SIZE = 1024
@@ -142,6 +144,109 @@ class DownloadTest < Net::SFTP::TestCase
     Net::SSH::Test::Extensions::IO.with_test_extension do
       assert_raises(ArgumentError) { sftp.download("/path/to/remote", StringIO.new, :recursive => true) }
     end
+  end
+
+  def test_download_directory_with_name_mapping_escape_writes_mapped_names_and_manifest
+    local = Dir.mktmpdir
+    remote = "/path/to/remote"
+    invalid = "bad\xffname".b
+
+    expect_sftp_session :server_version => 3 do |channel|
+      channel.sends_packet(FXP_OPENDIR, :long, 0, :string, remote)
+      channel.gets_packet(FXP_HANDLE, :long, 0, :string, "dir1")
+
+      channel.sends_packet(FXP_READDIR, :long, 1, :string, "dir1")
+      channel.gets_packet(FXP_NAME, :long, 1, :long, 5,
+        :string, "..",              :string, "drwxr-xr-x  4 bob bob  136 Aug  1 ..", :long, 0x04, :long, 040755,
+        :string, ".",               :string, "drwxr-xr-x  4 bob bob  136 Aug  1 .", :long, 0x04, :long, 040755,
+        :string, "data file.txt",   :string, "-rw-rw-r--  1 bob bob  100 Aug  1 data file.txt", :long, 0x04, :long, 0100644,
+        :string, "data%20file.txt", :string, "-rw-rw-r--  1 bob bob  100 Aug  1 data%20file.txt", :long, 0x04, :long, 0100644,
+        :string, invalid,           :string, "-rw-rw-r--  1 bob bob  100 Aug  1 bad", :long, 0x04, :long, 0100644)
+
+      channel.sends_packet(FXP_READDIR, :long, 2, :string, "dir1")
+      channel.gets_packet(FXP_STATUS, :long, 2, :long, 1)
+      channel.sends_packet(FXP_CLOSE, :long, 3, :string, "dir1")
+      channel.gets_packet(FXP_STATUS, :long, 3, :long, 0)
+
+      channel.sends_packet(FXP_OPEN, :long, 4, :string, File.join(remote, "data file.txt"), :long, 0x01, :long, 0)
+      channel.sends_packet(FXP_OPEN, :long, 5, :string, File.join(remote, "data%20file.txt"), :long, 0x01, :long, 0)
+      channel.sends_packet(FXP_OPEN, :long, 6, :string, File.join(remote, invalid), :long, 0x01, :long, 0)
+
+      channel.gets_packet(FXP_HANDLE, :long, 4, :string, "f1")
+      channel.sends_packet(FXP_READ, :long, 7, :string, "f1", :int64, 0, :long, 32_000)
+      channel.gets_packet(FXP_HANDLE, :long, 5, :string, "f2")
+      channel.sends_packet(FXP_READ, :long, 8, :string, "f2", :int64, 0, :long, 32_000)
+      channel.gets_packet(FXP_HANDLE, :long, 6, :string, "f3")
+      channel.sends_packet(FXP_READ, :long, 9, :string, "f3", :int64, 0, :long, 32_000)
+
+      channel.gets_packet(FXP_DATA, :long, 7, :string, "aaa")
+      channel.sends_packet(FXP_READ, :long, 10, :string, "f1", :int64, 3, :long, 32_000)
+      channel.gets_packet(FXP_DATA, :long, 8, :string, "bbb")
+      channel.sends_packet(FXP_READ, :long, 11, :string, "f2", :int64, 3, :long, 32_000)
+      channel.gets_packet(FXP_DATA, :long, 9, :string, "ccc")
+      channel.sends_packet(FXP_READ, :long, 12, :string, "f3", :int64, 3, :long, 32_000)
+
+      channel.gets_packet(FXP_STATUS, :long, 10, :long, 1)
+      channel.sends_packet(FXP_CLOSE, :long, 13, :string, "f1")
+      channel.gets_packet(FXP_STATUS, :long, 11, :long, 1)
+      channel.sends_packet(FXP_CLOSE, :long, 14, :string, "f2")
+      channel.gets_packet(FXP_STATUS, :long, 12, :long, 1)
+      channel.sends_packet(FXP_CLOSE, :long, 15, :string, "f3")
+      channel.gets_packet(FXP_STATUS, :long, 13, :long, 0)
+      channel.gets_packet(FXP_STATUS, :long, 14, :long, 0)
+      channel.gets_packet(FXP_STATUS, :long, 15, :long, 0)
+    end
+
+    assert_scripted_command do
+      sftp.download(remote, local, :recursive => true, :name_mapping => :escape)
+    end
+
+    assert_equal "aaa", File.read(File.join(local, "data file.txt"))
+    assert_equal "bbb", File.read(File.join(local, "data%2520file.txt"))
+    assert_equal "ccc", File.read(File.join(local, "bad%FFname"))
+
+    manifest_path = File.join(local, Net::SFTP::Operations::NameMapper::DEFAULT_MANIFEST_NAME)
+    manifest = Net::SFTP::Operations::NameMapper.parse_manifest(File.read(manifest_path))
+    assert_equal "data file.txt".b, manifest["data file.txt".b]
+    assert_equal "data%20file.txt".b, manifest["data%2520file.txt".b]
+    assert_equal invalid, manifest["bad%FFname".b]
+  ensure
+    FileUtils.remove_entry(local) if local
+  end
+
+  def test_download_directory_with_name_mapping_reject_failure_preserves_existing_files
+    local = Dir.mktmpdir
+    remote = "/path/to/remote"
+    existing = File.join(local, "file1")
+    File.write(existing, "original contents")
+
+    expect_sftp_session :server_version => 3 do |channel|
+      channel.sends_packet(FXP_OPENDIR, :long, 0, :string, remote)
+      channel.gets_packet(FXP_HANDLE, :long, 0, :string, "dir1")
+
+      channel.sends_packet(FXP_READDIR, :long, 1, :string, "dir1")
+      channel.gets_packet(FXP_NAME, :long, 1, :long, 4,
+        :string, "..",    :string, "drwxr-xr-x  4 bob bob  136 Aug  1 ..", :long, 0x04, :long, 040755,
+        :string, ".",     :string, "drwxr-xr-x  4 bob bob  136 Aug  1 .", :long, 0x04, :long, 040755,
+        :string, "File1", :string, "-rw-rw-r--  1 bob bob  100 Aug  1 File1", :long, 0x04, :long, 0100644,
+        :string, "file1", :string, "-rw-rw-r--  1 bob bob  100 Aug  1 file1", :long, 0x04, :long, 0100644)
+
+      channel.sends_packet(FXP_READDIR, :long, 2, :string, "dir1")
+      channel.gets_packet(FXP_STATUS, :long, 2, :long, 1)
+    end
+
+    assert_raises(Net::SFTP::Operations::NameMappingError) do
+      assert_scripted_command do
+        sftp.download(remote, local, :recursive => true, :name_mapping => :reject)
+      end
+    end
+
+    # the colliding level failed before anything was written: the existing
+    # file is untouched and neither new files nor a manifest appeared
+    assert_equal "original contents", File.read(existing)
+    assert_equal %w(file1), Dir.children(local).sort
+  ensure
+    FileUtils.remove_entry(local) if local
   end
 
   private
