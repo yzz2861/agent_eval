@@ -2671,6 +2671,643 @@ EOF
     end
   end
 
+  def test_pret_option
+    ftp = Net::FTP.new
+    assert_equal(:never, ftp.pret)
+    ftp.pret = true
+    assert_equal(:always, ftp.pret)
+    ftp.pret = :auto
+    assert_equal(:auto, ftp.pret)
+    ftp.pret = false
+    assert_equal(:never, ftp.pret)
+    ftp.pret = nil
+    assert_equal(:never, ftp.pret)
+    assert_raise(ArgumentError) { ftp.pret = :bogus }
+    assert_raise(ArgumentError) { Net::FTP.new(nil, pret: :bogus) }
+    assert_equal(:always, Net::FTP.new(nil, pret: :always).pret)
+    assert_equal(:auto, Net::FTP.new(nil, pret: :auto).pret)
+  end
+
+  def test_pret_getbinaryfile
+    commands = []
+    binary_data = (0..0xff).map {|i| i.chr}.join * 3
+    server = create_ftp_server { |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands.push(sock.gets)
+      sock.print("331 Please specify the password.\r\n")
+      commands.push(sock.gets)
+      sock.print("230 Login successful.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 Switching to Binary mode.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 PRET successful.\r\n")
+      commands.push(sock.gets)
+      data_server = create_data_connection_server(sock)
+      commands.push(sock.gets)
+      sock.print("150 Opening BINARY mode data connection for foo bar.txt (#{binary_data.size} bytes)\r\n")
+      conn = data_server.accept
+      conn.print(binary_data)
+      conn.close
+      data_server.close
+      sock.print("226 Transfer complete.\r\n")
+    }
+    begin
+      begin
+        ftp = Net::FTP.new(nil, pret: :always)
+        ftp.passive = true
+        ftp.connect(SERVER_ADDR, server.port)
+        ftp.login
+        assert_match(/\AUSER /, commands.shift)
+        assert_match(/\APASS /, commands.shift)
+        assert_equal("TYPE I\r\n", commands.shift)
+        buf = ftp.getbinaryfile("foo bar.txt", nil)
+        assert_equal(binary_data, buf)
+        assert_equal("PRET RETR foo bar.txt\r\n", commands.shift)
+        assert_match(/\A(EPSV|PASV)\r\n\z/, commands.shift)
+        assert_equal("RETR foo bar.txt\r\n", commands.shift)
+        assert_equal(nil, commands.shift)
+      ensure
+        ftp.close if ftp
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_pret_storbinary
+    commands = []
+    binary_data = (0..0xff).map {|i| i.chr}.join * 3
+    received_data = nil
+    server = create_ftp_server { |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands.push(sock.gets)
+      sock.print("331 Please specify the password.\r\n")
+      commands.push(sock.gets)
+      sock.print("230 Login successful.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 Switching to Binary mode.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 PRET successful.\r\n")
+      commands.push(sock.gets)
+      data_server = create_data_connection_server(sock)
+      commands.push(sock.gets)
+      sock.print("150 Ok to send data.\r\n")
+      conn = data_server.accept
+      received_data = conn.read
+      conn.close
+      data_server.close
+      sock.print("226 Transfer complete.\r\n")
+    }
+    begin
+      begin
+        ftp = Net::FTP.new(nil, pret: true)
+        ftp.passive = true
+        ftp.connect(SERVER_ADDR, server.port)
+        ftp.login
+        assert_match(/\AUSER /, commands.shift)
+        assert_match(/\APASS /, commands.shift)
+        assert_equal("TYPE I\r\n", commands.shift)
+        ftp.storbinary("STOR foo bar.txt", StringIO.new(binary_data), 1024)
+        assert_equal(binary_data, received_data)
+        assert_equal("PRET STOR foo bar.txt\r\n", commands.shift)
+        assert_match(/\A(EPSV|PASV)\r\n\z/, commands.shift)
+        assert_equal("STOR foo bar.txt\r\n", commands.shift)
+        assert_equal(nil, commands.shift)
+      ensure
+        ftp.close if ftp
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_pret_list
+    commands = []
+    list_lines = [
+      "-rw-r--r--    1 0        0               0 Mar 30 11:22 foo.txt",
+      "-rw-r--r--    1 0        0               0 Mar 30 11:22 bar.txt"
+    ]
+    server = create_ftp_server { |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands.push(sock.gets)
+      sock.print("331 Please specify the password.\r\n")
+      commands.push(sock.gets)
+      sock.print("230 Login successful.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 Switching to Binary mode.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 Switching to ASCII mode.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 PRET successful.\r\n")
+      commands.push(sock.gets)
+      data_server = create_data_connection_server(sock)
+      commands.push(sock.gets)
+      sock.print("150 Here comes the directory listing.\r\n")
+      conn = data_server.accept
+      list_lines.each do |l|
+        conn.print(l, "\r\n")
+      end
+      conn.close
+      data_server.close
+      sock.print("226 Directory send OK.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 Switching to Binary mode.\r\n")
+    }
+    begin
+      begin
+        ftp = Net::FTP.new(nil, pret: :always)
+        ftp.passive = true
+        ftp.connect(SERVER_ADDR, server.port)
+        ftp.login
+        assert_match(/\AUSER /, commands.shift)
+        assert_match(/\APASS /, commands.shift)
+        assert_equal("TYPE I\r\n", commands.shift)
+        assert_equal(list_lines, ftp.list("dir with space"))
+        assert_equal("TYPE A\r\n", commands.shift)
+        assert_equal("PRET LIST dir with space\r\n", commands.shift)
+        assert_match(/\A(EPSV|PASV)\r\n\z/, commands.shift)
+        assert_equal("LIST dir with space\r\n", commands.shift)
+        assert_equal("TYPE I\r\n", commands.shift)
+        assert_equal(nil, commands.shift)
+      ensure
+        ftp.close if ftp
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_pret_mlsd
+    commands = []
+    entry_lines = [
+      "Type=file;Unique=FC00U1E554A;Size=1234567;Modify=20131220035929;Perm=r; foo bar",
+      "Type=cdir;Unique=FC00U1E554B;Modify=20131220035929;Perm=flcdmpe; .",
+    ]
+    server = create_ftp_server { |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands.push(sock.gets)
+      sock.print("331 Please specify the password.\r\n")
+      commands.push(sock.gets)
+      sock.print("230 Login successful.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 Switching to Binary mode.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 Switching to ASCII mode.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 PRET successful.\r\n")
+      commands.push(sock.gets)
+      data_server = create_data_connection_server(sock)
+      commands.push(sock.gets)
+      sock.print("150 Here comes the directory listing.\r\n")
+      conn = data_server.accept
+      entry_lines.each do |l|
+        conn.print(l, "\r\n")
+      end
+      conn.close
+      data_server.close
+      sock.print("226 Directory send OK.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 Switching to Binary mode.\r\n")
+    }
+    begin
+      begin
+        ftp = Net::FTP.new(nil, pret: :always)
+        ftp.passive = true
+        ftp.connect(SERVER_ADDR, server.port)
+        ftp.login
+        assert_match(/\AUSER /, commands.shift)
+        assert_match(/\APASS /, commands.shift)
+        assert_equal("TYPE I\r\n", commands.shift)
+        entries = ftp.mlsd("dir with space")
+        assert_equal(["foo bar", "."], entries.map {|e| e.pathname})
+        assert_equal("TYPE A\r\n", commands.shift)
+        assert_equal("PRET MLSD dir with space\r\n", commands.shift)
+        assert_match(/\A(EPSV|PASV)\r\n\z/, commands.shift)
+        assert_equal("MLSD dir with space\r\n", commands.shift)
+        assert_equal("TYPE I\r\n", commands.shift)
+        assert_equal(nil, commands.shift)
+      ensure
+        ftp.close if ftp
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_pret_auto_fallback_on_perm_error
+    commands = []
+    binary_data = (0..0xff).map {|i| i.chr}.join * 3
+    server = create_ftp_server { |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands.push(sock.gets)
+      sock.print("331 Please specify the password.\r\n")
+      commands.push(sock.gets)
+      sock.print("230 Login successful.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 Switching to Binary mode.\r\n")
+      commands.push(sock.gets)
+      sock.print("502 PRET not implemented.\r\n")
+      2.times do
+        commands.push(sock.gets)
+        data_server = create_data_connection_server(sock)
+        commands.push(sock.gets)
+        sock.print("150 Opening BINARY mode data connection (#{binary_data.size} bytes)\r\n")
+        conn = data_server.accept
+        conn.print(binary_data)
+        conn.close
+        data_server.close
+        sock.print("226 Transfer complete.\r\n")
+      end
+    }
+    begin
+      begin
+        ftp = Net::FTP.new(nil, pret: :auto)
+        ftp.passive = true
+        ftp.connect(SERVER_ADDR, server.port)
+        ftp.login
+        assert_match(/\AUSER /, commands.shift)
+        assert_match(/\APASS /, commands.shift)
+        assert_equal("TYPE I\r\n", commands.shift)
+        assert_equal(binary_data, ftp.getbinaryfile("foo", nil))
+        assert_equal("PRET RETR foo\r\n", commands.shift)
+        assert_match(/\A(EPSV|PASV)\r\n\z/, commands.shift)
+        assert_equal("RETR foo\r\n", commands.shift)
+        # The server permanently rejected PRET, so the next transfer in
+        # this session must not attempt PRET again.
+        assert_equal(binary_data, ftp.getbinaryfile("bar", nil))
+        assert_match(/\A(EPSV|PASV)\r\n\z/, commands.shift)
+        assert_equal("RETR bar\r\n", commands.shift)
+        assert_equal(nil, commands.shift)
+      ensure
+        ftp.close if ftp
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_pret_auto_temp_error_raises
+    commands = []
+    server = create_ftp_server { |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands.push(sock.gets)
+      sock.print("331 Please specify the password.\r\n")
+      commands.push(sock.gets)
+      sock.print("230 Login successful.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 Switching to Binary mode.\r\n")
+      commands.push(sock.gets)
+      sock.print("451 Requested action aborted: local error in processing.\r\n")
+      while line = sock.gets
+        commands.push(line)
+      end
+    }
+    thread = @thread
+    begin
+      ftp = Net::FTP.new(nil, pret: :auto)
+      ftp.passive = true
+      ftp.connect(SERVER_ADDR, server.port)
+      ftp.login
+      assert_match(/\AUSER /, commands.shift)
+      assert_match(/\APASS /, commands.shift)
+      assert_equal("TYPE I\r\n", commands.shift)
+      # A temporary failure must not fall back to a plain transfer.
+      assert_raise(Net::FTPTempError) { ftp.getbinaryfile("foo", nil) }
+      assert_equal("PRET RETR foo\r\n", commands.shift)
+    ensure
+      ftp.close if ftp
+      server.close
+    end
+    thread.join
+    assert_equal(nil, commands.shift)
+  end
+
+  def test_pret_always_perm_error_raises
+    commands = []
+    server = create_ftp_server { |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands.push(sock.gets)
+      sock.print("331 Please specify the password.\r\n")
+      commands.push(sock.gets)
+      sock.print("230 Login successful.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 Switching to Binary mode.\r\n")
+      commands.push(sock.gets)
+      sock.print("502 PRET not implemented.\r\n")
+      while line = sock.gets
+        commands.push(line)
+      end
+    }
+    thread = @thread
+    begin
+      ftp = Net::FTP.new(nil, pret: :always)
+      ftp.passive = true
+      ftp.connect(SERVER_ADDR, server.port)
+      ftp.login
+      assert_match(/\AUSER /, commands.shift)
+      assert_match(/\APASS /, commands.shift)
+      assert_equal("TYPE I\r\n", commands.shift)
+      assert_raise(Net::FTPPermError) { ftp.getbinaryfile("foo", nil) }
+      assert_equal("PRET RETR foo\r\n", commands.shift)
+    ensure
+      ftp.close if ftp
+      server.close
+    end
+    thread.join
+    assert_equal(nil, commands.shift)
+  end
+
+  def test_pret_rest_pasv_order
+    commands = []
+    binary_data = (0..0xff).map {|i| i.chr}.join * 3
+    server = create_ftp_server { |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands.push(sock.gets)
+      sock.print("331 Please specify the password.\r\n")
+      commands.push(sock.gets)
+      sock.print("230 Login successful.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 Switching to Binary mode.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 PRET successful.\r\n")
+      commands.push(sock.gets)
+      data_server = create_data_connection_server(sock)
+      commands.push(sock.gets)
+      sock.print("350 Restart position accepted.\r\n")
+      commands.push(sock.gets)
+      sock.print("150 Opening BINARY mode data connection for foo (#{binary_data.size} bytes)\r\n")
+      conn = data_server.accept
+      conn.print(binary_data)
+      conn.close
+      data_server.close
+      sock.print("226 Transfer complete.\r\n")
+    }
+    begin
+      begin
+        ftp = Net::FTP.new(nil, pret: :always)
+        ftp.passive = true
+        ftp.resume = true
+        ftp.connect(SERVER_ADDR, server.port)
+        ftp.login
+        assert_match(/\AUSER /, commands.shift)
+        assert_match(/\APASS /, commands.shift)
+        assert_equal("TYPE I\r\n", commands.shift)
+        buf = String.new
+        ftp.retrbinary("RETR foo", 1024, 5) do |s|
+          buf << s
+        end
+        assert_equal(binary_data, buf)
+        assert_equal("PRET RETR foo\r\n", commands.shift)
+        assert_match(/\A(EPSV|PASV)\r\n\z/, commands.shift)
+        assert_equal("REST 5\r\n", commands.shift)
+        assert_equal("RETR foo\r\n", commands.shift)
+        assert_equal(nil, commands.shift)
+      ensure
+        ftp.close if ftp
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_pret_data_connection_failure_retry
+    commands = []
+    binary_data = (0..0xff).map {|i| i.chr}.join * 3
+    server = create_ftp_server { |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands.push(sock.gets)
+      sock.print("331 Please specify the password.\r\n")
+      commands.push(sock.gets)
+      sock.print("230 Login successful.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 Switching to Binary mode.\r\n")
+      # First attempt: PRET succeeds, but the passive data connection
+      # cannot be established.
+      commands.push(sock.gets)
+      sock.print("200 PRET successful.\r\n")
+      commands.push(sock.gets)
+      dead_server = TCPServer.new(SERVER_ADDR, 0)
+      dead_port = dead_server.local_address.ip_port
+      dead_server.close
+      if Addrinfo.tcp(SERVER_ADDR, 0).ipv4?
+        sock.printf("227 Entering Passive Mode (127,0,0,1,%s).\r\n",
+                    dead_port.divmod(256).join(","))
+      else
+        sock.printf("229 Entering Extended Passive Mode (|||%d|)\r\n", dead_port)
+      end
+      # Second attempt: a fresh PRET must precede the new data connection.
+      commands.push(sock.gets)
+      sock.print("200 PRET successful.\r\n")
+      commands.push(sock.gets)
+      data_server = create_data_connection_server(sock)
+      commands.push(sock.gets)
+      sock.print("150 Opening BINARY mode data connection for foo (#{binary_data.size} bytes)\r\n")
+      conn = data_server.accept
+      conn.print(binary_data)
+      conn.close
+      data_server.close
+      sock.print("226 Transfer complete.\r\n")
+    }
+    begin
+      begin
+        ftp = Net::FTP.new(nil, pret: :always)
+        ftp.passive = true
+        ftp.connect(SERVER_ADDR, server.port)
+        ftp.login
+        assert_match(/\AUSER /, commands.shift)
+        assert_match(/\APASS /, commands.shift)
+        assert_equal("TYPE I\r\n", commands.shift)
+        assert_raise(Errno::ECONNREFUSED) { ftp.getbinaryfile("foo", nil) }
+        assert_equal("PRET RETR foo\r\n", commands.shift)
+        assert_match(/\A(EPSV|PASV)\r\n\z/, commands.shift)
+        buf = ftp.getbinaryfile("foo", nil)
+        assert_equal(binary_data, buf)
+        assert_equal("PRET RETR foo\r\n", commands.shift)
+        assert_match(/\A(EPSV|PASV)\r\n\z/, commands.shift)
+        assert_equal("RETR foo\r\n", commands.shift)
+        assert_equal(nil, commands.shift)
+      ensure
+        ftp.close if ftp
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_pret_not_reused_after_chdir
+    commands = []
+    binary_data = (0..0xff).map {|i| i.chr}.join * 3
+    server = create_ftp_server { |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands.push(sock.gets)
+      sock.print("331 Please specify the password.\r\n")
+      commands.push(sock.gets)
+      sock.print("230 Login successful.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 Switching to Binary mode.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 PRET successful.\r\n")
+      commands.push(sock.gets)
+      data_server = create_data_connection_server(sock)
+      commands.push(sock.gets)
+      sock.print("150 Opening BINARY mode data connection for file1 (#{binary_data.size} bytes)\r\n")
+      conn = data_server.accept
+      conn.print(binary_data)
+      conn.close
+      data_server.close
+      sock.print("226 Transfer complete.\r\n")
+      commands.push(sock.gets)
+      sock.print("250 Directory successfully changed.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 PRET successful.\r\n")
+      commands.push(sock.gets)
+      data_server = create_data_connection_server(sock)
+      commands.push(sock.gets)
+      sock.print("150 Opening BINARY mode data connection for file2 (#{binary_data.size} bytes)\r\n")
+      conn = data_server.accept
+      conn.print(binary_data)
+      conn.close
+      data_server.close
+      sock.print("226 Transfer complete.\r\n")
+    }
+    begin
+      begin
+        ftp = Net::FTP.new(nil, pret: :always)
+        ftp.passive = true
+        ftp.connect(SERVER_ADDR, server.port)
+        ftp.login
+        assert_match(/\AUSER /, commands.shift)
+        assert_match(/\APASS /, commands.shift)
+        assert_equal("TYPE I\r\n", commands.shift)
+        assert_equal(binary_data, ftp.getbinaryfile("file1", nil))
+        assert_equal("PRET RETR file1\r\n", commands.shift)
+        assert_match(/\A(EPSV|PASV)\r\n\z/, commands.shift)
+        assert_equal("RETR file1\r\n", commands.shift)
+        ftp.chdir("sub dir")
+        assert_equal("CWD sub dir\r\n", commands.shift)
+        # A new transfer target after chdir needs its own PRET.
+        assert_equal(binary_data, ftp.getbinaryfile("file2", nil))
+        assert_equal("PRET RETR file2\r\n", commands.shift)
+        assert_match(/\A(EPSV|PASV)\r\n\z/, commands.shift)
+        assert_equal("RETR file2\r\n", commands.shift)
+        assert_equal(nil, commands.shift)
+      ensure
+        ftp.close if ftp
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_pret_reconnect_negotiates_again
+    commands1 = []
+    binary_data = (0..0xff).map {|i| i.chr}.join * 3
+    server1 = create_ftp_server { |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands1.push(sock.gets)
+      sock.print("331 Please specify the password.\r\n")
+      commands1.push(sock.gets)
+      sock.print("230 Login successful.\r\n")
+      commands1.push(sock.gets)
+      sock.print("200 Switching to Binary mode.\r\n")
+      commands1.push(sock.gets)
+      sock.print("502 PRET not implemented.\r\n")
+      commands1.push(sock.gets)
+      data_server = create_data_connection_server(sock)
+      commands1.push(sock.gets)
+      sock.print("150 Opening BINARY mode data connection for foo (#{binary_data.size} bytes)\r\n")
+      conn = data_server.accept
+      conn.print(binary_data)
+      conn.close
+      data_server.close
+      sock.print("226 Transfer complete.\r\n")
+    }
+    thread1 = @thread
+    ftp = Net::FTP.new(nil, pret: :auto)
+    begin
+      ftp.passive = true
+      ftp.connect(SERVER_ADDR, server1.port)
+      ftp.login
+      assert_equal(binary_data, ftp.getbinaryfile("foo", nil))
+      assert_equal("PRET RETR foo\r\n", commands1.shift)
+      ftp.close
+      server1.close
+      thread1.join
+
+      # After reconnecting, the cached "PRET unsupported" state must not
+      # be reused, so PRET is attempted again on the new connection.
+      commands2 = []
+      server2 = create_ftp_server { |sock|
+        sock.print("220 (test_ftp).\r\n")
+        commands2.push(sock.gets)
+        sock.print("331 Please specify the password.\r\n")
+        commands2.push(sock.gets)
+        sock.print("230 Login successful.\r\n")
+        commands2.push(sock.gets)
+        sock.print("200 Switching to Binary mode.\r\n")
+        commands2.push(sock.gets)
+        sock.print("200 PRET successful.\r\n")
+        commands2.push(sock.gets)
+        data_server = create_data_connection_server(sock)
+        commands2.push(sock.gets)
+        sock.print("150 Opening BINARY mode data connection for foo (#{binary_data.size} bytes)\r\n")
+        conn = data_server.accept
+        conn.print(binary_data)
+        conn.close
+        data_server.close
+        sock.print("226 Transfer complete.\r\n")
+      }
+      begin
+        ftp.connect(SERVER_ADDR, server2.port)
+        ftp.login
+        assert_equal(binary_data, ftp.getbinaryfile("foo", nil))
+        3.times { commands2.shift } # USER, PASS, TYPE I
+        assert_equal("PRET RETR foo\r\n", commands2.shift)
+        assert_match(/\A(EPSV|PASV)\r\n\z/, commands2.shift)
+        assert_equal("RETR foo\r\n", commands2.shift)
+        assert_equal(nil, commands2.shift)
+      ensure
+        server2.close
+      end
+    ensure
+      ftp.close if ftp
+    end
+  end
+
+  def test_pret_command_injection
+    commands = []
+    server = create_ftp_server { |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands.push(sock.gets)
+      sock.print("331 Please specify the password.\r\n")
+      commands.push(sock.gets)
+      sock.print("230 Login successful.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 Switching to Binary mode.\r\n")
+      while line = sock.gets
+        commands.push(line)
+      end
+    }
+    thread = @thread
+    begin
+      ftp = Net::FTP.new(nil, pret: :always)
+      ftp.passive = true
+      ftp.connect(SERVER_ADDR, server.port)
+      ftp.login
+      assert_match(/\AUSER /, commands.shift)
+      assert_match(/\APASS /, commands.shift)
+      assert_equal("TYPE I\r\n", commands.shift)
+      assert_raise(ArgumentError) { ftp.getbinaryfile("foo\nbar", nil) }
+      assert_raise(ArgumentError) { ftp.retrbinary("RETR foo\r\nbar", 1024) {} }
+    ensure
+      ftp.close if ftp
+      server.close
+    end
+    thread.join
+    # Neither PRET nor the transfer command may be sent for CR/LF input.
+    assert_equal(nil, commands.shift)
+  end
+
   private
 
   def create_ftp_server(sleep_time = nil, addr = SERVER_ADDR)

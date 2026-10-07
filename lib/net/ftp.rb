@@ -102,6 +102,10 @@ module Net
     # When +true+, the connection is in passive mode.  Default: +true+.
     attr_accessor :passive
 
+    # PRET (pre-transfer) mode.  One of +:auto+, +:always+, or +:never+.
+    # Default: +:never+.
+    attr_reader :pret
+
     # When +true+, use the IP address in PASV responses.  Otherwise, it uses
     # the same IP address for the control connection.  Default: +false+.
     attr_accessor :use_pasv_ip
@@ -213,6 +217,15 @@ module Net
     # account::   Account information for ACCT.
     # passive::   When +true+, the connection is in passive mode. Default:
     #             +true+.
+    # pret::      Controls use of the PRET command required by some FTP
+    #             gateways before a passive data connection is opened.
+    #             +:always+ (or +true+) sends "PRET <transfer command>"
+    #             before each PASV/PORT, and any error response is
+    #             raised.  +:auto+ sends PRET and, if the server rejects
+    #             it with a permanent (5xx) error, transparently disables
+    #             PRET for the rest of the session; a temporary (4xx)
+    #             failure is raised instead of falling back.  +:never+
+    #             (or +false+) disables PRET.  Default: +:never+.
     # open_timeout::  Number of seconds to wait for the connection to open.
     #                 See Net::FTP#open_timeout for details.  Default: +nil+.
     # read_timeout::  Number of seconds to wait for one block to be read.
@@ -301,12 +314,28 @@ module Net
       @ssl_handshake_timeout = options[:ssl_handshake_timeout]
       @read_timeout = options[:read_timeout] || 60
       @use_pasv_ip = options[:use_pasv_ip] || false
+      self.pret = options[:pret]
       if host
         connect(host, options[:port] || FTP_PORT)
         if options[:username]
           login(options[:username], options[:password], options[:account])
         end
       end
+    end
+
+    # Sets the PRET mode.  +mode+ must be one of +:auto+, +:always+
+    # (+true+), or +:never+ (+false+ or +nil+).  See the +:pret+ option
+    # of Net::FTP.new for the semantics of each mode.
+    def pret=(mode)
+      @pret =
+        case mode
+        when nil, false, :never then :never
+        when true, :always then :always
+        when :auto then :auto
+        else
+          raise ArgumentError, "invalid PRET mode: #{mode.inspect}"
+        end
+      @pret_supported = nil
     end
 
     # A setter to toggle transfers in binary mode.
@@ -402,6 +431,7 @@ module Net
     def connect(host, port = FTP_PORT)
       debug_print "connect: #{host}:#{port}"
       synchronize do
+        @pret_supported = nil
         @host = host
         @bare_sock = open_socket(host, port)
         if @ssl_context
@@ -570,6 +600,7 @@ module Net
 
     # Constructs a connection for transferring data
     def transfercmd(cmd, rest_offset = nil) # :nodoc:
+      send_pret_command(cmd)
       if @passive
         host, port = makepasv
         succeeded = false
@@ -623,6 +654,30 @@ module Net
       end
     end
     private :transfercmd
+
+    # Sends a PRET command announcing the upcoming transfer command +cmd+
+    # (e.g. "PRET RETR foo"), for servers that require preparation before
+    # PASV/PORT.  The argument is the exact transfer command that will be
+    # sent afterwards, so spaces in pathnames are preserved and CR/LF is
+    # rejected by putline just like for the transfer command itself.
+    # Each transfer sends its own PRET; the result is never reused across
+    # reconnects, directory changes, or different transfer targets.
+    def send_pret_command(cmd) # :nodoc:
+      return if @pret == :never
+      return if @pret == :auto && @pret_supported == false
+      begin
+        voidcmd("PRET #{cmd}")
+      rescue FTPPermError
+        # The server explicitly does not support PRET: remember it for
+        # the rest of the session in :auto mode.  Temporary (4xx)
+        # failures raise FTPTempError and never fall back.
+        raise if @pret == :always
+        @pret_supported = false
+      else
+        @pret_supported = true
+      end
+    end
+    private :send_pret_command
 
     #
     # Logs in to the remote host.  The session must have been
