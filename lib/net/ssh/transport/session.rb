@@ -48,6 +48,7 @@ module Net
         # The host-key verifier object used to verify host keys, to ensure that
         # the connection is not being spoofed.
         attr_reader :host_key_verifier
+        attr_accessor :server_host_key
 
         # The hash of options that were given to the object at initialization.
         attr_reader :options

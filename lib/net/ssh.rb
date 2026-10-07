@@ -69,7 +69,7 @@ module Net
       max_win_size send_env set_env use_agent number_of_password_prompts
       append_all_supported_algorithms non_interactive password_prompt
       agent_socket_factory minimum_dh_bits verify_host_key
-      fingerprint_hash check_host_ip pubkey_algorithms
+      fingerprint_hash check_host_ip pubkey_algorithms update_host_keys
     ]
 
     # The standard means of starting a new SSH connection. When used with a
@@ -190,6 +190,10 @@ module Net
     #   Defaults to %w(~/.ssh/known_hosts ~/.ssh/known_hosts2).
     # * :use_agent => Set false to disable the use of ssh-agent. Defaults to
     #   true
+    # * :update_host_keys => accept authenticated host-key rotation
+    #   announcements. true adds new keys, :replace also removes old keys,
+    #   :ask prompts, and a callable may return true, false, or :replace.
+    #   Defaults to false.
     # * :identity_agent => the path to the ssh-agent's UNIX socket
     # * :verbose => how verbose to be (Logger verbosity constants, Logger::DEBUG
     #   is very verbose, Logger::FATAL is all but silent). Logger::FATAL is the
@@ -257,6 +261,7 @@ module Net
       user = options.fetch(:user, user) || Etc.getpwuid.name
       if auth.authenticate("ssh-connection", user, options[:password])
         connection = Connection::Session.new(transport, options)
+        Connection::HostKeyRotator.install(connection, user, options)
         if block_given?
           begin
             yield connection

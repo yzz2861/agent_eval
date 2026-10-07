@@ -82,6 +82,8 @@ module Net
             unless connection.host_key_verifier.verify(key: key, key_blob: blob, fingerprint: fingerprint, session: connection)
               raise Net::SSH::Exception, 'host key verification failed'
             end
+
+            connection.server_host_key = key
           end
 
           def generate_key_fingerprint(key)

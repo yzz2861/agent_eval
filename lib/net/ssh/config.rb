@@ -34,6 +34,7 @@ module Net
     # * PubKeyAuthentication => maps to the :auth_methods option
     # * RekeyLimit => :rekey_limit
     # * StrictHostKeyChecking => :verify_host_key
+    # * UpdateHostKeys => :update_host_keys
     # * User => :user
     # * UserKnownHostsFile => :user_known_hosts_file
     # * NumberOfPasswordPrompts => :number_of_password_prompts
@@ -225,6 +226,7 @@ module Net
           identityagent: :identity_agent,
           globalknownhostsfile: :global_known_hosts_file,
           hostkeyalias: :host_key_alias,
+          updatehostkeys: :update_host_keys,
           identityfile: :keys,
           fingerprinthash: :fingerprint_hash,
           port: :port,
@@ -235,6 +237,8 @@ module Net
           case key
           when :stricthostkeychecking
             hash[:verify_host_key] = translate_verify_host_key(value)
+          when :updatehostkeys
+            hash[:update_host_keys] = value == 'ask' ? :ask : value
           when :ciphers
             hash[:encryption] = value.split(/,/)
           when :hostbasedauthentication

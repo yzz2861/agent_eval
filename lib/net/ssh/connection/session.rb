@@ -3,6 +3,7 @@ require 'net/ssh/connection/channel'
 require 'net/ssh/connection/constants'
 require 'net/ssh/service/forward'
 require 'net/ssh/connection/keepalive'
+require 'net/ssh/connection/host_key_rotator'
 require 'net/ssh/connection/event_loop'
 
 module Net
@@ -311,8 +312,8 @@ module Net
         def send_global_request(type, *extra, &callback)
           info { "sending global request #{type}" }
           msg = Buffer.from(:byte, GLOBAL_REQUEST, :string, type.to_s, :bool, !callback.nil?, *extra)
-          send_message(msg)
           pending_requests << callback if callback
+          send_message(msg)
           self
         end
 

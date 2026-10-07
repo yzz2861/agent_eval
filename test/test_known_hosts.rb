@@ -149,6 +149,64 @@ class TestKnownHosts < NetSSHTest
     end
   end
 
+  def test_update_replaces_only_matching_logical_host_and_port
+    old_key = OpenSSL::PKey::EC.generate("prime256v1")
+    new_key = OpenSSL::PKey::EC.generate("prime256v1")
+    other_key = OpenSSL::PKey::EC.generate("prime256v1")
+    host = "[host.example]:2222,[1.2.3.4]:2222"
+
+    Tempfile.open("known_hosts") do |file|
+      file.puts "#{hashed_host("[host.example]:2222")} #{key_line(old_key)}"
+      file.puts "#{hashed_host("[1.2.3.4]:2222")} #{key_line(old_key)}"
+      file.puts "other.example,#{hashed_host("[host.example]:2222")} #{key_line(other_key)}"
+      file.puts "#{hashed_host("unrelated.example", "other-salt")} #{key_line(other_key)}"
+      file.close
+
+      Net::SSH::KnownHosts.new(file.path).update(host, [new_key], {}, remove_old_keys: true)
+      content = File.read(file.path)
+
+      assert_includes content, "#{host} #{new_key.ssh_type} #{encoded_key(new_key)}"
+      assert_includes content, "other.example #{other_key.ssh_type} #{encoded_key(other_key)}\n"
+      assert_includes content, "#{hashed_host("unrelated.example", "other-salt")} #{key_line(other_key)}"
+      refute_includes content, encoded_key(old_key)
+
+      assert_equal [new_key.to_blob],
+                   Net::SSH::KnownHosts.new(file.path).keys_for(host).map(&:to_blob)
+      assert_equal [other_key.to_blob],
+                   Net::SSH::KnownHosts.new(file.path).keys_for("unrelated.example").map(&:to_blob)
+      assert_equal [], Net::SSH::KnownHosts.new(file.path).keys_for("[host.example]:2223")
+    end
+  end
+
+  def test_update_without_removing_old_keys_keeps_previous_key
+    old_key = OpenSSL::PKey::EC.generate("prime256v1")
+    new_key = OpenSSL::PKey::EC.generate("prime256v1")
+
+    with_config_file(lines: ["host.example #{key_line(old_key)}"]) do |path|
+      Net::SSH::KnownHosts.new(path).update("host.example", [new_key], {})
+
+      keys = Net::SSH::KnownHosts.new(path).keys_for("host.example").map(&:to_blob)
+      assert_equal [old_key.to_blob, new_key.to_blob], keys
+    end
+  end
+
+  def test_update_preserves_file_when_writing_fails
+    old_key = OpenSSL::PKey::EC.generate("prime256v1")
+    new_key = OpenSSL::PKey::EC.generate("prime256v1")
+
+    with_config_file(lines: ["host.example #{key_line(old_key)}"]) do |path|
+      original = File.read(path)
+      File.stubs(:rename).raises(Errno::EACCES)
+
+      assert_raises(SystemCallError) do
+        Net::SSH::KnownHosts.new(path).update("host.example", [new_key], {}, remove_old_keys: true)
+      end
+
+      assert_equal original, File.read(path)
+      File.unstub(:rename)
+    end
+  end
+
   def path(relative_path)
     File.join(File.dirname(__FILE__), relative_path)
   end
@@ -163,6 +221,20 @@ class TestKnownHosts < NetSSHTest
       f.close
       yield(f.path)
     end
+  end
+
+  def key_line(key)
+    "#{key.ssh_type} #{encoded_key(key)}"
+  end
+
+  def encoded_key(key)
+    [key.to_blob].pack("m0")
+  end
+
+  def hashed_host(host, salt = "known-host-salt")
+    digest = OpenSSL::Digest.new("sha1")
+    hmac = OpenSSL::HMAC.digest(digest, salt, host)
+    "|1|#{[salt].pack("m0")}|#{[hmac].pack("m0")}"
   end
 
   def rsa_key

@@ -1,6 +1,7 @@
 require 'strscan'
 require 'openssl'
 require 'delegate'
+require 'tempfile'
 require 'net/ssh/buffer'
 require 'net/ssh/authentication/ed25519_loader'
 
@@ -9,9 +10,12 @@ module Net
     module HostKeyEntries
       # regular public key entry
       class PubKey < Delegator
-        def initialize(key, comment: nil) # rubocop:disable Lint/MissingSuper
+        attr_accessor :source
+
+        def initialize(key, comment: nil, source: nil) # rubocop:disable Lint/MissingSuper
           @key = key
           @comment = comment
+          @source = source
         end
 
         def ssh_type
@@ -157,7 +161,12 @@ module Net
         # Search for all known keys for the given host, in every file given in
         # the +files+ array. Returns the list of keys.
         def search_in(files, host, options = {})
-          files.flat_map { |file| KnownHosts.new(file).keys_for(host, options) }
+          files.flat_map do |file|
+            known_hosts = KnownHosts.new(file)
+            known_hosts.keys_for(host, options).each do |entry|
+              entry.source = known_hosts.source if entry.respond_to?(:source=)
+            end
+          end
         end
 
         # Looks in the given +options+ hash for the :user_known_hosts_file and
@@ -190,6 +199,30 @@ module Net
             return
           rescue SystemCallError
             # try the next hostfile
+          end
+        end
+
+        def update(host, keys, options = {}, remove_old_keys: false, add_keys: keys)
+          keys = Array(keys)
+          add_keys = Array(add_keys)
+          hostfiles(options, :user).each do |file|
+            known_hosts = new(file)
+            next unless File.file?(known_hosts.source) &&
+                        known_hosts.keys_for(host, options).any?
+
+            known_hosts.update(host, keys, options,
+                               remove_old_keys: remove_old_keys, add_keys: add_keys)
+            return known_hosts.source
+          end
+
+          raise Errno::ENOENT, "no writable known_hosts file contains #{host}"
+        end
+
+        def source_for_key(host, key, options = {})
+          hostfiles(options, :user).find do |file|
+            new(file).keys_for(host, options).any? do |entry|
+              entry.respond_to?(:matches_key?) && entry.matches_key?(key)
+            end
           end
         end
       end
@@ -301,6 +334,88 @@ module Net
         File.open(source, "a") do |file|
           blob = [Net::SSH::Buffer.from(:key, key).to_s].pack("m*").gsub(/\s/, "")
           file.puts "#{host} #{key.ssh_type} #{blob}"
+        end
+      end
+
+      def update(host, keys, options = {}, remove_old_keys: false, add_keys: keys)
+        keys = Array(keys)
+        add_keys = Array(add_keys)
+        return if keys.empty? && !remove_old_keys
+
+        target_aliases = host.split(",")
+        key_blobs = keys.map { |key| Net::SSH::Buffer.from(:key, key).to_s }
+        output = []
+        missing_key_blobs = add_keys.map { |key| Net::SSH::Buffer.from(:key, key).to_s }
+
+        File.foreach(source) do |line|
+          updated_line = update_line(line, target_aliases, key_blobs,
+                                     missing_key_blobs, remove_old_keys)
+          output << updated_line unless updated_line.nil?
+        end
+
+        add_keys.each do |key|
+          blob = Net::SSH::Buffer.from(:key, key).to_s
+          next unless missing_key_blobs.include?(blob)
+
+          encoded = [blob].pack("m*").gsub(/\s/, "")
+          output << "#{host} #{key.ssh_type} #{encoded}\n"
+        end
+
+        write_atomically(output.join)
+      end
+
+      private
+
+      def update_line(line, target_aliases, key_blobs, missing_key_blobs, remove_old_keys)
+        original = line.chomp("\n")
+        fields = original.split(/\s+/)
+        marker = fields.first && fields.first.start_with?("@") ? fields.shift : nil
+        hosts, type, key_content = fields
+        return "#{original}\n" unless marker.nil? && type && SUPPORTED_TYPE.include?(type) && key_content
+
+        blob = key_content.unpack("m*").first
+        hostlist = hosts.split(",")
+        matched_aliases = matching_aliases(hostlist, target_aliases)
+        return "#{original}\n" if matched_aliases.empty?
+
+        if key_blobs.include?(blob)
+          missing_key_blobs.delete(blob)
+          return "#{original}\n"
+        end
+
+        return "#{original}\n" unless remove_old_keys
+
+        matched_patterns = hostlist.select do |pattern|
+          matched_aliases.any? do |target|
+            hostlist.include?(target) || known_host_hash?([pattern], [target])
+          end
+        end
+        remaining_aliases = hostlist - matched_patterns
+        return nil if remaining_aliases.empty?
+
+        line_with_aliases(original, fields, remaining_aliases)
+      end
+
+      def matching_aliases(hostlist, target_aliases)
+        target_aliases.select do |target|
+          hostlist.include?(target) ||
+            hostlist.any? { |pattern| known_host_hash?([pattern], [target]) }
+        end
+      end
+
+      def line_with_aliases(original, fields, aliases)
+        suffix = fields[1..-1].join(" ")
+        "#{aliases.join(',')} #{suffix}\n"
+      end
+
+      def write_atomically(content)
+        target = File.symlink?(source) ? File.realpath(source) : source
+        directory = File.dirname(target)
+        Tempfile.create(".known_hosts", directory, binmode: true) do |file|
+          file.write(content)
+          file.flush
+          file.chmod(File.stat(target).mode)
+          File.rename(file.path, target)
         end
       end
     end
