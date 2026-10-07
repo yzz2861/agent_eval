@@ -15,8 +15,10 @@ Hamster
 
 Efficient, immutable, and thread-safe collection classes for Ruby.
 
-Hamster provides 6 [Persistent Data
-Structures][PDS]: [`Hash`][HASH-DOC], [`Vector`][VECTOR-DOC], [`Set`][SET-DOC], [`SortedSet`][SORTED-SET-DOC], [`List`][LIST-DOC], and [`Deque`][DEQUE-DOC] (which works as an immutable queue or stack).
+Hamster provides 7 [Persistent Data Structures][PDS]: [`Hash`][HASH-DOC],
+[`Vector`][VECTOR-DOC], [`Set`][SET-DOC], [`SortedSet`][SORTED-SET-DOC],
+[`DisjointSet`][DISJOINT-SET-DOC], [`List`][LIST-DOC], and [`Deque`][DEQUE-DOC]
+(which works as an immutable queue or stack).
 
 Hamster collections are **immutable**. Whenever you modify a Hamster
 collection, the original is preserved and a modified copy is returned. This
@@ -45,6 +47,7 @@ process "infinitely large" lists.
 [VECTOR-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/Vector
 [LIST-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/List
 [SORTED-SET-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/SortedSet
+[DISJOINT-SET-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/DisjointSet
 [DEQUE-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/Deque
 
 
@@ -64,6 +67,7 @@ require "hamster/hash"
 require "hamster/vector"
 require "hamster/set"
 require "hamster/sorted_set"
+require "hamster/disjoint_set"
 require "hamster/list"
 require "hamster/deque"
 ```
@@ -182,6 +186,25 @@ Hamster::SortedSet.new(['toast', 'jam', 'bacon']) { |str| str.chars.last }
 ```
 
 See the [API documentation][SORTED-SET-DOC] for details on all `SortedSet` methods.
+
+
+<h2>DisjointSet <span style="font-size:0.7em">(<a href="http://rubydoc.info/github/hamstergem/hamster/master/Hamster/DisjointSet">API Documentation</a>)</span></h2>
+
+A `DisjointSet` (also called a union-find) tracks connected components:
+
+``` ruby
+rules = Hamster::DisjointSet[:a, :b, :c, :d]
+branch = rules.union(:a, :b).union(:b, :c)
+branch.connected?(:a, :c)  # => true
+rules.connected?(:a, :b)   # => false
+branch.partition_size(:a)  # => 3
+branch.partitions          # => Hamster::Set[Hamster::Set[:a, :b, :c], Hamster::Set[:d]]
+```
+
+Read-only lookups never mutate shared nodes. Path compression takes effect
+only in the new version returned by a changing `#union`.
+
+See the [API documentation][DISJOINT-SET-DOC] for details on all `DisjointSet` methods.
 
 
 <h2>List <span style="font-size:0.7em">(<a href="http://rubydoc.info/github/hamstergem/hamster/master/Hamster/List">API Documentation</a>)</span></h2>

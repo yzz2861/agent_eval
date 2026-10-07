@@ -34,6 +34,12 @@ describe :Hamster do
     end
   end
 
+  describe :DisjointSet do
+    it "can be loaded separately" do
+      expect(system(%{ruby -e "$:.unshift('#{hamster_lib_dir}'); require 'hamster/disjoint_set'; Hamster::DisjointSet.new"})).to be(true)
+    end
+  end
+
   describe :Deque do
     it "can be loaded separately" do
       expect(system(%{ruby -e "$:.unshift('#{hamster_lib_dir}'); require 'hamster/deque'; Hamster::Deque.new"})).to be(true)

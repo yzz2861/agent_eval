@@ -7,6 +7,7 @@ require "hamster/hash"
 require "hamster/set"
 require "hamster/vector"
 require "hamster/sorted_set"
+require "hamster/disjoint_set"
 require "hamster/list"
 require "hamster/deque"
 require "hamster/core_ext"
@@ -16,6 +17,7 @@ L = Hamster::List
 H = Hamster::Hash
 S = Hamster::Set
 SS = Hamster::SortedSet
+DS = Hamster::DisjointSet
 D = Hamster::Deque
 EmptyList = Hamster::EmptyList
 
