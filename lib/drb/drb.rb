@@ -43,6 +43,7 @@
 require 'socket'
 require 'io/wait' if RUBY_VERSION < '3.2'
 require 'monitor'
+require 'securerandom'
 require_relative 'eq'
 require_relative 'version'
 
@@ -342,6 +343,43 @@ module DRb
   # protocol.
   class DRbConnError < DRbError; end
 
+  # Error raised when a request may have been received or executed by a
+  # remote server, but the connection failed before its reply was received.
+  class DRbUnknownStatusError < DRbConnError; end
+
+  # Error raised when an object reference points at a restarted server
+  # instance rather than the instance that created the reference.
+  class DRbStaleReferenceError < DRbConnError; end
+
+  # :nodoc: internal wire representation of a service-scoped object id.
+  class DRbObjectRef
+    attr_reader :ref, :server_id
+
+    def initialize(ref, server_id=nil)
+      @ref = ref
+      @server_id = server_id
+    end
+
+    def ==(other)
+      equal?(other) ||
+        DRbObjectRef === other &&
+        ref == other.ref && server_id == other.server_id
+    end
+    alias eql? ==
+
+    def hash
+      [ref, server_id].hash
+    end
+
+    def marshal_dump
+      [ref, server_id]
+    end
+
+    def marshal_load(data)
+      @ref, @server_id = data
+    end
+  end
+
   class DRbObjectSpace # :nodoc:
     # This is an internal class for DRbIdConv. This must not be used
     # by users.
@@ -626,16 +664,35 @@ module DRb
 
     def send_request(stream, ref, msg_id, arg, b) # :nodoc:
       ary = []
-      ary.push(dump(ref.__drbref))
+      ary.push(dump(ref.__drb_wire_ref))
       ary.push(dump(msg_id.id2name))
       ary.push(dump(arg.length))
       arg.each do |e|
         ary.push(dump(e))
       end
       ary.push(dump(b))
-      stream.write(ary.join(''))
-    rescue
-      raise(DRbConnError, $!.message, $!.backtrace)
+      sent = 0
+      begin
+        ary.each do |message|
+          offset = 0
+          while offset < message.bytesize
+            count = stream.write(message.byteslice(offset, message.bytesize - offset))
+            unless count.is_a?(Integer) && count > 0
+              raise IOError, 'socket write made no progress'
+            end
+            offset += count
+            sent += count
+          end
+        end
+      rescue DRbConnError
+        raise
+      rescue
+        if sent.zero?
+          raise(DRbConnError, $!.message, $!.backtrace)
+        end
+        raise(DRbUnknownStatusError, $!.message, $!.backtrace)
+      end
+      sent
     end
 
     def recv_request(stream) # :nodoc:
@@ -1071,23 +1128,29 @@ module DRb
     # the object itself is returned.  Otherwise, a new DRbObject is
     # created to act as a stub for the remote referenced object.
     def self._load(s)
-      uri, ref = Marshal.load(s)
+      data = Marshal.load(s)
+      uri, ref, server_id = data
 
       if DRb.here?(uri)
-        obj = DRb.to_obj(ref)
-        return obj
+        current_server = DRb.current_server
+        if server_id && server_id != current_server.server_id
+          raise DRbStaleReferenceError,
+                "reference belongs to server #{server_id}, not #{current_server.server_id}"
+        end
+        return current_server.to_obj(DRbObjectRef.new(ref, server_id))
       end
 
-      self.new_with(uri, ref)
+      self.new_with(uri, ref, server_id: server_id)
     end
 
     # Creates a DRb::DRbObject given the reference information to the remote
     # host +uri+ and object +ref+.
 
-    def self.new_with(uri, ref)
+    def self.new_with(uri, ref, server_id: nil)
       it = self.allocate
       it.instance_variable_set(:@uri, uri)
       it.instance_variable_set(:@ref, ref)
+      it.instance_variable_set(:@server_id, server_id)
       it
     end
 
@@ -1100,7 +1163,7 @@ module DRb
     #
     # The URI and ref of the object are marshalled.
     def _dump(lv)
-      Marshal.dump([@uri, @ref])
+      Marshal.dump([@uri, @ref, @server_id])
     end
 
     # Create a new remote object stub.
@@ -1108,9 +1171,10 @@ module DRb
     # +obj+ is the (local) object we want to create a stub for.  Normally
     # this is +nil+.  +uri+ is the URI of the remote object that this
     # will be a stub for.
-    def initialize(obj, uri=nil)
+    def initialize(obj, uri=nil, server_id: nil)
       @uri = nil
       @ref = nil
+      @server_id = server_id
       case obj
       when Object
         is_nil = obj.nil?
@@ -1125,6 +1189,14 @@ module DRb
       else
         @uri = uri ? uri : (DRb.uri rescue nil)
         @ref = obj ? DRb.to_id(obj) : nil
+        if @server_id.nil? && @uri
+          current_server = DRb.current_server rescue nil
+          if current_server&.here?(@uri)
+            @server_id = current_server.server_id
+          else
+            @server_id = DRb.fetch_server(@uri)&.server_id
+          end
+        end
       end
     end
 
@@ -1136,6 +1208,16 @@ module DRb
     # Get the reference of the object, if local.
     def __drbref
       @ref
+    end
+
+    # The service instance identity that owns this reference.
+    def __drb_server_id
+      @server_id
+    end
+
+    def __drb_wire_ref # :nodoc:
+      return nil if @ref.nil?
+      DRbObjectRef.new(@ref, @server_id)
     end
 
     undef :to_s
@@ -1156,11 +1238,15 @@ module DRb
     # Routes method calls to the referenced remote object.
     ruby2_keywords def method_missing(msg_id, *a, &b)
       if DRb.here?(@uri)
-        obj = DRb.to_obj(@ref)
+        obj = DRb.current_server.to_obj(__drb_wire_ref)
         DRb.current_server.check_insecure_method(obj, msg_id)
         return obj.__send__(msg_id, *a, &b)
       end
 
+      invoke_remote(msg_id, a, b)
+    end
+
+    def invoke_remote(msg_id, a, b)
       succ, result = self.class.with_friend(@uri) do
         DRbConn.open(@uri) do |conn|
           conn.send_message(self, msg_id, a, b)
@@ -1171,6 +1257,9 @@ module DRb
         return result
       elsif DRbUnknown === result
         raise result
+      elsif DRbRemoteError === result &&
+            result.reason == 'DRb::DRbStaleReferenceError'
+        raise DRbStaleReferenceError, result.message
       else
         bt = self.class.prepare_backtrace(@uri, result)
         result.set_backtrace(bt + caller)
@@ -1216,6 +1305,104 @@ module DRb
         q.text '...'
       }
     end
+  end
+
+  # A concrete service endpoint used by DRb::DRbEndpointGroup.
+  class DRbEndpoint
+    def initialize(uri)
+      @uri, option = DRbProtocol.uri_option(uri, DRb.config)
+      @option = option
+    end
+
+    attr_reader :uri, :option
+
+    def front_uri
+      @option.nil? ? @uri : "#{@uri}?#{@option}"
+    end
+
+    # Returns a front reference that can be retried on another endpoint.
+    def front(group=nil)
+      DRbFrontObject.new(self, group)
+    end
+  end
+
+  # A group of equivalent service endpoints.
+  #
+  # The front reference obtained from a group can use another endpoint when a
+  # connection fails before a request has been sent. Object references returned
+  # by a service remain bound to that service endpoint and server instance.
+  class DRbEndpointGroup
+    include Enumerable
+
+    def initialize(*uris)
+      uris = uris.first if uris.size == 1 && Array === uris.first
+      @endpoints = uris.map do |uri|
+        DRbEndpoint === uri ? uri : DRbEndpoint.new(uri)
+      end
+      raise ArgumentError, 'DRb endpoint group requires at least one endpoint' \
+        if @endpoints.empty?
+    end
+
+    attr_reader :endpoints
+
+    def each(&block)
+      return @endpoints.each unless block
+      @endpoints.each(&block)
+    end
+
+    def uris
+      @endpoints.map(&:uri)
+    end
+
+    def front
+      @endpoints.first.front(self)
+    end
+  end
+
+  # A front reference backed by a DRb::DRbEndpointGroup. It is the only client
+  # reference that may transparently select another endpoint.
+  class DRbFrontObject < DRbObject
+    def initialize(endpoint, group=nil)
+      super(nil, endpoint.front_uri)
+      @endpoint = endpoint
+      @group = group || DRbEndpointGroup.new(endpoint)
+    end
+
+    attr_reader :endpoint
+
+    def _dump(level)
+      Marshal.dump([@group.endpoints.first.front_uri, nil, nil])
+    end
+
+    def self._load(data)
+      uri, = Marshal.load(data)
+      DRbObject.new(nil, uri)
+    end
+
+    def respond_to?(msg_id, priv=false)
+      invoke_front(:respond_to?, msg_id, priv)
+    end
+
+    ruby2_keywords def method_missing(msg_id, *arguments, &block)
+      invoke_front(msg_id, arguments, block)
+    end
+
+    def invoke_front(msg_id, arguments, block)
+      last_error = nil
+      @group.each do |endpoint|
+        proxy = DRbObject.new(nil, endpoint.front_uri)
+        begin
+          return proxy.invoke_remote(msg_id, arguments, block)
+        rescue DRbUnknownStatusError, DRbStaleReferenceError
+          raise
+        rescue DRbConnError => error
+          last_error = error
+        end
+      end
+      raise last_error
+    end
+
+    protected :invoke_front
   end
 
   class ThreadObject
@@ -1343,8 +1530,20 @@ module DRb
     attr_reader :uri  # :nodoc:
 
     def send_message(ref, msg_id, arg, block)  # :nodoc:
-      @protocol.send_request(ref, msg_id, arg, block)
-      @protocol.recv_reply
+      begin
+        written = @protocol.send_request(ref, msg_id, arg, block)
+        unless written.is_a?(Integer) && written > 0
+          raise DRbUnknownStatusError, 'protocol did not report sent bytes'
+        end
+        begin
+          @protocol.recv_reply
+        rescue DRbConnError => error
+          raise DRbUnknownStatusError, error.message, error.backtrace
+        end
+      rescue DRbConnError
+        close
+        raise
+      end
     end
 
     def close  # :nodoc:
@@ -1457,6 +1656,8 @@ module DRb
     # :argc_limit :: the maximum number of arguments to a remote
     #                method accepted by the server.  Defaults to
     #                256.
+    # :server_id :: an explicit identity for this server instance.
+    #               A random UUID is used by default.
     # The default values of these options can be modified on
     # a class-wide basis by the class methods #default_argc_limit,
     # #default_load_limit, #default_acl, #default_id_conv,
@@ -1485,6 +1686,7 @@ module DRb
       @protocol = DRbProtocol.open_server(uri, @config)
       @uri = @protocol.uri
       @exported_uri = [@uri]
+      @server_id = @config[:server_id] || SecureRandom.uuid
 
       @front = front
       @idconv = @config[:idconv]
@@ -1497,6 +1699,9 @@ module DRb
 
     # The URI of this DRbServer.
     attr_reader :uri
+
+    # The unique identity of this DRbServer instance.
+    attr_reader :server_id
 
     # The main thread of this DRbServer.
     #
@@ -1546,6 +1751,15 @@ module DRb
 
     # Convert a dRuby reference to the local object it refers to.
     def to_obj(ref)
+      server_id = nil
+      if DRbObjectRef === ref
+        server_id = ref.server_id
+        ref = ref.ref
+      end
+      if server_id && server_id != @server_id
+        raise DRbStaleReferenceError,
+              "reference belongs to server #{server_id}, not #{@server_id}"
+      end
       return front if ref.nil?
       return front[ref.to_s] if DRbURIOption === ref
       @idconv.to_obj(ref)
@@ -1906,6 +2120,16 @@ module DRb
   end
   module_function :to_id
   module_function :to_obj
+
+  # Create a group of equivalent service entry points.
+  #
+  # Only the front reference returned by the group is allowed to choose another
+  # endpoint. Object references returned from a service remain pinned to that
+  # endpoint and server instance.
+  def endpoint_group(*uris)
+    DRbEndpointGroup.new(*uris)
+  end
+  module_function :endpoint_group
 
   # Get the thread of the primary server.
   #
