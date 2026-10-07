@@ -24,9 +24,10 @@ require_relative 'ldap/dataset'
 require_relative 'ldap/password'
 require_relative 'ldap/entry'
 require_relative 'ldap/instrumentation'
-require_relative 'ldap/connection'
-require_relative 'ldap/version'
 require_relative 'ldap/error'
+require_relative 'ldap/connection'
+require_relative 'ldap/sync'
+require_relative 'ldap/version'
 require_relative 'ldap/auth_adapter'
 require_relative 'ldap/auth_adapter/simple'
 require_relative 'ldap/auth_adapter/sasl'
@@ -294,6 +295,7 @@ class Net::LDAP
     16 => :array, # AbandonRequest
     19 => :array, # SearchResultReferral
     24 => :array, # Unsolicited Notification
+    25 => :array, # IntermediateResponse
   }
   application = {
     :primitive => primitive,
@@ -324,7 +326,13 @@ class Net::LDAP
   }
 
   universal = {
+    primitive: {
+      6 => :oid,
+      13 => :oid,
+    },
     constructed: {
+      16 => :array,
+      17 => :array,
       107 => :string, # ExtendedResponse
     },
   }
@@ -447,6 +455,10 @@ class Net::LDAP
     SORT_REQUEST  = "1.2.840.113556.1.4.473"
     SORT_RESPONSE = "1.2.840.113556.1.4.474"
     DELETE_TREE   = "1.2.840.113556.1.4.805"
+    SYNC          = Net::LDAP::Sync::OID
+    SYNC_STATE    = Net::LDAP::Sync::STATE_OID
+    SYNC_INFO     = Net::LDAP::Sync::INFO_OID
+    SYNC_DONE     = Net::LDAP::Sync::DONE_OID
   end
 
   def self.result2string(code) #:nodoc:
@@ -859,6 +871,36 @@ class Net::LDAP
   # (You don't need to re-set the values of #host and #port.) As noted in
   # the documentation for #auth, the password parameter can be a Ruby Proc
   # instead of a String.
+  def synchronize(args = {}, &block)
+    args = args.dup
+    args[:base] ||= @base
+    mode = args.fetch(:mode, :refresh_only)
+    reconnect = args.fetch(:reconnect, mode == :refresh_and_persist)
+    max_reconnects = args.fetch(:max_reconnects, reconnect ? Float::INFINITY : 0)
+    cookie = args[:cookie]
+    result = nil
+    attempts = 0
+
+    instrument "synchronize.net_ldap", args do
+      loop do
+        begin
+          result = use_connection(args.merge(cookie: cookie)) do |conn|
+            conn.synchronize(args.merge(cookie: cookie), &block)
+          end
+          cookie = result[:cookie]
+          break
+        rescue EOFError, Errno::ECONNRESET, Errno::EPIPE, IOError
+          raise unless reconnect
+          raise if attempts >= max_reconnects
+
+          attempts += 1
+        end
+      end
+    end
+
+    result
+  end
+
   def bind(auth = @auth)
     instrument "bind.net_ldap" do |payload|
       if @open_connection

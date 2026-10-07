@@ -75,6 +75,7 @@ class Net::LDAP::PDU
   attr_reader :search_parameters
   attr_reader :bind_parameters
   attr_reader :extended_response
+  attr_reader :intermediate_response
 
   ##
   # Returns RFC-2251 Controls if any.
@@ -122,6 +123,8 @@ class Net::LDAP::PDU
       parse_unbind_request(ber_object[1])
     when ExtendedResponse
       parse_extended_response(ber_object[1])
+    when IntermediateResponse
+      parse_intermediate_response(ber_object[1])
     else
       raise Error.new("unknown pdu-type: #{@app_tag}")
     end
@@ -203,6 +206,16 @@ class Net::LDAP::PDU
     @extended_response = sequence.length == 3 ? nil : sequence.last
   end
   private :parse_extended_response
+
+  def parse_intermediate_response(sequence)
+    @ldap_result = {
+      :resultCode => Net::LDAP::ResultCodeSuccess,
+      :matchedDN => sequence[0],
+      :errorMessage => sequence[1],
+    }
+    @intermediate_response = sequence[2]
+  end
+  private :parse_intermediate_response
 
   ##
   # A Bind Response may have an additional field, ID [7], serverSaslCreds,

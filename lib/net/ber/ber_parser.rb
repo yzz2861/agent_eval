@@ -176,6 +176,9 @@ module Net::BER::BERParser
             "Indeterminite BER content length not implemented."
     end
     data = read(content_length)
+    if data.nil? || data.length < content_length
+      raise Net::BER::BerError, "incomplete BER object"
+    end
 
     parse_ber_object(syntax, id, data)
   end

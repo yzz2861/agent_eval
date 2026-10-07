@@ -195,7 +195,7 @@ class Net::LDAP::Connection #:nodoc:
   #
   # Returns a Net::LDAP::PDU object or nil.
   def queued_read(message_id)
-    if pdu = message_queue[message_id].shift
+    if pdu = message_queue.fetch(message_id, []).shift
       return pdu
     end
 
@@ -528,6 +528,81 @@ class Net::LDAP::Connection #:nodoc:
     if !messages.nil? && !messages.empty?
       instrument "search_messages_unread.net_ldap_connection",
                  message_id: message_id, messages: messages
+    end
+  end
+
+  def synchronize(args = nil, &block)
+    args ||= {}
+    filter = args[:filter] || Net::LDAP::Filter.eq("objectClass", "*")
+    base = args[:base]
+    scope = args[:scope] || Net::LDAP::SearchScope_WholeSubtree
+    attributes = Array(args[:attributes])
+    attributes |= ["entryUUID"]
+    deref = args[:deref] || Net::LDAP::DerefAliases_Never
+    size_limit = args[:size].to_i
+    time_limit = args[:time].to_i
+    attributes_only = args[:attributes_only] == true
+
+    raise ArgumentError, "search base is required" unless base
+    raise ArgumentError, "invalid search scope" unless Net::LDAP::SearchScopes.include?(scope)
+    raise ArgumentError, "invalid alias dereferencing value" unless Net::LDAP::DerefAliasesArray.include?(deref)
+
+    mode_name = args.fetch(:mode, :refresh_only)
+    mode = case mode_name
+           when :refresh_only then Net::LDAP::Sync::REFRESH_ONLY
+           when :refresh_and_persist then Net::LDAP::Sync::REFRESH_AND_PERSIST
+           else raise ArgumentError, "invalid synchronization mode: #{mode_name}"
+           end
+
+    filter = Net::LDAP::Filter.construct(filter) if filter.is_a?(String)
+    ber_attributes = attributes.map { |attribute| attribute.to_s.to_ber }
+    message_id = next_msgid
+    handler = Net::LDAP::Sync::Handler.new(
+      block,
+      initial_cookie: args[:cookie],
+      resumed: mode_name == :refresh_and_persist && !args[:cookie].nil?,
+    )
+
+    request = [
+      base.to_ber,
+      scope.to_ber_enumerated,
+      deref.to_ber_enumerated,
+      size_limit.to_ber,
+      time_limit.to_ber,
+      attributes_only.to_ber,
+      filter.to_ber,
+      ber_attributes.to_ber_sequence,
+    ].to_ber_appsequence(Net::LDAP::PDU::SearchRequest)
+
+    controls = [
+      Net::LDAP::Sync.request_control(
+        mode,
+        args[:cookie],
+        args[:reload_hint] == true,
+      ),
+    ].to_ber_contextspecific(0)
+
+    instrument "synchronize.net_ldap_connection",
+               message_id: message_id, base: base, mode: mode_name do
+      write(request, controls, message_id)
+
+      begin
+        while ber_object = socket.read_ber(Net::LDAP::AsnSyntax)
+          pdu = Net::LDAP::PDU.new(ber_object)
+          raise Net::LDAP::Sync::ProtocolError, "unexpected message id #{pdu.message_id}" unless pdu.message_id == message_id
+          begin
+            result = handler.call(pdu)
+            next unless result
+            return result if result[:terminal]
+          end
+        end
+
+        handler.eof!
+      rescue Net::BER::BerError => e
+        raise Net::LDAP::Sync::TruncatedError, e.message
+      ensure
+        message_queue.delete(message_id)
+      end
     end
   end
 
