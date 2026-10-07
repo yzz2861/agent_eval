@@ -43,6 +43,7 @@
 require 'socket'
 require 'io/wait' if RUBY_VERSION < '3.2'
 require 'monitor'
+require 'securerandom'
 require_relative 'eq'
 require_relative 'version'
 
@@ -545,13 +546,13 @@ module DRb
     def initialize(ary)
       @ary = ary.collect { |obj|
         if obj.kind_of? DRbUndumped
-          DRbObject.new(obj)
+          DRbObject.make_proxy(obj)
         else
           begin
             Marshal.dump(obj)
             obj
           rescue
-            DRbObject.new(obj)
+            DRbObject.make_proxy(obj)
           end
         end
       }
@@ -589,6 +590,12 @@ module DRb
         # nothing
       else
         obj = make_proxy(obj, error)
+      end
+      if !error && obj.is_a?(DRbObject)
+        session = DRbBidiSession.current
+        if session && (obj.bidi? ? obj.local? : DRb.here?(obj.__drburi))
+          obj = DRbBidiReference.new(session.session_id, session.local_side, obj.__drbref)
+        end
       end
       begin
         str = Marshal::dump(obj)
@@ -668,9 +675,368 @@ module DRb
     def make_proxy(obj, error=false) # :nodoc:
       if error
         DRbRemoteError.new(obj)
+      elsif (session = DRbBidiSession.current)
+        DRbBidiReference.new(session.session_id, session.local_side, DRb.to_id(obj))
       else
-        DRbObject.new(obj)
+        DRbObject.make_proxy(obj)
       end
+    end
+  end
+
+  # Bidirectional dRuby session.  All requests in both directions are
+  # multiplexed over the socket that was opened by the client.
+  class DRbBidiSession
+    class Closed < DRbConnError; end
+
+    PROTOCOL = "drbbidi/1"
+    MAGIC = "\x00\x00\x00\x01\x31"
+    MARKER_SIZE = 32
+
+    @mutex = Thread::Mutex.new
+    @sessions = {}
+
+    def self.register(session)
+      @mutex.synchronize do
+        @sessions[session.session_id] ||= {}
+        @sessions[session.session_id][session.local_side] = session
+      end
+    end
+
+    def self.unregister(session)
+      @mutex.synchronize do
+        sides = @sessions[session.session_id]
+        return unless sides
+        sides.delete(session.local_side)
+        @sessions.delete(session.session_id) if sides.empty?
+      end
+    end
+
+    def self.fetch(session_id, owner=nil)
+      @mutex.synchronize do
+        sides = @sessions.fetch(session_id)
+        if owner
+          sides.values.find { |session| session.local_side == owner } || sides.values.first
+        else
+          sides.values.first
+        end
+      end
+    end
+
+    def self.current
+      Thread.current[:drb_bidi_session]
+    end
+
+    def self.generate_session_id
+      SecureRandom.hex(MARKER_SIZE / 2)
+    end
+
+    attr_reader :session_id, :socket, :local_side, :remote_side,
+                :remote_uri, :server
+
+    def initialize(socket, session_id, local_side, remote_side, remote_uri, config, server=nil)
+      @socket = socket
+      @session_id = session_id
+      @local_side = local_side
+      @remote_side = remote_side
+      @remote_uri = remote_uri
+      @config = config
+      @server = server
+      @msg = DRbMessage.new(config)
+      @pending = {}
+      @request_id = 0
+      @closed = false
+      @reader = nil
+      @write_mutex = Thread::Mutex.new
+      @mutex = Thread::Mutex.new
+    end
+
+    def uri
+      "drbbidi://session/#{@session_id}/#{@remote_side}"
+    end
+
+    def local_uri
+      "drbbidi://session/#{@session_id}/#{@local_side}"
+    end
+
+    def bidi?
+      true
+    end
+
+    def alive?
+      !@closed && !@socket.closed?
+    end
+
+    def activate(server=nil)
+      @server = server if server
+      self.class.register(self)
+      @server&.add_bidi_session(self)
+      @server&.export_bidi_uri(local_uri)
+      @reader = Thread.start do
+        Thread.current[:drb_bidi_session] = self
+        Thread.current['DRb'] = { 'client' => self, 'server' => @server }
+        @server&.add_bidi_thread(Thread.current)
+        read_loop
+      end
+      @reader
+    end
+
+    def request(ref, msg_id, arg, block)
+      id = nil
+      @mutex.synchronize do
+        raise DRbConnError, 'connection closed' unless alive?
+        id = (@request_id += 1)
+        key = pending_key(@local_side, id)
+        @pending[key] = Thread::ConditionVariable.new
+        @pending["#{key}_mutex"] = Thread::Mutex.new
+      end
+
+      begin
+        save_session = Thread.current[:drb_bidi_session]
+        save_drb = Thread.current['DRb']
+        Thread.current[:drb_bidi_session] = self
+        Thread.current['DRb'] = { 'client' => self, 'server' => @server } if @server
+        @write_mutex.synchronize do
+          raise DRbConnError, 'connection closed' unless alive?
+          write_request(id, ref, msg_id, arg, block)
+        end
+      rescue Exception => error
+        conn_error = DRbConnError.new(error.message)
+        conn_error.set_backtrace(error.backtrace)
+        close(conn_error)
+        raise conn_error
+      ensure
+        Thread.current[:drb_bidi_session] = save_session
+        Thread.current['DRb'] = save_drb
+      end
+
+      mutex = @mutex.synchronize { @pending["#{pending_key(@local_side, id)}_mutex"] }
+      data = mutex.synchronize do
+        cond = @mutex.synchronize { @pending[pending_key(@local_side, id)] }
+        cond.wait(mutex) until @mutex.synchronize { @pending.key?("#{pending_key(@local_side, id)}_reply") || !alive? }
+        @mutex.synchronize { @pending["#{pending_key(@local_side, id)}_reply"] } || [false, Closed.new('connection closed')]
+      end
+      raise data[1] if data[0] == false && Closed === data[1]
+      data
+    ensure
+      key = pending_key(@local_side, id)
+      @mutex.synchronize do
+        @pending.delete(key)
+        @pending.delete("#{key}_mutex")
+        @pending.delete("#{key}_reply")
+      end
+    end
+
+    def close(error=Closed.new('connection closed'))
+      @mutex.synchronize do
+        return if @closed
+        @closed = true
+        begin
+          @socket.close unless @socket.closed?
+        rescue IOError
+        end
+        wake_all(error)
+      end
+      @server&.remove_bidi_session(self)
+      self.class.unregister(self)
+    end
+
+    def shutdown
+      close
+    end
+
+    def stream
+      @socket
+    end
+
+    def peeraddr
+      @socket.peeraddr
+    end
+
+    def send_reply(direction, id, succ, result)
+      @mutex.synchronize do
+        return unless alive?
+        payload = @msg.dump(succ) + @msg.dump(result, !succ)
+        @write_mutex.synchronize do
+          write_packet([PROTOCOL, 'reply', direction, id], payload)
+        end
+      end
+    rescue Exception => error
+      close(wrap_close_error(error))
+    end
+
+    def handle_request(direction, id)
+      ref = @msg.load(@socket)
+      object = request_target(ref)
+      message = @msg.load(@socket)
+      argc = @msg.load(@socket)
+      raise DRbConnError, 'too many arguments' if @config[:argc_limit] < argc
+      argv = Array.new(argc)
+      argc.times { |index| argv[index] = @msg.load(@socket) }
+      block = @msg.load(@socket)
+
+      Thread.start(object, message, argv, block) do |object, message, argv, block|
+        Thread.current[:drb_bidi_session] = self
+        Thread.current['DRb'] = { 'client' => self, 'server' => @server }
+        @server&.add_bidi_thread(Thread.current)
+        invoke_request(direction, id, object, message, argv, block)
+      end
+    end
+
+    def handle_reply(direction, id)
+      succ = @msg.load(@socket)
+      result = @msg.load(@socket)
+      complete(direction, id, succ, result)
+    end
+
+    private
+
+    def write_request(id, ref, msg_id, arg, block)
+      ary = []
+      ary.push(@msg.dump(ref.nil? ? nil : ref.__drbref))
+      ary.push(@msg.dump(msg_id.id2name))
+      ary.push(@msg.dump(arg.length))
+      arg.each { |value| ary.push(@msg.dump(value)) }
+      ary.push(@msg.dump(block))
+      write_packet([PROTOCOL, 'request', @local_side, id], ary.join)
+    end
+
+    def write_packet(metadata, payload)
+      header = Marshal.dump(metadata)
+      @socket.write([header.bytesize].pack('N') + header + payload)
+    end
+
+    def read_loop
+      loop do
+        metadata = read_metadata
+        _protocol, kind, direction, id = metadata
+        case kind
+        when 'request'
+          handle_request(direction, id)
+        when 'reply'
+          handle_reply(direction, id)
+        else
+          raise DRbConnError, "unknown bidirectional message #{kind.inspect}"
+        end
+      end
+    rescue Exception => error
+      close(wrap_close_error(error))
+    end
+
+    def read_metadata
+      header = @socket.read(4)
+      raise DRbConnError, 'connection closed' if header.nil?
+      raise DRbConnError, 'premature header' if header.bytesize < 4
+      size = header.unpack1('N')
+      raise DRbConnError, "too large packet #{size}" if @config[:load_limit] < size
+      data = @socket.read(size)
+      raise DRbConnError, 'connection closed' if data.nil?
+      raise DRbConnError, 'premature marshal format' if data.bytesize < size
+      metadata = Marshal.load(data)
+      unless metadata.is_a?(Array) && metadata[0] == PROTOCOL && %w[request reply].include?(metadata[1]) &&
+             %w[client server].include?(metadata[2]) && metadata[3].is_a?(Integer)
+        raise DRbConnError, 'invalid bidirectional message'
+      end
+      metadata
+    end
+
+    def request_target(ref)
+      return @server.to_obj(ref) if ref.nil? || ref.is_a?(Integer) || DRbURIOption === ref
+      raise DRbConnError, 'bidirectional reference is owned by the remote peer' if DRbObject === ref
+      ref
+    end
+
+    def invoke_request(direction, id, object, message, argv, block)
+      invocation = @server.class::InvokeMethod.allocate
+      invocation.instance_variable_set(:@drb_server, @server)
+      invocation.instance_variable_set(:@client, BidiRequestClient.new(self, object, message, argv, block))
+      succ, result = invocation.perform
+      result = DRbRemoteError.new(result) unless succ || result.is_a?(DRbError)
+      send_reply(direction, id, succ, result)
+    rescue StandardError => error
+      send_reply(direction, id, false, DRbRemoteError.new(error))
+    end
+
+    def complete(direction, id, succ, result)
+      key = pending_key(direction, id)
+      mutex = nil
+      @mutex.synchronize do
+        mutex = @pending["#{key}_mutex"]
+        return unless mutex
+        @pending["#{key}_reply"] = [succ, result]
+      end
+      mutex.synchronize { @pending[key]&.signal }
+    end
+
+    def wake_all(error)
+      entries = @pending.select { |key, _value| key.is_a?(Array) }
+      entries.each do |key, value|
+        @pending["#{key}_reply"] = [false, error] unless @pending.key?("#{key}_reply")
+        value.broadcast
+      end
+    end
+
+    def wrap_close_error(error)
+      return error if error.is_a?(DRbConnError)
+      wrapped = DRbConnError.new(error.message)
+      wrapped.set_backtrace(error.backtrace)
+      wrapped
+    end
+
+    def pending_key(direction, id)
+      [direction, id]
+    end
+
+    class BidiRequestClient
+      def initialize(session, object, message, argv, block)
+        @session = session
+        @object = object
+        @message = message
+        @argv = argv
+        @block = block
+      end
+
+      def recv_request
+        [@object, @message, @argv, @block]
+      end
+    end
+  end
+
+  # Wire reference for an object owned by one side of a bidirectional session.
+  class DRbBidiReference
+    def initialize(session_id, owner, ref)
+      @session_id = session_id
+      @owner = owner
+      @ref = ref
+    end
+
+    attr_reader :session_id, :owner, :ref
+
+    def _dump(_level)
+      Marshal.dump([:drbbidi, @session_id, @owner, @ref])
+    end
+
+    def self._load(data)
+      payload = Marshal.load(data)
+      return payload unless payload.is_a?(Array) && payload[0] == :drbbidi
+      reference = new(payload[1], payload[2], payload[3])
+      current_session = DRbBidiSession.current
+      current_session ? reference.resolve(current_session) : reference
+    end
+
+    def resolve(session)
+      if @session_id == session.session_id
+        target_session = session
+      else
+        target_session = DRbBidiSession.fetch(@session_id, @owner)
+      end
+
+      if @owner == target_session.local_side
+        target_session.server.to_obj(@ref)
+      else
+        DRbBidiObject.new_from_reference(target_session.uri, @ref, @session_id, @owner)
+      end
+    rescue KeyError
+      raise DRbConnError, 'bidirectional session is closed'
     end
   end
 
@@ -898,17 +1264,23 @@ module DRb
     def self.open_server(uri, config)
       uri = 'druby://:0' unless uri
       host, port, _ = parse_uri(uri)
+      return DRbBidiServerSocket.open_server(uri, config) if config[:bidirectional] || config[:bidi]
+      open_tcp_server(uri, host, port, config, method(:new))
+    end
+
+    def self.open_tcp_server(uri, host, port, config, builder)
       config = {:tcp_original_host => host}.update(config)
       if host.size == 0
-        host = getservername
-        soc = open_server_inaddr_any(host, port)
+        bound_host = getservername
+        soc = open_server_inaddr_any(bound_host, port)
+        host = bound_host
       else
         soc = TCPServer.open(host, port)
       end
       port = soc.addr[1] if port == 0
       config[:tcp_port] = port
       uri = "druby://#{host}:#{port}"
-      self.new(uri, soc, config)
+      builder.call(uri, soc, config)
     end
 
     # Parse +uri+ into a [uri, option] pair.
@@ -1036,8 +1408,126 @@ module DRb
     end
   end
 
+  class DRbBidiServerSocket < DRbTCPSocket
+    def self.open_server(uri, config)
+      host, port, _ = parse_uri(uri)
+      open_tcp_server(uri, host, port, config, method(:new))
+    end
+
+    def accept
+      loop do
+        socket = accept_or_shutdown
+        return nil unless socket
+        if @acl
+          unless @acl.allow_socket?(socket)
+            socket.close
+            next
+          end
+        end
+
+        begin
+          if bidirectional_packet?(socket)
+            return open_bidi_client(socket)
+          end
+          DRbTCPSocket.new(@uri, socket, @config.reject(:bidirectional, :bidi))
+        rescue DRbConnError
+          socket.close unless socket.closed?
+          raise if $!.message == 'connection closed'
+          next
+        end
+      end
+    end
+
+    def open_bidi_client(socket)
+      marker = socket.read(DRbBidiSession::MARKER_SIZE)
+      unless marker&.bytesize == DRbBidiSession::MARKER_SIZE && marker =~ /\A[0-9a-f]+\z/
+        socket.close
+        raise DRbConnError, 'invalid bidirectional handshake'
+      end
+      socket.write(DRbBidiProtocol::ACK)
+      session = DRbBidiSession.new(socket, marker, 'server', 'client', @uri, @config)
+      session.activate(DRb.current_server)
+      session
+    end
+    private :open_bidi_client
+
+    def bidirectional_packet?(socket)
+      marker = peek_exact(socket, DRbBidiSession::MAGIC.bytesize)
+      return false if marker.nil?
+      if marker == DRbBidiSession::MAGIC
+        socket.read(DRbBidiSession::MAGIC.bytesize)
+        true
+      else
+        false
+      end
+    rescue Errno::ECONNRESET, IOError, Errno::ENOTCONN
+      socket.close rescue nil
+      raise DRbConnError, 'connection closed'
+    end
+    private :bidirectional_packet?
+
+    def peek_exact(socket, size)
+      data = +''
+      deadline = Time.now + 1
+      while data.bytesize < size
+        remaining = deadline - Time.now
+        raise DRbConnError, 'bidirectional handshake timeout' if remaining <= 0
+        readables, = IO.select([socket, @shutdown_pipe_r], nil, nil, remaining)
+        return nil unless readables
+        return nil if readables.include?(@shutdown_pipe_r)
+        chunk = socket.recv(size, Socket::MSG_PEEK)
+        return nil if chunk.empty?
+        data = chunk.byteslice(0, size)
+      end
+      data
+    end
+  end
+
+  module DRbBidiProtocol
+    ACK = "\x06"
+
+    def self.uri?(uri)
+      uri.start_with?('drbbidi://')
+    end
+
+    def self.open(uri, config)
+      raise DRbBadScheme, uri unless uri?(uri)
+
+      target = uri.sub(/\Adrbbidi:/, 'druby:')
+      host, port, = DRbTCPSocket.send(:parse_uri, target)
+      socket = TCPSocket.open(host, port)
+      socket.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
+      session_id = DRbBidiSession.generate_session_id
+      socket.write(DRbBidiSession::MAGIC + session_id)
+      ack = socket.read(ACK.bytesize)
+      unless ack == ACK
+        socket.close
+        raise DRbConnError, 'bidirectional protocol is not enabled by peer'
+      end
+      server = DRb.primary_server
+      session = DRbBidiSession.new(socket, session_id, 'client', 'server', target, config, server)
+      session.activate
+      session
+    end
+
+    def self.open_server(uri, config)
+      raise DRbBadScheme, uri unless uri.start_with?('druby:') && (config[:bidirectional] || config[:bidi])
+      DRbBidiServerSocket.open_server(uri, config)
+    end
+
+    def self.uri_option(uri, config)
+      unless uri?(uri)
+        raise DRbBadScheme, uri unless uri.start_with?('drbbidi:')
+        raise DRbBadURI, "can't parse uri:#{uri}"
+      end
+      target = uri.sub(/\Adrbbidi:/, 'druby:')
+      normalized, option = DRbTCPSocket.uri_option(target, config)
+      [normalized.sub(/\Adruby:/, 'drbbidi:'), option]
+    end
+  end
+
   module DRbProtocol
-    @protocol = [DRbTCPSocket] # default
+    @protocol = [DRbBidiProtocol, DRbTCPSocket] # default
   end
 
   class DRbURIOption  # :nodoc:  I don't understand the purpose of this class...
@@ -1096,11 +1586,29 @@ module DRb
       self.new(nil, uri)
     end
 
+    def self.make_proxy(obj)
+      proxy = new(obj)
+      session = DRbBidiSession.current
+      if session && proxy.__drburi && DRb.here?(proxy.__drburi)
+        DRbBidiReference.new(session.session_id, session.local_side, proxy.__drbref)
+      else
+        proxy
+      end
+    end
+
     # Marshall this object.
     #
     # The URI and ref of the object are marshalled.
     def _dump(lv)
       Marshal.dump([@uri, @ref])
+    end
+
+    def bidi?
+      false
+    end
+
+    def local?
+      DRb.here?(@uri)
     end
 
     # Create a new remote object stub.
@@ -1218,6 +1726,56 @@ module DRb
     end
   end
 
+  class DRbBidiObject < DRbObject
+    def self._load(data)
+      marker, session_id, owner, ref = Marshal.load(data)
+      return super unless marker == :drbbidi
+      session = DRbBidiSession.current
+      reference = DRbBidiReference.new(session_id, owner, ref)
+      return reference.resolve(session) if session
+      new_from_reference(nil, ref, session_id, owner)
+    end
+
+    def self.new_from_reference(uri, ref, session_id, owner)
+      allocate.tap do |object|
+        object.instance_variable_set(:@uri, uri)
+        object.instance_variable_set(:@ref, ref)
+        object.instance_variable_set(:@session_id, session_id)
+        object.instance_variable_set(:@owner, owner)
+      end
+    end
+
+    def bidi?
+      true
+    end
+
+    def local?
+      target_session = DRbBidiSession.fetch(@session_id, @owner) rescue nil
+      !!target_session && @owner == target_session.local_side
+    end
+
+    def _dump(_level)
+      Marshal.dump([:drbbidi, @session_id, @owner, @ref])
+    end
+
+    ruby2_keywords def method_missing(msg_id, *arguments, &block)
+      session = DRbBidiSession.fetch(@session_id, @owner)
+      if @owner == session.local_side
+        object = session.server.to_obj(@ref)
+        session.server.check_insecure_method(object, msg_id)
+        return object.__send__(msg_id, *arguments, &block)
+      end
+
+      succ, result = session.request(self, msg_id, arguments, block)
+      return result if succ
+      raise result if DRbUnknown === result
+      result.set_backtrace(self.class.prepare_backtrace(session.uri, result) + caller)
+      raise result
+    rescue KeyError
+      raise DRbConnError, 'bidirectional session is closed'
+    end
+  end
+
   class ThreadObject
     include MonitorMixin
 
@@ -1277,6 +1835,8 @@ module DRb
   # not normally need to deal with it directly.
   class DRbConn
     POOL_SIZE = 16  # :nodoc:
+    @bidi_mutex = Thread::Mutex.new
+    @bidi_connections = {}
 
     def self.make_pool
       ThreadObject.new do |queue|
@@ -1314,9 +1874,17 @@ module DRb
     def self.stop_pool
       @pool_proxy&.kill
       @pool_proxy = nil
+      bidi_connections = nil
+      @bidi_mutex.synchronize do
+        bidi_connections = @bidi_connections.values
+        @bidi_connections.clear
+      end
+      bidi_connections&.each(&:close)
     end
 
     def self.open(remote_uri)  # :nodoc:
+      return open_bidi(remote_uri) { |conn| yield(conn) } if bidi_uri?(remote_uri)
+
       begin
         @pool_proxy = make_pool unless @pool_proxy&.alive?
 
@@ -1336,6 +1904,30 @@ module DRb
       end
     end
 
+    def self.bidi_uri?(uri)
+      uri.start_with?('drbbidi:')
+    end
+
+    def self.open_bidi(remote_uri)
+      connection = @bidi_mutex.synchronize do
+        existing = @bidi_connections[remote_uri]
+        if existing&.alive?
+          existing
+        else
+          @bidi_connections.delete(remote_uri) if existing
+          opened = DRbProtocol.open(remote_uri, DRb.config)
+          @bidi_connections[remote_uri] = opened
+        end
+      end
+      yield(connection)
+    rescue Exception
+      @bidi_mutex.synchronize do
+        @bidi_connections.delete(remote_uri) if @bidi_connections[remote_uri].equal?(connection)
+      end
+      connection&.close
+      raise
+    end
+
     def initialize(remote_uri)  # :nodoc:
       @uri = remote_uri
       @protocol = DRbProtocol.open(remote_uri, DRb.config)
@@ -1343,6 +1935,7 @@ module DRb
     attr_reader :uri  # :nodoc:
 
     def send_message(ref, msg_id, arg, block)  # :nodoc:
+      return @protocol.request(ref, msg_id, arg, block) if @protocol.respond_to?(:request)
       @protocol.send_request(ref, msg_id, arg, block)
       @protocol.recv_reply
     end
@@ -1424,6 +2017,7 @@ module DRb
         :tcp_acl => @@acl,
         :load_limit => @@load_limit,
         :argc_limit => @@argc_limit,
+        :bidirectional => false,
       }
       default_config.update(hash)
     end
@@ -1457,6 +2051,9 @@ module DRb
     # :argc_limit :: the maximum number of arguments to a remote
     #                method accepted by the server.  Defaults to
     #                256.
+    # :bidirectional :: when true, accept explicit bidirectional sessions
+    #                    on the same listener. Use a drbbidi:// URI so
+    #                    callbacks travel back over the client connection.
     # The default values of these options can be modified on
     # a class-wide basis by the class methods #default_argc_limit,
     # #default_load_limit, #default_acl, #default_id_conv,
@@ -1485,11 +2082,14 @@ module DRb
       @protocol = DRbProtocol.open_server(uri, @config)
       @uri = @protocol.uri
       @exported_uri = [@uri]
+      @exported_uri << @uri.sub(/\Adruby:/, 'drbbidi:') if bidirectional?
 
       @front = front
       @idconv = @config[:idconv]
 
       @grp = ThreadGroup.new
+      @bidi_mutex = Thread::Mutex.new
+      @bidi_sessions = []
       @thread = run
 
       DRb.regist_server(self)
@@ -1523,6 +2123,30 @@ module DRb
     #
     # In verbose mode, failed calls are logged to stdout.
     def verbose; @config[:verbose]; end
+
+    def bidirectional?
+      @config[:bidirectional] || @config[:bidi]
+    end
+
+    def add_bidi_session(session)
+      @bidi_mutex.synchronize do
+        @bidi_sessions << session unless @bidi_sessions.include?(session)
+      end
+    end
+
+    def remove_bidi_session(session)
+      @bidi_mutex.synchronize { @bidi_sessions.delete(session) }
+    end
+
+    def add_bidi_thread(thread)
+      @grp.add(thread)
+    end
+
+    def export_bidi_uri(uri)
+      DRb.mutex.synchronize do
+        @exported_uri << uri unless @exported_uri.include?(uri)
+      end
+    end
 
     # Is this server alive?
     def alive?
@@ -1561,6 +2185,8 @@ module DRb
 
     def shutdown
       current = Thread.current
+      sessions = @bidi_mutex.synchronize { @bidi_sessions.dup }
+      sessions.each { |session| session.close unless session == current[:drb_bidi_session] }
       if @protocol.respond_to? :shutdown
         @protocol.shutdown
       else
@@ -1758,6 +2384,11 @@ module DRb
     def main_loop
       client0 = @protocol.accept
       return nil if !client0
+      if client0.respond_to?(:bidi?) && client0.bidi?
+        add_bidi_session(client0)
+        client0.local_uri
+        return true
+      end
       Thread.start(client0) do |client|
         @grp.add Thread.current
         Thread.current['DRb'] = { 'client' => client ,
@@ -1855,6 +2486,7 @@ module DRb
     drb = Thread.current['DRb']
     client = (drb && drb['client'])
     if client
+      return client.local_uri if client.respond_to?(:bidi?) && client.bidi?
       uri = client.uri
       return uri if uri
     end
