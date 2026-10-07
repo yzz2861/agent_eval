@@ -23,6 +23,7 @@ require_relative 'ldap/filter'
 require_relative 'ldap/dataset'
 require_relative 'ldap/password'
 require_relative 'ldap/entry'
+require_relative 'ldap/ranged_attribute'
 require_relative 'ldap/instrumentation'
 require_relative 'ldap/connection'
 require_relative 'ldap/version'
@@ -1198,6 +1199,152 @@ class Net::LDAP
       delete(args.merge(:control_codes => [[Net::LDAP::LDAPControls::DELETE_TREE, true]]))
     else
       recursive_delete(args)
+    end
+  end
+
+  # Read the complete value list of an attribute that a server may return
+  # in several ranged segments, as Active Directory does for the +member+
+  # attribute of large groups. Takes the full DN of the entry and the name
+  # (Symbol or String) of the attribute.
+  #
+  # The first request asks for <tt>"<attribute>;range=0-*"</tt>. Each
+  # subsequent request is derived from the range markers the server
+  # actually returned (for example +member;range=0-1499+), never from an
+  # assumed segment size, and continues until the server answers with the
+  # <tt>"*"</tt> end-of-range marker. If the server returns a range that
+  # regresses, overlaps, repeats, or skips ahead of the expected position,
+  # the read stops with an error instead of fetching forever.
+  #
+  # Pass <tt>:version_attribute</tt> (for example +:usnchanged+ or
+  # +:whenchanged+) to re-read a version attribute of the entry on every
+  # round. If the version changes while reading, the partial results are
+  # discarded and the result reports an error. If the server does not
+  # return the version attribute, the read still completes but the result
+  # carries a warning that snapshot consistency cannot be guaranteed;
+  # check RangedAttributeResult#consistent? and #warnings.
+  #
+  # Returns a Net::LDAP::RangedAttributeResult. On success its #values are
+  # the concatenated attribute values in server order, with binary
+  # content preserved exactly as returned.
+  #
+  #  result = ldap.read_ranged_attribute(
+  #    "cn=big-group,ou=groups,dc=example,dc=com", :member,
+  #    :version_attribute => :usnchanged)
+  #  if result.success?
+  #    members = result.values
+  #  end
+  def read_ranged_attribute(dn, attribute, args = {})
+    attribute = attribute.to_s
+    version_attribute = args[:version_attribute]
+    version_attribute = version_attribute.to_s if version_attribute
+
+    values = []
+    warnings = []
+    range_start = 0
+    version_baseline = nil
+    version_checked = false
+    version_warned = false
+
+    loop do
+      requested = "#{attribute};range=#{range_start}-*"
+      attributes = [requested]
+      attributes << version_attribute if version_attribute
+
+      entries = search(:ignore_server_caps => true,
+                       :base => dn,
+                       :scope => SearchScope_BaseObject,
+                       :attributes => attributes)
+
+      unless entries
+        return RangedAttributeResult.new(
+          :error => "search for #{requested} on #{dn} failed: " \
+                    "#{get_operation_result.message}",
+          :warnings => warnings)
+      end
+
+      entry = entries.first
+      unless entry
+        return RangedAttributeResult.new(
+          :error => "no entry returned for #{dn}",
+          :warnings => warnings)
+      end
+
+      if version_attribute
+        current_version = entry[version_attribute].first
+        if current_version.nil?
+          unless version_warned
+            warnings << "version attribute #{version_attribute} is not " \
+                        "available; snapshot consistency cannot be guaranteed"
+            version_warned = true
+          end
+        elsif !version_checked
+          version_baseline = current_version
+          version_checked = true
+        elsif current_version != version_baseline
+          return RangedAttributeResult.new(
+            :error => "version attribute #{version_attribute} changed while " \
+                      "reading #{attribute} on #{dn}; partial results discarded",
+            :warnings => warnings)
+        end
+      end
+
+      match = nil
+      entry.each do |name, entry_values|
+        parsed = RangedAttributeName.parse(name)
+        next unless parsed.name.downcase == attribute.downcase
+        match = [parsed, entry_values]
+        break
+      end
+
+      unless match
+        if range_start.zero?
+          # The attribute is absent or empty on the entry.
+          return RangedAttributeResult.new(:values => [],
+                                           :warnings => warnings,
+                                           :version_checked => version_checked)
+        end
+        return RangedAttributeResult.new(
+          :error => "server stopped returning #{attribute} on #{dn} before " \
+                    "the final range segment",
+          :warnings => warnings)
+      end
+
+      parsed, entry_values = match
+
+      unless parsed.ranged?
+        # The server returned the whole attribute without ranging.
+        values.concat(entry_values)
+        return RangedAttributeResult.new(:values => values,
+                                         :warnings => warnings,
+                                         :version_checked => version_checked)
+      end
+
+      if parsed.range_start != range_start
+        return RangedAttributeResult.new(
+          :error => "server returned #{attribute};range=#{parsed.range_start}-" \
+                    "#{parsed.final? ? '*' : parsed.range_end} when " \
+                    "range=#{range_start}-* was expected; range regression, " \
+                    "gap, or duplicate segment",
+          :warnings => warnings)
+      end
+
+      if !parsed.final? && parsed.range_end < parsed.range_start
+        return RangedAttributeResult.new(
+          :error => "server returned a malformed range " \
+                    "#{parsed.range_start}-#{parsed.range_end} for " \
+                    "#{attribute} on #{dn}",
+          :warnings => warnings)
+      end
+
+      values.concat(entry_values)
+
+      if parsed.final?
+        return RangedAttributeResult.new(:values => values,
+                                         :warnings => warnings,
+                                         :version_checked => version_checked)
+      end
+
+      range_start = parsed.range_end + 1
     end
   end
 
