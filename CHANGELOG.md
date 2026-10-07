@@ -2,6 +2,13 @@
 # CHANGELOG.md
 
 
+### rufus-scheduler 3.9.3 - not yet released
+
+* Add fork lifecycle support, Scheduler#forked?, #pid and #fork_child
+* Refuse (ForkedError) use of an inherited scheduler in a forked child
+* Add Job#scheduler
+
+
 ### rufus-scheduler 3.9.2 - released 2024-09-04
 
 * For fugit >= 1.11.1
@@ -424,4 +431,3 @@
 ## initial release
 
 (was [openwferu-scheduler](https://rubygems.org/gems/openwferu-scheduler/versions) before that)
-

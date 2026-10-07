@@ -36,6 +36,12 @@ class Rufus::Scheduler
   #
   class NotRunningError < Error; end
 
+  #
+  # For when the scheduler is used from a process that is not the process
+  # that started it (a forked child that did not take the scheduler over)
+  #
+  class ForkedError < Error; end
+
   #MIN_WORK_THREADS = 3
   MAX_WORK_THREADS = 28
 
@@ -48,6 +54,10 @@ class Rufus::Scheduler
   attr_reader :thread_key
   attr_reader :mutexes
 
+  # The pid of the process this scheduler belongs to
+  #
+  attr_reader :pid
+
   #attr_accessor :min_work_threads
   attr_accessor :max_work_threads
 
@@ -58,6 +68,8 @@ class Rufus::Scheduler
   def initialize(opts={})
 
     @opts = opts
+
+    @pid = Process.pid
 
     @started_at = nil
     @paused_at = nil
@@ -137,6 +149,8 @@ class Rufus::Scheduler
 
   def join(time_limit=nil)
 
+    fail_if_forked
+
     fail NotRunningError.new('cannot join scheduler that is not running') \
       unless @thread
     fail ThreadError.new('scheduler thread cannot join itself') \
@@ -157,6 +171,20 @@ class Rufus::Scheduler
   def up?
 
     !! @started_at
+  end
+
+  # Returns true when the current process is not the process that
+  # started this scheduler (a forked child process).
+  #
+  # A forked child inherits the scheduler state, but not its threads
+  # and not the ownership of its locks. As long as #forked? is true,
+  # scheduling, joining and shutting down are refused (ForkedError).
+  # Call #fork_child in the child process to explicitly take the
+  # scheduler over.
+  #
+  def forked?
+
+    Process.pid != @pid
   end
 
   def paused?
@@ -466,6 +494,7 @@ class Rufus::Scheduler
     stderr.puts("  #{pre}     #{EoTime.platform_info}")
     stderr.puts("  #{pre}   scheduler:")
     stderr.puts("  #{pre}     object_id: #{object_id}")
+    stderr.puts("  #{pre}     pid: #{@pid} (current: #{Process.pid})")
     stderr.puts("  #{pre}     opts:")
     stderr.puts("  #{pre}       #{@opts.inspect}")
     stderr.puts("  #{pre}       frequency: #{self.frequency}")
@@ -513,6 +542,8 @@ class Rufus::Scheduler
 
   def shutdown(opt=nil)
 
+    fail_if_forked
+
     opts =
       case opt
       when Symbol then { opt => true }
@@ -534,9 +565,71 @@ class Rufus::Scheduler
 
     unlock
 
-    @thread.join unless @thread == Thread.current
+    @thread.join if @thread && @thread != Thread.current
   end
   alias stop shutdown
+
+  # Explicit takeover entry point for forked child processes.
+  #
+  # Must get called from a process whose pid differs from the pid of
+  # the process that started this scheduler (see #forked?), else it
+  # fails with an ArgumentError.
+  #
+  # It rebuilds the scheduler internals (scheduler thread, work queues,
+  # mutexes, locks) so that nothing gets inherited from the parent
+  # process. Jobs that were mid-execution in the parent process are
+  # not resumed, their count and running threads are not carried over.
+  #
+  # With :copy => true, the definitions (original, opts, callable) of
+  # the currently scheduled jobs are re-registered in the child process
+  # (with new job ids). Else (the default), the child scheduler starts
+  # with an empty schedule.
+  #
+  # The parent process scheduler is not affected. Since the locks are
+  # re-instantiated (not inherited), a #shutdown in the child process
+  # cannot release locks held by the parent process.
+  #
+  # Returns self.
+  #
+  def fork_child(opts={})
+
+    fail ArgumentError.new(
+      'not in a forked child process, cannot take over scheduler'
+    ) unless forked?
+
+    defs = opts[:copy] ? collect_job_definitions : []
+
+    @pid = Process.pid
+
+    @jobs = JobArray.new
+    @mutexes = {}
+
+    @work_queue = Queue.new
+    @join_queue = Queue.new
+
+    @thread = nil
+    @thread_key = "rufus_scheduler_#{object_id}_#{@pid}"
+
+    @scheduler_lock = relock(@scheduler_lock)
+    @trigger_lock = relock(@trigger_lock)
+
+    @started_at = nil
+    @paused_at = nil
+
+    return self unless lock
+
+    start
+
+    defs.each do |d|
+      begin
+        do_schedule(*d)
+      rescue => err
+        on_error(nil, err)
+      end
+    end
+
+    self
+  end
 
   protected
 
@@ -699,6 +792,8 @@ class Rufus::Scheduler
 
   def do_schedule(job_type, t, callable, opts, return_job_instance, block)
 
+    fail_if_forked
+
     fail NotRunningError.new(
       'cannot schedule, scheduler is down or shutting down'
     ) if @started_at.nil?
@@ -739,5 +834,52 @@ class Rufus::Scheduler
 
   def monow; self.class.monow; end
   def ltstamp; self.class.ltstamp; end
-end
 
+  # Fails with a ForkedError when the current process is not the process
+  # that started this scheduler (see #forked? and #fork_child).
+  #
+  def fail_if_forked
+
+    return unless forked?
+
+    fail ForkedError.new(
+      "this scheduler was started in process #{@pid}, " +
+      "current process is #{Process.pid}, " +
+      'call #fork_child to take the scheduler over in the child process'
+    )
+  end
+
+  # Collects [ job_type, original, handler, opts, false, nil ] for each
+  # job that is currently scheduled (arguments for #do_schedule).
+  # Used by #fork_child when :copy => true.
+  #
+  # Only re-registerable definitions are collected, nothing about the
+  # current execution state (count, threads, ...) is carried over.
+  #
+  def collect_job_definitions
+
+    ts = {
+      Rufus::Scheduler::AtJob => :once,
+      Rufus::Scheduler::InJob => :once,
+      Rufus::Scheduler::EveryJob => :every,
+      Rufus::Scheduler::IntervalJob => :interval,
+      Rufus::Scheduler::CronJob => :cron }
+
+    jobs
+      .select { |j| j.next_time }
+      .collect { |j|
+        [ ts[j.class], j.original, j.handler, j.opts.dup, false, nil ]
+      }
+  end
+
+  # Returns a fresh lock instance for locks that own OS-level resources
+  # (FileLock). A forked child process must not unlock something its
+  # parent process locked.
+  #
+  def relock(lock)
+
+    lock.is_a?(Rufus::Scheduler::FileLock) ?
+      Rufus::Scheduler::FileLock.new(lock.path) :
+      lock
+  end
+end

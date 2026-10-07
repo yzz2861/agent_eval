@@ -8,6 +8,10 @@ class Rufus::Scheduler::Job
   #
   class KillSignal < StandardError; end
 
+  # The scheduler this job belongs to
+  #
+  attr_reader :scheduler
+
   attr_reader :id
   attr_reader :opts
   attr_reader :original

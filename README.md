@@ -1125,6 +1125,28 @@ Lets the current thread join the scheduling thread in rufus-scheduler. The threa
 
 `#join` is mostly used in standalone scheduling script (or tiny one file examples). Calling `#join` from a web application initializer will probably hijack the main thread and prevent the web application from being served. Do not put a `#join` in such a web application initializer file.
 
+### Scheduler#pid / #forked? / #fork_child
+
+When a process holding a scheduler gets forked (a preforking server, a background worker, ...), the child process inherits the scheduler state, but not its threads and not the ownership of its locks. By default, the inherited scheduler refuses to be used in the child: scheduling, joining and shutting down raise a `Rufus::Scheduler::ForkedError` (in particular, the child cannot release locks held by the parent process).
+
+`Scheduler#pid` returns the pid of the process the scheduler belongs to, `Scheduler#forked?` returns true when the current process is not that process.
+
+A forked child can explicitly take the scheduler over with `#fork_child`:
+
+```ruby
+scheduler = Rufus::Scheduler.new
+scheduler.every('10m') { ... }
+
+pid = fork do
+  scheduler.fork_child(copy: true)
+  # ...
+  scheduler.shutdown
+  exit!
+end
+```
+
+`#fork_child` rebuilds the scheduler internals (scheduler thread, work queues, mutexes, locks) in the child process. Nothing is inherited from the parent: not the work threads, not the mutexes, not the running job counts, not the file lock ownership. With `copy: true`, the definitions (original, options, callable) of the currently scheduled jobs are re-registered with fresh job ids; jobs that were mid-execution in the parent are not resumed. With `copy: false` (the default), the child scheduler starts with an empty schedule. The parent process scheduler is not affected.
+
 ### Scheduler#threads
 
 Returns all the threads associated with the scheduler, including the scheduler thread itself.
@@ -1795,4 +1817,3 @@ see [getting help](#getting-help) above.
 ## license
 
 MIT, see [LICENSE.txt](LICENSE.txt)
-
