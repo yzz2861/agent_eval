@@ -51,6 +51,12 @@ module Net; module SFTP; module Operations
   # * <tt>:read_size</tt> - the maximum number of bytes to read at a time
   #   from the source. Increasing this value might improve throughput. It
   #   defaults to 32,000 bytes.
+  #
+  # When the server advertises the +limits@openssh.com+ extension, write
+  # packets are additionally capped by the negotiated write limit (with
+  # packet encoding and handle bytes subtracted), and no more than the
+  # negotiated number of handles are opened concurrently. See
+  # Net::SFTP::Limits and Net::SFTP::Session#limits.
   # * <tt>:name</tt> - the filename to report to the progress monitor when
   #   an IO object is given as +local+. This defaults to "<memory>".
   #
@@ -132,6 +138,16 @@ module Net; module SFTP; module Operations
     # The properties hash for this object
     attr_reader :properties
 
+    # The number of file handles currently held open (or being opened) on
+    # the server. Capped by the negotiated +max_open_handles+ limit when the
+    # server supports the +limits@openssh.com+ extension.
+    attr_reader :open_handles
+
+    # The greatest number of simultaneously open (or opening) file handles
+    # observed so far. Useful for verifying that the server's handle limit
+    # was respected.
+    attr_reader :peak_open_handles
+
     # Instantiates a new uploader process on top of the given SFTP session.
     # +local+ is either an IO object containing data to upload, or a string
     # identifying a file or directory on the local host. +remote+ is a string
@@ -148,6 +164,8 @@ module Net; module SFTP; module Operations
       @options = options
       @properties = options[:properties] || {}
       @active = 0
+      @open_handles = 0
+      @peak_open_handles = 0
 
       self.logger = sftp.logger
 
@@ -232,6 +250,39 @@ module Net; module SFTP; module Operations
       # The default # of bytes to read from disk at a time.
       DEFAULT_READ_SIZE   = 32_000
 
+      # The number of data bytes placed in a single FXP_WRITE packet when
+      # the server advertises limits, computed from the negotiated write
+      # limit and the actual handle length. Defaults to :read_size or
+      # DEFAULT_READ_SIZE on servers without the extension.
+      def write_size(file)
+        wanted = options[:read_size] || DEFAULT_READ_SIZE
+        if sftp.limits
+          sftp.limits.write_length(wanted, file.handle)
+        else
+          wanted
+        end
+      end
+
+      # Returns true if another remote file may be opened without exceeding
+      # the server's (possibly negotiated) concurrent-handle budget.
+      def handle_available?
+        sftp.limits.nil? || open_handles < sftp.limits.max_open_handles
+      end
+
+      # Reserve a handle slot immediately before an FXP_OPEN request is
+      # dispatched. A failed open frees the slot immediately (see
+      # #on_open); otherwise it stays occupied until the handle is closed
+      # (see #on_close).
+      def reserve_handle!
+        @open_handles += 1
+        @peak_open_handles = [@peak_open_handles, @open_handles].max
+      end
+
+      # Release a handle slot previously reserved via #reserve_handle!.
+      def release_handle!
+        @open_handles -= 1
+      end
+
       # The number of readers to use when uploading a single file.
       SINGLE_FILE_READERS = 2
 
@@ -268,10 +319,23 @@ module Net; module SFTP; module Operations
             request = sftp.mkdir(rpath, &method(:on_mkdir))
             request[:dir] = rpath
           else
-            open_file(lpath, rpath)
+            if handle_available?
+              open_file(lpath, rpath)
+            else
+              # Put the entry back; the next #process_next_entry will be
+              # triggered when a handle slot frees up.
+              @stack.last.unshift(entry)
+              return false
+            end
           end
         else
-          open_file(@stack.pop.first, remote)
+          entry = @stack.pop.first
+          if handle_available?
+            open_file(entry, remote)
+          else
+            @stack.push([entry])
+            return false
+          end
         end
         return true
       end
@@ -297,6 +361,7 @@ module Net; module SFTP; module Operations
         metafile = LiveFile.new(name, remote, file, size)
         update_progress(:open, metafile)
 
+        reserve_handle!
         request = sftp.open(remote, "w", &method(:on_open))
         request[:file] = metafile
       end
@@ -318,7 +383,10 @@ module Net; module SFTP; module Operations
       def on_open(response)
         @active -= 1
         file = response.request[:file]
-        raise StatusException.new(response, "open #{file.remote}") unless response.ok?
+        unless response.ok?
+          release_handle!
+          raise StatusException.new(response, "open #{file.remote}")
+        end
 
         file.handle = response[:handle]
 
@@ -346,7 +414,11 @@ module Net; module SFTP; module Operations
       def on_close(response)
         @active -= 1
         file = response.request[:file]
-        raise StatusException.new(response, "close #{file.remote}") unless response.ok?
+        if response.ok?
+          release_handle!
+        else
+          raise StatusException.new(response, "close #{file.remote}")
+        end
         process_next_entry
       end
 
@@ -358,7 +430,7 @@ module Net; module SFTP; module Operations
         else
           @active += 1
           offset = file.io.pos
-          data = file.io.read(options[:read_size] || DEFAULT_READ_SIZE)
+          data = file.io.read(write_size(file))
           if data.nil?
             update_progress(:close, file)
             request = sftp.close(file.handle, &method(:on_close))

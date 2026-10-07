@@ -21,6 +21,7 @@ Net::SFTP is a pure-Ruby implementation of the SFTP protocol (specifically, vers
 * Completely supports all six protocol versions
 * Asynchronous and synchronous operation
 * Read and write files using an IO-like interface
+* Honors the +limits@openssh.com+ extension, bounding read/write packet sizes and the number of concurrently open handles
 
 == SYNOPSIS:
 

@@ -1,6 +1,7 @@
 require 'net/ssh'
 require 'net/sftp/constants'
 require 'net/sftp/errors'
+require 'net/sftp/limits'
 require 'net/sftp/protocol'
 require 'net/sftp/request'
 require 'net/sftp/operations/dir'
@@ -67,6 +68,16 @@ module Net; module SFTP
     # The hash of pending requests. Any requests that have been sent and which
     # the server has not yet responded to will be represented here.
     attr_reader :pending_requests
+
+    # The hash of extensions advertised by the server during version
+    # negotiation, mapping extension names to their raw data. Empty when no
+    # extensions were advertised.
+    attr_reader :extensions
+
+    # The negotiated Limits (from the +limits@openssh.com+ extension), or nil
+    # when the server did not advertise a supported limits extension. See
+    # Net::SFTP::Limits.
+    attr_reader :limits
 
     # Creates a new Net::SFTP instance atop the given Net::SSH connection.
     # This will return immediately, before the SFTP connection has been properly
@@ -774,6 +785,8 @@ module Net; module SFTP
           @channel = session.open_channel(&method(:when_channel_confirmed))
           @packet_length = nil
           @protocol = nil
+          @extensions = {}
+          @limits = nil
           @on_ready = Array(block)
         else # opening
           @on_ready << block if block
@@ -927,12 +940,14 @@ module Net; module SFTP
         negotiated_version = [server_version, HIGHEST_PROTOCOL_VERSION_SUPPORTED].min
         info { "negotiated version is #{negotiated_version}" }
 
-        extensions = {}
+        @extensions = {}
         until packet.eof?
           name = packet.read_string
           data = packet.read_string
-          extensions[name] = data
+          @extensions[name] = data
         end
+
+        @limits = Limits.parse(@extensions[Limits::EXTENSION_NAME])
 
         @protocol = Protocol.load(self, negotiated_version)
         @pending_requests = {}

@@ -55,6 +55,13 @@ module Net; module SFTP; module Operations
   #   from the source. Increasing this value might improve throughput. It
   #   defaults to 32,000 bytes.
   #
+  # When the server advertises the +limits@openssh.com+ extension, read
+  # requests are additionally capped by the negotiated read limit (with
+  # packet encoding overhead subtracted), files and directories share the
+  # negotiated handle budget, and traversal reserves a slot so pending
+  # directories never occupy the entire budget. See Net::SFTP::Limits and
+  # Net::SFTP::Session#limits.
+  #
   # == Progress Monitoring
   #
   # Sometimes it is desirable to track the progress of a download. There are
@@ -136,6 +143,15 @@ module Net; module SFTP; module Operations
     # The properties hash for this object
     attr_reader :properties
 
+    # The number of file and directory handles currently held open on the
+    # server. Files and directories share the server's single handle budget.
+    attr_reader :open_handles
+
+    # The greatest number of simultaneously open (or opening) handles
+    # observed so far. Useful for verifying that the server's handle limit
+    # was respected.
+    attr_reader :peak_open_handles
+
     # Instantiates a new downloader process on top of the given SFTP session.
     # +local+ is either an IO object that should receive the data, or a string
     # identifying the target file or directory on the local host. +remote+ is
@@ -152,6 +168,9 @@ module Net; module SFTP; module Operations
       @options = options
       @active = 0
       @properties = options[:properties] || {}
+      @open_handles = 0
+      @opening_handles = 0
+      @peak_open_handles = 0
 
       self.logger = sftp.logger
 
@@ -225,6 +244,73 @@ module Net; module SFTP; module Operations
         options[:read_size] || DEFAULT_READ_SIZE
       end
 
+      # The number of bytes to request from the server in a single FXP_READ,
+      # bounded by the negotiated read limit and accounting for packet
+      # encoding overhead of the FXP_DATA reply. A FXP_READ request does
+      # not include the data, so its handle length does not affect the
+      # payload length; +handle+ is accepted for symmetry with writes.
+      def read_chunk_size(handle)
+        wanted = read_size
+        if sftp.limits
+          sftp.limits.read_length(wanted, handle)
+        else
+          wanted
+        end
+      end
+
+      # Number of handle slots currently committed: open handles plus open
+      # or opendir requests still in flight. This is what the budget is
+      # checked against, since a waiting opendir's slot must count even
+      # before its handle comes back.
+      def reserved_handles
+        @open_handles + @opening_handles
+      end
+
+      # Reserve a handle slot immediately before an FXP_OPEN or FXP_OPENDIR
+      # request is dispatched. The reservation turns into an open handle
+      # when the opening reply arrives (see #on_open/#on_opendir) and is
+      # finally released on close (see #on_close/#on_closedir).
+      def reserve_handle!
+        @opening_handles += 1
+      end
+
+      # Marks a reserved slot as backed by an actual server handle; it
+      # remains occupied until the handle is closed.
+      def confirm_handle!
+        @opening_handles -= 1
+        @open_handles += 1
+        @peak_open_handles = [@peak_open_handles, @open_handles].max
+      end
+
+      # Cancels a reservation for an opening request that failed, freeing
+      # the slot without ever holding a handle.
+      def cancel_reserved_handle!
+        @opening_handles -= 1
+      end
+
+      # Release the slot held by a closed handle.
+      def release_handle!
+        @open_handles -= 1
+      end
+
+      # Returns true if a handle slot is available for a file.
+      def file_handle_available?
+        sftp.limits.nil? || reserved_handles < sftp.limits.max_open_handles
+      end
+
+      # Returns true if a handle slot is available for the directory +entry+.
+      # Files and directories share the handle budget. Opening a directory
+      # is permitted only when at least one other slot remains free after it
+      # opens, so that in-progress traversals can always open files (or
+      # another directory) instead of stalling with every slot occupied by
+      # waiting directories. The reserved slot is waived when the directory
+      # is the only pending entry (e.g. a root directory on a one-handle
+      # server), since opening it is the only way to make progress.
+      def directory_handle_available?(entry)
+        return true if sftp.limits.nil?
+        reserved_handles + 1 < sftp.limits.max_open_handles || stack == [entry]
+      end
+
       # The number of simultaneou SFTP requests to use to effect the download.
       # Defaults to 16 for recursive downloads.
       def requests
@@ -235,12 +321,15 @@ module Net; module SFTP; module Operations
       # (see #requests).
       def process_next_entry
         while stack.any? && requests > @active
-          entry = stack.shift
+          entry = next_dispatchable_entry
+          break unless entry
+          stack.delete(entry)
           @active += 1
 
           if entry.directory
             update_progress(:mkdir, entry.local)
             ::Dir.mkdir(entry.local) unless ::File.directory?(entry.local)
+            reserve_handle!
             request = sftp.opendir(entry.remote, &method(:on_opendir))
             request[:entry] = entry
           else
@@ -251,12 +340,31 @@ module Net; module SFTP; module Operations
         update_progress(:finish) if !active?
       end
 
+      # Picks the next stack entry whose opening fits the current handle
+      # budget. A blocked file is skipped so a later directory can use an
+      # available slot. A blocked directory always stops the scan: later
+      # entries are siblings waiting on traversal progress, and consuming
+      # the reserved last slot with any of them would allow waiting
+      # directories to occupy the entire handle budget.
+      def next_dispatchable_entry
+        stack.each do |entry|
+          available = entry.directory ? directory_handle_available?(entry) : file_handle_available?
+          return entry if available
+          return nil if entry.directory
+        end
+        nil
+      end
+
       # Called when a remote directory is "opened" for reading, e.g. to
       # enumerate its contents. Starts an readdir operation if the opendir
       # operation was successful.
       def on_opendir(response)
         entry = response.request[:entry]
-        raise  StatusException.new(response, "opendir #{entry.remote}") unless response.ok?
+        unless response.ok?
+          cancel_reserved_handle!
+          raise StatusException.new(response, "opendir #{entry.remote}")
+        end
+        confirm_handle!
         entry.handle = response[:handle]
         request = sftp.readdir(response[:handle], &method(:on_readdir))
         request[:parent] = entry
@@ -289,6 +397,7 @@ module Net; module SFTP; module Operations
       # Called when a file is to be opened for reading from the remote server.
       def open_file(entry)
         update_progress(:open, entry)
+        reserve_handle!
         request = sftp.open(entry.remote, &method(:on_open))
         request[:entry] = entry
       end
@@ -297,7 +406,11 @@ module Net; module SFTP; module Operations
       def on_closedir(response)
         @active -= 1
         entry = response.request[:parent]
-        raise StatusException.new(response, "close #{entry.remote}") unless response.ok?
+        if response.ok?
+          release_handle!
+        else
+          raise StatusException.new(response, "close #{entry.remote}")
+        end
         process_next_entry
       end
 
@@ -305,7 +418,12 @@ module Net; module SFTP; module Operations
       # to initiate the data transfer.
       def on_open(response)
         entry = response.request[:entry]
-        raise StatusException.new(response, "open #{entry.remote}") unless response.ok?
+        unless response.ok?
+          @active -= 1
+          cancel_reserved_handle!
+          raise StatusException.new(response, "open #{entry.remote}")
+        end
+        confirm_handle!
 
         entry.handle = response[:handle]
         entry.sink = entry.local.respond_to?(:write) ? entry.local : ::File.open(entry.local, "wb")
@@ -316,7 +434,8 @@ module Net; module SFTP; module Operations
 
       # Initiates a read of the next #read_size bytes from the file.
       def download_next_chunk(entry)
-        request = sftp.read(entry.handle, entry.offset, read_size, &method(:on_read))
+        length = read_chunk_size(entry.handle)
+        request = sftp.read(entry.handle, entry.offset, length, &method(:on_read))
         request[:entry] = entry
         request[:offset] = entry.offset
       end
@@ -346,7 +465,11 @@ module Net; module SFTP; module Operations
       def on_close(response)
         @active -= 1
         entry = response.request[:entry]
-        raise StatusException.new(response, "close #{entry.remote}") unless response.ok?
+        if response.ok?
+          release_handle!
+        else
+          raise StatusException.new(response, "close #{entry.remote}")
+        end
         process_next_entry
       end
 

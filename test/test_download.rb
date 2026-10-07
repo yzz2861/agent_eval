@@ -144,7 +144,169 @@ class DownloadTest < Net::SFTP::TestCase
     end
   end
 
+  def limits_blob(read_limit, write_limit, open_handles)
+    Net::SSH::Buffer.from(:long, 1,
+                          :int64, read_limit,
+                          :int64, write_limit,
+                          :int64, open_handles).to_s
+  end
+
+  def test_download_respects_negotiated_read_packet_limit
+    local = "/path/to/local"
+    remote = "/path/to/remote"
+    text = "0123456789abcdefghij"
+
+    # A 20-byte FXP_DATA cap leaves 11 payload bytes after the 9 bytes of
+    # type/request-id/string-length encoding. The long handle shows that
+    # read sizing stays valid even though handle length varies.
+    handle = "long-handle-name"
+    expect_sftp_session(:server_version => 3, :extensions => {
+      Net::SFTP::Limits::EXTENSION_NAME => limits_blob(20, 1000, 100)
+    }) do |channel|
+      channel.sends_packet(FXP_OPEN, :long, 0, :string, remote, :long, 0x01, :long, 0)
+      channel.gets_packet(FXP_HANDLE, :long, 0, :string, handle)
+      channel.sends_packet(FXP_READ, :long, 1, :string, handle, :int64, 0,  :long, 11)
+      channel.gets_packet(FXP_DATA, :long, 1, :string, text[0, 11])
+      channel.sends_packet(FXP_READ, :long, 2, :string, handle, :int64, 11, :long, 11)
+      channel.gets_packet(FXP_DATA, :long, 2, :string, text[11, 11])
+      channel.sends_packet(FXP_READ, :long, 3, :string, handle, :int64, 20, :long, 11)
+      channel.gets_packet(FXP_STATUS, :long, 3, :long, 1)
+      channel.sends_packet(FXP_CLOSE, :long, 4, :string, handle)
+      channel.gets_packet(FXP_STATUS, :long, 4, :long, 0)
+    end
+
+    file = StringIO.new
+    File.stubs(:open).with(local, "wb").returns(file)
+
+    assert_scripted_command { sftp.download(remote, local) }
+    assert_equal text, file.string
+  end
+
+  def test_download_recursive_respects_negotiated_open_handles_limit
+    local = "/path/to/local"
+    remote = "/path/to/remote"
+    file1, file2 = prepare_limited_directory_tree(local, remote)
+
+    downloader = nil
+    assert_scripted_command do
+      downloader = sftp.download(remote, local, :recursive => true)
+    end
+
+    assert_equal "f1", file1.string
+    assert_equal "f2", file2.string
+    assert_equal 2, downloader.peak_open_handles
+  end
+
+  def test_download_recursive_works_with_single_handle_budget
+    local = "/path/to/local"
+    remote = "/path/to/remote"
+    expect_sftp_session(:server_version => 3, :extensions => {
+      Net::SFTP::Limits::EXTENSION_NAME => limits_blob(100_000, 100_000, 1)
+    }) do |channel|
+      channel.sends_packet(FXP_OPENDIR, :long, 0, :string, remote)
+      channel.gets_packet(FXP_HANDLE, :long, 0, :string, "root")
+      channel.sends_packet(FXP_READDIR, :long, 1, :string, "root")
+      channel.gets_packet(FXP_NAME, :long, 1, :long, 2,
+        :string, "file1", :string, "-rw-rw-r-- 1 bob bob 100 Aug 1 file1", :long, 0x04, :long, 0100644,
+        :string, "..", :string, "drwxr-xr-x 4 bob bob 136 Aug 1 ..", :long, 0x04, :long, 040755)
+      channel.sends_packet(FXP_READDIR, :long, 2, :string, "root")
+      channel.gets_packet(FXP_STATUS, :long, 2, :long, 1)
+      channel.sends_packet(FXP_CLOSE, :long, 3, :string, "root")
+      channel.gets_packet(FXP_STATUS, :long, 3, :long, 0)
+
+      channel.sends_packet(FXP_OPEN, :long, 4, :string, File.join(remote, "file1"), :long, 0x01, :long, 0)
+      channel.gets_packet(FXP_HANDLE, :long, 4, :string, "f1")
+      channel.sends_packet(FXP_READ, :long, 5, :string, "f1", :int64, 0, :long, 32_000)
+      channel.gets_packet(FXP_DATA, :long, 5, :string, "f1")
+      channel.sends_packet(FXP_READ, :long, 6, :string, "f1", :int64, 2, :long, 32_000)
+      channel.gets_packet(FXP_STATUS, :long, 6, :long, 1)
+      channel.sends_packet(FXP_CLOSE, :long, 7, :string, "f1")
+      channel.gets_packet(FXP_STATUS, :long, 7, :long, 0)
+    end
+
+    file = StringIO.new
+    File.expects(:directory?).with(local).returns(false)
+    Dir.expects(:mkdir).with(local)
+    File.expects(:open).with(File.join(local, "file1"), "wb").returns(file)
+
+    downloader = nil
+    assert_scripted_command do
+      downloader = sftp.download(remote, local, :recursive => true)
+    end
+
+    assert_equal "f1", file.string
+    assert_equal 1, downloader.peak_open_handles
+  end
+
   private
+
+    def prepare_limited_directory_tree(local, remote)
+      expect_sftp_session(:server_version => 3, :extensions => {
+        Net::SFTP::Limits::EXTENSION_NAME => limits_blob(100_000, 100_000, 2)
+      }) do |channel|
+        channel.sends_packet(FXP_OPENDIR, :long, 0, :string, remote)
+        channel.gets_packet(FXP_HANDLE, :long, 0, :string, "root")
+        channel.sends_packet(FXP_READDIR, :long, 1, :string, "root")
+        channel.gets_packet(FXP_NAME, :long, 1, :long, 3,
+          :string, "..", :string, "drwxr-xr-x 4 bob bob 136 Aug 1 ..", :long, 0x04, :long, 040755,
+          :string, "subdir1", :string, "drwxr-xr-x 4 bob bob 136 Aug 1 subdir1", :long, 0x04, :long, 040755,
+          :string, "file1", :string, "-rw-rw-r-- 1 bob bob 100 Aug 1 file1", :long, 0x04, :long, 0100644)
+        channel.sends_packet(FXP_READDIR, :long, 2, :string, "root")
+        channel.gets_packet(FXP_STATUS, :long, 2, :long, 1)
+        # subdir1 must not open yet: file1 is also queued and opening the
+        # directory would leave zero slots for the waiting file. Root is
+        # read to EOF and closed first, freeing its slot.
+        channel.sends_packet(FXP_CLOSE, :long, 3, :string, "root")
+        channel.gets_packet(FXP_STATUS, :long, 3, :long, 0)
+
+        # Root's slot is free. subdir1 opens, and because opening it leaves
+        # a slot available (used by the waiting file1), both proceed:
+        # directory and file share the two-handle budget.
+        channel.sends_packet(FXP_OPENDIR, :long, 4, :string, File.join(remote, "subdir1"))
+        channel.sends_packet(FXP_OPEN, :long, 5, :string, File.join(remote, "file1"), :long, 0x01, :long, 0)
+
+        channel.gets_packet(FXP_HANDLE, :long, 4, :string, "sub")
+        channel.sends_packet(FXP_READDIR, :long, 6, :string, "sub")
+        channel.gets_packet(FXP_HANDLE, :long, 5, :string, "f1")
+        channel.sends_packet(FXP_READ, :long, 7, :string, "f1", :int64, 0, :long, 32_000)
+
+        channel.gets_packet(FXP_NAME, :long, 6, :long, 2,
+          :string, ".", :string, "drwxr-xr-x 4 bob bob 136 Aug 1 .", :long, 0x04, :long, 040755,
+          :string, "file2", :string, "-rw-rw-r-- 1 bob bob 100 Aug 1 file2", :long, 0x04, :long, 0100644)
+        # file2 cannot open yet: both budget slots are held by sub and f1.
+        channel.sends_packet(FXP_READDIR, :long, 8, :string, "sub")
+        channel.gets_packet(FXP_DATA, :long, 7, :string, "f1")
+        channel.sends_packet(FXP_READ, :long, 9, :string, "f1", :int64, 2, :long, 32_000)
+        channel.gets_packet(FXP_STATUS, :long, 8, :long, 1)
+        channel.sends_packet(FXP_CLOSE, :long, 10, :string, "sub")
+
+        channel.gets_packet(FXP_STATUS, :long, 9, :long, 1)
+        channel.sends_packet(FXP_CLOSE, :long, 11, :string, "f1")
+        channel.gets_packet(FXP_STATUS, :long, 10, :long, 0)
+        # sub's slot frees: file2 opens while f1 is still open.
+        channel.sends_packet(FXP_OPEN, :long, 12, :string, File.join(remote, "subdir1", "file2"), :long, 0x01, :long, 0)
+        channel.gets_packet(FXP_STATUS, :long, 11, :long, 0)
+        channel.gets_packet(FXP_HANDLE, :long, 12, :string, "f2")
+        channel.sends_packet(FXP_READ, :long, 13, :string, "f2", :int64, 0, :long, 32_000)
+        channel.gets_packet(FXP_DATA, :long, 13, :string, "f2")
+        channel.sends_packet(FXP_READ, :long, 14, :string, "f2", :int64, 2, :long, 32_000)
+        channel.gets_packet(FXP_STATUS, :long, 14, :long, 1)
+        channel.sends_packet(FXP_CLOSE, :long, 15, :string, "f2")
+        channel.gets_packet(FXP_STATUS, :long, 15, :long, 0)
+      end
+
+      File.expects(:directory?).with(local).returns(false)
+      File.expects(:directory?).with(File.join(local, "subdir1")).returns(false)
+      Dir.expects(:mkdir).with(local)
+      Dir.expects(:mkdir).with(File.join(local, "subdir1"))
+
+      file1 = StringIO.new
+      file2 = StringIO.new
+      File.expects(:open).with(File.join(local, "file1"), "wb").returns(file1)
+      File.expects(:open).with(File.join(local, "subdir1", "file2"), "wb").returns(file2)
+
+      [file1, file2]
+    end
 
     def expect_file_transfer(remote, text, opts={})
       expect_sftp_session :server_version => 3 do |channel|
