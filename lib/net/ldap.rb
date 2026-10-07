@@ -23,6 +23,7 @@ require_relative 'ldap/filter'
 require_relative 'ldap/dataset'
 require_relative 'ldap/password'
 require_relative 'ldap/entry'
+require_relative 'ldap/ranged_attribute'
 require_relative 'ldap/instrumentation'
 require_relative 'ldap/connection'
 require_relative 'ldap/version'
@@ -800,6 +801,30 @@ class Net::LDAP
         @result.success?
       end
     end
+  end
+
+  # Reads all values of an attribute that Active Directory-style servers split
+  # into ranged responses. The range is taken from the attribute description
+  # returned by the server; this method does not assume a fixed page size.
+  #
+  # Attribute options are preserved. For example, requesting
+  # <tt>"member;binary"</tt> sends <tt>"member;binary;range=0-*"</tt>, followed
+  # by ranges calculated from each response. Values are concatenated without
+  # encoding conversion, so binary values remain binary.
+  #
+  # Pass <tt>:version_attribute</tt> to include a caller-selected version
+  # attribute, such as <tt>"uSNChanged"</tt>, in every search. Its value must
+  # remain unchanged for the whole read. If it is missing, a
+  # Net::LDAP::RangedAttributeVersionUnavailableError is raised; if it changes,
+  # Net::LDAP::RangedAttributeVersionChangedError is raised and accumulated
+  # values are discarded. Invalid, overlapping, gapped, or backwards ranges
+  # raise Net::LDAP::InvalidRangedAttributeError.
+  #
+  # Without <tt>:version_attribute</tt>, the server provides no snapshot
+  # coordination, so consistency across the separate searches cannot be
+  # guaranteed. Remaining arguments are passed through to #search.
+  def read_ranged_attribute(dn, attribute, args = {})
+    Net::LDAP::RangedAttribute.read(self, dn, attribute, args)
   end
 
   # #bind connects to an LDAP server and requests authentication based on

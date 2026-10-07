@@ -46,4 +46,8 @@ class Net::LDAP
   class FilterTypeUnknownError < Error; end
   class FilterSyntaxInvalidError < Error; end
   class EntryOverflowError < Error; end
+  class RangedAttributeError < Error; end
+  class InvalidRangedAttributeError < RangedAttributeError; end
+  class RangedAttributeVersionUnavailableError < RangedAttributeError; end
+  class RangedAttributeVersionChangedError < RangedAttributeError; end
 end
