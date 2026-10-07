@@ -19,6 +19,7 @@ class Rufus::Scheduler
   require 'rufus/scheduler/jobs_repeat'
   require 'rufus/scheduler/job_array'
   require 'rufus/scheduler/locks'
+  require 'rufus/scheduler/debouncer'
 
   #
   # A common error class for rufus-scheduler
@@ -63,6 +64,8 @@ class Rufus::Scheduler
     @paused_at = nil
 
     @jobs = JobArray.new
+
+    @debouncers = []
 
     @frequency = Rufus::Scheduler.parse(opts[:frequency] || 0.300)
     @discard_past = opts.has_key?(:discard_past) ? opts[:discard_past] : true
@@ -229,6 +232,18 @@ class Rufus::Scheduler
   def schedule_cron(cronline, callable=nil, opts={}, &block)
 
     do_schedule(:cron, cronline, callable, opts, true, block)
+  end
+
+  def debounce(quiet, opts={}, &block)
+
+    opts = opts.dup
+    opts[:quiet] = quiet unless opts.has_key?(:quiet)
+
+    debouncer = Rufus::Scheduler::Debouncer.new(self, opts, &block)
+
+    @debouncers << debouncer
+
+    debouncer
   end
 
   def schedule(arg, callable=nil, opts={}, &block)
@@ -520,6 +535,8 @@ class Rufus::Scheduler
       else {}
       end
 
+    @debouncers.each(&:close)
+
     @jobs.unschedule_all
 
     if opts[:wait] || opts[:join]
@@ -697,6 +714,16 @@ class Rufus::Scheduler
     (@join_queue.num_waiting * 2 + 1).times { @join_queue << @thread }
   end
 
+  def schedule_debouncer_timer(debouncer, key, delay)
+
+    job =
+      Rufus::Scheduler::Debouncer::TimerJob.new(self, debouncer, key, delay)
+
+    @jobs.push(job)
+
+    job
+  end
+
   def do_schedule(job_type, t, callable, opts, return_job_instance, block)
 
     fail NotRunningError.new(
@@ -740,4 +767,3 @@ class Rufus::Scheduler
   def monow; self.class.monow; end
   def ltstamp; self.class.ltstamp; end
 end
-

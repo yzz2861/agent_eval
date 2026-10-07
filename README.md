@@ -197,6 +197,28 @@ Interval jobs trigger, execute and then trigger again after the interval elapsed
 
 Cron jobs are based on the venerable cron utility (```man 5 crontab```). They trigger following a pattern given in (almost) the same language cron uses.
 
+### keyed debounce
+
+```scheduler.debounce``` groups external events by key. Each event postpones the key by the quiet period, while ```max_wait``` caps the delay measured from the first event in the round, so a stream of events cannot postpone execution forever:
+
+```ruby
+debouncer =
+  scheduler.debounce(
+    '2s',
+    max_wait: '10s',
+    merge: lambda { |payload, event| payload + [ event.payload ] }
+  ) do |key, payload, batch|
+
+    # batch.first_event and batch.last_event describe the coalesced round.
+  end
+
+debouncer.submit(account_id, [ change ])
+```
+
+The merge callable receives the current payload and the newest event payload, in oldest-to-newest order. If the merge raises, the existing payload and schedule are left untouched.
+
+Events received while a round is running start a new round; they never mutate the arguments of the running handler. A timer claims its round atomically when it becomes due. After that point, ```flush(key)``` or ```cancel(key)``` cannot take that batch. Before that point, flush claims and runs the batch, while cancel removes it and returns it. Without a key, both methods apply to every pending key. Shutting the scheduler cancels pending debouncer rounds without interrupting already running handlers.
+
 ### Chronic and "Wed at 2pm"
 
 By default, rufus-scheduler relies on Ruby to parse strings like "Wed at 2pm". But most of the time, when calling this on Thursday, the day before is "invoked". Relying on [Chronic](https://github.com/mojombo/chronic) might solve the issue.
@@ -1795,4 +1817,3 @@ see [getting help](#getting-help) above.
 ## license
 
 MIT, see [LICENSE.txt](LICENSE.txt)
-
