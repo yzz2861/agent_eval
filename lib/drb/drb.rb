@@ -1985,3 +1985,5 @@ end
 DRbObject = DRb::DRbObject
 DRbUndumped = DRb::DRbUndumped
 DRbIdConv = DRb::DRbIdConv
+
+require 'drb/batch'
