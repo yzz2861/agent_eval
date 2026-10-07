@@ -1,4 +1,5 @@
 require "common"
+require "tempfile"
 
 class UploadTest < Net::SFTP::TestCase
   def setup
@@ -82,6 +83,29 @@ class UploadTest < Net::SFTP::TestCase
     test_upload_file_should_read_chunks_of_size(100)
   end
 
+  def test_sparse_upload_sets_logical_size_after_data_writes
+    data = "ab" + "\0" * 6 + "cd"
+    expect_sftp_session :server_version => 3 do |channel|
+      channel.sends_packet(FXP_OPEN, :long, 0, :string, "/path/to/remote", :long, 0x1A, :long, 0)
+      channel.gets_packet(FXP_HANDLE, :long, 0, :string, "handle")
+      channel.sends_packet(FXP_WRITE, :long, 1, :string, "handle", :int64, 0, :string, "ab")
+      channel.sends_packet(FXP_WRITE, :long, 2, :string, "handle", :int64, 8, :string, "cd")
+      channel.gets_packet(FXP_STATUS, :long, 1, :long, 0)
+      channel.gets_packet(FXP_STATUS, :long, 2, :long, 0)
+      channel.sends_packet(FXP_FSETSTAT, :long, 3, :string, "handle", :long, 1, :int64, 10)
+      channel.gets_packet(FXP_STATUS, :long, 3, :long, 0)
+      channel.sends_packet(FXP_CLOSE, :long, 4, :string, "handle")
+      channel.gets_packet(FXP_STATUS, :long, 4, :long, 0)
+    end
+
+    expect_file("/path/to/local", data)
+
+    assert_scripted_command do
+      sftp.upload("/path/to/local", "/path/to/remote",
+        :sparse => true, :read_size => 4, :sparse_threshold => 4)
+    end
+  end
+
   def test_upload_file_with_custom_requests_should_start_that_many_writes
     size = Net::SFTP::Operations::Upload::DEFAULT_READ_SIZE
     expect_sftp_session :server_version => 3 do |channel|
@@ -154,6 +178,102 @@ class UploadTest < Net::SFTP::TestCase
     assert_scripted_command do
       sftp.upload(StringIO.new("this is some text"), "/path/to/remote")
     end
+  end
+
+  def test_sparse_upload_merges_zero_runs_across_read_blocks_and_preserves_remote_size
+    data = "ab" + "\0" * 6 + "cd"
+    remote = MemorySftp.new("/sparse" => "old bytes that must not remain")
+    events = []
+
+    Tempfile.create(["sparse", ".bin"]) do |path|
+      File.binwrite(path, data)
+      Net::SFTP::Operations::Upload.new(remote, path, "/sparse",
+        :sparse => true, :read_size => 4, :sparse_threshold => 4
+      ) { |*args| events << args }.wait
+    end
+
+    assert_equal data, remote.files["/sparse"]
+    writes = remote.calls.select { |call| call[:type] == :write }
+    assert_equal [[0, "ab"], [8, "cd"]], writes.map { |call| [call[:offset], call[:data]] }
+    assert_equal [{:type => :fsetstat, :size => 10}], remote.calls.select { |call| call[:type] == :fsetstat }.map { |call| call.slice(:type, :size) }
+    progress_file = events.select { |event| event[0] == :progress }.last[2]
+    assert_equal 10, progress_file.logical_bytes
+    assert_equal 4, progress_file.sent_bytes
+  end
+
+  def test_sparse_upload_handles_trailing_zeros_and_an_entirely_zero_file
+    trailing = MemorySftp.new
+    Net::SFTP::Operations::Upload.new(trailing, StringIO.new("ab" + "\0" * 6), "/tail",
+      :sparse => true, :read_size => 4, :sparse_threshold => 4).wait
+
+    assert_equal "ab" + "\0" * 6, trailing.files["/tail"]
+    assert_equal [[0, "ab"]], trailing.calls.select { |call| call[:type] == :write }.map { |call| [call[:offset], call[:data]] }
+    assert_equal 8, trailing.files["/tail"].bytesize
+
+    empty = MemorySftp.new
+    events = []
+    Net::SFTP::Operations::Upload.new(empty, StringIO.new("\0" * 8), "/empty",
+      :sparse => true, :read_size => 4, :sparse_threshold => 4
+    ) { |*args| events << args }.wait
+
+    assert_equal "\0" * 8, empty.files["/empty"]
+    assert_empty empty.calls.select { |call| call[:type] == :write }
+    assert_equal [:hole, 0, 8], events.map { |event| [event[0], event[3], event[4]] }.find { |event| event[0] == :hole }
+    assert_equal [{:type => :fsetstat, :size => 8}], empty.calls.select { |call| call[:type] == :fsetstat }.map { |call| call.slice(:type, :size) }
+  end
+
+  def test_sparse_upload_accepts_ordered_caller_ranges_and_io_input
+    data = "ab" + "\0" * 6 + "cd"
+    remote = MemorySftp.new
+    events = []
+
+    Net::SFTP::Operations::Upload.new(remote, StringIO.new(data), "/ranges",
+      :data_intervals => [0...2, 8...10], :read_size => 4
+    ) { |*args| events << args }.wait
+
+    assert_equal data, remote.files["/ranges"]
+    assert_equal [[0, "ab"], [8, "cd"]], remote.calls.select { |call| call[:type] == :write }.map { |call| [call[:offset], call[:data]] }
+    progress_file = events.select { |event| event[0] == :progress }.last[2]
+    assert_equal 10, progress_file.logical_bytes
+    assert_equal 4, progress_file.sent_bytes
+  end
+
+  def test_sparse_upload_rejects_unordered_overlapping_and_out_of_bounds_ranges
+    remote = MemorySftp.new
+    [[[2, 1], [0, 1]], [[0, 2], [1, 2]], [[9, 2]], [[0, 0]]].each do |intervals|
+      assert_raises(ArgumentError) do
+        Net::SFTP::Operations::Upload.new(remote, StringIO.new("\0" * 10), "/bad",
+          :data_intervals => intervals)
+      end
+    end
+    assert_empty remote.calls
+  end
+
+  def test_non_sparse_upload_still_writes_every_byte_from_io
+    data = "ab" + "\0" * 6 + "cd"
+    remote = MemorySftp.new
+
+    Net::SFTP::Operations::Upload.new(remote, StringIO.new(data), "/plain",
+      :read_size => 4).wait
+
+    assert_equal data, remote.files["/plain"]
+    assert_equal [[0, data[0, 4]], [4, data[4, 4]], [8, data[8, 2]]],
+      remote.calls.select { |call| call[:type] == :write }.map { |call| [call[:offset], call[:data]] }
+    assert_empty remote.calls.select { |call| call[:type] == :fsetstat }
+  end
+
+  def test_sparse_write_failure_is_observable_and_does_not_set_size_or_close
+    remote = MemorySftp.new
+    remote.fail_next_write!
+
+    error = assert_raises(Net::SFTP::StatusException) do
+      Net::SFTP::Operations::Upload.new(remote, StringIO.new("ab" + "\0" * 6), "/fail",
+        :sparse => true, :sparse_threshold => 4).wait
+    end
+
+    assert_equal 4, error.code
+    assert_empty remote.calls.select { |call| call[:type] == :fsetstat }
+    assert_empty remote.calls.select { |call| call[:type] == :close }
   end
 
   private
@@ -229,5 +349,136 @@ class UploadTest < Net::SFTP::TestCase
       end
 
       expect_file(local, data)
+    end
+end
+
+class MemoryRequest
+  attr_accessor :response
+
+  def initialize(session, properties={})
+    @session = session
+    @properties = properties
+  end
+
+  def [](key)
+    @properties[key]
+  end
+
+  def []=(key, value)
+    @properties[key] = value
+  end
+
+  def pending?
+    @response.nil?
+  end
+
+  def wait
+    @session.loop { pending? }
+    self
+  end
+end
+
+class MemoryResponse
+  include Net::SFTP::Constants::StatusCodes
+
+  attr_reader :request, :code, :message, :data
+
+  def initialize(request, code=FX_OK, data={})
+    @request = request
+    @code = code
+    @message = data[:message]
+    @data = data
+  end
+
+  def [](key)
+    @data[key]
+  end
+
+  def ok?
+    code == FX_OK
+  end
+end
+
+class MemorySftp
+  include Net::SFTP::Constants::StatusCodes
+
+  attr_reader :files, :calls
+
+  def initialize(files={})
+    @files = files
+    @calls = []
+    @queue = []
+    @next_id = 0
+    @fail_next_write = false
+  end
+
+  def logger
+    @logger ||= Logger.new(File::NULL)
+  end
+
+  def fail_next_write!
+    @fail_next_write = true
+  end
+
+  def loop
+    while block_given? ? yield : @queue.any?
+      callback, request, response = @queue.shift
+      break unless callback
+      request.response = response
+      callback.call(response)
+    end
+  end
+
+  def open(path, flags="r", options={}, &callback)
+    record(:open, :path => path, :flags => flags, :options => options)
+    @files[path] = "".b if flags == "w"
+    respond(callback, :handle => "handle:#{path}")
+  end
+
+  def write(handle, offset, data, &callback)
+    record(:write, :handle => handle, :offset => offset, :data => data.b)
+    path = path_for_handle(handle)
+    code = FX_OK
+    if @fail_next_write
+      code = FX_FAILURE
+      @fail_next_write = false
+    else
+      current = @files[path]
+      current = current.b.dup
+      current << "\0".b * (offset - current.bytesize) if current.bytesize < offset
+      current[offset, data.bytesize] = data.b
+      @files[path] = current
+    end
+    respond(callback, {}, code)
+  end
+
+  def fsetstat(handle, attrs, &callback)
+    record(:fsetstat, :handle => handle, :size => attrs[:size])
+    path = path_for_handle(handle)
+    @files[path] = @files[path].b.dup << "\0".b while @files[path].bytesize < attrs[:size]
+    @files[path] = @files[path][0, attrs[:size]].b if @files[path].bytesize > attrs[:size]
+    respond(callback)
+  end
+
+  def close(handle, &callback)
+    record(:close, :handle => handle)
+    respond(callback)
+  end
+
+  private
+
+    def record(type, attributes)
+      @calls << attributes.merge(:type => type)
+    end
+
+    def respond(callback, data={}, code=Net::SFTP::Constants::StatusCodes::FX_OK)
+      request = MemoryRequest.new(self)
+      response = MemoryResponse.new(request, code, data)
+      @queue << [callback, request, response]
+      request
+    end
+
+    def path_for_handle(handle)
+      handle.sub("handle:", "")
     end
 end

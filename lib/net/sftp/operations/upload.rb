@@ -1,3 +1,4 @@
+require 'strscan'
 require 'net/ssh/loggable'
 
 module Net; module SFTP; module Operations
@@ -51,6 +52,15 @@ module Net; module SFTP; module Operations
   # * <tt>:read_size</tt> - the maximum number of bytes to read at a time
   #   from the source. Increasing this value might improve throughput. It
   #   defaults to 32,000 bytes.
+  # * <tt>:sparse</tt> - when true, scan the source and send only data
+  #   ranges separated by sufficiently large zero runs. The remote file is
+  #   given the correct logical size with FSETSTAT; this avoids sending bytes
+  #   but does not promise the server physically allocates a sparse file. It
+  #   may also be an array of [offset, length] pairs or Ruby ranges. The
+  #   :data_intervals option is accepted as an alias for the array form.
+  # * <tt>:sparse_threshold</tt> - minimum logical zero run omitted during
+  #   automatic scanning, defaulting to 4096 bytes. Caller-supplied ranges
+  #   omit every gap exactly.
   # * <tt>:name</tt> - the filename to report to the progress monitor when
   #   an IO object is given as +local+. This defaults to "<memory>".
   #
@@ -72,6 +82,11 @@ module Net; module SFTP; module Operations
   #       # args[1] : byte offset in remote file
   #       # args[2] : data being written (as string)
   #       puts "writing #{args[2].length} bytes to #{args[0].remote} starting at #{args[1]}"
+  #     when :hole then
+  #       # args[0] : file metadata
+  #       # args[1] : byte offset in remote file
+  #       # args[2] : number of logical zero bytes being omitted
+  #       puts "skipping #{args[2]} bytes at #{args[1]}"
   #     when :close then
   #       # args[0] : file metadata
   #       puts "finished with #{args[0].remote}"
@@ -94,6 +109,10 @@ module Net; module SFTP; module Operations
   #
   #     def on_put(uploader, file, offset, data)
   #       puts "writing #{data.length} bytes to #{file.remote} starting at #{offset}"
+  #     end
+  #
+  #     def on_hole(uploader, file, offset, length)
+  #       puts "skipping #{length} bytes at #{offset}"
   #     end
   #
   #     def on_close(uploader, file)
@@ -227,7 +246,11 @@ module Net; module SFTP; module Operations
 
       # A simple struct for recording metadata about the file currently being
       # uploaded.
-      LiveFile = Struct.new(:local, :remote, :io, :size, :handle)
+      LiveFile = Struct.new(
+        :local, :remote, :io, :size, :handle,
+        :logical_offset, :logical_bytes, :sent_bytes,
+        :sparse, :data_intervals, :pending_writes, :state, :start_offset
+      )
 
       # The default # of bytes to read from disk at a time.
       DEFAULT_READ_SIZE   = 32_000
@@ -280,21 +303,39 @@ module Net; module SFTP; module Operations
       def open_file(local, remote)
         @active += 1
 
+        opened_file = false
         if local.respond_to?(:read)
-          file = local
+          source = local
           name = options[:name] || "<memory>"
+          size = source.respond_to?(:stat) ? source.stat.size : source.size
         else
-          file = ::File.open(local, "rb")
+          source = ::File.open(local, "rb")
+          opened_file = true
           name = local
+          size = source.stat.size
         end
 
-        if file.respond_to?(:stat)
-          size = file.stat.size
-        else
-          size = file.size
+        start_offset = source.respond_to?(:pos) ? source.pos : 0
+        unless source.respond_to?(:seek)
+          source = StringIO.new(source.read.to_s.b)
+          opened_file = true
+          start_offset = 0
+          size = source.size
         end
 
-        metafile = LiveFile.new(name, remote, file, size)
+        intervals_option = options[:data_intervals] || options[:sparse_intervals]
+        sparse_option = options[:sparse]
+        sparse = sparse_option == true || sparse_option.is_a?(::Array) || sparse_option.is_a?(::Range) || !intervals_option.nil?
+        ranges = sparse_option.is_a?(::Array) || sparse_option.is_a?(::Range) ? sparse_option : intervals_option
+
+        begin
+          intervals = sparse ? prepare_sparse(source, size, start_offset, ranges) : nil
+        rescue
+          source.close if opened_file
+          raise
+        end
+
+        metafile = LiveFile.new(name, remote, source, size, nil, start_offset, 0, 0, sparse, intervals, 0, :data, start_offset)
         update_progress(:open, metafile)
 
         request = sftp.open(remote, "w", &method(:on_open))
@@ -323,11 +364,8 @@ module Net; module SFTP; module Operations
         file.handle = response[:handle]
 
         @uploads << file
-        write_next_chunk(file)
-
-        if !recursive?
-          (options[:requests] || SINGLE_FILE_READERS).to_i.times { write_next_chunk(file) }
-        end
+        reader_count = recursive? ? 1 : (options[:requests] || SINGLE_FILE_READERS).to_i + 1
+        reader_count.times { write_next_chunk(file) }
       end
 
       # Called when a +write+ request finishes. Raises StatusException if the
@@ -337,7 +375,18 @@ module Net; module SFTP; module Operations
         @active -= 1
         file = response.request[:file]
         raise StatusException.new(response, "write #{file.remote}") unless response.ok?
+        file.pending_writes -= 1 if file.sparse
         write_next_chunk(file)
+        maybe_finalize_sparse(file)
+      end
+
+      # Called after a sparse upload sets the remote file's logical size.
+      def on_set_size(response)
+        @active -= 1
+        file = response.request[:file]
+        raise StatusException.new(response, "set size #{file.remote}") unless response.ok?
+        file.state = :closing
+        close_file(file)
       end
 
       # Called when a +close+ request finishes. Raises a StatusException if the
@@ -355,23 +404,213 @@ module Net; module SFTP; module Operations
       def write_next_chunk(file)
         if file.io.nil?
           process_next_entry
+        elsif file.sparse
+          pump_sparse(file)
         else
           @active += 1
           offset = file.io.pos
           data = file.io.read(options[:read_size] || DEFAULT_READ_SIZE)
           if data.nil?
-            update_progress(:close, file)
-            request = sftp.close(file.handle, &method(:on_close))
-            request[:file] = file
-            file.io.close
-            file.io = nil
-            @uploads.delete(file)
+            close_file(file)
           else
+            file.logical_offset = offset
+            file.logical_bytes = offset + data.bytesize
+            file.sent_bytes += data.bytesize
             update_progress(:put, file, offset, data)
             request = sftp.write(file.handle, offset, data, &method(:on_write))
             request[:file] = file
           end
         end
+      end
+
+      def pump_sparse(file)
+        return unless file.state == :data
+
+        limit = [(options[:requests] || SINGLE_FILE_READERS).to_i, 1].max
+        while file.pending_writes < limit
+          interval = file.data_intervals.first
+          if interval.nil?
+            maybe_finalize_sparse(file)
+            return
+          end
+
+          interval_offset, interval_length = interval
+          if file.logical_offset < interval_offset
+            length = interval_offset - file.logical_offset
+            update_progress(:hole, file, file.logical_offset, length)
+            file.logical_offset += length
+            file.logical_bytes += length
+            update_progress(:progress, file)
+            next
+          end
+
+          length = [options[:read_size] || DEFAULT_READ_SIZE, interval_length].min
+          data = read_sparse_data(file, interval_offset - file.start_offset, length)
+          actual_length = data.bytesize
+          if actual_length != length
+            raise Net::SFTP::Exception, "short read while uploading #{file.remote}: expected #{length} bytes at offset #{interval_offset}, got #{actual_length}"
+          end
+
+          file.logical_offset = interval_offset
+          file.logical_bytes = interval_offset + actual_length
+          file.sent_bytes += actual_length
+          interval[0] += actual_length
+          interval[1] -= actual_length
+          file.data_intervals.shift if interval[1].zero?
+
+          @active += 1
+          file.pending_writes += 1
+          update_progress(:put, file, interval_offset, data)
+          request = sftp.write(file.handle, interval_offset, data, &method(:on_write))
+          request[:file] = file
+          update_progress(:progress, file)
+        end
+      end
+
+      def read_sparse_data(file, offset, length)
+        source = file.io
+        if source.respond_to?(:seek)
+          source.seek(file.start_offset + offset)
+          source.read(length)
+        elsif source.pos == file.start_offset + offset
+          source.read(length)
+        else
+          raise Net::SFTP::Exception, "cannot seek to sparse offset #{offset} while uploading #{file.remote}"
+        end || "".b
+      end
+
+      def maybe_finalize_sparse(file)
+        return unless file.sparse && file.state == :data && file.data_intervals.empty? && file.pending_writes.zero?
+
+        logical_size = file.size
+        if file.logical_offset < logical_size
+          length = logical_size - file.logical_offset
+          update_progress(:hole, file, file.logical_offset, length)
+          file.logical_offset = logical_size
+          file.logical_bytes = file.size
+          update_progress(:progress, file)
+        end
+
+        file.state = :finalizing
+        @active += 1
+        request = sftp.fsetstat(file.handle, :size => file.size, &method(:on_set_size))
+        request[:file] = file
+      end
+
+      def close_file(file)
+        @active += 1 if file.sparse
+        update_progress(:close, file)
+        request = sftp.close(file.handle, &method(:on_close))
+        request[:file] = file
+        file.io.close unless file.io.nil? || file.io.closed?
+        file.io = nil
+        @uploads.delete(file)
+      end
+
+      def prepare_sparse(source, size, start_offset, provided_ranges)
+        if provided_ranges.nil?
+          scan_sparse(source, size, start_offset)
+        else
+          intervals = normalize_intervals(provided_ranges)
+          validate_intervals(intervals, size, start_offset)
+          intervals
+        end
+      end
+
+      def scan_sparse(source, size, start_offset)
+        threshold = sparse_threshold
+        holes = []
+        zero_start = nil
+        position = start_offset
+        finish = size
+        chunk_size = options[:read_size] || DEFAULT_READ_SIZE
+        source.seek(start_offset)
+
+        while position < finish
+          chunk = source.read(chunk_size) || "".b
+          if chunk.bytesize.zero? || chunk.bytesize > finish - position
+            raise Net::SFTP::Exception, "short read while scanning sparse source at byte #{position}"
+          end
+
+          scanner = StringScanner.new(chunk)
+          until scanner.eos?
+            if scanner.scan(/\x00+/n)
+              zero_start = position + scanner.pos - scanner.matched_size if zero_start.nil?
+            elsif scanner.scan(/[^\x00]+/n)
+              unless zero_start.nil?
+                run_end = position + scanner.pre_match.bytesize
+                holes << [zero_start, run_end - zero_start] if run_end - zero_start >= threshold
+                zero_start = nil
+              end
+            end
+          end
+
+          position += chunk.bytesize
+        end
+
+        unless zero_start.nil?
+          holes << [zero_start, finish - zero_start] if finish - zero_start >= threshold
+        end
+
+        intervals = []
+        cursor = start_offset
+        holes.each do |hole_start, hole_length|
+          intervals << [cursor, hole_start - cursor] if cursor < hole_start
+          cursor = hole_start + hole_length
+        end
+        intervals << [cursor, finish - cursor] if cursor < finish
+
+        source.seek(start_offset)
+        intervals
+      end
+
+      def normalize_intervals(ranges)
+        Array(ranges).map do |range|
+          if range.is_a?(::Range)
+            start = integer_interval_value(range.begin, 0)
+            length = integer_interval_value(range.size, 1)
+            [start, length]
+          elsif range.is_a?(::Array) && range.length == 2
+            start = integer_interval_value(range[0], 0)
+            length = integer_interval_value(range[1], 1)
+            [start, length]
+          else
+            raise ArgumentError, "sparse intervals must be [offset, length] pairs or ranges"
+          end
+        end
+      end
+
+      def integer_interval_value(value, position)
+        unless value.is_a?(::Integer) && value >= 0
+          raise ArgumentError, "sparse interval #{position.zero? ? "offset" : "length"} must be a non-negative integer"
+        end
+        value
+      end
+
+      def validate_intervals(intervals, size, start_offset=0)
+        previous_finish = start_offset
+        finish = size
+        intervals.each do |start, length|
+          end_offset = start + length
+          if length.zero?
+            raise ArgumentError, "sparse interval at offset #{start} must not be empty"
+          elsif start < start_offset
+            raise ArgumentError, "sparse interval starts before source position"
+          elsif start < previous_finish
+            raise ArgumentError, "sparse intervals must be ordered and must not overlap"
+          elsif end_offset > finish
+            raise ArgumentError, "sparse interval extends beyond source size"
+          end
+          previous_finish = end_offset
+        end
+      end
+
+      def sparse_threshold
+        value = options[:sparse_threshold] || options[:sparse_hole_size] || options[:sparse_min_size] || 4096
+        unless value.is_a?(::Integer) && value >= 0
+          raise ArgumentError, "sparse_threshold must be a non-negative integer"
+        end
+        value
       end
 
       # Returns all directory entries for the given path, removing the '.'
