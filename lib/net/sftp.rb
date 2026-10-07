@@ -1,5 +1,6 @@
 require 'net/ssh'
 require 'net/sftp/session'
+require 'net/sftp/acl'
 
 module Net
 
