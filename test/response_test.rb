@@ -1115,6 +1115,61 @@ class RubySamlTest < Minitest::Test
       end
     end
 
+    describe "#validate_authn_context" do
+      let(:authn_context_levels) do
+        {
+          "urn:oasis:names:tc:SAML:2.0:ac:classes:Password" => 1,
+          "urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport" => 2
+        }
+      end
+
+      it "validates the returned AuthnContext against the current AuthnRequest" do
+        response_valid_signed_without_recipient.stubs(:conditions).returns(nil)
+        response_valid_signed_without_recipient.settings = settings
+        response_valid_signed_without_recipient.settings.idp_cert_fingerprint = ruby_saml_cert_fingerprint
+        response_valid_signed_without_recipient.options[:authn_context] = "urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport"
+        response_valid_signed_without_recipient.options[:authn_context_comparison] = "exact"
+
+        assert response_valid_signed_without_recipient.is_valid?
+      end
+
+      it "rejects a response configured for another AuthnRequest even if its signature is valid" do
+        response_valid_signed_without_recipient.stubs(:conditions).returns(nil)
+        response_valid_signed_without_recipient.settings = settings
+        response_valid_signed_without_recipient.settings.idp_cert_fingerprint = ruby_saml_cert_fingerprint
+        response_valid_signed_without_recipient.options[:matches_request_id] = "another-request-id"
+        response_valid_signed_without_recipient.options[:authn_context] = "urn:local:high"
+        response_valid_signed_without_recipient.options[:authn_context_comparison] = "exact"
+
+        refute response_valid_signed_without_recipient.is_valid?(true)
+        assert response_valid_signed_without_recipient.errors.any? { |error| error.include?("does not match the ID of the AuthNRequest") }
+        assert response_valid_signed_without_recipient.errors.any? { |error| error.include?("The AuthnContext of the Response does not match") }
+      end
+
+      it "supports caller-provided minimum ordering" do
+        response_valid_signed_without_recipient.stubs(:conditions).returns(nil)
+        response_valid_signed_without_recipient.settings = settings
+        response_valid_signed_without_recipient.settings.idp_cert_fingerprint = ruby_saml_cert_fingerprint
+        response_valid_signed_without_recipient.options[:authn_context] = "urn:oasis:names:tc:SAML:2.0:ac:classes:Password"
+        response_valid_signed_without_recipient.options[:authn_context_comparison] = "minimum"
+        response_valid_signed_without_recipient.options[:authn_context_comparator] = authn_context_levels
+
+        assert response_valid_signed_without_recipient.is_valid?
+      end
+
+      it "rejects an unknown AuthnContext" do
+        response_valid_signed_without_recipient.stubs(:conditions).returns(nil)
+        response_valid_signed_without_recipient.settings = settings
+        response_valid_signed_without_recipient.settings.idp_cert_fingerprint = ruby_saml_cert_fingerprint
+        response_valid_signed_without_recipient.options[:authn_context] = "urn:local:high"
+        response_valid_signed_without_recipient.options[:authn_context_comparison] = "minimum"
+        response_valid_signed_without_recipient.options[:authn_context_comparator] = {}
+
+        refute response_valid_signed_without_recipient.is_valid?
+        assert response_valid_signed_without_recipient.errors.any? { |error| error.include?("The AuthnContext of the Response does not match") }
+      end
+    end
+
     describe "#check_conditions" do
       it "check time conditions" do
         response.soft = true

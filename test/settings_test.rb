@@ -19,7 +19,7 @@ class SettingsTest < Minitest::Test
         :sessionindex, :attributes_index, :passive, :force_authn,
         :compress_request, :double_quote_xml_attribute_values, :message_max_bytesize,
         :security, :certificate, :private_key, :certificate_new, :sp_cert_multi,
-        :authn_context, :authn_context_comparison, :authn_context_decl_ref,
+        :authn_context, :authn_context_comparison, :authn_context_decl_ref, :authn_context_comparator,
         :assertion_consumer_logout_service_url
       ]
 

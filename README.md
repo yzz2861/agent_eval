@@ -588,6 +588,27 @@ pp(response.attributes.fetch(/givenname/))
 The `saml:AuthnContextClassRef` of the AuthNRequest can be provided by `settings.authn_context`; possible values are described at [SAMLAuthnCxt]. The comparison method can be set using `settings.authn_context_comparison` parameter. Possible values include: 'exact', 'better', 'maximum' and 'minimum' (default value is 'exact').
 To add a `saml:AuthnContextDeclRef`, define `settings.authn_context_decl_ref`.
 
+When the response answers a request that specified a context, response validation checks the signed assertion's context as well as the response signature. For ordered comparisons, provide a callable that receives `(requested_context, actual_context)` and returns `-1`, `0`, or `1` when the actual context is weaker than, equal to, or stronger than the requested context. Return `nil` for incomparable contexts; raise or use a hash when a URI is unknown. A hash comparator maps context URIs to ordered values.
+
+```ruby
+authn_context_levels = {
+  "urn:example:ac:low" => 1,
+  "urn:example:ac:high" => 2
+}
+
+response = OneLogin::RubySaml::Response.new(
+  params[:SAMLResponse],
+  :settings => settings,
+  :matches_request_id => request_id,
+  :authn_context => "urn:example:ac:low",
+  :authn_context_comparison => "minimum",
+  :authn_context_comparator => authn_context_levels
+)
+response.is_valid?
+```
+
+Pass `:authn_context => nil` when validating a response that is not answering the locally configured AuthnRequest and no response-side context check should be performed.
+
 In a SP-initiated flow, the SP can indicate to the IdP the subject that should be authenticated. This is done by defining the `settings.name_identifier_value_requested` before
 building the authrequest object.
 

@@ -1,4 +1,5 @@
 require "xml_security"
+require "onelogin/ruby-saml/authn_context_policy"
 require "onelogin/ruby-saml/attributes"
 
 require "time"
@@ -38,7 +39,8 @@ module OneLogin
       # This is not a whitelist to allow people extending OneLogin::RubySaml:Response
       # and pass custom options
       AVAILABLE_OPTIONS = [
-        :allowed_clock_drift, :check_duplicated_attributes, :matches_request_id, :settings, :skip_audience, :skip_authnstatement, :skip_conditions,
+        :allowed_clock_drift, :authn_context, :authn_context_class_ref, :authn_context_comparison, :authn_context_comparator,
+        :authn_context_decl_ref, :check_duplicated_attributes, :matches_request_id, :settings, :skip_audience, :skip_authnstatement, :skip_conditions,
         :skip_destination, :skip_recipient_check, :skip_subject_confirmation
       ]
       # TODO: Update the comment on initialize to describe every option
@@ -221,6 +223,10 @@ module OneLogin
       #
       def authn_context_class_ref
         @authn_context_class_ref ||= Utils.element_text(xpath_first_from_signed_assertion('/a:AuthnStatement/a:AuthnContext/a:AuthnContextClassRef'))
+      end
+
+      def authn_context_decl_ref
+        @authn_context_decl_ref ||= Utils.element_text(xpath_first_from_signed_assertion('/a:AuthnStatement/a:AuthnContext/a:AuthnContextDeclRef'))
       end
 
       # Checks if the Status has the "Success" code
@@ -412,6 +418,7 @@ module OneLogin
           :validate_one_conditions,
           :validate_conditions,
           :validate_one_authnstatement,
+          :validate_authn_context,
           :validate_audience,
           :validate_destination,
           :validate_issuer,
@@ -713,6 +720,33 @@ module OneLogin
         true
       end
 
+      def validate_authn_context
+        requested_class_refs = option_or_setting(:authn_context_class_ref, :authn_context)
+        requested_decl_refs = option_or_setting(:authn_context_decl_ref)
+        comparison = option_or_setting(:authn_context_comparison) || "exact"
+        comparator = option_or_setting(:authn_context_comparator)
+
+        return true if requested_class_refs.nil? && requested_decl_refs.nil?
+
+        actual_class_refs = xpath_from_signed_assertion('/a:AuthnStatement/a:AuthnContext/a:AuthnContextClassRef').map { |node| Utils.element_text(node) }.compact
+        actual_decl_refs = xpath_from_signed_assertion('/a:AuthnStatement/a:AuthnContext/a:AuthnContextDeclRef').map { |node| Utils.element_text(node) }.compact
+
+        policy = AuthnContextPolicy.new(
+          requested_class_refs,
+          requested_decl_refs,
+          {
+            :class_ref => actual_class_refs,
+            :decl_ref => actual_decl_refs
+          },
+          comparison,
+          comparator
+        )
+
+        return true if policy.match?
+
+        append_error("The AuthnContext of the Response does not match the requested AuthnContext: #{policy.errors.join(', ')}")
+      end
+
       # Validates the Conditions. (If the response was initialized with the :skip_conditions option, this validation is skipped,
       # If the response was initialized with the :allowed_clock_drift option, the timing validations are relaxed by the allowed_clock_drift value)
       # @return [Boolean] True if satisfies the conditions, otherwise False if soft=True
@@ -963,6 +997,19 @@ module OneLogin
               xpath_first_from_signed_assertion('/a:Subject/a:NameID')
             end
           end
+      end
+
+      def option_or_setting(option_name, setting_name = option_name)
+        names = [option_name, setting_name].uniq
+        names.each do |name|
+          return options[name] if options.has_key?(name)
+        end
+
+        if settings
+          names.each do |name|
+            return settings.send(name) if settings.respond_to?(name)
+          end
+        end
       end
 
       def get_cached_signed_assertion
