@@ -394,6 +394,12 @@ module DRb
         retry
       end
     end
+
+    # Bidirectional sessions are negotiated on the plain TCP transport
+    # and are therefore not available over SSL.
+    def bidi_upgrade(server) # :nodoc:
+      nil
+    end
   end
 
   DRbProtocol.add_protocol(DRbSSLSocket)

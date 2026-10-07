@@ -43,6 +43,7 @@
 require 'socket'
 require 'io/wait' if RUBY_VERSION < '3.2'
 require 'monitor'
+require 'stringio'
 require_relative 'eq'
 require_relative 'version'
 
@@ -858,6 +859,9 @@ module DRb
     # recognized protocol.  See DRb::DRbServer.new for information on built-in
     # URI protocols.
     def self.open(uri, config)
+      if config[:bidi]
+        return DRbBidiProtocol.open(uri, config)
+      end
       host, port, = parse_uri(uri)
       soc = TCPSocket.open(host, port)
       self.new(uri, soc, config)
@@ -935,6 +939,9 @@ module DRb
     # Get the URI that we are connected to.
     attr_reader :uri
 
+    # The configuration of this transport.
+    attr_reader :config
+
     # Get the address of our TCP peer (the other end of the socket
     # we are bound to.
     def peeraddr
@@ -943,6 +950,18 @@ module DRb
 
     # Get the socket.
     def stream; @socket; end
+
+    # Whether this transport is a multiplexed bidirectional session.
+    # Regular transports are not; see DRb::DRbBidiSocket.
+    def bidi?
+      false
+    end
+
+    # Whether this transport is shared by multiple application threads and
+    # therefore must not be pooled or closed per call.
+    def shared?
+      false
+    end
 
     # On the client side, send a request to the server.
     def send_request(ref, msg_id, arg, b)
@@ -1031,7 +1050,7 @@ module DRb
 
     def set_sockopt(soc) # :nodoc:
       soc.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
-    rescue IOError, Errno::ECONNRESET, Errno::EINVAL
+    rescue IOError, Errno::ECONNRESET, Errno::EINVAL, Errno::EOPNOTSUPP
       # closed/shutdown socket, ignore error
     end
   end
@@ -1039,6 +1058,9 @@ module DRb
   module DRbProtocol
     @protocol = [DRbTCPSocket] # default
   end
+
+  require_relative 'bidi'
+  DRbProtocol.instance_variable_get(:@protocol).unshift(DRb::DRbBidiProtocol)
 
   class DRbURIOption  # :nodoc:  I don't understand the purpose of this class...
     def initialize(option)
@@ -1173,7 +1195,7 @@ module DRb
         raise result
       else
         bt = self.class.prepare_backtrace(@uri, result)
-        result.set_backtrace(bt + caller)
+        result.set_backtrace((result.backtrace || []) + bt + caller)
         raise result
       end
     end
@@ -1317,34 +1339,47 @@ module DRb
     end
 
     def self.open(remote_uri)  # :nodoc:
-      begin
-        @pool_proxy = make_pool unless @pool_proxy&.alive?
+      @pool_proxy = make_pool unless @pool_proxy&.alive?
 
+      config = DRb.config
+      if config[:bidi] || DRbBidiProtocol.scheme?(remote_uri)
+        require_relative 'bidi'
+        protocol = DRbBidiProtocol.open(remote_uri, config)
+        conn = self.new(remote_uri, protocol)
+        # The session is multiplexed and shared; it is never stored in the
+        # pool and never closed per call.
+        yield(conn)
+      else
         conn = @pool_proxy.take(remote_uri)
         conn = self.new(remote_uri) unless conn
-        succ, result = yield(conn)
-        return succ, result
-
-      ensure
-        if conn
-          if succ
-            @pool_proxy.store(conn)
-          else
-            conn.close
+        begin
+          succ, result = yield(conn)
+        ensure
+          if conn
+            if succ
+              @pool_proxy.store(conn)
+            else
+              conn.close
+            end
           end
         end
+        [succ, result]
       end
     end
 
-    def initialize(remote_uri)  # :nodoc:
+    def initialize(remote_uri, protocol=nil)  # :nodoc:
       @uri = remote_uri
-      @protocol = DRbProtocol.open(remote_uri, DRb.config)
+      @protocol = protocol || DRbProtocol.open(remote_uri, DRb.config)
     end
     attr_reader :uri  # :nodoc:
 
     def send_message(ref, msg_id, arg, block)  # :nodoc:
-      @protocol.send_request(ref, msg_id, arg, block)
-      @protocol.recv_reply
+      if @protocol.respond_to?(:send_message)
+        @protocol.send_message(ref, msg_id, arg, block)
+      else
+        @protocol.send_request(ref, msg_id, arg, block)
+        @protocol.recv_reply
+      end
     end
 
     def close  # :nodoc:
@@ -1424,6 +1459,7 @@ module DRb
         :tcp_acl => @@acl,
         :load_limit => @@load_limit,
         :argc_limit => @@argc_limit,
+        :bidi => false,
       }
       default_config.update(hash)
     end
@@ -1489,6 +1525,7 @@ module DRb
       @front = front
       @idconv = @config[:idconv]
 
+      @bidi_sessions = []
       @grp = ThreadGroup.new
       @thread = run
 
@@ -1563,6 +1600,7 @@ module DRb
       current = Thread.current
       if @protocol.respond_to? :shutdown
         @protocol.shutdown
+        @bidi_sessions.dup.each { |session| session.close }
       else
         [@thread, *@grp.list].each { |thread|
           thread.kill unless thread == current # xxx: Thread#kill
@@ -1642,6 +1680,80 @@ module DRb
       end
     end
     public :check_insecure_method
+
+    # Attach an established bidirectional session (DRb::DRbBidiSocket)
+    # to this server.  The session's local URI is exported by this
+    # server, so references sent over the session resolve back here.
+    def drbbidi_attach(session) # :nodoc:
+      DRb.mutex.synchronize do
+        @bidi_sessions << session unless @bidi_sessions.include?(session)
+        @exported_uri << session.local_uri unless @exported_uri.include?(session.local_uri)
+      end
+    end
+
+    def drbbidi_detach(session) # :nodoc:
+      DRb.mutex.synchronize do
+        @bidi_sessions.delete(session)
+      end
+    end
+
+    def grp # :nodoc:
+      @grp
+    end
+
+    # Handle a request frame received on a bidirectional session.  Each
+    # request is invoked in its own thread so the single session reader
+    # keeps processing frames, including nested requests made while
+    # callbacks are in progress.
+    def drbbidi_dispatch(session, id, payload)
+      Thread.start do
+        @grp.add Thread.current
+        Thread.current['DRb'] = { 'client' => session, 'server' => self }
+        begin
+          client = DRbBidiRequestAdapter.new(session, id, payload)
+          invoke_method = InvokeMethod.new(self, client)
+          succ, result = invoke_method.perform
+          error_print(result) if !succ && verbose
+          client.send_reply(succ, result)
+          if Thread.current['DRb'] && Thread.current['DRb']['stop_service']
+            shutdown
+          end
+        rescue Exception => e
+          error_print(e) if verbose
+        end
+      end
+    end
+    public :drbbidi_attach, :drbbidi_detach, :drbbidi_dispatch, :grp
+
+    # Presents one incoming bidirectional request frame as the client
+    # interface expected by InvokeMethod.
+    class DRbBidiRequestAdapter # :nodoc:
+      def initialize(session, id, payload)
+        @session = session
+        @id = id
+        @io = DRbBidiPayloadIO.new(payload)
+        @msg = DRbMessage.new(session.server_config)
+      end
+
+      def uri
+        @session.local_uri
+      end
+
+      def recv_request
+        @msg.recv_request(@io)
+      end
+
+      def send_reply(succ, result)
+        @session.send_reply_frame(@id, succ, result)
+      end
+
+      def close
+      end
+
+      def peeraddr
+        @session.peeraddr
+      end
+    end
 
     class InvokeMethod  # :nodoc:
       def initialize(drb_server, client)
@@ -1762,10 +1874,20 @@ module DRb
         @grp.add Thread.current
         Thread.current['DRb'] = { 'client' => client ,
                                   'server' => self }
+
+        if client.respond_to?(:bidi_upgrade)
+          session = client.bidi_upgrade(self)
+          if session
+            session.start
+            break
+          end
+        end
+
         DRb.mutex.synchronize do
           client_uri = client.uri
           @exported_uri << client_uri unless @exported_uri.include?(client_uri)
         end
+
         _last_invoke_method = nil
         loop do
           begin
@@ -1855,7 +1977,7 @@ module DRb
     drb = Thread.current['DRb']
     client = (drb && drb['client'])
     if client
-      uri = client.uri
+      uri = client.respond_to?(:local_uri) ? client.local_uri : client.uri
       return uri if uri
     end
     current_server.uri
