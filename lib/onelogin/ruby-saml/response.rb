@@ -17,6 +17,8 @@ module OneLogin
       PROTOCOL  = "urn:oasis:names:tc:SAML:2.0:protocol"
       DSIG      = "http://www.w3.org/2000/09/xmldsig#"
       XENC      = "http://www.w3.org/2001/04/xmlenc#"
+      BEARER_METHOD = "urn:oasis:names:tc:SAML:2.0:cm:bearer"
+      HOLDER_OF_KEY_METHOD = "urn:oasis:names:tc:SAML:2.0:cm:holder-of-key"
       SAML_NAMESPACES = {
         "p" => PROTOCOL,
         "a" => ASSERTION
@@ -38,8 +40,8 @@ module OneLogin
       # This is not a whitelist to allow people extending OneLogin::RubySaml:Response
       # and pass custom options
       AVAILABLE_OPTIONS = [
-        :allowed_clock_drift, :check_duplicated_attributes, :matches_request_id, :settings, :skip_audience, :skip_authnstatement, :skip_conditions,
-        :skip_destination, :skip_recipient_check, :skip_subject_confirmation
+        :allowed_clock_drift, :check_duplicated_attributes, :client_public_key, :client_public_keys, :matches_request_id, :settings, :skip_audience,
+        :skip_authnstatement, :skip_conditions, :skip_destination, :skip_recipient_check, :skip_subject_confirmation
       ]
       # TODO: Update the comment on initialize to describe every option
 
@@ -52,6 +54,8 @@ module OneLogin
       #                          or skip the subject confirmation validation with the :skip_subject_confirmation option
       #                          or skip the recipient validation of the subject confirmation element with :skip_recipient_check option
       #                          or skip the audience validation with :skip_audience option
+      #                          or pass :client_public_key or :client_public_keys with a TLS-verified X.509 certificate, public key, or an Array of either
+      #                          to validate a holder-of-key SubjectConfirmation containing a ds:KeyInfo
       #
       def initialize(response, options = {})
         raise ArgumentError.new("Response cannot be nil") if response.nil?
@@ -796,9 +800,9 @@ module OneLogin
 
         now = Time.now.utc
         subject_confirmation_nodes.each do |subject_confirmation|
-          if subject_confirmation.attributes.include? "Method" and subject_confirmation.attributes['Method'] != 'urn:oasis:names:tc:SAML:2.0:cm:bearer'
-            next
-          end
+          method = subject_confirmation.attributes['Method']
+          expected_method = normalized_client_public_keys.empty? ? BEARER_METHOD : HOLDER_OF_KEY_METHOD
+          next unless method == expected_method
 
           confirmation_data_node = REXML::XPath.first(
             subject_confirmation,
@@ -807,12 +811,7 @@ module OneLogin
           )
 
           next unless confirmation_data_node
-
-          attrs = confirmation_data_node.attributes
-          next if (attrs.include? "InResponseTo" and attrs['InResponseTo'] != in_response_to) ||
-                  (attrs.include? "NotBefore" and now < (parse_time(confirmation_data_node, "NotBefore") - allowed_clock_drift)) ||
-                  (attrs.include? "NotOnOrAfter" and now >= (parse_time(confirmation_data_node, "NotOnOrAfter") + allowed_clock_drift)) ||
-                  (attrs.include? "Recipient" and !options[:skip_recipient_check] and settings and attrs['Recipient'] != settings.assertion_consumer_service_url)
+          next unless valid_subject_confirmation_data?(confirmation_data_node, now, method)
 
           valid_subject_confirmation = true
           break
@@ -824,6 +823,133 @@ module OneLogin
         end
 
         true
+      end
+
+      def valid_subject_confirmation_data?(confirmation_data_node, now, method)
+        attrs = confirmation_data_node.attributes
+
+        if attrs.include?("InResponseTo")
+          expected_in_response_to = options[:matches_request_id] if options.has_key?(:matches_request_id)
+          expected_in_response_to ||= in_response_to
+          return false if expected_in_response_to && attrs['InResponseTo'] != expected_in_response_to
+        end
+        return false if attrs.include?("NotBefore") && now < (parse_time(confirmation_data_node, "NotBefore") - allowed_clock_drift)
+        return false if attrs.include?("NotOnOrAfter") && now >= (parse_time(confirmation_data_node, "NotOnOrAfter") + allowed_clock_drift)
+        return false if attrs.include?("Recipient") && !options[:skip_recipient_check] && settings && attrs['Recipient'] != settings.assertion_consumer_service_url
+        return false if method == HOLDER_OF_KEY_METHOD && !holder_of_key_matches?(confirmation_data_node)
+
+        true
+      end
+
+      def holder_of_key_matches?(confirmation_data_node)
+        tls_public_keys = normalized_client_public_keys
+        return false if tls_public_keys.empty?
+
+        key_info_nodes = REXML::XPath.match(
+          confirmation_data_node,
+          './ds:KeyInfo',
+          { "ds" => DSIG }
+        )
+        return false if key_info_nodes.empty?
+
+        asserted_public_keys = key_info_nodes.flat_map { |key_info| public_keys_from_key_info(key_info) }.compact
+        !(tls_public_keys & asserted_public_keys).empty?
+      end
+
+      def normalized_client_public_keys
+        @normalized_client_public_keys ||= Array(options[:client_public_keys] || options[:client_public_key]).flat_map do |public_key_material|
+          normalize_public_key(public_key_material)
+        end.compact
+      rescue ArgumentError, OpenSSL::PKey::RSAError, OpenSSL::ASN1::ASN1Error => error
+        raise ArgumentError, "Invalid TLS client public key: #{error.message}"
+      end
+
+      def normalize_public_key(public_key_material)
+        return [] if public_key_material.nil? || (public_key_material.respond_to?(:empty?) && public_key_material.empty?)
+
+        public_key =
+          if public_key_material.is_a?(OpenSSL::X509::Certificate)
+            public_key_material.public_key
+          elsif public_key_material.is_a?(OpenSSL::PKey::RSA)
+            public_key_material
+          elsif public_key_material.is_a?(String)
+            parse_public_key_material(public_key_material)
+          else
+            raise ArgumentError, "must be an X.509 certificate or RSA public key"
+          end
+
+        return [] unless public_key
+        raise ArgumentError, "private keys are not accepted" if private_key?(public_key)
+
+        [public_key.to_der]
+      end
+
+      def parse_public_key_material(public_key_material)
+        if public_key_material.include?("BEGIN CERTIFICATE")
+          return OpenSSL::X509::Certificate.new(public_key_material).public_key
+        elsif public_key_material.include?("BEGIN PUBLIC KEY") || public_key_material.include?("BEGIN RSA PUBLIC KEY")
+          return OpenSSL::PKey::RSA.new(public_key_material)
+        end
+
+        begin
+          cert_text = OneLogin::RubySaml::Utils.format_cert(public_key_material)
+          return OpenSSL::X509::Certificate.new(cert_text).public_key
+        rescue OpenSSL::X509::CertificateError
+        end
+
+        key_text = public_key_material
+        unless key_text.include?("-----")
+          key_text = "-----BEGIN PUBLIC KEY-----\n#{key_text.gsub(/\s+/, "")}\n-----END PUBLIC KEY-----"
+        end
+        OpenSSL::PKey::RSA.new(key_text)
+      end
+
+      def private_key?(public_key)
+        public_key.respond_to?(:private?) && public_key.private?
+      end
+
+      def public_keys_from_key_info(key_info)
+        public_keys = []
+
+        REXML::XPath.match(key_info, './ds:X509Data/ds:X509Certificate', { "ds" => DSIG }).each do |certificate_node|
+          certificate_text = Base64.decode64(OneLogin::RubySaml::Utils.element_text(certificate_node).to_s.gsub(/\s+/, ""))
+          begin
+            public_keys << OpenSSL::X509::Certificate.new(certificate_text).public_key.to_der
+          rescue OpenSSL::X509::CertificateError, OpenSSL::ASN1::ASN1Error
+            next
+          end
+        end
+
+        REXML::XPath.match(key_info, './ds:KeyValue/ds:RSAKeyValue', { "ds" => DSIG }).each do |rsa_key_value|
+          modulus_node = REXML::XPath.first(rsa_key_value, './ds:Modulus', { "ds" => DSIG })
+          exponent_node = REXML::XPath.first(rsa_key_value, './ds:Exponent', { "ds" => DSIG })
+          next unless modulus_node && exponent_node
+
+          begin
+            modulus = OpenSSL::BN.new(Base64.decode64(OneLogin::RubySaml::Utils.element_text(modulus_node).to_s.gsub(/\s+/, "")), 2)
+            exponent = OpenSSL::BN.new(Base64.decode64(OneLogin::RubySaml::Utils.element_text(exponent_node).to_s.gsub(/\s+/, "")), 2)
+            public_keys << build_rsa_public_key_der(modulus, exponent)
+          rescue OpenSSL::PKey::RSAError, OpenSSL::ASN1::ASN1Error
+            next
+          end
+        end
+
+        public_keys
+      end
+
+      def build_rsa_public_key_der(modulus, exponent)
+        rsa_public_key = OpenSSL::ASN1::Sequence.new([
+          OpenSSL::ASN1::Integer.new(modulus),
+          OpenSSL::ASN1::Integer.new(exponent)
+        ]).to_der
+        algorithm = OpenSSL::ASN1::Sequence.new([
+          OpenSSL::ASN1::ObjectId.new("rsaEncryption"),
+          OpenSSL::ASN1::Null.new(nil)
+        ])
+        OpenSSL::ASN1::Sequence.new([
+          algorithm,
+          OpenSSL::ASN1::BitString.new(rsa_public_key)
+        ]).to_der
       end
 
       # Validates the NameID element

@@ -63,6 +63,126 @@ class RubySamlTest < Minitest::Test
       return "Invalid Audience#{s}. The audience#{s} #{actual.join(',')}, did not match the expected audience #{expected}"
     end
 
+    def build_holder_of_key_response(branches, settings)
+      @holder_of_key_idp_cert, idp_key = CertificateHelper.generate_pair
+      @holder_of_key_client_cert, client_key = CertificateHelper.generate_pair
+      @holder_of_key_client_key = client_key
+      @holder_of_key_replacement_cert = build_certificate_with_key(client_key, 2)
+      @holder_of_key_other_cert, _other_key = CertificateHelper.generate_pair
+      confirmation_nodes = branches.map { |branch| holder_of_key_confirmation(branch) }.join
+      response_in_response_to = branches.any? { |branch| branch[:response_in_response_to] == false } ? "" : " InResponseTo=\"_request-id\""
+      xml = holder_of_key_response_xml(confirmation_nodes, response_in_response_to)
+
+      document = XMLSecurity::Document.new(xml)
+      document.sign_document(idp_key, @holder_of_key_idp_cert, XMLSecurity::Document::RSA_SHA256, XMLSecurity::Document::SHA256)
+
+      settings.idp_cert = @holder_of_key_idp_cert.to_pem
+      response_options = { :settings => settings }
+      response_options[:matches_request_id] = "_request-id" unless branches.any? { |branch| branch[:matches_request_id] == false }
+      response = OneLogin::RubySaml::Response.new(document.to_s, response_options)
+      [
+        response,
+        {
+          :client_cert => @holder_of_key_client_cert,
+          :client_key => @holder_of_key_client_key,
+          :replacement_cert => @holder_of_key_replacement_cert,
+          :other_cert => @holder_of_key_other_cert
+        }
+      ]
+    end
+
+    def holder_of_key_confirmation(branch)
+      attributes = holder_of_key_confirmation_attributes(branch)
+      method = branch[:method] || 'urn:oasis:names:tc:SAML:2.0:cm:holder-of-key'
+      key_info = method == 'urn:oasis:names:tc:SAML:2.0:cm:holder-of-key' ? holder_of_key_branch_key_info(branch) : ""
+      <<-XML
+        <saml:SubjectConfirmation Method="#{method}">
+          <saml:SubjectConfirmationData #{attributes}>#{key_info}</saml:SubjectConfirmationData>
+        </saml:SubjectConfirmation>
+      XML
+    end
+
+    def holder_of_key_branch_key_info(branch)
+      return holder_of_key_value_info(@holder_of_key_client_key) if branch[:key_value]
+
+      confirmation_cert = @holder_of_key_client_cert
+      confirmation_cert = @holder_of_key_replacement_cert if branch[:cert] == :replacement
+      confirmation_cert = @holder_of_key_other_cert if branch[:cert] == :other
+      confirmation_cert = branch[:cert] if branch[:cert].is_a?(OpenSSL::X509::Certificate)
+      holder_of_key_info(confirmation_cert)
+    end
+
+    def holder_of_key_response_xml(confirmation_nodes, response_in_response_to)
+      <<-XML
+        <samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="holder-of-key-response" Version="2.0" IssueInstant="#{Time.now.utc.iso8601}"#{response_in_response_to}>
+          <saml:Issuer>http://idp.example.com/</saml:Issuer>
+          <samlp:Status>
+            <samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/>
+          </samlp:Status>
+          <saml:Assertion ID="_holder-of-key-assertion" Version="2.0" IssueInstant="#{Time.now.utc.iso8601}">
+            <saml:Issuer>http://idp.example.com/</saml:Issuer>
+            <saml:Subject>
+              <saml:NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">someone@example.com</saml:NameID>
+              #{confirmation_nodes}
+            </saml:Subject>
+            <saml:Conditions NotBefore="#{(Time.now - 300).utc.iso8601}" NotOnOrAfter="#{(Time.now + 300).utc.iso8601}"/>
+            <saml:AuthnStatement AuthnInstant="#{Time.now.utc.iso8601}">
+              <saml:AuthnContext>
+                <saml:AuthnContextClassRef>urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport</saml:AuthnContextClassRef>
+              </saml:AuthnContext>
+            </saml:AuthnStatement>
+          </saml:Assertion>
+        </samlp:Response>
+      XML
+    end
+
+    def build_certificate_with_key(key, serial)
+      cert = OpenSSL::X509::Certificate.new
+      cert.version = 2
+      cert.serial = serial
+      cert.not_before = Time.now - 3600
+      cert.not_after = Time.now + 3600
+      cert.public_key = key.public_key
+      cert.subject = OpenSSL::X509::Name.parse("/DC=org/DC=ruby-saml/CN=Client #{serial}")
+      cert.issuer = cert.subject
+      cert.sign(key, OpenSSL::Digest::SHA256.new)
+      cert
+    end
+
+    def holder_of_key_confirmation_attributes(branch)
+      values = {
+        "NotBefore" => branch.key?(:not_before) ? branch[:not_before] : (Time.now - 300).utc.iso8601,
+        "NotOnOrAfter" => branch.key?(:not_on_or_after) ? branch[:not_on_or_after] : (Time.now + 300).utc.iso8601,
+        "Recipient" => branch.key?(:recipient) ? branch[:recipient] : "https://sp.example.com/acs",
+        "InResponseTo" => branch[:in_response_to] || "_request-id"
+      }
+      values.select { |_key, value| value }.map { |key, value| "#{key}=\"#{value}\"" }.join(" ")
+    end
+
+    def holder_of_key_info(cert)
+      certificate_text = Base64.strict_encode64(cert.to_der).scan(/.{1,64}/).join("\n")
+      <<-XML
+        <ds:KeyInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+          <ds:X509Data><ds:X509Certificate>#{certificate_text}</ds:X509Certificate></ds:X509Data>
+        </ds:KeyInfo>
+      XML
+    end
+
+    def holder_of_key_value_info(key)
+      modulus = Base64.strict_encode64(key.n.to_s(2))
+      exponent = Base64.strict_encode64(key.e.to_s(2))
+      <<-XML
+        <ds:KeyInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+          <ds:KeyValue>
+            <ds:RSAKeyValue>
+              <ds:Modulus>#{modulus}</ds:Modulus>
+              <ds:Exponent>#{exponent}</ds:Exponent>
+            </ds:RSAKeyValue>
+          </ds:KeyValue>
+        </ds:KeyInfo>
+      XML
+    end
+
     it "raise an exception when response is initialized with nil" do
       assert_raises(ArgumentError) { OneLogin::RubySaml::Response.new(nil) }
     end
@@ -844,6 +964,162 @@ class RubySamlTest < Minitest::Test
         Time.expects(:now).times(0) # ensures the test isn't run and thus Time.now.utc is never called within the test
         assert response_with_skip.send(:validate_subject_confirmation)
         assert_empty response_with_skip.errors
+      end
+
+      describe "holder-of-key" do
+        before do
+          settings.assertion_consumer_service_url = "https://sp.example.com/acs"
+        end
+
+        it "matches a TLS client certificate with the signed confirmation key" do
+          response, keys = Timecop.freeze(Time.now) { build_holder_of_key_response([{}], settings) }
+          response.options[:client_public_key] = keys[:client_cert]
+
+          assert response.send(:validate_subject_confirmation)
+          assert_empty response.errors
+        end
+
+        it "matches TLS public key material with a signed RSA KeyValue confirmation" do
+          response, keys = Timecop.freeze(Time.now) do
+            build_holder_of_key_response([{ :key_value => true }], settings)
+          end
+          response.options[:client_public_keys] = keys[:client_key].public_key
+
+          assert response.send(:validate_subject_confirmation)
+          assert_empty response.errors
+        end
+
+        it "matches TLS public key material and a different certificate with the same public key" do
+          response, keys = Timecop.freeze(Time.now) do
+            build_holder_of_key_response([{ :cert => :replacement }], settings)
+          end
+          response.options[:client_public_keys] = [
+            keys[:client_cert].public_key,
+            keys[:client_cert].public_key.to_pem
+          ]
+
+          refute_equal keys[:client_cert].to_pem, keys[:replacement_cert].to_pem
+          assert_equal keys[:client_cert].public_key.to_der, keys[:replacement_cert].public_key.to_der
+          assert response.send(:validate_subject_confirmation)
+          assert_empty response.errors
+        end
+
+        it "rejects a different TLS client key" do
+          response, keys = Timecop.freeze(Time.now) { build_holder_of_key_response([{}], settings) }
+          response.options[:client_public_keys] = keys[:other_cert]
+
+          assert !response.send(:validate_subject_confirmation)
+          assert_includes response.errors, "A valid SubjectConfirmation was not found on this Response"
+        end
+
+        it "does not trust a certificate only because it is embedded in the assertion" do
+          response, _keys = Timecop.freeze(Time.now) { build_holder_of_key_response([{}], settings) }
+
+          assert !response.send(:validate_subject_confirmation)
+          assert_includes response.errors, "A valid SubjectConfirmation was not found on this Response"
+        end
+
+        it "uses the InResponseTo value from the selected SubjectConfirmation branch" do
+          response, keys = Timecop.freeze(Time.now) do
+            build_holder_of_key_response([{ :response_in_response_to => false, :matches_request_id => false }], settings)
+          end
+          response.options[:client_public_keys] = keys[:client_cert]
+
+          assert_nil response.in_response_to
+          assert response.send(:validate_subject_confirmation)
+          assert_empty response.errors
+        end
+
+        it "rejects InResponseTo values mixed from another SubjectConfirmation branch" do
+          response, keys = Timecop.freeze(Time.now) do
+            build_holder_of_key_response([{ :in_response_to => "_different-request" }], settings)
+          end
+          response.options[:client_public_keys] = keys[:client_cert]
+
+          assert !response.send(:validate_subject_confirmation)
+          assert_includes response.errors, "A valid SubjectConfirmation was not found on this Response"
+        end
+
+        it "requires every branch condition and key match in the same SubjectConfirmation" do
+          branches = [
+            { :recipient => "https://sp.example.com/wrong" },
+            { :not_before => (Time.now + 300).utc.iso8601 },
+            { :not_on_or_after => (Time.now - 300).utc.iso8601 },
+            { :in_response_to => "_different-request" },
+            { :cert => :other }
+          ]
+          response, keys = Timecop.freeze(Time.now) { build_holder_of_key_response(branches, settings) }
+          response.options[:client_public_keys] = keys[:client_cert]
+
+          assert !response.send(:validate_subject_confirmation)
+          assert_includes response.errors, "A valid SubjectConfirmation was not found on this Response"
+        end
+
+        it "keeps bearer validation enabled without client key material and disabled when it is provided" do
+          client_cert, _client_key = CertificateHelper.generate_pair
+          bearer_settings = settings
+          bearer_settings.assertion_consumer_service_url = "recipient"
+
+          bearer_response = OneLogin::RubySaml::Response.new(response_document_valid_signed)
+          bearer_response.settings = bearer_settings
+          assert bearer_response.send(:validate_subject_confirmation)
+
+          hok_response = OneLogin::RubySaml::Response.new(
+            response_document_valid_signed,
+            :client_public_keys => client_cert
+          )
+          hok_response.settings = bearer_settings
+          assert !hok_response.send(:validate_subject_confirmation)
+          assert_includes hok_response.errors, "A valid SubjectConfirmation was not found on this Response"
+        end
+
+        it "rejects a private key supplied as TLS client public key material" do
+          response, _keys = Timecop.freeze(Time.now) { build_holder_of_key_response([{}], settings) }
+          response.options[:client_public_keys] = read_certificate("ruby-saml.key")
+
+          error = assert_raises(ArgumentError) do
+            response.send(:validate_subject_confirmation)
+          end
+          assert_match(/private keys are not accepted/, error.message)
+        end
+
+        it "validates the complete signed response with a replaced client certificate" do
+          response, keys = Timecop.freeze(Time.now) do
+            build_holder_of_key_response([{}], settings)
+          end
+          response.options[:client_public_keys] = keys[:replacement_cert]
+
+          assert response.is_valid?
+          assert_empty response.errors
+        end
+
+        it "rejects replacement of the signed confirmation certificate after response signing" do
+          response, keys = Timecop.freeze(Time.now) do
+            build_holder_of_key_response([{}], settings)
+          end
+
+          document = REXML::Document.new(response.response)
+          certificate_node = REXML::XPath.first(
+            document,
+            "/p:Response/a:Assertion/a:Subject/a:SubjectConfirmation/a:SubjectConfirmationData//ds:X509Certificate",
+            {
+              "p" => OneLogin::RubySaml::Response::PROTOCOL,
+              "a" => OneLogin::RubySaml::Response::ASSERTION,
+              "ds" => OneLogin::RubySaml::Response::DSIG
+            }
+          )
+          certificate_node.text = Base64.strict_encode64(keys[:replacement_cert].to_der)
+
+          tampered_response = OneLogin::RubySaml::Response.new(
+            document.to_s,
+            :settings => settings,
+            :matches_request_id => "_request-id",
+            :client_public_keys => keys[:replacement_cert]
+          )
+
+          assert !tampered_response.is_valid?
+          assert_includes tampered_response.errors, "Invalid Signature on SAML Response"
+        end
       end
     end
 

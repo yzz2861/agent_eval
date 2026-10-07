@@ -244,6 +244,19 @@ response = OneLogin::RubySaml::Response.new(params[:SAMLResponse], {skip_recipie
 response = OneLogin::RubySaml::Response.new(params[:SAMLResponse], {skip_audience: true}) # skips audience check
 ```
 
+For holder-of-key assertions, pass the public key or X.509 certificate already
+verified by the TLS layer in `:client_public_keys`. Ruby SAML does not read
+client certificates from HTTP headers, and a certificate embedded in the
+assertion is accepted only when its public key matches the externally supplied
+key material.
+
+```ruby
+response = OneLogin::RubySaml::Response.new(
+  params[:SAMLResponse],
+  client_public_keys: tls_verified_client_public_key
+)
+```
+
 All that's left is to wrap everything in a controller and reference it in the initialization and
 consumption URLs in OneLogin. A full controller example could look like this:
 
