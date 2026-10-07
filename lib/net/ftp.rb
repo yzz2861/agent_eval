@@ -185,6 +185,166 @@ module Net
       end
     end
 
+    #
+    # The outcome of a server-to-server (FXP) transfer started by FTP.fxp.
+    # The preliminary (1xx) and final responses of both control connections
+    # are preserved here, including when the transfer fails (see
+    # FXPError#result).
+    #
+    class FXPResult
+      # Preliminary (1xx) reply of the target server to STOR.
+      attr_accessor :target_preliminary_response
+      # Final reply of the target server after its data connection closed.
+      attr_accessor :target_final_response
+      # Preliminary (1xx) reply of the source server to RETR.
+      attr_accessor :source_preliminary_response
+      # Final reply of the source server after its data connection closed.
+      attr_accessor :source_final_response
+    end
+
+    #
+    # Error raised when a server-to-server (FXP) transfer started by
+    # FTP.fxp fails.  The responses collected before the failure are
+    # available via #result.  STOR is never retried automatically, and the
+    # target may contain a partial file.
+    #
+    class FXPError < FTPError
+      # The FXPResult holding the responses collected before the failure.
+      attr_reader :result
+
+      def initialize(message, result) # :nodoc:
+        super("#{message}; the target may contain a partial file")
+        @result = result
+      end
+    end
+
+    #
+    # Transfers +source_path+ on +source+ to +target_path+ on +target+
+    # directly between the two servers (FXP), without passing the data
+    # through this client.  Both +source+ and +target+ must be logged-in
+    # Net::FTP instances.
+    #
+    # The target is put into passive mode and the source into active mode:
+    # the data address is taken only from the target's actual PASV/EPSV
+    # negotiation and handed to the source via PORT/EPRT.  Before any
+    # PORT/EPRT command is sent, the negotiated address is passed to
+    # +address_policy+, a callable the caller must explicitly provide (for
+    # example <tt>->(host, port) { host == expected_host }</tt>).  If it
+    # does not return a truthy value, the transfer is refused before any
+    # PORT/EPRT command is issued, so this client cannot be tricked into
+    # connecting the source server to an arbitrary third party (FTP bounce
+    # attack).
+    #
+    # Both control connections are locked in a stable, direction-independent
+    # order for the whole transfer, so a concurrent FTP.fxp in the opposite
+    # direction cannot deadlock with this one.  STOR is issued exactly once
+    # and is never retried automatically.  If either side fails, the other
+    # side is stopped and Net::FTP::FXPError is raised; note that the
+    # target may contain a partial file.
+    #
+    # Returns an FXPResult with the preliminary and final responses of both
+    # servers.
+    #
+    def self.fxp(source, target, source_path, target_path, address_policy:)
+      unless address_policy.respond_to?(:call)
+        raise ArgumentError, "fxp requires a trusted :address_policy callable"
+      end
+      result = FXPResult.new
+      # Lock both control connections in a stable order that does not
+      # depend on the transfer direction, so that a concurrent reverse
+      # transfer cannot deadlock with this one.
+      first, second = [source, target].sort_by { |ftp| ftp.__id__ }
+      first.synchronize do
+        second.synchronize do
+          fxp_transfer(source, target, source_path, target_path,
+                       address_policy, result)
+        end
+      end
+      return result
+    end
+
+    def self.fxp_transfer(source, target, source_path, target_path, # :nodoc:
+                          address_policy, result)
+      # The target listens; only the data address it actually negotiated
+      # is a candidate for the PORT/EPRT command sent to the source.
+      host, port = target.__send__(:makepasv)
+      unless address_policy.call(host, port)
+        raise FTPError,
+              "address policy rejected the negotiated data address #{host}:#{port}"
+      end
+      source.__send__(:sendport, host, port)
+
+      result.target_preliminary_response =
+        fxp_preliminary(target, "STOR #{target_path}")
+      unless result.target_preliminary_response.start_with?("1")
+        raise FXPError.new(
+          "target refused STOR: #{result.target_preliminary_response.strip}",
+          result)
+      end
+
+      result.source_preliminary_response =
+        fxp_preliminary(source, "RETR #{source_path}")
+      unless result.source_preliminary_response.start_with?("1")
+        result.target_final_response = fxp_stop(target)
+        raise FXPError.new(
+          "source refused RETR: #{result.source_preliminary_response.strip}",
+          result)
+      end
+
+      begin
+        result.target_final_response = fxp_response(target)
+      rescue FTPError, SystemCallError, IOError => e
+        result.source_final_response = fxp_stop(source)
+        raise FXPError.new("target failed during transfer: #{e.message}", result)
+      end
+      unless result.target_final_response.start_with?("2")
+        result.source_final_response = fxp_stop(source)
+        raise FXPError.new(
+          "target reported failure: #{result.target_final_response.strip}",
+          result)
+      end
+
+      begin
+        result.source_final_response = fxp_response(source)
+      rescue FTPError, SystemCallError, IOError => e
+        raise FXPError.new("source failed during transfer: #{e.message}", result)
+      end
+      unless result.source_final_response.start_with?("2")
+        raise FXPError.new(
+          "source reported failure: #{result.source_final_response.strip}",
+          result)
+      end
+    end
+    private_class_method :fxp_transfer
+
+    # Sends +cmd+ on +ftp+ and returns the preliminary (1xx) response,
+    # skipping an immediate 2xx reply as transfercmd does.  The raw
+    # response is returned even for 4xx/5xx replies so that failure
+    # responses are preserved in the FXPResult.
+    def self.fxp_preliminary(ftp, cmd) # :nodoc:
+      ftp.__send__(:putline, cmd)
+      resp = fxp_response(ftp)
+      resp = fxp_response(ftp) if resp.start_with?("2")
+      return resp
+    end
+    private_class_method :fxp_preliminary
+
+    # Reads one (possibly multiline) response from +ftp+ without raising
+    # on 4xx/5xx replies.
+    def self.fxp_response(ftp) # :nodoc:
+      ftp.__send__(:getmultiline)
+    end
+    private_class_method :fxp_response
+
+    # Best-effort abort of a server whose transfer can no longer complete;
+    # returns its final response, or nil if it could not be obtained.
+    def self.fxp_stop(ftp) # :nodoc:
+      ftp.abort
+    rescue FTPError, SystemCallError, IOError
+      nil
+    end
+    private_class_method :fxp_stop
+
     # :call-seq:
     #    Net::FTP.new(host = nil, options = {})
     #
