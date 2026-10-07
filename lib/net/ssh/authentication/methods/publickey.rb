@@ -94,7 +94,7 @@ module Net
           def authenticate_with(identity, next_service, username)
             type = identity.ssh_type
             if type == "ssh-rsa"
-              pubkey_algorithms.each do |pk_alg|
+              candidate_pubkey_algorithms.each do |pk_alg|
                 case pk_alg
                 when "rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"
                   if authenticate_with_alg(identity, next_service, username, pk_alg, pk_alg)
@@ -104,7 +104,7 @@ module Net
                 end
               end
             elsif type == "ssh-rsa-cert-v01@openssh.com"
-              pubkey_algorithms.each do |pk_alg|
+              candidate_pubkey_algorithms.each do |pk_alg|
                 case pk_alg
                 when "rsa-sha2-512-cert-v01@openssh.com"
                   if authenticate_with_alg(identity, next_service, username, pk_alg, "rsa-sha2-512")
@@ -129,6 +129,40 @@ module Net
             end
             # failure
             return false
+          end
+
+          # Returns the public key algorithms to offer for RSA identities.
+          # When the server advertised its accepted signature algorithms via
+          # the "server-sig-algs" extension (RFC 8308), the configured list
+          # is narrowed to the algorithms both sides support; a certificate
+          # variant is considered supported when the server accepts its
+          # underlying signature algorithm. When the server sent no
+          # extension, the configured (or default) list is used unchanged,
+          # preserving the pre-RFC 8308 behavior. When the extension was
+          # received but no common algorithm remains, an exception is raised
+          # explaining the mismatch.
+          def candidate_pubkey_algorithms
+            @candidate_pubkey_algorithms ||= begin
+              server_algs = session.transport.algorithms&.server_signature_algorithms
+
+              if server_algs.nil?
+                pubkey_algorithms
+              else
+                filtered = pubkey_algorithms.select do |name|
+                  server_algs.include?(name) ||
+                    server_algs.include?(name.sub(/-cert-v01@openssh\.com\z/, ""))
+                end
+
+                if filtered.empty?
+                  raise Net::SSH::Exception,
+                        "could not settle on a public key signature algorithm " \
+                        "(server-sig-algs: #{server_algs.join(',')}; " \
+                        "client: #{pubkey_algorithms.join(',')})"
+                end
+
+                filtered
+              end
+            end
           end
         end
       end

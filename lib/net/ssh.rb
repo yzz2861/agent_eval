@@ -169,10 +169,13 @@ module Net
     #   properties (see Net::SSH::Connection::Session#properties)
     # * :proxy => a proxy instance (see Proxy) to use when connecting
     # * :pubkey_algorithms => the public key authentication algorithms to use for
-    #   this connection. Valid values are 'rsa-sha2-256-cert-v01@openssh.com',
-    #   'ssh-rsa-cert-v01@openssh.com', 'rsa-sha2-256', 'ssh-rsa'. Currently, this
-    #   option is only used for RSA public key authentication and ignored for other
-    #   types.
+    #   this connection. Valid values are 'rsa-sha2-512-cert-v01@openssh.com',
+    #   'rsa-sha2-256-cert-v01@openssh.com', 'ssh-rsa-cert-v01@openssh.com',
+    #   'rsa-sha2-512', 'rsa-sha2-256', 'ssh-rsa'. Currently, this option is only
+    #   used for RSA public key authentication and ignored for other types. When
+    #   the server advertises its accepted signature algorithms via the
+    #   "server-sig-algs" extension (RFC 8308), this list is narrowed to the
+    #   algorithms both sides have in common.
     # * :rekey_blocks_limit => the max number of blocks to process before rekeying
     # * :rekey_limit => the max number of bytes to process before rekeying
     # * :rekey_packet_limit => the max number of packets to process before rekeying

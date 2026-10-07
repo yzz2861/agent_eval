@@ -35,6 +35,12 @@ It is possible to return to the previous behavior by adding the option : `append
 
 Unsecure algoritms will definitely be removed in Net::SSH 8.*.
 
+Net::SSH also implements RFC 8308 extension negotiation: the client advertises
+`ext-info-c` during key exchange, and when the server answers with an
+`EXT_INFO` message containing `server-sig-algs`, public key authentication
+picks a signature algorithm both sides accept (e.g. `rsa-sha2-512` or
+`rsa-sha2-256` instead of `ssh-rsa` for RSA user keys).
+
 ### Host Keys
 
 | Name                 | Support               | Details  |

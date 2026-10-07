@@ -209,8 +209,16 @@ module Net
             when KEXINIT
               algorithms.accept_kexinit(packet)
 
+            when EXT_INFO
+              algorithms.accept_ext_info(packet)
+
             else
-              return packet if algorithms.allow?(packet)
+              if algorithms.allow?(packet)
+                # any regular packet ends the window in which EXT_INFO may
+                # be received (it is only valid immediately after NEWKEYS)
+                algorithms.close_ext_info_window
+                return packet
+              end
 
               push(packet)
             end

@@ -32,8 +32,10 @@ module Net
             @options = options
             @prompt = options[:password_prompt]
             @pubkey_algorithms = options[:pubkey_algorithms] \
-              || %w[rsa-sha2-256-cert-v01@openssh.com
+              || %w[rsa-sha2-512-cert-v01@openssh.com
+                    rsa-sha2-256-cert-v01@openssh.com
                     ssh-rsa-cert-v01@openssh.com
+                    rsa-sha2-512
                     rsa-sha2-256
                     ssh-rsa]
             self.logger = session.logger

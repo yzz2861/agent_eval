@@ -146,6 +146,13 @@ module Net
         # The session-id for this session, as decided during the initial key exchange.
         attr_reader :session_id
 
+        # The signature algorithms the server accepts for publickey
+        # authentication, as advertised via the "server-sig-algs" extension
+        # (RFC 8308). This is +nil+ when the server did not send an EXT_INFO
+        # message, in which case the client falls back to its configured
+        # (or default) public key algorithm preferences.
+        attr_reader :server_signature_algorithms
+
         # Returns true if the given packet can be processed during a key-exchange.
         def self.allowed_packet?(packet)
           (1..4).include?(packet.type) ||
@@ -162,6 +169,9 @@ module Net
           @algorithms = {}
           @pending = @initialized = false
           @client_packet = @server_packet = nil
+          @server_signature_algorithms = nil
+          @ext_info_expected = false
+          @ext_info_received = false
           prepare_preferred_algorithms!
         end
 
@@ -195,6 +205,37 @@ module Net
           else
             proceed!
           end
+        end
+
+        # Parses an EXT_INFO packet (RFC 8308) from the server. The message is
+        # only honored when it arrives in its valid phase: after the initial
+        # key exchange has completed, and before any other post-key-exchange
+        # traffic. Only the first well-formed EXT_INFO is processed; anything
+        # else is ignored, so a stray or malicious message cannot change the
+        # authentication policy mid-session.
+        def accept_ext_info(packet)
+          if !initialized? || pending? || !@ext_info_expected
+            lwarn { "received EXT_INFO outside of its valid phase; ignoring" }
+            return
+          end
+
+          @ext_info_expected = false
+
+          if @ext_info_received
+            lwarn { "received duplicate EXT_INFO; ignoring" }
+            return
+          end
+
+          @ext_info_received = true
+          parse_ext_info(packet)
+        end
+
+        # Closes the window in which an EXT_INFO packet may be honored. This
+        # is called by the transport session when the first regular packet
+        # after a key exchange is delivered, since RFC 8308 requires EXT_INFO
+        # to be sent immediately after NEWKEYS.
+        def close_ext_info_window
+          @ext_info_expected = false
         end
 
         # A convenience method for accessing the list of preferred types for a
@@ -370,7 +411,10 @@ module Net
         # a KEXINIT packet to send to the server. It does not actually send it,
         # it simply builds the packet and returns it.
         def build_client_algorithm_packet
-          kex         = algorithms[:kex].join(",")
+          # "ext-info-c" is an RFC 8308 pseudo-algorithm that tells the server
+          # it may send an EXT_INFO message after NEWKEYS. It is advertised
+          # with the kex algorithms, but never takes part in negotiation.
+          kex         = (algorithms[:kex] + %w[ext-info-c]).join(",")
           host_key    = algorithms[:host_key].join(",")
           encryption  = algorithms[:encryption].join(",")
           hmac        = algorithms[:hmac].join(",")
@@ -512,7 +556,59 @@ module Net
                                    max_packets: options[:rekey_packet_limit],
                                    max_blocks: options[:rekey_blocks_limit]
 
+          # The server may send EXT_INFO immediately after the initial
+          # NEWKEYS (RFC 8308), so open the receive window for it. Later
+          # re-exchanges do not reopen the window: the authentication
+          # policy derived from the extension must not change mid-session.
+          @ext_info_expected = true unless @initialized
           @initialized = true
+        end
+
+        # Parses the payload of an EXT_INFO packet: a uint32 extension count
+        # followed by that many name/value string pairs (RFC 8308, section
+        # 2.2). The declared lengths are validated against the actual packet
+        # size, and duplicate extension names are rejected. If anything is
+        # malformed, the whole message is ignored, leaving any previously
+        # negotiated state untouched.
+        def parse_ext_info(packet)
+          count = packet.read_long
+          if count.nil? || count > packet.available / 8
+            lwarn { "malformed EXT_INFO (invalid extension count); ignoring" }
+            return
+          end
+
+          extensions = {}
+          count.times do
+            name = read_ext_info_string(packet)
+            value = read_ext_info_string(packet)
+
+            if name.nil? || value.nil?
+              lwarn { "malformed EXT_INFO (truncated extension); ignoring" }
+              return
+            end
+
+            if extensions.key?(name)
+              lwarn { "malformed EXT_INFO (duplicate extension `#{name}'); ignoring" }
+              return
+            end
+
+            extensions[name] = value
+          end
+
+          if (server_sig_algs = extensions['server-sig-algs'])
+            @server_signature_algorithms = server_sig_algs.split(',')
+            debug { "server-sig-algs: #{@server_signature_algorithms.join(',')}" }
+          end
+        end
+
+        # Reads a single string from an EXT_INFO packet, returning +nil+
+        # instead of a truncated value when the declared length runs past
+        # the end of the packet.
+        def read_ext_info_string(packet)
+          length = packet.read_long
+          return nil if length.nil? || length > packet.available
+
+          packet.read(length)
         end
 
         # Given the SSH name for some compression algorithm, return a normalized

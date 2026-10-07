@@ -1,3 +1,4 @@
+require 'net/ssh/authentication/constants'
 require 'net/ssh/connection/constants'
 require 'net/ssh/transport/constants'
 
@@ -15,6 +16,7 @@ module Net
       # to either validate data that was sent by the local host (Net::SSH::Test::LocalPacket)
       # or to mimic the sending of data by the remote host (Net::SSH::Test::RemotePacket).
       class Packet
+        include Net::SSH::Authentication::Constants
         include Net::SSH::Transport::Constants
         include Net::SSH::Connection::Constants
 
@@ -74,6 +76,12 @@ module Net
                           string string string string string string string string string string
                           bool]
                      when NEWKEYS then []
+                     when SERVICE_REQUEST, SERVICE_ACCEPT then [:string]
+                     when EXT_INFO then [:raw]
+                     when USERAUTH_REQUEST then []
+                     when USERAUTH_PK_OK then %i[string string]
+                     when USERAUTH_FAILURE then %i[string bool]
+                     when USERAUTH_SUCCESS then []
                      when CHANNEL_OPEN then %i[string long long long]
                      when CHANNEL_OPEN_CONFIRMATION then %i[long long long long]
                      when CHANNEL_DATA then %i[long string]
