@@ -8,6 +8,16 @@ class Rufus::Scheduler::Job
   #
   class KillSignal < StandardError; end
 
+  #
+  # Used by jobs with :overlap => :latest, describes the trigger
+  # currently sitting in the "pending" slot.
+  #
+  # The slot keeps the original scheduled time of the latest merged
+  # trigger and the count of triggers merged into the slot so far
+  # (>= 1, the trigger that opened the slot included).
+  #
+  LatestPending = Struct.new(:time, :merged)
+
   attr_reader :id
   attr_reader :opts
   attr_reader :original
@@ -71,6 +81,10 @@ class Rufus::Scheduler::Job
 
     @locals = opts[:locals] || opts[:l] || {}
     @local_mutex = Mutex.new
+
+    @latest_mutex = Mutex.new
+    @latest_active = false
+    @latest_pending = nil
 
     @id = determine_id
     @name = opts[:name] || opts[:n]
@@ -137,9 +151,23 @@ class Rufus::Scheduler::Job
     do_trigger(time)
   end
 
+  # Only meaningful for jobs with :overlap => :latest.
+  #
+  # Returns a LatestPending (time, merged) describing the trigger
+  # currently sitting in the pending slot, or nil when the slot
+  # is empty.
+  #
+  def latest_pending
+
+    @latest_mutex.synchronize {
+      @latest_pending ? @latest_pending.dup : nil }
+  end
+
   def unschedule
 
     @unscheduled_at = EoTime.now
+
+    @latest_mutex.synchronize { @latest_pending = nil }
   end
 
   def threads
@@ -263,6 +291,11 @@ class Rufus::Scheduler::Job
       callback(:on_pre_trigger, time)
     ) == false
 
+    return if (
+      opts[:overlap] == :latest &&
+      ! claim_latest_slot(time)
+    )
+
     @count += 1
 
     if opts[:blocking]
@@ -296,9 +329,81 @@ class Rufus::Scheduler::Job
 
     post_trigger(time)
 
+    release_latest_slot
+
     ct[:rufus_scheduler_job] = nil
     ct[:rufus_scheduler_time] = nil
     ct[:rufus_scheduler_timeout] = nil
+  end
+
+  # For jobs with :overlap => :latest.
+  #
+  # Returns true when the trigger may proceed (it claimed the
+  # "active" slot), false when the trigger got merged into the
+  # pending slot (a newer trigger replaces the slot content).
+  #
+  def claim_latest_slot(time)
+
+    @latest_mutex.synchronize do
+
+      if @latest_active
+        if @latest_pending
+          @latest_pending.time = time
+          @latest_pending.merged += 1
+        else
+          @latest_pending = LatestPending.new(time, 1)
+        end
+        false
+      else
+        @latest_active = true
+        true
+      end
+    end
+  end
+
+  # For jobs with :overlap => :latest. Called when a run of the job
+  # is done (end of #trigger_now).
+  #
+  # Hands the "active" slot over to the pending trigger if there is
+  # one, else simply releases the slot.
+  #
+  def release_latest_slot
+
+    return unless opts[:overlap] == :latest
+
+    pending = nil
+
+    @latest_mutex.synchronize do
+      pending = @latest_pending
+      @latest_pending = nil
+      @latest_active = false unless pending
+    end
+
+    trigger_pending_latest(pending) if pending
+  end
+
+  # Dispatches the pending trigger of an :overlap => :latest job.
+  #
+  # Goes through the work queue (never through #trigger_now) so that
+  # the follow-up run does not happen recursively on the stack of
+  # the thread that just finished (not even for :blocking => true
+  # jobs).
+  #
+  def trigger_pending_latest(pending)
+
+    time = pending.time
+
+    if (
+      callback(:confirm_lock, time) &&
+      callback(:on_pre_trigger, time)
+    ) == false
+      @latest_mutex.synchronize { @latest_active = false }
+      return
+    end
+
+    @count += 1
+
+    trigger_queue(time)
   end
 
   def post_trigger(time)

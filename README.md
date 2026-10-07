@@ -433,6 +433,31 @@ To prevent overlap, one can set `overlap: false`. Such a job will not trigger if
 
 The `:overlap` option is considered before the `:mutex` option when the scheduler is reviewing jobs for triggering.
 
+### overlap: :latest
+
+`overlap: false` drops every trigger that happens while a previous instance of the job is still running. For something like a periodic cache refresh, that means the last update might get lost. Queueing all the missed triggers for catch-up runs is wasteful, only the latest state matters.
+
+`overlap: :latest` (for repeat jobs) allows at most one running instance and one pending trigger. Triggers that arrive while an instance is running are merged into a single pending slot. A newer trigger replaces the content of the slot.
+
+The pending slot remembers the original scheduled time of the latest merged trigger and how many triggers got merged into it:
+
+```ruby
+job = scheduler.every('5m', overlap: :latest) { refresh_cache }
+
+job.latest_pending # => nil or a LatestPending struct
+job.latest_pending.time   # scheduled time of the latest merged trigger
+job.latest_pending.merged # count of triggers merged into the slot (>= 1)
+```
+
+When the current run ends, the pending trigger is dispatched through the scheduler work queue (never recursively on the stack of the thread that just finished, not even for `blocking: true` jobs). The follow-up run keeps the original scheduled time of the merged trigger.
+
+Behaviour in combination with other scheduler/job features:
+
+* `job.unschedule` (and thus `scheduler.shutdown`, which unschedules all the jobs) clears the pending slot; a run already in progress is not affected;
+* `job.pause` / `scheduler.pause`: triggers that would occur while paused are discarded, they are not merged into the pending slot; an already pending trigger survives the pause and is dispatched when the current run ends;
+* `job.resume` / `scheduler.resume` do not touch the pending slot;
+* manually triggering the job (`job.trigger_off_schedule`) goes through the same slot logic: it proceeds immediately if no instance is active, else it is merged into the pending slot.
+
 ### mutex: mutex_instance / mutex_name / array of mutexes
 
 When a job with a mutex triggers, the job's block is executed with the mutex around it, preventing other jobs with the same mutex from entering (it makes the other jobs wait until it exits the mutex).
@@ -1795,4 +1820,3 @@ see [getting help](#getting-help) above.
 ## license
 
 MIT, see [LICENSE.txt](LICENSE.txt)
-
