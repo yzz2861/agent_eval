@@ -77,6 +77,25 @@ module Rake
       Rake::FileTask.define_task(*args, &block)
     end
 
+    # Declare a content-based file task. The target is rebuilt when its
+    # content signature changes, regardless of modification times. Declare the
+    # files, environment variables, parameters, and action version that must be
+    # included in the signature. Bump +action_version+ when the Ruby action
+    # changes.
+    #
+    # Example:
+    #   file_content "app.config",
+    #     inputs: ["config.template", "secrets/base.yml"],
+    #     env: %w[RAILS_ENV REGION],
+    #     params: {features: [:ssl]},
+    #     action_version: 3 do |t|
+    #     # generate t.name
+    #   end
+    #
+    def file_content(*args, &block) # :doc:
+      Rake::FileContentTask.define_task(*args, &block)
+    end
+
     # Declare a file creation task.
     # (Mainly used for the directory command).
     def file_create(*args, &block)

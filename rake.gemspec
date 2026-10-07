@@ -59,6 +59,7 @@ Gem::Specification.new do |s|
     "lib/rake/ext/core.rb",
     "lib/rake/ext/string.rb",
     "lib/rake/file_creation_task.rb",
+    "lib/rake/file_content_task.rb",
     "lib/rake/file_list.rb",
     "lib/rake/file_task.rb",
     "lib/rake/file_utils.rb",
