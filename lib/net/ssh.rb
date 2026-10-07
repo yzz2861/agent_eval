@@ -70,6 +70,8 @@ module Net
       append_all_supported_algorithms non_interactive password_prompt
       agent_socket_factory minimum_dh_bits verify_host_key
       fingerprint_hash check_host_ip pubkey_algorithms
+      canonicalize_hostname canonical_domains canonicalize_fallback_local
+      canonicalize_max_dots canonicalize_permitted_cnames canonicalize_resolver
     ]
 
     # The standard means of starting a new SSH connection. When used with a
@@ -228,7 +230,8 @@ module Net
       _sanitize_options(options)
 
       options[:user] = user if user
-      options = configuration_for(host, options.fetch(:config, true)).merge(options)
+      options = configuration_for(host, options.fetch(:config, true),
+                                  resolver: options[:canonicalize_resolver]).merge(options)
       host = options.fetch(:host_name, host)
 
       options[:check_host_ip] = true unless options.key?(:check_host_ip)
@@ -281,14 +284,13 @@ module Net
     # to read.
     #
     # See Net::SSH::Config for the full description of all supported options.
-    def self.configuration_for(host, use_ssh_config)
+    def self.configuration_for(host, use_ssh_config, resolver: nil)
       files = case use_ssh_config
               when true then Net::SSH::Config.expandable_default_files
               when false, nil then return {}
               else Array(use_ssh_config)
               end
-
-      Net::SSH::Config.for(host, files)
+      Net::SSH::Config.for(host, files, resolver: resolver)
     end
 
     def self.assign_defaults(options)
