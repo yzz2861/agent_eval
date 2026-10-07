@@ -1649,6 +1649,324 @@ EOF
     end
   end
 
+  def test_file_hash
+    commands = []
+    server = create_ftp_server { |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands.push(sock.gets)
+      sock.print("211-Features\r\n")
+      sock.print(" HASH SHA-512*;SHA-256;MD5;\r\n")
+      sock.print("211 End\r\n")
+      commands.push(sock.gets)
+      sock.print("200 Algorithm set to SHA-256\r\n")
+      commands.push(sock.gets)
+      sock.print("213 SHA-256 0-1023 #{"ab" * 32} my file.txt\r\n")
+    }
+    begin
+      begin
+        ftp = Net::FTP.new
+        ftp.read_timeout *= 5 if mjit_enabled? # for --jit-wait
+        ftp.connect(SERVER_ADDR, server.port)
+        assert_equal(%w[SHA-512 SHA-256 MD5], ftp.hash_algorithms)
+        assert_equal("SHA-512", ftp.default_hash_algorithm)
+        result = ftp.file_hash("my file.txt", algorithm: "SHA-256")
+        assert_equal("SHA-256", result.algorithm)
+        assert_equal(0, result.start_offset)
+        assert_equal(1023, result.end_offset)
+        assert_equal(0..1023, result.range)
+        assert_equal("ab" * 32, result.digest)
+        assert_equal("my file.txt", result.filename)
+        assert_equal("FEAT\r\n", commands.shift)
+        assert_equal("OPTS HASH SHA-256\r\n", commands.shift)
+        assert_equal("HASH my file.txt\r\n", commands.shift)
+        assert_equal(nil, commands.shift)
+      ensure
+        ftp.close if ftp
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_file_hash_default_algorithm
+    commands = []
+    server = create_ftp_server { |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands.push(sock.gets)
+      sock.print("211-Features\r\n")
+      sock.print(" HASH SHA-512*;SHA-256;\r\n")
+      sock.print("211 End\r\n")
+      commands.push(sock.gets)
+      sock.print("213 SHA-512 0-9 #{"cd" * 64} file.bin\r\n")
+    }
+    begin
+      begin
+        ftp = Net::FTP.new
+        ftp.read_timeout *= 5 if mjit_enabled? # for --jit-wait
+        ftp.connect(SERVER_ADDR, server.port)
+        result = ftp.file_hash("file.bin")
+        assert_equal("SHA-512", result.algorithm)
+        assert_equal("cd" * 64, result.digest)
+        assert_equal("file.bin", result.filename)
+        assert_equal("FEAT\r\n", commands.shift)
+        # no OPTS HASH: the server default is used
+        assert_equal("HASH file.bin\r\n", commands.shift)
+        assert_equal(nil, commands.shift)
+      ensure
+        ftp.close if ftp
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_file_hash_range
+    commands = []
+    server = create_ftp_server { |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands.push(sock.gets)
+      sock.print("211-Features\r\n")
+      sock.print(" HASH SHA-256*;\r\n")
+      sock.print("211 End\r\n")
+      commands.push(sock.gets)
+      sock.print("213 SHA-256 100-199 #{"ef" * 32} file.bin\r\n")
+    }
+    begin
+      begin
+        ftp = Net::FTP.new
+        ftp.read_timeout *= 5 if mjit_enabled? # for --jit-wait
+        ftp.connect(SERVER_ADDR, server.port)
+        result = ftp.file_hash("file.bin", range: 100..199)
+        assert_equal(100..199, result.range)
+        assert_equal("ef" * 32, result.digest)
+        assert_equal("FEAT\r\n", commands.shift)
+        assert_equal("HASH RANG 100-199 file.bin\r\n", commands.shift)
+        assert_equal(nil, commands.shift)
+      ensure
+        ftp.close if ftp
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_file_hash_no_silent_downgrade
+    commands = []
+    server = create_ftp_server { |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands.push(sock.gets)
+      sock.print("211-Features\r\n")
+      sock.print(" HASH MD5*;SHA-256;\r\n")
+      sock.print("211 End\r\n")
+      commands.push(sock.gets)
+      sock.print("504 Algorithm not allowed\r\n")
+    }
+    begin
+      begin
+        ftp = Net::FTP.new
+        ftp.read_timeout *= 5 if mjit_enabled? # for --jit-wait
+        ftp.connect(SERVER_ADDR, server.port)
+        # the server refuses the requested strong algorithm: the client
+        # must not silently fall back to the server default (MD5)
+        assert_raise(Net::FTPPermError) do
+          ftp.file_hash("file.bin", algorithm: "SHA-256")
+        end
+        assert_equal("FEAT\r\n", commands.shift)
+        assert_equal("OPTS HASH SHA-256\r\n", commands.shift)
+        # no HASH command was issued with a weaker algorithm
+        assert_equal(nil, commands.shift)
+      ensure
+        ftp.close if ftp
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_file_hash_unsupported_algorithm
+    commands = []
+    server = create_ftp_server { |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands.push(sock.gets)
+      sock.print("211-Features\r\n")
+      sock.print(" HASH MD5*;\r\n")
+      sock.print("211 End\r\n")
+    }
+    begin
+      begin
+        ftp = Net::FTP.new
+        ftp.read_timeout *= 5 if mjit_enabled? # for --jit-wait
+        ftp.connect(SERVER_ADDR, server.port)
+        assert_raise(Net::FTPPermError) do
+          ftp.file_hash("file.bin", algorithm: "SHA-256")
+        end
+        # no OPTS/HASH command sent for an unadvertised algorithm
+        assert_equal("FEAT\r\n", commands.shift)
+        assert_equal(nil, commands.shift)
+      ensure
+        ftp.close if ftp
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_file_hash_overlong_digest
+    commands = []
+    server = create_ftp_server { |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands.push(sock.gets)
+      sock.print("211-Features\r\n")
+      sock.print(" HASH SHA-256*;\r\n")
+      sock.print("211 End\r\n")
+      commands.push(sock.gets)
+      sock.print("213 SHA-256 0-1023 #{"a" * 10000} file.bin\r\n")
+    }
+    begin
+      begin
+        ftp = Net::FTP.new
+        ftp.read_timeout *= 5 if mjit_enabled? # for --jit-wait
+        ftp.connect(SERVER_ADDR, server.port)
+        assert_raise(Net::FTPProtoError) do
+          ftp.file_hash("file.bin")
+        end
+      ensure
+        ftp.close if ftp
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_file_hash_range_mismatch
+    commands = []
+    server = create_ftp_server { |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands.push(sock.gets)
+      sock.print("211-Features\r\n")
+      sock.print(" HASH SHA-256*;\r\n")
+      sock.print("211 End\r\n")
+      commands.push(sock.gets)
+      sock.print("213 SHA-256 0-98 #{"ab" * 32} file.bin\r\n")
+    }
+    begin
+      begin
+        ftp = Net::FTP.new
+        ftp.read_timeout *= 5 if mjit_enabled? # for --jit-wait
+        ftp.connect(SERVER_ADDR, server.port)
+        assert_raise(Net::FTPProtoError) do
+          ftp.file_hash("file.bin", range: 0..99)
+        end
+      ensure
+        ftp.close if ftp
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_file_hash_algorithm_mismatch
+    commands = []
+    server = create_ftp_server { |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands.push(sock.gets)
+      sock.print("211-Features\r\n")
+      sock.print(" HASH SHA-256*;MD5;\r\n")
+      sock.print("211 End\r\n")
+      commands.push(sock.gets)
+      sock.print("213 MD5 0-1023 #{"ab" * 16} file.bin\r\n")
+    }
+    begin
+      begin
+        ftp = Net::FTP.new
+        ftp.read_timeout *= 5 if mjit_enabled? # for --jit-wait
+        ftp.connect(SERVER_ADDR, server.port)
+        assert_raise(Net::FTPProtoError) do
+          ftp.file_hash("file.bin")
+        end
+      ensure
+        ftp.close if ftp
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_file_hash_not_supported
+    commands = []
+    server = create_ftp_server { |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands.push(sock.gets)
+      sock.print("502 FEAT not implemented\r\n")
+      commands.push(sock.gets)
+      sock.print("213 1024\r\n")
+    }
+    begin
+      begin
+        ftp = Net::FTP.new
+        ftp.read_timeout *= 5 if mjit_enabled? # for --jit-wait
+        ftp.connect(SERVER_ADDR, server.port)
+        assert_raise(Net::FTPPermError) do
+          ftp.file_hash("file.bin")
+        end
+        # normal transfers still work on servers without HASH
+        assert_equal(1024, ftp.size("file.bin"))
+        assert_equal("FEAT\r\n", commands.shift)
+        assert_equal("SIZE file.bin\r\n", commands.shift)
+        assert_equal(nil, commands.shift)
+      ensure
+        ftp.close if ftp
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_file_hash_renegotiated_after_reconnect
+    commands1 = []
+    server1 = create_ftp_server { |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands1.push(sock.gets)
+      sock.print("211-Features\r\n")
+      sock.print(" HASH SHA-256*;\r\n")
+      sock.print("211 End\r\n")
+      commands1.push(sock.gets)
+      sock.print("213 SHA-256 0-9 #{"ab" * 32} file.bin\r\n")
+    }
+    begin
+      begin
+        ftp = Net::FTP.new
+        ftp.read_timeout *= 5 if mjit_enabled? # for --jit-wait
+        ftp.connect(SERVER_ADDR, server1.port)
+        assert_equal("SHA-256", ftp.file_hash("file.bin").algorithm)
+        ftp.close
+
+        commands2 = []
+        server2 = create_ftp_server { |sock|
+          sock.print("220 (test_ftp).\r\n")
+          commands2.push(sock.gets)
+          sock.print("502 FEAT not implemented\r\n")
+        }
+        begin
+          ftp.connect(SERVER_ADDR, server2.port)
+          # the cached algorithm selection must not leak into the new
+          # connection; capabilities are re-negotiated
+          assert_raise(Net::FTPPermError) do
+            ftp.file_hash("file.bin")
+          end
+          assert_equal("FEAT\r\n", commands2.shift)
+          assert_equal(nil, commands2.shift)
+        ensure
+          server2.close
+        end
+      ensure
+        ftp.close if ftp
+      end
+    ensure
+      server1.close
+    end
+  end
+
   def test_mlst
     commands = []
     server = create_ftp_server { |sock|

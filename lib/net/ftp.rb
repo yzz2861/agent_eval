@@ -94,6 +94,21 @@ module Net
     CRLF = "\r\n"
     DEFAULT_BLOCKSIZE = BufferedIO::BUFSIZE
     @@default_passive = true
+
+    # Hex digest lengths (in characters) of well-known HASH algorithms.
+    HASH_DIGEST_LENGTHS = {
+      "CRC32" => 8,
+      "MD5" => 32,
+      "SHA-1" => 40,
+      "SHA-224" => 56,
+      "SHA-256" => 64,
+      "SHA-384" => 96,
+      "SHA-512" => 128,
+    }.freeze
+
+    # Upper bound on the hex digest length accepted for algorithms not
+    # listed in HASH_DIGEST_LENGTHS, to reject absurdly long responses.
+    MAX_HASH_DIGEST_LENGTH = 128
     # :startdoc:
 
     # When +true+, transfers are performed in binary mode.  Default: +true+.
@@ -301,6 +316,9 @@ module Net
       @ssl_handshake_timeout = options[:ssl_handshake_timeout]
       @read_timeout = options[:read_timeout] || 60
       @use_pasv_ip = options[:use_pasv_ip] || false
+      @hash_algorithms = nil
+      @hash_default_algorithm = nil
+      @hash_selected_algorithm = nil
       if host
         connect(host, options[:port] || FTP_PORT)
         if options[:username]
@@ -402,6 +420,9 @@ module Net
     def connect(host, port = FTP_PORT)
       debug_print "connect: #{host}:#{port}"
       synchronize do
+        @hash_algorithms = nil
+        @hash_default_algorithm = nil
+        @hash_selected_algorithm = nil
         @host = host
         @bare_sock = open_socket(host, port)
         if @ssl_context
@@ -1391,6 +1412,231 @@ module Net
     end
 
     #
+    # The result of a HASH command, returned by #file_hash.
+    #
+    class HashResult
+      # The hash algorithm used by the server, e.g. "SHA-256".
+      attr_reader :algorithm
+
+      # The offset of the first hashed byte.
+      attr_reader :start_offset
+
+      # The offset of the last hashed byte, inclusive.
+      attr_reader :end_offset
+
+      # The hexadecimal digest returned by the server.
+      attr_reader :digest
+
+      # The name of the hashed file, as reported by the server.  Note
+      # that file names may contain spaces.
+      attr_reader :filename
+
+      def initialize(algorithm, start_offset, end_offset, digest, filename) # :nodoc:
+        @algorithm = algorithm
+        @start_offset = start_offset
+        @end_offset = end_offset
+        @digest = digest
+        @filename = filename
+      end
+
+      # The hashed byte range, <tt>start_offset..end_offset</tt>.
+      def range
+        @start_offset..@end_offset
+      end
+    end
+
+    #
+    # Returns the hash algorithms the server supports for the HASH
+    # command, as advertised in its FEAT response, in uppercase.
+    #
+    # Raises Net::FTPPermError if the server does not support HASH.
+    #
+    def hash_algorithms
+      synchronize do
+        negotiate_hash_algorithms unless @hash_algorithms
+        return @hash_algorithms.dup
+      end
+    end
+
+    #
+    # Returns the server's default HASH algorithm (the one marked with
+    # "*" in the FEAT response), or the first advertised algorithm if the
+    # server did not mark a default.
+    #
+    # Raises Net::FTPPermError if the server does not support HASH.
+    #
+    def default_hash_algorithm
+      synchronize do
+        negotiate_hash_algorithms unless @hash_algorithms
+        return @hash_default_algorithm
+      end
+    end
+
+    #
+    # Issues a HASH command to compute the cryptographic hash of
+    # +remotefile+ and returns a HashResult.
+    #
+    # +algorithm+ may be a single algorithm name (e.g. "SHA-256") or an
+    # array of acceptable algorithm names in order of preference.  The
+    # first algorithm that is both acceptable to the caller and
+    # advertised in the server's FEAT response is selected with
+    # <tt>OPTS HASH</tt>.  If the server rejects the selection, the next
+    # caller-acceptable algorithm is tried; if none is accepted,
+    # Net::FTPPermError is raised.  The client never silently falls back
+    # to an algorithm the caller did not allow.  When +algorithm+ is
+    # +nil+, the server's default algorithm is used.
+    #
+    # +range+ may be a Range or a <tt>[start, end]</tt> pair of byte
+    # offsets to hash only part of the file (<tt>HASH RANG</tt>).
+    #
+    # The algorithm selection and the HASH command itself are performed
+    # atomically with respect to other threads using this connection, so
+    # a concurrent #file_hash call cannot change the selected algorithm
+    # in between.  The algorithm is re-negotiated after each reconnect.
+    #
+    def file_hash(remotefile, algorithm: nil, range: nil)
+      synchronize do
+        algo = select_hash_algorithm(algorithm)
+        if range
+          first, last = hash_range_offsets(range)
+          resp = sendcmd("HASH RANG #{first}-#{last} #{remotefile}")
+        else
+          resp = sendcmd("HASH #{remotefile}")
+        end
+        return parse_hash_response(resp, algo, range && [first, last])
+      end
+    end
+
+    # Queries and caches the HASH algorithms advertised in the FEAT
+    # response.  Raises FTPPermError if HASH is not supported.
+    def negotiate_hash_algorithms # :nodoc:
+      feats =
+        begin
+          features
+        rescue FTPError
+          []
+        end
+      line = feats.find { |feat| feat =~ /\AHASH[ \t]/i }
+      if line
+        algorithms = []
+        default = nil
+        line.sub(/\AHASH[ \t]+/i, "").split(";").each do |entry|
+          entry = entry.strip
+          next if entry.empty?
+          if entry.end_with?("*")
+            entry = entry[0...-1]
+            default = entry.upcase
+          end
+          algorithms << entry.upcase unless entry.empty?
+        end
+        unless algorithms.empty?
+          @hash_algorithms = algorithms
+          @hash_default_algorithm = default || algorithms.first
+          return
+        end
+      end
+      raise FTPPermError, "the server does not support the HASH command"
+    end
+    private :negotiate_hash_algorithms
+
+    # Selects the algorithm to use for a HASH command, sending OPTS HASH
+    # when the caller requested specific algorithms.  Returns the
+    # selected algorithm name.
+    def select_hash_algorithm(requested) # :nodoc:
+      negotiate_hash_algorithms unless @hash_algorithms
+      acceptable = Array(requested).map { |name| name.to_s.upcase }
+      if acceptable.empty?
+        return @hash_default_algorithm
+      end
+      rejected = false
+      acceptable.each do |algo|
+        next unless @hash_algorithms.include?(algo)
+        begin
+          if @hash_selected_algorithm != algo
+            voidcmd("OPTS HASH #{algo}")
+            @hash_selected_algorithm = algo
+          end
+          return algo
+        rescue FTPTempError, FTPPermError
+          rejected = true
+        end
+      end
+      if rejected
+        raise FTPPermError,
+          "the server rejected the requested HASH algorithms: #{acceptable.join(', ')}"
+      else
+        raise FTPPermError,
+          "the server does not support any of the requested HASH algorithms: #{acceptable.join(', ')}"
+      end
+    end
+    private :select_hash_algorithm
+
+    # Normalizes a Range or [start, end] pair into byte offsets.
+    def hash_range_offsets(range) # :nodoc:
+      if range.is_a?(Range)
+        first = range.begin
+        last = range.end
+        last -= 1 if last && range.exclude_end?
+      else
+        first, last = range.to_ary
+      end
+      unless first.is_a?(Integer) && last.is_a?(Integer) &&
+             first >= 0 && first <= last
+        raise ArgumentError, "invalid HASH range: #{range.inspect}"
+      end
+      return [first, last]
+    end
+    private :hash_range_offsets
+
+    # Parses and validates a 213 response to a HASH command.  The
+    # pathname is the remainder of the line and may contain spaces, so
+    # the response is parsed field by field from the left instead of
+    # being split naively.
+    def parse_hash_response(resp, expected_algorithm, expected_range) # :nodoc:
+      unless resp.start_with?("213")
+        raise FTPReplyError, resp
+      end
+      match = /\A213[ -](\S+)[ \t]+(\d+)-(\d+)[ \t]+(\S+)[ \t]+(.+)[ \t]*\z/m.match(resp.strip)
+      unless match
+        raise FTPProtoError, resp
+      end
+      algorithm = match[1].upcase
+      first = Integer(match[2], 10)
+      last = Integer(match[3], 10)
+      digest = match[4]
+      filename = match[5]
+      if algorithm != expected_algorithm
+        raise FTPProtoError,
+          "unexpected HASH algorithm in response: #{algorithm} (expected #{expected_algorithm})"
+      end
+      if first > last
+        raise FTPProtoError, resp
+      end
+      if expected_range
+        if first != expected_range[0] || last != expected_range[1]
+          raise FTPProtoError,
+            "HASH range mismatch: requested #{expected_range[0]}-#{expected_range[1]}, got #{first}-#{last}"
+        end
+      elsif first != 0
+        raise FTPProtoError, resp
+      end
+      unless /\A[0-9a-f]+\z/i.match?(digest)
+        raise FTPProtoError, "invalid HASH digest in response: #{digest.inspect}"
+      end
+      if (expected_length = HASH_DIGEST_LENGTHS[algorithm])
+        unless digest.length == expected_length
+          raise FTPProtoError,
+            "invalid #{algorithm} digest length: #{digest.length} (expected #{expected_length})"
+        end
+      elsif digest.length > MAX_HASH_DIGEST_LENGTH
+        raise FTPProtoError,
+          "HASH digest too long: #{digest.length} characters"
+      end
+      return HashResult.new(algorithm, first, last, digest, filename)
+    end
+    private :parse_hash_response
+
+    #
     # Closes the connection.  Further operations are impossible until you open
     # a new connection with #connect.
     #
@@ -1405,6 +1651,9 @@ module Net
           self.read_timeout = orig
         end
       end
+      @hash_algorithms = nil
+      @hash_default_algorithm = nil
+      @hash_selected_algorithm = nil
     end
 
     #
