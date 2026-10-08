@@ -264,8 +264,13 @@ module XMLRPC # :nodoc:
     # If the remote procedure returned a fault-structure, then a
     # XMLRPC::FaultException exception is raised, which has two accessor-methods
     # +faultCode+ an Integer, and +faultString+ a String.
-    def call(method, *args)
-      ok, param = call2(method, *args)
+    #
+    # Readable IO values are sent as streaming base64 values. +base64_sinks+
+    # maps response paths to writable IO, and +on_cancel+ may return true to
+    # cancel response processing.
+    def call(method, *args, base64_sinks: nil, on_cancel: nil)
+      ok, param = call2(method, *args, base64_sinks: base64_sinks, on_cancel: on_cancel)
+      return param if base64_sinks
       if ok
         param
       else
@@ -282,10 +287,16 @@ module XMLRPC # :nodoc:
     # Both are explained in XMLRPC::Client#call.
     #
     # Simple to remember: The "2" in "call2" denotes the number of values it returns.
-    def call2(method, *args)
+    # The response root uses path +[]+; nested values use array indexes and hash
+    # keys, for example +[0, "image", 1]+.
+    def call2(method, *args, base64_sinks: nil, on_cancel: nil)
       request = create().methodCall(method, *args)
-      data = do_rpc(request, false)
-      parser().parseMethodResponse(data)
+      data = do_rpc(request, false, base64_sinks: base64_sinks, on_cancel: on_cancel)
+      if base64_sinks
+        data
+      else
+        parser().parseMethodResponse(data)
+      end
     end
 
     # Similar to XMLRPC::Client#call, however can be called concurrently and
@@ -304,8 +315,8 @@ module XMLRPC # :nodoc:
     #     p client.call_async("michael.div", 7, 9)
     #   }
     #
-    def call_async(method, *args)
-      ok, param = call2_async(method, *args)
+    def call_async(method, *args, base64_sinks: nil, on_cancel: nil)
+      ok, param = call2_async(method, *args, base64_sinks: base64_sinks, on_cancel: on_cancel)
       if ok
         param
       else
@@ -316,10 +327,14 @@ module XMLRPC # :nodoc:
     # Same as XMLRPC::Client#call2, but can be called concurrently.
     #
     # See also XMLRPC::Client#call_async
-    def call2_async(method, *args)
+    def call2_async(method, *args, base64_sinks: nil, on_cancel: nil)
       request = create().methodCall(method, *args)
-      data = do_rpc(request, true)
-      parser().parseMethodResponse(data)
+      data = do_rpc(request, true, base64_sinks: base64_sinks, on_cancel: on_cancel)
+      if base64_sinks
+        data
+      else
+        parser().parseMethodResponse(data)
+      end
     end
 
 
@@ -461,13 +476,22 @@ module XMLRPC # :nodoc:
       end
     end
 
-    def do_rpc(request, async=false)
+    def do_rpc(request, async=false, base64_sinks: nil, on_cancel: nil)
       header = {
        "User-Agent"     =>  USER_AGENT,
        "Content-Type"   => "text/xml; charset=utf-8",
-       "Content-Length" => request.bytesize.to_s,
        "Connection"     => (async ? "close" : "keep-alive")
       }
+
+      if request.respond_to?(:read)
+        if request.size
+          header["Content-Length"] = request.size.to_s
+        else
+          header["Transfer-Encoding"] = "chunked"
+        end
+      else
+        header["Content-Length"] = request.bytesize.to_s
+      end
 
       header["Cookie"] = @cookie        if @cookie
       header.update(@http_header_extra) if @http_header_extra
@@ -479,15 +503,79 @@ module XMLRPC # :nodoc:
 
       resp = nil
       @http_last_response = nil
+      parser_result = nil
+      stream_request = request.respond_to?(:read)
 
+      read_response = base64_sinks && proc do |response|
+        validate_rpc_response(response, false)
+        reader, writer = IO.pipe
+        parser_error = nil
+        parser_thread = Thread.new do
+          begin
+            parser_result = parser().parseMethodResponse(reader, base64_sinks: base64_sinks)
+          rescue CancelledError
+            parser_error = CancelledError.new("XML-RPC request cancelled")
+          rescue IOError
+          rescue Exception => error
+            parser_error = error
+          ensure
+            reader.close unless reader.closed?
+          end
+        end
+        parser_thread.report_on_exception = false
+
+        begin
+          response.read_body do |chunk|
+            begin
+              if on_cancel && on_cancel.call(chunk.bytesize)
+                parser_thread.raise(CancelledError, "XML-RPC request cancelled")
+                raise IOError, "XML-RPC request cancelled"
+              end
+            rescue Exception => cancellation
+              parser_thread.raise(CancelledError, "XML-RPC request cancelled") unless cancellation.is_a?(CancelledError)
+              join_parser_thread(parser_thread)
+              raise cancellation.is_a?(CancelledError) ? IOError.new("XML-RPC request cancelled") : cancellation
+            end
+            unless parser_thread.alive?
+              join_parser_thread(parser_thread)
+              raise parser_error if parser_error && !parser_error.is_a?(CancelledError)
+            end
+            writer.write(chunk)
+          end
+        ensure
+          writer.close unless writer.closed?
+          join_parser_thread(parser_thread)
+          close_base64_sinks(base64_sinks) if parser_error
+        end
+
+        raise parser_error if parser_error && !parser_error.is_a?(CancelledError)
+      end
+
+      begin
       if async
         # use a new HTTP object for each call
         http = dup_net_http
 
         # post request
-        http.start {
-          resp = http.request_post(@path, request, header)
-        }
+        begin
+          http.start do
+            if request.respond_to?(:read)
+              post = Net::HTTP::Post.new(@path, header)
+              post.body_stream = request
+              if read_response
+                resp = http.request(post, &read_response)
+              else
+                resp = http.request(post)
+              end
+            else
+              if read_response
+                resp = http.request_post(@path, request, header, &read_response)
+              else
+                resp = http.request_post(@path, request, header)
+              end
+            end
+          end
+          end
       else
         # reuse the HTTP object for each call => connection alive is possible
         # we must start connection explicitly first time so that http.request
@@ -495,49 +583,87 @@ module XMLRPC # :nodoc:
         @http.start if not @http.started?
 
         # post request
-        resp = @http.request_post(@path, request, header)
+        begin
+          if request.respond_to?(:read)
+            post = Net::HTTP::Post.new(@path, header)
+            post.body_stream = request
+            if read_response
+              resp = @http.request(post, &read_response)
+            else
+              resp = @http.request(post)
+            end
+          else
+            if read_response
+              resp = @http.request_post(@path, request, header, &read_response)
+            else
+              resp = @http.request_post(@path, request, header)
+            end
+          end
+          end
+      end
+
+      rescue
+        close_base64_sinks(base64_sinks) if base64_sinks
+        raise
+      ensure
+        request.close if stream_request
       end
 
       @http_last_response = resp
 
-      data = resp.body
+      data = base64_sinks ? parser_result : resp.body
 
-      if resp.code == "401"
-        # Authorization Required
-        raise "Authorization failed.\nHTTP-Error: #{resp.code} #{resp.message}"
-      elsif resp.code[0,1] != "2"
-        raise "HTTP-Error: #{resp.code} #{resp.message}"
-      end
-
-      # assume text/xml on instances where Content-Type header is not set
-      ct_expected = resp["Content-Type"] || 'text/xml'
-      ct = parse_content_type(ct_expected).first
-      case ct
-      when "text/xml", "application/xml"
-        # OK
+      if base64_sinks
+        raise "No data" if parser_result.nil?
       else
-        message =
-          "Wrong content-type " +
-          "(received '#{ct}' but expected 'text/xml' or 'application/xml')"
-        if ct == "text/html"
-          raise "#{message}:\n#{data}"
-        else
-          raise message
-        end
-      end
-
-      if data.nil?
-        raise "No data"
-      end
-
-      expected = resp["Content-Length"] || "<unknown>"
-      if data.bytesize == 0
-        raise "Wrong size. Was #{data.bytesize}, should be #{expected}"
+        validate_rpc_response(resp, data)
       end
 
       parse_set_cookies(resp.get_fields("Set-Cookie"))
 
-      return data
+      base64_sinks ? parser_result : data
+    end
+
+    def validate_rpc_response(response, data)
+      if response.code == "401"
+        raise "Authorization failed.\nHTTP-Error: #{response.code} #{response.message}"
+      elsif response.code[0,1] != "2"
+        raise "HTTP-Error: #{response.code} #{response.message}"
+      end
+
+      ct_expected = response["Content-Type"] || "text/xml"
+      ct = parse_content_type(ct_expected).first
+      unless ct == "text/xml" || ct == "application/xml"
+        message = "Wrong content-type (received '#{ct}' but expected text/xml or application/xml)"
+        raise data && ct == "text/html" ? "#{message}:\n#{data}" : message
+      end
+
+      if data.nil?
+        raise "No data"
+      elsif data == false
+        return
+      elsif data.respond_to?(:bytesize) && !data.is_a?(Array)
+        expected = response["Content-Length"] || "<unknown>"
+        raise "Wrong size. Was #{data.bytesize}, should be #{expected}" if data.bytesize == 0
+      end
+    end
+
+    def close_base64_sinks(sinks)
+      values = []
+      if sinks.respond_to?(:each_value)
+        sinks.each_value { |sink| values << sink }
+      elsif sinks.respond_to?(:call)
+        sink = sinks.call(nil)
+        values << sink if sink
+      end
+      values.each do |sink|
+        sink.close if sink.is_a?(XMLRPC::Base64::Sink)
+      end
+    end
+
+    def join_parser_thread(thread)
+      thread.join
+    rescue Exception
     end
 
     def parse_set_cookies(set_cookies)

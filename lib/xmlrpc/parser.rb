@@ -32,6 +32,9 @@ module XMLRPC # :nodoc:
     end
   end
 
+  class CancelledError < StandardError
+  end
+
   # Helper class used to convert types.
   module Convert
 
@@ -447,9 +450,17 @@ module XMLRPC # :nodoc:
     end # module TreeParserMixin
 
     class AbstractStreamParser
-      def parseMethodResponse(str)
-        parser = @parser_class.new
-        parser.parse(str)
+      def parseMethodResponse(str, base64_sinks: nil, &block)
+        input = wrap_input(str)
+        parser = new_parser(base64_sinks, true, &block)
+        begin
+          parser.parse(input)
+        rescue
+          parser.close_base64_sinks
+          str.close if str.is_a?(XMLRPC::Base64::Stream) ||
+            (str.respond_to?(:close_on_parse_error?) && str.close_on_parse_error?)
+          raise
+        end
         raise "No valid method response!" if parser.method_name != nil
         if parser.fault != nil
           # is a fault structure
@@ -462,11 +473,130 @@ module XMLRPC # :nodoc:
         end
       end
 
-      def parseMethodCall(str)
-        parser = @parser_class.new
-        parser.parse(str)
+      def parseMethodCall(str, base64_sinks: nil, &block)
+        input = wrap_input(str)
+        parser = new_parser(base64_sinks, false, &block)
+        begin
+          parser.parse(input)
+        rescue
+          parser.close_base64_sinks
+          str.close if str.is_a?(XMLRPC::Base64::Stream) ||
+            (str.respond_to?(:close_on_parse_error?) && str.close_on_parse_error?)
+          raise
+        end
         raise "No valid method call - missing method name!" if parser.method_name.nil?
         [parser.method_name, parser.params]
+      end
+
+      private
+
+      def new_parser(base64_sinks, single_value, &block)
+        parser = @parser_class.new
+        parser.base64_sinks = base64_sinks
+        parser.single_value_root = single_value
+        parser.on_cancel = block if block
+        parser
+      end
+
+      def wrap_input(input)
+        return input unless input.respond_to?(:read)
+        wrap_stream_input(input)
+      end
+
+      def wrap_stream_input(input)
+        input
+      end
+
+      class StreamInput
+        READ_SIZE = 4
+
+        def initialize(io)
+          @io = io
+          @buffer = String.new
+          @buffer.force_encoding(Encoding::BINARY)
+          @inside_base64_text = false
+        end
+
+        def read(length = nil, outbuf = nil)
+          wanted = length ? [length, READ_SIZE].min : READ_SIZE
+          while @buffer.bytesize < wanted && !@io.eof?
+            fill_buffer(wanted)
+          end
+          chunk = @buffer.byteslice(0, wanted)
+          if chunk.nil? || chunk.empty?
+            outbuf.replace("") if outbuf
+            return nil
+          end
+          @buffer = @buffer.byteslice(chunk.bytesize, @buffer.bytesize) || String.new
+          chunk.force_encoding(Encoding::BINARY)
+          outbuf ? outbuf.replace(chunk) : chunk
+        end
+
+        def readline(sep = "\n", limit = nil)
+          separator = sep || "\n"
+          bounded_text = separator == "<" && inside_base64_text?
+          until @io.eof? || (index = @buffer.index(separator)) ||
+                (bounded_text && @buffer.bytesize >= READ_SIZE)
+            fill_buffer(READ_SIZE + @buffer.bytesize)
+          end
+
+          index = @buffer.index(separator)
+          if index
+            length = index + separator.to_s.bytesize
+          else
+            length = @buffer.bytesize
+          end
+          return nil if length.zero?
+
+          result = @buffer.byteslice(0, length)
+          remainder = @buffer.byteslice(length, @buffer.bytesize - length) || String.new
+          @buffer.replace(remainder)
+
+          if limit && result.bytesize > limit
+            @buffer.replace(result.byteslice(limit, result.bytesize - limit) + @buffer)
+            result = result.byteslice(0, limit)
+          end
+          if separator == "<" && result.include?("<base64>")
+            @inside_base64_text = true
+          elsif separator == "<" && (result.include?("</base64>") || result.end_with?("</"))
+            @inside_base64_text = false
+          end
+          result
+        end
+
+        def inside_base64_text?
+          @inside_base64_text
+        end
+
+        def eof?
+          @buffer.empty? && @io.eof?
+        end
+
+        private
+
+        def fill_buffer(length)
+          while @buffer.bytesize < length && !@io.eof?
+            chunk = @io.read(length - @buffer.bytesize)
+            break if chunk.nil? || chunk.empty?
+            @buffer << chunk
+          end
+        end
+
+        def rewind
+          raise IOError, "streaming XML input is not rewindable"
+        end
+
+        def seek(*)
+          raise IOError, "streaming XML input is not seekable"
+        end
+
+        def respond_to_missing?(name, include_private = false)
+          @io.respond_to?(name, include_private) || super
+        end
+
+        def method_missing(name, *args, &block)
+          @io.send(name, *args, &block)
+        end
       end
     end
 
@@ -474,6 +604,9 @@ module XMLRPC # :nodoc:
       attr_reader :params
       attr_reader :method_name
       attr_reader :fault
+      attr_accessor :base64_sinks
+      attr_accessor :single_value_root
+      attr_accessor :on_cancel
 
       def initialize(*a)
         super(*a)
@@ -491,6 +624,27 @@ module XMLRPC # :nodoc:
         @fault = nil
 
         @data = nil
+        @path_stack = []
+        @value_path = nil
+        @base64_decoder = nil
+        @base64_sink = nil
+        @closed_base64_sinks = false
+        @single_value_root = false
+        @on_cancel = nil
+      end
+
+      def close_base64_sinks
+        return if @closed_base64_sinks
+        @closed_base64_sinks = true
+        if @base64_decoder
+          @base64_decoder.close
+          @base64_decoder = nil
+        end
+      end
+
+      def cancel
+        close_base64_sinks
+        raise CancelledError, "XML-RPC parsing was cancelled"
       end
 
       def startElement(name, attrs=[])
@@ -498,23 +652,41 @@ module XMLRPC # :nodoc:
         case name
         when "value"
           @value = nil
+          @value_path = current_value_path
         when "nil"
           raise "wrong/unknown XML-RPC type 'nil'" unless Config.enable_nil_parser?
           @value = :nil
+        when "base64"
+          sink = resolve_base64_sink(@value_path)
+          if sink
+            @base64_sink = wrap_base64_sink(sink)
+            @base64_decoder = XMLRPC::Base64::StreamDecoder.new(@base64_sink)
+          end
+          if @on_cancel
+            callback = @on_cancel
+            @on_cancel = nil
+            callback.call(self)
+          end
         when "array"
           @val_stack << @values
           @values = []
+          @path_stack << IndexPath.new(@value_path || [])
         when "struct"
           @names << @name
           @name = []
 
           @structs << @struct
           @struct = {}
+          @path_stack << StructPath.new(@value_path || [])
+        when "params"
+          @path_stack << IndexPath.new([], !@single_value_root)
+        when "member"
+          @path_stack.last.start_member if @path_stack.last.respond_to?(:start_member)
         end
       end
 
       def endElement(name)
-        @data ||= ""
+        @data ||= "" unless name == "base64" && @base64_decoder
         case name
         when "string"
           @value = @data
@@ -527,20 +699,33 @@ module XMLRPC # :nodoc:
         when "dateTime.iso8601"
           @value = Convert.dateTime(@data)
         when "base64"
-          @value = Convert.base64(@data)
+          if @base64_decoder
+            @base64_decoder.finish
+            @value = @base64_sink
+            @base64_decoder = nil
+            @base64_sink = nil
+          else
+            @value = Convert.base64(@data)
+          end
         when "value"
           @value = @data if @value.nil?
           @values << (@value == :nil ? nil : @value)
+          @path_stack.last.advance if @path_stack.last.is_a?(IndexPath)
         when "array"
           @value = @values
           @values = @val_stack.pop
+          @path_stack.pop
         when "struct"
           @value = Convert.struct(@struct)
 
           @name = @names.pop
           @struct = @structs.pop
+          @path_stack.pop
         when "name"
           @name[0] = @data
+          if @path_stack.last.respond_to?(:member_name=)
+            @path_stack.last.member_name = @data
+          end
         when "member"
           @struct[@name[0]] = @values.pop
 
@@ -550,6 +735,8 @@ module XMLRPC # :nodoc:
 
         when "fault"
           @fault = Convert.fault(@values[0])
+        when "params"
+          @path_stack.pop
 
         when "methodName"
           @method_name = @data
@@ -559,10 +746,69 @@ module XMLRPC # :nodoc:
       end
 
       def character(data)
+        if @base64_decoder
+          @base64_decoder << data
+          return
+        end
         if @data
           @data << data
         else
           @data = data
+        end
+      end
+
+      private
+
+      def current_value_path
+        container = @path_stack.last
+        return nil if container.nil?
+        container.next_value_path
+      end
+
+      def resolve_base64_sink(path)
+        return nil if base64_sinks.nil? || path.nil?
+        if base64_sinks.respond_to?(:call)
+          result = base64_sinks.call(path)
+          return result if result
+        end
+        return nil unless base64_sinks.respond_to?(:[])
+        base64_sinks[path] || base64_sinks[path.map(&:to_s)]
+      end
+
+      def wrap_base64_sink(sink)
+        sink.is_a?(XMLRPC::Base64::Sink) ? sink : XMLRPC::Base64::Sink.new(sink)
+      end
+
+      class IndexPath
+        def initialize(prefix = [], increment = true)
+          @prefix = prefix
+          @index = 0
+          @increment = increment
+        end
+
+        def next_value_path
+          @increment ? @prefix + [@index] : @prefix.dup
+        end
+
+        def advance
+          @index += 1 if @increment
+        end
+      end
+
+      class StructPath
+        attr_accessor :member_name
+
+        def initialize(prefix)
+          @prefix = prefix
+          @member_name = nil
+        end
+
+        def start_member
+          @member_name = nil
+        end
+
+        def next_value_path
+          @prefix + [@member_name]
         end
       end
 
@@ -572,6 +818,12 @@ module XMLRPC # :nodoc:
       def initialize
         require "rexml/document"
         @parser_class = StreamListener
+      end
+
+      private
+
+      def wrap_stream_input(input)
+        StreamInput.new(input)
       end
 
       class StreamListener
@@ -589,6 +841,7 @@ module XMLRPC # :nodoc:
         def parse(str)
           REXML::Document.parse_stream(str, self)
         end
+
       end
 
     end
@@ -628,6 +881,12 @@ module XMLRPC # :nodoc:
       def initialize
         require 'nokogiri'
         @parser_class = NokogiriStreamListener
+      end
+
+      private
+
+      def wrap_stream_input(input)
+        StreamInput.new(input)
       end
 
       class NokogiriStreamListener
@@ -684,4 +943,3 @@ module XMLRPC # :nodoc:
 
 
 end # module XMLRPC
-
