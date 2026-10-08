@@ -66,6 +66,9 @@ module Async
 				@cause = cause
 			end
 			
+			# @returns [Task] The task which will be cancelled when this operation is transferred.
+			attr :task
+			
 			# @returns [Boolean] Whether the task is alive.
 			def alive?
 				true
@@ -73,6 +76,8 @@ module Async
 			
 			# Transfer control to the operation - this will cancel the task.
 			def transfer
+				Fiber.scheduler&.clear_pending_cancel(@task)
+				
 				@task.cancel(false, cause: @cause)
 			end
 		end

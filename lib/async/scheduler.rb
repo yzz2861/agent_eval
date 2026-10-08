@@ -83,6 +83,9 @@ module Async
 			
 			@interrupted = false
 			
+			# Tasks which have a deferred cancellation ({Cancel::Later}) queued and waiting to be delivered. Cooperatively scheduled code checks this at scheduling points (e.g. work budget checkpoints) so that cancellations are visible without waiting for the ready queue to drain naturally.
+			@pending_cancels = nil
+			
 			@blocked = 0
 			
 			@busy_time = 0.0
@@ -159,6 +162,8 @@ module Async
 			Kernel.raise "Closing scheduler with blocked operations!" if @blocked > 0
 		ensure
 			# We want `@selector = nil` to be a visible side effect from this point forward, specifically in `#interrupt` and `#unblock`. If the selector is closed, then we don't want to push any fibers to it.
+			@pending_cancels = nil
+			
 			if selector = @selector
 				@selector = nil
 				selector.close
@@ -203,7 +208,35 @@ module Async
 		# Schedule a fiber (or equivalent object) to be resumed on the next loop through the reactor.
 		# @parameter fiber [Fiber | Object] The object to be resumed on the next iteration of the run-loop.
 		def push(fiber)
+			if fiber.is_a?(Cancel::Later)
+				register_pending_cancel(fiber)
+			end
+			
 			@selector.push(fiber)
+		end
+		
+		# Whether a cancellation targeting the given task (or the current task, by default) is queued and waiting to be delivered.
+		#
+		# {Task#cancel} with `later: true` enqueues a {Cancel::Later} operation instead of raising into the fiber immediately. Cooperatively scheduled code only observes such a cancellation at a scheduling point, so a work budget checks this after yielding at a checkpoint.
+		#
+		# @parameter task [Task] The task to check for a pending cancellation.
+		# @returns [Boolean] Whether a deferred cancellation is queued for the task.
+		def pending_cancel?(task = Task.current?)
+			return false unless task
+			
+			@pending_cancels&.key?(task)
+		end
+		
+		# Record that a deferred cancellation has been queued for the operation's task.
+		# @parameter operation [Cancel::Later] The queued cancellation operation.
+		private def register_pending_cancel(operation)
+			(@pending_cancels ||= {})[operation.task] = true
+		end
+		
+		# Remove a delivered or cancelled deferred cancellation from the pending set.
+		# @parameter task [Task] The task whose cancellation was delivered.
+		def clear_pending_cancel(task)
+			@pending_cancels&.delete(task)
 		end
 		
 		# Raise an exception on a specified fiber with the given arguments.

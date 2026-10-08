@@ -159,6 +159,22 @@ module Async
 			Fiber.scheduler.yield
 		end
 		
+		# Mark a cooperative checkpoint in CPU-bound work.
+		#
+		# If an {Budget} is active for the current fiber, it consumes one operation and yields back to the reactor when the current work quantum (an operation count or elapsed time limit) has been exhausted. This prevents a tight, non-blocking loop from starving other tasks (timers, I/O waits, and short jobs).
+		#
+		# Without an active budget this is a no-op, so it is safe to call unconditionally from shared libraries.
+		#
+		# Cancellation requested while yielded becomes visible here as an {Async::Cancel} exception; wrap non-interruptible cleanup in {#defer_cancel}.
+		#
+		# This cannot preempt code that never calls a checkpoint: budgets are cooperative.
+		#
+		# @parameter operations [Integer] The number of logical operations performed since the previous checkpoint.
+		# @raises {Async::Cancel} If the task was cancelled while yielded.
+		def checkpoint!(operations = 1)
+			Budget.checkpoint!(operations)
+		end
+		
 		# @attribute [Fiber] The fiber which is being used for the execution of this task.
 		attr :fiber
 		

@@ -7,6 +7,7 @@
 require_relative "async/version"
 require_relative "async/reactor"
 require_relative "async/loop"
+require_relative "async/budget"
 
 require_relative "kernel/async"
 require_relative "kernel/sync"
