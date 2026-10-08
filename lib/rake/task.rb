@@ -38,6 +38,11 @@ module Rake
     # will be skipped unless you reenable them.
     attr_reader :already_invoked
 
+    # The execution context carried by this task.  While the task runs,
+    # its effective context is derived from the context of the invoking
+    # task and applied to Rake's command helpers (+sh+, +ruby+, ...).
+    attr_reader :execution_context
+
     # Return task name
     def to_s
       name
@@ -109,6 +114,25 @@ module Rake
       @locations       = []
       @invocation_exception = nil
       @order_only_prerequisites = []
+      @execution_context = nil
+    end
+
+    # Set the task's execution context.  Accepts a Rake::ExecutionContext
+    # or a Hash with :dir and :env keys.
+    def execution_context=(context)
+      @execution_context = ExecutionContext.coerce(context)
+    end
+
+    # Derive and assign this task's execution context.  Returns the task
+    # so it can be chained off a task definition:
+    #
+    #   task(:build) { sh "make" }.derive_execution_context(
+    #     dir: "out", env: { "TARGET" => "a" })
+    #
+    def derive_execution_context(dir: nil, env: nil)
+      base = @execution_context || ExecutionContext::EMPTY
+      @execution_context = base.derive(dir: dir, env: env)
+      self
     end
 
     # Enhance a task with prerequisites or actions.  Returns self.
@@ -196,35 +220,50 @@ module Rake
     # this task fails.
     def invoke_with_call_chain(task_args, invocation_chain)
       new_chain = Rake::InvocationChain.append(self, invocation_chain)
-      @lock.synchronize do
-        begin
-          if application.options.trace
-            application.trace "** Invoke #{name} #{format_trace_flags}"
-          end
-
-          if @already_invoked
-            if @invocation_exception
-              if application.options.trace
-                application.trace "** Previous invocation of #{name} failed #{format_trace_flags}"
-              end
-              raise @invocation_exception
-            else
-              return
+      ExecutionContext.with(effective_execution_context) do
+        @lock.synchronize do
+          begin
+            if application.options.trace
+              application.trace "** Invoke #{name} #{format_trace_flags}"
             end
+
+            if @already_invoked
+              if @invocation_exception
+                if application.options.trace
+                  application.trace "** Previous invocation of #{name} failed #{format_trace_flags}"
+                end
+                raise @invocation_exception
+              else
+                return
+              end
+            end
+
+            @already_invoked = true
+
+            invoke_prerequisites(task_args, new_chain)
+            execute(task_args) if needed?
+          rescue Exception => ex
+            add_chain_to(ex, new_chain)
+            @invocation_exception = ex
+            raise ex
           end
-
-          @already_invoked = true
-
-          invoke_prerequisites(task_args, new_chain)
-          execute(task_args) if needed?
-        rescue Exception => ex
-          add_chain_to(ex, new_chain)
-          @invocation_exception = ex
-          raise ex
         end
       end
     end
     protected :invoke_with_call_chain
+
+    # The context in effect while this task runs: the ambient context of
+    # the invoker, overlaid with this task's own context (if any).
+    def effective_execution_context # :nodoc:
+      context = ExecutionContext.current
+      if @execution_context
+        context.derive(dir: @execution_context.dir,
+                       env: @execution_context.env)
+      else
+        context
+      end
+    end
+    private :effective_execution_context
 
     def add_chain_to(exception, new_chain) # :nodoc:
       exception.extend(InvocationExceptionMixin) unless
@@ -247,10 +286,13 @@ module Rake
 
     # Invoke all the prerequisites of a task in parallel.
     def invoke_prerequisites_concurrently(task_args, invocation_chain)# :nodoc:
+      context = ExecutionContext.current
       futures = prerequisite_tasks.map do |p|
         prereq_args = task_args.new_scope(p.arg_names)
         application.thread_pool.future(p) do |r|
-          r.invoke_with_call_chain(prereq_args, invocation_chain)
+          ExecutionContext.with(context) do
+            r.invoke_with_call_chain(prereq_args, invocation_chain)
+          end
         end
       end
       # Iterate in reverse to improve performance related to thread waiting and switching

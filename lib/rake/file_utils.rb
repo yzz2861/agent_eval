@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 require "rbconfig"
 require "fileutils"
+require_relative "execution_context"
 
 #--
 # This a FileUtils extension that defines several additional commands to be
@@ -42,6 +43,10 @@ module FileUtils
   #
   def sh(*cmd, &block)
     options = (Hash === cmd.last) ? cmd.pop : {}
+
+    context = Rake::ExecutionContext.current
+    context.apply_to_command(cmd, options) unless context.empty?
+
     shell_runner = block_given? ? block : create_shell_runner(cmd)
 
     set_verbose_option(options)
