@@ -29,9 +29,17 @@ module Rake
     def value
       unless complete?
         stat :sleeping_on, item_id: object_id
+        pool = Thread.current[:rake_thread_pool]
         @mutex.synchronize do
           stat :has_lock_on, item_id: object_id
-          chore
+          if pool
+            until complete?
+              promise = pool.__send__(:dequeue_available)
+              promise ? promise.work : chore
+            end
+          else
+            chore
+          end
           stat :releasing_lock_on, item_id: object_id
         end
       end

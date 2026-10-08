@@ -49,10 +49,12 @@ class Rake::TestCase < Test::Unit::TestCase
     @orig_rake_columns = ENV["RAKE_COLUMNS"]
     @orig_rake_system  = ENV["RAKE_SYSTEM"]
     @orig_rakeopt      = ENV["RAKEOPT"]
+    @orig_makeflags    = ENV["MAKEFLAGS"]
     @orig_userprofile  = ENV["USERPROFILE"]
     ENV.delete "RAKE_COLUMNS"
     ENV.delete "RAKE_SYSTEM"
     ENV.delete "RAKEOPT"
+    ENV.delete "MAKEFLAGS"
 
     tmpdir = Dir.chdir Dir.tmpdir do Dir.pwd end
     @tempdir = File.join tmpdir, "test_rake_#{$$}"
@@ -82,6 +84,7 @@ class Rake::TestCase < Test::Unit::TestCase
     ENV["RAKE_COLUMNS"] = @orig_rake_columns
     ENV["RAKE_SYSTEM"]  = @orig_rake_system
     ENV["RAKEOPT"]      = @orig_rakeopt
+    ENV["MAKEFLAGS"]    = @orig_makeflags
     ENV["USERPROFILE"]  = @orig_userprofile
   end
 

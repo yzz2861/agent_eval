@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 require File.expand_path("../helper", __FILE__)
 require "thread"
+require "timeout"
 
 class TestRakeMultiTask < Rake::TestCase # :nodoc:
   include Rake
@@ -60,6 +61,105 @@ class TestRakeMultiTask < Rake::TestCase # :nodoc:
     Task[:b].invoke "b"
     assert @runs[0] == "b"
     assert @runs[1] == "bmt"
+  end
+
+  def test_single_jobserver_slot_allows_nested_multitask_dependencies
+    read_io, write_io = IO.pipe
+    job_server = Rake::JobServerClient.new(read_io, write_io, 1)
+    Rake.application.instance_variable_set(:@job_server, job_server)
+    Rake.application.instance_variable_set(:@thread_pool, nil)
+    order = []
+
+    task :leaf do
+      order << :leaf
+    end
+    task :child do
+      Task[:leaf].invoke
+      order << :child
+    end
+    multitask parent: [:child] do
+      order << :parent
+    end
+
+    Timeout.timeout(1) do
+      Task[:parent].invoke
+    end
+
+    assert_equal [:leaf, :child, :parent], order
+  ensure
+    write_io&.close
+    read_io&.close
+  end
+
+  def test_tasks_waiting_on_prerequisites_do_not_hold_the_only_slot
+    read_io, write_io = IO.pipe
+    write_io.write("+")
+    job_server = Rake::JobServerClient.new(read_io, write_io, 2)
+    Rake.application.instance_variable_set(:@job_server, job_server)
+    Rake.application.instance_variable_set(:@thread_pool, nil)
+    implicit_token = job_server.acquire
+    task :child
+    parent = task :parent
+    parent.enhance([:child])
+
+    invocation = Thread.new { parent.invoke }
+    invocation.join
+    job_server.release(implicit_token)
+    assert_equal "+", read_io.read_nonblock(1)
+  ensure
+    write_io&.close
+    read_io&.close
+  end
+
+  def test_parallel_action_releases_slot_when_subcommand_fails_to_start
+    read_io, write_io = IO.pipe
+    job_server = Rake::JobServerClient.new(read_io, write_io, 1)
+    Rake.application.instance_variable_set(:@job_server, job_server)
+    Rake.application.instance_variable_set(:@thread_pool, nil)
+    multitask :failing do
+      sh("this-command-does-not-exist-#{object_id}")
+      raise RuntimeError, "command failed"
+    end
+
+    error = assert_raises(RuntimeError) { Task[:failing].invoke }
+    assert_match(/Command failed/, error.message)
+    assert_equal :implicit, job_server.acquire.kind
+  ensure
+    write_io&.close
+    read_io&.close
+  end
+
+  def test_parallel_action_releases_borrowed_slot_on_application_exit
+    read_io, write_io = IO.pipe
+    write_io.write("Z")
+    script_dir = File.join(@orig_pwd, "tmp-jobserver-test")
+    FileUtils.mkdir_p(script_dir)
+    script = File.join(script_dir, "rake_exit.rb")
+    File.write(script, <<~RUBY)
+      require "rake"
+      include Rake::DSL
+      multitask :exiting do
+        exit
+      end
+      Rake.application.job_server.acquire
+      Thread.new { Rake::Task[:exiting].invoke }.join
+    RUBY
+    env = {
+      "MAKEFLAGS" => "--jobserver-auth=#{read_io.fileno},#{write_io.fileno} -j2"
+    }
+    pid = spawn(env, RUBY, "-I#{@rake_lib}", script,
+      read_io.fileno => read_io.fileno,
+      write_io.fileno => write_io.fileno,
+      close_others: false)
+
+    _pid, status = Process.wait2(pid)
+    assert status.success?, "rake subprocess failed"
+    read_io.wait_readable
+    assert_equal "Z", read_io.read_nonblock(1)
+  ensure
+    FileUtils.rm_rf(script_dir) if defined?(script_dir)
+    write_io&.close
+    read_io&.close
   end
 
   def test_cross_thread_prerequisite_failures

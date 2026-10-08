@@ -250,7 +250,13 @@ module Rake
       futures = prerequisite_tasks.map do |p|
         prereq_args = task_args.new_scope(p.arg_names)
         application.thread_pool.future(p) do |r|
-          r.invoke_with_call_chain(prereq_args, invocation_chain)
+          old_parallel_task = Thread.current[:rake_job_server_parallel_task]
+          Thread.current[:rake_job_server_parallel_task] = true
+          begin
+            r.invoke_with_call_chain(prereq_args, invocation_chain)
+          ensure
+            Thread.current[:rake_job_server_parallel_task] = old_parallel_task
+          end
         end
       end
       # Iterate in reverse to improve performance related to thread waiting and switching
@@ -275,10 +281,20 @@ module Rake
       end
       application.trace "** Execute #{name}" if application.options.trace
       application.enhance_with_matching_rule(name) if @actions.empty?
-      if opts = Hash.try_convert(args) and !opts.empty?
-        @actions.each { |act| act.call(self, args, **opts) }
+      return if @actions.empty?
+
+      execute_actions = proc do
+        if opts = Hash.try_convert(args) and !opts.empty?
+          @actions.each { |act| act.call(self, args, **opts) }
+        else
+          @actions.each { |act| act.call(self, args) }
+        end
+      end
+
+      if Thread.current[:rake_job_server_parallel_task]
+        application.job_server.synchronize(&execute_actions)
       else
-        @actions.each { |act| act.call(self, args) }
+        execute_actions.call
       end
     end
 

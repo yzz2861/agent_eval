@@ -113,6 +113,7 @@ module Rake
         next unless @threads.count < @max_active_threads
 
         t = Thread.new do
+          Thread.current[:rake_thread_pool] = self
           begin
             loop do
               break unless process_queue_item
@@ -134,6 +135,12 @@ module Rake
         @total_threads_in_play = @threads.count if
           @threads.count > @total_threads_in_play
       end
+    end
+
+    def dequeue_available # :nodoc:
+      return if @queue.empty?
+      @queue.deq(true)
+    rescue ThreadError
     end
 
     def stat(event, data=nil) # :nodoc:

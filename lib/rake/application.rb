@@ -5,6 +5,7 @@ require_relative "options"
 require_relative "task_manager"
 require_relative "file_list"
 require_relative "thread_pool"
+require_relative "job_server_client"
 require_relative "thread_history_display"
 require_relative "trace_output"
 require_relative "win32"
@@ -39,6 +40,9 @@ module Rake
     # Override the detected TTY output state (mostly for testing)
     attr_writer :tty_output
 
+    # GNU make job server used by executing tasks.
+    attr_reader :job_server
+
     DEFAULT_RAKEFILES = [
       "rakefile",
       "Rakefile",
@@ -63,6 +67,7 @@ module Rake
       add_loader("rake", DefaultLoader.new)
       @tty_output = STDOUT.tty?
       @terminal_columns = ENV["RAKE_COLUMNS"].to_i
+      @job_server = JobServerClient.from_env
 
       set_default_options
     end
@@ -171,7 +176,17 @@ module Rake
 
     # Return the thread pool used for multithreaded processing.
     def thread_pool             # :nodoc:
-      @thread_pool ||= ThreadPool.new(options.thread_pool_size || Rake.suggested_thread_count-1)
+      @thread_pool ||= ThreadPool.new(thread_pool_size)
+    end
+
+    def thread_pool_size # :nodoc:
+      configured_size = options.thread_pool_size || Rake.suggested_thread_count - 1
+      size = job_server.thread_pool_size(configured_size)
+      if job_server.equal?(JobServerClient::UnavailableClient)
+        0
+      else
+        [size, 1].max
+      end
     end
 
     # internal ----------------------------------------------------------------

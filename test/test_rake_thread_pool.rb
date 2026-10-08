@@ -99,8 +99,23 @@ class TestRakeTestThreadPool < Rake::TestCase # :nodoc:
     pool.join
   end
 
-  def test_pool_prevents_deadlock
-    pool = ThreadPool.new(5)
+  def test_exceptions_from_nested_work_stealing
+    pool = ThreadPool.new(1)
+    error = Class.new(StandardError)
+
+    assert_raises(error) do
+      pool.future do
+        pool.future do
+          pool.future { raise error, "deep" }.value
+        end.value
+      end.value
+    end
+  ensure
+    pool.join
+  end
+
+  def test_pool_prevents_deadlock_with_one_worker
+    pool = ThreadPool.new(1)
 
     common_dependency_a = pool.future { sleep 0.2 }
     futures_a = 10.times.map {
@@ -119,6 +134,19 @@ class TestRakeTestThreadPool < Rake::TestCase # :nodoc:
     }
 
     futures_b.each(&:value)
+    pool.join
+  end
+
+  def test_one_worker_processes_sibling_nested_futures
+    pool = ThreadPool.new(1)
+
+    completed = 2.times.map do
+      pool.future do
+        pool.future { :done }.value
+      end
+    end
+
+    assert_equal [:done, :done], completed.map(&:value)
     pool.join
   end
 

@@ -65,6 +65,7 @@ Gem::Specification.new do |s|
     "lib/rake/file_utils_ext.rb",
     "lib/rake/invocation_chain.rb",
     "lib/rake/invocation_exception_mixin.rb",
+    "lib/rake/job_server_client.rb",
     "lib/rake/late_time.rb",
     "lib/rake/linked_list.rb",
     "lib/rake/loaders/makefile.rb",
