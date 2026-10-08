@@ -334,6 +334,8 @@ require_relative 'version'
 # register an object using the same dRuby name.
 #
 module DRb
+  SERVER_SESSION_KEY = :__drb_server_session__
+  CLIENT_SESSION_KEY = :__drb_client_session__
 
   # Superclass of all errors raised in the DRb module.
   class DRbError < RuntimeError; end
@@ -1078,7 +1080,10 @@ module DRb
         return obj
       end
 
-      self.new_with(uri, ref)
+      object = self.new_with(uri, ref)
+      session = Thread.current[SERVER_SESSION_KEY]
+      object.attach_server_session(session) if session && ref
+      object
     end
 
     # Creates a DRb::DRbObject given the reference information to the remote
@@ -1125,6 +1130,11 @@ module DRb
       else
         @uri = uri ? uri : (DRb.uri rescue nil)
         @ref = obj ? DRb.to_id(obj) : nil
+        if obj.is_a?(DRbObject)
+          @server_session = obj.instance_variable_get(:@server_session)
+        else
+          @server_session = Thread.current[SERVER_SESSION_KEY] if Thread.current.key?(SERVER_SESSION_KEY)
+        end
       end
     end
 
@@ -1135,6 +1145,26 @@ module DRb
 
     # Get the reference of the object, if local.
     def __drbref
+      @ref
+    end
+
+    def attach_server_session(session) # :nodoc:
+      @server_session = session
+    end
+
+    def attach_client_session(session) # :nodoc:
+      @client_session = session
+    end
+
+    def client_session # :nodoc:
+      @client_session if @client_session && !@client_session.closed?
+    end
+
+    def client_session=(session) # :nodoc:
+      @client_session = session
+    end
+
+    def ref
       @ref
     end
 
@@ -1161,9 +1191,25 @@ module DRb
         return obj.__send__(msg_id, *a, &b)
       end
 
-      succ, result = self.class.with_friend(@uri) do
-        DRbConn.open(@uri) do |conn|
-          conn.send_message(self, msg_id, a, b)
+      if @server_session
+        @server_session.callback do
+          send_remote_message(msg_id, *a, &b)
+        end
+      else
+        send_remote_message(msg_id, *a, &b)
+      end
+    end
+
+    ruby2_keywords def send_remote_message(msg_id, *a, &b) # :nodoc:
+      succ, result = if ref.nil?
+        owned_client_session.open_call { |conn| conn.send_message(self, msg_id, a, b) }
+      elsif client_session
+        client_session.call(self, msg_id, a, b)
+      else
+        self.class.with_friend(@uri) do
+          DRbConn.open(@uri) do |conn|
+            conn.send_message(self, msg_id, a, b)
+          end
         end
       end
 
@@ -1176,6 +1222,12 @@ module DRb
         result.set_backtrace(bt + caller)
         raise result
       end
+    end
+
+    def owned_client_session # :nodoc:
+      session = @client_session if @ref.nil?
+      session = nil if session&.closed?
+      @client_session = session || DRbConn::ClientSession.new(@uri)
     end
 
     # Given the +uri+ of another host executes the block provided.
@@ -1278,6 +1330,107 @@ module DRb
   class DRbConn
     POOL_SIZE = 16  # :nodoc:
 
+    class ClientSession # :nodoc:
+      include MonitorMixin
+
+      def initialize(uri)
+        super()
+        @uri = uri
+        @conn = nil
+        @closed = false
+        @busy = false
+        @idle = new_cond
+        @requests = 0
+        DRbConn.register_client_session(self)
+      end
+
+      attr_reader :uri, :requests
+
+      def connection
+        synchronize { @conn }
+      end
+
+      def closed?
+        synchronize { @closed }
+      end
+
+      def call(object, message, args, block)
+        invoke { |conn| conn.send_message(object, message, args, block) }
+      end
+
+      def open_call
+        invoke { |conn| yield(conn) }
+      end
+
+      def close
+        synchronize do
+          return if @closed
+          @closed = true
+          @idle.broadcast
+        end
+        DRbConn.remove_client_session(self)
+        nil
+      end
+
+      private
+
+      def invoke
+        conn = acquire_connection
+        previous = Thread.current[CLIENT_SESSION_KEY]
+        context = Thread.current['DRb']
+        Thread.current['DRb'] = context.dup if context
+        Thread.current[CLIENT_SESSION_KEY] = self
+        Thread.current['DRb']&.delete('client')
+        result = yield(conn)
+        retain(conn)
+        result
+      rescue Exception
+        discard(conn)
+        raise
+      ensure
+        Thread.current[CLIENT_SESSION_KEY] = previous
+        Thread.current['DRb'] = context
+        release
+      end
+
+      def acquire_connection
+        synchronize do
+          @idle.wait_while { @busy && !@closed }
+          raise DRbConnError, 'client session closed' if @closed
+          @busy = true
+          @requests += 1
+          @conn&.close unless @conn&.alive?
+          @conn = DRbConn.new(@uri) unless @conn
+          @conn
+        end
+      end
+
+      def retain(conn)
+        synchronize do
+          if @closed
+            conn.close
+            @conn = nil
+          else
+            @conn = conn
+          end
+        end
+      end
+
+      def discard(conn)
+        return unless conn
+        synchronize { @conn = nil if @conn == conn }
+        conn.close
+      rescue DRbConnError
+      end
+
+      def release
+        synchronize do
+          @busy = false
+          @idle.broadcast
+        end
+      end
+    end
+
     def self.make_pool
       ThreadObject.new do |queue|
         pool = []
@@ -1312,8 +1465,24 @@ module DRb
     @pool_proxy = nil
 
     def self.stop_pool
+      client_sessions.each(&:close)
       @pool_proxy&.kill
       @pool_proxy = nil
+    end
+
+    @client_sessions = []
+    @client_sessions_mutex = Mutex.new
+
+    def self.register_client_session(session)
+      @client_sessions_mutex.synchronize { @client_sessions << session }
+    end
+
+    def self.remove_client_session(session)
+      @client_sessions_mutex.synchronize { @client_sessions.delete(session) }
+    end
+
+    def self.client_sessions
+      @client_sessions_mutex.synchronize { @client_sessions.dup }
     end
 
     def self.open(remote_uri)  # :nodoc:
@@ -1344,7 +1513,9 @@ module DRb
 
     def send_message(ref, msg_id, arg, block)  # :nodoc:
       @protocol.send_request(ref, msg_id, arg, block)
-      @protocol.recv_reply
+      reply = @protocol.recv_reply
+      attach_client_session(reply.last) if Thread.current[CLIENT_SESSION_KEY]
+      reply
     end
 
     def close  # :nodoc:
@@ -1355,6 +1526,20 @@ module DRb
     def alive?  # :nodoc:
       return false unless @protocol
       @protocol.alive?
+    end
+
+    private
+
+    def attach_client_session(object)
+      session = Thread.current[CLIENT_SESSION_KEY]
+      case object
+      when DRbObject
+        object.attach_client_session(session)
+      when Array
+        object.each { |item| attach_client_session(item) }
+      when Hash
+        object.each_value { |item| attach_client_session(item) }
+      end
     end
   end
 
@@ -1424,6 +1609,7 @@ module DRb
         :tcp_acl => @@acl,
         :load_limit => @@load_limit,
         :argc_limit => @@argc_limit,
+        :session_shutdown_timeout => 5,
       }
       default_config.update(hash)
     end
@@ -1457,6 +1643,16 @@ module DRb
     # :argc_limit :: the maximum number of arguments to a remote
     #                method accepted by the server.  Defaults to
     #                256.
+    # :front_factory :: callable invoked after accepting each client
+    #                   connection. It returns that connection's front
+    #                   object; objects exported through it are only
+    #                   available to the same connection.
+    # :session_cleanup :: callable invoked when the session ends, with
+    #                     the session front object. Exceptions do not
+    #                     prevent socket closure.
+    # :session_shutdown_timeout :: seconds to wait for asynchronous
+    #                               callbacks before closing the socket.
+    #                               Defaults to 5; nil waits indefinitely.
     # The default values of these options can be modified on
     # a class-wide basis by the class methods #default_argc_limit,
     # #default_load_limit, #default_acl, #default_id_conv,
@@ -1480,6 +1676,19 @@ module DRb
         }
       end
 
+      front_factory = config.delete(:front_factory) || config.delete(:session_front_factory) ||
+        config.delete(:session_factory)
+      session_cleanup = config.delete(:session_cleanup) || config.delete(:session_cleanup_hook)
+      if front && front_factory
+        raise ArgumentError, 'front and a session front factory cannot both be specified'
+      end
+      unless front_factory.nil? || front_factory.respond_to?(:call)
+        raise ArgumentError, 'session front factory must respond to call'
+      end
+      unless session_cleanup.nil? || session_cleanup.respond_to?(:call)
+        raise ArgumentError, 'session cleanup must respond to call'
+      end
+
       @config = self.class.make_config(config)
 
       @protocol = DRbProtocol.open_server(uri, @config)
@@ -1487,7 +1696,13 @@ module DRb
       @exported_uri = [@uri]
 
       @front = front
+      @front_factory = front_factory
+      @session_cleanup = session_cleanup
       @idconv = @config[:idconv]
+
+      @sessions = []
+      @sessions_mutex = Mutex.new
+      @next_session_id = 0
 
       @grp = ThreadGroup.new
       @thread = run
@@ -1513,6 +1728,164 @@ module DRb
 
     # The configuration of this DRbServer
     attr_reader :config
+
+  class ServerSession # :nodoc:
+    include MonitorMixin
+
+    class Closed < DRbConnError; end
+    attr_reader :front
+
+      def initialize(server, client, id, factory, cleanup)
+        super()
+        @server = server
+        @client = client
+        @id = id
+        @cleanup = cleanup
+        @objects = {}
+        @operations = {}
+        @closing = false
+        @closed = false
+        @condition = new_cond
+        @front = factory.call
+        raise TypeError, 'session front factory must return an object' if @front.nil?
+      end
+
+      def call
+        result = operation(:call) { yield }
+        raise DRbConnError, 'session closed' if result == false
+        result
+      end
+
+      def callback
+        callback_thread = Thread.start do
+          Thread.current[CLIENT_SESSION_KEY] = nil
+          Thread.current[SERVER_SESSION_KEY] = self
+          begin
+            if closing?
+              yield
+            else
+              operation(:callback) { yield }
+            end
+          rescue Exception
+            raise if @server.verbose
+          end
+        end
+        callback_thread.join
+        callback_thread.value
+      end
+
+      def closing?
+        synchronize { @closing }
+      end
+
+      def to_obj(ref)
+        synchronize do
+          raise RangeError, 'invalid session reference' unless @objects.key?(ref)
+          @objects[ref]
+        end
+      end
+
+      def to_id(object)
+        return nil if object.nil? || object.equal?(@front)
+        synchronize do
+          @objects[object.__id__] = object
+          object.__id__
+        end
+      end
+
+      def front_option(key)
+        @front[key.to_s]
+      end
+
+      def close
+        front = nil
+        cleanup = nil
+        timeout = nil
+        synchronize do
+          return if @closed
+          @closing = true
+          front = @front
+          cleanup = @cleanup
+          timeout = @server.config[:session_shutdown_timeout]
+          @condition.broadcast
+        end
+
+        begin
+          invoke_cleanup(front, cleanup)
+        ensure
+          deadline = timeout ? Time.now + timeout : nil
+          wait_for_operations(deadline)
+          @client.close rescue nil
+          synchronize do
+            @closed = true
+            @objects.clear
+            @condition.broadcast
+          end
+          @server.send(:remove_session, self)
+        end
+      end
+
+      private
+
+      def operation(type)
+        thread = Thread.current
+        synchronize do
+          if @closing
+            raise Closed
+          end
+          @operations[thread] = type
+        end
+        thread[SERVER_SESSION_KEY] = self
+        begin
+          yield
+        ensure
+          finish_operation(thread)
+          thread[SERVER_SESSION_KEY] = nil
+        end
+      end
+
+      def invoke_cleanup(front, cleanup)
+        return unless cleanup
+        if cleanup.respond_to?(:arity) && cleanup.arity == 0
+          cleanup.call
+        else
+          cleanup.call(front)
+        end
+      rescue Exception
+        error = $!
+        if @server.verbose
+          warn "#{error.class}: #{error.message}"
+          warn error.backtrace.first if error.backtrace
+        end
+      end
+
+      def wait_for_operations(deadline)
+        threads = nil
+        synchronize do
+          loop do
+            threads = @operations.keys
+            break if @operations.empty?
+            remaining = deadline ? deadline - Time.now : nil
+            break if remaining && remaining <= 0
+            @condition.wait(remaining)
+          end
+        end
+        return unless deadline && Time.now >= deadline
+        threads.each do |thread|
+          next unless @operations.key?(thread)
+          thread.kill
+          thread.join
+        end
+      end
+
+      def finish_operation(thread)
+        synchronize do
+          if @operations.delete(thread)
+            @condition.broadcast if @operations.empty?
+          end
+        end
+      end
+    end
 
     # Set whether to operate in verbose mode.
     #
@@ -1546,6 +1919,10 @@ module DRb
 
     # Convert a dRuby reference to the local object it refers to.
     def to_obj(ref)
+      session = current_session
+      return session.front if session && ref.nil?
+      return session.front_option(ref) if session && DRbURIOption === ref
+      return session.to_obj(ref) if session
       return front if ref.nil?
       return front[ref.to_s] if DRbURIOption === ref
       @idconv.to_obj(ref)
@@ -1553,11 +1930,29 @@ module DRb
 
     # Convert a local object to a dRuby reference.
     def to_id(obj)
-      return nil if obj.__id__ == front.__id__
+      session = current_session
+      return session.to_id(obj) if session
+      return nil if front && obj.__id__ == front.__id__
       @idconv.to_id(obj)
     end
 
     private
+
+    def current_session
+      Thread.current[SERVER_SESSION_KEY]
+    end
+
+    def register_session(session)
+      @sessions_mutex.synchronize { @sessions << session }
+    end
+
+    def remove_session(session)
+      @sessions_mutex.synchronize { @sessions.delete(session) }
+    end
+
+    def each_session(&block)
+      @sessions_mutex.synchronize { @sessions.dup }.each(&block)
+    end
 
     def shutdown
       current = Thread.current
@@ -1569,6 +1964,11 @@ module DRb
         }
       end
       @thread.join unless @thread == current
+      current_session = Thread.current[SERVER_SESSION_KEY]
+      each_session do |session|
+        next if session.equal?(current_session)
+        session.close
+      end
     end
 
     ##
@@ -1766,27 +2166,54 @@ module DRb
           client_uri = client.uri
           @exported_uri << client_uri unless @exported_uri.include?(client_uri)
         end
-        _last_invoke_method = nil
-        loop do
-          begin
-            succ = false
-            invoke_method = InvokeMethod.new(self, client)
-            succ, result = invoke_method.perform
-            error_print(result) if !succ && verbose
-            unless DRbConnError === result && result.message == 'connection closed'
-              client.send_reply(succ, result)
-            end
-          rescue Exception => e
-            error_print(e) if verbose
-          ensure
-            _last_invoke_method = invoke_method
-            client.close unless succ
-            if Thread.current['DRb']['stop_service']
-              shutdown
-              break
-            end
-            break unless succ
+        session = nil
+        begin
+          if @front_factory
+            session_id = @sessions_mutex.synchronize { @next_session_id += 1 }
+            session = ServerSession.new(self, client, session_id, @front_factory, @session_cleanup)
+            register_session(session)
           end
+
+          _last_invoke_method = nil
+          loop do
+            succ = false
+            invoke_method = nil
+            begin
+              if session
+                succ, result = session.call do
+                  invoke_method = InvokeMethod.new(self, client)
+                  value = invoke_method.perform
+                  unless !value.first && DRbConnError === value.last && value.last.message == 'connection closed'
+                    begin
+                      client.send_reply(*value)
+                    rescue DRbConnError
+                    end
+                  end
+                  value
+                end
+                break unless succ
+              else
+                invoke_method = InvokeMethod.new(self, client)
+                succ, result = invoke_method.perform
+                unless DRbConnError === result && result.message == 'connection closed'
+                  client.send_reply(succ, result)
+                end
+              end
+              error_print(result) if !succ && verbose
+            rescue Exception => e
+              error_print(e) if verbose
+            ensure
+              _last_invoke_method = invoke_method
+              if Thread.current['DRb']['stop_service']
+                shutdown
+                break
+              end
+              break unless succ
+            end
+          end
+        ensure
+          session&.close
+          client.close rescue nil unless session
         end
       end
     end
@@ -1888,6 +2315,12 @@ module DRb
     current_server.front
   end
   module_function :front
+
+  # Close the client connection associated with a session front proxy.
+  def close_session(object)
+    object.instance_variable_get(:@client_session)&.close
+  end
+  module_function :close_session
 
   # Convert a reference into an object using the current server.
   #
