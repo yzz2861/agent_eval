@@ -1,5 +1,9 @@
 # Releases
 
+## Unreleased
+
+  - Introduce Async::WatchCell for coalesced configuration updates with monotonic versions, subscriber-based change waiting, atomic updates, and final-value delivery before close.
+
 ## v2.46.0
 
   - Fixed `Thread#kill` raising a `TypeError` while shutting down a thread with an active `Async::Reactor`.
