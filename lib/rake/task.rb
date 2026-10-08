@@ -13,6 +13,43 @@ module Rake
   # use the +file+ and +task+ convenience methods.
   #
   class Task
+    # State for one invocation of a parameterized task.
+    class Invocation
+      attr_reader :task, :key
+      attr_reader :lock
+      attr_accessor :already_invoked, :exception
+
+      def initialize(task, key)
+        @task = task
+        @key = key
+        @already_invoked = false
+        @exception = nil
+        @lock = Monitor.new
+      end
+
+      def reenable
+        @lock.synchronize do
+          @already_invoked = false
+          @exception = nil
+        end
+      end
+
+      def ==(other)
+        other.is_a?(Invocation) &&
+          task.equal?(other.task) &&
+          key == other.key
+      end
+      alias eql? ==
+
+      def hash
+        [task.object_id, key].hash
+      end
+
+      def to_s
+        key.nil? ? task.name : "#{task.name}[#{key.inspect}]"
+      end
+    end
+
     # List of prerequisites for a task.
     attr_reader :prerequisites
     alias prereqs prerequisites
@@ -35,8 +72,15 @@ module Rake
     attr_reader :locations
 
     # Has this task already been invoked?  Already invoked tasks
-    # will be skipped unless you reenable them.
-    attr_reader :already_invoked
+    # will be skipped unless you reenable them. For parameterized tasks this
+    # is true when any parameter key has been invoked.
+    def already_invoked
+      if parameterized?
+        @lock.synchronize { @invocations.values.any?(&:already_invoked) }
+      else
+        invocation_for(nil).already_invoked
+      end
+    end
 
     # Return task name
     def to_s
@@ -100,15 +144,16 @@ module Rake
       @name            = task_name.to_s
       @prerequisites   = []
       @actions         = []
-      @already_invoked = false
       @comments        = []
       @lock            = Monitor.new
       @application     = app
       @scope           = app.current_scope
       @arg_names       = nil
       @locations       = []
-      @invocation_exception = nil
       @order_only_prerequisites = []
+      @parameterized = false
+      @parameter_key = nil
+      @invocations = {}
     end
 
     # Enhance a task with prerequisites or actions.  Returns self.
@@ -142,11 +187,41 @@ module Rake
       @arg_names || []
     end
 
+    # Enable parameterized invocations. By default all task arguments are used
+    # as the invocation key. Named arguments or a block receiving the arguments
+    # can define a stable custom key.
+    def parameterize(*argument_names, &block)
+      @parameterized = true
+      @parameter_key =
+        if block
+          block
+        elsif argument_names.empty?
+          lambda { |task_args| task_args.to_a }
+        else
+          lambda { |task_args|
+            values = task_args.values_at(*argument_names)
+            values.length == 1 ? values.first : values
+          }
+        end
+      self
+    end
+
+    # Whether this task keeps separate invocation state by parameter key.
+    def parameterized?
+      @parameterized
+    end
+
     # Reenable the task, allowing its tasks to be executed if the task
-    # is invoked again.
-    def reenable
-      @already_invoked = false
-      @invocation_exception = nil
+    # is invoked again. A parameter key reenables only that parameterized
+    # invocation; calling reenable without a key reenables all keys.
+    def reenable(key = :__all_parameter_keys__)
+      if parameterized? && key == :__all_parameter_keys__
+        @lock.synchronize { @invocations.values.dup }.each(&:reenable)
+      elsif !parameterized?
+        invocation_for(nil).reenable
+      else
+        invocation_for(key).reenable
+      end
     end
 
     # Clear the existing prerequisites, actions, comments, and arguments of a rake task.
@@ -191,35 +266,35 @@ module Rake
     # Same as invoke, but explicitly pass a call chain to detect
     # circular dependencies.
     #
-    # If multiple tasks depend on this
-    # one in parallel, they will all fail if the first execution of
-    # this task fails.
+    # If multiple tasks depend on the same parameterized invocation in
+    # parallel, they will all fail if its first execution fails.
     def invoke_with_call_chain(task_args, invocation_chain)
-      new_chain = Rake::InvocationChain.append(self, invocation_chain)
-      @lock.synchronize do
+      invocation = invocation_for(invocation_key(task_args))
+      new_chain = Rake::InvocationChain.append(invocation, invocation_chain)
+      invocation.lock.synchronize do
         begin
           if application.options.trace
-            application.trace "** Invoke #{name} #{format_trace_flags}"
+            application.trace "** Invoke #{name} #{format_trace_flags(invocation)}"
           end
 
-          if @already_invoked
-            if @invocation_exception
+          if invocation.already_invoked
+            if invocation.exception
               if application.options.trace
-                application.trace "** Previous invocation of #{name} failed #{format_trace_flags}"
+                application.trace "** Previous invocation of #{name} failed #{format_trace_flags(invocation)}"
               end
-              raise @invocation_exception
+              raise invocation.exception
             else
               return
             end
           end
 
-          @already_invoked = true
+          invocation.already_invoked = true
 
           invoke_prerequisites(task_args, new_chain)
           execute(task_args) if needed?
         rescue Exception => ex
           add_chain_to(ex, new_chain)
-          @invocation_exception = ex
+          invocation.exception = ex
           raise ex
         end
       end
@@ -258,13 +333,27 @@ module Rake
     end
 
     # Format the trace flags for display.
-    def format_trace_flags
+    def format_trace_flags(invocation)
       flags = []
-      flags << "first_time" unless @already_invoked
+      flags << "first_time" unless invocation.already_invoked
       flags << "not_needed" unless needed?
       flags.empty? ? "" : "(" + flags.join(", ") + ")"
     end
     private :format_trace_flags
+
+    def invocation_key(task_args)
+      return nil unless parameterized?
+
+      @parameter_key.call(task_args)
+    end
+    private :invocation_key
+
+    def invocation_for(key)
+      @lock.synchronize do
+        @invocations[key] ||= Invocation.new(self, key)
+      end
+    end
+    private :invocation_for
 
     # Execute the actions associated with this task.
     def execute(args=nil)
