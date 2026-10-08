@@ -4,6 +4,7 @@ require "optparse"
 require_relative "options"
 require_relative "task_manager"
 require_relative "file_list"
+require_relative "job_server"
 require_relative "thread_pool"
 require_relative "thread_history_display"
 require_relative "trace_output"
@@ -22,7 +23,7 @@ module Rake
     include TraceOutput
 
     # The name of the application (typically 'rake')
-    attr_reader :name
+    attr_reader :name, :job_server
 
     # The original directory where rake was invoked.
     attr_reader :original_dir
@@ -63,6 +64,7 @@ module Rake
       add_loader("rake", DefaultLoader.new)
       @tty_output = STDOUT.tty?
       @terminal_columns = ENV["RAKE_COLUMNS"].to_i
+      @job_server = nil
 
       set_default_options
     end
@@ -91,9 +93,14 @@ module Rake
         @name = app_name
         begin
           args = handle_options argv
+          setup_job_server
         rescue ArgumentError
           # Backward compatibility for capistrano
-          args = handle_options
+          begin
+            args = handle_options
+          ensure
+            setup_job_server
+          end
         end
         load_debug_at_stop_feature
         collect_command_line_tasks(args)
@@ -143,11 +150,15 @@ module Rake
 
     # Run the given block with the thread startup and shutdown.
     def run_with_threads
-      thread_pool.gather_history if options.job_stats == :history
+      begin
+        thread_pool.gather_history if options.job_stats == :history
 
-      yield
+        yield
+      ensure
+        thread_pool.join if defined?(@thread_pool)
+        @job_server.shutdown if @job_server
+      end
     ensure
-      thread_pool.join if defined?(@thread_pool)
       if options.job_stats
         stats = thread_pool.statistics
         puts "Maximum active threads: #{stats[:max_active_threads]} + main"
@@ -172,6 +183,22 @@ module Rake
     # Return the thread pool used for multithreaded processing.
     def thread_pool             # :nodoc:
       @thread_pool ||= ThreadPool.new(options.thread_pool_size || Rake.suggested_thread_count-1)
+    end
+
+    def setup_job_server # :nodoc:
+      result = JobServer.open_from_env
+
+      case result
+      when :not_configured
+        nil
+      when :unavailable
+        options.thread_pool_size = 0
+      else
+        @job_server = result
+        if result.jobs
+          options.thread_pool_size = [options.thread_pool_size, result.jobs - 1].min
+        end
+      end
     end
 
     # internal ----------------------------------------------------------------

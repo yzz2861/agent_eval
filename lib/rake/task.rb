@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 require_relative "invocation_exception_mixin"
+require_relative "job_server"
 
 module Rake
 
@@ -275,10 +276,15 @@ module Rake
       end
       application.trace "** Execute #{name}" if application.options.trace
       application.enhance_with_matching_rule(name) if @actions.empty?
-      if opts = Hash.try_convert(args) and !opts.empty?
-        @actions.each { |act| act.call(self, args, **opts) }
-      else
-        @actions.each { |act| act.call(self, args) }
+      return if @actions.empty?
+
+      job_server = application.respond_to?(:job_server) ? application.job_server : JobServer::NULL
+      (job_server || JobServer::NULL).around_action do
+        if opts = Hash.try_convert(args) and !opts.empty?
+          @actions.each { |act| act.call(self, args, **opts) }
+        else
+          @actions.each { |act| act.call(self, args) }
+        end
       end
     end
 
