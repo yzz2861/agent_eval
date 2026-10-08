@@ -38,6 +38,10 @@ module Rake
     # will be skipped unless you reenable them.
     attr_reader :already_invoked
 
+    # Execution context overrides declared for this task, or nil.
+    # See #set_execution_context.
+    attr_reader :context_override
+
     # Return task name
     def to_s
       name
@@ -109,7 +113,38 @@ module Rake
       @locations       = []
       @invocation_exception = nil
       @order_only_prerequisites = []
+      @context_override = nil
+      @effective_context = nil
     end
+
+    # Declare the execution context for this task, either as a
+    # Rake::ExecutionContext or as +chdir+/+env+ overrides.  The
+    # declared overrides are merged over the context of the task that
+    # invokes this one, and are applied to commands run through Rake's
+    # command helpers (+sh+, +ruby+, ...).  A nil value in +env+ removes
+    # that variable from the spawned command's environment.  Returns
+    # self.
+    def set_execution_context(context = nil, chdir: nil, env: {})
+      @context_override =
+        context || Rake::ExecutionContext.new(chdir: chdir, env: env)
+      self
+    end
+
+    # The effective execution context for this task: the context of the
+    # invoking task (or the ambient context) merged with this task's
+    # declared overrides.  Before the task is invoked this is derived
+    # from the ambient context; afterwards it is the context computed
+    # for the most recent invocation.
+    def execution_context
+      @effective_context || derive_execution_context
+    end
+
+    # Derive this task's context from the ambient one.  :nodoc:
+    def derive_execution_context
+      current = Rake::ExecutionContext.current
+      @context_override ? current.merge(@context_override) : current
+    end
+    private :derive_execution_context
 
     # Enhance a task with prerequisites or actions.  Returns self.
     def enhance(deps=nil, &block)
@@ -215,8 +250,11 @@ module Rake
 
           @already_invoked = true
 
-          invoke_prerequisites(task_args, new_chain)
-          execute(task_args) if needed?
+          @effective_context = derive_execution_context
+          Rake::ExecutionContext.with(@effective_context) do
+            invoke_prerequisites(task_args, new_chain)
+            execute(task_args) if needed?
+          end
         rescue Exception => ex
           add_chain_to(ex, new_chain)
           @invocation_exception = ex
@@ -249,8 +287,11 @@ module Rake
     def invoke_prerequisites_concurrently(task_args, invocation_chain)# :nodoc:
       futures = prerequisite_tasks.map do |p|
         prereq_args = task_args.new_scope(p.arg_names)
+        context = Rake::ExecutionContext.current
         application.thread_pool.future(p) do |r|
-          r.invoke_with_call_chain(prereq_args, invocation_chain)
+          Rake::ExecutionContext.with(context) do
+            r.invoke_with_call_chain(prereq_args, invocation_chain)
+          end
         end
       end
       # Iterate in reverse to improve performance related to thread waiting and switching

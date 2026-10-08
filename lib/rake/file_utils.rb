@@ -48,6 +48,8 @@ module FileUtils
     verbose = options.delete :verbose
     noop    = options.delete(:noop) || Rake::FileUtilsExt.nowrite_flag
 
+    cmd, options = apply_execution_context(cmd, options)
+
     Rake.rake_output_message sh_show_command(cmd, options) if verbose
 
     unless noop
@@ -94,6 +96,26 @@ module FileUtils
     end
   end
   private :set_verbose_option
+
+  # Merge the current Rake::ExecutionContext into the command and spawn
+  # options.  Options given explicitly at the call site (a leading env
+  # hash or a +chdir+ option) take precedence over the context.  :nodoc:
+  def apply_execution_context(cmd, options)
+    context = Rake::ExecutionContext.current
+    return [cmd, options] if context.empty?
+
+    cmd = cmd.dup
+    env = context.env
+    env = env.merge(cmd.shift) if Hash === cmd.first
+    cmd.unshift(env) unless env.empty?
+
+    if context.chdir && !options.key?(:chdir)
+      options = options.merge(chdir: context.chdir)
+    end
+
+    [cmd, options]
+  end
+  private :apply_execution_context
 
   # Run a Ruby interpreter with the given arguments.
   #
