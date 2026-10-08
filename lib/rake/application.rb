@@ -184,24 +184,111 @@ module Rake
     end
 
     def parse_task_string(string) # :nodoc:
-      /^([^\[]+)(?:\[(.*)\])$/ =~ string.to_s
+      source_string = string
+      string = string.to_s
+      opening = string.index("[")
+      closing = string.rindex("]")
+      return string, [] unless opening
 
-      name           = $1
-      remaining_args = $2
+      unless closing && closing > opening
+        source_map = source_map_for(source_string)
+        arguments_source_map = source_map &&
+          source_map[(opening + 1)..-1]
+        arguments = parse_task_arguments(
+          string[(opening + 1)..-1], arguments_source_map, 0
+        )
+        location = source_map && source_map[opening]
+        raise_task_argument_error(
+          location,
+          arguments.length + 1,
+          "missing closing bracket"
+        )
+      end
 
-      return string, [] unless name
-      return name,   [] if     remaining_args.empty?
+      name = string[0...opening]
+      arguments = string[(opening + 1)...closing]
+      source_map = source_map_for(source_string)
+      return name, [] if arguments.empty?
+      arguments_source_map = source_map &&
+        source_map[(opening + 1)...closing]
+      args = parse_task_arguments(
+        arguments, arguments_source_map, 0
+      )
+      [name, args]
+    end
 
-      args = []
+    def parse_task_arguments(arguments, source_map, offset) # :nodoc:
+      arguments_list = []
+      pieces = []
+      quote = nil
+      escaped = false
+      argument_number = 1
+      quote_location = nil
 
-      begin
-        /\s*((?:[^\\,]|\\.)*?)\s*(?:,\s*(.*))?$/ =~ remaining_args
+      arguments.each_char.each_with_index do |character, index|
+        location = source_map && source_map[offset + index]
 
-        remaining_args = $2
-        args << $1.gsub(/\\(.)/, '\1')
-      end while remaining_args
+        if escaped
+          pieces << [character, true]
+          escaped = false
+        elsif character == "\\" && quote != "'"
+          escaped = true
+        elsif quote
+          if character == quote
+            quote = nil
+          else
+            pieces << [character, true]
+          end
+        elsif character == "'" || character == '"'
+          quote = character
+          quote_location = location
+        elsif character == ","
+          arguments_list << finish_task_argument(pieces)
+          pieces = []
+          argument_number += 1
+        else
+          pieces << [character, false]
+        end
+      end
 
-      return name, args
+      if quote
+        raise_task_argument_error(
+          quote_location, argument_number, "unterminated quote"
+        )
+      end
+      if escaped
+        pieces << ["\\", true]
+      else
+        arguments_list << finish_task_argument(pieces)
+      end
+      arguments_list
+    end
+
+    def finish_task_argument(pieces)
+      pieces.shift while pieces.first && !pieces.first[1] &&
+        pieces.first[0] =~ /\A\s\z/
+      pieces.pop while pieces.last && !pieces.last[1] &&
+        pieces.last[0] =~ /\A\s\z/
+
+      if pieces.empty?
+        ""
+      else
+        pieces.map(&:first).join
+      end
+    end
+
+    def source_map_for(string)
+      string.respond_to?(:source_map) ? string.source_map : nil
+    end
+
+    def raise_task_argument_error(location, argument_number, message)
+      prefix = if location
+        "#{location.path}:#{location.line}:#{location.column}: "
+      else
+        ""
+      end
+      fail CommandLineOptionError,
+        "#{prefix}task argument #{argument_number}: #{message}"
     end
 
     # Provide standard exception handling for the given block.
@@ -211,6 +298,9 @@ module Rake
       # Exit silently with current status
       raise
     rescue OptionParser::InvalidOption => ex
+      $stderr.puts ex.message
+      exit(false)
+    rescue ArgumentFileError, CommandLineOptionError => ex
       $stderr.puts ex.message
       exit(false)
     rescue Exception => ex
@@ -668,6 +758,7 @@ module Rake
     # task names and env vars.
     def handle_options(argv) # :nodoc:
       set_default_options
+      expanded_argv = argv ? ArgumentFileExpander.expand(argv) : nil
 
       OptionParser.new do |opts|
         opts.banner = "#{Rake.application.name} [-f rakefile] {options} targets..."
@@ -681,7 +772,7 @@ module Rake
 
         standard_rake_options.each { |args| opts.on(*args) }
         opts.environment("RAKEOPT")
-      end.parse(argv)
+      end.parse(expanded_argv)
     end
 
     # Similar to the regular Ruby +require+ command, but will check

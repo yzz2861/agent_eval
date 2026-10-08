@@ -1,5 +1,9 @@
 === 13.2.1
 
+* Support UTF-8 parameter files referenced with <tt>@file</tt>, including
+  quoted values, relative nested files, expansion limits, and source
+  positions in errors.
+
 * Suppressed "internal:array:52:in 'Array#each'" from backtrace by @hsbt in #554
 * Bump actions/configure-pages from 4 to 5 by @dependabot in #553
 

@@ -56,6 +56,18 @@ class TestRakeTaskArgumentParsing < Rake::TestCase # :nodoc:
     assert_equal ["one", "two", "three_a, three_b", "four"], args
   end
 
+  def test_can_handle_quoted_args
+    name, args = @app.parse_task_string(%q{name["a,b", 'c d', "x[y]", ""]})
+    assert_equal "name", name
+    assert_equal ["a,b", "c d", "x[y]", ""], args
+  end
+
+  def test_quoted_args_preserve_protected_spaces
+    name, args = @app.parse_task_string(%q{name[ " leading", "trailing " ]})
+    assert_equal "name", name
+    assert_equal [" leading", "trailing "], args
+  end
+
   def test_treat_blank_arg_as_empty_string
     name, args = @app.parse_task_string("name[one,]")
     assert_equal "name", name

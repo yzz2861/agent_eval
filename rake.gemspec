@@ -48,6 +48,7 @@ Gem::Specification.new do |s|
     "doc/rational.rdoc",
     "exe/rake",
     "lib/rake.rb",
+    "lib/rake/argument_file.rb",
     "lib/rake/application.rb",
     "lib/rake/backtrace.rb",
     "lib/rake/clean.rb",

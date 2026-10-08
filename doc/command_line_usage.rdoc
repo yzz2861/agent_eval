@@ -169,3 +169,23 @@ Options are:
 In addition, any command line option of the form
 <em>VAR</em>=<em>VALUE</em> will be added to the environment hash
 <tt>ENV</tt> and may be tested in the Rakefile.
+
+== Parameter Files
+
+Long command lines can be stored in a UTF-8 file and referenced with
+
+    % rake @arguments.args
+
+Arguments in the file are separated by whitespace. Single or double
+quotes group an argument and preserve spaces, commas and square brackets;
+a backslash quotes the following character. A quoted <tt>@</tt> is a
+literal <tt>@</tt> and never starts another file. An unquoted token that
+starts with <tt>@</tt> includes another parameter file. Relative paths in
+an included file are resolved from the directory containing that file.
+
+The contents are expanded with the quoting rules above and then passed to
+Rake's normal option and task argument parser. Shell command substitution
+and variable expansion are not performed. Nesting is limited to eight
+files, and the total number of bytes read from parameter files is limited
+to 1 MiB. Syntax errors report both the source file line and column and,
+when applicable, the task argument position.
