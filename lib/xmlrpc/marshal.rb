@@ -22,16 +22,24 @@ module XMLRPC # :nodoc:
         new.dump_call( methodName, *params )
       end
 
+      def dump_call_stream( methodName, *params, &block )
+        new.dump_call_stream( methodName, *params, &block )
+      end
+
       def dump_response( param )
         new.dump_response( param )
       end
 
-      def load_call( stringOrReadable )
-        new.load_call( stringOrReadable )
+      def dump_response_stream( param, &block )
+        new.dump_response_stream( param, &block )
       end
 
-      def load_response( stringOrReadable )
-        new.load_response( stringOrReadable )
+      def load_call( stringOrReadable, base64_sink: nil )
+        new.load_call( stringOrReadable, base64_sink: base64_sink )
+      end
+
+      def load_response( stringOrReadable, base64_sink: nil )
+        new.load_response( stringOrReadable, base64_sink: base64_sink )
       end
 
       alias dump dump_response
@@ -48,18 +56,29 @@ module XMLRPC # :nodoc:
       create.methodCall( methodName, *params )
     end
 
+    # Streams a methodCall document (see XMLRPC::Create#methodCall_stream).
+    def dump_call_stream( methodName, *params, &block )
+      create.methodCall_stream( methodName, *params, &block )
+    end
+
     def dump_response( param )
       create.methodResponse( ! param.kind_of?( XMLRPC::FaultException ) , param )
     end
 
+    # Streams a methodResponse document
+    # (see XMLRPC::Create#methodResponse_stream).
+    def dump_response_stream( param, &block )
+      create.methodResponse_stream( ! param.kind_of?( XMLRPC::FaultException ), param, &block )
+    end
+
     # Returns <code>[ methodname, params ]</code>
-    def load_call( stringOrReadable )
-      parser.parseMethodCall( stringOrReadable )
+    def load_call( stringOrReadable, base64_sink: nil )
+      parser.parseMethodCall( stringOrReadable, base64_sink: base64_sink )
     end
 
     # Returns +paramOrFault+
-    def load_response( stringOrReadable )
-      parser.parseMethodResponse( stringOrReadable )[1]
+    def load_response( stringOrReadable, base64_sink: nil )
+      parser.parseMethodResponse( stringOrReadable, base64_sink: base64_sink )[1]
     end
 
   end # class Marshal

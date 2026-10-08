@@ -168,6 +168,31 @@ module XMLRPC # :nodoc:
       @writer.document_to_str(tree) + "\n"
     end
 
+    # Streams a XML-RPC methodCall document instead of building the whole
+    # string. Yields each piece, so parameters wrapped with
+    # XMLRPC::Base64.stream can be encoded directly from their source IO.
+    # Returns an Enumerator when no block is given.
+    def methodCall_stream(name, *params)
+      name = name.to_s
+      if name !~ /[a-zA-Z0-9_.:\/]+/
+        raise ArgumentError, "Wrong XML-RPC method-name"
+      end
+      return enum_for(:methodCall_stream, name, *params) unless block_given?
+      emit_method_call(name, params) { |piece| yield piece }
+    end
+
+    # Streams a XML-RPC methodResponse document. See #methodCall_stream.
+    # Returns an Enumerator when no block is given.
+    def methodResponse_stream(is_ret, *params)
+      unless is_ret
+        if params.size != 1 or params[0] === XMLRPC::FaultException
+          raise ArgumentError, "no valid fault-structure given"
+        end
+      end
+      return enum_for(:methodResponse_stream, is_ret, *params) unless block_given?
+      emit_method_response(is_ret, params) { |piece| yield piece }
+    end
+
 
 
     private
@@ -247,6 +272,9 @@ module XMLRPC # :nodoc:
         when XMLRPC::Base64
           @writer.tag("base64", param.encoded)
 
+        when XMLRPC::Base64::Stream
+          @writer.tag("base64", param.encoded)
+
         else
           if Config.enable_marshalling? and param.class.included_modules.include? XMLRPC::Marshallable
             # convert Ruby object into Hash
@@ -279,8 +307,103 @@ module XMLRPC # :nodoc:
       false
     end
 
+    # Emits the pieces of a methodCall document, tracking owned Base64
+    # streams so they are closed on completion, failure or early stop.
+    def emit_method_call(name, params)
+      active = collect_owned_streams(params)
+      begin
+        yield @writer.pi("xml", 'version="1.0"')
+        yield "<methodCall>"
+        yield "<methodName>" + @writer.text(name) + "</methodName>"
+        yield "<params>"
+        params.each do |param|
+          yield "<param>"
+          stream_value(param, active) { |piece| yield piece }
+          yield "</param>"
+        end
+        yield "</params>"
+        yield "</methodCall>"
+        yield "\n"
+      ensure
+        active.each { |stream| stream.close! }
+      end
+    end
+
+    def emit_method_response(is_ret, params)
+      values = is_ret ? params : [params[0].to_h]
+      active = collect_owned_streams(values)
+      begin
+        yield @writer.pi("xml", 'version="1.0"')
+        yield "<methodResponse>"
+        if is_ret
+          yield "<params>"
+          params.each do |param|
+            yield "<param>"
+            stream_value(param, active) { |piece| yield piece }
+            yield "</param>"
+          end
+          yield "</params>"
+        else
+          yield "<fault>"
+          stream_value(params[0].to_h, active) { |piece| yield piece }
+          yield "</fault>"
+        end
+        yield "</methodResponse>"
+        yield "\n"
+      ensure
+        active.each { |stream| stream.close! }
+      end
+    end
+
+    def collect_owned_streams(values, found = [])
+      values.each do |value|
+        case value
+        when XMLRPC::Base64::Stream
+          found << value if value.close?
+        when Hash
+          collect_owned_streams(value.values, found)
+        when Struct
+          collect_owned_streams(value.members.map { |k| value[k] }, found)
+        when Array
+          collect_owned_streams(value, found)
+        end
+      end
+      found
+    end
+
+    def stream_value(param, active = nil)
+      case param
+      when XMLRPC::Base64::Stream
+        active << param if active && param.close?
+        yield "<value><base64>"
+        param.each_chunk { |piece| yield piece }
+        yield "</base64></value>"
+      when Hash
+        yield "<value><struct>"
+        param.each do |key, value|
+          yield "<member><name>" + @writer.text(key.to_s) + "</name>"
+          stream_value(value, active) { |piece| yield piece }
+          yield "</member>"
+        end
+        yield "</struct></value>"
+      when Struct
+        yield "<value><struct>"
+        param.members.each do |key|
+          yield "<member><name>" + @writer.text(key.to_s) + "</name>"
+          stream_value(param[key], active) { |piece| yield piece }
+          yield "</member>"
+        end
+        yield "</struct></value>"
+      when Array
+        yield "<value><array><data>"
+        param.each { |v| stream_value(v, active) { |piece| yield piece } }
+        yield "</data></array></value>"
+      else
+        yield @writer.document_to_str(conv2value(param))
+      end
+    end
+
 
   end # class Create
 
 end # module XMLRPC
-

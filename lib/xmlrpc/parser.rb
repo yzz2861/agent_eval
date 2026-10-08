@@ -447,26 +447,36 @@ module XMLRPC # :nodoc:
     end # module TreeParserMixin
 
     class AbstractStreamParser
-      def parseMethodResponse(str)
-        parser = @parser_class.new
+      def parseMethodResponse(str, base64_sink: nil)
+        parser = @parser_class.new(base64_sink: base64_sink)
+        result = nil
+        begin
         parser.parse(str)
         raise "No valid method response!" if parser.method_name != nil
         if parser.fault != nil
           # is a fault structure
-          [false, parser.fault]
+          result = [false, parser.fault]
         else
           # is a normal return value
           raise "Missing return value!" if parser.params.size == 0
           raise "Too many return values. Only one allowed!" if parser.params.size > 1
-          [true, parser.params[0]]
+          result = [true, parser.params[0]]
         end
+        ensure
+          parser.close_base64_sinks!
+        end
+        result
       end
 
-      def parseMethodCall(str)
-        parser = @parser_class.new
-        parser.parse(str)
-        raise "No valid method call - missing method name!" if parser.method_name.nil?
-        [parser.method_name, parser.params]
+      def parseMethodCall(str, base64_sink: nil)
+        parser = @parser_class.new(base64_sink: base64_sink)
+        begin
+          parser.parse(str)
+          raise "No valid method call - missing method name!" if parser.method_name.nil?
+          [parser.method_name, parser.params]
+        ensure
+          parser.close_base64_sinks!
+        end
       end
     end
 
@@ -475,7 +485,7 @@ module XMLRPC # :nodoc:
       attr_reader :method_name
       attr_reader :fault
 
-      def initialize(*a)
+      def initialize(*a, base64_sink: nil)
         super(*a)
         @params = []
         @values = []
@@ -483,6 +493,12 @@ module XMLRPC # :nodoc:
 
         @names = []
         @name = []
+        # Location of the <value> currently being parsed. Entries are
+        # Integer (array index / param index) or String (struct member
+        # name).
+        @path_stack = []
+        # Per open container frame: [type, index]
+        @container_frames = []
 
         @structs = []
         @struct = {}
@@ -491,56 +507,99 @@ module XMLRPC # :nodoc:
         @fault = nil
 
         @data = nil
+
+        @base64_sink_resolver = base64_sink
+        @open_sinks = []
+        @base64_decoder = nil
+        @current_base64_sink = nil
+      end
+
+      # Closes every still-open owned base64 sink. Called once the whole
+      # document (or an aborted parse) is finished, following the sink
+      # ownership contract.
+      def close_base64_sinks!
+        first_error = nil
+        until @open_sinks.empty?
+          sink = @open_sinks.pop
+          begin
+            sink.close
+          rescue Exception => e
+            first_error ||= e
+          end
+        end
+        raise first_error unless first_error.nil?
       end
 
       def startElement(name, attrs=[])
-        @data = nil
+        @data = nil unless @base64_decoder
         case name
         when "value"
           @value = nil
+          enter_value
         when "nil"
           raise "wrong/unknown XML-RPC type 'nil'" unless Config.enable_nil_parser?
           @value = :nil
         when "array"
           @val_stack << @values
           @values = []
+          @container_frames << [:array, 0]
         when "struct"
           @names << @name
           @name = []
 
           @structs << @struct
           @struct = {}
+          @container_frames << [:struct, 0]
+        when "base64"
+          start_base64
         end
       end
 
       def endElement(name)
-        @data ||= ""
         case name
         when "string"
+          @data ||= ""
           @value = @data
         when "i4", "i8", "int"
+          @data ||= ""
           @value = Convert.int(@data)
         when "boolean"
+          @data ||= ""
           @value = Convert.boolean(@data)
         when "double"
+          @data ||= ""
           @value = Convert.double(@data)
         when "dateTime.iso8601"
+          @data ||= ""
           @value = Convert.dateTime(@data)
         when "base64"
-          @value = Convert.base64(@data)
+          @value = end_base64
         when "value"
-          @value = @data if @value.nil?
+          @value = (@data || "") if @value.nil?
           @values << (@value == :nil ? nil : @value)
+          case @value
+          when Array
+            # entry is popped by the closing <array> element
+          when Hash
+            # entry is popped by the closing <struct> element
+          else
+            @path_stack.pop
+            increment_value_index
+          end
         when "array"
           @value = @values
           @values = @val_stack.pop
+          @container_frames.pop
+          @path_stack.pop
         when "struct"
           @value = Convert.struct(@struct)
 
           @name = @names.pop
           @struct = @structs.pop
+          @container_frames.pop
+          @path_stack.pop
         when "name"
-          @name[0] = @data
+          @name[0] = (@data || "")
         when "member"
           @struct[@name[0]] = @values.pop
 
@@ -559,10 +618,78 @@ module XMLRPC # :nodoc:
       end
 
       def character(data)
-        if @data
+        if @base64_decoder
+          begin
+            @base64_decoder.decode(data)
+          rescue Base64::FormatError
+            @base64_decoder = nil
+            raise
+          end
+        elsif @data
           @data << data
         else
           @data = data
+        end
+      end
+
+      private
+
+      # Computes the path of the value about to start, relative to the
+      # document root, e.g. [0, "blob", 2].
+      def enter_value
+        frame = @container_frames.last
+        entry = if frame.nil?
+          # direct <param> value or <fault> value; params are indexed
+          # from zero and the fault value uses path [0] as well.
+          @params.size
+        elsif frame[0] == :array
+          frame[1]
+        else # struct member value
+          @name[0]
+        end
+        @path_stack << entry
+      end
+
+      def increment_value_index
+        frame = @container_frames.last
+        frame[1] += 1 if frame && frame[0] == :array
+      end
+
+      def current_value_path
+        @path_stack.dup
+      end
+
+      def start_base64
+        return unless @base64_sink_resolver
+        target = @base64_sink_resolver.call(current_value_path)
+        return if target.nil?
+        sink, write_size = coerce_sink(target)
+        @open_sinks << sink if sink.close?
+        @base64_decoder = Base64::StrictDecoder.new(sink.io, write_size: write_size)
+        @current_base64_sink = sink.io
+      end
+
+      def end_base64
+        if @base64_decoder
+          decoder = @base64_decoder
+          @base64_decoder = nil
+          sink_io = @current_base64_sink
+          @current_base64_sink = nil
+          decoder.finish
+          sink_io
+        else
+          @current_base64_sink = nil
+          Convert.base64(@data || "")
+        end
+      end
+
+      # Returns [Base64::Sink wrapper, write_size].
+      def coerce_sink(target)
+        case target
+        when Base64::Sink
+          [target, target.write_size]
+        else
+          [Base64::Sink.new(target), Base64::DEFAULT_WRITE_SIZE]
         end
       end
 
@@ -684,4 +811,3 @@ module XMLRPC # :nodoc:
 
 
 end # module XMLRPC
-
