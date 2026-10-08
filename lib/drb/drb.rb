@@ -367,6 +367,12 @@ module DRb
         obj
       end
     end
+
+    def remove(ref) # :nodoc:
+      synchronize do
+        @map.delete(ref)
+      end
+    end
   end
 
   # :nodoc:
@@ -400,6 +406,14 @@ module DRb
     # object space.
     def to_id(obj)
       (nil == obj) ? nil : DRB_OBJECT_SPACE.to_id(obj)
+    end
+
+    # Remove the object registered under +ref+, if any.
+    #
+    # This is used to revoke references whose lifetime is bound to a
+    # client session.  See the :front_factory option of DRbServer#new.
+    def remove(ref)
+      DRB_OBJECT_SPACE.remove(ref)
     end
   end
 
@@ -982,8 +996,8 @@ module DRb
     end
 
     def close_shutdown_pipe
-      @shutdown_pipe_w.close
-      @shutdown_pipe_r.close
+      @shutdown_pipe_w.close unless @shutdown_pipe_w.closed?
+      @shutdown_pipe_r.close unless @shutdown_pipe_r.closed?
     end
     private :close_shutdown_pipe
 
@@ -1016,7 +1030,7 @@ module DRb
 
     # Graceful shutdown
     def shutdown
-      @shutdown_pipe_w.close
+      @shutdown_pipe_w.close unless @shutdown_pipe_w.closed?
     end
 
     # Check to see if this connection is alive.
@@ -1424,6 +1438,8 @@ module DRb
         :tcp_acl => @@acl,
         :load_limit => @@load_limit,
         :argc_limit => @@argc_limit,
+        :front_factory => nil,
+        :front_cleanup => nil,
       }
       default_config.update(hash)
     end
@@ -1457,6 +1473,23 @@ module DRb
     # :argc_limit :: the maximum number of arguments to a remote
     #                method accepted by the server.  Defaults to
     #                256.
+    # :front_factory :: a callable object used to create a dedicated
+    #                   front object for each accepted client
+    #                   connection.  It is called once per connection
+    #                   with a DRbServer::Session, and must return the
+    #                   front object for that session.  All subsequent
+    #                   calls arriving on the same connection are
+    #                   dispatched to that front object; objects
+    #                   exported by it are bound to the session and
+    #                   revoked when the session ends.  If the factory
+    #                   raises, the connection is closed immediately
+    #                   and nothing is registered.  See
+    #                   DRbServer::Session.
+    # :front_cleanup :: a callable object invoked with the session
+    #                   when the session's connection has ended.
+    #                   Exceptions raised here are logged (in verbose
+    #                   mode) and ignored; they never prevent the
+    #                   connection from being closed.
     # The default values of these options can be modified on
     # a class-wide basis by the class methods #default_argc_limit,
     # #default_load_limit, #default_acl, #default_id_conv,
@@ -1489,6 +1522,11 @@ module DRb
       @front = front
       @idconv = @config[:idconv]
 
+      @front_factory = @config[:front_factory]
+      @front_cleanup = @config[:front_cleanup]
+      @session_refs = {}
+      @session_refs_mutex = Thread::Mutex.new
+
       @grp = ThreadGroup.new
       @thread = run
 
@@ -1509,6 +1547,11 @@ module DRb
     #
     # This object receives remote method calls made on the server's
     # URI alone, with an object id.
+    #
+    # When the server is configured with the :front_factory option,
+    # this is only used outside of client sessions; each connection
+    # gets its own front object from the factory.  See
+    # DRbServer::Session.
     attr_reader :front
 
     # The configuration of this DRbServer
@@ -1546,15 +1589,31 @@ module DRb
 
     # Convert a dRuby reference to the local object it refers to.
     def to_obj(ref)
-      return front if ref.nil?
-      return front[ref.to_s] if DRbURIOption === ref
+      session = current_session
+      session_front = session && session.front
+      return session_front || front if ref.nil?
+      return (session_front || front)[ref.to_s] if DRbURIOption === ref
+      owner = session_owner(ref)
+      if owner
+        raise RangeError, 'invalid reference' unless owner.equal?(session)
+        return owner.fetch_export(ref)
+      end
       @idconv.to_obj(ref)
     end
 
     # Convert a local object to a dRuby reference.
     def to_id(obj)
-      return nil if obj.__id__ == front.__id__
-      @idconv.to_id(obj)
+      session = current_session
+      session_front = session && session.front
+      return nil if obj.__id__ == (session_front || front).__id__
+      if session
+        ref = @idconv.to_id(obj)
+        session.store_export(ref, obj)
+        regist_session_export(session, ref)
+        ref
+      else
+        @idconv.to_id(obj)
+      end
     end
 
     private
@@ -1642,6 +1701,79 @@ module DRb
       end
     end
     public :check_insecure_method
+
+    # A per-connection session created by a front factory.
+    #
+    # When a DRbServer is configured with the :front_factory option,
+    # one Session is created for every accepted client connection, and
+    # the factory is called with it to produce the front object that
+    # receives remote calls made on the server's URI over that
+    # connection.
+    #
+    # Objects exported (converted to dRuby references) while a session
+    # is alive are bound to that session: they resolve only through
+    # the connection that owns the session, they are kept alive until
+    # the session ends, and they are unregistered when it ends.
+    class Session
+      # The DRbServer that owns this session.
+      attr_reader :server
+
+      # The server-side connection (protocol object) of this session.
+      attr_reader :client
+
+      # The front object created by the factory.  This is nil while
+      # the factory is running.
+      attr_reader :front
+
+      def initialize(server, client) # :nodoc:
+        @server = server
+        @client = client
+        @front = nil
+        @exported = {}
+        @closed = false
+        @mutex = Thread::Mutex.new
+      end
+
+      # Is this session still serving its connection?
+      def active?
+        @mutex.synchronize { !@closed }
+      end
+
+      # The URI the client of this session connected to.
+      def uri
+        @client.uri
+      end
+
+      def front=(front) # :nodoc:
+        @mutex.synchronize { @front = front }
+      end
+
+      def store_export(ref, obj) # :nodoc:
+        @mutex.synchronize { @exported[ref] = obj }
+      end
+
+      def fetch_export(ref) # :nodoc:
+        @mutex.synchronize do
+          @exported.fetch(ref) { raise RangeError, 'invalid reference' }
+        end
+      end
+
+      def exported_refs # :nodoc:
+        @mutex.synchronize { @exported.keys }
+      end
+
+      def take_exports # :nodoc:
+        @mutex.synchronize do
+          exported = @exported
+          @exported = {}
+          exported
+        end
+      end
+
+      def close # :nodoc:
+        @mutex.synchronize { @closed = true }
+      end
+    end
 
     class InvokeMethod  # :nodoc:
       def initialize(drb_server, client)
@@ -1748,6 +1880,79 @@ module DRb
       end
     end
 
+    # The session bound to the current thread's connection, if any.
+    def current_session # :nodoc:
+      drb = Thread.current['DRb']
+      return nil unless drb
+      session = drb['session']
+      return nil unless Session === session && session.server.equal?(self)
+      session.active? ? session : nil
+    end
+
+    def session_owner(ref) # :nodoc:
+      @session_refs_mutex.synchronize { @session_refs[ref] }
+    end
+
+    def regist_session_export(session, ref) # :nodoc:
+      @session_refs_mutex.synchronize { @session_refs[ref] = session }
+    end
+
+    # Revoke remote access to every object exported by +session+.
+    # Strong references are kept by the session itself until it is
+    # released, so objects stay usable locally during cleanup.
+    def revoke_session_exports(session) # :nodoc:
+      refs = session.exported_refs
+      @session_refs_mutex.synchronize do
+        refs.each { |ref| @session_refs.delete(ref) }
+      end
+      if @idconv.respond_to?(:remove)
+        refs.each do |ref|
+          begin
+            @idconv.remove(ref)
+          rescue Exception
+          end
+        end
+      end
+      refs
+    end
+
+    # Create the session for a freshly accepted connection.  Returns
+    # nil when no front factory is configured.  If the factory raises,
+    # anything exported during the attempt is unregistered so that no
+    # half-registered objects are left behind.
+    def open_session(client) # :nodoc:
+      return nil unless @front_factory
+      session = Session.new(self, client)
+      Thread.current['DRb']['session'] = session
+      begin
+        session.front = @front_factory.call(session)
+      rescue Exception
+        session.close
+        revoke_session_exports(session)
+        session.take_exports
+        raise
+      end
+      session
+    end
+
+    # End +session+: stop resolving its objects remotely, invoke the
+    # cleanup hook, then drop the references the session held.  The
+    # cleanup hook runs at most once per session, and exceptions it
+    # raises are swallowed (logged in verbose mode) so that they can
+    # never prevent the connection from being closed.
+    def close_session(session) # :nodoc:
+      session.close
+      revoke_session_exports(session)
+      begin
+        @front_cleanup.call(session) if @front_cleanup
+      rescue Exception => e
+        error_print(e) if verbose
+      ensure
+        session.take_exports
+      end
+      nil
+    end
+
     # The main loop performed by a DRbServer's internal thread.
     #
     # Accepts a connection from a client, and starts up its own
@@ -1762,30 +1967,46 @@ module DRb
         @grp.add Thread.current
         Thread.current['DRb'] = { 'client' => client ,
                                   'server' => self }
+        session = nil
+        begin
+          session = open_session(client)
+        rescue Exception => e
+          # The front factory failed; the connection is closed without
+          # registering anything for this client.
+          error_print(e) if verbose
+          client.close
+          next
+        end
         DRb.mutex.synchronize do
           client_uri = client.uri
           @exported_uri << client_uri unless @exported_uri.include?(client_uri)
         end
-        _last_invoke_method = nil
-        loop do
+        begin
+          loop do
+            begin
+              succ = false
+              invoke_method = InvokeMethod.new(self, client)
+              succ, result = invoke_method.perform
+              error_print(result) if !succ && verbose
+              unless DRbConnError === result && result.message == 'connection closed'
+                client.send_reply(succ, result)
+              end
+            rescue Exception => e
+              error_print(e) if verbose
+            ensure
+              client.close unless succ
+              if Thread.current['DRb']['stop_service']
+                shutdown
+                break
+              end
+              break unless succ
+            end
+          end
+        ensure
           begin
-            succ = false
-            invoke_method = InvokeMethod.new(self, client)
-            succ, result = invoke_method.perform
-            error_print(result) if !succ && verbose
-            unless DRbConnError === result && result.message == 'connection closed'
-              client.send_reply(succ, result)
-            end
-          rescue Exception => e
-            error_print(e) if verbose
+            close_session(session) if session
           ensure
-            _last_invoke_method = invoke_method
-            client.close unless succ
-            if Thread.current['DRb']['stop_service']
-              shutdown
-              break
-            end
-            break unless succ
+            client.close
           end
         end
       end
