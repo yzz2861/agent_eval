@@ -266,6 +266,31 @@ There is also the convenience method to_a that returns all parameters
 in the sequential order they were given, including those associated
 with named parameters.
 
+=== Parameterized Task Instances
+
+By default, a task runs at most once in a Rake process, even when it is
+invoked with different arguments.  When a task should run separately for
+each stable parameter value, call +parameterize+ and provide the argument
+name, or a block that returns the stable parameter key:
+
+   task :package, [:region] => [:prepare] do |t, args|
+     package_region(args.region)
+   end.parameterize(:region)
+
+   Rake::Task[:package].invoke("us")
+   Rake::Task[:package].invoke("eu")
+
+Invocation state, failures, and circular dependency checks are tracked on
+each parameterized instance.  Prerequisites still receive arguments using
+Rake's normal argument scoping rules, and then calculate their own
+parameter keys, so different parent instances may share one prerequisite
+instance when those scoped arguments produce the same key.
+
+Use +reenable+ with the parameter key to allow one parameterized instance
+to run again:
+
+   Rake::Task[:package].reenable("us")
+
 === Deprecated Task Parameters Format
 
 There is an older format for declaring task parameters that omitted

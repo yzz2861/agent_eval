@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 module Rake
 
-  # InvocationChain tracks the chain of task invocations to detect
+  # InvocationChain tracks the chain of task invocation instances to detect
   # circular dependencies.
   class InvocationChain < LinkedList
 

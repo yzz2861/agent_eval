@@ -35,8 +35,13 @@ module Rake
     attr_reader :locations
 
     # Has this task already been invoked?  Already invoked tasks
-    # will be skipped unless you reenable them.
-    attr_reader :already_invoked
+    # will be skipped unless you reenable them.  Parameterized tasks
+    # track this separately for each parameter key.
+    def already_invoked(parameter_key=nil)
+      parameter_key = nil unless @parameter_key_block
+      current_invocation = @invocations_lock.synchronize { @invocations[parameter_key] }
+      current_invocation ? current_invocation.already_invoked? : false
+    end
 
     # Return task name
     def to_s
@@ -100,15 +105,15 @@ module Rake
       @name            = task_name.to_s
       @prerequisites   = []
       @actions         = []
-      @already_invoked = false
       @comments        = []
-      @lock            = Monitor.new
       @application     = app
       @scope           = app.current_scope
       @arg_names       = nil
       @locations       = []
-      @invocation_exception = nil
       @order_only_prerequisites = []
+      @parameter_key_block = nil
+      @invocations = {}
+      @invocations_lock = Monitor.new
     end
 
     # Enhance a task with prerequisites or actions.  Returns self.
@@ -142,11 +147,22 @@ module Rake
       @arg_names || []
     end
 
+    # Enable separate invocations for each stable parameter key.  A Symbol
+    # or String names an argument.  A block receives the task's arguments.
+    def parameterize(key=nil, &block)
+      if key.nil? && block.nil?
+        raise ArgumentError, "a parameter key or block is required"
+      end
+      @parameter_key_block = block || parameter_key_extractor(key)
+      self
+    end
+
     # Reenable the task, allowing its tasks to be executed if the task
-    # is invoked again.
-    def reenable
-      @already_invoked = false
-      @invocation_exception = nil
+    # is invoked again.  For parameterized tasks, pass the parameter key
+    # of the invocation to reenable.
+    def reenable(parameter_key=nil)
+      parameter_key = nil unless @parameter_key_block
+      invocation(parameter_key).reenable
     end
 
     # Clear the existing prerequisites, actions, comments, and arguments of a rake task.
@@ -195,32 +211,18 @@ module Rake
     # one in parallel, they will all fail if the first execution of
     # this task fails.
     def invoke_with_call_chain(task_args, invocation_chain)
-      new_chain = Rake::InvocationChain.append(self, invocation_chain)
-      @lock.synchronize do
+      current_invocation = invocation_for_arguments(task_args)
+      new_chain = Rake::InvocationChain.append(current_invocation, invocation_chain)
+      current_invocation.start do
         begin
-          if application.options.trace
-            application.trace "** Invoke #{name} #{format_trace_flags}"
-          end
-
-          if @already_invoked
-            if @invocation_exception
-              if application.options.trace
-                application.trace "** Previous invocation of #{name} failed #{format_trace_flags}"
-              end
-              raise @invocation_exception
-            else
-              return
-            end
-          end
-
-          @already_invoked = true
-
           invoke_prerequisites(task_args, new_chain)
           execute(task_args) if needed?
         rescue Exception => ex
           add_chain_to(ex, new_chain)
-          @invocation_exception = ex
+          current_invocation.exception = ex
           raise ex
+        ensure
+          current_invocation.finish
         end
       end
     end
@@ -257,14 +259,131 @@ module Rake
       futures.reverse_each(&:value)
     end
 
-    # Format the trace flags for display.
-    def format_trace_flags
-      flags = []
-      flags << "first_time" unless @already_invoked
-      flags << "not_needed" unless needed?
-      flags.empty? ? "" : "(" + flags.join(", ") + ")"
+    def parameter_key_for(task_args)
+      return nil unless @parameter_key_block
+      @parameter_key_block.call(task_args)
     end
-    private :format_trace_flags
+    private :parameter_key_for
+
+    def invocation_for_arguments(task_args)
+      invocation(parameter_key_for(task_args))
+    end
+    private :invocation_for_arguments
+
+    def invocation(parameter_key)
+      @invocations_lock.synchronize do
+        @invocations[parameter_key] ||= Invocation.new(self, parameter_key)
+      end
+    end
+    private :invocation
+
+    def parameter_key_extractor(key)
+      return key if key.respond_to?(:call)
+      ->(task_args) { task_args.public_send(key) }
+    end
+    private :parameter_key_extractor
+
+    class Invocation # :nodoc:
+      attr_reader :parameter_key
+      attr_accessor :exception
+
+      def initialize(task, parameter_key)
+        @task = task
+        @parameter_key = parameter_key
+        @monitor = Monitor.new
+        @condition = @monitor.new_cond
+        @already_invoked = false
+        @running = false
+        @first_time = false
+        @reenabled = false
+        @exception = nil
+      end
+
+      def already_invoked?
+        @monitor.synchronize { @already_invoked }
+      end
+
+      def start
+        execute_invocation = @monitor.synchronize do
+          if @already_invoked && !@running
+            if @exception
+              trace_previous_failure
+              raise @exception
+            else
+              trace_invocation
+              return
+            end
+          end
+
+          @condition.wait_while { @running }
+          if @already_invoked
+            if @exception
+              trace_previous_failure
+              raise @exception
+            else
+              trace_invocation
+              return
+            end
+          end
+
+          @running = true
+          @already_invoked = true
+          @first_time = true
+          trace_invocation
+          true
+        end
+
+        yield if execute_invocation
+      end
+
+      def finish
+        @monitor.synchronize do
+          @running = false
+          @first_time = false
+          @already_invoked = !@reenabled
+          @exception = nil if @reenabled
+          @reenabled = false
+          @condition.broadcast
+        end
+      end
+
+      def reenable
+        @monitor.synchronize do
+          @already_invoked = false
+          @exception = nil
+          @reenabled = @running
+        end
+      end
+
+      def first_time?
+        @monitor.synchronize { @first_time }
+      end
+
+      private
+
+      def trace_invocation
+        return unless @task.application.options.trace
+        @task.application.trace "** Invoke #{self} #{trace_flags}"
+      end
+
+      def trace_previous_failure
+        return unless @task.application.options.trace
+        @task.application.trace "** Previous invocation of #{self} failed #{trace_flags}"
+      end
+
+      def trace_flags
+        flags = []
+        flags << "first_time" if @first_time
+        flags << "not_needed" unless @task.needed?
+        return "" if flags.empty?
+        "(" + flags.join(", ") + ")"
+      end
+
+      def to_s
+        return @task.name if @parameter_key.nil?
+        "#{@task.name}[#{@parameter_key}]"
+      end
+    end
 
     # Execute the actions associated with this task.
     def execute(args=nil)

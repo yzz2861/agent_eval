@@ -144,6 +144,207 @@ class TestRakeTask < Rake::TestCase # :nodoc:
     assert_equal 2, invoked
   end
 
+  def test_parameterized_invocations_run_once_per_key
+    runs = []
+    t1 = task(:t1, [:region]) do |t, args|
+      runs << args.region
+    end.parameterize(:region)
+
+    t1.invoke("us")
+    t1.invoke("us")
+    t1.invoke("eu")
+
+    assert_equal ["us", "eu"], runs
+    assert_equal true, t1.already_invoked("us")
+    assert_equal true, t1.already_invoked("eu")
+    assert_equal false, t1.already_invoked("ap")
+  end
+
+  def test_unparameterized_tasks_run_even_when_arguments_change
+    runs = []
+    t1 = task(:t1, [:region]) do |t, args|
+      runs << args.region
+    end
+
+    t1.invoke("us")
+    t1.invoke("eu")
+
+    assert_equal ["us"], runs
+  end
+
+  def test_parameterized_failures_are_isolated_by_key
+    runs = []
+    t1 = task(:t1, [:region]) do |t, args|
+      runs << args.region
+      raise "failed in us" if args.region == "us"
+    end.parameterize(:region)
+
+    us_error = assert_raises(RuntimeError) { t1.invoke("us") }
+    assert_equal "failed in us", us_error.message
+
+    eu_error = nil
+    begin
+      t1.invoke("eu")
+    rescue RuntimeError => error
+      eu_error = error
+    end
+
+    assert_nil eu_error
+    assert_equal ["us", "eu"], runs
+    assert_same us_error, assert_raises(RuntimeError) { t1.invoke("us") }
+    assert_equal ["us", "eu"], runs
+  end
+
+  def test_parameterized_reenable_only_affects_the_given_key
+    runs = []
+    t1 = task(:t1, [:region]) do |t, args|
+      runs << args.region
+    end.parameterize(:region)
+
+    t1.invoke("us")
+    t1.invoke("eu")
+    t1.reenable("us")
+    t1.invoke("us")
+    t1.invoke("eu")
+
+    assert_equal ["us", "eu", "us"], runs
+  end
+
+  def test_prerequisites_are_scoped_before_their_parameter_keys
+    runs = []
+    task(:prepare, [:region]) do |t, args|
+      runs << ["prepare", args.region]
+    end.parameterize(:region)
+    task(:common, [:region]) do |t, args|
+      runs << ["common", args.region]
+    end.parameterize(:region)
+    package = task(:package, [:region] => [:prepare, :common]) do |t, args|
+      runs << ["package", args.region]
+    end.parameterize(:region)
+
+    package.invoke("us")
+    package.invoke("eu")
+
+    assert_equal [
+      ["prepare", "us"],
+      ["common", "us"],
+      ["package", "us"],
+      ["prepare", "eu"],
+      ["common", "eu"],
+      ["package", "eu"],
+    ], runs
+  end
+
+  def test_parameterized_parent_instances_can_share_a_prerequisite_instance
+    runs = []
+    task(:prepare, [:region]) do |t, args|
+      runs << ["prepare", args.region]
+    end.parameterize(:region)
+    package = task(:package, [:region, :variant] => [:prepare]) do |t, args|
+      runs << ["package", args.region, args.variant]
+    end
+    package.parameterize { |args| [args.region, args.variant] }
+
+    package.invoke("us", "online")
+    package.invoke("us", "batch")
+
+    assert_equal [
+      ["prepare", "us"],
+      ["package", "us", "online"],
+      ["package", "us", "batch"],
+    ], runs
+  end
+
+  def test_unparameterized_prerequisites_remain_shared
+    runs = []
+    task(:prepare) do
+      runs << "prepare"
+    end
+    package = task(:package, [:region] => [:prepare]) do |t, args|
+      runs << args.region
+    end.parameterize(:region)
+
+    package.invoke("us")
+    package.invoke("eu")
+
+    assert_equal ["prepare", "us", "eu"], runs
+  end
+
+  def test_parameterized_circular_dependencies_are_detected_per_instance
+    package = task(:package, [:region] => [:prepare])
+    task(:prepare, [:region] => [:package]).parameterize(:region)
+    package.parameterize(:region)
+
+    error = assert_raises(RuntimeError) { package.invoke("us") }
+    assert_match(/package\[us\] => prepare\[us\] => package\[us\]/, error.message)
+  end
+
+  def test_concurrent_calls_with_the_same_parameter_key_run_once
+    started = Queue.new
+    release = Queue.new
+    runs = []
+    t1 = task(:t1, [:region]) do |t, args|
+      runs << args.region
+      started.push(true)
+      release.pop
+    end.parameterize(:region)
+
+    first = Thread.new { t1.invoke("us") }
+    started.pop
+    second = Thread.new { t1.invoke("us") }
+    sleep 0.01
+
+    assert_equal ["us"], runs
+
+    release.push(true)
+    first.join(5)
+    second.join(5)
+
+    refute first.alive?
+    refute second.alive?
+    assert_equal ["us"], runs
+  end
+
+  def test_concurrent_calls_with_the_same_parameter_key_share_failure
+    started = Queue.new
+    release = Queue.new
+    runs = []
+    t1 = task(:t1, [:region]) do |t, args|
+      runs << args.region
+      started.push(true)
+      release.pop
+      raise "failed in us"
+    end.parameterize(:region)
+
+    first_error = nil
+    second_error = nil
+    first = Thread.new do
+      begin
+        t1.invoke("us")
+      rescue RuntimeError => error
+        first_error = error
+      end
+    end
+    started.pop
+    second = Thread.new do
+      begin
+        t1.invoke("us")
+      rescue RuntimeError => error
+        second_error = error
+      end
+    end
+
+    release.push(true)
+    first.join(5)
+    second.join(5)
+
+    refute first.alive?
+    refute second.alive?
+    assert_equal "failed in us", first_error.message
+    assert_same first_error, second_error
+    assert_equal ["us"], runs
+  end
+
   def test_clear
     desc "a task"
     t = task("t", ["b"] => "a") {}
