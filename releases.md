@@ -1,5 +1,9 @@
 # Releases
 
+## Unreleased
+
+  - Introduce `Async::Mailbox`, a selective message queue. Unlike `Async::Queue`, which is strictly first-in-first-out, `Mailbox#receive_if` lets a receiver wait for the first message (in arrival order) matching a predicate, leaving non-matching messages buffered in their original order for other receivers. Waiting receivers are served in first-come-first-served order, predicates are evaluated in the receiver's own fiber without holding any internal lock (predicate errors propagate to that receiver only and never remove messages), and waits support cancellation, `timeout:`, and mailbox closing. An optional `limit:` applies back-pressure by blocking `push` when the mailbox is full.
+
 ## v2.46.0
 
   - Fixed `Thread#kill` raising a `TypeError` while shutting down a thread with an active `Async::Reactor`.
