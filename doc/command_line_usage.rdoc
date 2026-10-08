@@ -101,6 +101,14 @@ Options are:
 [<tt>--rakelibdir</tt> _rakelibdir_ (-R)]
     Auto-import any .rake files in RAKELIBDIR. (default is 'rakelib')
 
+[<tt>--response-files</tt>]
+    Enable response files: any command-line argument that begins with an
+    <tt>@</tt> names a UTF-8 text file whose contents are expanded into
+    arguments before normal option and task parsing.  This keeps long
+    command lines manageable, e.g. <tt>rake --response-files @args.txt</tt>.
+    A bare <tt>@</tt> is a literal argument.  See the *Response Files*
+    section below for the quoting and escaping rules.
+
 [<tt>--require</tt> _name_ (-r)]
     Require _name_ before executing the Rakefile.
 
@@ -169,3 +177,52 @@ Options are:
 In addition, any command line option of the form
 <em>VAR</em>=<em>VALUE</em> will be added to the environment hash
 <tt>ENV</tt> and may be tested in the Rakefile.
+
+== Response Files
+
+When the <tt>--response-files</tt> option is given, any argument that begins
+with <tt>@</tt> is treated as a reference to a UTF-8 encoded response file.
+The file contents are expanded into arguments before the usual option and
+task argument parsing, so response files may contain options, environment
+assignments and task specifications in any order:
+
+    # args.txt contents (whitespace, including newlines, separates
+    # arguments; response files have no comment syntax):
+    --trace
+    GREETING=hello
+    deploy['web server', '1,2', '[brackets]', '']
+
+    % rake --response-files @args.txt
+
+The quoting and escaping rules are:
+
+* Whitespace (including newlines) separates arguments. Whitespace inside a
+  task argument list, between an unquoted <tt>[</tt> and its matching
+  <tt>]</tt>, is part of the task specification, so
+  <tt>task[a b, c]</tt> is a single argument.
+* Single quotes preserve every character literally, including backslashes,
+  dollar signs and backticks.
+* Double quotes preserve whitespace; a backslash only escapes another
+  backslash, a double quote, a dollar sign, a backtick, or (as a line
+  continuation) a newline. Other backslashes are literal.
+* Outside quotes, a backslash escapes the next character; a backslash at the
+  end of a line joins the next line. A dangling backslash at end of file is
+  an error.
+* Dollar signs and backticks are never expanded: there is no variable or
+  command substitution.  Use the normal <em>VAR</em>=<em>VALUE</em> syntax to
+  set environment variables.
+* A token that begins with an unquoted <tt>@</tt> includes another response
+  file; the rest of the token is the path, which may itself contain quoted
+  sections. A bare <tt>@</tt> or a quoted leading <tt>@</tt> is passed
+  through literally.
+* Relative file paths are resolved against the directory of the response
+  file that contains the reference. Command line references are resolved
+  against the current working directory.
+* Inclusion is limited to 10 levels and 1 megabyte of response files in
+  total; cyclic includes are rejected.
+
+Commas and brackets protected by quotes or backslashes inside task arguments
+survive task parsing, so a value such as <tt>'a,b'</tt> or <tt>'[x]'</tt>
+reaches the task as a single argument. Empty quotes produce an empty string
+argument. Expansion errors report both the file line and column and the
+position of the originating command-line argument.

@@ -554,6 +554,11 @@ module Rake
               options.rakelib = value.split(File::PATH_SEPARATOR)
             }
           ],
+          ["--response-files",
+            "Expand arguments of the form @PATH from response files. " +
+            "Arguments are expanded before normal option and task parsing.",
+            lambda { |value| options.response_files = value }
+          ],
           ["--require", "-r MODULE",
             "Require MODULE before executing rakefile.",
             lambda { |value|
@@ -669,6 +674,9 @@ module Rake
     def handle_options(argv) # :nodoc:
       set_default_options
 
+      argv = expand_response_files(argv) if
+        response_files_enabled?(argv)
+
       OptionParser.new do |opts|
         opts.banner = "#{Rake.application.name} [-f rakefile] {options} targets..."
         opts.separator ""
@@ -683,6 +691,20 @@ module Rake
         opts.environment("RAKEOPT")
       end.parse(argv)
     end
+
+    # Response file expansion is opt-in: the --response-files switch must
+    # appear on the original command line before any @PATH references are
+    # followed.  It is detected before OptionParser runs so that referenced
+    # files can contribute ordinary options as well as task arguments.
+    def response_files_enabled?(argv) # :nodoc:
+      argv.any? { |arg| arg == "--response-files" }
+    end
+    private :response_files_enabled?
+
+    def expand_response_files(argv) # :nodoc:
+      Rake::ResponseFile.expand(argv)
+    end
+    private :expand_response_files
 
     # Similar to the regular Ruby +require+ command, but will check
     # for *.rake files in addition to *.rb files.
@@ -831,6 +853,7 @@ module Rake
       options.load_system                = false
       options.nosearch                   = false
       options.rakelib                    = %w[rakelib]
+      options.response_files             = false
       options.show_all_tasks             = false
       options.show_prereqs               = false
       options.show_task_pattern          = nil
