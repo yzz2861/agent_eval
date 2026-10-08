@@ -23,6 +23,18 @@ module Rake
     # List of actions attached to a task.
     attr_reader :actions
 
+    # List of dependency scanners attached to a task.  Scanners are
+    # callbacks that run after the declared prerequisites complete and
+    # return names of additional prerequisites discovered at invoke
+    # time (for example by reading a generated index file).
+    attr_reader :dependency_scanners
+
+    # Maximum number of dependency discovery rounds before giving up.
+    DEFAULT_DISCOVERY_ROUND_LIMIT = 10
+
+    # Upper bound on discovery rounds for this task.
+    attr_accessor :discovery_round_limit
+
     # Application owning this task.
     attr_accessor :application
 
@@ -109,12 +121,24 @@ module Rake
       @locations       = []
       @invocation_exception = nil
       @order_only_prerequisites = []
+      @dependency_scanners = []
+      @discovery_round_limit = DEFAULT_DISCOVERY_ROUND_LIMIT
     end
 
     # Enhance a task with prerequisites or actions.  Returns self.
     def enhance(deps=nil, &block)
       @prerequisites |= deps if deps
       @actions << block if block_given?
+      self
+    end
+
+    # Register a dependency scanner for this task.  The block is called
+    # with the task and its arguments after the declared prerequisites
+    # have completed, and must return the names of any additional
+    # prerequisites discovered (or nil/empty when there are none).
+    # Returns self.
+    def scan_with(&block)
+      @dependency_scanners << block
       self
     end
 
@@ -153,6 +177,7 @@ module Rake
     def clear
       clear_prerequisites
       clear_actions
+      clear_dependency_scanners
       clear_comments
       clear_args
       self
@@ -167,6 +192,12 @@ module Rake
     # Clear the existing actions on a rake task.
     def clear_actions
       actions.clear
+      self
+    end
+
+    # Clear the existing dependency scanners on a rake task.
+    def clear_dependency_scanners
+      @dependency_scanners = []
       self
     end
 
@@ -216,6 +247,7 @@ module Rake
           @already_invoked = true
 
           invoke_prerequisites(task_args, new_chain)
+          discover_dependencies(task_args, new_chain)
           execute(task_args) if needed?
         rescue Exception => ex
           add_chain_to(ex, new_chain)
@@ -256,6 +288,49 @@ module Rake
       # Iterate in reverse to improve performance related to thread waiting and switching
       futures.reverse_each(&:value)
     end
+
+    # Run the dependency discovery phase: repeatedly call the registered
+    # scanners, merge newly found edges into the graph and invoke the new
+    # prerequisites, until a round discovers nothing new.  Scanners may
+    # report additional dependencies once earlier discoveries have
+    # completed, so scanning repeats until the graph is stable, bounded
+    # by +discovery_round_limit+.  Runs inside the task lock, so
+    # concurrent invocations share a single discovery pass.
+    def discover_dependencies(task_args, invocation_chain) # :nodoc:
+      return if @dependency_scanners.empty?
+
+      rounds = 0
+      loop do
+        discovered = @dependency_scanners.flat_map { |scanner|
+          Array(scanner.call(self, task_args))
+        }
+        new_deps = Task.format_deps(discovered.compact) -
+                   @prerequisites - @order_only_prerequisites
+        break if new_deps.empty?
+
+        rounds += 1
+        if rounds > @discovery_round_limit
+          fail RuntimeError,
+            "Dependency discovery for task '#{name}' did not settle " +
+            "within #{@discovery_round_limit} rounds"
+        end
+
+        new_tasks = new_deps.map { |dep| lookup_prerequisite(dep) }
+        new_tasks.each do |dep_task|
+          if invocation_chain.member?(dep_task)
+            fail RuntimeError,
+              "Circular dependency detected: #{invocation_chain} => #{dep_task}"
+          end
+        end
+
+        @prerequisites |= new_deps
+        new_tasks.each do |dep_task|
+          prereq_args = task_args.new_scope(dep_task.arg_names)
+          dep_task.invoke_with_call_chain(prereq_args, invocation_chain)
+        end
+      end
+    end
+    private :discover_dependencies
 
     # Format the trace flags for display.
     def format_trace_flags
