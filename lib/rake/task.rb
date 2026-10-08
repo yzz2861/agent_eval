@@ -13,6 +13,11 @@ module Rake
   # use the +file+ and +task+ convenience methods.
   #
   class Task
+    # Default upper bound on dependency scan rounds.  Scanning repeats
+    # while new prerequisites are discovered; if the graph does not
+    # stabilize within this many rounds, invocation fails.
+    DEFAULT_MAX_SCAN_ROUNDS = 100
+
     # List of prerequisites for a task.
     attr_reader :prerequisites
     alias prereqs prerequisites
@@ -37,6 +42,17 @@ module Rake
     # Has this task already been invoked?  Already invoked tasks
     # will be skipped unless you reenable them.
     attr_reader :already_invoked
+
+    # Dependency scanner for this task (nil if none).  The scanner is a
+    # callback, independent of the task's actions, that is called after
+    # the declared prerequisites have completed.  It must return a list
+    # of additional prerequisite names (possibly empty).  Use
+    # +enhance_with_scanner+ to register one.
+    attr_reader :scanner
+
+    # Maximum number of dependency scan rounds before the scan is
+    # declared unstable.  Defaults to DEFAULT_MAX_SCAN_ROUNDS.
+    attr_accessor :max_scan_rounds
 
     # Return task name
     def to_s
@@ -109,12 +125,29 @@ module Rake
       @locations       = []
       @invocation_exception = nil
       @order_only_prerequisites = []
+      @scanner         = nil
+      @max_scan_rounds = DEFAULT_MAX_SCAN_ROUNDS
     end
 
     # Enhance a task with prerequisites or actions.  Returns self.
     def enhance(deps=nil, &block)
       @prerequisites |= deps if deps
       @actions << block if block_given?
+      self
+    end
+
+    # Register a dependency scanner for this task.  Returns self.
+    #
+    # The scanner block is called with the task after its declared
+    # prerequisites have completed, and must return a list of additional
+    # prerequisite names.  Discovered prerequisites are merged into the
+    # dependency graph (duplicates are coalesced) and invoked, after
+    # which the scanner runs again.  Scanning repeats until a round
+    # discovers nothing new, so scanners may depend on files generated
+    # by prerequisites discovered in earlier rounds.  Only then are the
+    # task's own actions executed.
+    def enhance_with_scanner(&block)
+      @scanner = block
       self
     end
 
@@ -216,6 +249,7 @@ module Rake
           @already_invoked = true
 
           invoke_prerequisites(task_args, new_chain)
+          invoke_scanned_prerequisites(task_args, new_chain) if @scanner
           execute(task_args) if needed?
         rescue Exception => ex
           add_chain_to(ex, new_chain)
@@ -256,6 +290,43 @@ module Rake
       # Iterate in reverse to improve performance related to thread waiting and switching
       futures.reverse_each(&:value)
     end
+
+    # Run the dependency scan phase: call the scanner, merge newly
+    # discovered prerequisites into the graph and invoke them, then scan
+    # again.  Repeats until a round discovers no new prerequisites, and
+    # fails if the graph does not stabilize within +max_scan_rounds+
+    # rounds.  A discovered edge that points back into the current
+    # invocation chain raises immediately, reporting the concrete cycle.
+    def invoke_scanned_prerequisites(task_args, invocation_chain) # :nodoc:
+      round = 0
+      loop do
+        discovered = Array(@scanner.call(self)).map(&:to_s)
+        new_deps = discovered - @prerequisites
+        break if new_deps.empty?
+
+        round += 1
+        if round > @max_scan_rounds
+          fail "Dependency scan of #{name} did not stabilize " \
+            "after #{@max_scan_rounds} rounds"
+        end
+
+        if application.options.trace
+          application.trace "** Scan #{name} (round #{round}): #{new_deps.join(', ')}"
+        end
+
+        enhance(new_deps)
+        new_deps.each do |dep|
+          prereq_task = lookup_prerequisite(dep)
+          if invocation_chain.member?(prereq_task)
+            fail "Circular dependency detected by dependency scan of #{name}: " \
+              "#{invocation_chain} => #{prereq_task.name}"
+          end
+          prereq_args = task_args.new_scope(prereq_task.arg_names)
+          prereq_task.invoke_with_call_chain(prereq_args, invocation_chain)
+        end
+      end
+    end
+    private :invoke_scanned_prerequisites
 
     # Format the trace flags for display.
     def format_trace_flags

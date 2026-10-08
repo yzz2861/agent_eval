@@ -82,6 +82,38 @@ specification given above.
     # actions
   end
 
+== Tasks with Scanned Dependencies
+
+Some tasks cannot know their prerequisites when the rakefile is loaded.
+For example, a code generation task may have to read an index file
+produced by one of its prerequisites to learn which files it depends
+on.  Such a task can register a <em>dependency scanner</em> with
++enhance_with_scanner+.
+
+The scanner is a callback, independent of the task's actions.  When the
+task is invoked, Rake first runs the declared prerequisites, then calls
+the scanner, merges the returned names into the task's prerequisites
+(duplicates are coalesced) and runs the newly discovered prerequisites.
+Because completed prerequisites may generate further indexes, the
+scanner is called again afterwards, and discovery repeats until a round
+finds nothing new.  Only then are the task's own actions executed.
+
+  task :index do
+    # generates index.txt, listing the generated sources
+  end
+
+  task codegen: [:index] do
+    # compiles the generated sources
+  end.enhance_with_scanner do |t|
+    File.exist?("index.txt") ? File.readlines("index.txt").map(&:strip) : []
+  end
+
+Discovery is bounded: if the graph does not stabilize after
++max_scan_rounds+ rounds (100 by default), invocation fails.  If a
+discovered edge points back into the current invocation chain, Rake
+raises immediately and reports the concrete cycle.  Parallel
+invocations of the same task share a single discovery and execution.
+
 == File Tasks
 
 Some tasks are designed to create a file from one or more other files.
