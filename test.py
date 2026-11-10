@@ -499,6 +499,247 @@ class ParseUriTest(unittest.TestCase):
         self.assertEqual(otp.issuer, "Big Corp")
 
 
+class ParseUriStrictTest(unittest.TestCase):
+    TOTP_URI = "otpauth://totp/FooCorp:alice?secret=GEZDGNBVGY3TQOJQ&issuer=FooCorp&algorithm=SHA1&digits=6&period=30"
+    HOTP_URI = "otpauth://hotp/FooCorp:alice?secret=GEZDGNBVGY3TQOJQ&issuer=FooCorp&algorithm=SHA256&digits=7&counter=3"
+
+    def test_valid_totp_and_hotp(self):
+        totp = pyotp.parse_uri(self.TOTP_URI, strict=True)
+        self.assertIsInstance(totp, pyotp.TOTP)
+        self.assertEqual(totp.secret, "GEZDGNBVGY3TQOJQ")
+        self.assertEqual(totp.name, "alice")
+        self.assertEqual(totp.issuer, "FooCorp")
+        self.assertEqual(totp.digits, 6)
+        self.assertEqual(totp.interval, 30)
+        self.assertEqual(totp.digest, hashlib.sha1)
+
+        hotp = pyotp.parse_uri(self.HOTP_URI, strict=True)
+        self.assertIsInstance(hotp, pyotp.HOTP)
+        self.assertEqual(hotp.digits, 7)
+        self.assertEqual(hotp.initial_count, 3)
+        self.assertEqual(hotp.digest, hashlib.sha256)
+
+    def test_default_argument_keeps_legacy_behavior(self):
+        # Duplicate parameters are still tolerated when strict is not enabled.
+        otp = pyotp.parse_uri("otpauth://totp?secret=GEZDGNBV&secret=GEZDGNBV")
+        self.assertEqual(otp.secret, "GEZDGNBV")
+        self.assertEqual(
+            pyotp.parse_uri("otpauth://totp?secret=GEZDGNBV&period=15").interval,
+            pyotp.parse_uri("otpauth://totp?secret=GEZDGNBV&period=15", strict=False).interval,
+        )
+
+    def test_duplicate_parameters_rejected(self):
+        duplicates = (
+            "secret=GEZDGNBV&secret=GEZDGNBV",
+            "secret=GEZDGNBV&algorithm=SHA1&algorithm=SHA256",
+            "secret=GEZDGNBV&digits=6&digits=7",
+            "secret=GEZDGNBV&period=30&period=60",
+            "secret=GEZDGNBV&issuer=Foo&issuer=Bar",
+        )
+        for query in duplicates:
+            with self.assertRaises(ValueError):
+                pyotp.parse_uri("otpauth://totp/alice?" + query, strict=True)
+        with self.assertRaises(ValueError):
+            pyotp.parse_uri("otpauth://hotp/alice?secret=GEZDGNBV&counter=1&counter=2", strict=True)
+
+    def test_issuer_case_and_encoding_differences(self):
+        # Case differences are not equivalent: the label and query issuer
+        # must match exactly (after percent-decoding).
+        with self.assertRaises(ValueError):
+            pyotp.parse_uri(
+                "otpauth://totp/FooCorp:alice?secret=GEZDGNBV&issuer=foocorp",
+                strict=True,
+            )
+
+        # Different percent-encodings of the same characters are equivalent.
+        otp = pyotp.parse_uri(
+            "otpauth://totp/Foo%20Corp:alice?secret=GEZDGNBV&issuer=Foo%20Corp",
+            strict=True,
+        )
+        self.assertEqual(otp.issuer, "Foo Corp")
+
+        # A double-encoded value must not be silently decoded twice.
+        with self.assertRaises(ValueError):
+            pyotp.parse_uri(
+                "otpauth://totp/Foo%3A:alice?secret=GEZDGNBV&issuer=Foo%253A",
+                strict=True,
+            )
+        otp = pyotp.parse_uri(
+            "otpauth://totp/Foo%253A:alice?secret=GEZDGNBV&issuer=Foo%253A",
+            strict=True,
+        )
+        self.assertEqual(otp.issuer, "Foo%3A")
+
+    def test_encoded_colon_and_ampersand_confusion(self):
+        # An encoded colon is part of the label text, not the separator.
+        otp = pyotp.parse_uri(
+            "otpauth://totp/Text%3A%20More%20Text:Secret?secret=GEZDGNBV&issuer=Text%3A%20More%20Text",
+            strict=True,
+        )
+        self.assertEqual(otp.issuer, "Text: More Text")
+        self.assertEqual(otp.name, "Secret")
+
+        # An encoded ampersand stays inside the parameter value.
+        otp = pyotp.parse_uri(
+            "otpauth://totp/Foo:alice%26bob?secret=GEZDGNBV&issuer=Foo",
+            strict=True,
+        )
+        self.assertEqual(otp.name, "alice&bob")
+
+        # An encoded ampersand in the label must not split query parameters.
+        otp = pyotp.parse_uri(
+            "otpauth://totp/Foo%26Co:alice?secret=GEZDGNBV&issuer=Foo%26Co",
+            strict=True,
+        )
+        self.assertEqual(otp.issuer, "Foo&Co")
+
+        # A literal ampersand splits parameters, so a duplicated secret is
+        # rejected rather than the second value silently winning.
+        with self.assertRaises(ValueError):
+            pyotp.parse_uri(
+                "otpauth://totp/Foo:alice?secret=GEZDGNBV&secret=MZXW6YQ=",
+                strict=True,
+            )
+
+    def test_negative_and_non_numeric_parameters(self):
+        bad_queries = (
+            "secret=GEZDGNBV&digits=-1",
+            "secret=GEZDGNBV&digits=abc",
+            "secret=GEZDGNBV&digits=6.5",
+            "secret=GEZDGNBV&period=0",
+            "secret=GEZDGNBV&period=-30",
+            "secret=GEZDGNBV&period=abc",
+            "secret=GEZDGNBV&period=86401",
+            "secret=GEZDGNBV&counter=-1",
+            "secret=GEZDGNBV&counter=x",
+        )
+        for query in bad_queries:
+            with self.assertRaises(ValueError):
+                pyotp.parse_uri("otpauth://totp/alice?" + query, strict=True)
+        with self.assertRaises(ValueError):
+            pyotp.parse_uri("otpauth://hotp/alice?secret=GEZDGNBV&counter=-1", strict=True)
+
+    def test_missing_counter_for_hotp(self):
+        with self.assertRaises(ValueError):
+            pyotp.parse_uri("otpauth://hotp/alice?secret=GEZDGNBV", strict=True)
+        otp = pyotp.parse_uri("otpauth://hotp/alice?secret=GEZDGNBV&counter=0", strict=True)
+        self.assertEqual(otp.initial_count, 0)
+
+    def test_strict_structure_checks(self):
+        bad_uris = (
+            "http://hello.com",
+            "otpauth://derp/alice?secret=GEZDGNBV",
+            "otpauth://TOTP/alice?secret=GEZDGNBV",
+            "otpauth://user@totp/alice?secret=GEZDGNBV",
+            "otpauth://totp:80/alice?secret=GEZDGNBV",
+            "otpauth://totp/alice?secret=GEZDGNBV#frag",
+            "otpauth://totp?secret=GEZDGNBV",
+            "otpauth://totp/?secret=GEZDGNBV",
+            "otpauth://totp/%20?secret=GEZDGNBV",
+            "otpauth://totp/Foo:?secret=GEZDGNBV&issuer=Foo",
+            "otpauth://totp/:alice?secret=GEZDGNBV",
+        )
+        for uri in bad_uris:
+            with self.assertRaises(ValueError):
+                pyotp.parse_uri(uri, strict=True)
+
+    def test_secret_validation(self):
+        bad_secrets = (
+            "",
+            "GEZDGNBV0",
+            "GEZDGNBV=",
+            "GEZDGNBV====",
+            "AAA",
+            "GEZD GNBV",
+            "GEZDGNBV%00",
+        )
+        for secret in bad_secrets:
+            with self.assertRaises(ValueError):
+                pyotp.parse_uri("otpauth://totp/alice?secret=" + secret, strict=True)
+
+        # Lowercase Base32 is accepted; unpadded and correctly padded work.
+        for secret in ("gezdgnbv", "JBSWY3DP", "MZXW6===", "MZXW6"):
+            otp = pyotp.parse_uri("otpauth://totp/alice?secret=" + secret, strict=True)
+            self.assertEqual(otp.secret, secret)
+
+    def test_algorithm_normalization(self):
+        for value, digest in (
+            ("sha1", hashlib.sha1),
+            ("Sha256", hashlib.sha256),
+            ("SHA512", hashlib.sha512),
+        ):
+            otp = pyotp.parse_uri(
+                "otpauth://totp/alice?secret=GEZDGNBV&algorithm=" + value,
+                strict=True,
+            )
+            self.assertEqual(otp.digest, digest)
+        with self.assertRaises(ValueError):
+            pyotp.parse_uri("otpauth://totp/alice?secret=GEZDGNBV&algorithm=md5", strict=True)
+
+    def test_label_control_characters_rejected(self):
+        encoded_controls = ("%00", "%0D", "%0A", "%E2%80%8E", "%E2%80%8F", "%E2%80%AE", "%E2%81%A6")
+        for encoded in encoded_controls:
+            with self.assertRaises(ValueError):
+                pyotp.parse_uri(
+                    "otpauth://totp/Foo:alice" + encoded + "?secret=GEZDGNBV&issuer=Foo",
+                    strict=True,
+                )
+            with self.assertRaises(ValueError):
+                pyotp.parse_uri(
+                    "otpauth://totp/Foo" + encoded + ":alice?secret=GEZDGNBV&issuer=Foo",
+                    strict=True,
+                )
+
+    def test_oversized_uri_and_label(self):
+        prefix = "otpauth://totp/"
+        suffix = "?secret=GEZDGNBV"
+        long_label = "a" * (pyotp.MAX_URI_LENGTH - len(prefix) - len(suffix) + 1)
+        long_uri = prefix + long_label + suffix
+        self.assertEqual(len(long_uri), pyotp.MAX_URI_LENGTH + 1)
+        with self.assertRaises(ValueError):
+            pyotp.parse_uri(long_uri, strict=True)
+
+        # The largest URI at exactly the limit is accepted.
+        max_label = "a" * (pyotp.MAX_URI_LENGTH - len(prefix) - len(suffix))
+        max_uri = prefix + max_label + suffix
+        self.assertEqual(len(max_uri), pyotp.MAX_URI_LENGTH)
+        otp = pyotp.parse_uri(max_uri, strict=True)
+        self.assertEqual(otp.name, max_label)
+
+    def test_round_trip(self):
+        sources = (
+            pyotp.TOTP("GEZDGNBVGY3TQOJQ", name="alice", issuer="FooCorp"),
+            pyotp.TOTP(
+                "c7uxuqhgflpw7oruedmglbrk7u6242vb",
+                digits=8,
+                interval=60,
+                digest=hashlib.sha256,
+                name="baco@peperina",
+                issuer="Foo Corp",
+            ),
+            pyotp.HOTP(
+                "wrn3pqx5uqxqvnqr",
+                digits=7,
+                digest=hashlib.sha512,
+                name="mark@percival",
+                issuer="FooCorp!",
+                initial_count=12,
+            ),
+        )
+        for source in sources:
+            uri = source.provisioning_uri()
+            parsed = pyotp.parse_uri(uri, strict=True)
+            self.assertEqual(parsed.provisioning_uri(), uri)
+
+        # Labels containing literal colons and ampersands survive round-trip.
+        tricky = pyotp.TOTP("GEZDGNBV", name="a:b&c", issuer="Text: More Text")
+        uri = tricky.provisioning_uri()
+        parsed = pyotp.parse_uri(uri, strict=True)
+        self.assertEqual(parsed.name, "a:b&c")
+        self.assertEqual(parsed.issuer, "Text: More Text")
+        self.assertEqual(parsed.provisioning_uri(), uri)
+
+
 class Timecop(object):
     """
     Half-assed clone of timecop.rb, just enough to pass our tests.
