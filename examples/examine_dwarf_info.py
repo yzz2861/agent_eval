@@ -1,0 +1,47 @@
+#-------------------------------------------------------------------------------
+# elftools example: examine_dwarf_info.py
+#
+# An example of examining information in the .debug_info section of an ELF file.
+#
+# Eli Bendersky (eliben@gmail.com)
+# This code is in the public domain
+#-------------------------------------------------------------------------------
+import sys
+from pathlib import Path
+
+from elftools.elf.elffile import ELFFile
+
+
+def process_file(filename):
+    print('Processing file:', filename)
+    with open(filename, 'rb') as f:
+        elffile = ELFFile(f)
+
+        if not elffile.has_dwarf_info():
+            print('  file has no DWARF info')
+            return
+
+        # get_dwarf_info returns a DWARFInfo context object, which is the
+        # starting point for all DWARF-based processing in pyelftools.
+        dwarfinfo = elffile.get_dwarf_info()
+
+        for CU in dwarfinfo.iter_CUs():
+            # DWARFInfo allows to iterate over the compile units contained in
+            # the .debug_info section. CU is a CompileUnit object, with some
+            # computed attributes (such as its offset in the section) and
+            # a header which conforms to the DWARF standard. The access to
+            # header elements is, as usual, via item-lookup.
+            print('  Found a compile unit at offset {}, length {}'.format(
+                CU.cu_offset, CU['unit_length']))
+
+            # The first DIE in each compile unit describes it.
+            top_DIE = CU.get_top_DIE()
+            print(f'    Top DIE with tag={top_DIE.tag}')
+
+            # We're interested in the filename...
+            print(f'    name={Path(top_DIE.get_full_path()).as_posix()}')
+
+if __name__ == '__main__':
+    if sys.argv[1] == '--test':
+        for filename in sys.argv[2:]:
+            process_file(filename)

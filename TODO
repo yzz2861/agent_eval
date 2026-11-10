@@ -1,0 +1,34 @@
+New version
+-----------
+
+* Update elftools/__init__.py
+* Tag in git (v0.xx)
+
+Preparing a new release
+-----------------------
+
+* Make sure new version was updated everywhere appropriate
+* Run ``uv build`` or ``python3 -m build --sdist --wheel``
+* Untar the created ``dist/pyelftools-x.y.tar.gz`` and make sure
+  everything looks ok
+* Distribute (see below)
+* Tag new version in git
+* Test with ``pip install`` from some new virtualenv
+
+Distribution
+------------
+
+1. First install Twine (https://packaging.python.org/tutorials/packaging-projects/)
+   into a venv, unless already done in ~/bin/venv/...
+2. Run ``uv publish`` or ``python3 -m twine upload dist/*``, but make sure
+   package was already built and the updated whl and tarball are in dist/.
+
+Credentials for PyPI are stored in ~/.pypirc
+
+construct
+---------
+
+construct seems to be maintained again - they also backported my Python 3 fixes.
+Theoretically, I can remove construct from pyelftools and use it as a dependency
+instead. I don't really have time to play with this now, but may do so in the
+future.

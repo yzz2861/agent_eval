@@ -1,0 +1,603 @@
+#!/usr/bin/env python
+#-------------------------------------------------------------------------------
+# scripts/dwarfdump.py
+#
+# A clone of 'llvm-dwarfdump' in Python, based on the pyelftools library
+# Roughly corresponding to v15
+#
+# Sources under https://github.com/llvm/llvm-project/tree/main/llvm/tools/llvm-dwarfdump
+#
+# Utterly incompatible with 64-bit DWARF or DWARFv2 targeting a 64-bit machine.
+# Also incompatible with machines that have a selector/segment in the address.
+#
+# Eli Bendersky (eliben@gmail.com)
+# This code is in the public domain
+#-------------------------------------------------------------------------------
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+import traceback
+from typing import IO, TYPE_CHECKING, overload
+
+# For running from development directory. It should take precedence over the
+# installed pyelftools.
+sys.path.insert(0, '.')
+
+import elftools.dwarf.enums as e
+import elftools.dwarf.ranges
+from elftools import __version__
+from elftools.common.exceptions import DWARFError, ELFError
+from elftools.common.utils import bytes2str
+from elftools.dwarf.datatype_cpp import describe_cpp_datatype
+from elftools.dwarf.descriptions import describe_reg_name
+from elftools.dwarf.dwarf_expr import DWARFExprOp, DWARFExprParser
+from elftools.dwarf.locationlists import BaseAddressEntry as LocBaseAddressEntry
+from elftools.dwarf.locationlists import LocationEntry, LocationExpr, LocationParser
+from elftools.dwarf.ranges import (
+    RangeEntry,  # ranges.BaseAddressEntry collides with the one above
+)
+from elftools.elf.elffile import ELFFile
+
+if TYPE_CHECKING:
+    from elftools.dwarf.compileunit import CompileUnit
+    from elftools.dwarf.die import DIE
+
+
+# ------------------------------
+# ------------------------------
+
+def _get_cu_base(cu: CompileUnit):
+    top_die = cu.get_top_DIE()
+    attr = top_die.attributes
+    if 'DW_AT_low_pc' in attr:
+        return attr['DW_AT_low_pc'].value
+    elif 'DW_AT_entry_pc' in attr:
+        return attr['DW_AT_entry_pc'].value
+    else:
+        raise ValueError("Can't find the base IP (low_pc) for a CU")
+
+def _addr_str_length(die: DIE) -> int:
+    return die.cu.header.address_size*2
+
+def _DIE_name(die: DIE) -> str:
+    if 'DW_AT_name' in die.attributes:
+        return bytes2str(die.attributes['DW_AT_name'].value)
+    elif 'DW_AT_linkage_name' in die.attributes:
+        return bytes2str(die.attributes['DW_AT_linkage_name'].value)
+    else:
+        raise DWARFError()
+
+def _DIE_linkage_name(die: DIE) -> str:
+    if 'DW_AT_linkage_name' in die.attributes:
+        return bytes2str(die.attributes['DW_AT_linkage_name'].value)
+    elif 'DW_AT_name' in die.attributes:
+        return bytes2str(die.attributes['DW_AT_name'].value)
+    else:
+        raise DWARFError()
+
+@overload
+def _safe_DIE_name(die: DIE, default: str) -> str: ...
+@overload
+def _safe_DIE_name(die: DIE) -> str | None: ...
+def _safe_DIE_name(die: DIE, default: str | None = None) -> str | None:
+    if 'DW_AT_name' in die.attributes:
+        return bytes2str(die.attributes['DW_AT_name'].value)
+    elif 'DW_AT_linkage_name' in die.attributes:
+        return bytes2str(die.attributes['DW_AT_linkage_name'].value)
+    else:
+        return default
+
+@overload
+def _safe_DIE_linkage_name(die: DIE, default: str) -> str: ...
+@overload
+def _safe_DIE_linkage_name(die: DIE) -> str | None: ...
+def _safe_DIE_linkage_name(die: DIE, default: str | None = None) -> str | None:
+    if 'DW_AT_linkage_name' in die.attributes:
+        return bytes2str(die.attributes['DW_AT_linkage_name'].value)
+    elif 'DW_AT_name' in die.attributes:
+        return bytes2str(die.attributes['DW_AT_name'].value)
+    else:
+        return default
+
+def _desc_ref(attr, die: DIE, extra: str = '') -> str:
+    if extra:
+        extra = f" \"{extra}\""
+    if attr.form == 'DW_FORM_ref_addr':
+        return f"0x{attr.value:016x}{extra}"
+    if attr.form == 'DW_FORM_ref_sig8':
+        return f"0x{attr.value:016x}"
+    # TODO: leading zeros on the addend to CU - sometimes present, sometimes not.
+    # Check by the LLVM sources.
+    return f"cu + 0x{attr.raw_value:04x} => {{0x{die.cu.cu_offset + attr.raw_value:08x}}}{extra}"
+
+def _desc_data(attr, die: DIE) -> str:
+    """ Hex with length driven by form
+    """
+    len = int(attr.form[12:]) * 2
+    return f"0x{attr.value:0{len}x}"
+
+def _desc_strx(attr, die: DIE) -> str:
+    return "indexed ({:08x}) string = \"{}\"".format(attr.raw_value, bytes2str(attr.value).replace("\\", "\\\\"))
+
+FORM_DESCRIPTIONS = {
+    'DW_FORM_string': lambda attr, die: "\"{}\"".format(bytes2str(attr.value).replace("\\", "\\\\")),
+    'DW_FORM_strp': lambda attr, die: " .debug_str[0x{:08x}] = \"{}\"".format(attr.raw_value, bytes2str(attr.value).replace("\\", "\\\\")),
+    'DW_FORM_strx1': _desc_strx,
+    'DW_FORM_strx2': _desc_strx,
+    'DW_FORM_strx3': _desc_strx,
+    'DW_FORM_strx4': _desc_strx,
+    'DW_FORM_line_strp': lambda attr, die: ".debug_line_str[0x{:08x}] = \"{}\"".format(attr.raw_value, bytes2str(attr.value).replace("\\", "\\\\")),
+    'DW_FORM_flag_present': lambda attr, die: "true",
+    'DW_FORM_flag': lambda attr, die: f"0x{int(attr.value):02x}",
+    'DW_FORM_addr': lambda attr, die: f"0x{attr.value:0{_addr_str_length(die)}x}",
+    'DW_FORM_addrx': lambda attr, die: (
+        f"indexed ({attr.raw_value:08x}) address = "
+        f"0x{attr.value:0{_addr_str_length(die)}x}"
+    ),
+    'DW_FORM_data1': _desc_data,
+    'DW_FORM_data2': _desc_data,
+    'DW_FORM_data4': _desc_data,
+    'DW_FORM_data8': _desc_data,
+    'DW_FORM_block1': lambda attr, die: "<0x{:02x}> {} ".format(len(attr.value), bytes(attr.value).hex(" ")),
+    'DW_FORM_block2': lambda attr, die: "<0x{:04x}> {} ".format(len(attr.value), bytes(attr.value).hex(" ")),
+    'DW_FORM_block4': lambda attr, die: "<0x{:08x}> {} ".format(len(attr.value), bytes(attr.value).hex(" ")),
+    'DW_FORM_ref': _desc_ref,
+    'DW_FORM_ref1': _desc_ref, 'DW_FORM_ref2': _desc_ref,
+    'DW_FORM_ref4': _desc_ref, 'DW_FORM_ref8': _desc_ref,
+    'DW_FORM_sec_offset': lambda attr,die:  f"0x{attr.value:08x}",
+    'DW_FORM_exprloc': lambda attr, die: _desc_expression(attr.value, die)
+}
+
+def _desc_enum(attr, enum: dict[str, int]) -> str:
+    """For attributes like DW_AT_language, physically
+    int, logically an enum
+    """
+    return next((k for (k, v) in enum.items() if v == attr.value), str(attr.value))
+
+def _cu_comp_dir(cu: CompileUnit) -> str:
+    return bytes2str(cu.get_top_DIE().attributes['DW_AT_comp_dir'].value)
+
+def _desc_decl_file(attr, die: DIE) -> str:
+    # Filename/dirname arrays are 0 based in DWARFv5
+    cu = die.cu
+    if not hasattr(cu, "_lineprogram"):
+        cu._lineprogram = die.dwarfinfo.line_program_for_CU(cu)
+    ver5 = cu._lineprogram.header.version >= 5
+    file_index = attr.value if ver5 else attr.value-1
+    if cu._lineprogram and file_index >= 0 and file_index < len(cu._lineprogram.header.file_entry):
+        file_entry = cu._lineprogram.header.file_entry[file_index]
+        dir_index = file_entry.dir_index if ver5 else file_entry.dir_index - 1
+        includes = cu._lineprogram.header.include_directory
+        if dir_index >= 0:
+            dir = bytes2str(includes[dir_index])
+            if dir.startswith('.'):
+                dir = os.path.join(_cu_comp_dir(cu), dir)
+        else:
+            dir = _cu_comp_dir(cu)
+        file_name = bytes2str(file_entry.name)
+    else:
+        raise DWARFError("Invalid source filename entry index in a decl_file attribute")
+    return f"\"{os.path.join(dir, file_name)}\""
+
+
+def _desc_ranges(attr, die: DIE) -> str:
+    di = die.cu.dwarfinfo
+    if not hasattr(di, '_rnglists'):
+        di._rangelists = di.range_lists()
+    rangelist = di._rangelists.get_range_list_at_offset(attr.value, die.cu)
+    base_ip = _get_cu_base(die.cu)
+    lines = []
+    addr_str_len = die.cu.header.address_size*2
+    for entry in rangelist:
+        if isinstance(entry, RangeEntry):
+            begin = (0 if entry.is_absolute else base_ip) + entry.begin_offset
+            end = (0 if entry.is_absolute else base_ip) + entry.end_offset
+            lines.append(
+                f"                 [0x{begin:0{addr_str_len}x}, "
+                f"0x{end:0{addr_str_len}x})"
+            )
+        elif isinstance(entry, elftools.dwarf.ranges.BaseAddressEntry):
+            base_ip = entry.base_address
+        else:
+            raise NotImplementedError("Unknown object in a range list")
+    prefix = f"indexed (0x{attr.raw_value:x}) rangelist = " if attr.form == 'DW_FORM_rnglistx' else ''
+    return (f"{prefix}0x{attr.value:08x}\n") + "\n".join(lines)
+
+def _desc_locations(attr, die: DIE) -> str:
+    cu = die.cu
+    di = cu.dwarfinfo
+    if not hasattr(di, '_loclists'):
+        di._loclists = di.location_lists()
+    if not hasattr(di, '_locparser'):
+        di._locparser = LocationParser(di._loclists)
+    loclist = di._locparser.parse_from_attribute(attr, cu.header.version, die)
+    if isinstance(loclist, LocationExpr):
+        return _desc_expression(loclist.loc_expr, die)
+    else:
+        base_ip = _get_cu_base(cu)
+        lines = []
+        addr_str_len = die.cu.header.address_size*2
+        for entry in loclist:
+            if isinstance(entry, LocationEntry):
+                begin = (0 if entry.is_absolute else base_ip) + entry.begin_offset
+                end = (0 if entry.is_absolute else base_ip) + entry.end_offset
+                lines.append(
+                    f"                 [0x{begin:0{addr_str_len}x}, "
+                    f"0x{end:0{addr_str_len}x}): "
+                    f"{_desc_expression(entry.loc_expr, die)}"
+                )
+            elif isinstance(entry, LocBaseAddressEntry):
+                base_ip = entry.base_address
+            else:
+                raise NotImplementedError("Unknown object in a location list")
+        prefix = f"indexed (0x{attr.raw_value:x}) loclist = " if attr.form == 'DW_FORM_loclistx' else ''
+        return (f"{prefix}0x{attr.value:08x}:\n") + "\n".join(lines)
+
+# By default, numeric arguments are spelled in hex with a leading 0x
+def _desc_operationarg(s: str | int | list, cu: CompileUnit) -> str:
+    if isinstance(s, str):
+        return s
+    elif isinstance(s, int):
+        return hex(s)
+    elif isinstance(s, list): # Could be a blob (list of ints), could be a subexpression
+        if s and isinstance(s[0], DWARFExprOp): # Subexpression
+            return '(' + '; '.join(_desc_operation(op.op, op.op_name, op.args, cu) for op in s) + ')'
+        else:
+            return " ".join((hex(len(s)), *(f"0x{b:02x}" for b in s)))
+
+def _arch(cu: CompileUnit) -> str:
+    return cu.dwarfinfo.config.machine_arch
+
+def _desc_reg(reg_no: int, cu: CompileUnit) -> str:
+    reg_name = describe_reg_name(reg_no, _arch(cu), False)
+    return reg_name.upper() if reg_name else ""
+
+def _desc_operation(op, op_name: str, args, cu: CompileUnit) -> str:
+    # Not sure about regx(regno) and bregx(regno, offset)
+    if 0x50 <= op <= 0x6f: # reg0...reg31 - decode reg name
+        return op_name + " " + _desc_reg(op - 0x50, cu)
+    elif 0x70 <= op <= 0x8f: # breg0...breg31(offset) - also decode reg name
+        return f'{op_name} {_desc_reg(op - 112, cu)}{int(args[0]):+}'
+    elif op_name in ('DW_OP_fbreg', 'DW_OP_bra', 'DW_OP_skip', 'DW_OP_consts', ): # Argument is decimal with a leading sign
+        return op_name + ' ' + f"{int(args[0]):+}"
+    elif op_name in ('DW_OP_const1s', 'DW_OP_const2s'): # Argument is decimal without a leading sign
+        return op_name + ' ' + f"{int(args[0])}"
+    elif op_name in ('DW_OP_entry_value', 'DW_OP_GNU_entry_value'): # No space between opcode and args
+        return op_name + _desc_operationarg(args[0], cu)
+    elif op_name == 'DW_OP_regval_type': # Arg is a DIE pointer
+        return f"{op_name} {_desc_reg(args[0], cu)} (0x{args[1]:08x} -> 0x{args[1] + cu.cu_offset:08x}) \"{_DIE_name(cu._get_cached_DIE(args[1] + cu.cu_offset))}\""
+    elif op_name == 'DW_OP_convert': # Arg is a DIE pointer
+        return f"{op_name} (0x{args[0]:08x} -> 0x{args[0] + cu.cu_offset:08x}) \"{_DIE_name(cu._get_cached_DIE(args[0] + cu.cu_offset))}\""
+    elif args:
+        return op_name + ' ' + ', '.join(_desc_operationarg(s, cu) for s in args)
+    else:
+        return op_name
+
+# TODO: remove this once dwarfdump catches up
+UNSUPPORTED_OPS = (
+    'DW_OP_implicit_pointer',
+    'DW_OP_deref_type',
+    'DW_OP_GNU_parameter_ref',
+    'DW_OP_GNU_deref_type',
+    'DW_OP_GNU_implicit_pointer',
+    'DW_OP_GNU_convert',
+    'DW_OP_GNU_regval_type')
+
+def _desc_expression(expr, die: DIE) -> str:
+    cu = die.cu
+    if not hasattr(cu, '_exprparser'):
+        cu._exprparser = DWARFExprParser(cu.structs)
+
+    parsed = cu._exprparser.parse_expr(expr)
+    # TODO: remove this once dwarfdump catches up
+    first_unsupported = next((i for (i, op) in enumerate(parsed) if op.op_name in UNSUPPORTED_OPS), None)
+    if first_unsupported is None:
+        lines = [_desc_operation(op.op, op.op_name, op.args, cu) for op in parsed]
+    else:
+        lines = [_desc_operation(op.op, op.op_name, op.args, cu) for op in parsed[0:first_unsupported]]
+        start_of_unparsed = parsed[first_unsupported].offset
+        lines.append("<decoding error> " + " ".join(f"{b:02x}" for b in expr[start_of_unparsed:]))
+    return ", ".join(lines)
+
+def _desc_datatype(attr, die: DIE) -> str:
+    """Oy vey
+    """
+    return _desc_ref(attr, die, describe_cpp_datatype(die))
+
+def _get_origin_name(die: DIE) -> str:
+    func_die = die.get_DIE_from_attribute('DW_AT_abstract_origin')
+    name = _safe_DIE_linkage_name(func_die, '')
+    if not name:
+        if 'DW_AT_specification' in func_die.attributes:
+            name = _DIE_linkage_name(func_die.get_DIE_from_attribute('DW_AT_specification'))
+        elif 'DW_AT_abstract_origin' in func_die.attributes:
+            return _get_origin_name(func_die)
+    return name
+
+def _desc_origin(attr, die: DIE) -> str:
+    return _desc_ref(attr, die, _get_origin_name(die))
+
+def _desc_spec(attr, die: DIE) -> str:
+    return _desc_ref(attr, die,
+        _DIE_linkage_name(die.get_DIE_from_attribute('DW_AT_specification')))
+
+def _desc_value(attr, die: DIE) -> str:
+    return str(attr.value)
+
+ATTR_DESCRIPTIONS = {
+    'DW_AT_language': lambda attr, die: _desc_enum(attr, e.ENUM_DW_LANG),
+    'DW_AT_encoding': lambda attr, die: _desc_enum(attr, e.ENUM_DW_ATE),
+    'DW_AT_accessibility': lambda attr, die: _desc_enum(attr, e.ENUM_DW_ACCESS),
+    'DW_AT_inline': lambda attr, die: _desc_enum(attr, e.ENUM_DW_INL),
+    'DW_AT_calling_convention': lambda attr, die: _desc_enum(attr, e.ENUM_DW_CC),
+    'DW_AT_decl_file': _desc_decl_file,
+    'DW_AT_decl_line': _desc_value,
+    'DW_AT_ranges': _desc_ranges,
+    'DW_AT_location': _desc_locations,
+    'DW_AT_data_member_location': lambda attr, die: _desc_data(attr, die) if attr.form.startswith('DW_FORM_data') else _desc_locations(attr, die),
+    'DW_AT_frame_base': _desc_locations,
+    'DW_AT_type': _desc_datatype,
+    'DW_AT_call_line': _desc_value,
+    'DW_AT_call_file': _desc_decl_file,
+    'DW_AT_abstract_origin': _desc_origin,
+    'DW_AT_specification': _desc_spec,
+    'DW_AT_call_site_value': lambda attr, die: _desc_expression(attr.value, die) if attr.form.startswith('DW_FORM_block') else _desc_locations(attr, die),
+    'DW_AT_GNU_call_site_value': lambda attr, die: _desc_expression(attr.value, die) if attr.form.startswith('DW_FORM_block') else _desc_locations(attr, die),
+}
+
+class ReadElf:
+    """ dump_xxx is used to dump the respective section.
+    Mimics the output of dwarfdump with --verbose
+    """
+    def __init__(self, filename: str, file: IO[bytes], output: IO[str]) -> None:
+        """ file:
+                stream object with the ELF file to read
+
+            output:
+                output stream to write to
+        """
+        self.elffile = ELFFile(file)
+        self.output = output
+        self._dwarfinfo = self.elffile.get_dwarf_info()
+        arches = {"EM_386": "i386", "EM_X86_64": "x86-64", "EM_ARM": "littlearm", "EM_AARCH64": "littleaarch64", "EM_LOONGARCH": "loongarch", "EM_RISCV": "littleriscv", "EM_MIPS": "mips", "EM_TI_C2000": "unknown"}
+        arch = arches[self.elffile['e_machine']]
+        bits = self.elffile.elfclass
+        self._emitline(f"{filename}:\tfile format elf{int(bits)}-{arch}")
+
+    def _emit(self, s: str = '') -> None:
+        """ Emit an object to output
+        """
+        self.output.write(str(s))
+
+    def _emitline(self, s: str = '') -> None:
+        """ Emit an object to output, followed by a newline
+        """
+        self.output.write(str(s).rstrip() + '\n')
+
+    def dump_info(self) -> None:
+        # TODO: DWARF64 will cause discrepancies in hex offset sizes
+        self._emitline(".debug_info contents:")
+        for cu in self._dwarfinfo.iter_CUs():
+            if cu.header.version >= 5:
+                unit_type_str = f" unit_type = {cu.header.unit_type},"
+            else:
+                unit_type_str = ''
+
+            next_unit = (
+                cu.cu_offset
+                + (4 if cu.structs.dwarf_format == 32 else 12)
+                + cu.header.unit_length
+            )
+            self._emitline(
+                f"0x{cu.cu_offset:08x}: Compile Unit: "
+                f"length = 0x{cu.header.unit_length:08x}, "
+                f"format = DWARF{cu.structs.dwarf_format:d}, "
+                f"version = 0x{cu.header.version:04x},{unit_type_str} "
+                f"abbr_offset = 0x{cu.header.debug_abbrev_offset:04x}, "
+                f"addr_size = 0x{cu.header.address_size:02x} "
+                f"(next unit at 0x{next_unit:08x})"
+            )
+            self._emitline()
+            parent = cu.get_top_DIE()
+            for die in cu.iter_DIEs():
+                if die.get_parent() == parent:
+                    parent = die
+                if not die.is_null():
+                    tag = (
+                        die.tag
+                        if isinstance(die.tag, str)
+                        else f"DW_TAG_unknown_{die.tag:x}"
+                    )
+                    child_marker = '*' if die.has_children else ''
+                    die_parent = die.get_parent()
+                    parent_offset = (
+                        f'(0x{die_parent.offset:08x})'
+                        if die_parent is not None
+                        else ''
+                    )
+                    self._emitline(
+                        f"0x{die.offset:08x}: {tag} [{die.abbrev_code:d}] "
+                        f"{child_marker} {parent_offset}"
+                    )
+                    for attr_name in die.attributes:
+                        attr = die.attributes[attr_name]
+                        self._emitline("              {} [{}]	({})".format(
+                            attr_name if isinstance(attr_name, str) else f"DW_AT_unknown_{attr_name:x}",
+                            attr.form,
+                            self.describe_attr_value(die, attr)))
+                else:
+                    self._emitline(f"0x{die.offset:08x}: NULL")
+                    parent = die.get_parent()
+                self._emitline()
+
+    def describe_attr_value(self, die: DIE, attr) -> str:
+        """This describes the attribute value in the way that's compatible
+        with llvm_dwarfdump. Somewhat duplicates the work of describe_attr_value() in descriptions
+        """
+        if attr.name in ATTR_DESCRIPTIONS:
+            return ATTR_DESCRIPTIONS[attr.name](attr, die)
+        elif attr.form in FORM_DESCRIPTIONS:
+            return FORM_DESCRIPTIONS[attr.form](attr, die)
+        else:
+            return str(attr.value)
+
+    def dump_loc(self) -> None:
+        pass
+
+    def dump_loclists(self) -> None:
+        pass
+
+    def dump_ranges(self) -> None:
+        pass
+
+    def dump_v4_rangelist(self, rangelist, cu_map) -> None:
+        cu = cu_map[rangelist[0].entry_offset]
+        addr_str_len = cu.header.address_size*2
+        base_ip = _get_cu_base(cu)
+        for entry in rangelist:
+            if isinstance(entry, RangeEntry):
+                begin = (0 if entry.is_absolute else base_ip) + entry.begin_offset
+                end = (0 if entry.is_absolute else base_ip) + entry.end_offset
+                self._emitline(
+                    f"[0x{begin:0{addr_str_len}x}, 0x{end:0{addr_str_len}x})"
+                )
+            elif isinstance(entry, elftools.dwarf.ranges.BaseAddressEntry):
+                base_ip = entry.base_address
+            else:
+                raise NotImplementedError("Unknown object in a range list")
+
+    def dump_rnglists(self) -> None:
+        self._emitline(".debug_rnglists contents:")
+        ranges_sec = self._dwarfinfo.range_lists()
+        assert ranges_sec is not None
+        if ranges_sec.version < 5:
+            return
+
+        cu_map = {die.attributes['DW_AT_ranges'].value : cu # Dict from range offset to home CU
+            for cu in self._dwarfinfo.iter_CUs()
+            for die in cu.iter_DIEs()
+            if 'DW_AT_ranges' in die.attributes}
+
+        for cu in ranges_sec.iter_CUs():
+            self._emitline(
+                f"0x{cu.cu_offset:08x}: range list header: "
+                f"length = 0x{cu.unit_length:08x}, "
+                f"format = DWARF{64 if cu.is64 else 32:d}, "
+                f"version = 0x{cu.version:04x}, "
+                f"addr_size = 0x{cu.address_size:02x}, "
+                f"seg_size = 0x{cu.segment_selector_size:02x}, "
+                f"offset_entry_count = 0x{cu.offset_count:08x}"
+            )
+            self._emitline("ranges:")
+            if cu.offset_count > 0:
+                rangelists = [ranges_sec.get_range_list_at_offset_ex(offset) for offset in cu.offsets]
+            else:
+                rangelists = list(ranges_sec.iter_CU_range_lists_ex(cu))
+            # We have to parse it completely before dumping, because dwarfdump aligns columns,
+            # no way to do that without some lookahead
+            max_type_len = max(len(entry.entry_type) for rangelist in rangelists for entry in rangelist)
+            for rangelist in rangelists:
+                self.dump_v5_rangelist(rangelist, cu_map, max_type_len)
+
+    def dump_v5_rangelist(self, rangelist, cu_map, max_type_len):
+        cu = cu_map[rangelist[0].entry_offset]
+        addr_str_len = cu.header.address_size*2
+        base_ip = _get_cu_base(cu)
+        for entry in rangelist:
+            type = entry.entry_type
+            self._emit(f"0x{entry.entry_offset:08x}: [{type.ljust(max_type_len)}]:  ")
+            if type == 'DW_RLE_base_address':
+                base_ip = entry.address
+                self._emitline(f"0x{base_ip:0{addr_str_len}x}")
+            elif type == 'DW_RLE_offset_pair':
+                self._emitline(
+                    f"0x{entry.start_offset:0{addr_str_len}x}, "
+                    f"0x{entry.end_offset:0{addr_str_len}x} => "
+                    f"[0x{entry.start_offset + base_ip:0{addr_str_len}x}, "
+                    f"0x{entry.end_offset + base_ip:0{addr_str_len}x})"
+                )
+            elif type == 'DW_RLE_start_length':
+                self._emitline(
+                    f"0x{entry.start_address:0{addr_str_len}x}, "
+                    f"0x{entry.length:0{addr_str_len}x} => "
+                    f"[0x{entry.start_address:0{addr_str_len}x}, "
+                    f"0x{entry.start_address + entry.length:0{addr_str_len}x})"
+                )
+            elif type == 'DW_RLE_start_end':
+                self._emitline(
+                    f"0x{entry.start_address:0{addr_str_len}x}, "
+                    f"0x{entry.end_address:0{addr_str_len}x} => "
+                    f"[0x{entry.start_address:0{addr_str_len}x}, "
+                    f"0x{entry.end_address:0{addr_str_len}x})"
+                )
+            else:
+                raise NotImplementedError()
+        last = rangelist[-1]
+        self._emitline(f"0x{last.entry_offset + last.entry_length:08x}: [DW_RLE_end_of_list ]")
+
+SCRIPT_DESCRIPTION = 'Display information about the contents of ELF format files'
+VERSION_STRING = f'%(prog)s: based on pyelftools {__version__}'
+
+def main(stream: IO[str] | None = None) -> None:
+    # parse the command-line arguments and invoke ReadElf
+    argparser = argparse.ArgumentParser(
+            usage='usage: %(prog)s [options] <elf-file>',
+            description=SCRIPT_DESCRIPTION,
+            add_help=False,
+            prog='readelf.py')
+    argparser.add_argument('file',
+            nargs='?', default=None,
+            help='ELF file to parse')
+    argparser.add_argument('-H', '--help',
+            action='store_true', dest='help',
+            help='Display this information')
+    argparser.add_argument('--verbose',
+            action='store_true', dest='verbose',
+            help=('For compatibility with dwarfdump. Non-verbose mode is not implemented.'))
+
+    # Section dumpers
+    sections = ('info', 'loclists', 'rnglists') # 'loc', 'ranges' not implemented yet
+    for section in sections:
+        argparser.add_argument(f'--debug-{section}',
+            action='store_true', dest=section,
+            help=(f'Display the contents of DWARF debug_{section} section.'))
+
+    args = argparser.parse_args()
+
+    if args.help or not args.file:
+        argparser.print_help()
+        sys.exit(0)
+
+    # A compatibility hack on top of a compatibility hack :(
+    del e.ENUM_DW_TAG["DW_TAG_template_type_param"]
+    del e.ENUM_DW_TAG["DW_TAG_template_value_param"]
+    e.ENUM_DW_TAG['DW_TAG_template_type_parameter'] = 0x2f
+    e.ENUM_DW_TAG['DW_TAG_template_value_parameter'] = 0x30
+    del e.ENUM_DW_TAG['DW_TAG_lo_user'] # dwarfdump dumps it as unknown
+
+    with open(args.file, 'rb') as file:
+        try:
+            readelf = ReadElf(args.file, file, stream or sys.stdout)
+            if args.info:
+                readelf.dump_info()
+            if args.loclists:
+                readelf.dump_loclists()
+            if args.rnglists:
+                readelf.dump_rnglists()
+            #if args.loc:
+            #    readelf.dump_loc()
+            #if args.ranges:
+            #    readelf.dump_ranges()
+        except ELFError as ex:
+            sys.stdout.flush()
+            sys.stderr.write(f'ELF error: {ex}\n')
+            if args.show_traceback:
+                traceback.print_exc()
+            sys.exit(1)
+
+#-------------------------------------------------------------------------------
+if __name__ == '__main__':
+    main()
+    #profile_main()

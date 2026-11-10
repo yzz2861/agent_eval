@@ -1,0 +1,13 @@
+*.pyc
+.coverage
+.tox
+htmlcov
+tags
+build
+dist
+MANIFEST
+*.sublime-workspace
+*.egg-info
+temp
+mypy.junit.xml
+mypy/

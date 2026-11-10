@@ -1,0 +1,10 @@
+Processing file: ./examples/sample_exe64.elf
+  Found a compile unit at offset 0, length 115
+  Found a compile unit at offset 119, length 135
+  Found a compile unit at offset 258, length 156
+  Found a compile unit at offset 418, length 300
+   DIE DW_TAG_lexical_block at 0x264. DW_AT_ranges (DW_FORM_data4)
+    [0x40053a, 0x400548) (base 0x400520 + offsets 0x1a, 0x28)
+    [0x400575, 0x400596) (base 0x400520 + offsets 0x55, 0x76)
+    [0x400569, 0x40056d) (base 0x400520 + offsets 0x49, 0x4d)
+    [0x400560, 0x400563) (base 0x400520 + offsets 0x40, 0x43)

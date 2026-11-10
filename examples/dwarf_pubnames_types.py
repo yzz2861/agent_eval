@@ -1,0 +1,107 @@
+#-------------------------------------------------------------------------------
+# elftools example: dwarf_pubnames_types.py
+#
+# Dump the contents of .debug_pubnames and .debug_pubtypes sections from the
+# ELF file.
+#
+# Note: sample_exe64.elf doesn't have a .debug_pubtypes section.
+#
+# Vijay Ramasami (rvijayc@gmail.com)
+# This code is in the public domain
+#-------------------------------------------------------------------------------
+import sys
+
+from elftools.common.utils import bytes2str
+from elftools.elf.elffile import ELFFile
+
+
+def process_file(filename):
+    print('Processing file:', filename)
+    with open(filename, 'rb') as f:
+        elffile = ELFFile(f)
+
+        if not elffile.has_dwarf_info():
+            print('  file has no DWARF info')
+            return
+
+        # get_dwarf_info returns a DWARFInfo context object, which is the
+        # starting point for all DWARF-based processing in pyelftools.
+        dwarfinfo = elffile.get_dwarf_info()
+
+        # get .debug_pubtypes section.
+        pubnames = dwarfinfo.get_pubnames()
+        if pubnames is None:
+            print('ERROR: No .debug_pubnames section found in ELF.')
+        else:
+            print(f'{len(pubnames)} entries found in .debug_pubnames')
+
+            print('Trying pubnames example ...')
+            for name, entry in pubnames.items():
+                print(f'{name}: cu_ofs = {entry.cu_ofs}, die_ofs = {entry.die_ofs}')
+
+                # get the actual CU/DIE that has this information.
+                print(f'Fetching the actual die for {name} ...')
+                for cu in dwarfinfo.iter_CUs():
+                    if cu.cu_offset == entry.cu_ofs:
+                        for die in cu.iter_DIEs():
+                            if die.offset == entry.die_ofs:
+                                print('Die Name: {}'.format(bytes2str(die.attributes['DW_AT_name'].value)))
+
+            # dump all entries in .debug_pubnames section.
+            print('Dumping .debug_pubnames table ...')
+            print('-' * 66)
+            print(f'{"Symbol":>50}{"CU_OFS":>8}{"DIE_OFS":>8}')
+            print('-' * 66)
+            for (name, entry) in pubnames.items():
+                print(f'{name:>50}{int(entry.cu_ofs):8}{int(entry.die_ofs):8}')
+            print('-' * 66)
+
+        # get .debug_pubtypes section.
+        pubtypes = dwarfinfo.get_pubtypes()
+        if pubtypes is None:
+            print('ERROR: No .debug_pubtypes section found in ELF')
+        else:
+            print(f'{len(pubtypes)} entries found in .debug_pubtypes')
+
+            for name, entry in pubtypes.items():
+                print(f'{name}: cu_ofs = {entry.cu_ofs}, die_ofs = {entry.die_ofs}')
+
+                # get the actual CU/DIE that has this information.
+                print(f'Fetching the actual die for {name} ...')
+                for cu in dwarfinfo.iter_CUs():
+                    if cu.cu_offset == entry.cu_ofs:
+                        for die in cu.iter_DIEs():
+                            if die.offset == entry.die_ofs:
+                                print('Die Name: {}'.format(bytes2str(die.attributes['DW_AT_name'].value)))
+                                die_info_rec(die)
+
+            # dump all entries in .debug_pubtypes section.
+            print('Dumping .debug_pubtypes table ...')
+            print('-' * 66)
+            print(f'{"Symbol":>50}{"CU_OFS":>8}{"DIE_OFS":>8}')
+            print('-' * 66)
+            for (name, entry) in pubtypes.items():
+                print(f'{name:>50}{int(entry.cu_ofs):8}{int(entry.die_ofs):8}')
+            print('-' * 66)
+
+
+def die_info_rec(die, indent_level='    '):
+    """ A recursive function for showing information about a DIE and its
+        children.
+    """
+    print(indent_level + f'DIE tag={die.tag}, attrs=')
+    for name, val in die.attributes.items():
+        print(indent_level + f'  {name} = {val}')
+    child_indent = indent_level + '  '
+    for child in die.iter_children():
+        die_info_rec(child, child_indent)
+
+
+if __name__ == '__main__':
+    if sys.argv[1] == '--test':
+        process_file(sys.argv[2])
+        sys.exit(0)
+
+    if len(sys.argv) < 2:
+        sys.exit(f'Expected usage: {sys.argv[0]} <executable>')
+    process_file(sys.argv[1])

@@ -1,0 +1,11 @@
+recursive-include elftools *.py
+recursive-include scripts *.py
+recursive-include examples *.py *.elf *.out
+recursive-include test *
+global-exclude *.py[cod]
+global-exclude __pycache__
+global-exclude .mypy_cache
+include README.md
+include LICENSE
+include CHANGES
+include tox.ini
