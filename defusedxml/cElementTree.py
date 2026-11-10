@@ -3,12 +3,14 @@
 # Copyright (c) 2013 by Christian Heimes <christian@python.org>
 # Licensed to PSF under a Contributor Agreement.
 # See https://www.python.org/psf/license for licensing details.
-"""Defused xml.etree.cElementTree
-"""
+"""Defused xml.etree.cElementTree"""
+
 import warnings
 
 # This module is an alias for ElementTree just like xml.etree.cElementTree
 from .ElementTree import (
+    EntityExpansionExceeded,
+    ExpansionPolicy,
     XML,
     XMLParse,
     XMLParser,
@@ -42,6 +44,8 @@ __all__ = [
     "iterparse",
     "parse",
     "tostring",
+    "EntityExpansionExceeded",
+    "ExpansionPolicy",
     # backwards compatibility
     "DefusedXMLParser",
 ]

@@ -3,8 +3,8 @@
 # Copyright (c) 2013 by Christian Heimes <christian@python.org>
 # Licensed to PSF under a Contributor Agreement.
 # See https://www.python.org/psf/license for licensing details.
-"""Defused xml.dom.minidom
-"""
+"""Defused xml.dom.minidom"""
+
 from __future__ import print_function, absolute_import
 
 from xml.dom.minidom import _do_pulldom_parse
@@ -15,7 +15,13 @@ __origin__ = "xml.dom.minidom"
 
 
 def parse(
-    file, parser=None, bufsize=None, forbid_dtd=False, forbid_entities=True, forbid_external=True
+    file,
+    parser=None,
+    bufsize=None,
+    forbid_dtd=False,
+    forbid_entities=True,
+    forbid_external=True,
+    expansion_policy=None,
 ):
     """Parse a file into a DOM by filename or file object."""
     if parser is None and not bufsize:
@@ -24,6 +30,7 @@ def parse(
             forbid_dtd=forbid_dtd,
             forbid_entities=forbid_entities,
             forbid_external=forbid_external,
+            expansion_policy=expansion_policy,
         )
     else:
         return _do_pulldom_parse(
@@ -35,12 +42,18 @@ def parse(
                 "forbid_dtd": forbid_dtd,
                 "forbid_entities": forbid_entities,
                 "forbid_external": forbid_external,
+                "expansion_policy": expansion_policy,
             },
         )
 
 
 def parseString(
-    string, parser=None, forbid_dtd=False, forbid_entities=True, forbid_external=True
+    string,
+    parser=None,
+    forbid_dtd=False,
+    forbid_entities=True,
+    forbid_external=True,
+    expansion_policy=None,
 ):
     """Parse a file into a DOM from a string."""
     if parser is None:
@@ -49,6 +62,7 @@ def parseString(
             forbid_dtd=forbid_dtd,
             forbid_entities=forbid_entities,
             forbid_external=forbid_external,
+            expansion_policy=expansion_policy,
         )
     else:
         return _do_pulldom_parse(
@@ -59,5 +73,6 @@ def parseString(
                 "forbid_dtd": forbid_dtd,
                 "forbid_entities": forbid_entities,
                 "forbid_external": forbid_external,
+                "expansion_policy": expansion_policy,
             },
         )

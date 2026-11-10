@@ -1,6 +1,13 @@
 Changelog
 =========
 
+unreleased
+----------
+
+- Add opt-in ``ExpansionPolicy`` for bounded internal general entity expansion.
+- Add ``EntityExpansionExceeded`` for limit-specific expansion failures.
+- Keep external entities, parameter entities, and unparsed entities forbidden.
+
 defusedxml 0.8.0
 ----------------
 

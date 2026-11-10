@@ -329,10 +329,38 @@ forbid_external (default: True)
   or entity references an external resource.
 
 
+Allowed internal entity expansion
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Internal general entities remain forbidden unless an enabled
+``ExpansionPolicy`` is passed explicitly. The policy limits declaration
+count, nested depth, one entity's expanded byte size, one declaration's
+literal byte size, and the total expanded byte budget for one parser
+instance. External entities, parameter entities, and unparsed entities
+remain forbidden.
+
+::
+
+   from defusedxml.ElementTree import fromstring, ExpansionPolicy
+
+   policy = ExpansionPolicy(
+       max_entity_declarations=100,
+       max_expansion_size=64 * 1024,
+       max_entity_depth=10,
+       max_entity_value_size=8 * 1024,
+       max_document_expansion=1024 * 1024,
+   )
+   root = fromstring(xml_text, expansion_policy=policy)
+
+When a limit is exceeded, parsing raises ``EntityExpansionExceeded`` with
+``limit_name``, ``limit``, ``current``, and ``entity_name`` attributes.
+
+
 defusedxml (package)
 --------------------
 
 DefusedXmlException, DTDForbidden, EntitiesForbidden,
+EntityExpansionExceeded, ExpansionPolicy,
 ExternalReferenceForbidden, NotSupportedError
 
 defuse_stdlib() (*experimental*)

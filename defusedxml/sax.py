@@ -3,8 +3,8 @@
 # Copyright (c) 2013 by Christian Heimes <christian@python.org>
 # Licensed to PSF under a Contributor Agreement.
 # See https://www.python.org/psf/license for licensing details.
-"""Defused xml.sax
-"""
+"""Defused xml.sax"""
+
 from __future__ import print_function, absolute_import
 
 from xml.sax import InputSource as _InputSource
@@ -22,6 +22,7 @@ def parse(
     forbid_dtd=False,
     forbid_entities=True,
     forbid_external=True,
+    expansion_policy=None,
 ):
     parser = make_parser()
     parser.setContentHandler(handler)
@@ -29,6 +30,7 @@ def parse(
     parser.forbid_dtd = forbid_dtd
     parser.forbid_entities = forbid_entities
     parser.forbid_external = forbid_external
+    parser.expansion_policy = expansion_policy
     parser.parse(source)
 
 
@@ -39,6 +41,7 @@ def parseString(
     forbid_dtd=False,
     forbid_entities=True,
     forbid_external=True,
+    expansion_policy=None,
 ):
     from io import BytesIO
 
@@ -50,6 +53,7 @@ def parseString(
     parser.forbid_dtd = forbid_dtd
     parser.forbid_entities = forbid_entities
     parser.forbid_external = forbid_external
+    parser.expansion_policy = expansion_policy
 
     inpsrc = _InputSource()
     inpsrc.setByteStream(BytesIO(string))

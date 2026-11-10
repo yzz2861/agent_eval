@@ -3,8 +3,8 @@
 # Copyright (c) 2013 by Christian Heimes <christian@python.org>
 # Licensed to PSF under a Contributor Agreement.
 # See https://www.python.org/psf/license for licensing details.
-"""Defuse XML bomb denial of service vulnerabilities
-"""
+"""Defuse XML bomb denial of service vulnerabilities"""
+
 from __future__ import print_function, absolute_import
 
 import warnings
@@ -12,7 +12,9 @@ import warnings
 from .common import (
     DefusedXmlException,
     DTDForbidden,
+    EntityExpansionExceeded,
     EntitiesForbidden,
+    ExpansionPolicy,
     ExternalReferenceForbidden,
     NotSupportedError,
     _apply_defusing,
@@ -62,7 +64,9 @@ __version__ = "0.8.0rc2"
 __all__ = [
     "DefusedXmlException",
     "DTDForbidden",
+    "EntityExpansionExceeded",
     "EntitiesForbidden",
+    "ExpansionPolicy",
     "ExternalReferenceForbidden",
     "NotSupportedError",
 ]

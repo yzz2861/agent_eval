@@ -17,7 +17,9 @@ from defusedxml import ElementTree, minidom, pulldom, sax, xmlrpc, expatreader
 from defusedxml import defuse_stdlib
 from defusedxml import (
     DTDForbidden,
+    EntityExpansionExceeded,
     EntitiesForbidden,
+    ExpansionPolicy,
     ExternalReferenceForbidden,
     NotSupportedError,
 )
@@ -579,6 +581,242 @@ class TestDefusedGzip(DefusedTestCase):
             self.decode_response(response, 4095, 8192)
 
 
+class TestExpansionPolicy(DefusedTestCase):
+    benign = (
+        "<!DOCTYPE root ["
+        '<!ENTITY reuse "ab">'
+        '<!ENTITY nested "&reuse;cd">'
+        "]>"
+        '<root attr="x&amp;Y&#65;&reuse;">'
+        "text&nested;&#65;&amp;</root>"
+    )
+    many_declarations = (
+        "<!DOCTYPE root ["
+        + "".join('<!ENTITY e{} "v">'.format(index) for index in range(4))
+        + "]><root/>"
+    )
+    large_value = '<!DOCTYPE root [<!ENTITY big "{}">]><root/>'.format("x" * 40)
+    quadratic = (
+        '<!DOCTYPE root [<!ENTITY a "{}">]>'.format("x" * 10) + "<root>" + "&a;" * 5 + "</root>"
+    )
+    exponential = (
+        "<!DOCTYPE root ["
+        '<!ENTITY a "xx">'
+        '<!ENTITY b "&a;&a;">'
+        '<!ENTITY c "&b;&b;">'
+        "]><root>&c;</root>"
+    )
+    cyclic = "<!DOCTYPE root [" '<!ENTITY a "&b;">' '<!ENTITY b "&a;">' "]><root>&a;</root>"
+    mutual = "<!DOCTYPE root [" '<!ENTITY a "x&b;">' '<!ENTITY b "y&a;">' "]><root>&a;</root>"
+    external = (
+        '<!DOCTYPE root [<!ENTITY ext SYSTEM "http://example.invalid/entity">]><root>&ext;</root>'
+    )
+    parameter = '<!DOCTYPE root [<!ENTITY % param "x">%param;]><root/>'
+    unparsed = '<!DOCTYPE root [<!ENTITY pic SYSTEM "pic.gif" NDATA gif>]><root/>'
+
+    def parse_etree(self, xml, policy):
+        return ElementTree.fromstring(xml, expansion_policy=policy)
+
+    def parse_minidom(self, xml, policy):
+        return minidom.parseString(xml, expansion_policy=policy)
+
+    def parse_pulldom(self, xml, policy):
+        return list(pulldom.parseString(xml, expansion_policy=policy))
+
+    def parse_sax(self, xml, policy):
+        with io.StringIO() as result:
+            sax.parseString(xml.encode("utf-8"), XMLGenerator(result), expansion_policy=policy)
+            return result.getvalue()
+
+    def parsers(self):
+        return (
+            ("ElementTree", self.parse_etree),
+            ("minidom", self.parse_minidom),
+            ("pulldom", self.parse_pulldom),
+            ("SAX", self.parse_sax),
+        )
+
+    def test_default_remains_forbidden(self):
+        for parser_name, parser in self.parsers():
+            with self.subTest(parser=parser_name):
+                self.assertRaises(EntitiesForbidden, parser, self.benign, None)
+
+    def test_disabled_policy_remains_forbidden(self):
+        policy = ExpansionPolicy(enabled=False)
+        for parser_name, parser in self.parsers():
+            with self.subTest(parser=parser_name):
+                self.assertRaises(EntitiesForbidden, parser, self.benign, policy)
+
+    def test_benign_entities_and_builtin_references(self):
+        policy = ExpansionPolicy()
+        root = self.parse_etree(self.benign, policy)
+        self.assertEqual(root.text, "textabcdA&")
+        self.assertEqual(root.attrib["attr"], "x&YAab")
+        self.parse_minidom(self.benign, policy)
+        self.parse_pulldom(self.benign, policy)
+        self.parse_sax(self.benign, policy)
+
+    def test_predefined_and_numeric_references_do_not_consume_budget(self):
+        xml = "<root>a&amp;b&#65;c&#x42;d</root>"
+        policy = ExpansionPolicy(max_document_expansion=0)
+        root = self.parse_etree(xml, policy)
+        self.assertEqual(root.text, "a&bAcBd")
+        self.parse_minidom(xml, policy)
+        self.parse_pulldom(xml, policy)
+        self.parse_sax(xml, policy)
+
+    def test_limit_exceptions_identify_limit(self):
+        cases = (
+            ("max_entity_declarations", dict(max_entity_declarations=3), self.many_declarations),
+            ("max_entity_value_size", dict(max_entity_value_size=39), self.large_value),
+            ("max_expansion_size", dict(max_expansion_size=7), self.exponential),
+            ("max_entity_depth", dict(max_entity_depth=2), self.exponential),
+            ("max_document_expansion", dict(max_document_expansion=39), self.quadratic),
+        )
+        for parser_name, parser in self.parsers():
+            for limit_name, kwargs, xml in cases:
+                with self.subTest(parser=parser_name, limit=limit_name):
+                    with self.assertRaises(EntityExpansionExceeded) as context:
+                        parser(xml, ExpansionPolicy(**kwargs))
+                    self.assertEqual(context.exception.limit_name, limit_name)
+                    self.assertEqual(context.exception.limit, kwargs[limit_name])
+                    self.assertGreater(context.exception.current, kwargs[limit_name])
+
+    def test_recursive_and_mutual_entities_are_stable(self):
+        policy = ExpansionPolicy(max_entity_depth=5)
+        for parser_name, parser in self.parsers():
+            for xml in (self.cyclic, self.mutual):
+                with self.subTest(parser=parser_name):
+                    self.assertRaises(EntityExpansionExceeded, parser, xml, policy)
+
+    def test_external_parameter_and_unparsed_entities_remain_forbidden(self):
+        policy = ExpansionPolicy()
+        for parser_name, parser in self.parsers():
+            for xml in (self.external, self.parameter, self.unparsed):
+                with self.subTest(parser=parser_name):
+                    self.assertRaises(EntitiesForbidden, parser, xml, policy)
+
+    def test_many_declarations_without_uses_are_limited(self):
+        policy = ExpansionPolicy(max_entity_declarations=3)
+        for parser_name, parser in self.parsers():
+            with self.subTest(parser=parser_name):
+                self.assertRaises(EntityExpansionExceeded, parser, self.many_declarations, policy)
+
+    def test_document_budget_accumulates_across_elements_and_attributes(self):
+        xml = (
+            '<!DOCTYPE root [<!ENTITY reuse "xy">]>'
+            "<root><child>&reuse;</child>"
+            '<child attr="&reuse;"/></root>'
+        )
+        policy = ExpansionPolicy(max_document_expansion=3)
+        for parser_name, parser in self.parsers():
+            with self.subTest(parser=parser_name):
+                with self.assertRaises(EntityExpansionExceeded) as context:
+                    parser(xml, policy)
+                self.assertEqual(context.exception.limit_name, "max_document_expansion")
+                self.assertEqual(context.exception.current, 4)
+
+    def test_etree_parse_and_iterparse_entries(self):
+        policy = ExpansionPolicy()
+        stream = io.BytesIO(self.benign.encode("utf-8"))
+        root = ElementTree.parse(stream, expansion_policy=policy).getroot()
+        self.assertEqual(root.text, "textabcdA&")
+
+        stream = io.BytesIO(self.quadratic.encode("utf-8"))
+        events = ElementTree.iterparse(
+            stream,
+            expansion_policy=ExpansionPolicy(max_document_expansion=9),
+        )
+        with self.assertRaises(EntityExpansionExceeded):
+            try:
+                list(events)
+            finally:
+                events = None
+        self.assertIsNone(events)
+
+    def test_etree_iterparse_closes_opened_file_on_error(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "bomb.xml")
+            with open(path, "wb") as stream:
+                stream.write(self.quadratic.encode("utf-8"))
+            before = set(os.listdir(directory))
+            events = ElementTree.iterparse(
+                path,
+                expansion_policy=ExpansionPolicy(max_document_expansion=9),
+            )
+            with self.assertRaises(EntityExpansionExceeded):
+                list(events)
+            self.assertEqual(set(os.listdir(directory)), before)
+
+            success_path = os.path.join(directory, "simple.xml")
+            with open(success_path, "wb") as stream:
+                stream.write(b"<root/>")
+            success_events = ElementTree.iterparse(
+                success_path, expansion_policy=ExpansionPolicy()
+            )
+            list(success_events)
+            success_events.close()
+            os.remove(success_path)
+
+    def test_sax_reset_does_not_leak_budget(self):
+        parser = expatreader.create_parser(expansion_policy=ExpansionPolicy())
+        with io.StringIO() as result:
+            sax.parseString(
+                self.benign.encode("utf-8"),
+                XMLGenerator(result),
+                expansion_policy=parser.expansion_policy,
+            )
+        state = parser.expansion_state
+        parser.reset()
+        self.assertIsNot(parser.expansion_state, state)
+        self.assertEqual(parser.expansion_state.document_expansion, 0)
+
+    def test_etree_budget_is_per_parser_instance(self):
+        policy = ExpansionPolicy(max_document_expansion=9)
+        first = ElementTree.DefusedXMLParser(
+            target=ElementTree._TreeBuilder(), expansion_policy=policy
+        )
+        with self.assertRaises(EntityExpansionExceeded):
+            first.feed(self.quadratic)
+            first.close()
+        second = ElementTree.DefusedXMLParser(
+            target=ElementTree._TreeBuilder(), expansion_policy=policy
+        )
+        self.assertIsNot(first.expansion_state, second.expansion_state)
+        root = second.feed(self.benign) or second.close()
+        self.assertEqual(root.text, "textabcdA&")
+
+    def test_sax_failed_parse_does_not_leak_budget(self):
+        from xml.sax import InputSource
+
+        parser = expatreader.create_parser(
+            expansion_policy=ExpansionPolicy(max_document_expansion=9)
+        )
+        with io.StringIO() as result:
+            handler = XMLGenerator(result)
+            parser.setContentHandler(handler)
+            with self.assertRaises(EntityExpansionExceeded):
+                source = InputSource()
+                source.setByteStream(io.BytesIO(self.quadratic.encode("utf-8")))
+                parser.parse(source)
+        self.assertGreater(parser.expansion_state.document_expansion, 9)
+        parser.reset()
+        with io.StringIO() as result:
+            parser.setContentHandler(XMLGenerator(result))
+            source = InputSource()
+            source.setByteStream(io.BytesIO(self.benign.encode("utf-8")))
+            parser.parse(source)
+        self.assertLessEqual(
+            parser.expansion_state.document_expansion,
+            parser.expansion_policy.max_document_expansion,
+        )
+
+    def test_policy_requires_non_negative_limits(self):
+        self.assertRaises(ValueError, ExpansionPolicy, max_entity_declarations=-1)
+
+
 def test_main():
     suite = unittest.TestSuite()
     cls = [
@@ -589,6 +827,7 @@ def test_main():
         TestDefusedPulldom,
         TestDefusedSax,
         TestDefusedLxml,
+        TestExpansionPolicy,
         TestXmlRpc,
         TestDefusedGzip,
     ]
