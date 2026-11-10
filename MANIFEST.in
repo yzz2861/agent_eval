@@ -1,0 +1,20 @@
+include CHANGES
+include CODE_OF_CONDUCT.md
+include CONTRIBUTING.rst
+include CONTRIBUTORS
+include LICENSE
+include Makefile
+include README.rst
+include requirements-dev.txt
+include SECURITY.md
+include tox.ini
+
+include docs/conf.py
+include docs/Makefile
+
+include scripts/*
+
+recursive-include bleach *.py *.rst *.sh *.txt INSTALLER METADATA RECORD WHEEL LICENSE REQUESTED *.SHA256SUM
+recursive-include docs *.rst
+recursive-include tests *.py *.test
+recursive-include tests_website *.html *.py *.rst
