@@ -1,6 +1,8 @@
 import re
+import unicodedata
 
-from urllib.parse import quote
+from ipaddress import ip_address
+from urllib.parse import quote, urlsplit
 
 from bleach import callbacks as linkify_callbacks
 from bleach import html5lib_shim
@@ -87,6 +89,193 @@ def build_email_re(tlds=TLDS):
 EMAIL_RE = build_email_re()
 
 
+MAX_LABEL_LENGTH = 63
+MAX_HOSTNAME_LENGTH = 253
+
+#: Schemes that must never show up in a URL fragment, e.g. a fragment like
+#: ``#javascript:alert(1)`` can be turned into an executable URL by a browser
+EXECUTABLE_SCHEME_RE = re.compile(
+    r"^[\s\u0000-\u001f\u007f]*(?:javascript|vbscript|file|data):",
+    re.IGNORECASE,
+)
+
+#: A bare label made up of digits and hex letters looks like an (decimal or
+#: hexadecimal) numeric IP address
+NUMERIC_LABEL_RE = re.compile(r"^[0-9a-f]+$")
+
+#: An entire host that looks like a dotted numeric IP address
+NUMERIC_IP_RE = re.compile(r"^[0-9a-f][0-9a-f.]*[0-9a-f]$")
+
+
+def _label_scripts(label):
+    """Returns the set of letter scripts used in a hostname label"""
+    scripts = set()
+    for char in label:
+        if not char.isalpha():
+            continue
+        name = unicodedata.name(char, "").split(" ", 1)[0]
+        if name in ("LATIN", "CYRILLIC", "GREEK"):
+            scripts.add(name)
+        elif name:
+            # Other letter scripts are grouped together--we only care about
+            # mixing them with the three spoof-prone scripts above and each
+            # other.
+            scripts.add(name)
+    return scripts
+
+
+def _normalize_label(label):
+    """Normalizes a single hostname label to lowercase IDNA (punycode)
+
+    :arg str label: the label in Unicode
+
+    :returns: the normalized ASCII label
+    :raises UnicodeError: if the label can't be represented as IDNA or an
+        A-label doesn't normalize back to the same host
+
+    """
+    label = label.lower()
+
+    if len(label.encode("idna")) > MAX_LABEL_LENGTH:
+        raise UnicodeError("hostname label is too long")
+
+    if label.startswith("xn--"):
+        # This is already punycode. Decode it to Unicode, verify it uses a
+        # single script, and require IDNA to produce the exact same A-label
+        # again. That rejects non-canonical and spoofing punycode.
+        unicode_label = label.encode("ascii").decode("idna")
+        scripts = _label_scripts(unicode_label)
+        if len(scripts) > 1:
+            raise UnicodeError("label mixes multiple scripts")
+        encoded = unicode_label.encode("idna").decode("ascii")
+        if encoded != label:
+            raise UnicodeError("punycode label does not normalize back to itself")
+        return label
+
+    scripts = _label_scripts(label)
+    if len(scripts) > 1:
+        raise UnicodeError("label mixes multiple scripts")
+
+    try:
+        label.encode("ascii")
+    except UnicodeEncodeError:
+        label = label.encode("idna").decode("ascii")
+    return label
+
+
+class LinkPolicy:
+    """Validates and normalizes URLs that linkify auto-discovers
+
+    A policy is applied only to links created from URL-like text. The
+    ``href`` of an existing ``<a>`` tag is left untouched and continues to be
+    the sanitizer's responsibility.
+
+    When a URL is rejected, :meth:`normalize` returns ``None`` and linkify
+    keeps the original text instead of emitting a partial link. Passing
+    ``policy=None`` (the default) preserves the historical linkify behavior.
+
+    """
+
+    def __init__(self, allowed_schemes=("http", "https")):
+        """Creates a LinkPolicy instance
+
+        :arg tuple allowed_schemes: schemes permitted on auto-discovered URLs;
+            defaults to ``("http", "https")``
+
+        """
+        self.allowed_schemes = frozenset(
+            scheme.lower() for scheme in allowed_schemes
+        )
+
+    def normalize_host(self, host):
+        """Lowercases and IDNA-normalizes a hostname
+
+        :arg str host: the host portion of a URL as returned by
+            :func:`urllib.parse.urlsplit`
+
+        :returns: the normalized ASCII hostname
+        :raises ValueError: if the host is not an acceptable hostname
+
+        """
+        if not host:
+            raise ValueError("missing host")
+
+        # IP literals (e.g. [::1]) and percent-encoded hosts are not hostnames
+        if host.startswith("[") or "%" in host:
+            raise ValueError("invalid host")
+
+        try:
+            ip_address(host)
+        except ValueError:
+            pass
+        else:
+            raise ValueError("numeric IP addresses are not allowed")
+
+        # Reject dotted decimal/hex numeric IPs that ip_address() doesn't
+        # understand, e.g. 0x7f.1 or 2130706433
+        if NUMERIC_IP_RE.match(host) and all(
+            NUMERIC_LABEL_RE.match(part) for part in host.split(".")
+        ):
+            raise ValueError("numeric IP addresses are not allowed")
+
+        if host.endswith(".") or ".." in host or host.startswith("."):
+            raise ValueError("malformed dots in host")
+
+        labels = host.split(".")
+        if len(labels) < 2:
+            raise ValueError("single-label hosts are not allowed")
+
+        normalized_labels = []
+        for label in labels:
+            if not label or len(label) > MAX_LABEL_LENGTH:
+                raise ValueError("invalid hostname label")
+            normalized_labels.append(_normalize_label(label))
+
+        normalized = ".".join(normalized_labels)
+        if len(normalized) > MAX_HOSTNAME_LENGTH:
+            raise ValueError("hostname is too long")
+        return normalized
+
+    def normalize(self, url):
+        """Validates and normalizes an auto-discovered URL
+
+        :arg str url: the URL discovered in the text
+
+        :returns: the normalized URL as a string, or ``None`` if the URL must
+            not be turned into a link
+
+        """
+        try:
+            if not url or any(char.isspace() for char in url):
+                return None
+            if "\\" in url or any(ord(char) < 32 or ord(char) == 127 for char in url):
+                return None
+
+            parsed = urlsplit(url)
+
+            if parsed.scheme.lower() not in self.allowed_schemes:
+                return None
+            if parsed.username is not None or parsed.password is not None:
+                return None
+            if EXECUTABLE_SCHEME_RE.match(parsed.fragment):
+                return None
+            # Touch the port so malformed ports raise and get rejected
+            parsed.port
+
+            host = self.normalize_host(parsed.hostname)
+        except (ValueError, UnicodeError):
+            return None
+
+        netloc = host
+        if parsed.port is not None:
+            netloc = "%s:%d" % (host, parsed.port)
+
+        return parsed._replace(netloc=netloc).geturl()
+
+    def __call__(self, url):
+        return self.normalize(url)
+
+
 class Linker:
     """Convert URL-like strings in an HTML fragment to links
 
@@ -110,6 +299,7 @@ class Linker:
         url_re=URL_RE,
         email_re=EMAIL_RE,
         recognized_tags=html5lib_shim.HTML_TAGS,
+        policy=None,
     ):
         """Creates a Linker instance
 
@@ -130,6 +320,10 @@ class Linker:
         :arg set recognized_tags: the set of tags that linkify knows about;
             everything else gets escaped
 
+        :arg policy: a :py:class:`LinkPolicy` (or other callable) that
+            validates and normalizes auto-discovered URLs; ``None`` (the
+            default) keeps the historical behavior and never rejects a match
+
         :returns: linkified text as unicode
 
         """
@@ -138,6 +332,7 @@ class Linker:
         self.parse_email = parse_email
         self.url_re = url_re
         self.email_re = email_re
+        self.policy = policy
 
         # Create a parser/tokenizer that allows all HTML tags and escapes
         # anything not in that list.
@@ -184,6 +379,7 @@ class Linker:
             parse_email=self.parse_email,
             url_re=self.url_re,
             email_re=self.email_re,
+            policy=self.policy,
         )
         return self.serializer.render(filtered)
 
@@ -210,6 +406,7 @@ class LinkifyFilter(html5lib_shim.Filter):
         parse_email=False,
         url_re=URL_RE,
         email_re=EMAIL_RE,
+        policy=None,
     ):
         """Creates a LinkifyFilter instance
 
@@ -228,6 +425,10 @@ class LinkifyFilter(html5lib_shim.Filter):
 
         :arg email_re: email matching regex
 
+        :arg policy: a :py:class:`LinkPolicy` (or other callable) that
+            validates and normalizes auto-discovered URLs; ``None`` (the
+            default) keeps the historical behavior and never rejects a match
+
         """
         super().__init__(source)
 
@@ -237,6 +438,7 @@ class LinkifyFilter(html5lib_shim.Filter):
 
         self.url_re = url_re
         self.email_re = email_re
+        self.policy = policy
 
     def apply_callbacks(self, attrs, is_new):
         """Given an attrs dict and an is_new bool, runs through callbacks
@@ -391,6 +593,61 @@ class LinkifyFilter(html5lib_shim.Filter):
 
         return fragment, prefix, suffix
 
+    def policy_url(self, text, start, end, href):
+        """Applies the link policy to a regex URL match
+
+        The URL regex stops at characters such as ``@``, backslashes,
+        whitespace and trailing dots, so dangerous text can sit immediately
+        after a match. This validates the match plus the adjacent source text
+        before a link is generated and returns the normalized href or ``None``.
+
+        :arg str text: the whole Characters token being scanned
+        :arg int start: start index of the regex match in ``text``
+        :arg int end: end index of the regex match in ``text``
+        :arg str href: the candidate href (with a scheme added if needed)
+
+        :returns: normalized href or ``None`` if the policy rejects it
+
+        """
+        # The regex stops at whitespace, but it can match text containing
+        # control characters that browsers ignore, so reject those outright.
+        if any(ord(char) < 33 or ord(char) == 127 for char in href):
+            return None
+
+        # The regex stops at whitespace and some control characters. A regular
+        # space is a natural word boundary (e.g. "see http://x.com/ now"), but
+        # a tab or control character embedded next to the match is rejected so
+        # dangerous text can't be hidden from the policy that way.
+        if end < len(text):
+            following = text[end]
+            if following == "\t" or ord(following) < 32 or ord(following) == 127:
+                return None
+
+        # A fragment-like executable scheme immediately after the match (with
+        # optional whitespace) is an attempt to smuggle javascript:/vbscript:
+        # into the generated URL.
+        remainder = text[end:].lstrip()
+        if EXECUTABLE_SCHEME_RE.match(remainder):
+            return None
+
+        # Walk forward over text that could belong to one URL even though the
+        # regex excluded it, growing the candidate. A whitespace character ends
+        # the run, so a link followed by prose is fine.
+        probe_end = end
+        while probe_end < len(text) and not text[probe_end].isspace():
+            probe_end += 1
+
+        extended = text[start:probe_end]
+        if PROTO_RE.search(extended):
+            candidate = extended
+        else:
+            candidate = "http://%s" % extended
+        if self.policy(candidate) is None:
+            return None
+
+        # The surrounding text is safe; normalize the actual matched href.
+        return self.policy(href)
+
     def handle_links(self, src_iter):
         """Handle links in character tokens"""
         in_a = False  # happens, if parse_email=True and if a mail was found
@@ -427,6 +684,25 @@ class LinkifyFilter(html5lib_shim.Filter):
                         href = url
                     else:
                         href = "http://%s" % url
+
+                    if self.policy is not None:
+                        # The policy only governs links we're creating here;
+                        # existing <a> hrefs are handled by the sanitizer. The
+                        # regex can stop before dangerous trailing text (for
+                        # example an ``http://good@evil`` userinfo, a backslash
+                        # or a trailing dot), so validate the match together
+                        # with the adjacent source text before making a link.
+                        href = self.policy_url(text, match.start(), match.end(), href)
+                        if href is None:
+                            # Keep the original text verbatim--no partial link.
+                            new_tokens.append(
+                                {
+                                    "type": "Characters",
+                                    "data": prefix + url + suffix,
+                                }
+                            )
+                            end = match.end()
+                            continue
 
                     attrs = {(None, "href"): href, "_text": url}
                     attrs = self.apply_callbacks(attrs, True)

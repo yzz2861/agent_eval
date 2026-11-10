@@ -4,7 +4,7 @@ import pytest
 from urllib.parse import quote_plus
 
 from bleach import linkify, DEFAULT_CALLBACKS as DC
-from bleach.linkifier import Linker, LinkifyFilter
+from bleach.linkifier import Linker, LinkifyFilter, LinkPolicy
 from bleach.sanitizer import Cleaner
 
 
@@ -819,3 +819,195 @@ class TestLinkify:
 def test_linkify_filter(text, expected):
     cleaner = Cleaner(filters=[LinkifyFilter])
     assert cleaner.clean(text) == expected
+
+
+class TestLinkPolicy:
+    def linker(self):
+        return Linker(policy=LinkPolicy())
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # userinfo / @ confusion
+            "http://paypal.com@evil.example/login",
+            "http://user:pass@example.com/",
+            # non-http(s) schemes
+            "ftp://example.com/",
+            # backslashes and control/whitespace characters
+            r"http://example.com\@evil.com/path",
+            "http://example.com/a\tb",
+            "http://example.com/a\x01b",
+            "http://example.com/a\x7fb",
+            # executable schemes in the fragment
+            "http://example.com/#javascript:alert(1)",
+            "http://example.com/#JAVASCRIPT:alert(1)",
+            "http://example.com/# vbscript:msgbox(1)",
+            "http://example.com/#data:text/html,abc",
+            "http://example.com/#file:///etc/passwd",
+            # percent-encoded host
+            "http://example%2fcom/",
+            # numeric and hexadecimal IPs
+            "http://192.168.1.1/",
+            "http://0x7f.1/",
+            "http://2130706433/",
+            "http://[::1]/",
+            # single-label, dotted and trailing-dot hosts
+            "http://localhost/",
+            "http://example.com./",
+            "http://exa..mple.com/",
+            # overlong label / hostname
+            "http://%s.com/" % ("a" * 64),
+            "http://%s/" % ".".join(["a" * 63] * 4 + ["com"]),
+            # bad punycode that doesn't normalize back to itself
+            "http://xn--fa-hia.de/",
+            # mixed-script (Latin + Cyrillic) homograph label
+            "http://payp\u0430l.com/",
+            # malformed port
+            "http://example.com:bad/",
+        ],
+    )
+    def test_rejected_urls_keep_original_text(self, text):
+        # No link is generated and the whole input text is preserved.
+        assert self.linker().linkify(text) == text
+
+    @pytest.mark.parametrize(
+        "text, expected_href, expected_text",
+        [
+            (
+                "http://M\u00fcnchen.de/",
+                "http://xn--mnchen-3ya.de/",
+                "http://M\u00fcnchen.de/",
+            ),
+            (
+                "http://xn--mnchen-3ya.de/",
+                "http://xn--mnchen-3ya.de/",
+                "http://xn--mnchen-3ya.de/",
+            ),
+            (
+                "https://EXAMPLE.com/Path?x=1#frag",
+                "https://example.com/Path?x=1#frag",
+                "https://EXAMPLE.com/Path?x=1#frag",
+            ),
+            (
+                "example.com/path",
+                "http://example.com/path",
+                "example.com/path",
+            ),
+            # percent-encoded path components are fine--only hosts reject %%
+            (
+                "http://example.com/a%2f..%2fbar",
+                "http://example.com/a%2f..%2fbar",
+                "http://example.com/a%2f..%2fbar",
+            ),
+            # a label exactly at the 63 octet limit is accepted
+            (
+                "http://%s.com/" % ("a" * 63),
+                "http://%s.com/" % ("a" * 63),
+                "http://%s.com/" % ("a" * 63),
+            ),
+        ],
+    )
+    def test_accepted_urls_are_normalized(self, text, expected_href, expected_text):
+        assert self.linker().linkify(text) == (
+            '<a href="%s" rel="nofollow">%s</a>' % (expected_href, expected_text)
+        )
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://M\u00fcnchen.de/foo",
+            "https://EXAMPLE.com:8080/a?b=1#c",
+            "http://xn--mnchen-3ya.de/",
+            "http://example.com/a%2fb",
+        ],
+    )
+    def test_normalize_is_idempotent(self, url):
+        policy = LinkPolicy()
+        once = policy.normalize(url)
+        assert once is not None
+        assert policy.normalize(once) == once
+
+    def test_policy_is_callable(self):
+        policy = LinkPolicy()
+        assert policy("http://example.com/") == policy.normalize(
+            "http://example.com/"
+        )
+        assert policy("http://localhost/") is None
+
+    def test_linkify_with_policy_is_idempotent(self):
+        linker = self.linker()
+        text = (
+            "visit http://M\u00fcnchen.de/ and https://Example.com/a%2fb; "
+            "the http://exa..mple.com/ stays text"
+        )
+        once = linker.linkify(text)
+        assert linker.linkify(once) == once
+
+    def test_percent_encoded_path_kept_but_percent_host_rejected(self):
+        linker = self.linker()
+        assert linker.linkify("http://example.com/a%2f..%2fb") == (
+            '<a href="http://example.com/a%2f..%2fb" rel="nofollow">'
+            "http://example.com/a%2f..%2fb</a>"
+        )
+        assert linker.linkify("http://example%2fcom/") == (
+            "http://example%2fcom/"
+        )
+
+    def test_existing_a_tag_href_is_not_rewritten(self):
+        # The policy only applies to auto-discovered URLs; existing <a> hrefs
+        # are the sanitizer's job and must pass through untouched.
+        text = '<a href="http://192.168.1.1/">already linked</a>'
+        assert self.linker().linkify(text) == (
+            '<a href="http://192.168.1.1/" rel="nofollow">already linked</a>'
+        )
+
+    def test_existing_link_not_wrapped_again(self):
+        text = '<a href="http://example.com/x">already</a> and example.com/y'
+        assert self.linker().linkify(text) == (
+            '<a href="http://example.com/x" rel="nofollow">already</a> and '
+            '<a href="http://example.com/y" rel="nofollow">example.com/y</a>'
+        )
+
+    def test_rejected_match_keeps_surrounding_text_intact(self):
+        assert self.linker().linkify("see http://exa..mple.com/ now") == (
+            "see http://exa..mple.com/ now"
+        )
+
+    def test_linkify_filter_accepts_policy(self):
+        class PolicyFilter(LinkifyFilter):
+            def __init__(self, source, **kwargs):
+                super().__init__(source, policy=LinkPolicy(), **kwargs)
+
+        cleaner = Cleaner(filters=[PolicyFilter])
+        assert cleaner.clean("see http://192.168.1.1/ and http://example.com/") == (
+            "see http://192.168.1.1/ and "
+            '<a href="http://example.com/" rel="nofollow">http://example.com/</a>'
+        )
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "http://paypal.com@evil.example/login",
+            "http://exa..mple.com/",
+            "http://192.168.1.1/",
+            r"http://example.com\@evil.com/",
+            "http://example%2fcom/",
+            "http://%s.com/" % ("a" * 64),
+        ],
+    )
+    def test_none_policy_keeps_legacy_behavior(self, text):
+        assert Linker().linkify(text) == linkify(text)
+
+    def test_punycode_roundtrip_spoof_rejected(self):
+        # xn--fa-hia decodes but IDNA re-encodes it to a different label,
+        # so it must not be accepted as a canonical hostname.
+        assert LinkPolicy().normalize("http://xn--fa-hia.de/") is None
+
+    def test_mixed_script_label_rejected_but_single_scripts_pass(self):
+        policy = LinkPolicy()
+        assert policy.normalize("http://payp\u0430l.com/") is None
+        # An all-Cyrillic label uses one script and is acceptable
+        assert (
+            policy.normalize("http://\u0440\u043e\u0441\u0441\u0438\u044f.example/")
+            is not None
+        )
