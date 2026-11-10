@@ -1,6 +1,20 @@
 Revision 0.7.0, released XX-XX-2026
 ---------------------------------------
 
+- Added configurable, per-decoder-instance resource budgets to the
+  BER/CER/DER decoder family: ``maxNestingDepth``, ``maxNodes``,
+  ``maxValueBytes``, ``maxConstructedLength`` and ``maxIndefiniteChunks``
+  can be passed to ``decode()``/``Decoder``/``StreamingDecoder``. Exceeding
+  a budget raises the new ``pyasn1.error.PyAsn1ResourceError`` (a
+  ``PyAsn1Error`` subclass) before the offending substrate is consumed.
+  The defaults preserve the historical behavior, capping only the
+  nesting depth at 100 levels
+- Tightened the DER decoder to reject non-canonical encodings on every
+  decode path, schema-driven included: non-shortest-form lengths,
+  constructed encoding of primitive universal types and trailing
+  substrate past the top-level object are now refused, in addition to
+  the previously enforced indefinite-length ban. BER and CER decoding
+  behavior is unchanged
 - Fixed OverflowError from BER/CER/DER length values that fit in the
   supported 8-octet length field but exceed the platform maximum readable
   size. Such oversized definite lengths are now rejected with PyAsn1Error.

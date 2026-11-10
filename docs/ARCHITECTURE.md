@@ -906,27 +906,31 @@ module-level `TYPE_MAP = {...}` literal in `ber/encoder.py`) or copied and
 updated by hand.
 
 The two maps serve different code paths, and the schema-driven path bypasses
-derived-codec strictness. Both paths live in `SingleItemDecoder.__call__` in
+derived-codec strictness that lives in payload-decoder instances. Both
+paths live in `SingleItemDecoder.__call__` in
 `ber/decoder.py`: schemaless decoding dispatches through `tagMap` in the
 `stGetValueDecoderByTag` state, while decoding with an `asn1Spec` (the way
 X.509 and LDAP consumers actually call pyasn1) takes the
 `stGetValueDecoderByAsn1Spec` state, which consults
 `typeMap[chosenSpec.typeId]` first, and the `TYPE_MAP` hit returns BER's
-permissive decoder. Two probes confirm it:
+permissive decoder. A probe confirms it:
 
-- `der.decode(b'\x24\x06\x04\x01a\x04\x01b')` raises
-  `Constructed encoding form prohibited`, but the same bytes with
-  `asn1Spec=univ.OctetString()` decode fine.
 - `cer.decode(b'\x01\x01\x01')` raises `Unexpected Boolean payload: 1`, but
   with `asn1Spec=univ.Boolean()` returns `True`.
 
-The one DER restriction that always applies is `supportIndefLength = False`,
-because it sits on `der/decoder.py`'s `SingleItemDecoder` itself rather than
-in a map. Removing the `typeId not in TYPE_MAP` guard from the derived
-backfill loops looks like a cleanup but would newly route schema-driven
-CER/DER decodes through the strict subclasses, breaking every caller that
-currently (if accidentally) relies on DER accepting constructed OCTET STRINGs
-under a schema.
+DER used to ship the same gap for constructed OCTET STRINGs; it is closed
+not through the maps but through class attributes on `der/decoder.py`'s
+`SingleItemDecoder` itself, which every decode path funnels through:
+`supportIndefLength = False`, `supportNonMinimalLength = False` and
+`supportConstructedPrimitive = False`. The last one rejects constructed
+universal-class tags other than SEQUENCE/SET in `stDecodeTag`, before any
+payload decoder is chosen, so `der.decode(b'\x24\x06\x04\x01a\x04\x01b')`
+raises with and without `asn1Spec=univ.OctetString()`. Removing the
+`typeId not in TYPE_MAP` guard from the derived backfill loops still looks
+like a cleanup but would newly route schema-driven CER decodes through the
+strict subclasses, breaking callers that (if accidentally) rely on the
+schema path bypassing map-level strictness such as CER's canonical Boolean
+check.
 
 Registration history has also left dead weight in the maps. The module-level
 `TAG_MAP.update({...})` block in `cer/encoder.py` registers
@@ -1010,7 +1014,13 @@ subclasses, `BitStringPayloadDecoder` and `OctetStringPayloadDecoder`, setting
 `valueDecoder` methods in `ber/decoder.py`), plus
 `supportIndefLength = False` on its `SingleItemDecoder`; how that one
 attribute shuts indefinite framing off entirely is covered in [Two framing
-modes](#two-framing-modes).
+modes](#two-framing-modes). DER's `SingleItemDecoder` additionally sets
+`supportNonMinimalLength = False` and `supportConstructedPrimitive = False`,
+and its `Decoder` sets `allowTrailingSubstrate = False`, so DER refuses
+non-shortest-form lengths, constructed encoding of primitive universal
+types (on the schema-driven path too, the check sitting in `stDecodeTag`)
+and trailing substrate past the top-level object — the canonical-encoding
+rules X.690 clause 10 expects of DER.
 
 ### Configuration surfaces
 
@@ -1025,9 +1035,11 @@ class with no instance ever created, and the class has no `__init__`, so
 customize decoding, go through `StreamingDecoder` or `SingleItemDecoder`.
 
 Both families accept unknown options without complaint.
-`SingleItemEncoder.__init__` in `ber/encoder.py` and
-`SingleItemDecoder.__init__` in `ber/decoder.py` end in `**ignored`, so a
-misspelled option constructs and runs as if it had never been passed, and
+`SingleItemEncoder.__init__` in `ber/encoder.py` ends in `**ignored`, and
+`SingleItemDecoder.__init__` in `ber/decoder.py` ends in `**options` of
+which only the resource-budget keys are read ([Decoder
+limits](#decoder-limits)), so a misspelled
+option constructs and runs as if it had never been passed, and
 nothing warns. `Encoder(tagmap={}, typemap={}, bogusOption=42)` constructs and
 encodes normally, the lowercase misspellings having done nothing, while the
 correctly spelled empty maps raise `No encoder for ...`. Call-time options
@@ -1221,8 +1233,8 @@ flowchart TD
     L3["Layer 3 SingleItemDecoder.__call__<br/>generator, is also decodeFun"]
     L1 --> L2 --> L3
 
-    L3 --> DEPTH{"_nestingLevel greater than MAX_NESTING_DEPTH"}
-    DEPTH -->|"yes"| EDEPTH["PyAsn1Error nesting depth<br/>CVE-2026-30922"]
+    L3 --> DEPTH{"_nestingLevel greater than maxNestingDepth budget<br/>default MAX_NESTING_DEPTH"}
+    DEPTH -->|"yes"| EDEPTH["PyAsn1ResourceError nesting depth<br/>CVE-2026-30922"]
     DEPTH -->|"no"| BUMP["options _nestingLevel plus 1<br/>pop allowEoo"]
 
     BUMP --> EOOG{"allowEoo and supportIndefLength"}
@@ -1568,7 +1580,8 @@ defeats the `testIndefMode` cases of `BitStringDecoderTestCase` and
 indefinite-length support enabled; CER requires indefinite-length framing
 for long strings. DER's remaining decoder overrides are inventoried under
 [What each dialect changes](#what-each-dialect-changes), and this attribute
-is the one DER restriction that applies on every decode path
+is one of the `SingleItemDecoder` class attributes through which DER
+applies its restrictions on every decode path
 ([Registration and import order](#registration-and-import-order)).
 
 ### Deferred typing: ANY and open types
@@ -1622,13 +1635,23 @@ dict (the limit's value and inventory row are under
 # pyasn1/codec/ber/decoder.py, SingleItemDecoder.__call__ entry
 _nestingLevel = options.get('_nestingLevel', 0)
 
-if _nestingLevel > MAX_NESTING_DEPTH:
-    raise error.PyAsn1Error(
-        'ASN.1 structure nesting depth exceeds limit (%d)' % MAX_NESTING_DEPTH
+if (self._maxNestingDepth is not None and
+        _nestingLevel > self._maxNestingDepth):
+    raise error.PyAsn1ResourceError(
+        'ASN.1 structure nesting depth exceeds limit (%d)' % (
+            self._maxNestingDepth,)
     )
 
 options['_nestingLevel'] = _nestingLevel + 1
 ```
+
+The limit read off the instance, not the module:
+`SingleItemDecoder.__init__` copies the `maxNestingDepth` decode option
+into `self._maxNestingDepth`, falling back to the module-level
+`MAX_NESTING_DEPTH` (100) when the option is absent, so callers at a
+public boundary can tighten (or, with `None`, relax) the cap per decoder
+instance without touching the process-wide default. The same constructor
+parses the other resource budgets; see [Decoder limits](#decoder-limits).
 
 `**kwargs` semantics make this correct: splatting builds a fresh dict per
 call, as under [The class spine](#the-class-spine), so each
@@ -1699,6 +1722,32 @@ The checks fire before the value they guard is materialized: the tag limit
 before the shift, the length-octet limit before the octets are read, the OID
 limit before the arc accumulates. Moving a check after its accumulation keeps
 the error message and loses the protection.
+
+Five further limits are not module constants but per-instance budgets,
+so a caller exposing the decoder to untrusted input can size the
+allowance per request. `SingleItemDecoder.__init__` parses them out of
+the decode options (`decode(...)`, `Decoder` and `StreamingDecoder` all
+forward `**options` to it), and the consumption counters live on the
+same instance — which works because the instance itself is the
+`decodeFun` of every nested call. Two decoder instances in one process
+never share a counter, and nothing module-global is mutated:
+
+| Option | Default | Enforced in | What it bounds |
+| --- | --- | --- | --- |
+| `maxNestingDepth` | `MAX_NESTING_DEPTH` (100); `None` disables | `SingleItemDecoder.__call__`, at generator entry | Nesting depth of the TLV tree |
+| `maxNodes` | `None` (unlimited) | `SingleItemDecoder.__call__`, past the end-of-octets probe | Total TLV items decoded, containers included |
+| `maxValueBytes` | `None` | the `stDecodeLength` block, right after the length is decoded | Cumulative payload octets of primitive (simple-format) values; chunks of constructed strings count individually |
+| `maxConstructedLength` | `None` | the `stDecodeLength` block | Declared content length of one constructed value, catching claims far beyond the actual input before the value is read |
+| `maxIndefiniteChunks` | `None` | `SingleItemDecoder.__call__`, on items decoded under `allowEoo` | Total items inside indefinite-length containers |
+
+Exceeding a budget raises `PyAsn1ResourceError` (a `PyAsn1Error`
+subclass in `pyasn1/error.py`) whose message names the limit, raised
+where the budget is checked — before the offending value octets are
+read — so no partial object is produced, and the decoder instance stays
+over budget (failing fast on reuse) rather than resumable in a
+half-consumed state. The budget tests live in
+`tests/codec/test_decoder_budgets.py`, with inheritance mirrors in
+`tests/codec/cer/test_decoder.py` and `tests/codec/der/test_decoder.py`.
 
 The boundary tests come in matched pairs, at-limit passes and one-over fails,
 so an off-by-one in a comparison is caught. All live in
@@ -1882,4 +1931,3 @@ them as a drive-by; each needs its own dedicated change with tests.
   literal text. Not worth a churn-heavy rewrite mid-release; if ever fixed,
   do it as a dedicated pass verified with `tox -e docs`, since the file is
   compiled into the `-W` build.
-

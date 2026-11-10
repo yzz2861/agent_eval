@@ -79,18 +79,34 @@ downstream callers depend on. Rationale in
   on. Conversely, registering a new type in the BER source is enough; only
   *runtime* mutation after import fails to propagate. Add to `cer/` or `der/`
   only when that codec needs different behavior.
-- **CER/DER decoder strictness does not fire on the schema-driven path**,
   because the fully inherited `TYPE_MAP` is consulted before `TAG_MAP`
   whenever an `asn1Spec` is supplied. DER's `supportConstructedForm=False` and
   CER's canonical Boolean check are inert there; only
   `supportIndefLength=False` is unconditional. Test strictness changes both
   with and without a schema.
+- **CER/DER map-level strictness does not fire on the schema-driven path**,
+   because the fully inherited `TYPE_MAP` is consulted before `TAG_MAP`
+   whenever an `asn1Spec` is supplied: CER's canonical Boolean check is
+   inert there. DER's canonical-encoding rules are instead enforced on
+   every path through class attributes on its `SingleItemDecoder`
+   (`supportIndefLength=False`, `supportNonMinimalLength=False`,
+   `supportConstructedPrimitive=False`, checked in the `stDecodeTag`/
+   `stDecodeLength` states before any payload decoder is chosen) plus
+   `allowTrailingSubstrate=False` on its `Decoder`. Test strictness changes
+   both with and without a schema.
 - **Do not weaken the decoder limits.** `MAX_OID_ARC_CONTINUATION_OCTETS`,
   `MAX_TAG_OCTETS`, `MAX_NESTING_DEPTH` and `MAX_LENGTH_OCTETS` sit at the top
   of `pyasn1/codec/ber/decoder.py`; the unnamed `length > sys.maxsize` guard
   is enforced inline in the `stDecodeLength` state handling of
   `SingleItemDecoder.__call__`. There is no per-codec override hook: one
   constant protects all three codecs.
+   Callers can additionally pass per-instance budgets (`maxNestingDepth`,
+   `maxNodes`, `maxValueBytes`, `maxConstructedLength`,
+   `maxIndefiniteChunks`) through `decode()`/`StreamingDecoder` options;
+   `SingleItemDecoder.__init__` parses them and keeps the counters on the
+   instance (the same instance is the `decodeFun` of every nested call),
+   raising `pyasn1.error.PyAsn1ResourceError` on exhaustion. Never move
+   these into module-level mutable state.
 - **`eoo.endOfOctets` is compared with `is`, never `==`.** It is a singleton
   whose `defaultValue` is `0`, so `==` is true against a decoded `Integer(0)`
   and would truncate an indefinite-length container silently, with no

@@ -75,6 +75,16 @@ class UnsupportedSubstrateError(PyAsn1Error):
     """Unsupported substrate type to parse as ASN.1 data."""
 
 
+class PyAsn1ResourceError(PyAsn1Error):
+    """ASN.1 decoder resource budget exhaustion
+
+    The `PyAsn1ResourceError` exception indicates that a configurable
+    decoder resource budget (nesting depth, node count, cumulative
+    value size, constructed value length or indefinite-length chunk
+    count) has been exceeded while decoding.
+    """
+
+
 class PyAsn1UnicodeError(PyAsn1Error, UnicodeError):
     """Unicode text processing error
 
@@ -112,5 +122,4 @@ class PyAsn1UnicodeEncodeError(PyAsn1UnicodeError, UnicodeEncodeError):
     from :class:`UnicodeEncodeError` to help the caller catching
     unicode-related errors.
     """
-
 

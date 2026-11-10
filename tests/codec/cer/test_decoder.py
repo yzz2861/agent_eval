@@ -16,6 +16,7 @@ from pyasn1.type import univ
 from pyasn1.codec.cer import decoder
 from pyasn1.codec.cer import encoder
 from pyasn1.error import PyAsn1Error
+from pyasn1.error import PyAsn1ResourceError
 
 
 class BooleanDecoderTestCase(BaseTestCase):
@@ -450,6 +451,28 @@ class NestingDepthLimitTestCase(BaseTestCase):
             pass
         except RecursionError:
             assert False, 'Got RecursionError instead of PyAsn1Error'
+
+
+class DecoderBudgetMirrorTestCase(BaseTestCase):
+    """Budget options reach the CER decoder through inheritance."""
+
+    def testMaxNodesEnforced(self):
+        substrate = b'\x30\x0f' + b'\x02\x01\x01' * 5
+        try:
+            decoder.decode(substrate, maxNodes=5)
+        except PyAsn1ResourceError:
+            pass
+        else:
+            assert 0, 'node count over budget tolerated'
+
+    def testMaxIndefiniteChunksEnforced(self):
+        substrate = b'\x24\x80' + b'\x04\x01A' * 5 + b'\x00\x00'
+        try:
+            decoder.decode(substrate, maxIndefiniteChunks=4)
+        except PyAsn1ResourceError:
+            pass
+        else:
+            assert 0, 'excessive indefinite-length chunks tolerated'
 
 
 suite = unittest.TestLoader().loadTestsFromModule(sys.modules[__name__])

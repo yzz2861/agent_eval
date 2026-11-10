@@ -47,6 +47,8 @@ class SingleItemDecoder(decoder.SingleItemDecoder):
     TYPE_MAP = TYPE_MAP
 
     supportIndefLength = False
+    supportNonMinimalLength = False
+    supportConstructedPrimitive = False
 
 
 class StreamingDecoder(decoder.StreamingDecoder):
@@ -59,6 +61,7 @@ class Decoder(decoder.Decoder):
     __doc__ = decoder.Decoder.__doc__
 
     STREAMING_DECODER = StreamingDecoder
+    allowTrailingSubstrate = False
 
 
 #: Turns DER octet stream into an ASN.1 object.
@@ -83,7 +86,8 @@ class Decoder(decoder.Decoder):
 #: -------
 #: : :py:class:`tuple`
 #:     A tuple of pyasn1 object recovered from DER substrate (:py:class:`~pyasn1.type.base.PyAsn1Item` derivative)
-#:     and the unprocessed trailing portion of the *substrate* (may be empty)
+#:     and the unprocessed trailing portion of the *substrate* (always empty,
+#:     as trailing substrate past the top-level object is rejected)
 #:
 #: Raises
 #: ------

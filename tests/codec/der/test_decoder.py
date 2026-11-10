@@ -9,7 +9,6 @@ import unittest
 
 from tests.base import BaseTestCase
 
-from pyasn1.type import char
 from pyasn1.type import tag
 from pyasn1.type import namedtype
 from pyasn1.type import opentype
@@ -17,6 +16,7 @@ from pyasn1.type import univ
 from pyasn1.codec.der import decoder
 from pyasn1.codec.der import encoder
 from pyasn1.error import PyAsn1Error
+from pyasn1.error import PyAsn1ResourceError
 
 
 class BitStringDecoderTestCase(BaseTestCase):
@@ -47,12 +47,13 @@ class BitStringDecoderTestCase(BaseTestCase):
 
     def testSchemaDrivenChunkedWithIntermediatePadding(self):
         fragments = b'\x03\x02\x03\x10\x03\x02\x00\xa5'
-        value, rest = decoder.decode(b'\x23\x08' + fragments,
-                                     asn1Spec=univ.BitString())
-
-        assert value == univ.BitString(binValue='0001010100101')
-        assert len(value) == 13
-        assert rest == b''
+        try:
+            decoder.decode(b'\x23\x08' + fragments,
+                           asn1Spec=univ.BitString())
+        except PyAsn1Error:
+            pass
+        else:
+            assert 0, 'constructed-form BIT STRING tolerated'
 
 
 class OctetStringDecoderTestCase(BaseTestCase):
@@ -83,18 +84,22 @@ class OctetStringDecoderTestCase(BaseTestCase):
 
     def testSchemaDrivenManyFragments(self):
         fragments = b'\x04\x01A' * 64
-        value, rest = decoder.decode(b'\x24\x81\xc0' + fragments,
-                                     asn1Spec=univ.OctetString())
-
-        assert value.asOctets() == b'A' * 64
-        assert rest == b''
+        try:
+            decoder.decode(b'\x24\x81\xc0' + fragments,
+                           asn1Spec=univ.OctetString())
+        except PyAsn1Error:
+            pass
+        else:
+            assert 0, 'constructed-form OCTET STRING tolerated'
 
     def testConstructedCharacterString(self):
         fragments = b'\x0c\x01A' * 64
-        value, rest = decoder.decode(b'\x2c\x81\xc0' + fragments)
-
-        assert value == char.UTF8String(b'A' * 64)
-        assert rest == b''
+        try:
+            decoder.decode(b'\x2c\x81\xc0' + fragments)
+        except PyAsn1Error:
+            pass
+        else:
+            assert 0, 'constructed-form character string tolerated'
 
 
 class LargeTagDecoderTestCase(BaseTestCase):
@@ -469,6 +474,105 @@ class NestingDepthLimitTestCase(BaseTestCase):
             pass
         except RecursionError:
             assert False, 'Got RecursionError instead of PyAsn1Error'
+
+
+class StrictDerDecodingTestCase(BaseTestCase):
+    """DER canonical-encoding checks applied on every decode path."""
+
+    def testIndefiniteLengthRejected(self):
+        try:
+            decoder.decode(b'\x30\x80\x02\x01\x01\x00\x00')
+        except PyAsn1Error:
+            pass
+        else:
+            assert 0, 'indefinite length tolerated'
+
+    def testLongFormLengthForShortValueRejected(self):
+        # INTEGER 5 encoded with a long-form length of 1
+        try:
+            decoder.decode(b'\x02\x81\x01\x05')
+        except PyAsn1Error as exc:
+            assert 'non-minimal' in str(exc).lower(), \
+                'Error message missing encoding info: %s' % exc
+        else:
+            assert 0, 'non-minimal length tolerated'
+
+    def testLeadingZeroLengthOctetRejected(self):
+        # 128-octet OCTET STRING with a zero-padded two-octet length
+        substrate = b'\x04\x82\x00\x80' + b'A' * 128
+        try:
+            decoder.decode(substrate)
+        except PyAsn1Error as exc:
+            assert 'non-minimal' in str(exc).lower(), \
+                'Error message missing encoding info: %s' % exc
+        else:
+            assert 0, 'zero-padded length tolerated'
+
+    def testMinimalLongFormLengthDecodes(self):
+        # 128 octets is the shortest value requiring the long form
+        substrate = b'\x04\x81\x80' + b'A' * 128
+        value, rest = decoder.decode(substrate)
+        assert value.asOctets() == b'A' * 128
+        assert rest == b''
+
+    def testConstructedPrimitiveRejectedSchemaless(self):
+        try:
+            decoder.decode(b'\x24\x06\x04\x01a\x04\x01b')
+        except PyAsn1Error:
+            pass
+        else:
+            assert 0, 'constructed-form OCTET STRING tolerated'
+
+    def testConstructedPrimitiveRejectedWithSchema(self):
+        try:
+            decoder.decode(b'\x24\x06\x04\x01a\x04\x01b',
+                           asn1Spec=univ.OctetString())
+        except PyAsn1Error:
+            pass
+        else:
+            assert 0, 'constructed-form OCTET STRING tolerated on schema path'
+
+    def testConstructedContextTagStillDecodes(self):
+        # explicit tagging uses constructed context-specific tags
+        substrate = b'\xa0\x03\x02\x01\x05'
+        value, rest = decoder.decode(substrate)
+        assert value is not None
+        assert rest == b''
+
+    def testTrailingSubstrateRejected(self):
+        try:
+            decoder.decode(b'\x02\x01\x01\x00')
+        except PyAsn1Error as exc:
+            assert 'trailing' in str(exc).lower(), \
+                'Error message missing trailing info: %s' % exc
+        else:
+            assert 0, 'trailing substrate tolerated'
+
+
+class DecoderBudgetMirrorTestCase(BaseTestCase):
+    """Budget options reach the DER decoder through inheritance."""
+
+    def testMaxNodesEnforced(self):
+        substrate = b'\x30\x0f' + b'\x02\x01\x01' * 5
+        try:
+            decoder.decode(substrate, maxNodes=5)
+        except PyAsn1ResourceError:
+            pass
+        else:
+            assert 0, 'node count over budget tolerated'
+
+    def testMaxNestingDepthEnforced(self):
+        # two nested definite-length SEQUENCEs around a NULL
+        substrate = b'\x30\x04\x30\x02\x05\x00'
+        try:
+            decoder.decode(substrate, maxNestingDepth=1)
+        except PyAsn1ResourceError:
+            pass
+        else:
+            assert 0, 'nesting over budget tolerated'
+
+        asn1Object, rest = decoder.decode(substrate, maxNestingDepth=2)
+        assert asn1Object is not None
 
 
 suite = unittest.TestLoader().loadTestsFromModule(sys.modules[__name__])

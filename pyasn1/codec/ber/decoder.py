@@ -45,6 +45,12 @@ MAX_NESTING_DEPTH = 100
 # Maximum number of bytes in a BER length field (8 bytes = up to 2^64-1)
 MAX_LENGTH_OCTETS = 8
 
+# Universal tag IDs of the only universal-class types allowed in
+# constructed encoding form: SEQUENCE/SEQUENCE OF and SET/SET OF
+_CONSTRUCTED_UNIVERSAL_TAG_IDS = frozenset((
+    univ.Sequence.tagSet.baseTag.tagId,
+    univ.Set.tagSet.baseTag.tagId))
+
 
 class AbstractPayloadDecoder(object):
     protoComponent = None
@@ -1585,12 +1591,33 @@ class SingleItemDecoder(object):
 
     supportIndefLength = True
 
+    # DER turns these off: X.690 10.1 requires shortest-form lengths and
+    # forbids the constructed encoding form for primitive universal types
+    supportNonMinimalLength = True
+    supportConstructedPrimitive = True
+
     TAG_MAP = TAG_MAP
     TYPE_MAP = TYPE_MAP
 
-    def __init__(self, tagMap=_MISSING, typeMap=_MISSING, **ignored):
+    def __init__(self, tagMap=_MISSING, typeMap=_MISSING, **options):
         self._tagMap = tagMap if tagMap is not _MISSING else self.TAG_MAP
         self._typeMap = typeMap if typeMap is not _MISSING else self.TYPE_MAP
+
+        # Per-instance resource budgets; None means unlimited. The defaults
+        # keep the historical behavior: only the nesting depth is capped.
+        self._maxNestingDepth = options.get('maxNestingDepth', MAX_NESTING_DEPTH)
+        self._maxNodes = options.get('maxNodes')
+        self._maxValueBytes = options.get('maxValueBytes')
+        self._maxConstructedLength = options.get('maxConstructedLength')
+        self._maxIndefiniteChunks = options.get('maxIndefiniteChunks')
+
+        # Cumulative consumption counters. The same SingleItemDecoder
+        # instance is passed as decodeFun down the whole recursion, so
+        # instance state is shared by every nested item of one decode
+        # operation and never leaks across decoder instances.
+        self._nodesUsed = 0
+        self._valueBytesUsed = 0
+        self._indefChunksUsed = 0
 
         # Tag & TagSet objects caches
         self._tagCache = {}
@@ -1603,9 +1630,11 @@ class SingleItemDecoder(object):
 
         _nestingLevel = options.get('_nestingLevel', 0)
 
-        if _nestingLevel > MAX_NESTING_DEPTH:
-            raise error.PyAsn1Error(
-                'ASN.1 structure nesting depth exceeds limit (%d)' % MAX_NESTING_DEPTH
+        if (self._maxNestingDepth is not None and
+                _nestingLevel > self._maxNestingDepth):
+            raise error.PyAsn1ResourceError(
+                'ASN.1 structure nesting depth exceeds limit (%d)' % (
+                    self._maxNestingDepth,)
             )
 
         options['_nestingLevel'] = _nestingLevel + 1
@@ -1632,6 +1661,23 @@ class SingleItemDecoder(object):
 
             else:
                 substrate.seek(-2, os.SEEK_CUR)
+
+        if allowEoo and self._maxIndefiniteChunks is not None:
+            # This item is a chunk of an indefinite-length container
+            self._indefChunksUsed += 1
+            if self._indefChunksUsed > self._maxIndefiniteChunks:
+                raise error.PyAsn1ResourceError(
+                    'Indefinite-length chunk count exceeds limit (%d)' % (
+                        self._maxIndefiniteChunks,)
+                )
+
+        if self._maxNodes is not None:
+            self._nodesUsed += 1
+            if self._nodesUsed > self._maxNodes:
+                raise error.PyAsn1ResourceError(
+                    'ASN.1 node count exceeds limit (%d)' % (
+                        self._maxNodes,)
+                )
 
         tagMap = self._tagMap
         typeMap = self._typeMap
@@ -1714,6 +1760,15 @@ class SingleItemDecoder(object):
                 else:
                     tagSet = lastTag + tagSet
 
+                if (not self.supportConstructedPrimitive and
+                        lastTag.tagFormat == tag.tagFormatConstructed and
+                        lastTag.tagClass == tag.tagClassUniversal and
+                        lastTag.tagId not in _CONSTRUCTED_UNIVERSAL_TAG_IDS):
+                    raise error.PyAsn1Error(
+                        'Constructed encoding form of universal primitive '
+                        'type tag %s prohibited by this codec' % (lastTag,)
+                    )
+
                 state = stDecodeLength
 
                 if LOG:
@@ -1761,11 +1816,42 @@ class SingleItemDecoder(object):
                                 length, sys.maxsize)
                         )
 
+                    if not self.supportNonMinimalLength:
+                        if not encodedLength[0]:
+                            raise error.PyAsn1Error(
+                                'Non-minimal length encoding: leading zero '
+                                'octet in long-form length'
+                            )
+
+                        if length < 128:
+                            raise error.PyAsn1Error(
+                                'Non-minimal length encoding: long-form '
+                                'length used for length %d' % (length,)
+                            )
+
                 else:  # 128 means indefinite
                     length = -1
 
                 if length == -1 and not self.supportIndefLength:
                     raise error.PyAsn1Error('Indefinite length encoding not supported by this codec')
+
+                if length > 0:
+                    if tagSet[0].tagFormat == tag.tagFormatSimple:
+                        if self._maxValueBytes is not None:
+                            self._valueBytesUsed += length
+                            if self._valueBytesUsed > self._maxValueBytes:
+                                raise error.PyAsn1ResourceError(
+                                    'Cumulative primitive value size exceeds '
+                                    'limit (%d octets)' % (
+                                        self._maxValueBytes,)
+                                )
+
+                    elif (self._maxConstructedLength is not None and
+                            length > self._maxConstructedLength):
+                        raise error.PyAsn1ResourceError(
+                            'Constructed value length %d exceeds limit '
+                            '(%d octets)' % (length, self._maxConstructedLength)
+                        )
 
                 state = stGetValueDecoder
 
@@ -2072,6 +2158,10 @@ class Decoder(object):
     """
     STREAMING_DECODER = StreamingDecoder
 
+    #: Whether substrate past the first top-level ASN.1 object is
+    #: tolerated (and returned as the tail). DER turns this off.
+    allowTrailingSubstrate = True
+
     @classmethod
     def __call__(cls, substrate, asn1Spec=None, **options):
         """Turns BER/CER/DER octet stream into an ASN.1 object.
@@ -2115,6 +2205,30 @@ class Decoder(object):
             decode passes as 2nd item.
             The streaming variant shall yield an object that will be propagated as
             decode() return value, and leave the remaining payload in the stream.
+
+        maxNestingDepth: :py:class:`int` or None
+            Maximum ASN.1 structure nesting depth (default
+            :data:`MAX_NESTING_DEPTH`; None disables the limit).
+
+        maxNodes: :py:class:`int` or None
+            Maximum number of ASN.1 items (nodes) decoded per decoder
+            instance (default None, unlimited).
+
+        maxValueBytes: :py:class:`int` or None
+            Maximum cumulative number of payload octets of all primitive
+            values decoded per decoder instance (default None, unlimited).
+
+        maxConstructedLength: :py:class:`int` or None
+            Maximum declared length of a single constructed value
+            (default None, unlimited).
+
+        maxIndefiniteChunks: :py:class:`int` or None
+            Maximum number of chunks decoded within indefinite-length
+            containers per decoder instance (default None, unlimited).
+
+            Exceeding any of the budgets raises
+            :py:class:`~pyasn1.error.PyAsn1ResourceError` before the
+            offending substrate is consumed.
 
         Returns
         -------
@@ -2190,6 +2304,12 @@ class Decoder(object):
 
             except error.EndOfStreamError:
                 tail = b''
+
+            if tail and not cls.allowTrailingSubstrate:
+                raise error.PyAsn1Error(
+                    'Trailing %d octets of substrate past top-level '
+                    'ASN.1 object' % (len(tail),)
+                )
 
             return asn1Object, tail
 
