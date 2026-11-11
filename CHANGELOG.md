@@ -1,0 +1,160 @@
+# Changelog
+
+## 0.0.33 (2026-10-31)
+
+* Drop Python 3.10 support [#329](https://github.com/Kludex/python-multipart/pull/329).
+* Add Python 3.15 support [#350](https://github.com/Kludex/python-multipart/pull/350).
+* Add opt-in field-count and field-size limits for URL-encoded forms in `FormParser` [#333](https://github.com/Kludex/python-multipart/pull/333).
+* Normalize the content type returned by `parse_options_header` when the header has parameters [#287](https://github.com/Kludex/python-multipart/pull/287).
+* Finalize `Content-Transfer-Encoding` decoding before invoking field and file callbacks [#336](https://github.com/Kludex/python-multipart/pull/336).
+* Keep only the incomplete escape when quoted-printable data is split across writes [#355](https://github.com/Kludex/python-multipart/pull/355).
+* Handle nameless uploads when `UPLOAD_KEEP_FILENAME` or `UPLOAD_KEEP_EXTENSIONS` is set [#343](https://github.com/Kludex/python-multipart/pull/343).
+* Accept a `str` `UPLOAD_DIR` when `UPLOAD_KEEP_FILENAME` is set [#335](https://github.com/Kludex/python-multipart/pull/335).
+* Speed up parser state lookups [#330](https://github.com/Kludex/python-multipart/pull/330).
+* Speed up opening boundary matching [#328](https://github.com/Kludex/python-multipart/pull/328).
+* Speed up querystring callback dispatch [#316](https://github.com/Kludex/python-multipart/pull/316).
+
+## 0.0.32 (2026-06-04)
+
+* Speed up partial-boundary scanning for CR/LF-dense part data [#300](https://github.com/Kludex/python-multipart/pull/300).
+
+## 0.0.31 (2026-06-04)
+
+* Speed up multipart header parsing and callback dispatch [#295](https://github.com/Kludex/python-multipart/pull/295).
+* Bound header field name size before validating [#296](https://github.com/Kludex/python-multipart/pull/296).
+* Validate `Content-Length` is non-negative in `parse_form` [#297](https://github.com/Kludex/python-multipart/pull/297).
+
+## 0.0.30 (2026-05-31)
+
+* Parse `application/x-www-form-urlencoded` bodies per the WHATWG URL standard, treating only `&` as a field separator [#290](https://github.com/Kludex/python-multipart/pull/290).
+* Ignore RFC 2231/5987 extended parameters (`name*`, `filename*`) in `parse_options_header`, keeping the plain parameter authoritative per [RFC 7578 §4.2](https://datatracker.ietf.org/doc/html/rfc7578#section-4.2) [#291](https://github.com/Kludex/python-multipart/pull/291).
+
+## 0.0.29 (2026-05-17)
+
+* Handle malformed RFC 2231 continuations in `parse_options_header` [#270](https://github.com/Kludex/python-multipart/pull/270).
+
+## 0.0.28 (2026-05-10)
+
+* Speed up partial-boundary tail scan via `bytes.find` [#281](https://github.com/Kludex/python-multipart/pull/281).
+* Cap multipart boundary length at 256 bytes [#282](https://github.com/Kludex/python-multipart/pull/282).
+
+## 0.0.27 (2026-04-27)
+
+* Add multipart header limits [#267](https://github.com/Kludex/python-multipart/pull/267).
+* Pass parse offsets via constructors [#268](https://github.com/Kludex/python-multipart/pull/268).
+
+## 0.0.26 (2026-04-10)
+
+* Skip preamble before the first multipart boundary more efficiently [#262](https://github.com/Kludex/python-multipart/pull/262).
+* Silently discard epilogue data after the closing multipart boundary [#259](https://github.com/Kludex/python-multipart/pull/259).
+
+## 0.0.25 (2026-04-10)
+
+* Add MIME content type info to `File` [#143](https://github.com/Kludex/python-multipart/pull/143).
+* Handle CTE values case-insensitively [#258](https://github.com/Kludex/python-multipart/pull/258).
+* Remove custom `FormParser` classes [#257](https://github.com/Kludex/python-multipart/pull/257).
+* Add `UPLOAD_DELETE_TMP` to `FormParser` config [#254](https://github.com/Kludex/python-multipart/pull/254).
+* Emit `field_end` for trailing bare field names on finalize [#230](https://github.com/Kludex/python-multipart/pull/230).
+* Handle multipart headers case-insensitively [#252](https://github.com/Kludex/python-multipart/pull/252).
+* Apply Apache-2.0 properly [#247](https://github.com/Kludex/python-multipart/pull/247).
+
+## 0.0.24 (2026-04-05)
+
+* Validate `chunk_size` in `parse_form()` [#244](https://github.com/Kludex/python-multipart/pull/244).
+
+## 0.0.23 (2026-04-05)
+
+* Remove unused `trust_x_headers` parameter and `X-File-Name` fallback [#196](https://github.com/Kludex/python-multipart/pull/196).
+* Return processed length from `QuerystringParser._internal_write` [#229](https://github.com/Kludex/python-multipart/pull/229).
+* Cleanup metadata dunders from `__init__.py` [#227](https://github.com/Kludex/python-multipart/pull/227).
+
+## 0.0.22 (2026-01-25)
+
+* Drop directory path from filename in `File` [9433f4b](https://github.com/Kludex/python-multipart/commit/9433f4bbc9652bdde82bbe380984e32f8cfc89c4).
+
+## 0.0.21 (2025-12-17)
+
+* Add support for Python 3.14 and drop EOL 3.8 and 3.9 [#216](https://github.com/Kludex/python-multipart/pull/216).
+
+## 0.0.20 (2024-12-16)
+
+* Handle messages containing only end boundary [#142](https://github.com/Kludex/python-multipart/pull/142).
+
+## 0.0.19 (2024-11-30)
+
+* Don't warn when CRLF is found after last boundary on `MultipartParser` [#193](https://github.com/Kludex/python-multipart/pull/193).
+
+## 0.0.18 (2024-11-28)
+
+* Hard break if found data after last boundary on `MultipartParser` [#189](https://github.com/Kludex/python-multipart/pull/189).
+
+## 0.0.17 (2024-10-31)
+
+* Handle PermissionError in fallback code for old import name [#182](https://github.com/Kludex/python-multipart/pull/182).
+
+## 0.0.16 (2024-10-27)
+
+* Add dunder attributes to `multipart` package [#177](https://github.com/Kludex/python-multipart/pull/177).
+
+## 0.0.15 (2024-10-27)
+
+* Replace `FutureWarning` to `PendingDeprecationWarning` [#174](https://github.com/Kludex/python-multipart/pull/174).
+* Add missing files to SDist [#171](https://github.com/Kludex/python-multipart/pull/171).
+
+## 0.0.14 (2024-10-24)
+
+* Fix import scheme for `multipart` module ([#168](https://github.com/Kludex/python-multipart/pull/168)).
+
+## 0.0.13 (2024-10-20)
+
+* Rename import to `python_multipart` [#166](https://github.com/Kludex/python-multipart/pull/166).
+
+## 0.0.12 (2024-09-29)
+
+* Improve error message when boundary character does not match [#124](https://github.com/Kludex/python-multipart/pull/124).
+* Add mypy strict typing [#140](https://github.com/Kludex/python-multipart/pull/140).
+* Enforce 100% coverage [#159](https://github.com/Kludex/python-multipart/pull/159).
+
+## 0.0.11 (2024-09-28)
+
+* Improve performance, especially in data with many CR-LF [#137](https://github.com/Kludex/python-multipart/pull/137).
+* Handle invalid CRLF in header name [#141](https://github.com/Kludex/python-multipart/pull/141).
+
+## 0.0.10 (2024-09-21)
+
+* Support `on_header_begin` [#103](https://github.com/Kludex/python-multipart/pull/103).
+* Improve type hints on `FormParser` [#104](https://github.com/Kludex/python-multipart/pull/104).
+* Fix `OnFileCallback` type [#106](https://github.com/Kludex/python-multipart/pull/106).
+* Improve type hints [#110](https://github.com/Kludex/python-multipart/pull/110).
+* Improve type hints on `File` [#111](https://github.com/Kludex/python-multipart/pull/111).
+* Add type hint to helper functions [#112](https://github.com/Kludex/python-multipart/pull/112).
+* Minor fix for Field.__repr__ [#114](https://github.com/Kludex/python-multipart/pull/114).
+* Fix use of chunk_size parameter [#136](https://github.com/Kludex/python-multipart/pull/136).
+* Allow digits and valid token chars in headers [#134](https://github.com/Kludex/python-multipart/pull/134).
+* Fix headers being carried between parts [#135](https://github.com/Kludex/python-multipart/pull/135).
+
+## 0.0.9 (2024-02-10)
+
+* Add support for Python 3.12 [#85](https://github.com/Kludex/python-multipart/pull/85).
+* Drop support for Python 3.7 [#95](https://github.com/Kludex/python-multipart/pull/95).
+* Add `MultipartState(IntEnum)` [#96](https://github.com/Kludex/python-multipart/pull/96).
+* Add `QuerystringState` [#97](https://github.com/Kludex/python-multipart/pull/97).
+* Add `TypedDict` callbacks [#98](https://github.com/Kludex/python-multipart/pull/98).
+* Add config `TypedDict`s [#99](https://github.com/Kludex/python-multipart/pull/99).
+
+## 0.0.8 (2024-02-09)
+
+* Check if Message.get_params return 3-tuple instead of str on parse_options_header [#79](https://github.com/Kludex/python-multipart/pull/79).
+* Cleanup unused regex patterns [#82](https://github.com/Kludex/python-multipart/pull/82).
+
+## 0.0.7 (2024-02-03)
+
+* Refactor header option parser to use the standard library instead of a custom RegEx [#75](https://github.com/andrew-d/python-multipart/pull/75).
+
+## 0.0.6 (2023-02-27)
+
+* Migrate package installation to `pyproject.toml` (PEP 621) [#54](https://github.com/andrew-d/python-multipart/pull/54).
+* Use yaml.safe_load instead of yaml.load [#46](https://github.com/andrew-d/python-multipart/pull/46).
+* Add support for Python 3.11, drop EOL 3.6 [#51](https://github.com/andrew-d/python-multipart/pull/51).
+* Add support for Python 3.8-3.10, drop EOL 2.7-3.5 [#42](https://github.com/andrew-d/python-multipart/pull/42).
+* `QuerystringParser`: don't raise an AttributeError in `__repr__` [#30](https://github.com/andrew-d/python-multipart/pull/30).
