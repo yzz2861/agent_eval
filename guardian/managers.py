@@ -9,8 +9,8 @@ from django.db.models import Model, Q, QuerySet
 
 from guardian.conf import settings as guardian_settings
 from guardian.core import ObjectPermissionChecker
-from guardian.ctypes import get_content_type, get_default_content_type
-from guardian.exceptions import ObjectNotPersisted
+from guardian.ctypes import get_content_type, get_default_content_type, validate_object_identity, validate_tenant
+from guardian.exceptions import MixedContentTypeError, ObjectIdentityError, ObjectNotPersisted
 
 _PermType: TypeAlias = Permission | str
 
@@ -37,6 +37,15 @@ def _is_using_default_content_type() -> bool:
 def _ensure_permission(perm: _PermType, ctype: ContentType) -> Permission:
     if isinstance(perm, str):
         perm = Permission.objects.get(content_type=ctype, codename=perm)
+    elif isinstance(ctype, ContentType) and perm.content_type_id != ctype.pk:
+        # A Permission instance whose content type differs from the object's
+        # content type would persist a row whose identity (permission,
+        # content type, object pk) is inconsistent; bulk writes bypass the
+        # model-level save() validation, so reject it here.
+        raise ObjectIdentityError(
+            f"Permission {perm!r} (content type {perm.content_type_id}) does not belong "
+            f"to the object's content type {ctype.pk} ({ctype})"
+        )
 
     return perm
 
@@ -73,6 +82,8 @@ class BaseObjectPermissionManager(models.Manager):
         if getattr(obj, "pk", None) is None:
             raise ObjectNotPersisted("Object %s needs to be persisted first" % obj)
         ctype = get_content_type(obj)
+        validate_object_identity(obj, ctype)
+        validate_tenant(user_or_group, obj, operation="assign")
         permission = _ensure_permission(perm, ctype)
 
         kwargs = {"permission": permission, self.user_or_group_field: user_or_group}
@@ -97,8 +108,14 @@ class BaseObjectPermissionManager(models.Manager):
             if not queryset:
                 return []
             ctype = get_content_type(queryset[0])
+            for instance in queryset:
+                self._validate_bulk_instance(instance, ctype, user_or_group)
         else:
             ctype = get_content_type(queryset.model)
+            validate_object_identity(queryset.model, ctype)
+            if guardian_settings.GET_TENANT:
+                for instance in queryset:
+                    validate_tenant(user_or_group, instance, operation="assign")
 
         permission = _ensure_permission(perm, ctype)
         checker = ObjectPermissionChecker(user_or_group)
@@ -118,6 +135,25 @@ class BaseObjectPermissionManager(models.Manager):
 
         return assigned_perms
 
+    def _validate_bulk_instance(self, instance: Model, ctype: ContentType, user_or_group: Any) -> None:
+        """Validate one object of a bulk input as a whole identity.
+
+        Every element must be persisted, share the batch's content type and
+        model identity, and belong to a tenant the identity may access;
+        validation happens before any row is written so a rejected batch
+        leaves no partial grants behind.
+        """
+        if getattr(instance, "pk", None) is None:
+            raise ObjectNotPersisted("Object %s needs to be persisted first" % instance)
+        instance_ctype = get_content_type(instance)
+        if instance_ctype != ctype:
+            raise MixedContentTypeError(
+                "Bulk permission operations require objects sharing the same content type "
+                f"(got {instance_ctype} where {ctype} was expected)"
+            )
+        validate_object_identity(instance, instance_ctype)
+        validate_tenant(user_or_group, instance, operation="assign")
+
     def assign_perm_to_many(
         self, perm: _PermType, users_or_groups: Any, obj: Model, ignore_conflicts: bool = False
     ) -> list:
@@ -125,6 +161,9 @@ class BaseObjectPermissionManager(models.Manager):
         Bulk assigns given `perm` for the object `obj` to a set of users or a set of groups.
         """
         ctype = get_content_type(obj)
+        if getattr(obj, "pk", None) is None:
+            raise ObjectNotPersisted("Object %s needs to be persisted first" % obj)
+        validate_object_identity(obj, ctype)
         permission = _ensure_permission(perm, ctype)
 
         kwargs = {"permission": permission}
@@ -137,6 +176,7 @@ class BaseObjectPermissionManager(models.Manager):
         to_add = []
         field = self.user_or_group_field
         for user in users_or_groups:
+            validate_tenant(user, obj, operation="assign")
             kwargs[field] = user
             to_add.append(self.model(**kwargs))
 
@@ -160,9 +200,14 @@ class BaseObjectPermissionManager(models.Manager):
         if getattr(obj, "pk", None) is None:
             raise ObjectNotPersisted("Object %s needs to be persisted first" % obj)
 
+        validate_tenant(user_or_group, obj, operation="remove")
+        ctype = get_content_type(obj)
         filters = Q(**{self.user_or_group_field: user_or_group})
         filters &= _get_perm_filter(perm, model=obj)
         if self.is_generic():
+            # Bind the row's own content type together with the object pk:
+            # object_pk alone (or via the permission join) is not an identity.
+            filters &= Q(content_type=ctype)
             filters &= Q(object_pk=obj.pk)
         else:
             filters &= Q(content_object__pk=obj.pk)
@@ -186,12 +231,18 @@ class BaseObjectPermissionManager(models.Manager):
 
         filters &= _get_perm_filter(perm, ctype=ctype)
         if self.is_generic():
+            # Bind the row's own content type together with the object pks.
+            filters &= Q(content_type=ctype)
             if isinstance(queryset, list):
-                filters &= Q(object_pk__in=[str(obj.pk) for obj in queryset])
+                filters &= Q(object_pk__in=[obj.pk for obj in queryset])
             else:
-                filters &= Q(object_pk__in=[str(pk) for pk in queryset.values_list("pk", flat=True)])
+                filters &= Q(object_pk__in=list(queryset.values_list("pk", flat=True)))
         else:
             filters &= Q(content_object__in=queryset)
+
+        if guardian_settings.GET_TENANT:
+            for instance in queryset:
+                validate_tenant(user_or_group, instance, operation="remove")
 
         return self.filter(filters).delete()
 
@@ -202,7 +253,8 @@ class BaseObjectPermissionManager(models.Manager):
         ctype = get_content_type(obj)
         filters = _get_perm_filter(perm, ctype=ctype)
         if self.is_generic():
-            filters &= Q(object_pk=str(obj.pk))
+            filters &= Q(content_type=ctype)
+            filters &= Q(object_pk=obj.pk)
         else:
             filters &= Q(content_object=obj)
 
@@ -210,6 +262,10 @@ class BaseObjectPermissionManager(models.Manager):
             to_remove = [item.pk for item in users_or_groups]
         else:
             to_remove = users_or_groups.values_list("pk", flat=True)
+
+        if guardian_settings.GET_TENANT:
+            for identity in users_or_groups:
+                validate_tenant(identity, obj, operation="remove")
 
         filters &= Q(**{f"{self.user_or_group_field}_id__in": to_remove})
 

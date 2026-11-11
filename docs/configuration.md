@@ -139,6 +139,25 @@ non-polymorphic classes.
 
 Defaults to `"guardian.ctypes.get_default_content_type"`.
 
+## `GUARDIAN_GET_TENANT`
+
+Guardian can optionally validate the tenant of objects and identities
+(users/groups) as part of the object identity. When set to a dotted path
+of a callable, the callable is invoked with a user, group, or content
+object and must return a hashable tenant key, or `None` when the entity
+has no tenant (historical, tenant-less data stays fully compatible).
+
+When configured, cross-tenant permission assignments and removals are
+refused with `guardian.exceptions.TenantMismatchError`, and permission
+checks and `get_objects_for_user()`/`get_objects_for_group()` silently
+exclude objects belonging to other tenants (without revealing whether
+those objects exist). Every denial is logged on the `guardian.ctypes`
+logger with a stable `reason_code` (`tenant_mismatch`) so monitoring can
+aggregate on it. When unset (the default), guardian keeps its historical
+single-tenant behaviour.
+
+Defaults to `None`.
+
 ## `GUARDIAN_AUTO_PREFETCH`
 
 !!! abstract "Added in version 2.0.0"

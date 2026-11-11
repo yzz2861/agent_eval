@@ -21,6 +21,13 @@ class Post(models.Model):
         return self.title
 
 
+class PostProxy(Post):
+    """Proxy model used to verify object identity handling for proxies."""
+
+    class Meta:
+        proxy = True
+
+
 class DynamicAccessor:
     def __init__(self):
         pass

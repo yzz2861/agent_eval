@@ -40,6 +40,11 @@ if hasattr(settings, "GUARDIAN_MONKEY_PATCH"):
 
 GET_CONTENT_TYPE = getattr(settings, "GUARDIAN_GET_CONTENT_TYPE", "guardian.ctypes.get_default_content_type")
 
+# Dotted path to a callable resolving the tenant of a user/group/content
+# object (returning any hashable tenant key, or None for tenant-less data).
+# When unset, guardian keeps its historical single-tenant behaviour.
+GET_TENANT = getattr(settings, "GUARDIAN_GET_TENANT", None)
+
 AUTO_PREFETCH = getattr(settings, "GUARDIAN_AUTO_PREFETCH", False)
 
 # Restores the pre-3.5.1 get_objects_for_user behaviour fixed in GHSA-5729-mvhf-9gq4. Insecure, removed in 3.6.0.

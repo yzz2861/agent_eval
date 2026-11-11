@@ -7,7 +7,7 @@ from django.db.models.query import QuerySet
 from django.utils.encoding import force_str
 
 from guardian.conf import settings as guardian_settings
-from guardian.ctypes import get_content_type
+from guardian.ctypes import get_content_type, tenant_allows
 from guardian.utils import get_group_obj_perms_model, get_identity, get_user_obj_perms_model
 
 
@@ -126,6 +126,9 @@ class ObjectPermissionChecker:
         if self.user and not self.user.is_active:
             return Permission.objects.none().values_list("codename", flat=True)
 
+        if not (self.user and self.user.is_superuser) and not tenant_allows(self.user, obj, operation="check"):
+            return Permission.objects.none().values_list("codename", flat=True)
+
         ctype = get_content_type(obj)
 
         perms_qs = Permission.objects.filter(content_type=ctype)
@@ -137,6 +140,10 @@ class ObjectPermissionChecker:
 
     def get_group_perms(self, obj: Model) -> QuerySet[str]:
         if self.user and not self.user.is_active:
+            return Permission.objects.none().values_list("codename", flat=True)
+
+        identity = self.user if self.user else self.group
+        if not (self.user and self.user.is_superuser) and not tenant_allows(identity, obj, operation="check"):
             return Permission.objects.none().values_list("codename", flat=True)
 
         ctype = get_content_type(obj)
@@ -159,6 +166,13 @@ class ObjectPermissionChecker:
         """
         if self.user and not self.user.is_active:
             return []
+
+        # Object identity includes the optional tenant: a cross-tenant
+        # check is denied silently (no existence leak) and logged.
+        if not (self.user and self.user.is_superuser):
+            identity = self.user if self.user else self.group
+            if not tenant_allows(identity, obj, operation="check"):
+                return []
 
         # Superusers have every permission, so the prefetch cache (which only
         # holds explicitly assigned permissions) is not used for them.
@@ -199,6 +213,12 @@ class ObjectPermissionChecker:
         """
         if self.user and not self.user.is_active:
             return []
+
+        if not (self.user and self.user.is_superuser) and guardian_settings.GET_TENANT:
+            identity = self.user if self.user else self.group
+            objects = [obj for obj in objects if tenant_allows(identity, obj, operation="check")]
+            if not objects:
+                return True
 
         pks, model, ctype = _get_pks_model_and_ctype(objects)
 

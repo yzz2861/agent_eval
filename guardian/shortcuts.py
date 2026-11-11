@@ -30,7 +30,7 @@ from django.shortcuts import _get_queryset
 
 from guardian.conf import settings as guardian_settings
 from guardian.core import ObjectPermissionChecker
-from guardian.ctypes import get_content_type
+from guardian.ctypes import get_content_type, get_tenant
 from guardian.exceptions import (
     MixedContentTypeError,
     MultipleIdentityAndObjectError,
@@ -512,6 +512,26 @@ def get_groups_with_perms(
 T = TypeVar("T", bound=Model)
 
 
+def _restrict_to_tenant(queryset: QuerySet[T], identity: Any) -> QuerySet[T]:
+    """Exclude objects whose tenant differs from the identity's tenant.
+
+    No-op when no GUARDIAN_GET_TENANT resolver is configured (single-tenant
+    compatibility) or when the identity has no tenant. Objects without a
+    tenant (historical, tenant-less data) stay visible. Cross-tenant
+    objects are excluded silently so callers cannot tell whether they
+    exist at all.
+    """
+    identity_tenant = get_tenant(identity)
+    if identity_tenant is None:
+        return queryset
+    kept_pks = []
+    for obj in queryset:
+        obj_tenant = get_tenant(obj)
+        if obj_tenant is None or obj_tenant == identity_tenant:
+            kept_pks.append(obj.pk)
+    return queryset.filter(pk__in=kept_pks)
+
+
 def _compute_codenames_and_ctype(
     perms: str | list[str],
 ) -> tuple[ContentType | None, set[str]]:
@@ -698,7 +718,7 @@ def get_objects_for_user(
         # 2. any_perm is True, then the global permission beats the object based permission anyway,
         # therefore return full queryset
         if global_perms and (not codenames or any_perm):
-            return queryset
+            return _restrict_to_tenant(queryset, user)
         # Otherwise the remaining codenames must all be granted per object (by user or groups), see below.
         has_global_perms = bool(global_perms and codenames)
 
@@ -717,9 +737,12 @@ def get_objects_for_user(
 
     # Now we should extract the list of pk values for which we would filter the queryset
     user_model = get_user_obj_perms_model(queryset.model)
-    user_obj_perms_queryset = filter_perms_queryset_by_objects(
-        user_model.objects.filter(user=user).filter(permission__content_type=ctype), klass
-    )
+    user_obj_perms_queryset = user_model.objects.filter(user=user).filter(permission__content_type=ctype)
+    if user_model.objects.is_generic():
+        # Bind the row's own content type to the object pk: object_pk and
+        # codename alone do not identify an object across models.
+        user_obj_perms_queryset = user_obj_perms_queryset.filter(content_type=ctype)
+    user_obj_perms_queryset = filter_perms_queryset_by_objects(user_obj_perms_queryset, klass)
     if codenames:
         user_obj_perms_queryset = user_obj_perms_queryset.filter(permission__codename__in=codenames)
     direct_fields = ["content_object__pk", "permission__codename"]
@@ -741,7 +764,10 @@ def get_objects_for_user(
                     "permission__codename__in": codenames,
                 }
             )
-        groups_obj_perms_queryset = filter_perms_queryset_by_objects(group_model.objects.filter(**group_filters), klass)
+        groups_obj_perms_queryset = group_model.objects.filter(**group_filters)
+        if group_model.objects.is_generic():
+            groups_obj_perms_queryset = groups_obj_perms_queryset.filter(content_type=ctype)
+        groups_obj_perms_queryset = filter_perms_queryset_by_objects(groups_obj_perms_queryset, klass)
         if group_model.objects.is_generic():
             group_fields = generic_fields
         else:
@@ -758,7 +784,7 @@ def get_objects_for_user(
                 if codenames.issubset(obj_codenames):
                     pk_list.append(pk)
             objects = queryset.filter(pk__in=pk_list)
-            return objects
+            return _restrict_to_tenant(objects, user)
 
     if not any_perm and len(codenames) > 1:
         counts = user_obj_perms_queryset.values(user_fields[0]).annotate(object_pk_count=Count(user_fields[0]))
@@ -799,7 +825,7 @@ def get_objects_for_user(
             q |= Q(str_pk__in=values)
         else:
             q |= Q(pk__in=values)
-    return queryset.filter(q)
+    return _restrict_to_tenant(queryset.filter(q), user)
 
 
 def get_objects_for_group(
@@ -893,14 +919,15 @@ def get_objects_for_group(
         for code in global_perms:
             codenames.remove(code)
         if global_perms and (not codenames or any_perm):
-            return queryset
+            return _restrict_to_tenant(queryset, group)
 
     # Now we should extract list of pk values for which we would filter
     # queryset
     group_model = get_group_obj_perms_model(queryset.model)
-    groups_obj_perms_queryset = filter_perms_queryset_by_objects(
-        group_model.objects.filter(group=group).filter(permission__content_type=ctype), klass
-    )
+    groups_obj_perms_queryset = group_model.objects.filter(group=group).filter(permission__content_type=ctype)
+    if group_model.objects.is_generic():
+        groups_obj_perms_queryset = groups_obj_perms_queryset.filter(content_type=ctype)
+    groups_obj_perms_queryset = filter_perms_queryset_by_objects(groups_obj_perms_queryset, klass)
     if codenames:
         groups_obj_perms_queryset = groups_obj_perms_queryset.filter(permission__codename__in=codenames)
     if group_model.objects.is_generic():
@@ -914,12 +941,13 @@ def get_objects_for_group(
         # sorting/grouping by pk (first in result tuple)
         data = sorted(data, key=_get_first)
         pk_list = []
+        group_identity = group
         for pk, group in groupby(data, _get_first):
             obj_codenames = {e[1] for e in group}
             if any_perm or codenames.issubset(obj_codenames):
                 pk_list.append(pk)
         objects = queryset.filter(pk__in=pk_list)
-        return objects
+        return _restrict_to_tenant(objects, group_identity)
 
     field_pk = fields[0]
     values = groups_obj_perms_queryset
@@ -934,9 +962,9 @@ def get_objects_for_group(
 
     values = values.values_list(field_pk, flat=True)
     if not use_str_pk:
-        return queryset.filter(pk__in=values)
+        return _restrict_to_tenant(queryset.filter(pk__in=values), group)
     else:
-        return queryset.filter(str_pk__in=values)
+        return _restrict_to_tenant(queryset.filter(str_pk__in=values), group)
 
 
 def _handle_pk_field(queryset):
