@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING
 
 from . import exceptions
 from .hashers import HasherProtocol
-from .hashers.base import validate_str_or_bytes
+from .hashers.base import PepperedHasher, PepperStrategy, validate_str_or_bytes
 
 if TYPE_CHECKING:
     import sys
@@ -19,17 +19,34 @@ class PasswordHash:
     Represents a password hashing utility.
     """
 
-    def __init__(self, hashers: collections.abc.Sequence[HasherProtocol]) -> None:
+    def __init__(
+        self,
+        hashers: collections.abc.Sequence[HasherProtocol],
+        *,
+        pepper: PepperStrategy | None = None,
+    ) -> None:
         """
         Args:
             hashers: A sequence of hashers to be used for password hashing.
+            pepper: An optional, explicitly enabled pepper strategy. When
+                provided, new hashes are wrapped with the current pepper key
+                while legacy unpeppered hashes remain verifiable and are
+                upgraded on successful ``verify_and_update`` calls.
 
         Raises:
             AssertionError: If no hashers are specified.
         """
         assert len(hashers) > 0, "You must specify at least one hasher."
-        self.hashers = hashers
-        self.current_hasher = hashers[0]
+        if pepper is not None and not isinstance(pepper, PepperStrategy):
+            raise TypeError(  # noqa: TRY003
+                "pepper must be a PepperStrategy instance or None."
+            )
+        self.pepper = pepper
+        if pepper is None:
+            self.hashers = tuple(hashers)
+        else:
+            self.hashers = tuple(PepperedHasher(hasher, pepper) for hasher in hashers)
+        self.current_hasher = self.hashers[0]
 
     @classmethod
     def recommended(cls) -> "Self":
@@ -88,6 +105,10 @@ class PasswordHash:
         """
         validate_str_or_bytes(password, "password")
         validate_str_or_bytes(hash, "hash")
+        if self.pepper is not None and self.pepper.is_wrapped(hash):
+            # Fail fast on a malformed wrapper instead of silently treating it
+            # as an unknown algorithm hash.
+            self.pepper.parse(hash)
         for hasher in self.hashers:
             if hasher.identify(hash):
                 return hasher.verify(password, hash)
@@ -115,6 +136,8 @@ class PasswordHash:
         """
         validate_str_or_bytes(password, "password")
         validate_str_or_bytes(hash, "hash")
+        if self.pepper is not None and self.pepper.is_wrapped(hash):
+            self.pepper.parse(hash)
         for hasher in self.hashers:
             if hasher.identify(hash):
                 if not hasher.verify(password, hash):

@@ -7,5 +7,13 @@
 
 ::: pwdlib.hashers.bcrypt
     options:
-      show_root_heading: true
-      show_source: false
+        show_root_heading: true
+        show_source: false
+
+::: pwdlib.hashers.base
+    options:
+        show_root_heading: true
+        show_source: false
+        members:
+            - PepperStrategy
+            - PepperedHasher

@@ -103,3 +103,51 @@ valid, updated_hash = password_hash.verify_and_update("herminetincture", hash)
 If the hash needs to be updated, `updated_hash` will be a string. Otherwise, it's `None`. Then, don't forget to update it in your database.
 
 It's worth to note that the hash is also upgraded if the **settings of the algorithm** has been changed, like the time or memory cost.
+
+## Adding a pepper with key rotation
+
+A pepper is a server-side secret combined with the password before the regular hashing step. It adds protection in case the password database leaks on its own. `pwdlib` keeps peppering **opt-in**: instances created without a pepper produce exactly the same hashes as before.
+
+Enable it by passing a [`PepperStrategy`](./reference/pwdlib.hashers.md#pwdlib.hashers.base.PepperStrategy) to [`PasswordHash`](./reference/pwdlib.md#pwdlib.PasswordHash):
+
+```py
+from pwdlib import PasswordHash
+from pwdlib.hashers.argon2 import Argon2Hasher
+from pwdlib.hashers.base import PepperStrategy
+
+pepper = PepperStrategy(
+    current_key_id="key-2",
+    keys={
+        "key-1": previous_pepper_secret,  # kept during the rotation window
+        "key-2": current_pepper_secret,
+    },
+)
+password_hash = PasswordHash((Argon2Hasher(),), pepper=pepper)
+```
+
+The password is first derived through HMAC-SHA-256 keyed by the pepper, then the digest goes through the regular hasher. The stored value only embeds the non-secret key identifier:
+
+```
+$pwdlib-pepper$v1$key-2$argon2id$v=19$m=65536,t=3,p=4$...
+```
+
+The key material itself is never part of the hash. During a rotation window, hashes stamped with the previous key id are still verified with the previous key, while new and upgraded hashes use `current_key_id`.
+
+### Rotation window and retirement
+
+Rolling a key is a configuration change, not a data migration:
+
+1. Add the new key to `keys` and point `current_key_id` at it.
+2. Let users log in. [`verify_and_update`](./reference/pwdlib.md#pwdlib.PasswordHash.verify_and_update) verifies old records with the previous key and returns a fresh hash using the current key.
+3. Once every active record has been upgraded, retire the old key by setting its material to `None`, then remove the id entirely.
+
+Failure reasons stay distinct so monitoring never confuses a missing key with a wrong password:
+
+- `UnknownPepperKeyError`: the wrapper references a key id that is not registered.
+- `MissingPepperKeyError`: the key id is registered but its secret material was retired (`None`).
+- `CorruptPepperHashError`: the wrapper itself is structurally invalid.
+- A wrong password still returns `False` from `verify`.
+
+Error messages, logs and exception representations only contain the non-secret key id, never the pepper material or the original hash.
+
+Legacy records stored without a pepper keep verifying unchanged: a successful `verify_and_update` upgrades them to a peppered hash on the next login.
