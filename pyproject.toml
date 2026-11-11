@@ -1,0 +1,90 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "python-json-logger"
+version = "4.3.0.dev3"
+description = "JSON Log Formatter for the Python Logging Package"
+authors = [
+    {name = "Zakaria Zajac", email = "zak@madzak.com"},
+    {name = "Nicholas Hairs", email = "info+python-json-logger@nicholashairs.com"},
+]
+maintainers  = [
+    {name = "Nicholas Hairs", email = "info+python-json-logger@nicholashairs.com"},
+]
+
+# Dependency Information
+requires-python = ">=3.10"
+
+# Extra information
+readme = "README.md"
+license = "BSD-2-Clause"
+license-files = ["LICENSE"]
+classifiers = [
+    "Development Status :: 6 - Mature",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Topic :: System :: Logging",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://nhairs.github.io/python-json-logger"
+GitHub = "https://github.com/nhairs/python-json-logger"
+
+[dependency-groups]
+benchmark-report = ["matplotlib>=3.8,<4"]
+benchmark = [
+    # pytest-benchmark 5.x uses Node._nodeid, removed in pytest 9.2.
+    "pytest<9.2",
+    "pytest-benchmark>=5.1,<6",
+    "orjson;implementation_name!='pypy'",
+    "msgspec;implementation_name!='pypy'",
+]
+dev = [
+    ## Optional but required for dev
+    "orjson;implementation_name!='pypy'",
+    "msgspec;implementation_name!='pypy'",
+    ## Lint
+    "validate-pyproject[all]",
+    "black",
+    "pylint",
+    "pyrefly",
+    ## Test
+    "pytest",
+    "freezegun",
+    "tzdata",
+    ## Build
+    "build",
+    ## Docs
+    "mkdocs<2",
+    "mkdocs-material>=8.5",
+    "mkdocs-awesome-pages-plugin",
+    "mdx_truly_sane_lists",
+    "mkdocstrings[python]",
+    "mkdocs-gen-files",
+    "mkdocs-literate-nav",
+    "mike",
+    "packaging",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["pythonjsonlogger*"]
+
+[tool.setuptools.package-data]
+pythonjsonlogger = ["py.typed"]
+
+[tool.black]
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
