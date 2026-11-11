@@ -59,6 +59,43 @@ venv $> uv run -m examples.registration
 
 See **examples/authentication.py** for practical examples of using `generate_authentication_options()` and `verify_authentication_response()`.
 
+#### Stateful authentication ceremonies
+
+The stateless `generate_authentication_options()` and `verify_authentication_response()` helpers leave challenge lifecycle management (binding a challenge to a user, marking it consumed, persisting sign counts) entirely to the RP. An RP that only compares a caller-supplied challenge cannot tell whether a challenge was already used, was issued for a different user, or has expired.
+
+`AuthenticationCeremony` is an explicitly enabled, opt-in transactional layer that sits on top of those unchanged helpers:
+
+```python
+from webauthn import AuthenticationCeremony
+from webauthn.authentication.ceremony import InMemoryAuthenticationChallengeStore, InMemoryCredentialStore
+
+ceremony = AuthenticationCeremony(
+    rp_id="example.com",
+    expected_origin="https://example.com",
+    # Any object implementing the challenge/credential store protocols works;
+    # database-backed stores can replace the in-memory reference implementations.
+    challenge_store=InMemoryAuthenticationChallengeStore(),
+    credential_store=InMemoryCredentialStore(),
+)
+
+# Generating options persists a record of the challenge purpose, RP ID,
+# allowCredentials, optional userHandle, issuance time and expiry time.
+options = ceremony.generate_options(user_handle=user_handle, allow_credentials=descriptors)
+
+# Verification atomically validates the challenge ownership, marks it consumed,
+# looks up the credential by credential id, and checks and updates the sign count.
+result = ceremony.verify_response(credential)
+print(result.user_handle, result.verification.new_sign_count)
+```
+
+Guarantees provided by the ceremony layer:
+
+- A challenge is single-use: concurrent submissions of the same challenge have at most one successful consumer, and replays raise `ChallengeAlreadyConsumed`.
+- Ownership, purpose, RP ID, expiry, allowCredentials, revocation, backup-flag and sign-count checks run before consumption, so a rejected request never consumes another user's challenge.
+- `userHandle` can only confirm the user bound to the challenge; it can never override the binding, including for usernameless ceremonies.
+- Legacy authenticators that always report a sign count of zero remain supported; any other non-zero count must strictly increase or the submission is rejected as a replay (`SignCountReplay`).
+- Every rejected attempt increments an observable `failed_attempts` counter on the challenge record, keyed by reason.
+
 You can also run these examples with the following:
 
 ```sh

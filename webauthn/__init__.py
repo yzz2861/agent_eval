@@ -6,6 +6,13 @@ from .authentication.generate_authentication_options import (
 from .authentication.verify_authentication_response import (
     verify_authentication_response,
 )
+from .authentication.ceremony import (
+    AuthenticationCeremony,
+    AuthenticationChallengeRecord,
+    InMemoryAuthenticationChallengeStore,
+    InMemoryCredentialStore,
+    StoredCredential,
+)
 from .helpers import base64url_to_bytes, options_to_json
 
 __version__ = "3.0.1"
@@ -15,6 +22,11 @@ __all__ = [
     "verify_registration_response",
     "generate_authentication_options",
     "verify_authentication_response",
+    "AuthenticationCeremony",
+    "AuthenticationChallengeRecord",
+    "InMemoryAuthenticationChallengeStore",
+    "InMemoryCredentialStore",
+    "StoredCredential",
     "base64url_to_bytes",
     "options_to_json",
 ]
