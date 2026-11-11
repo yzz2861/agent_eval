@@ -1,0 +1,101 @@
+"""Implements the wiki WSGI application which dispatches requests to
+specific wiki pages and actions.
+"""
+from os import path
+
+from sqlalchemy import create_engine
+from werkzeug.middleware.shared_data import SharedDataMiddleware
+from werkzeug.utils import redirect
+from werkzeug.wsgi import ClosingIterator
+
+from . import actions
+from .database import metadata
+from .database import session
+from .specialpages import page_not_found
+from .specialpages import pages
+from .utils import href
+from .utils import local
+from .utils import local_manager
+from .utils import Request
+
+#: path to shared data
+SHARED_DATA = path.join(path.dirname(__file__), "shared")
+
+
+class SimpleWiki:
+    """
+    Our central WSGI application.
+    """
+
+    def __init__(self, database_uri):
+        self.database_engine = create_engine(database_uri)
+        # apply the middleware *inside* the application so that we never lose
+        # the reference to the `SimpleWiki` object.
+        self._dispatch = SharedDataMiddleware(self.app, {"/_shared": SHARED_DATA})
+
+    def init_database(self):
+        """Called from the management script to generate the db."""
+        metadata.create_all(bind=self.database_engine)
+
+    def bind_to_context(self):
+        """
+        Useful for the shell.  Binds the application to the current active
+        context.  It's automatically called by the shell command.
+        """
+        local.application = self
+
+    def dispatch(self, request):
+        """Dispatch an incoming request."""
+        # set up all the stuff we want to have for this request.  That is
+        # creating a request object, propagating the application to the
+        # current context and instantiating the database session.
+        self.bind_to_context()
+        request.bind_to_context()
+
+        # get the current action from the url and normalize the page name
+        # which is just the request path
+        action_name = request.args.get("action") or "show"
+        page_name = "_".join([x for x in request.path.strip("/").split() if x])
+
+        # redirect to the Main_Page if the user requested the index
+        if not page_name:
+            response = redirect(href("Main_Page"))
+
+        # check special pages
+        elif page_name.startswith("Special:"):
+            if page_name[8:] not in pages:
+                response = page_not_found(request, page_name)
+            else:
+                response = pages[page_name[8:]](request)
+
+        # get the callback function for the requested action from the
+        # action module.  It's "on_" + the action name.  If it doesn't
+        # exists call the missing_action method from the same module.
+        else:
+            action = getattr(actions, f"on_{action_name}", None)
+            if action is None:
+                response = actions.missing_action(request, action_name)
+            else:
+                response = action(request, page_name)
+
+        return response
+
+    def _teardown(self):
+        session.remove()
+        local_manager.cleanup()
+
+    @Request.application
+    def app(self, request):
+        """Run the request dispatch, cleaning up on error or success."""
+        try:
+            response = self.dispatch(request)
+        except:
+            self._teardown()
+            raise
+
+        response.call_on_close(self._teardown)
+        return response
+
+    def __call__(self, environ, start_response):
+        """Just forward a WSGI call to the first internal middleware."""
+        return self._dispatch(environ, start_response)
