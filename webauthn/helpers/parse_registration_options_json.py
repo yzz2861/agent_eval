@@ -175,6 +175,11 @@ def parse_registration_options_json(
     if isinstance(options_exclude_credentials, list):
         mapped_exclude_credentials = []
         for cred in options_exclude_credentials:
+            if not isinstance(cred, dict):
+                raise InvalidJSONStructure(
+                    "Options excludeCredentials entry was invalid value"
+                )
+
             _cred_id = cred.get("id")
             if not isinstance(_cred_id, str):
                 raise InvalidJSONStructure("Options excludeCredentials entry missing required id")

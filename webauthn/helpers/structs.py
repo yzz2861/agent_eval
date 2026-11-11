@@ -1,6 +1,6 @@
 from enum import Enum
 from dataclasses import dataclass, field
-from typing import List, Literal, Optional
+from typing import Any, List, Literal, Optional, Union
 
 from .cose import COSEAlgorithmIdentifier
 
@@ -249,6 +249,278 @@ class PublicKeyCredentialDescriptor:
     id: bytes
     type: Literal[PublicKeyCredentialType.PUBLIC_KEY] = PublicKeyCredentialType.PUBLIC_KEY
     transports: Optional[List[AuthenticatorTransport]] = None
+
+
+@dataclass(init=False)
+class ExistingCredential:
+    """An existing credential, as stored by a Relying Party.
+
+    This is intentionally richer than :class:`PublicKeyCredentialDescriptor`. Policy-related
+    metadata (database identifiers, user handles, labels, revocation and expiry state) is used
+    only while resolving registration options and is never copied into ``excludeCredentials``.
+
+    Attributes:
+        `credential_id`: The credential's WebAuthn ID
+        (optional) `transports`: How the credential's authenticator communicates with clients
+        (optional) `aaguid`: The authenticator model's AAGUID, useful for compatibility rules
+        (optional) `revoked`: Whether the credential has been revoked
+        (optional) `revoked_at`: When the credential was revoked, if applicable
+        (optional) `expires_at`: When the credential expires, if applicable
+        (optional) `database_id`: Internal database identifier. Never serialized into options
+        (optional) `user_handle`: The user's WebAuthn handle. Never serialized into options
+        (optional) `label`: A human-readable label. Never serialized into options
+    """
+
+    credential_id: bytes
+    transports: Optional[List[AuthenticatorTransport]] = None
+    aaguid: Optional[Union[str, bytes, Any]] = None
+    revoked: bool = False
+    revoked_at: Optional[Any] = None
+    expires_at: Optional[Any] = None
+    expired: Optional[bool] = None
+    status: Optional[str] = None
+    database_id: Optional[Any] = None
+    user_handle: Optional[bytes] = None
+    label: Optional[str] = None
+
+    def __init__(
+        self,
+        credential_id: Optional[bytes] = None,
+        *,
+        id: Optional[bytes] = None,
+        credentialId: Optional[bytes] = None,
+        transports: Optional[List[AuthenticatorTransport]] = None,
+        aaguid: Optional[Any] = None,
+        revoked: bool = False,
+        revoked_at: Optional[Any] = None,
+        expires_at: Optional[Any] = None,
+        expired: Optional[bool] = None,
+        status: Optional[str] = None,
+        database_id: Optional[Any] = None,
+        db_id: Optional[Any] = None,
+        internal_id: Optional[Any] = None,
+        user_handle: Optional[bytes] = None,
+        label: Optional[str] = None,
+        **kwargs: Any,
+    ) -> None:
+        resolved_id = credential_id if credential_id is not None else credentialId
+        if resolved_id is None:
+            resolved_id = id
+        if resolved_id is None:
+            for alias in ("credentialID", "cred_id", "credential"):
+                if kwargs.get(alias) is not None:
+                    resolved_id = kwargs[alias]
+                    break
+        if resolved_id is None:
+            raise ValueError("credential_id is required")
+
+        self.credential_id = resolved_id
+        self.transports = transports if transports is not None else kwargs.get("transport")
+        self.aaguid = aaguid if aaguid is not None else kwargs.get("AAGUID")
+        self.revoked = bool(
+            revoked
+            or kwargs.get("is_revoked", False)
+            or kwargs.get("isRevoked", False)
+        )
+        self.revoked_at = (
+            revoked_at
+            if revoked_at is not None
+            else kwargs.get("revokedAt", kwargs.get("revocation_date"))
+        )
+        self.expires_at = (
+            expires_at
+            if expires_at is not None
+            else kwargs.get("expiresAt", kwargs.get("expiration", kwargs.get("expiry")))
+        )
+        self.expired = expired if expired is not None else kwargs.get("is_expired")
+        self.status = status if status is not None else kwargs.get("state")
+        self.database_id = (
+            database_id
+            if database_id is not None
+            else db_id
+            if db_id is not None
+            else internal_id
+        )
+        self.user_handle = (
+            user_handle
+            if user_handle is not None
+            else kwargs.get("userHandle")
+        )
+        self.label = label if label is not None else kwargs.get("name")
+
+    @property
+    def id(self) -> bytes:
+        """Alias for `credential_id`, matching WebAuthn descriptor terminology."""
+        return self.credential_id
+
+    @id.setter
+    def id(self, value: bytes) -> None:
+        self.credential_id = value
+
+
+# Descriptive aliases for callers that think in terms of a credential database record.
+RegistrationCredentialRecord = ExistingCredential
+StoredCredential = ExistingCredential
+CredentialRecord = ExistingCredential
+UserCredential = ExistingCredential
+
+
+@dataclass(init=False)
+class RegistrationPolicy:
+    """Explicit policy for selecting credentials and authenticator requirements.
+
+    Policy resolution is deterministic: revoked/expired records are removed, duplicate credential
+    IDs are merged (or rejected when they identify different authenticators), incompatible
+    transports/AAGUIDs are excluded, and the remaining descriptors are sorted by credential ID.
+
+    Attributes:
+        (optional) `existing_credentials`: Credentials already registered to the user
+        (optional) `resident_key`: Desired resident-key support
+        (optional) `require_resident_key`: Legacy companion to `resident_key`
+        (optional) `user_verification`: Desired user-verification level
+        (optional) `authenticator_attachment`: Desired authenticator attachment
+        (optional) `excluded_transports`: A credential using any of these is incompatible
+        (optional) `allowed_transports`: A credential must support one of these when known
+        (optional) `excluded_aaguids`: Authenticator models to exclude
+        (optional) `allowed_aaguids`: Authenticator models to allow when their AAGUID is known
+        (optional) `now`: Time used to evaluate expiry. Defaults to the current UTC time
+    """
+
+    existing_credentials: Optional[List[Any]] = None
+    resident_key: Optional[ResidentKeyRequirement] = None
+    require_resident_key: Optional[bool] = None
+    user_verification: Optional[UserVerificationRequirement] = None
+    authenticator_attachment: Optional[AuthenticatorAttachment] = None
+    excluded_transports: Optional[List[AuthenticatorTransport]] = None
+    allowed_transports: Optional[List[AuthenticatorTransport]] = None
+    excluded_aaguids: Optional[List[Any]] = None
+    allowed_aaguids: Optional[List[Any]] = None
+    now: Optional[Any] = None
+
+    def __init__(
+        self,
+        existing_credentials: Optional[List[Any]] = None,
+        *,
+        credentials: Optional[List[Any]] = None,
+        excluded_credentials: Optional[List[Any]] = None,
+        exclude_credentials: Optional[List[Any]] = None,
+        credential_descriptions: Optional[List[Any]] = None,
+        credential_descriptors: Optional[List[Any]] = None,
+        existing_credential_records: Optional[List[Any]] = None,
+        resident_key: Optional[ResidentKeyRequirement] = None,
+        require_resident_key: Optional[bool] = None,
+        user_verification: Optional[UserVerificationRequirement] = None,
+        authenticator_attachment: Optional[AuthenticatorAttachment] = None,
+        excluded_transports: Optional[List[AuthenticatorTransport]] = None,
+        allowed_transports: Optional[List[AuthenticatorTransport]] = None,
+        excluded_aaguids: Optional[List[Any]] = None,
+        allowed_aaguids: Optional[List[Any]] = None,
+        now: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> None:
+        resolved_credentials = existing_credentials
+        if resolved_credentials is None:
+            resolved_credentials = credentials
+        if resolved_credentials is None:
+            resolved_credentials = excluded_credentials
+        if resolved_credentials is None:
+            resolved_credentials = exclude_credentials
+        if resolved_credentials is None:
+            resolved_credentials = credential_descriptions
+        if resolved_credentials is None:
+            resolved_credentials = credential_descriptors
+        if resolved_credentials is None:
+            resolved_credentials = existing_credential_records
+        if resolved_credentials is None:
+            resolved_credentials = kwargs.get("existingCredentialRecords")
+
+        if resident_key is None and kwargs.get("residentKey") is not None:
+            resident_key = kwargs["residentKey"]
+        if resident_key is not None and not isinstance(
+            resident_key, ResidentKeyRequirement
+        ):
+            resident_key = ResidentKeyRequirement(resident_key)
+        if require_resident_key is None:
+            require_resident_key = kwargs.get("requireResidentKey")
+        if user_verification is None:
+            user_verification = kwargs.get("userVerification")
+        if isinstance(user_verification, str):
+            user_verification = UserVerificationRequirement(user_verification)
+        if authenticator_attachment is None:
+            authenticator_attachment = kwargs.get("attachment")
+        if authenticator_attachment is not None and not isinstance(
+            authenticator_attachment, AuthenticatorAttachment
+        ):
+            authenticator_attachment = AuthenticatorAttachment(authenticator_attachment)
+
+        if excluded_transports is None:
+            excluded_transports = kwargs.get(
+                "exclude_transports",
+                kwargs.get(
+                    "transport_exclusions",
+                    kwargs.get(
+                        "excludeTransports",
+                        kwargs.get(
+                            "blocked_transports",
+                            kwargs.get("deny_transports"),
+                        ),
+                    ),
+                ),
+            )
+        if allowed_transports is None:
+            allowed_transports = kwargs.get(
+                "include_transports", kwargs.get("allowedTransports")
+            )
+        if excluded_aaguids is None:
+            excluded_aaguids = kwargs.get(
+                "exclude_aaguids",
+                kwargs.get(
+                    "aaguid_exclusions",
+                    kwargs.get(
+                        "excludeAaguids",
+                        kwargs.get(
+                            "blocked_aaguids",
+                            kwargs.get("deny_aaguids"),
+                        ),
+                    ),
+                ),
+            )
+        if allowed_aaguids is None:
+            allowed_aaguids = kwargs.get(
+                "include_aaguids", kwargs.get("allowedAaguids")
+            )
+
+        self.existing_credentials = resolved_credentials
+        self.resident_key = resident_key
+        self.require_resident_key = require_resident_key
+        self.user_verification = user_verification
+        self.authenticator_attachment = authenticator_attachment
+        self.excluded_transports = excluded_transports
+        self.allowed_transports = allowed_transports
+        self.excluded_aaguids = excluded_aaguids
+        self.allowed_aaguids = allowed_aaguids
+        self.now = now if now is not None else kwargs.get("current_time")
+
+    @property
+    def credentials(self) -> Optional[List[Any]]:
+        return self.existing_credentials
+
+    @credentials.setter
+    def credentials(self, value: Optional[List[Any]]) -> None:
+        self.existing_credentials = value
+
+    @property
+    def excluded_credentials(self) -> Optional[List[Any]]:
+        return self.existing_credentials
+
+    @excluded_credentials.setter
+    def excluded_credentials(self, value: Optional[List[Any]]) -> None:
+        self.existing_credentials = value
+
+
+RegistrationOptionsPolicy = RegistrationPolicy
+RegistrationCredentialPolicy = RegistrationPolicy
+CredentialExclusionPolicy = RegistrationPolicy
 
 
 @dataclass

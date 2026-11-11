@@ -6,6 +6,12 @@ class InvalidRegistrationOptions(WebAuthnException):
     pass
 
 
+class AmbiguousCredentialIdError(ValueError, InvalidRegistrationOptions):
+    """Raised when one credential ID is claimed by multiple distinct authenticators."""
+
+    pass
+
+
 class InvalidRegistrationResponse(WebAuthnException):
     pass
 

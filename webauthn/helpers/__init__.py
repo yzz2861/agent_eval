@@ -19,6 +19,16 @@ from .parse_cbor import parse_cbor
 from .parse_client_data_json import parse_client_data_json
 from .parse_registration_credential_json import parse_registration_credential_json
 from .parse_registration_options_json import parse_registration_options_json
+from .registration_policy import resolve_exclude_credentials
+from .structs import (
+    CredentialRecord,
+    ExistingCredential,
+    RegistrationCredentialRecord,
+    RegistrationOptionsPolicy,
+    RegistrationPolicy,
+    StoredCredential,
+    UserCredential,
+)
 from .validate_certificate_chain import validate_certificate_chain
 from .verify_safetynet_timestamp import verify_safetynet_timestamp
 from .verify_signature import verify_signature
@@ -45,6 +55,14 @@ __all__ = [
     "parse_client_data_json",
     "parse_registration_credential_json",
     "parse_registration_options_json",
+    "ExistingCredential",
+    "CredentialRecord",
+    "RegistrationCredentialRecord",
+    "StoredCredential",
+    "UserCredential",
+    "RegistrationPolicy",
+    "RegistrationOptionsPolicy",
+    "resolve_exclude_credentials",
     "validate_certificate_chain",
     "verify_safetynet_timestamp",
     "verify_signature",

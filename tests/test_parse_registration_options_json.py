@@ -7,7 +7,9 @@ from webauthn.helpers.structs import (
     AuthenticatorAttachment,
     AttestationConveyancePreference,
     AuthenticatorSelectionCriteria,
+    ExistingCredential,
     PublicKeyCredentialDescriptor,
+    RegistrationPolicy,
     ResidentKeyRequirement,
     PublicKeyCredentialHint,
     PublicKeyCredentialRpEntity,
@@ -280,6 +282,66 @@ class TestParseRegistrationOptionsJSON(TestCase):
         self.assertEqual(parsed_opts_json.pub_key_cred_params, opts.pub_key_cred_params)
         self.assertEqual(parsed_opts_json.timeout, opts.timeout)
         self.assertEqual(parsed_opts_json.hints, opts.hints)
+
+    def test_round_trips_policy_resolved_registration_options(self) -> None:
+        opts = generate_registration_options(
+            rp_id="example.com",
+            rp_name="Example Co",
+            user_id=b"user",
+            user_name="lee",
+            existing_credentials=[
+                ExistingCredential(
+                    credential_id=b"credential-b",
+                    transports=[AuthenticatorTransport.USB],
+                ),
+                ExistingCredential(
+                    credential_id=b"credential-a",
+                    transports=[AuthenticatorTransport.INTERNAL],
+                ),
+            ],
+            registration_policy=RegistrationPolicy(
+                resident_key=ResidentKeyRequirement.REQUIRED,
+                user_verification=UserVerificationRequirement.REQUIRED,
+                authenticator_attachment=AuthenticatorAttachment.PLATFORM,
+            ),
+        )
+
+        parsed = parse_registration_options_json(options_to_json(opts))
+
+        self.assertEqual(parsed.rp, opts.rp)
+        self.assertEqual(parsed.user, opts.user)
+        self.assertEqual(parsed.attestation, opts.attestation)
+        self.assertEqual(parsed.authenticator_selection, opts.authenticator_selection)
+        self.assertEqual(parsed.challenge, opts.challenge)
+        self.assertEqual(parsed.exclude_credentials, opts.exclude_credentials)
+        self.assertEqual(parsed.pub_key_cred_params, opts.pub_key_cred_params)
+        self.assertEqual(parsed.timeout, opts.timeout)
+        self.assertEqual(parsed.hints, opts.hints)
+
+    def test_parses_legacy_options_without_policy_fields(self) -> None:
+        parsed = parse_registration_options_json(
+            {
+                "rp": {"id": "example.com", "name": "Example Co"},
+                "user": {"id": "AQIDBA", "name": "lee", "displayName": "Lee"},
+                "challenge": "AQIDBA",
+                "pubKeyCredParams": [{"type": "public-key", "alg": -7}],
+                "authenticatorSelection": {
+                    "requireResidentKey": True,
+                },
+                "attestation": "none",
+                "excludeCredentials": [],
+            }
+        )
+
+        self.assertEqual(
+            parsed.authenticator_selection,
+            AuthenticatorSelectionCriteria(
+                resident_key=None,
+                require_resident_key=True,
+                user_verification=UserVerificationRequirement.PREFERRED,
+            ),
+        )
+        self.assertEqual(parsed.exclude_credentials, [])
 
     def test_raises_on_non_dict_json(self) -> None:
         with self.assertRaisesRegex(InvalidJSONStructure, "not a JSON object"):

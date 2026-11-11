@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
@@ -6,12 +7,18 @@ from webauthn.helpers.structs import (
     AttestationConveyancePreference,
     AuthenticatorAttachment,
     AuthenticatorSelectionCriteria,
+    AuthenticatorTransport,
+    ExistingCredential,
     PublicKeyCredentialDescriptor,
     PublicKeyCredentialParameters,
     PublicKeyCredentialRpEntity,
     PublicKeyCredentialUserEntity,
     ResidentKeyRequirement,
+    RegistrationPolicy,
+    UserVerificationRequirement,
 )
+from webauthn.helpers.exceptions import AmbiguousCredentialIdError
+from webauthn.helpers.options_to_json_dict import options_to_json_dict
 from webauthn import generate_registration_options
 
 
@@ -160,3 +167,175 @@ class TestGenerateRegistrationOptions(TestCase):
             options.pub_key_cred_params[2].alg,
             COSEAlgorithmIdentifier.RSASSA_PKCS1_v1_5_SHA_256,
         )
+
+    def test_policy_dedupes_same_credential_id_across_transports(self) -> None:
+        options = generate_registration_options(
+            rp_id="example.com",
+            rp_name="Example Co",
+            user_name="lee",
+            user_id=b"user",
+            existing_credentials=[
+                ExistingCredential(credential_id=b"b", transports=[AuthenticatorTransport.USB]),
+                ExistingCredential(credential_id=b"a", transports=[AuthenticatorTransport.INTERNAL]),
+                ExistingCredential(credential_id=b"b", transports=[AuthenticatorTransport.NFC]),
+            ],
+        )
+
+        self.assertEqual(
+            options.exclude_credentials,
+            [
+                PublicKeyCredentialDescriptor(
+                    id=b"a", transports=[AuthenticatorTransport.INTERNAL]
+                ),
+                PublicKeyCredentialDescriptor(
+                    id=b"b",
+                    transports=[AuthenticatorTransport.NFC, AuthenticatorTransport.USB],
+                ),
+            ],
+        )
+
+    def test_policy_filters_revoked_and_expired_credentials(self) -> None:
+        now = datetime(2026, 11, 12, tzinfo=timezone.utc)
+        options = generate_registration_options(
+            rp_id="example.com",
+            rp_name="Example Co",
+            user_name="lee",
+            user_id=b"user",
+            registration_policy=RegistrationPolicy(
+                existing_credentials=[
+                    ExistingCredential(credential_id=b"revoked", revoked=True),
+                    ExistingCredential(credential_id=b"revoked-at", revoked_at=now),
+                    ExistingCredential(credential_id=b"expired", expires_at=now - timedelta(days=1)),
+                    ExistingCredential(credential_id=b"valid", expires_at=now + timedelta(days=1)),
+                ],
+                now=now,
+            ),
+        )
+
+        self.assertEqual(
+            options.exclude_credentials,
+            [PublicKeyCredentialDescriptor(id=b"valid")],
+        )
+
+    def test_policy_with_empty_credentials_produces_empty_exclusions(self) -> None:
+        options = generate_registration_options(
+            rp_id="example.com",
+            rp_name="Example Co",
+            user_name="lee",
+            user_id=b"user",
+            existing_credentials=[],
+        )
+
+        self.assertEqual(options.exclude_credentials, [])
+
+    def test_policy_rejects_shared_credential_ids_from_distinct_authenticators(self) -> None:
+        with self.assertRaisesRegex(AmbiguousCredentialIdError, "share credential id"):
+            generate_registration_options(
+                rp_id="example.com",
+                rp_name="Example Co",
+                user_name="lee",
+                user_id=b"user",
+                existing_credentials=[
+                    ExistingCredential(
+                        credential_id=b"shared",
+                        aaguid="11111111-1111-1111-1111-111111111111",
+                    ),
+                    ExistingCredential(
+                        credential_id=b"shared",
+                        aaguid="22222222-2222-2222-2222-222222222222",
+                    ),
+                ],
+            )
+
+    def test_policy_excludes_incompatible_transports_and_aaguids(self) -> None:
+        options = generate_registration_options(
+            rp_id="example.com",
+            rp_name="Example Co",
+            user_name="lee",
+            user_id=b"user",
+            registration_policy=RegistrationPolicy(
+                existing_credentials=[
+                    ExistingCredential(
+                        credential_id=b"usb",
+                        transports=[AuthenticatorTransport.USB],
+                    ),
+                    ExistingCredential(
+                        credential_id=b"internal",
+                        transports=[AuthenticatorTransport.INTERNAL],
+                    ),
+                    ExistingCredential(
+                        credential_id=b"blocked-aaguid",
+                        transports=[AuthenticatorTransport.HYBRID],
+                        aaguid="22222222-2222-2222-2222-222222222222",
+                    ),
+                ],
+                excluded_transports=[AuthenticatorTransport.USB],
+                excluded_aaguids=["22222222-2222-2222-2222-222222222222"],
+            ),
+        )
+
+        self.assertEqual(
+            options.exclude_credentials,
+            [
+                PublicKeyCredentialDescriptor(
+                    id=b"internal", transports=[AuthenticatorTransport.INTERNAL]
+                )
+            ],
+        )
+
+    def test_exclude_credentials_do_not_leak_internal_metadata(self) -> None:
+        options = generate_registration_options(
+            rp_id="example.com",
+            rp_name="Example Co",
+            user_name="lee",
+            user_id=b"user",
+            existing_credentials=[
+                ExistingCredential(
+                    credential_id=b"credential",
+                    transports=[AuthenticatorTransport.INTERNAL],
+                    database_id=42,
+                    user_handle=b"handle-secret",
+                    label="Work laptop",
+                )
+            ],
+        )
+
+        exclude_credentials_json = options_to_json_dict(options)["excludeCredentials"]
+        self.assertEqual(len(exclude_credentials_json), 1)
+        self.assertEqual(
+            set(exclude_credentials_json[0]), {"id", "type", "transports"}
+        )
+        self.assertNotIn("handle-secret", str(exclude_credentials_json))
+        self.assertNotIn("Work laptop", str(exclude_credentials_json))
+
+    def test_resident_key_policy_supports_all_three_values(self) -> None:
+        for resident_key, expected_require_resident_key in (
+            (ResidentKeyRequirement.DISCOURAGED, False),
+            (ResidentKeyRequirement.PREFERRED, False),
+            (ResidentKeyRequirement.REQUIRED, True),
+        ):
+            with self.subTest(resident_key=resident_key):
+                options = generate_registration_options(
+                    rp_id="example.com",
+                    rp_name="Example Co",
+                    user_name="lee",
+                    user_id=b"user",
+                    registration_policy=RegistrationPolicy(
+                        resident_key=resident_key,
+                        user_verification=UserVerificationRequirement.REQUIRED,
+                    ),
+                )
+
+                self.assertIsNotNone(options.authenticator_selection)
+                assert options.authenticator_selection is not None
+                self.assertEqual(
+                    options.authenticator_selection.resident_key, resident_key
+                )
+                self.assertEqual(
+                    options.authenticator_selection.require_resident_key,
+                    expected_require_resident_key,
+                )
+                self.assertEqual(
+                    options.authenticator_selection.user_verification,
+                    UserVerificationRequirement.REQUIRED,
+                )

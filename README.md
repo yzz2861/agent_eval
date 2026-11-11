@@ -48,6 +48,38 @@ Other arguments into this library's methods that are defined as `bytes` are inte
 
 See **examples/registration.py** for practical examples of using `generate_registration_options()` and `verify_registration_response()`.
 
+Registration options can also be resolved from a `RegistrationPolicy`. Existing credential records are
+deduplicated by credential ID, filtered by revocation/expiry, checked against transport and AAGUID
+rules, and then emitted as safe `excludeCredentials` descriptors. Internal database IDs, user handles,
+and labels are never included in the options sent to the client:
+
+```python
+from webauthn import ExistingCredential, RegistrationPolicy, generate_registration_options
+from webauthn.helpers.structs import ResidentKeyRequirement, UserVerificationRequirement
+
+policy = RegistrationPolicy(
+    existing_credentials=[
+        ExistingCredential(
+            credential_id=b"...",
+            transports=["internal"],
+            aaguid="...",
+            database_id=123,
+            label="Work laptop",
+        ),
+    ],
+    resident_key=ResidentKeyRequirement.REQUIRED,
+    user_verification=UserVerificationRequirement.REQUIRED,
+    excluded_transports=["usb"],
+)
+
+options = generate_registration_options(
+    rp_id="example.com",
+    rp_name="Example Co",
+    user_name="lee",
+    registration_policy=policy,
+)
+```
+
 You can also run these examples with the following:
 
 ```sh

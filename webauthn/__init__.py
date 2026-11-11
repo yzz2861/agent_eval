@@ -7,6 +7,15 @@ from .authentication.verify_authentication_response import (
     verify_authentication_response,
 )
 from .helpers import base64url_to_bytes, options_to_json
+from .helpers.structs import (
+    CredentialRecord,
+    ExistingCredential,
+    RegistrationCredentialRecord,
+    RegistrationOptionsPolicy,
+    RegistrationPolicy,
+    StoredCredential,
+    UserCredential,
+)
 
 __version__ = "3.0.1"
 
@@ -17,4 +26,11 @@ __all__ = [
     "verify_authentication_response",
     "base64url_to_bytes",
     "options_to_json",
+    "ExistingCredential",
+    "CredentialRecord",
+    "RegistrationCredentialRecord",
+    "StoredCredential",
+    "UserCredential",
+    "RegistrationPolicy",
+    "RegistrationOptionsPolicy",
 ]
