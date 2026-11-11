@@ -1,0 +1,10 @@
+pip
+pyasn1>=0.4.6
+build
+pycryptodomex
+winkerberos
+setuptools
+sphinx
+sphinx-rtd-theme
+twine
+wheel
