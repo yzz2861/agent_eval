@@ -1172,6 +1172,15 @@ else:  # pragma: no cover
     make_cdnskey = _need_pyca
     _have_pyca = False
 
+from dns._dnssec_denial import (  # noqa: E402,F401
+    MAX_NSEC3_ITERATIONS as MAX_NSEC3_ITERATIONS,
+)
+from dns._dnssec_denial import DenialStatus as DenialStatus  # noqa: E402,F401
+from dns._dnssec_denial import (  # noqa: E402,F401
+    DenialValidationResult as DenialValidationResult,
+)
+from dns._dnssec_denial import validate_denial as validate_denial  # noqa: E402,F401
+
 ### BEGIN generated Algorithm constants
 
 RSAMD5 = Algorithm.RSAMD5
