@@ -190,6 +190,13 @@ Example ``AXES_LOCKOUT_PARAMETERS`` configuration:
 
 This way, axes will lock out users using ip_address or combination of username and user_agent
 
+Axes normalizes the configured scopes before counting failures. Parameter names inside each
+combination and the scopes themselves are sorted, and duplicate scopes are removed, so reordering
+the same configuration does not change database filters or cache keys. Empty combinations,
+unknown parameter names, and repeated parameter names inside one combination raise a configuration
+error before any failure is counted. Cache keys use a version prefix and hash canonical JSON that
+preserves both parameter names and value boundaries; old unversioned cache keys are not reused.
+
 Example of callable ``AXES_LOCKOUT_PARAMETERS``:
 
 ``example/utils.py``::

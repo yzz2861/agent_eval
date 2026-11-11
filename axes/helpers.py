@@ -1,8 +1,9 @@
+import json
 from datetime import timedelta, datetime
 from hashlib import sha256
 from logging import getLogger
 from string import Template
-from typing import Callable, Optional, Type, Union, List
+from typing import Callable, Optional, Type, Union, List, Tuple
 from urllib.parse import urlencode
 
 from django.contrib.auth import get_user_model
@@ -16,6 +17,9 @@ from axes.conf import LockoutTier, settings
 from axes.models import AccessBase
 
 log = getLogger(__name__)
+
+LOCKOUT_PARAMETER_NAMES = ("username", "ip_address", "user_agent")
+CACHE_KEY_VERSION = 2
 
 try:
     import ipware.ip
@@ -313,7 +317,7 @@ def get_client_http_accept(request: HttpRequest) -> str:
 def get_lockout_parameters(
     request_or_attempt: Union[HttpRequest, AccessBase],
     credentials: Optional[dict] = None,
-) -> List[Union[str, List[str]]]:
+) -> List[Union[str, List[str], Tuple[str, ...]]]:
     if callable(settings.AXES_LOCKOUT_PARAMETERS):
         return settings.AXES_LOCKOUT_PARAMETERS(request_or_attempt, credentials)
 
@@ -345,8 +349,6 @@ def get_client_parameters(
 
     Returns list of dict, every item of list are separate parameters
     """
-    lockout_parameters = get_lockout_parameters(request_or_attempt, credentials)
-
     parameters_dict = {
         "username": username,
         "ip_address": ip_address,
@@ -354,16 +356,14 @@ def get_client_parameters(
     }
 
     filter_kwargs = []
-
-    for parameter in lockout_parameters:
+    for parameter in normalize_lockout_parameters(
+        get_lockout_parameters(request_or_attempt, credentials)
+    ):
         try:
-            if isinstance(parameter, str):
-                filter_kwarg = {parameter: parameters_dict[parameter]}
-            else:
-                filter_kwarg = {
-                    combined_parameter: parameters_dict[combined_parameter]
-                    for combined_parameter in parameter
-                }
+            filter_kwarg = {
+                combined_parameter: parameters_dict[combined_parameter]
+                for combined_parameter in parameter
+            }
             filter_kwargs.append(filter_kwarg)
 
         except KeyError as e:
@@ -377,14 +377,77 @@ def get_client_parameters(
     return filter_kwargs
 
 
+def normalize_lockout_parameters(
+    lockout_parameters: List[Union[str, List[str], Tuple[str, ...]]],
+) -> List[Tuple[str, ...]]:
+    """
+    Return a deterministic representation of the configured lockout scopes.
+
+    Parameter names within each scope and the scopes themselves are sorted,
+    and duplicate scopes are removed. Empty scopes, repeated parameter names
+    inside a scope, and unknown parameter names are configuration errors.
+    """
+
+    normalized_scopes = set()
+    allowed_parameters = set(LOCKOUT_PARAMETER_NAMES)
+
+    for parameter in lockout_parameters:
+        if isinstance(parameter, str):
+            scope = (parameter,)
+        elif isinstance(parameter, (list, tuple)) and all(
+            isinstance(combined_parameter, str)
+            for combined_parameter in parameter
+        ):
+            scope = tuple(parameter)
+        else:
+            error_msg = (
+                "Lockout parameters must be strings or lists of strings. "
+                f"Allowed parameters: {', '.join(LOCKOUT_PARAMETER_NAMES)}"
+            )
+            log.exception(error_msg)
+            raise TypeError(error_msg)
+
+        if not scope:
+            error_msg = (
+                "Empty lockout parameter combinations are not allowed. "
+                f"Allowed parameters: {', '.join(LOCKOUT_PARAMETER_NAMES)}"
+            )
+            log.exception(error_msg)
+            raise ValueError(error_msg)
+
+        unknown_parameters = sorted(set(scope) - allowed_parameters)
+        if unknown_parameters:
+            error_msg = (
+                f"{', '.join(unknown_parameters)} lockout parameter is not allowed. "
+                f"Allowed parameters: {', '.join(LOCKOUT_PARAMETER_NAMES)}"
+            )
+            log.exception(error_msg)
+            raise ValueError(error_msg)
+
+        if len(scope) != len(set(scope)):
+            error_msg = (
+                "Repeated lockout parameters are not allowed: "
+                f"{', '.join(scope)}"
+            )
+            log.exception(error_msg)
+            raise ValueError(error_msg)
+
+        normalized_scopes.add(tuple(sorted(scope)))
+
+    return sorted(normalized_scopes)
+
+
 def make_cache_key_list(filter_kwargs_list: List[dict]) -> List[str]:
     cache_keys = []
     for filter_kwargs in filter_kwargs_list:
-        cache_key_components = "".join(
-            value for value in filter_kwargs.values() if value
+        canonical_filter_kwargs = json.dumps(
+            filter_kwargs,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
         )
-        cache_key_digest = sha256(cache_key_components.encode()).hexdigest()
-        cache_keys.append(f"axes-{cache_key_digest}")
+        cache_key_digest = sha256(canonical_filter_kwargs.encode()).hexdigest()
+        cache_keys.append(f"axes-v{CACHE_KEY_VERSION}-{cache_key_digest}")
     return cache_keys
 
 

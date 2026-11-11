@@ -1,19 +1,26 @@
-from unittest.mock import MagicMock, patch
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone as dt_timezone
-from django.test import override_settings
-from django.utils import timezone
-from axes.handlers.database import AxesDatabaseHandler
-from axes.models import AccessAttempt, AccessLog, AccessFailureLog, AccessAttemptExpiration
-
+from threading import Barrier
+from unittest.mock import MagicMock, patch
 
 from django.core.cache import cache
 from django.http import HttpRequest
 from django.http.multipartparser import MultiPartParserError
+from django.test import RequestFactory, TransactionTestCase, override_settings
 from django.urls import reverse
+from django.utils import timezone
 
 from axes.conf import settings
+from axes.handlers.cache import AxesCacheHandler
+from axes.handlers.database import AxesDatabaseHandler
 from axes.handlers.proxy import AxesProxyHandler
-from axes.helpers import get_client_str
+from axes.helpers import get_client_str, get_cool_off, get_failure_limit
+from axes.models import (
+    AccessAttempt,
+    AccessAttemptExpiration,
+    AccessFailureLog,
+    AccessLog,
+)
 from tests.base import AxesTestCase
 
 
@@ -600,6 +607,338 @@ class AxesCacheHandlerTestCase(AxesHandlerBaseTestCase):
         # The count is re-seeded with its timeout, so touch is not needed.
         self.assertEqual(cache_add.call_count, 2)
         self.assertFalse(cache_touch.called)
+
+
+class LockoutScopeHandlerConsistencyTestCase(AxesTestCase):
+    HANDLER_CLASSES = (AxesDatabaseHandler, AxesCacheHandler)
+    LOCKOUT_PARAMETERS = ["username", ["username", "ip_address"]]
+
+    def failure_request(self):
+        request = RequestFactory().post(
+            "/admin/login/",
+            data={"username": "shared-user", "password": "wrong-password"},
+            REMOTE_ADDR="2.3.4.5",
+            HTTP_USER_AGENT="test-browser",
+        )
+        request.axes_locked_out = False
+        return request
+
+    def run_failure_sequence(self, handler_class, lockout_parameters):
+        results = []
+
+        with override_settings(
+            AXES_LOCKOUT_PARAMETERS=lockout_parameters,
+            AXES_HANDLER=(
+                f"{handler_class.__module__}.{handler_class.__name__}"
+            ),
+        ):
+            for _ in range(get_failure_limit(None, None)):
+                request = self.failure_request()
+                credentials = {
+                    "username": "shared-user",
+                    "password": "wrong-password",
+                }
+                AxesProxyHandler.user_login_failed(
+                    sender=None, request=request, credentials=credentials
+                )
+                results.append(
+                    {
+                        "failures": AxesProxyHandler.get_failures(
+                            request, credentials
+                        ),
+                        "request_failures": request.axes_failures_since_start,
+                        "locked_out": request.axes_locked_out,
+                        "failure_limit": get_failure_limit(
+                            request, credentials
+                        ),
+                        "cool_off": get_cool_off(request),
+                    }
+                )
+
+        return results
+
+    def test_database_and_cache_count_same_failure_sequence(self):
+        database_results = self.run_failure_sequence(
+            AxesDatabaseHandler, self.LOCKOUT_PARAMETERS
+        )
+        cache_results = self.run_failure_sequence(
+            AxesCacheHandler, self.LOCKOUT_PARAMETERS
+        )
+
+        self.assertEqual(database_results, cache_results)
+        self.assertEqual(
+            [result["failures"] for result in database_results],
+            list(range(1, get_failure_limit(None, None) + 1)),
+        )
+        self.assertTrue(database_results[-1]["locked_out"])
+        self.assertEqual(
+            database_results[-1]["request_failures"],
+            database_results[-1]["failure_limit"],
+        )
+        failure_limit = get_failure_limit(None, None)
+        for failure_number, result in enumerate(database_results, start=1):
+            self.assertEqual(result["failure_limit"], failure_limit)
+            self.assertEqual(result["locked_out"], failure_number >= failure_limit)
+
+    def test_scope_order_does_not_change_handler_results(self):
+        reversed_parameters = [
+            list(reversed(parameter)) if isinstance(parameter, list) else parameter
+            for parameter in reversed(self.LOCKOUT_PARAMETERS)
+        ]
+
+        for handler_class in self.HANDLER_CLASSES:
+            with self.subTest(handler=handler_class.__name__):
+                self.assertEqual(
+                    self.run_failure_sequence(
+                        handler_class, self.LOCKOUT_PARAMETERS
+                    ),
+                    self.run_failure_sequence(handler_class, reversed_parameters),
+                )
+
+    def test_value_boundary_collision_does_not_merge_clients(self):
+        with override_settings(
+            AXES_LOCKOUT_PARAMETERS=[["username", "ip_address"]],
+            AXES_HANDLER="axes.handlers.cache.AxesCacheHandler",
+        ):
+            first_request = RequestFactory().post(
+                "/admin/login/",
+                data={"username": "foo1", "password": "wrong-password"},
+                REMOTE_ADDR="2.3.4.5",
+            )
+            second_request = RequestFactory().post(
+                "/admin/login/",
+                data={"username": "foo", "password": "wrong-password"},
+                REMOTE_ADDR="12.3.4.5",
+            )
+            first_request.axes_locked_out = False
+            second_request.axes_locked_out = False
+
+            AxesProxyHandler.user_login_failed(
+                sender=None,
+                request=first_request,
+                credentials={"username": "foo1"},
+            )
+            AxesProxyHandler.user_login_failed(
+                sender=None,
+                request=second_request,
+                credentials={"username": "foo"},
+            )
+
+            self.assertEqual(AxesProxyHandler.get_failures(first_request), 1)
+            self.assertEqual(AxesProxyHandler.get_failures(second_request), 1)
+
+    def test_legacy_cache_keys_are_not_reused_by_versioned_keys(self):
+        legacy_digest = "legacy-cache-digest"
+        legacy_key = f"axes-{legacy_digest}"
+
+        with override_settings(
+            AXES_LOCKOUT_PARAMETERS=["username"],
+            AXES_HANDLER="axes.handlers.cache.AxesCacheHandler",
+        ):
+            cache.set(legacy_key, get_failure_limit(None, None))
+            request = self.failure_request()
+
+            AxesProxyHandler.user_login_failed(
+                sender=None,
+                request=request,
+                credentials={"username": "shared-user"},
+            )
+
+            self.assertEqual(
+                cache.get(legacy_key), get_failure_limit(None, None)
+            )
+            self.assertEqual(request.axes_failures_since_start, 1)
+            self.assertFalse(request.axes_locked_out)
+
+    def test_empty_and_unknown_scopes_raise_before_counting_failures(self):
+        invalid_configurations = (
+            [[]],
+            ["unknown_parameter"],
+            [["username", "username"]],
+            [42],
+        )
+
+        for handler_class in self.HANDLER_CLASSES:
+            for lockout_parameters in invalid_configurations:
+                with self.subTest(
+                    handler=handler_class.__name__,
+                    lockout_parameters=lockout_parameters,
+                ):
+                    with override_settings(
+                        AXES_HANDLER=(
+                            f"{handler_class.__module__}."
+                            f"{handler_class.__name__}"
+                        ),
+                        AXES_LOCKOUT_PARAMETERS=lockout_parameters,
+                    ):
+                        request = self.failure_request()
+                        with self.assertRaises((TypeError, ValueError)):
+                            AxesProxyHandler.user_login_failed(
+                                sender=None,
+                                request=request,
+                                credentials={"username": "shared-user"},
+                            )
+
+                    self.assertEqual(AccessAttempt.objects.count(), 0)
+                    self.assertEqual(cache._cache, {})
+
+    def test_duplicate_scopes_are_counted_once_for_each_handler(self):
+        lockout_parameters = ["username", "username", ["username", "ip_address"]]
+
+        for handler_class in self.HANDLER_CLASSES:
+            with self.subTest(handler=handler_class.__name__):
+                results = self.run_failure_sequence(
+                    handler_class, lockout_parameters
+                )
+                self.assertEqual(
+                    [result["failures"] for result in results],
+                    list(range(1, get_failure_limit(None, None) + 1)),
+                )
+
+    def test_lockout_response_cool_off_is_consistent_across_handlers(self):
+        lockout_parameters = ["username", ["username", "ip_address"]]
+        response_headers = {}
+
+        for handler_class in self.HANDLER_CLASSES:
+            with override_settings(
+                AXES_HANDLER=(
+                    f"{handler_class.__module__}.{handler_class.__name__}"
+                ),
+                AXES_LOCKOUT_PARAMETERS=lockout_parameters,
+                AXES_COOLOFF_TIME=timedelta(seconds=120),
+                AXES_ENABLE_RETRY_AFTER_HEADER=True,
+            ):
+                for _ in range(get_failure_limit(None, None)):
+                    response = self.client.post(
+                        reverse("admin:login"),
+                        {
+                            "username": "shared-user",
+                            "password": "wrong-password",
+                        },
+                        REMOTE_ADDR="2.3.4.5",
+                        HTTP_USER_AGENT="test-browser",
+                    )
+
+                self.assertEqual(response.status_code, 429)
+                response_headers[handler_class.__name__] = response["Retry-After"]
+                AccessAttempt.objects.all().delete()
+                cache.clear()
+
+        self.assertEqual(
+            response_headers,
+            {
+                AxesDatabaseHandler.__name__: "120",
+                AxesCacheHandler.__name__: "120",
+            },
+        )
+
+
+class ConcurrentFailureCountTestCase(AxesTestCase):
+    thread_count = 10
+
+    def request_for_failure(self):
+        request = RequestFactory().post(
+            "/admin/login/",
+            data={"username": "concurrent-user", "password": "wrong-password"},
+            REMOTE_ADDR="10.0.0.1",
+            HTTP_USER_AGENT="test-browser",
+        )
+        request.axes_locked_out = False
+        return request
+
+    def record_failure(self, handler, barrier):
+        barrier.wait()
+        request = self.request_for_failure()
+        credentials = {"username": "concurrent-user"}
+        AxesProxyHandler.user_login_failed(
+            sender=None, request=request, credentials=credentials
+        )
+        return request.axes_failures_since_start
+
+    def test_cache_failures_are_counted_without_lost_updates(self):
+        handler = AxesCacheHandler()
+        barrier = Barrier(self.thread_count)
+
+        with override_settings(
+            AXES_LOCKOUT_PARAMETERS=["username"],
+            AXES_HANDLER="axes.handlers.cache.AxesCacheHandler",
+            AXES_FAILURE_LIMIT=50,
+        ):
+            with ThreadPoolExecutor(max_workers=self.thread_count) as executor:
+                failure_counts = list(
+                    executor.map(
+                        lambda _: self.record_failure(handler, barrier),
+                        range(self.thread_count),
+                    )
+                )
+
+            request = self.request_for_failure()
+            AxesProxyHandler.update_request(request)
+            self.assertEqual(
+                handler.get_failures(request, {"username": "concurrent-user"}),
+                self.thread_count,
+            )
+            self.assertEqual(
+                sorted(failure_counts),
+                list(range(1, self.thread_count + 1)),
+            )
+
+
+@override_settings(AXES_FAILURE_LIMIT=50)
+class ConcurrentDatabaseFailureCountTestCase(TransactionTestCase):
+    thread_count = 10
+
+    def setUp(self):
+        cache.clear()
+
+    def tearDown(self):
+        cache.clear()
+
+    def request_for_failure(self):
+        request = RequestFactory().post(
+            "/admin/login/",
+            data={"username": "concurrent-user", "password": "wrong-password"},
+            REMOTE_ADDR="10.0.0.1",
+            HTTP_USER_AGENT="test-browser",
+        )
+        request.axes_locked_out = False
+        return request
+
+    def record_failure(self, handler, barrier):
+        barrier.wait()
+        request = self.request_for_failure()
+        credentials = {"username": "concurrent-user"}
+        AxesProxyHandler.user_login_failed(
+            sender=None, request=request, credentials=credentials
+        )
+        return request.axes_failures_since_start
+
+    def test_database_failures_are_counted_without_lost_updates(self):
+        handler = AxesDatabaseHandler()
+        barrier = Barrier(self.thread_count)
+
+        with override_settings(
+            AXES_LOCKOUT_PARAMETERS=["username"],
+            AXES_HANDLER="axes.handlers.database.AxesDatabaseHandler",
+        ):
+            with ThreadPoolExecutor(max_workers=self.thread_count) as executor:
+                failure_counts = list(
+                    executor.map(
+                        lambda _: self.record_failure(handler, barrier),
+                        range(self.thread_count),
+                    )
+                )
+
+            request = self.request_for_failure()
+            AxesProxyHandler.update_request(request)
+            self.assertEqual(
+                handler.get_failures(request, {"username": "concurrent-user"}),
+                self.thread_count,
+            )
+            self.assertEqual(
+                sorted(failure_counts),
+                list(range(1, self.thread_count + 1)),
+            )
 
 
 @override_settings(AXES_HANDLER="axes.handlers.dummy.AxesDummyHandler")
