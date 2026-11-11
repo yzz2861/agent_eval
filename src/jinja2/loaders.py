@@ -43,7 +43,9 @@ class BaseLoader:
     """Baseclass for all loaders.  Subclass this and override `get_source` to
     implement a custom loading mechanism.  The environment provides a
     `get_template` method that calls the loader's `load` method to get the
-    :class:`Template` object.
+    :class:`Template` object. Composite loaders override ``load`` to route to
+    the loader that actually provides a template, so template cache keys use
+    that actual loader's identity.
 
     A very basic example for a loader that looks up templates on the file
     system could look like this::
@@ -111,12 +113,19 @@ class BaseLoader:
         name: str,
         globals: t.MutableMapping[str, t.Any] | None = None,
     ) -> "Template":
-        """Loads a template.  This method looks up the template in the cache
-        or loads one by calling :meth:`get_source`.  Subclasses should not
-        override this method as loaders working on collections of other
-        loaders (such as :class:`PrefixLoader` or :class:`ChoiceLoader`)
-        will not call this method but `get_source` directly.
-        """
+        """Load a template, using the environment's template cache."""
+        return environment._load_cached_template(
+            self, name, globals, lambda: self._load(environment, name, globals)
+        )
+
+    @internalcode
+    def _load(
+        self,
+        environment: "Environment",
+        name: str,
+        globals: t.MutableMapping[str, t.Any] | None = None,
+    ) -> "Template":
+        """Load a template by calling :meth:`get_source`."""
         code = None
         if globals is None:
             globals = {}
@@ -541,6 +550,15 @@ class PrefixLoader(BaseLoader):
         name: str,
         globals: t.MutableMapping[str, t.Any] | None = None,
     ) -> "Template":
+        return self._load(environment, name, globals)
+
+    @internalcode
+    def _load(
+        self,
+        environment: "Environment",
+        name: str,
+        globals: t.MutableMapping[str, t.Any] | None = None,
+    ) -> "Template":
         loader, local_name = self.get_loader(name)
         try:
             return loader.load(environment, local_name, globals)
@@ -586,6 +604,15 @@ class ChoiceLoader(BaseLoader):
 
     @internalcode
     def load(
+        self,
+        environment: "Environment",
+        name: str,
+        globals: t.MutableMapping[str, t.Any] | None = None,
+    ) -> "Template":
+        return self._load(environment, name, globals)
+
+    @internalcode
+    def _load(
         self,
         environment: "Environment",
         name: str,
@@ -657,7 +684,7 @@ class ModuleLoader(BaseLoader):
         return ModuleLoader.get_template_key(name) + ".py"
 
     @internalcode
-    def load(
+    def _load(
         self,
         environment: "Environment",
         name: str,

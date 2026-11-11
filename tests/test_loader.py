@@ -5,17 +5,49 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import weakref
 from pathlib import Path
 
 import pytest
-
 from jinja2 import Environment
 from jinja2 import loaders
 from jinja2 import PackageLoader
 from jinja2.exceptions import TemplateNotFound
+from jinja2.exceptions import TemplateSyntaxError
 from jinja2.loaders import split_template_path
+
+
+class TenantLoader(loaders.BaseLoader):
+    def __init__(self, sources: dict[str, dict[str, str]]) -> None:
+        self.sources = sources
+
+    def get_source(self, environment, template):
+        namespace = environment.cache_namespace
+        sources = self.sources[namespace]
+
+        if template not in sources:
+            raise TemplateNotFound(template)
+
+        return sources[template], None, None
+
+
+class TrackingLoader(loaders.BaseLoader):
+    def __init__(
+        self,
+        started: threading.Event,
+        release: threading.Event,
+    ) -> None:
+        self.started = started
+        self.release = release
+        self.load_count = 0
+
+    def get_source(self, environment, template):
+        self.load_count += 1
+        self.started.set()
+        assert self.release.wait(timeout=5)
+        return "{{ name }}", None, None
 
 
 class TestLoaders:
@@ -114,6 +146,222 @@ class TestLoaders:
         assert split_template_path("foo/bar") == ["foo", "bar"]
         assert split_template_path("./foo/bar") == ["foo", "bar"]
         pytest.raises(TemplateNotFound, split_template_path, "../foo")
+
+
+class TestCacheNamespace:
+    def test_same_template_name_is_isolated_between_namespaces(self):
+        sources = {
+            "a": {
+                "same.html": "A direct",
+                "selected.html": "A selected",
+                "include.html": "A include: {% include 'same.html' %}",
+                "base.html": "A base: {% block content %}{% endblock %}",
+                "child.html": "{% extends 'base.html' %}"
+                "{% block content %}A child{% endblock %}",
+            },
+            "b": {
+                "same.html": "B direct",
+                "selected.html": "B selected",
+                "include.html": "B include: {% include 'same.html' %}",
+                "base.html": "B base: {% block content %}{% endblock %}",
+                "child.html": "{% extends 'base.html' %}"
+                "{% block content %}B child{% endblock %}",
+            },
+        }
+        loader = TenantLoader(sources)
+        env = Environment(loader=loader, cache_namespace="a")
+
+        a_template = env.get_template("same.html")
+        assert a_template is env.get_template("same.html")
+        assert a_template.render() == "A direct"
+        assert env.select_template(["missing.html", "selected.html"]).render() == (
+            "A selected"
+        )
+        assert env.get_template("include.html").render() == ("A include: A direct")
+        assert env.get_template("child.html").render() == "A base: A child"
+
+        env.cache_namespace = "b"
+        b_template = env.get_template("same.html")
+
+        assert a_template is not b_template
+        assert b_template is env.get_template("same.html")
+        assert b_template.render() == "B direct"
+        assert env.select_template(["missing.html", "selected.html"]).render() == (
+            "B selected"
+        )
+        assert env.get_template("include.html").render() == ("B include: B direct")
+        assert env.get_template("child.html").render() == "B base: B child"
+        assert len(env.cache) == 5
+
+    def test_concurrent_first_load_compiles_once(self):
+        started = threading.Event()
+        release = threading.Event()
+        loader = TrackingLoader(started, release)
+        env = Environment(loader=loader, cache_namespace="tenant")
+        templates = []
+        errors = []
+
+        def load_template():
+            try:
+                templates.append(env.get_template("same.html"))
+            except BaseException as error:
+                errors.append(error)
+
+        threads = [threading.Thread(target=load_template) for _ in range(2)]
+
+        for thread in threads:
+            thread.start()
+
+        assert started.wait(timeout=5)
+        time.sleep(0.05)
+        assert loader.load_count == 1
+        time.sleep(0.05)
+        release.set()
+
+        for thread in threads:
+            thread.join()
+
+        assert errors == []
+        assert len(templates) == 2
+        assert templates[0] is templates[1]
+        assert loader.load_count == 1
+        assert len(env.cache) == 1
+
+    def test_cache_uses_actual_choice_loader_identity(self):
+        first_loader = loaders.DictLoader({"same.html": "first"})
+        second_loader = loaders.DictLoader({"same.html": "second"})
+        choice_loader = loaders.ChoiceLoader([first_loader, second_loader])
+        env = Environment(loader=choice_loader, cache_namespace="tenant")
+
+        first_template = env.get_template("same.html")
+
+        assert first_template.render() == "first"
+        assert (
+            "tenant",
+            weakref.ref(first_loader),
+            "same.html",
+        ) in env.cache
+        assert (
+            "tenant",
+            weakref.ref(choice_loader),
+            "same.html",
+        ) not in env.cache
+
+        choice_loader.loaders[0] = second_loader
+        second_template = env.get_template("same.html")
+
+        assert second_template is not first_template
+        assert second_template.render() == "second"
+        assert (
+            "tenant",
+            weakref.ref(second_loader),
+            "same.html",
+        ) in env.cache
+
+    def test_loader_change_does_not_use_old_cache_entry(self):
+        first_loader = loaders.DictLoader({"same.html": "first"})
+        second_loader = loaders.DictLoader({"same.html": "second"})
+        env = Environment(loader=first_loader, cache_namespace="tenant")
+
+        first_template = env.get_template("same.html")
+        env.loader = second_loader
+        second_template = env.get_template("same.html")
+
+        assert second_template is not first_template
+        assert second_template.render() == "second"
+        assert (
+            "tenant",
+            weakref.ref(second_loader),
+            "same.html",
+        ) in env.cache
+
+    def test_namespace_change_clears_old_entries(self):
+        loader = TenantLoader({"a": {"same.html": "A"}, "b": {"same.html": "B"}})
+        env = Environment(loader=loader, cache_namespace="a")
+
+        first_template = env.get_template("same.html")
+        assert len(env.cache) == 1
+
+        env.cache_namespace = "b"
+
+        assert len(env.cache) == 0
+        second_template = env.get_template("same.html")
+        assert second_template is not first_template
+        assert second_template.render() == "B"
+
+    def test_overlay_uses_its_own_namespace(self):
+        loader = TenantLoader({"a": {"same.html": "A"}, "b": {"same.html": "B"}})
+        env = Environment(loader=loader, cache_namespace="a")
+        env.get_template("same.html")
+
+        overlay = env.overlay(cache_namespace="b")
+
+        assert overlay.cache_namespace == "b"
+        assert len(overlay.cache) == 0
+        assert overlay.get_template("same.html").render() == "B"
+
+    def test_source_change_reloads_within_namespace(self, tmp_path):
+        path = tmp_path / "same.html"
+        path.write_text("first")
+        loader = loaders.FileSystemLoader(tmp_path)
+        env = Environment(loader=loader, cache_namespace="tenant")
+
+        first_template = env.get_template("same.html")
+        timestamp = time.time() + 10
+        path.write_text("second")
+        os.utime(path, (timestamp, timestamp))
+        second_template = env.get_template("same.html")
+
+        assert second_template is not first_template
+        assert second_template.render() == "second"
+
+    def test_failures_do_not_pollute_other_namespaces(self):
+        loader = TenantLoader(
+            {
+                "a": {"bad.html": "{% for %}"},
+                "b": {"bad.html": "B valid", "missing.html": "B found"},
+            }
+        )
+        env = Environment(loader=loader, cache_namespace="a")
+
+        with pytest.raises(TemplateSyntaxError):
+            env.get_template("bad.html")
+        with pytest.raises(TemplateNotFound):
+            env.get_template("missing.html")
+        assert len(env.cache) == 0
+
+        env.cache_namespace = "b"
+
+        assert env.get_template("bad.html").render() == "B valid"
+        assert env.get_template("missing.html").render() == "B found"
+
+    def test_lru_eviction_keeps_namespace_in_key(self):
+        loader = TenantLoader({"a": {"same.html": "A"}, "b": {"same.html": "B"}})
+        env = Environment(loader=loader, cache_size=1, cache_namespace="a")
+
+        env.get_template("same.html")
+        env.cache_namespace = "b"
+        env.get_template("same.html")
+
+        assert (
+            "b",
+            weakref.ref(loader),
+            "same.html",
+        ) in env.cache
+        assert (
+            "a",
+            weakref.ref(loader),
+            "same.html",
+        ) not in env.cache
+
+    def test_without_namespace_keeps_legacy_cache_key(self):
+        loader = loaders.DictLoader({"same.html": "same"})
+        env = Environment(loader=loader)
+
+        template = env.get_template("same.html")
+
+        assert template is env.get_template("same.html")
+        assert (weakref.ref(loader), "same.html") in env.cache
 
 
 class TestFileSystemLoader:

@@ -3,10 +3,12 @@ options.
 """
 
 import os
+import threading
 import typing
 import typing as t
 import weakref
 from collections import ChainMap
+from collections.abc import Hashable
 from contextlib import aclosing
 from functools import lru_cache
 from functools import partial
@@ -63,6 +65,7 @@ if t.TYPE_CHECKING:
     from .loaders import BaseLoader
 
 _env_bound = t.TypeVar("_env_bound", bound="Environment")
+_CacheKey = tuple[t.Any, ...]
 
 
 # for direct template usage we have up to ten living environments
@@ -82,7 +85,7 @@ def get_spontaneous_environment(cls: type[_env_bound], *args: t.Any) -> _env_bou
 
 def create_cache(
     size: int,
-) -> t.MutableMapping[tuple["weakref.ref[BaseLoader]", str], "Template"] | None:
+) -> t.MutableMapping[_CacheKey, "Template"] | None:
     """Return the cache class for the given size."""
     if size == 0:
         return None
@@ -94,8 +97,8 @@ def create_cache(
 
 
 def copy_cache(
-    cache: t.MutableMapping[tuple["weakref.ref[BaseLoader]", str], "Template"] | None,
-) -> t.MutableMapping[tuple["weakref.ref[BaseLoader]", str], "Template"] | None:
+    cache: t.MutableMapping[_CacheKey, "Template"] | None,
+) -> t.MutableMapping[_CacheKey, "Template"] | None:
     """Create an empty copy of the given cache."""
     if cache is None:
         return None
@@ -140,6 +143,29 @@ def _environment_config_check(environment: _env_bound) -> _env_bound:
         "\n",
     }, "'newline_sequence' must be one of '\\n', '\\r\\n', or '\\r'."
     return environment
+
+
+class _CacheLock:
+    __slots__ = ("_lock", "__weakref__")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+
+    def __enter__(self) -> t.Any:
+        return self._lock.__enter__()
+
+    def __exit__(self, *args: t.Any) -> t.Any:
+        return self._lock.__exit__(*args)
+
+
+def _template_globals_update(
+    template: "Template", globals: t.MutableMapping[str, t.Any] | None
+) -> None:
+    if isinstance(globals, ChainMap):
+        globals = globals.maps[0]
+
+    if globals:
+        template.globals.update(globals)
 
 
 class Environment:
@@ -234,6 +260,13 @@ class Environment:
         `loader`
             The template loader for this environment.
 
+        `cache_namespace`
+            A stable value identifying a cache scope, such as a tenant ID.
+            Cache keys include this value, so the same template name in
+            different namespaces cannot resolve to the same cached template.
+            When not given, the cache key remains the loader and template
+            name.
+
         `cache_size`
             The size of the cache.  Per default this is ``400`` which means
             that if more than 400 templates are loaded the loader will clean
@@ -313,6 +346,7 @@ class Environment:
         autoescape: bool | t.Callable[[str | None], bool] = False,
         loader: t.Optional["BaseLoader"] = None,
         cache_size: int = 400,
+        cache_namespace: Hashable | None = None,
         auto_reload: bool = True,
         bytecode_cache: t.Optional["BytecodeCache"] = None,
         enable_async: bool = False,
@@ -356,6 +390,11 @@ class Environment:
         # set the loader provided
         self.loader = loader
         self.cache = create_cache(cache_size)
+        self._cache_namespace = cache_namespace
+        self._cache_locks: weakref.WeakValueDictionary[_CacheKey, _CacheLock] = (
+            weakref.WeakValueDictionary()
+        )
+        self._cache_locks_guard = threading.Lock()
         self.bytecode_cache = bytecode_cache
         self.auto_reload = auto_reload
 
@@ -374,6 +413,18 @@ class Environment:
         .. versionadded:: 2.5
         """
         self.extensions.update(load_extensions(self, [extension]))
+
+    def __getstate__(self) -> dict[str, t.Any]:
+        state = self.__dict__.copy()
+        state["cache"] = copy_cache(self.cache)
+        state.pop("_cache_locks", None)
+        state.pop("_cache_locks_guard", None)
+        return state
+
+    def __setstate__(self, state: dict[str, t.Any]) -> None:
+        self.__dict__.update(state)
+        self._cache_locks = weakref.WeakValueDictionary()
+        self._cache_locks_guard = threading.Lock()
 
     def extend(self, **attributes: t.Any) -> None:
         """Add the items to the instance of the environment if they do not exist
@@ -408,6 +459,7 @@ class Environment:
         auto_reload: bool = missing,
         bytecode_cache: t.Optional["BytecodeCache"] = missing,
         enable_async: bool = missing,
+        cache_namespace: Hashable | None = missing,
     ) -> "te.Self":
         """Create a new overlay environment that shares all the data with the
         current environment except for cache and the overridden attributes.
@@ -428,7 +480,13 @@ class Environment:
             and ``enable_async`` parameters to match ``__init__``.
         """
         args = dict(locals())
-        del args["self"], args["cache_size"], args["extensions"], args["enable_async"]
+        del (
+            args["self"],
+            args["cache_size"],
+            args["extensions"],
+            args["enable_async"],
+            args["cache_namespace"],
+        )
 
         rv = object.__new__(self.__class__)
         rv.__dict__.update(self.__dict__)
@@ -443,6 +501,12 @@ class Environment:
             rv.cache = create_cache(cache_size)
         else:
             rv.cache = copy_cache(self.cache)
+
+        rv._cache_locks = weakref.WeakValueDictionary()
+        rv._cache_locks_guard = threading.Lock()
+
+        if cache_namespace is not missing:
+            rv.cache_namespace = cache_namespace
 
         rv.extensions = {}
         for key, value in self.extensions.items():
@@ -459,6 +523,79 @@ class Environment:
     def lexer(self) -> Lexer:
         """The lexer for this environment."""
         return get_lexer(self)
+
+    @property
+    def cache_namespace(self) -> Hashable | None:
+        """The scope used when building template cache keys."""
+        return self._cache_namespace
+
+    @cache_namespace.setter
+    def cache_namespace(self, value: Hashable | None) -> None:
+        if value != self._cache_namespace:
+            self._cache_namespace = value
+
+            if self.cache is not None:
+                self.cache.clear()
+
+            self._cache_locks.clear()
+
+    def _get_cache_key(self, loader: "BaseLoader", name: str) -> _CacheKey:
+        key: _CacheKey = (weakref.ref(loader), name)
+
+        if self._cache_namespace is not None:
+            key = (self._cache_namespace, *key)
+
+        return key
+
+    def _get_cache_lock(self, key: _CacheKey) -> _CacheLock:
+        with self._cache_locks_guard:
+            lock = self._cache_locks.get(key)
+
+            if lock is None:
+                lock = _CacheLock()
+                self._cache_locks[key] = lock
+
+            return lock
+
+    def _load_cached_template(
+        self,
+        loader: "BaseLoader",
+        name: str,
+        globals: t.MutableMapping[str, t.Any] | None,
+        load: t.Callable[[], "Template"],
+    ) -> "Template":
+        if self.cache is None:
+            return load()
+
+        cache_key = self._get_cache_key(loader, name)
+        template = self.cache.get(cache_key)
+
+        if template is not None and (not self.auto_reload or template.is_up_to_date):
+            _template_globals_update(template, globals)
+
+            return template
+
+        with self._get_cache_lock(cache_key):
+            template = self.cache.get(cache_key)
+
+            if template is not None and (
+                not self.auto_reload or template.is_up_to_date
+            ):
+                _template_globals_update(template, globals)
+
+                return template
+
+            self.cache.pop(cache_key, None)
+
+            try:
+                template = load()
+            except Exception:
+                self.cache.pop(cache_key, None)
+
+                raise
+
+            self.cache[cache_key] = template
+            return template
 
     def iter_extensions(self) -> t.Iterator["Extension"]:
         """Iterates over the extensions by priority."""
@@ -958,24 +1095,7 @@ class Environment:
     ) -> "Template":
         if self.loader is None:
             raise TypeError("no loader for this environment specified")
-        cache_key = (weakref.ref(self.loader), name)
-        if self.cache is not None:
-            template = self.cache.get(cache_key)
-            if template is not None and (
-                not self.auto_reload or template.is_up_to_date
-            ):
-                # template.globals is a ChainMap, modifying it will only
-                # affect the template, not the environment globals.
-                if globals:
-                    template.globals.update(globals)
-
-                return template
-
-        template = self.loader.load(self, name, self.make_globals(globals))
-
-        if self.cache is not None:
-            self.cache[cache_key] = template
-        return template
+        return self.loader.load(self, name, self.make_globals(globals))
 
     @internalcode
     def get_template(

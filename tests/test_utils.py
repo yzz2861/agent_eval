@@ -5,8 +5,6 @@ from collections import deque
 from copy import copy as shallow_copy
 
 import pytest
-from markupsafe import Markup
-
 from jinja2.utils import consume
 from jinja2.utils import generate_lorem_ipsum
 from jinja2.utils import LRUCache
@@ -14,6 +12,7 @@ from jinja2.utils import missing
 from jinja2.utils import object_type_repr
 from jinja2.utils import select_autoescape
 from jinja2.utils import urlize
+from markupsafe import Markup
 
 
 class TestLRUCache:
@@ -66,6 +65,16 @@ class TestLRUCache:
         d["c"] = 3
         d.clear()
         assert d.__getstate__() == {"capacity": 3, "_mapping": {}, "_queue": deque([])}
+
+    def test_pop(self):
+        d = LRUCache(3)
+        d["a"] = 1
+        d["b"] = 2
+
+        assert d.pop("a") == 1
+        assert "a" not in d
+        assert d.pop("a", 3) == 3
+        assert d.keys() == ["b"]
 
     def test_repr(self):
         d = LRUCache(3)

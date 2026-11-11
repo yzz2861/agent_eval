@@ -494,6 +494,21 @@ class LRUCache:
             self._mapping.clear()
             self._queue.clear()
 
+    def pop(self, key: t.Any, default: t.Any = None) -> t.Any:
+        """Remove and return an item, or ``default`` if it does not exist."""
+        with self._wlock:
+            try:
+                value = self._mapping.pop(key)
+            except KeyError:
+                return default
+
+            try:
+                self._remove(key)
+            except ValueError:
+                pass
+
+            return value
+
     def __contains__(self, key: t.Any) -> bool:
         """Check if a key exists in this cache."""
         return key in self._mapping
