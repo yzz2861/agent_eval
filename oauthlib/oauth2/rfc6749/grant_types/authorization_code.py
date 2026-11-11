@@ -574,6 +574,8 @@ class AuthorizationCodeGrant(GrantTypeBase):
             request.using_default_redirect_uri = False
             log.debug('Using provided redirect_uri %s', request.redirect_uri)
 
+        self._match_registered_redirect_uri(request)
+
         if not self.request_validator.confirm_redirect_uri(request.client_id, request.code,
                                                            request.redirect_uri, request.client,
                                                            request):

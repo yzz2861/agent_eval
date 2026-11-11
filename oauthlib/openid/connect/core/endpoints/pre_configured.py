@@ -72,14 +72,20 @@ class Server(
         :param kwargs: Extra parameters to pass to authorization-,
                        token-, resource-, and revocation-endpoint constructors.
         """
-        self.auth_grant = OAuth2AuthorizationCodeGrant(request_validator)
-        self.implicit_grant = OAuth2ImplicitGrant(request_validator)
+        redirect_uri_registry = kwargs.get('redirect_uri_registry')
+        self.auth_grant = OAuth2AuthorizationCodeGrant(
+            request_validator, redirect_uri_registry=redirect_uri_registry)
+        self.implicit_grant = OAuth2ImplicitGrant(
+            request_validator, redirect_uri_registry=redirect_uri_registry)
         self.password_grant = ResourceOwnerPasswordCredentialsGrant(request_validator)
         self.credentials_grant = ClientCredentialsGrant(request_validator)
         self.refresh_grant = RefreshTokenGrant(request_validator)
-        self.openid_connect_auth = AuthorizationCodeGrant(request_validator)
-        self.openid_connect_implicit = ImplicitGrant(request_validator)
-        self.openid_connect_hybrid = HybridGrant(request_validator)
+        self.openid_connect_auth = AuthorizationCodeGrant(
+            request_validator, redirect_uri_registry=redirect_uri_registry)
+        self.openid_connect_implicit = ImplicitGrant(
+            request_validator, redirect_uri_registry=redirect_uri_registry)
+        self.openid_connect_hybrid = HybridGrant(
+            request_validator, redirect_uri_registry=redirect_uri_registry)
         self.device_code_grant = DeviceCodeGrant(request_validator, **kwargs)
 
         self.bearer = BearerToken(

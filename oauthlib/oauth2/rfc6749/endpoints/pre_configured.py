@@ -52,8 +52,11 @@ class Server(
         :param kwargs: Extra parameters to pass to authorization-,
                        token-, resource-, and revocation-endpoint constructors.
         """
-        self.auth_grant = AuthorizationCodeGrant(request_validator)
-        self.implicit_grant = ImplicitGrant(request_validator)
+        redirect_uri_registry = kwargs.get('redirect_uri_registry')
+        self.auth_grant = AuthorizationCodeGrant(
+            request_validator, redirect_uri_registry=redirect_uri_registry)
+        self.implicit_grant = ImplicitGrant(
+            request_validator, redirect_uri_registry=redirect_uri_registry)
         self.password_grant = ResourceOwnerPasswordCredentialsGrant(request_validator)
         self.credentials_grant = ClientCredentialsGrant(request_validator)
         self.refresh_grant = RefreshTokenGrant(request_validator)
@@ -119,7 +122,9 @@ class WebApplicationServer(
         :param kwargs: Extra parameters to pass to authorization-,
                        token-, resource-, and revocation-endpoint constructors.
         """
-        self.auth_grant = AuthorizationCodeGrant(request_validator)
+        self.auth_grant = AuthorizationCodeGrant(
+            request_validator,
+            redirect_uri_registry=kwargs.get('redirect_uri_registry'))
         self.refresh_grant = RefreshTokenGrant(request_validator)
         self.bearer = BearerToken(
             request_validator, token_generator, token_expires_in, refresh_token_generator
@@ -172,7 +177,9 @@ class MobileApplicationServer(
         :param kwargs: Extra parameters to pass to authorization-,
                        token-, resource-, and revocation-endpoint constructors.
         """
-        self.implicit_grant = ImplicitGrant(request_validator)
+        self.implicit_grant = ImplicitGrant(
+            request_validator,
+            redirect_uri_registry=kwargs.get('redirect_uri_registry'))
         self.bearer = BearerToken(
             request_validator, token_generator, token_expires_in, refresh_token_generator
         )

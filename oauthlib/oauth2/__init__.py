@@ -64,6 +64,17 @@ from .rfc6749.grant_types import (
     ResourceOwnerPasswordCredentialsGrant,
 )
 from .rfc6749.request_validator import RequestValidator
+from .rfc6749.redirect_uri import (
+    DuplicateRedirectURIError,
+    RedirectURIError,
+    RedirectURIMatcher,
+    RedirectURIRegistry,
+    RedirectUriRegistry,
+    WildcardRedirectURIError,
+    canonical_redirect_uri,
+    canonicalize_redirect_uri,
+    normalize_redirect_uri,
+)
 from .rfc6749.tokens import BearerToken, OAuth2Token
 from .rfc6749.utils import is_secure_transport
 from .rfc8628.clients import DeviceClient

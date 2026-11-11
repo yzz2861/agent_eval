@@ -11,6 +11,7 @@ from oauthlib.oauth2.rfc6749 import errors, utils
 from oauthlib.uri_validate import is_absolute_uri
 
 from ..request_validator import RequestValidator
+from ..redirect_uri import RedirectURIError, RedirectURIRegistry
 from ..utils import is_secure_transport
 
 log = logging.getLogger(__name__)
@@ -112,8 +113,17 @@ class GrantTypeBase:
     refresh_token = True
     response_types = ['code']
 
-    def __init__(self, request_validator=None, **kwargs):
+    def __init__(self, request_validator=None, redirect_uri_registry=None, **kwargs):
         self.request_validator = request_validator or RequestValidator()
+
+        if redirect_uri_registry is None:
+            # Also allow attaching the registry to the validator explicitly.
+            # Checking the type keeps a default/mock validator from opting in
+            # accidentally.
+            candidate = getattr(self.request_validator, 'redirect_uri_registry', None)
+            if isinstance(candidate, RedirectURIRegistry):
+                redirect_uri_registry = candidate
+        self.redirect_uri_registry = redirect_uri_registry
 
         # Transforms class variables into instance variables:
         self.response_types = self.response_types
@@ -148,6 +158,27 @@ class GrantTypeBase:
 
     def register_token_modifier(self, modifier):
         self._token_modifiers.append(modifier)
+
+    def _get_redirect_uri_registry(self):
+        if self.redirect_uri_registry is not None:
+            return self.redirect_uri_registry
+        candidate = getattr(self.request_validator, 'redirect_uri_registry', None)
+        return candidate if isinstance(candidate, RedirectURIRegistry) else None
+
+    def _match_registered_redirect_uri(self, request):
+        """Canonicalize and verify ``request.redirect_uri`` against the registry."""
+        registry = self._get_redirect_uri_registry()
+        if registry is None:
+            return
+        try:
+            registry.canonicalize(request.redirect_uri)
+        except RedirectURIError:
+            raise errors.InvalidRedirectURIError(request=request) from None
+
+        canonical_uri = registry.match(request.client_id, request.redirect_uri)
+        if canonical_uri is None:
+            raise errors.MismatchingRedirectURIError(request=request)
+        request.redirect_uri = canonical_uri
 
     def create_authorization_response(self, request, token_handler):
         """
@@ -324,6 +355,11 @@ class GrantTypeBase:
         }
 
     def _handle_redirects(self, request):
+        registry = self._get_redirect_uri_registry()
+        if registry is not None:
+            self._handle_registered_redirects(request)
+            return
+
         if request.redirect_uri is not None:
             request.using_default_redirect_uri = False
             log.debug('Using provided redirect_uri %s', request.redirect_uri)
@@ -347,6 +383,24 @@ class GrantTypeBase:
                 raise errors.MissingRedirectURIError(request=request)
             if not is_absolute_uri(request.redirect_uri):
                 raise errors.InvalidRedirectURIError(request=request)
+
+    def _handle_registered_redirects(self, request):
+        if request.redirect_uri is not None:
+            request.using_default_redirect_uri = False
+            log.debug('Using provided redirect_uri %s', request.redirect_uri)
+            if not is_absolute_uri(request.redirect_uri):
+                raise errors.InvalidRedirectURIError(request=request)
+        else:
+            request.redirect_uri = self.request_validator.get_default_redirect_uri(
+                request.client_id, request)
+            request.using_default_redirect_uri = True
+            log.debug('Using default redirect_uri %s.', request.redirect_uri)
+            if not request.redirect_uri:
+                raise errors.MissingRedirectURIError(request=request)
+            if not is_absolute_uri(request.redirect_uri):
+                raise errors.InvalidRedirectURIError(request=request)
+
+        self._match_registered_redirect_uri(request)
 
     def _create_cors_headers(self, request):
         """If CORS is allowed, create the appropriate headers."""
