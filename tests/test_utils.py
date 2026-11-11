@@ -5,7 +5,6 @@ import inspect
 from contextlib import nullcontext
 
 import pytest
-
 from werkzeug import Request
 from werkzeug import utils
 from werkzeug._header_property import environ_property
@@ -301,3 +300,99 @@ def test_secure_filename():
     )
     assert utils.secure_filename("__filename__") == "filename"
     assert utils.secure_filename("foo$&^*)bar") == "foobar"
+
+
+def test_download_name_policy_config():
+    policy = utils.DownloadNamePolicy(
+        max_length=10,
+        allow_non_ascii=False,
+        reject_windows_device_names=False,
+    )
+    assert policy.max_length == 10
+    assert not policy.allow_non_ascii
+    assert not policy.reject_windows_device_names
+    policy.validate("ascii.txt")
+
+    with pytest.raises(ValueError, match="max_length"):
+        utils.DownloadNamePolicy(max_length=0)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "report.txt",
+        "季度报表.txt",
+        "CONcert.mp3",
+        "COM10.txt",
+        "archive.tar.gz",
+        "my report.bin",
+    ],
+)
+def test_download_name_policy_accepts(name):
+    utils.DownloadNamePolicy().validate(name)
+
+
+def test_download_name_policy_reasons():
+    policy = utils.DownloadNamePolicy(max_length=8)
+
+    def reason(name):
+        with pytest.raises(utils.UnsafeDownloadName) as exc_info:
+            policy.validate(name)
+
+        return exc_info.value
+
+    assert reason("").reason is utils.UnsafeDownloadNameReason.EMPTY
+    assert reason("a\x00b").reason is utils.UnsafeDownloadNameReason.CONTROL_CHARACTER
+    assert reason("a\rb").reason is utils.UnsafeDownloadNameReason.CONTROL_CHARACTER
+    assert reason("a\tb").reason is utils.UnsafeDownloadNameReason.CONTROL_CHARACTER
+    assert reason("a\x9fb").reason is utils.UnsafeDownloadNameReason.CONTROL_CHARACTER
+    assert reason("a\u202eb").reason is utils.UnsafeDownloadNameReason.BIDI_CHARACTER
+    assert reason("a\u2066b").reason is utils.UnsafeDownloadNameReason.BIDI_CHARACTER
+    assert reason("a\u200eb").reason is utils.UnsafeDownloadNameReason.BIDI_CHARACTER
+    assert reason("a\u061cb").reason is utils.UnsafeDownloadNameReason.BIDI_CHARACTER
+    assert reason("a/b").reason is utils.UnsafeDownloadNameReason.PATH_SEPARATOR
+    assert reason("a\\b").reason is utils.UnsafeDownloadNameReason.PATH_SEPARATOR
+    assert reason(".").reason is utils.UnsafeDownloadNameReason.PATH_SEGMENT
+    assert reason("..").reason is utils.UnsafeDownloadNameReason.PATH_SEGMENT
+    assert (
+        reason(" a.txt").reason is utils.UnsafeDownloadNameReason.SURROUNDING_WHITESPACE
+    )
+    assert (
+        reason("a.txt ").reason is utils.UnsafeDownloadNameReason.SURROUNDING_WHITESPACE
+    )
+    assert reason("a.").reason is utils.UnsafeDownloadNameReason.TRAILING_DOT
+    assert reason("123456789").reason is utils.UnsafeDownloadNameReason.TOO_LONG
+    assert reason("CON").reason is utils.UnsafeDownloadNameReason.WINDOWS_DEVICE_NAME
+    assert (
+        reason("lpt1.txt").reason is utils.UnsafeDownloadNameReason.WINDOWS_DEVICE_NAME
+    )
+    assert reason("PRN. ").reason is utils.UnsafeDownloadNameReason.WINDOWS_DEVICE_NAME
+
+
+def test_download_name_policy_non_ascii_option():
+    policy = utils.DownloadNamePolicy(allow_non_ascii=False)
+
+    with pytest.raises(utils.UnsafeDownloadName) as exc_info:
+        policy.validate("中文.txt")
+
+    assert exc_info.value.reason is utils.UnsafeDownloadNameReason.NON_ASCII
+    assert isinstance(exc_info.value, ValueError)
+
+
+def test_download_name_policy_device_option():
+    utils.DownloadNamePolicy(reject_windows_device_names=False).validate("CON")
+
+    with pytest.raises(utils.UnsafeDownloadName) as exc_info:
+        utils.DownloadNamePolicy().validate("COM1")
+
+    assert exc_info.value.reason is utils.UnsafeDownloadNameReason.WINDOWS_DEVICE_NAME
+
+
+def test_unsafe_download_name_attributes():
+    error = utils.UnsafeDownloadName(
+        "a\nb", utils.UnsafeDownloadNameReason.CONTROL_CHARACTER
+    )
+    assert error.download_name == "a\nb"
+    assert error.reason is utils.UnsafeDownloadNameReason.CONTROL_CHARACTER
+    assert isinstance(error, ValueError)
+    assert "control" in str(error)

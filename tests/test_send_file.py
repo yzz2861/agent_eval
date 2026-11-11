@@ -6,12 +6,16 @@ import pathlib
 import typing as t
 
 import pytest
-
 from werkzeug.exceptions import NotFound
 from werkzeug.http import http_date
+from werkzeug.http import parse_options_header
 from werkzeug.test import create_environ
+from werkzeug.utils import DownloadNamePolicy
 from werkzeug.utils import send_file
 from werkzeug.utils import send_from_directory
+from werkzeug.utils import UnsafeDownloadName
+from werkzeug.utils import UnsafeDownloadNameReason
+from werkzeug.wrappers import Response
 
 res_path = pathlib.Path(__file__).parent / "res"
 html_path = res_path / "index.html"
@@ -200,3 +204,207 @@ def test_max_age_callable():
     # This is a private API, it should only be used by Flask.
     with send_file(txt_path, environ, max_age=lambda p: 10) as rv:
         assert rv.cache_control.max_age == 10
+
+
+class ExplodingResponse(Response):
+    def __init__(self, *args, **kwargs):
+        raise AssertionError("response object must not be created")
+
+
+@pytest.mark.parametrize(
+    ("name", "reason"),
+    [
+        ("report\x00.txt", UnsafeDownloadNameReason.CONTROL_CHARACTER),
+        ("report\r.txt", UnsafeDownloadNameReason.CONTROL_CHARACTER),
+        ("report\n.txt", UnsafeDownloadNameReason.CONTROL_CHARACTER),
+        ("report\r\n.txt", UnsafeDownloadNameReason.CONTROL_CHARACTER),
+        ("report\ttxt", UnsafeDownloadNameReason.CONTROL_CHARACTER),
+        ("report\x1f.txt", UnsafeDownloadNameReason.CONTROL_CHARACTER),
+        ("report\x7f.txt", UnsafeDownloadNameReason.CONTROL_CHARACTER),
+        ("report\x9f.txt", UnsafeDownloadNameReason.CONTROL_CHARACTER),
+        ("..\\..\\季度报表\u202eexe.txt", UnsafeDownloadNameReason.BIDI_CHARACTER),
+        ("report\u202a.txt", UnsafeDownloadNameReason.BIDI_CHARACTER),
+        ("report\u202e.txt", UnsafeDownloadNameReason.BIDI_CHARACTER),
+        ("report\u2066.txt", UnsafeDownloadNameReason.BIDI_CHARACTER),
+        ("report\u2069.txt", UnsafeDownloadNameReason.BIDI_CHARACTER),
+        ("report\u200e.txt", UnsafeDownloadNameReason.BIDI_CHARACTER),
+        ("report\u200f.txt", UnsafeDownloadNameReason.BIDI_CHARACTER),
+        ("report\u061c.txt", UnsafeDownloadNameReason.BIDI_CHARACTER),
+        ("../report.txt", UnsafeDownloadNameReason.PATH_SEPARATOR),
+        ("..\\report.txt", UnsafeDownloadNameReason.PATH_SEPARATOR),
+        ("a/b.txt", UnsafeDownloadNameReason.PATH_SEPARATOR),
+        ("a\\b.txt", UnsafeDownloadNameReason.PATH_SEPARATOR),
+        (".", UnsafeDownloadNameReason.PATH_SEGMENT),
+        ("..", UnsafeDownloadNameReason.PATH_SEGMENT),
+        (" report.txt", UnsafeDownloadNameReason.SURROUNDING_WHITESPACE),
+        ("report.txt ", UnsafeDownloadNameReason.SURROUNDING_WHITESPACE),
+        ("report.", UnsafeDownloadNameReason.TRAILING_DOT),
+        ("CON", UnsafeDownloadNameReason.WINDOWS_DEVICE_NAME),
+        ("con.txt", UnsafeDownloadNameReason.WINDOWS_DEVICE_NAME),
+        ("PRN.", UnsafeDownloadNameReason.WINDOWS_DEVICE_NAME),
+        ("aux ", UnsafeDownloadNameReason.WINDOWS_DEVICE_NAME),
+        ("NUL", UnsafeDownloadNameReason.WINDOWS_DEVICE_NAME),
+        ("COM1", UnsafeDownloadNameReason.WINDOWS_DEVICE_NAME),
+        ("com9.dat", UnsafeDownloadNameReason.WINDOWS_DEVICE_NAME),
+        ("LPT7", UnsafeDownloadNameReason.WINDOWS_DEVICE_NAME),
+        ("x" * 256, UnsafeDownloadNameReason.TOO_LONG),
+    ],
+)
+def test_send_file_strict_policy_rejects(name, reason):
+    policy = DownloadNamePolicy()
+
+    with pytest.raises(UnsafeDownloadName) as exc_info:
+        send_file(
+            io.BytesIO(b"data"),
+            environ,
+            as_attachment=True,
+            download_name=name,
+            download_name_policy=policy,
+        )
+
+    error = exc_info.value
+    assert isinstance(error, ValueError)
+    assert error.reason is reason
+    assert error.download_name == name
+
+
+@pytest.mark.parametrize("name", [".", "..", "CON", "report\r\n.txt"])
+def test_send_file_strict_policy_before_response(name):
+    # The response class would raise if the response was constructed.
+    with pytest.raises(UnsafeDownloadName):
+        send_file(
+            io.BytesIO(b"data"),
+            environ,
+            as_attachment=True,
+            download_name=name,
+            download_name_policy=DownloadNamePolicy(),
+            response_class=ExplodingResponse,
+        )
+
+
+def test_send_file_strict_policy_validates_default_name():
+    # A name derived from the path is validated too.
+    with pytest.raises(UnsafeDownloadName):
+        send_file(
+            txt_path,
+            environ,
+            download_name="../test.txt",
+            download_name_policy=DownloadNamePolicy(),
+        )
+
+
+def test_send_file_strict_policy_custom_length():
+    policy = DownloadNamePolicy(max_length=5)
+
+    with send_file(
+        io.BytesIO(b"data"),
+        environ,
+        as_attachment=True,
+        download_name="a.txt",
+        download_name_policy=policy,
+    ) as rv:
+        assert "filename=a.txt" in rv.headers["Content-Disposition"]
+
+    with pytest.raises(UnsafeDownloadName) as exc_info:
+        send_file(
+            io.BytesIO(b"data"),
+            environ,
+            as_attachment=True,
+            download_name="longer.txt",
+            download_name_policy=policy,
+        )
+
+    assert exc_info.value.reason is UnsafeDownloadNameReason.TOO_LONG
+
+
+def test_send_file_strict_policy_non_ascii_disallowed():
+    policy = DownloadNamePolicy(allow_non_ascii=False)
+
+    with pytest.raises(UnsafeDownloadName) as exc_info:
+        send_file(
+            io.BytesIO(b"data"),
+            environ,
+            as_attachment=True,
+            download_name="季度报表.txt",
+            download_name_policy=policy,
+        )
+
+    assert exc_info.value.reason is UnsafeDownloadNameReason.NON_ASCII
+
+
+def test_send_file_strict_policy_device_names_allowed():
+    policy = DownloadNamePolicy(reject_windows_device_names=False)
+
+    with send_file(
+        io.BytesIO(b"data"),
+        environ,
+        as_attachment=True,
+        download_name="CON",
+        download_name_policy=policy,
+    ) as rv:
+        assert rv.headers["Content-Disposition"] == "attachment; filename=CON"
+
+
+def test_send_file_strict_policy_unicode_roundtrip():
+    name = "季度报表.txt"
+
+    with send_file(
+        io.BytesIO(b"data"),
+        environ,
+        as_attachment=True,
+        download_name=name,
+        download_name_policy=DownloadNamePolicy(),
+    ) as rv:
+        content_disposition = rv.headers["Content-Disposition"]
+        value, options = parse_options_header(content_disposition)
+
+    assert value == "attachment"
+    assert "filename*=UTF-8''" in content_disposition
+    # RFC 5987 value decodes back to the original name.
+    assert options["filename"] == name
+    # The ASCII fallback is present and non-empty.
+    assert "filename=.txt" in content_disposition
+
+
+def test_send_file_strict_policy_ascii_fallback_not_empty():
+    with pytest.raises(UnsafeDownloadName) as exc_info:
+        send_file(
+            io.BytesIO(b"data"),
+            environ,
+            as_attachment=True,
+            download_name="中文",
+            download_name_policy=DownloadNamePolicy(),
+        )
+
+    assert exc_info.value.reason is UnsafeDownloadNameReason.ASCII_FALLBACK_EMPTY
+
+
+def test_send_file_strict_policy_encoded_header_is_safe():
+    # Even though quote() percent-encodes, assert no raw CR/LF or quote can
+    # appear in the generated header for a policy-accepted name.
+    with send_file(
+        io.BytesIO(b"data"),
+        environ,
+        as_attachment=True,
+        download_name="季度 报表.txt",
+        download_name_policy=DownloadNamePolicy(),
+    ) as rv:
+        content_disposition = rv.headers["Content-Disposition"]
+
+    assert "\r" not in content_disposition
+    assert "\n" not in content_disposition
+    assert content_disposition.count('"') == 2
+
+
+def test_send_file_no_policy_keeps_existing_behavior():
+    # Without a policy, names the strict policy would reject are still sent.
+    with send_file(
+        io.BytesIO(b"data"),
+        environ,
+        as_attachment=True,
+        download_name="../季度报表.txt",
+    ) as rv:
+        content_disposition = rv.headers["Content-Disposition"]
+
+    assert content_disposition.startswith("attachment;")
+    assert "filename*=UTF-8''" in content_disposition

@@ -303,6 +303,15 @@ Version 3.2.0
     previously only on ``TestResponse``. :pr:`3341`
 -   The test client always writes form data to ``BytesIO`` instead of a
     temporary file.
+-   ``send_file`` accepts an optional ``download_name_policy``. Passing a
+    :class:`~werkzeug.utils.DownloadNamePolicy` validates the
+    ``download_name`` before the response is created and raises
+    :class:`~werkzeug.utils.UnsafeDownloadName` with a specific
+    :class:`~werkzeug.utils.UnsafeDownloadNameReason` instead of silently
+    changing the name. It can enforce a maximum length, reject non-ASCII names,
+    and reject reserved Windows device names, as well as control and
+    bidirectional formatting characters, path segments, surrounding
+    whitespace, and trailing dots. Without a policy, behavior is unchanged.
 
 
 Version 3.1.9

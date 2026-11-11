@@ -10,6 +10,7 @@ import sys
 import typing as t
 import unicodedata
 import wsgiref.types as wt
+from enum import Enum
 from functools import update_wrapper
 from time import time
 from urllib.parse import quote
@@ -306,6 +307,196 @@ def _append_slash_redirect(environ: wt.WSGIEnvironment, code: int = 308) -> Resp
     return redirect(new_path, code)
 
 
+class UnsafeDownloadNameReason(Enum):
+    """The specific reason a :class:`DownloadNamePolicy` rejected a name.
+
+    .. versionadded:: 3.2
+    """
+
+    EMPTY = "The download name is empty."
+    CONTROL_CHARACTER = "The download name contains a control character."
+    BIDI_CHARACTER = "The download name contains a bidirectional formatting character."
+    NON_ASCII = "The download name contains a non-ASCII character."
+    PATH_SEPARATOR = "The download name contains a '/' or '\\\\' path separator."
+    PATH_SEGMENT = "The download name contains a '.' or '..' path segment."
+    SURROUNDING_WHITESPACE = "The download name has leading or trailing whitespace."
+    TRAILING_DOT = "The download name ends with a dot."
+    TOO_LONG = "The download name is longer than the allowed maximum length."
+    WINDOWS_DEVICE_NAME = "The download name is a reserved Windows device name."
+    ASCII_FALLBACK_EMPTY = "The non-ASCII download name has no usable ASCII fallback."
+    ENCODING_UNSAFE = "The encoded download name contains an unsafe header character."
+
+
+class UnsafeDownloadName(ValueError):
+    """Raised when a :class:`DownloadNamePolicy` rejects a ``download_name``
+    passed to :func:`send_file`. The :attr:`reason` identifies which rule was
+    violated so callers can handle each case differently. The unsafe value is
+    available as :attr:`download_name`.
+
+    This is never raised unless a policy is explicitly passed; the default
+    :func:`send_file` behavior is unchanged.
+
+    .. versionadded:: 3.2
+    """
+
+    def __init__(self, download_name: str, reason: UnsafeDownloadNameReason) -> None:
+        self.download_name = download_name
+        self.reason = reason
+        super().__init__(reason.value)
+
+
+# Bidirectional formatting characters that can reverse or reorder the visible
+# text of a filename in a browser or file manager.
+_bidi_characters = frozenset(
+    chr(code)
+    for code in (
+        *range(0x202A, 0x202F),  # U+202A..U+202E embeds/overrides
+        *range(0x2066, 0x206A),  # U+2066..U+2069 isolates
+        0x200E,  # LEFT-TO-RIGHT MARK
+        0x200F,  # RIGHT-TO-LEFT MARK
+        0x061C,  # ARABIC LETTER MARK
+    )
+)
+
+# Reserved Windows device names, checked without an extension and ignoring
+# trailing spaces and dots. Case-insensitive.
+_download_device_names = frozenset(
+    (
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        *(f"COM{index}" for index in range(1, 10)),
+        *(f"LPT{index}" for index in range(1, 10)),
+    )
+)
+
+
+class DownloadNamePolicy:
+    """Validate a ``download_name`` before it is placed in a
+    ``Content-Disposition`` header by :func:`send_file`.
+
+    Validation runs before the response object is created, and raises
+    :class:`UnsafeDownloadName` instead of silently changing the name. Names
+    are never modified.
+
+    The policy rejects control characters (including NUL, CR, LF, and TAB),
+    bidirectional formatting characters, path separators and path segments,
+    surrounding whitespace, trailing dots, names longer than
+    :attr:`max_length`, and reserved Windows device names. Non-ASCII names are
+    allowed by default, but can be disabled.
+
+    :param max_length: Maximum allowed length in Unicode code points.
+    :param allow_non_ascii: Allow characters outside the ASCII range.
+    :param reject_windows_device_names: Reject reserved Windows device names
+        such as ``CON`` and ``COM1``, regardless of extension or trailing
+        spaces and dots.
+
+    .. versionadded:: 3.2
+    """
+
+    def __init__(
+        self,
+        *,
+        max_length: int = 255,
+        allow_non_ascii: bool = True,
+        reject_windows_device_names: bool = True,
+    ) -> None:
+        if max_length < 1:
+            raise ValueError("'max_length' must be at least 1.")
+
+        self.max_length = max_length
+        self.allow_non_ascii = allow_non_ascii
+        self.reject_windows_device_names = reject_windows_device_names
+
+    def validate(self, download_name: str) -> None:
+        """Validate ``download_name``, raising :class:`UnsafeDownloadName`
+        with a specific :class:`UnsafeDownloadNameReason` if it is not safe.
+        """
+        if not download_name:
+            raise UnsafeDownloadName(download_name, UnsafeDownloadNameReason.EMPTY)
+
+        for char in download_name:
+            if unicodedata.category(char) == "Cc":
+                raise UnsafeDownloadName(
+                    download_name, UnsafeDownloadNameReason.CONTROL_CHARACTER
+                )
+
+            if char in _bidi_characters:
+                raise UnsafeDownloadName(
+                    download_name, UnsafeDownloadNameReason.BIDI_CHARACTER
+                )
+
+        if not self.allow_non_ascii and not download_name.isascii():
+            raise UnsafeDownloadName(download_name, UnsafeDownloadNameReason.NON_ASCII)
+
+        if "/" in download_name or "\\" in download_name:
+            raise UnsafeDownloadName(
+                download_name, UnsafeDownloadNameReason.PATH_SEPARATOR
+            )
+
+        if any(part in {".", ".."} for part in re.split(r"[\\\/]", download_name)):
+            raise UnsafeDownloadName(
+                download_name, UnsafeDownloadNameReason.PATH_SEGMENT
+            )
+
+        if self.reject_windows_device_names:
+            # Check before trailing spaces/dots, which are ignored when Windows
+            # resolves a device name, e.g. "CON." or "PRN ".
+            stem = download_name.partition(".")[0].strip(" .").upper()
+
+            if stem in _download_device_names:
+                raise UnsafeDownloadName(
+                    download_name,
+                    UnsafeDownloadNameReason.WINDOWS_DEVICE_NAME,
+                )
+
+        if download_name != download_name.strip():
+            raise UnsafeDownloadName(
+                download_name, UnsafeDownloadNameReason.SURROUNDING_WHITESPACE
+            )
+
+        if download_name.endswith("."):
+            raise UnsafeDownloadName(
+                download_name, UnsafeDownloadNameReason.TRAILING_DOT
+            )
+
+        if len(download_name) > self.max_length:
+            raise UnsafeDownloadName(download_name, UnsafeDownloadNameReason.TOO_LONG)
+
+
+def _content_disposition_names(
+    download_name: str, policy: DownloadNamePolicy | None
+) -> dict[str, str]:
+    """Build the ``filename`` and, for non-ASCII names, ``filename*`` header
+    parameters for ``download_name``.
+
+    With a policy, the ASCII ``filename`` fallback must not be empty, and the
+    percent-encoded RFC 5987 value must not reintroduce characters that could
+    break or inject into the header, such as CR, LF, or a double quote.
+    """
+    if download_name.isascii():
+        return {"filename": download_name}
+
+    simple = unicodedata.normalize("NFKD", download_name)
+    simple = simple.encode("ascii", "ignore").decode("ascii")
+
+    if policy is not None and not simple:
+        raise UnsafeDownloadName(
+            download_name, UnsafeDownloadNameReason.ASCII_FALLBACK_EMPTY
+        )
+
+    # safe = RFC 5987 attr-char
+    quoted = quote(download_name, safe="!#$&+-.^_`|~")
+
+    if policy is not None and any(char in quoted for char in ('"', "\r", "\n")):
+        raise UnsafeDownloadName(
+            download_name, UnsafeDownloadNameReason.ENCODING_UNSAFE
+        )
+
+    return {"filename": simple, "filename*": f"UTF-8''{quoted}"}
+
+
 def send_file(
     path_or_file: os.PathLike[str] | str | t.IO[bytes],
     environ: wt.WSGIEnvironment,
@@ -320,6 +511,7 @@ def send_file(
     | None = None,
     use_x_sendfile: bool = False,
     response_class: type[Response] | None = None,
+    download_name_policy: DownloadNamePolicy | None = None,
     _root_path: os.PathLike[str] | str | None = None,
 ) -> Response:
     """Send the contents of a file to the client.
@@ -364,6 +556,11 @@ def send_file(
         efficiently send the file. Requires support from the HTTP server..
     :param response_class: Build the response using this class. Defaults to
         :class:`.Response`.
+    :param download_name_policy: Validate ``download_name`` against this
+        :class:`DownloadNamePolicy` before creating the response and setting
+        ``Content-Disposition``. Raises :class:`UnsafeDownloadName` instead of
+        silently changing the name. When not given, no validation is performed
+        and the previous behavior is preserved.
     :param _root_path: Do not use. For internal use only. Use
         :func:`send_from_directory` to safely send files under a path.
 
@@ -405,6 +602,14 @@ def send_file(
     file: t.IO[bytes]
     size: int | None = None
     headers = Headers()
+
+    if download_name is None and isinstance(path_or_file, (os.PathLike, str)):
+        download_name = os.path.basename(os.fspath(path_or_file))
+
+    if download_name is not None and download_name_policy is not None:
+        # Validate before opening the file, creating a header value, or
+        # constructing the response. Reject instead of silently renaming.
+        download_name_policy.validate(download_name)
 
     if isinstance(path_or_file, (os.PathLike, str)):
         path = path_or_file
@@ -468,14 +673,7 @@ def send_file(
                 headers["Content-Encoding"] = encoding
 
     if download_name is not None:
-        if download_name.isascii():
-            names = {"filename": download_name}
-        else:
-            simple = unicodedata.normalize("NFKD", download_name)
-            simple = simple.encode("ascii", "ignore").decode("ascii")
-            # safe = RFC 5987 attr-char
-            quoted = quote(download_name, safe="!#$&+-.^_`|~")
-            names = {"filename": simple, "filename*": f"UTF-8''{quoted}"}
+        names = _content_disposition_names(download_name, download_name_policy)
 
         value = "attachment" if as_attachment else "inline"
         headers.set("Content-Disposition", value, **names)

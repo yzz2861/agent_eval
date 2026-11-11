@@ -25,6 +25,15 @@ General Helpers
 
 .. autofunction:: send_from_directory
 
+.. autoclass:: DownloadNamePolicy
+   :members:
+
+.. autoclass:: UnsafeDownloadName
+   :members:
+
+.. autoclass:: UnsafeDownloadNameReason
+   :members:
+
 .. autofunction:: import_string
 
 .. autofunction:: find_modules
