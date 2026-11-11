@@ -85,15 +85,20 @@ class TestManagerAssignPerm(TestCase):
 
     def test_user_bulk_assign_perm(self):
         UserObjectPermission = get_user_obj_perms_model(self.obj)
-        with self.assertNumQueries(3):
-            assigned = UserObjectPermission.objects.bulk_assign_perm(self.permission, self.user, [self.obj])
-        self.assertEqual(assigned, [UserObjectPermission.objects.get(user=self.user, permission=self.permission)])
+        with self.assertNumQueries(4):
+            result = UserObjectPermission.objects.bulk_assign_perm(self.permission, self.user, [self.obj])
+        self.assertEqual(
+            result.created,
+            [UserObjectPermission.objects.get(user=self.user, permission=self.permission)],
+        )
+        self.assertEqual(result.skipped, [])
 
     def test_user_bulk_assign_perm_empty_list(self):
         UserObjectPermission = get_user_obj_perms_model(self.obj)
         with self.assertNumQueries(0):
-            assigned = UserObjectPermission.objects.bulk_assign_perm(self.permission, self.user, [])
-        self.assertEqual(assigned, [])
+            result = UserObjectPermission.objects.bulk_assign_perm(self.permission, self.user, [])
+        self.assertEqual(result.created, [])
+        self.assertEqual(result.skipped, [])
 
     def test_user_assign_perm_to_many(self):
         UserObjectPermission = get_user_obj_perms_model(self.obj)
@@ -109,15 +114,20 @@ class TestManagerAssignPerm(TestCase):
 
     def test_group_bulk_assign_perm(self):
         GroupObjectPermission = get_group_obj_perms_model(self.obj)
-        with self.assertNumQueries(2):
-            assigned = GroupObjectPermission.objects.bulk_assign_perm(self.permission, self.group, [self.obj])
-        self.assertEqual(assigned, [GroupObjectPermission.objects.get(group=self.group, permission=self.permission)])
+        with self.assertNumQueries(4):
+            result = GroupObjectPermission.objects.bulk_assign_perm(self.permission, self.group, [self.obj])
+        self.assertEqual(
+            result.created,
+            [GroupObjectPermission.objects.get(group=self.group, permission=self.permission)],
+        )
+        self.assertEqual(result.skipped, [])
 
     def test_group_bulk_assign_perm_empty_list(self):
         GroupObjectPermission = get_group_obj_perms_model(self.obj)
         with self.assertNumQueries(0):
-            assigned = GroupObjectPermission.objects.bulk_assign_perm(self.permission, self.group, [])
-        self.assertEqual(assigned, [])
+            result = GroupObjectPermission.objects.bulk_assign_perm(self.permission, self.group, [])
+        self.assertEqual(result.created, [])
+        self.assertEqual(result.skipped, [])
 
     def test_group_assign_perm_to_many(self):
         GroupObjectPermission = get_group_obj_perms_model(self.obj)

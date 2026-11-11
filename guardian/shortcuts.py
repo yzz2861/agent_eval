@@ -32,10 +32,12 @@ from guardian.conf import settings as guardian_settings
 from guardian.core import ObjectPermissionChecker
 from guardian.ctypes import get_content_type
 from guardian.exceptions import (
+    BulkAssignmentError,
     MixedContentTypeError,
     MultipleIdentityAndObjectError,
     WrongAppError,
 )
+from guardian.managers import BulkAssignResult
 from guardian.utils import (
     get_anonymous_user,
     get_group_obj_perms_model,
@@ -85,6 +87,7 @@ def assign_perm(
     perm: str | Permission,
     user_or_group: Any,
     obj: Model | None = None,
+    ignore_existing: bool = True,
 ) -> str | Permission | None:
     """Assigns permission to user/group and object pair.
 
@@ -99,6 +102,12 @@ def assign_perm(
         obj (Model | QuerySet): Django's `Model` instance or QuerySet or
             a list of Django `Model` instances or `None` if assigning global permission.
             *Default* is `None`.
+        ignore_existing (bool): only used for bulk assignment over a list or
+            QuerySet of objects. When ``True`` (default, matching the legacy
+            behaviour) objects that already carry the permission are skipped;
+            set ``False`` to fail the whole transactional batch instead. Use
+            :func:`bulk_assign_perm` directly when you need the structured
+            ``BulkAssignResult`` audit object.
 
     Example:
         ```shell
@@ -155,10 +164,10 @@ def assign_perm(
             raise MultipleIdentityAndObjectError("Only bulk operations on either users/groups OR objects supported")
         if user:
             model = get_user_obj_perms_model(obj[0] if isinstance(obj, list) else obj.model)
-            return model.objects.bulk_assign_perm(perm, user, obj)
+            return model.objects.bulk_assign_perm(perm, user, obj, ignore_existing=ignore_existing).created
         if group:
             model = get_group_obj_perms_model(obj[0] if isinstance(obj, list) else obj.model)
-            return model.objects.bulk_assign_perm(perm, group, obj)
+            return model.objects.bulk_assign_perm(perm, group, obj, ignore_existing=ignore_existing).created
 
     if isinstance(user_or_group, (QuerySet, list)):
         if user:
@@ -185,6 +194,52 @@ def assign(perm, user_or_group, obj=None):
         DeprecationWarning,
     )
     return assign_perm(perm, user_or_group, obj)
+
+
+def bulk_assign_perm(
+    perm: str | Permission,
+    user_or_group: Any,
+    obj: QuerySet | list,
+    *,
+    ignore_existing: bool = False,
+) -> BulkAssignResult:
+    """Transactionally assign one permission across many objects.
+
+    Unlike :func:`assign_perm`, this always returns a
+    :class:`guardian.managers.BulkAssignResult` describing exactly which rows
+    were created and which target objects were skipped, making it suitable for
+    audit logs and bulk admin screens.
+
+    All pre-validation happens inside one transaction before any insert, so a
+    failure (mixed content types, unpersisted objects, unknown codename,
+    inactive user, duplicates in fail mode or a concurrent duplicate commit)
+    rolls the entire batch back and never leaves partial rows.
+
+    Args:
+        perm: ``app_label.codename``/codename string or ``Permission``.
+        user_or_group: single persisted, active user or persisted group.
+        obj: non-empty, homogeneous list or QuerySet of persisted objects.
+        ignore_existing: ``False`` (default) means any duplicate - inside the
+            batch or already stored - raises and rolls everything back;
+            ``True`` means existing pairs are reported in ``result.skipped``
+            and only missing rows are created.
+
+    Returns:
+        BulkAssignResult: ``created`` rows and ``skipped`` objects. The two
+        modes never share a return shape with :func:`assign_perm`.
+    """
+    if isinstance(user_or_group, (QuerySet, list)):
+        raise MultipleIdentityAndObjectError("bulk_assign_perm assigns to a single user/group")
+
+    user, group = get_identity(user_or_group)
+    perm = _normalize_perm(perm)
+    if user:
+        model = get_user_obj_perms_model(obj[0] if isinstance(obj, list) else obj.model)
+        return model.objects.bulk_assign_perm(perm, user, obj, ignore_existing=ignore_existing)
+    if group:
+        model = get_group_obj_perms_model(obj[0] if isinstance(obj, list) else obj.model)
+        return model.objects.bulk_assign_perm(perm, group, obj, ignore_existing=ignore_existing)
+    raise BulkAssignmentError("A single user or group is required for bulk_assign_perm")
 
 
 def remove_perm(

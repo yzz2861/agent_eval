@@ -157,8 +157,34 @@ QuerySet of objects:
 
 ``` python
 >>> tasks = Task.objects.filter(reported_by=boss)
->>> UserObjectPermission.objects.bulk_assign_perm('change_task', joe, tasks)
+>>> result = UserObjectPermission.objects.bulk_assign_perm('change_task', joe, tasks)
+>>> result.created   # rows actually inserted
+>>> result.skipped   # objects that already had the permission (only with ignore mode)
 ```
+
+The whole batch runs in a single transaction. Every target object, permission
+codename, content type and the user/group state are validated **before** any
+row is inserted, so a failure (e.g. an object of another model mixed into the
+batch, an unpersisted object or an inactive user) rolls everything back and
+never leaves a partial batch behind.
+
+Two explicit duplicate policies are supported and they never share a return
+shape:
+
+``` python
+# Default: any duplicate (inside the batch or already stored) fails the batch.
+UserObjectPermission.objects.bulk_assign_perm('change_task', joe, tasks)
+
+# Ignore duplicates: existing pairs are returned in `skipped`, new rows in `created`.
+UserObjectPermission.objects.bulk_assign_perm(
+    'change_task', joe, tasks, ignore_existing=True
+)
+```
+
+The shortcut `guardian.shortcuts.bulk_assign_perm` exposes the same
+transactional behavior and the `BulkAssignResult(created, skipped)` audit
+object. The legacy `assign_perm(perm, user, queryset)` call keeps returning a
+plain list of created rows for backwards compatibility.
 
 ### For multiple users or groups
 
