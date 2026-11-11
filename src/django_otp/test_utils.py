@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from contextlib import suppress
 from datetime import timedelta
+import os
+import tempfile
 
 from freezegun import freeze_time
 
 from django.contrib.auth import get_user_model
+from django.db import connections
 from django.test import TestCase as DjangoTestCase
 from django.test import TransactionTestCase as DjangoTransactionTestCase
 from django.utils import timezone
@@ -40,6 +44,67 @@ class TestCase(OTPTestCaseMixin, DjangoTestCase):
 
 class TransactionTestCase(OTPTestCaseMixin, DjangoTransactionTestCase):
     pass
+
+
+class ConcurrencyTestCase(OTPTestCaseMixin, DjangoTransactionTestCase):
+    """
+    A :class:`~django.test.TransactionTestCase` for multi-threaded tests.
+
+    Each worker thread is expected to open and close its own database
+    connection, so that concurrent requests really hit the database through
+    independent connections rather than a thread-local shared one.
+
+    Django's default SQLite test database is an in-memory database opened in
+    shared-cache mode, which reports ``database table is locked`` immediately
+    on concurrent writes instead of honoring a busy timeout. On SQLite we
+    therefore redirect the test database to a temporary file; a busy timeout
+    then lets the database serialize concurrent writes like a production
+    server would. Other backends are left untouched.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._file_database = None
+        default_connection = connections['default']
+        if (
+            default_connection.vendor == 'sqlite'
+            and default_connection.is_in_memory_db()
+        ):
+            # Build a dedicated file-backed database for this class. The
+            # runner's in-memory database can't serialize concurrent writes
+            # from independent connections, so worker threads would hit
+            # "database table is locked" instead of a busy-timeout wait.
+            sqlite_file = tempfile.NamedTemporaryFile(suffix='.sqlite3')
+            sqlite_file.close()
+            cls._file_database = sqlite_file.name
+
+            settings_dict = default_connection.settings_dict
+            cls._original_settings = settings_dict.copy()
+            settings_dict['NAME'] = cls._file_database
+            settings_dict.setdefault('TEST', {})['NAME'] = cls._file_database
+            settings_dict['OPTIONS'] = {
+                **settings_dict.get('OPTIONS', {}),
+                # Keep waiting rather than fail a serialized write.
+                'timeout': 20,
+            }
+            default_connection.close()
+            default_connection.creation.create_test_db(verbosity=0)
+
+        super().setUpClass()
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+
+        if cls._file_database is not None:
+            default_connection = connections['default']
+            default_connection.creation.destroy_test_db(cls._file_database, verbosity=0)
+            original = cls._original_settings
+            default_connection.settings_dict.clear()
+            default_connection.settings_dict.update(original)
+            default_connection.close()
+            with suppress(FileNotFoundError):
+                os.remove(cls._file_database)
 
 
 class TimestampTestMixin:

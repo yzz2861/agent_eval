@@ -1,3 +1,6 @@
+from binascii import unhexlify
+from datetime import timedelta
+from threading import Barrier, Thread
 from time import time
 from urllib.parse import parse_qs, urlsplit
 
@@ -5,12 +8,19 @@ from django.contrib.admin.sites import AdminSite
 from django.contrib.auth.models import Permission
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import PermissionDenied
-from django.db import IntegrityError
+from django.db import IntegrityError, connection
 from django.test import RequestFactory
 from django.test.utils import override_settings
 from django.urls import reverse
+from django.utils import timezone
 
-from django_otp.test_utils import TestCase, ThrottlingTestMixin, TimestampTestMixin
+from django_otp.oath import hotp
+from django_otp.test_utils import (
+    ConcurrencyTestCase,
+    TestCase,
+    ThrottlingTestMixin,
+    TimestampTestMixin,
+)
 
 from .admin import TOTPDeviceAdmin
 from .models import TOTPDevice
@@ -364,3 +374,142 @@ class TimetstampTestCase(TOTPDeviceMixin, TimestampTestMixin, TestCase):
 
     def invalid_token(self):
         return -1
+
+
+class VerifyThread(Thread):
+    """
+    Runs a verification on its own database connection.
+
+    Django test connections are thread-local, so each thread gets an
+    independent connection; it has to be closed again when we're done.
+    """
+
+    def __init__(self, device_pk, token, barrier=None):
+        super().__init__()
+
+        self.device_pk = device_pk
+        self.token = token
+        self.barrier = barrier
+        self.verified = None
+        self.error = None
+
+    def run(self):
+        try:
+            if self.barrier is not None:
+                self.barrier.wait()
+            device = TOTPDevice.objects.get(pk=self.device_pk)
+            self.verified = device.verify_token(self.token)
+        except Exception as error:
+            self.error = error
+        finally:
+            connection.close()
+
+
+@override_settings(OTP_TOTP_THROTTLE_FACTOR=1)
+class TOTPConcurrencyTestCase(ConcurrencyTestCase):
+    """
+    Deterministic concurrency checks using independent database connections.
+
+    Each pair of requests must always produce exactly one acceptance,
+    regardless of how the threads are scheduled.
+    """
+
+    def setUp(self):
+        try:
+            self.alice = self.create_user(
+                'alice', 'password', email='alice@example.com'
+            )
+        except IntegrityError:
+            self.skipTest("Unable to create the test user.")
+            return
+
+        # A device parked at time step 3 with a 30-second step and t0 chosen
+        # so that the live clock keeps reporting t == 3 for the whole test.
+        self.device = self.alice.totpdevice_set.create(
+            key='2a2bbba1092ffdd25a328ad1a0a5f5d61d7aacc4',
+            step=30,
+            t0=int(time() - (30 * 3)),
+            digits=6,
+            tolerance=1,
+            drift=0,
+            last_t=-1,
+        )
+
+    def _run_pair(self, first_token, second_token):
+        barrier = Barrier(2)
+        threads = [
+            VerifyThread(self.device.pk, first_token, barrier),
+            VerifyThread(self.device.pk, second_token, barrier),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+            if thread.error is not None:
+                raise thread.error
+
+        return [thread.verified for thread in threads]
+
+    def test_same_token_accepted_once(self):
+        # Both requests present the same valid token for time step 3.
+        results = self._run_pair(self.totp_token(3), self.totp_token(3))
+
+        self.assertEqual(sorted(results), [False, True])
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.last_t, 3)
+        # The rejected request lost a consumption race, it is not a failure.
+        self.assertEqual(self.device.throttling_failure_count, 0)
+        self.assertIsNone(self.device.throttling_failure_timestamp)
+
+    def test_different_time_steps_accepted_once(self):
+        # Tokens for two distinct time steps are presented simultaneously;
+        # only one of them may be consumed.
+        results = self._run_pair(self.totp_token(3), self.totp_token(4))
+
+        self.assertEqual(sorted(results), [False, True])
+        self.device.refresh_from_db()
+        self.assertIn(self.device.last_t, (3, 4))
+        self.assertEqual(self.device.throttling_failure_count, 0)
+
+    def test_invalid_tokens_increment_throttle(self):
+        # Genuinely wrong tokens still count as failed attempts, even when
+        # they arrive concurrently.
+        results = self._run_pair(-1, -2)
+
+        self.assertEqual(results, [False, False])
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.throttling_failure_count, 2)
+        self.assertEqual(self.device.last_t, -1)
+
+    def test_locked_device_rejects_without_throttle_change(self):
+        # Put the device into an active throttle lockout.
+        self.device.throttling_failure_count = 1
+        self.device.throttling_failure_timestamp = timezone.now()
+        self.device.save()
+
+        results = self._run_pair(self.totp_token(3), self.totp_token(3))
+
+        self.assertEqual(results, [False, False])
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.throttling_failure_count, 1)
+        self.assertEqual(self.device.last_t, -1)
+
+    def test_success_resets_throttle(self):
+        # An existing failure history is cleared by the successful request,
+        # while the racing duplicate stays a non-counting rejection.
+        self.device.throttling_failure_count = 3
+        self.device.throttling_failure_timestamp = timezone.now() - timedelta(
+            seconds=100
+        )
+        self.device.save()
+
+        results = self._run_pair(self.totp_token(3), self.totp_token(3))
+
+        self.assertEqual(sorted(results), [False, True])
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.throttling_failure_count, 0)
+        self.assertIsNone(self.device.throttling_failure_timestamp)
+        self.assertIsNotNone(self.device.last_used_at)
+
+    def totp_token(self, time_step):
+        return hotp(unhexlify(self.device.key.encode()), time_step)

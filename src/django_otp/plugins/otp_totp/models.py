@@ -4,7 +4,8 @@ import time
 from urllib.parse import quote, urlencode
 
 from django.conf import settings
-from django.db import models
+from django.db import models, transaction
+from django.utils import timezone
 
 from django_otp.models import Device, ThrottlingMixin, TimestampMixin
 from django_otp.oath import TOTP
@@ -107,35 +108,63 @@ class TOTPDevice(TimestampMixin, ThrottlingMixin, Device):
         return unhexlify(self.key.encode())
 
     def verify_token(self, token):
-        OTP_TOTP_SYNC = getattr(settings, 'OTP_TOTP_SYNC', True)
-
-        verify_allowed, _ = self.verify_is_allowed()
-        if not verify_allowed:
-            return False
-
         try:
             token = int(token)
         except Exception:
-            verified = False
-        else:
+            # A token that can't even be parsed is a genuine failure.
+            with transaction.atomic():
+                verify_allowed, _ = self.verify_is_allowed()
+                if verify_allowed:
+                    self.throttle_increment_atomic()
+            return False
+
+        # The allowed-check, the last_t guard and the state update all happen
+        # in a single transaction with a conditional UPDATE, so a concurrent
+        # verification can never consume the same token twice.
+        with transaction.atomic():
+            verify_allowed, _ = self.verify_is_allowed()
+            if not verify_allowed:
+                return False
+
             key = self.bin_key
 
             totp = TOTP(key, self.step, self.t0, self.digits, self.drift)
             totp.time = time.time()
 
-            verified = totp.verify(token, self.tolerance, self.last_t + 1)
-            if verified:
-                self.last_t = totp.t()
-                if OTP_TOTP_SYNC:
-                    self.drift = totp.drift
-                self.throttle_reset(commit=False)
-                self.set_last_used_timestamp(commit=False)
-                self.save()
+            current_last_t = self.last_t
+            verified = totp.verify(token, self.tolerance, current_last_t + 1)
+            if not verified:
+                # A genuinely wrong token still counts as a failure.
+                self.throttle_increment_atomic()
+                return False
 
-        if not verified:
-            self.throttle_increment(commit=True)
+            update_fields = {
+                'last_t': totp.t(),
+                'last_used_at': timezone.now(),
+                'throttling_failure_timestamp': None,
+                'throttling_failure_count': 0,
+            }
+            if getattr(settings, 'OTP_TOTP_SYNC', True):
+                update_fields['drift'] = totp.drift
 
-        return verified
+            # Only commit while last_t still holds the value we read. If a
+            # concurrent request already consumed any token (advancing
+            # last_t), this matches zero rows and exactly one request wins;
+            # the strict time-step rule itself is enforced by totp.verify().
+            updated = (
+                type(self)
+                .objects.filter(pk=self.pk, last_t=current_last_t)
+                .update(**update_fields)
+            )
+            if updated == 0:
+                # The token was already consumed by a concurrent request;
+                # that is not a failed attempt and must not count toward
+                # throttling.
+                return False
+
+            for name, value in update_fields.items():
+                setattr(self, name, value)
+            return True
 
     def get_throttle_factor(self):
         return getattr(settings, 'OTP_TOTP_THROTTLE_FACTOR', 1)

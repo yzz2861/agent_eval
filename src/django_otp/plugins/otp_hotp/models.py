@@ -3,7 +3,8 @@ from binascii import unhexlify
 from urllib.parse import quote, urlencode
 
 from django.conf import settings
-from django.db import models
+from django.db import models, transaction
+from django.utils import timezone
 
 from django_otp.models import Device, ThrottlingMixin, TimestampMixin
 from django_otp.oath import hotp
@@ -74,32 +75,57 @@ class HOTPDevice(TimestampMixin, ThrottlingMixin, Device):
         return unhexlify(self.key.encode())
 
     def verify_token(self, token):
-        verify_allowed, _ = self.verify_is_allowed()
-        if not verify_allowed:
-            return False
-
         try:
             token = int(token)
         except Exception:
-            verified = False
-        else:
+            with transaction.atomic():
+                verify_allowed, _ = self.verify_is_allowed()
+                if verify_allowed:
+                    self.throttle_increment_atomic()
+            return False
+
+        # The allowed-check, the counter guard and the state update all
+        # happen in a single transaction with a conditional UPDATE, so a
+        # concurrent verification can never consume the same counter twice.
+        with transaction.atomic():
+            verify_allowed, _ = self.verify_is_allowed()
+            if not verify_allowed:
+                return False
+
             key = self.bin_key
+            current_counter = self.counter
 
-            for counter in range(self.counter, self.counter + self.tolerance + 1):
-                if hotp(key, counter, self.digits) == token:
-                    verified = True
-                    self.counter = counter + 1
-                    self.throttle_reset(commit=False)
-                    self.set_last_used_timestamp(commit=False)
-                    self.save()
-                    break
-            else:
-                verified = False
+            for counter in range(current_counter, current_counter + self.tolerance + 1):
+                if hotp(key, counter, self.digits) != token:
+                    continue
 
-        if not verified:
-            self.throttle_increment(commit=True)
+                # Advance the counter only if it still holds the value we
+                # read above; a lost race means another request already
+                # consumed this token.
+                updated = (
+                    type(self)
+                    .objects.filter(pk=self.pk, counter=current_counter)
+                    .update(
+                        counter=counter + 1,
+                        last_used_at=timezone.now(),
+                        throttling_failure_timestamp=None,
+                        throttling_failure_count=0,
+                    )
+                )
+                if updated == 0:
+                    # Not a failed attempt: the token was simply consumed by
+                    # a concurrent request, so don't add throttle.
+                    return False
 
-        return verified
+                self.counter = counter + 1
+                self.last_used_at = timezone.now()
+                self.throttling_failure_timestamp = None
+                self.throttling_failure_count = 0
+                return True
+
+            # A genuinely wrong token still counts as a failure.
+            self.throttle_increment_atomic()
+            return False
 
     def get_throttle_factor(self):
         return getattr(settings, 'OTP_HOTP_THROTTLE_FACTOR', 1)

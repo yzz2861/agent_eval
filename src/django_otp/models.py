@@ -6,6 +6,7 @@ from django.apps import apps
 from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import models
+from django.db.models import F
 from django.utils import timezone
 from django.utils.functional import cached_property
 
@@ -572,6 +573,26 @@ class ThrottlingMixin(models.Model):
         self.throttling_failure_count += 1
         if commit:
             self.save()
+
+    def throttle_increment_atomic(self):
+        """
+        Record a failed verification as a single conditional statement.
+
+        Unlike :meth:`throttle_increment`, this never writes the whole
+        instance back to the database, so concurrent failures can't overwrite
+        each other or a concurrently consumed token. Only the two throttling
+        columns are touched and the in-memory instance is updated to match,
+        leaving any other unsaved field values intact.
+        """
+        failure_timestamp = timezone.now()
+        type(self).objects.filter(pk=self.pk).update(
+            throttling_failure_timestamp=failure_timestamp,
+            throttling_failure_count=F('throttling_failure_count') + 1,
+        )
+        self.throttling_failure_timestamp = failure_timestamp
+        # The in-memory value may be stale relative to another connection;
+        # mirror the database-side increment for this instance's own state.
+        self.throttling_failure_count += 1
 
     @cached_property
     def throttling_enabled(self):
