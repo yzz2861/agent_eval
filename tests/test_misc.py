@@ -1,0 +1,229 @@
+import collections
+import gc
+import importlib.util
+import io
+import platform
+import sys
+import weakref
+
+import pytest
+
+import ijson
+from ijson import common
+from ijson.common import ObjectBuilder
+
+from tests.test_base import JSON, JSON_EVENTS, JSON_PARSE_EVENTS, JSON_OBJECT,\
+    JSON_KVITEMS
+
+
+class TestMisc:
+    """Miscellaneous unit tests"""
+
+    def test_common_number_is_deprecated(self):
+        with pytest.deprecated_call():
+            common.number("1")
+
+    def test_yajl2_c_loadable(self):
+        spec = importlib.util.find_spec("ijson.backends._yajl2")
+        if spec is None:
+            pytest.skip("yajl2_c is not built")
+        importlib.util.module_from_spec(spec)
+
+    @pytest.mark.parametrize("length, exc, match", [
+        (17, ValueError, r"readinto\(\) returned invalid length 17"),
+        (4096, ValueError, r"readinto\(\) returned invalid length 4096"),
+        (-1, ValueError, r"readinto\(\) returned invalid length -1"),
+        (-2, ValueError, r"readinto\(\) returned invalid length -2"),
+        (2**64, OverflowError, "too large"),
+    ])
+    def test_yajl2_c_invalid_readinto_length(self, length, exc, match):
+        try:
+            backend = ijson.get_backend("yajl2_c")
+        except ImportError:
+            pytest.skip("yajl2_c is not built")
+
+        class BadReadinto:
+            def read(self, n):
+                return b''
+            def readinto(self, buf):
+                buf[:] = b' ' * len(buf)
+                return length
+
+        with pytest.raises(exc, match=match):
+            list(backend.basic_parse(BadReadinto(), buf_size=16))
+
+    def test_yajl2_c_readinto_length_checked_against_original_size(self):
+        """Check that readinto() cannot make the ijson-controlled buffer grow."""
+        try:
+            backend = ijson.get_backend("yajl2_c")
+        except ImportError:
+            pytest.skip("yajl2_c is not built")
+
+        class GrowingReadinto:
+            def read(self, n):
+                return b''
+            def readinto(self, buf):
+                size = len(buf)
+                buf[:] = b' ' * (size * 2)
+                return size * 2
+
+        if platform.python_implementation() == "PyPy":
+            match = "cannot modify size of memoryview object"
+        else:
+            match = "memoryview assignment: lvalue and rvalue have different structures"
+        with pytest.raises(ValueError, match=match):
+            list(backend.basic_parse(GrowingReadinto(), buf_size=16))
+
+
+class TestObjectBuilder:
+    """Unit tests for the pure-python ObjectBuilder class"""
+
+    def test_initial_value_is_none(self):
+        assert ObjectBuilder().value is None
+
+    def test_value_available_during_construction(self):
+        builder = ObjectBuilder()
+        builder.event('start_map', None)
+        assert builder.value == {}
+        builder.event('map_key', 'a')
+        builder.event('string', 'value')
+        assert builder.value == {'a': 'value'}
+        builder.event('map_key', 'b')
+        builder.event('number', 1)
+        assert builder.value == {'a': 'value', 'b': 1}
+
+    def test_builds_expected_value(self):
+        builder = ObjectBuilder()
+        for event, value in JSON_EVENTS:
+            builder.event(event, value)
+        assert builder.value == JSON_OBJECT
+
+    def test_custom_map_type(self):
+        builder = ObjectBuilder(map_type=collections.OrderedDict)
+        events = [
+            ('start_map', None),
+            ('map_key', 'a'),
+            ('start_map', None),
+            ('map_key', 'b'),
+            ('number', 1),
+            ('end_map', None),
+            ('map_key', 'c'),
+            ('start_array', None),
+            ('number', 2),
+            ('end_array', None),
+            ('end_map', None),
+        ]
+        for event, value in events:
+            builder.event(event, value)
+        assert builder.value == {'a': {'b': 1}, 'c': [2]}
+        assert type(builder.value) is collections.OrderedDict
+        assert type(builder.value['a']) is collections.OrderedDict
+
+    @pytest.mark.skipif(sys.implementation.name != "cpython",
+                        reason="deterministic refcounting is CPython-only")
+    @pytest.mark.parametrize("events", [
+        pytest.param([
+            ('start_map', None),
+            ('map_key', 'key'),
+            ('start_map', None),
+            ('map_key', 'inner'),
+            ('string', 'value'),
+            ('end_map', None),
+            ('end_map', None),
+        ], id="nested_map"),
+        pytest.param([
+            ('start_array', None),
+            ('number', 1),
+            ('start_array', None),
+            ('number', 2),
+            ('end_array', None),
+            ('end_array', None),
+        ], id="nested_array"),
+        pytest.param([
+            ('string', 'scalar'),
+        ], id="scalar_only"),
+        pytest.param([], id="no_events"),
+    ])
+    def test_builder_freed_without_cyclic_gc(self, events):
+        """A discarded builder must be freed by refcounting alone.
+
+        The previous implementation stored setter closures in
+        self.containers; each closure referenced the builder, creating a
+        reference cycle that kept the builder (and the value being built)
+        alive until a cyclic GC pass."""
+        builder = ObjectBuilder()
+        for event, value in events:
+            builder.event(event, value)
+        ref = weakref.ref(builder)
+        gc_was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            del builder
+            assert ref() is None
+        finally:
+            if gc_was_enabled:
+                gc.enable()
+
+
+class TestMainEntryPoints:
+    """Tests that main API entry points work against different types of inputs automatically"""
+
+    def _assert_invalid_type(self, routine, *args, **kwargs):
+        # Functions are not valid inputs
+        with pytest.raises(ValueError):
+            routine(lambda _: JSON, *args, **kwargs)
+
+    def _assert_bytes(self, expected_results, routine, *args, **kwargs):
+        results = list(routine(JSON, *args, **kwargs))
+        assert expected_results == results
+
+    def _assert_str(self, expected_results, routine, *args, **kwargs):
+        with pytest.deprecated_call():
+            results = list(routine(JSON.decode("utf-8"), *args, **kwargs))
+
+    def _assert_file(self, expected_results, routine, *args, **kwargs):
+        results = list(routine(io.BytesIO(JSON), *args, **kwargs))
+        assert expected_results == results
+
+    def _assert_async_file(self, expected_results, routine, *args, **kwargs):
+        from .support.async_ import get_all
+        results = get_all(routine, JSON, *args, **kwargs)
+        expected_results == results
+
+    def _assert_async_types_coroutine(self, expected_results, routine, *args, **kwargs):
+        from .support.async_types_coroutines import get_all
+        results = get_all(routine, JSON, *args, **kwargs)
+        assert expected_results == results
+
+    def _assert_events(self, expected_results, previous_routine, routine, *args, **kwargs):
+        events = previous_routine(io.BytesIO(JSON))
+        # Using a different generator to make the point that we can chain
+        # user-provided code
+        def event_yielder():
+            for evt in events:
+                yield evt
+        results = list(routine(event_yielder(), *args, **kwargs))
+        assert expected_results == results
+
+    def _assert_entry_point(self, expected_results, previous_routine, routine,
+                            *args, **kwargs):
+        self._assert_invalid_type(routine, *args, **kwargs)
+        self._assert_bytes(expected_results, routine, *args, **kwargs)
+        self._assert_str(expected_results, routine, *args, **kwargs)
+        self._assert_file(expected_results, routine, *args, **kwargs)
+        self._assert_async_file(expected_results, routine, *args, **kwargs)
+        self._assert_async_types_coroutine(expected_results, routine, *args, **kwargs)
+        if previous_routine:
+            self._assert_events(expected_results, previous_routine, routine, *args, **kwargs)
+
+    def test_rich_basic_parse(self, backend):
+        self._assert_entry_point(JSON_EVENTS, None, backend.basic_parse)
+
+    def test_rich_parse(self, backend):
+        self._assert_entry_point(JSON_PARSE_EVENTS, backend.basic_parse, backend.parse)
+
+    def test_rich_items(self, backend):
+        self._assert_entry_point([JSON_OBJECT], backend.parse, backend.items, '')
+
+    def test_rich_kvitems(self, backend):
+        self._assert_entry_point(JSON_KVITEMS, backend.parse, backend.kvitems, 'docs.item')
