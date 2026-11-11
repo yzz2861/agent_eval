@@ -103,3 +103,30 @@ valid, updated_hash = password_hash.verify_and_update("herminetincture", hash)
 If the hash needs to be updated, `updated_hash` will be a string. Otherwise, it's `None`. Then, don't forget to update it in your database.
 
 It's worth to note that the hash is also upgraded if the **settings of the algorithm** has been changed, like the time or memory cost.
+
+## Password policy
+
+`PasswordHash` only hashes and verifies values; it does **not** normalize or validate them. Registration entry points should explicitly evaluate the raw password with the same [`PasswordPolicy`](./reference/pwdlib.policy.md#pwdlib.policy.PasswordPolicy) configuration before calling the hasher:
+
+```py
+from pwdlib import PasswordHash
+from pwdlib.policy import PasswordPolicy
+
+password_hash = PasswordHash.recommended()
+password_policy = PasswordPolicy()
+
+result = password_policy.evaluate(raw_password, entrypoint="registration-api")
+if not result.allowed:
+    # Log result.audit_event() and return result.suggested_action to the caller.
+    ...
+else:
+    hash = password_hash.hash(result.normalized)
+```
+
+The policy uses one fixed normalization form (NFKC) everywhere, so full-width and half-width variants, composing and combining sequences, and `str`/UTF-8 `bytes` inputs reach the same decision. It counts UTF-8 bytes after normalization, counts visible grapheme bases separately, and explicitly rejects control characters, zero-width/format characters, bidirectional controls and unpaired surrogates. A small local weak-password denylist is built in, and `weak_password_checker` can inject another local check without any network access.
+
+`PolicyResult.audit_event()` and `PasswordPolicyError` expose only a stable rule id, a length bucket and the entry point; they never contain the raw or normalized password. `enforce()` is a fail-fast alternative that returns the normalized password or raises without exposing plaintext.
+
+!!! important "Existing accounts"
+
+    The policy is not wired into `PasswordHash.hash()` or `PasswordHash.verify()`. Always verify existing accounts with the original password value; `verify_and_update()` also passes that same value to the current hasher. Normalize only new registrations that have passed the policy.

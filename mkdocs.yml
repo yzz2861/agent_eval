@@ -67,5 +67,6 @@ nav:
     - Guide: guide.md
     - Reference:
           - pwdlib: reference/pwdlib.md
+          - pwdlib.policy: reference/pwdlib.policy.md
           - pwdlib.exceptions: reference/pwdlib.exceptions.md
           - pwdlib.hashers: reference/pwdlib.hashers.md
