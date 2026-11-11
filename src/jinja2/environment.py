@@ -259,6 +259,12 @@ class Environment:
 
             See :ref:`bytecode-cache` for more information.
 
+        `cache_namespace`
+            An application-defined cache domain. Authenticated bytecode
+            caches use this to prevent entries from being accepted across
+            cache domains, such as different tenants sharing a cache
+            directory. "namespace" is an alias for this attribute.
+
         `enable_async`
             If set to true this enables async template execution which
             allows using async functions and generators.
@@ -316,6 +322,8 @@ class Environment:
         auto_reload: bool = True,
         bytecode_cache: t.Optional["BytecodeCache"] = None,
         enable_async: bool = False,
+        cache_namespace: str | None = None,
+        namespace: str | None = None,
     ):
         # !!Important notice!!
         #   The constructor accepts quite a few arguments that should be
@@ -358,6 +366,15 @@ class Environment:
         self.cache = create_cache(cache_size)
         self.bytecode_cache = bytecode_cache
         self.auto_reload = auto_reload
+
+        if namespace is not None:
+            if cache_namespace is not None and cache_namespace != namespace:
+                raise ValueError("cache_namespace and namespace must match")
+
+            cache_namespace = namespace
+
+        self.cache_namespace = cache_namespace
+        self.namespace = cache_namespace
 
         # configurable policies
         self.policies = DEFAULT_POLICIES.copy()
@@ -408,6 +425,8 @@ class Environment:
         auto_reload: bool = missing,
         bytecode_cache: t.Optional["BytecodeCache"] = missing,
         enable_async: bool = missing,
+        cache_namespace: str | None = missing,
+        namespace: str | None = missing,
     ) -> "te.Self":
         """Create a new overlay environment that shares all the data with the
         current environment except for cache and the overridden attributes.
@@ -427,6 +446,10 @@ class Environment:
             Added the ``newline_sequence``, ``keep_trailing_newline``,
             and ``enable_async`` parameters to match ``__init__``.
         """
+        if namespace is not missing:
+            if cache_namespace is not missing and cache_namespace != namespace:
+                raise ValueError("cache_namespace and namespace must match")
+
         args = dict(locals())
         del args["self"], args["cache_size"], args["extensions"], args["enable_async"]
 
@@ -459,6 +482,15 @@ class Environment:
     def lexer(self) -> Lexer:
         """The lexer for this environment."""
         return get_lexer(self)
+
+    @property
+    def namespace(self) -> str | None:
+        """Alias for cache_namespace, used as the bytecode cache domain."""
+        return self.cache_namespace
+
+    @namespace.setter
+    def namespace(self, value: str | None) -> None:
+        self.cache_namespace = value
 
     def iter_extensions(self) -> t.Iterator["Extension"]:
         """Iterates over the extensions by priority."""

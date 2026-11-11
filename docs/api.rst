@@ -496,6 +496,10 @@ Builtin bytecode caches:
 
 .. autoclass:: jinja2.FileSystemBytecodeCache
 
+.. autoclass:: jinja2.IntegrityBytecodeCache
+
+.. autoclass:: jinja2.IntegrityCacheStatus
+
 .. autoclass:: jinja2.MemcachedBytecodeCache
 
 
