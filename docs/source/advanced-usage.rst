@@ -70,6 +70,32 @@ directly.
     for event in connection.events():
         # As with WSConnection, only without any handshake events
 
+Decompression limits
+--------------------
+
+``permessage-deflate`` is disabled by default. When it is enabled, inbound
+decompression is unlimited unless a limits policy is supplied. Limits are
+enforced while zlib is inflating, rather than after the complete message has
+been decoded.
+
+.. code-block:: python
+
+    from wsproto.extensions import PerMessageDeflate, PerMessageDeflateLimits
+
+    extension = PerMessageDeflate(
+        limits=PerMessageDeflateLimits(
+            max_message_size=8 * 1024 * 1024,
+            max_total_size=64 * 1024 * 1024,
+            max_frame_size=1 * 1024 * 1024,
+        ),
+    )
+
+``max_message_size`` applies to each complete message, ``max_total_size``
+accumulates for the lifetime of the extension (the WebSocket connection), and
+``max_frame_size`` applies independently to each frame. All values count
+decompressed bytes. A limit breach closes the connection with
+``CloseReason.MESSAGE_TOO_BIG``.
+
 HTTP/2
 ------
 

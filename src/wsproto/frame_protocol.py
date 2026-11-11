@@ -11,7 +11,7 @@ import os
 import struct
 from codecs import IncrementalDecoder, getincrementaldecoder
 from enum import IntEnum
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, NoReturn
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -344,11 +344,15 @@ class FrameDecoder:
         self.masker: None | XorMaskerNull | XorMaskerSimple = None
         self.payload_required = 0
         self.payload_consumed = 0
+        self._extension_error: CloseReason | None = None
 
     def receive_bytes(self, data: bytes) -> None:
         self.buffer.feed(data)
 
     def process_buffer(self) -> Frame | None:
+        if self._extension_error is not None:
+            msg = "error in extension"
+            raise ParseFailed(msg, self._extension_error)
         if not self.header and not self.parse_header():
             return None
         # parse_header() sets these.
@@ -369,24 +373,7 @@ class FrameDecoder:
         finished = self.payload_consumed == self.header.payload_len
 
         payload = self.masker.process(payload)
-
-        for extension in self.extensions:
-            payload_ = extension.frame_inbound_payload_data(self, bytes(payload))
-            if isinstance(payload_, CloseReason):
-                msg = "error in extension"
-                raise ParseFailed(msg, payload_)
-            payload = bytearray(payload_)
-
-        if finished:
-            final = bytearray()
-            for extension in self.extensions:
-                result = extension.frame_inbound_complete(self, self.header.fin)
-                if isinstance(result, CloseReason):
-                    msg = "error in extension"
-                    raise ParseFailed(msg, result)
-                if result is not None:
-                    final += result
-            payload += final
+        payload = self._process_inbound_extensions(payload, finished)
 
         frame = Frame(self.effective_opcode, bytes(payload), finished, self.header.fin)
 
@@ -398,6 +385,33 @@ class FrameDecoder:
             self.effective_opcode = Opcode.CONTINUATION
 
         return frame
+
+    def _process_inbound_extensions(
+        self, payload: bytearray, finished: bool,
+    ) -> bytearray:
+        for extension in self.extensions:
+            payload_ = extension.frame_inbound_payload_data(self, bytes(payload))
+            if isinstance(payload_, CloseReason):
+                self._fail_extension(payload_)
+            payload = bytearray(payload_)
+
+        if finished:
+            assert self.header is not None
+            final = bytearray()
+            for extension in self.extensions:
+                result = extension.frame_inbound_complete(self, self.header.fin)
+                if isinstance(result, CloseReason):
+                    self._fail_extension(result)
+                if result is not None:
+                    final += result
+            payload += final
+
+        return payload
+
+    def _fail_extension(self, reason: CloseReason) -> NoReturn:
+        self._extension_error = reason
+        msg = "error in extension"
+        raise ParseFailed(msg, reason)
 
     def parse_header(self) -> bool:
         data = self.buffer.consume_exactly(2)
@@ -497,8 +511,7 @@ class FrameDecoder:
         for extension in self.extensions:
             result = extension.frame_inbound_header(self, opcode, rsv, payload_len)
             if isinstance(result, CloseReason):
-                msg = "error in extension"
-                raise ParseFailed(msg, result)
+                self._fail_extension(result)
             for bit, used in enumerate(result):
                 if used:
                     rsv_used[bit] = True
@@ -519,6 +532,7 @@ class FrameProtocol:
         self._parse_more = self._parse_more_gen()
 
         self._outbound_opcode: Opcode | None = None
+        self._parse_error: tuple[str, CloseReason] | None = None
 
     def _process_close(self, frame: Frame) -> Frame:
         data = frame.payload
@@ -580,11 +594,19 @@ class FrameProtocol:
         self._frame_decoder.receive_bytes(data)
 
     def received_frames(self) -> Generator[Frame, None, None]:
-        for event in self._parse_more:
-            if event is None:
-                break
-            else:
-                yield event
+        if self._parse_error is not None:
+            msg, code = self._parse_error
+            raise ParseFailed(msg, code)
+
+        try:
+            for event in self._parse_more:
+                if event is None:
+                    break
+                else:
+                    yield event
+        except ParseFailed as exc:
+            self._parse_error = (str(exc), exc.code)
+            raise
 
     def close(self, code: int | None = None, reason: str | None = None) -> bytearray:
         payload = bytearray()

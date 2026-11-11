@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import gzip
+import struct
 import zlib
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Optional, cast
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 import pytest
 
@@ -20,6 +22,51 @@ if TYPE_CHECKING:
 
 else:
     Params = dict
+
+
+def compress_message(data: bytes, compressor: Any = None) -> bytes:
+    compressor = compressor or zlib.compressobj(
+        zlib.Z_DEFAULT_COMPRESSION, zlib.DEFLATED, -15,
+    )
+    compressed = compressor.compress(data)
+    compressed += compressor.flush(zlib.Z_SYNC_FLUSH)
+    return compressed[:-4]
+
+
+def make_frame(
+    opcode: fp.Opcode, payload: bytes, *, fin: bool = True, rsv1: bool = False,
+) -> bytes:
+    first = int(opcode)
+    if fin:
+        first |= fp.FIN_MASK
+    if rsv1:
+        first |= fp.RSV1_MASK
+
+    length = len(payload)
+    if length <= fp.MAX_PAYLOAD_NORMAL:
+        header = bytes((first, length))
+    elif length <= fp.MAX_PAYLOAD_TWO_BYTE:
+        header = bytes((first, fp.PAYLOAD_LENGTH_TWO_BYTE)) + struct.pack(
+            "!H", length,
+        )
+    else:
+        header = bytes((first, fp.PAYLOAD_LENGTH_EIGHT_BYTE)) + struct.pack(
+            "!Q", length,
+        )
+    return header + payload
+
+
+def split_for_output(compressed: bytes, output_size: int) -> int:
+    """Find a prefix of compressed data that produces roughly output_size."""
+    for end in range(1, len(compressed) + 1):
+        decompressor = zlib.decompressobj(-15)
+        try:
+            output = decompressor.decompress(compressed[:end])
+        except zlib.error:
+            continue
+        if len(output) >= output_size:
+            return end
+    return len(compressed)
 
 
 class TestPerMessageDeflate:
@@ -501,3 +548,341 @@ class TestPerMessageDeflate:
     def test_repr(self, params: Params) -> None:
         ext = wpext.PerMessageDeflate(**params)
         self.compare_params_to_string(params, ext, repr(ext))
+
+
+class TestPerMessageDeflateInboundLimits:
+    def make_extension(
+        self,
+        client: bool = True,
+        **kwargs: object,
+    ) -> tuple[wpext.PerMessageDeflate, fp.FrameProtocol]:
+        ext = wpext.PerMessageDeflate(**kwargs)  # type: ignore[arg-type]
+        ext._enabled = True
+        return ext, fp.FrameProtocol(client=client, extensions=[ext])
+
+    def decode_single(
+        self,
+        ext: wpext.PerMessageDeflate,
+        proto: fp.FrameProtocol,
+        compressed: bytes,
+        opcode: fp.Opcode = fp.Opcode.BINARY,
+    ) -> bytes | fp.CloseReason:
+        header = ext.frame_inbound_header(
+            proto, opcode, fp.RsvBits(True, False, False), len(compressed),
+        )
+        assert isinstance(header, fp.RsvBits)
+        result = ext.frame_inbound_payload_data(proto, compressed)
+        if isinstance(result, fp.CloseReason):
+            return result
+
+        completed = ext.frame_inbound_complete(proto, True)
+        if isinstance(completed, fp.CloseReason):
+            return completed
+        return result + (completed or b"")
+
+    def test_default_is_unlimited(self) -> None:
+        ext, proto = self.make_extension()
+        assert ext.limits is None
+
+        payload = b"x" * 1_000_000
+        result = self.decode_single(ext, proto, compress_message(payload))
+        assert result == payload
+
+    def test_single_frame_bomb_stops_at_message_limit(self) -> None:
+        ext, proto = self.make_extension(max_message_size=1024)
+        compressed = compress_message(b"x" * 1_000_000)
+        assert len(compressed) < 1024
+
+        result = self.decode_single(ext, proto, compressed)
+        assert result is fp.CloseReason.MESSAGE_TOO_BIG
+        assert ext._inbound_total_output == 1024
+        assert ext._decompressor is None
+
+        # Bytes from the rejected frame must not be decoded as a new message.
+        assert ext.frame_inbound_payload_data(proto, b"remaining") is (
+            fp.CloseReason.MESSAGE_TOO_BIG
+        )
+
+    def test_single_frame_bomb_stops_at_frame_limit(self) -> None:
+        ext, proto = self.make_extension(max_frame_size=4096)
+        compressed = compress_message(b"x" * 1_000_000)
+
+        result = self.decode_single(ext, proto, compressed)
+        assert result is fp.CloseReason.MESSAGE_TOO_BIG
+        assert ext._inbound_total_output == 4096
+        assert ext._decompressor is None
+
+    def test_message_budget_accumulates_across_continuations(self) -> None:
+        ext, proto = self.make_extension(max_message_size=8192)
+        payload = b"x" * 100_000
+        compressed = compress_message(payload)
+        split = split_for_output(compressed, 5000)
+        first = compressed[:split]
+        second = compressed[split:]
+
+        header = ext.frame_inbound_header(
+            proto, fp.Opcode.BINARY, fp.RsvBits(True, False, False), len(first),
+        )
+        assert isinstance(header, fp.RsvBits)
+        first_output = ext.frame_inbound_payload_data(proto, first)
+        assert isinstance(first_output, bytes)
+        assert ext.frame_inbound_complete(proto, False) is None
+        assert ext._inbound_message_output == len(first_output)
+
+        # A control frame in the middle must not reset the message budget.
+        assert isinstance(
+            ext.frame_inbound_header(
+                proto, fp.Opcode.PING, fp.RsvBits(False, False, False), 4,
+            ),
+            fp.RsvBits,
+        )
+        assert ext.frame_inbound_payload_data(proto, b"ping") == b"ping"
+        assert ext.frame_inbound_complete(proto, True) is None
+        assert ext._inbound_message_output == len(first_output)
+        assert ext._decompressor is not None
+
+        assert isinstance(
+            ext.frame_inbound_header(
+                proto,
+                fp.Opcode.CONTINUATION,
+                fp.RsvBits(False, False, False),
+                len(second),
+            ),
+            fp.RsvBits,
+        )
+        result = ext.frame_inbound_payload_data(proto, second)
+        assert result is fp.CloseReason.MESSAGE_TOO_BIG
+        assert ext._inbound_total_output == 8192
+        assert ext._decompressor is None
+
+    def test_frame_budget_resets_for_each_frame(self) -> None:
+        ext, proto = self.make_extension(max_frame_size=4096)
+        payload = b"x" * 100_000
+        compressed = compress_message(payload)
+        split = split_for_output(compressed, 3000)
+        first = compressed[:split]
+        second = compressed[split:]
+
+        assert isinstance(
+            ext.frame_inbound_header(
+                proto, fp.Opcode.BINARY, fp.RsvBits(True, False, False), len(first),
+            ),
+            fp.RsvBits,
+        )
+        first_output = ext.frame_inbound_payload_data(proto, first)
+        assert isinstance(first_output, bytes)
+        assert ext.frame_inbound_complete(proto, False) is None
+
+        assert isinstance(
+            ext.frame_inbound_header(
+                proto,
+                fp.Opcode.CONTINUATION,
+                fp.RsvBits(False, False, False),
+                len(second),
+            ),
+            fp.RsvBits,
+        )
+        result = ext.frame_inbound_payload_data(proto, second)
+        assert result is fp.CloseReason.MESSAGE_TOO_BIG
+        assert ext._decompressor is None
+
+    def test_total_budget_accumulates_across_messages_and_controls(self) -> None:
+        ext, proto = self.make_extension(max_total_size=5000)
+        first = compress_message(b"x" * 3000)
+        assert self.decode_single(ext, proto, first) == b"x" * 3000
+        assert ext._inbound_total_output == 3000
+
+        assert isinstance(
+            ext.frame_inbound_header(
+                proto, fp.Opcode.PING, fp.RsvBits(False, False, False), 4,
+            ),
+            fp.RsvBits,
+        )
+        assert ext.frame_inbound_payload_data(proto, b"ping") == b"ping"
+        assert ext.frame_inbound_complete(proto, True) is None
+        assert ext._inbound_total_output == 3000
+
+        second = compress_message(b"x" * 3000)
+        result = self.decode_single(ext, proto, second)
+        assert result is fp.CloseReason.MESSAGE_TOO_BIG
+        assert ext._inbound_total_output == 5000
+        assert ext._decompressor is None
+
+    def test_empty_compressed_message_with_zero_budgets(self) -> None:
+        ext, proto = self.make_extension(
+            max_message_size=0, max_total_size=0, max_frame_size=0,
+        )
+        assert isinstance(
+            ext.frame_inbound_header(
+                proto, fp.Opcode.BINARY, fp.RsvBits(True, False, False), 0,
+            ),
+            fp.RsvBits,
+        )
+        assert ext.frame_inbound_payload_data(proto, b"") == b""
+        assert ext.frame_inbound_complete(proto, True) == b""
+        assert ext._inbound_error is None
+
+    @pytest.mark.parametrize(
+        "no_context_takeover",
+        [True, False],
+    )
+    def test_context_reuse_and_takeover_with_limits(
+        self, no_context_takeover: bool,
+    ) -> None:
+        ext, proto = self.make_extension(
+            server_no_context_takeover=no_context_takeover,
+            max_message_size=10_000,
+        )
+        compressor = None
+        if not no_context_takeover:
+            compressor = zlib.compressobj(
+                zlib.Z_DEFAULT_COMPRESSION, zlib.DEFLATED, -15,
+            )
+        first = compress_message(b"first" * 500, compressor)
+        second = compress_message(
+            b"second" * 500,
+            compressor if compressor is not None else zlib.compressobj(
+                zlib.Z_DEFAULT_COMPRESSION, zlib.DEFLATED, -15,
+            ),
+        )
+
+        assert self.decode_single(ext, proto, first) == b"first" * 500
+        if no_context_takeover:
+            assert ext._decompressor is None
+        else:
+            assert ext._decompressor is not None
+
+        # Whether the receiver reuses the dictionary or starts fresh for each
+        # message, both messages must decode successfully with the budget.
+        assert self.decode_single(ext, proto, second) == b"second" * 500
+
+    def test_no_context_takeover_waits_for_message_end(self) -> None:
+        ext, proto = self.make_extension(server_no_context_takeover=True)
+        compressed = compress_message(b"x" * 100)
+        split = split_for_output(compressed, 50)
+
+        assert isinstance(
+            ext.frame_inbound_header(
+                proto,
+                fp.Opcode.BINARY,
+                fp.RsvBits(True, False, False),
+                split,
+            ),
+            fp.RsvBits,
+        )
+        output = ext.frame_inbound_payload_data(proto, compressed[:split])
+        assert isinstance(output, bytes)
+        assert ext.frame_inbound_complete(proto, False) is None
+        assert ext._decompressor is not None
+
+        assert isinstance(
+            ext.frame_inbound_header(
+                proto,
+                fp.Opcode.CONTINUATION,
+                fp.RsvBits(False, False, False),
+                len(compressed) - split,
+            ),
+            fp.RsvBits,
+        )
+        more_output = ext.frame_inbound_payload_data(proto, compressed[split:])
+        assert isinstance(more_output, bytes)
+        output += more_output
+        assert ext.frame_inbound_complete(proto, True) == b""
+        assert ext._decompressor is None
+
+    @pytest.mark.parametrize(
+        "bad_payload",
+        [
+            b"not a deflate stream",
+            zlib.compress(b"x" * 1000),
+            gzip.compress(b"x" * 1000),
+            compress_message(b"x" * 1000) + gzip.compress(b"trailing"),
+        ],
+    )
+    def test_invalid_or_trailing_stream_is_rejected(self, bad_payload: bytes) -> None:
+        ext, proto = self.make_extension(max_message_size=4096)
+
+        result = self.decode_single(ext, proto, bad_payload)
+        assert result is fp.CloseReason.INVALID_FRAME_PAYLOAD_DATA
+        assert ext._decompressor is None
+        assert ext.frame_inbound_payload_data(proto, bad_payload) is (
+            fp.CloseReason.INVALID_FRAME_PAYLOAD_DATA
+        )
+
+    def test_raw_finished_deflate_stream_is_rejected(self) -> None:
+        compressor = zlib.compressobj(
+            zlib.Z_DEFAULT_COMPRESSION, zlib.DEFLATED, -15,
+        )
+        bad_payload = compressor.compress(b"x" * 1000)
+        bad_payload += compressor.flush(zlib.Z_FINISH)
+        bad_payload += b"trailing"
+
+        ext, proto = self.make_extension(max_message_size=4096)
+        assert self.decode_single(ext, proto, bad_payload) is (
+            fp.CloseReason.INVALID_FRAME_PAYLOAD_DATA
+        )
+        assert ext._decompressor is None
+
+    def test_frame_protocol_budget_error_is_sticky(self) -> None:
+        _ext, proto = self.make_extension(max_message_size=1024)
+        compressed = compress_message(b"x" * 1_000_000)
+        bomb_frame = make_frame(fp.Opcode.BINARY, compressed, rsv1=True)
+
+        proto.receive_bytes(bomb_frame)
+        with pytest.raises(fp.ParseFailed) as excinfo:
+            list(proto.received_frames())
+        assert excinfo.value.code is fp.CloseReason.MESSAGE_TOO_BIG
+
+        # Re-feeding must repeat the close reason rather than exposing the
+        # next frame as a brand new message using a polluted decompressor.
+        proto.receive_bytes(
+            make_frame(fp.Opcode.BINARY, compress_message(b"ok"), rsv1=True),
+        )
+        with pytest.raises(fp.ParseFailed) as excinfo:
+            list(proto.received_frames())
+        assert excinfo.value.code is fp.CloseReason.MESSAGE_TOO_BIG
+
+    def test_frame_protocol_control_interleaving_keeps_budget(self) -> None:
+        _ext, proto = self.make_extension(max_message_size=8192)
+        payload = b"x" * 100_000
+        compressed = compress_message(payload)
+        split = split_for_output(compressed, 5000)
+
+        proto.receive_bytes(
+            make_frame(fp.Opcode.BINARY, compressed[:split], fin=False, rsv1=True),
+        )
+        proto.receive_bytes(make_frame(fp.Opcode.PING, b"ping"))
+        proto.receive_bytes(
+            make_frame(fp.Opcode.CONTINUATION, compressed[split:]),
+        )
+
+        with pytest.raises(fp.ParseFailed) as excinfo:
+            list(proto.received_frames())
+        assert excinfo.value.code is fp.CloseReason.MESSAGE_TOO_BIG
+
+    def test_frame_protocol_control_interleaving_under_budget(self) -> None:
+        _ext, proto = self.make_extension(max_message_size=20_000)
+        payload = b"x" * 10_000
+        compressed = compress_message(payload)
+        split = split_for_output(compressed, 5000)
+
+        proto.receive_bytes(
+            make_frame(fp.Opcode.BINARY, compressed[:split], fin=False, rsv1=True),
+        )
+        proto.receive_bytes(make_frame(fp.Opcode.PING, b"ping"))
+        proto.receive_bytes(
+            make_frame(fp.Opcode.CONTINUATION, compressed[split:]),
+        )
+
+        frames = list(proto.received_frames())
+        assert [frame.opcode for frame in frames] == [
+            fp.Opcode.BINARY,
+            fp.Opcode.PING,
+            fp.Opcode.BINARY,
+        ]
+        data = bytearray()
+        for frame in frames:
+            if not frame.opcode.iscontrol():
+                assert isinstance(frame.payload, bytes)
+                data += frame.payload
+        assert bytes(data) == payload
