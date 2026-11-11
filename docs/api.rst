@@ -444,6 +444,8 @@ Here a list of the builtin loaders Jinja provides:
 
 .. autoclass:: jinja2.FileSystemLoader
 
+.. autoclass:: jinja2.RootedFileSystemLoader
+
 .. autoclass:: jinja2.PackageLoader
 
 .. autoclass:: jinja2.DictLoader

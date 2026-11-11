@@ -3,9 +3,12 @@ sources.
 """
 
 import importlib.util
+import ntpath
 import os
 import posixpath
+import stat
 import sys
+import threading
 import typing as t
 import weakref
 import zipimport
@@ -13,6 +16,7 @@ from collections import abc
 from hashlib import sha1
 from importlib import import_module
 from types import ModuleType
+from urllib.parse import unquote
 
 from .exceptions import TemplateNotFound
 from .utils import internalcode
@@ -242,6 +246,339 @@ class FileSystemLoader(BaseLoader):
                         found.add(template)
         return sorted(found)
 
+
+#: True if the platform provides the primitives (dir_fd-relative opens and
+#: O_NOFOLLOW) that RootedFileSystemLoader needs to open files without a
+#: check-then-open race.
+_ROOTED_SUPPORTED = (
+    os.open in os.supports_dir_fd
+    and os.stat in os.supports_follow_symlinks
+    and hasattr(os, "O_NOFOLLOW")
+    and hasattr(os, "O_DIRECTORY")
+)
+
+
+class RootedFileSystemLoader(BaseLoader):
+    """Load templates from directories that are treated as security
+    boundaries, for example when template names come from an untrusted
+    source such as a tenant identifier.
+
+    Unlike :class:`FileSystemLoader`, each search path is bound to an open
+    directory handle and every path segment is opened relative to its
+    parent directory with ``O_NOFOLLOW``. The open itself is the
+    containment check, so there is no window in which a path component can
+    be replaced with a symlink between validation and use. Template names
+    that are absolute, contain ``..`` segments, contain backslashes or
+    percent-encoded characters, or resolve through any symbolic link are
+    rejected.
+
+    Error messages only contain the template name and a rejection
+    category, never absolute server paths.
+
+    This loader requires a platform with ``dir_fd``-relative ``os.open``
+    and ``O_NOFOLLOW`` (Linux, macOS, and other POSIX systems). On
+    platforms without those primitives, instantiating the loader raises
+    :exc:`RuntimeError` rather than silently falling back to racy checks.
+
+    .. code-block:: python
+
+        loader = RootedFileSystemLoader("/var/templates/tenant-a")
+
+    :param searchpath: A path, or list of paths, to the directories that
+        contain the templates.
+    :param encoding: Use this encoding to read the text from template
+        files.
+
+    .. versionadded:: 3.2
+    """
+
+    def __init__(
+        self,
+        searchpath: t.Union[
+            str, "os.PathLike[str]", t.Sequence[t.Union[str, "os.PathLike[str]"]]
+        ],
+        encoding: str = "utf-8",
+    ) -> None:
+        if not _ROOTED_SUPPORTED:
+            raise RuntimeError(
+                "RootedFileSystemLoader requires dir_fd-relative os.open and"
+                " O_NOFOLLOW support, which this platform does not provide."
+                " Refusing to load templates with racy path checks."
+            )
+
+        if not isinstance(searchpath, abc.Iterable) or isinstance(searchpath, str):
+            searchpath = [searchpath]
+
+        self.searchpath = [os.fspath(p) for p in searchpath]
+        self.encoding = encoding
+        # Maps each search path to (fd, resolved path) once bound. The fd
+        # pins the root directory inode for the lifetime of the loader.
+        self._bound_roots: dict[str, tuple[int, str]] = {}
+        self._bind_lock = threading.Lock()
+
+    def _reject(self, template: str, category: str) -> t.NoReturn:
+        raise TemplateNotFound(
+            template, f"template name {template!r} rejected: {category}"
+        )
+
+    def _validate_name(self, template: str) -> list[str]:
+        """Split a template name into path segments, rejecting anything
+        that could escape or be re-interpreted outside the search root.
+        """
+        if not template:
+            self._reject(template, "empty name")
+
+        if "\x00" in template:
+            self._reject(template, "null byte")
+
+        if unquote(template) != template:
+            self._reject(template, "percent-encoded characters")
+
+        if (
+            template.startswith(("/", "\\\\"))
+            or ntpath.splitdrive(template)[0]
+            or os.path.isabs(template)
+        ):
+            self._reject(template, "absolute path")
+
+        pieces = []
+
+        for piece in template.split("/"):
+            if not piece or piece == ".":
+                continue
+
+            if piece == "..":
+                self._reject(template, "parent directory reference")
+
+            if (
+                "\\" in piece
+                or (os.sep != "/" and os.sep in piece)
+                or (os.path.altsep and os.path.altsep in piece)
+            ):
+                self._reject(template, "path separator")
+
+            pieces.append(piece)
+
+        if not pieces:
+            self._reject(template, "empty name")
+
+        return pieces
+
+    def _bind_root(self, root: str) -> tuple[int, str] | None:
+        """Open and pin a search root directory, returning its fd and
+        resolved path, or ``None`` if it cannot be opened.
+        """
+        bound = self._bound_roots.get(root)
+
+        if bound is not None:
+            return bound
+
+        with self._bind_lock:
+            bound = self._bound_roots.get(root)
+
+            if bound is not None:
+                return bound
+
+            resolved = os.path.realpath(root)
+
+            try:
+                fd = os.open(resolved, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            except OSError:
+                return None
+
+            try:
+                from_fd = os.fstat(fd)
+                from_path = os.stat(resolved)
+            except OSError:
+                os.close(fd)
+                return None
+
+            if (from_fd.st_dev, from_fd.st_ino) != (from_path.st_dev, from_path.st_ino):
+                os.close(fd)
+                return None
+
+            bound = (fd, resolved)
+            self._bound_roots[root] = bound
+            return bound
+
+    def _open_pieces(self, root_fd: int, pieces: list[str]) -> int:
+        """Open ``pieces`` below ``root_fd`` without following symlinks.
+        Each component is opened relative to its parent's fd, so a
+        component swapped for a symlink after any check fails the open
+        itself instead of escaping the root.
+        """
+        flags = os.O_RDONLY | os.O_NOFOLLOW
+        dir_flags = flags | os.O_DIRECTORY
+
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+            dir_flags |= os.O_CLOEXEC
+
+        current = root_fd
+        opened: list[int] = []
+
+        try:
+            for piece in pieces[:-1]:
+                current = os.open(piece, dir_flags, dir_fd=current)
+                opened.append(current)
+
+            return os.open(pieces[-1], flags, dir_fd=current)
+        finally:
+            for fd in opened:
+                os.close(fd)
+
+    def _open_template(
+        self, template: str, pieces: list[str]
+    ) -> tuple[int, int, str]:
+        """Find and open a template in the bound roots. Returns the open
+        fd, the root fd, and the resolved display path.
+        """
+        category: str | None = None
+
+        for root in self.searchpath:
+            bound = self._bind_root(root)
+
+            if bound is None:
+                continue
+
+            root_fd, resolved = bound
+
+            try:
+                fd = self._open_pieces(root_fd, pieces)
+            except OSError:
+                if category is None:
+                    category = self._classify_failure(resolved, pieces)
+
+                continue
+
+            try:
+                mode = os.fstat(fd).st_mode
+            except OSError:
+                os.close(fd)
+                continue
+
+            if not stat.S_ISREG(mode):
+                os.close(fd)
+
+                if category is None:
+                    category = "not a regular file"
+
+                continue
+
+            return fd, root_fd, os.path.join(resolved, *pieces)
+
+        if category is not None:
+            self._reject(template, category)
+
+        raise TemplateNotFound(template)
+
+    def _classify_failure(self, resolved: str, pieces: list[str]) -> str | None:
+        """Best-effort categorization of a failed open, used only for
+        the error message. This plays no part in authorization, so a
+        racing replacement can at worst produce an inaccurate category.
+        """
+        path = resolved
+
+        for index, piece in enumerate(pieces):
+            path = os.path.join(path, piece)
+
+            try:
+                mode = os.lstat(path).st_mode
+            except OSError:
+                return None
+
+            if stat.S_ISLNK(mode):
+                return "symbolic link"
+
+            if index < len(pieces) - 1 and not stat.S_ISDIR(mode):
+                return "not a directory"
+
+        return None
+
+    def get_source(
+        self, environment: "Environment", template: str
+    ) -> tuple[str, str, t.Callable[[], bool]]:
+        pieces = self._validate_name(template)
+        fd, root_fd, filename = self._open_template(template, pieces)
+
+        try:
+            identity = os.fstat(fd)
+
+            if not stat.S_ISREG(identity.st_mode):
+                self._reject(template, "not a regular file")
+
+            with os.fdopen(fd, encoding=self.encoding) as f:
+                contents = f.read()
+        except BaseException:
+            # fdopen takes ownership of the fd, so only close it here if
+            # fdopen was never reached.
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+            raise
+
+        def uptodate() -> bool:
+            try:
+                new_fd = self._open_pieces(root_fd, pieces)
+            except OSError:
+                return False
+
+            try:
+                current = os.fstat(new_fd)
+            except OSError:
+                return False
+            finally:
+                os.close(new_fd)
+
+            return (
+                stat.S_ISREG(current.st_mode)
+                and (current.st_dev, current.st_ino)
+                == (identity.st_dev, identity.st_ino)
+                and current.st_mtime_ns == identity.st_mtime_ns
+            )
+
+        return contents, filename, uptodate
+
+    def list_templates(self) -> list[str]:
+        found = set()
+
+        for root in self.searchpath:
+            bound = self._bind_root(root)
+
+            if bound is None:
+                continue
+
+            root_fd, resolved = bound
+
+            def onerror(error: OSError) -> None:
+                # A broken or replaced link must not abort enumeration.
+                pass
+
+            walk_dir = os.walk(resolved, followlinks=False, onerror=onerror)
+
+            for dirpath, _, filenames in walk_dir:
+                for filename in filenames:
+                    template = os.path.relpath(
+                        os.path.join(dirpath, filename), resolved
+                    ).replace(os.sep, "/")
+
+                    try:
+                        pieces = self._validate_name(template)
+                        fd = self._open_pieces(root_fd, pieces)
+                    except (OSError, TemplateNotFound):
+                        continue
+
+                    try:
+                        if stat.S_ISREG(os.fstat(fd).st_mode):
+                            found.add(template)
+                    except OSError:
+                        continue
+                    finally:
+                        os.close(fd)
+
+        return sorted(found)
 
 if sys.version_info >= (3, 13):
 

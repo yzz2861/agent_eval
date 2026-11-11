@@ -198,6 +198,180 @@ class TestFileSystemLoader:
         assert ", 'other'" in e_str
 
 
+@pytest.mark.skipif(
+    not loaders._ROOTED_SUPPORTED,
+    reason="platform lacks dir_fd-relative open with O_NOFOLLOW",
+)
+class TestRootedFileSystemLoader:
+    @pytest.fixture
+    def root(self, tmp_path):
+        root = tmp_path / "templates"
+        (root / "sub").mkdir(parents=True)
+        (root / "hello.html").write_text("Hello {{ name }}!")
+        (root / "sub" / "nested.html").write_text("nested")
+        return root
+
+    @pytest.fixture
+    def secret(self, tmp_path):
+        secret = tmp_path / "secret.txt"
+        secret.write_text("TOPSECRET")
+        return secret
+
+    def make_env(self, searchpath):
+        return Environment(loader=loaders.RootedFileSystemLoader(searchpath))
+
+    def test_loads_within_root(self, root):
+        env = self.make_env(root)
+        assert env.get_template("hello.html").render(name="world") == "Hello world!"
+        assert env.get_template("sub/nested.html").render() == "nested"
+
+    def test_rejects_parent_references(self, root, secret):
+        env = self.make_env(root)
+
+        for name in ("../secret.txt", "sub/../../secret.txt", ".."):
+            with pytest.raises(TemplateNotFound) as info:
+                env.get_template(name)
+
+            assert "parent directory reference" in str(info.value)
+
+    def test_rejects_absolute_names(self, root, secret):
+        env = self.make_env(root)
+
+        for name in ("/etc/passwd", str(secret), str(root / "hello.html")):
+            with pytest.raises(TemplateNotFound) as info:
+                env.get_template(name)
+
+            assert "absolute path" in str(info.value)
+
+    def test_rejects_encoded_separators(self, root):
+        env = self.make_env(root)
+
+        for name in ("sub%2f..%2fsecret.txt", "%2e%2e%2fsecret.txt", "a%5cb"):
+            with pytest.raises(TemplateNotFound) as info:
+                env.get_template(name)
+
+            assert "percent-encoded characters" in str(info.value)
+
+    def test_rejects_backslash_separator(self, root):
+        env = self.make_env(root)
+
+        with pytest.raises(TemplateNotFound) as info:
+            env.get_template("sub\\\\..\\\\secret.txt")
+
+        assert "path separator" in str(info.value)
+
+    def test_rejects_file_symlink_escape(self, root, secret):
+        (root / "leak.html").symlink_to(secret)
+        env = self.make_env(root)
+
+        with pytest.raises(TemplateNotFound) as info:
+            env.get_template("leak.html")
+
+        assert "symbolic link" in str(info.value)
+
+    def test_rejects_dir_symlink_escape(self, root, secret):
+        (root / "dirlink").symlink_to(root.parent)
+        env = self.make_env(root)
+
+        with pytest.raises(TemplateNotFound) as info:
+            env.get_template("dirlink/secret.txt")
+
+        assert "symbolic link" in str(info.value)
+
+    def test_rejects_symlink_swapped_in_after_check(self, root, secret):
+        """A real file replaced by a symlink after a successful load must
+        not be served from the environment cache or by a fresh lookup.
+        """
+        target = root / "page.html"
+        target.write_text("real")
+        env = self.make_env(root)
+        assert env.get_template("page.html").render() == "real"
+
+        target.unlink()
+        target.symlink_to(secret)
+
+        with pytest.raises(TemplateNotFound):
+            env.get_template("page.html")
+
+        with pytest.raises(TemplateNotFound):
+            env.loader.get_source(env, "page.html")
+
+    def test_cache_invalidates_on_mtime_change(self, root):
+        target = root / "page.html"
+        target.write_text("one")
+        env = self.make_env(root)
+        tmpl1 = env.get_template("page.html")
+        assert tmpl1.render() == "one"
+        assert env.get_template("page.html") is tmpl1
+
+        target.write_text("two")
+        stat = target.stat()
+        os.utime(target, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000))
+        tmpl2 = env.get_template("page.html")
+        assert tmpl2 is not tmpl1
+        assert tmpl2.render() == "two"
+
+    def test_cache_invalidates_on_identity_change(self, root):
+        """Replacing the file with a new inode must not reuse the cached
+        source, even if the mtime is forged to match.
+        """
+        target = root / "page.html"
+        target.write_text("one")
+        env = self.make_env(root)
+        tmpl1 = env.get_template("page.html")
+        assert tmpl1.render() == "one"
+
+        stat = target.stat()
+        forged = root / "page.html.forged"
+        forged.write_text("two")
+        os.utime(forged, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        os.replace(forged, target)
+
+        tmpl2 = env.get_template("page.html")
+        assert tmpl2 is not tmpl1
+        assert tmpl2.render() == "two"
+
+    def test_cache_follows_root_order(self, tmp_path):
+        """The same name resolving through a different root must not be
+        served stale source from the first root.
+        """
+        root_a = tmp_path / "a"
+        root_b = tmp_path / "b"
+        root_a.mkdir()
+        root_b.mkdir()
+        (root_a / "page.html").write_text("from a")
+        (root_b / "page.html").write_text("from b")
+        env = self.make_env([root_a, root_b])
+        assert env.get_template("page.html").render() == "from a"
+
+        (root_a / "page.html").unlink()
+        assert env.get_template("page.html").render() == "from b"
+
+    def test_list_templates_skips_bad_links(self, root, secret):
+        (root / "broken.html").symlink_to(root / "missing.html")
+        (root / "leak.html").symlink_to(secret)
+        (root / "dirlink").symlink_to(root.parent)
+        env = self.make_env(root)
+        assert env.loader.list_templates() == ["hello.html", "sub/nested.html"]
+
+    def test_errors_do_not_leak_server_paths(self, root, secret):
+        (root / "leak.html").symlink_to(secret)
+        env = self.make_env(root)
+
+        for name in ("../secret.txt", "leak.html", "sub%2f..%2fsecret.txt"):
+            with pytest.raises(TemplateNotFound) as info:
+                env.get_template(name)
+
+            message = str(info.value)
+            assert str(root) not in message
+            assert str(root.parent) not in message
+
+    def test_unsupported_platform_refused(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(loaders, "_ROOTED_SUPPORTED", False)
+
+        with pytest.raises(RuntimeError):
+            loaders.RootedFileSystemLoader(tmp_path)
+
 class TestModuleLoader:
     archive = None
     mod_env = None

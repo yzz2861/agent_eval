@@ -13,6 +13,10 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Add ``RootedFileSystemLoader``, an opt-in loader that binds each search
+    root as a security boundary. It rejects absolute names, ``..`` segments,
+    encoded separators, and symlinks, and opens templates relative to the
+    pinned root directory so there is no check-then-open race.
 
 
 Version 3.1.6
