@@ -13,6 +13,10 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Add an opt-in ``strict_attribute_checking`` policy to the sandbox. It
+    checks static definitions before resolving attributes, so denied
+    properties and dynamic lookup methods are not called. Undefined results
+    expose a ``reason_code`` for missing, denied, or unrenderable values.
 
 
 Version 3.1.6

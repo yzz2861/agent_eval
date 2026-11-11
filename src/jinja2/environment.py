@@ -262,6 +262,12 @@ class Environment:
         `enable_async`
             If set to true this enables async template execution which
             allows using async functions and generators.
+
+        `strict_attribute_checking`
+            If set to true, the sandbox checks the static attribute
+            definition before resolving it, so denied descriptors and
+            dynamic lookup methods are never called.  This only applies
+            to sandboxed environments and defaults to ``False``.
     """
 
     #: if this environment is sandboxed.  Modifying this variable won't make
@@ -316,6 +322,7 @@ class Environment:
         auto_reload: bool = True,
         bytecode_cache: t.Optional["BytecodeCache"] = None,
         enable_async: bool = False,
+        strict_attribute_checking: bool = False,
     ):
         # !!Important notice!!
         #   The constructor accepts quite a few arguments that should be
@@ -358,6 +365,12 @@ class Environment:
         self.cache = create_cache(cache_size)
         self.bytecode_cache = bytecode_cache
         self.auto_reload = auto_reload
+
+        #: Enable definition-first attribute checking in sandboxed
+        #: environments.  The regular environment does not enforce a
+        #: sandbox policy, so this only has an effect when a sandbox
+        #: environment is used.
+        self.strict_attribute_checking = strict_attribute_checking
 
         # configurable policies
         self.policies = DEFAULT_POLICIES.copy()
@@ -408,6 +421,7 @@ class Environment:
         auto_reload: bool = missing,
         bytecode_cache: t.Optional["BytecodeCache"] = missing,
         enable_async: bool = missing,
+        strict_attribute_checking: bool = missing,
     ) -> "te.Self":
         """Create a new overlay environment that shares all the data with the
         current environment except for cache and the overridden attributes.

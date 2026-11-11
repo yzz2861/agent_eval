@@ -813,6 +813,7 @@ class Undefined:
         "_undefined_obj",
         "_undefined_name",
         "_undefined_exception",
+        "_undefined_reason",
     )
 
     def __init__(
@@ -821,11 +822,27 @@ class Undefined:
         obj: t.Any = missing,
         name: str | None = None,
         exc: type[TemplateRuntimeError] = UndefinedError,
+        reason: str | None = None,
     ) -> None:
         self._undefined_hint = hint
         self._undefined_obj = obj
         self._undefined_name = name
         self._undefined_exception = exc
+        self._undefined_reason = reason
+
+    @property
+    def reason_code(self) -> str | None:
+        """A stable reason code for a sandboxed lookup, or ``None``.
+
+        This is available to application code without exposing the
+        object or the original exception in the template-facing message.
+        """
+        return self._undefined_reason
+
+    @property
+    def reason(self) -> str | None:
+        """Alias for :attr:`reason_code`."""
+        return self._undefined_reason
 
     @property
     def _undefined_message(self) -> str:
@@ -856,7 +873,16 @@ class Undefined:
         """Raise an :exc:`UndefinedError` when operations are performed
         on the undefined value.
         """
-        raise self._undefined_exception(self._undefined_message)
+        exc = self._undefined_exception(self._undefined_message)
+
+        if self._undefined_reason is not None:
+            try:
+                exc.reason_code = self._undefined_reason  # type: ignore[attr-defined]
+                exc.reason = self._undefined_reason  # type: ignore[attr-defined]
+            except (AttributeError, TypeError):
+                pass
+
+        raise exc
 
     @internalcode
     def __getattr__(self, name: str) -> t.Any:

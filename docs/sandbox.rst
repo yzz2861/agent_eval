@@ -51,6 +51,14 @@ prevent calling them from templates when passing objects as data. Use
 :class:`ImmutableSandboxedEnvironment` to prevent modifying lists and
 dictionaries.
 
+Attribute access normally resolves the value before the sandbox checks
+it.  A property or dynamic attribute can therefore run before the policy
+decides to hide it.  Passing ``strict_attribute_checking=True`` enables a
+definition-first policy: the object type, class dictionaries, and
+instance dictionary are inspected before any descriptor, ``__getattr__``,
+or ``__getitem__`` implementation is called.  This mode is opt-in and
+the default sandbox behavior is unchanged.
+
 
 API
 ---
@@ -63,6 +71,10 @@ API
               call_binop, call_unop
 
 .. autoclass:: ImmutableSandboxedEnvironment([options])
+
+.. autoclass:: AttributeAccessPolicy
+
+.. autoclass:: AttributeAccessReason
 
 .. autoexception:: SecurityError
 
