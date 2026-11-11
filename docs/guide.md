@@ -23,6 +23,25 @@ password_hash = PasswordHash((
 
 [`PasswordHash`](./reference/pwdlib.md#pwdlib.PasswordHash) expects a tuple (or list) of hashing algorithms.
 
+### Input limits
+
+Input limits are enabled by default and are checked before any value is passed to Argon2 or Bcrypt. Passwords are limited to 1024 UTF-8 bytes and must not contain NUL bytes or invalid UTF-8. Bcrypt hashers use Bcrypt's native 72-byte boundary, so a password of exactly 72 bytes is accepted while longer passwords are rejected instead of silently truncated.
+
+Encoded hashes are limited to 512 bytes and 6 `$`-separated fields. Hashers additionally enforce their own suffix, field count, and character sets: Argon2 accepts only the supported `argon2id`, `argon2i`, and `argon2d` prefixes, while Bcrypt accepts the supported `$2a$`, `$2b$`, `$2x$`, and `$2y$` prefixes.
+
+Limits can be configured on the wrapper or on individual hashers:
+
+```py
+password_hash = PasswordHash(
+    (Argon2Hasher(max_password_bytes=512), BcryptHasher()),
+    max_password_bytes=512,
+    max_hash_bytes=512,
+    max_hash_fields=6,
+)
+```
+
+Oversized or malformed values raise typed errors from `pwdlib.exceptions`, including `PasswordTooLongError`, `HashTooShortError`, `HashTooLongError`, and `UnsupportedHashError`. Error messages never include the submitted password.
+
 !!! warning "The corresponding dependencies must be installed"
 
     Hashing algorithms are available through third-party implementations. Therefore, you should install the extra for all the algorithms you want to use.

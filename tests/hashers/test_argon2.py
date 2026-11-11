@@ -58,10 +58,10 @@ def test_identify(hash: str | bytes, result: bool) -> None:
     assert Argon2Hasher.identify(hash) == result
 
 
-def test_identify_large_hash() -> None:
+def test_identify_large_hash_is_rejected() -> None:
     with open("tests/data/argon2id_large_hash", "rb") as large_hash_file:
         large_hash = large_hash_file.read()
-    assert Argon2Hasher.identify(large_hash)
+    assert not Argon2Hasher.identify(large_hash)
 
 
 def test_hash(argon2_hasher: Argon2Hasher) -> None:
