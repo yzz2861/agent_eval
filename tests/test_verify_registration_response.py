@@ -21,6 +21,9 @@ from webauthn.helpers.structs import (
     PublicKeyCredentialType,
 )
 from webauthn import verify_registration_response
+from webauthn.helpers.cose import COSEAlgorithmIdentifier
+
+from .helpers.attestation_policy import build_packed_credential, generate_leaf, generate_root
 
 
 class TestVerifyRegistrationResponse(TestCase):
@@ -454,3 +457,59 @@ class TestVerifyRegistrationResponse(TestCase):
             )
 
         self.assertIsInstance(raised.exception.__cause__, InvalidJSONStructure)
+
+
+class TestVerifyRegistrationResponseDefaultBehavior(TestCase):
+    """Regression tests for behavior when no attestation trust policy is supplied."""
+
+    def test_no_policy_keeps_legacy_none_attestation_behavior(self) -> None:
+        credential = """{
+            "id": "9y1xA8Tmg1FEmT-c7_fvWZ_uoTuoih3OvR45_oAK-cwHWhAbXrl2q62iLVTjiyEZ7O7n-CROOY494k7Q3xrs_w",
+            "rawId": "9y1xA8Tmg1FEmT-c7_fvWZ_uoTuoih3OvR45_oAK-cwHWhAbXrl2q62iLVTjiyEZ7O7n-CROOY494k7Q3xrs_w",
+            "response": {
+                "attestationObject": "o2NmbXRkbm9uZWdhdHRTdG10oGhhdXRoRGF0YVjESZYN5YgOjGh0NBcPZHZgW4_krrmihjLHmVzzuoMdl2NFAAAAFwAAAAAAAAAAAAAAAAAAAAAAQPctcQPE5oNRRJk_nO_371mf7qE7qIodzr0eOf6ACvnMB1oQG165dqutoi1U44shGezu5_gkTjmOPeJO0N8a7P-lAQIDJiABIVggSFbUJF-42Ug3pdM8rDRFu_N5oiVEysPDB6n66r_7dZAiWCDUVnB39FlGypL-qAoIO9xWHtJygo2jfDmHl-_eKFRLDA",
+                "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiVHdON240V1R5R0tMYzRaWS1xR3NGcUtuSE00bmdscXN5VjBJQ0psTjJUTzlYaVJ5RnRya2FEd1V2c3FsLWdrTEpYUDZmbkYxTWxyWjUzTW00UjdDdnciLCJvcmlnaW4iOiJodHRwOi8vbG9jYWxob3N0OjUwMDAiLCJjcm9zc09yaWdpbiI6ZmFsc2V9"
+            },
+            "type": "public-key",
+            "clientExtensionResults": {},
+            "transports": ["nfc", "usb"]
+        }"""
+
+        challenge = base64url_to_bytes(
+            "TwN7n4WTyGKLc4ZY-qGsFqKnHM4nglqsyV0ICJlN2TO9XiRyFtrkaDwUvsql-gkLJXP6fnF1MlrZ53Mm4R7Cvw"
+        )
+
+        verification = verify_registration_response(
+            credential=credential,
+            expected_challenge=challenge,
+            expected_origin="http://localhost:5000",
+            expected_rp_id="localhost",
+        )
+
+        self.assertEqual(verification.fmt, AttestationFormat.NONE)
+
+    def test_no_policy_does_not_enforce_aaguid_or_chain_policy(self) -> None:
+        # Self attestation without x5c must still work when no policy is enabled
+        root_key, root_cert = generate_root()
+        leaf_key, leaf_cert = generate_leaf(issuer_key=root_key, issuer_cert=root_cert)
+        denied_aaguid = b"\x09" * 16
+        challenge = b"legacy-no-policy-challenge-0123456789ab"
+
+        credential = build_packed_credential(
+            challenge=challenge,
+            aaguid=denied_aaguid,
+            x5c=None,
+            signing_key=leaf_key,
+            credential_key=leaf_key,
+            alg=COSEAlgorithmIdentifier.ECDSA_SHA_256,
+        )
+
+        verification = verify_registration_response(
+            credential=credential,
+            expected_challenge=challenge,
+            expected_origin="http://localhost:5000",
+            expected_rp_id="localhost",
+        )
+
+        self.assertEqual(verification.fmt, AttestationFormat.PACKED)
+        self.assertEqual(verification.aaguid, "09090909-0909-0909-0909-090909090909")

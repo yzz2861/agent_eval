@@ -49,6 +49,17 @@ class TestValidateCertificateChain(TestCase):
             print(err)
             self.fail("validate_certificate_chain failed when it should have succeeded")
 
+    def test_legacy_chain_validation_ignores_unknown_intermediates(self):
+        """Regression: without an explicit trust policy the helper stays permissive about roots."""
+        try:
+            validate_certificate_chain(
+                x5c=apple_x5c_certs,
+                pem_root_certs_bytes=None,
+            )
+        except Exception as err:
+            print(err)
+            self.fail("validate_certificate_chain failed when it should have succeeded")
+
     @patch_validate_certificate_chain_x509store_getter
     def test_throws_on_bad_root_cert(self, patched_x509store: X509Store) -> None:
         patched_x509store.set_time(self.x509store_time)

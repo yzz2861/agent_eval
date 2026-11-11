@@ -1,5 +1,5 @@
 import hashlib
-from typing import List, cast
+from typing import List, Optional, cast
 
 from pyasn1.type.univ import OctetString
 from pyasn1.codec.ber.decoder import decode as ber_decode
@@ -48,6 +48,7 @@ def verify_android_key(
     client_data_json: bytes,
     credential_public_key: bytes,
     pem_root_certs_bytes: List[bytes],
+    pem_intermediate_certs_bytes: Optional[List[bytes]] = None,
 ) -> bool:
     """Verify an "android-key" attestation statement
 
@@ -85,6 +86,7 @@ def verify_android_key(
         validate_certificate_chain(
             x5c=x5c_no_root,
             pem_root_certs_bytes=[x5c_root_cert_pem],
+            pem_intermediate_certs_bytes=pem_intermediate_certs_bytes,
         )
     except InvalidCertificateChain as err:
         raise InvalidRegistrationResponse(f"{err} (Android Key)")

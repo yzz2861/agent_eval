@@ -29,6 +29,7 @@ from .formats.fido_u2f import verify_fido_u2f
 from .formats.packed import verify_packed
 from .formats.tpm import verify_tpm
 from .generate_registration_options import default_supported_pub_key_algs
+from .trust_policy import AttestationTrustPolicy, apply_attestation_trust_policy
 
 
 @dataclass
@@ -74,6 +75,7 @@ def verify_registration_response(
     require_user_verification: bool = False,
     supported_pub_key_algs: List[COSEAlgorithmIdentifier] = default_supported_pub_key_algs,
     pem_root_certs_bytes_by_fmt: Optional[Mapping[AttestationFormat, List[bytes]]] = None,
+    attestation_trust_policy: Optional[AttestationTrustPolicy] = None,
 ) -> VerifiedRegistration:
     """Verify an authenticator's response to navigator.credentials.create()
 
@@ -94,6 +96,11 @@ def verify_registration_response(
           restrict support to. Defaults to all supported algorithm IDs.
         - (optional) `pem_root_certs_bytes_by_fmt`: A list of root certificates, in PEM format, to
           be used to validate the certificate chains for specific attestation statement formats.
+        - (optional) `attestation_trust_policy`: An explicitly enabled reusable attestation trust
+          policy. When provided, trust roots and intermediates are selected per `fmt`, certificate
+          validity/key usage/basic constraints/signature algorithms are enforced, AAGUID
+          allow/deny lists are applied, and `none`/self attestation are accepted only when
+          enabled. When omitted, verification behaves exactly as before.
 
     Returns:
         Information about the authenticator and registration
@@ -209,13 +216,36 @@ def verify_registration_response(
     if not isinstance(attestation_object.fmt, str):
         raise InvalidRegistrationResponse("malformed attestation type")
 
-    # Prepare a list of possible root certificates for certificate chain validation
-    pem_root_certs_bytes: List[bytes] = []
-    if pem_root_certs_bytes_by_fmt:
-        custom_certs = pem_root_certs_bytes_by_fmt.get(attestation_object.fmt)
-        if custom_certs:
-            # Load any provided custom root certs
-            pem_root_certs_bytes.extend(custom_certs)
+    if attestation_trust_policy is not None:
+        # An explicit policy fully controls attestation trust, including which roots may serve
+        # which format. Enforce it before format-specific verification so no VerifiedRegistration
+        # can be returned when the policy rejects the response.
+        apply_attestation_trust_policy(
+            policy=attestation_trust_policy,
+            fmt=attestation_object.fmt,
+            aaguid=aaguid_to_string(attested_credential_data.aaguid),
+            x5c=attestation_object.att_stmt.x5c,
+            statement_alg=attestation_object.att_stmt.alg,
+        )
+
+        # Hand the policy's format-scoped roots to the existing format verifiers. Roots are read
+        # from the policy only, so a root configured for another format can never be used here.
+        active_format_policy = attestation_trust_policy.format_policy(attestation_object.fmt)
+        pem_root_certs_bytes: List[bytes] = (
+            list(active_format_policy.pem_root_certs_bytes) if active_format_policy else []
+        )
+        pem_intermediate_certs_bytes: List[bytes] = (
+            list(active_format_policy.pem_intermediate_certs_bytes) if active_format_policy else []
+        )
+    else:
+        # Legacy behavior: no explicit policy, so preserve the previous parameter semantics
+        pem_root_certs_bytes = []
+        if pem_root_certs_bytes_by_fmt:
+            custom_certs = pem_root_certs_bytes_by_fmt.get(attestation_object.fmt)
+            if custom_certs:
+                # Load any provided custom root certs
+                pem_root_certs_bytes.extend(custom_certs)
+        pem_intermediate_certs_bytes = []
 
     if attestation_object.fmt == AttestationFormat.NONE:
         # A "none" attestation should not contain _anything_ in its attestation statement
@@ -239,6 +269,7 @@ def verify_registration_response(
             credential_public_key=attested_credential_data.credential_public_key,
             aaguid=attested_credential_data.aaguid,
             pem_root_certs_bytes=pem_root_certs_bytes,
+            pem_intermediate_certs_bytes=pem_intermediate_certs_bytes,
         )
     elif attestation_object.fmt == AttestationFormat.PACKED:
         verified = verify_packed(
@@ -247,6 +278,7 @@ def verify_registration_response(
             client_data_json=client_data_bytes,
             credential_public_key=attested_credential_data.credential_public_key,
             pem_root_certs_bytes=pem_root_certs_bytes,
+            pem_intermediate_certs_bytes=pem_intermediate_certs_bytes,
         )
     elif attestation_object.fmt == AttestationFormat.TPM:
         verified = verify_tpm(
@@ -255,6 +287,7 @@ def verify_registration_response(
             client_data_json=client_data_bytes,
             credential_public_key=attested_credential_data.credential_public_key,
             pem_root_certs_bytes=pem_root_certs_bytes,
+            pem_intermediate_certs_bytes=pem_intermediate_certs_bytes,
         )
     elif attestation_object.fmt == AttestationFormat.APPLE:
         verified = verify_apple(
@@ -263,6 +296,7 @@ def verify_registration_response(
             client_data_json=client_data_bytes,
             credential_public_key=attested_credential_data.credential_public_key,
             pem_root_certs_bytes=pem_root_certs_bytes,
+            pem_intermediate_certs_bytes=pem_intermediate_certs_bytes,
         )
     elif attestation_object.fmt == AttestationFormat.ANDROID_SAFETYNET:
         verified = verify_android_safetynet(
@@ -270,6 +304,7 @@ def verify_registration_response(
             attestation_object=attestation_object_bytes,
             client_data_json=client_data_bytes,
             pem_root_certs_bytes=pem_root_certs_bytes,
+            pem_intermediate_certs_bytes=pem_intermediate_certs_bytes,
         )
     elif attestation_object.fmt == AttestationFormat.ANDROID_KEY:
         verified = verify_android_key(
@@ -278,6 +313,7 @@ def verify_registration_response(
             client_data_json=client_data_bytes,
             credential_public_key=attested_credential_data.credential_public_key,
             pem_root_certs_bytes=pem_root_certs_bytes,
+            pem_intermediate_certs_bytes=pem_intermediate_certs_bytes,
         )
     else:
         # Raise exception on an attestation format we're not prepared to verify
