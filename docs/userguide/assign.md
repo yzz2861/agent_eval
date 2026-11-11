@@ -170,6 +170,44 @@ groups at once:
 >>> UserObjectPermission.objects.assign_perm_to_many('change_task', users, task)
 ```
 
+### Temporary grants
+
+Object permissions accept optional `valid_from` and `valid_until` bounds. Null
+bounds are permanent, so existing rows and legacy calls keep their original
+meaning. The window is **left-closed, right-open**: the grant is active from
+`valid_from` (inclusive) until `valid_until` (exclusive). At exactly
+`valid_until` the grant is already inactive.
+
+``` python
+>>> from datetime import timedelta
+>>> from django.utils import timezone
+>>> now = timezone.now()
+>>> assign_perm(
+...     'change_task', joe, task,
+...     valid_from=now,
+...     valid_until=now + timedelta(days=2),
+... )
+```
+
+Passing only `valid_until` creates a grant that is active immediately. Passing
+only `valid_from` creates a permanent grant that activates at that instant.
+Re-assigning the same user/group, permission and object with a later
+`valid_until` renews the existing window; passing `None` explicitly clears a
+bound and makes that side permanent.
+
+The same window is applied by `has_perm()`/`ObjectPermissionChecker`, the
+authentication backend, group inheritance, `get_objects_for_user()` and
+`get_objects_for_group()`. Inactive users still never receive permissions;
+superusers still receive every permission for the object.
+
+Temporary bounds apply to object permissions only. Passing either bound with a
+global permission raises `ValueError`.
+
+Bulk assignment and removal accept the same arguments. A batch spanning
+multiple content types is grouped by content type and executed in one
+transaction, so a failure in any group rolls the entire batch back. Duplicate
+objects/identities within a batch are de-duplicated before writing.
+
 ## Limitations
 
 !!! warning

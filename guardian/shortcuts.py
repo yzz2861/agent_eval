@@ -27,6 +27,7 @@ from django.db.models import (
 from django.db.models.expressions import Value
 from django.db.models.functions import Cast, Replace
 from django.shortcuts import _get_queryset
+from django.utils import timezone
 
 from guardian.conf import settings as guardian_settings
 from guardian.core import ObjectPermissionChecker
@@ -36,6 +37,7 @@ from guardian.exceptions import (
     MultipleIdentityAndObjectError,
     WrongAppError,
 )
+from guardian.temporal import UNSET, active_validity_q
 from guardian.utils import (
     get_anonymous_user,
     get_group_obj_perms_model,
@@ -85,6 +87,8 @@ def assign_perm(
     perm: str | Permission,
     user_or_group: Any,
     obj: Model | None = None,
+    valid_from=UNSET,
+    valid_until=UNSET,
 ) -> str | Permission | None:
     """Assigns permission to user/group and object pair.
 
@@ -99,6 +103,12 @@ def assign_perm(
         obj (Model | QuerySet): Django's `Model` instance or QuerySet or
             a list of Django `Model` instances or `None` if assigning global permission.
             *Default* is `None`.
+        valid_from (datetime | None): Inclusive start of a temporary grant.  ``None``
+            means the grant has always been active.  Global permissions cannot be
+            temporary.
+        valid_until (datetime | None): Exclusive end of a temporary grant.  ``None``
+            means the grant never expires.  Re-assigning with a later ``valid_until``
+            renews the grant.
 
     Example:
         ```shell
@@ -141,6 +151,8 @@ def assign_perm(
     user, group = get_identity(user_or_group)
     # If obj is None we try to operate on global permissions
     if obj is None:
+        if valid_from is not UNSET or valid_until is not UNSET:
+            raise ValueError("Temporary validity is only supported for object permissions")
         perm = _ensure_permission(perm)
         if user:
             user.user_permissions.add(perm)
@@ -155,36 +167,40 @@ def assign_perm(
             raise MultipleIdentityAndObjectError("Only bulk operations on either users/groups OR objects supported")
         if user:
             model = get_user_obj_perms_model(obj[0] if isinstance(obj, list) else obj.model)
-            return model.objects.bulk_assign_perm(perm, user, obj)
+            return model.objects.bulk_assign_perm(perm, user, obj, valid_from=valid_from, valid_until=valid_until)
         if group:
             model = get_group_obj_perms_model(obj[0] if isinstance(obj, list) else obj.model)
-            return model.objects.bulk_assign_perm(perm, group, obj)
+            return model.objects.bulk_assign_perm(perm, group, obj, valid_from=valid_from, valid_until=valid_until)
 
     if isinstance(user_or_group, (QuerySet, list)):
         if user:
             model = get_user_obj_perms_model(obj)
-            return model.objects.assign_perm_to_many(perm, user, obj, ignore_conflicts=True)
+            return model.objects.assign_perm_to_many(
+                perm, user, obj, ignore_conflicts=True, valid_from=valid_from, valid_until=valid_until
+            )
         if group:
             model = get_group_obj_perms_model(obj)
-            return model.objects.assign_perm_to_many(perm, group, obj, ignore_conflicts=True)
+            return model.objects.assign_perm_to_many(
+                perm, group, obj, ignore_conflicts=True, valid_from=valid_from, valid_until=valid_until
+            )
 
     if user:
         model = get_user_obj_perms_model(obj)
-        return model.objects.assign_perm(perm, user, obj)
+        return model.objects.assign_perm(perm, user, obj, valid_from=valid_from, valid_until=valid_until)
 
     if group:
         model = get_group_obj_perms_model(obj)
-        return model.objects.assign_perm(perm, group, obj)
+        return model.objects.assign_perm(perm, group, obj, valid_from=valid_from, valid_until=valid_until)
     return None
 
 
-def assign(perm, user_or_group, obj=None):
+def assign(perm, user_or_group, obj=None, valid_from=UNSET, valid_until=UNSET):
     """Depreciated function name left in for compatibility"""
     warnings.warn(
         "Shortcut function 'assign' is being renamed to 'assign_perm'. Update your code accordingly as old name will be depreciated in 2.0 version.",
         DeprecationWarning,
     )
-    return assign_perm(perm, user_or_group, obj)
+    return assign_perm(perm, user_or_group, obj, valid_from=valid_from, valid_until=valid_until)
 
 
 def remove_perm(
@@ -377,6 +393,7 @@ def get_users_with_perms(
         ```
     """
     ctype = get_content_type(obj)
+    now = timezone.now()
     if not attach_perms:
         # It's much easier without attached perms so we do it first if that is
         # the case
@@ -389,7 +406,7 @@ def get_users_with_perms(
             }
         else:
             user_filters = {"%s__content_object" % related_name: obj}
-        qset = Q(**user_filters)
+        qset = Q(**user_filters) & active_validity_q(at=now, prefix=f"{related_name}__")
         if only_with_perms_in is not None:
             permission_ids = Permission.objects.filter(content_type=ctype, codename__in=only_with_perms_in).values_list(
                 "id", flat=True
@@ -416,7 +433,12 @@ def get_users_with_perms(
                         "permission_id__in": permission_ids,
                     }
                 )
-            group_ids = group_model.objects.filter(**group_obj_perm_filters).values("group_id").distinct()
+            group_ids = (
+                group_model.objects.filter(**group_obj_perm_filters)
+                .filter(active_validity_q(at=now))
+                .values("group_id")
+                .distinct()
+            )
             qset = qset | Q(groups__in=group_ids)
         if with_superusers:
             qset = qset | Q(is_superuser=True)
@@ -471,6 +493,7 @@ def get_groups_with_perms(
         ```
     """
     ctype = get_content_type(obj)
+    now = timezone.now()
     group_model = get_group_obj_perms_model(obj)
 
     if not attach_perms:
@@ -494,11 +517,19 @@ def get_groups_with_perms(
             )
 
         group_rel_model = group_model.group.field.related_model
-        return group_rel_model.objects.filter(**group_filters).distinct()
+        return (
+            group_rel_model.objects.filter(**group_filters)
+            .filter(active_validity_q(at=now, prefix=f"{group_rel_name}__"))
+            .distinct()
+        )
     else:
         group_perms_mapping = defaultdict(list)
         groups_with_perms = get_groups_with_perms(obj, only_with_perms_in=only_with_perms_in)
-        qs = group_model.objects.filter(group__in=groups_with_perms).prefetch_related("group", "permission")
+        qs = (
+            group_model.objects.filter(group__in=groups_with_perms)
+            .filter(active_validity_q(at=now))
+            .prefetch_related("group", "permission")
+        )
         if group_model.objects.is_generic():
             qs = qs.filter(object_pk=obj.pk, content_type=ctype)
         else:
@@ -670,20 +701,27 @@ def get_objects_for_user(
     """
     ctype, codenames = _compute_codenames_and_ctype(perms)
     ctype, queryset = _compute_queryset(ctype, klass)
+    now = timezone.now()
 
     # At this point, we should have both ctype and queryset and they should
     # match which means: ctype.model_class() == queryset.model
     # we should also have `codenames` list
-
-    # First check if user is superuser and if so, return queryset immediately
-    if with_superuser and user.is_superuser:
-        return queryset
 
     # Check if the user is anonymous. The
     # django.contrib.auth.models.AnonymousUser object doesn't work for queries
     # and it's nice to be able to pass in request.user blindly.
     if user.is_anonymous:
         user = get_anonymous_user()
+
+    # Keep list results consistent with ObjectPermissionBackend/Checker: an
+    # inactive user has no effective object permissions, even if stale rows or
+    # historical permanent grants still exist.
+    if not user.is_active:
+        return queryset.none()
+
+    # First check if user is superuser and if so, return queryset immediately
+    if with_superuser and user.is_superuser:
+        return queryset
 
     has_global_perms = False
     # a superuser has by default assigned global perms for any
@@ -719,7 +757,7 @@ def get_objects_for_user(
     user_model = get_user_obj_perms_model(queryset.model)
     user_obj_perms_queryset = filter_perms_queryset_by_objects(
         user_model.objects.filter(user=user).filter(permission__content_type=ctype), klass
-    )
+    ).filter(active_validity_q(at=now))
     if codenames:
         user_obj_perms_queryset = user_obj_perms_queryset.filter(permission__codename__in=codenames)
     direct_fields = ["content_object__pk", "permission__codename"]
@@ -741,7 +779,9 @@ def get_objects_for_user(
                     "permission__codename__in": codenames,
                 }
             )
-        groups_obj_perms_queryset = filter_perms_queryset_by_objects(group_model.objects.filter(**group_filters), klass)
+        groups_obj_perms_queryset = filter_perms_queryset_by_objects(
+            group_model.objects.filter(**group_filters).filter(active_validity_q(at=now)), klass
+        )
         if group_model.objects.is_generic():
             group_fields = generic_fields
         else:
@@ -876,6 +916,7 @@ def get_objects_for_group(
     """
     ctype, codenames = _compute_codenames_and_ctype(perms)
     ctype, queryset = _compute_queryset(ctype, klass)
+    now = timezone.now()
 
     # At this point, we should have both ctype and queryset and they should
     # match which means: ctype.model_class() == queryset.model
@@ -899,7 +940,8 @@ def get_objects_for_group(
     # queryset
     group_model = get_group_obj_perms_model(queryset.model)
     groups_obj_perms_queryset = filter_perms_queryset_by_objects(
-        group_model.objects.filter(group=group).filter(permission__content_type=ctype), klass
+        group_model.objects.filter(group=group).filter(permission__content_type=ctype).filter(active_validity_q(at=now)),
+        klass,
     )
     if codenames:
         groups_obj_perms_queryset = groups_obj_perms_queryset.filter(permission__codename__in=codenames)

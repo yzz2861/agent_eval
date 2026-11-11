@@ -8,6 +8,7 @@ from django.utils.translation import gettext_lazy as _
 from guardian.compat import user_model_label
 from guardian.ctypes import get_content_type
 from guardian.managers import GroupObjectPermissionManager, UserObjectPermissionManager
+from guardian.temporal import normalize_datetime, validate_validity_window
 
 
 class BaseObjectPermission(models.Model):
@@ -20,6 +21,11 @@ class BaseObjectPermission(models.Model):
     """
 
     permission = models.ForeignKey(Permission, on_delete=models.CASCADE)
+    # Both bounds are optional.  ``valid_from`` is inclusive and
+    # ``valid_until`` is exclusive; null means unbounded on that side.
+    # Existing rows migrate with both values NULL, i.e. permanent grants.
+    valid_from = models.DateTimeField(null=True, blank=True, db_index=True)
+    valid_until = models.DateTimeField(null=True, blank=True, db_index=True)
 
     class Meta:
         abstract = True
@@ -41,6 +47,10 @@ class BaseObjectPermission(models.Model):
             force_insert (bool): If True, the save will be forced to be an insert.
             force_update (bool): If True, the save will be forced to be an update.
         """
+        self.valid_from = normalize_datetime(self.valid_from, "valid_from")
+        self.valid_until = normalize_datetime(self.valid_until, "valid_until")
+        validate_validity_window(self.valid_from, self.valid_until)
+
         content_type = get_content_type(self.content_object)
         if content_type != self.permission.content_type:
             raise ValidationError(
@@ -49,6 +59,24 @@ class BaseObjectPermission(models.Model):
                 % (self.permission.content_type, content_type)
             )
         return super().save(*args, **kwargs)
+
+    def is_active(self, at=None) -> bool:
+        """Return whether this grant is active at ``at`` (defaults to now)."""
+        from django.utils import timezone
+
+        at = normalize_datetime(timezone.now() if at is None else at)
+        return (self.valid_from is None or self.valid_from <= at) and (
+            self.valid_until is None or at < self.valid_until
+        )
+
+    # Readable aliases for integrations that use "start/expiry" terminology.
+    @property
+    def starts_at(self):
+        return self.valid_from
+
+    @property
+    def expires_at(self):
+        return self.valid_until
 
 
 class BaseGenericObjectPermission(models.Model):
