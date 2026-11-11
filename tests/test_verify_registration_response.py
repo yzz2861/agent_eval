@@ -12,12 +12,16 @@ from webauthn.helpers import (
 )
 from webauthn.helpers.exceptions import (
     InvalidAttestationObjectStructure,
+    InvalidCredentialBackupState,
     InvalidRegistrationResponse,
     InvalidJSONStructure,
 )
 from webauthn.helpers.known_root_certs import globalsign_root_ca
+from webauthn.helpers import CredentialBackupState, CredentialBackupStatePolicy
 from webauthn.helpers.structs import (
     AttestationFormat,
+    CredentialBackupStateChange,
+    CredentialDeviceType,
     PublicKeyCredentialType,
 )
 from webauthn import verify_registration_response
@@ -454,3 +458,150 @@ class TestVerifyRegistrationResponse(TestCase):
             )
 
         self.assertIsInstance(raised.exception.__cause__, InvalidJSONStructure)
+
+
+class _RecordingBackupStateStore:
+    """In-memory store used to prove the library itself keeps no global credential state."""
+
+    def __init__(self) -> None:
+        self.records: dict = {}
+        self.persist_calls: list = []
+
+    def get_credential_backup_state(self, credential_id: bytes):
+        return self.records.get(credential_id)
+
+    def persist_credential_backup_state(
+        self, credential_id, credential_device_type, credential_backed_up
+    ) -> bool:
+        self.persist_calls.append(
+            (credential_id, credential_device_type, credential_backed_up)
+        )
+        self.records[credential_id] = CredentialBackupState(
+            credential_device_type=credential_device_type,
+            credential_backed_up=credential_backed_up,
+        )
+        return True
+
+
+class TestVerifyRegistrationBackupStatePolicy(TestCase):
+    NONE_ATTESTATION_OBJECT = (
+        "o2NmbXRkbm9uZWdhdHRTdG10oGhhdXRoRGF0YVjESZYN5YgOjGh0NBcPZHZgW4_krrmihjLHmVzzuoMdl2NFAAAAFw"
+        "AAAAAAAAAAAAAAAAAAAAAAQPctcQPE5oNRRJk_nO_371mf7qE7qIodzr0eOf6ACvnMB1oQG165dqutoi1U44shGe"
+        "zu5_gkTjmOPeJO0N8a7P-lAQIDJiABIVggSFbUJF-42Ug3pdM8rDRFu_N5oiVEysPDB6n66r_7dZAiWCDUVnB39Fl"
+        "GypL-qAoIO9xWHtJygo2jfDmHl-_eKFRLDA"
+    )
+    NONE_CLIENT_DATA_JSON = (
+        "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiVHdON240V1R5R0tMYzRaWS1xR3NGcUtuSE00bmdscXN5VjBJQ0psTjJUTzlYaVJ5RnRya2FEd1V2c3FsLWdrTEpYUDZmbkYxTWxyWjUzTW00UjdDdnciLCJvcmlnaW4iOiJodHRwOi8vbG9jYWxob3N0OjUwMDAiLCJjcm9zc09yaWdpbiI6ZmFsc2V9"
+    )
+
+    def _credential(self) -> dict:
+        return {
+            "id": "9y1xA8Tmg1FEmT-c7_fvWZ_uoTuoih3OvR45_oAK-cwHWhAbXrl2q62iLVTjiyEZ7O7n-CROOY494k7Q3xrs_w",
+            "rawId": "9y1xA8Tmg1FEmT-c7_fvWZ_uoTuoih3OvR45_oAK-cwHWhAbXrl2q62iLVTjiyEZ7O7n-CROOY494k7Q3xrs_w",
+            "response": {
+                "attestationObject": self.NONE_ATTESTATION_OBJECT,
+                "clientDataJSON": self.NONE_CLIENT_DATA_JSON,
+            },
+            "type": "public-key",
+            "clientExtensionResults": {},
+        }
+
+    def _verify_with_flags(self, be: bool, bs: bool):
+        credential = parse_registration_credential_json(self._credential())
+        attestation_object = parse_attestation_object(
+            credential.response.attestation_object
+        )
+        attestation_object.auth_data.flags.be = be
+        attestation_object.auth_data.flags.bs = bs
+
+        store = _RecordingBackupStateStore()
+        policy = CredentialBackupStatePolicy(store=store)
+
+        with patch(
+            "webauthn.registration.verify_registration_response.parse_attestation_object",
+            return_value=attestation_object,
+        ):
+            verification = verify_registration_response(
+                credential=credential,
+                expected_challenge=base64url_to_bytes(
+                    "TwN7n4WTyGKLc4ZY-qGsFqKnHM4nglqsyV0ICJlN2TO9XiRyFtrkaDwUvsql-gkLJXP6fnF1MlrZ53Mm4R7Cvw"
+                ),
+                expected_origin="http://localhost:5000",
+                expected_rp_id="localhost",
+                credential_backup_state_policy=policy,
+            )
+
+        return verification, store
+
+    def test_registration_be_zero_bs_zero_suggests_single_device_state(self) -> None:
+        verification, store = self._verify_with_flags(be=False, bs=False)
+
+        self.assertEqual(
+            verification.credential_device_type, CredentialDeviceType.SINGLE_DEVICE
+        )
+        self.assertFalse(verification.credential_backed_up)
+        self.assertEqual(
+            verification.backup_state_change,
+            CredentialBackupStateChange.FIRST_REGISTRATION,
+        )
+        # Registration never writes through the store itself; the RP persists the suggested state.
+        self.assertEqual(store.persist_calls, [])
+
+    def test_registration_be_one_bs_zero_suggests_multi_device_not_backed_up(self) -> None:
+        verification, _ = self._verify_with_flags(be=True, bs=False)
+
+        self.assertEqual(
+            verification.credential_device_type, CredentialDeviceType.MULTI_DEVICE
+        )
+        self.assertFalse(verification.credential_backed_up)
+        self.assertEqual(
+            verification.backup_state_change,
+            CredentialBackupStateChange.FIRST_REGISTRATION,
+        )
+
+    def test_registration_be_one_bs_one_suggests_backed_up_state(self) -> None:
+        verification, _ = self._verify_with_flags(be=True, bs=True)
+
+        self.assertEqual(
+            verification.credential_device_type, CredentialDeviceType.MULTI_DEVICE
+        )
+        self.assertTrue(verification.credential_backed_up)
+        self.assertEqual(
+            verification.backup_state_change,
+            CredentialBackupStateChange.FIRST_REGISTRATION,
+        )
+
+    def test_registration_be_zero_bs_one_fails_with_stable_reason(self) -> None:
+        with self.assertRaises(InvalidRegistrationResponse) as raised:
+            self._verify_with_flags(be=False, bs=True)
+
+        self.assertIsInstance(raised.exception.__cause__, InvalidCredentialBackupState)
+        self.assertEqual(
+            raised.exception.__cause__.reason,
+            CredentialBackupStateChange.INVALID_BACKUP_FLAGS.value,
+        )
+        self.assertIn(
+            CredentialBackupStateChange.INVALID_BACKUP_FLAGS.value,
+            str(raised.exception),
+        )
+
+    def test_registration_without_policy_keeps_legacy_fields_only(self) -> None:
+        credential = parse_registration_credential_json(self._credential())
+        attestation_object = parse_attestation_object(
+            credential.response.attestation_object
+        )
+
+        with patch(
+            "webauthn.registration.verify_registration_response.parse_attestation_object",
+            return_value=attestation_object,
+        ):
+            verification = verify_registration_response(
+                credential=credential,
+                expected_challenge=base64url_to_bytes(
+                    "TwN7n4WTyGKLc4ZY-qGsFqKnHM4nglqsyV0ICJlN2TO9XiRyFtrkaDwUvsql-gkLJXP6fnF1MlrZ53Mm4R7Cvw"
+                ),
+                expected_origin="http://localhost:5000",
+                expected_rp_id="localhost",
+            )
+
+        self.assertIsNone(verification.backup_state_change)

@@ -2,6 +2,12 @@ from .aaguid_to_string import aaguid_to_string
 from .base64url_to_bytes import base64url_to_bytes
 from .bytes_to_base64url import bytes_to_base64url
 from .byteslike_to_bytes import byteslike_to_bytes
+from .credential_backup_state_policy import (
+    CredentialBackupState,
+    CredentialBackupStatePolicy,
+    CredentialBackupStateStore,
+    apply_credential_backup_state_policy,
+)
 from .decode_credential_public_key import decode_credential_public_key
 from .decoded_public_key_to_cryptography import decoded_public_key_to_cryptography
 from .encode_cbor import encode_cbor
@@ -14,7 +20,9 @@ from .parse_attestation_object import parse_attestation_object
 from .parse_authentication_credential_json import parse_authentication_credential_json
 from .parse_authentication_options_json import parse_authentication_options_json
 from .parse_authenticator_data import parse_authenticator_data
+from .parse_authenticator_data import parse_authenticator_backup_flags
 from .parse_backup_flags import parse_backup_flags
+from .parse_backup_flags import evaluate_credential_backup_state
 from .parse_cbor import parse_cbor
 from .parse_client_data_json import parse_client_data_json
 from .parse_registration_credential_json import parse_registration_credential_json
@@ -28,6 +36,10 @@ __all__ = [
     "base64url_to_bytes",
     "bytes_to_base64url",
     "byteslike_to_bytes",
+    "CredentialBackupState",
+    "CredentialBackupStatePolicy",
+    "CredentialBackupStateStore",
+    "apply_credential_backup_state_policy",
     "decode_credential_public_key",
     "decoded_public_key_to_cryptography",
     "encode_cbor",
@@ -40,7 +52,9 @@ __all__ = [
     "parse_authenticator_data",
     "parse_authentication_credential_json",
     "parse_authentication_options_json",
+    "parse_authenticator_backup_flags",
     "parse_backup_flags",
+    "evaluate_credential_backup_state",
     "parse_cbor",
     "parse_client_data_json",
     "parse_registration_credential_json",

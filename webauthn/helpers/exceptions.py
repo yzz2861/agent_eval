@@ -66,6 +66,18 @@ class InvalidBackupFlags(WebAuthnException):
     pass
 
 
+class InvalidCredentialBackupState(WebAuthnException):
+    """Raised when an enabled credential backup state policy rejects a transition.
+
+    The stable, machine-readable reason is available both as the exception's ``reason`` attribute
+    and (as its string value) inside the exception message.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 class InvalidCBORData(WebAuthnException):
     pass
 

@@ -183,6 +183,16 @@ class TestWebAuthnParseAuthenticatorData(TestCase):
         assert output.flags.be is True
         assert output.flags.be is True
 
+    def test_parse_authenticator_backup_flags_exposes_be_and_bs(self) -> None:
+        from webauthn.helpers import parse_authenticator_backup_flags
+
+        (auth_data, _, _, _, _, _) = _generate_auth_data(be=True, bs=False)
+
+        flags = parse_authenticator_backup_flags(parse_authenticator_data(auth_data))
+
+        assert flags.be is True
+        assert flags.bs is False
+
     def test_parses_bad_eddsa_auth_data(self) -> None:
         """
         Help out particular YubiKeys that incorrectly CBOR-encode authData when they use Ed25519

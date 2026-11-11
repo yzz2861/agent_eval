@@ -7,16 +7,23 @@ from webauthn.helpers import (
     bytes_to_base64url,
     byteslike_to_bytes,
     decode_credential_public_key,
+    apply_credential_backup_state_policy,
+    CredentialBackupStatePolicy,
     parse_attestation_object,
+    parse_authenticator_backup_flags,
     parse_client_data_json,
     parse_backup_flags,
     parse_registration_credential_json,
 )
 from webauthn.helpers.cose import COSEAlgorithmIdentifier
-from webauthn.helpers.exceptions import InvalidRegistrationResponse
+from webauthn.helpers.exceptions import (
+    InvalidCredentialBackupState,
+    InvalidRegistrationResponse,
+)
 from webauthn.helpers.structs import (
     AttestationFormat,
     ClientDataType,
+    CredentialBackupStateChange,
     CredentialDeviceType,
     PublicKeyCredentialType,
     RegistrationCredential,
@@ -56,6 +63,9 @@ class VerifiedRegistration:
     attestation_object: bytes
     credential_device_type: CredentialDeviceType
     credential_backed_up: bool
+    # Stable audit reason describing the interpreted backup state; only populated when a
+    # `credential_backup_state_policy` is supplied, so existing callers see no new required field.
+    backup_state_change: Optional[CredentialBackupStateChange] = None
 
 
 expected_token_binding_statuses = [
@@ -74,6 +84,7 @@ def verify_registration_response(
     require_user_verification: bool = False,
     supported_pub_key_algs: List[COSEAlgorithmIdentifier] = default_supported_pub_key_algs,
     pem_root_certs_bytes_by_fmt: Optional[Mapping[AttestationFormat, List[bytes]]] = None,
+    credential_backup_state_policy: Optional[CredentialBackupStatePolicy] = None,
 ) -> VerifiedRegistration:
     """Verify an authenticator's response to navigator.credentials.create()
 
@@ -94,6 +105,11 @@ def verify_registration_response(
           restrict support to. Defaults to all supported algorithm IDs.
         - (optional) `pem_root_certs_bytes_by_fmt`: A list of root certificates, in PEM format, to
           be used to validate the certificate chains for specific attestation statement formats.
+        - (optional) `credential_backup_state_policy`: Explicitly opt in to credential backup state
+          enforcement by injecting a policy (and its stateless store callbacks). When provided the
+          returned `credential_device_type`/`credential_backed_up` are the values the Relying Party
+          should persist, and `backup_state_change` carries a stable audit reason code. When omitted
+          the response shape and parsing behavior are unchanged.
 
     Returns:
         Information about the authenticator and registration
@@ -290,7 +306,28 @@ def verify_registration_response(
     if not verified:
         raise InvalidRegistrationResponse("Attestation statement could not be verified")
 
-    parsed_backup_flags = parse_backup_flags(auth_data.flags)
+    backup_state_change: Optional[CredentialBackupStateChange] = None
+
+    if credential_backup_state_policy is not None:
+        try:
+            decision, _ = apply_credential_backup_state_policy(
+                policy=credential_backup_state_policy,
+                credential_id=attested_credential_data.credential_id,
+                flags=parse_authenticator_backup_flags(auth_data),
+                is_registration=True,
+            )
+        except InvalidCredentialBackupState as exc:
+            raise InvalidRegistrationResponse(
+                f"Credential backup state rejected: {exc.reason}"
+            ) from exc
+
+        parsed_backup_flags_device_type = decision.credential_device_type
+        parsed_backup_flags_backed_up = decision.credential_backed_up
+        backup_state_change = decision.reason
+    else:
+        parsed_backup_flags = parse_backup_flags(auth_data.flags)
+        parsed_backup_flags_device_type = parsed_backup_flags.credential_device_type
+        parsed_backup_flags_backed_up = parsed_backup_flags.credential_backed_up
 
     return VerifiedRegistration(
         credential_id=attested_credential_data.credential_id,
@@ -301,6 +338,7 @@ def verify_registration_response(
         credential_type=credential.type,
         user_verified=auth_data.flags.uv,
         attestation_object=attestation_object_bytes,
-        credential_device_type=parsed_backup_flags.credential_device_type,
-        credential_backed_up=parsed_backup_flags.credential_backed_up,
+        credential_device_type=parsed_backup_flags_device_type,
+        credential_backed_up=parsed_backup_flags_backed_up,
+        backup_state_change=backup_state_change,
     )

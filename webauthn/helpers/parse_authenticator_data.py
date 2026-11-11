@@ -7,6 +7,15 @@ from .parse_cbor import parse_cbor
 from .encode_cbor import encode_cbor
 
 
+def parse_authenticator_backup_flags(auth_data: AuthenticatorData) -> AuthenticatorDataFlags:
+    """Return the authenticator data flags object carrying the current BE/BS backup bits.
+
+    Kept as an explicit entry point so that registration/authentication verification can feed the
+    current backup state into a credential backup state policy without re-decoding raw bytes.
+    """
+    return auth_data.flags
+
+
 def parse_authenticator_data(val: bytes) -> AuthenticatorData:
     """
     Turn `response.attestationObject.authData` into structured data

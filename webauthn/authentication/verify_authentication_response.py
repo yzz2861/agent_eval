@@ -1,24 +1,31 @@
 from dataclasses import dataclass
 import hashlib
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 
 from cryptography.exceptions import InvalidSignature
 
 from webauthn.helpers import (
+    apply_credential_backup_state_policy,
     bytes_to_base64url,
     byteslike_to_bytes,
+    CredentialBackupStatePolicy,
     decode_credential_public_key,
     decoded_public_key_to_cryptography,
     parse_authenticator_data,
+    parse_authenticator_backup_flags,
     parse_backup_flags,
     parse_client_data_json,
     parse_authentication_credential_json,
     verify_signature,
 )
-from webauthn.helpers.exceptions import InvalidAuthenticationResponse
+from webauthn.helpers.exceptions import (
+    InvalidAuthenticationResponse,
+    InvalidCredentialBackupState,
+)
 from webauthn.helpers.structs import (
     AuthenticationCredential,
     ClientDataType,
+    CredentialBackupStateChange,
     CredentialDeviceType,
     PublicKeyCredentialType,
     TokenBindingStatus,
@@ -36,6 +43,9 @@ class VerifiedAuthentication:
     credential_device_type: CredentialDeviceType
     credential_backed_up: bool
     user_verified: bool
+    # Stable audit reason for the interpreted backup state; only set when a
+    # `credential_backup_state_policy` is supplied to the verification call.
+    backup_state_change: Optional[CredentialBackupStateChange] = None
 
 
 expected_token_binding_statuses = [
@@ -53,6 +63,7 @@ def verify_authentication_response(
     credential_public_key: bytes,
     credential_current_sign_count: int,
     require_user_verification: bool = False,
+    credential_backup_state_policy: Optional[CredentialBackupStatePolicy] = None,
 ) -> VerifiedAuthentication:
     """Verify a response from navigator.credentials.get()
 
@@ -71,6 +82,12 @@ def verify_authentication_response(
           used.
         - (optional) `require_user_verification`: Whether or not to require that the authenticator
           verified the user.
+        - (optional) `credential_backup_state_policy`: Explicitly opt in to credential backup state
+          enforcement by injecting a policy (and its stateless store callbacks). When provided the
+          current authenticator BE/BS flags are compared to the saved credential state: legal
+          migrations are accepted (and persisted through the store when the state changes), while
+          state rollbacks or unexplainable changes fail verification with a stable reason code.
+          When omitted the parsing and return fields are unchanged.
 
     Returns:
         Information about the authenticator
@@ -184,12 +201,34 @@ def verify_authentication_response(
     except InvalidSignature:
         raise InvalidAuthenticationResponse("Could not verify authentication signature")
 
-    parsed_backup_flags = parse_backup_flags(auth_data.flags)
+    backup_state_change: Optional[CredentialBackupStateChange] = None
+
+    if credential_backup_state_policy is not None:
+        try:
+            decision, _ = apply_credential_backup_state_policy(
+                policy=credential_backup_state_policy,
+                credential_id=credential.raw_id,
+                flags=parse_authenticator_backup_flags(auth_data),
+                is_registration=False,
+            )
+        except InvalidCredentialBackupState as exc:
+            raise InvalidAuthenticationResponse(
+                f"Credential backup state rejected: {exc.reason}"
+            ) from exc
+
+        result_device_type = decision.credential_device_type
+        result_backed_up = decision.credential_backed_up
+        backup_state_change = decision.reason
+    else:
+        parsed_backup_flags = parse_backup_flags(auth_data.flags)
+        result_device_type = parsed_backup_flags.credential_device_type
+        result_backed_up = parsed_backup_flags.credential_backed_up
 
     return VerifiedAuthentication(
         credential_id=credential.raw_id,
         new_sign_count=auth_data.sign_count,
-        credential_device_type=parsed_backup_flags.credential_device_type,
-        credential_backed_up=parsed_backup_flags.credential_backed_up,
+        credential_device_type=result_device_type,
+        credential_backed_up=result_backed_up,
         user_verified=auth_data.flags.uv,
+        backup_state_change=backup_state_change,
     )

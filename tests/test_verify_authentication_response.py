@@ -1,11 +1,24 @@
 from unittest import TestCase
+from unittest.mock import patch
 
 from webauthn import verify_authentication_response
-from webauthn.helpers import base64url_to_bytes, parse_authentication_credential_json
+from webauthn.helpers import (
+    base64url_to_bytes,
+    bytes_to_base64url,
+    CredentialBackupState,
+    CredentialBackupStatePolicy,
+    parse_authentication_credential_json,
+    parse_authenticator_data,
+)
 from webauthn.helpers.exceptions import (
     InvalidAuthenticationResponse,
+    InvalidCredentialBackupState,
     InvalidAuthenticatorDataStructure,
     InvalidJSONStructure,
+)
+from webauthn.helpers.structs import (
+    CredentialBackupStateChange,
+    CredentialDeviceType,
 )
 
 
@@ -358,3 +371,269 @@ class TestVerifyAuthenticationResponse(TestCase):
             )
 
         self.assertIsInstance(raised.exception.__cause__, InvalidJSONStructure)
+
+
+class _InMemoryBackupStateStore:
+    def __init__(self, records=None, persist_result: bool = True) -> None:
+        self.records = records if records is not None else {}
+        self.persist_result = persist_result
+        self.persist_calls = []
+        self.lookup_calls = []
+
+    def get_credential_backup_state(self, credential_id: bytes):
+        self.lookup_calls.append(credential_id)
+        if isinstance(self.records.get(credential_id), KeyError):
+            raise KeyError(credential_id)
+        return self.records.get(credential_id)
+
+    def persist_credential_backup_state(
+        self, credential_id, credential_device_type, credential_backed_up
+    ) -> bool:
+        self.persist_calls.append(
+            (credential_id, credential_device_type, credential_backed_up)
+        )
+        if self.persist_result:
+            self.records[credential_id] = CredentialBackupState(
+                credential_device_type=credential_device_type,
+                credential_backed_up=credential_backed_up,
+            )
+        return self.persist_result
+
+
+class TestVerifyAuthenticationBackupStatePolicy(TestCase):
+    CREDENTIAL_ID = base64url_to_bytes(
+        "EDx9FfAbp4obx6oll2oC4-CZuDidRVV4gZhxC529ytlnqHyqCStDUwfNdm1SNHAe3X5KvueWQdAX3x9R1a2b9Q"
+    )
+    PUBLIC_KEY = base64url_to_bytes(
+        "pQECAyYgASFYIIeDTe-gN8A-zQclHoRnGFWN8ehM1b7yAsa8I8KIvmplIlgg4nFGT5px8o6gpPZZhO01wdy9crDSA_Ngtkx0vGpvPHI"
+    )
+    CHALLENGE = base64url_to_bytes(
+        "xi30GPGAFYRxVDpY1sM10DaLzVQG66nv-_7RUazH0vI2YvG8LYgDEnvN5fZZNVuvEDuMi9te3VLqb42N0fkLGA"
+    )
+    AUTH_DATA = base64url_to_bytes(
+        "SZYN5YgOjGh0NBcPZHZgW4_krrmihjLHmVzzuoMdl2MBAAAATg"
+    )
+    CLIENT_DATA_JSON = base64url_to_bytes(
+        "eyJjaGFsbGVuZ2UiOiJ4aTMwR1BHQUZZUnhWRHBZMXNNMTBEYUx6VlFHNjZudi1fN1JVYXpIMHZJMll2RzhMWWdERW52TjVmWlpOVnV2RUR1TWk5dGUzVkxxYjQyTjBma0xHQSIsImNsaWVudEV4dGVuc2lvbnMiOnt9LCJoYXNoQWxnb3JpdGhtIjoiU0hBLTI1NiIsIm9yaWdpbiI6Imh0dHA6Ly9sb2NhbGhvc3Q6NTAwMCIsInR5cGUiOiJ3ZWJhdXRobi5nZXQifQ"
+    )
+    SIGNATURE = base64url_to_bytes(
+        "MEUCIGisVZOBapCWbnJJvjelIzwpixxIwkjCCb5aCHafQu68AiEA88v-2pJNNApPFwAKFiNuf82-2hBxYW5kGwVweeoxCwo"
+    )
+
+    def _credential(self) -> dict:
+        return {
+            "id": "EDx9FfAbp4obx6oll2oC4-CZuDidRVV4gZhxC529ytlnqHyqCStDUwfNdm1SNHAe3X5KvueWQdAX3x9R1a2b9Q",
+            "rawId": "EDx9FfAbp4obx6oll2oC4-CZuDidRVV4gZhxC529ytlnqHyqCStDUwfNdm1SNHAe3X5KvueWQdAX3x9R1a2b9Q",
+            "response": {
+                "authenticatorData": bytes_to_base64url(self.AUTH_DATA),
+                "clientDataJSON": bytes_to_base64url(self.CLIENT_DATA_JSON),
+                "signature": bytes_to_base64url(self.SIGNATURE),
+            },
+            "type": "public-key",
+            "clientExtensionResults": {},
+        }
+
+    def _verify(self, store, be: bool, bs: bool, **policy_kwargs):
+        auth_data = parse_authenticator_data(self.AUTH_DATA)
+        auth_data.flags.be = be
+        auth_data.flags.bs = bs
+        policy = CredentialBackupStatePolicy(store=store, **policy_kwargs)
+
+        with patch(
+            "webauthn.authentication.verify_authentication_response.parse_authenticator_data",
+            return_value=auth_data,
+        ):
+            return verify_authentication_response(
+                credential=self._credential(),
+                expected_challenge=self.CHALLENGE,
+                expected_rp_id="localhost",
+                expected_origin="http://localhost:5000",
+                credential_public_key=self.PUBLIC_KEY,
+                credential_current_sign_count=77,
+                credential_backup_state_policy=policy,
+            )
+
+    def _record(self, device_type, backed_up):
+        return {
+            self.CREDENTIAL_ID: CredentialBackupState(
+                credential_device_type=device_type,
+                credential_backed_up=backed_up,
+            )
+        }
+
+    def test_legal_backup_enablement_upgrades_and_persists(self) -> None:
+        store = _InMemoryBackupStateStore(
+            self._record(CredentialDeviceType.MULTI_DEVICE, False)
+        )
+
+        verification = self._verify(store, be=True, bs=True)
+
+        self.assertEqual(
+            verification.backup_state_change,
+            CredentialBackupStateChange.BACKUP_ENABLED,
+        )
+        self.assertEqual(
+            verification.credential_device_type, CredentialDeviceType.MULTI_DEVICE
+        )
+        self.assertTrue(verification.credential_backed_up)
+        self.assertEqual(len(store.persist_calls), 1)
+        self.assertTrue(store.records[self.CREDENTIAL_ID].credential_backed_up)
+
+    def test_legal_eligibility_gain_from_single_device(self) -> None:
+        store = _InMemoryBackupStateStore(
+            self._record(CredentialDeviceType.SINGLE_DEVICE, False)
+        )
+
+        verification = self._verify(store, be=True, bs=False)
+
+        self.assertEqual(
+            verification.backup_state_change,
+            CredentialBackupStateChange.BACKUP_ELIGIBILITY_GAINED,
+        )
+        self.assertEqual(len(store.persist_calls), 1)
+
+    def test_backup_recovery_from_backed_up_credential_is_allowed(self) -> None:
+        store = _InMemoryBackupStateStore(
+            self._record(CredentialDeviceType.MULTI_DEVICE, True)
+        )
+
+        verification = self._verify(store, be=True, bs=True)
+
+        self.assertEqual(
+            verification.backup_state_change,
+            CredentialBackupStateChange.BACKUP_RECOVERED,
+        )
+        # No state changed, so nothing should be written back.
+        self.assertEqual(store.persist_calls, [])
+
+    def test_bs_rollback_fails_with_stable_reason(self) -> None:
+        store = _InMemoryBackupStateStore(
+            self._record(CredentialDeviceType.MULTI_DEVICE, True)
+        )
+
+        with self.assertRaises(InvalidAuthenticationResponse) as raised:
+            self._verify(store, be=True, bs=False)
+
+        self.assertIsInstance(raised.exception.__cause__, InvalidCredentialBackupState)
+        self.assertEqual(
+            raised.exception.__cause__.reason,
+            CredentialBackupStateChange.BACKUP_STATE_ROLLBACK.value,
+        )
+        self.assertIn(
+            CredentialBackupStateChange.BACKUP_STATE_ROLLBACK.value,
+            str(raised.exception),
+        )
+        self.assertEqual(store.persist_calls, [])
+
+    def test_be_rollback_fails_as_clone_suspected(self) -> None:
+        store = _InMemoryBackupStateStore(
+            self._record(CredentialDeviceType.MULTI_DEVICE, False)
+        )
+
+        with self.assertRaises(InvalidAuthenticationResponse) as raised:
+            self._verify(store, be=False, bs=False)
+
+        self.assertIsInstance(raised.exception.__cause__, InvalidCredentialBackupState)
+        self.assertEqual(
+            raised.exception.__cause__.reason,
+            CredentialBackupStateChange.BACKUP_ELIGIBILITY_ROLLBACK.value,
+        )
+
+    def test_impossible_flags_fail_even_without_saved_state_lookup(self) -> None:
+        store = _InMemoryBackupStateStore(
+            self._record(CredentialDeviceType.SINGLE_DEVICE, False)
+        )
+
+        with self.assertRaises(InvalidAuthenticationResponse) as raised:
+            self._verify(store, be=False, bs=True)
+
+        self.assertEqual(
+            raised.exception.__cause__.reason,
+            CredentialBackupStateChange.INVALID_BACKUP_FLAGS.value,
+        )
+
+    def test_missing_state_fails_closed_by_default(self) -> None:
+        store = _InMemoryBackupStateStore(
+            {
+                self.CREDENTIAL_ID: CredentialBackupState(
+                    credential_device_type=None,
+                    credential_backed_up=None,
+                )
+            }
+        )
+
+        with self.assertRaises(InvalidAuthenticationResponse) as raised:
+            self._verify(store, be=True, bs=False)
+
+        self.assertEqual(
+            raised.exception.__cause__.reason,
+            CredentialBackupStateChange.CREDENTIAL_STATE_MISSING.value,
+        )
+
+    def test_missing_state_can_bootstrap_when_configured(self) -> None:
+        store = _InMemoryBackupStateStore(
+            {
+                self.CREDENTIAL_ID: CredentialBackupState(
+                    credential_device_type=None,
+                    credential_backed_up=None,
+                )
+            }
+        )
+
+        verification = self._verify(
+            store, be=True, bs=False, fail_on_missing_state=False
+        )
+
+        self.assertEqual(
+            verification.backup_state_change,
+            CredentialBackupStateChange.FIRST_REGISTRATION,
+        )
+        self.assertEqual(len(store.persist_calls), 1)
+
+    def test_unknown_credential_none_record_fails(self) -> None:
+        store = _InMemoryBackupStateStore({})
+
+        with self.assertRaises(InvalidAuthenticationResponse) as raised:
+            self._verify(store, be=False, bs=False)
+
+        self.assertEqual(
+            raised.exception.__cause__.reason,
+            CredentialBackupStateChange.CREDENTIAL_NOT_FOUND.value,
+        )
+
+    def test_unknown_credential_key_error_fails_with_same_reason(self) -> None:
+        store = _InMemoryBackupStateStore({self.CREDENTIAL_ID: KeyError()})
+
+        with self.assertRaises(InvalidAuthenticationResponse) as raised:
+            self._verify(store, be=False, bs=False)
+
+        self.assertEqual(
+            raised.exception.__cause__.reason,
+            CredentialBackupStateChange.CREDENTIAL_NOT_FOUND.value,
+        )
+
+    def test_concurrent_update_conflict_fails_with_stable_reason(self) -> None:
+        store = _InMemoryBackupStateStore(
+            self._record(CredentialDeviceType.MULTI_DEVICE, False),
+            persist_result=False,
+        )
+
+        with self.assertRaises(InvalidAuthenticationResponse) as raised:
+            self._verify(store, be=True, bs=True)
+
+        self.assertEqual(
+            raised.exception.__cause__.reason,
+            CredentialBackupStateChange.STATE_UPDATE_CONFLICT.value,
+        )
+
+    def test_without_policy_the_legacy_return_shape_is_kept(self) -> None:
+        verification = verify_authentication_response(
+            credential=self._credential(),
+            expected_challenge=self.CHALLENGE,
+            expected_rp_id="localhost",
+            expected_origin="http://localhost:5000",
+            credential_public_key=self.PUBLIC_KEY,
+            credential_current_sign_count=77,
+        )
+
+        self.assertIsNone(verification.backup_state_change)

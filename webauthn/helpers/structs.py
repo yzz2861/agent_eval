@@ -554,3 +554,41 @@ class CredentialDeviceType(str, Enum):
 
     SINGLE_DEVICE = "single_device"
     MULTI_DEVICE = "multi_device"
+
+
+class CredentialBackupStateChange(str, Enum):
+    """Stable audit reason describing how a credential's backup state was interpreted.
+
+    The values are part of the public API: Relying Parties can persist them alongside their
+    credential records or forward them to logging/alerting pipelines, so they must remain stable
+    even if exception messages change.
+
+    Allowed (successful) transitions:
+        `FIRST_REGISTRATION`: No saved state existed and the current flags are valid
+        `SINGLE_DEVICE`: A non-backup-eligible (BE=0, BS=0) credential stayed single-device
+        `BACKUP_ELIGIBILITY_GAINED`: A single-device credential became backup-eligible (BE 0 -> 1)
+        `BACKUP_ENABLED`: A backup-eligible credential became backed up (BS 0 -> 1)
+        `BACKUP_RECOVERED`: An already backed-up credential re-authenticated from a backup
+        `STATE_UNCHANGED`: A backup-eligible, not-backed-up credential reported the same state
+
+    Rejected (failed) transitions:
+        `INVALID_BACKUP_FLAGS`: BS was set while BE was not, which the spec forbids
+        `CREDENTIAL_NOT_FOUND`: The store callback did not recognize the credential ID
+        `CREDENTIAL_STATE_MISSING`: The credential existed but its backup state was not recorded
+        `BACKUP_STATE_ROLLBACK`: A backed-up credential reported BS=0 (backup state regressed)
+        `BACKUP_ELIGIBILITY_ROLLBACK`: A backup-eligible credential reported BE=0 (clone suspected)
+        `STATE_UPDATE_CONFLICT`: The persist callback rejected the update (e.g. concurrent write)
+    """
+
+    FIRST_REGISTRATION = "first_registration"
+    SINGLE_DEVICE = "single_device"
+    BACKUP_ELIGIBILITY_GAINED = "backup_eligibility_gained"
+    BACKUP_ENABLED = "backup_enabled"
+    BACKUP_RECOVERED = "backup_recovered"
+    STATE_UNCHANGED = "state_unchanged"
+    INVALID_BACKUP_FLAGS = "invalid_backup_flags"
+    CREDENTIAL_NOT_FOUND = "credential_not_found"
+    CREDENTIAL_STATE_MISSING = "credential_state_missing"
+    BACKUP_STATE_ROLLBACK = "backup_state_rollback"
+    BACKUP_ELIGIBILITY_ROLLBACK = "backup_eligibility_rollback"
+    STATE_UPDATE_CONFLICT = "state_update_conflict"
