@@ -160,6 +160,25 @@ Altering the encrypted information will *likely* cause a
     about the key. It’s only a tiny bit of information, but every bit
     makes cracking the keys easier.
 
+Implicit rejection
+++++++++++++++++++
+
+Applications that handle attacker-controlled ciphertexts (for example a TLS
+server) may prefer not to raise on bad padding. Use
+:py:func:`rsa.decrypt_implicit_rejection`, which performs a fixed-order
+validation of the decrypted block and never raises on padding errors. Instead
+it returns a :py:class:`rsa.pkcs1.DecryptionResult`; when the padding is
+invalid, ``rejected`` is ``True`` and ``message`` contains a deterministic
+synthetic message derived from the private key and the ciphertext, always of
+the maximum message length for the key so no plaintext length is leaked.
+
+    >>> result = rsa.decrypt_implicit_rejection(crypto, bob_priv)
+    >>> result.rejected
+    True
+
+The regular :py:func:`rsa.decrypt` function and its
+:py:class:`rsa.pkcs1.DecryptionError` behaviour are unchanged.
+
 Low-level operations
 ++++++++++++++++++++
 

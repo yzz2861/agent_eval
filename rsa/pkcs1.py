@@ -27,6 +27,7 @@ to your users.
 """
 
 import hashlib
+import hmac
 import os
 import sys
 import typing
@@ -76,6 +77,20 @@ class DecryptionError(CryptoError):
 
 class VerificationError(CryptoError):
     """Raised when verification fails."""
+
+
+class DecryptionResult(typing.NamedTuple):
+    """Result of an implicit-rejection PKCS#1 v1.5 decryption.
+
+    :param message: the recovered message when the padding was valid, otherwise
+        a deterministic synthetic message of the same length a real message
+        could have had.
+    :param rejected: ``True`` when the padding was invalid and a synthetic
+        message was returned, ``False`` when the padding was valid.
+    """
+
+    message: bytes
+    rejected: bool
 
 
 def _pad_for_encryption(message: bytes, target_length: int) -> bytes:
@@ -271,6 +286,117 @@ def decrypt(crypto: bytes, priv_key: key.PrivateKey) -> bytes:
     return cleartext[sep_idx + 1 :]
 
 
+def _synthetic_message(priv_key: key.PrivateKey, crypto: bytes, blocksize: int) -> bytes:
+    """Derives a deterministic synthetic message from the private key and ciphertext.
+
+    The result only depends on private key material and the ciphertext, so the
+    same rejected ciphertext always produces the same synthetic message without
+    consuming randomness. Its fixed length (``blocksize - 11`` bytes, the
+    maximum PKCS#1 v1.5 message length) does not reveal the length of any real
+    plaintext. An attacker without the private key cannot predict the output.
+    """
+
+    message_length = blocksize - 11
+    key_material = b"".join(
+        [
+            b"rsa.pkcs1.decrypt_implicit_rejection\x00",
+            priv_key.n.to_bytes(blocksize, "big"),
+            priv_key.d.to_bytes(blocksize, "big"),
+        ]
+    )
+
+    output = b""
+    counter = 0
+    while len(output) < message_length:
+        output += hmac.new(
+            key_material,
+            b"".join([crypto, bytes([counter])]),
+            hashlib.sha256,
+        ).digest()
+        counter += 1
+
+    return output[:message_length]
+
+
+def decrypt_implicit_rejection(
+    crypto: bytes, priv_key: key.PrivateKey
+) -> DecryptionResult:
+    r"""Decrypts using PKCS#1 v1.5 with implicit rejection of bad padding.
+
+    This is a side-channel hardened alternative to :func:`decrypt`. Instead of
+    raising an exception on invalid padding it returns a deterministic
+    synthetic message and marks the result as rejected. All padding errors take
+    the same code path, so callers cannot distinguish them by exception type,
+    exception message or response length.
+
+    The ciphertext length and integer range are checked on public information
+    *before* the modular exponentiation, as required by RFC 8017. The blinded
+    modular exponentiation is still performed once per call, reusing
+    :meth:`rsa.PrivateKey.blinded_decrypt`. After decryption the whole block is
+    scanned in a fixed order without short-circuiting on the first error.
+
+    :param crypto: the crypto text as returned by :py:func:`rsa.encrypt`
+    :param priv_key: the :py:class:`rsa.PrivateKey` to decrypt with.
+    :return: a :class:`DecryptionResult`; ``rejected`` is ``True`` and
+        ``message`` is a deterministic synthetic message when the padding is
+        invalid, otherwise ``rejected`` is ``False`` and ``message`` is the
+        recovered plaintext. Synthetic messages always have the maximum
+        possible message length (``k - 11`` bytes), so plaintext length is not
+        leaked through the return value.
+
+    >>> import rsa
+    >>> (pub_key, priv_key) = rsa.newkeys(256)
+    >>> crypto = encrypt(b'hello', pub_key)
+    >>> result = decrypt_implicit_rejection(crypto, priv_key)
+    >>> result.rejected
+    False
+    >>> result.message
+    b'hello'
+    """
+
+    blocksize = common.byte_size(priv_key.n)
+
+    # Public checks, performed before the modular exponentiation. They only
+    # inspect attacker-controlled data, so no key material is leaked.
+    length_bad = len(crypto) != blocksize
+    encrypted = transform.bytes2int(crypto)
+    range_bad = encrypted >= priv_key.n
+    input_bad = length_bad | range_bad
+
+    # Always perform one blinded modular exponentiation, reducing the value
+    # modulo n when it was out of range so the operation remains well defined.
+    payload = encrypted % priv_key.n
+    decrypted = priv_key.blinded_decrypt(payload)
+    cleartext = transform.int2bytes(decrypted, blocksize)
+
+    # Validate the whole block in a fixed order, without early returns or
+    # short-circuiting operators.
+    marker_bad = not compare_digest(cleartext[:2], b"\x00\x02")
+
+    separator_found = False
+    sep_idx = -1
+    for idx in range(2, blocksize):
+        byte_is_separator = cleartext[idx] == 0
+        # Keep the first separator; later matches must not change the result.
+        take_separator = byte_is_separator & (not separator_found)
+        sep_idx = idx if take_separator else sep_idx
+        separator_found = separator_found | byte_is_separator
+
+    # RFC 8017 section 7.2.2 requires at least 8 padding bytes, hence the
+    # separator must be located at index 10 or later.
+    separator_too_early = sep_idx < 10
+    padding_bad = (not separator_found) | separator_too_early
+
+    rejected = input_bad | marker_bad | padding_bad
+
+    # The synthetic message is computed for every call so successful and
+    # rejected calls perform the same allocations. It is only used on failure.
+    synthetic = _synthetic_message(priv_key, crypto, blocksize)
+    message = synthetic if rejected else cleartext[sep_idx + 1 :]
+
+    return DecryptionResult(message=message, rejected=rejected)
+
+
 def sign_hash(hash_value: bytes, priv_key: key.PrivateKey, hash_method: str) -> bytes:
     """Signs a precomputed hash with the private key.
 
@@ -450,6 +576,8 @@ def _find_method_hash(clearsig: bytes) -> str:
 __all__ = [
     "encrypt",
     "decrypt",
+    "decrypt_implicit_rejection",
+    "DecryptionResult",
     "sign",
     "verify",
     "DecryptionError",

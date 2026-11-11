@@ -16,10 +16,192 @@
 
 import struct
 import sys
+import threading
 import unittest
 
 import rsa
 from rsa import pkcs1
+
+
+def _encrypt_raw_block(block: bytes, pub: rsa.PublicKey) -> bytes:
+    """RSA-encrypts an already PKCS#1-padded block without re-padding it."""
+
+    blocksize = rsa.common.byte_size(pub.n)
+    payload = rsa.transform.bytes2int(block)
+    encrypted = rsa.core.encrypt_int(payload, pub.e, pub.n)
+    return rsa.transform.int2bytes(encrypted, blocksize)
+
+
+class ImplicitRejectionTest(unittest.TestCase):
+    def setUp(self):
+        (self.pub, self.priv) = rsa.newkeys(512)
+        self.blocksize = rsa.common.byte_size(self.priv.n)
+
+    def _raw_crypto(self, block: bytes) -> bytes:
+        self.assertEqual(len(block), self.blocksize)
+        return _encrypt_raw_block(block, self.pub)
+
+    def test_valid_ciphertext_accepted(self):
+        message = b"implicit rejection happy path"
+        crypto = pkcs1.encrypt(message, self.pub)
+
+        result = pkcs1.decrypt_implicit_rejection(crypto, self.priv)
+
+        self.assertFalse(result.rejected)
+        self.assertEqual(result.message, message)
+
+    def test_bad_marker_is_rejected(self):
+        suffix = b"\x00msg"
+        block = (
+            b"\x00\x03"
+            + b"\x01" * (self.blocksize - 2 - len(suffix))
+            + suffix
+        )
+        crypto = self._raw_crypto(block)
+
+        result = pkcs1.decrypt_implicit_rejection(crypto, self.priv)
+
+        self.assertTrue(result.rejected)
+        self.assertEqual(len(result.message), self.blocksize - 11)
+
+    def test_missing_separator_is_rejected(self):
+        # No 0x00 byte anywhere after the marker.
+        block = b"\x00\x02" + b"\x11" * (self.blocksize - 2)
+        crypto = self._raw_crypto(block)
+
+        result = pkcs1.decrypt_implicit_rejection(crypto, self.priv)
+
+        self.assertTrue(result.rejected)
+        self.assertEqual(len(result.message), self.blocksize - 11)
+
+    def test_separator_before_index_10_is_rejected(self):
+        # Separator at index 9 gives only 7 padding bytes.
+        block = b"\x00\x02" + b"\x01" * 7 + b"\x00" + b"msg"
+        block = block + b"\x01" * (self.blocksize - len(block))
+        crypto = self._raw_crypto(block)
+
+        result = pkcs1.decrypt_implicit_rejection(crypto, self.priv)
+
+        self.assertTrue(result.rejected)
+        self.assertEqual(len(result.message), self.blocksize - 11)
+
+    def test_all_zero_block_is_rejected(self):
+        # The raw encrypted value 0 decrypts back to an all-zero block.
+        crypto = rsa.transform.int2bytes(0, self.blocksize)
+
+        result = pkcs1.decrypt_implicit_rejection(crypto, self.priv)
+
+        self.assertTrue(result.rejected)
+        self.assertEqual(len(result.message), self.blocksize - 11)
+
+    def test_overlong_ciphertext_is_rejected(self):
+        message = b"too long ciphertext"
+        crypto = pkcs1.encrypt(message, self.pub)
+        overlong = crypto + b"\x00"
+
+        result = pkcs1.decrypt_implicit_rejection(overlong, self.priv)
+
+        self.assertTrue(result.rejected)
+        self.assertEqual(len(result.message), self.blocksize - 11)
+
+    def test_leading_zero_ciphertext_is_rejected(self):
+        # A leading zero makes the represented integer smaller than n, but the
+        # encoded ciphertext no longer has the modulus length.
+        crypto = b"\x00" + b"\x42" * (self.blocksize - 1)
+
+        result = pkcs1.decrypt_implicit_rejection(crypto, self.priv)
+
+        self.assertTrue(result.rejected)
+        self.assertEqual(len(result.message), self.blocksize - 11)
+
+    def test_integer_out_of_range_is_rejected(self):
+        # Encoding of n itself: the value is not a valid RSA ciphertext.
+        crypto = rsa.transform.int2bytes(self.priv.n, self.blocksize)
+
+        result = pkcs1.decrypt_implicit_rejection(crypto, self.priv)
+
+        self.assertTrue(result.rejected)
+        self.assertEqual(len(result.message), self.blocksize - 11)
+
+    def test_synthetic_message_is_deterministic(self):
+        suffix = b"\x00msg"
+        block = (
+            b"\x00\x03"
+            + b"\x01" * (self.blocksize - 2 - len(suffix))
+            + suffix
+        )
+        crypto = self._raw_crypto(block)
+
+        first = pkcs1.decrypt_implicit_rejection(crypto, self.priv)
+        second = pkcs1.decrypt_implicit_rejection(crypto, self.priv)
+
+        self.assertTrue(first.rejected and second.rejected)
+        self.assertEqual(first.message, second.message)
+
+    def test_synthetic_message_depends_on_ciphertext(self):
+        first_suffix = b"\x00aa"
+        second_suffix = b"\x00bb"
+        first_block = (
+            b"\x00\x03"
+            + b"\x01" * (self.blocksize - 2 - len(first_suffix))
+            + first_suffix
+        )
+        second_block = (
+            b"\x00\x03"
+            + b"\x01" * (self.blocksize - 2 - len(second_suffix))
+            + second_suffix
+        )
+
+        first = pkcs1.decrypt_implicit_rejection(
+            self._raw_crypto(first_block), self.priv
+        )
+        second = pkcs1.decrypt_implicit_rejection(
+            self._raw_crypto(second_block), self.priv
+        )
+
+        self.assertNotEqual(first.message, second.message)
+
+    def test_default_decrypt_still_raises(self):
+        crypto = rsa.transform.int2bytes(0, self.blocksize)
+
+        with self.assertRaises(pkcs1.DecryptionError):
+            pkcs1.decrypt(crypto, self.priv)
+
+    def test_concurrent_calls_keep_blinding_state_consistent(self):
+        valid_crypto = pkcs1.encrypt(b"concurrent", self.pub)
+        invalid_crypto = rsa.transform.int2bytes(0, self.blocksize)
+        errors = []
+
+        def worker():
+            try:
+                for _ in range(25):
+                    accepted = pkcs1.decrypt_implicit_rejection(
+                        valid_crypto, self.priv
+                    )
+                    rejected = pkcs1.decrypt_implicit_rejection(
+                        invalid_crypto, self.priv
+                    )
+                    if accepted.rejected or not rejected.rejected:
+                        errors.append("unexpected rejection flag")
+            except BaseException as ex:  # pragma: no cover - failure reporting
+                errors.append(repr(ex))
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [])
+
+        # The blinding factors remain a consistent pair after concurrent use.
+        product = (self.priv.blindfac * self.priv.blindfac_inverse) % self.priv.n
+        self.assertEqual(product, 1)
+
+        # Subsequent normal decryption still works correctly.
+        self.assertEqual(
+            pkcs1.decrypt(valid_crypto, self.priv), b"concurrent"
+        )
 
 
 class BinaryTest(unittest.TestCase):

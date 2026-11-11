@@ -2,6 +2,11 @@
 
 ## Version 4.10 - in development
 
+- Add `rsa.pkcs1.decrypt_implicit_rejection()`, a PKCS#1 v1.5 decryption path
+  with implicit rejection. Malformed ciphertexts return a deterministic
+  synthetic message and a `DecryptionResult.rejected` flag instead of raising,
+  performing fixed-order validation without data-dependent early exits. The
+  existing `decrypt()` function and its exceptions are unchanged.
 - Drop support for Python 3.6 ([#209](https://github.com/sybrenstuvel/python-rsa/pull/209))
   and declare support for 3.11 ([#208](https://github.com/sybrenstuvel/python-rsa/pull/208)).
 - Upgrade `pytest` dependency to fix a [security issue](https://github.com/pytest-dev/py/issues/287#issuecomment-1290407715).

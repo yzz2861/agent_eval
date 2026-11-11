@@ -11,6 +11,11 @@ Functions
 
 .. autofunction:: rsa.decrypt
 
+.. autofunction:: rsa.decrypt_implicit_rejection
+
+.. autoclass:: rsa.pkcs1.DecryptionResult
+    :members:
+
 .. autofunction:: rsa.sign
 
 .. autofunction:: rsa.verify

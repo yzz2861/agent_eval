@@ -25,6 +25,8 @@ from rsa.key import newkeys, PrivateKey, PublicKey
 from rsa.pkcs1 import (
     encrypt,
     decrypt,
+    decrypt_implicit_rejection,
+    DecryptionResult,
     sign,
     verify,
     DecryptionError,
@@ -48,6 +50,8 @@ __all__ = [
     "newkeys",
     "encrypt",
     "decrypt",
+    "decrypt_implicit_rejection",
+    "DecryptionResult",
     "sign",
     "verify",
     "PublicKey",
