@@ -23,6 +23,7 @@ from python_multipart.exceptions import (
 from python_multipart.multipart import (
     END,
     FIELD_DATA,
+    FILENAME_FALLBACK_ORDER,
     BaseParser,
     Field,
     File,
@@ -32,9 +33,12 @@ from python_multipart.multipart import (
     OctetStreamParser,
     QuerystringParser,
     QuerystringState,
+    StrictHeaderRejection,
+    StrictOptionsHeaderError,
     create_form_parser,
     parse_form,
     parse_options_header,
+    parse_options_header_strict,
 )
 
 from .compat import parametrize, parametrize_class
@@ -362,6 +366,170 @@ class TestParseOptionsHeader(unittest.TestCase):
         _, p = parse_options_header(b'text/plain; q="a\\\\b"')
 
         self.assertEqual(p, {b"q": b"a\\b"})
+
+
+class TestParseOptionsHeaderStrict(unittest.TestCase):
+    def test_preserves_order_raw_bytes_values_and_provenance(self) -> None:
+        result = parse_options_header_strict(
+            b'form-data; file_name = "C:\\tmp\\a.txt"; name="field"; filename="result.txt"'
+        )
+
+        self.assertEqual(result.content_type, b"form-data")
+        self.assertEqual([parameter.name for parameter in result.parameters], [b"file_name", b"name", b"filename"])
+        self.assertEqual(result.parameters[0].raw, b'file_name = "C:\\tmp\\a.txt"')
+        self.assertEqual(result.parameters[0].raw_value, b' "C:\\tmp\\a.txt"')
+        self.assertEqual(result.parameters[0].value, b"C:\\tmp\\a.txt")
+        self.assertEqual(result.name, b"field")
+        self.assertEqual(result.filename, b"result.txt")
+        self.assertEqual(result.name_decision.source, "plain")
+        self.assertEqual(result.filename_decision.source, "plain")
+
+    def test_duplicate_name_has_distinct_reason(self) -> None:
+        with self.assertRaises(StrictOptionsHeaderError) as ctx:
+            parse_options_header_strict(b'form-data; name="first"; name="second"')
+
+        self.assertEqual(ctx.exception.reason, StrictHeaderRejection.DUPLICATE_NAME)
+        self.assertEqual(ctx.exception.code, "duplicate_name")
+        self.assertEqual(ctx.exception.category, "semantics")
+
+    def test_duplicate_filename_has_distinct_reason(self) -> None:
+        with self.assertRaises(StrictOptionsHeaderError) as ctx:
+            parse_options_header_strict(b'form-data; name="f"; filename="a"; filename="b"')
+
+        self.assertEqual(ctx.exception.reason, StrictHeaderRejection.DUPLICATE_FILENAME)
+        self.assertEqual(ctx.exception.code, "duplicate_filename")
+
+    def test_extended_plain_conflict_has_distinct_reason(self) -> None:
+        with self.assertRaises(StrictOptionsHeaderError) as ctx:
+            parse_options_header_strict(b"form-data; name=\"plain\"; name*=utf-8''extended")
+
+        self.assertEqual(ctx.exception.reason, StrictHeaderRejection.EXTENDED_PARAMETER_CONFLICT)
+
+    def test_filename_star_is_ignored_candidate_and_never_wins(self) -> None:
+        result = parse_options_header_strict(
+            b'form-data; name="f"; filename="plain.txt"; filename*=utf-8\'\'extended.txt'
+        )
+
+        self.assertEqual(result.filename, b"plain.txt")
+        self.assertEqual(len(result.ignored_candidates), 1)
+        extended = result.ignored_candidates[0]
+        self.assertEqual(extended.name, b"filename*")
+        self.assertEqual(extended.raw_value, b"utf-8''extended.txt")
+        self.assertEqual(extended.value, b"utf-8''extended.txt")
+        self.equal_extended_ignored(extended)
+
+    def equal_extended_ignored(self, parameter: Any) -> None:
+        self.assertTrue(parameter.ignored)
+        self.assertEqual(parameter.ignore_reason, "extended_parameter_ignored")
+        self.assertFalse(parameter.selected)
+
+    def test_filename_star_alone_does_not_create_a_filename(self) -> None:
+        result = parse_options_header_strict(b"form-data; name=\"f\"; filename*=utf-8''x.txt")
+
+        self.assertIsNone(result.filename)
+        self.assertEqual(result.filename_decision.source, "none")
+        self.assertEqual(result.filename_decision.reason, "no plain filename parameter")
+
+    def test_quoted_semicolon_escaped_quote_and_backslash(self) -> None:
+        result = parse_options_header_strict(b'form-data; name="a;b"; filename="say \\"hi\\"; C:\\\\tmp\\\\file.txt"')
+
+        self.assertEqual(result.name, b"a;b")
+        self.assertEqual(result.filename, b'say "hi"; C:\\tmp\\file.txt')
+        self.assertEqual(result.parameters[0].value_source, "quoted")
+        self.assertEqual(result.parameters[1].value, b'say "hi"; C:\\tmp\\file.txt')
+
+    def test_ie_windows_full_path_uses_fixed_basename_fallback(self) -> None:
+        result = parse_options_header_strict(b'form-data; name="f"; filename="C:\\fakepath\\invoice.pdf"')
+
+        self.assertEqual(result.filename, b"invoice.pdf")
+        self.assertEqual(result.filename_decision.source, "ie_windows_basename")
+        self.assertEqual(result.filename_decision.reason, "basename of an IE Windows full path")
+        self.assertEqual(result.filename_decision.value, result.filename)
+        self.assertEqual(FILENAME_FALLBACK_ORDER, ("filename", "ie_windows_basename", "none"))
+
+    def test_missing_name_has_distinct_reason(self) -> None:
+        with self.assertRaises(StrictOptionsHeaderError) as ctx:
+            parse_options_header_strict(b'form-data; filename="secret.txt"')
+
+        self.assertEqual(ctx.exception.reason, StrictHeaderRejection.MISSING_NAME)
+        self.assertIn("Field name not found in Content-Disposition", str(ctx.exception))
+
+    def test_crlf_injection_is_rejected_before_field_construction(self) -> None:
+        with self.assertRaises(StrictOptionsHeaderError) as ctx:
+            parse_options_header_strict(b'form-data; name="f"\r\nX-Injected: yes')
+
+        self.assertEqual(ctx.exception.reason, StrictHeaderRejection.BARE_CR)
+        self.assertEqual(ctx.exception.category, "header_injection")
+
+        with self.assertRaises(StrictOptionsHeaderError) as ctx:
+            parse_options_header_strict(b'form-data; name="f"\nX-Injected: yes')
+        self.assertEqual(ctx.exception.reason, StrictHeaderRejection.BARE_LF)
+
+    def test_nul_and_invalid_latin1_are_rejected(self) -> None:
+        with self.assertRaises(StrictOptionsHeaderError) as ctx:
+            parse_options_header_strict(b'form-data; name="f\x00"')
+        self.assertEqual(ctx.exception.reason, StrictHeaderRejection.NUL_BYTE)
+
+        with self.assertRaises(StrictOptionsHeaderError) as ctx:
+            parse_options_header_strict('form-data; name="f\u2603"')
+        self.assertEqual(ctx.exception.reason, StrictHeaderRejection.INVALID_LATIN1_BYTE)
+
+    def test_unclosed_quote_and_text_after_quote_are_rejected(self) -> None:
+        with self.assertRaises(StrictOptionsHeaderError) as ctx:
+            parse_options_header_strict(b'form-data; name="f; filename="a.txt"')
+        self.assertEqual(ctx.exception.reason, StrictHeaderRejection.UNCLOSED_QUOTE)
+
+        with self.assertRaises(StrictOptionsHeaderError) as ctx:
+            parse_options_header_strict(b'form-data; name="f" trailing')
+        self.assertEqual(ctx.exception.reason, StrictHeaderRejection.INVALID_QUOTED_VALUE)
+
+    def test_empty_whitespace_and_control_field_names_are_rejected(self) -> None:
+        for name in (b"", b"   ", b"a\tb"):
+            with self.subTest(name=name):
+                with self.assertRaises(FormParserError):
+                    Field(name)
+
+        for header in (b'form-data; name=""', b'form-data; name="   "', b'form-data; name="a\tb"'):
+            with self.subTest(header=header):
+                with self.assertRaises(StrictOptionsHeaderError) as ctx:
+                    parse_options_header_strict(header)
+                self.assertEqual(ctx.exception.reason, StrictHeaderRejection.INVALID_FIELD_NAME)
+
+    def test_form_parser_uses_strict_decisions(self) -> None:
+        fields: list[Field] = []
+        files: list[File] = []
+        data = (
+            b"--b\r\n"
+            b'Content-Disposition: form-data; name="file"; filename="C:\\fakepath\\invoice.pdf"\r\n'
+            b"Content-Type: application/pdf\r\n\r\n"
+            b"PDF\r\n"
+            b"--b--\r\n"
+        )
+        parser = FormParser("multipart/form-data", fields.append, files.append, boundary="b")
+        parser.write(data)
+        parser.finalize()
+
+        self.assertEqual(fields, [])
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0].field_name, b"file")
+        self.assertEqual(files[0].file_name, b"invoice.pdf")
+
+    def test_form_parser_rejects_duplicate_filename_before_creating_file(self) -> None:
+        files: list[File] = []
+        data = (
+            b"--b\r\n"
+            b'Content-Disposition: form-data; name="file"; filename="a.txt"; filename="b.txt"\r\n'
+            b"\r\n"
+            b"x\r\n"
+            b"--b--\r\n"
+        )
+        parser = FormParser("multipart/form-data", None, files.append, boundary="b")
+
+        with self.assertRaises(StrictOptionsHeaderError) as ctx:
+            parser.write(data)
+            parser.finalize()
+        self.assertEqual(ctx.exception.reason, StrictHeaderRejection.DUPLICATE_FILENAME)
+        self.assertEqual(files, [])
 
 
 class TestBaseParser(unittest.TestCase):

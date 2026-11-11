@@ -5,7 +5,8 @@ import os
 import shutil
 import sys
 import tempfile
-from enum import IntEnum, global_enum
+from dataclasses import dataclass
+from enum import Enum, IntEnum, global_enum
 from io import BufferedRandom, BytesIO
 from numbers import Number
 from typing import TYPE_CHECKING, cast
@@ -14,7 +15,7 @@ from .decoders import Base64Decoder, QuotedPrintableDecoder
 from .exceptions import FileError, FormParserError, MultipartParseError, QuerystringParseError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
     from typing import Any, Literal, Protocol, TypeAlias, TypedDict
 
     class SupportsRead(Protocol):
@@ -189,6 +190,670 @@ every HTTP client.
 """
 
 
+class StrictHeaderRejection(str, Enum):
+    """Machine-readable reasons a strict options header may be rejected."""
+
+    DUPLICATE_NAME = "duplicate_name"
+    DUPLICATE_FILENAME = "duplicate_filename"
+    MISSING_NAME = "missing_name"
+    EXTENDED_PARAMETER_CONFLICT = "extended_parameter_conflict"
+    EXTENDED_PARAMETER_IGNORED = "extended_parameter_ignored"
+    DUPLICATE_PARAMETER = "duplicate_parameter"
+    EMPTY_PARAMETER = "empty_parameter"
+    EMPTY_PARAMETER_NAME = "empty_parameter_name"
+    INVALID_PARAMETER_NAME = "invalid_parameter_name"
+    MISSING_EQUALS = "missing_equals"
+    UNCLOSED_QUOTE = "unclosed_quote"
+    INVALID_QUOTED_VALUE = "invalid_quoted_value"
+    BARE_CR = "bare_cr"
+    BARE_LF = "bare_lf"
+    NUL_BYTE = "nul_byte"
+    CONTROL_CHARACTER = "control_character"
+    INVALID_LATIN1_BYTE = "invalid_latin1_byte"
+    INVALID_FIELD_NAME = "invalid_field_name"
+
+
+class ParameterSource(str, Enum):
+    """Where a parsed parameter came from."""
+
+    PLAIN = "plain"
+    EXTENDED = "extended"
+
+
+class ValueSource(str, Enum):
+    """How the parameter's value was encoded in the header."""
+
+    QUOTED = "quoted"
+    UNQUOTED = "unquoted"
+
+
+class DecisionSource(str, Enum):
+    """The rule that selected (or ignored) a name/filename candidate."""
+
+    PLAIN = "plain"
+    IE_WINDOWS_BASENAME = "ie_windows_basename"
+    NONE = "none"
+
+
+# The filename decision is intentionally a fixed, auditable sequence.  RFC
+# 7578 forbids `filename*`, so it is never part of this fallback chain.
+FILENAME_FALLBACK_ORDER: tuple[str, ...] = ("filename", "ie_windows_basename", "none")
+"""The ordered filename fallback rules used by strict header parsing."""
+
+
+class StrictOptionsHeaderError(FormParserError):
+    """Raised when a strict options header cannot be used safely.
+
+    ``reason`` is a :class:`StrictHeaderRejection` member.  Its value is also
+    exposed as ``code`` (a plain string) for logging and API compatibility.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: StrictHeaderRejection,
+        category: str,
+        raw: bytes = b"",
+        offset: int = -1,
+        parameter: OptionsParameter | None = None,
+        result: StrictOptionsHeader | None = None,
+    ) -> None:
+        self.reason = reason
+        self.code = reason.value
+        self.category = category
+        self.raw = raw
+        self.offset = offset
+        self.parameter = parameter
+        self.result = result
+        super().__init__(f"{message} [{reason.value}]")
+
+    @property
+    def reason_code(self) -> str:
+        return self.code
+
+    @property
+    def rejection(self) -> StrictHeaderRejection:
+        return self.reason
+
+
+@dataclass(slots=True)
+class OptionsParameter:
+    """One parameter occurrence, preserving its raw bytes and provenance."""
+
+    index: int
+    name: bytes
+    raw_name: bytes
+    raw_value: bytes
+    value: bytes
+    source: ParameterSource
+    value_source: ValueSource
+    raw: bytes
+    offset: int
+    value_offset: int
+    ignored: bool = False
+    ignore_reason: StrictHeaderRejection | None = None
+    selected: bool = False
+
+    @property
+    def key(self) -> bytes:
+        return self.name
+
+    @property
+    def parsed_value(self) -> bytes:
+        return self.value
+
+    @property
+    def decision_source(self) -> ParameterSource:
+        return self.source
+
+    @property
+    def raw_bytes(self) -> bytes:
+        return self.raw
+
+    @property
+    def raw_key(self) -> bytes:
+        return self.raw_name
+
+    @property
+    def origin(self) -> ParameterSource:
+        return self.source
+
+
+@dataclass(frozen=True, slots=True)
+class ParameterDecision:
+    """The result of applying a selection rule to zero or more candidates."""
+
+    parameter: OptionsParameter | None
+    value: bytes | None
+    source: DecisionSource
+    reason: str
+    selected: bool
+
+    @property
+    def decision_source(self) -> DecisionSource:
+        return self.source
+
+    @property
+    def parsed_value(self) -> bytes | None:
+        return self.value
+
+    @property
+    def raw(self) -> bytes | None:
+        return self.parameter.raw if self.parameter is not None else None
+
+
+@dataclass(frozen=True, slots=True)
+class StrictOptionsHeader:
+    """A lossless, explicitly ordered options-header parse result."""
+
+    raw: bytes
+    raw_content_type: bytes
+    content_type: bytes
+    parameters: tuple[OptionsParameter, ...]
+    name: bytes | None
+    filename: bytes | None
+    name_decision: ParameterDecision
+    filename_decision: ParameterDecision
+
+    @property
+    def value(self) -> bytes:
+        return self.content_type
+
+    @property
+    def params(self) -> tuple[OptionsParameter, ...]:
+        return self.parameters
+
+    @property
+    def decisions(self) -> tuple[OptionsParameter, ...]:
+        return self.parameters
+
+    @property
+    def ignored_candidates(self) -> tuple[OptionsParameter, ...]:
+        return tuple(parameter for parameter in self.parameters if parameter.ignored)
+
+    @property
+    def options(self) -> dict[bytes, bytes]:
+        """A convenience view built from plain (non-extended) parameters only."""
+        return {parameter.name: parameter.value for parameter in self.parameters if not parameter.ignored}
+
+    def get_all(self, name: bytes | str) -> tuple[OptionsParameter, ...]:
+        key = name.encode("latin-1") if isinstance(name, str) else name
+        key = key.lower()
+        return tuple(parameter for parameter in self.parameters if parameter.name == key)
+
+    def get(self, name: bytes | str) -> bytes | None:
+        key = name.encode("latin-1") if isinstance(name, str) else name
+        key = key.lower()
+        for parameter in self.parameters:
+            if not parameter.ignored and parameter.name == key:
+                return parameter.value
+        return None
+
+    def __iter__(self) -> Iterator[bytes | dict[bytes, bytes]]:
+        yield self.content_type
+        yield self.options
+
+    @property
+    def field_name(self) -> bytes | None:
+        return self.name
+
+    @property
+    def file_name(self) -> bytes | None:
+        return self.filename
+
+
+OptionsHeader = StrictOptionsHeader
+OptionsParameterResult = OptionsParameter
+OptionsHeaderError = StrictOptionsHeaderError
+StrictParseError = StrictOptionsHeaderError
+OptionsHeaderParseError = StrictOptionsHeaderError
+StrictOptionsResult = StrictOptionsHeader
+RejectionReason = StrictHeaderRejection
+
+
+_STRICT_OWS = b" \t"
+_STRICT_QUOTE = b'"'[0]
+_STRICT_BACKSLASH = b"\\"[0]
+_STRICT_SEMICOLON = b";"[0]
+_STRICT_EQUALS = b"="[0]
+
+
+def _strict_error(
+    reason: StrictHeaderRejection,
+    message: str,
+    *,
+    category: str,
+    raw: bytes = b"",
+    offset: int = -1,
+    parameter: OptionsParameter | None = None,
+    result: StrictOptionsHeader | None = None,
+) -> None:
+    raise StrictOptionsHeaderError(
+        message, reason=reason, category=category, raw=raw, offset=offset, parameter=parameter, result=result
+    )
+
+
+def _validate_strict_bytes(raw: bytes) -> None:
+    for offset, byte in enumerate(raw):
+        if byte == NULL:
+            _strict_error(
+                StrictHeaderRejection.NUL_BYTE,
+                f"NUL byte in options header at offset {offset}",
+                category="header_injection",
+                raw=raw,
+                offset=offset,
+            )
+        if byte == CR:
+            _strict_error(
+                StrictHeaderRejection.BARE_CR,
+                f"Potential header injection: bare CR at offset {offset}",
+                category="header_injection",
+                raw=raw,
+                offset=offset,
+            )
+        if byte == LF:
+            _strict_error(
+                StrictHeaderRejection.BARE_LF,
+                f"Potential header injection: bare LF at offset {offset}",
+                category="header_injection",
+                raw=raw,
+                offset=offset,
+            )
+        if (byte < 0x20 and byte != 0x09) or byte == 0x7F:
+            _strict_error(
+                StrictHeaderRejection.CONTROL_CHARACTER,
+                f"Control character 0x{byte:02x} in options header at offset {offset}",
+                category="header_injection",
+                raw=raw,
+                offset=offset,
+            )
+
+
+def _strict_segments(raw: bytes) -> list[tuple[int, int]]:
+    """Split on semicolons outside quoted strings, keeping byte offsets."""
+
+    segments: list[tuple[int, int]] = []
+    start = 0
+    index = 0
+    in_quote = False
+    while index < len(raw):
+        byte = raw[index]
+        if in_quote:
+            if byte == _STRICT_BACKSLASH:
+                if index + 1 >= len(raw):
+                    _strict_error(
+                        StrictHeaderRejection.UNCLOSED_QUOTE,
+                        f"Unclosed quoted string at offset {start}",
+                        category="syntax",
+                        raw=raw,
+                        offset=index,
+                    )
+                index += 2
+                continue
+            if byte == _STRICT_QUOTE:
+                in_quote = False
+            index += 1
+            continue
+
+        if byte == _STRICT_QUOTE:
+            in_quote = True
+        elif byte == _STRICT_SEMICOLON:
+            segments.append((start, index))
+            start = index + 1
+        index += 1
+
+    if in_quote:
+        _strict_error(
+            StrictHeaderRejection.UNCLOSED_QUOTE,
+            f"Unclosed quoted string at offset {start}",
+            category="syntax",
+            raw=raw,
+            offset=len(raw),
+        )
+    segments.append((start, len(raw)))
+    return segments
+
+
+def _parse_strict_value(raw_value: bytes, *, raw: bytes, offset: int) -> tuple[bytes, bool]:
+    value = raw_value.strip(_STRICT_OWS)
+    if not value:
+        return b"", False
+
+    if value[0] != _STRICT_QUOTE:
+        if _STRICT_QUOTE in value:
+            _strict_error(
+                StrictHeaderRejection.INVALID_QUOTED_VALUE,
+                f"Double quote inside an unquoted parameter value at offset {offset}",
+                category="syntax",
+                raw=raw,
+                offset=offset,
+            )
+        return value, False
+
+    parsed: list[int] = []
+    index = 1
+    closed = False
+    while index < len(value):
+        byte = value[index]
+        if byte == _STRICT_BACKSLASH:
+            if index + 1 >= len(value):
+                break
+            next_byte = value[index + 1]
+            if next_byte in (_STRICT_BACKSLASH, _STRICT_QUOTE):
+                parsed.append(next_byte)
+            else:
+                # Browsers (and IE in particular) use backslashes as path
+                # separators.  Only the two quoted-pair forms that the
+                # historical parser decoded are unescaped here.
+                parsed.extend((byte, next_byte))
+            index += 2
+            continue
+        if byte == _STRICT_QUOTE:
+            closed = True
+            trailing = value[index + 1 :]
+            if trailing.strip(_STRICT_OWS):
+                _strict_error(
+                    StrictHeaderRejection.INVALID_QUOTED_VALUE,
+                    f"Text follows the closing quote at offset {offset}",
+                    category="syntax",
+                    raw=raw,
+                    offset=offset,
+                )
+            break
+        parsed.append(byte)
+        index += 1
+
+    if not closed:
+        _strict_error(
+            StrictHeaderRejection.UNCLOSED_QUOTE,
+            f"Unclosed quoted value at offset {offset}",
+            category="syntax",
+            raw=raw,
+            offset=offset,
+        )
+    return bytes(parsed), True
+
+
+def _is_control(byte: int) -> bool:
+    return byte < 0x20 or byte == 0x7F
+
+
+def _validate_field_name(name: bytes, *, raw: bytes = b"", offset: int = -1) -> None:
+    if not name:
+        _strict_error(
+            StrictHeaderRejection.INVALID_FIELD_NAME,
+            "Field name must not be empty",
+            category="semantics",
+            raw=raw,
+            offset=offset,
+        )
+    if not name.strip(b" \t"):
+        _strict_error(
+            StrictHeaderRejection.INVALID_FIELD_NAME,
+            "Field name must not consist only of whitespace",
+            category="semantics",
+            raw=raw,
+            offset=offset,
+        )
+    if any(_is_control(byte) for byte in name):
+        _strict_error(
+            StrictHeaderRejection.INVALID_FIELD_NAME,
+            "Field name must not contain control characters",
+            category="semantics",
+            raw=raw,
+            offset=offset,
+        )
+
+
+def _extended_base_name(name: bytes) -> bytes | None:
+    star = name.find(b"*")
+    if star < 0:
+        return None
+    return name[:star]
+
+
+def _ie_windows_basename(value: bytes) -> bytes:
+    is_drive_path = len(value) >= 3 and value[1:2] == b":" and value[2:3] in (b"\\", b"/")
+    is_unc_path = value.startswith(b"\\\\") or value.startswith(b"//")
+    if is_drive_path or is_unc_path:
+        return value.replace(b"\\", b"/").rsplit(b"/", 1)[-1]
+    return value
+
+
+def parse_options_header_strict(
+    value: str | bytes | None, *, require_name: bool | None = None, validate_field_name: bool = True
+) -> StrictOptionsHeader:
+    """Parse an options header without collapsing ambiguous parameters.
+
+    Unlike :func:`parse_options_header`, this entry point is opt-in and
+    returns a :class:`StrictOptionsHeader`.  Every parameter occurrence is
+    retained in source order together with its raw bytes, parsed value, and
+    provenance.  Ambiguous names/filenames and unsafe bytes raise
+    :class:`StrictOptionsHeaderError` with a machine-readable ``reason``.
+
+    ``require_name`` defaults to true for ``form-data`` headers and false for
+    other media types.  Pass it explicitly when parsing a Content-Disposition
+    with a non-standard disposition type.
+    """
+
+    if value is None:
+        raw = b""
+    elif isinstance(value, bytes):
+        raw = value
+    elif isinstance(value, str):
+        try:
+            raw = value.encode("latin-1")
+        except UnicodeEncodeError as exc:
+            _strict_error(
+                StrictHeaderRejection.INVALID_LATIN1_BYTE,
+                f"Header contains a character that is not valid latin-1: {value[exc.start : exc.end]!r}",
+                category="encoding",
+                offset=exc.start,
+            )
+    else:
+        raise TypeError("value must be str, bytes, or None")
+
+    _validate_strict_bytes(raw)
+    segments = _strict_segments(raw)
+
+    first_start, first_end = segments[0]
+    raw_content_type = raw[first_start:first_end].strip(_STRICT_OWS)
+    content_type = raw_content_type.lower()
+
+    parameters: list[OptionsParameter] = []
+    for segment_index, (start, end) in enumerate(segments[1:], start=1):
+        raw_segment = raw[start:end]
+        stripped_segment = raw_segment.strip(_STRICT_OWS)
+        if not stripped_segment:
+            # A single trailing delimiter is harmless.  Empty parameters in
+            # the middle of the header are ambiguous and are rejected.
+            trailing_segments = segments[segment_index + 1 :]
+            trailing_are_empty = all(
+                not raw[future_start:future_end].strip(_STRICT_OWS) for future_start, future_end in trailing_segments
+            )
+            if trailing_are_empty:
+                continue
+            _strict_error(
+                StrictHeaderRejection.EMPTY_PARAMETER,
+                f"Empty parameter at offset {start}",
+                category="syntax",
+                raw=raw,
+                offset=start,
+            )
+
+        equals = raw_segment.find(b"=")
+        if equals < 0:
+            _strict_error(
+                StrictHeaderRejection.MISSING_EQUALS,
+                f"Parameter at offset {start} has no '=' separator",
+                category="syntax",
+                raw=raw,
+                offset=start,
+            )
+
+        raw_name = raw_segment[:equals]
+        name = raw_name.strip(_STRICT_OWS)
+        if not name:
+            _strict_error(
+                StrictHeaderRejection.EMPTY_PARAMETER_NAME,
+                f"Parameter at offset {start} has an empty name",
+                category="syntax",
+                raw=raw,
+                offset=start,
+            )
+        if b'"' in name or b" " in name or b"\t" in name:
+            _strict_error(
+                StrictHeaderRejection.INVALID_PARAMETER_NAME,
+                f"Invalid parameter name {name!r} at offset {start}",
+                category="syntax",
+                raw=raw,
+                offset=start,
+            )
+
+        raw_value = raw_segment[equals + 1 :]
+        parsed_value, quoted = _parse_strict_value(raw_value, raw=raw, offset=start + equals + 1)
+        canonical_name = name.lower()
+        source = ParameterSource.EXTENDED if b"*" in canonical_name else ParameterSource.PLAIN
+        parameters.append(
+            OptionsParameter(
+                index=len(parameters),
+                name=canonical_name,
+                raw_name=name,
+                raw_value=raw_value,
+                value=parsed_value,
+                source=source,
+                value_source=ValueSource.QUOTED if quoted else ValueSource.UNQUOTED,
+                raw=stripped_segment,
+                offset=start,
+                value_offset=start + equals + 1,
+                ignored=source is ParameterSource.EXTENDED,
+                ignore_reason=(
+                    StrictHeaderRejection.EXTENDED_PARAMETER_IGNORED if source is ParameterSource.EXTENDED else None
+                ),
+            )
+        )
+
+    # Detect duplicates from the ordered occurrence list.  Never collapse
+    # these into a dict, because the caller must be able to explain the result.
+    seen_plain: dict[bytes, OptionsParameter] = {}
+    for parameter in parameters:
+        if parameter.source is not ParameterSource.PLAIN:
+            continue
+        previous = seen_plain.get(parameter.name)
+        if previous is None:
+            seen_plain[parameter.name] = parameter
+            continue
+        if parameter.name == b"name":
+            reason = StrictHeaderRejection.DUPLICATE_NAME
+            message = "Duplicate Content-Disposition name parameter"
+        elif parameter.name == b"filename":
+            reason = StrictHeaderRejection.DUPLICATE_FILENAME
+            message = "Duplicate Content-Disposition filename parameter"
+        else:
+            reason = StrictHeaderRejection.DUPLICATE_PARAMETER
+            message = f"Duplicate parameter {parameter.name!r}"
+        _strict_error(reason, message, category="semantics", raw=raw, offset=parameter.offset, parameter=parameter)
+
+    # RFC 7578 §4.2 forbids RFC 2231/5987 extended parameters in
+    # multipart/form-data.  They remain visible as ignored candidates.  A
+    # plain parameter is authoritative; `filename*` in particular must never
+    # override `filename`.
+    for parameter in parameters:
+        if parameter.source is not ParameterSource.EXTENDED:
+            continue
+        base_name = _extended_base_name(parameter.name)
+        if base_name is None or base_name not in seen_plain:
+            continue
+        if base_name == b"filename":
+            continue
+        _strict_error(
+            StrictHeaderRejection.EXTENDED_PARAMETER_CONFLICT,
+            f"Extended parameter {parameter.raw_name!r} conflicts with plain {base_name!r}",
+            category="semantics",
+            raw=raw,
+            offset=parameter.offset,
+            parameter=parameter,
+        )
+
+    name_parameter = seen_plain.get(b"name")
+    filename_parameter = seen_plain.get(b"filename")
+
+    should_require_name = content_type == b"form-data" if require_name is None else require_name
+    if should_require_name and name_parameter is None:
+        _strict_error(
+            StrictHeaderRejection.MISSING_NAME,
+            f"Field name not found in Content-Disposition: {raw!r}",
+            category="semantics",
+            raw=raw,
+        )
+
+    if name_parameter is not None and validate_field_name:
+        _validate_field_name(name_parameter.value, raw=raw, offset=name_parameter.value_offset)
+
+    name_decision = ParameterDecision(
+        parameter=name_parameter,
+        value=name_parameter.value if name_parameter is not None else None,
+        source=DecisionSource.PLAIN if name_parameter is not None else DecisionSource.NONE,
+        reason="selected plain name parameter" if name_parameter is not None else "no name parameter",
+        selected=name_parameter is not None,
+    )
+
+    if filename_parameter is None:
+        filename_value: bytes | None = None
+        filename_source = DecisionSource.NONE
+        filename_reason = "no plain filename parameter"
+        filename_selected = False
+    elif not filename_parameter.value:
+        filename_value = None
+        filename_source = DecisionSource.NONE
+        filename_reason = "empty filename parameter ignored"
+        filename_selected = False
+    else:
+        filename_value = _ie_windows_basename(filename_parameter.value)
+        if filename_value != filename_parameter.value:
+            filename_source = DecisionSource.IE_WINDOWS_BASENAME
+            filename_reason = "basename of an IE Windows full path"
+        else:
+            filename_source = DecisionSource.PLAIN
+            filename_reason = "selected plain filename parameter"
+        filename_selected = True
+        filename_parameter.selected = True
+        if not filename_value:
+            filename_value = None
+            filename_source = DecisionSource.NONE
+            filename_reason = "Windows path has an empty basename"
+            filename_selected = False
+            filename_parameter.selected = False
+
+    if name_parameter is not None:
+        name_parameter.selected = True
+
+    filename_decision = ParameterDecision(
+        parameter=filename_parameter,
+        value=filename_value,
+        source=filename_source,
+        reason=filename_reason,
+        selected=filename_selected,
+    )
+
+    return StrictOptionsHeader(
+        raw=raw,
+        raw_content_type=raw_content_type,
+        content_type=content_type,
+        parameters=tuple(parameters),
+        name=name_parameter.value if name_parameter is not None else None,
+        filename=filename_value,
+        name_decision=name_decision,
+        filename_decision=filename_decision,
+    )
+
+
+parse_options_header_strictly = parse_options_header_strict
+parse_strict_options_header = parse_options_header_strict
+parse_content_disposition_strict = parse_options_header_strict
+
+
 def _parseparam(s: str) -> list[str]:
     # Vendored from the standard library's
     # [`email.message._parseparam`](https://github.com/python/cpython/blob/v3.14.2/Lib/email/message.py#L73-L96)
@@ -218,8 +883,17 @@ def _parseparam(s: str) -> list[str]:
     return plist
 
 
-def parse_options_header(value: str | bytes | None) -> tuple[bytes, dict[bytes, bytes]]:
-    """Parses a Content-Type header into a value in the following format: (content_type, {parameters})."""
+def parse_options_header(
+    value: str | bytes | None, *, strict: bool = False
+) -> tuple[bytes, dict[bytes, bytes]] | StrictOptionsHeader:
+    """Parses a Content-Type header into a value in the following format: (content_type, {parameters}).
+
+    The default return shape and behavior are unchanged.  Pass ``strict=True``
+    to explicitly use :func:`parse_options_header_strict` and receive its
+    structured result instead.
+    """
+    if strict:
+        return parse_options_header_strict(value)
     if not value:
         return (b"", {})
 
@@ -273,6 +947,8 @@ class Field:
     """
 
     def __init__(self, name: bytes | None, *, content_type: str | None = None) -> None:
+        if name is not None:
+            _validate_field_name(name)
         self._name = name
         self._value: list[bytes] = []
         self._content_type = content_type
@@ -1837,16 +2513,15 @@ class FormParser:
                 # Reset the 'is file' flag.
                 is_file = False
 
-                # Parse the content-disposition header.
+                # Parse the content-disposition header using the strict entry
+                # point so duplicate or ambiguous parameters are explained
+                # instead of being silently overwritten by dict insertion.
                 content_disp = headers.get(b"content-disposition")
-                disp, options = parse_options_header(content_disp)
+                disposition = parse_options_header_strict(content_disp, require_name=True)
 
                 # Get the field and filename.
-                field_name = options.get(b"name")
-                file_name = options.get(b"filename")
-                # RFC 7578 §4.2: each part MUST have a Content-Disposition header with a "name" parameter.
-                if field_name is None:
-                    raise FormParserError(f'Field name not found in Content-Disposition: "{content_disp!r}"')
+                field_name = disposition.name
+                file_name = disposition.filename
 
                 # Create the proper class.
                 content_type_b = headers.get(b"content-type")
