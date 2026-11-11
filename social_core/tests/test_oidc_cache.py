@@ -159,7 +159,7 @@ class OIDCUrlCacheTest(unittest.TestCase):
             ) as second_fetch,
             patch(
                 "social_core.backends.open_id_connect.jwt.get_unverified_header",
-                return_value={"kid": "new"},
+                return_value={"kid": "new", "alg": "RS256"},
             ),
         ):
             first.get_jwks_keys()

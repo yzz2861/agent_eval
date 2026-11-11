@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
 
+### Security
+
+- Harden OpenID Connect JWKS key selection. The token header algorithm must be
+  configured in `JWT_ALGORITHMS` and is the only algorithm used for
+  verification; `none` is never accepted and a JWK without `alg` no longer
+  falls back to the first configured algorithm. Candidate keys must match the
+  algorithm's key type, declare `use` absent or `sig`, declare `key_ops`
+  absent or containing `verify`, and declare `alg` absent or equal to the
+  header algorithm. Symmetric (`oct`) keys from a remote JWKS are rejected
+  unless the new `JWKS_ALLOW_SYMMETRIC_KEYS` setting is enabled. When several
+  candidates share a `kid`, exactly one must verify; ambiguous matches are
+  rejected. Cache refreshes for unknown key IDs are rate-limited by the new
+  `JWKS_REFRESH_COOLDOWN` setting and single-flighted across concurrent
+  requests, and a failed refresh keeps the previously cached keys.
+
 ## [7.0.0](https://github.com/python-social-auth/social-core/releases/tag/7.0.0) - 2026-11-09
 
 ### Security

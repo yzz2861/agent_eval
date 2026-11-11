@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import threading
 from calendar import timegm
 from json import loads
+from time import monotonic as _monotonic
 from time import time as _time
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -90,6 +92,10 @@ class OpenIdConnectAuth(OIDCDiscoveryMixin[ResponseT_co], BaseOAuth2PKCE[Respons
     JWT_ALGORITHMS = ["RS256"]
     JWT_DECODE_OPTIONS: Options = {}
     JWT_LEEWAY: float = 1.0  # seconds
+    # Minimum seconds between remote JWKS refreshes triggered by unknown kids.
+    JWKS_REFRESH_COOLDOWN = 30.0
+    # Symmetric (oct) keys from a remote JWKS require explicit opt-in.
+    JWKS_ALLOW_SYMMETRIC_KEYS = False
     VALIDATE_AT_HASH: bool = True
     CUSTOM_AT_HASH_ALGO: str | None = None
     # When these options are unspecified, server will choose via openid autoconfiguration
@@ -110,6 +116,11 @@ class OpenIdConnectAuth(OIDCDiscoveryMixin[ResponseT_co], BaseOAuth2PKCE[Respons
     ACR_VALUES: str | None = None
     PKCE_DEFAULT_CODE_CHALLENGE_METHOD = "S256"
     DEFAULT_USE_PKCE = False
+
+    # Shared across instances so concurrent requests cannot each trigger a
+    # remote JWKS refresh; keyed by (backend class, JWKS URI).
+    _jwks_refresh_lock = threading.Lock()
+    _jwks_refresh_attempts: dict[tuple[type, str], float] = {}
 
     def __init__(
         self,
@@ -470,32 +481,125 @@ class OpenIdConnectAuth(OIDCDiscoveryMixin[ResponseT_co], BaseOAuth2PKCE[Respons
             )
 
     def find_valid_key(self, id_token):
-        kid = jwt.get_unverified_header(id_token).get("kid")
+        header = jwt.get_unverified_header(id_token)
+        algorithm = self.validate_id_token_algorithm(header.get("alg"))
+        kid = header.get("kid")
 
-        keys = self.get_jwks_keys()
-        if kid is not None:
-            for key in keys:
-                if kid == key.get("kid"):
-                    break
-            else:
-                # Reload this URL's keys when the key ID is absent from the cache.
-                self.get_jwks_keys_for_uri.invalidate(self, self.jwks_uri())
-                keys = self.get_jwks_keys()
+        candidates = self.jwks_candidate_keys(self.get_jwks_keys(), kid, algorithm)
+        if not candidates:
+            # The signing key is absent from the cache; try one rate-limited
+            # refresh to pick up a legitimate key rotation.
+            refreshed_keys = self.refresh_jwks_keys(self.jwks_uri())
+            if refreshed_keys is not None:
+                candidates = self.jwks_candidate_keys(refreshed_keys, kid, algorithm)
 
-        for key in keys:
-            if kid is None or kid == key.get("kid"):
-                if "alg" not in key:
-                    key["alg"] = cast(
-                        "list[str]", self.setting("JWT_ALGORITHMS", self.JWT_ALGORITHMS)
-                    )[0]
-                rsakey = jwt.PyJWK(key)
-                message, encoded_sig = id_token.rsplit(".", 1)
-                decoded_sig = base64url_decode(encoded_sig.encode("utf-8"))
-                if rsakey.Algorithm.verify(
-                    message.encode("utf-8"), rsakey.key, decoded_sig
-                ):
-                    return key
+        valid_keys = [
+            key
+            for key in candidates
+            if self.verify_jwks_signature(key, algorithm, id_token)
+        ]
+        if len(valid_keys) != 1:
+            # Reject both unverifiable tokens and ambiguous key matches. A bad
+            # signature alone never triggers a cache refresh.
+            return None
+        # Never mutate the cached JWK; verification and at_hash use the token's
+        # validated header algorithm.
+        return {**valid_keys[0], "alg": algorithm}
+
+    def validate_id_token_algorithm(self, algorithm: Any) -> str:
+        """Return the token header algorithm when it is allowed for verification."""
+        allowed = cast("list[str]", self.setting("JWT_ALGORITHMS", self.JWT_ALGORITHMS))
+        if (
+            not isinstance(algorithm, str)
+            or algorithm.lower() == "none"
+            or algorithm not in allowed
+        ):
+            raise AuthResponseError(
+                self,
+                "Disallowed id_token signing algorithm",
+                claim="alg",
+                code="invalid_claim",
+                stage="token_validation",
+            )
+        return algorithm
+
+    @staticmethod
+    def algorithm_key_type(algorithm: str) -> str | None:
+        """Return the JWK kty required for a JWT signing algorithm."""
+        if algorithm.startswith(("RS", "PS")):
+            return "RSA"
+        if algorithm.startswith("ES"):
+            return "EC"
+        if algorithm == "EdDSA":
+            return "OKP"
+        if algorithm.startswith("HS"):
+            return "oct"
         return None
+
+    def jwks_candidate_keys(
+        self, keys: list[dict[str, Any]], kid: Any, algorithm: str
+    ) -> list[dict[str, Any]]:
+        """Select JWKS entries eligible to verify a token signed with algorithm."""
+        expected_kty = self.algorithm_key_type(algorithm)
+        allow_symmetric = self.setting(
+            "JWKS_ALLOW_SYMMETRIC_KEYS", self.JWKS_ALLOW_SYMMETRIC_KEYS
+        )
+        candidates = []
+        for key in keys:
+            if kid is not None and key.get("kid") != kid:
+                continue
+            if expected_kty is None or key.get("kty") != expected_kty:
+                continue
+            if expected_kty == "oct" and not allow_symmetric:
+                continue
+            if key.get("use", "sig") != "sig":
+                continue
+            key_ops = key.get("key_ops")
+            if key_ops is not None and (
+                not isinstance(key_ops, list) or "verify" not in key_ops
+            ):
+                continue
+            key_algorithm = key.get("alg")
+            if key_algorithm is not None and key_algorithm != algorithm:
+                continue
+            candidates.append(key)
+        return candidates
+
+    @staticmethod
+    def verify_jwks_signature(
+        key: dict[str, Any], algorithm: str, id_token: str
+    ) -> bool:
+        """Verify the token signature with a candidate key and exact algorithm."""
+        try:
+            jwk = jwt.PyJWK(key, algorithm=algorithm)
+        except PyJWTError:
+            return False
+        message, encoded_sig = id_token.rsplit(".", 1)
+        decoded_sig = base64url_decode(encoded_sig.encode("utf-8"))
+        return jwk.Algorithm.verify(message.encode("utf-8"), jwk.key, decoded_sig)
+
+    def refresh_jwks_keys(self, uri: str) -> list[dict[str, Any]] | None:
+        """Fetch fresh JWKS keys, rate-limited and single-flight.
+
+        At most one remote refresh runs per cooldown window across concurrent
+        requests. A skipped or failed refresh keeps the previously cached keys.
+        """
+        cooldown = cast(
+            "float",
+            self.setting("JWKS_REFRESH_COOLDOWN", self.JWKS_REFRESH_COOLDOWN),
+        )
+        state_key = (type(self), uri)
+        with self._jwks_refresh_lock:
+            now = _monotonic()
+            last_attempt = self._jwks_refresh_attempts.get(state_key)
+            if last_attempt is not None and now - last_attempt < cooldown:
+                return None
+            self._jwks_refresh_attempts[state_key] = now
+        try:
+            return self.get_jwks_keys_for_uri.refresh(self, uri)
+        except SocialAuthBaseException:
+            # A failed refresh must not discard the previously cached keys.
+            return None
 
     def decode_and_validate_id_token(self, id_token, access_token):
         """Validate an ID token's signature and self-contained claims."""

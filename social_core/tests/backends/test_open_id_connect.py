@@ -3,11 +3,17 @@ from __future__ import annotations
 import copy
 import datetime as dt
 import json
+import threading
+import time
 from typing import Protocol, cast
 from unittest.mock import patch
 
 import jwt
+import requests
 import responses
+from cryptography.hazmat.primitives.asymmetric import rsa
+from jwt.algorithms import RSAAlgorithm
+from jwt.utils import base64url_encode
 
 from social_core.backends.open_id_connect import OpenIdConnectAuth
 from social_core.exceptions import (
@@ -20,6 +26,8 @@ from social_core.utils import get_querystring, parse_qs
 
 from .oauth import BaseAuthUrlTestMixin
 from .open_id_connect import (
+    JWK_KEY,
+    JWK_PUBLIC_KEY,
     PARTIAL_ID_TOKEN_KEY,
     STORED_ID_TOKEN_CONTEXT_KEY,
     OpenIdConnectTest,
@@ -506,6 +514,10 @@ class ExampleOpenIdConnectAuth(OpenIdConnectAuth):
 class OpenIdConnectPkceEnabledByDefault(ExampleOpenIdConnectAuth):
     name = "example123-pkce-default"
     DEFAULT_USE_PKCE = True
+
+
+class OpenIdConnectStrictJwksAuth(ExampleOpenIdConnectAuth):
+    name = "example123-strict-jwks"
 
 
 class ExampleOpenIdConnectTest(OpenIdConnectTest):
@@ -996,3 +1008,244 @@ class ExampleOpenIdConnectInvalidParamsTest(OpenIdConnectTest):
                 }
             )
             self.backend.auth_params(state=self.backend.get_or_create_state())
+
+
+class OpenIdConnectJwksKeySelectionTest(OpenIdConnectTest):
+    backend_path = (
+        "social_core.tests.backends.test_open_id_connect.OpenIdConnectStrictJwksAuth"
+    )
+    issuer = "https://example.com"
+    openid_config_body = json.dumps(
+        {
+            "issuer": "https://example.com",
+            "authorization_endpoint": "https://example.com/oidc/auth",
+            "token_endpoint": "https://example.com/oidc/token",
+            "userinfo_endpoint": "https://example.com/oidc/userinfo",
+            "revocation_endpoint": "https://example.com/oidc/revoke",
+            "jwks_uri": "https://example.com/oidc/certs",
+        }
+    )
+    jwks_url = "https://example.com/oidc/certs"
+
+    expected_username = "cartman"
+
+    def setUp(self) -> None:
+        super().setUp()
+        refresh_state = patch.dict(
+            "social_core.backends.open_id_connect.OpenIdConnectAuth._jwks_refresh_attempts",
+            {},
+        )
+        refresh_state.start()
+        self.addCleanup(refresh_state.stop)
+        self.backend.get_jwks_keys_for_uri.invalidate()
+
+    def pre_complete_callback(self, start_url) -> None:
+        super().pre_complete_callback(start_url)
+        responses.add(
+            responses.GET,
+            url=self.backend.userinfo_url(),
+            status=200,
+            body=json.dumps({"preferred_username": self.expected_username}),
+            content_type="text/json",
+        )
+
+    @staticmethod
+    def generate_rsa_jwk(kid: str = "testkey", **public_overrides):
+        private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        private_jwk = RSAAlgorithm.to_jwk(private_key, as_dict=True)
+        public_jwk = RSAAlgorithm.to_jwk(private_key.public_key(), as_dict=True)
+        private_jwk["kid"] = kid
+        public_jwk["kid"] = kid
+        public_jwk.update(public_overrides)
+        return private_jwk, public_jwk
+
+    @staticmethod
+    def make_token(signing_key, algorithm: str = "RS256", kid: str | None = "testkey"):
+        headers = {"kid": kid} if kid is not None else None
+        return jwt.encode(
+            {"sub": "1234"}, signing_key, algorithm=algorithm, headers=headers
+        )
+
+    @staticmethod
+    def rsa_signing_key():
+        return jwt.PyJWK(JWK_KEY).key
+
+    def serve_jwks(self, keys) -> None:
+        responses.replace(responses.GET, self.jwks_url, json={"keys": keys})
+        self.backend.get_jwks_keys_for_uri.invalidate()
+
+    def jwks_fetch_count(self) -> int:
+        return sum(1 for call in responses.calls if call.request.url == self.jwks_url)
+
+    def backend_setting(self, suffix: str) -> str:
+        return f"SOCIAL_AUTH_{self.backend.name.upper().replace('-', '_')}_{suffix}"
+
+    def test_login_with_key_without_use_and_alg(self) -> None:
+        key = {
+            name: value
+            for name, value in JWK_PUBLIC_KEY.items()
+            if name not in ("use", "alg")
+        }
+        self.serve_jwks([key])
+        self.do_login()
+
+    def test_jwks_use_enc_key_rejected(self) -> None:
+        self.serve_jwks([{**JWK_PUBLIC_KEY, "use": "enc"}])
+        token = self.make_token(self.rsa_signing_key())
+        self.assertIsNone(self.backend.find_valid_key(token))
+
+    def test_jwks_key_ops_without_verify_rejected(self) -> None:
+        self.serve_jwks([{**JWK_PUBLIC_KEY, "key_ops": ["encrypt"]}])
+        token = self.make_token(self.rsa_signing_key())
+        self.assertIsNone(self.backend.find_valid_key(token))
+
+    def test_jwks_key_ops_with_verify_accepted(self) -> None:
+        self.serve_jwks([{**JWK_PUBLIC_KEY, "key_ops": ["verify"]}])
+        token = self.make_token(self.rsa_signing_key())
+        self.assertEqual(self.backend.find_valid_key(token)["kid"], "testkey")
+
+    def test_jwk_alg_mismatch_rejected(self) -> None:
+        self.serve_jwks([{**JWK_PUBLIC_KEY, "alg": "RS512"}])
+        token = self.make_token(self.rsa_signing_key())
+        self.assertIsNone(self.backend.find_valid_key(token))
+
+    def test_kty_algorithm_mismatch_rejected(self) -> None:
+        self.serve_jwks([{**JWK_PUBLIC_KEY, "kty": "EC"}])
+        token = self.make_token(self.rsa_signing_key())
+        self.assertIsNone(self.backend.find_valid_key(token))
+
+    def test_header_algorithm_not_configured_rejected(self) -> None:
+        token = self.make_token(self.rsa_signing_key(), algorithm="RS512")
+        with assert_auth_error(self, AuthResponseError, "invalid_claim"):
+            self.backend.find_valid_key(token)
+
+    def test_none_algorithm_rejected_even_when_configured(self) -> None:
+        self.strategy.set_settings(
+            {
+                **self.extra_settings(),
+                self.backend_setting("JWT_ALGORITHMS"): ["RS256", "none"],
+            }
+        )
+        token = self.make_token(None, algorithm="none", kid=None)
+        with assert_auth_error(self, AuthResponseError, "invalid_claim"):
+            self.backend.find_valid_key(token)
+
+    def serve_symmetric_jwks(self, hmac_key: str, allow_symmetric: bool) -> str:
+        self.strategy.set_settings(
+            {
+                **self.extra_settings(),
+                self.backend_setting("JWT_ALGORITHMS"): ["HS256"],
+                self.backend_setting("JWKS_ALLOW_SYMMETRIC_KEYS"): allow_symmetric,
+            }
+        )
+        self.serve_jwks(
+            [
+                {
+                    "kty": "oct",
+                    "k": base64url_encode(hmac_key.encode()).decode(),
+                    "kid": "testkey",
+                    "alg": "HS256",
+                }
+            ]
+        )
+        return self.make_token(hmac_key, algorithm="HS256")
+
+    def test_symmetric_jwks_key_rejected_by_default(self) -> None:
+        token = self.serve_symmetric_jwks("test-hmac-key" * 4, allow_symmetric=False)
+        self.assertIsNone(self.backend.find_valid_key(token))
+
+    def test_symmetric_jwks_key_allowed_with_explicit_setting(self) -> None:
+        token = self.serve_symmetric_jwks("test-hmac-key" * 4, allow_symmetric=True)
+        self.assertEqual(self.backend.find_valid_key(token)["kid"], "testkey")
+
+    def test_duplicate_kid_with_single_matching_key_accepted(self) -> None:
+        _other_private_jwk, other_public_jwk = self.generate_rsa_jwk(kid="testkey")
+        self.serve_jwks([other_public_jwk, JWK_PUBLIC_KEY])
+        self.access_token_kwargs = {"kid": "testkey"}
+        self.do_login()
+
+    def test_duplicate_kid_with_multiple_matching_keys_rejected(self) -> None:
+        self.serve_jwks([JWK_PUBLIC_KEY, dict(JWK_PUBLIC_KEY)])
+        self.authtoken_raised("invalid_signature", kid="testkey")
+
+    def test_unknown_kid_refresh_has_cooldown(self) -> None:
+        self.backend.get_jwks_keys()
+        self.assertEqual(self.jwks_fetch_count(), 1)
+        now = [1000.0]
+        with patch("social_core.backends.open_id_connect._monotonic", lambda: now[0]):
+            for kid in ("unknown-1", "unknown-2"):
+                token = self.make_token(self.rsa_signing_key(), kid=kid)
+                self.assertIsNone(self.backend.find_valid_key(token))
+            self.assertEqual(self.jwks_fetch_count(), 2)
+
+            now[0] += self.backend.JWKS_REFRESH_COOLDOWN + 1
+            token = self.make_token(self.rsa_signing_key(), kid="unknown-3")
+            self.assertIsNone(self.backend.find_valid_key(token))
+            self.assertEqual(self.jwks_fetch_count(), 3)
+
+    def test_bad_signature_does_not_trigger_refresh(self) -> None:
+        self.backend.get_jwks_keys()
+        self.assertEqual(self.jwks_fetch_count(), 1)
+        token = self.make_token(self.rsa_signing_key(), kid="testkey")
+        header, message, _signature = token.rsplit(".")
+        tampered = f"{header}.{message}.{'A' * 43}"
+        self.assertIsNone(self.backend.find_valid_key(tampered))
+        self.assertEqual(self.jwks_fetch_count(), 1)
+
+    def test_failed_refresh_preserves_cached_keys(self) -> None:
+        original_keys = self.backend.get_jwks_keys()
+        responses.replace(
+            responses.GET,
+            self.jwks_url,
+            body=requests.ConnectionError("jwks unavailable"),
+        )
+        token = self.make_token(self.rsa_signing_key(), kid="unknown-kid")
+        self.assertIsNone(self.backend.find_valid_key(token))
+        self.assertEqual(self.jwks_fetch_count(), 2)
+        self.assertEqual(self.backend.get_jwks_keys(), original_keys)
+
+        valid_token = self.make_token(self.rsa_signing_key(), kid="testkey")
+        self.assertEqual(self.backend.find_valid_key(valid_token)["kid"], "testkey")
+
+    def test_concurrent_refresh_is_single_flight(self) -> None:
+        self.backend.get_jwks_keys()
+        self.assertEqual(self.jwks_fetch_count(), 1)
+        token = self.make_token(self.rsa_signing_key(), kid="unknown-kid")
+        fetch_count = 0
+        fetch_lock = threading.Lock()
+        original = type(self.backend).get_remote_jwks_keys
+
+        def counting_remote(backend, uri=None):
+            nonlocal fetch_count
+            with fetch_lock:
+                fetch_count += 1
+            time.sleep(0.2)
+            return original(backend, uri)
+
+        barrier = threading.Barrier(8)
+        results = []
+
+        def worker() -> None:
+            barrier.wait()
+            results.append(self.backend.find_valid_key(token))
+
+        with patch.object(type(self.backend), "get_remote_jwks_keys", counting_remote):
+            threads = [threading.Thread(target=worker) for _ in range(8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+        self.assertEqual(fetch_count, 1)
+        self.assertEqual(results, [None] * 8)
+
+    def test_legitimate_key_rotation(self) -> None:
+        private_jwk, public_jwk = self.generate_rsa_jwk(kid="rotated-key")
+        self.backend.get_jwks_keys()
+        self.assertEqual(self.jwks_fetch_count(), 1)
+        # Rotate the remote keys while the cache still holds the old ones.
+        responses.replace(responses.GET, self.jwks_url, json={"keys": [public_jwk]})
+        self.key = private_jwk
+        self.access_token_kwargs = {"kid": "rotated-key"}
+        self.do_login()
+        self.assertEqual(self.jwks_fetch_count(), 2)
