@@ -13,6 +13,14 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Add an opt-in ``RenderBudget`` that bounds a single render's total
+    output bytes, number of generated fragments, cumulative sandbox
+    ``range`` elements, ``include``/``extends`` count, and wall time.
+    Pass it as ``render_budget`` to ``Template.render``,
+    ``render_async``, ``generate``, or ``generate_async``; the same
+    budget is shared across included and extended templates. Exceeding a
+    limit raises ``RenderBudgetExceeded`` identifying the dimension.
+    Renders without a budget keep their existing behavior.
 
 
 Version 3.1.6

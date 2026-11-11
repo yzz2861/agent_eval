@@ -2,7 +2,11 @@
 options.
 """
 
+import contextvars
+import ctypes
 import os
+import threading
+import time
 import typing
 import typing as t
 import weakref
@@ -63,6 +67,335 @@ if t.TYPE_CHECKING:
     from .loaders import BaseLoader
 
 _env_bound = t.TypeVar("_env_bound", bound="Environment")
+
+#: Name of the :class:`RenderBudget` limit for the total rendered output
+#: size, counted in encoded bytes per produced fragment.
+RENDER_BUDGET_OUTPUT_BYTES = "output_bytes"
+
+#: Name of the :class:`RenderBudget` limit for the number of fragments
+#: produced by the render functions.
+RENDER_BUDGET_FRAGMENTS = "fragments"
+
+#: Name of the :class:`RenderBudget` limit for the cumulative number of
+#: elements produced by calls to the sandbox ``range`` global.
+RENDER_BUDGET_RANGE_ELEMENTS = "range_elements"
+
+#: Name of the :class:`RenderBudget` limit for the number of templates
+#: pulled in through ``include``, ``extends`` and template imports.
+RENDER_BUDGET_TEMPLATE_INCLUDES = "template_includes"
+
+#: Name of the :class:`RenderBudget` limit for the wall time of a single
+#: render, measured in seconds.
+RENDER_BUDGET_WALL_TIME = "wall_time"
+
+#: The budget attached to the currently running render. Rendering is the
+#: only time this is set, so code executed outside of a render observes
+#: ``None`` even if the environment has budgets configured.
+_active_render_budget: contextvars.ContextVar["RenderBudget | None"] = (
+    contextvars.ContextVar("jinja2_render_budget", default=None)
+)
+
+
+def get_render_budget() -> "RenderBudget | None":
+    """Return the :class:`RenderBudget` of the render currently executing
+    in this thread or task, or ``None`` if no budgeted render is active.
+
+    Budget state never leaks between renders: entering a render sets the
+    value for its execution context and leaving the render restores the
+    previous value. Includes, extends and imported templates execute
+    within the same render, so they observe the same budget instance.
+    """
+    return _active_render_budget.get()
+
+
+class RenderBudgetExceeded(TemplateRuntimeError):
+    """Raised when a render exceeds one of the limits of its
+    :class:`RenderBudget`.
+
+    :param limit: One of the ``RENDER_BUDGET_*`` constants naming the
+        dimension that was exhausted.
+    :param used: Amount of the dimension consumed when the limit was
+        hit.
+    :param limit_value: Configured maximum for the dimension.
+    """
+
+    def __init__(
+        self, limit: str, used: int | float, limit_value: int | float
+    ) -> None:
+        self.limit = limit
+        self.used = used
+        self.limit_value = limit_value
+        super().__init__(
+            f"Render budget {limit!r} exceeded: used {used} of"
+            f" {limit_value}."
+        )
+
+
+class RenderBudget:
+    """Explicit resource limits for a single render.
+
+    Every limit is optional; ``None`` (the default for each) disables
+    that dimension. The budget is inert unless it is passed to
+    :meth:`Template.render`, :meth:`Template.render_async`,
+    :meth:`Template.generate` or :meth:`Template.generate_async`, so
+    environments and templates keep their existing behavior by default.
+
+    The same budget instance is shared by the whole render, including
+    ``include``, ``extends`` and imported templates. Each render should
+    be given a fresh instance; an instance that was already used to
+    render is never reset by the engine.
+
+    :param output_bytes: Maximum number of bytes rendered in total. The
+        size of each produced fragment is measured as the length of its
+        UTF-8 encoding.
+    :param fragments: Maximum number of fragments produced by the render
+        functions.
+    :param range_elements: Maximum cumulative number of elements
+        produced by calls to the sandboxed ``range`` global.
+    :param template_includes: Maximum number of templates pulled in via
+        ``include``, ``extends`` and template imports.
+    :param wall_time: Maximum wall time for the render in seconds. On the
+        main thread a watchdog thread injects the exception into the
+        render thread at the deadline, so CPU-bound templates stop without
+        waiting for a yield. Other threads rely on the same cooperative
+        check points as the other limits.
+    """
+
+    def __init__(
+        self,
+        *,
+        output_bytes: int | None = None,
+        fragments: int | None = None,
+        range_elements: int | None = None,
+        template_includes: int | None = None,
+        wall_time: float | None = None,
+    ) -> None:
+        self.output_bytes_limit = output_bytes
+        self.fragments_limit = fragments
+        self.range_elements_limit = range_elements
+        self.template_includes_limit = template_includes
+        self.wall_time_limit = wall_time
+
+        self.output_bytes_used = 0
+        self.fragments_used = 0
+        self.range_elements_used = 0
+        self.template_includes_used = 0
+
+        self._deadline: float | None = None
+        self._started = False
+
+    def start(self) -> None:
+        """Start the wall time clock. Called once when a render begins
+        consuming its render function. Re-entrant calls are ignored.
+        """
+        if self._started:
+            return
+
+        self._started = True
+
+        if self.wall_time_limit is not None:
+            self._deadline = time.monotonic() + self.wall_time_limit
+
+    def _raise_if_exceeded(
+        self, limit: str, used: int | float, limit_value: int | None
+    ) -> None:
+        if limit_value is not None and used > limit_value:
+            raise RenderBudgetExceeded(limit, used, limit_value)
+
+    def check_wall_time(self) -> None:
+        """Raise if the wall time deadline has passed."""
+        if self._deadline is not None and time.monotonic() >= self._deadline:
+            self.raise_wall_time_exceeded()
+
+    def raise_wall_time_exceeded(self) -> t.NoReturn:
+        """Raise the public exception for an exhausted wall time limit."""
+        raise RenderBudgetExceeded(
+            RENDER_BUDGET_WALL_TIME,
+            self.wall_time_limit,
+            self.wall_time_limit,
+        )
+
+    def charge_fragment(self, fragment: t.Any) -> None:
+        """Account for one rendered fragment and its size."""
+        self.check_wall_time()
+        self.fragments_used += 1
+        self._raise_if_exceeded(
+            RENDER_BUDGET_FRAGMENTS,
+            self.fragments_used,
+            self.fragments_limit,
+        )
+
+        if self.output_bytes_limit is not None:
+            if isinstance(fragment, str):
+                size = len(fragment.encode("utf-8"))
+            else:
+                size = len(str(fragment).encode("utf-8"))
+
+            self.output_bytes_used += size
+            self._raise_if_exceeded(
+                RENDER_BUDGET_OUTPUT_BYTES,
+                self.output_bytes_used,
+                self.output_bytes_limit,
+            )
+
+    def charge_range(self, length: int) -> None:
+        """Account for the elements of one sandboxed ``range`` call."""
+        self.check_wall_time()
+        self.range_elements_used += length
+        self._raise_if_exceeded(
+            RENDER_BUDGET_RANGE_ELEMENTS,
+            self.range_elements_used,
+            self.range_elements_limit,
+        )
+
+    def charge_template_include(self) -> None:
+        """Account for one template pulled into the active render."""
+        self.check_wall_time()
+        self.template_includes_used += 1
+        self._raise_if_exceeded(
+            RENDER_BUDGET_TEMPLATE_INCLUDES,
+            self.template_includes_used,
+            self.template_includes_limit,
+        )
+
+    def can_interrupt(self) -> bool:
+        """Whether a hard wall time interrupt is available."""
+        return self.wall_time_limit is not None and hasattr(
+            ctypes.pythonapi, "PyThreadState_SetAsyncExc"
+        )
+
+
+class _RenderBudgetTimeout(BaseException):
+    """Raised inside a render thread by its watchdog when the wall time
+    deadline is reached. The render stream wrappers convert it into the
+    public :class:`RenderBudgetExceeded`. It is a private ``BaseException``
+    so it is not accidentally caught by user ``except Exception`` blocks
+    and so the engine can recognize its own timeout.
+    """
+
+
+class _RenderBudgetWatchdog:
+    """Interrupt a render thread once its wall time deadline is reached.
+
+    A daemon thread sleeps until the deadline and then schedules the
+    private :class:`_RenderBudgetTimeout` exception in the render thread
+    through ``PyThreadState_SetAsyncExc``. The exception is delivered at
+    the next bytecode boundary, which also interrupts a template stuck in
+    a CPU-bound loop that never yields. Scheduling the exception class
+    (rather than an instance) means nothing is left pending for a later
+    render once it has been raised and handled.
+    """
+
+    def __init__(self, thread_id: int, deadline: float) -> None:
+        self._thread_id = thread_id
+        self._deadline = deadline
+        self._canceled = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def cancel(self) -> None:
+        self._canceled.set()
+
+    def join(self) -> None:
+        self._thread.join(timeout=0.1)
+
+    def _run(self) -> None:
+        timeout = max(0.0, self._deadline - time.monotonic())
+
+        if self._canceled.wait(timeout):
+            return
+
+        if self._canceled.is_set():
+            return
+
+        result = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+            ctypes.c_long(self._thread_id),
+            ctypes.py_object(_RenderBudgetTimeout),
+        )
+
+        if result > 1:
+            # More than one thread matched; undo the operation.
+            ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                ctypes.c_long(self._thread_id), None
+            )
+
+
+def _start_render_budget_watchdog(budget: RenderBudget) -> t.Any:
+    if (
+        not budget.can_interrupt()
+        or threading.current_thread() is not threading.main_thread()
+    ):
+        return None
+
+    if budget._deadline is None:
+        return None
+
+    remaining = budget._deadline - time.monotonic()
+
+    if remaining <= 0:
+        budget.check_wall_time()
+        return None
+
+    watchdog = _RenderBudgetWatchdog(threading.get_ident(), budget._deadline)
+    watchdog.start()
+    return watchdog
+
+
+def _stop_render_budget_watchdog(watchdog: t.Any) -> None:
+    if watchdog is not None:
+        watchdog.cancel()
+        watchdog.join()
+
+
+def _budgeted_stream(
+    template: "Template",
+    context: Context,
+    budget: RenderBudget,
+) -> t.Iterator[str]:
+    """Drive a synchronous render function under a shared budget."""
+    budget.start()
+    token = _active_render_budget.set(budget)
+    watchdog = _start_render_budget_watchdog(budget)
+
+    try:
+        generator = template.root_render_func(context)
+
+        for fragment in generator:
+            budget.charge_fragment(fragment)
+            yield fragment
+    except _RenderBudgetTimeout:
+        budget.raise_wall_time_exceeded()
+    finally:
+        _stop_render_budget_watchdog(watchdog)
+        _active_render_budget.reset(token)
+
+
+async def _budgeted_async_stream(
+    template: "Template",
+    context: Context,
+    budget: RenderBudget,
+) -> t.AsyncGenerator[str, None]:
+    """Drive an asynchronous render function under a shared budget."""
+    budget.start()
+    token = _active_render_budget.set(budget)
+    watchdog = _start_render_budget_watchdog(budget)
+
+    try:
+        generator: t.AsyncGenerator[str, None] = (
+            template.root_render_func(context)
+        )
+
+        async with aclosing(generator):
+            async for fragment in generator:
+                budget.charge_fragment(fragment)
+                yield fragment
+    except _RenderBudgetTimeout:
+        budget.raise_wall_time_exceeded()
+    finally:
+        _stop_render_budget_watchdog(watchdog)
+        _active_render_budget.reset(token)
 
 
 # for direct template usage we have up to ten living environments
@@ -956,6 +1289,8 @@ class Environment:
     def _load_template(
         self, name: str, globals: t.MutableMapping[str, t.Any] | None
     ) -> "Template":
+        budget = get_render_budget()
+
         if self.loader is None:
             raise TypeError("no loader for this environment specified")
         cache_key = (weakref.ref(self.loader), name)
@@ -969,12 +1304,19 @@ class Environment:
                 if globals:
                     template.globals.update(globals)
 
+                if budget is not None:
+                    budget.charge_template_include()
+
                 return template
 
         template = self.loader.load(self, name, self.make_globals(globals))
 
         if self.cache is not None:
             self.cache[cache_key] = template
+
+        if budget is not None:
+            budget.charge_template_include()
+
         return template
 
     @internalcode
@@ -1269,7 +1611,12 @@ class Template:
 
         return t
 
-    def render(self, *args: t.Any, **kwargs: t.Any) -> str:
+    def render(
+        self,
+        *args: t.Any,
+        render_budget: "RenderBudget | None" = None,
+        **kwargs: t.Any,
+    ) -> str:
         """This method accepts the same arguments as the `dict` constructor:
         A dict, a dict subclass or some keyword arguments.  If no arguments
         are given the context will be empty.  These two calls do the same::
@@ -1282,16 +1629,30 @@ class Template:
         if self.environment.is_async:
             import asyncio
 
-            return asyncio.run(self.render_async(*args, **kwargs))
+            return asyncio.run(
+                self.render_async(
+                    *args, render_budget=render_budget, **kwargs
+                )
+            )
 
         ctx = self.new_context(dict(*args, **kwargs))
 
         try:
-            return self.environment.concat(self.root_render_func(ctx))  # type: ignore
+            if render_budget is None:
+                stream: t.Iterator[str] = self.root_render_func(ctx)
+            else:
+                stream = _budgeted_stream(self, ctx, render_budget)
+
+            return self.environment.concat(stream)
         except Exception:
             self.environment.handle_exception()
 
-    async def render_async(self, *args: t.Any, **kwargs: t.Any) -> str:
+    async def render_async(
+        self,
+        *args: t.Any,
+        render_budget: "RenderBudget | None" = None,
+        **kwargs: t.Any,
+    ) -> str:
         """This works similar to :meth:`render` but returns a coroutine
         that when awaited returns the entire rendered template string.  This
         requires the async feature to be enabled.
@@ -1308,8 +1669,18 @@ class Template:
         ctx = self.new_context(dict(*args, **kwargs))
 
         try:
+            if render_budget is None:
+                return self.environment.concat(  # type: ignore
+                    [n async for n in self.root_render_func(ctx)]  # type: ignore
+                )
+
             return self.environment.concat(  # type: ignore
-                [n async for n in self.root_render_func(ctx)]  # type: ignore
+                [
+                    n
+                    async for n in _budgeted_async_stream(
+                        self, ctx, render_budget
+                    )
+                ]
             )
         except Exception:
             return self.environment.handle_exception()
@@ -1320,7 +1691,12 @@ class Template:
         """
         return TemplateStream(self.generate(*args, **kwargs))
 
-    def generate(self, *args: t.Any, **kwargs: t.Any) -> t.Iterator[str]:
+    def generate(
+        self,
+        *args: t.Any,
+        render_budget: "RenderBudget | None" = None,
+        **kwargs: t.Any,
+    ) -> t.Iterator[str]:
         """For very large templates it can be useful to not render the whole
         template at once but evaluate each statement after another and yield
         piece for piece.  This method basically does exactly that and returns
@@ -1332,7 +1708,12 @@ class Template:
             import asyncio
 
             async def to_list() -> list[str]:
-                return [x async for x in self.generate_async(*args, **kwargs)]
+                return [
+                    x
+                    async for x in self.generate_async(
+                        *args, render_budget=render_budget, **kwargs
+                    )
+                ]
 
             yield from asyncio.run(to_list())
             return
@@ -1340,12 +1721,20 @@ class Template:
         ctx = self.new_context(dict(*args, **kwargs))
 
         try:
-            yield from self.root_render_func(ctx)
+            if render_budget is None:
+                stream = self.root_render_func(ctx)
+            else:
+                stream = _budgeted_stream(self, ctx, render_budget)
+
+            yield from stream
         except Exception:
             yield self.environment.handle_exception()
 
     async def generate_async(
-        self, *args: t.Any, **kwargs: t.Any
+        self,
+        *args: t.Any,
+        render_budget: "RenderBudget | None" = None,
+        **kwargs: t.Any,
     ) -> t.AsyncGenerator[str, object]:
         """An async version of :meth:`generate`.  Works very similarly but
         returns an async iterator instead.
@@ -1358,10 +1747,16 @@ class Template:
         ctx = self.new_context(dict(*args, **kwargs))
 
         try:
-            agen: t.AsyncGenerator[str, None] = self.root_render_func(ctx)  # type: ignore[assignment]
+            if render_budget is None:
+                agen: t.AsyncGenerator[str, None] = self.root_render_func(ctx)  # type: ignore[assignment]
 
-            async with aclosing(agen):
-                async for event in agen:
+                async with aclosing(agen):
+                    async for event in agen:
+                        yield event
+            else:
+                async for event in _budgeted_async_stream(
+                    self, ctx, render_budget
+                ):
                     yield event
         except Exception:
             yield self.environment.handle_exception()

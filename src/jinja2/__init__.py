@@ -11,6 +11,8 @@ from .bccache import BytecodeCache as BytecodeCache
 from .bccache import FileSystemBytecodeCache as FileSystemBytecodeCache
 from .bccache import MemcachedBytecodeCache as MemcachedBytecodeCache
 from .environment import Environment as Environment
+from .environment import RenderBudget as RenderBudget
+from .environment import RenderBudgetExceeded as RenderBudgetExceeded
 from .environment import Template as Template
 from .exceptions import TemplateAssertionError as TemplateAssertionError
 from .exceptions import TemplateError as TemplateError

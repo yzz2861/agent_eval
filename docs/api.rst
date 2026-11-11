@@ -216,6 +216,13 @@ useful if you want to dig deeper into Jinja or :ref:`develop extensions
     .. automethod:: generate_async([context])
 
 
+.. autoclass:: jinja2.RenderBudget
+    :members:
+
+.. autoclass:: jinja2.RenderBudgetExceeded
+    :members:
+
+
 .. autoclass:: jinja2.environment.TemplateStream()
     :members: disable_buffering, enable_buffering, dump
 

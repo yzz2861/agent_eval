@@ -15,6 +15,7 @@ from markupsafe import EscapeFormatter
 from markupsafe import Markup
 
 from .environment import Environment
+from .environment import get_render_budget
 from .exceptions import SecurityError
 from .runtime import Context
 from .runtime import Undefined
@@ -95,6 +96,11 @@ def safe_range(*args: int) -> range:
             "Range too big. The sandbox blocks ranges larger than"
             f" MAX_RANGE ({MAX_RANGE})."
         )
+
+    budget = get_render_budget()
+
+    if budget is not None:
+        budget.charge_range(len(rng))
 
     return rng
 
