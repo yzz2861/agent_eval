@@ -189,6 +189,14 @@ class FunctionalTests(testtools.TestCase):
         }
         self.check_example("imports-aliases.py", expect)
 
+    def test_imports_aliases_scoped(self):
+        """Test scope-aware resolution of import aliases."""
+        expect = {
+            "SEVERITY": {"UNDEFINED": 0, "LOW": 10, "MEDIUM": 4, "HIGH": 0},
+            "CONFIDENCE": {"UNDEFINED": 0, "LOW": 4, "MEDIUM": 0, "HIGH": 10},
+        }
+        self.check_example("imports-aliases-scoped.py", expect)
+
     def test_imports_from(self):
         """Test the `from X import Y` syntax."""
         expect = {
