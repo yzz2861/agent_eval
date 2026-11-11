@@ -23,6 +23,10 @@ from .config import REFRESH_MESSAGE_CATEGORY
 from .config import SESSION_KEYS
 from .config import USE_SESSION_FOR_NEXT
 from .mixins import AnonymousUserMixin
+from .remember_token import InMemoryRememberTokenStore
+from .remember_token import RememberToken
+from .remember_token import TokenConsumeResult
+from .signals import remember_token_replayed
 from .signals import session_protected
 from .signals import user_accessed
 from .signals import user_loaded_from_cookie
@@ -32,8 +36,11 @@ from .signals import user_unauthorized
 from .utils import _create_identifier
 from .utils import _user_context_processor
 from .utils import decode_cookie
+from .utils import decode_rotating_cookie
 from .utils import encode_cookie
+from .utils import encode_rotating_cookie
 from .utils import expand_login_view
+from .utils import generate_remember_token_id
 from .utils import login_url as make_login_url
 from .utils import make_next_param
 
@@ -99,6 +106,21 @@ class LoginManager:
         self._request_callback = None
 
         self._session_identifier_generator = _create_identifier
+
+        #: The store used by rotating "remember me" tokens when
+        #: ``REMEMBER_COOKIE_ROTATION`` is enabled. Defaults to an in-memory
+        #: store so the feature works out of the box; replace it via the
+        #: ``REMEMBER_TOKEN_STORE`` configuration with a shared backend.
+        self.remember_token_store = InMemoryRememberTokenStore()
+
+        #: Whether rotating remember-me tokens are enabled. The
+        #: ``REMEMBER_COOKIE_ROTATION`` application config takes precedence
+        #: over this attribute. Defaults to ``False``.
+        self.remember_cookie_rotation = False
+
+        #: The replay grace window. The ``REMEMBER_COOKIE_REPLAY_GRACE``
+        #: application config takes precedence over this attribute.
+        self.remember_cookie_replay_grace = None
 
         if app is not None:
             self.init_app(app, add_context_processor)
@@ -364,6 +386,9 @@ class LoginManager:
         return False
 
     def _load_user_from_remember_cookie(self, cookie):
+        if self._rotation_enabled():
+            return self._load_user_from_rotating_cookie(cookie)
+
         user_id = decode_cookie(cookie)
         if user_id is not None:
             session["_user_id"] = user_id
@@ -376,6 +401,190 @@ class LoginManager:
                 user_loaded_from_cookie.send(app, user=user)
                 return user
         return None
+
+    def _get_remember_token_store(self):
+        """Return the configured :class:`RememberTokenStore` instance."""
+        store = current_app.config.get("REMEMBER_TOKEN_STORE")
+        if store is None:
+            store = self.remember_token_store
+        return store
+
+    def _rotation_enabled(self):
+        enabled = current_app.config.get(
+            "REMEMBER_COOKIE_ROTATION", self.remember_cookie_rotation
+        )
+        return bool(enabled)
+
+    def _remember_grace_window(self):
+        """Return the replay grace window as a timedelta, or ``None``."""
+        window = current_app.config.get(
+            "REMEMBER_COOKIE_REPLAY_GRACE", self.remember_cookie_replay_grace
+        )
+        if window is None:
+            return None
+        if isinstance(window, (int, float)):
+            return timedelta(seconds=window)
+        return window
+
+    def _clear_login_session(self):
+        """Clear the session and schedule the remember cookie for deletion."""
+        for key in list(session.keys()):
+            session.pop(key, None)
+        session["_remember"] = "clear"
+
+    def _handle_remember_replay(self, payload):
+        """React to a replayed rotating token.
+
+        Outside the grace window the whole token family is revoked, the
+        session and cookie are cleared, and the
+        :data:`~flask_login.signals.remember_token_replayed` signal is sent.
+        Inside the grace window the request is rejected and the signal is
+        still sent, but the family is not revoked.
+        """
+        family_id = payload.get("family_id")
+        token_id = payload.get("token_id")
+        user_id = payload.get("user_id")
+
+        store = self._get_remember_token_store()
+        grace = self._remember_grace_window()
+        within_grace = False
+        if grace is not None:
+            stored = store.get_token(family_id, token_id)
+            if stored is not None and stored.consumed_at is not None:
+                consumed_at = stored.consumed_at
+                if consumed_at.tzinfo is None:
+                    consumed_at = consumed_at.replace(tzinfo=timezone.utc)
+                within_grace = datetime.now(timezone.utc) - consumed_at <= grace
+
+        if not within_grace:
+            store.revoke_family(family_id)
+            self._clear_login_session()
+        remember_token_replayed.send(
+            current_app._get_current_object(),
+            user_id=user_id,
+            family_id=family_id,
+            token_id=token_id,
+        )
+
+    def _load_user_from_rotating_cookie(self, cookie):
+        payload = decode_rotating_cookie(cookie)
+        if payload is None:
+            return None
+
+        try:
+            now = datetime.now(timezone.utc)
+            expires_at = datetime.fromtimestamp(payload["expires_at"], timezone.utc)
+            if now >= expires_at:
+                return None
+
+            if payload["version"] != 1:
+                return None
+            user_id = str(payload["user_id"])
+            identifier = payload["identifier"]
+            family_id = payload["family_id"]
+            token_id = payload["token_id"]
+
+            if identifier != self._session_identifier_generator():
+                return None
+
+            user = None
+            if self._user_callback:
+                user = self._user_callback(user_id)
+            if user is None:
+                return None
+        except Exception:
+            # Malformed payloads or a failing user loader are treated as an
+            # unauthenticated request; the token has not been consumed yet.
+            return None
+
+        store = self._get_remember_token_store()
+        try:
+            result = store.consume_token(family_id, token_id)
+        except Exception:
+            # We cannot prove the token is unused: invalidate the family when
+            # possible and treat the request as unauthenticated.
+            self._best_effort_revoke(store, family_id)
+            self._clear_login_session()
+            return None
+
+        if result == TokenConsumeResult.ALREADY_USED:
+            try:
+                self._handle_remember_replay(payload)
+            except Exception:
+                self._best_effort_revoke(store, family_id)
+                self._clear_login_session()
+            return None
+        if result != TokenConsumeResult.CONSUMED:
+            return None
+
+        # Rotate within the same family and schedule the cookie rewrite.
+        try:
+            next_payload = self._issue_rotating_token(
+                user_id=user_id,
+                identifier=identifier,
+                family_id=family_id,
+                expires_at=expires_at,
+            )
+        except Exception:
+            self._best_effort_revoke(store, family_id)
+            self._clear_login_session()
+            return None
+
+        session["_user_id"] = user_id
+        session["_fresh"] = False
+        session["_id"] = identifier
+        session["_remember"] = "rotate"
+        g._login_remember_cookie_rotated = True
+        g._login_remember_cookie_payload = next_payload
+        app = current_app._get_current_object()
+        user_loaded_from_cookie.send(app, user=user)
+        return user
+
+    def _best_effort_revoke(self, store, family_id):
+        try:
+            store.revoke_family(family_id)
+        except Exception:
+            return
+
+    def _issue_rotating_token(self, user_id, identifier, family_id=None, expires_at=None):
+        """Create and persist a single-use rotating remember token.
+
+        Returns the payload mapping that should be signed into the cookie.
+        Store failures are propagated to the caller.
+        """
+        config = current_app.config
+        now = datetime.now(timezone.utc)
+        if "_remember_seconds" in session:
+            duration = timedelta(seconds=session["_remember_seconds"])
+        else:
+            duration = config.get("REMEMBER_COOKIE_DURATION", COOKIE_DURATION)
+        if isinstance(duration, int):
+            duration = timedelta(seconds=duration)
+        if expires_at is None:
+            expires_at = now + duration
+        if family_id is None:
+            family_id = generate_remember_token_id()
+        token_id = generate_remember_token_id()
+
+        token = RememberToken(
+            user_id=str(user_id),
+            family_id=family_id,
+            token_id=token_id,
+            identifier=identifier,
+            created_at=now,
+            expires_at=expires_at,
+        )
+        store = self._get_remember_token_store()
+        store.save_token(token)
+        return {
+            "version": 1,
+            "user_id": str(user_id),
+            "identifier": identifier,
+            "family_id": family_id,
+            "token_id": token_id,
+            "issued_at": now.timestamp(),
+            "expires_at": expires_at.timestamp(),
+        }
 
     def _load_user_from_request(self, request):
         if self._request_callback:
@@ -390,16 +599,24 @@ class LoginManager:
         config = current_app.config
         cookie_name = config.get("REMEMBER_COOKIE_NAME", COOKIE_NAME)
         has_cookie = cookie_name in request.cookies and session.get("_remember") != "clear"
-        refresh = current_app.config.get("REMEMBER_COOKIE_REFRESH_EACH_REQUEST") and has_cookie
+        # With rotation enabled every refresh would mint a new single-use
+        # token on every request. Rotation is driven only by an actual
+        # remember-me restore instead.
+        refresh = (
+            config.get("REMEMBER_COOKIE_REFRESH_EACH_REQUEST")
+            and has_cookie
+            and not self._rotation_enabled()
+        )
 
         operation = session.pop("_remember", None)
-        if not operation and not refresh:
+        rotated = g.pop("_login_remember_cookie_rotated", False)
+        if not operation and not refresh and not rotated:
             return response
 
         if operation == "clear":
             self._clear_cookie(response)
 
-        if operation == "set" or refresh:
+        if operation == "set" or refresh or rotated:
             self._set_cookie(response)
 
         return response
@@ -423,9 +640,6 @@ class LoginManager:
         else:
             duration = config.get("REMEMBER_COOKIE_DURATION", COOKIE_DURATION)
 
-        # prepare data
-        data = encode_cookie(str(session["_user_id"]))
-
         if isinstance(duration, int):
             duration = timedelta(seconds=duration)
 
@@ -435,6 +649,27 @@ class LoginManager:
             raise Exception(
                 f"REMEMBER_COOKIE_DURATION must be a datetime.timedelta, instead got: {duration}"
             ) from e
+
+        # prepare data
+        if self._rotation_enabled():
+            payload = g.pop("_login_remember_cookie_payload", None)
+            if payload is None:
+                identifier = self._session_identifier_generator()
+                try:
+                    payload = self._issue_rotating_token(
+                        user_id=session["_user_id"],
+                        identifier=identifier,
+                        expires_at=expires,
+                    )
+                except Exception:
+                    # Storage failures must not produce a 500 or a usable cookie.
+                    session.pop("_remember_seconds", None)
+                    self._clear_cookie(response)
+                    return
+            expires = datetime.fromtimestamp(payload["expires_at"], timezone.utc)
+            data = encode_rotating_cookie(payload)
+        else:
+            data = encode_cookie(str(session["_user_id"]))
 
         # actually set it
         response.set_cookie(
@@ -454,3 +689,25 @@ class LoginManager:
         domain = config.get("REMEMBER_COOKIE_DOMAIN")
         path = config.get("REMEMBER_COOKIE_PATH", "/")
         response.delete_cookie(cookie_name, domain=domain, path=path)
+
+    def _revoke_current_remember_family(self):
+        """Revoke the token family carried by the current request's cookie.
+
+        Used by :func:`flask_login.logout_user`. Failures are swallowed so a
+        broken store cannot turn a logout into a server error; the cookie is
+        still cleared.
+        """
+        if not self._rotation_enabled():
+            return
+        config = current_app.config
+        cookie_name = config.get("REMEMBER_COOKIE_NAME", COOKIE_NAME)
+        cookie = request.cookies.get(cookie_name)
+        if cookie is None:
+            return
+        payload = decode_rotating_cookie(cookie)
+        if payload is None:
+            return
+        try:
+            self._get_remember_token_store().revoke_family(payload["family_id"])
+        except Exception:
+            return

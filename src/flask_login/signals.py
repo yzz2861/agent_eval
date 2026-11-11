@@ -39,3 +39,10 @@ user_accessed = _signals.signal("accessed")
 #: marked non-fresh or deleted. It receives no additional arguments besides
 #: the app.
 session_protected = _signals.signal("session-protected")
+
+#: Sent when a rotating "remember me" token that has already been consumed is
+#: presented again, indicating a replay (such as a cookie being copied to
+#: another machine). The whole token family is revoked unless the replay
+#: happens inside the configured grace window. In addition to the app (which
+#: is the sender), it is passed `user_id`, `family_id` and `token_id`.
+remember_token_replayed = _signals.signal("remember-token-replayed")

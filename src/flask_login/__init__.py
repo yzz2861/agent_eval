@@ -10,6 +10,11 @@ from .config import REFRESH_MESSAGE_CATEGORY
 from .login_manager import LoginManager
 from .mixins import AnonymousUserMixin
 from .mixins import UserMixin
+from .remember_token import InMemoryRememberTokenStore
+from .remember_token import RememberToken
+from .remember_token import RememberTokenStore
+from .remember_token import TokenConsumeResult
+from .signals import remember_token_replayed
 from .signals import session_protected
 from .signals import user_accessed
 from .signals import user_loaded_from_cookie
@@ -23,7 +28,9 @@ from .test_client import FlaskLoginClient
 from .utils import confirm_login
 from .utils import current_user
 from .utils import decode_cookie
+from .utils import decode_rotating_cookie
 from .utils import encode_cookie
+from .utils import encode_rotating_cookie
 from .utils import fresh_login_required
 from .utils import login_fresh
 from .utils import login_remembered
@@ -47,7 +54,12 @@ __all__ = [
     "LoginManager",
     "AnonymousUserMixin",
     "UserMixin",
+    "RememberToken",
+    "RememberTokenStore",
+    "InMemoryRememberTokenStore",
+    "TokenConsumeResult",
     "session_protected",
+    "remember_token_replayed",
     "user_accessed",
     "user_loaded_from_cookie",
     "user_loaded_from_request",
@@ -60,7 +72,9 @@ __all__ = [
     "confirm_login",
     "current_user",
     "decode_cookie",
+    "decode_rotating_cookie",
     "encode_cookie",
+    "encode_rotating_cookie",
     "fresh_login_required",
     "login_fresh",
     "login_remembered",

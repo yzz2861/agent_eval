@@ -18,6 +18,9 @@ Unreleased
 - Never look at the `X-Forwarded-For` header, always use `request.remote_addr`,
   requiring the developer to configure `ProxyFix` appropriately. #700
 - Remove `LOGIN_DISABLED` config. #697
+- Add opt-in single-use rotating remember-me tokens via `REMEMBER_COOKIE_ROTATION`,
+  the pluggable `REMEMBER_TOKEN_STORE` interface, replay detection, and logout
+  family revocation. Rotation is disabled by default.
 
 
 Version 0.6.3

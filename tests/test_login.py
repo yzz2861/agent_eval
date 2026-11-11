@@ -1,3 +1,4 @@
+import threading
 import unittest
 from collections.abc import Hashable
 from contextlib import contextmanager
@@ -30,6 +31,8 @@ from flask_login import login_user
 from flask_login import LoginManager
 from flask_login import logout_user
 from flask_login import make_next_param
+from flask_login import remember_token_replayed
+from flask_login import RememberToken
 from flask_login import session_protected
 from flask_login import set_login_view
 from flask_login import user_accessed
@@ -41,8 +44,11 @@ from flask_login import user_login_confirmed
 from flask_login import user_needs_refresh
 from flask_login import user_unauthorized
 from flask_login import UserMixin
+from flask_login.remember_token import InMemoryRememberTokenStore
+from flask_login.remember_token import TokenConsumeResult
 from flask_login.utils import _secret_key
 from flask_login.utils import _user_context_processor
+from flask_login.utils import decode_rotating_cookie
 
 
 @contextmanager
@@ -1623,3 +1629,321 @@ class CustomTestClientTestCase(unittest.TestCase):
             self.assertEqual("Anonymous", username.data.decode("utf-8"))
             is_fresh = c.get("/is-fresh")
             self.assertEqual("False", is_fresh.data.decode("utf-8"))
+
+
+class RememberRotationTestCase(unittest.TestCase):
+    """Tests for the opt-in rotating remember-me token mechanism."""
+
+    def setUp(self):
+        self.app = Flask(__name__)
+        self.app.config["SECRET_KEY"] = "deterministic"
+        self.app.config["SESSION_PROTECTION"] = None
+        self.app.config["REMEMBER_COOKIE_ROTATION"] = True
+        self.remember_cookie_name = "remember"
+        self.app.config["REMEMBER_COOKIE_NAME"] = self.remember_cookie_name
+        self.store = InMemoryRememberTokenStore()
+        self.app.config["REMEMBER_TOKEN_STORE"] = self.store
+        self.login_manager = LoginManager()
+        self.login_manager.init_app(self.app)
+
+        @self.app.route("/login-notch-remember")
+        def login_notch_remember():
+            return str(login_user(notch, remember=True))
+
+        @self.app.route("/username")
+        def username():
+            if current_user.is_authenticated:
+                return current_user.name
+            return "Anonymous"
+
+        @self.app.route("/is-fresh")
+        def is_fresh():
+            return str(login_fresh())
+
+        @self.app.route("/is-remembered")
+        def is_remembered():
+            return str(login_remembered())
+
+        @self.app.route("/logout")
+        def logout():
+            return str(logout_user())
+
+        @self.login_manager.user_loader
+        def load_user(user_id):
+            return USERS[int(user_id)]
+
+        @self.app.errorhandler(404)
+        def handle_404(e):
+            raise e
+
+        unittest.TestCase.setUp(self)
+
+    def _delete_session(self, c):
+        with c.session_transaction() as sess:
+            sess.clear()
+
+    def _login_and_get_cookie(self, c):
+        c.get("/login-notch-remember")
+        cookie = c.get_cookie(self.remember_cookie_name)
+        self.assertIsNotNone(cookie)
+        return cookie.value
+
+    def _decode(self, cookie):
+        with self.app.app_context():
+            return decode_rotating_cookie(cookie)
+
+    def _use_cookie(self, cookie, user_agent=None):
+        client = self.app.test_client()
+        headers = [("User-Agent", user_agent)] if user_agent else None
+        client.set_cookie(self.remember_cookie_name, cookie)
+        if headers:
+            return client.get("/username", headers=headers)
+        return client.get("/username")
+
+    def test_remember_rotation_cookie_contains_required_fields(self):
+        with self.app.test_client() as c:
+            cookie = self._login_and_get_cookie(c)
+        payload = self._decode(cookie)
+        self.assertIsNotNone(payload)
+        self.assertEqual(
+            set(payload),
+            {
+                "version",
+                "user_id",
+                "identifier",
+                "family_id",
+                "token_id",
+                "issued_at",
+                "expires_at",
+            },
+        )
+        self.assertEqual(1, payload["version"])
+        self.assertEqual("1", payload["user_id"])
+        self.assertTrue(payload["identifier"])
+        self.assertTrue(payload["family_id"])
+        self.assertTrue(payload["token_id"])
+        self.assertLess(payload["issued_at"], payload["expires_at"])
+
+    def test_remember_rotation_restores_and_refreshes_unfresh(self):
+        with self.app.test_client() as c:
+            old_cookie = self._login_and_get_cookie(c)
+            old_payload = self._decode(old_cookie)
+            self._delete_session(c)
+            result = c.get("/username")
+            self.assertEqual("Notch", result.data.decode("utf-8"))
+            self.assertEqual("False", c.get("/is-fresh").data.decode("utf-8"))
+            self.assertEqual("True", c.get("/is-remembered").data.decode("utf-8"))
+
+            new_cookie = c.get_cookie(self.remember_cookie_name).value
+            self.assertNotEqual(old_cookie, new_cookie)
+            new_payload = self._decode(new_cookie)
+            self.assertEqual(old_payload["family_id"], new_payload["family_id"])
+            self.assertNotEqual(old_payload["token_id"], new_payload["token_id"])
+
+    def test_remember_rotation_sequential_replay_revokes_family(self):
+        with self.app.test_client() as c:
+            old_cookie = self._login_and_get_cookie(c)
+            old_payload = self._decode(old_cookie)
+            self._delete_session(c)
+            self.assertEqual("Notch", c.get("/username").data.decode("utf-8"))
+
+            # Replaying the old single-use token must revoke the family.
+            self._delete_session(c)
+            c.set_cookie(self.remember_cookie_name, old_cookie)
+            with listen_to(remember_token_replayed) as listener:
+                result = c.get("/username")
+                listener.assert_heard_one(
+                    self.app,
+                    user_id="1",
+                    family_id=old_payload["family_id"],
+                    token_id=old_payload["token_id"],
+                )
+            self.assertEqual("Anonymous", result.data.decode("utf-8"))
+            self.assertIsNone(c.get_cookie(self.remember_cookie_name))
+
+    def test_remember_rotation_old_token_invalid_after_refresh(self):
+        with self.app.test_client() as c:
+            old_cookie = self._login_and_get_cookie(c)
+            self._delete_session(c)
+            self.assertEqual("Notch", c.get("/username").data.decode("utf-8"))
+        self.assertEqual("Anonymous", self._use_cookie(old_cookie).data.decode("utf-8"))
+
+    def test_remember_rotation_concurrent_use_only_one_wins(self):
+        with self.app.test_client() as c:
+            cookie = self._login_and_get_cookie(c)
+
+        first = self.app.test_client()
+        second = self.app.test_client()
+        first.set_cookie(self.remember_cookie_name, cookie)
+        second.set_cookie(self.remember_cookie_name, cookie)
+
+        results = [
+            first.get("/username").data.decode("utf-8"),
+            second.get("/username").data.decode("utf-8"),
+        ]
+        self.assertEqual(sorted(results), ["Anonymous", "Notch"])
+
+    def test_remember_logout_revokes_family(self):
+        with self.app.test_client() as c:
+            cookie = self._login_and_get_cookie(c)
+            payload = self._decode(cookie)
+            c.get("/logout")
+            self.assertEqual("Anonymous", c.get("/username").data.decode("utf-8"))
+
+        # The pre-logout token must not work anywhere afterwards.
+        self.assertEqual("Anonymous", self._use_cookie(cookie).data.decode("utf-8"))
+        self.assertIsNone(self.store.get_token(payload["family_id"], payload["token_id"]))
+
+    def test_remember_user_revocation_invalidates_tokens(self):
+        with self.app.test_client() as c:
+            cookie = self._login_and_get_cookie(c)
+            payload = self._decode(cookie)
+        self.store.revoke_user_tokens(payload["user_id"])
+        self.assertEqual("Anonymous", self._use_cookie(cookie).data.decode("utf-8"))
+
+    def test_remember_rotation_refresh_each_request_does_not_rotate(self):
+        self.app.config["REMEMBER_COOKIE_REFRESH_EACH_REQUEST"] = True
+        with self.app.test_client() as c:
+            cookie_before = self._login_and_get_cookie(c)
+            c.get("/username")
+            cookie_after_one = c.get_cookie(self.remember_cookie_name).value
+            c.get("/username")
+            cookie_after_two = c.get_cookie(self.remember_cookie_name).value
+        self.assertEqual(cookie_before, cookie_after_one)
+        self.assertEqual(cookie_after_one, cookie_after_two)
+
+    def test_remember_rotation_refresh_rotates_on_restore(self):
+        self.app.config["REMEMBER_COOKIE_REFRESH_EACH_REQUEST"] = True
+        with self.app.test_client() as c:
+            old_cookie = self._login_and_get_cookie(c)
+            self._delete_session(c)
+            self.assertEqual("Notch", c.get("/username").data.decode("utf-8"))
+            new_cookie = c.get_cookie(self.remember_cookie_name).value
+        self.assertNotEqual(old_cookie, new_cookie)
+
+    def test_remember_rotation_rejects_bad_signature(self):
+        with self.app.test_client() as c:
+            cookie = self._login_and_get_cookie(c)
+            self._delete_session(c)
+            index = len(cookie) // 2
+            replacement = "A" if cookie[index] != "A" else "B"
+            tampered = cookie[:index] + replacement + cookie[index + 1 :]
+            c.set_cookie(self.remember_cookie_name, tampered)
+            result = c.get("/username")
+        self.assertEqual(200, result.status_code)
+        self.assertEqual("Anonymous", result.data.decode("utf-8"))
+
+    def test_remember_rotation_rejects_copied_cookie_binding_mismatch(self):
+        with self.app.test_client() as c:
+            cookie = self._login_and_get_cookie(c)
+        result = self._use_cookie(cookie, user_agent="different-browser")
+        self.assertEqual(200, result.status_code)
+        self.assertEqual("Anonymous", result.data.decode("utf-8"))
+
+    def test_remember_rotation_storage_error_on_consume_is_unauthenticated(self):
+        class BrokenStore(InMemoryRememberTokenStore):
+            def consume_token(self, family_id, token_id):
+                raise RuntimeError("storage unavailable")
+
+        broken_store = BrokenStore()
+        self.app.config["REMEMBER_TOKEN_STORE"] = broken_store
+        with self.app.test_client() as c:
+            c.get("/login-notch-remember")
+            cookie = c.get_cookie(self.remember_cookie_name).value
+            payload = self._decode(cookie)
+            self._delete_session(c)
+            c.set_cookie(self.remember_cookie_name, cookie)
+            result = c.get("/username")
+            self.assertIsNone(c.get_cookie(self.remember_cookie_name))
+        self.assertEqual(200, result.status_code)
+        self.assertEqual("Anonymous", result.data.decode("utf-8"))
+        self.assertIsNone(broken_store.get_token(payload["family_id"], payload["token_id"]))
+
+    def test_remember_rotation_storage_error_on_save_is_not_500(self):
+        class BrokenSaveStore(InMemoryRememberTokenStore):
+            def save_token(self, token):
+                raise RuntimeError("storage unavailable")
+
+        self.app.config["REMEMBER_TOKEN_STORE"] = BrokenSaveStore()
+        with self.app.test_client() as c:
+            result = c.get("/login-notch-remember")
+            self.assertEqual(200, result.status_code)
+            self.assertIsNone(c.get_cookie(self.remember_cookie_name))
+            self._delete_session(c)
+            self.assertEqual("Anonymous", c.get("/username").data.decode("utf-8"))
+
+    def test_remember_rotation_replay_grace_window_does_not_revoke_family(self):
+        self.app.config["REMEMBER_COOKIE_REPLAY_GRACE"] = timedelta(seconds=30)
+        with self.app.test_client() as c:
+            old_cookie = self._login_and_get_cookie(c)
+            self._delete_session(c)
+            self.assertEqual("Notch", c.get("/username").data.decode("utf-8"))
+            new_cookie = c.get_cookie(self.remember_cookie_name).value
+
+            self._delete_session(c)
+            c.set_cookie(self.remember_cookie_name, old_cookie)
+            with listen_to(remember_token_replayed) as listener:
+                result = c.get("/username")
+                listener.assert_heard_one(
+                    self.app,
+                    user_id="1",
+                    family_id=self._decode(old_cookie)["family_id"],
+                    token_id=self._decode(old_cookie)["token_id"],
+                )
+            self.assertEqual("Anonymous", result.data.decode("utf-8"))
+
+            # The family survived, so the rotated cookie still works.
+            self._delete_session(c)
+            c.set_cookie(self.remember_cookie_name, new_cookie)
+            self.assertEqual("Notch", c.get("/username").data.decode("utf-8"))
+
+    def test_remember_rotation_store_consume_is_once_only(self):
+        token = self.store
+        token.save_token(
+            RememberToken(
+                user_id="1",
+                family_id="family",
+                token_id="token",
+                identifier="binding",
+                created_at=datetime.now(timezone.utc),
+                expires_at=datetime.now(timezone.utc) + timedelta(seconds=5),
+            )
+        )
+        self.assertEqual(
+            TokenConsumeResult.CONSUMED, token.consume_token("family", "token")
+        )
+        self.assertEqual(
+            TokenConsumeResult.ALREADY_USED, token.consume_token("family", "token")
+        )
+        self.assertEqual(TokenConsumeResult.UNKNOWN, token.consume_token("family", "missing"))
+
+    def test_remember_rotation_store_concurrent_consume_only_one_wins(self):
+        token = self.store
+        token.save_token(
+            RememberToken(
+                user_id="1",
+                family_id="family",
+                token_id="token",
+                identifier="binding",
+                created_at=datetime.now(timezone.utc),
+                expires_at=datetime.now(timezone.utc) + timedelta(seconds=5),
+            )
+        )
+        results = []
+        barrier = threading.Barrier(8)
+        lock = threading.Lock()
+
+        def consume():
+            barrier.wait()
+            result = token.consume_token("family", "token")
+            with lock:
+                results.append(result)
+
+        threads = [threading.Thread(target=consume) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(1, results.count(TokenConsumeResult.CONSUMED))
+        self.assertEqual(7, results.count(TokenConsumeResult.ALREADY_USED))

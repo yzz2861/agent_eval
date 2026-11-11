@@ -316,6 +316,42 @@ old authentication sessions will cease to be valid. Note that the alternative
 id must still uniquely identify the user... think of it as a second user ID.
 
 
+Rotating Remember Cookies
+=========================
+The default remember cookie contains a signed user ID with no server-side
+state. It can be replayed indefinitely until it expires, and copying it to
+another machine still logs that machine in. Applications that need stronger
+protection can opt in to single-use, rotating remember tokens::
+
+    app.config["REMEMBER_COOKIE_ROTATION"] = True
+    app.config["REMEMBER_TOKEN_STORE"] = my_store
+
+This feature is disabled by default. When enabled, the remember cookie is
+signed with itsdangerous and contains the user ID, a browser/session binding
+identifier, a token family ID, a single-use token ID, and the issue and
+expiry timestamps. On a successful restore the old token is consumed and a
+new token in the same family is written back; the login remains non-fresh.
+
+The application provides a :class:`~flask_login.RememberTokenStore` instance
+via ``REMEMBER_TOKEN_STORE``. The store must implement ``save_token``,
+``consume_token``, ``get_token``, ``revoke_family``, and
+``revoke_user_tokens``. ``consume_token`` must atomically mark a token used
+and report whether it was consumed, already used, or unknown. A broken or
+shared store (for example Redis or SQL) is what makes the mechanism useful
+across processes and machines; the process-local
+:class:`~flask_login.InMemoryRememberTokenStore` is only a reference
+implementation for tests.
+
+If an already consumed token is presented again, the whole family is revoked,
+the session and cookie are cleared, and the
+:data:`~flask_login.remember_token_replayed` signal is sent. Set
+``REMEMBER_COOKIE_REPLAY_GRACE`` to an integer number of seconds or a
+`datetime.timedelta` to reject exact replays (such as concurrent requests)
+without revoking the family during that short window. ``logout_user`` revokes
+the current family. Storage errors are treated as an unauthenticated request
+rather than surfacing a server error.
+
+
 Fresh Logins
 ============
 When a user logs in, their session is marked as "fresh," which indicates that
@@ -376,6 +412,13 @@ The details of the cookie can be customized in the application settings.
                                        request, which bumps the lifetime. Works like
                                        Flask's `SESSION_REFRESH_EACH_REQUEST`.
                                        **Default:** `False`
+`REMEMBER_COOKIE_ROTATION`              Enables single-use, rotating remember tokens.
+                                       **Default:** `False`
+`REMEMBER_COOKIE_REPLAY_GRACE`          Seconds (or a `datetime.timedelta`) during which
+                                       a replayed token is rejected without revoking the
+                                       family. **Default:** `None`
+`REMEMBER_TOKEN_STORE`                  A `RememberTokenStore` instance used when rotation
+                                       is enabled. **Default:** process-local in-memory store
 `REMEMBER_COOKIE_SAMESITE`             Restricts the "Remember Me" cookie to first-party
                                        or same-site context.
                                        **Default:** `None`
@@ -599,6 +642,14 @@ Utilities
 
 .. autoclass:: FlaskLoginClient
 
+.. autoclass:: RememberToken
+   :members:
+
+.. autoclass:: RememberTokenStore
+   :members:
+
+.. autoclass:: InMemoryRememberTokenStore
+
 
 Signals
 -------
@@ -636,6 +687,13 @@ signals in your code.
    Sent whenever session protection takes effect, and a session is either
    marked non-fresh or deleted. It receives no additional arguments besides
    the app.
+
+.. data:: remember_token_replayed
+
+   Sent when an already consumed rotating remember token is presented again.
+   In addition to the app (which is the sender), it is passed `user_id`,
+   `family_id`, and `token_id`. The token family is revoked unless the replay
+   falls inside the configured grace window.
 
 .. _source code: https://github.com/maxcountryman/flask-login/tree/main/src/flask_login
 .. _Flask documentation on signals: https://flask.palletsprojects.com/en/latest/signals/

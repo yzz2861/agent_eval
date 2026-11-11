@@ -1,4 +1,5 @@
 import hmac
+import secrets
 from functools import wraps
 from hashlib import sha512
 from urllib.parse import parse_qs
@@ -12,6 +13,8 @@ from flask import has_request_context
 from flask import request
 from flask import session
 from flask import url_for
+from itsdangerous import BadData
+from itsdangerous import URLSafeSerializer
 from werkzeug.local import LocalProxy
 
 from .config import COOKIE_NAME
@@ -61,6 +64,67 @@ def decode_cookie(cookie, key=None):
 
     if hmac.compare_digest(_cookie_digest(payload, key=key), digest):
         return payload
+
+
+#: Salt used for the rotating remember-me cookie serializer. Keeping a fixed
+#: salt separates these signatures from other itsdangerous payloads.
+_ROTATING_COOKIE_SALT = "flask-login-remember-rotation"
+
+
+def _rotating_serializer(key=None):
+    return URLSafeSerializer(_secret_key(key), salt=_ROTATING_COOKIE_SALT)
+
+
+def generate_remember_token_id():
+    """Generate a random, URL-safe id for a token family or single token."""
+    return secrets.token_urlsafe(32)
+
+
+def encode_rotating_cookie(payload, key=None):
+    """Sign a structured rotating remember-me payload with itsdangerous.
+
+    The payload must contain the user id, browser binding identifier, token
+    family id, single-use token id, issued-at and expires-at timestamps.
+
+    :param payload: The mapping to encode.
+    :type payload: dict
+    :param key: The key to use when creating the cookie digest. If not
+                specified, the SECRET_KEY value from app config will be used.
+    :type key: str
+    """
+    return _rotating_serializer(key).dumps(payload)
+
+
+def decode_rotating_cookie(cookie, key=None):
+    """Verify and decode a rotating remember-me cookie.
+
+    Returns the payload mapping, or ``None`` if the signature is invalid or
+    the data is malformed. Expiry is checked separately by the caller.
+
+    :param cookie: An encoded cookie.
+    :type cookie: str
+
+    :param key: The key to use when creating the cookie digest. If not
+                specified, the SECRET_KEY value from app config will be used.
+    :type key: str
+    """
+    try:
+        payload = _rotating_serializer(key).loads(cookie)
+    except BadData:
+        return None
+
+    required_keys = {
+        "version",
+        "user_id",
+        "identifier",
+        "family_id",
+        "token_id",
+        "issued_at",
+        "expires_at",
+    }
+    if not isinstance(payload, dict) or not required_keys.issubset(payload):
+        return None
+    return payload
 
 
 def make_next_param(login_url, current_url):
@@ -146,6 +210,8 @@ def login_remembered():
     has_cookie = cookie_name in request.cookies and session.get("_remember") != "clear"
     if has_cookie:
         cookie = request.cookies[cookie_name]
+        if current_app.login_manager._rotation_enabled():
+            return decode_rotating_cookie(cookie) is not None
         user_id = decode_cookie(cookie)
         return user_id is not None
     return False
@@ -220,6 +286,7 @@ def logout_user():
 
     cookie_name = current_app.config.get("REMEMBER_COOKIE_NAME", COOKIE_NAME)
     if cookie_name in request.cookies:
+        current_app.login_manager._revoke_current_remember_family()
         session["_remember"] = "clear"
         if "_remember_seconds" in session:
             session.pop("_remember_seconds")
