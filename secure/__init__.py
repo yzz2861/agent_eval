@@ -6,6 +6,15 @@ from secure.secure import (
     Secure,
 )
 
+from ._internal.resolver import (
+    HeaderOrigin,
+    PolicyConflictError,
+    PolicyDiagnostic,
+    PolicyEntry,
+    PolicyLayer,
+    PolicyResolver,
+    ResolvedPolicy,
+)
 from .headers.cache_control import CacheControl
 from .headers.content_security_policy import ContentSecurityPolicy
 from .headers.cross_origin_embedder_policy import CrossOriginEmbedderPolicy
@@ -31,9 +40,16 @@ __all__ = [
     "CrossOriginOpenerPolicy",
     "CrossOriginResourcePolicy",
     "CustomHeader",
+    "HeaderOrigin",
     "PermissionsPolicy",
+    "PolicyConflictError",
+    "PolicyDiagnostic",
+    "PolicyEntry",
+    "PolicyLayer",
+    "PolicyResolver",
     "Preset",
     "ReferrerPolicy",
+    "ResolvedPolicy",
     "Secure",
     "Server",
     "StrictTransportSecurity",

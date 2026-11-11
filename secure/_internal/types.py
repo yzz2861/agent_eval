@@ -5,6 +5,8 @@ from typing import Literal, Protocol, TypeAlias
 OnInvalidPolicy = Literal["drop", "warn", "raise"]
 DeduplicateAction = Literal["raise", "first", "last", "concat"]
 OnUnexpectedPolicy = Literal["raise", "drop", "warn"]
+OnConflictPolicy = Literal["raise", "collect"]
+HeaderEffect = Literal["allow", "deny"]
 
 
 class HeadersProtocol(Protocol):

@@ -71,6 +71,58 @@ def normalize_header_items(
     return MappingProxyType(cleaned)
 
 
+def validate_header_pair(  # noqa: PLR0913
+    name: str,
+    value: str,
+    *,
+    on_invalid: OnInvalidPolicy = "drop",
+    strict: bool = False,
+    allow_obs_text: bool = False,
+    logger: logging.Logger | None = None,
+) -> tuple[str, str] | None:
+    """
+    Validate and normalize a single ``(name, value)`` header pair.
+
+    Shared by :func:`normalize_header_items` and the layered policy resolver so
+    that CR/LF handling, RFC 7230 header-name checks, and empty-value rejection
+    cannot be bypassed by any merge path.
+
+    Returns the cleaned ``(name, value)`` pair, or ``None`` when the entry is
+    dropped under ``on_invalid="drop"``/``"warn"``.
+    """
+    options = _NormalizationOptions(
+        on_invalid=on_invalid,
+        strict=strict,
+        allow_obs_text=allow_obs_text,
+        logger=logger or logging.getLogger(__name__),
+    )
+    return _validate_header_pair(name, value, options=options)
+
+
+def validate_header_name(
+    name: str,
+    *,
+    on_invalid: OnInvalidPolicy = "drop",
+    logger: logging.Logger | None = None,
+) -> str | None:
+    """
+    Validate an RFC 7230 header field-name and return its trimmed form.
+
+    Used for deny rules, which carry no value. Returns ``None`` when the name
+    is dropped under ``on_invalid="drop"``/``"warn"``.
+    """
+    normalized_name = name.strip()
+    if HEADER_NAME_RE.match(normalized_name):
+        return normalized_name
+
+    message = f"Invalid header name {normalized_name!r} (RFC 7230 token required)"
+    if on_invalid == "warn":
+        (logger or logging.getLogger(__name__)).warning(message)
+    elif on_invalid == "raise":
+        raise ValueError(message)
+    return None
+
+
 def _validate_header_pair(
     name: str,
     value: str,

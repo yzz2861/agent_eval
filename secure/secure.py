@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from threading import RLock
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -31,6 +32,7 @@ from ._internal.constants import COMMA_JOIN_OK, DEFAULT_ALLOWED_HEADERS, MULTI_O
 from ._internal.normalize import normalize_header_items
 from ._internal.policy import allowlist_header_objects, deduplicate_header_objects
 from ._internal.presets import Preset, preset_kwargs
+from ._internal.resolver import PolicyLayer as _PolicyLayer, PolicyResolver, ResolvedPolicy as _ResolvedPolicy
 
 HeaderSetError = _emit.HeaderSetError
 
@@ -142,6 +144,8 @@ class Secure:
         self._headers = ConfiguredHeaders(configured_headers, on_change=self._discard_normalized_headers)
         self._normalized_headers: Mapping[str, str] | None = None
         self._normalized_source_items: HeaderItems | None = None
+        self._resolved_policy: _ResolvedPolicy | None = None
+        self._policy_lock = RLock()
 
     @property
     def headers_list(self) -> list[BaseHeader]:
@@ -155,6 +159,7 @@ class Secure:
     def _discard_normalized_headers(self) -> None:
         self._normalized_headers = None
         self._normalized_source_items = None
+        self._resolved_policy = None
 
     def _normalized_headers_for(
         self,
@@ -268,6 +273,9 @@ class Secure:
             if duplicates are found when building the single-valued mapping,
             or if ``strict=True`` and CR/LF or disallowed characters are present.
         """
+        if self._current_resolved_policy() is not None:
+            return self
+
         header_items = self.header_items()
         self._normalized_headers = normalize_header_items(
             header_items,
@@ -380,6 +388,81 @@ class Secure:
     # Serialization / access
     # ------------------------------------------------------------------
 
+    @classmethod
+    def from_layers(
+        cls,
+        layers: Iterable[_PolicyLayer],
+        *,
+        resolver: PolicyResolver | None = None,
+    ) -> Secure:
+        """
+        Build a :class:`Secure` facade backed by an explicit layered policy.
+
+        Each :class:`~secure.PolicyLayer` carries its own source identifier and
+        priority. The resolver merges them once into an immutable
+        :class:`~secure.ResolvedPolicy` snapshot that drives :meth:`headers`,
+        :meth:`header_items`, :meth:`set_headers`, and
+        :meth:`set_headers_async`.
+
+        The existing chained API remains available; mutating
+        :attr:`headers_list` falls back to the classic single-layer pipeline.
+
+        Parameters
+        ----------
+        layers :
+            Ordered policy layers (default policy, tenant policy, route
+            overrides, ...). Layer order does not affect the outcome:
+            priorities do.
+        resolver :
+            Optional preconfigured :class:`~secure.PolicyResolver`. When
+            omitted, a resolver with strict output validation is used.
+
+        Returns
+        -------
+        Secure
+            Instance whose emitted headers come from the resolved snapshot.
+        """
+        secure = cls()
+        secure.apply_layers(layers, resolver=resolver)
+        return secure
+
+    def apply_layers(
+        self,
+        layers: Iterable[_PolicyLayer],
+        *,
+        resolver: PolicyResolver | None = None,
+    ) -> _ResolvedPolicy:
+        """
+        Resolve ``layers`` and atomically install the resulting snapshot.
+
+        In-flight requests keep using the previous snapshot until this method
+        returns; later requests observe the complete new snapshot, never a mix
+        of the two.
+
+        Returns
+        -------
+        ResolvedPolicy
+            The immutable snapshot now backing this instance.
+        """
+        active_resolver = resolver or PolicyResolver()
+        resolved = active_resolver.resolve(layers)
+        self._install_resolved_policy(resolved)
+        return resolved
+
+    # Concise hot-reload alias for callers managing config updates.
+    reload_layers = apply_layers
+
+    def _install_resolved_policy(self, resolved: _ResolvedPolicy) -> None:
+        with self._policy_lock:
+            self._resolved_policy = resolved
+            self._normalized_headers = None
+            self._normalized_source_items = None
+
+    @property
+    def resolved_policy(self) -> _ResolvedPolicy | None:
+        """Currently installed immutable layered snapshot, if any."""
+        return self._current_resolved_policy()
+
     def header_items(self) -> HeaderItems:
         """
         Serialize the current headers into ``(name, value)`` pairs.
@@ -393,17 +476,29 @@ class Secure:
         tuple[tuple[str, str], ...]
             Immutable sequence of ``(name, value)`` pairs.
         """
+        resolved_policy = self._current_resolved_policy()
+        if resolved_policy is not None:
+            return resolved_policy.header_items
+
         return header_items_from_objects(self._headers)
 
     def _resolved_header_items(self) -> HeaderItems:
         """
         Return the list of header items honoring any normalized override.
         """
+        resolved_policy = self._current_resolved_policy()
+        if resolved_policy is not None:
+            return resolved_policy.header_items
+
         header_items = self.header_items()
         normalized_headers = self._normalized_headers_for(header_items)
         if normalized_headers is not None:
             return tuple(normalized_headers.items())
         return header_items
+
+    def _current_resolved_policy(self) -> _ResolvedPolicy | None:
+        with self._policy_lock:
+            return self._resolved_policy
 
     @property
     def headers(self) -> Mapping[str, str]:
@@ -427,6 +522,10 @@ class Secure:
             in :data:`MULTI_OK`. Use :meth:`header_items` to emit multi-valued
             headers or call :meth:`deduplicate_headers` first.
         """
+        resolved_policy = self._current_resolved_policy()
+        if resolved_policy is not None:
+            return resolved_policy.headers
+
         header_items = self.header_items()
         normalized_headers = self._normalized_headers_for(header_items)
         if normalized_headers is not None:

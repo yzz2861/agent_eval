@@ -85,6 +85,49 @@ secure_headers.headers_list.append(
 This replaces the preset HSTS builder while leaving the rest of the preset untouched.
 If you need the compatibility profile instead, start from `Preset.BASIC`.
 
+## Layered policy resolution
+
+When headers come from several sources (default policy, tenant policy, per-route overrides), loading them into one list and relying on call order is unsafe: duplicate names silently resolve to whichever value was appended last. `PolicyResolver` models each source as an explicit layer with its own identifier and priority, then merges them once into an immutable snapshot.
+
+```python
+from secure import PolicyLayer, PolicyResolver, Secure, StrictTransportSecurity
+
+resolver = PolicyResolver()
+secure = Secure.from_layers(
+    [
+        PolicyLayer.from_headers('default', 10, [StrictTransportSecurity().max_age(31536000)]),
+        PolicyLayer.from_headers('tenant', 20, [('Strict-Transport-Security', 'max-age=60')]),
+        PolicyLayer.from_headers('route', 30, [('Strict-Transport-Security', 'max-age=63072000')]),
+    ],
+    resolver=resolver,
+)
+```
+
+Resolution rules:
+
+- **Single-valued headers:** the highest-priority value wins. Layer order never matters, so a shorter `max-age` cannot overwrite a stronger one just because it was loaded second.
+- **Explicit deny:** `PolicyEntry.deny('Server')` suppresses every lower-priority allow. A higher-priority allow still overrides the deny.
+- **Multi-valued headers:** names in `multi_ok` (default: `Content-Security-Policy`) keep one output line per distinct value; names in `comma_join_ok` (default: `Cache-Control`) are joined with `', '`.
+- **Conflicts:** two different single values at the same priority raise `PolicyConflictError` with a readable message and per-source origins. Pass `on_conflict='collect'` to omit the conflicted header and keep a `PolicyDiagnostic` on the snapshot instead.
+- **Provenance:** `ResolvedPolicy.origins` records the source, priority, effect, and value behind every emitted header line.
+
+The returned `ResolvedPolicy` is an immutable snapshot: mutating the original header builders or layers after resolution cannot change it. `set_headers()` and `set_headers_async()` emit exactly that snapshot.
+
+### Hot reload
+
+For configuration updates, call `reload_layers()` (an alias of `apply_layers()`). The new layers are fully resolved before the snapshot reference is swapped, so concurrent requests observe either the complete old snapshot or the complete new one, never a mixture:
+
+```python
+secure.reload_layers(
+    [PolicyLayer.from_headers('default', 10, new_headers)],
+    resolver=resolver,
+)
+```
+
+In-flight requests keep using the snapshot they started with. Directly mutating `headers_list` remains supported and falls back to the classic single-layer pipeline, discarding any installed layered snapshot.
+
+Validation runs while the snapshot is built. The resolver defaults to `strict=True` and `on_invalid='raise'`, so CR/LF injection, illegal header names, and empty values fail resolution instead of being smuggled through the merge. Use `on_invalid='drop'`/`'warn'` or `strict=False` to mirror the normalization helper's softer policies.
+
 ## Middleware behavior
 
 The ASGI and WSGI middleware classes use the same `Secure` instance you would use in hooks or handlers:
