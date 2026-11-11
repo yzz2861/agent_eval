@@ -50,6 +50,7 @@ Release 0.14 (in development)
 .. rubric:: Changes
 
 * Form values, query parameters, path elements and cookies are now always decoded as `utf8` with `errors='surrogateescape'`. This is the correct approach for almost all modern web applications, but still allows applications to recover the original byte sequence if needed. This also means that ``bottle.FormsDict`` no longer re-encodes PEP-3333 `latin1` strings to `utf8` on demand (via attribute access). The ``FormsDict.getunicode()`` and ``FormsDict.decode()`` methods are deprecated and do nothing, as all values are already transcoded to `utf8`.
+* The ``X-Forwarded-For``, ``X-Forwarded-Host``, ``X-Forwarded-Proto`` and ``X-Forwarded-Port`` headers are no longer trusted unconditionally. They are parsed only when the direct peer (``REMOTE_ADDR``) matches the new ``Bottle.config['trusted_proxies']`` list of IPv4/IPv6 addresses or CIDR networks, which defaults to an empty list. ``BaseRequest.url``/``urlparts``, ``redirect()``, ``remote_addr`` and ``remote_route`` now all share a single validated result, the forwarded client chain is traversed right-to-left across trusted proxies, and conflicting or malformed forwarded headers cause the affected header group (or the whole ``X-Forwarded-For`` chain) to be ignored in favor of the direct connection data. Malformed ``trusted_proxies`` entries raise ``ValueError`` at configuration time instead of being treated as an empty list.
 
 .. rubric:: New features
 
@@ -272,4 +273,3 @@ This is an incomplete list of new features and improved functionality.
 * New :func:`get`, :func:`post`, :func:`put` and :func:`delete` decorators.
 * The :class:`SimpleTemplate` engine got full unicode support.
 * Lots of non-critical bugfixes.
-

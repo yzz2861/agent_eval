@@ -69,7 +69,8 @@ if __name__ == '__main__':
 ###############################################################################
 
 import base64, calendar, email.utils, functools, hmac, itertools, \
-    mimetypes, os, re, tempfile, threading, time, warnings, weakref, hashlib
+    mimetypes, os, re, tempfile, threading, time, warnings, weakref, hashlib, \
+    ipaddress
 
 from types import FunctionType
 from datetime import date as datedate, datetime, timedelta
@@ -593,6 +594,10 @@ class Bottle:
         cfg = ConfigDict()
         cfg._define('catchall', default=True, filter=bool,
             help="Catch all unhandled exceptions and display an error page.")
+        cfg._define('trusted_proxies', default=(), filter=_parse_trusted_proxies,
+            help="List of trusted reverse proxy IP addresses or CIDR ranges. "
+                 "Forwarded headers (X-Forwarded-*) are parsed only for "
+                 "requests coming directly from one of these addresses.")
         return cfg
 
     def __init__(self, **kwargs):
@@ -1104,6 +1109,226 @@ class Bottle:
 ###############################################################################
 
 
+def _parse_trusted_proxies(value):
+    """ Validate and normalize the ``trusted_proxies`` config value into a
+        tuple of :class:`ipaddress` networks. Accepts a single string or an
+        iterable of strings, where each entry is an IPv4/IPv6 address or CIDR
+        network. Raises :class:`ValueError` for malformed entries instead of
+        silently ignoring them. """
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        entries = [value]
+    elif isinstance(value, (int, bytes)) or not hasattr(value, '__iter__'):
+        raise ValueError(
+            "trusted_proxies must be an iterable of IP addresses or CIDR "
+            "networks, not %r" % (value,))
+    else:
+        entries = list(value)
+
+    networks = []
+    for entry in entries:
+        if not isinstance(entry, str):
+            raise ValueError(
+                "trusted_proxies entries must be strings, got %r" % (entry,))
+        text = entry.strip()
+        if not text:
+            raise ValueError("trusted_proxies contains an empty entry")
+        try:
+            networks.append(ipaddress.ip_network(text, strict=False))
+        except ValueError:
+            raise ValueError(
+                "trusted_proxies entry %r is not a valid IP address or CIDR "
+                "network" % entry)
+    return tuple(networks)
+
+
+class _ProxyInfo:
+    """ Shared, normalized result of the trusted proxy boundary check.
+
+        All URL and client-address related request properties read from this
+        object so that emails, redirects and audit logs can never disagree. """
+
+    __slots__ = ('scheme', 'host', 'remote_addr', 'remote_route', 'trusted')
+
+    def __init__(self, scheme, host, remote_addr, remote_route, trusted=False):
+        self.scheme = scheme
+        self.host = host
+        self.remote_addr = remote_addr
+        self.remote_route = remote_route
+        self.trusted = trusted
+
+
+def _split_forwarded_values(header):
+    """ Split a comma-separated forwarded header into stripped, non-empty
+        values (the standard comma+space list form is supported). Returns an
+        empty list for a missing or empty header. """
+    if not header:
+        return []
+    return [part.strip() for part in header.split(',') if part.strip()]
+
+
+_HOST_FORBIDDEN_CHARS = frozenset(' \t\r\n/@?#')
+
+
+def _parse_forwarded_host(value):
+    """ Validate a single X-Forwarded-Host entry and return it normalized.
+
+        Userinfo, paths, query strings, fragments, whitespace, control
+        characters and invalid ports are rejected. Returns a
+        ``(host, port)`` tuple, with ``port`` being ``None`` when the host
+        does not include one. """
+    if not value or any(ch in value for ch in _HOST_FORBIDDEN_CHARS):
+        raise ValueError("invalid forwarded host: %r" % value)
+    if any(ord(ch) < 0x21 or ord(ch) == 0x7f for ch in value):
+        raise ValueError("invalid forwarded host: %r" % value)
+
+    hostname = value
+    port = None
+    if value.startswith('['):
+        end = value.find(']')
+        if end < 0:
+            raise ValueError("invalid forwarded host: %r" % value)
+        hostname = value[:end + 1]
+        rest = value[end + 1:]
+        if rest:
+            if not rest.startswith(':'):
+                raise ValueError("invalid forwarded host: %r" % value)
+            port = rest[1:]
+    elif value.count(':') == 1:
+        hostname, port = value.split(':', 1)
+    elif ':' in value:
+        raise ValueError("invalid forwarded host: %r" % value)
+
+    if not hostname or any(ord(ch) < 0x21 or ord(ch) == 0x7f for ch in hostname):
+        raise ValueError("invalid forwarded host: %r" % value)
+
+    if hostname.startswith('['):
+        try:
+            ipaddress.IPv6Address(hostname[1:-1])
+        except ValueError:
+            raise ValueError("invalid forwarded host: %r" % value)
+
+    if port is not None:
+        if not port.isdigit() or not (1 <= int(port) <= 65535):
+            raise ValueError("invalid forwarded host port: %r" % value)
+
+    if ':' in hostname and not hostname.startswith('['):
+        hostname = '[' + hostname + ']'
+    return hostname.lower(), port
+
+
+def _format_forwarded_host(hostname, port):
+    return hostname + (':' + port if port is not None else '')
+
+
+def _parse_forwarded_port(value):
+    """ Validate a single X-Forwarded-Port entry. """
+    if not value or not value.isdigit() or not (1 <= int(value) <= 65535):
+        raise ValueError("invalid forwarded port: %r" % value)
+    return value
+
+
+def _ip_in_networks(address, networks):
+    for network in networks:
+        if address.version == network.version and address in network:
+            return True
+    return False
+
+
+def _parse_proxy_info(environ, trusted_networks):
+    """ Resolve all forwarded headers behind one explicit trust boundary.
+
+        Forwarded headers are only inspected when ``REMOTE_ADDR`` is part of
+        ``trusted_networks``. Any conflict or malformed header group causes
+        the whole group to be ignored, falling back to the direct connection
+        information. """
+    scheme = environ.get('wsgi.url_scheme', 'http')
+    host = environ.get('HTTP_HOST')
+    if not host:
+        # HTTP 1.1 requires a Host-header. This is for HTTP/1.0 clients.
+        host = environ.get('SERVER_NAME', '127.0.0.1')
+        port = environ.get('SERVER_PORT')
+        if port and port != ('80' if scheme == 'http' else '443'):
+            host += ':' + port
+
+    remote = environ.get('REMOTE_ADDR')
+    remote_route = [remote] if remote else []
+    info = _ProxyInfo(scheme, host, remote, remote_route)
+
+    if not trusted_networks or not remote:
+        return info
+
+    try:
+        remote_ip = ipaddress.ip_address(remote.strip())
+    except ValueError:
+        return info
+    if not _ip_in_networks(remote_ip, trusted_networks):
+        return info
+
+    info.trusted = True
+
+    # X-Forwarded-For: walk the chain right-to-left across trusted proxies.
+    xff = _split_forwarded_values(environ.get('HTTP_X_FORWARDED_FOR'))
+    if xff:
+        try:
+            chain = [ipaddress.ip_address(entry) for entry in xff]
+        except ValueError:
+            chain = None  # A malformed entry invalidates the whole chain.
+        if chain is not None:
+            route = [str(address) for address in chain]
+            if remote and (not route or route[-1] != remote.strip()):
+                route.append(remote)
+            info.remote_route = route
+            client_ip = chain[0]
+            for address in reversed(chain):
+                if not _ip_in_networks(address, trusted_networks):
+                    client_ip = address
+                    break
+            info.remote_addr = str(client_ip)
+
+    # X-Forwarded-Host / Proto / Port form one validated header group.
+    try:
+        parsed_hosts = [_parse_forwarded_host(entry)
+                 for entry in _split_forwarded_values(
+                     environ.get('HTTP_X_FORWARDED_HOST'))]
+        proto_entries = _split_forwarded_values(
+            environ.get('HTTP_X_FORWARDED_PROTO'))
+        if any(entry.lower() not in ('http', 'https')
+               for entry in proto_entries):
+            raise ValueError("invalid forwarded proto")
+        protos = [entry.lower() for entry in proto_entries]
+        if len(set(parsed_hosts)) > 1 or len(set(protos)) > 1:
+            raise ValueError("conflicting forwarded host/proto headers")
+
+        new_scheme = info.scheme
+        new_host = info.host
+        if protos:
+            new_scheme = protos[0]
+        if parsed_hosts:
+            hostname, host_port = parsed_hosts[0]
+            if host_port is None:
+                # X-Forwarded-Port only applies when the host has no port.
+                raw_port = environ.get('HTTP_X_FORWARDED_PORT')
+                if raw_port is not None:
+                    port_values = _split_forwarded_values(raw_port)
+                    ports = [_parse_forwarded_port(entry)
+                             for entry in port_values]
+                    if len(set(ports)) > 1:
+                        raise ValueError("conflicting forwarded port headers")
+                    if ports:
+                        host_port = ports[0]
+            new_host = _format_forwarded_host(hostname, host_port)
+        # Commit the whole group only after every value validated.
+        info.scheme, info.host = new_scheme, new_host
+    except ValueError:
+        # Ignore the whole forwarded host/proto/port group and keep the
+        # direct-connection scheme and host.
+        pass
+
+    return info
+
+
 class BaseRequest:
     """ A wrapper for WSGI environment dictionaries that adds a lot of
         convenient access methods and properties. Most of them are read-only.
@@ -1376,9 +1601,10 @@ class BaseRequest:
     @property
     def url(self):
         """ The full request URI including hostname and scheme. If your app
-            lives behind a reverse proxy or load balancer and you get confusing
-            results, make sure that the ``X-Forwarded-Host`` header is set
-            correctly. """
+            lives behind a reverse proxy or load balancer, configure the
+            trusted proxy boundary in
+            ``app.config['trusted_proxies']``; only then are
+            ``X-Forwarded-Host`` and ``X-Forwarded-Proto`` honored. """
         return self.urlparts.geturl()
 
     @DictProperty('environ', 'bottle.request.urlparts', read_only=True)
@@ -1388,16 +1614,28 @@ class BaseRequest:
             but the fragment is always empty because it is not visible to the
             server. """
         env = self.environ
-        http = env.get('HTTP_X_FORWARDED_PROTO') or env.get('wsgi.url_scheme', 'http')
-        host = env.get('HTTP_X_FORWARDED_HOST') or env.get('HTTP_HOST')
-        if not host:
-            # HTTP 1.1 requires a Host-header. This is for HTTP/1.0 clients.
-            host = env.get('SERVER_NAME', '127.0.0.1')
-            port = env.get('SERVER_PORT')
-            if port and port != ('80' if http == 'http' else '443'):
-                host += ':' + port
+        proxy = self._proxy_info
+        http = proxy.scheme
+        host = proxy.host
         path = urlquote(self.fullpath)
         return UrlSplitResult(http, host, path, env.get('QUERY_STRING'), '')
+
+    @property
+    def _trusted_proxies(self):
+        """ The validated ``trusted_proxies`` network list of the handling
+            application, or the global default list for requests that are not
+            connected to an application. Malformed configuration raises here
+            rather than being treated as an empty list. """
+        app = self.environ.get('bottle.app')
+        if app is not None:
+            return app.config.get('trusted_proxies', ())
+        return Bottle._global_config.get('trusted_proxies', ())
+
+    @DictProperty('environ', 'bottle.request.proxy_info', read_only=True)
+    def _proxy_info(self):
+        """ Cached, shared result of the trusted proxy boundary check. All
+            URL and client-address properties read from this object. """
+        return _parse_proxy_info(self.environ, self._trusted_proxies)
 
     @property
     def fullpath(self):
@@ -1471,20 +1709,21 @@ class BaseRequest:
     @property
     def remote_route(self):
         """ A list of all IPs that were involved in this request, starting with
-            the client IP and followed by zero or more proxies. This does only
-            work if all proxies support the ```X-Forwarded-For`` header. Note
-            that this information can be forged by malicious clients. """
-        proxy = self.environ.get('HTTP_X_FORWARDED_FOR')
-        if proxy: return [ip.strip() for ip in proxy.split(',')]
-        remote = self.environ.get('REMOTE_ADDR')
-        return [remote] if remote else []
+            the client IP and followed by zero or more proxies. The
+            ``X-Forwarded-For`` header is only honored when the request comes
+            from a proxy listed in ``app.config['trusted_proxies']``; otherwise
+            this is just ``[REMOTE_ADDR]``. A malformed forwarded chain is
+            ignored entirely. """
+        return list(self._proxy_info.remote_route)
 
     @property
     def remote_addr(self):
-        """ The client IP as a string. Note that this information can be forged
-            by malicious clients. """
-        route = self.remote_route
-        return route[0] if route else None
+        """ The client IP as a string. When trusted proxies are configured,
+            this is the first non-trusted address of the
+            ``X-Forwarded-For`` chain (walking right-to-left); otherwise it is
+            ``REMOTE_ADDR``. Without trusted proxies, forwarded headers are
+            never trusted. """
+        return self._proxy_info.remote_addr
 
     def copy(self):
         """ Return a new :class:`Request` with a shallow :attr:`environ` copy. """

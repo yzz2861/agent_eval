@@ -56,6 +56,46 @@ To make life easier, plugins and applications should follow some simple rules wh
 - Your own application should use a separate namespace (e.g. ``myapp.*``).
 
 
+Trusted Proxies and Forwarded Headers
+=====================================
+
+Applications deployed behind a reverse proxy or load balancer often receive
+information about the original request through the ``X-Forwarded-For``,
+``X-Forwarded-Host``, ``X-Forwarded-Proto`` and ``X-Forwarded-Port`` headers.
+Because these headers can be set by arbitrary clients, Bottle ignores all of
+them by default. They are only parsed for requests whose ``REMOTE_ADDR`` is
+part of the explicit trust boundary configured in
+``app.config['trusted_proxies']``::
+
+    app.config['trusted_proxies'] = [
+        '10.0.0.1',          # single IPv4/IPv6 address
+        '10.0.0.0/8',        # CIDR network
+        'fd00::/8',          # IPv6 CIDR network
+    ]
+
+The default value is empty, meaning forwarded headers are never trusted.
+Each entry must be a valid IPv4/IPv6 address or CIDR network;
+malformed entries raise :class:`ValueError` when the configuration is set,
+rather than being silently ignored.
+
+Once the trust boundary is established, all request properties share a single
+validated result so that :attr:`BaseRequest.url`, :func:`redirect`,
+:attr:`BaseRequest.remote_addr` and :attr:`BaseRequest.remote_route` always
+agree:
+
+- ``X-Forwarded-For`` is walked from right to left, skipping trusted proxies.
+  The first non-trusted address is reported as :attr:`~BaseRequest.remote_addr`;
+  a malformed address invalidates the whole chain and the request falls back to
+  ``REMOTE_ADDR``.
+- Multiple ``X-Forwarded-Host`` or ``X-Forwarded-Proto`` values are accepted
+  only if they normalize to the same value, otherwise the whole forwarded
+  host/proto/port group is ignored.
+- Hosts must not contain userinfo, paths, query strings, fragments,
+  whitespace, control characters or invalid ports. The protocol must be either
+  ``http`` or ``https``.
+- ``X-Forwarded-Port`` is only used when the forwarded host has no explicit
+  port and the port is in the range ``1..65535``.
+
 Load configuration from a File
 =================================
 

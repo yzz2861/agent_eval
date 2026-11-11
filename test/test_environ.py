@@ -429,25 +429,29 @@ class TestRequest(unittest.TestCase):
 
     def test_remote_route(self):
         ips = ['1.2.3.4', '2.3.4.5', '3.4.5.6']
-        r = BaseRequest({})
-        self.assertEqual(r.remote_route, [])
-        r.environ['HTTP_X_FORWARDED_FOR'] = ', '.join(ips)
-        self.assertEqual(r.remote_route, ips)
-        r.environ['REMOTE_ADDR'] = ips[1]
-        self.assertEqual(r.remote_route, ips)
-        del r.environ['HTTP_X_FORWARDED_FOR']
+        self.assertEqual(BaseRequest({}).remote_route, [])
+        # Forwarded headers are ignored without a trusted proxy boundary.
+        self.assertEqual(
+            BaseRequest({'HTTP_X_FORWARDED_FOR': ', '.join(ips)}).remote_route,
+            [])
+        r = BaseRequest({'HTTP_X_FORWARDED_FOR': ', '.join(ips),
+                         'REMOTE_ADDR': ips[1]})
         self.assertEqual(r.remote_route, [ips[1]])
+        self.assertEqual(BaseRequest({'REMOTE_ADDR': ips[1]}).remote_route,
+                         [ips[1]])
 
     def test_remote_addr(self):
         ips = ['1.2.3.4', '2.3.4.5', '3.4.5.6']
-        r = BaseRequest({})
-        self.assertEqual(r.remote_addr, None)
-        r.environ['HTTP_X_FORWARDED_FOR'] = ', '.join(ips)
-        self.assertEqual(r.remote_addr, ips[0])
-        r.environ['REMOTE_ADDR'] = ips[1]
-        self.assertEqual(r.remote_addr, ips[0])
-        del r.environ['HTTP_X_FORWARDED_FOR']
+        self.assertEqual(BaseRequest({}).remote_addr, None)
+        # Forwarded headers are ignored without a trusted proxy boundary.
+        self.assertEqual(
+            BaseRequest({'HTTP_X_FORWARDED_FOR': ', '.join(ips)}).remote_addr,
+            None)
+        r = BaseRequest({'HTTP_X_FORWARDED_FOR': ', '.join(ips),
+                         'REMOTE_ADDR': ips[1]})
         self.assertEqual(r.remote_addr, ips[1])
+        self.assertEqual(BaseRequest({'REMOTE_ADDR': ips[1]}).remote_addr,
+                         ips[1])
 
     def test_user_defined_attributes(self):
         for cls in (BaseRequest, LocalRequest):
@@ -466,6 +470,190 @@ class TestRequest(unittest.TestCase):
 
             # Unknown attributes raise AttributeError.
             self.assertRaises(AttributeError, getattr, r, 'somevalue')
+
+
+class TestTrustedProxies(unittest.TestCase):
+
+    def make_request(self, trusted_proxies=None, app=None, **environ):
+        env = {'SERVER_PROTOCOL': 'HTTP/1.1', 'HTTP_HOST': '127.0.0.1'}
+        env.update(environ)
+        if app is None and trusted_proxies is not None:
+            app = bottle.Bottle()
+        if app is not None:
+            if trusted_proxies is not None:
+                app.config['trusted_proxies'] = trusted_proxies
+            env['bottle.app'] = app
+        return BaseRequest(env)
+
+    def test_default_disabled(self):
+        # The default trust boundary is empty: all forwarded headers lose.
+        r = self.make_request(
+            REMOTE_ADDR='10.0.0.1', HTTP_HOST='127.0.0.1',
+            HTTP_X_FORWARDED_HOST='evil.example',
+            HTTP_X_FORWARDED_PROTO='https',
+            HTTP_X_FORWARDED_FOR='203.0.113.7')
+        self.assertEqual('http://127.0.0.1/', r.url)
+        self.assertEqual('10.0.0.1', r.remote_addr)
+        self.assertEqual(['10.0.0.1'], r.remote_route)
+        self.assertFalse(r._proxy_info.trusted)
+
+    def test_direct_connection_forgery(self):
+        # Even with proxies configured, an untrusted direct peer cannot use
+        # any forwarded header.
+        r = self.make_request(
+            ['10.0.0.0/8'], REMOTE_ADDR='8.8.8.8', HTTP_HOST='127.0.0.1',
+            HTTP_X_FORWARDED_HOST='evil.example',
+            HTTP_X_FORWARDED_PROTO='https',
+            HTTP_X_FORWARDED_FOR='203.0.113.7')
+        self.assertEqual('http://127.0.0.1/', r.url)
+        self.assertEqual('8.8.8.8', r.remote_addr)
+        self.assertEqual(['8.8.8.8'], r.remote_route)
+        self.assertFalse(r._proxy_info.trusted)
+
+    def test_trusted_single_proxy(self):
+        r = self.make_request(
+            ['10.0.0.1'], REMOTE_ADDR='10.0.0.1', HTTP_HOST='127.0.0.1',
+            HTTP_X_FORWARDED_HOST='example.com',
+            HTTP_X_FORWARDED_PROTO='https',
+            HTTP_X_FORWARDED_FOR='203.0.113.7')
+        self.assertTrue(r._proxy_info.trusted)
+        self.assertEqual('https://example.com/', r.url)
+        self.assertEqual('203.0.113.7', r.remote_addr)
+        self.assertEqual(['203.0.113.7', '10.0.0.1'], r.remote_route)
+
+    def test_two_layer_proxy_chain(self):
+        r = self.make_request(
+            ['10.0.0.0/8'], REMOTE_ADDR='10.0.0.2', HTTP_HOST='127.0.0.1',
+            HTTP_X_FORWARDED_HOST='example.com',
+            HTTP_X_FORWARDED_PROTO='https',
+            HTTP_X_FORWARDED_FOR='203.0.113.7, 10.0.0.1')
+        self.assertEqual('https://example.com/', r.url)
+        self.assertEqual('203.0.113.7', r.remote_addr)
+        self.assertEqual(['203.0.113.7', '10.0.0.1', '10.0.0.2'],
+                         r.remote_route)
+
+    def test_right_to_left_skips_trusted_hops(self):
+        # The rightmost non-trusted address wins, not simply the leftmost.
+        r = self.make_request(
+            ['10.0.0.0/8'], REMOTE_ADDR='10.0.0.2',
+            HTTP_X_FORWARDED_FOR='198.51.100.1, 203.0.113.7, 10.0.0.1')
+        self.assertEqual('203.0.113.7', r.remote_addr)
+
+    def test_leftmost_spoof_still_auditable(self):
+        # The client-controlled leftmost entry survives in the route, but the
+        # first untrusted hop when scanning right-to-left is the client.
+        r = self.make_request(
+            ['10.0.0.1'], REMOTE_ADDR='10.0.0.1',
+            HTTP_X_FORWARDED_FOR='198.51.100.66, 203.0.113.7')
+        self.assertEqual('203.0.113.7', r.remote_addr)
+        self.assertEqual(['198.51.100.66', '203.0.113.7', '10.0.0.1'],
+                         r.remote_route)
+
+    def test_malformed_forwarded_chain_falls_back(self):
+        r = self.make_request(
+            ['10.0.0.0/8'], REMOTE_ADDR='10.0.0.1',
+            HTTP_X_FORWARDED_FOR='203.0.113.7, not-an-ip')
+        self.assertEqual('10.0.0.1', r.remote_addr)
+        self.assertEqual(['10.0.0.1'], r.remote_route)
+
+    def test_all_trusted_chain_uses_leftmost(self):
+        r = self.make_request(
+            ['10.0.0.0/8'], REMOTE_ADDR='10.0.0.2',
+            HTTP_X_FORWARDED_FOR='10.0.0.5, 10.0.0.1')
+        self.assertEqual('10.0.0.5', r.remote_addr)
+        self.assertEqual(['10.0.0.5', '10.0.0.1', '10.0.0.2'],
+                         r.remote_route)
+
+    def test_ipv6_proxy(self):
+        r = self.make_request(
+            ['fd00::/8'], REMOTE_ADDR='fd00::1', HTTP_HOST='127.0.0.1',
+            HTTP_X_FORWARDED_HOST='[2001:db8::1]:8443',
+            HTTP_X_FORWARDED_PROTO='https',
+            HTTP_X_FORWARDED_FOR='2001:db8::dead, fd00::1')
+        self.assertEqual('https://[2001:db8::1]:8443/', r.url)
+        self.assertEqual('2001:db8::dead', r.remote_addr)
+        self.assertEqual(['2001:db8::dead', 'fd00::1'],
+                         r.remote_route)
+
+    def test_conflicting_host_and_proto(self):
+        r = self.make_request(
+            ['10.0.0.1'], REMOTE_ADDR='10.0.0.1', HTTP_HOST='127.0.0.1',
+            HTTP_X_FORWARDED_HOST='example.com, evil.example')
+        self.assertEqual('http://127.0.0.1/', r.url)
+        r = self.make_request(
+            ['10.0.0.1'], REMOTE_ADDR='10.0.0.1', HTTP_HOST='127.0.0.1',
+            HTTP_X_FORWARDED_PROTO='http, https')
+        self.assertEqual('http://127.0.0.1/', r.url)
+
+    def test_forwarded_port_rules(self):
+        r = self.make_request(
+            ['10.0.0.1'], REMOTE_ADDR='10.0.0.1', HTTP_HOST='127.0.0.1',
+            HTTP_X_FORWARDED_HOST='example.com',
+            HTTP_X_FORWARDED_PORT='8443',
+            HTTP_X_FORWARDED_PROTO='https')
+        self.assertEqual('https://example.com:8443/', r.url)
+        # Host-provided port takes precedence over X-Forwarded-Port.
+        r = self.make_request(
+            ['10.0.0.1'], REMOTE_ADDR='10.0.0.1', HTTP_HOST='127.0.0.1',
+            HTTP_X_FORWARDED_HOST='example.com:9000',
+            HTTP_X_FORWARDED_PORT='8443',
+            HTTP_X_FORWARDED_PROTO='https')
+        self.assertEqual('https://example.com:9000/', r.url)
+
+    def test_forwarded_port_out_of_range(self):
+        for bad in ('0', '65536', 'abc', '-1'):
+            r = self.make_request(
+                ['10.0.0.1'], REMOTE_ADDR='10.0.0.1', HTTP_HOST='127.0.0.1',
+                HTTP_X_FORWARDED_HOST='example.com',
+                HTTP_X_FORWARDED_PORT=bad,
+                HTTP_X_FORWARDED_PROTO='https')
+            self.assertEqual('http://127.0.0.1/', r.url)
+
+    def test_url_remote_and_redirect_share_result(self):
+        # request.url, redirect() and the address properties must all see the
+        # same validated forwarding decision.
+        app = bottle.Bottle()
+        app.config['trusted_proxies'] = ['10.0.0.1']
+        env = {
+            'SERVER_PROTOCOL': 'HTTP/1.1', 'REMOTE_ADDR': '10.0.0.1',
+            'HTTP_HOST': '127.0.0.1',
+            'HTTP_X_FORWARDED_HOST': 'example.com',
+            'HTTP_X_FORWARDED_PROTO': 'https',
+            'HTTP_X_FORWARDED_FOR': '203.0.113.7',
+            'bottle.app': app,
+        }
+        request.bind(env)
+        bottle.response.bind()
+        self.assertEqual('https://example.com/', request.url)
+        self.assertEqual('203.0.113.7', request.remote_addr)
+        try:
+            bottle.redirect('./login')
+        except bottle.HTTPResponse as response:
+            self.assertEqual('https://example.com/login',
+                             response.headers['Location'])
+        else:
+            self.fail('redirect() did not raise')
+
+    def test_invalid_cidr_raises(self):
+        app = bottle.Bottle()
+        for bad in ('not-an-ip', '10.0.0.0/99', '999.1.1.1', '10.0.0.0/',
+                    '', '   '):
+            with self.assertRaises(ValueError):
+                app.config['trusted_proxies'] = [bad]
+        with self.assertRaises(ValueError):
+            app.config['trusted_proxies'] = 12345
+        with self.assertRaises(ValueError):
+            app.config['trusted_proxies'] = [12345]
+        # A failure must not silently turn the setting into an empty list.
+        self.assertEqual((), app.config['trusted_proxies'])
+
+    def test_valid_config_formats(self):
+        app = bottle.Bottle()
+        app.config['trusted_proxies'] = [
+            '10.0.0.1', '10.0.0.0/8', 'fd00::1', '2001:db8::/32']
+        r = self.make_request(app=app, REMOTE_ADDR='10.0.0.2',
+                              HTTP_X_FORWARDED_FOR='203.0.113.7, 10.0.0.1')
+        self.assertEqual('203.0.113.7', r.remote_addr)
 
 
 class TestResponse(unittest.TestCase):
@@ -773,15 +961,26 @@ class TestResponse(unittest.TestCase):
 
 class TestRedirect(unittest.TestCase):
 
+    def bind_request(self, env, trusted_proxies=None):
+        request.bind(env)
+        if trusted_proxies is not None:
+            request.environ['bottle.app'] = self._proxy_app(trusted_proxies)
+        bottle.response.bind()
+
+    def _proxy_app(self, trusted_proxies):
+        app = bottle.Bottle()
+        app.config['trusted_proxies'] = trusted_proxies
+        return app
+
     def assertRedirect(self, target, result, query=None, status=303, **args):
         env = {'SERVER_PROTOCOL': 'HTTP/1.1'}
+        trusted = args.pop('trusted_proxies', None)
         for key in list(args):
             if key.startswith('wsgi'):
                 args[key.replace('_', '.', 1)] = args[key]
                 del args[key]
         env.update(args)
-        request.bind(env)
-        bottle.response.bind()
+        self.bind_request(env, trusted)
         try:
             bottle.redirect(target, **(query or {}))
         except bottle.HTTPResponse as E:
@@ -856,10 +1055,135 @@ class TestRedirect(unittest.TestCase):
                             HTTP_HOST='example.com:81', SERVER_PORT='80')
 
     def test_host_http_proxy(self):
-        # Trust proxy headers over original header.
+        # Forwarded headers are ignored without an explicit trust boundary.
+        self.assertRedirect('./test.html', 'http://127.0.0.1/test.html',
+                            HTTP_X_FORWARDED_HOST='evil.example',
+                            HTTP_X_FORWARDED_PROTO='https',
+                            HTTP_HOST='127.0.0.1', REMOTE_ADDR='10.0.0.9')
+        # With a trusted proxy, the forwarded headers win over Host.
         self.assertRedirect('./test.html', 'http://example.com/test.html',
                             HTTP_X_FORWARDED_HOST='example.com',
-                            HTTP_HOST='127.0.0.1')
+                            HTTP_HOST='127.0.0.1', REMOTE_ADDR='10.0.0.1',
+                            trusted_proxies=['10.0.0.1'])
+
+    def test_host_http_proxy_direct_forgery(self):
+        # A direct client cannot influence host or scheme via forwarded
+        # headers, even if a proxy is trusted but this peer is not.
+        self.assertRedirect('./test.html', 'http://127.0.0.1/test.html',
+                            HTTP_X_FORWARDED_HOST='evil.example',
+                            HTTP_X_FORWARDED_PROTO='https',
+                            HTTP_HOST='127.0.0.1', REMOTE_ADDR='8.8.8.8',
+                            trusted_proxies=['10.0.0.0/8'])
+
+    def test_host_http_proxy_proto(self):
+        self.assertRedirect('./test.html', 'https://example.com/test.html',
+                            HTTP_X_FORWARDED_HOST='example.com',
+                            HTTP_X_FORWARDED_PROTO='https',
+                            HTTP_HOST='127.0.0.1', REMOTE_ADDR='10.0.0.1',
+                            trusted_proxies=['10.0.0.0/8'])
+
+    def test_host_http_proxy_two_layers(self):
+        env = {
+            'SERVER_PROTOCOL': 'HTTP/1.1',
+            'REMOTE_ADDR': '10.0.0.2',
+            'HTTP_HOST': '127.0.0.1',
+            'HTTP_X_FORWARDED_FOR': '203.0.113.7, 10.0.0.1',
+            'HTTP_X_FORWARDED_HOST': 'example.com',
+            'HTTP_X_FORWARDED_PROTO': 'https',
+        }
+        self.bind_request(env, ['10.0.0.0/8'])
+        self.assertEqual('https://example.com/', request.url)
+        self.assertEqual('203.0.113.7', request.remote_addr)
+        self.assertEqual(['203.0.113.7', '10.0.0.1', '10.0.0.2'],
+                         request.remote_route)
+
+    def test_host_http_proxy_leftmost_forgery(self):
+        # The attacker-controlled leftmost entry is exposed as client IP, but
+        # a trusted hop closer to the app still controls the URL headers.
+        env = {
+            'SERVER_PROTOCOL': 'HTTP/1.1',
+            'REMOTE_ADDR': '10.0.0.1',
+            'HTTP_HOST': '127.0.0.1',
+            'HTTP_X_FORWARDED_FOR': '198.51.100.66, 203.0.113.7',
+            'HTTP_X_FORWARDED_HOST': 'example.com',
+            'HTTP_X_FORWARDED_PROTO': 'https',
+        }
+        self.bind_request(env, ['10.0.0.1'])
+        self.assertEqual('203.0.113.7', request.remote_addr)
+        self.assertEqual('https://example.com/', request.url)
+
+    def test_host_http_proxy_ipv6(self):
+        env = {
+            'SERVER_PROTOCOL': 'HTTP/1.1',
+            'REMOTE_ADDR': 'fd00::1',
+            'HTTP_HOST': '127.0.0.1',
+            'HTTP_X_FORWARDED_FOR': '2001:db8::dead, fd00::1',
+            'HTTP_X_FORWARDED_HOST': '[2001:db8::1]:8443',
+            'HTTP_X_FORWARDED_PROTO': 'https',
+        }
+        self.bind_request(env, ['fd00::/8'])
+        self.assertEqual('https://[2001:db8::1]:8443/', request.url)
+        self.assertEqual('2001:db8::dead', request.remote_addr)
+
+    def test_host_http_proxy_conflicting_headers(self):
+        # Conflicting host or proto values invalidate the whole forwarded
+        # group, falling back to the direct connection.
+        base = dict(HTTP_HOST='127.0.0.1', REMOTE_ADDR='10.0.0.1',
+                    trusted_proxies=['10.0.0.1'])
+        self.assertRedirect(
+            './test.html', 'http://127.0.0.1/test.html',
+            HTTP_X_FORWARDED_HOST='example.com, evil.example', **base)
+        self.assertRedirect(
+            './test.html', 'http://127.0.0.1/test.html',
+            HTTP_X_FORWARDED_HOST='example.com',
+            HTTP_X_FORWARDED_PROTO='http, https', **base)
+
+    def test_host_http_proxy_invalid_host(self):
+        base = dict(HTTP_HOST='127.0.0.1', REMOTE_ADDR='10.0.0.1',
+                    trusted_proxies=['10.0.0.1'])
+        for forged in ('user@example.com', 'example.com/path',
+                       'example.com?q=1', 'example.com#frag',
+                       'example.com:99999', 'example.com:zero',
+                       'exa mple.com', 'example.com\x00'):
+            self.assertRedirect(
+                './test.html', 'http://127.0.0.1/test.html',
+                HTTP_X_FORWARDED_HOST=forged, **base)
+
+    def test_host_http_proxy_invalid_proto(self):
+        self.assertRedirect(
+            './test.html', 'http://127.0.0.1/test.html',
+            HTTP_X_FORWARDED_HOST='example.com',
+            HTTP_X_FORWARDED_PROTO='ftp',
+            HTTP_HOST='127.0.0.1', REMOTE_ADDR='10.0.0.1',
+            trusted_proxies=['10.0.0.1'])
+
+    def test_host_http_proxy_forwarded_port(self):
+        # Port only applies when the forwarded host carries no port.
+        self.assertRedirect(
+            './test.html', 'https://example.com:8443/test.html',
+            HTTP_X_FORWARDED_HOST='example.com',
+            HTTP_X_FORWARDED_PORT='8443',
+            HTTP_X_FORWARDED_PROTO='https',
+            HTTP_HOST='127.0.0.1', REMOTE_ADDR='10.0.0.1',
+            trusted_proxies=['10.0.0.1'])
+        # A port embedded in the host wins; X-Forwarded-Port is ignored.
+        self.assertRedirect(
+            './test.html', 'https://example.com:9000/test.html',
+            HTTP_X_FORWARDED_HOST='example.com:9000',
+            HTTP_X_FORWARDED_PORT='8443',
+            HTTP_X_FORWARDED_PROTO='https',
+            HTTP_HOST='127.0.0.1', REMOTE_ADDR='10.0.0.1',
+            trusted_proxies=['10.0.0.1'])
+
+    def test_host_http_proxy_port_out_of_range(self):
+        for bad in ('0', '65536', 'abc', '-1'):
+            self.assertRedirect(
+                './test.html', 'http://127.0.0.1/test.html',
+                HTTP_X_FORWARDED_HOST='example.com',
+                HTTP_X_FORWARDED_PORT=bad,
+                HTTP_X_FORWARDED_PROTO='https',
+                HTTP_HOST='127.0.0.1', REMOTE_ADDR='10.0.0.1',
+                trusted_proxies=['10.0.0.1'])
 
     def test_specialchars(self):
         ''' The target URL is not quoted automatically. '''
