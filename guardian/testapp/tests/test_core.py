@@ -1,4 +1,5 @@
 from itertools import chain
+from unittest.mock import patch
 
 from django.apps import apps as django_apps
 from django.conf import settings
@@ -10,6 +11,7 @@ from django.db import connection
 from django.template import Context, Template
 from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
+from django.utils.encoding import force_str
 
 from guardian.conf import settings as guardian_settings
 from guardian.core import ObjectPermissionChecker
@@ -786,3 +788,155 @@ class ObjectPermissionCheckerTest(ObjectPermissionTestCase):
         # Ignore other queries that JOIN this table.
         group_selects = [q for q in queries if q["sql"].endswith(auth_group_from)]
         self.assertEqual(len(group_selects), 1)
+
+
+class ObjectPermissionExplanationTest(ObjectPermissionTestCase):
+    def setUp(self):
+        super().setUp()
+        self.project = Project.objects.create(name="contract")
+        self.other_project = Project.objects.create(name="other-contract")
+
+    def test_explains_direct_user_permission_from_database(self):
+        assign_perm("change_project", self.user, self.project)
+        checker = ObjectPermissionChecker(self.user)
+
+        result = checker.explain_perm("change_project", self.project)
+
+        self.assertTrue(result)
+        self.assertTrue(result["result"])
+        self.assertEqual(result["source"], "direct_user")
+        self.assertTrue(result["direct_user"])
+        self.assertEqual(result["direct_user_permissions"], ["change_project"])
+        self.assertEqual(result["group_paths"], [])
+        self.assertIsNone(result["denial_reason"])
+        self.assertEqual(result.source_type, "direct_user")
+        self.assertEqual(result.object_pk, force_str(self.project.pk))
+        self.assertEqual(checker.has_perm("change_project", self.project), result["result"])
+
+        # The explanation is derived from the row, not from wrapping has_perm.
+        ProjectUserObjectPermission.objects.get(user=self.user, content_object=self.project)
+
+    def test_explains_one_and_multiple_group_sources_without_listing_other_groups(self):
+        second_group = Group.objects.create(name="second-group")
+        unrelated_group = Group.objects.create(name="unrelated-group")
+        self.user.groups.add(second_group, unrelated_group)
+        assign_perm("change_project", self.group, self.project)
+
+        checker = ObjectPermissionChecker(self.user)
+        first = checker.explain_perm("change_project", self.project)
+        self.assertTrue(first["result"])
+        self.assertEqual(first["source"], "group")
+        self.assertEqual(first["group_paths"], [self.group.name])
+        self.assertNotIn(unrelated_group.name, first["group_paths"])
+
+        assign_perm("change_project", second_group, self.project)
+        result = checker.explain_perm("change_project", self.project)
+        self.assertEqual(result["source"], "group")
+        self.assertEqual(set(result["group_paths"]), {self.group.name, second_group.name})
+        self.assertNotIn(unrelated_group.name, result["group_paths"])
+        self.assertEqual(set(result["sources"]), {"group"})
+
+    def test_explains_global_permission_only_when_accepted(self):
+        assign_perm("testapp.change_project", self.user)
+        checker = ObjectPermissionChecker(self.user)
+
+        ignored = checker.explain_perm("change_project", self.project, accept_global_perms=False)
+        self.assertFalse(ignored["result"])
+        self.assertFalse(ignored["global_checked"])
+        self.assertEqual(ignored["denial_reason"], "no_matching_permission")
+
+        accepted = checker.explain_perm("change_project", self.project, accept_global_perms=True)
+        self.assertTrue(accepted["result"])
+        self.assertEqual(accepted["source"], "global")
+        self.assertTrue(accepted["global_permission"])
+        self.assertTrue(accepted["global_user"])
+        self.assertEqual(accepted["global_permissions"], ["change_project"])
+
+    def test_explains_global_group_permission_only_when_accepted(self):
+        assign_perm("testapp.change_project", self.group)
+        checker = ObjectPermissionChecker(self.user)
+
+        result = checker.explain_perm("change_project", self.project, accept_global_perms=True)
+        self.assertTrue(result["result"])
+        self.assertEqual(result["source"], "global")
+        self.assertEqual([group["name"] for group in result["global_groups"]], [self.group.name])
+
+    def test_denial_reason_and_batch_reuses_source_queries(self):
+        projects = [Project.objects.create(name=f"batch-project-{index}") for index in range(4)]
+        assign_perm("change_project", self.user, projects[0])
+        assign_perm("change_project", self.group, projects[1])
+        checker = ObjectPermissionChecker(self.user)
+
+        with CaptureQueriesContext(connection) as queries:
+            results = checker.explain_perms("change_project", projects)
+
+        self.assertEqual([result["result"] for result in results], [True, True, False, False])
+        self.assertEqual(results[0]["source"], "direct_user")
+        self.assertEqual(results[1]["source"], "group")
+        self.assertEqual(results[2]["denial_reason"], "no_matching_permission")
+        self.assertIsNone(results[2]["source"])
+        # Membership + direct + group.  The count is independent of len(projects).
+        self.assertLessEqual(len(queries), 5)
+
+    def test_explains_inactive_and_superuser_paths(self):
+        assign_perm("change_project", self.user, self.project)
+        self.user.is_active = False
+        inactive = ObjectPermissionChecker(self.user).explain_perm("change_project", self.project)
+        self.assertFalse(inactive["result"])
+        self.assertEqual(inactive["source"], "inactive_user")
+        self.assertEqual(inactive["denial_reason"], "inactive_user")
+
+        superuser = User.objects.create(username="explanation-superuser", is_superuser=True)
+        result = ObjectPermissionChecker(superuser).explain_perm("change_project", self.project)
+        self.assertTrue(result["result"])
+        self.assertEqual(result["source"], "superuser")
+        self.assertTrue(result["is_superuser"])
+        self.assertEqual(result["special_path"], "superuser")
+
+        inactive_superuser = User.objects.create(username="inactive-superuser", is_superuser=True, is_active=False)
+        inactive_result = ObjectPermissionChecker(inactive_superuser).explain_perm("change_project", self.project)
+        self.assertFalse(inactive_result["result"])
+        self.assertEqual(inactive_result["source"], "inactive_user")
+        self.assertTrue(inactive_result["is_superuser"])
+
+    def test_anonymous_group_path_and_redaction(self):
+        anonymous = User.objects.get(username=guardian_settings.ANONYMOUS_USER_NAME)
+        anonymous_group = Group.objects.create(name="anonymous-contract-readers")
+        anonymous.groups.add(anonymous_group)
+        assign_perm("view_project", anonymous_group, self.project)
+
+        checker = ObjectPermissionChecker(AnonymousUser())
+        result = checker.explain_perm(
+            "view_project",
+            self.project,
+            redact_group=lambda name: f"[{name}]",
+            redact_object=lambda name: "[contract]",
+        )
+        self.assertTrue(result["result"])
+        self.assertTrue(result["is_anonymous"])
+        self.assertEqual(result["special_path"], "anonymous")
+        self.assertEqual(result["group_paths"], [f"[{anonymous_group.name}]"])
+        self.assertEqual(result["object_name"], "[contract]")
+
+    def test_anonymous_support_disabled_is_explicit_in_checker(self):
+        with patch("guardian.core.guardian_settings.ANONYMOUS_USER_NAME", None):
+            checker = ObjectPermissionChecker(AnonymousUser())
+            result = checker.explain_perm("view_project", self.project)
+
+        self.assertFalse(result["result"])
+        self.assertTrue(result["is_anonymous"])
+        self.assertEqual(result["denial_reason"], "anonymous_not_supported")
+
+    def test_has_perm_stays_boolean_and_does_not_use_explanation_queries(self):
+        assign_perm("change_project", self.user, self.project)
+        checker = ObjectPermissionChecker(self.user)
+        checker._fetch_direct_explanation_rows = lambda *args, **kwargs: self.fail(
+            "has_perm must not run explanation queries"
+        )
+        checker._fetch_group_explanation_rows = lambda *args, **kwargs: self.fail(
+            "has_perm must not run explanation queries"
+        )
+
+        self.assertIs(checker.has_perm("change_project", self.project), True)
+        self.assertIs(checker.has_perm("delete_project", self.project), False)
+        self.assertEqual(len(checker._obj_perms_cache), 1)

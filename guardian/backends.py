@@ -6,7 +6,11 @@ from django.db.models import Model
 from django.http import HttpRequest
 
 from guardian.conf import settings
-from guardian.core import ObjectPermissionChecker
+from guardian.core import (
+    ObjectPermissionChecker,
+    PermissionExplanation,
+    denied_permission_explanation,
+)
 from guardian.ctypes import get_content_type
 from guardian.exceptions import WrongAppError
 from guardian.utils import get_anonymous_user
@@ -112,6 +116,188 @@ class ObjectPermissionBackend:
 
         check = ObjectPermissionChecker(user_obj)
         return check.has_perm(perm, obj)
+
+    @staticmethod
+    def _validate_app_label(user_obj: Any, perm: str, obj: Model) -> None:
+        """Apply the same app-label validation used by ``has_perm``."""
+        if "." not in perm:
+            return
+        app_label, _ = perm.split(".", 1)
+        if app_label != obj._meta.app_label:
+            ctype = get_content_type(obj)
+            if app_label != ctype.app_label:
+                raise WrongAppError(
+                    f"Passed perm has app label of '{app_label}' while "
+                    f"given obj has app label '{obj._meta.app_label}' and given obj"
+                    f"content_type has app label '{ctype.app_label}'"
+                )
+
+    @staticmethod
+    def _is_anonymous(user_obj: Any) -> bool:
+        return not getattr(user_obj, "is_authenticated", False)
+
+    def explain_perm(
+        self,
+        user_obj: Any,
+        perm: str,
+        obj: Model | Iterable[Model] | None = None,
+        *,
+        objects: Iterable[Model] | None = None,
+        accept_global_perms: bool = False,
+        redact: Any = None,
+        redact_group: Any = None,
+        redact_object: Any = None,
+    ) -> PermissionExplanation | list[PermissionExplanation]:
+        """Explain a backend object-permission decision.
+
+        This follows the same support, app-label and identity rules as
+        :meth:`has_perm`, and delegates the actual row inspection to
+        :class:`~guardian.core.ObjectPermissionChecker`.  The boolean result is
+        therefore guaranteed to agree with the checker path for the same input.
+        """
+        if objects is not None:
+            return self.explain_perms(
+                user_obj,
+                perm,
+                objects,
+                accept_global_perms=accept_global_perms,
+                redact=redact,
+                redact_group=redact_group,
+                redact_object=redact_object,
+            )
+
+        anonymous = self._is_anonymous(user_obj)
+        if obj is None:
+            return denied_permission_explanation(
+                perm,
+                None,
+                "no_object",
+                anonymous=anonymous,
+                redact=redact,
+                redact_group=redact_group,
+                redact_object=redact_object,
+            )
+        if isinstance(obj, (list, tuple, Iterable)):
+            return self.explain_perms(
+                user_obj,
+                perm,
+                obj,
+                accept_global_perms=accept_global_perms,
+                redact=redact,
+                redact_group=redact_group,
+                redact_object=redact_object,
+            )
+
+        if not check_object_support(obj):
+            return denied_permission_explanation(
+                perm,
+                obj,
+                "unsupported_object",
+                anonymous=anonymous,
+                redact=redact,
+                redact_group=redact_group,
+                redact_object=redact_object,
+            )
+
+        support, resolved_user = check_support(user_obj, obj)
+        if not support:
+            reason = "anonymous_not_supported" if anonymous else "unsupported_user"
+            return denied_permission_explanation(
+                perm,
+                obj,
+                reason,
+                anonymous=anonymous,
+                redact=redact,
+                redact_group=redact_group,
+                redact_object=redact_object,
+            )
+
+        self._validate_app_label(resolved_user, perm, obj)
+        checker = ObjectPermissionChecker(resolved_user)
+        if anonymous:
+            checker._is_anonymous = True
+        return checker.explain_perm(
+            perm,
+            obj,
+            accept_global_perms=accept_global_perms,
+            redact=redact,
+            redact_group=redact_group,
+            redact_object=redact_object,
+        )
+
+    def explain_perms(
+        self,
+        user_obj: Any,
+        perm: str,
+        objects: Iterable[Model],
+        *,
+        accept_global_perms: bool = False,
+        redact: Any = None,
+        redact_group: Any = None,
+        redact_object: Any = None,
+    ) -> list[PermissionExplanation]:
+        """Explain one permission for a batch of objects through the backend."""
+        objects_list = list(objects)
+        if not objects_list:
+            return []
+
+        anonymous = self._is_anonymous(user_obj)
+        if not all(check_object_support(obj) for obj in objects_list):
+            return [
+                denied_permission_explanation(
+                    perm,
+                    obj if isinstance(obj, models.Model) else None,
+                    "unsupported_object",
+                    anonymous=anonymous,
+                    redact=redact,
+                    redact_group=redact_group,
+                    redact_object=redact_object,
+                )
+                for obj in objects_list
+            ]
+
+        # check_support only depends on the user and object support, both of
+        # which were just validated for the whole batch.
+        support, resolved_user = check_support(user_obj, objects_list[0])
+        if not support:
+            reason = "anonymous_not_supported" if anonymous else "unsupported_user"
+            return [
+                denied_permission_explanation(
+                    perm,
+                    obj,
+                    reason,
+                    anonymous=anonymous,
+                    redact=redact,
+                    redact_group=redact_group,
+                    redact_object=redact_object,
+                )
+                for obj in objects_list
+            ]
+
+        for obj in objects_list:
+            self._validate_app_label(resolved_user, perm, obj)
+
+        checker = ObjectPermissionChecker(resolved_user)
+        if anonymous:
+            checker._is_anonymous = True
+        return checker.explain_perms(
+            perm,
+            objects_list,
+            accept_global_perms=accept_global_perms,
+            redact=redact,
+            redact_group=redact_group,
+            redact_object=redact_object,
+        )
+
+    def explain_perm_many(
+        self,
+        user_obj: Any,
+        perm: str,
+        objects: Iterable[Model],
+        **kwargs: Any,
+    ) -> list[PermissionExplanation]:
+        """Alias for :meth:`explain_perms`."""
+        return self.explain_perms(user_obj, perm, objects, **kwargs)
 
     def get_group_permissions(self, user_obj: Any, obj: Model | None = None) -> Iterable[str]:
         """Returns group permissions for a given object.

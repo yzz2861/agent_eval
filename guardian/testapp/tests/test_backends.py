@@ -3,10 +3,13 @@ from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser, Group
 from django.core.cache import cache
+from django.db import connection
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 
 from guardian.backends import ObjectPermissionBackend, check_user_support
 from guardian.conf import settings as guardian_settings
+from guardian.core import ObjectPermissionChecker
 from guardian.shortcuts import assign_perm, remove_perm
 from guardian.testapp.models import Project
 
@@ -175,6 +178,97 @@ class ObjectPermissionBackendTest(TestCase):
         self.assertTrue(self.backend.supports_object_permissions)
         self.assertTrue(self.backend.supports_anonymous_user)
         self.assertTrue(self.backend.supports_inactive_user)
+
+    def test_explain_perm_matches_has_perm_and_reports_real_sources(self):
+        assign_perm("change_project", self.user, self.project)
+        direct = self.backend.explain_perm(self.user, "change_project", self.project)
+        self.assertEqual(direct["result"], self.backend.has_perm(self.user, "change_project", self.project))
+        self.assertEqual(direct["source"], "direct_user")
+
+        other_project = Project.objects.create(name="group-project")
+        assign_perm("delete_project", self.group, other_project)
+        inherited = self.backend.explain_perm(self.user, "delete_project", other_project)
+        self.assertTrue(inherited["result"])
+        self.assertEqual(inherited["source"], "group")
+        self.assertEqual(inherited["group_paths"], [self.group.name])
+        self.assertTrue(self.backend.has_perm(self.user, "delete_project", other_project))
+
+        denied = self.backend.explain_perm(self.user, "change_project", other_project)
+        self.assertFalse(denied["result"])
+        self.assertFalse(self.backend.has_perm(self.user, "change_project", other_project))
+        self.assertEqual(denied["denial_reason"], "no_matching_permission")
+
+    def test_explain_perm_global_semantics(self):
+        assign_perm("testapp.change_project", self.user)
+
+        ignored = self.backend.explain_perm(
+            self.user,
+            "change_project",
+            self.project,
+            accept_global_perms=False,
+        )
+        self.assertFalse(ignored["result"])
+
+        accepted = self.backend.explain_perm(
+            self.user,
+            "change_project",
+            self.project,
+            accept_global_perms=True,
+        )
+        self.assertTrue(accepted["result"])
+        self.assertEqual(accepted["source"], "global")
+
+        checker = ObjectPermissionChecker(self.user)
+        checker_result = checker.explain_perm(
+            "change_project",
+            self.project,
+            accept_global_perms=True,
+        )
+        self.assertEqual(accepted["result"], checker_result["result"])
+        self.assertEqual(accepted["source"], checker_result["source"])
+
+    def test_explain_perm_inactive_superuser_and_anonymous_special_paths(self):
+        assign_perm("change_project", self.inactive_user, self.project)
+        inactive = self.backend.explain_perm(self.inactive_user, "change_project", self.project)
+        self.assertFalse(inactive["result"])
+        self.assertEqual(inactive["source"], "inactive_user")
+
+        superuser = self.backend.explain_perm(self.superuser, "change_project", self.project)
+        self.assertTrue(superuser["result"])
+        self.assertEqual(superuser["source"], "superuser")
+        self.assertEqual(superuser["special_path"], "superuser")
+
+        anonymous_group = Group.objects.create(name="anonymous-group")
+        self.anonymous_user.groups.add(anonymous_group)
+        assign_perm("view_project", anonymous_group, self.project)
+        anonymous = self.backend.explain_perm(AnonymousUser(), "view_project", self.project)
+        self.assertTrue(anonymous["result"])
+        self.assertTrue(anonymous["is_anonymous"])
+        self.assertEqual(anonymous["special_path"], "anonymous")
+        self.assertEqual(anonymous["group_paths"], [anonymous_group.name])
+
+    def test_explain_perms_batch_reuses_group_source_queries(self):
+        projects = [Project.objects.create(name=f"batch-backend-{index}") for index in range(5)]
+        assign_perm("change_project", self.user, projects[0])
+        assign_perm("change_project", self.group, projects[1])
+
+        with CaptureQueriesContext(connection) as queries:
+            results = self.backend.explain_perms(self.user, "change_project", projects)
+
+        self.assertEqual([result["result"] for result in results], [True, True, False, False, False])
+        self.assertEqual(results[0]["source"], "direct_user")
+        self.assertEqual(results[1]["source"], "group")
+        # One group-membership query, one direct-row query and one group-row
+        # query, regardless of the number of objects in the batch.
+        self.assertLessEqual(len(queries), 5)
+
+    def test_explain_perm_anonymous_support_disabled_is_explicit(self):
+        with patch("guardian.backends.settings.ANONYMOUS_USER_NAME", None):
+            result = self.backend.explain_perm(AnonymousUser(), "view_project", self.project)
+
+        self.assertFalse(result["result"])
+        self.assertTrue(result["is_anonymous"])
+        self.assertEqual(result["denial_reason"], "anonymous_not_supported")
 
 
 class CheckUserSupportAnonymousCacheTest(TestCase):
