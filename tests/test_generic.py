@@ -1,0 +1,1799 @@
+"""Test the pypdf.generic module."""
+
+import codecs
+import gc
+import re
+import sys
+import weakref
+from base64 import a85encode
+from copy import deepcopy
+from io import BytesIO
+
+import pytest
+
+from pypdf import PdfReader, PdfWriter
+from pypdf._utils import get_stream_data
+from pypdf.constants import CheckboxRadioButtonAttributes, OutlineFontFlag
+from pypdf.errors import STREAM_TRUNCATED_PREMATURELY, LimitReachedError, PdfReadError, PdfStreamError
+from pypdf.generic import (
+    ArrayObject,
+    BooleanObject,
+    ByteStringObject,
+    ContentStream,
+    DecodedStreamObject,
+    Destination,
+    DictionaryObject,
+    Fit,
+    FloatObject,
+    IndirectObject,
+    NameObject,
+    NullObject,
+    NumberObject,
+    OutlineItem,
+    PdfObject,
+    RectangleObject,
+    StreamObject,
+    TextStringObject,
+    TreeObject,
+    create_string_object,
+    encode_pdfdocencoding,
+    is_null_or_none,
+    read_hex_string_from_stream,
+    read_object,
+    read_string_from_stream,
+)
+from pypdf.generic._data_structures import _MAX_LEADING_COMMENTS
+from pypdf.generic._image_inline import (
+    extract_inline__ascii85_decode,
+    extract_inline__ascii_hex_decode,
+    extract_inline__dct_decode,
+    extract_inline__run_length_decode,
+)
+
+from . import RESOURCE_ROOT, get_data_from_url
+from .utils import ReaderDummy, count_function_calls
+
+
+class ChildDummy(DictionaryObject):
+    @property
+    def indirect_reference(self):
+        return self
+
+
+def test_float_object_exception(caplog):
+    assert FloatObject("abc") == 0
+    assert caplog.text != ""
+
+
+def test_number_object_exception(caplog):
+    assert NumberObject("0,0") == 0
+    assert caplog.text != ""
+
+
+def test_number_object_no_exception():
+    NumberObject(2**100_000_000)
+
+
+def test_create_string_object_exception():
+    with pytest.raises(TypeError) as exc:
+        create_string_object(123)
+    assert (  # typeguard is not running
+        exc.value.args[0] == "create_string_object should have str or unicode arg"
+    ) or (  # typeguard is enabled
+        'type of argument "string" must be one of (str, bytes); got int instead'
+        in exc.value.args[0]
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected", "tell"), [(b"true", b"true", 4), (b"false", b"false", 5)]
+)
+def test_boolean_object(value, expected, tell):
+    stream = BytesIO(value)
+    assert BooleanObject.read_from_stream(stream).value == (expected == b"true")
+    stream.seek(0, 0)
+    assert stream.read() == expected
+    assert stream.tell() == tell
+
+
+def test_boolean_object_write():
+    stream = BytesIO()
+    boolobj = BooleanObject(None)
+    boolobj.write_to_stream(stream)
+    stream.seek(0, 0)
+    assert stream.read() == b"false"
+
+
+def test_boolean_eq():
+    boolobj = BooleanObject(True)
+    assert (boolobj == True) is True  # noqa: E712
+    assert (boolobj == False) is False  # noqa: E712
+    assert (boolobj == "True") is False
+    hash1 = hash(boolobj)
+    assert hash1 == hash(boolobj)
+
+    boolobj = BooleanObject(False)
+    assert (boolobj == True) is False  # noqa: E712
+    assert (boolobj == False) is True  # noqa: E712
+    assert (boolobj == "True") is False
+    assert hash1 != hash(boolobj)
+
+
+def test_boolean_object_exception():
+    stream = BytesIO(b"False")
+    with pytest.raises(PdfReadError) as exc:
+        BooleanObject.read_from_stream(stream)
+    assert exc.value.args[0] == "Could not read Boolean object"
+
+
+def test_array_object_exception():
+    stream = BytesIO(b"False")
+    with pytest.raises(PdfReadError) as exc:
+        ArrayObject.read_from_stream(stream, None)
+    assert exc.value.args[0] == "Could not read array"
+
+
+def test_null_object_exception():
+    stream = BytesIO(b"notnull")
+    with pytest.raises(PdfReadError) as exc:
+        NullObject.read_from_stream(stream)
+    assert exc.value.args[0] == "Could not read Null object"
+
+
+@pytest.mark.parametrize("value", [b"", b"False", b"foo ", b"foo  ", b"foo bar"])
+def test_indirect_object_premature(value):
+    stream = BytesIO(value)
+    with pytest.raises(expected_exception=PdfStreamError, match=re.escape(STREAM_TRUNCATED_PREMATURELY)):
+        IndirectObject.read_from_stream(stream, None)
+
+
+def test_read_hex_string_from_stream():
+    stream = BytesIO(b"a1>")
+    assert read_hex_string_from_stream(stream) == "\x10"
+
+
+def test_read_hex_string_from_stream_exception():
+    stream = BytesIO(b"")
+    with pytest.raises(PdfStreamError) as exc:
+        read_hex_string_from_stream(stream)
+    assert exc.value.args[0] == "Stream has ended unexpectedly"
+
+
+def test_read_hex_string_from_stream_non_hex():
+    stream = BytesIO(b"<41ZZ42>")
+    with pytest.raises(PdfStreamError) as exc:
+        read_hex_string_from_stream(stream)
+    assert "Invalid hexadecimal character" in exc.value.args[0]
+
+
+def test_read_string_from_stream_exception():
+    stream = BytesIO(b"x")
+    with pytest.raises(PdfStreamError) as exc:
+        read_string_from_stream(stream)
+    assert exc.value.args[0] == "Stream has ended unexpectedly"
+
+
+def test_read_string_from_stream_not_in_escapedict_no_digit():
+    stream = BytesIO(b"x\\y")
+    with pytest.raises(PdfReadError) as exc:
+        read_string_from_stream(stream)
+    assert exc.value.args[0] == "Stream has ended unexpectedly"
+
+
+def test_read_string_from_stream_multichar_eol():
+    stream = BytesIO(b"x\\\n )")
+    assert read_string_from_stream(stream) == " "
+
+
+def test_read_string_from_stream_multichar_eol2():
+    stream = BytesIO(b"x\\\n\n)")
+    assert read_string_from_stream(stream) == ""
+
+
+def test_read_string_from_stream_escape_digit():
+    stream = BytesIO(b"x\\1a )")
+    assert read_string_from_stream(stream) == "\x01a "
+
+
+def test_read_string_from_stream_escape_digit2():
+    stream = BytesIO(b"(hello \\1\\2\\3\\4)")
+    assert read_string_from_stream(stream) == "hello \x01\x02\x03\x04"
+
+
+def test_name_object(caplog):
+    stream = BytesIO(b"x")
+    with pytest.raises(PdfReadError, match=r"^Name read error$"):
+        NameObject.read_from_stream(stream, None)
+
+    assert (
+        NameObject.read_from_stream(
+            BytesIO(b"/A;Name_With-Various***Characters?"), None
+        )
+        == "/A;Name_With-Various***Characters?"
+    )
+
+    assert (
+        NameObject.read_from_stream(BytesIO(b"/paired#28#29parentheses"), None)
+        == "/paired()parentheses"
+    )
+
+    assert NameObject.read_from_stream(BytesIO(b"/A#42"), None) == "/AB"
+
+    assert (
+        NameObject.read_from_stream(
+            BytesIO(b"/#f1j#d4#aa#0c#ce#87#b4#b3#b0#23J#86#fe#2a#b2jYJ#94"),
+            ReaderDummy(),
+        )
+        == "/ñjÔª\x0cÎ\x87´³°#J\x86þ*²jYJ\x94"
+    )
+
+    assert (NameObject.read_from_stream(BytesIO(b"/#JA#231f"), None)) == "/#JA#1f"
+
+    assert (
+        NameObject.read_from_stream(
+            BytesIO(b"/#e4#bd#a0#e5#a5#bd#e4#b8#96#e7#95#8c"), None
+        )
+    ) == "/你好世界"
+
+    # test PDFDocEncoding (latin-1)
+    assert (
+        NameObject.read_from_stream(BytesIO(b"/DocuSign\xae"), None)
+    ) == "/DocuSign®"
+
+    # test write
+    b = BytesIO()
+    NameObject("/hello").write_to_stream(b)
+    assert get_stream_data(b) == b"/hello"
+
+    caplog.clear()
+    b = BytesIO()
+    with pytest.raises(
+            expected_exception=PdfStreamError,
+            match=r"^Incorrect first char in NameObject, should start with '/': \(hello\)$"
+    ):
+        NameObject("hello").write_to_stream(b)
+
+    caplog.clear()
+    b = BytesIO()
+    NameObject("/DIJMAC+Arial Black#1").write_to_stream(b)
+    assert get_stream_data(b) == b"/DIJMAC+Arial#20Black#231"
+    assert caplog.text == ""
+
+    caplog.clear()
+    b = BytesIO()
+    NameObject("/你好世界 (%)").write_to_stream(b)
+    assert get_stream_data(b) == b"/#E4#BD#A0#E5#A5#BD#E4#B8#96#E7#95#8C#20#28#25#29"
+    assert caplog.text == ""
+
+    caplog.clear()
+    b = BytesIO()
+    NameObject("/{foo}<bar>(baz)[qux]#/%").write_to_stream(b)
+    assert get_stream_data(b) == b"/#7Bfoo#7D#3Cbar#3E#28baz#29#5Bqux#5D#23#2F#25"
+    assert caplog.text == ""
+
+
+def test_destination_fit_r():
+    d = Destination(
+        TextStringObject("title"), NullObject(), Fit.fit_rectangle(0, 0, 0, 0)
+    )
+    assert d.title == NameObject("title")
+    assert d.typ == "/FitR"
+    assert d.zoom is None
+    assert d.left == FloatObject(0)
+    assert d.right == FloatObject(0)
+    assert d.top == FloatObject(0)
+    assert d.bottom == FloatObject(0)
+    assert list(d) == []
+    d.empty_tree()
+
+
+def test_destination_color_and_font_format_defaults():
+    d = Destination(NameObject("title"), NullObject(), Fit.fit_rectangle(0, 0, 0, 0))
+    assert isinstance(d.color, ArrayObject)
+    assert d.color == [FloatObject(0), FloatObject(0), FloatObject(0)]
+    assert isinstance(d.font_format, OutlineFontFlag)
+    assert d.font_format == 0
+
+
+def test_destination_fit_v():
+    d = Destination(NameObject("title"), NullObject(), Fit.fit_vertically(left=0))
+
+    writer = PdfWriter()
+    writer.add_named_destination_object(d)
+
+    # Trigger Exception
+    Destination(NameObject("title"), NullObject(), Fit.fit_vertically(left=None))
+
+
+def test_destination_malformed_fit_arguments():
+    # /XYZ with surplus arguments keeps the first three coordinates
+    d = Destination(NameObject("title"), NullObject(), Fit(fit_type="/XYZ", fit_args=(1, 2, 3, 4)))
+    assert d.left == FloatObject(1)
+    assert d.top == FloatObject(2)
+    assert d.zoom == FloatObject(3)
+
+    # /FitR with a wrong number of arguments falls back to null coordinates
+    d = Destination(NameObject("title"), NullObject(), Fit(fit_type="/FitR", fit_args=(1, 2)))
+    assert d.typ == "/FitR"
+    assert isinstance(d.left, NullObject)
+    assert isinstance(d.bottom, NullObject)
+    assert isinstance(d.right, NullObject)
+    assert isinstance(d.top, NullObject)
+
+
+def test_outline_item_write_to_stream():
+    stream = BytesIO()
+    oi = OutlineItem(NameObject("title"), NullObject(), Fit.fit_vertically(left=0))
+    oi.write_to_stream(stream)
+    stream.seek(0, 0)
+    assert stream.read() == b"<<\n/Title (title)\n/Dest [ null /FitV 0.0 ]\n>>"
+
+
+def test_encode_pdfdocencoding_keyerror():
+    with pytest.raises(UnicodeEncodeError) as exc:
+        encode_pdfdocencoding("😀")
+    assert exc.value.args[0] == "pdfdocencoding"
+
+
+@pytest.mark.parametrize("test_input", ["", "data"])
+def test_encode_pdfdocencoding_returns_bytes(test_input):
+    """
+    Test that encode_pdfdocencoding() always returns bytes because bytearray
+    is duck type compatible with bytes in mypy
+    """
+    out = encode_pdfdocencoding(test_input)
+    assert isinstance(out, bytes)
+
+
+def test_read_object_comment_exception():
+    stream = BytesIO(b"% foobar")
+    pdf = None
+    with pytest.raises(PdfStreamError) as exc:
+        read_object(stream, pdf)
+    assert exc.value.args[0] == "File ended unexpectedly."
+
+
+def test_read_object_empty():
+    stream = BytesIO(b"endobj")
+    pdf = None
+    assert isinstance(read_object(stream, pdf), NullObject)
+
+
+def test_read_object_empty_in_array():
+    stream = BytesIO(b"[endobj")
+    pdf = None
+    result = read_object(stream, pdf)
+    assert isinstance(result, ArrayObject)
+    assert len(result) == 1
+    assert isinstance(result[0], NullObject)
+
+
+def test_read_object_invalid():
+    stream = BytesIO(b"hello")
+    pdf = None
+    with pytest.raises(PdfReadError) as exc:
+        read_object(stream, pdf)
+    assert "hello" in exc.value.args[0]
+
+
+def test_read_object_comment():
+    stream = BytesIO(b"% foobar\n1 ")
+    pdf = None
+    out = read_object(stream, pdf)
+    assert out == 1
+
+
+@pytest.mark.parametrize("count", [0, 1, _MAX_LEADING_COMMENTS - 1, _MAX_LEADING_COMMENTS])
+@pytest.mark.parametrize("newline", [b"\n", b"\r", b"\r\n"])
+def test_read_object__leading_comments(count, newline):
+    stream = BytesIO((b"% comment" + newline + b" \t") * count + b"42 next")
+    assert read_object(stream, None) == 42
+    assert stream.read() == b" next"
+
+
+@pytest.mark.parametrize("count", [_MAX_LEADING_COMMENTS + 1, 2 * _MAX_LEADING_COMMENTS])
+def test_read_object__leading_comments_limit(count):
+    stream = BytesIO(b"% comment\n" * count + b"42 ")
+    with pytest.raises(
+        expected_exception=LimitReachedError,
+        match=rf"^Maximum number of leading comments reached: {_MAX_LEADING_COMMENTS}\.$",
+    ):
+        read_object(stream, None)
+
+
+def test_read_object__leading_comments_limit_before_scanning():
+    prefix = b"% comment\n" * _MAX_LEADING_COMMENTS
+    stream = BytesIO(prefix + b"%" + b"x" * 100_000)
+    with pytest.raises(
+        expected_exception=LimitReachedError,
+        match=rf"^Maximum number of leading comments reached: {_MAX_LEADING_COMMENTS}\.$",
+    ):
+        read_object(stream, None)
+    assert stream.tell() == len(prefix)
+
+
+@pytest.mark.parametrize(
+    ("token", "expected_type"),
+    [
+        (b"/Example", NameObject),
+        (b"true", BooleanObject),
+        (b"null", NullObject),
+        (b"1 0 R", IndirectObject),
+        (b"[42]", ArrayObject),
+    ],
+)
+def test_read_object__leading_comments_dispatch(token, expected_type):
+    stream = BytesIO(b"% comment\n" * _MAX_LEADING_COMMENTS + token + b" tail")
+    assert isinstance(read_object(stream, ReaderDummy()), expected_type)
+    assert stream.read() == b" tail"
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_read_object__leading_comments_limit_in_dictionary(strict):
+    stream = BytesIO(b"<< /Value " + b"% comment\n" * (_MAX_LEADING_COMMENTS + 1) + b"42 >>")
+    pdf = ReaderDummy()
+    pdf.strict = strict
+    with pytest.raises(
+            expected_exception=LimitReachedError, match=r"^Maximum number of leading comments reached: 1000\.$"
+    ):
+        read_object(stream, pdf)
+
+
+@pytest.mark.parametrize(("prefix", "suffix"), [(b"[", b"]"), (b"<< /Value ", b">>")])
+def test_read_object__leading_comments_in_container(prefix, suffix):
+    result = read_object(BytesIO(prefix + b"% comment\n" * _MAX_LEADING_COMMENTS + b"42 " + suffix), None)
+    assert (result[0] if isinstance(result, ArrayObject) else result["/Value"]) == 42
+
+
+@pytest.mark.parametrize("token", [b"(A)", b"<41>"])
+def test_read_object__leading_comments_forced_encoding(token):
+    result = read_object(BytesIO(b"% comment\n" * _MAX_LEADING_COMMENTS + token), None, {65: "Z"})
+    assert result == "Z"
+
+
+@pytest.mark.parametrize("data", [b"% comment", b"% first\n% comment"])
+def test_read_object__leading_comments_truncated(data):
+    with pytest.raises(expected_exception=PdfStreamError, match=r"^File ended unexpectedly\.$"):
+        read_object(BytesIO(data), None)
+
+
+@pytest.mark.parametrize("data", [b"% comment\n", b"% comment\n \t"])
+def test_read_object__leading_comments_without_object(data):
+    with pytest.raises(expected_exception=PdfReadError, match="Invalid Elementary Object"):
+        read_object(BytesIO(data), None)
+
+
+@pytest.mark.parametrize(
+    ("data", "idnum", "generation", "remainder"),
+    [
+        (b"12 0 R/Next", 12, 0, b"/Next"),
+        (b"12\n0\r\nR>>", 12, 0, b">>"),
+        (b"-12 3 R ", -12, 3, b" "),
+        # A vertical tab is no whitespace in PDF, but the intention is clear
+        (b"12 0 \x0bR ", 12, 0, b" "),
+    ],
+)
+def test_read_object__indirect_object(data, idnum, generation, remainder):
+    """The stream continues right after the "R"."""
+    stream = BytesIO(data)
+    result = read_object(stream, ReaderDummy())
+    assert isinstance(result, IndirectObject)
+    assert (result.idnum, result.generation) == (idnum, generation)
+    assert stream.read() == remainder
+
+    written = BytesIO()
+    result.write_to_stream(written)
+    assert written.getvalue() == f"{idnum} {generation} R".encode()
+
+
+@pytest.mark.parametrize(
+    ("data", "expected", "remainder"),
+    [
+        (b"123/Next", NumberObject(123), b"/Next"),
+        (b"-4.5]", FloatObject(-4.5), b"]"),
+        (b"12 0 obj", NumberObject(12), b" 0 obj"),
+        # The number ends with the stream
+        (b"123", NumberObject(123), b""),
+        # The number is longer than the peek of the reference check
+        (b"1" * 25 + b" ", NumberObject(int("1" * 25)), b" "),
+    ],
+)
+def test_read_object__number(data, expected, remainder):
+    """The stream continues right after the number."""
+    stream = BytesIO(data)
+    result = read_object(stream, ReaderDummy())
+    assert type(result) is type(expected)
+    assert result == expected
+    assert stream.read() == remainder
+
+
+def test_read_array_of_numbers_and_references__function_calls():
+    """
+    Parsing numbers and indirect references must stay cheap, see #2136.
+
+    Counting the Python function calls measures the work per element
+    independently of the machine speed.
+    """
+    stream = BytesIO(b"[" + b" ".join([b"123", b"4.5", b"12 0 R"] * 100) + b"]")
+
+    array, calls = count_function_calls(
+        ArrayObject.read_from_stream, stream, ReaderDummy(), names_to_ignore={"_check_limits"}
+    )
+
+    assert len(array) == 300
+    assert array[:3] == [123, 4.5, IndirectObject(12, 0, array[2].pdf)]
+    # Two calls per element; numbers took four and references six before
+    assert calls < 3 * len(array)
+
+
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        (b"[null null]", [NullObject(), NullObject()]),
+        (b"[null]", [NullObject()]),
+        (b"[nullnull 1]", [NullObject(), NullObject(), NumberObject(1)]),
+        (b"[ null\n/A ]", [NullObject(), NameObject("/A")]),
+    ],
+)
+def test_read_array_of_nulls(data, expected):
+    array = ArrayObject.read_from_stream(BytesIO(data), ReaderDummy())
+    assert array == expected
+    assert all(type(value) is type(other) for value, other in zip(array, expected))
+
+
+@pytest.mark.parametrize("data", [b"[nul]", b"[nu", b"[n"])
+def test_read_array_of_nulls__invalid(data):
+    with pytest.raises(PdfReadError, match=r"^Could not read Null object$"):
+        ArrayObject.read_from_stream(BytesIO(data), ReaderDummy())
+
+
+def test_array_of_nulls__function_calls():
+    """
+    Parsing and cloning nulls must stay cheap, see #2136.
+
+    Tagged documents can contain arrays with thousands of nulls in the
+    /ParentTree of the structure tree.
+    """
+    stream = BytesIO(b"[" + b" ".join([b"null"] * 1000) + b"]")
+
+    array, calls = count_function_calls(
+        ArrayObject.read_from_stream, stream, ReaderDummy(), names_to_ignore={"_check_limits"}
+    )
+
+    assert array == [NullObject()] * 1000
+    # No calls per element; it was two before
+    assert calls < len(array)
+
+    clone, calls = count_function_calls(array.clone, PdfWriter())
+
+    assert clone == array
+    # One call per element; it was three before
+    assert calls < 2 * len(array)
+
+
+def test_read_array_with_nul_whitespace():
+    """NUL separates array values (regression test for #4189)."""
+    stream = BytesIO(b"[(Invoice)\x00-185\x00(Total)]")
+
+    array_object = ArrayObject.read_from_stream(stream, None)
+
+    assert array_object == ["Invoice", -185, "Total"]
+
+
+def test_bytestringobject():
+    bo = ByteStringObject("stream", encoding="utf-8")
+    stream = BytesIO(b"")
+    bo.write_to_stream(stream)
+    stream.seek(0, 0)
+    assert stream.read() == b"<73747265616d>"  # TODO: how can we verify this?
+
+
+def test_dictionaryobject_key_is_no_pdfobject():
+    do = DictionaryObject({NameObject("/S"): NameObject("/GoTo")})
+    with pytest.raises(ValueError) as exc:
+        do["foo"] = NameObject("/GoTo")
+    assert exc.value.args[0] == "Key must be a PdfObject"
+
+
+def test_dictionaryobject_xmp_meta():
+    do = DictionaryObject({NameObject("/S"): NameObject("/GoTo")})
+    assert do.xmp_metadata is None
+
+
+def test_dictionaryobject_value_is_no_pdfobject():
+    do = DictionaryObject({NameObject("/S"): NameObject("/GoTo")})
+    with pytest.raises(ValueError) as exc:
+        do[NameObject("/S")] = "/GoTo"
+    assert exc.value.args[0] == "Value must be a PdfObject"
+
+
+def test_dictionaryobject_setdefault_key_is_no_pdfobject():
+    do = DictionaryObject({NameObject("/S"): NameObject("/GoTo")})
+    with pytest.raises(ValueError) as exc:
+        do.setdefault("foo", NameObject("/GoTo"))
+    assert exc.value.args[0] == "Key must be a PdfObject"
+
+
+def test_dictionaryobject_setdefault_value_is_no_pdfobject():
+    do = DictionaryObject({NameObject("/S"): NameObject("/GoTo")})
+    with pytest.raises(ValueError) as exc:
+        do.setdefault(NameObject("/S"), "/GoTo")
+    assert exc.value.args[0] == "Value must be a PdfObject"
+
+
+def test_dictionaryobject_setdefault_value():
+    do = DictionaryObject({NameObject("/S"): NameObject("/GoTo")})
+    do.setdefault(NameObject("/S"), NameObject("/GoTo"))
+
+
+def test_dictionaryobject_read_from_stream():
+    stream = BytesIO(b"<< /S /GoTo >>")
+    pdf = None
+    out = DictionaryObject.read_from_stream(stream, pdf)
+    assert out.get_object() == {NameObject("/S"): NameObject("/GoTo")}
+
+
+def test_dictionaryobject_read_from_stream_broken():
+    stream = BytesIO(b"< /S /GoTo >>")
+    pdf = None
+    with pytest.raises(PdfReadError) as exc:
+        DictionaryObject.read_from_stream(stream, pdf)
+    assert (
+        exc.value.args[0]
+        == "Dictionary read error at byte 0x2: stream must begin with '<<'"
+    )
+
+
+def test_dictionaryobject_read_from_stream_unexpected_end():
+    stream = BytesIO(b"<< \x00/S /GoTo")
+    pdf = None
+    with pytest.raises(PdfStreamError) as exc:
+        DictionaryObject.read_from_stream(stream, pdf)
+    assert exc.value.args[0] == "Stream has ended unexpectedly"
+
+
+def test_dictionaryobject_read_from_stream_stream_no_newline():
+    stream = BytesIO(b"<< /S /GoTo >>stream")
+    pdf = None
+    with pytest.raises(PdfReadError) as exc:
+        DictionaryObject.read_from_stream(stream, pdf)
+    assert exc.value.args[0] == "Stream data must be followed by a newline"
+
+
+@pytest.mark.parametrize(("strict"), [(True), (False)])
+def test_dictionaryobject_read_from_stream_stream_no_stream_length(strict, caplog):
+    stream = BytesIO(b"<< /S /GoTo >>stream\n123456789endstream abcd")
+
+    class Tst:  # to replace pdf
+        strict = False
+
+    pdf = Tst()
+    pdf.strict = strict
+    if strict:
+        with pytest.raises(PdfReadError) as exc:
+            DictionaryObject.read_from_stream(stream, pdf)
+        assert exc.value.args[0] == "Stream length not defined"
+    else:
+        o = DictionaryObject.read_from_stream(stream, pdf)
+        assert "Stream length not defined" in caplog.text
+        assert o.get_data() == b"123456789"
+
+
+@pytest.mark.parametrize(
+    ("strict", "length", "should_fail"),
+    [
+        (True, 6, False),
+        (True, 10, False),
+        (True, 4, True),
+        (False, 6, False),
+        (False, 10, False),
+    ],
+)
+def test_dictionaryobject_read_from_stream_stream_stream_valid(
+    strict, length, should_fail
+):
+    stream = BytesIO(b"<< /S /GoTo /Length %d >>stream\nBT /F1\nendstream\n" % length)
+
+    class Tst:  # to replace pdf
+        strict = True
+
+    pdf = Tst()
+    pdf.strict = strict
+    with pytest.raises(PdfReadError) as exc:
+        do = DictionaryObject.read_from_stream(stream, pdf)
+        # TODO: What should happen with the stream?
+        assert do == {"/S": "/GoTo"}
+        if length in (6, 10):
+            assert b"BT /F1" in do.get_data()
+        raise PdfReadError("__ALLGOOD__")
+    assert should_fail ^ (exc.value.args[0] == "__ALLGOOD__")
+
+
+def test_rectangleobject():
+    ro = RectangleObject((1, 2, 3, 4))
+    assert ro.lower_left == (1, 2)
+    assert ro.lower_right == (3, 2)
+    assert ro.upper_left == (1, 4)
+    assert ro.upper_right == (3, 4)
+
+    ro.lower_left = (5, 6)
+    assert ro.lower_left == (5, 6)
+
+    ro.bottom -= 2
+    ro.left -= 2
+    assert ro.lower_left == (3, 4)
+
+    ro.lower_right = (7, 8)
+    assert ro.lower_right == (7, 8)
+
+    ro.upper_left = (9, 11)
+    assert ro.upper_left == (9, 11)
+
+    ro.upper_right = (13, 17)
+    assert ro.upper_right == (13, 17)
+    ro.top += 1
+    ro.right += 1
+    assert ro.upper_right == (14, 18)
+
+
+def test_rectangleobject__accepts_an_array_object():
+    """A /MediaBox read from a PDF arrives as an ArrayObject, not a tuple."""
+    ro = RectangleObject(ArrayObject([
+        NumberObject(0), NumberObject(0), NumberObject(612), NumberObject(792)
+    ]))
+
+    assert list(ro) == [0, 0, 612, 792]
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        pytest.param((0, 0), id="too-few"),
+        pytest.param((0, 0, 1, 1, 2), id="too-many"),
+        pytest.param((), id="empty"),
+    ],
+)
+def test_rectangleobject__requires_four_values(values):
+    """A rectangle built from the wrong number of values reports it."""
+    with pytest.raises(
+        ValueError, match=f"Expected four values for a rectangle, got {len(values)}"
+    ):
+        RectangleObject(values)
+
+
+def test_textstringobject_exc():
+    tso = TextStringObject("foo")
+    assert tso.get_original_bytes() == b"foo"
+
+
+def test_textstringobject_autodetect_utf16():
+    tso = TextStringObject("foo")
+    tso.autodetect_utf16 = True
+    tso.utf16_bom = codecs.BOM_UTF16_BE
+    assert tso.get_original_bytes() == b"\xfe\xff\x00f\x00o\x00o"
+    tso.utf16_bom = codecs.BOM_UTF16_LE
+    assert tso.get_original_bytes() == b"\xff\xfef\x00o\x00o\x00"
+    assert tso.get_encoded_bytes() == b"\xff\xfef\x00o\x00o\x00"
+
+
+def test_textstringobject__numbers_as_input():
+    _ = TextStringObject(42)
+    _ = TextStringObject(13.37)
+
+
+def test_remove_child_not_in_tree():
+    tree = TreeObject()
+    with pytest.raises(ValueError) as exc:
+        tree.remove_child(ChildDummy())
+    assert exc.value.args[0] == "Removed child does not appear to be a tree item"
+
+
+def test_remove_child_not_in_that_tree():
+    tree = TreeObject()
+    tree.indirect_reference = NullObject()
+    child = TreeObject()
+    child.indirect_reference = NullObject()
+    with pytest.raises(ValueError) as exc:
+        child.remove_from_tree()
+    assert exc.value.args[0] == "Removed child does not appear to be a tree item"
+    tree.add_child(child, ReaderDummy())
+    with pytest.raises(ValueError) as exc:
+        tree.remove_child(child)
+    assert exc.value.args[0] == "Removed child is not a member of this tree"
+
+
+def test_remove_child_not_found_in_tree():
+    class ChildDummy(DictionaryObject):
+        @property
+        def indirect_reference(self) -> "ChildDummy":
+            return self
+
+    tree = TreeObject()
+    tree.indirect_reference = NullObject()
+    child = ChildDummy(TreeObject())
+    tree.add_child(child, ReaderDummy())
+    child2 = ChildDummy(TreeObject())
+    child2[NameObject("/Parent")] = tree
+    with pytest.raises(ValueError) as exc:
+        tree.remove_child(child2)
+    assert exc.value.args[0] == "Removal couldn't find item in tree"
+
+
+def test_remove_child_found_in_tree():
+    writer = PdfWriter()
+
+    # Add Tree
+    tree = TreeObject()
+    writer._add_object(tree)
+
+    # Add first child
+    # It's important to set a value, otherwise the writer.get_reference will
+    # return the same object when a second child is added.
+    child1 = TreeObject()
+    child1[NameObject("/Foo")] = TextStringObject("bar")
+    child1_ref = writer._add_object(child1)
+    tree.add_child(child1_ref, writer)
+    assert tree[NameObject("/Count")] == 1
+    assert len(list(tree.children())) == 1
+
+    # Add second child
+    child2 = TreeObject()
+    child2[NameObject("/Foo")] = TextStringObject("baz")
+    child2_ref = writer._add_object(child2)
+    tree.add_child(child2_ref, writer)
+    assert tree[NameObject("/Count")] == 2
+    assert len(list(tree.children())) == 2
+
+    # Remove last child
+    tree.remove_child(child2_ref)
+    assert tree[NameObject("/Count")] == 1
+    assert len(list(tree.children())) == 1
+
+    # Add new child
+    child3 = TreeObject()
+    child3[NameObject("/Foo")] = TextStringObject("3")
+    child3_ref = writer._add_object(child3)
+    tree.add_child(child3_ref, writer)
+    assert tree[NameObject("/Count")] == 2
+    assert len(list(tree.children())) == 2
+
+    # Remove first child
+    child1 = tree[NameObject("/First")]
+    tree.remove_child(child1)
+    assert tree[NameObject("/Count")] == 1
+    assert len(list(tree.children())) == 1
+
+    child4 = TreeObject()
+    child4[NameObject("/Foo")] = TextStringObject("4")
+    child4_ref = writer._add_object(child4)
+    tree.add_child(child4_ref, writer)
+    assert tree[NameObject("/Count")] == 2
+    assert len(list(tree.children())) == 2
+
+    child5 = TreeObject()
+    child5[NameObject("/Foo")] = TextStringObject("5")
+    child5_ref = writer._add_object(child5)
+    tree.add_child(child5_ref, writer)
+    assert tree[NameObject("/Count")] == 3
+    assert len(list(tree.children())) == 3
+
+    # Remove middle child
+    child4.remove_from_tree()
+    assert tree[NameObject("/Count")] == 2
+    assert len(list(tree.children())) == 2
+
+    tree.empty_tree()
+
+
+def test_remove_child_in_tree():
+    pdf = RESOURCE_ROOT / "form.pdf"
+
+    tree = TreeObject()
+    reader = PdfReader(pdf)
+    writer = PdfWriter()
+    writer._add_object(tree)
+    writer.add_page(reader.pages[0])
+    writer.add_outline_item("foo", page_number=0)
+    obj = writer._objects[-1]
+    tree.add_child(obj, writer)
+    tree.remove_child(obj)
+    tree.add_child(obj, writer)
+    tree.empty_tree()
+
+
+def test_insert_child_before_last_with_multiple_existing():
+    """Cover TreeObject.insert_child try-success path.
+
+    Inserts a child before the existing /Last node when the tree already
+    has multiple children, so the node being inserted before has a /Prev.
+    """
+    writer = PdfWriter()
+    tree = TreeObject()
+    writer._add_object(tree)
+
+    child1 = TreeObject()
+    child1[NameObject("/Foo")] = TextStringObject("1")
+    child1_ref = writer._add_object(child1)
+    tree.add_child(child1_ref, writer)
+
+    child2 = TreeObject()
+    child2[NameObject("/Foo")] = TextStringObject("2")
+    child2_ref = writer._add_object(child2)
+    tree.add_child(child2_ref, writer)
+
+    # /Last is now child2, /First is child1, child2 has /Prev pointing at child1.
+    # Inserting before child2_ref hits the try block successfully.
+    new_child = TreeObject()
+    new_child[NameObject("/Foo")] = TextStringObject("new")
+    new_child_ref = writer._add_object(new_child)
+    tree.insert_child(new_child_ref, child2_ref, writer)
+
+    assert tree[NameObject("/Count")] == 3
+    assert len(list(tree.children())) == 3
+
+
+@pytest.mark.enable_socket
+@pytest.mark.parametrize(
+    ("url", "name", "caplog_content"),
+    [
+        (  # parse_content_stream_peek_percentage
+            "https://github.com/user-attachments/files/18381763/tika-985770.pdf",
+            "tika-985770.pdf",
+            "",
+        ),
+        (  # read_inline_image_no_has_q
+            "https://github.com/user-attachments/files/18381775/tika-998719.pdf",
+            "tika-998719.pdf",
+            "",
+        ),
+        (  # read_inline_image_loc_neg_1
+            "https://github.com/user-attachments/files/18381706/tika-935066.pdf",
+            "tika-935066.pdf",
+            "",
+        ),
+        (  # object_read_from_stream_unicode_error
+            "https://github.com/user-attachments/files/18381750/tika-974966.pdf",
+            "tika-974966.pdf",
+            "",
+        ),
+        (  # dict_read_from_stream
+            "https://github.com/user-attachments/files/18381762/tika-984877.pdf",
+            "tika-984877.pdf",
+            "Multiple definitions in dictionary at byte 0x1084 for key /Length",
+        ),
+    ],
+    ids=[
+        "parse_content_stream_peek_percentage",
+        "read_inline_image_no_has_q",
+        "read_inline_image_loc_neg_1",
+        "object_read_from_stream_unicode_error",
+        "dict_read_from_stream",
+    ],
+)
+def test_extract_text(caplog, url: str, name: str, caplog_content: str):
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    for page in reader.pages:
+        page.extract_text()
+    if caplog_content == "":
+        assert caplog_content == caplog.text
+    else:
+        assert caplog_content in caplog.text
+
+
+@pytest.mark.slow
+@pytest.mark.enable_socket
+def test_text_string_write_to_stream():
+    url = "https://github.com/user-attachments/files/18381698/tika-924562.pdf"
+    name = "tika-924562.pdf"
+
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    writer = PdfWriter()
+    writer.clone_document_from_reader(reader)
+    for page in writer.pages:
+        page.compress_content_streams()
+
+
+@pytest.mark.enable_socket
+def test_bool_repr(tmp_path):
+    url = "https://github.com/user-attachments/files/18381703/tika-932449.pdf"
+    name = "tika-932449.pdf"
+
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    write_path = tmp_path / "tmp-fields-report.txt"
+    with open(write_path, "w") as fp:
+        fields = reader.get_fields(fileobj=fp)
+    assert fields
+    assert list(fields.keys()) == ["USGPOSignature"]
+    with open(write_path) as fp:
+        data = fp.read()
+    assert data.startswith(
+        "Field Name: USGPOSignature\nField Type: Signature\nField Flags: 1\n"
+        "Value: {'/Type': '/Sig', '/Filter': '/Adobe.PPKLite', "
+        "'/SubFilter':"
+    )
+
+
+@pytest.mark.enable_socket
+def test_issue_997(pdf_file_path):
+    url = (
+        "https://github.com/py-pdf/pypdf/files/8908874/"
+        "Exhibit_A-2_930_Enterprise_Zone_Tax_Credits_final.pdf"
+    )
+    name = "gh-issue-997.pdf"
+
+    merger = PdfWriter()
+    merger.append(BytesIO(get_data_from_url(url=url, name=name)))  # here the error raises
+    with open(pdf_file_path, "wb") as f:
+        merger.write(f)
+    merger.close()
+
+    # Strict
+    merger = PdfWriter()
+    merger.append(BytesIO(get_data_from_url(url=url, name=name)))  # here the error raises
+    with open(pdf_file_path, "wb") as f:
+        merger.write(f)
+    merger.close()
+
+
+def test_checkboxradiobuttonattributes_opt():
+    assert "/Opt" in CheckboxRadioButtonAttributes.attributes_dict()
+
+
+def test_name_object_invalid_decode():
+    charsets = deepcopy(NameObject.CHARSETS)
+    try:
+        NameObject.CHARSETS = ("utf-8",)
+        stream = BytesIO(b"/\x80\x02\x03")
+        # strict:
+        with pytest.raises(PdfReadError) as exc:
+            NameObject.read_from_stream(stream, ReaderDummy(strict=True))
+        assert "Illegal character in NameObject " in exc.value.args[0]
+
+        # non-strict:
+        stream.seek(0)
+        NameObject.read_from_stream(stream, ReaderDummy(strict=False))
+    finally:
+        NameObject.CHARSETS = charsets
+
+
+def test_indirect_object_invalid_read():
+    stream = BytesIO(b"0 1 s")
+    with pytest.raises(PdfReadError) as exc:
+        IndirectObject.read_from_stream(stream, ReaderDummy())
+    assert exc.value.args[0] == "Error reading indirect object reference at byte 0x5"
+
+
+def test_create_string_object_utf16_bom():
+    # utf16-be
+    result = create_string_object(
+        b"\xfe\xff\x00P\x00a\x00p\x00e\x00r\x00P\x00o\x00r\x00t\x00 \x001\x004\x00\x00"
+    )
+    assert result == "PaperPort 14\x00"
+    assert result.autodetect_utf16 is True
+    assert result.utf16_bom == b"\xfe\xff"
+    assert (
+        result.get_encoded_bytes()
+        == b"\xfe\xff\x00P\x00a\x00p\x00e\x00r\x00P\x00o\x00r\x00t\x00 \x001\x004\x00\x00"
+    )
+
+    # utf16-le
+    result = create_string_object(
+        b"\xff\xfeP\x00a\x00p\x00e\x00r\x00P\x00o\x00r\x00t\x00 \x001\x004\x00\x00\x00"
+    )
+    assert result == "PaperPort 14\x00"
+    assert result.autodetect_utf16 is True
+    assert result.utf16_bom == b"\xff\xfe"
+    assert (
+        result.get_encoded_bytes()
+        == b"\xff\xfeP\x00a\x00p\x00e\x00r\x00P\x00o\x00r\x00t\x00 \x001\x004\x00\x00\x00"
+    )
+    result = TextStringObject(
+        b"\xff\xfeP\x00a\x00p\x00e\x00r\x00P\x00o\x00r\x00t\x00 \x001\x004\x00\x00\x00"
+    )
+    assert result == "PaperPort 14\x00"
+    assert result.autodetect_utf16 is True
+    assert result.utf16_bom == b"\xff\xfe"
+    assert (
+        result.get_encoded_bytes()
+        == b"\xff\xfeP\x00a\x00p\x00e\x00r\x00P\x00o\x00r\x00t\x00 \x001\x004\x00\x00\x00"
+    )
+
+    # utf16-be without bom
+    result = TextStringObject("ÿ")
+    result.autodetect_utf16 = True
+    result.utf16_bom = b""
+    assert result.get_encoded_bytes() == b"\x00\xFF"
+    assert result.original_bytes == b"\x00\xFF"
+
+
+def test_create_string_object_force():
+    assert create_string_object(b"Hello World", []) == "Hello World"
+    assert create_string_object(b"Hello World", {72: "A"}) == "Aello World"
+    assert create_string_object(b"Hello World", "utf8") == "Hello World"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("0.000000", "0.0"),
+        ("0.0", "0.0"),
+        ("1.0", "1"),
+        ("0.123000", "0.123"),
+        ("0.000123000", "0.000123"),
+        ("0", "0.0"),
+        ("1", "1"),
+        ("1.01", "1.01"),
+        ("1.010", "1.01"),
+        ("0000.0000", "0.0"),
+        ("0.10101010", "0.1010101"),
+        ("50000000000", "50000000000"),
+        ("99900000000000000123", "99900000000000000000"),
+        ("99900000000000000123.456000", "99900000000000000000"),
+        ("0.00000000000000000000123", "0.00000000000000000000123"),
+        ("0.00000123", "0.00000123"),
+        ("0.00000000000000000000123000", "0.00000000000000000000123"),
+        ("-4.6", "-4.6"),  # from #1910
+        # (
+        #    "50032481330523882508234.00000000000000000000123000",
+        #    "50032481330523882508234.00000000000000000000123",
+        # ),
+        # (
+        #    "928457298572093487502198745102973402987412908743.75249875981374981237498213740000",
+        #    "928457298572093487502198745102973402987412908743.7524987598137498123749821374",
+        # ),
+    ],
+)
+def test_float_object_decimal_to_string(value, expected):
+    assert repr(FloatObject(value)) == expected
+
+
+def test_cloning(caplog):
+    writer = PdfWriter()
+    with pytest.raises(Exception) as exc:
+        PdfObject().clone(writer)
+    assert "PdfObject does not implement .clone so far" in exc.value.args[0]
+
+    obj1 = DictionaryObject()
+    obj1.indirect_reference = None
+    n = len(writer._objects)
+    obj2 = obj1.clone(writer)
+    assert len(writer._objects) == n + 1
+    obj3 = obj2.clone(writer)
+    assert len(writer._objects) == n + 1
+    assert obj2.indirect_reference == obj3.indirect_reference
+    obj3 = obj2.indirect_reference.clone(writer)
+    assert len(writer._objects) == n + 1
+    assert obj2.indirect_reference == obj3.indirect_reference
+    assert (
+        obj2.indirect_reference
+        == obj2._reference_clone(obj2, writer).indirect_reference
+    )
+    assert len(writer._objects) == n + 1
+    assert obj2.indirect_reference == obj3.indirect_reference
+
+    obj3 = obj2.indirect_reference.clone(writer, True)
+    assert len(writer._objects) == n + 2
+    assert obj2.indirect_reference != obj3.indirect_reference
+
+    arr1 = ArrayObject([obj2])
+    arr2 = arr1.clone(writer)
+    arr3 = arr2.clone(writer)
+    assert arr2 == arr3
+    obj10 = StreamObject()
+    arr1 = ArrayObject([obj10])
+    obj11 = obj10.clone(writer)
+    assert arr1[0] == obj11
+
+    obj20 = DictionaryObject(
+        {NameObject("/Test"): NumberObject(1), NameObject("/Test2"): StreamObject()}
+    )
+    obj21 = obj20.clone(writer, ignore_fields=None)
+    assert "/Test" in obj21
+    assert isinstance(obj21.get("/Test2"), IndirectObject)
+
+
+def test_cloning_indirect_obj_keeps_hard_reference():
+    """
+    Reported in #3450
+
+    Ensure that cloning an IndirectObject keeps a hard reference to
+    the underlying object, preventing its deallocation, which could allow
+    `id(obj)` to return the same value for different objects.
+    """
+    writer1 = PdfWriter()
+    indirect_object = IndirectObject(1, 0, writer1)
+
+    # Create a weak reference to the underlying object to test later
+    # if it is still alive in memory or not
+    obj_weakref = weakref.ref(indirect_object.pdf)
+    assert obj_weakref() is not None
+
+    writer2 = PdfWriter()
+    indirect_object.clone(writer2)
+
+    # Mimic indirect_object/writer1 going out of scope and being
+    # garbage collected. Clone should have kept a hard reference to
+    # it, preventing its deallocation.
+    del indirect_object
+    del writer1
+    gc.collect()
+    assert obj_weakref() is not None
+
+
+def test_cloning_null_obj_keeps_hard_reference():
+    """
+    Ensure that cloning a NullObject keeps a hard reference to
+    the underlying object, preventing its deallocation, which could allow
+    `id(obj)` to return the same value for different objects.
+    """
+    writer1 = PdfWriter()
+    indirect_object = IndirectObject(1, 0, writer1)
+    null_obj = NullObject()
+    null_obj.indirect_reference = indirect_object
+
+    # Create a weak reference to the underlying object to test later
+    # if it is still alive in memory or not
+    obj_weakref = weakref.ref(indirect_object.pdf)
+    assert obj_weakref() is not None
+
+    writer2 = PdfWriter()
+    null_obj.clone(writer2)
+
+    # Mimic indirect_object/writer1 going out of scope and being
+    # garbage collected. Clone should have kept a hard reference to
+    # it, preventing its deallocation.
+    del indirect_object
+    del writer1
+    del null_obj
+    gc.collect()
+    assert obj_weakref() is not None
+
+
+def _create_direct_objects_container(as_array: bool, size: int) -> ArrayObject | DictionaryObject:
+    elements = [NullObject(), BooleanObject(True), NumberObject(1), FloatObject(1.5), NameObject("/A")]
+    elements = elements * (size // len(elements))
+    if as_array:
+        return ArrayObject(elements)
+    return DictionaryObject({NameObject(f"/K{i}"): element for i, element in enumerate(elements)})
+
+
+def _clone_and_count(container: ArrayObject | DictionaryObject, writer: PdfWriter) -> tuple[int, int]:
+    """Clone the container and return the number of Python function calls and raised exceptions."""
+    calls = 0
+    exceptions = 0
+
+    def trace(frame, event, arg):  # noqa: ANN202
+        nonlocal calls, exceptions
+        if event == "call":
+            calls += 1
+        elif event == "exception":
+            exceptions += 1
+        return trace
+
+    # Otherwise, finalizers and weakref callbacks of unrelated objects might be counted.
+    gc.collect()
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
+    previous_trace = sys.gettrace()
+    sys.settrace(trace)
+    try:
+        clone = container.clone(writer)
+    finally:
+        sys.settrace(previous_trace)
+        if gc_was_enabled:
+            gc.enable()
+
+    assert clone == container
+    return calls, exceptions
+
+
+@pytest.mark.parametrize(
+    ("as_array", "calls_per_1000_elements"),
+    [
+        # 7,600 to 9,600 before the fix, depending on the Python version, and
+        # 3,600 before the shortcut for nulls in NullObject.clone().
+        pytest.param(True, 3200, id="array"),
+        # 10,600 to 11,600 before the fix, depending on the Python version,
+        # 8,600 while PdfObject inherited from a Protocol, as the isinstance()
+        # checks in DictionaryObject.__setitem__() ran Python code, and 4,600
+        # before the shortcut for nulls in NullObject.clone().
+        pytest.param(False, 4200, id="dictionary"),
+    ],
+)
+def test_cloning_direct_objects__function_calls_and_exceptions(as_array, calls_per_1000_elements):
+    """
+    Cloning direct objects must stay cheap, see #2136.
+
+    Documents can contain arrays with thousands of direct objects, for example
+    in the /ParentTree of the structure tree. Counting the Python function calls
+    and the raised exceptions measures the work per element independently of the
+    machine speed. Comparing 1,000 with 2,000 elements leaves out the work for
+    the container itself.
+    """
+    writer = PdfWriter()
+    # The first clone fills caches, for example of isinstance(), which takes additional calls.
+    _create_direct_objects_container(as_array, size=5).clone(writer)
+
+    calls_1000, exceptions_1000 = _clone_and_count(_create_direct_objects_container(as_array, size=1000), writer)
+    calls_2000, exceptions_2000 = _clone_and_count(_create_direct_objects_container(as_array, size=2000), writer)
+
+    assert calls_2000 - calls_1000 == calls_per_1000_elements
+    # Direct objects have no indirect reference, which must not be handled by
+    # catching an AttributeError per element.
+    assert exceptions_2000 == exceptions_1000
+
+
+@pytest.mark.enable_socket
+def test_append_with_indirectobject_not_pointing(caplog):
+    """
+    Reported in #1631
+    the object 43 0 is not invalid
+    """
+    url = "https://github.com/py-pdf/pypdf/files/10729142/document.pdf"
+    name = "tst_iss1631.pdf"
+    data = BytesIO(get_data_from_url(url=url, name=name))
+    reader = PdfReader(data, strict=False)
+    writer = PdfWriter()
+    writer.append(reader)
+    assert "Object 43 0 not defined." in caplog.text
+
+
+@pytest.mark.enable_socket
+def test_iss1615_1673():
+    """
+    Test cases where /N is not indicating chains of objects
+    test also where /N,... are not part of chains
+    """
+    # #1615
+    url = "https://github.com/py-pdf/pypdf/files/10671366/graph_letter.pdf"
+    name = "graph_letter.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    writer = PdfWriter()
+    writer.append(reader)
+    assert (
+        "/N"
+        in writer.pages[0]["/Annots"][0]
+        .get_object()["/AP"]["/N"]["/Resources"]["/ColorSpace"]["/Cs1"][1]
+        .get_object()
+    )
+    # #1673
+    url = "https://github.com/py-pdf/pypdf/files/10848750/budgeting-loan-form-sf500.pdf"
+    name = "budgeting-loan-form-sf500.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    writer = PdfWriter()
+    writer.clone_document_from_reader(reader)
+
+
+@pytest.mark.enable_socket
+def test_destination_withoutzoom():
+    """Cf issue #1832"""
+    url = "https://github.com/user-attachments/files/15605648/2021_book_security.pdf"
+    name = "2021_book_security.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    reader.outline
+
+    out = BytesIO()
+    writer = PdfWriter(clone_from=reader)
+    writer.write(out)
+
+
+def test_encodedstream_set_data():
+    """
+    EncodedStreamObject.set_data to extend data stream works.
+
+    Checks also the flate_encode.
+    """
+    pdf_path = RESOURCE_ROOT / "crazyones.pdf"
+    reader = PdfReader(pdf_path)
+    co = reader.pages[0]["/Contents"][0].get_object()
+    co.set_data(b"%hello\n" + co.get_data())
+    assert b"hello" in co.get_data()
+    b = BytesIO()
+    co.write_to_stream(b)
+    b.seek(0)
+    aa = read_object(b, None)
+    assert b"hello" in aa.get_data()
+    assert aa["/Filter"] == "/FlateDecode"
+    assert "/DecodeParms" not in aa
+    bb = aa.flate_encode()
+    assert b"hello" in bb.get_data()
+    assert bb["/Filter"] == ["/FlateDecode", "/FlateDecode"]
+    assert str(bb["/DecodeParms"]) == "[NullObject, NullObject]"
+    bb[NameObject("/Test")] = NameObject("/MyTest")
+    cc = bb.flate_encode()
+    assert bb["/Filter"] == ["/FlateDecode", "/FlateDecode"]
+    assert b"hello" in cc.get_data()
+    assert cc["/Filter"] == ["/FlateDecode", "/FlateDecode", "/FlateDecode"]
+    assert str(cc["/DecodeParms"]) == "[NullObject, NullObject, NullObject]"
+    assert cc[NameObject("/Test")] == "/MyTest"
+
+    with pytest.raises(TypeError):
+        aa.set_data("toto")
+
+    aa[NameObject("/Filter")] = NameObject("/JPXEncode")
+    with pytest.raises(PdfReadError):
+        aa.set_data(b"toto")
+
+
+@pytest.mark.enable_socket
+def test_set_data_2():
+    """
+    Modify a stream not yet loaded and
+    where the filter is ["/FlateDecode"]
+    """
+    url = "https://github.com/user-attachments/files/16796095/f5471sm-2.pdf"
+    name = "iss2780.pdf"
+    writer = PdfWriter(BytesIO(get_data_from_url(url=url, name=name)))
+    writer.root_object["/AcroForm"]["/XFA"][7].set_data(b"test")
+    assert writer.root_object["/AcroForm"]["/XFA"][7].get_object()["/Filter"] == [
+        "/FlateDecode"
+    ]
+    assert writer.root_object["/AcroForm"]["/XFA"][7].get_object().get_data() == b"test"
+
+
+@pytest.mark.enable_socket
+def test_calling_indirect_objects():
+    """Cope with cases where attributes/items are called from indirectObject"""
+    url = "https://github.com/user-attachments/files/15605648/2021_book_security.pdf"
+    name = "2021_book_security.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    reader.trailer.get("/Info")["/Creator"]
+    reader.pages[0]["/Contents"][0].get_data()
+    writer = PdfWriter(clone_from=reader)
+    ind = writer._add_object(writer)
+    assert ind.fileobj == writer.fileobj
+    with pytest.raises(AttributeError):
+        ind.not_existing_attribute
+    # create an IndirectObject referencing an IndirectObject.
+    writer._objects.append(writer.pages[0].indirect_reference)
+    ind = IndirectObject(len(writer._objects), 0, writer)
+    with pytest.raises(PdfStreamError):
+        ind["/Type"]
+
+
+@pytest.mark.enable_socket
+def test_indirect_object_page_dimensions():
+    url = "https://github.com/py-pdf/pypdf/files/13302338/Zymeworks_Corporate.Presentation_FINAL1101.pdf.pdf"
+    name = "issue2287.pdf"
+    data = BytesIO(get_data_from_url(url=url, name=name))
+    reader = PdfReader(data, strict=False)
+    mediabox = reader.pages[0].mediabox
+    assert mediabox == RectangleObject((0, 0, 792, 612))
+
+
+def test_indirect_object_contains():
+    writer = PdfWriter()
+    indirect_object = IndirectObject(1, 0, writer)
+    assert "foo" not in indirect_object
+    assert "/Producer" in indirect_object
+
+
+def test_indirect_object_iter():
+    writer = PdfWriter()
+    indirect_object = IndirectObject(1, 0, writer)
+    assert "foo" not in list(indirect_object)
+    assert "/Producer" in list(indirect_object)
+
+
+def test_array_operators():
+    a = ArrayObject(
+        [
+            NumberObject(1),
+            NumberObject(2),
+            NumberObject(3),
+            NumberObject(4),
+        ]
+    )
+    b = a + 5
+    assert isinstance(b, ArrayObject)
+    assert b == [1, 2, 3, 4, 5]
+    assert a == [1, 2, 3, 4]
+    a -= 2
+    a += "abc"
+    a -= (3, 4)
+    a += ["d", "e"]
+    a += BooleanObject(True)
+    assert a == [1, "abc", "d", "e", True]
+    a += "/toto"
+    assert isinstance(a[-1], NameObject)
+    assert isinstance(a[1], TextStringObject)
+    a += b"1234"
+    assert a[-1] == ByteStringObject(b"1234")
+    la = len(a)
+    a -= 300
+    assert len(a) == la
+
+
+def test_unitary_extract_inline_buffer_invalid():
+    with pytest.raises(PdfReadError):
+        extract_inline__ascii_hex_decode(BytesIO())
+    with pytest.raises(PdfReadError):
+        extract_inline__ascii_hex_decode(BytesIO(4095 * b"00" + b"   "))
+    with pytest.raises(PdfReadError):
+        extract_inline__ascii_hex_decode(BytesIO(b"00"))
+    with pytest.raises(PdfReadError):
+        extract_inline__ascii85_decode(BytesIO())
+    with pytest.raises(PdfReadError):
+        extract_inline__ascii85_decode(BytesIO(a85encode(b"1")))
+    with pytest.raises(PdfReadError):
+        extract_inline__ascii85_decode(BytesIO(a85encode(b"1") + b"~> Q"))
+    with pytest.raises(PdfReadError):
+        extract_inline__ascii85_decode(BytesIO(a85encode(b"1234578" * 990)))
+    with pytest.raises(PdfReadError):
+        extract_inline__run_length_decode(BytesIO())
+    with pytest.raises(PdfReadError):
+        extract_inline__run_length_decode(BytesIO(b"\x01\x01\x80"))
+    with pytest.raises(PdfReadError):
+        extract_inline__dct_decode(BytesIO(b"\xFF\xD9"))
+
+
+def test_unitary_extract_inline():
+    # AHx
+    b = 16000 * b"00"
+    assert len(extract_inline__ascii_hex_decode(BytesIO(b + b" EI"))) == len(b)
+    with pytest.raises(PdfReadError):
+        extract_inline__ascii_hex_decode(BytesIO(b + b"> "))
+    # RL
+    b = 8200 * b"\x00\xAB" + b"\x80"
+    assert len(extract_inline__run_length_decode(BytesIO(b + b" EI"))) == len(b)
+
+    # default
+    # EIDD instead of EI; using A85
+    b = b"""1 0 0 1 0 0 cm  BT /F1 12 Tf 14.4 TL ET\nq 100 0 0 100 100 100 cm
+BI\n/W 16 /H 16 /BPC 8 /CS /RGB /F [/A85 /Fl]\nID
+Gar8O(o6*is8QV#;;JAuTq2lQ8J;%6#\'d5b"Q[+ZD?\'\\+CGj9~>
+EIDD
+Q\nBT 1 0 0 1 200 100 Tm (Test) Tj T* ET\n \n"""
+    ec = DecodedStreamObject()
+    ec.set_data(b)
+    co = ContentStream(ec, None)
+    with pytest.raises(PdfReadError) as exc:
+        co.operations
+    assert "EI stream not found" in exc.value.args[0]
+    # EIDD instead of EI; using /Fl (default extraction)
+    b = b"""1 0 0 1 0 0 cm  BT /F1 12 Tf 14.4 TL ET\nq 100 0 0 100 100 100 cm
+BI\n/W 16 /H 16 /BPC 8 /CS /RGB /F /Fl \nID
+Gar8O(o6*is8QV#;;JAuTq2lQ8J;%6#\'d5b"Q[+ZD?\'\\+CGj9~>
+EIDD
+Q\nBT 1 0 0 1 200 100 Tm (Test) Tj T* ET\n \n"""
+    ec = DecodedStreamObject()
+    ec.set_data(b)
+    co = ContentStream(ec, None)
+    with pytest.raises(PdfReadError) as exc:
+        co.operations
+    assert "Unexpected end of stream" in exc.value.args[0]
+
+    b = b"""1 0 0 1 0 0 cm  BT /F1 12 Tf 14.4 TL ET\nq 100 0 0 100 100 100 cm
+BI\n/W 16 /H 16 /BPC 8 /CS /RGB /F /Fl \nID
+Gar8O(o6*is8QV#;;JAuTq2lQ8J;%6#\'d5b"Q[+ZD?\'\\+CGj9~>EI
+BT\nQ\nBT 1 0 0 1 200 100 Tm (Test) Tj T* ET\n \n"""
+    ec = DecodedStreamObject()
+    ec.set_data(b)
+    co = ContentStream(ec, None)
+    with pytest.raises(PdfReadError) as exc:
+        co.operations
+    assert "Unexpected end of stream" in exc.value.args[0]
+
+    b = b"""1 0 0 1 0 0 cm  BT /F1 12 Tf 14.4 TL ET\nq 100 0 0 100 100 100 cm
+BI\n/W 4 /H 4 /CS /G \nID
+abcdefghijklmnopEI
+Q\nQ\nBT 1 0 0 1 200 100 Tm (Test) Tj T* ET\n \n"""
+    ec = DecodedStreamObject()
+    ec.set_data(b)
+    co = ContentStream(ec, None)
+    assert co.operations[7][0]["data"] == b"abcdefghijklmnop"
+
+    b = b"""1 0 0 1 0 0 cm  BT /F1 12 Tf 14.4 TL ET\nq 100 0 0 100 100 100 cm
+BI\n/W 4 /H 4 \nID
+abcdefghijklmnopEI
+Q\nQ\nBT 1 0 0 1 200 100 Tm (Test) Tj T* ET\n \n"""
+    ec = DecodedStreamObject()
+    ec.set_data(b)
+    co = ContentStream(ec, None)
+    assert co.operations[7][0]["data"] == b"abcdefghijklmnop"
+
+
+@pytest.mark.parametrize("tail", [b"", b"\n", b"\nQ\n"])
+@pytest.mark.parametrize(
+    ("filter_name", "image_data"),
+    [
+        (b"AHx", b"41>"),
+        (b"A85", a85encode(b"A") + b"~>"),
+        (b"RL", b"\x00A\x80"),
+        (b"DCT", b"\xff\xd8\xff\xd9"),
+    ],
+    ids=["ASCIIHex", "ASCII85", "RunLength", "DCT"],
+)
+def test_content_stream_filtered_inline_image_at_end_of_stream(filter_name, image_data, tail):
+    """The separator before `EI` is excluded from filtered inline image data."""
+    stream_object = DecodedStreamObject()
+    stream_object.set_data(
+        b"BI /W 1 /H 1 /BPC 8 /CS /G /F /" + filter_name + b" ID\n" + image_data + b"\nEI" + tail
+    )
+    operations = ContentStream(stream_object, None).operations
+
+    assert operations[0][1] == b"INLINE IMAGE"
+    assert operations[0][0]["data"] == image_data
+    assert operations[1:] == ([([], b"Q")] if tail == b"\nQ\n" else [])
+
+
+@pytest.mark.parametrize("tail", [b"", b"\n", b"\nQ\n"])
+def test_inline_image_at_end_of_stream(tail):
+    # An inline image whose `EI` marker is the very end of the content stream
+    # (no trailing whitespace or operator) must not raise (#3468).
+    image = b"abcdefghijklmnop"  # 4 * 4 * 1 byte
+    content = b"q 100 0 0 100 100 100 cm\nBI\n/W 4 /H 4 /CS /G\nID\n" + image + b"\nEI" + tail
+    stream_object = DecodedStreamObject()
+    stream_object.set_data(content)
+    content_stream = ContentStream(stream_object, None)
+    inline_images = [op for op in content_stream.operations if op[1] == b"INLINE IMAGE"]
+    assert len(inline_images) == 1
+    assert inline_images[0][0]["data"] == image
+
+
+def test_inline_image_at_end_of_stream_default_extractor():
+    # An unrecognized colorspace forces extraction through
+    # `extract_inline_default`, which must also accept an `EI` marker at the
+    # very end of the stream without raising (#3468).
+    image = b"abcdefghijklmnop"  # 4 * 4 * 1 byte
+    content = b"q 100 0 0 100 100 100 cm\nBI\n/W 4 /H 4 /CS /Unknown\nID\n" + image + b"\nEI"
+    stream_object = DecodedStreamObject()
+    stream_object.set_data(content)
+    content_stream = ContentStream(stream_object, None)
+    inline_images = [op for op in content_stream.operations if op[1] == b"INLINE IMAGE"]
+    assert len(inline_images) == 1
+    assert image in inline_images[0][0]["data"]
+
+
+def test_inline_image_at_end_of_stream_fallback_extractor():
+    # A recognized colorspace with oversized `/W`/`/H` makes the primary
+    # dimension-based read overshoot the `EI` marker, so extraction falls back
+    # to `extract_inline_default`. With the marker at the very end of the
+    # stream the fallback `read(3)` returns only two bytes (`b"EI"`), which
+    # exercises the `len(ei) != 3` path of the fallback branch (#3468).
+    image = b"abcdefghijklmnop"  # 16 bytes; `/W 8` * `/H 4` would expect 32
+    content = b"q 100 0 0 100 100 100 cm\nBI\n/W 8 /H 4 /CS /G\nID\n" + image + b"\nEI"
+    stream_object = DecodedStreamObject()
+    stream_object.set_data(content)
+    content_stream = ContentStream(stream_object, None)
+    inline_images = [op for op in content_stream.operations if op[1] == b"INLINE IMAGE"]
+    assert len(inline_images) == 1
+    assert image in inline_images[0][0]["data"]
+
+
+def test_missing_hashbin():
+    assert NullObject().hash_bin() == hash((NullObject,))
+    assert hash(NullObject()) == NullObject().hash_bin()
+    t = ByteStringObject(b"123")
+    assert t.hash_bin() == hash((ByteStringObject, b"123"))
+    assert FloatObject(1.5).hash_bin() == hash((FloatObject, 1.5))
+    assert FloatObject(1.5).hash_bin() == FloatObject(1.5).hash_bin()
+
+
+def test_is_null_or_none():
+    assert is_null_or_none(NullObject())
+    assert not is_null_or_none(PdfObject())
+
+    reader = PdfReader(RESOURCE_ROOT / "crazyones.pdf")
+    # used with get
+    assert is_null_or_none(reader.root_object.get("/do_no_exist"))
+    # object unknown...
+    assert is_null_or_none(IndirectObject(99999, 0, reader).get_object())
+    # ... or which has been replaced with NullObject
+    writer = PdfWriter(reader)
+    writer.pages[0]["/Contents"].append(writer._add_object(NullObject()))
+    assert is_null_or_none(writer.pages[0]["/Contents"][-1])
+
+
+def test_coverage_arrayobject():
+    writer = PdfWriter()
+    a = ArrayObject([1])
+    assert isinstance(a.replicate(writer)[0], int)
+    assert isinstance(a.clone(writer)[0], int)
+    a.indirect_reference = IndirectObject(1, 0, writer)
+    assert isinstance(a.clone(writer)[0], int)
+    r = PdfReader(RESOURCE_ROOT / "crazyones.pdf")
+    a = ArrayObject([r.pages[0]["/Contents"][0].get_object()])
+    aa = a.clone(writer)
+    assert isinstance(aa[0], IndirectObject)
+    for k, v in aa.items():
+        assert isinstance(k, int)
+        assert isinstance(v, PdfObject)
+
+
+def test_coverage_streamobject():
+    writer = PdfWriter()
+    s = StreamObject()
+    del s.decoded_self
+    s.replicate(writer)
+    s.clone(writer)
+
+    co = ContentStream(None, None)
+    co.replicate(writer)
+    co.clone(writer, False, None)
+    co.indirect_reference = IndirectObject(1, 0, writer)
+    assert co == co.clone(writer)
+
+    r = PdfReader(RESOURCE_ROOT / "crazyones.pdf")
+    co = r.pages[0].get_contents()
+    co[NameObject("/testkey")] = NameObject("/test")
+    co.decoded_self = None
+    assert "/testkey" in co.replicate(writer)
+    co = r.pages[0].get_contents()
+    co[NameObject("/testkey")] = NameObject("/test")
+    co.decoded_self = DecodedStreamObject()
+    assert "/testkey" in co.replicate(writer)
+
+
+def test_contentstream_arrayobject_containing_nullobject(caplog):
+    stream_object = DecodedStreamObject()
+    stream_object.set_data(b"Hello World!")
+
+    input_stream = ArrayObject([NullObject(), stream_object])
+    content_stream = ContentStream(stream=input_stream, pdf=None)
+    assert content_stream.get_data() == b"Hello World!\n"
+    assert caplog.text == ""
+
+
+@pytest.mark.enable_socket
+def test_build_link__go_to_action_without_destination():
+    reader = PdfReader(BytesIO(get_data_from_url(name="issue-3419.pdf")))
+    writer = PdfWriter()
+    for page in reader.pages:
+        writer.add_page(page)
+    assert len(writer.pages) == len(reader.pages)
+
+
+@pytest.mark.enable_socket
+def test_dictionaryobject__length_0_stream():
+    """Test for issue #3052."""
+    url = "https://github.com/user-attachments/files/18734105/correct.pdf"
+    name = "issue3052.pdf"
+    writer = PdfWriter(clone_from=BytesIO(get_data_from_url(url=url, name=name)))
+    output = BytesIO()
+    writer.write(output)
+    assert b"\n8 0 obj\n<<\n/Length 0\n>>\nstream\n\nendstream\nendobj\n" in output.getvalue()
+
+
+def test_get_inherited_malformed_parent():
+    """A malformed /Parent that is not a dictionary ends the walk with default.
+
+    Regression test for issue #4202: previously a NumberObject parent made
+    get_inherited raise TypeError ("argument of type 'NumberObject' is not
+    iterable"), which surfaced as a crash in extract_text().
+    """
+    parent = DictionaryObject({NameObject("/Rotate"): NumberObject(90)})
+    child = DictionaryObject({NameObject("/Parent"): parent})
+    assert child.get_inherited("/Rotate") == 90
+    assert child.get_inherited("/Missing", "dflt") == "dflt"
+
+    number_parent = DictionaryObject({NameObject("/Parent"): NumberObject(42)})
+    assert number_parent.get_inherited("/Rotate", "dflt") == "dflt"
+    assert number_parent.get_inherited("/Rotate") is None
+
+
+def test_content_stream_replicate__parsed_operations():
+    """The replica of a content stream whose operations were parsed has the same operations."""
+    writer = PdfWriter()
+    content = ContentStream(None, None)
+    content.set_data(b"BT /F1 12 Tf (Hello) Tj ET")
+    operations = list(content.operations)
+    assert operations
+
+    replica = content.replicate(writer)
+
+    assert replica is not content
+    assert replica.operations == operations
+    assert replica.get_data() == content.get_data()
+    assert b"Hello" in replica.get_data()
+
+
+def test_content_stream_replicate__raw_data():
+    """The replica of a content stream that was never parsed has the same data."""
+    writer = PdfWriter()
+    content = ContentStream(None, None)
+    content.set_data(b"q 1 0 0 1 10 10 cm Q")
+
+    replica = content.replicate(writer)
+
+    assert replica.get_data() == b"q 1 0 0 1 10 10 cm Q"

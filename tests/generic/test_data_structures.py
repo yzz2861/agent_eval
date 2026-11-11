@@ -1,0 +1,946 @@
+"""Test the pypdf.generic._data_structures module."""
+import subprocess
+import sys
+from collections.abc import Callable
+from io import BytesIO
+from pathlib import Path
+from unittest import mock
+
+import pytest
+
+from pypdf import PdfReader, PdfWriter, apply_configuration
+from pypdf.errors import LimitReachedError, PdfReadError
+from pypdf.generic import (
+    ArrayObject,
+    ByteStringObject,
+    ContentStream,
+    Destination,
+    DictionaryObject,
+    Fit,
+    NameObject,
+    NullObject,
+    NumberObject,
+    OutlineItem,
+    RectangleObject,
+    StreamObject,
+    StreamParsingBudget,
+    TextStringObject,
+    TreeObject,
+)
+from pypdf.types import OutlineType
+from tests import RESOURCE_ROOT, get_data_from_url, get_subprocess_environment
+from tests.utils import ReaderDummy
+
+try:
+    import resource
+except ImportError:
+    resource = None  # type: ignore[assignment]
+
+
+@pytest.mark.parametrize("link", ["/Next", "/Prev", "/N", "/V"])
+def test_dictionary_object__clone_linked_objects_with_constructor_arguments(link: str) -> None:
+    """Linked dictionaries requiring constructor arguments can be cloned."""
+    source = PdfWriter()
+    destination = PdfWriter()
+    first = OutlineItem("First", NumberObject(0), Fit.fit())
+    second = OutlineItem("Second", NumberObject(0), Fit.fit())
+    source._add_object(first)
+    first[NameObject(link)] = source._add_object(second)
+
+    cloned = first.clone(destination)
+    cloned_second = cloned[link]
+
+    assert isinstance(cloned, OutlineItem)
+    assert isinstance(cloned_second, OutlineItem)
+    assert cloned is not first
+    assert cloned_second is not second
+    assert cloned.title == first.title
+    assert cloned_second.items() == second.items()
+    assert cloned.indirect_reference is not None
+    assert cloned.indirect_reference.pdf is destination
+    assert cloned_second.indirect_reference is not None
+    assert cloned_second.indirect_reference.pdf is destination
+    assert first[link] is second
+    assert second.indirect_reference is not None
+    assert second.indirect_reference.pdf is source
+
+
+def test_dictionary_object__get_next_object_position() -> None:
+    reader = PdfReader(RESOURCE_ROOT / "crazyones.pdf")
+
+    # reader.xref = {0: {7: 15, 9: 10245, 12: 939, 14: 2999, 16: 4982, 18: 9949, 22: 11160}}
+    assert DictionaryObject._get_next_object_position(
+        position_before=12345, position_end=999999, generations=list(reader.xref), pdf=reader
+    ) == 999999  # No value after 12345 in dictionary
+    assert DictionaryObject._get_next_object_position(
+        position_before=11111, position_end=999999, generations=list(reader.xref), pdf=reader
+    ) == 11160  # First value after 11111 in dictionary.
+    assert DictionaryObject._get_next_object_position(
+        position_before=42, position_end=999999, generations=list(reader.xref), pdf=reader
+    ) == 939  # First value after 42 in dictionary.
+
+    # New generation.
+    reader.xref[1] = {7: 42, 24: 15000}
+    assert DictionaryObject._get_next_object_position(
+        position_before=10, position_end=999999, generations=list(reader.xref), pdf=reader
+    ) == 15
+
+
+def test_dictionary_object__duplicate_key_with_falsy_first_value__strict() -> None:
+    stream = BytesIO(b"<< /Count 0 /Count 5 >>")
+
+    with pytest.raises(
+            expected_exception=PdfReadError,
+            match=r"^Multiple definitions in dictionary"
+    ):
+        DictionaryObject.read_from_stream(stream, mock.Mock(strict=True))
+
+
+def test_dictionary_object__duplicate_key_with_falsy_first_value__non_strict(
+        caplog: pytest.LogCaptureFixture
+) -> None:
+    stream = BytesIO(b"<< /Count 0 /Count 5 >>")
+
+    dictionary = DictionaryObject.read_from_stream(stream, mock.Mock(strict=False))
+
+    assert caplog.messages == ["Multiple definitions in dictionary at byte 0x14 for key /Count"]
+    # The first value wins, which is how a duplicate with a non-falsy first value
+    # has always behaved. Before the fix this case kept 5 and logged nothing.
+    assert dictionary == {NameObject("/Count"): NumberObject(0)}
+
+
+def test_dictionary_object__duplicate_key_with_non_falsy_first_value__strict() -> None:
+    stream = BytesIO(b"<< /Count 7 /Count 5 >>")
+
+    with pytest.raises(
+            expected_exception=PdfReadError,
+            match=r"^Multiple definitions in dictionary"
+    ):
+        DictionaryObject.read_from_stream(stream, mock.Mock(strict=True))
+
+
+def test_dictionary_object__different_keys_with_falsy_first_value() -> None:
+    stream = BytesIO(b"<< /Count 0 /Size 5 >>")
+
+    dictionary = DictionaryObject.read_from_stream(stream, mock.Mock(strict=True))
+
+    assert dictionary == {
+        NameObject("/Count"): NumberObject(0),
+        NameObject("/Size"): NumberObject(5),
+    }
+
+
+def test_tree_object__cyclic_reference(caplog: pytest.LogCaptureFixture) -> None:
+    writer = PdfWriter()
+    child1_object = DictionaryObject()
+    child1 = writer._add_object(child1_object)
+    child2 = writer._add_object(DictionaryObject({NameObject("/Next"): child1}))
+    child3 = writer._add_object(DictionaryObject({NameObject("/Next"): child2}))
+    child1_object[NameObject("/Next")] = child3
+    tree = TreeObject()
+    tree[NameObject("/First")] = child2
+    tree[NameObject("/Last")] = writer._add_object(DictionaryObject())
+
+    assert list(tree.children()) == [child2.get_object(), child1.get_object(), child3.get_object()]
+    assert "Detected cycle in outline structure for " in caplog.text
+
+
+def test_tree_object__insert_child_without_next_key() -> None:
+    """Regression test for TreeObject.insert_child without /Next."""
+    writer = PdfWriter()
+    tree = TreeObject()
+    writer._add_object(tree)
+
+    first_child_ref = writer._add_object(DictionaryObject())
+    tree.add_child(first_child_ref, writer)
+
+    fresh_child = DictionaryObject()
+    fresh_child_ref = writer._add_object(fresh_child)
+    assert "/Next" not in fresh_child
+
+    # Must not raise KeyError("/Next") even though the new child has no /Next.
+    tree.insert_child(fresh_child_ref, first_child_ref, writer)
+
+    # The new child is linked before the existing one.
+    first_child = first_child_ref.get_object()
+    assert isinstance(first_child, DictionaryObject)
+    assert fresh_child["/Next"] == first_child
+    assert first_child["/Prev"] == fresh_child
+
+
+def test_tree_object__insert_child_in_first_position_with_next() -> None:
+    """Regression test: child with /Next inserted in first position."""
+    writer = PdfWriter()
+    tree = TreeObject()
+    writer._add_object(tree)
+
+    # Create a single child A as the /First (and /Last)
+    child_a = DictionaryObject()
+    child_a_ref = writer._add_object(child_a)
+    tree.add_child(child_a_ref, writer)
+
+    # prev = tree["/Last"] = A, prev == before, so no while loop.
+    # try: prev["/Prev"] — A has no /Prev → KeyError → except block fires.
+
+    # Create child C with a /Next pointer pointing to something
+    child_c = DictionaryObject()
+    child_c[NameObject("/Next")] = child_a_ref  # C -> A
+    child_c_ref = writer._add_object(child_c)
+    assert "/Next" in child_c
+
+    # Insert C before A (first position)
+    tree.insert_child(child_c_ref, child_a_ref, writer)
+
+    # C is now first, linked to A
+    c_obj = child_c_ref.get_object()
+    assert isinstance(c_obj, DictionaryObject)
+    assert c_obj["/Next"] == child_a
+
+
+@pytest.mark.enable_socket
+def test_array_object__clone_same_object_multiple_times(caplog: pytest.LogCaptureFixture) -> None:
+    url = "https://github.com/user-attachments/files/25412858/Draft_OSMF_financial_statement_2013.pdf"
+    name = "issue2991.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+
+    writer = PdfWriter()
+    for page in reader.pages:
+        page2 = writer.add_page(page)
+        assert page2.mediabox == RectangleObject((0, 0, 595, 841))
+    assert caplog.messages == []
+
+
+def test_array_object__clone_same_stream_multiple_times() -> None:
+    writer = PdfWriter()
+
+    # Unique streams.
+    stream1 = StreamObject()
+    stream1.set_data(b"Hello World!")
+    stream2 = StreamObject()
+    stream2.set_data(b"Lorem ipsum!")
+
+    # Shared streams.
+    shared_streams = [StreamObject() for _ in range(3)]
+    for index, shared_stream in enumerate(shared_streams):
+        shared_stream.set_data(f"Shared stream {index}".encode())
+
+    # Add to writer.
+    writer._add_object(stream1)
+    writer._add_object(stream2)
+    shared_references = [writer._add_object(shared_stream) for shared_stream in shared_streams]
+
+    # Arrays.
+    array1 = ArrayObject([stream1.indirect_reference, *shared_references])
+    array2 = ArrayObject([stream2.indirect_reference, *shared_references])
+
+    # Cloned.
+    cloned1 = array1.clone(pdf_dest=writer)
+    cloned2 = array2.clone(pdf_dest=writer)
+
+    # Nullify one shared object.
+    writer._replace_object(shared_references[1].indirect_reference, NullObject())
+
+    # The first entry is always different. The remaining shared entries should be dedicated copies.
+    assert cloned1[1:] != cloned2[1:]
+
+    assert ContentStream(stream=array1, pdf=None).get_data() == b"Hello World!\nShared stream 0\nShared stream 2\n"
+    assert ContentStream(stream=array2, pdf=None).get_data() == b"Lorem ipsum!\nShared stream 0\nShared stream 2\n"
+    assert (
+        ContentStream(stream=cloned1, pdf=None).get_data() ==
+        b"Hello World!\nShared stream 0\nShared stream 1\nShared stream 2\n"
+    )
+    assert (
+        ContentStream(stream=cloned2, pdf=None).get_data() ==
+        b"Lorem ipsum!\nShared stream 0\nShared stream 1\nShared stream 2\n"
+    )
+
+
+def test_array_object__to_lst_conversion() -> None:
+    arr = ArrayObject()
+
+    # str not starting with "/" -> TextStringObject
+    arr += "hello"
+    assert isinstance(arr[0], TextStringObject)
+
+    # bytes -> ByteStringObject
+    arr += b"data"
+    assert isinstance(arr[1], ByteStringObject)
+
+    # number (else branch) - should pass through unwrapped
+    arr += 42
+    assert arr[2] == 42
+    assert type(arr[2]) is int
+
+
+@pytest.mark.enable_socket
+def test_dictionary_object__read_from_stream__limit() -> None:
+    name = "read_from_stream__length_2gb.pdf"
+    url = "https://github.com/user-attachments/files/25842437/read_from_stream__length_2gb.pdf"
+
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    page = reader.pages[0]
+
+    with pytest.raises(
+            expected_exception=LimitReachedError,
+            match=r"^Declared stream length of 2147483647 exceeds maximum allowed length\.$"
+    ):
+        page.extract_text()
+
+
+def _prepare_test_dictionary_object__read_from_stream__no_limit(
+        path: Path
+) -> tuple[str, dict[str, str], Callable[[], None]]:
+    name = "read_from_stream__length_2gb.pdf"
+    url = "https://github.com/user-attachments/files/25842437/read_from_stream__length_2gb.pdf"
+    data = get_data_from_url(url=url, name=name)
+    pdf_path = path / name
+    pdf_path.write_bytes(data)
+    pdf_path_str = pdf_path.resolve().as_posix()
+
+    def limit_virtual_memory() -> None:
+        limit_kb = 1_000_000
+        limit_bytes = limit_kb * 1024
+        resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes))
+
+    return pdf_path_str, get_subprocess_environment(), limit_virtual_memory
+
+
+@pytest.mark.enable_socket
+@pytest.mark.skipif(condition=resource is None, reason="Does not have 'resource' module.")
+@pytest.mark.skipif(sys.platform == "darwin", reason="RLIMIT_AS is unreliable.")
+def test_dictionary_object__read_from_stream__no_limit(tmp_path: Path) -> None:
+    pdf_path_str, env, limit_virtual_memory = _prepare_test_dictionary_object__read_from_stream__no_limit(tmp_path)
+
+    source_file = tmp_path / "script.py"
+    source_file.write_text(
+        f"""
+import sys
+from pypdf import PdfReader, overwrite_configuration
+
+overwrite_configuration(maximum_declared_stream_length=sys.maxsize)
+
+with open({pdf_path_str!r}, mode="rb") as fd:
+    reader = PdfReader(fd)
+    print(reader.pages[0].extract_text())
+"""
+    )
+
+    result = subprocess.run(  # noqa: S603  # We have the control here.
+        [sys.executable, source_file],
+        capture_output=True,
+        env=env,
+        text=True,
+        preexec_fn=limit_virtual_memory,
+    )
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr.replace("\r", "").endswith("\nMemoryError\n")
+
+
+@pytest.mark.enable_socket
+@pytest.mark.skipif(condition=resource is None, reason="Does not have 'resource' module.")
+@pytest.mark.skipif(sys.platform == "darwin", reason="RLIMIT_AS is unreliable.")
+def test_dictionary_object__read_from_stream__no_limit__path(tmp_path: Path) -> None:
+    pdf_path_str, env, limit_virtual_memory = _prepare_test_dictionary_object__read_from_stream__no_limit(tmp_path)
+
+    source_file = tmp_path / "script.py"
+    source_file.write_text(
+        f"""
+import sys
+from pypdf import PdfReader, overwrite_configuration
+
+overwrite_configuration(maximum_declared_stream_length=sys.maxsize)
+
+reader = PdfReader({pdf_path_str!r})
+print(reader.pages[0].extract_text())
+"""
+    )
+
+    result = subprocess.run(  # noqa: S603  # We have the control here.
+        [sys.executable, source_file],
+        capture_output=True,
+        env=env,
+        text=True,
+        preexec_fn=limit_virtual_memory,
+    )
+    assert result.returncode == 0
+    assert result.stdout.replace("\r", "") == "Hello from pypdf\n"
+    assert result.stderr == ""
+
+
+def _get_array_based_buffer(stream_count: int, chunk_bytes: int) -> BytesIO:
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=10, height=10)
+
+    streams = [ContentStream(stream=None, pdf=writer) for _ in range(stream_count)]
+    chunk = b"q\n" + (b"A" * chunk_bytes) + b"\nQ\n"
+    for stream in streams:
+        stream.set_data(chunk)
+    contents = ArrayObject([writer._add_object(stream) for stream in streams])
+    page[NameObject("/Contents")] = contents
+
+    buffer = BytesIO()
+    writer.write(buffer)
+    buffer.flush()
+    return buffer
+
+
+@pytest.mark.timeout(10)
+def test_content_stream__array_based__performance() -> None:
+    buffer = _get_array_based_buffer(stream_count=10_000, chunk_bytes=7000)
+    reader = PdfReader(buffer)
+    _ = reader.pages[0].get_contents()
+
+
+def test_content_stream__array_based__length() -> None:
+    buffer = _get_array_based_buffer(stream_count=11_000, chunk_bytes=1)
+    reader = PdfReader(buffer)
+    with pytest.raises(
+            expected_exception=LimitReachedError, match=r"^Array\-based stream has 11000 > 10000 elements\.$"
+    ):
+        _ = reader.pages[0].get_contents()
+
+
+@pytest.mark.timeout(10)
+def test_content_stream__array_based__output_length() -> None:
+    buffer = _get_array_based_buffer(stream_count=10_000, chunk_bytes=8192)
+    reader = PdfReader(buffer)
+    with pytest.raises(
+            expected_exception=LimitReachedError,
+            match=r"^Array\-based stream has at least 75002550 > 75000000 output bytes\.$"
+    ):
+        _ = reader.pages[0].get_contents()
+
+
+@pytest.mark.timeout(5)
+def test_dictionary_object__read_from_stream__infinite_loop(caplog: pytest.LogCaptureFixture) -> None:
+    data = b"""1 0 obj
+<<
+<</Length 1 0 R>>
+stream
+trailer
+<< /Size 1 >>
+startxref
+0
+%%EOF
+"""
+    buffer = BytesIO(data)
+
+    reader = PdfReader(buffer, strict=False)
+    with pytest.raises(expected_exception=PdfReadError, match=r"^Cannot find Root object in pdf$"):
+        assert len(reader.pages) == 0
+
+
+@pytest.mark.timeout(5)
+def test_dictionary_object__get_inherited__cyclic() -> None:
+    writer = PdfWriter()
+
+    dictionary1 = DictionaryObject()
+    reference1 = writer._add_object(dictionary1)
+    dictionary2 = DictionaryObject()
+    reference2 = writer._add_object(dictionary2)
+    dictionary3 = DictionaryObject({NameObject("/Parent"): reference2})
+    reference3 = writer._add_object(dictionary3)
+    dictionary1[NameObject("/Parent")] = reference3
+    dictionary2[NameObject("/Parent")] = reference1
+
+    with pytest.raises(
+            expected_exception=LimitReachedError,
+            match=r"^Detected cycle in /Parent hierarchy when retrieving value for key '/FT'\.$"
+    ):
+        writer.get_pages_showing_field(reference1)
+
+
+def _make_pdf__read_from_stream__limit() -> bytes:
+    offsets = []
+    pdf = bytearray(b"%PDF-1.4\n")
+
+    def add_obj(n: int, body: bytes) -> None:
+        offsets.append((n, len(pdf)))
+        pdf.extend(f"{n} 0 obj\n".encode())
+        pdf.extend(body)
+        pdf.extend(b"\nendobj\n")
+
+    add_obj(1, b"<< /Type /Catalog /Pages 2 0 R >>")
+    add_obj(2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
+    add_obj(3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] /Contents 4 0 R /Resources << >> >>")
+    offsets.append((4, len(pdf)))
+    pdf.extend(b"4 0 obj\n")
+    pdf.extend(b"<< >>\nstream\n")
+    pdf.extend(b"A" * 75_000_001)
+    pdf.extend(b"\nendstream\nendobj\n")
+    xref_offset = len(pdf)
+    pdf.extend(b"xref\n0 5\n0000000000 65535 f \n")
+    offset_map = dict(offsets)
+    for n in range(1, 5):
+        pdf.extend(f"{offset_map[n]:010d} 00000 n \n".encode())
+    pdf.extend(f"trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n".encode())
+    return bytes(pdf)
+
+
+@pytest.mark.timeout(5)
+def test_dictionary_object__read_from_stream__missing_length__limit() -> None:
+    reader = PdfReader(BytesIO(_make_pdf__read_from_stream__limit()))
+    page = reader.pages[0]
+
+    with pytest.raises(
+            expected_exception=LimitReachedError,
+            match=r"^Read stream length of 75000187 exceeds maximum allowed length of 75000000\.$"
+    ):
+        page.get_contents()
+
+
+def test_dictionary_object__read_from_stream__read_unsized__limit() -> None:
+    reader = PdfReader(RESOURCE_ROOT / "issue-301.pdf")
+
+    with mock.patch.object(DictionaryObject, "_read_unsized_from_stream", return_value=b"dummy") as read_mock:
+        obj = reader.get_object(13)
+        assert obj is not None
+        assert obj == DictionaryObject({
+            NameObject("/Filter"): NameObject("/FlateDecode"),
+            NameObject("/Length1"): NumberObject(218)
+        })
+    read_mock.assert_called_once_with(stream=reader.stream, pdf=reader, length=75_000_000)
+
+
+def test_dictionary_object__read_unsized_from_stream__limit() -> None:
+    reader = PdfReader(RESOURCE_ROOT / "issue-301.pdf")
+
+    reader.stream.seek(63101, 0)  # pstart value from the corresponding call
+    with pytest.raises(
+            expected_exception=LimitReachedError,
+            match=r"^Requested length of 236 exceeds maximum allowed length\.$"
+    ):
+        DictionaryObject._read_unsized_from_stream(stream=reader.stream, pdf=reader, length=137)
+
+
+def test_content_stream__parse_content_stream__limits() -> None:
+    content_stream = ContentStream(stream=None, pdf=None)
+
+    stream = BytesIO(b"/Do TESTING\n")
+    content_stream._parse_content_stream(stream)
+    assert content_stream.operations == [(["/Do"], b"TESTING")]
+
+    stream = BytesIO(f"/Do {'TESTING' * 100}\n".encode())
+    with pytest.raises(
+            expected_exception=LimitReachedError,
+            match=r"^Read stream length of 240 exceeds maximum allowed length of 128\.$"
+    ):
+        content_stream._parse_content_stream(stream)
+
+
+@pytest.mark.timeout(5)
+def test_content_stream__read_inline_image__end_of_stream() -> None:
+    # Broken content stream, for example due to filter errors.
+    # Specific example:
+    #   Error -3 while decompressing data: invalid distance too far back
+    #   b'q 0.1 0 0 0.1 0 0 cm\n/R7 gs\n0 g\nq 4.8 0 0 -135.6 2155.08 7150.48 cm\nBI\n/IM true\n/W001'
+    content_stream = ContentStream(stream=None, pdf=None)
+
+    with pytest.raises(expected_exception=PdfReadError, match=r"^Unexpected end of stream\.$"):
+        content_stream._read_inline_image(
+            BytesIO(b"\n/IM true\n/W001"),
+            parsing_budget=StreamParsingBudget(remaining_budget=100)
+        )
+
+
+def test_tree_object__insert_child__cycle() -> None:
+    writer = PdfWriter()
+
+    previous1 = TreeObject()
+    previous2 = TreeObject()
+    previous3 = TreeObject()
+    previous1[NameObject("/Next")] = writer._add_object(previous2)
+    previous2[NameObject("/Next")] = writer._add_object(previous3)
+    previous3[NameObject("/Next")] = writer._add_object(previous1)
+
+    tree = TreeObject()
+    tree[NameObject("/Last")] = writer._add_object(previous1)
+    tree[NameObject("/First")] = writer._add_object(DictionaryObject())
+    writer._add_object(tree)
+
+    with pytest.raises(LimitReachedError, match=r"^Detected cycle in tree structure\.$"):
+        tree.insert_child(
+            child=writer._add_object(DictionaryObject()),
+            before=None,
+            pdf=writer,
+        )
+
+
+def _outlined_pdf(nested: bool = False) -> BytesIO:
+    writer = PdfWriter()
+    for _ in range(4):
+        writer.add_blank_page(200, 200)
+    cover = writer.add_outline_item("Cover", 0)
+    writer.add_outline_item("Body", 1)
+    if nested:
+        writer.add_outline_item("Sub", 2, parent=cover)
+    writer.add_outline_item("End", 3)
+    stream = BytesIO()
+    writer.write(stream)
+    stream.seek(0)
+    return stream
+
+
+def _flat_outline(outline: OutlineType) -> list[Destination]:
+    """The outline items, asserting the outline holds no nested children."""
+    items = []
+    for entry in outline:
+        assert isinstance(entry, Destination), f"unexpected nested entry: {entry!r}"
+        items.append(entry)
+    return items
+
+
+@pytest.mark.parametrize(
+    ("index", "expected"),
+    [(0, ["Body", "End"]), (1, ["Cover", "End"]), (2, ["Cover", "Body"])],
+)
+def test_remove_from_tree_on_outline_item(index: int, expected: list[str]) -> None:
+    """
+    reader.outline and writer.outline yield detached copies which never carry
+    /Parent, so removal has to act on the node they were built from.
+    """
+    writer = PdfWriter(clone_from=PdfReader(_outlined_pdf()))
+
+    _flat_outline(writer.outline)[index].remove_from_tree()
+
+    assert [item.title for item in _flat_outline(writer.outline)] == expected
+    stream = BytesIO()
+    writer.write(stream)
+    stream.seek(0)
+    assert [item.title for item in _flat_outline(PdfReader(stream).outline)] == expected
+
+
+def test_remove_from_tree_on_outline_item_without_clone() -> None:
+    writer = PdfWriter()
+    for _ in range(3):
+        writer.add_blank_page(200, 200)
+    for page_number, title in enumerate(["Cover", "Body", "End"]):
+        writer.add_outline_item(title, page_number)
+
+    _flat_outline(writer.outline)[0].remove_from_tree()
+
+    assert [item.title for item in _flat_outline(writer.outline)] == ["Body", "End"]
+
+
+def test_remove_from_tree_on_nested_outline_item() -> None:
+    writer = PdfWriter(clone_from=PdfReader(_outlined_pdf(nested=True)))
+    children = writer.outline[1]
+    assert isinstance(children, list)
+    sub = children[0]
+    assert isinstance(sub, Destination)
+    assert sub.title == "Sub"
+
+    sub.remove_from_tree()
+
+    assert [item.title for item in _flat_outline(writer.outline)] == [
+        "Cover",
+        "Body",
+        "End",
+    ]
+
+
+def test_remove_from_tree_on_destination_without_node() -> None:
+    """A destination carrying no node falls back to the plain tree behaviour."""
+    writer = PdfWriter(clone_from=PdfReader(_outlined_pdf()))
+    item = _flat_outline(writer.outline)[0]
+    item.node = None
+
+    with pytest.raises(
+        ValueError, match=r"^Removed child does not appear to be a tree item$"
+    ):
+        item.remove_from_tree()
+
+
+def test_remove_from_tree_on_node_already_detached() -> None:
+    """A node whose /Parent has gone is no longer part of any tree."""
+    writer = PdfWriter(clone_from=PdfReader(_outlined_pdf()))
+    item = _flat_outline(writer.outline)[0]
+    assert item.node is not None
+    del item.node[NameObject("/Parent")]
+
+    with pytest.raises(
+        ValueError, match=r"^Removed child does not appear to be a tree item$"
+    ):
+        item.remove_from_tree()
+
+
+def test_tree_object__remove_child__cyclic() -> None:
+    writer = PdfWriter()
+    writer.add_blank_page(width=10, height=10)
+
+    entry1 = DictionaryObject()
+    reference1 = writer._add_object(entry1)
+    entry2 = DictionaryObject({
+        NameObject("/Next"): reference1
+    })
+    reference2 = writer._add_object(entry2)
+    entry3 = DictionaryObject({
+        NameObject("/Next"): reference2
+    })
+    reference3 = writer._add_object(entry3)
+    entry1[NameObject("/Next")] = reference3
+
+    tree = TreeObject(
+        DictionaryObject({
+            NameObject("/First"): reference3,
+            NameObject("/Last"): NullObject(),
+        })
+    )
+    child = DictionaryObject({
+        NameObject("/Parent"): writer._add_object(tree)
+    })
+    writer._add_object(child)
+
+    with pytest.raises(expected_exception=LimitReachedError, match=r"^Detected cyclic /Next hierarchy\.$"):
+        tree.remove_child(child)
+
+
+def test_content_stream__parse_content_stream__token_limit() -> None:
+    # Ensure counting works correctly.
+    # This stream has 36 tokens to consider.
+    # `q` = 1 token
+    # `[20 0 0 20 0 0] cm` = 8 tokens
+    # Inline image top-level = 2 tokens
+    # The inline image settings = 22 tokens
+    # `0.0001 0.0001 Td` = 3 tokens
+    data = (
+        b"q 20 0 0 20 0 0 cm\n"
+        b"\nBI\n  /W 16\n  /H 16\n  /CS /G\n  /BPC 1\n  /F [/CCF]\n"
+        b"  /DP [ << /K -1 /BlackIs1 false /Columns 16 /Rows 16 >> ]\nID\n"
+        b"&\xa0\xbf\xcc9\x14|G#\x1f\xff\xf1\xcc9\x18\xfe\xbbX\xfc\x00@\x04"
+        b"\nEI\n"
+        b"\n0.0001 0.0001 Td "
+    )
+    with apply_configuration(stream_parsing_work_maximum_count=36):
+        content_stream = ContentStream(stream=None, pdf=None)
+        content_stream._parse_content_stream(BytesIO(data))
+        assert content_stream.operations == [
+            ([], b"q"),
+            ([20, 0, 0, 20, 0, 0], b"cm"),
+            (
+                {
+                    "data": b"&\xa0\xbf\xcc9\x14|G#\x1f\xff\xf1\xcc9\x18\xfe\xbbX\xfc\x00@\x04\n",
+                    "settings": {
+                        "/BPC": 1,
+                        "/CS": "/G",
+                        "/DP": [{"/BlackIs1": False, "/Columns": 16, "/K": -1, "/Rows": 16}],
+                        "/F": ["/CCF"],
+                        "/H": 16,
+                        "/W": 16
+                    }
+                },
+                b"INLINE IMAGE"
+            ),
+            ([0.0001, 0.0001], b"Td")
+        ]
+
+    # Exceed the limit.
+    data = b"\n0.0001 0.0001 Td " * 50
+    with apply_configuration(stream_parsing_work_maximum_count=100):
+        content_stream = ContentStream(stream=None, pdf=None)
+        with pytest.raises(
+                expected_exception=LimitReachedError, match=r"^Reached maximum number of tokens per stream\.$"
+        ):
+            content_stream._parse_content_stream(BytesIO(data))
+        assert content_stream.operations == [
+            ([0.0001, 0.0001], b"Td")
+        ] * 33
+
+    # Nested limit.
+    data = b" [ " * 11 + b" /Name " + b" ] " * 11
+    with apply_configuration(stream_parsing_work_maximum_count=10):
+        content_stream = ContentStream(stream=None, pdf=None)
+        with pytest.raises(
+                expected_exception=LimitReachedError, match=r"^Reached maximum number of tokens\.$"
+        ):
+            content_stream._parse_content_stream(BytesIO(data))
+        assert content_stream.operations == []
+
+
+def test_array_object__read_from_stream__token_limit() -> None:
+    pdf = ReaderDummy()
+    data = b"[ null [ [ [ [ /SomeName 42 ] ] ] ] 13 ]"
+    expected = [
+        NullObject(),
+        [[[[NameObject("/SomeName"), NumberObject(42)]]]],
+        NumberObject(13)
+    ]
+
+    # No budget.
+    assert ArrayObject.read_from_stream(BytesIO(data), pdf=pdf) == expected  # type: ignore[arg-type]
+
+    # Enough budget.
+    parsing_budget = StreamParsingBudget(remaining_budget=10)
+    assert ArrayObject.read_from_stream(BytesIO(data), pdf=pdf, parsing_budget=parsing_budget) == expected  # type: ignore[arg-type]
+    # Internal array with 2 objects + 4 arrays + `null` + `13` = 8
+    assert parsing_budget.remaining_budget == 2
+
+    # Too strict budget.
+    with pytest.raises(expected_exception=LimitReachedError, match=r"^Reached maximum number of tokens\.$"):
+        ArrayObject.read_from_stream(BytesIO(data), pdf=pdf, parsing_budget=parsing_budget)  # type: ignore[arg-type]
+    assert parsing_budget.remaining_budget == -1
+
+    # NullObject handling.
+    null_data = b"[ " + b"null " * 11 + b"]"
+    with pytest.raises(expected_exception=LimitReachedError, match=r"^Reached maximum number of tokens\.$"):
+        ArrayObject.read_from_stream(
+            BytesIO(null_data),
+            pdf=pdf,  # type: ignore[arg-type]
+            parsing_budget=StreamParsingBudget(remaining_budget=10)
+        )
+
+
+def test_array_object__read_from_stream__maximum_element_count() -> None:
+    pdf = ReaderDummy()
+
+    with apply_configuration(array_maximum_element_count=20):
+        data = b"[ " + b"null " * 20 + b"]"
+        assert ArrayObject.read_from_stream(BytesIO(data), pdf=pdf) == [NullObject()] * 20  # type: ignore[arg-type]
+
+        data = b"[ " + b"null " * 21 + b"]"
+        with pytest.raises(expected_exception=LimitReachedError, match=r"^Reached maximum array element count\.$"):
+            ArrayObject.read_from_stream(BytesIO(data), pdf=pdf)  # type: ignore[arg-type]
+
+        data = b"[ null null " + b" 42 " * 19 + b"]"
+        with pytest.raises(expected_exception=LimitReachedError, match=r"^Reached maximum array element count\.$"):
+            ArrayObject.read_from_stream(BytesIO(data), pdf=pdf)  # type: ignore[arg-type]
+
+
+def test_dictionary_object__read_from_stream__token_limit() -> None:
+    pdf = ReaderDummy()
+    data = b"<< /Key1 << /Key2 << /Key3 << /Key4 << /SomeName 42 >> >> >> >> /Key5 13 >>"
+    expected = {
+        NameObject("/Key1"): {
+            NameObject("/Key2"): {
+                NameObject("/Key3"): {
+                    NameObject("/Key4"): {
+                        NameObject("/SomeName"): NumberObject(42)
+                    }
+                }
+            }
+        },
+        NameObject("/Key5"): NumberObject(13)
+    }
+
+    # No budget.
+    assert DictionaryObject.read_from_stream(BytesIO(data), pdf=pdf) == expected  # type: ignore[arg-type]
+
+    # Enough budget.
+    parsing_budget = StreamParsingBudget(remaining_budget=14)
+    assert DictionaryObject.read_from_stream(BytesIO(data), pdf=pdf, parsing_budget=parsing_budget) == expected  # type: ignore[arg-type]
+    # 6 key-value pairs
+    assert parsing_budget.remaining_budget == 2
+
+    # Too strict budget.
+    with pytest.raises(expected_exception=LimitReachedError, match=r"^Reached maximum number of tokens\.$"):
+        DictionaryObject.read_from_stream(BytesIO(data), pdf=pdf, parsing_budget=parsing_budget)  # type: ignore[arg-type]
+    assert parsing_budget.remaining_budget == -2  # Decrements of 2.
+
+
+def test_dictionary_object__read_from_stream__maximum_element_count() -> None:
+    pdf = ReaderDummy()
+
+    with apply_configuration(dictionary_maximum_element_count=20):
+        key_value_pairs = " ".join(f"/Key{index} {index}" for index in range(20))
+        data = b"<< " + key_value_pairs.encode() + b" >>"
+        assert DictionaryObject.read_from_stream(BytesIO(data), pdf=pdf) == {  # type: ignore[arg-type]
+            NameObject(f"/Key{index}"): NumberObject(index) for index in range(20)
+        }
+
+        key_value_pairs = " ".join(f"/Key{index} {index}" for index in range(21))
+        data = b"<< " + key_value_pairs.encode() + b" >>"
+        with pytest.raises(
+                expected_exception=LimitReachedError, match=r"^Reached maximum number of dictionary entries\.$"
+        ):
+            DictionaryObject.read_from_stream(BytesIO(data), pdf=pdf)  # type: ignore[arg-type]
+
+
+def test_content_stream__parse_content_stream__dictionary_limit() -> None:
+    key_value_pairs = " ".join(f"/Key{index} {index}" for index in range(20))
+    data = b"<< " + key_value_pairs.encode() + b" >>"
+
+    with apply_configuration(dictionary_maximum_element_count=10):
+        content_stream = ContentStream(stream=None, pdf=None)
+        with pytest.raises(
+                expected_exception=LimitReachedError, match=r"^Reached maximum number of dictionary entries\.$"
+        ):
+            content_stream._parse_content_stream(BytesIO(data))
+
+
+@pytest.mark.parametrize(
+    "budget",
+    [
+        pytest.param(9, id="list-as-key"),
+        pytest.param(15, id="dictionary1"),
+        pytest.param(16, id="dictionary2"),
+    ]
+)
+def test_content_stream__read_inline_image__parsing_budget(budget: int) -> None:
+    data = b"<< [ 0 1 2 3 4 5 6 7 8 9 10 ] << /Key1 42 /Key2 1337 >> >>"
+
+    content_stream = ContentStream(stream=None, pdf=None)
+    with pytest.raises(expected_exception=LimitReachedError, match=r"^Reached maximum number of tokens\.$"):
+        content_stream._read_inline_image(
+            stream=BytesIO(data),
+            parsing_budget=StreamParsingBudget(remaining_budget=budget)
+        )
+
+
+def test_content_stream__check_limits__read_inline_image_dictionary_limit() -> None:
+    with pytest.raises(expected_exception=LimitReachedError, match=r"^Reached maximum number of tokens\.$"):
+        ContentStream._check_limits(
+            remaining_elements=0, parsing_budget=StreamParsingBudget(remaining_budget=10), token_decrement=1
+        )
+
+
+def test_dictionary_object__read_from_stream__error_handling() -> None:
+    header = b"%PDF-1.4\n"
+    obj1_offset = len(header)
+    nested = b"<< /A " * 18  # never closed
+    obj1 = b"1 0 obj\n" + nested + b"\nendobj\n"
+    body = header + obj1
+    xref_offset = len(body)
+    xref = (
+        b"xref\n0 2\n"
+        b"0000000000 65535 f \n"
+        + (b"%010d 00000 n \n" % obj1_offset)
+    )
+    trailer = (
+        b"trailer\n<< /Size 2 /Root 1 0 R >>\nstartxref\n"
+        + str(xref_offset).encode() + b"\n%%EOF"
+    )
+    data = body + xref + trailer
+
+    reader = PdfReader(BytesIO(data), strict=True)
+    with pytest.raises(expected_exception=PdfReadError, match=r"^Error reading PDF file\.$"):
+        _ = reader.trailer["/Root"]  # forces resolution of the broken dictionary
+
+
+@pytest.mark.timeout(5)
+def test_dictionary_object__clone__cycle_detection() -> None:
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents [4 0 R] >>",
+        b"<< /Length 0 /N 5 0 R >>\nstream\n\nendstream",
+        b"<< /N 6 0 R /T (alpha) >>",
+        b"<< /N 5 0 R /T (beta) >>",
+    ]
+    object_count = len(objects)
+    out = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = []
+    for num, obj in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % num + obj + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n" % (object_count + 1)
+    out += b"0000000000 65535 f \n"
+    for offset in offsets:
+        out += b"%010d 00000 n \n" % offset
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (object_count + 1, xref)
+    data = bytes(out)
+
+    writer = PdfWriter()
+    writer.append(BytesIO(data))
+    assert len(writer.pages) == 1

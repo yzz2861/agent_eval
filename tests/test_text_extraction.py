@@ -1,0 +1,1758 @@
+"""
+Testing the text-extraction submodule and ensuring the quality of text extraction.
+
+The tested code might be in _page.py.
+"""
+
+import json
+import re
+from collections.abc import Callable
+from dataclasses import asdict
+from io import BytesIO
+from pathlib import Path
+from unittest import mock
+
+import pytest
+
+from pypdf import PdfReader, PdfWriter, apply_configuration, mult
+from pypdf._page import PageObject
+from pypdf._text_extraction import get_display_str, get_text_operands, set_custom_rtl
+from pypdf._text_extraction._layout_mode._fixed_width_page import (
+    BTGroup,
+    fixed_width_page,
+    recurse_to_target_op,
+    text_show_operations,
+)
+from pypdf._text_extraction._layout_mode._text_state_manager import TextStateManager
+from pypdf._text_extraction._layout_mode._text_state_params import TextStateParams
+from pypdf.errors import PdfReadError
+from pypdf.generic import (
+    ArrayObject,
+    ContentStream,
+    DecodedStreamObject,
+    DictionaryObject,
+    NameObject,
+    NullObject,
+    NumberObject,
+    RectangleObject,
+    StreamObject,
+    TextStringObject,
+)
+from pypdf.generic._font import Font
+
+from . import RESOURCE_ROOT, SAMPLE_ROOT, get_data_from_url
+
+
+@pytest.mark.samples
+@pytest.mark.parametrize("visitor_text", [None, lambda a, b, c, d, e: None], ids=["none", "lambda-none"])  # noqa: ARG005
+def test_multi_language(visitor_text):
+    reader = PdfReader(RESOURCE_ROOT / "multilang.pdf")
+    txt = reader.pages[0].extract_text(visitor_text=visitor_text)
+    assert "Hello World" in txt, "English not correctly extracted"
+    # iss #1296
+    assert "مرحبا بالعالم" in txt, "Arabic not correctly extracted"
+    assert "Привет, мир" in txt, "Russian not correctly extracted"
+    assert "你好世界" in txt, "Chinese not correctly extracted"
+    assert "สวัสดีชาวโลก" in txt, "Thai not correctly extracted"
+    assert "こんにちは世界" in txt, "Japanese not correctly extracted"
+    # check customizations
+    set_custom_rtl(None, None, "Russian:")
+    assert ":naissuR" in reader.pages[0].extract_text(
+        visitor_text=visitor_text
+    ), "(1) CUSTOM_RTL_SPECIAL_CHARS failed"
+    set_custom_rtl(None, None, [ord(x) for x in "Russian:"])
+    assert ":naissuR" in reader.pages[0].extract_text(
+        visitor_text=visitor_text
+    ), "(2) CUSTOM_RTL_SPECIAL_CHARS failed"
+    set_custom_rtl(0, 255, None)
+    assert ":hsilgnE" in reader.pages[0].extract_text(
+        visitor_text=visitor_text
+    ), "CUSTOM_RTL_MIN/MAX failed"
+    set_custom_rtl("A", "z", [])
+    assert ":hsilgnE" in reader.pages[0].extract_text(
+        visitor_text=visitor_text
+    ), "CUSTOM_RTL_MIN/MAX failed"
+    set_custom_rtl(-1, -1, [])  # to prevent further errors
+
+    reader = PdfReader(SAMPLE_ROOT / "015-arabic/habibi-rotated.pdf")
+    assert "habibi" in reader.pages[0].extract_text(visitor_text=visitor_text)
+    assert "حَبيبي" in reader.pages[0].extract_text(visitor_text=visitor_text)
+    assert "habibi" in reader.pages[1].extract_text(visitor_text=visitor_text)
+    assert "حَبيبي" in reader.pages[1].extract_text(visitor_text=visitor_text)
+    assert "habibi" in reader.pages[2].extract_text(visitor_text=visitor_text)
+    assert "حَبيبي" in reader.pages[2].extract_text(visitor_text=visitor_text)
+    assert "habibi" in reader.pages[3].extract_text(visitor_text=visitor_text)
+    assert "حَبيبي" in reader.pages[3].extract_text(visitor_text=visitor_text)
+
+
+@pytest.mark.parametrize(
+    ("file_name", "constraints"),
+    [
+        (
+            "inkscape-abc.pdf",
+            {
+                "A": lambda x, y: 0 < x < 94 and 189 < y < 283,  # In upper left
+                "B": lambda x, y: 94 < x < 189 and 94 < y < 189,  # In the center
+                "C": lambda x, y: 189 < x < 283 and 0 < y < 94,  # In lower right
+            },
+        )
+    ],
+)
+def test_visitor_text_matrices(file_name, constraints):
+    """
+    Checks if the matrices given to the visitor_text function when calling
+    `extract_text` on the first page of `file_name` match some given constraints.
+    `constraints` is a dictionary mapping a line of text to a constraint that should
+    evaluate to `True` on its expected x,y-coordinates.
+    """
+    reader = PdfReader(RESOURCE_ROOT / file_name)
+
+    lines = []
+
+    def visitor_text(text, cm, tm, font_dict, font_size) -> None:
+        ctm = mult(tm, cm)
+        x = ctm[4]  # mult(tm, cm)[4]
+        y = ctm[5]  # mult(tm, cm)[5]
+        lines.append({"text": text, "x": x, "y": y})
+
+    reader.pages[0].extract_text(visitor_text=visitor_text)
+
+    for text, constraint in constraints.items():
+        matches = [li for li in lines if li["text"].strip() == text]
+        assert len(matches) <= 1, f"Multiple lines match {text}"
+        assert len(matches) >= 1, f"No lines match {text}"
+
+        x = matches[0]["x"]
+        y = matches[0]["y"]
+        assert constraint(x, y), f'Line "{text}" is wrong at x:{x}, y:{y}'
+
+
+@pytest.mark.enable_socket
+def test_issue_2336():
+    name = "Pesquisa-de-Precos-Combustiveis-novembro-2023.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(name=name)))
+    page = reader.pages[0]
+    actual_text = page.extract_text()
+    assert "Beira Rio" in actual_text
+
+
+def test_font_class_to_dict():
+    font = Font(
+        name = "Unknown",
+        space_width=8,
+        character_map={},
+        encoding = "utf-16-be"
+    )
+    assert asdict(font) == {
+        "name": "Unknown",
+        "character_map": {},
+        "encoding": "utf-16-be",
+        "sub_type": "Unknown",
+        "font_descriptor": {
+            "name": "Unknown",
+            "family": "Unknown",
+            "weight": "Unknown",
+            "ascent": 700.0,
+            "descent": -200.0,
+            "cap_height": 600.0,
+            "x_height": 500.0,
+            "italic_angle": 0.0,
+            "flags": 32,
+            "font_file": None,
+            "bbox": (
+                -100.0,
+                -200.0,
+                1000.0,
+                900.0,
+            ),
+        },
+        "character_widths": {"default": 500},
+        "space_char": " ",
+        "space_width": 8,
+        "interpretable": True,
+    }
+
+
+@pytest.mark.enable_socket
+def test_uninterpretable_type3_font(caplog):
+    url = "https://github.com/user-attachments/files/18551904/UninterpretableType3Font.pdf"
+    name = "UninterpretableType3Font.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    page = reader.pages[0]
+    assert page.extract_text(extraction_mode="layout") == ""
+    assert "PDF contains an uninterpretable font. Output will be incomplete." in caplog.messages
+
+
+@pytest.mark.enable_socket
+def test_layout_mode_epic_page_fonts():
+    url = "https://github.com/py-pdf/pypdf/files/13836944/Epic.Page.PDF"
+    name = "Epic Page.PDF"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    expected = (RESOURCE_ROOT / "Epic.Page.layout.txt").read_text(encoding="utf-8")
+    assert expected == reader.pages[0].extract_text(extraction_mode="layout")
+
+
+def test_layout_mode_uncommon_operators():
+    # Coverage for layout mode Tc, Tz, Ts, ', ", TD, TL, and Tw
+    reader = PdfReader(RESOURCE_ROOT / "toy.pdf")
+    expected = (RESOURCE_ROOT / "toy.layout.txt").read_text(encoding="utf-8")
+    assert expected == reader.pages[0].extract_text(extraction_mode="layout")
+
+
+def test_layout_mode_character_spacing_per_glyph():
+    """Tc advances the text matrix once per glyph, not once per shown string.
+
+    Regression test for #3948. Both content streams place the same glyphs at
+    the same positions per PDF 32000-1: with Courier 12pt and Tc=36 the
+    ten-glyph run advances 10 * (600/1000 * 12) + 10 * 36 = 432pt, so ``BB``
+    starts at x = 72 + 432 in both, abutting the run. Before the fix the TJ
+    form only added Tc once (advancing the run by 9 * Tc too little), so the
+    two forms disagreed.
+    """
+
+    def build(content: bytes) -> str:
+        writer = PdfWriter()
+        page = writer.add_blank_page(width=612, height=792)
+
+        font = DictionaryObject()
+        font[NameObject("/Type")] = NameObject("/Font")
+        font[NameObject("/Subtype")] = NameObject("/Type1")
+        font[NameObject("/BaseFont")] = NameObject("/Courier")
+        font[NameObject("/FirstChar")] = NumberObject(32)
+        font[NameObject("/LastChar")] = NumberObject(90)
+        font[NameObject("/Widths")] = ArrayObject([NumberObject(600)] * 59)
+        font_resources = DictionaryObject()
+        font_resources[NameObject("/F1")] = writer._add_object(font)
+        resources = DictionaryObject()
+        resources[NameObject("/Font")] = font_resources
+        page[NameObject("/Resources")] = resources
+
+        stream = DecodedStreamObject()
+        stream.set_data(content)
+        page[NameObject("/Contents")] = writer._add_object(stream)
+
+        buffer = BytesIO()
+        writer.write(buffer)
+        buffer.seek(0)
+        return PdfReader(buffer).pages[0].extract_text(extraction_mode="layout")
+
+    tj_form = build(b"BT /F1 12 Tf 36 Tc 72 720 Td [(AAAAAAAAAA) 0 (BB)] TJ ET")
+    td_form = build(b"BT /F1 12 Tf 36 Tc 72 720 Td (AAAAAAAAAA) Tj 432 0 Td (BB) Tj ET")
+
+    # The run ends exactly where BB begins, so BB abuts it in both streams.
+    assert "AAAAAAAAAABB" in tj_form.replace(" ", "")
+    assert tj_form == td_form
+
+
+def build_pdf_font_size_in_tm(stream: bytes) -> bytes:
+    """Build a minimal PDF whose font size lives in Tm (Tf 1), as in issue #4110."""
+    objs = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
+        ),
+        (
+            b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n"
+            + stream + b"endstream"
+        ),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    out = bytearray(b"%PDF-1.7\n")
+    offsets = {}
+    for number, body in enumerate(objs, start=1):
+        offsets[number] = len(out)
+        out += f"{number} 0 obj\n".encode() + body + b"\nendobj\n"
+    xref = len(out)
+    out += f"xref\n0 {len(objs) + 1}\n".encode() + b"0000000000 65535 f \n"
+    for number, _body in enumerate(objs, start=1):
+        out += f"{offsets[number]:010d} 00000 n \n".encode()
+    out += (
+        f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\n"
+        f"startxref\n{xref}\n%%EOF\n"
+    ).encode()
+    return bytes(out)
+
+
+@pytest.mark.parametrize(
+    ("stream", "expected"),
+    [
+        # Illustrator/InDesign/Figma: Tf 1, real size in Tm, small TJ kern.
+        (
+            b"BT /F1 1 Tf 11 0 0 11 100 700 Tm [(C) -30.5 (EO)] TJ ET\n",
+            "CEO",
+        ),
+        # Same kern under a y-flipped CTM (Skia). transform[0] stays positive.
+        (
+            (
+                b"q 1 0 0 -1 0 792 cm "
+                b"BT /F1 1 Tf 11 0 0 11 100 100 Tm [(C) -30.5 (EO)] TJ ET Q\n"
+            ),
+            "CEO",
+        ),
+        # Horizontal flip: page-space advance is negative, width uses abs(transform[0]).
+        (
+            (
+                b"q -1 0 0 1 612 0 cm "
+                b"BT /F1 1 Tf 11 0 0 11 100 700 Tm [(C) -30.5 (EO)] TJ ET Q\n"
+            ),
+            "CEO",
+        ),
+        # A real space-width TJ gap becomes exactly one space.
+        (
+            b"BT /F1 1 Tf 11 0 0 11 100 700 Tm [(Hello) -278 (World)] TJ ET\n",
+            "Hello World",
+        ),
+    ],
+    ids=["tm_kern", "y_flipped_ctm", "x_flipped_ctm", "real_space"],
+)
+def test_layout_mode_space_tx_scaled_into_page_space(stream: bytes, expected: str):
+    """Regression test for #4110.
+
+    space_tx is scaled into page space like tx / displaced_tx, so a small kern
+    such as [(C) -30.5 (EO)] TJ extracts as "CEO".
+    """
+    page = PdfReader(BytesIO(build_pdf_font_size_in_tm(stream))).pages[0]
+    assert page.extract_text(extraction_mode="layout").strip() == expected
+    assert page.extract_text().strip() == expected
+
+
+@pytest.mark.enable_socket
+def test_layout_mode_type0_font_widths():
+    # Cover both the 'int int int' and 'int [int int ...]' formats for Type0
+    # /DescendantFonts /W array entries.
+    url = "https://github.com/py-pdf/pypdf/files/13533204/Claim.Maker.Alerts.Guide_pg2.PDF"
+    name = "Claim Maker Alerts Guide_pg2.PDF"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    expected = (RESOURCE_ROOT / "Claim Maker Alerts Guide_pg2.layout.txt").read_text(
+        encoding="utf-8"
+    )
+    assert expected == reader.pages[0].extract_text(extraction_mode="layout")
+
+
+@pytest.mark.enable_socket
+def test_layout_mode_indirect_sequence_font_widths(caplog):
+    # Cover the situation where the sequence for font widths is an IndirectObject
+    # https://github.com/py-pdf/pypdf/pull/2788
+    url = "https://github.com/user-attachments/files/16491621/2788_example.pdf"
+    name = "2788_example.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    assert reader.pages[0].extract_text(extraction_mode="layout") == ""
+    url = "https://github.com/user-attachments/files/16491619/2788_example_malformed.pdf"
+    name = "2788_example_malformed.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    reader.pages[0].extract_text(extraction_mode="layout")
+    assert any("Invalid font width definition" in message for message in caplog.messages)
+
+
+def dummy_visitor_text(text, ctm, tm, fd, fs):
+    pass
+
+
+def test_layout_mode_warnings(caplog):
+    # Check that a warning is issued when an argument is ignored
+    reader = PdfReader(RESOURCE_ROOT / "hello-world.pdf")
+    page = reader.pages[0]
+    expected = "Argument visitor_text is ignored in layout mode"
+
+    page.extract_text(extraction_mode="plain", visitor_text=dummy_visitor_text)
+    assert expected not in caplog.messages
+    page.extract_text(extraction_mode="layout", visitor_text=dummy_visitor_text)
+    assert expected in caplog.messages
+
+
+def test_layout_mode_undefined_font_name(caplog):
+    # A Tf operator may name a font that is not declared in the page resources,
+    # both inside a BT/ET block and at the top level. Layout mode should warn
+    # and continue instead of raising KeyError.
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=200, height=200)
+
+    helvetica = DictionaryObject()
+    helvetica[NameObject("/Type")] = NameObject("/Font")
+    helvetica[NameObject("/Subtype")] = NameObject("/Type1")
+    helvetica[NameObject("/BaseFont")] = NameObject("/Helvetica")
+    font_resources = DictionaryObject()
+    font_resources[NameObject("/F1")] = writer._add_object(helvetica)
+    resources = DictionaryObject()
+    resources[NameObject("/Font")] = font_resources
+    page[NameObject("/Resources")] = resources
+
+    # /F9 (top level) and /F2 (inside BT) are never declared; only /F1 is.
+    content = DecodedStreamObject()
+    content.set_data(
+        b"/F9 12 Tf BT /F1 12 Tf 10 150 Td (Hi) Tj ET "
+        b"BT /F2 12 Tf 10 100 Td (X) Tj ET"
+    )
+    page[NameObject("/Contents")] = writer._add_object(content)
+
+    buffer = BytesIO()
+    writer.write(buffer)
+    buffer.seek(0)
+
+    text = PdfReader(buffer).pages[0].extract_text(extraction_mode="layout")
+    assert "Hi" in text
+    assert "Font /F9 is not in the page resources." in caplog.messages
+    assert "Font /F2 is not in the page resources." in caplog.messages
+
+
+@pytest.mark.enable_socket
+def test_space_with_one_unit_smaller_than_font_width():
+    """Tests for #1328"""
+    url = "https://github.com/py-pdf/pypdf/files/9498481/0004.pdf"
+    name = "iss1328.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    page = reader.pages[0]
+    extracted = page.extract_text()
+    assert "Reporting crude oil leak.\n" in extracted
+
+
+@pytest.mark.enable_socket
+def test_space_position_calculation():
+    """Tests for #1153"""
+    url = "https://github.com/py-pdf/pypdf/files/9164743/file-0.pdf"
+    name = "iss1153.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    page = reader.pages[3]
+    extracted = page.extract_text()
+    assert "Shortly after the Geneva BOF session, the" in extracted
+
+
+def test_text_leading_height_unit():
+    """Tests for #2262"""
+    reader = PdfReader(RESOURCE_ROOT / "toy.pdf")
+    page = reader.pages[0]
+    extracted = page.extract_text()
+    assert "Something[cited]\n" in extracted
+
+
+def test_layout_mode_space_vertically_font_height_weight():
+    """Tests layout mode with vertical space and font height weight (issue #2915)"""
+    with open(RESOURCE_ROOT / "crazyones.pdf", "rb") as inputfile:
+        # Load PDF file from file
+        reader = PdfReader(inputfile)
+        page = reader.pages[0]
+
+        # Normal behaviour
+        with open(RESOURCE_ROOT / "crazyones_layout_vertical_space.txt", "rb") as pdftext_file:
+            pdftext = pdftext_file.read()
+
+        text = page.extract_text(extraction_mode="layout", layout_mode_space_vertically=True).encode("utf-8")
+
+        # Compare the text of the PDF to a known source
+        for expected_line, actual_line in zip(text.splitlines(), pdftext.splitlines()):
+            assert expected_line == actual_line
+
+        pdftext = pdftext.replace(b"\r\n", b"\n")  # fix for windows
+        assert text == pdftext
+
+        # Blank lines are added to truly separate paragraphs
+        with open(RESOURCE_ROOT / "crazyones_layout_vertical_space_font_height_weight.txt", "rb") as pdftext_file:
+            pdftext = pdftext_file.read()
+
+        text = page.extract_text(extraction_mode="layout", layout_mode_space_vertically=True,
+                                 layout_mode_font_height_weight=0.85).encode("utf-8")
+
+        # Compare the text of the PDF to a known source
+        for expected_line, actual_line in zip(text.splitlines(), pdftext.splitlines()):
+            assert expected_line == actual_line
+
+        pdftext = pdftext.replace(b"\r\n", b"\n")  # fix for windows
+        assert text == pdftext
+
+
+@pytest.mark.enable_socket
+def test_infinite_loop_arrays():
+    """Tests for #2928"""
+    url = "https://github.com/user-attachments/files/17576546/arrayabruptending.pdf"
+    name = "arrayabruptending.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+
+    page = reader.pages[0]
+    extracted = page.extract_text()
+    assert "RNA structure comparison" in extracted
+
+
+@pytest.mark.enable_socket
+def test_content_stream_is_dictionary_object(caplog):
+    """Tests for #2995"""
+    url = "https://github.com/user-attachments/files/18049322/6fa5fd46-5f98-4a67-800d-5e2362b0164f.pdf"
+    name = "iss2995.pdf"
+    data = get_data_from_url(url=url, name=name)
+
+    reader = PdfReader(BytesIO(data))
+    page = reader.pages[0]
+    assert "\nYours faithfully   \n" in page.extract_text()
+    assert "Expected StreamObject, got DictionaryObject instead. Data might be wrong." in caplog.text
+    caplog.clear()
+
+    reader = PdfReader(BytesIO(data), strict=True)
+    page = reader.pages[0]
+    with pytest.raises(PdfReadError, match=r"^Error reading PDF file\.$"):
+        page.extract_text()
+
+
+@pytest.mark.enable_socket
+def test_tz_with_no_operands():
+    """Tests for #2975"""
+    url = "https://github.com/user-attachments/files/17974120/9E5E080E-C8DB-4A6B-822B-9A67DC04E526-120438.pdf"
+    name = "iss2975.pdf"
+    data = get_data_from_url(url=url, name=name)
+
+    reader = PdfReader(BytesIO(data))
+    page = reader.pages[1]
+    assert "\nThankyouforyourattentiontothismatter.\n" in page.extract_text()
+
+
+@pytest.mark.enable_socket
+def test_iss3060():
+    """Test for not throwing 'font not set: is PDF missing a Tf operator'"""
+    url = "https://github.com/user-attachments/files/18482531/test-anon.pdf"
+    name = "iss3060.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    # pypdf.errors.PdfReadError: font not set: is PDF missing a Tf operator?
+    txt = reader.pages[0].extract_text(extraction_mode="layout")
+    assert txt.startswith(" *******")
+
+
+@pytest.mark.enable_socket
+def test_iss3074():
+    """Test for not throwing 'ZeroDivisionError: float division by zero'"""
+    url = "https://github.com/user-attachments/files/18533211/test-anon.pdf"
+    name = "iss3074.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    # pypdf.errors.PdfReadError: ZeroDivisionError: float division by zero
+    txt = reader.pages[0].extract_text(extraction_mode="layout")
+    assert txt.strip().startswith("AAAAAA")
+
+
+@pytest.mark.enable_socket
+def test_layout_mode_text_state():
+    """Ensure the text state is stored and reset with q/Q operators."""
+    # Get the PDF from issue #3212
+    url = "https://github.com/user-attachments/files/19396790/garbled.pdf"
+    name = "garbled-font.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    # Get the txt from issue #3212 and normalize line endings
+    txt_url = "https://github.com/user-attachments/files/19510731/garbled-font.layout.txt"
+    txt_name = "garbled-font.layout.txt"
+    expected = get_data_from_url(url=txt_url, name=txt_name).decode("utf-8").replace("\r\n", "\n")
+    # Ignore differences in rendering of spaces to work around older differences between the
+    # old layout mode Font code and the new Font class in calculating and dealing with the
+    # fallback width for a character that has no width defined in character_widths.
+    assert expected.replace(" ", "") == reader.pages[0].extract_text(extraction_mode="layout").replace(" ", "")
+
+
+@pytest.mark.enable_socket
+def test_rotated_line_wrap():
+    """Ensure correct 2D translation of rotated text after a line wrap."""
+    # Get the PDF from issue #3247
+    url = "https://github.com/user-attachments/files/19696918/link16-line-wrap.sanitized.pdf"
+    name = "link16-line-wrap.sanitized.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    # Get the txt from issue #3247 and normalize line endings
+    txt_url = "https://github.com/user-attachments/files/19696917/link16-line-wrap.sanitized.expected.txt"
+    txt_name = "link16-line-wrap.sanitized.expected.txt"
+    expected = get_data_from_url(url=txt_url, name=txt_name).decode("utf-8").replace("\r\n", "\n")
+
+    assert expected == reader.pages[0].extract_text()
+
+
+@pytest.mark.parametrize(
+        ("op", "msg"),
+        [
+            (b"BT", "Unbalanced target operations, expected b'ET'."),
+            (b"q", "Unbalanced target operations, expected b'Q'."),
+        ],
+)
+def test_layout_mode_warns_on_malformed_content_stream(op, msg, caplog):
+    """Ensures that imbalanced q/Q or EB/ET is handled gracefully."""
+    text_show_operations(ops=iter([([], op)]), fonts={})
+    assert caplog.records
+    assert caplog.records[-1].getMessage() == msg
+
+
+def test_text_operators_with_missing_operands():
+    """Text operators carrying too few operands must not crash extraction."""
+    writer = PdfWriter(clone_from=RESOURCE_ROOT / "crazyones.pdf")
+    page = writer.pages[0]
+    # Each malformed operator below previously raised IndexError/ValueError on
+    # the default extraction path: TD/Td with a single operand, the show-and-
+    # move " operator with fewer than three operands, and a bare Tf.
+    content = (
+        b"BT /F1 12 Tf 100 700 Td (Hello) Tj "
+        b"5 TD (A) Tj "
+        b"3 Td (B) Tj "
+        b'(C) " '
+        b"Tf (D) Tj "
+        b"ET"
+    )
+    stream = ContentStream(stream=None, pdf=writer)
+    stream.set_data(content)
+    page.replace_contents(stream)
+    assert "Hello" in page.extract_text()
+
+
+def test_tm_operator_with_wrong_operand_count():
+    """A Tm operator with the wrong number of operands must not crash extraction."""
+    writer = PdfWriter(clone_from=RESOURCE_ROOT / "crazyones.pdf")
+    page = writer.pages[0]
+    # A short Tm left the text matrix with fewer than six entries, so the next
+    # positioning operator read past its end (IndexError in mult()); a bare Tm
+    # had the same effect. A non-numeric operand makes float() raise instead.
+    content = (
+        b"BT /F1 12 Tf 100 700 Td (Hello) Tj "
+        b"1 0 0 Tm (A) Tj "
+        b"T* (B) Tj "
+        b"Tm (C) Tj "
+        b"(x) 0 0 1 0 0 Tm (D) Tj "
+        b"ET"
+    )
+    stream = ContentStream(stream=None, pdf=writer)
+    stream.set_data(content)
+    page.replace_contents(stream)
+    assert "Hello" in page.extract_text()
+
+
+def test_do_operator_without_operand_is_skipped() -> None:
+    """A Do operator without an operand is skipped and the text around it is kept."""
+    page = PdfReader(_page_with_helvetica(b"BT /F1 12 Tf (Hello) Tj ET Do BT /F1 12 Tf (World) Tj ET")).pages[0]
+    assert page.extract_text() == "HelloWorld"
+
+
+def test_tj_operator_without_an_array_is_skipped() -> None:
+    """A TJ operator whose operand is not an array is skipped and the text around it is kept."""
+    page = PdfReader(_page_with_helvetica(b"BT /F1 12 Tf (Hello) Tj 5 TJ (World) Tj ET")).pages[0]
+    assert page.extract_text() == "HelloWorld"
+    assert page.extract_text(extraction_mode="layout") == "HelloWorld"
+
+
+def test_tj_operator_without_a_string_is_skipped() -> None:
+    """A Tj operator whose operand is not a string is skipped and the text around it is kept."""
+    page = PdfReader(_page_with_helvetica(b"BT /F1 12 Tf (Hello) Tj 5 Tj (World) Tj ET")).pages[0]
+    assert page.extract_text() == "HelloWorld"
+    assert page.extract_text(extraction_mode="layout") == "HelloWorld"
+
+
+@pytest.mark.parametrize("item", [b"/X", b"[(x)]", b"<</A 1>>"])
+def test_tj_array_item_that_is_neither_a_string_nor_a_number_is_skipped(item: bytes) -> None:
+    """A TJ array item that is neither a string nor a number is skipped and the text around it is kept."""
+    page = PdfReader(_page_with_helvetica(b"BT /F1 12 Tf [(Hello) " + item + b" (World)] TJ ET")).pages[0]
+    assert page.extract_text() == "HelloWorld"
+    assert page.extract_text(extraction_mode="layout") == "HelloWorld"
+
+
+@pytest.mark.parametrize(
+    ("operator", "expected"),
+    [
+        (b"5 '", "Hello\nWorld"),
+        (b"'", "Hello\nWorld"),
+        (b'1 2 5 "', "Hello\nWorld"),
+    ],
+)
+def test_quote_operator_without_a_string_shows_no_text(operator: bytes, expected: str) -> None:
+    """A ' or " operator without a string to show still moves to the next line, and the text around it is kept."""
+    content = b"BT /F1 12 Tf 14 TL 72 700 Td (Hello) Tj " + operator + b" (World) Tj ET"
+    page = PdfReader(_page_with_helvetica(content)).pages[0]
+    assert page.extract_text() == expected
+    assert page.extract_text(extraction_mode="layout") == expected
+
+
+def test_quote_operator_with_too_few_operands_is_skipped() -> None:
+    """A " operator with fewer than three operands is skipped entirely, as in plain mode, and the text is kept."""
+    content = b'BT /F1 12 Tf 14 TL 72 700 Td (Hello) Tj (x) " (World) Tj ET'
+    page = PdfReader(_page_with_helvetica(content)).pages[0]
+    assert page.extract_text() == "HelloWorld"
+    assert page.extract_text(extraction_mode="layout") == "HelloWorld"
+
+
+def test_layout_mode_text_with_zero_font_size() -> None:
+    """Text drawn with a font size of 0 is extracted in layout mode instead of dividing by a zero width."""
+    page = PdfReader(_page_with_helvetica(b"BT /F1 0 Tf (Hello) Tj ET")).pages[0]
+    assert page.extract_text(extraction_mode="layout") == "Hello"
+
+
+def test_layout_mode_tf_with_a_missing_size_keeps_the_previous_size() -> None:
+    """A Tf operator naming a font but missing its size operand keeps the current font size
+    in layout mode, matching plain mode, instead of raising IndexError.
+    """
+    content = b"BT /F1 24 Tf 72 700 Td (Hello) Tj /F1 Tf (World) Tj ET"
+    page = PdfReader(_page_with_helvetica(content)).pages[0]
+    assert page.extract_text(extraction_mode="layout") == "HelloWorld"
+
+
+def test_layout_mode_tf_with_no_operands_does_not_crash() -> None:
+    """A Tf operator with no operands at all falls back to an uninterpretable font, the
+    same as an unknown font name, instead of raising IndexError.
+    """
+    content = b"BT /F1 24 Tf 72 700 Td (Hello) Tj Tf (World) Tj ET"
+    page = PdfReader(_page_with_helvetica(content)).pages[0]
+    assert page.extract_text(extraction_mode="layout") == "Hello"
+
+
+@pytest.mark.parametrize("operator", [b"/X 5 Td", b"/X TL", b"/X Tz", b"/X Tw"])
+def test_text_operator_with_a_non_numeric_operand(operator: bytes) -> None:
+    """A text operator whose operand is not a number is treated as having none, and the text is kept."""
+    content = b"BT /F1 12 Tf (Hello) Tj " + operator + b" (World) Tj ET"
+    assert PdfReader(_page_with_helvetica(content)).pages[0].extract_text() == "HelloWorld"
+
+
+@pytest.mark.parametrize(
+    "operator",
+    [
+        pytest.param(b"/X /Y TD", id="names"),
+        pytest.param(b"5 /Y TD", id="non-numeric-ty"),
+        pytest.param(b"5 TD", id="one-operand"),
+        pytest.param(b"TD", id="no-operands"),
+    ],
+)
+def test_td_operator_with_missing_or_non_numeric_operands(operator: bytes) -> None:
+    """A TD operator whose ty is missing or not a number leaves the leading unchanged,
+    in plain and layout mode, and the text around it is kept.
+    """
+    content = b"BT /F1 12 Tf 72 700 Td (Hello) Tj " + operator + b" (World) Tj ET"
+    page = PdfReader(_page_with_helvetica(content)).pages[0]
+    assert page.extract_text() == "HelloWorld"
+    text = page.extract_text(extraction_mode="layout")
+    assert "Hello" in text
+    assert "World" in text
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        pytest.param(b"BT /F1 12 Tf 72 700 Td BT (Hello) Tj ET ET", ["Hello"], id="nested-text-object"),
+        pytest.param(b"BT /F1 12 Tf 72 700 Td (Hello) Tj BT ET", ["Hello"], id="nested-bt-takes-the-et"),
+        pytest.param(
+            b"BT /F1 12 Tf 72 700 Td (Hello) Tj BT 72 650 Td (World) Tj ET ET",
+            ["Hello", "World"],
+            id="text-before-and-after",
+        ),
+    ],
+)
+def test_layout_mode_bt_inside_a_text_object(content: bytes, expected: list[str]) -> None:
+    """A BT inside a text object resets the text matrix and the text object ends at
+    the first ET, so layout mode shows each string once, as plain mode does.
+    """
+    page = PdfReader(_page_with_helvetica(content)).pages[0]
+    lines = [line.strip() for line in page.extract_text(extraction_mode="layout").splitlines() if line.strip()]
+    assert lines == expected
+    assert page.extract_text().split() == expected
+
+
+@pytest.mark.parametrize(
+    "operator",
+    [b"/X Tz", b"/X Tc", b"/X Ts", b"/X Tw", b"/X TL T*", b"/X /Y Td", b"/X 0 0 1 0 0 Tm"],
+)
+def test_layout_mode_text_operator_with_a_non_numeric_operand(operator: bytes) -> None:
+    """A text or positioning operator whose operand is not a number is treated as having none
+    in layout mode too, matching plain mode, and the text around it is kept.
+    """
+    content = b"BT /F1 12 Tf 72 700 Td (Hello) Tj " + operator + b" (World) Tj ET"
+    page = PdfReader(_page_with_helvetica(content)).pages[0]
+    assert "Hello" in page.extract_text(extraction_mode="layout")
+    assert "World" in page.extract_text(extraction_mode="layout")
+
+
+@pytest.mark.parametrize(
+    "operator",
+    [
+        pytest.param(b"Tc", id="Tc"),
+        pytest.param(b"Tw", id="Tw"),
+        pytest.param(b"Tz", id="Tz"),
+        pytest.param(b"Ts", id="Ts"),
+        pytest.param(b"TL T*", id="TL"),
+    ],
+)
+def test_layout_mode_text_state_operator_without_operands(operator: bytes) -> None:
+    """A text state operator without an operand leaves the parameter unchanged in layout mode,
+    matching plain mode, and the text around it is kept.
+    """
+    content = b"BT /F1 12 Tf 72 700 Td (Hello) Tj " + operator + b" (World) Tj ET"
+    page = PdfReader(_page_with_helvetica(content)).pages[0]
+    assert page.extract_text() == "HelloWorld"
+    text = page.extract_text(extraction_mode="layout")
+    assert "Hello" in text
+    assert "World" in text
+
+
+def test_process_operation__cm_multiplication_issue():
+    """Test for #3262."""
+    writer = PdfWriter(clone_from=RESOURCE_ROOT / "crazyones.pdf")
+    page = writer.pages[0]
+    content = page.get_contents().get_data()
+    content = content.replace(b" 1 0 0 1 72 720 cm ", b" 0.70278 65.3 163.36 cm ")
+    stream = ContentStream(stream=None, pdf=writer)
+    stream.set_data(content)
+    page.replace_contents(stream)
+    assert page.extract_text().startswith("The Crazy Ones\nOctober 14, 1998\n")
+
+
+@pytest.mark.enable_socket
+def test_rotated_layout_mode(caplog):
+    """Ensures text extraction of rotated pages, as in issue #3270."""
+    url = "https://github.com/user-attachments/files/19981120/rotated-page.pdf"
+    name = "rotated-page.pdf"
+    writer = PdfWriter(clone_from=BytesIO(get_data_from_url(url=url, name=name)))
+    page = writer.pages[0]
+
+    page.transfer_rotation_to_content()
+    text = page.extract_text(extraction_mode="layout")
+
+    assert not caplog.records, "No warnings should be issued"
+    assert text, "Text matching the page rotation should be extracted"
+    assert re.search(r"\r?\n +69\r?\n +UNCLASSIFIED$", text), "Contents should be in expected layout"
+
+
+@pytest.mark.enable_socket
+@pytest.mark.filterwarnings("ignore::pypdf.errors.PdfReadWarning")
+def test_extract_text__none_objects():
+    url = "https://github.com/user-attachments/files/18381726/tika-957721.pdf"
+    name = "tika-957721.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+
+    reader.pages[0].extract_text()
+    reader.pages[8].extract_text()
+
+
+@pytest.mark.enable_socket
+def test_extract_text__with_visitor_text():
+    def visitor_text(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        pass
+
+    url = "https://github.com/user-attachments/files/18381718/tika-952016.pdf"
+    name = "tika-952016.pdf"
+    stream = BytesIO(get_data_from_url(url=url, name=name))
+    reader = PdfReader(stream)
+    page = reader.pages[0]
+    page.extract_text(visitor_text=visitor_text)
+
+    reader = PdfReader(BytesIO(get_data_from_url(name="TextAttack_paper.pdf")))
+    page = reader.pages[0]
+    page.extract_text(visitor_text=visitor_text)
+
+
+@pytest.mark.enable_socket
+def test_extract_text__restore_cm_stack_pop_error():
+    url = "https://github.com/user-attachments/files/18381737/tika-966635.pdf"
+    name = "tika-966635.pdf"
+    stream = BytesIO(get_data_from_url(url=url, name=name))
+    reader = PdfReader(stream)
+    page = reader.pages[10]
+
+    # The cm stack pop error ("pop from empty list") is already omitted. This
+    # page also carries a short Tm operator that used to raise IndexError in
+    # mult(); it is now tolerated as well, so extraction completes.
+    page.extract_text()
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.enable_socket
+def test_slow_huge_string():
+    """Tests for #3541"""
+    url = "https://github.com/user-attachments/files/23855795/file.pdf"
+    name = "issue-3541.pdf"
+    stream = BytesIO(get_data_from_url(url=url, name=name))
+    reader = PdfReader(stream)
+    page = reader.pages[0]
+
+    _ = page.extract_text(extraction_mode="layout")
+
+
+@pytest.mark.enable_socket
+def test_extract_text_with_missing_font_bbox():
+    url = "https://github.com/user-attachments/files/24611650/bbox_bug_emoji.pdf"
+    name = "issue-3599.pdf"
+    stream = BytesIO(get_data_from_url(url=url, name=name))
+    reader = PdfReader(stream)
+    page = reader.pages[0]
+    text = page.extract_text()
+    assert "🎉" in text
+
+
+def test_recurse_to_target_op__excessive_intra_group_spacing(caplog):
+    operators = [
+        (["/F1", 12], b"Tf"),
+        ([1, 0, 0, 1, 0, 700], b"Tm"),
+        ([b"A"], b"Tj"),
+        ([1, 0, 0, 1, 1000000, 700], b"Tm"),
+        ([b"B"], b"Tj"),
+        ([], b"ET")
+    ]
+    text_state_manager = TextStateManager()
+    font = DictionaryObject({
+        NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/Type1"),
+        NameObject("/BaseFont"): NameObject("/Helvetica"),
+    })
+    fonts = {"/F1": Font.from_font_resource(font)}
+
+    bt_groups, _tj_ops = recurse_to_target_op(
+        ops=iter(operators),
+        text_state_mgr=text_state_manager,
+        end_target=b"ET",
+        fonts=fonts,
+    )
+    assert bt_groups == [
+        {
+            "displaced_tx": 1000008.004,
+            "flip_sort": 1,
+            "font_height": 12.0,
+            "font_size": 12,
+            "text": "A" + 10000 * " " + "B",
+            "tx": 0.0,
+            "ty": 700.0
+        }
+    ]
+    assert caplog.messages == ["Limiting excessive whitespace from 299758 to 10000 characters."]
+
+
+def test_fixed_width_page__excessive_blank_lines(caplog):
+    ty_groups = {
+        100: [
+            BTGroup(tx=0, text="Top", displaced_tx=3, font_height=1, ty=0, font_size=12, flip_sort=1),
+        ],
+        # Creates 1499 blank lines:
+        # (1600 - 100) / (1 * 1) - 1
+        # = 1500 - 1
+        # = 1499
+        1600: [
+            BTGroup(tx=0, text="Bottom", displaced_tx=6, font_height=1, ty=0, font_size=12, flip_sort=1)
+        ],
+    }
+
+    result = fixed_width_page(
+        ty_groups=ty_groups,
+        char_width=1,
+        space_vertically=True,
+        font_height_weight=1,
+    )
+
+    lines = result.splitlines()
+
+    assert lines[0] == "Top"
+    assert lines[-1] == "Bottom"
+
+    # 2 content lines + reduced 1000 blank lines
+    assert len(lines) == 1002
+
+    blank_lines = lines[1:-1]
+    assert all(line == "" for line in blank_lines)
+
+    assert caplog.messages == ["Limiting excessive newlines from 1499 to 1000."]
+
+
+def test_fixed_width_page__excessive_needed_spaces(caplog):
+    ty_groups = {
+        100: [
+            BTGroup(
+                tx=13_000,
+                text="X",
+                displaced_tx=13_370,
+                font_height=12,
+                ty=0,
+                font_size=12,
+                flip_sort=1,
+            )
+        ]
+    }
+
+    result = fixed_width_page(
+        ty_groups=ty_groups,
+        char_width=1,
+        space_vertically=True,
+        font_height_weight=1,
+    )
+
+    assert result == " " * 10_000 + "X"
+    assert caplog.messages == ["Limiting excessive whitespace from 13000 to 10000 characters."]
+
+
+def test_page__extract_text__xform__self_references(caplog):
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=10, height=10)
+
+    form = ContentStream(stream=None, pdf=writer)
+    form[NameObject("/Type")] = NameObject("/XObject")
+    form[NameObject("/Subtype")] = NameObject("/Form")
+    form.set_data(b"/X1 Do")
+    form_reference = writer._add_object(form)
+    form[NameObject("/Resources")] = DictionaryObject({
+        NameObject("/XObject"): DictionaryObject({
+            NameObject("/X1"): form_reference
+        })
+    })
+
+    page[NameObject("/Resources")] = form[NameObject("/Resources")]
+    content = ContentStream(stream=None, pdf=writer)
+    content.set_data(b"q /X1 Do Q")
+    page.replace_contents(content)
+
+    assert page.extract_text() == ""
+    assert caplog.messages == ["Detected cyclic form XObject reference, skipping /X1."]
+
+
+@pytest.mark.parametrize(
+    ("raw_bytes", "expected_text"),
+    [
+        # Truncated 1-byte payload triggers UnicodeDecodeError -> fallback to replace
+        (b"\xff", "\ufffd"),
+        # Isolated high surrogate (U+D800) in UTF-16-BE -> decoded directly via surrogatepass
+        (b"\xd8\x00", "\ud800"),
+        # Truncated byte below 0x80 -> fallback to replace
+        (b"\x4e\x2d\x41", "中\ufffd"),
+    ],
+    ids=["truncated_byte_replace", "unpaired_surrogatepass", "truncated_ascii_byte_replace"],
+)
+def test_text_state_params__unicode_decode_error(raw_bytes, expected_text):
+    font_dictionary = DictionaryObject({
+        NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/Type0"),
+        NameObject("/BaseFont"): NameObject("/Helvetica"),
+        NameObject("/Encoding"): NameObject("/Identity-H"),
+        NameObject("/DescendantFonts"): ArrayObject([
+            DictionaryObject({
+                NameObject("/Type"): NameObject("/Font"),
+                NameObject("/Subtype"): NameObject("/CIDFontType2"),
+                NameObject("/BaseFont"): NameObject("/Helvetica"),
+            })
+        ]),
+    })
+    font = Font.from_font_resource(font_dictionary)
+    font.encoding = "utf-16-be"
+
+    parameters = TextStateParams(value=raw_bytes, font=font, font_size=10)
+
+    assert parameters._raw_chars == expected_text
+    assert parameters.text == expected_text
+
+
+@pytest.mark.parametrize(
+    ("raw_bytes", "expected_text"),
+    [
+        # Complete UTF-16-BE code units -> decoded directly
+        (b"\x4e\x2d\x65\x87", "中文"),
+        # Isolated high surrogate (U+D800) -> decoded directly via surrogatepass
+        (b"\xd8\x00", "\ud800"),
+        # Odd byte count triggers UnicodeDecodeError -> fallback to replace
+        (b"\x4e\x2d\xc1", "中\ufffd"),
+        # Truncated byte below 0x80 -> fallback to replace
+        (b"\x4e\x2d\x41", "中\ufffd"),
+    ],
+    ids=[
+        "complete_code_units",
+        "unpaired_surrogatepass",
+        "truncated_byte_replace",
+        "truncated_ascii_byte_replace",
+    ],
+)
+def test_get_text_operands__unicode_decode_error(raw_bytes, expected_text):
+    """UniGB-UTF16-H without /ToUnicode decodes through the predefined CMap only."""
+    font_dictionary = DictionaryObject({
+        NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/Type0"),
+        NameObject("/BaseFont"): NameObject("/STSong-Light"),
+        NameObject("/Encoding"): NameObject("/UniGB-UTF16-H"),
+        NameObject("/DescendantFonts"): ArrayObject([
+            DictionaryObject({
+                NameObject("/Type"): NameObject("/Font"),
+                NameObject("/Subtype"): NameObject("/CIDFontType0"),
+                NameObject("/BaseFont"): NameObject("/STSong-Light"),
+                NameObject("/DW"): NumberObject(1000),
+            })
+        ]),
+    })
+    font = Font.from_font_resource(font_dictionary)
+    assert font.encoding == "utf-16-be"
+
+    identity = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+    text, is_str_operands, _ = get_text_operands(
+        [raw_bytes], identity, identity, font, (0, 90, 180, 270)
+    )
+
+    assert text == expected_text
+    assert is_str_operands is False
+
+
+@pytest.mark.timeout(5)
+def test_page_object__layout_mode_fonts__cyclic(caplog) -> None:
+    writer = PdfWriter()
+
+    font = DictionaryObject({
+        NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/Type1"),
+        NameObject("/BaseFont"): NameObject("/Helvetica"),
+    })
+    fonts = {"/F1": Font.from_font_resource(font)}
+    page = writer.add_blank_page(width=10, height=10)
+    dictionary2 = DictionaryObject(DictionaryObject({
+        NameObject("/Resources"): DictionaryObject({
+            NameObject("/Font"): DictionaryObject({
+                NameObject("/F1"): font
+            })
+        })
+    }))
+    reference2 = writer._add_object(dictionary2)
+    dictionary3 = DictionaryObject({NameObject("/Parent"): reference2})
+    reference3 = writer._add_object(dictionary3)
+    page[NameObject("/Parent")] = reference3
+    dictionary2[NameObject("/Parent")] = page.indirect_reference
+    page.pdf = writer
+
+    assert page._layout_mode_fonts() == fonts
+    assert caplog.messages == ["Detected cycle in /Parent hierarchy when retrieving fonts."]
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "expected_font_names", "expected_messages"),
+    [
+        ("/Resources", NullObject(), [], ["Page resources are not a dictionary: NullObject"]),
+        ("/Resources", NumberObject(1), [], ["Page resources are not a dictionary: 1"]),
+        ("/Parent", NullObject(), ["/F1", "/F2", "/F3"], []),
+        ("/Parent", NumberObject(1), ["/F1", "/F2", "/F3"], []),
+    ],
+    ids=[
+        "resources-null",
+        "resources-not-a-dictionary",
+        "parent-null",
+        "parent-not-a-dictionary",
+    ],
+)
+def test_page_object__layout_mode_fonts__malformed_hierarchy(
+    key, value, expected_font_names, expected_messages, caplog
+) -> None:
+    writer = PdfWriter(clone_from=RESOURCE_ROOT / "crazyones.pdf")
+    page = writer.pages[0]
+    page[NameObject(key)] = value
+
+    assert list(page._layout_mode_fonts()) == expected_font_names
+    assert caplog.messages == expected_messages
+
+
+def test_page_object__layout_mode_fonts__malformed_font_resource() -> None:
+    writer = PdfWriter(clone_from=RESOURCE_ROOT / "crazyones.pdf")
+    page = writer.pages[0]
+    page[NameObject("/Resources")] = DictionaryObject({
+        NameObject("/Font"): DictionaryObject({
+            # Valid dictionary, but with a non-string /BaseFont.
+            NameObject("/F1"): DictionaryObject({
+                NameObject("/Type"): NameObject("/Font"),
+                NameObject("/Subtype"): NameObject("/Type1"),
+                NameObject("/BaseFont"): NullObject(),
+            }),
+            # Font resource that is not a dictionary at all.
+            NameObject("/F2"): NumberObject(1),
+        })
+    })
+
+    fonts = page._layout_mode_fonts()
+    # The non-dictionary entry is skipped; the one with a missing name falls
+    # back to "Unknown" so extraction keeps going rather than aborting.
+    assert list(fonts) == ["/F1"]
+    assert fonts["/F1"].name == "Unknown"
+    assert "Crazy Ones" in page.extract_text(extraction_mode="layout")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [NullObject(), NumberObject(1)],
+    ids=["contents-null", "contents-not-a-stream"],
+)
+def test_page_object__layout_mode_text__malformed_contents(value) -> None:
+    writer = PdfWriter(clone_from=RESOURCE_ROOT / "crazyones.pdf")
+    page = writer.pages[0]
+    page[NameObject("/Contents")] = value
+
+    assert page.extract_text(extraction_mode="layout") == page.extract_text() == ""
+
+
+def test_page_object__layout_mode_text__without_contents() -> None:
+    page = PageObject.create_blank_page(width=10, height=10)
+
+    assert page.extract_text(extraction_mode="layout") == page.extract_text() == ""
+
+
+def _generate_dag_with_forms(depth: int) -> bytes:
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=612, height=792)
+
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    font_ref = writer._add_object(font)
+
+    # There are only depth + 1 actual Form objects:
+    #
+    #   F0 -> F1 -> F2 -> ... -> Fdepth
+    #
+    # But each form invokes its child twice:
+    #
+    #   F0
+    #   ├── F1
+    #   │   ├── F2
+    #   │   │   └── ...
+    #   │   └── F2
+    #   └── F1
+    #       ├── F2
+    #       └── F2
+    #
+    # This gives a DAG with exponentially many traversal paths while
+    # keeping the PDF itself linear in size.
+    num_forms = depth + 1
+    forms: list[StreamObject] = []
+
+    for _ in range(num_forms):
+        form = StreamObject()
+        forms.append(form)
+
+    # Register all forms first so that their indirect references are
+    # available when constructing their resource dictionaries.
+    form_refs = [writer._add_object(form) for form in forms]
+
+    for k, form in enumerate(forms):
+        if k < depth:
+            next_name = NameObject(f"/F{k + 1}")
+            form_content = (
+                f"q\n"
+                f"{next_name} Do\n"
+                f"{next_name} Do\n"
+                f"Q\n"
+            ).encode("ascii")
+            xobjects = DictionaryObject({
+                next_name: form_refs[k + 1],
+            })
+        else:
+            # Leaf form: emit a single character.
+            form_content = (
+                b"BT\n"
+                b"/F1 12 Tf\n"
+                b"100 700 Td\n"
+                b"(.) Tj\n"
+                b"ET\n"
+            )
+            xobjects = DictionaryObject()
+
+        resources = DictionaryObject({
+            NameObject("/Font"): DictionaryObject({
+                NameObject("/F1"): font_ref,
+            }),
+        })
+        if xobjects:
+            resources[NameObject("/XObject")] = xobjects
+
+        form.update({
+            NameObject("/Type"): NameObject("/XObject"),
+            NameObject("/Subtype"): NameObject("/Form"),
+            NameObject("/FormType"): NumberObject(1),
+            NameObject("/BBox"): RectangleObject([0, 0, 612, 792]),
+            NameObject("/Resources"): resources,
+        })
+        form.set_data(form_content)
+
+    # Invoke the root form twice.
+    page_content = StreamObject()
+    page_content.set_data(
+        b"q\n"
+        b"/F0 Do\n"
+        b"/F0 Do\n"
+        b"Q\n"
+    )
+    page_content_ref = writer._add_object(page_content)
+
+    page_resources = DictionaryObject({
+        NameObject("/XObject"): DictionaryObject({
+            NameObject("/F0"): form_refs[0],
+        }),
+    })
+
+    page[NameObject("/Resources")] = page_resources
+    page[NameObject("/Contents")] = page_content_ref
+    page[NameObject("/MediaBox")] = ArrayObject(list(map(NumberObject, [0, 0, 612, 792])))
+
+    data = BytesIO()
+    writer.write(data)
+    return data.getvalue()
+
+
+@pytest.mark.timeout(5)
+def test_extract_text__form_xobject__limit(caplog) -> None:
+    # Takes about 15 seconds without fix.
+    reader = PdfReader(BytesIO(_generate_dag_with_forms(12)))
+    page = reader.pages[0]
+    with apply_configuration(xform_maximum_invocations_per_extraction=100):
+        text = page.extract_text()
+    assert len(text) == 92
+    assert text == ".\n" * 46
+    assert caplog.messages == [
+        "Exceeded 100 form XObject invocations while extracting text; further form content is skipped."
+    ]
+
+
+def _page_with_helvetica(content_stream: bytes) -> BytesIO:
+    """Build a single page using /F1 (Helvetica) and the given content stream."""
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=612, height=792)
+
+    helvetica = DictionaryObject()
+    helvetica[NameObject("/Type")] = NameObject("/Font")
+    helvetica[NameObject("/Subtype")] = NameObject("/Type1")
+    helvetica[NameObject("/BaseFont")] = NameObject("/Helvetica")
+    font_resources = DictionaryObject()
+    font_resources[NameObject("/F1")] = writer._add_object(helvetica)
+    resources = DictionaryObject()
+    resources[NameObject("/Font")] = font_resources
+    page[NameObject("/Resources")] = resources
+
+    content = DecodedStreamObject()
+    content.set_data(content_stream)
+    page[NameObject("/Contents")] = writer._add_object(content)
+
+    buffer = BytesIO()
+    writer.write(buffer)
+    buffer.seek(0)
+    return buffer
+
+
+def _page_with_cid_font(text: str) -> BytesIO:
+    """
+    Build a single page showing `text` through a Type0/Identity-H font.
+
+    The character codes are 1, 2, 3, ... and a ToUnicode CMap maps them back to
+    the characters of `text`, so the extracted string depends only on pypdf's
+    own handling and not on any embedded font program.
+    """
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=612, height=792)
+
+    entries = "".join(f"<{code:04X}> <{ord(char):04X}>\n" for code, char in enumerate(text, 1))
+    to_unicode = DecodedStreamObject()
+    to_unicode.set_data(
+        b"/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CMapType 2 def\n"
+        b"1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n"
+        + f"{len(text)} beginbfchar\n{entries}endbfchar\n".encode()
+        + b"endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend"
+    )
+
+    cid_system_info = DictionaryObject()
+    cid_system_info[NameObject("/Registry")] = TextStringObject("Adobe")
+    cid_system_info[NameObject("/Ordering")] = TextStringObject("Identity")
+    cid_system_info[NameObject("/Supplement")] = NumberObject(0)
+    cid_font = DictionaryObject()
+    cid_font[NameObject("/Type")] = NameObject("/Font")
+    cid_font[NameObject("/Subtype")] = NameObject("/CIDFontType2")
+    cid_font[NameObject("/BaseFont")] = NameObject("/Test")
+    cid_font[NameObject("/CIDSystemInfo")] = cid_system_info
+    cid_font[NameObject("/DW")] = NumberObject(1000)
+
+    font = DictionaryObject()
+    font[NameObject("/Type")] = NameObject("/Font")
+    font[NameObject("/Subtype")] = NameObject("/Type0")
+    font[NameObject("/BaseFont")] = NameObject("/Test")
+    font[NameObject("/Encoding")] = NameObject("/Identity-H")
+    font[NameObject("/DescendantFonts")] = ArrayObject([writer._add_object(cid_font)])
+    font[NameObject("/ToUnicode")] = writer._add_object(to_unicode)
+
+    font_resources = DictionaryObject()
+    font_resources[NameObject("/F1")] = writer._add_object(font)
+    resources = DictionaryObject()
+    resources[NameObject("/Font")] = font_resources
+    page[NameObject("/Resources")] = resources
+
+    codes = "".join(f"{code:04X}" for code in range(1, len(text) + 1))
+    content = DecodedStreamObject()
+    content.set_data(
+        b"BT /F1 12 Tf 1 0 0 1 72 700 Tm <" + codes.encode() + b"> Tj ET"
+    )
+    page[NameObject("/Contents")] = writer._add_object(content)
+
+    buffer = BytesIO()
+    writer.write(buffer)
+    buffer.seek(0)
+    return buffer
+
+
+@pytest.mark.parametrize(
+    ("shown", "expected"),
+    [
+        # Arabic-Indic digits: U+0660-0669. Digits are not reordered by the
+        # bidirectional algorithm, so they must come back in the order shown.
+        ("١٢٣٤", "١٢٣٤"),
+        # Extended Arabic-Indic (Persian) digits: U+06F0-06F9.
+        ("۱۲۳۴", "۱۲۳۴"),
+        # Arabic-Indic digits with the Arabic percent sign U+066A.
+        ("٥٠٪", "٥٠٪"),
+        # Arabic letters are still reversed: they are shown in visual order.
+        ("ابحرم", "مرحبا"),
+        # Hebrew is unaffected as well.
+        ("םולש", "שלום"),
+    ],
+    ids=["arabic-indic-digits", "persian-digits", "arabic-percent", "arabic-letters", "hebrew"],
+)
+def test_arabic_indic_digits_keep_their_order(shown: str, expected: str) -> None:
+    """Arabic-Indic digits should not be reversed during extraction. Related: #1629."""
+    assert PdfReader(_page_with_cid_font(shown)).pages[0].extract_text() == expected
+
+
+@pytest.mark.parametrize(
+    ("shown", "expected"),
+    [
+        pytest.param("١٢٣٤ ابحرم", "١٢٣٤ مرحبا", id="arabic-indic-digits-before"),
+        pytest.param("۱۲۳۴ ابحرم", "۱۲۳۴ مرحبا", id="persian-digits-before"),
+        pytest.param("AB ابحرم", "AB مرحبا", id="latin-before"),
+        pytest.param("ابحرمAB", "مرحباAB", id="latin-after"),
+    ],
+)
+def test_text_before_a_change_of_direction_is_kept(shown: str, expected: str) -> None:
+    """Text shown before a change of direction stays in the output and reaches the visitor once. Related: #4142."""
+    page = PdfReader(_page_with_cid_font(shown)).pages[0]
+    assert page.extract_text() == expected
+
+    parts: list[str] = []
+    page.extract_text(visitor_text=lambda text, *_: parts.append(text))
+    assert "".join(parts) == expected
+
+
+def test_text_leading_is_not_scaled_by_font_size() -> None:
+    """Tests for #3982"""
+    buffer = _page_with_helvetica(
+        b"BT /F1 12 Tf 1 0 0 1 72 700 Tm 14 TL "
+        b"(Line one) Tj T* (Line two) Tj T* (Line three) Tj ET"
+    )
+
+    positions = []
+
+    def visitor_text(text, cm, tm, font_dict, font_size) -> None:
+        if text.strip():
+            positions.append(round(tm[5], 2))
+
+    text = PdfReader(buffer).pages[0].extract_text(visitor_text=visitor_text)
+
+    # T* moves down by the leading itself: 14 units, not 14 * 12 (the font size).
+    assert positions == [700.0, 686.0, 672.0]
+    assert text == "Line one\nLine two\nLine three"
+
+
+def test_line_breaks_with_scaled_current_matrix() -> None:
+    """Tests for #2262: the line height has to be compared in the same space."""
+    # The lines are 240 units apart in text space, which the CTM scales down to
+    # 12 units, matching a 200 pt font scaled down to 10 pt.
+    buffer = _page_with_helvetica(
+        b"q 0.05 0 0 0.05 0 0 cm "
+        b"BT /F1 200 Tf 1 0 0 1 200 14000 Tm (Line one) Tj "
+        b"1 0 0 1 200 13760 Tm (Line two) Tj ET Q"
+    )
+
+    assert PdfReader(buffer).pages[0].extract_text() == "Line one\nLine two"
+
+
+def test_wrapped_table_cell_line_is_not_split():
+    """The second wrapped line of a cell stays with the row label. Regression #4130."""
+    # Label baseline sits between the two wrapped cell baselines. Comparing only
+    # to the previous fragment used to insert a break before BBB (#4130).
+    text = PdfReader(
+        _page_with_helvetica(
+            b"BT /F1 12 Tf "
+            b"1 0 0 1 40 700 Tm (LBL) Tj "
+            b"1 0 0 1 100 694 Tm (AAA) Tj "
+            b"1 0 0 1 100 706 Tm (BBB) Tj ET"
+        )
+    ).pages[0].extract_text()
+    # The invariant from #4130 is that both cell lines stay on the label's line;
+    # the space between the words is the separate #4254 fix.
+    lines = [line for line in text.splitlines() if "LBL" in line]
+    assert len(lines) == 1
+    assert lines[0].split() == ["LBL", "AAA", "BBB"]
+
+
+def test_wrapped_table_cell_lines_are_separated():
+    """Wrapped cell lines must not be glued together. Regression #4254."""
+    # The second line of each cell moved to another baseline but is kept on the
+    # label's line by the line span, so it needs the space the horizontal gap
+    # test alone cannot provide.
+    text = PdfReader(
+        _page_with_helvetica(
+            b"BT /F1 10 Tf "
+            b"1 0 0 1 72 700 Tm (Row) Tj "
+            b"1 0 0 1 160 706 Tm (Alpha) Tj "
+            b"1 0 0 1 160 694 Tm (Beta) Tj "
+            b"1 0 0 1 240 706 Tm (Gamma) Tj "
+            b"1 0 0 1 240 694 Tm (Delta) Tj ET"
+        )
+    ).pages[0].extract_text()
+    assert text == "Row Alpha Beta Gamma Delta"
+
+
+def test_visitor_text_uses_current_text_matrix():
+    reader = PdfReader(RESOURCE_ROOT / "visitor_text_position.pdf")
+    page = reader.pages[0]
+
+    text_matrices = []
+
+    def visitor_text(text, cm, tm, font_dict, font_size) -> None:
+        if text.strip() == "visitor Sample":
+            text_matrices.append(tuple(float(v) for v in tm))
+
+    extracted_text = page.extract_text(
+        orientations=0,
+        visitor_text=visitor_text,
+    )
+
+    assert "visitor Sample" in extracted_text
+    assert len(text_matrices) == 1
+    assert text_matrices[0] == pytest.approx((1.0, 0.0, 0.0, 1.0, 100.0, 20.0))
+
+
+def _page_with_form_xobject(
+    page_content: bytes, form_matrix: list[int], form_content: bytes
+) -> BytesIO:
+    """Build a page painting form XObject /Fx (using Helvetica /F1 inside)."""
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=612, height=792)
+
+    helvetica = DictionaryObject()
+    helvetica[NameObject("/Type")] = NameObject("/Font")
+    helvetica[NameObject("/Subtype")] = NameObject("/Type1")
+    helvetica[NameObject("/BaseFont")] = NameObject("/Helvetica")
+    font_ref = writer._add_object(helvetica)
+
+    form = DecodedStreamObject()
+    form.update({
+        NameObject("/Type"): NameObject("/XObject"),
+        NameObject("/Subtype"): NameObject("/Form"),
+        NameObject("/FormType"): NumberObject(1),
+        NameObject("/BBox"): RectangleObject([0, 0, 595, 842]),
+        NameObject("/Matrix"): ArrayObject(list(map(NumberObject, form_matrix))),
+        NameObject("/Resources"): DictionaryObject({
+            NameObject("/Font"): DictionaryObject({
+                NameObject("/F1"): font_ref,
+            }),
+        }),
+    })
+    form.set_data(form_content)
+    form_ref = writer._add_object(form)
+
+    resources = DictionaryObject({
+        NameObject("/Font"): DictionaryObject({
+            NameObject("/F1"): font_ref,
+        }),
+        NameObject("/XObject"): DictionaryObject({
+            NameObject("/Fx"): form_ref,
+        }),
+    })
+    page[NameObject("/Resources")] = resources
+
+    content = DecodedStreamObject()
+    content.set_data(page_content)
+    page[NameObject("/Contents")] = writer._add_object(content)
+
+    buffer = BytesIO()
+    writer.write(buffer)
+    buffer.seek(0)
+    return buffer
+
+
+def test_visitor_text_reports_form_xobject_text_once() -> None:
+    """Regression test for #4079: visitor_text must report form text exactly once."""
+    def text_at(x: int, y: int, s: str) -> bytes:
+        return f"BT /F1 12 Tf 1 0 0 1 {x} {y} Tm ({s}) Tj ET".encode("ascii")
+
+    def collect(pdf: BytesIO) -> list[tuple[int, str]]:
+        page = PdfReader(pdf).pages[0]
+        depth = [0]
+        reports = []
+
+        def before(op, args, cm, tm) -> None:
+            if op == b"Do":
+                depth[0] += 1
+
+        def after(op, args, cm, tm) -> None:
+            if op == b"Do":
+                depth[0] -= 1
+
+        def visitor_text(t, cm, tm, font, size) -> None:
+            if t.strip():
+                reports.append((depth[0], t))
+
+        page.extract_text(
+            visitor_text=visitor_text,
+            visitor_operand_before=before,
+            visitor_operand_after=after,
+        )
+        return reports
+
+    # Case A: form with a non-identity /Matrix. The form text must be
+    # reported exactly once with the form's own matrix.
+    reports_a = collect(
+        _page_with_form_xobject(
+            b"q /Fx Do Q",
+            [1, 0, 0, 1, 50, 50],
+            text_at(100, 200, "1234"),
+        )
+    )
+    assert reports_a == [(1, "1234")]
+
+    # Case B: page text, then an identity form with its own text. The form
+    # text must be reported exactly once at the form text position.
+    reports_b = collect(
+        _page_with_form_xobject(
+            text_at(100, 700, "1111") + b" /Fx Do",
+            [1, 0, 0, 1, 0, 0],
+            text_at(300, 700, "2222"),
+        )
+    )
+    assert reports_b == [(0, "1111"), (1, "2222")]
+
+
+def test_simple_font_character_widths_with_differences_encoding() -> None:
+    # This test was written by hpertuz-vzy
+    def build() -> bytes:
+        stream = b"BT /F1 12 Tf 1 0 0 1 72 700 Tm (ABC) Tj ET\n"
+        objs = [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            (
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+                b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
+            ),
+            b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"endstream",
+            (
+                b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /FirstChar 65 /LastChar 67 "
+                b"/Widths [600 700 800] /FontDescriptor 6 0 R "
+                b"/Encoding << /Type /Encoding /BaseEncoding /WinAnsiEncoding "
+                b"/Differences [65 /Aacute /Eacute /Iacute] >> >>"
+            ),
+            b"<< /Type /FontDescriptor /FontName /Helvetica /Flags 32 /MissingWidth 250 >>",
+        ]
+        out = bytearray(b"%PDF-1.7\n")
+        offsets = []
+        for index, obj in enumerate(objs, start=1):
+            offsets.append(len(out))
+            out += f"{index} 0 obj\n".encode() + obj + b"\nendobj\n"
+        xref = len(out)
+        out += f"xref\n0 {len(objs) + 1}\n".encode() + b"0000000000 65535 f \n"
+        for offset in offsets:
+            out += f"{offset:010d} 00000 n \n".encode()
+        out += f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
+        return bytes(out)
+
+    page = PdfReader(BytesIO(build())).pages[0]
+    ops = iter(ContentStream(page["/Contents"].get_object(), page.pdf, "bytes").operations)
+    groups = text_show_operations(ops, page._layout_mode_fonts())
+    advance = sum(g["displaced_tx"] - g["tx"] for g in groups)
+    assert f"{advance:.1f}" == "25.2"
+
+
+def test_layout_mode_debug_path(tmp_path: Path) -> None:
+    """
+    layout_mode_debug_path is a pypdf feature; the PDF specification does not cover it.
+
+    The page shows "Hello" with the standard font Helvetica (ISO 32000-2:2020, 9.6.2.2),
+    which is not embedded and thus has no font stream that json cannot serialize.
+    """
+    page = PdfReader(_page_with_helvetica(b"BT /F1 12 Tf (Hello) Tj ET")).pages[0]
+    assert page.extract_text(extraction_mode="layout", layout_mode_debug_path=tmp_path) == "Hello"
+
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["bt_groups.json", "bts.json", "fonts.json", "tjs.json"]
+    tj_ops = json.loads(tmp_path.joinpath("tjs.json").read_text("utf-8"))
+    assert len(tj_ops) == 1
+    assert "font" not in tj_ops[0]
+    assert tj_ops[0]["text"] == "Hello"
+    assert tj_ops[0]["font_size"] == 12
+
+
+@pytest.mark.parametrize(
+    ("text", "rtl_dir", "text_operands", "character_map", "expected", "expected_visited"),
+    [
+        pytest.param("", False, "abc", {}, ("abc", False, ""), [], id="left-to-right"),
+        pytest.param("", False, "\u05d0\u05d1\u05d2", {}, ("\u05d2\u05d1\u05d0", True, ""), [""], id="right-to-left"),
+        pytest.param(
+            "x",
+            False,
+            "ab \u05d0\u05d1, cd",
+            {},
+            ("cd", False, "xab  ,\u05d1\u05d0"),
+            ["xab ", " ,\u05d1\u05d0"],
+            id="direction-changes",
+        ),
+        pytest.param(
+            "\u05d0",
+            True,
+            "\x01\u05d1.",
+            {"\x01": "XY"},
+            (".\u05d1XY\u05d0", True, ""),
+            [],
+            id="byte-sequence-in-right-to-left-run",
+        ),
+    ],
+)
+def test_get_display_str(text, rtl_dir, text_operands, character_map, expected, expected_visited):
+    visited = []
+    font = Font(name="Test", encoding="charmap", character_map=character_map)
+
+    result = get_display_str(
+        text, [1, 0, 0, 1, 0, 0], [1, 0, 0, 1, 0, 0], None, font, text_operands, 12, rtl_dir,
+        lambda visited_text, *_: visited.append(visited_text),
+    )
+
+    assert result == expected
+    assert visited == expected_visited
+
+
+def test_extract_text__content_without_text_operators_is_not_parsed() -> None:
+    """
+    extract_text() does not parse a content stream that cannot add text.
+
+    Text is only added by the text-showing operators (ISO 32000-2:2020, 9.4.3,
+    Table 107) and by Do, which can paint a form XObject with text (8.8.1,
+    Table 86). Content without them gives an empty string anyway.
+    """
+    # A gray rectangle, as in a figure: only color, path construction and painting.
+    page = PdfReader(_page_with_helvetica(b"0.5 g 10 10 100 100 re f")).pages[0]
+
+    with mock.patch.object(ContentStream, "_parse_content_stream", autospec=True) as parse:
+        assert page.extract_text() == ""
+
+    parse.assert_not_called()
+
+
+@pytest.mark.parametrize("visitor", ["visitor_operand_before", "visitor_operand_after", "visitor_text"])
+def test_extract_text__content_without_text_operators_is_parsed_for_visitors(visitor: str) -> None:
+    """extract_text() parses a content stream that cannot add text if a visitor is given."""
+    page = PdfReader(_page_with_helvetica(b"0.5 g 10 10 100 100 re f")).pages[0]
+
+    with mock.patch.object(
+        ContentStream, "_parse_content_stream", autospec=True, side_effect=ContentStream._parse_content_stream
+    ) as parse:
+        assert page.extract_text(**{visitor: lambda *_: None}) == ""
+
+    parse.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("build_page", "content"),
+    [
+        pytest.param(_page_with_helvetica, b"BT /F1 12 Tf (Hello) Tj ET", id="Tj"),
+        pytest.param(_page_with_helvetica, b"BT /F1 12 Tf [(Hello)] TJ ET", id="TJ"),
+        pytest.param(_page_with_helvetica, b"BT /F1 12 Tf 14 TL (Hello) ' ET", id="'"),
+        pytest.param(_page_with_helvetica, b'BT /F1 12 Tf 14 TL 0 0 (Hello) " ET', id='"'),
+        # The page only contains "/Fx Do"; the text is in the form XObject.
+        pytest.param(
+            lambda content: _page_with_form_xobject(b"/Fx Do", [1, 0, 0, 1, 0, 0], content),
+            b"BT /F1 12 Tf (Hello) Tj ET",
+            id="Do",
+        ),
+    ],
+)
+def test_extract_text__each_text_operator(build_page: Callable[[bytes], BytesIO], content: bytes) -> None:
+    """
+    extract_text() extracts the text of each operator that can add text.
+
+    These are the text-showing operators (ISO 32000-2:2020, 9.4.3, Table 107)
+    and Do with a form XObject (8.8.1, Table 86).
+    """
+    assert PdfReader(build_page(content)).pages[0].extract_text() == "Hello"

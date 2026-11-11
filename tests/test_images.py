@@ -1,0 +1,1153 @@
+"""
+Tests which ensure that image extraction works properly go here.
+
+Typically, tests in here should compare the extracted images count, names,
+and/or the actual image data with the expected value.
+"""
+import zlib
+from io import BytesIO
+from pathlib import Path
+from unittest import mock
+from zipfile import ZipFile
+
+import pytest
+from PIL import Image, ImageChops, ImageDraw, ImageStat
+
+from pypdf import PageObject, PdfReader, PdfWriter, apply_configuration
+from pypdf._page import ImageFile
+from pypdf.errors import DeprecationError, LimitReachedError, PdfReadError
+from pypdf.filters import JBIG2Decode
+from pypdf.generic import (
+    ArrayObject,
+    ByteStringObject,
+    ContentStream,
+    DecodedStreamObject,
+    DictionaryObject,
+    NameObject,
+    NullObject,
+    NumberObject,
+    TextStringObject,
+)
+from pypdf.generic._image_xobject import _handle_flate, _xobj_to_image
+
+from . import RESOURCE_ROOT, SAMPLE_ROOT, get_data_from_url
+from .generic.test_image_xobject import _create_image
+
+
+def open_image(path: Path | Image.Image | BytesIO) -> Image.Image:
+    if isinstance(path, Image.Image):
+        img = path
+    else:
+        if isinstance(path, Path):
+            assert path.exists()
+        with Image.open(path) as img:
+            img = (
+                img.copy()
+            )  # Opened image should be copied to avoid issues with file closing
+    return img
+
+
+def image_size(image: Image.Image):
+    buffer = BytesIO()
+    image.save(buffer, format=image.format)
+    return buffer.tell()
+
+
+def image_similarity(
+    path1: Path | Image.Image | BytesIO, path2: Path | Image.Image | BytesIO
+) -> float:
+    """
+    Check image similarity.
+
+    A value of "0" means the images are different. A value of 1 means they are
+    identical. A value above 0.9 means they are almost the same.
+
+    This can be used to ensure visual similarity.
+    """
+    # Open the images using Pillow
+    image1 = open_image(path1)
+    image2 = open_image(path2)
+
+    # Check if the images have the same dimensions
+    if image1.size != image2.size:
+        return 0
+
+    # Check if the color modes are the same
+    if image1.mode != image2.mode:
+        return 0
+
+    # Calculate the Mean Squared Error (MSE)
+    diff = ImageChops.difference(image1, image2)
+    squared_sums = ImageStat.Stat(diff).sum2
+    value_count = diff.width * diff.height * len(squared_sums)
+    mse = sum(squared_sums) / ((255.0 ** 2) * value_count)
+
+    return 1 - mse
+
+
+@pytest.mark.samples
+def test_image_similarity_one():
+    path_a = SAMPLE_ROOT / "018-base64-image/page-0-QuickPDFImd32aa1ab.png"
+    path_b = path_a
+    assert image_similarity(path_a, path_b) == 1
+
+
+@pytest.mark.samples
+def test_image_similarity_zero():
+    path_a = SAMPLE_ROOT / "018-base64-image/page-0-QuickPDFImd32aa1ab.png"
+    path_b = SAMPLE_ROOT / "009-pdflatex-geotopo/page-23-Im2.png"
+    assert image_similarity(path_a, path_b) == 0
+
+
+@pytest.mark.samples
+def test_image_similarity_mid():
+    path_a = SAMPLE_ROOT / "018-base64-image/page-0-QuickPDFImd32aa1ab.png"
+    img_b = Image.open(path_a)
+    draw = ImageDraw.Draw(img_b)
+
+    # Fill the rectangle with black color
+    draw.rectangle([0, 0, 100, 100], fill=(0, 0, 0))
+    sim1 = image_similarity(path_a, img_b)
+    assert sim1 > 0.9
+    assert sim1 > 0
+    assert sim1 < 1
+
+    draw.rectangle([0, 0, 200, 200], fill=(0, 0, 0))
+    sim2 = image_similarity(path_a, img_b)
+    assert sim2 < sim1
+    assert sim2 > 0
+
+
+@pytest.mark.enable_socket
+def test_image_new_property():
+    name = "pdf_font_garbled.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(name=name)))
+    assert reader.pages[0].images.keys() == [
+        "/I0",
+        "/I1",
+        "/I2",
+        "/I3",
+        "/I4",
+        "/I5",
+        "/I6",
+        "/I7",
+        "/I8",
+        "/I9",
+        ["/TPL1", "/Image5"],
+        ["/TPL2", "/Image53"],
+        ["/TPL2", "/Image37"],
+        ["/TPL2", "/Image49"],
+        ["/TPL2", "/Image51"],
+        ["/TPL2", "/Image39"],
+        ["/TPL2", "/Image57"],
+        ["/TPL2", "/Image55"],
+        ["/TPL2", "/Image43"],
+        ["/TPL2", "/Image30"],
+        ["/TPL2", "/Image22"],
+        ["/TPL2", "/Image41"],
+        ["/TPL2", "/Image47"],
+        ["/TPL2", "/Image45"],
+        ["/TPL3", "/Image65"],
+        ["/TPL3", "/Image30"],
+        ["/TPL3", "/Image61"],
+        ["/TPL4", "/Image30"],
+        ["/TPL5", "/Image30"],
+        ["/TPL6", "/Image30"],
+        ["/TPL7", "/Image30"],
+        ["/TPL8", "/Image30"],
+        ["/TPL9", "/Image30"],
+        ["/TPL10", "/Image30"],
+        ["/TPL11", "/Image30"],
+        ["/TPL12", "/Image30"],
+    ]
+    assert len(reader.pages[0].images.items()) == 36
+    assert reader.pages[0].images[0].name == "I0.png"
+
+    expected_image_url = "https://github.com/user-attachments/assets/3bf25760-2113-4e25-b4c2-fc1d3a84a263"
+    expected_image_name = "pdf_font_garbled_image30.png"
+    expected_image_data = BytesIO(get_data_from_url(url=expected_image_url, name=expected_image_name))
+    assert image_similarity(
+        expected_image_data,
+        reader.pages[0].images[-1].image
+    ) == 1
+
+    assert reader.pages[0].images["/TPL1", "/Image5"].image.format == "JPEG"
+    assert (
+        reader.pages[0].images["/I0"].indirect_reference.get_object()
+        == reader.pages[0]["/Resources"]["/XObject"]["/I0"]
+    )
+    list(reader.pages[0].images[0:2])
+    with pytest.raises(TypeError):
+        reader.pages[0].images[b"0"]
+    with pytest.raises(IndexError):
+        reader.pages[0].images[9999]
+    # just for test coverage:
+    with pytest.raises(KeyError):
+        reader.pages[0]._get_image(["test"], reader.pages[0])
+    assert list(PageObject(None, None).images) == []
+
+
+@pytest.mark.enable_socket
+def test_get_image_keyerror_for_non_image_xobject():
+    """Test that accessing an XObject which is not a image directly raises KeyError."""
+    reader = PdfReader(BytesIO(get_data_from_url(name="pdf_font_garbled.pdf")))
+    with pytest.raises(KeyError):
+        reader.pages[0].images["/TPL1"]  # /TPL1 is a form, not /Image
+
+
+@pytest.mark.parametrize(
+    ("src", "page_index", "image_key", "expected"),
+    [
+        (
+            SAMPLE_ROOT / "009-pdflatex-geotopo/GeoTopo.pdf",
+            23,
+            "/Im2",
+            SAMPLE_ROOT / "009-pdflatex-geotopo/page-23-Im2.png",
+        ),
+        (
+            SAMPLE_ROOT / "003-pdflatex-image/pdflatex-image.pdf",
+            0,
+            "/Im1",
+            SAMPLE_ROOT / "003-pdflatex-image/page-0-Im1.jpg",
+        ),
+        (
+            SAMPLE_ROOT / "018-base64-image/base64image.pdf",
+            0,
+            "/QuickPDFImd32aa1ab",
+            SAMPLE_ROOT / "018-base64-image/page-0-QuickPDFImd32aa1ab.png",
+        ),
+        (
+            SAMPLE_ROOT / "019-grayscale-image/grayscale-image.pdf",
+            0,
+            "/X0",
+            SAMPLE_ROOT / "019-grayscale-image/page-0-X0.png",
+        ),
+    ],
+    ids=[
+        "009-pdflatex-geotopo/page-23-Im2.png",
+        "003-pdflatex-image/page-0-Im1.jpg",
+        "018-base64-image/page-0-QuickPDFImd32aa1ab.png",
+        "019-grayscale-image/page-0-X0.png",
+    ],
+)
+@pytest.mark.samples
+def test_image_extraction(src, page_index, image_key, expected):
+    reader = PdfReader(src)
+    actual_image = reader.pages[page_index].images[image_key]
+    if not expected.exists():
+        # A little helper for test generation
+        with open(f"page-{page_index}-{actual_image.name}", "wb") as fp:
+            fp.write(actual_image.data)
+    assert image_similarity(BytesIO(actual_image.data), expected) >= 0.99
+
+
+def test_get_inline_image_without_xobject_resources():
+    page = PageObject(None, None)
+    inline_image = ImageFile(is_inline=True, is_displayed=True)
+
+    with mock.patch.object(page, "_parse_images_from_content_stream", return_value={"~0~": inline_image}):
+        assert page._get_image("~0~") is inline_image
+
+
+def test_get_inline_image_without_xobject_resources_raises_when_missing():
+    page = PageObject(None, None)
+
+    # Force cache population
+    _ = list(page.images)
+
+    with (
+        mock.patch.object(page, "_parse_images_from_content_stream", return_value=None),
+        pytest.raises(KeyError, match="Image ~0~ not found"),
+    ):
+        page._get_image("~0~")
+
+
+def test_inline_image_with_unknown_key(caplog):
+    """
+    An inline image carrying a key outside the abbreviation map must not
+    crash image extraction.
+    """
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=200, height=200)
+    # 2x2 RGB image with a non-standard `/Foo` key that is absent from
+    # _INLINE_IMAGE_KEY_MAPPING. A numeric value keeps value translation from
+    # bailing out first so the key lookup is reached.
+    content = (
+        b"q 20 0 0 20 0 0 cm "
+        b"BI /W 2 /H 2 /CS /RGB /BPC 8 /Foo 1 ID " + b"\x00" * 12 + b" EI Q"
+    )
+    stream = ContentStream(stream=None, pdf=writer)
+    stream.set_data(content)
+    page.replace_contents(stream)
+
+    buffer = BytesIO()
+    writer.write(buffer)
+    buffer.seek(0)
+
+    reader = PdfReader(buffer)
+    images = reader.pages[0].images
+    assert len(images) == 1
+    assert images[0].image is not None
+    assert "Unknown inline image key /Foo" in caplog.text
+
+
+def test_get_xobject_image_without_xobject_resources_raises():
+    page = PageObject(None, None)
+
+    with pytest.raises(
+        KeyError,
+        match="Cannot access image object /Im0 without XObject resources",
+    ):
+        page._get_image("/Im0")
+
+
+@pytest.mark.enable_socket
+@pytest.mark.timeout(30)
+def test_loop_in_image_keys():
+    """Cf #2077"""
+    reader = PdfReader(BytesIO(get_data_from_url(name="iss2077.pdf")))
+    reader.pages[0]["/Resources"]["/XObject"][NameObject("/toto")] = NullObject()
+    reader.pages[0].images.keys()
+
+
+@pytest.mark.enable_socket
+def test_devicen_cmyk_black_only():
+    """Cf #2321"""
+    url = "https://github.com/py-pdf/pypdf/files/13501846/Addressing_Adversarial_Attacks.pdf"
+    name = "iss2321.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    url = "https://github.com/py-pdf/pypdf/assets/4083478/cc2dabc1-86e6-4179-a8a4-2b0efea124be"
+    name = "iss2321_img0.pdf"
+    img = Image.open(BytesIO(get_data_from_url(url=url, name=name)))
+    assert image_similarity(reader.pages[5].images[0].image, img) >= 0.99
+    url = "https://github.com/py-pdf/pypdf/assets/4083478/6b64a949-42be-40d5-9eea-95707f350d89"
+    name = "iss2321_img1.pdf"
+    img = Image.open(BytesIO(get_data_from_url(url=url, name=name)))
+    assert image_similarity(reader.pages[10].images[0].image, img) >= 0.99
+
+
+@pytest.mark.enable_socket
+def test_bi_in_text():
+    """Cf #2456"""
+    url = "https://github.com/py-pdf/pypdf/files/14322910/BI_text_with_one_image.pdf"
+    name = "BI_text_with_one_image.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    assert reader.pages[0].images.keys() == ["~0~"]
+    assert reader.pages[0].images[0].name == "~0~.png"
+
+
+@pytest.mark.enable_socket
+def test_cmyk_no_filter():
+    """Cf #2522"""
+    url = "https://github.com/py-pdf/pypdf/files/14614887/out3.pdf"
+    name = "iss2522.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    reader.pages[0].images[0].image
+
+
+@pytest.mark.enable_socket
+def test_cmyk_dct_with_identity_decode_is_not_inverted():
+    """Cf #2931"""
+    url = "https://github.com/user-attachments/files/17602693/example.pdf"
+    name = "iss2931.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    image = reader.pages[0].images[0].image
+
+    # Adobe CMYK JPEGs store inverted values. This one also carries an explicit
+    # identity /Decode array, which must not cancel out that inversion.
+    #
+    # The exact samples come out of the JPEG decoder, so they are not asserted
+    # directly: they can shift by a step or two between libjpeg builds. What
+    # the fix changes is far larger than that - every channel comes back as its
+    # 255-complement when the inversion is dropped - so the assertions below
+    # pin the sample against that complement with a tolerance.
+    assert image.mode == "CMYK"
+    for xy, expected in (
+        ((0, 0), (121, 102, 114, 42)),        # light grey wall
+        ((449, 629), (153, 137, 74, 82)),     # dark suit
+    ):
+        actual = image.getpixel(xy)
+        assert all(abs(a - e) <= 8 for a, e in zip(actual, expected)), (
+            f"pixel {xy}: got {actual}, expected close to {expected}. "
+            f"Without the fix this decodes to roughly "
+            f"{tuple(255 - value for value in expected)}."
+        )
+
+
+@pytest.mark.enable_socket
+def test_separation_1byte_to_rgb_inverted():
+    """Cf #2343"""
+    url = "https://github.com/py-pdf/pypdf/files/13679585/test2_P038-038.pdf"
+    name = "iss2343.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    url = "https://github.com/py-pdf/pypdf/assets/4083478/b7f41897-96ef-4ea6-b165-5ef307a92b87"
+    name = "iss2343.png"
+    img = Image.open(BytesIO(get_data_from_url(url=url, name=name)))
+    assert image_similarity(reader.pages[0].images[0].image, img) >= 0.99
+    obj = reader.pages[0].images[0].indirect_reference.get_object()
+    obj.set_data(obj.get_data() + b"\x00")
+    with pytest.raises(ValueError):
+        reader.pages[0].images[0]
+
+
+@pytest.mark.enable_socket
+def test_data_with_lf():
+    """Cf #2343"""
+    url = "https://github.com/py-pdf/pypdf/files/13946477/panda.pdf"
+    name = "iss2343b.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    url = "https://github.com/py-pdf/pypdf/assets/4083478/1120b0cf-a67a-403f-aa1a-9a191cbc087f"
+    name = "iss2343b0.png"
+    img = Image.open(BytesIO(get_data_from_url(url=url, name=name)))
+    assert image_similarity(reader.pages[8].images[9].image, img) == 1.0
+
+
+@pytest.mark.enable_socket
+def test_oserror():
+    """Cf #2265"""
+    url = "https://github.com/py-pdf/pypdf/files/13127130/Binance.discovery.responses.2.gov.uscourts.dcd.256060.140.1.pdf"
+    name = "iss2265.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    reader.pages[2].images[1]
+    # Due to errors in translation in pillow we may not get
+    # the correct image. Therefore we cannot use `image_similarity`.
+
+
+@pytest.mark.parametrize(
+    ("pdf", "pdf_name", "images", "images_name", "filtr"),
+    [
+        (
+            "https://github.com/py-pdf/pypdf/files/13127197/FTX.Claim.SC30.01072023101624File595287144.pdf",
+            "iss2266a.pdf",
+            "https://github.com/py-pdf/pypdf/files/14967061/iss2266a_images.zip",
+            "iss2266a_images.zip",
+            ((0, 0), (1, 0), (4, 0), (9, 0)),  # random pick-up to speed up test
+        ),
+        (
+            "https://github.com/py-pdf/pypdf/files/13127242/FTX.Claim.Skybridge.Capital.30062023113350File971325116.pdf",
+            "iss2266b.pdf",
+            "https://github.com/py-pdf/pypdf/files/14967099/iss2266b_images.zip",
+            "iss2266b_images.zip",
+            ((0, 0), (1, 0), (4, 0), (9, 0)),  # random pick-up to speed up test
+        ),
+    ],
+)
+@pytest.mark.enable_socket
+def test_corrupted_jpeg_iss2266(pdf, pdf_name, images, images_name, filtr):
+    """
+    Code to create zipfile:
+    import pypdf;zipfile
+
+    with pypdf.PdfReader("____inputfile___") as r:
+     with zipfile.ZipFile("__outputzip___","w") as z:
+      for p in r.pages:
+       for ii,i in enumerate(p.images):
+        print(i.name)
+        b=BytesIO()
+        i.image.save(b,"JPEG")
+        z.writestr(f"image_{p.page_number}_{ii}_{i.name}", b.getbuffer())
+    """
+    url = pdf
+    name = pdf_name
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    url = images
+    name = images_name
+    print(pdf_name, images_name)  # noqa: T201
+    with ZipFile(BytesIO(get_data_from_url(url=url, name=name)), "r") as zf:
+        for fn in zf.namelist():
+            sp = fn.split("_")
+            p, i = int(sp[1]), int(sp[2])
+            if filtr is not None and (p, i) not in filtr:
+                continue
+            print(fn)  # noqa: T201
+            img = Image.open(BytesIO(zf.read(fn)))
+            assert image_similarity(reader.pages[p].images[i].image, img) >= 0.99
+
+
+@pytest.mark.enable_socket
+@pytest.mark.timeout(30)
+def test_large_compressed_image():
+    """This test ensures that a small stream which expands past the default limit decodes once the limit is raised."""
+    url = "https://github.com/py-pdf/pypdf/files/15306199/file_with_large_compressed_image.pdf"
+    reader = PdfReader(
+        BytesIO(get_data_from_url(url=url, name="file_with_large_compressed_image.pdf"))
+    )
+    with apply_configuration(image_maximum_buffer_size=80_000_000):
+        list(reader.pages[0].images)
+
+
+@pytest.mark.timeout(timeout=1, method="thread")
+def test_1bit_indexed_flate_image_extraction_performance() -> None:
+    """1-bit indexed FlateDecode extraction times out on the old per-pixel path."""
+    reader = PdfReader(RESOURCE_ROOT / "issue-3850-1bit-indexed-flate.pdf")
+    image = reader.pages[0].images["/Im1"].image
+
+    assert isinstance(image, Image.Image)
+    image.load()
+    assert image.mode == "L"
+    assert image.size == (2550, 3300)
+
+
+@pytest.mark.enable_socket
+def test_ff_fe_starting_lut():
+    """Cf issue #2660"""
+    url = "https://github.com/py-pdf/pypdf/files/15385628/original_before_merge.pdf"
+    name = "iss2660.pdf"
+    writer = PdfWriter(BytesIO(get_data_from_url(url=url, name=name)))
+    b = BytesIO()
+    writer.write(b)
+    reader = PdfReader(b)
+    url = "https://github.com/py-pdf/pypdf/assets/4083478/6150700d-87fd-43a2-8695-c2c05a44838c"
+    name = "iss2660.png"
+    img = Image.open(BytesIO(get_data_from_url(url=url, name=name)))
+    assert image_similarity(writer.pages[1].images[0].image, img) == 1.0
+    assert image_similarity(reader.pages[1].images[0].image, img) == 1.0
+
+
+@pytest.mark.enable_socket
+def test_inline_image_extraction():
+    """Cf #2598"""
+    url = "https://github.com/py-pdf/pypdf/files/14982414/lebo102.pdf"
+    name = "iss2598.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    # there is no error because images are correctly extracted
+    reader.pages[1].extract_text()
+    reader.pages[2].extract_text()
+    reader.pages[3].extract_text()
+
+    url = "https://github.com/py-pdf/pypdf/files/15210011/Pages.62.73.from.0560-22_WSP.Plan_July.2022_Version.1.pdf"
+    name = "iss2598a.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    reader.pages[0].extract_text()
+    reader.pages[1].extract_text()
+
+    url = "https://github.com/mozilla/pdf.js/raw/master/test/pdfs/issue14256.pdf"
+    name = "iss2598b.pdf"
+    writer = PdfWriter(BytesIO(get_data_from_url(url=url, name=name)))
+    url = "https://github.com/py-pdf/pypdf/assets/4083478/71bc5053-cfc7-44ba-b7be-8e2333e2c749"
+    name = "iss2598b.png"
+    img = Image.open(BytesIO(get_data_from_url(url=url, name=name)))
+    for i in range(8):
+        assert image_similarity(writer.pages[0].images[i].image, img) == 1
+    writer.pages[0].extract_text()
+    # check recalculation of inline images
+    assert writer.pages[0]._content_stream_images is not None
+    writer.pages[0].merge_scaled_page(writer.pages[0], 0.25)
+    assert writer.pages[0]._content_stream_images is None
+    reader = PdfReader(RESOURCE_ROOT / "imagemagick-ASCII85Decode.pdf")
+    writer.pages[0].merge_page(reader.pages[0])
+    assert list(writer.pages[0].images.keys()) == [
+        "/Im0",
+        "~0~",
+        "~1~",
+        "~2~",
+        "~3~",
+        "~4~",
+        "~5~",
+        "~6~",
+        "~7~",
+        "~8~",
+        "~9~",
+        "~10~",
+        "~11~",
+        "~12~",
+        "~13~",
+        "~14~",
+        "~15~",
+    ]
+
+    url = "https://github.com/py-pdf/pypdf/files/15233597/bug1065245.pdf"
+    name = "iss2598c.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    url = "https://github.com/py-pdf/pypdf/assets/4083478/bfb221be-11bd-46fe-8129-55a58088a4b6"
+    name = "iss2598c.jpg"
+    img = Image.open(BytesIO(get_data_from_url(url=url, name=name)))
+    assert image_similarity(reader.pages[0].images[0].image, img) >= 0.99
+
+    url = "https://github.com/py-pdf/pypdf/files/15282904/tt.pdf"
+    name = "iss2598d.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    url = "https://github.com/py-pdf/pypdf/assets/4083478/1a770e1b-9ad2-4125-89ae-6069992dda23"
+    name = "iss2598d.png"
+    img = Image.open(BytesIO(get_data_from_url(url=url, name=name)))
+    assert image_similarity(reader.pages[0].images[0].image, img) == 1
+
+
+@pytest.mark.enable_socket
+def test_extract_image_from_object(caplog):
+    url = "https://github.com/py-pdf/pypdf/files/15176076/B2.pdf"
+    name = "iss2613.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    image = reader.pages[0]["/Resources"]["/Pattern"]["/P1"]["/Resources"]["/XObject"][
+        "/X1"
+    ].decode_as_image()
+    assert isinstance(image, Image.Image)
+    with pytest.raises(Exception):
+        co = reader.pages[0].get_contents()
+        co.decode_as_image()
+    assert "does not seem to be an Image" in caplog.text
+    caplog.clear()
+    co.indirect_reference = "for_test"
+    with pytest.raises(Exception):
+        co = reader.pages[0].get_contents()
+        co.decode_as_image()
+    assert "does not seem to be an Image" in caplog.text
+
+
+def test_extract_jpeg_with_explicit_quality():
+    reader = PdfReader(RESOURCE_ROOT / "side-by-side-subfig.pdf")
+    page = reader.pages[0]
+    x_object = page["/Resources"]["/XObject"]["/Im1"]
+    assert x_object["/Filter"] == "/DCTDecode"
+    image = x_object.decode_as_image()
+    assert isinstance(image, Image.Image)
+    assert image.format == "JPEG"
+    small_image = x_object.decode_as_image(pillow_parameters={"quality": 75})
+    assert image_size(small_image) < image_size(image)
+
+
+@pytest.mark.enable_socket
+def test_4bits_images(caplog):
+    url = "https://github.com/user-attachments/files/16624406/tt.pdf"
+    name = "iss2411.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    url = "https://github.com/user-attachments/assets/53058564-9a28-4e4a-818f-a6528013d7dc"
+    name = "iss2411.png"
+    img = Image.open(BytesIO(get_data_from_url(url=url, name=name)))
+    assert image_similarity(reader.pages[0].images[1].image, img) == 1.0
+
+
+def test_low_bit_devicergb_image_mode():
+    """Low-bit (2/4) /DeviceRGB images decode to RGB, not palette (#3924)."""
+    # 2x2, 4-bit DeviceRGB: red, green / blue, white.
+    # Samples are 3 interleaved 4-bit components per pixel, high nibble first.
+    data = bytes([0xF0, 0x00, 0xF0, 0x00, 0xFF, 0xFF])
+    img = _handle_flate((2, 2), data, "4bits", "/DeviceRGB", 3, "")[0]
+    assert img.mode == "RGB"
+    assert img.size == (2, 2)
+    assert img.tobytes() == bytes(
+        [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255]
+    )
+
+    # A single-component space must still map to a palette image ("P").
+    gray = _handle_flate((2, 2), bytes([0xF0, 0x0F]), "4bits", "/DeviceGray", 1, "")[0]
+    assert gray.mode == "P"
+
+
+def test_low_bit_devicergb_image_without_filter():
+    """Low-bit /DeviceRGB images decode even without a filter (#3367)."""
+    # Same 2x2 4-bit DeviceRGB samples as above, but stored uncompressed:
+    # images without a filter never reach the FlateDecode handler.
+    writer = PdfWriter()
+    image = DecodedStreamObject()
+    image.set_data(bytes([0xF0, 0x00, 0xF0, 0x00, 0xFF, 0xFF]))
+    image[NameObject("/Type")] = NameObject("/XObject")
+    image[NameObject("/Subtype")] = NameObject("/Image")
+    image[NameObject("/Width")] = NumberObject(2)
+    image[NameObject("/Height")] = NumberObject(2)
+    image[NameObject("/BitsPerComponent")] = NumberObject(4)
+    image[NameObject("/ColorSpace")] = NameObject("/DeviceRGB")
+    image[NameObject("/Colors")] = NumberObject(3)
+
+    page = writer.add_blank_page(20, 20)
+    page[NameObject("/Resources")] = DictionaryObject()
+    page["/Resources"][NameObject("/XObject")] = DictionaryObject()
+    page["/Resources"]["/XObject"][NameObject("/Im0")] = writer._add_object(image)
+
+    output = BytesIO()
+    writer.write(output)
+    output.seek(0)
+
+    img = PdfReader(output).pages[0].images[0].image
+    assert img.mode == "RGB"
+    assert img.tobytes() == bytes(
+        [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255]
+    )
+
+
+@pytest.mark.enable_socket
+def test_no_filter_with_colorspace_as_list():
+    """Tests for #2998"""
+    url = "https://github.com/user-attachments/files/18058571/9bf7a2e2-72c8-4ac1-b8ae-164df16c8cef.pdf"
+    name = "iss2998.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+
+    page = reader.pages[0]
+    page.images.items()
+
+
+@pytest.mark.parametrize("tail", [b"", b"\n", b"\nQ\n"])
+def test_run_length_inline_image_at_end_of_stream(tail, caplog):
+    """EOF extraction preserves pixels without warning about a spurious newline."""
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=10, height=10)
+    stream = DecodedStreamObject()
+    stream.set_data(b"BI /W 1 /H 1 /BPC 8 /CS /G /F /RL ID\n\x00A\x80\nEI" + tail)
+    page[NameObject("/Contents")] = writer._add_object(stream)
+    output = BytesIO()
+    writer.write(output)
+    output.seek(0)
+
+    images = list(PdfReader(output).pages[0].images)
+
+    assert len(images) == 1
+    assert images[0].image.mode == "L"
+    assert images[0].image.size == (1, 1)
+    assert images[0].image.tobytes() == b"A"
+    assert "Found trailing newline in stream data" not in caplog.text
+
+
+def test_contentstream__read_inline_image__fallback_is_successful():
+    stream = ContentStream(stream=None, pdf=None)
+    stream.set_data(
+        b"""Q
+q 9.6 0 0 4.8 5523.6 1031 cm
+BI
+/CS /RGB
+/W 2
+/H 1
+/BPC 8
+ID \x8b\x8b\x8b\xfe\xfe\xfe
+EI Q
+/R413 gs
+        """
+    )
+    page = PageObject(pdf=None)
+    with mock.patch.object(page, "get_contents", return_value=stream):
+        images = page._parse_images_from_content_stream()
+        assert list(images) == ["~0~"]
+        assert images["~0~"].data == (
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x02\x00\x00\x00\x01\x08\x02\x00\x00\x00{@\xe8\xdd\x00\x00\x00\x0f"
+            b"IDATx\x9cc\xe8\xee\xee\xfe\xf7\xef\x1f\x00\x0e \x04\x9cpr_\x96\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        # Empty `/Filter` array (a spec-legal way to say "no filter").
+        b"q BI /W 2 /H 2 /CS /RGB /BPC 8 /F [] ID " + b"\x00" * 12 + b" EI Q",
+        # `/Filter` that is not a name.
+        b"q BI /W 2 /H 2 /CS /RGB /BPC 8 /F 5 ID " + b"\x00" * 12 + b" EI Q",
+        # Empty `/ColorSpace` array.
+        b"q BI /W 2 /H 2 /CS [] /BPC 8 ID " + b"\x00" * 12 + b" EI Q",
+        # `/ColorSpace` that is not a name.
+        b"q BI /W 2 /H 2 /CS 5 /BPC 8 ID " + b"\x00" * 12 + b" EI Q",
+        # `/BitsPerComponent` that is not a number.
+        b"q BI /W 2 /H 2 /CS /DeviceGray /BPC /X ID " + b"\x00" * 12 + b" EI Q",
+        # Missing `/Height`.
+        b"q BI /W 2 /CS /RGB /BPC 8 ID " + b"\x00" * 12 + b" EI Q",
+        # Missing `/Width`.
+        b"q BI /H 2 /CS /CMYK /BPC 8 ID " + b"\x00" * 16 + b" EI Q",
+        # `/Width` that is not a number.
+        b"q BI /W (x) /H 2 /CS /RGB /BPC 8 ID " + b"\x00" * 12 + b" EI Q",
+    ],
+    ids=[
+        "Empty filter array", "Non-name filter", "Empty color space", "Non-name color space",
+        "Non-number bits per component", "Missing height", "Missing width", "Non-number width"
+    ]
+)
+def test_contentstream__read_inline_image__malformed_settings(data):
+    """A malformed inline image dictionary must not crash content stream parsing."""
+    stream = ContentStream(stream=None, pdf=None)
+    stream.set_data(data)
+
+    operations = stream.operations
+
+    assert any(operator == b"INLINE IMAGE" for _, operator in operations)
+
+
+@pytest.mark.enable_socket
+def test_inline_image_containing_ei_in_body():
+    """Tests for #3107"""
+    expected = """\nID ><8d>£^H<8e><8b>¢AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA¡^BêMEI E^N^^<8a>^AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA^D
+<8b>²: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA5>^D
+é^EAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD<98>AAAAAA<8d><82>
+AAAAAAAA^B
+EI\nQ\n""".encode("latin1")  # noqa: E501
+    url = "https://github.com/user-attachments/files/18943249/testing.pdf"
+    name = "issue3107.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    writer = PdfWriter(clone_from=reader)
+    for page in writer.pages:
+        page.transfer_rotation_to_content()
+    output = BytesIO()
+    writer.write(output)
+    assert expected in output.getvalue()
+
+
+@pytest.mark.enable_socket
+@pytest.mark.skipif(condition=not JBIG2Decode._is_binary_compatible(), reason="Requires recent jbig2dec")
+def test_jbig2decode():
+    url = "https://github.com/py-pdf/pypdf/files/12090692/New.Jersey.Coinbase.staking.securities.charges.2023-0606_Coinbase-Penalty-and-C-D.pdf"
+    name = "jbig2.pdf"
+
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    page = reader.pages[0]
+    image = next(iter(page.images))
+    assert image.image.size == (5138, 6630)
+    assert image.image.mode == "1"
+    assert image.image.format == "PNG"
+
+    url = "https://github.com/user-attachments/assets/d6f88c80-a2e0-4ea9-b1e0-34442041d004"
+    name = "jbig2.png"
+    img = Image.open(BytesIO(get_data_from_url(url=url, name=name)))
+
+    assert image_similarity(image.image, img) >= 0.999
+
+
+@pytest.mark.enable_socket
+@pytest.mark.skipif(condition=not JBIG2Decode._is_binary_compatible(), reason="Requires recent jbig2dec")
+def test_jbig2decode__jbig2globals():
+    url = "https://github.com/user-attachments/files/20119148/out.pdf"
+    name = "jbig2_globals.pdf"
+
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    page = reader.pages[0]
+    image = next(iter(page.images))
+    assert image.image.size == (1067, 1067)
+    assert image.image.mode == "1"
+    assert image.image.format == "PNG"
+
+    url = "https://github.com/user-attachments/assets/7ac41ee3-9c13-44cf-aa74-8f106287e354"
+    name = "jbig2_globals.png"
+    img = Image.open(BytesIO(get_data_from_url(url=url, name=name)))
+
+    # Wrong image: 0.9618265964800714
+    assert image_similarity(image.image, img) >= 0.999
+
+
+@pytest.mark.enable_socket
+@pytest.mark.skipif(condition=not JBIG2Decode._is_binary_compatible(), reason="Requires recent jbig2dec")
+def test_jbig2decode__memory_limit():
+    url = "https://github.com/py-pdf/pypdf/files/12090692/New.Jersey.Coinbase.staking.securities.charges.2023-0606_Coinbase-Penalty-and-C-D.pdf"
+    name = "jbig2.pdf"
+    error_messages = [
+        # Version 0.20
+        (
+            r"^Memory limit reached while reading JBIG2 data:\n"
+            r"jbig2dec FATAL ERROR memory: limit reached: limit: 5000000 \(4 Mbyte\) used: 4329386 \(4 Mbyte\) allocation: 4263106 \(4 Mbyte\)\n"  # noqa: E501
+            r"jbig2dec FATAL ERROR failed to allocate image data buffer \(stride=643, height=6630\)"
+        ),
+        # Version 0.19
+        (
+            r"^Memory limit reached while reading JBIG2 data:\n"
+            r"jbig2dec FATAL ERROR failed to allocate image data buffer \(stride=643, height=6630\)"
+        ),
+    ]
+
+    with apply_configuration(jbig2_maximum_output_length=5_000_000):
+        reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+        page = reader.pages[0]
+        with pytest.raises(expected_exception=LimitReachedError, match=rf"({'|'.join(error_messages)})"):
+            _ = next(iter(page.images))
+
+
+@pytest.mark.enable_socket
+def test_get_ids_image__resources_is_none():
+    url = "https://github.com/user-attachments/files/18381726/tika-957721.pdf"
+    name = "tika-957721.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    page = reader.pages[2]
+    assert list(page.images.items()) == []
+
+
+@pytest.mark.samples
+def test_is_xobject_image_displayed():
+    """Test XObject image display detection via _content_stream_images membership."""
+    path = SAMPLE_ROOT / "028-image-references-deduplication/wrong-references.pdf"
+    reader = PdfReader(path)
+
+    expected_results = [
+        # Page 1: /Im20 not displayed, /Im8 displayed
+        (0, "/Im20", False),
+        (0, "/Im8", True),
+        # Page 2: Neither displayed
+        (1, "/Im20", False),
+        (1, "/Im8", False),
+        # Page 3: /Im20 displayed, /Im8 not displayed
+        (2, "/Im20", True),
+        (2, "/Im8", False),
+    ]
+
+    for page_num, image_id, expected in expected_results:
+        page = reader.pages[page_num]
+        _ = page.images[image_id]  # trigger parsing
+        assert page._content_stream_images is not None
+        in_content_stream = image_id in page._content_stream_images
+        assert in_content_stream == expected, (
+            f"Page {page_num}: {image_id} expected {expected}, got {in_content_stream}"
+        )
+
+
+@pytest.mark.samples
+def test_is_inline_image_displayed():
+    """This test ensures that displayed inline images are detected by `ImageFile.is_displayed`"""
+    path = SAMPLE_ROOT / "008-reportlab-inline-image/inline-image.pdf"
+    reader = PdfReader(path)
+
+    # Page 1:
+    expected_results = [
+        (0, "~0~", True),
+    ]
+
+    for page_num, image_id, expected in expected_results:
+        page = reader.pages[page_num]
+        img = page.images[image_id]
+        assert img.is_displayed == expected, f"Page {page_num}: {image_id} expected {expected}, got {img.is_displayed}"
+
+
+@pytest.mark.samples
+def test_inline_images_property_deprecation_error():
+    """Test that inline_images property emits a deprecation error."""
+    reader = PdfReader(SAMPLE_ROOT / "008-reportlab-inline-image/inline-image.pdf")
+    page = reader.pages[0]
+
+    with pytest.raises(DeprecationError, match=r"PageObject\.inline_images is deprecated.*"):
+        _ = page.inline_images
+
+
+@pytest.mark.samples
+def test_inline_images_setter_deprecation_error():
+    """Test that setting inline_images raises a deprecation error."""
+    reader = PdfReader(SAMPLE_ROOT / "008-reportlab-inline-image/inline-image.pdf")
+    page = reader.pages[0]
+
+    # Force cache population by accessing images
+    _ = list(page.images)
+    assert page._content_stream_images is not None
+
+    # Clear cache via setter
+    with pytest.raises(DeprecationError, match=r"PageObject\.inline_images is deprecated.*"):
+        page.inline_images = None
+
+
+def test_do_images_stored_as_none_in_cache():
+    """Test that Do-referenced images are stored as None in _content_stream_images."""
+    reader = PdfReader(RESOURCE_ROOT / "imagemagick-ASCII85Decode.pdf")
+    page = reader.pages[0]
+
+    # Force cache population
+    _ = list(page.images)
+    assert page._content_stream_images is not None
+
+    # Do images should be in the cache with None value
+    do_images = {
+        image_name: image_value for image_name, image_value in page._content_stream_images.items()
+        if not image_value
+    }
+    assert len(do_images) == 1, "Document should contain only 1 Do-referenced image."
+    do_image_key = next(iter(do_images.keys()))
+    assert do_images[do_image_key] is None, f"Image {do_image_key} should be None (lazy placeholder)"
+
+
+@pytest.mark.enable_socket
+def test_do_image_lazy_decode_preserves_none():
+    """Test that Do images remain as None after access (never cached by design)."""
+    url = "https://github.com/py-pdf/pypdf/files/13127130/Binance.discovery.responses.2.gov.uscourts.dcd.256060.140.1.pdf"
+    name = "iss2265.pdf"
+    reader = PdfReader(BytesIO(get_data_from_url(url=url, name=name)))
+    page = reader.pages[2]
+
+    # First access: triggers lazy decode in _get_image()
+    img = page.images[1]
+    assert img is not None
+    assert page._content_stream_images is not None
+    # Do images should remain as None (never cached, decoded on demand each time)
+    assert page._content_stream_images["/Im1"] is None
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        pytest.param(
+            NumberObject(1), "XObject resources are not a dictionary: 1", id="number"
+        ),
+        pytest.param(
+            ArrayObject(), "XObject resources are not a dictionary: []", id="array"
+        ),
+        pytest.param(
+            TextStringObject("x"),
+            "XObject resources are not a dictionary: x",
+            id="string",
+        ),
+    ],
+)
+def test_images__xobject_is_not_a_dictionary(caplog, value, expected):
+    """A malformed /XObject raised a TypeError when the loop tried to iterate it."""
+    writer = PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    writer.pages[0][NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/XObject"): value}
+    )
+    stream = BytesIO()
+    writer.write(stream)
+    stream.seek(0)
+
+    assert list(PdfReader(stream).pages[0].images) == []
+    assert expected in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        pytest.param(NumberObject(1), "Resources are not a dictionary: 1", id="number"),
+        pytest.param(ArrayObject(), "Resources are not a dictionary: []", id="array"),
+        pytest.param(
+            TextStringObject("x"), "Resources are not a dictionary: x", id="string"
+        ),
+    ],
+)
+def test_images__resources_are_not_a_dictionary(caplog, value, expected):
+    """Resources which are not a dictionary give no images and a warning."""
+    writer = PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    writer.pages[0][NameObject("/Resources")] = value
+    stream = BytesIO()
+    writer.write(stream)
+    stream.seek(0)
+
+    assert list(PdfReader(stream).pages[0].images) == []
+    assert expected in caplog.text
+
+
+def test_images__inline_image_with_resources_not_a_dictionary(caplog):
+    """An inline image does not need the resources, so it is still returned."""
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=72, height=72)
+    page[NameObject("/Resources")] = NumberObject(1)
+    content = DecodedStreamObject()
+    content.set_data(b"q 10 0 0 10 0 0 cm BI /W 1 /H 1 /BPC 8 /CS /G ID \x80 EI Q")
+    page[NameObject("/Contents")] = writer._add_object(content)
+    stream = BytesIO()
+    writer.write(stream)
+    stream.seek(0)
+
+    images = PdfReader(stream).pages[0].images
+    assert len(images) == 1
+    assert images[0].image.size == (1, 1)
+    assert "Resources are not a dictionary: 1" in caplog.text
+
+
+def _create_gray_2x2_image_stream(data: bytes, filter_name: str) -> DecodedStreamObject:
+    stream = DecodedStreamObject()
+    stream.set_data(data)
+    stream.update(
+        {
+            NameObject("/Width"): NumberObject(2),
+            NameObject("/Height"): NumberObject(2),
+            NameObject("/ColorSpace"): NameObject("/DeviceGray"),
+            NameObject("/BitsPerComponent"): NumberObject(8),
+            NameObject("/Filter"): NameObject(filter_name),
+        }
+    )
+    return stream
+
+
+@pytest.mark.parametrize(
+    ("filter_name", "container_format", "expected_extension"),
+    [
+        # Data without a TIFF/PNG container: raw samples, the format is guessed from the filter.
+        ("/LZWDecode", None, ".tiff"),
+        ("/ASCII85Decode", None, ".png"),
+        # Data with a container: the format is detected by Pillow, regardless of the filter.
+        ("/LZWDecode", "PNG", ".png"),
+        ("/ASCII85Decode", "TIFF", ".tiff"),
+        ("/LZWDecode", "TIFF", ".tiff"),
+        ("/ASCII85Decode", "PNG", ".png"),
+    ],
+)
+def test_xobj_to_image__lzw_ascii85_image_format(filter_name, container_format, expected_extension):
+    samples = bytes([0, 64, 128, 255])
+    if container_format is None:
+        data = samples
+    else:
+        buffer = BytesIO()
+        Image.frombytes("L", (2, 2), samples).save(buffer, container_format)
+        data = buffer.getvalue()
+
+    extension, image_data, img = _xobj_to_image(_create_gray_2x2_image_stream(data, filter_name))
+
+    assert extension == expected_extension
+    assert img.mode == "L"
+    assert img.size == (2, 2)
+    assert img.tobytes() == samples
+    with Image.open(BytesIO(image_data)) as saved:
+        assert saved.format == expected_extension.lstrip(".").upper()
+        assert saved.tobytes() == samples
+
+
+def test_handle_flate__indexed_cmyk_palette():
+    # CMYK: white, cyan, mid-tone, black
+    lookup = bytes([0, 0, 0, 0,  255, 0, 0, 0,  128, 64, 32, 16,  0, 0, 0, 255])
+    color_space = ArrayObject(
+        [NameObject("/Indexed"), NameObject("/DeviceCMYK"), NumberObject(3), ByteStringObject(lookup)]
+    )
+
+    img = _handle_flate((4, 1), bytes([0, 1, 2, 3]), "P", color_space, 1, "")[0]
+
+    # The palette has to be converted to RGB regardless of the installed Pillow version:
+    # Starting with Pillow 12.2.0, `putpalette(..., rawmode="CMYK")` keeps a CMYK palette.
+    assert img.mode == "RGB"
+    assert [img.getpixel((x, 0)) for x in range(4)] == [
+        (255, 255, 255),
+        (0, 255, 255),
+        (119, 179, 209),
+        (0, 0, 0),
+    ]
+
+
+def test_inline_image__perceptual() -> None:
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=10, height=10)
+
+    image = _create_image(size=(5, 5), mode="RGB")
+    contents = (
+        b"BI\n/BPC 8\n/Intent /Perceptual\n/W 5\n/F /FlateDecode\n/CS /RGB\n/H 5\nID\n"
+        + zlib.compress(image.tobytes())
+        + b"\nEI\n"
+    )
+    stream = ContentStream(stream=None, pdf=writer)
+    stream.set_data(contents)
+
+    page.replace_contents(stream)
+
+    assert len(page.images) == 1
+    assert image_similarity(image, page.images[0].image) > 0.9999
+
+
+def test_inline_image__custom_color_space_resources__not_a_dictionary():
+    """A custom inline-image color space with non-dictionary resources raises the clear input error."""
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=72, height=72)
+    page[NameObject("/Resources")] = NumberObject(1)
+    content = DecodedStreamObject()
+    content.set_data(b"q BI /CS /CS0 /W 1 /H 1 /BPC 8 ID 00 EI Q")
+    page[NameObject("/Contents")] = writer._add_object(content)
+    stream = BytesIO()
+    writer.write(stream)
+    stream.seek(0)
+
+    with pytest.raises(PdfReadError, match=r"^Cannot find resource entry /CS0 for /CS$"):
+        list(PdfReader(stream).pages[0].images)
+
+
+def test_inline_image__custom_color_space__resolved_from_resources():
+    """A custom inline-image color space is resolved through dictionary /Resources."""
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=72, height=72)
+    resources = DictionaryObject()
+    resources[NameObject("/ColorSpace")] = DictionaryObject(
+        {NameObject("/CS0"): NameObject("/DeviceGray")}
+    )
+    page[NameObject("/Resources")] = resources
+    content = DecodedStreamObject()
+    content.set_data(b"q BI /CS /CS0 /W 1 /H 1 /BPC 8 ID 00 EI Q")
+    page[NameObject("/Contents")] = writer._add_object(content)
+    stream = BytesIO()
+    writer.write(stream)
+    stream.seek(0)
+
+    images = list(PdfReader(stream).pages[0].images)
+    assert len(images) == 1

@@ -1,0 +1,720 @@
+"""Test the pypdf.annotations submodule."""
+
+from io import BytesIO
+from pathlib import Path
+
+import pytest
+
+from pypdf import PdfReader, PdfWriter
+from pypdf.annotations import (
+    AnnotationDictionary,
+    Ellipse,
+    FreeText,
+    Highlight,
+    Line,
+    Link,
+    Polygon,
+    PolyLine,
+    Popup,
+    Rectangle,
+    Text,
+)
+from pypdf.constants import AnnotationFlag
+from pypdf.errors import PdfReadError
+from pypdf.generic import (
+    ArrayObject,
+    DictionaryObject,
+    Fit,
+    FloatObject,
+    NameObject,
+    NumberObject,
+    RectangleObject,
+)
+
+from . import RESOURCE_ROOT, get_data_from_url
+
+
+def test_annotation_flags_returns_annotation_flag_type():
+    annot = Text(rect=(0, 0, 100, 100), text="test")
+
+    # Without /F key, should return AnnotationFlag(0)
+    assert isinstance(annot.flags, AnnotationFlag)
+    assert annot.flags == 0
+
+    # With /F key set as a NumberObject (as stored in PDFs)
+    annot[NameObject("/F")] = NumberObject(4)
+    assert isinstance(annot.flags, AnnotationFlag)
+    assert annot.flags == AnnotationFlag.PRINT
+
+
+def test_ellipse(pdf_file_path):
+    # Arrange
+    pdf_path = RESOURCE_ROOT / "crazyones.pdf"
+    reader = PdfReader(pdf_path)
+    page = reader.pages[0]
+    writer = PdfWriter()
+    writer.add_page(page)
+
+    # Act
+    ellipse_annotation = Ellipse(
+        rect=(50, 550, 500, 650),
+        interior_color="ff0000",
+    )
+    writer.add_annotation(0, ellipse_annotation)
+
+    # Assert: You need to inspect the file manually
+    with open(pdf_file_path, "wb") as fp:
+        writer.write(fp)
+
+
+def test_text(pdf_file_path):
+    # Arrange
+    pdf_path = RESOURCE_ROOT / "outline-without-title.pdf"
+    reader = PdfReader(pdf_path)
+    page = reader.pages[0]
+    writer = PdfWriter()
+    writer.add_page(page)
+
+    # Act
+    text_annotation = Text(
+        text="Hello World\nThis is the second line!",
+        rect=(50, 550, 500, 650),
+        open=True,
+    )
+    writer.add_annotation(0, text_annotation)
+
+    # Assert: You need to inspect the file manually
+    with open(pdf_file_path, "wb") as fp:
+        writer.write(fp)
+
+
+def test_free_text(pdf_file_path):
+    # Arrange
+    pdf_path = RESOURCE_ROOT / "crazyones.pdf"
+    reader = PdfReader(pdf_path)
+    page = reader.pages[0]
+    writer = PdfWriter()
+    writer.add_page(page)
+
+    # Act
+    free_text_annotation = FreeText(
+        text="Hello World - bold and italic\nThis is the second line!",
+        rect=(50, 550, 200, 650),
+        font="Arial",
+        bold=True,
+        italic=True,
+        font_size="20pt",
+        font_color="00ff00",
+        border_color=None,
+        background_color=None,
+    )
+    writer.add_annotation(0, free_text_annotation)
+
+    free_text_annotation = FreeText(
+        text="Another free text annotation (not bold, not italic)",
+        rect=(500, 550, 200, 650),
+        font="Arial",
+        bold=False,
+        italic=False,
+        font_size="20pt",
+        font_color="00ff00",
+        border_color="0000ff",
+        background_color="cdcdcd",
+    )
+    writer.add_annotation(0, free_text_annotation)
+
+    # Assert: You need to inspect the file manually
+    with open(pdf_file_path, "wb") as fp:
+        writer.write(fp)
+
+
+def test_free_text__font_specifier():
+    free_text_annotation = FreeText(
+        text="Hello World",
+        rect=(0, 0, 0, 0),
+    )
+    assert free_text_annotation["/DS"] == "font: normal normal 14pt Helvetica;text-align:left;color:#000000"
+    free_text_annotation = FreeText(
+        text="Hello World",
+        rect=(50, 550, 200, 650),
+        font="Arial",
+        bold=True,
+        italic=True,
+        font_size="20pt",
+        font_color="00ff00",
+        border_color=None,
+        background_color=None,
+    )
+    assert free_text_annotation["/DS"] == "font: italic bold 20pt Arial;text-align:left;color:#00ff00"
+
+
+@pytest.mark.parametrize("border_color", ["0000ff", None, ""])
+@pytest.mark.parametrize(
+    ("font_color", "expected_appearance"),
+    [
+        ("00ff00", "0.0 1.0 0.0 rg"),
+        ("ff0000", "1.0 0.0 0.0 rg"),
+        ("000000", "0.0 0.0 0.0 rg"),
+        ("", ""),
+    ],
+)
+def test_free_text__font_color(font_color, border_color, expected_appearance):
+    free_text_annotation = FreeText(
+        text="Hello World",
+        rect=(50, 550, 200, 650),
+        font_color=font_color,
+        border_color=border_color,
+    )
+    assert free_text_annotation["/DA"] == expected_appearance
+    if border_color is None:
+        assert free_text_annotation["/BS"]["/W"] == 0
+    else:
+        assert "/BS" not in free_text_annotation
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=300, height=700)
+    writer.add_annotation(0, free_text_annotation)
+    output = BytesIO()
+    writer.write(output)
+
+    reader = PdfReader(output)
+    annotation = reader.pages[0]["/Annots"][0].get_object()
+    assert annotation["/DA"] == expected_appearance
+
+
+def test_annotation_dictionary():
+    a = AnnotationDictionary()
+    a.flags = AnnotationFlag.HIDDEN | AnnotationFlag.PRINT | AnnotationFlag.NO_ZOOM
+    assert a.flags == AnnotationFlag.HIDDEN | AnnotationFlag.PRINT | AnnotationFlag.NO_ZOOM
+
+
+def test_polygon(pdf_file_path):
+    # Arrange
+    pdf_path = RESOURCE_ROOT / "crazyones.pdf"
+    reader = PdfReader(pdf_path)
+    page = reader.pages[0]
+    writer = PdfWriter()
+    writer.add_page(page)
+
+    with pytest.raises(ValueError):
+        Polygon(
+            vertices=[],
+        )
+
+    annotation = Polygon(
+        vertices=[(50, 550), (200, 650), (70, 750), (50, 700)],
+    )
+    writer.add_annotation(0, annotation)
+
+    # Assert: You need to inspect the file manually
+    with open(pdf_file_path, "wb") as fp:
+        writer.write(fp)
+
+
+def test_polyline(pdf_file_path):
+    # Arrange
+    pdf_path = RESOURCE_ROOT / "crazyones.pdf"
+    reader = PdfReader(pdf_path)
+    page = reader.pages[0]
+    writer = PdfWriter()
+    writer.add_page(page)
+
+    with pytest.raises(
+            ValueError,
+            match=r"A polyline needs at least 1 vertex with two coordinates",
+    ):
+        PolyLine(
+            vertices=[],
+        )
+
+    annotation = PolyLine(
+        vertices=[(50, 550), (200, 650), (70, 750), (50, 700)],
+    )
+    writer.add_annotation(0, annotation)
+
+    # Assert: You need to inspect the file manually
+    with open(pdf_file_path, "wb") as fp:
+        writer.write(fp)
+
+
+def test_line(pdf_file_path):
+    # Arrange
+    pdf_path = RESOURCE_ROOT / "crazyones.pdf"
+    reader = PdfReader(pdf_path)
+    page = reader.pages[0]
+    writer = PdfWriter()
+    writer.add_page(page)
+
+    # Act
+    line_annotation = Line(
+        text="Hello World\nLine2",
+        rect=(50, 550, 200, 650),
+        p1=(50, 550),
+        p2=(200, 650),
+    )
+    writer.add_annotation(0, line_annotation)
+
+    # Assert: You need to inspect the file manually
+    with open(pdf_file_path, "wb") as fp:
+        writer.write(fp)
+
+
+def test_rectangle(pdf_file_path):
+    # Arrange
+    pdf_path = RESOURCE_ROOT / "crazyones.pdf"
+    reader = PdfReader(pdf_path)
+    page = reader.pages[0]
+    writer = PdfWriter()
+    writer.add_page(page)
+
+    # Act
+    square_annotation = Rectangle(
+        rect=(50, 550, 200, 650), interior_color="ff0000"
+    )
+    writer.add_annotation(0, square_annotation)
+
+    square_annotation = Rectangle(rect=(40, 400, 150, 450))
+    writer.add_annotation(0, square_annotation)
+
+    # Assert: You need to inspect the file manually
+    with open(pdf_file_path, "wb") as fp:
+        writer.write(fp)
+
+
+def test_highlight(pdf_file_path):
+    # Arrange
+    pdf_path = RESOURCE_ROOT / "crazyones.pdf"
+    reader = PdfReader(pdf_path)
+    page = reader.pages[0]
+    writer = PdfWriter()
+    writer.add_page(page)
+
+    # Act
+    highlight_annotation = Highlight(
+        rect=(95.79332, 704.31777, 138.55779, 724.6855),
+        highlight_color="ff0000",
+        quad_points=ArrayObject(
+            [
+                FloatObject(100.060779),
+                FloatObject(723.55398),
+                FloatObject(134.29033),
+                FloatObject(723.55398),
+                FloatObject(100.060779),
+                FloatObject(705.4493),
+                FloatObject(134.29033),
+                FloatObject(705.4493),
+            ]
+        ),
+        printing=False,
+    )
+    writer.add_annotation(0, highlight_annotation)
+    for annot in writer.pages[0]["/Annots"]:
+        obj = annot.get_object()
+        subtype = obj["/Subtype"]
+        if subtype == "/Highlight":
+            assert "/F" not in obj or obj["/F"] == NumberObject(0)
+
+    writer.add_page(page)
+    # Act
+    highlight_annotation = Highlight(
+        rect=(95.79332, 704.31777, 138.55779, 724.6855),
+        highlight_color="ff0000",
+        quad_points=ArrayObject(
+            [
+                FloatObject(100.060779),
+                FloatObject(723.55398),
+                FloatObject(134.29033),
+                FloatObject(723.55398),
+                FloatObject(100.060779),
+                FloatObject(705.4493),
+                FloatObject(134.29033),
+                FloatObject(705.4493),
+            ]
+        ),
+        printing=True,
+    )
+    writer.add_annotation(1, highlight_annotation)
+    for annot in writer.pages[1]["/Annots"]:
+        obj = annot.get_object()
+        subtype = obj["/Subtype"]
+        if subtype == "/Highlight":
+            assert obj["/F"] == NumberObject(4)
+
+    # Assert: You need to inspect the file manually
+    with open(pdf_file_path, "wb") as fp:
+        writer.write(fp)
+
+
+def test_link(pdf_file_path):
+    # Arrange
+    pdf_path = RESOURCE_ROOT / "outline-without-title.pdf"
+    reader = PdfReader(pdf_path)
+    writer = PdfWriter()
+    for page in reader.pages:
+        writer.add_page(page)
+
+    # Act
+    # Part 1: Too many args
+    with pytest.raises(ValueError):
+        Link(
+            rect=(50, 550, 200, 650),
+            url="https://martin-thoma.com/",
+            target_page_index=3,
+        )
+
+    # Part 2: Too few args
+    with pytest.raises(ValueError):
+        Link(
+            rect=(50, 550, 200, 650),
+        )
+
+    # Part 3: External Link
+    link_annotation = Link(
+        rect=(50, 50, 100, 100),
+        url="https://martin-thoma.com/",
+        border=[1, 0, 6, [3, 2]],
+    )
+    writer.add_annotation(0, link_annotation)
+
+    # Part 4: Internal Link
+    link_annotation = Link(
+        rect=(100, 100, 300, 200),
+        target_page_index=1,
+        border=[50, 10, 4],
+    )
+    writer.add_annotation(0, link_annotation)
+
+    # Assert: You need to inspect the file manually
+    with open(pdf_file_path, "wb") as fp:
+        writer.write(fp)
+
+
+def test_link__existing_target_uses_indirect_reference():
+    # Arrange
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    writer.add_blank_page(width=200, height=200)
+
+    link_annotation = Link(
+        rect=(100, 100, 300, 200),
+        target_page_index=1,
+        border=[50, 10, 4],
+        fit=Fit(fit_type="/XYZ", fit_args=(0, 0, 0)),
+    )
+
+    # Act
+    added_annotation = writer.add_annotation(0, link_annotation)
+
+    # Assert
+    destination = added_annotation["/Dest"]
+
+    assert isinstance(destination, ArrayObject)
+    assert destination[0] == writer.pages[1].indirect_reference
+    assert destination[1] == "/XYZ"
+    assert destination[2:] == [0, 0, 0]
+
+
+def test_link__future_target_preserves_page_index():
+    # Arrange
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+
+    link_annotation = Link(
+        rect=(100, 100, 300, 200),
+        target_page_index=1,
+        border=[50, 10, 4],
+        fit=Fit(fit_type="/Fit"),
+    )
+
+    # Act
+    added_annotation = writer.add_annotation(0, link_annotation)
+
+    # Assert
+    destination = added_annotation["/Dest"]
+
+    assert isinstance(destination, ArrayObject)
+    # Preserve the existing page-index representation when the target page
+    # has not yet been added to the writer. See #2450.
+    assert destination[0] == NumberObject(1)
+    assert destination[1] == "/Fit"
+
+
+def test_link__completed_destination_is_preserved():
+    # Arrange
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    writer.add_blank_page(width=200, height=200)
+
+    target_page_reference = writer.pages[1].indirect_reference
+    assert target_page_reference is not None
+
+    destination = ArrayObject(
+        [
+            target_page_reference,
+            NameObject("/Fit"),
+        ]
+    )
+    link_annotation = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Annot"),
+            NameObject("/Subtype"): NameObject("/Link"),
+            NameObject("/Rect"): RectangleObject((100, 100, 300, 200)),
+            NameObject("/Dest"): destination,
+        }
+    )
+
+    # Act
+    added_annotation = writer.add_annotation(0, link_annotation)
+
+    # Assert
+    added_destination = added_annotation["/Dest"]
+
+    assert isinstance(added_destination, ArrayObject)
+    assert added_destination[0] == target_page_reference
+    assert added_destination[1] == "/Fit"
+
+
+def test_popup(caplog):
+    # Arrange
+    pdf_path = RESOURCE_ROOT / "outline-without-title.pdf"
+    reader = PdfReader(pdf_path)
+    page = reader.pages[0]
+    writer = PdfWriter()
+    writer.add_page(page)
+
+    # Act
+    text_annotation = Text(
+        title_bar="hello world",
+        text="Hello World\nThis is the second line!",
+        rect=(50, 550, 200, 650),
+        open=True,
+    )
+    ta = writer.add_annotation(0, text_annotation)
+    popup_annotation = Popup(
+        rect=(50, 550, 200, 650),
+        open=True,
+        parent=ta,  # prefer to use for evolutivity
+    )
+    writer.add_annotation(writer.pages[0], popup_annotation)
+
+    Popup(
+        rect=(50, 550, 200, 650),
+        open=True,
+        parent=True,  # broken parameter  # type: ignore[arg-type]
+    )
+    assert "Unregistered Parent object : No Parent field set" in caplog.text
+
+    target = "annotated-pdf-popup.pdf"
+    writer.write(target)
+    Path(target).unlink()  # comment this out for manual inspection
+
+
+def test_markup_annotation_in_reply_to():
+    """Test that a reply annotation gets /IRT, /RT, and /NM after a write/read cycle."""
+    writer = PdfWriter(clone_from=RESOURCE_ROOT / "crazyones.pdf")
+
+    parent = Text(
+        text="Parent comment",
+        rect=(50, 550, 200, 650),
+        open=True,
+    )
+    parent_ref = writer.add_annotation(0, parent)
+
+    reply = Text(
+        text="Reply to parent",
+        rect=(50, 550, 200, 650),
+        in_reply_to=parent_ref,
+    )
+    writer.add_annotation(0, reply)
+
+    assert "/IRT" in reply
+    assert reply["/IRT"].get_object() is parent_ref
+    assert reply["/RT"] == "/R"
+    assert "/NM" in reply
+
+    assert "/NM" not in parent_ref
+
+    buf = BytesIO()
+    writer.write(buf)
+
+    reader2 = PdfReader(buf)
+    annots = reader2.pages[0]["/Annots"]
+    assert len(annots) == 2
+
+    reply_obj = annots[1].get_object()
+    assert reply_obj["/IRT"].get_object()["/Contents"] == "Parent comment"
+    assert reply_obj["/NM"] == reply["/NM"]
+
+
+def test_markup_annotation_in_reply_to_group_type():
+    """Test that a grouped annotation sets /RT to /Group."""
+    writer = PdfWriter(clone_from=RESOURCE_ROOT / "crazyones.pdf")
+
+    parent = Text(
+        text="Parent",
+        rect=(50, 550, 200, 650),
+    )
+    parent_ref = writer.add_annotation(0, parent)
+
+    grouped = Text(
+        text="Grouped with parent",
+        rect=(50, 550, 200, 650),
+        in_reply_to=parent_ref,
+        reply_type="Group",
+    )
+    writer.add_annotation(0, grouped)
+
+    assert grouped["/RT"] == "/Group"
+    assert "/IRT" in grouped
+    assert "/NM" in grouped
+
+
+def test_markup_annotation_name_without_reply():
+    """Test that annotation_name without in_reply_to raises ValueError."""
+    with pytest.raises(ValueError, match="annotation_name is only supported when in_reply_to is set"):
+        Text(
+            text="Named but not a reply",
+            rect=(50, 550, 200, 650),
+            annotation_name="my-unique-name",
+        )
+
+
+def test_markup_annotation_reply_type_without_reply():
+    """Test that non-default reply_type without in_reply_to raises ValueError."""
+    with pytest.raises(ValueError, match="reply_type is only meaningful when in_reply_to is set"):
+        Text(
+            text="Grouped but not a reply",
+            rect=(50, 550, 200, 650),
+            reply_type="Group",
+        )
+
+
+def test_markup_annotation_in_reply_to_custom_name():
+    """Test explicit annotation_name with in_reply_to."""
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+
+    parent = Text(text="Parent", rect=(0, 0, 100, 100))
+    parent_ref = writer.add_annotation(0, parent)
+
+    reply = Text(
+        text="Reply",
+        rect=(0, 0, 100, 100),
+        in_reply_to=parent_ref,
+        annotation_name="custom-reply-name",
+    )
+    writer.add_annotation(0, reply)
+
+    assert reply["/NM"] == "custom-reply-name"
+    assert "/IRT" in reply
+
+
+def test_markup_annotation_in_reply_to_unregistered():
+    """Test that an unregistered parent raises ValueError."""
+    unregistered = Text(text="Not added to writer", rect=(0, 0, 100, 100))
+    with pytest.raises(ValueError, match="in_reply_to must be a registered annotation"):
+        Text(
+            text="Reply",
+            rect=(0, 0, 100, 100),
+            in_reply_to=unregistered,
+        )
+
+
+def test_markup_annotation_in_reply_to_indirect_object():
+    """Test passing an IndirectObject directly as in_reply_to."""
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+
+    parent = Text(text="Parent", rect=(0, 0, 100, 100))
+    parent_ref = writer.add_annotation(0, parent)
+    indirect_ref = parent_ref.indirect_reference
+
+    reply = Text(
+        text="Reply via IndirectObject",
+        rect=(0, 0, 100, 100),
+        in_reply_to=indirect_ref,
+    )
+    writer.add_annotation(0, reply)
+
+    assert "/IRT" in reply
+    assert reply["/RT"] == "/R"
+    assert "/NM" in reply
+
+    buf = BytesIO()
+    writer.write(buf)
+
+    reader = PdfReader(buf)
+    annots = reader.pages[0]["/Annots"]
+    assert len(annots) == 2
+    reply_obj = annots[1].get_object()
+    assert reply_obj["/IRT"].get_object()["/Contents"] == "Parent"
+    assert reply_obj["/NM"] == reply["/NM"]
+
+
+@pytest.mark.enable_socket
+def test_outline_action_without_d_lenient():
+    reader = PdfReader(BytesIO(get_data_from_url(name="iss3268.pdf")))
+    assert len(reader.outline) == 2
+
+
+@pytest.mark.enable_socket
+def test_outline_action_without_d_strict(pdf_file_path):
+    reader = PdfReader(BytesIO(get_data_from_url(name="iss3268.pdf")))
+    reader.strict = True
+    with pytest.raises(PdfReadError) as e:
+        assert len(reader.outline) == 2
+    assert "Outline Action Missing /D" in str(e)
+
+
+@pytest.mark.parametrize(("border_color", "expected"), [("000000", [0, 0, 0]), ("ff0000", [1, 0, 0]), (None, None)])
+def test_rectangle__border_color(border_color, expected):
+    writer = PdfWriter()
+    writer.add_blank_page(100, 100)
+    annotation = Rectangle(rect=(10, 10, 90, 90), border_color=border_color, interior_color="00ff00")
+    writer.add_annotation(0, annotation)
+    output = BytesIO()
+    writer.write(output)
+    result = PdfReader(output).pages[0].annotations[0].get_object()
+    assert result.get("/C") == expected
+    assert result["/IC"] == [0, 1, 0]
+
+
+def test_rectangle__default_border_color():
+    annotation = Rectangle(rect=(10, 10, 90, 90))
+    assert "/C" not in annotation
+    assert "/IC" not in annotation
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        Ellipse(rect=(0, 0, 100, 100)),
+        FreeText(rect=(0, 0, 100, 100), text="free text"),
+        Highlight(
+            rect=(0, 0, 100, 100), quad_points=ArrayObject([FloatObject(0)] * 8)
+        ),
+        Line(rect=(0, 0, 100, 100), p1=(0, 0), p2=(100, 100)),
+        Link(rect=(0, 0, 100, 100), url="https://example.com"),
+        Polygon(vertices=[(0, 0), (100, 100), (50, 50)]),
+        PolyLine(vertices=[(0, 0), (100, 100)]),
+        Popup(rect=(0, 0, 100, 100)),
+        Rectangle(rect=(0, 0, 100, 100)),
+        Text(rect=(0, 0, 100, 100), text="text"),
+    ],
+    ids=lambda annotation: type(annotation).__name__,
+)
+def test_clone_and_replicate_annotation(annotation):
+    """Annotations requiring constructor arguments can be cloned and replicated."""
+    writer = PdfWriter()
+
+    cloned = annotation.clone(writer, force_duplicate=True)
+    replicated = annotation.replicate(writer)
+
+    for copy in (cloned, replicated):
+        assert type(copy) is type(annotation)
+        assert copy is not annotation
+        assert copy.items() == annotation.items()
+
+        # The copy must not share its entries with the source annotation.
+        copy[NameObject("/Test")] = NumberObject(1)
+        assert "/Test" not in annotation

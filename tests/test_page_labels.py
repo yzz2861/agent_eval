@@ -1,0 +1,756 @@
+"""Test the pypdf._page_labels module."""
+from io import BytesIO
+
+import pytest
+
+from pypdf import PdfReader, PdfWriter
+from pypdf._page_labels import (
+    get_label_from_nums,
+    index2label,
+    index2labels,
+    number2lowercase_letter,
+    number2lowercase_roman_numeral,
+    number2uppercase_letter,
+    number2uppercase_roman_numeral,
+    nums_clear_range,
+    nums_insert,
+    nums_next,
+)
+from pypdf.generic import (
+    ArrayObject,
+    DictionaryObject,
+    IndirectObject,
+    NameObject,
+    NullObject,
+    NumberObject,
+    PdfObject,
+    TextStringObject,
+)
+
+from . import RESOURCE_ROOT, get_data_from_url
+
+
+@pytest.mark.parametrize(
+    ("number", "expected"),
+    [
+        (1, "I"),
+        (2, "II"),
+        (3, "III"),
+        (4, "IV"),
+        (5, "V"),
+        (6, "VI"),
+        (7, "VII"),
+        (8, "VIII"),
+        (9, "IX"),
+        (10, "X"),
+        (3_888, "MMMDCCCLXXXVIII"),
+        (3_999, "MMMCMXCIX"),
+    ],
+)
+def test_number2uppercase_roman_numeral(number, expected):
+    assert number2uppercase_roman_numeral(number) == expected
+
+
+def test_number2lowercase_roman_numeral():
+    assert number2lowercase_roman_numeral(123) == "cxxiii"
+
+
+@pytest.mark.parametrize(
+    ("number", "expected"),
+    [
+        (1, "a"),
+        (2, "b"),
+        (3, "c"),
+        (25, "y"),
+        (26, "z"),
+        (27, "aa"),
+        (28, "bb"),
+        (51, "yy"),
+        (52, "zz"),
+        (53, "aaa"),
+        (78, "zzz"),
+        (79, "aaaa"),
+    ],
+)
+def test_number2lowercase_letter(number, expected):
+    assert number2lowercase_letter(number) == expected
+
+
+@pytest.mark.parametrize(
+    ("number", "expected"),
+    [
+        (26, "Z"),
+        (27, "AA"),
+        (28, "BB"),
+        (52, "ZZ"),
+        (53, "AAA"),
+    ],
+)
+def test_number2uppercase_letter__repeats_the_same_letter(number, expected):
+    """A to Z for the first 26 pages, AA to ZZ for the next 26, and so on."""
+    assert number2uppercase_letter(number) == expected
+
+
+def test_number2uppercase_letter():
+    with pytest.raises(ValueError):
+        number2uppercase_letter(-1)
+
+
+def test_get_label_from_nums__letter_style_past_z():
+    # Page 28 of an /S /A section is "BB", not "AB". See the module docstring.
+    value = DictionaryObject()
+    value[NameObject("/S")] = NameObject("/A")
+    dictionary_object = DictionaryObject()
+    dictionary_object[NameObject("/Nums")] = ArrayObject([NumberObject(0), value])
+    assert get_label_from_nums(dictionary_object, 27) == "BB"
+
+
+@pytest.mark.parametrize("number", [0, -1, -5])
+def test_number2roman_numeral_non_positive(number):
+    """A non-positive number produced a numeral rather than being refused."""
+    with pytest.raises(ValueError, match="Expecting a positive number"):
+        number2uppercase_roman_numeral(number)
+    with pytest.raises(ValueError, match="Expecting a positive number"):
+        number2lowercase_roman_numeral(number)
+
+
+@pytest.mark.enable_socket
+def test_index2label(caplog):
+    name = "waarom-meisjes-het-beter-doen-op-HAVO-en-VWO-ROA.pdf"
+    r = PdfReader(BytesIO(get_data_from_url(name=name)))
+    assert index2label(r, 1) == "ii"
+    assert index2label(r, 9) == "6"
+    # very silly data to get test cover
+    r.trailer["/Root"]["/PageLabels"]["/Nums"].append(8)
+    r.trailer["/Root"]["/PageLabels"]["/Nums"].append(NullObject())
+    assert index2label(r, 9) == "10"
+
+    with pytest.raises(ValueError):
+        nums_clear_range(
+            NumberObject(10), 8, r.trailer["/Root"]["/PageLabels"]["/Nums"]
+        )
+    r.trailer["/Root"]["/PageLabels"]["/Nums"].append(8)
+    with pytest.raises(ValueError):
+        nums_next(NumberObject(10), r.trailer["/Root"]["/PageLabels"]["/Nums"])
+    with pytest.raises(ValueError):
+        nums_clear_range(
+            NumberObject(10), 8, r.trailer["/Root"]["/PageLabels"]["/Nums"]
+        )
+    with pytest.raises(ValueError):
+        nums_insert(
+            NumberObject(10),
+            DictionaryObject(),
+            r.trailer["/Root"]["/PageLabels"]["/Nums"],
+        )
+
+    del r.trailer["/Root"]["/PageLabels"]["/Nums"]
+    assert index2label(r, 1) == "2"
+    caplog.clear()
+    r.trailer["/Root"]["/PageLabels"][NameObject("/Kids")] = NullObject()
+    assert index2label(r, 1) == "2"
+    assert caplog.text != ""
+
+
+@pytest.mark.enable_socket
+def test_index2label_kids():
+    url = "https://github.com/py-pdf/pypdf/files/14858124/Terminologie_Epochen.Schwerpunkte.Umsetzungen.pdf"
+    r = PdfReader(BytesIO(get_data_from_url(url=url, name="index2label_kids.pdf")))
+    expected = [
+        "C1",
+        "I",
+        "II",
+        "III",
+        "IV",
+        "V",
+        "VI",
+        "VII",
+        "VIII",
+        "IX",
+        "X",
+        "XI",
+        "XII",
+        "XIII",
+        "XIV",
+        "XV",
+        "XVI",
+        "XVII",
+        *list(map(str, range(1, 284)))
+    ]
+    for x in ["20", "44", "58", "82", "94", "116", "154", "166", "192", "224", "250"]:
+        # Some page labels are unused. Removing them is still easier than copying the
+        # whole list itself here.
+        expected.remove(x)
+    assert r.page_labels == expected
+
+
+@pytest.mark.enable_socket
+def test_index2label_kids__recursive(caplog):
+    url = "https://github.com/py-pdf/pypdf/files/14842446/tt1.pdf"
+    r = PdfReader(
+        BytesIO(get_data_from_url(url=url, name="index2label_kids_recursive.pdf"))
+    )
+    expected = [
+        "A",
+        "B",
+        "C",
+        "D",
+        "E",
+        "F",
+        "G",
+        "H",
+        "I",
+        "J",
+        "K",
+        "L",
+        "M",
+        "N",
+        "O",
+        "P",
+        "17",
+        "18",
+        "19",
+    ]
+    assert r.page_labels == expected
+    assert caplog.text != ""
+
+
+def test_get_label_from_nums__empty_nums_list():
+    dictionary_object = DictionaryObject()
+    dictionary_object[NameObject("/Nums")] = ArrayObject()
+    assert get_label_from_nums(dictionary_object, 13) == "14"
+
+
+def test_get_label_from_nums__truncated_pair(caplog):
+    # Odd-length /Nums: the trailing key has no value object.
+    value = DictionaryObject()
+    value[NameObject("/S")] = NameObject("/D")
+    dictionary_object = DictionaryObject()
+    dictionary_object[NameObject("/Nums")] = ArrayObject(
+        [NumberObject(0), value, NumberObject(5)]
+    )
+    assert get_label_from_nums(dictionary_object, 7) == "8"
+    assert "Ignoring last /Nums key without a value." in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [
+        (DictionaryObject(), "{}"),
+        (NameObject("/invalid-key"), "'/invalid-key'"),
+        (TextStringObject("invalid key"), "'invalid key'"),
+    ],
+)
+def test_get_label_from_nums__non_numeric_key(caplog, key, expected):
+    """A /Nums whose next key is not a number falls back to the page position."""
+    value = DictionaryObject({NameObject("/S"): NameObject("/D")})
+    dictionary_object = DictionaryObject()
+    dictionary_object[NameObject("/Nums")] = ArrayObject(
+        [NumberObject(0), value, key, value]
+    )
+    assert get_label_from_nums(dictionary_object, 3) == "4"
+    assert caplog.messages == [
+        f"Ignoring malformed page label key {expected} in /Nums."
+    ]
+
+
+def test_get_label_from_nums__unknown_style(caplog):
+    # /S carries a numbering style that is not part of the specification.
+    value = DictionaryObject()
+    value[NameObject("/S")] = NameObject("/X")
+    dictionary_object = DictionaryObject()
+    dictionary_object[NameObject("/Nums")] = ArrayObject([NumberObject(0), value])
+    assert get_label_from_nums(dictionary_object, 3) == "4"
+    assert "Ignoring unknown page label numbering style '/X' in /Nums." in caplog.text
+
+
+def test_get_label_from_nums__malformed_start(caplog):
+    # /St is not an integer, so the label arithmetic cannot be performed.
+    value = DictionaryObject()
+    value[NameObject("/S")] = NameObject("/D")
+    value[NameObject("/St")] = NameObject("/bad")
+    dictionary_object = DictionaryObject()
+    dictionary_object[NameObject("/Nums")] = ArrayObject([NumberObject(0), value])
+    assert get_label_from_nums(dictionary_object, 3) == "4"
+    assert caplog.messages == [
+        (
+            "Ignoring malformed page label entry in /Nums (/St='/bad', /P=''): "
+            "unsupported operand type(s) for +: 'int' and 'NameObject'"
+        )
+    ]
+
+
+def test_index2label__empty_kids_list():
+    reader = PdfReader(RESOURCE_ROOT / "crazyones.pdf")
+    number_tree = DictionaryObject()
+    number_tree[NameObject("/Kids")] = ArrayObject()
+    root = reader.root_object
+    root[NameObject("/PageLabels")] = number_tree
+
+    assert index2label(reader, 42) == "43"
+
+
+@pytest.mark.parametrize(
+    "limits",
+    [
+        None,  # /Limits key entirely absent
+        ArrayObject([NumberObject(0)]),  # truncated to a single bound
+    ],
+)
+def test_index2label__malformed_kid_limits(limits, caplog):
+    reader = PdfReader(RESOURCE_ROOT / "crazyones.pdf")
+    kid = DictionaryObject()
+    if limits is not None:
+        kid[NameObject("/Limits")] = limits
+    kid[NameObject("/Nums")] = ArrayObject([NumberObject(0), DictionaryObject()])
+    number_tree = DictionaryObject()
+    number_tree[NameObject("/Kids")] = ArrayObject([kid])
+    reader.root_object[NameObject("/PageLabels")] = number_tree
+
+    assert index2label(reader, 5) == "6"
+    assert "Ignoring kid with missing or malformed /Limits" in caplog.text
+    assert "Could not reliably determine page label" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("kids", "expected"),
+    [
+        pytest.param(
+            NumberObject(1), "Page label kids are not an array: 1", id="number"
+        ),
+        pytest.param(
+            DictionaryObject(), "Page label kids are not an array: {}", id="dictionary"
+        ),
+        pytest.param(
+            TextStringObject("x"), "Page label kids are not an array: x", id="string"
+        ),
+    ],
+)
+def test_index2label__kids_not_an_array(caplog, kids, expected):
+    """A /Kids entry which is not an array is reported instead of being iterated."""
+    reader = PdfReader(RESOURCE_ROOT / "crazyones.pdf")
+    number_tree = DictionaryObject()
+    number_tree[NameObject("/Kids")] = kids
+    reader.root_object[NameObject("/PageLabels")] = number_tree
+
+    assert index2label(reader, 5) == "6"
+    assert expected in caplog.text
+    assert "Could not reliably determine page label" in caplog.text
+
+
+def test_index2label__kid_not_a_dictionary(caplog):
+    """A kid which is not a dictionary is skipped rather than being looked up."""
+    reader = PdfReader(RESOURCE_ROOT / "crazyones.pdf")
+    number_tree = DictionaryObject()
+    number_tree[NameObject("/Kids")] = ArrayObject([NumberObject(5)])
+    reader.root_object[NameObject("/PageLabels")] = number_tree
+
+    assert index2label(reader, 5) == "6"
+    assert "Ignoring kid which is not a dictionary in /PageLabels." in caplog.text
+    assert "Could not reliably determine page label" in caplog.text
+
+
+def test_index2label__kids_in_indirect_objects(caplog):
+    """Both the kids array and the kid itself may be stored indirectly."""
+    writer = PdfWriter()
+    for _ in range(2):
+        writer.add_blank_page(width=72, height=72)
+    label = DictionaryObject()
+    label[NameObject("/S")] = NameObject("/D")
+    kid = DictionaryObject()
+    kid[NameObject("/Limits")] = ArrayObject([NumberObject(0), NumberObject(1)])
+    kid[NameObject("/Nums")] = ArrayObject([NumberObject(0), label])
+    number_tree = DictionaryObject()
+    number_tree[NameObject("/Kids")] = writer._add_object(
+        ArrayObject([writer._add_object(kid)])
+    )
+    writer.root_object[NameObject("/PageLabels")] = number_tree
+    stream = BytesIO()
+    writer.write(stream)
+    stream.seek(0)
+
+    assert PdfReader(stream).page_labels == ["1", "2"]
+    assert caplog.text == ""
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        pytest.param(
+            NumberObject(1), "Page labels are not a dictionary: 1", id="number"
+        ),
+        pytest.param(ArrayObject(), "Page labels are not a dictionary: []", id="array"),
+        pytest.param(
+            TextStringObject("x"), "Page labels are not a dictionary: x", id="string"
+        ),
+    ],
+)
+def test_index2label__page_labels_not_a_dictionary(caplog, value, expected):
+    """A malformed /PageLabels raised a TypeError from the first membership test."""
+    writer = PdfWriter()
+    for _ in range(2):
+        writer.add_blank_page(width=72, height=72)
+    writer.root_object[NameObject("/PageLabels")] = value
+    stream = BytesIO()
+    writer.write(stream)
+    stream.seek(0)
+
+    assert PdfReader(stream).page_labels == ["1", "2"]
+    assert expected in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("nums", "expected"),
+    [
+        pytest.param(
+            NumberObject(1), "Page label numbers are not an array: 1", id="number"
+        ),
+        pytest.param(
+            DictionaryObject(), "Page label numbers are not an array: {}", id="dictionary"
+        ),
+        pytest.param(
+            TextStringObject("x"), "Page label numbers are not an array: x", id="string"
+        ),
+    ],
+)
+def test_index2label__nums_not_an_array(caplog, nums, expected):
+    """A /Nums entry which is not an array falls back to the page position."""
+    writer = PdfWriter()
+    for _ in range(2):
+        writer.add_blank_page(width=72, height=72)
+    writer.root_object[NameObject("/PageLabels")] = DictionaryObject(
+        {NameObject("/Nums"): nums}
+    )
+    stream = BytesIO()
+    writer.write(stream)
+    stream.seek(0)
+
+    assert PdfReader(stream).page_labels == ["1", "2"]
+    assert expected in caplog.text
+
+
+def test_get_label_from_nums__roman__limits(caplog):
+    with pytest.raises(expected_exception=ValueError, match=r"^Number is out of range\.$"):
+        number2uppercase_roman_numeral(4321)
+    assert caplog.messages == []
+
+    labels_large = DictionaryObject({
+        NameObject("/Nums"): ArrayObject([
+            NumberObject(0),
+            DictionaryObject({
+                NameObject("/S"): NameObject("/R"),
+                NameObject("/St"): NumberObject(5000)
+            })
+        ])
+    })
+    assert get_label_from_nums(labels_large, 0) == "1"
+    assert caplog.messages == [
+        "Ignoring malformed page label entry in /Nums (/St=5000, /P=''): Number is out of range."
+    ]
+
+    labels_negative = DictionaryObject({
+        NameObject("/Nums"): ArrayObject([
+            NumberObject(-10_000),
+            DictionaryObject({
+                NameObject("/S"): NameObject("/R"),
+            })
+        ])
+    })
+    caplog.clear()
+    assert get_label_from_nums(labels_negative, 0) == "1"
+    assert caplog.messages == [
+        "Ignoring malformed page label entry in /Nums (/St=1, /P=''): Number is out of range."
+    ]
+
+
+def test_get_label_from_nums__regular__limits(caplog):
+    with pytest.raises(expected_exception=ValueError, match=r"^Number is too large\.$"):
+        number2lowercase_letter(15_000)
+    assert caplog.messages == []
+
+    labels_at_limit = DictionaryObject({
+        NameObject("/Nums"): ArrayObject([
+            NumberObject(0),
+            DictionaryObject({
+                NameObject("/S"): NameObject("/A"),
+                NameObject("/St"): NumberObject(13_312)
+            })
+        ])
+    })
+    assert get_label_from_nums(labels_at_limit, 0) == "Z" * 512
+    assert caplog.messages == []
+
+    labels_over_limit = DictionaryObject({
+        NameObject("/Nums"): ArrayObject([
+            NumberObject(0),
+            DictionaryObject({
+                NameObject("/S"): NameObject("/A"),
+                NameObject("/St"): NumberObject(13_313)
+            })
+        ])
+    })
+    assert get_label_from_nums(labels_over_limit, 0) == "1"
+    assert caplog.messages == [
+        "Ignoring malformed page label entry in /Nums (/St=13313, /P=''): Number is too large."]
+
+    caplog.clear()
+    labels_large = DictionaryObject({
+        NameObject("/Nums"): ArrayObject([
+            NumberObject(0),
+            DictionaryObject({
+                NameObject("/S"): NameObject("/A"),
+                NameObject("/St"): NumberObject(15_000)
+            })
+        ])
+    })
+    assert get_label_from_nums(labels_large, 0) == "1"
+    assert caplog.messages == [
+        "Ignoring malformed page label entry in /Nums (/St=15000, /P=''): Number is too large."
+    ]
+
+
+def _build_label(*, style=None, prefix=None, start=None) -> DictionaryObject:
+    entry = DictionaryObject()
+    if style is not None:
+        entry[NameObject("/S")] = NameObject(style)
+    if prefix is not None:
+        entry[NameObject("/P")] = TextStringObject(prefix)
+    if start is not None:
+        entry[NameObject("/St")] = NumberObject(start)
+    return entry
+
+
+@pytest.mark.parametrize(
+    "nums",
+    [
+        pytest.param(
+            [0, _build_label(style="/r"), 4, _build_label(style="/D"), 10, _build_label(style="/A", prefix="App-")],
+            id="roman-decimal-letters-with-prefix",
+        ),
+        pytest.param([3, _build_label(style="/D", start=7)], id="first-key-after-first-page-with-start"),
+        pytest.param(
+            [0, _build_label(style="/D"), 1, _build_label(style="/R"), 2, _build_label(prefix="Cover")],
+            id="prefix-without-style",
+        ),
+        pytest.param([0, _build_label(style="/X"), 5, _build_label(style="/D")], id="unknown-style"),
+        pytest.param([0, NullObject(), 6, _build_label(style="/a")], id="value-not-a-dictionary"),
+        pytest.param([8, _build_label(style="/D"), 2, _build_label(style="/r")], id="keys-not-sorted"),
+        pytest.param([0, _build_label(style="/D"), 5], id="last-key-without-value"),
+        pytest.param([0, _build_label(style="/D"), 0, _build_label(style="/r")], id="duplicate-keys"),
+        pytest.param([40, _build_label(style="/D")], id="only-key-after-last-page"),
+        pytest.param(
+            [40, _build_label(style="/D"), 0, _build_label(style="/r")],
+            id="first-key-after-last-page-then-smaller-key",
+        ),
+        pytest.param(
+            [40, _build_label(style="/D"), 50, _build_label(style="/r")],
+            id="first-key-after-last-page-then-larger-key",
+        ),
+        pytest.param(
+            [key for i in range(100) for key in (i * 3, _build_label(style="/D", prefix=f"P{i}-"))],
+            id="more-ranges-than-pages",
+        ),
+        pytest.param(
+            [0, _build_label(style="/D"), 10, _build_label(style="/r"), 50],
+            id="key-without-value-after-last-page",
+        ),
+        pytest.param([0, _build_label(style="/D"), NameObject("/x"), _build_label(style="/r")], id="malformed-key"),
+        pytest.param([], id="empty-array"),
+    ],
+)
+def test_index2labels_matches_index2label(nums, caplog):
+    reader = PdfReader(RESOURCE_ROOT / "crazyones.pdf")
+    reader.root_object[NameObject("/PageLabels")] = DictionaryObject(
+        {NameObject("/Nums"): ArrayObject(NumberObject(n) if isinstance(n, int) else n for n in nums)}
+    )
+
+    expected = [index2label(reader, index) for index in range(30)]
+    expected_messages = caplog.messages[:]
+    caplog.clear()
+
+    assert index2labels(reader, 30) == expected
+    assert caplog.messages == expected_messages
+
+
+def test_index2labels__no_pages():
+    reader = PdfReader(RESOURCE_ROOT / "crazyones.pdf")
+    reader.root_object[NameObject("/PageLabels")] = NullObject()
+
+    assert index2labels(reader, 0) == []
+
+
+def test_index2labels__nums_not_an_array(caplog):
+    reader = PdfReader(RESOURCE_ROOT / "crazyones.pdf")
+    reader.root_object[NameObject("/PageLabels")] = DictionaryObject(
+        {NameObject("/Nums"): DictionaryObject({NameObject("/A"): NumberObject(1)})}
+    )
+    expected = [index2label(reader, index) for index in range(3)]
+    expected_messages = caplog.messages[:]
+    caplog.clear()
+
+    assert index2labels(reader, 3) == expected
+    assert caplog.messages == expected_messages
+
+
+def _build_kid(*, first, last, nums=None, kids=None) -> DictionaryObject:
+    kid = DictionaryObject({NameObject("/Limits"): ArrayObject([NumberObject(first), NumberObject(last)])})
+    if nums is not None:
+        kid[NameObject("/Nums")] = ArrayObject(NumberObject(n) if isinstance(n, int) else n for n in nums)
+    if kids is not None:
+        kid[NameObject("/Kids")] = ArrayObject(kids)
+    return kid
+
+
+@pytest.mark.parametrize(
+    "kids",
+    [
+        pytest.param(
+            [_build_kid(first=0, last=30, nums=[0, _build_label(style="/r"), 4, _build_label(style="/D")])],
+            id="one-kid",
+        ),
+        pytest.param(
+            [
+                _build_kid(first=0, last=3, nums=[0, _build_label(style="/r")]),
+                _build_kid(first=4, last=30, nums=[4, _build_label(style="/D")]),
+            ],
+            id="two-kids",
+        ),
+        pytest.param(
+            [
+                _build_kid(first=0, last=10, nums=[0, _build_label(style="/D")]),
+                _build_kid(first=5, last=30, nums=[0, _build_label(style="/r")]),
+            ],
+            id="overlapping-limits",
+        ),
+        pytest.param(
+            [
+                _build_kid(first=10, last=30, nums=[10, _build_label(style="/D")]),
+                _build_kid(first=0, last=12, nums=[0, _build_label(style="/r")]),
+            ],
+            id="limits-not-sorted",
+        ),
+        pytest.param(
+            [
+                _build_kid(
+                    first=0,
+                    last=30,
+                    kids=[
+                        _build_kid(first=0, last=5, nums=[0, _build_label(style="/r")]),
+                        _build_kid(first=6, last=30, nums=[6, _build_label(style="/D", prefix="A-")]),
+                    ],
+                )
+            ],
+            id="nested-kids",
+        ),
+        pytest.param(
+            [
+                _build_kid(first=0, last=5, nums=[0, _build_label(style="/D")]),
+                _build_kid(first=10, last=12, nums=[10, _build_label(style="/r")]),
+            ],
+            id="pages-without-kid",
+        ),
+        pytest.param(
+            [TextStringObject("not a kid"), _build_kid(first=0, last=30, nums=[0, _build_label(style="/D")])],
+            id="kid-not-a-dictionary",
+        ),
+    ],
+)
+def test_index2labels_matches_index2label__kids(kids):
+    reader = PdfReader(RESOURCE_ROOT / "crazyones.pdf")
+    reader.root_object[NameObject("/PageLabels")] = DictionaryObject({NameObject("/Kids"): ArrayObject(kids)})
+
+    assert index2labels(reader, 30) == [index2label(reader, index) for index in range(30)]
+
+
+def test_index2labels_matches_index2label__indirect_and_shared_nums():
+    writer = PdfWriter()
+    nums = writer._add_object(
+        ArrayObject(
+            [
+                NumberObject(0),
+                writer._add_object(_build_label(style="/r")),
+                NumberObject(4),
+                writer._add_object(_build_label(style="/D")),
+            ]
+        )
+    )
+    kids = [_build_kid(first=0, last=3), _build_kid(first=4, last=30)]
+    for kid in kids:
+        kid[NameObject("/Nums")] = nums
+    writer.root_object[NameObject("/PageLabels")] = DictionaryObject({NameObject("/Kids"): ArrayObject(kids)})
+
+    assert index2labels(writer, 30) == [index2label(writer, index) for index in range(30)]
+
+    writer.root_object[NameObject("/PageLabels")] = DictionaryObject({NameObject("/Nums"): nums})
+    assert index2labels(writer, 30) == [index2label(writer, index) for index in range(30)]
+
+
+def _build_kid_with(*, first, last, key, value) -> DictionaryObject:
+    kid = _build_kid(first=first, last=last)
+    kid[NameObject(key)] = value
+    return kid
+
+
+def _build_kids_tree(*kids: PdfObject) -> DictionaryObject:
+    return DictionaryObject({NameObject("/Kids"): ArrayObject(kids)})
+
+
+_DECIMAL_KID = _build_kid(first=0, last=30, nums=[0, _build_label(style="/D")])
+_SHARED_KIDS = ArrayObject([_build_kid(first=0, last=30, nums=[0, _build_label(style="/r")])])
+
+
+@pytest.mark.parametrize(
+    "number_tree",
+    [
+        pytest.param(DictionaryObject(), id="neither-nums-nor-kids"),
+        pytest.param(DictionaryObject({NameObject("/Kids"): NumberObject(5)}), id="kids-not-an-array"),
+        pytest.param(
+            _build_kids_tree(_build_kid_with(first=0, last=30, key="/Kids", value=NumberObject(5))),
+            id="nested-kids-not-an-array",
+        ),
+        pytest.param(
+            _build_kids_tree(_build_kid_with(first=0, last=30, key="/Nums", value=NumberObject(3))),
+            id="nums-of-kid-not-an-array",
+        ),
+        pytest.param(
+            _build_kids_tree(
+                DictionaryObject({NameObject("/Nums"): ArrayObject([NumberObject(0), _build_label(style="/r")])}),
+                _DECIMAL_KID,
+            ),
+            id="kid-without-limits",
+        ),
+        pytest.param(
+            _build_kids_tree(
+                _build_kid(first=100, last=200, nums=[0, _build_label(style="/r")]),
+                _build_kid(first=-5, last=-1, nums=[0, _build_label(style="/r")]),
+                _DECIMAL_KID,
+            ),
+            id="limits-outside-of-pages",
+        ),
+        pytest.param(
+            _build_kids_tree(
+                _build_kid_with(first=0, last=9, key="/Kids", value=_SHARED_KIDS),
+                _build_kid_with(first=10, last=30, key="/Kids", value=_SHARED_KIDS),
+            ),
+            id="kids-sharing-a-kids-array",
+        ),
+    ],
+)
+def test_index2labels_matches_index2label__trees(number_tree):
+    reader = PdfReader(RESOURCE_ROOT / "crazyones.pdf")
+    reader.root_object[NameObject("/PageLabels")] = number_tree
+
+    assert index2labels(reader, 30) == [index2label(reader, index) for index in range(30)]
+
+
+def test_index2labels__kid_which_cannot_be_read():
+    writer = PdfWriter()
+    broken_kid = IndirectObject(999, 0, writer)
+
+    writer.root_object[NameObject("/PageLabels")] = _build_kids_tree(_DECIMAL_KID, broken_kid)
+    assert index2labels(writer, 30) == [index2label(writer, index) for index in range(30)]
+
+    writer.root_object[NameObject("/PageLabels")] = _build_kids_tree(broken_kid, _DECIMAL_KID)
+    with pytest.raises(IndexError):
+        index2label(writer, 0)
+    with pytest.raises(IndexError):
+        index2labels(writer, 30)
