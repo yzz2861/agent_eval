@@ -114,8 +114,8 @@ Options
    header to ``noopen`` to prevent IE >= 8 to from opening file downloads
    directly and only save them instead.
 
-Per-view options
-~~~~~~~~~~~~~~~~
+Per-view and per-blueprint options
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Sometimes you want to change the policy for a specific view. The
 ``force_https``, ``frame_options``, ``frame_options_allow_from``, and
@@ -137,6 +137,23 @@ Sometimes you want to change the policy for a specific view. The
     @talisman(frame_options=ALLOW_FROM, frame_options_allow_from='*')
     def embeddable():
         return 'Embeddable'
+
+The same decorator can be applied to a blueprint. View level options take
+precedence over blueprint level options, which take precedence over the
+options passed to ``Talisman``. Overrides are resolved per request and never
+affect other requests.
+
+.. code:: python
+
+    from flask import Blueprint
+
+    blueprint = talisman(
+        content_security_policy=None
+    )(Blueprint('blueprint', __name__))
+
+    @blueprint.route('/blueprint')
+    def blueprint_view():
+        return 'Blueprint'
 
 Content Security Policy
 -----------------------
@@ -276,6 +293,18 @@ The nonce needs to be added to the script tag in the template:
 
 Note that the CSP directive (`script-src` in the example) to which the `nonce-...`
 source should be added needs to be defined explicitly.
+
+The nonce is generated exactly once per request, before the view runs, so the
+value returned by ``csp_nonce()`` in a template is always the same as the
+value in the ``Content-Security-Policy`` (or
+``Content-Security-Policy-Report-Only``) header. This also applies to
+streaming responses: the header is finalized before the response body is
+iterated, and Talisman keeps the request context alive for the streaming
+iterator. A fresh nonce is generated for every request, including 304,
+redirect and error responses, and nonces are never shared between concurrent
+requests. When the CSP is disabled (globally or via a per-view/per-blueprint
+override) or ``content_security_policy_nonce_in`` is empty, no nonce is
+generated and ``csp_nonce()`` returns an empty string.
 
 Example 7
 ~~~~~~~~~

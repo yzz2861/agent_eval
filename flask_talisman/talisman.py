@@ -178,17 +178,26 @@ class Talisman(object):
         view_options = getattr(
             view_function, 'talisman_view_options', {})
 
-        view_options.setdefault('force_https', self.force_https)
-        view_options.setdefault('frame_options', self.frame_options)
-        view_options.setdefault(
-            'frame_options_allow_from', self.frame_options_allow_from)
-        view_options.setdefault(
-            'content_security_policy', self.content_security_policy)
-        view_options.setdefault(
-            'feature_policy', self.feature_policy
-        )
+        blueprint = flask.current_app.blueprints.get(
+            flask.request.blueprint) if flask.request.blueprint else None
+        blueprint_options = getattr(
+            blueprint, 'talisman_blueprint_options', {})
 
-        return view_options
+        # Build a fresh dict per request so that per-view and per-blueprint
+        # overrides never leak into other requests. View level options take
+        # precedence over blueprint level options, which take precedence over
+        # the extension level defaults.
+        local_options = {
+            'force_https': self.force_https,
+            'frame_options': self.frame_options,
+            'frame_options_allow_from': self.frame_options_allow_from,
+            'content_security_policy': self.content_security_policy,
+            'feature_policy': self.feature_policy,
+        }
+        local_options.update(blueprint_options)
+        local_options.update(view_options)
+
+        return local_options
 
     def _force_https(self):
         """Redirect any non-https requests to https.
@@ -225,9 +234,24 @@ class Talisman(object):
         self._set_content_security_policy_headers(response.headers, options)
         self._set_hsts_headers(response.headers)
         self._set_referrer_policy_headers(response.headers)
+        # Headers (and therefore the nonce) are finalized at this point.
+        # Flask pops the request context before a streaming response's
+        # iterator is consumed, so keep it alive to guarantee that anything
+        # rendered by the generator, including csp_nonce(), observes the
+        # same request and the same nonce as the headers.
+        if response.is_streamed:
+            response.response = flask.stream_with_context(
+                response.response)
         return response
 
     def _make_nonce(self):
+        """Generate the request's nonce exactly once, before the view runs.
+
+        The nonce is stored on the request object so that the template
+        global, the CSP header and the report-only header all observe the
+        same value. No nonce is generated when CSP is disabled (globally or
+        via a route/blueprint override) or when no section is configured.
+        """
         local_options = self._get_local_options()
         if (
                 local_options['content_security_policy'] and
@@ -236,6 +260,11 @@ class Talisman(object):
             flask.request.csp_nonce = get_random_string(NONCE_LENGTH)
 
     def _get_nonce(self):
+        """Return the nonce generated for the current request.
+
+        Returns an empty string when nonces are disabled, which keeps
+        templates usable on routes without a CSP.
+        """
         return getattr(flask.request, 'csp_nonce', '')
 
     def _parse_policy(self, policy):
@@ -254,10 +283,9 @@ class Talisman(object):
                 content = ' '.join(content)
             policy_part = '{} {}'.format(section, content)
 
-            if (
-                    hasattr(flask.request, 'csp_nonce') and
-                    section in self.content_security_policy_nonce_in):
-                policy_part += " 'nonce-{}'".format(flask.request.csp_nonce)
+            nonce = self._get_nonce()
+            if nonce and section in self.content_security_policy_nonce_in:
+                policy_part += " 'nonce-{}'".format(nonce)
 
             policies.append(policy_part)
 
@@ -329,10 +357,14 @@ class Talisman(object):
 
     def __call__(self, **kwargs):
         """Use talisman as a decorator to configure options for a particular
-        view.
+        view or blueprint.
 
         Only frame_options, frame_options_allow_from, and
         content_security_policy can be set on a per-view basis.
+
+        View level options take precedence over blueprint level options,
+        which take precedence over the options given to ``init_app``.
+        Overrides are resolved per request and never affect other requests.
 
         Example:
 
@@ -347,9 +379,22 @@ class Talisman(object):
             @talisman(frame_options=ALLOW_FROM, frame_options_allow_from='*')
             def embeddable():
                 return 'Embeddable'
+
+        Blueprint example:
+
+            bp = talisman(
+                content_security_policy=None
+            )(Blueprint('bp', __name__))
+
+            @bp.route('/bp')
+            def blueprint_view():
+                return 'Blueprint'
         """
         def decorator(f):
-            setattr(f, 'talisman_view_options', kwargs)
+            if isinstance(f, flask.Blueprint):
+                setattr(f, 'talisman_blueprint_options', kwargs)
+            else:
+                setattr(f, 'talisman_view_options', kwargs)
             return f
         return decorator
 
