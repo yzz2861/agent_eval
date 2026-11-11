@@ -1,8 +1,13 @@
 """Tests for the ijson.parse method"""
 
+import asyncio
+import collections
+import io
 import sys
 
 import pytest
+import ijson
+from ijson.common import ParseBudget, ParseBudgetExceeded
 
 from .test_base import ARRAY_JSON, ARRAY_JSON_PARSE_EVENTS, JSON, JSON_PARSE_EVENTS
 
@@ -52,3 +57,244 @@ def test_parse_int_exceeding_max_str_digits(adaptor):
     json = b'[%s]' % (b'1' * (sys.get_int_max_str_digits() + 1))
     with pytest.raises(ValueError, match="integer string conversion"):
         adaptor.parse(json)
+
+
+PYTHON_BACKEND = ijson.get_backend('python')
+
+
+class CountingReader:
+    def __init__(self, data):
+        self.data = data
+        self.pos = 0
+        self.reads = []
+
+    def read(self, n=-1):
+        self.reads.append((n, self.pos))
+        if n == 0:
+            return b''
+        if n < 0:
+            n = len(self.data) - self.pos
+        chunk = self.data[self.pos:self.pos + n]
+        self.pos += len(chunk)
+        return chunk
+
+
+class GreedyReader(CountingReader):
+    """Returns a whole chunk regardless of the requested size."""
+    def __init__(self, data):
+        super().__init__(data)
+        self.returned = False
+
+    def read(self, n=-1):
+        self.reads.append((n, self.pos))
+        if n == 0:
+            return b''
+        if self.returned:
+            return b''
+        self.returned = True
+        chunk = self.data
+        self.pos = len(chunk)
+        return chunk
+
+
+class AsyncCountingReader(CountingReader):
+    async def read(self, n=-1):
+        await asyncio.sleep(0)
+        return super().read(n)
+
+
+def test_budget_depth_and_error_details():
+    budget = ParseBudget(max_depth=2)
+    with pytest.raises(ParseBudgetExceeded) as excinfo:
+        list(PYTHON_BACKEND.parse(b'[[[1]]]', budget=budget))
+    error = excinfo.value
+    assert ('depth', 3, 2) == (error.dimension, error.used, error.limit)
+    assert 'depth' in str(error)
+    assert 2 == budget.depth
+
+
+def test_budget_long_string_and_key():
+    long_string = b'"' + b'a' * 32 + b'"'
+    budget = ParseBudget(max_string_bytes=10)
+    with pytest.raises(ParseBudgetExceeded) as excinfo:
+        list(PYTHON_BACKEND.basic_parse(
+            io.BytesIO(long_string), buf_size=4, budget=budget
+        ))
+    assert 'string_bytes' == excinfo.value.dimension
+    assert excinfo.value.used > 10
+
+    long_key = b'{"' + b'k' * 32 + b'": 1}'
+    budget = ParseBudget(max_key_bytes=10)
+    with pytest.raises(ParseBudgetExceeded) as excinfo:
+        list(PYTHON_BACKEND.basic_parse(
+            io.BytesIO(long_key), buf_size=4, budget=budget
+        ))
+    assert 'key_bytes' == excinfo.value.dimension
+    assert excinfo.value.used > 10
+
+
+def test_budget_counts_events_and_nodes():
+    budget = ParseBudget(max_events=4)
+    with pytest.raises(ParseBudgetExceeded) as excinfo:
+        list(PYTHON_BACKEND.basic_parse(b'[1, 2, 3]', budget=budget))
+    assert ('events', 5, 4) == (
+        excinfo.value.dimension, excinfo.value.used, excinfo.value.limit
+    )
+    assert 5 == budget.events
+
+    budget = ParseBudget(max_nodes=3)
+    with pytest.raises(ParseBudgetExceeded) as excinfo:
+        list(PYTHON_BACKEND.basic_parse(b'[1, 2, 3]', budget=budget))
+    assert ('nodes', 4, 3) == (
+        excinfo.value.dimension, excinfo.value.used, excinfo.value.limit
+    )
+
+
+def test_budget_limits_reads_before_they_happen():
+    data = b'[' + b'0,' * 200 + b'0]'
+    reader = CountingReader(data)
+    budget = ParseBudget(max_input_bytes=100, max_buffer_bytes=32)
+    with pytest.raises(ParseBudgetExceeded) as excinfo:
+        list(PYTHON_BACKEND.basic_parse(
+            reader, buf_size=1024 * 1024, budget=budget
+        ))
+    error = excinfo.value
+    assert ('input_bytes', 100, 100) == (
+        error.dimension, error.used, error.limit
+    )
+    assert 100 == reader.pos
+    assert all(n <= 32 for n, _ in reader.reads if n > 0)
+    assert budget.peak_buffer_bytes <= 32
+
+
+def test_budget_detects_oversized_chunk():
+    data = b'[' + b'0,' * 100 + b'0]'
+    reader = GreedyReader(data)
+    budget = ParseBudget(max_buffer_bytes=32)
+    with pytest.raises(ParseBudgetExceeded) as excinfo:
+        list(PYTHON_BACKEND.basic_parse(
+            reader, buf_size=1024 * 1024, budget=budget
+        ))
+    assert 'buffer_bytes' == excinfo.value.dimension
+    assert excinfo.value.used == len(data)
+    assert budget.peak_buffer_bytes == len(data)
+
+
+def test_budget_all_entry_points():
+    data = b'[[1], [2], [3]]'
+
+    budget = ParseBudget(max_depth=1)
+    with pytest.raises(ParseBudgetExceeded):
+        list(PYTHON_BACKEND.parse(data, budget=budget))
+
+    budget = ParseBudget(max_string_bytes=1)
+    with pytest.raises(ParseBudgetExceeded):
+        list(PYTHON_BACKEND.parse(
+            io.BytesIO(b'"too long"'), buf_size=2, budget=budget
+        ))
+
+    budget = ParseBudget(max_nodes=2)
+    with pytest.raises(ParseBudgetExceeded):
+        list(PYTHON_BACKEND.parse(
+            ijson.from_iter([data]), budget=budget
+        ))
+
+    budget = ParseBudget(max_events=3)
+    with pytest.raises(ParseBudgetExceeded):
+        asyncio.run(_consume_async(AsyncCountingReader(data), budget))
+
+
+async def _consume_async(reader, budget):
+    async for _ in PYTHON_BACKEND.parse_async(reader, budget=budget):
+        pass
+
+
+def test_budget_async_and_early_close():
+    source = b'[' + b'0,' * 100 + b'0]'
+
+    async def run():
+        reader = AsyncCountingReader(source)
+        iterator = PYTHON_BACKEND.basic_parse_async(
+            reader, buf_size=8, budget=ParseBudget(max_input_bytes=16)
+        )
+        events = []
+        with pytest.raises(ParseBudgetExceeded):
+            async for event in iterator:
+                events.append(event)
+        assert 16 == reader.pos
+
+        reader = AsyncCountingReader(source)
+        iterator = PYTHON_BACKEND.basic_parse_async(reader, buf_size=8)
+        await iterator.__anext__()
+        pos, reads = reader.pos, len(reader.reads)
+        await iterator.aclose()
+        assert (pos, reads) == (reader.pos, len(reader.reads))
+        with pytest.raises(StopAsyncIteration):
+            await iterator.__anext__()
+
+    asyncio.run(run())
+
+
+def test_budget_generator_close_does_not_read():
+    reader = CountingReader(b'[' + b'0,' * 100 + b'0]')
+    iterator = PYTHON_BACKEND.basic_parse(reader, buf_size=8)
+    next(iterator)
+    pos, reads = reader.pos, len(reader.reads)
+    iterator.close()
+    assert (pos, reads) == (reader.pos, len(reader.reads))
+
+
+def test_budget_push_coroutine_entry():
+    events = ijson.sendable_list()
+    coro = PYTHON_BACKEND.basic_parse_coro(
+        events, budget=ParseBudget(max_nodes=2)
+    )
+    with pytest.raises(ParseBudgetExceeded):
+        coro.send(b'[1, 2]')
+
+
+def test_budget_multiple_values_accumulates():
+    data = b'{"a": 1}\n{"b": 2}\n'
+    budget = ParseBudget()
+    events = list(PYTHON_BACKEND.basic_parse(
+        data, multiple_values=True, budget=budget
+    ))
+    assert 0 == budget.depth
+    assert budget.events == len(events)
+    assert 2 == sum(1 for event, _ in events if event == 'start_map')
+
+    budget = ParseBudget(max_nodes=3)
+    with pytest.raises(ParseBudgetExceeded):
+        list(PYTHON_BACKEND.basic_parse(
+            data, multiple_values=True, budget=budget
+        ))
+
+
+def test_budget_large_array_stays_incremental():
+    data = b'[' + b','.join(
+        b'{"i": %d}' % i for i in range(200)
+    ) + b']'
+    reader = CountingReader(data)
+    budget = ParseBudget(
+        max_depth=3, max_buffer_bytes=64, max_input_bytes=len(data) + 8
+    )
+    iterator = PYTHON_BACKEND.items(reader, 'item', budget=budget)
+    first = next(iterator)
+    assert {'i': 0} == first
+    assert reader.pos < len(data)
+    rest = list(iterator)
+    assert [{'i': i} for i in range(1, 200)] == rest
+    assert budget.peak_buffer_bytes <= 64
+
+
+def test_budget_prefix_and_map_type_share_counts():
+    data = (b'{"skip": {"a": "x"}, '
+            b'"pick": [{"a": 1}, {"b": 2}]}')
+    expected_events = sum(1 for _ in PYTHON_BACKEND.basic_parse(data))
+    budget = ParseBudget(max_depth=3, max_events=expected_events)
+    items = list(PYTHON_BACKEND.items(
+        data, 'pick.item', map_type=collections.OrderedDict, budget=budget
+    ))
+    assert [{'a': 1}, {'b': 2}] == items
+    assert all(isinstance(item, collections.OrderedDict) for item in items)
+    assert expected_events == budget.events

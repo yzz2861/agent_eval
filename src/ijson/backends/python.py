@@ -50,11 +50,20 @@ def utf8_encoder(target):
         if sdata:
             send(sdata)
         elif not bdata:
-            target.close()
+            if final:
+                target.close()
+            else:
+                # Signal a clean end of input to the Lexer.  GeneratorExit
+                # above (an explicit close) must not look like EOF, otherwise
+                # an aborted parse would run the rest of the pipeline.
+                try:
+                    send('')
+                except StopIteration:
+                    pass
             break
 
 @utils.coroutine
-def Lexer(target):
+def Lexer(target, budget=None, budget_context=None):
     """
     Parses lexemes out of the incoming content, and sends them to parse_value.
     A special EOF result is sent when the data source has been exhausted to
@@ -65,6 +74,9 @@ def Lexer(target):
         data = (yield)
     except GeneratorExit:
         data = ''
+        closed = True
+    else:
+        closed = False
     buf = data
     pos = 0
     discarded = 0
@@ -76,6 +88,7 @@ def Lexer(target):
             if lexeme == '"':
                 pos = match.start()
                 start = pos + 1
+                kind = budget_context.get('kind') if budget_context else None
                 while True:
                     try:
                         end = buf.index('"', start)
@@ -87,13 +100,22 @@ def Lexer(target):
                         else:
                             break
                     except ValueError:
+                        if budget is not None:
+                            budget.check_lexeme(
+                                kind, len(buf) - (match.start() + 1)
+                            )
                         try:
                             data = (yield)
                         except GeneratorExit:
                             data = ''
+                            closed = True
                         if not data:
+                            if closed and budget is not None and budget.aborted:
+                                return
                             raise common.IncompleteJSONError('Incomplete string lexeme')
                         buf += data
+                if budget is not None:
+                    budget.check_lexeme(kind, end - (match.start() + 1))
                 send((discarded + pos, buf[pos:end + 1]))
                 pos = end + 1
             else:
@@ -102,11 +124,16 @@ def Lexer(target):
                         data = (yield)
                     except GeneratorExit:
                         data = ''
+                        closed = True
                     if not data:
+                        if closed and budget is not None and budget.aborted:
+                            return
                         break
                     buf += data
                     match = LEXEME_RE.search(buf, pos)
                     lexeme = match.group()
+                if closed and budget is not None and budget.aborted:
+                    return
                 send((discarded + match.start(), lexeme))
                 pos = match.end()
         else:
@@ -116,7 +143,10 @@ def Lexer(target):
                     data = (yield)
                 except GeneratorExit:
                     data = ''
+                    closed = True
             if not data:
+                if closed and budget is not None and budget.aborted:
+                    break
                 # Normally should raise StopIteration, but can raise
                 # IncompleteJSONError too, which is the point of sending EOF
                 try:
@@ -140,7 +170,7 @@ inf = float("inf")
 neg_inf = float("-inf")
 
 @utils.coroutine
-def parse_value(target, multivalue, use_float):
+def parse_value(target, multivalue, use_float, budget_context=None):
     """
     Parses results coming out of the Lexer into ijson events, which are sent to
     `target`. A stack keeps track of the type of object being parsed at the time
@@ -163,6 +193,14 @@ def parse_value(target, multivalue, use_float):
     while True:
 
         if prev_pos is None:
+            if budget_context is not None:
+                state = state_stack[-1] if state_stack else None
+                if state == _PARSE_VALUE:
+                    budget_context['kind'] = 'string'
+                elif state == _PARSE_OBJECT_KEY:
+                    budget_context['kind'] = 'key'
+                else:
+                    budget_context['kind'] = None
             pos, symbol = (yield)
             if (pos, symbol) == EOF:
                 if state_stack:
@@ -198,6 +236,8 @@ def parse_value(target, multivalue, use_float):
             # Array start
             elif symbol == '[':
                 send(('start_array', None))
+                if budget_context is not None:
+                    budget_context['kind'] = 'string'
                 pos, symbol = (yield)
                 if (pos, symbol) == EOF:
                     raise common.IncompleteJSONError('Incomplete JSON content')
@@ -211,6 +251,8 @@ def parse_value(target, multivalue, use_float):
             # Object start
             elif symbol == '{':
                 send(('start_map', None))
+                if budget_context is not None:
+                    budget_context['kind'] = 'key'
                 pos, symbol = (yield)
                 if (pos, symbol) == EOF:
                     raise common.IncompleteJSONError('Incomplete JSON content')
@@ -254,6 +296,8 @@ def parse_value(target, multivalue, use_float):
             if symbol[0] != '"':
                 raise UnexpectedSymbol(symbol, pos)
             send(('map_key', parse_string(symbol)))
+            if budget_context is not None:
+                budget_context['kind'] = None
             pos, symbol = (yield)
             if (pos, symbol) == EOF:
                 raise common.IncompleteJSONError('Incomplete JSON content')
@@ -289,7 +333,7 @@ def parse_string(symbol):
 
 
 def basic_parse_basecoro(target, multiple_values=False, allow_comments=False,
-                         use_float=False):
+                         use_float=False, budget=None):
     '''
     Iterator yielding unprefixed events.
 
@@ -299,7 +343,11 @@ def basic_parse_basecoro(target, multiple_values=False, allow_comments=False,
     '''
     if allow_comments:
         raise ValueError("Comments are not supported by the python backend")
-    return utf8_encoder(Lexer(parse_value(target, multiple_values, use_float)))
+    budget_context = {'kind': None} if budget is not None else None
+    return utf8_encoder(Lexer(parse_value(
+        target, multiple_values, use_float,
+        budget_context=budget_context
+    ), budget=budget, budget_context=budget_context))
 
 
 common.enrich_backend(globals(), c_comments=False)

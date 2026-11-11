@@ -23,6 +23,280 @@ class IncompleteJSONError(JSONError):
     pass
 
 
+class ParseBudgetExceeded(JSONError):
+    '''
+    Raised when a parse budget limit is exceeded.
+
+    The offending dimension, the amount used (or the amount that would be
+    used), and the configured limit are available as attributes.
+    '''
+    _LIMIT_NAMES = {
+        'depth': 'max_depth',
+        'events': 'max_events',
+        'nodes': 'max_nodes',
+        'string_bytes': 'max_string_bytes',
+        'key_bytes': 'max_key_bytes',
+        'input_bytes': 'max_input_bytes',
+        'buffer_bytes': 'max_buffer_bytes',
+    }
+
+    def __init__(self, dimension, used, limit):
+        self.dimension = dimension
+        self.dimension_name = dimension
+        self.used = used
+        self.used_amount = used
+        self.limit = limit
+        self.limit_value = limit
+        limit_name = self._LIMIT_NAMES.get(dimension, dimension)
+        self.limit_name = limit_name
+        super(ParseBudgetExceeded, self).__init__(
+            'Parse budget exceeded for %s (%s): used=%s limit=%s' %
+            (dimension, limit_name, used, limit)
+        )
+
+
+class ParseBudget:
+    '''
+    Optional limits and accounting for a single parse.
+
+    All limits default to ``None`` (unlimited), so passing no budget to the
+    regular ijson entry points preserves their previous behaviour.  A budget
+    instance accumulates counters while parsing; create a new instance for a
+    new parse if limits should start counting from zero again.
+
+    Limits are expressed as:
+
+    - ``max_depth``: maximum container nesting depth (a top-level container
+      has depth 1)
+    - ``max_events``: maximum number of ijson events produced
+    - ``max_nodes``: maximum number of JSON nodes (containers and scalar
+      values, but not map keys or closing events)
+    - ``max_string_bytes``: maximum UTF-8 byte length of one string value
+    - ``max_key_bytes``: maximum UTF-8 byte length of one map key
+    - ``max_input_bytes``: maximum number of bytes read from the source
+    - ``max_buffer_bytes``: maximum size of a single read buffer/chunk; this
+      is also the largest read size requested from the source
+
+    The constructor also accepts common spelling variants such as
+    ``max_nesting_depth``, ``max_event_count``, ``max_node_count``,
+    ``max_string_length``, ``max_key_length``, ``max_consumed_bytes`` and
+    ``max_buffer_size``.
+    '''
+
+    _ALIASES = {
+        'depth': 'max_depth',
+        'max_nesting_depth': 'max_depth',
+        'max_nesting': 'max_depth',
+        'max_nesting_level': 'max_depth',
+        'events': 'max_events',
+        'max_event_count': 'max_events',
+        'nodes': 'max_nodes',
+        'max_node_count': 'max_nodes',
+        'max_string_length': 'max_string_bytes',
+        'max_string_size': 'max_string_bytes',
+        'string_bytes': 'max_string_bytes',
+        'max_key_length': 'max_key_bytes',
+        'max_key_size': 'max_key_bytes',
+        'key_bytes': 'max_key_bytes',
+        'max_consumed_bytes': 'max_input_bytes',
+        'max_read_bytes': 'max_input_bytes',
+        'input_bytes': 'max_input_bytes',
+        'max_buffer_size': 'max_buffer_bytes',
+        'max_chunk_bytes': 'max_buffer_bytes',
+        'buffer_bytes': 'max_buffer_bytes',
+        'buffer_size': 'max_buffer_bytes',
+    }
+
+    def __init__(self, max_depth=None, max_events=None, max_nodes=None,
+                 max_string_bytes=None, max_key_bytes=None,
+                 max_input_bytes=None, max_buffer_bytes=None, **aliases):
+        values = {
+            'max_depth': max_depth,
+            'max_events': max_events,
+            'max_nodes': max_nodes,
+            'max_string_bytes': max_string_bytes,
+            'max_key_bytes': max_key_bytes,
+            'max_input_bytes': max_input_bytes,
+            'max_buffer_bytes': max_buffer_bytes,
+        }
+        for alias, value in aliases.items():
+            try:
+                canonical = self._ALIASES[alias]
+            except KeyError:
+                raise TypeError('Unknown ParseBudget parameter: %s' % alias)
+            if values[canonical] is not None:
+                raise TypeError(
+                    'ParseBudget parameter %s specified more than once' %
+                    canonical
+                )
+            values[canonical] = value
+        for name, value in values.items():
+            if value is not None and (isinstance(value, bool) or
+                                      not isinstance(value, int) or value < 0):
+                raise TypeError('%s must be a non-negative integer or None' % name)
+            setattr(self, name, value)
+
+        self.depth = 0
+        self.max_depth_seen = 0
+        self.events = 0
+        self.nodes = 0
+        self.input_bytes = 0
+        self.peak_buffer_bytes = 0
+        self.max_string_bytes_seen = 0
+        self.max_key_bytes_seen = 0
+        self.aborted = False
+
+    def reset(self):
+        '''Clear accumulated counters while keeping the configured limits.'''
+        self.depth = 0
+        self.max_depth_seen = 0
+        self.events = 0
+        self.nodes = 0
+        self.input_bytes = 0
+        self.peak_buffer_bytes = 0
+        self.max_string_bytes_seen = 0
+        self.max_key_bytes_seen = 0
+        self.aborted = False
+
+    @property
+    def event_count(self):
+        return self.events
+
+    @property
+    def node_count(self):
+        return self.nodes
+
+    @property
+    def current_depth(self):
+        return self.depth
+
+    @property
+    def nesting_depth(self):
+        return self.depth
+
+    @property
+    def max_depth_reached(self):
+        return self.max_depth_seen
+
+    @property
+    def peak_depth(self):
+        return self.max_depth_seen
+
+    @property
+    def bytes_read(self):
+        return self.input_bytes
+
+    @property
+    def consumed_bytes(self):
+        return self.input_bytes
+
+    @property
+    def string_bytes(self):
+        return self.max_string_bytes_seen
+
+    @property
+    def key_bytes(self):
+        return self.max_key_bytes_seen
+
+    @property
+    def buffer_bytes(self):
+        return self.peak_buffer_bytes
+
+    @property
+    def peak_buffer(self):
+        return self.peak_buffer_bytes
+
+    def _exceeded(self, dimension, used, limit):
+        self.aborted = True
+        raise ParseBudgetExceeded(dimension, used, limit)
+
+    def _check(self, dimension, used, limit):
+        if limit is not None and used > limit:
+            self._exceeded(dimension, used, limit)
+
+    def prepare_read(self, requested):
+        '''Return the safe read size, raising before a budget would be crossed.'''
+        limit = requested
+        if self.max_buffer_bytes is not None and limit is not None:
+            limit = min(limit, self.max_buffer_bytes)
+        if self.max_input_bytes is not None:
+            remaining = self.max_input_bytes - self.input_bytes
+            if remaining <= 0:
+                self._exceeded('input_bytes', self.input_bytes,
+                               self.max_input_bytes)
+            if limit is None:
+                limit = remaining
+            else:
+                limit = min(limit, remaining)
+        return limit
+
+    def record_read(self, data):
+        '''Account for a chunk returned by the source.'''
+        size = len(data)
+        if not size:
+            return
+        self.peak_buffer_bytes = max(self.peak_buffer_bytes, size)
+        used = self.input_bytes + size
+        self.input_bytes = used
+        self._check('buffer_bytes', size, self.max_buffer_bytes)
+        self._check('input_bytes', used, self.max_input_bytes)
+
+    def observe(self, event, value):
+        '''Account for one ijson event and enforce event/node/string limits.'''
+        self.events += 1
+        self._check('events', self.events, self.max_events)
+
+        if event in ('start_map', 'start_array'):
+            depth = self.depth + 1
+            self._check('depth', depth, self.max_depth)
+            self.depth = depth
+            self.max_depth_seen = max(self.max_depth_seen, depth)
+            self.nodes += 1
+            self._check('nodes', self.nodes, self.max_nodes)
+        elif event in ('end_map', 'end_array'):
+            if self.depth:
+                self.depth -= 1
+        elif event == 'map_key':
+            size = self._value_bytes(value)
+            self.max_key_bytes_seen = max(self.max_key_bytes_seen, size)
+            self._check('key_bytes', size, self.max_key_bytes)
+        else:
+            self.nodes += 1
+            self._check('nodes', self.nodes, self.max_nodes)
+            if event == 'string':
+                size = self._value_bytes(value)
+                self.max_string_bytes_seen = max(
+                    self.max_string_bytes_seen, size
+                )
+                self._check('string_bytes', size, self.max_string_bytes)
+
+    @staticmethod
+    def _value_bytes(value):
+        if isinstance(value, str):
+            return len(value.encode('utf-8'))
+        if isinstance(value, bytes):
+            return len(value)
+        return len(str(value))
+
+    def lexeme_limit(self):
+        '''Largest quoted lexeme the backend should accumulate, if any.'''
+        limits = [limit for limit in
+                  (self.max_string_bytes, self.max_key_bytes)
+                  if limit is not None]
+        return max(limits) if limits else None
+
+    def check_lexeme(self, kind, used):
+        '''Early check while a backend is still accumulating a quoted lexeme.'''
+        if kind == 'key':
+            self.max_key_bytes_seen = max(self.max_key_bytes_seen, used)
+            self._check('key_bytes', used, self.max_key_bytes)
+        elif kind == 'string':
+            self.max_string_bytes_seen = max(
+                self.max_string_bytes_seen, used
+            )
+            self._check('string_bytes', used, self.max_string_bytes)
+
+
 @utils.coroutine
 def parse_basecoro(target):
     '''
@@ -221,77 +495,129 @@ def number(str_value):
     warnings.warn("number() function will be removed in a later release", DeprecationWarning)
     return integer_or_decimal(str_value)
 
-def file_source(f, buf_size=64*1024):
+def file_source(f, buf_size=64*1024, budget=None):
     '''A generator that yields data from a file-like object'''
     f = compat.bytes_reader(f)
     while True:
-        data = f.read(buf_size)
+        if budget is None:
+            data = f.read(buf_size)
+        else:
+            data = f.read(budget.prepare_read(buf_size))
+            budget.record_read(data)
         yield data
         if not data:
             break
 
 
-def _basic_parse_pipeline(backend, config):
-    return (
-        (backend['basic_parse_basecoro'], [], config),
-    )
+@utils.coroutine
+def budget_basecoro(target, budget):
+    '''Checks a ParseBudget against every event flowing through it.'''
+    while True:
+        item = (yield)
+        if len(item) == 2:
+            event, value = item
+        else:
+            _, event, value = item
+        budget.observe(event, value)
+        target.send(item)
 
 
-def _parse_pipeline(backend, config):
-    return (
+def _with_budget(pipeline, budget):
+    if budget is None:
+        return pipeline
+    pipeline = list(pipeline)
+    pipeline.insert(len(pipeline) - 1,
+                    (budget_basecoro, [], {'budget': budget}))
+    return tuple(pipeline)
+
+
+def _before_sink_budget(pipeline, budget):
+    '''Put budget immediately in front of a single sink-side coroutine.'''
+    if budget is None:
+        return pipeline
+    return tuple(pipeline) + ((budget_basecoro, [], {'budget': budget}),)
+
+
+def _config_with_budget(backend, config, budget):
+    if budget is None:
+        return config
+    try:
+        parameters = inspect.signature(
+            backend['basic_parse_basecoro']
+        ).parameters
+    except (TypeError, ValueError):
+        return config
+    if 'budget' in parameters:
+        config = dict(config)
+        config['budget'] = budget
+    return config
+
+
+def _basic_parse_pipeline(backend, config, budget=None):
+    return _with_budget((
+        (backend['basic_parse_basecoro'], [],
+         _config_with_budget(backend, config, budget)),
+    ), budget)
+
+
+def _parse_pipeline(backend, config, budget=None):
+    return _with_budget((
         (backend['parse_basecoro'], [], {}),
-        (backend['basic_parse_basecoro'], [], config)
-    )
+        (backend['basic_parse_basecoro'], [],
+         _config_with_budget(backend, config, budget))
+    ), budget)
 
 
-def _items_pipeline(backend, prefix, map_type, config):
-    return (
+def _items_pipeline(backend, prefix, map_type, config, budget=None):
+    return _with_budget((
         (backend['items_basecoro'], (prefix,), {'map_type': map_type}),
         (backend['parse_basecoro'], [], {}),
-        (backend['basic_parse_basecoro'], [], config)
-    )
+        (backend['basic_parse_basecoro'], [],
+         _config_with_budget(backend, config, budget))
+    ), budget)
 
 
-def _kvitems_pipeline(backend, prefix, map_type, config):
-    return (
+def _kvitems_pipeline(backend, prefix, map_type, config, budget=None):
+    return _with_budget((
         (backend['kvitems_basecoro'], (prefix,), {'map_type': map_type}),
         (backend['parse_basecoro'], [], {}),
-        (backend['basic_parse_basecoro'], [], config)
-    )
+        (backend['basic_parse_basecoro'], [],
+         _config_with_budget(backend, config, budget))
+    ), budget)
 
 
 def _make_basic_parse_coro(backend):
-    def basic_parse_coro(target, **config):
+    def basic_parse_coro(target, budget=None, **config):
         return utils.chain(
             target,
-            *_basic_parse_pipeline(backend, config)
+            *_basic_parse_pipeline(backend, config, budget)
         )
     return basic_parse_coro
 
 
 def _make_parse_coro(backend):
-    def parse_coro(target, **config):
+    def parse_coro(target, budget=None, **config):
         return utils.chain(
             target,
-            *_parse_pipeline(backend, config)
+            *_parse_pipeline(backend, config, budget)
         )
     return parse_coro
 
 
 def _make_items_coro(backend):
-    def items_coro(target, prefix, map_type=None, **config):
+    def items_coro(target, prefix, map_type=None, budget=None, **config):
         return utils.chain(
             target,
-            *_items_pipeline(backend, prefix, map_type, config)
+            *_items_pipeline(backend, prefix, map_type, config, budget)
         )
     return items_coro
 
 
 def _make_kvitems_coro(backend):
-    def kvitems_coro(target, prefix, map_type=None, **config):
+    def kvitems_coro(target, prefix, map_type=None, budget=None, **config):
         return utils.chain(
             target,
-            *_kvitems_pipeline(backend, prefix, map_type, config)
+            *_kvitems_pipeline(backend, prefix, map_type, config, budget)
         )
     return kvitems_coro
 
@@ -331,108 +657,128 @@ def _get_source(source):
 
 
 def _make_basic_parse_gen(backend):
-    def basic_parse_gen(file_obj, buf_size=64*1024, **config):
+    def basic_parse_gen(file_obj, buf_size=64*1024, budget=None, **config):
         return utils.coros2gen(
-            file_source(file_obj, buf_size=buf_size),
-            *_basic_parse_pipeline(backend, config)
+            file_source(file_obj, buf_size=buf_size, budget=budget),
+            *_basic_parse_pipeline(backend, config, budget)
         )
     return basic_parse_gen
 
 
 def _make_parse_gen(backend):
-    def parse_gen(file_obj, buf_size=64*1024, **config):
+    def parse_gen(file_obj, buf_size=64*1024, budget=None, **config):
         return utils.coros2gen(
-            file_source(file_obj, buf_size=buf_size),
-            *_parse_pipeline(backend, config)
+            file_source(file_obj, buf_size=buf_size, budget=budget),
+            *_parse_pipeline(backend, config, budget)
         )
     return parse_gen
 
 
 def _make_items_gen(backend):
-    def items_gen(file_obj, prefix, map_type=None, buf_size=64*1024, **config):
+    def items_gen(file_obj, prefix, map_type=None, buf_size=64*1024,
+                  budget=None, **config):
         return utils.coros2gen(
-            file_source(file_obj, buf_size=buf_size),
-            *_items_pipeline(backend, prefix, map_type, config)
+            file_source(file_obj, buf_size=buf_size, budget=budget),
+            *_items_pipeline(backend, prefix, map_type, config, budget),
+            trim_budget_events=False
         )
     return items_gen
 
 
 def _make_kvitems_gen(backend):
-    def kvitems_gen(file_obj, prefix, map_type=None, buf_size=64*1024, **config):
+    def kvitems_gen(file_obj, prefix, map_type=None, buf_size=64*1024,
+                    budget=None, **config):
         return utils.coros2gen(
-            file_source(file_obj, buf_size=buf_size),
-            *_kvitems_pipeline(backend, prefix, map_type, config)
+            file_source(file_obj, buf_size=buf_size, budget=budget),
+            *_kvitems_pipeline(backend, prefix, map_type, config, budget),
+            trim_budget_events=False
         )
     return kvitems_gen
 
 
 def _make_basic_parse(backend):
-    def basic_parse(source, buf_size=64*1024, **config):
+    def basic_parse(source, buf_size=64*1024, budget=None, **config):
         source = _get_source(source)
         if is_async_file(source):
             return backend['basic_parse_async'](
-                source, buf_size=buf_size, **config
+                source, buf_size=buf_size, budget=budget, **config
             )
         elif is_file(source):
             return backend['basic_parse_gen'](
-                source, buf_size=buf_size, **config
+                source, buf_size=buf_size, budget=budget, **config
             )
         raise ValueError("Unknown source type: %r" % type(source))
     return basic_parse
 
 
 def _make_parse(backend):
-    def parse(source, buf_size=64*1024, **config):
+    def parse(source, buf_size=64*1024, budget=None, **config):
         source = _get_source(source)
         if is_async_file(source):
             return backend['parse_async'](
-                source, buf_size=buf_size, **config
+                source, buf_size=buf_size, budget=budget, **config
             )
         elif is_file(source):
             return backend['parse_gen'](
-                source, buf_size=buf_size, **config
+                source, buf_size=buf_size, budget=budget, **config
             )
         elif is_iterable(source):
             return utils.coros2gen(source,
-                (backend['parse_basecoro'], (), {})
+                *_before_sink_budget((
+                    (backend['parse_basecoro'], (), {}),
+                ), budget)
             )
         raise ValueError("Unknown source type: %r" % type(source))
     return parse
 
 
 def _make_items(backend):
-    def items(source, prefix, map_type=None, buf_size=64*1024, **config):
+    def items(source, prefix, map_type=None, buf_size=64*1024, budget=None,
+              **config):
         source = _get_source(source)
         if is_async_file(source):
             return backend['items_async'](
-                source, prefix, map_type=map_type, buf_size=buf_size, **config
+                source, prefix, map_type=map_type, buf_size=buf_size,
+                budget=budget, **config
             )
         elif is_file(source):
             return backend['items_gen'](
-                source, prefix, map_type=map_type, buf_size=buf_size, **config
+                source, prefix, map_type=map_type, buf_size=buf_size,
+                budget=budget, **config
             )
         elif is_iterable(source):
             return utils.coros2gen(source,
-                (backend['items_basecoro'], (prefix,), {'map_type': map_type})
+                *_before_sink_budget((
+                    (backend['items_basecoro'], (prefix,),
+                     {'map_type': map_type}),
+                ), budget),
+                trim_budget_events=False
             )
         raise ValueError("Unknown source type: %r" % type(source))
     return items
 
 
 def _make_kvitems(backend):
-    def kvitems(source, prefix, map_type=None, buf_size=64*1024, **config):
+    def kvitems(source, prefix, map_type=None, buf_size=64*1024, budget=None,
+                **config):
         source = _get_source(source)
         if is_async_file(source):
             return backend['kvitems_async'](
-                source, prefix, map_type=map_type, buf_size=buf_size, **config
+                source, prefix, map_type=map_type, buf_size=buf_size,
+                budget=budget, **config
             )
         elif is_file(source):
             return backend['kvitems_gen'](
-                source, prefix, map_type=map_type, buf_size=buf_size, **config
+                source, prefix, map_type=map_type, buf_size=buf_size,
+                budget=budget, **config
             )
         elif is_iterable(source):
             return utils.coros2gen(source,
-                (backend['kvitems_basecoro'], (prefix,), {'map_type': map_type})
+                *_before_sink_budget((
+                    (backend['kvitems_basecoro'], (prefix,),
+                     {'map_type': map_type}),
+                ), budget),
+                trim_budget_events=False
             )
         raise ValueError("Unknown source type: %r" % type(source))
     return kvitems
@@ -443,30 +789,38 @@ Don't use the ijson.common.* functions; instead go directly with the ijson.* one
 See the documentation for more information.
 '''
 
-def parse(events):
+def parse(events, budget=None):
     """Like ijson.parse, but takes events generated via ijson.basic_parse instead
     of a file"""
     warnings.warn(_common_functions_warn, DeprecationWarning)
     return utils.coros2gen(events,
-        (parse_basecoro, (), {})
+        *_before_sink_budget(((parse_basecoro, (), {}),), budget)
     )
 
 
-def kvitems(events, prefix, map_type=None):
+def kvitems(events, prefix, map_type=None, budget=None):
     """Like ijson.kvitems, but takes events generated via ijson.parse instead of
     a file"""
     warnings.warn(_common_functions_warn, DeprecationWarning)
     return utils.coros2gen(events,
-        (kvitems_basecoro, (prefix,), {'map_type': map_type})
+        *_before_sink_budget(
+            ((kvitems_basecoro, (prefix,), {'map_type': map_type}),),
+            budget
+        ),
+        trim_budget_events=False
     )
 
 
-def items(events, prefix, map_type=None):
+def items(events, prefix, map_type=None, budget=None):
     """Like ijson.items, but takes events generated via ijson.parse instead of
     a file"""
     warnings.warn(_common_functions_warn, DeprecationWarning)
     return utils.coros2gen(events,
-        (items_basecoro, (prefix,), {'map_type': map_type})
+        *_before_sink_budget(
+            ((items_basecoro, (prefix,), {'map_type': map_type}),),
+            budget
+        ),
+        trim_budget_events=False
     )
 
 

@@ -42,28 +42,73 @@ class sendable_list(list):
     send = list.append
 
 
-def coros2gen(source, *coro_pipeline):
+def _event_name(item):
+    return item[0] if len(item) == 2 else item[1]
+
+
+def _update_depth(depth, item):
+    event = _event_name(item)
+    if event in ('start_map', 'start_array'):
+        return depth + 1
+    if event in ('end_map', 'end_array'):
+        return depth - 1
+    return depth
+
+
+def complete_events_prefix(events, initial_depth=0):
+    '''Return the prefix of events that contains only complete values.'''
+    events = list(events)
+    depth = initial_depth
+    safe_end = 0
+    for index, item in enumerate(events):
+        event = _event_name(item)
+        if event in ('start_map', 'start_array'):
+            depth += 1
+        elif event in ('end_map', 'end_array'):
+            depth -= 1
+        elif depth <= initial_depth:
+            safe_end = index + 1
+    return events[:safe_end]
+
+
+def coros2gen(source, *coro_pipeline, trim_budget_events=True):
     '''
     A utility function that returns a generator yielding values dispatched by a
     coroutine pipeline after *it* has received values coming from `source`.
     '''
     events = sendable_list()
     f = chain(events, *coro_pipeline)
+    yielded_depth = 0
     try:
         for value in source:
             try:
                 f.send(value)
             except Exception as ex:
-                for event in events:
+                from ijson.common import ParseBudgetExceeded
+                complete_events = (
+                    complete_events_prefix(events, yielded_depth)
+                    if (isinstance(ex, ParseBudgetExceeded) and
+                        trim_budget_events) else events
+                )
+                for event in complete_events:
                     yield event
                 if isinstance(ex, StopIteration):
                     return
                 raise
             for event in events:
                 yield event
+                if trim_budget_events:
+                    yielded_depth = _update_depth(yielded_depth, event)
             del events[:]
     except GeneratorExit:
         try:
             f.close()
         except:
             pass
+        close = getattr(source, 'close', None)
+        if close is not None:
+            try:
+                close()
+            except:
+                pass
+        raise

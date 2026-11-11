@@ -411,6 +411,21 @@ to give users more fine-grained control over certain operations:
   an additional ``buf_size`` option (defaults to ``65536`` or 64KB)
   specifies the amount of bytes the library
   should attempt to read each time.
+- All ``parse``, ``basic_parse``, ``items`` and ``kvitems`` functions
+  (including their generator, coroutine and asynchronous variants)
+  accept an optional ``budget`` argument holding an
+  :class:`ijson.ParseBudget` instance.  A budget can cap nesting depth,
+  cumulative events and nodes, individual string and key sizes,
+  bytes read from the source, and the size of each read buffer.  Limits
+  are checked while reading and parsing; exceeding one raises
+  ``ijson.ParseBudgetExceeded``, whose ``dimension``, ``used`` and
+  ``limit`` attributes identify the failed check.  Omitting the budget
+  keeps the existing unlimited behaviour::
+
+      budget = ijson.ParseBudget(max_depth=100, max_string_bytes=10_000_000)
+      for event, value in ijson.basic_parse(file, budget=budget):
+          ...
+
 - The ``items`` and ``kvitems`` functions, and all their variants,
   have an optional ``map_type`` argument (defaults to ``dict``)
   used to construct objects from the JSON stream.
