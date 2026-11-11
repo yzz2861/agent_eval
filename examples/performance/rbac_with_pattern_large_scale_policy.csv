@@ -162,11 +162,6 @@ g, staffUser1001, staff001, /orgs/1/sites/site003
 g, staffUser1001, staff001, /orgs/1/sites/site004
 g, staffUser1001, staff001, /orgs/1/sites/site005
 
-g, staffUser1001, staff001, /orgs/1/sites/site001
-g, staffUser1001, staff001, /orgs/1/sites/site002
-g, staffUser1001, staff001, /orgs/1/sites/site003
-g, staffUser1001, staff001, /orgs/1/sites/site004
-g, staffUser1001, staff001, /orgs/1/sites/site005
 
 g, staffUser1003, staff001, /orgs/1/sites/site001
 g, staffUser1003, staff001, /orgs/1/sites/site002
@@ -463,11 +458,6 @@ g, staffUser2001, staff001, /orgs/1/sites/site003
 g, staffUser2001, staff001, /orgs/1/sites/site004
 g, staffUser2001, staff001, /orgs/1/sites/site005
 
-g, staffUser2001, staff001, /orgs/1/sites/site001
-g, staffUser2001, staff001, /orgs/1/sites/site002
-g, staffUser2001, staff001, /orgs/1/sites/site003
-g, staffUser2001, staff001, /orgs/1/sites/site004
-g, staffUser2001, staff001, /orgs/1/sites/site005
 
 g, staffUser2003, staff001, /orgs/1/sites/site001
 g, staffUser2003, staff001, /orgs/1/sites/site002
@@ -764,11 +754,6 @@ g, managerUser1001, manager001, /orgs/1/sites/site003
 g, managerUser1001, manager001, /orgs/1/sites/site004
 g, managerUser1001, manager001, /orgs/1/sites/site005
 
-g, managerUser1001, manager001, /orgs/1/sites/site001
-g, managerUser1001, manager001, /orgs/1/sites/site002
-g, managerUser1001, manager001, /orgs/1/sites/site003
-g, managerUser1001, manager001, /orgs/1/sites/site004
-g, managerUser1001, manager001, /orgs/1/sites/site005
 
 g, managerUser1003, manager001, /orgs/1/sites/site001
 g, managerUser1003, manager001, /orgs/1/sites/site002
@@ -1065,11 +1050,6 @@ g, managerUser2001, manager001, /orgs/1/sites/site003
 g, managerUser2001, manager001, /orgs/1/sites/site004
 g, managerUser2001, manager001, /orgs/1/sites/site005
 
-g, managerUser2001, manager001, /orgs/1/sites/site001
-g, managerUser2001, manager001, /orgs/1/sites/site002
-g, managerUser2001, manager001, /orgs/1/sites/site003
-g, managerUser2001, manager001, /orgs/1/sites/site004
-g, managerUser2001, manager001, /orgs/1/sites/site005
 
 g, managerUser2003, manager001, /orgs/1/sites/site001
 g, managerUser2003, manager001, /orgs/1/sites/site002
@@ -1366,11 +1346,6 @@ g, customerUser1001, customer001, /orgs/1/sites/site003
 g, customerUser1001, customer001, /orgs/1/sites/site004
 g, customerUser1001, customer001, /orgs/1/sites/site005
 
-g, customerUser1001, customer001, /orgs/1/sites/site001
-g, customerUser1001, customer001, /orgs/1/sites/site002
-g, customerUser1001, customer001, /orgs/1/sites/site003
-g, customerUser1001, customer001, /orgs/1/sites/site004
-g, customerUser1001, customer001, /orgs/1/sites/site005
 
 g, customerUser1003, customer001, /orgs/1/sites/site001
 g, customerUser1003, customer001, /orgs/1/sites/site002
@@ -1667,11 +1642,6 @@ g, customerUser2001, customer001, /orgs/1/sites/site003
 g, customerUser2001, customer001, /orgs/1/sites/site004
 g, customerUser2001, customer001, /orgs/1/sites/site005
 
-g, customerUser2001, customer001, /orgs/1/sites/site001
-g, customerUser2001, customer001, /orgs/1/sites/site002
-g, customerUser2001, customer001, /orgs/1/sites/site003
-g, customerUser2001, customer001, /orgs/1/sites/site004
-g, customerUser2001, customer001, /orgs/1/sites/site005
 
 g, customerUser2003, customer001, /orgs/1/sites/site001
 g, customerUser2003, customer001, /orgs/1/sites/site002
@@ -1968,11 +1938,6 @@ g, staffUser1001, staff001, /orgs/2/sites/site003
 g, staffUser1001, staff001, /orgs/2/sites/site004
 g, staffUser1001, staff001, /orgs/2/sites/site005
 
-g, staffUser1001, staff001, /orgs/2/sites/site001
-g, staffUser1001, staff001, /orgs/2/sites/site002
-g, staffUser1001, staff001, /orgs/2/sites/site003
-g, staffUser1001, staff001, /orgs/2/sites/site004
-g, staffUser1001, staff001, /orgs/2/sites/site005
 
 g, staffUser1003, staff001, /orgs/2/sites/site001
 g, staffUser1003, staff001, /orgs/2/sites/site002
@@ -2269,11 +2234,6 @@ g, staffUser2001, staff001, /orgs/2/sites/site003
 g, staffUser2001, staff001, /orgs/2/sites/site004
 g, staffUser2001, staff001, /orgs/2/sites/site005
 
-g, staffUser2001, staff001, /orgs/2/sites/site001
-g, staffUser2001, staff001, /orgs/2/sites/site002
-g, staffUser2001, staff001, /orgs/2/sites/site003
-g, staffUser2001, staff001, /orgs/2/sites/site004
-g, staffUser2001, staff001, /orgs/2/sites/site005
 
 g, staffUser2003, staff001, /orgs/2/sites/site001
 g, staffUser2003, staff001, /orgs/2/sites/site002
@@ -2570,11 +2530,6 @@ g, managerUser1001, manager001, /orgs/2/sites/site003
 g, managerUser1001, manager001, /orgs/2/sites/site004
 g, managerUser1001, manager001, /orgs/2/sites/site005
 
-g, managerUser1001, manager001, /orgs/2/sites/site001
-g, managerUser1001, manager001, /orgs/2/sites/site002
-g, managerUser1001, manager001, /orgs/2/sites/site003
-g, managerUser1001, manager001, /orgs/2/sites/site004
-g, managerUser1001, manager001, /orgs/2/sites/site005
 
 g, managerUser1003, manager001, /orgs/2/sites/site001
 g, managerUser1003, manager001, /orgs/2/sites/site002
@@ -2871,11 +2826,6 @@ g, managerUser2001, manager001, /orgs/2/sites/site003
 g, managerUser2001, manager001, /orgs/2/sites/site004
 g, managerUser2001, manager001, /orgs/2/sites/site005
 
-g, managerUser2001, manager001, /orgs/2/sites/site001
-g, managerUser2001, manager001, /orgs/2/sites/site002
-g, managerUser2001, manager001, /orgs/2/sites/site003
-g, managerUser2001, manager001, /orgs/2/sites/site004
-g, managerUser2001, manager001, /orgs/2/sites/site005
 
 g, managerUser2003, manager001, /orgs/2/sites/site001
 g, managerUser2003, manager001, /orgs/2/sites/site002
@@ -3172,11 +3122,6 @@ g, customerUser1001, customer001, /orgs/2/sites/site003
 g, customerUser1001, customer001, /orgs/2/sites/site004
 g, customerUser1001, customer001, /orgs/2/sites/site005
 
-g, customerUser1001, customer001, /orgs/2/sites/site001
-g, customerUser1001, customer001, /orgs/2/sites/site002
-g, customerUser1001, customer001, /orgs/2/sites/site003
-g, customerUser1001, customer001, /orgs/2/sites/site004
-g, customerUser1001, customer001, /orgs/2/sites/site005
 
 g, customerUser1003, customer001, /orgs/2/sites/site001
 g, customerUser1003, customer001, /orgs/2/sites/site002
@@ -3473,11 +3418,6 @@ g, customerUser2001, customer001, /orgs/2/sites/site003
 g, customerUser2001, customer001, /orgs/2/sites/site004
 g, customerUser2001, customer001, /orgs/2/sites/site005
 
-g, customerUser2001, customer001, /orgs/2/sites/site001
-g, customerUser2001, customer001, /orgs/2/sites/site002
-g, customerUser2001, customer001, /orgs/2/sites/site003
-g, customerUser2001, customer001, /orgs/2/sites/site004
-g, customerUser2001, customer001, /orgs/2/sites/site005
 
 g, customerUser2003, customer001, /orgs/2/sites/site001
 g, customerUser2003, customer001, /orgs/2/sites/site002

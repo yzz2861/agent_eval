@@ -24,6 +24,8 @@ from unittest import TestCase, IsolatedAsyncioTestCase
 
 import casbin
 from casbin import util
+from casbin.persist import PolicyLoadError
+from casbin.persist.adapters import FileAdapter, FilteredFileAdapter
 
 
 def get_examples(path):
@@ -1168,3 +1170,205 @@ class TestLogging(TestCaseBase):
         finally:
             policy_logger.disabled = policy_disabled
             role_logger.disabled = role_disabled
+
+
+class _CorruptingFileAdapter(FileAdapter):
+    """A file adapter that bypasses line validation and injects a grouping
+    rule that cannot be turned into role links."""
+
+    def load_policy(self, model):
+        super().load_policy(model)
+        model.model["g"]["g"].policy.append(["alice"])
+
+
+class _RecordingWatcher:
+    def __init__(self):
+        self.calls = 0
+
+    def update(self):
+        self.calls += 1
+
+
+class TestTransactionalLoadPolicy(TestCase):
+    BASE_POLICY = (
+        "p, alice, data1, read\n"
+        "p, data2_admin, data2, read\n"
+        "p, data2_admin, data2, write\n"
+        "g, alice, data2_admin\n"
+    )
+
+    def _write_policy(self, text):
+        fd, path = tempfile.mkstemp(prefix="policy-", suffix=".csv", dir=_scratch_dir)
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        return path
+
+    def _new_enforcer(self, policy_text):
+        policy_path = self._write_policy(policy_text)
+        e = casbin.Enforcer(get_examples("rbac_model.conf"), policy_path)
+        return e, policy_path
+
+    def _assert_base_decisions(self, e):
+        self.assertTrue(e.enforce("alice", "data1", "read"))
+        self.assertTrue(e.enforce("alice", "data2", "read"))
+        self.assertTrue(e.enforce("alice", "data2", "write"))
+        self.assertFalse(e.enforce("alice", "data1", "write"))
+        self.assertFalse(e.enforce("bob", "data1", "read"))
+
+    def test_load_policy_success_swaps_decisions(self):
+        e, policy_path = self._new_enforcer(self.BASE_POLICY)
+        self._assert_base_decisions(e)
+
+        with open(policy_path, "w") as f:
+            f.write("p, alice, data1, read\np, bob, data1, read\n")
+        e.load_policy()
+
+        self.assertTrue(e.enforce("alice", "data1", "read"))
+        self.assertTrue(e.enforce("bob", "data1", "read"))
+        # the grouping rule is gone, so the inherited permissions are gone too
+        self.assertFalse(e.enforce("alice", "data2", "read"))
+        self.assertFalse(e.enforce("alice", "data2", "write"))
+
+    def test_load_policy_bad_column_count(self):
+        e, policy_path = self._new_enforcer(self.BASE_POLICY)
+        with open(policy_path, "a") as f:
+            f.write("p, bob, data1\n")
+
+        with self.assertRaises(PolicyLoadError) as ctx:
+            e.load_policy()
+        self.assertEqual(ctx.exception.line_no, 5)
+        self.assertIn("column", str(ctx.exception))
+        self._assert_base_decisions(e)
+
+    def test_load_policy_duplicate_rule(self):
+        e, policy_path = self._new_enforcer(self.BASE_POLICY)
+        with open(policy_path, "a") as f:
+            f.write("p, alice, data1, read\n")
+
+        with self.assertRaises(PolicyLoadError) as ctx:
+            e.load_policy()
+        self.assertEqual(ctx.exception.line_no, 5)
+        self.assertIn("duplicated", str(ctx.exception))
+        self._assert_base_decisions(e)
+
+    def test_load_policy_empty_field(self):
+        e, policy_path = self._new_enforcer(self.BASE_POLICY)
+        with open(policy_path, "a") as f:
+            f.write("p, bob, , read\n")
+
+        with self.assertRaises(PolicyLoadError) as ctx:
+            e.load_policy()
+        self.assertEqual(ctx.exception.line_no, 5)
+        self.assertIn("empty field", str(ctx.exception))
+        self._assert_base_decisions(e)
+
+    def test_load_policy_invalid_ptype(self):
+        e, policy_path = self._new_enforcer(self.BASE_POLICY)
+        with open(policy_path, "a") as f:
+            f.write("p2, bob, data1, read\n")
+
+        with self.assertRaises(PolicyLoadError) as ctx:
+            e.load_policy()
+        self.assertEqual(ctx.exception.line_no, 5)
+        self.assertIn("unknown policy type", str(ctx.exception))
+        self._assert_base_decisions(e)
+
+    def test_load_policy_incomplete_grouping_rule(self):
+        e, policy_path = self._new_enforcer(self.BASE_POLICY)
+        with open(policy_path, "a") as f:
+            f.write("g, bob\n")
+
+        with self.assertRaises(PolicyLoadError) as ctx:
+            e.load_policy()
+        self.assertEqual(ctx.exception.line_no, 5)
+        self.assertIn("incomplete", str(ctx.exception))
+        self._assert_base_decisions(e)
+
+    def test_load_policy_role_link_build_failure_keeps_old_state(self):
+        e, policy_path = self._new_enforcer(self.BASE_POLICY)
+        old_model = e.model
+        old_rm_map = e.rm_map
+        old_cond_rm_map = e.cond_rm_map
+        watcher = _RecordingWatcher()
+        e.set_watcher(watcher)
+
+        e.set_adapter(_CorruptingFileAdapter(policy_path))
+        with self.assertRaises(RuntimeError):
+            e.load_policy()
+
+        # the failed load must not have touched any live state
+        self.assertIs(e.model, old_model)
+        self.assertIs(e.rm_map, old_rm_map)
+        self.assertIs(e.cond_rm_map, old_cond_rm_map)
+        self.assertEqual(watcher.calls, 0)
+        # the very first request after the failure is decided by the old
+        # policy with the old role links: no error, no missing inheritance
+        self._assert_base_decisions(e)
+
+    def test_load_policy_parse_failure_keeps_old_state(self):
+        e, policy_path = self._new_enforcer(self.BASE_POLICY)
+        old_model = e.model
+        old_rm_map = e.rm_map
+        watcher = _RecordingWatcher()
+        e.set_watcher(watcher)
+
+        with open(policy_path, "a") as f:
+            f.write("p, bob, data1, read\n")
+            f.write("p, carol\n")
+
+        with self.assertRaises(PolicyLoadError):
+            e.load_policy()
+
+        # even the valid line appended before the bad one must not leak in
+        self.assertIs(e.model, old_model)
+        self.assertIs(e.rm_map, old_rm_map)
+        self.assertFalse(e.enforce("bob", "data1", "read"))
+        self.assertEqual(watcher.calls, 0)
+        self._assert_base_decisions(e)
+
+    def test_load_policy_without_auto_build_role_links(self):
+        e, policy_path = self._new_enforcer(self.BASE_POLICY)
+        e.enable_auto_build_role_links(False)
+        rm_map = e.rm_map
+        cond_rm_map = e.cond_rm_map
+
+        with open(policy_path, "w") as f:
+            f.write(self.BASE_POLICY)
+            f.write("p, carol, data1, read\n")
+            f.write("g, bob, data2_admin\n")
+        e.load_policy()
+
+        # role managers are left untouched when auto_build_role_links is off
+        self.assertIs(e.rm_map, rm_map)
+        self.assertIs(e.cond_rm_map, cond_rm_map)
+        # policy rules are swapped, but no new links are built
+        self.assertTrue(e.enforce("carol", "data1", "read"))
+        self.assertFalse(e.enforce("bob", "data2", "read"))
+        self._assert_base_decisions(e)
+
+    def test_load_filtered_policy_semantics_unchanged(self):
+        policy_path = self._write_policy(
+            "p, admin, domain1, data1, read\n"
+            "p, admin, domain2, data2, read\n"
+            "g, alice, admin, domain1\n"
+            "g, bob, admin, domain2\n"
+        )
+        adapter = FilteredFileAdapter(policy_path)
+        e = casbin.Enforcer(get_examples("rbac_with_domains_model.conf"), adapter)
+
+        class Filter:
+            pass
+
+        filter = Filter()
+        filter.P = ["", "domain1"]
+        filter.G = ["", "", "domain1"]
+
+        e.load_filtered_policy(filter)
+        self.assertTrue(e.is_filtered())
+        self.assertTrue(e.enforce("alice", "domain1", "data1", "read"))
+        self.assertFalse(e.enforce("bob", "domain2", "data2", "read"))
+
+        # a full reload through the same adapter stays transactional
+        e.load_policy()
+        self.assertFalse(e.is_filtered())
+        self.assertTrue(e.enforce("bob", "domain2", "data2", "read"))

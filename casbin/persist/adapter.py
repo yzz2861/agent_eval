@@ -17,6 +17,26 @@ import re
 _INTERESTING_TOKENS_RE = re.compile(r"[,\[\]\(\)]")
 
 
+class PolicyLoadError(Exception):
+    """raised when a policy line cannot be loaded into the model.
+
+    Carries the 1-based line number (when known) and the reason for the
+    failure, so operators can locate the offending rule in the source file.
+    """
+
+    def __init__(self, reason, line_no=None, line=None):
+        self.reason = reason
+        self.line_no = line_no
+        self.line = line
+        message = "failed to load policy"
+        if line_no is not None:
+            message += " at line {}".format(line_no)
+        message += ": {}".format(reason)
+        if line is not None:
+            message += " (line: {!r})".format(line)
+        super().__init__(message)
+
+
 def _extract_tokens(line):
     """Return the list of 'tokens' from the line, or None if this line has none"""
 
@@ -56,23 +76,30 @@ def _extract_tokens(line):
     return tokens
 
 
-def load_policy_line(line, model):
-    """loads a text line as a policy rule to model."""
+def load_policy_line(line, model, line_no=None):
+    """loads a text line as a policy rule to model.
+
+    Raises PolicyLoadError if the line names an unknown policy type or the
+    rule fails the model's validation (column count, empty fields, duplicates,
+    incomplete grouping rules).
+    """
 
     tokens = _extract_tokens(line)
     if tokens is None:
         return
 
     key = tokens[0]
-    sec = key[0]
+    sec = key[:1]
 
-    if sec not in model.model.keys():
-        return
+    if not sec or sec not in model.model.keys() or key not in model.model[sec].keys():
+        raise PolicyLoadError("unknown policy type {!r}".format(key), line_no=line_no, line=line)
 
-    if key not in model.model[sec].keys():
-        return
+    rule = tokens[1:]
+    reason = model.validate_load_rule(sec, key, rule)
+    if reason is not None:
+        raise PolicyLoadError(reason, line_no=line_no, line=line)
 
-    model.model[sec][key].policy.append(tokens[1:])
+    model.model[sec][key].policy.append(rule)
 
 
 class Adapter:

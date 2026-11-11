@@ -321,6 +321,9 @@ class CoreEnforcer:
         return r_domain_token, p_domain_token
 
     def _register_domain_matching_func(self, ptype):
+        self._register_domain_matching_func_for_maps(ptype, self.rm_map, self.cond_rm_map)
+
+    def _register_domain_matching_func_for_maps(self, ptype, rm_map, cond_rm_map):
         r_domain_token, p_domain_token = self._get_domain_tokens()
         m_assertion = (self.model["m"] or {}).get("m")
         if r_domain_token == "" or p_domain_token == "" or m_assertion is None:
@@ -328,43 +331,77 @@ class CoreEnforcer:
 
         match_fun = "keyMatch({}, {})".format(r_domain_token, p_domain_token)
         if match_fun in m_assertion.value:
-            self.add_named_domain_matching_func(ptype, key_match)
+            if ptype in rm_map:
+                rm_map[ptype].add_domain_matching_func(key_match)
+            elif ptype in cond_rm_map:
+                cond_rm_map[ptype].add_domain_matching_func(key_match)
+
+    def _build_role_managers(self, model):
+        """creates fresh role managers for the given model.
+
+        The live rm_map/cond_rm_map are left untouched, so a load that fails
+        partway cannot corrupt the role links currently in use.
+        """
+        rm_map = dict()
+        cond_rm_map = dict()
+        if "g" not in model.keys():
+            return rm_map, cond_rm_map
+
+        for ptype in model["g"]:
+            assertion = model["g"][ptype]
+            if len(assertion.tokens) <= 2 and len(assertion.params_tokens) == 0:
+                assertion.rm = default_role_manager.RoleManager(10)
+                rm_map[ptype] = assertion.rm
+            elif len(assertion.tokens) <= 2:
+                assertion.cond_rm = default_role_manager.ConditionalRoleManager(10)
+                cond_rm_map[ptype] = assertion.cond_rm
+            elif len(assertion.params_tokens) == 0:
+                assertion.rm = default_role_manager.DomainManager(10)
+                rm_map[ptype] = assertion.rm
+            else:
+                assertion.cond_rm = default_role_manager.ConditionalDomainManager(10)
+                cond_rm_map[ptype] = assertion.cond_rm
+
+            if len(assertion.tokens) > 2:
+                self._register_domain_matching_func_for_maps(ptype, rm_map, cond_rm_map)
+
+        return rm_map, cond_rm_map
 
     def load_policy(self):
-        """reloads the policy from file/database."""
-        need_to_rebuild = False
+        """reloads the policy from file/database.
+
+        The load is transactional: rules are parsed into an isolated copy of
+        the model and role links are built on fresh role managers. The live
+        model, role managers and policy caches are only swapped once every
+        step has succeeded, so a failed load leaves the previous policy fully
+        intact and concurrent enforce() calls keep seeing a consistent state.
+        """
         new_model = copy.deepcopy(self.model)
         new_model.clear_policy()
 
-        try:
-            self.adapter.load_policy(new_model)
+        self.adapter.load_policy(new_model)
 
-            new_model.sort_policies_by_subject_hierarchy()
+        new_model.sort_policies_by_subject_hierarchy()
 
-            new_model.sort_policies_by_priority()
+        new_model.sort_policies_by_priority()
 
-            new_model.print_policy()
+        new_model.print_policy()
 
-            if self.auto_build_role_links:
-                need_to_rebuild = True
-                for rm in self.rm_map.values():
-                    rm.clear()
-                if len(self.rm_map) != 0:
-                    new_model.build_role_links(self.rm_map)
+        if self.auto_build_role_links:
+            new_rm_map, new_cond_rm_map = self._build_role_managers(new_model)
+            if len(new_rm_map) != 0:
+                new_model.build_role_links(new_rm_map)
+            if len(new_cond_rm_map) != 0:
+                new_model.build_conditional_role_links(new_cond_rm_map)
 
-                for crm in self.cond_rm_map.values():
-                    crm.clear()
-                if len(self.cond_rm_map) != 0:
-                    new_model.build_conditional_role_links(self.cond_rm_map)
+            # Swap the role managers before the model: enforce() reaches the
+            # role manager through the model's assertions, so every in-flight
+            # request keeps seeing a consistent (model, links) pair.
+            self.rm_map = new_rm_map
+            self.cond_rm_map = new_cond_rm_map
 
-            self.model = new_model
-            self._reset_policy_caches()
-
-        except Exception as e:
-            if self.auto_build_role_links and need_to_rebuild:
-                self.build_role_links()
-
-            raise e
+        self.model = new_model
+        self._reset_policy_caches()
 
     def load_filtered_policy(self, filter):
         """reloads a filtered policy from file/database."""

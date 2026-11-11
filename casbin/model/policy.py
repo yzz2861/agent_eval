@@ -67,6 +67,35 @@ class Policy:
             if cond_rm:
                 ast.build_conditional_role_links(cond_rm)
 
+    def validate_load_rule(self, sec, ptype, rule):
+        """validates a rule about to be loaded from an adapter.
+
+        Returns None when the rule is valid for the given assertion, otherwise a
+        human-readable reason describing the first violation found. This lets
+        adapters reject malformed lines before they can pollute shared state.
+        """
+        assertion = self[sec][ptype]
+
+        if sec == "g":
+            required = assertion.value.count("_")
+            if len(rule) < required:
+                return "grouping rule for {!r} is incomplete: expected at least {} columns, got {}".format(
+                    ptype, required, len(rule)
+                )
+        else:
+            expected = len(assertion.tokens)
+            if len(rule) != expected:
+                return "expected {} columns for policy type {!r}, got {}".format(expected, ptype, len(rule))
+
+        for i, field in enumerate(rule):
+            if field == "":
+                return "empty field at column {}".format(i + 1)
+
+        if rule in assertion.policy:
+            return "duplicated rule"
+
+        return None
+
     def print_policy(self):
         """Logs the policy at debug level."""
 

@@ -41,10 +41,8 @@ class FileAdapter(Adapter):
 
     def _load_policy_file(self, model):
         with open(self._file_path, "rb") as file:
-            line = file.readline()
-            while line:
-                load_policy_line(line.decode().strip(), model)
-                line = file.readline()
+            for line_no, raw_line in enumerate(file, start=1):
+                load_policy_line(raw_line.decode().strip(), model, line_no=line_no)
 
     def _save_policy_file(self, model):
         with open(self._file_path, "w") as file:
