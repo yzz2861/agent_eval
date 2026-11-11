@@ -50,3 +50,22 @@ class UnknownHashError(PwdlibError):
             "Make sure it's valid and that its corresponding hasher is enabled."
         )
         super().__init__(message)
+
+
+class HashVerificationPolicyError(PwdlibError):
+    """
+    Error raised when a hash violates the configured verification policy.
+
+    The encoded hash is never included in the error: only the stable, machine
+    readable ``reason`` code and a human readable explanation are exposed.
+    """
+
+    def __init__(self, reason: str, message: str) -> None:
+        """
+        Args:
+            reason: Stable, machine readable code identifying the first
+                policy parameter that was violated.
+            message: Human readable explanation of the violation.
+        """
+        self.reason = reason
+        super().__init__(message)

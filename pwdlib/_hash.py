@@ -13,23 +13,46 @@ if TYPE_CHECKING:
     else:
         from typing_extensions import Self
 
+    from .hashers.argon2 import Argon2VerificationPolicy
+
 
 class PasswordHash:
     """
     Represents a password hashing utility.
     """
 
-    def __init__(self, hashers: collections.abc.Sequence[HasherProtocol]) -> None:
+    def __init__(
+        self,
+        hashers: collections.abc.Sequence[HasherProtocol],
+        *,
+        verification_policy: "Argon2VerificationPolicy | None" = None,
+    ) -> None:
         """
         Args:
             hashers: A sequence of hashers to be used for password hashing.
+            verification_policy: Optional explicit verification budget applied
+                to the Argon2 hashers. When set, hashes are validated against
+                the policy before the Argon2 backend is invoked. When ``None``
+                (default), no policy is enforced and behavior is unchanged.
 
         Raises:
             AssertionError: If no hashers are specified.
         """
         assert len(hashers) > 0, "You must specify at least one hasher."
-        self.hashers = hashers
-        self.current_hasher = hashers[0]
+        if verification_policy is None:
+            self.hashers = tuple(hashers)
+        else:
+            from .hashers.argon2 import Argon2Hasher
+
+            self.hashers = tuple(
+                hasher.with_verification_policy(  # type: ignore[attr-defined]
+                    verification_policy
+                )
+                if isinstance(hasher, Argon2Hasher)
+                else hasher
+                for hasher in hashers
+            )
+        self.current_hasher = self.hashers[0]
 
     @classmethod
     def recommended(cls) -> "Self":
@@ -47,6 +70,20 @@ class PasswordHash:
         from .hashers.argon2 import Argon2Hasher
 
         return cls((Argon2Hasher(),))
+
+    @classmethod
+    def recommended_with_verification_policy(
+        cls, verification_policy: "Argon2VerificationPolicy"
+    ) -> "Self":
+        """Return a recommended instance enforcing an Argon2 verification policy.
+
+        Args:
+            verification_policy: Explicit verification budget applied before
+                the Argon2 backend verifies any hash.
+        """
+        from .hashers.argon2 import Argon2Hasher
+
+        return cls((Argon2Hasher(),), verification_policy=verification_policy)
 
     def hash(self, password: str | bytes, *, salt: bytes | None = None) -> str:
         """

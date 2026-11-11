@@ -103,3 +103,34 @@ valid, updated_hash = password_hash.verify_and_update("herminetincture", hash)
 If the hash needs to be updated, `updated_hash` will be a string. Otherwise, it's `None`. Then, don't forget to update it in your database.
 
 It's worth to note that the hash is also upgraded if the **settings of the algorithm** has been changed, like the time or memory cost.
+
+### Enforce an Argon2 verification budget
+
+The encoded Argon2 hash stores the cost parameters (memory, time, parallelism, salt and digest length). If an attacker can tamper with the stored hash, a verifier that blindly trusts these parameters could be forced to allocate huge amounts of memory or CPU.
+
+`pwdlib` lets you opt in to an explicit verification budget with [`Argon2VerificationPolicy`](./reference/pwdlib.hashers.md#pwdlib.hashers.argon2.Argon2VerificationPolicy). When a policy is configured, every hash is parsed and checked **before** the Argon2 backend is called, so a non-compliant hash can never trigger the underlying allocation:
+
+```py
+from pwdlib import Argon2VerificationPolicy, PasswordHash
+from pwdlib.exceptions import HashVerificationPolicyError
+
+password_hash = PasswordHash.recommended_with_verification_policy(
+    Argon2VerificationPolicy(
+        max_memory_cost=65536,
+        max_time_cost=3,
+        max_parallelism=4,
+        max_salt_len=16,
+        max_hash_len=32,
+        max_encoded_size=1024,
+    )
+)
+
+try:
+    valid = password_hash.verify("herminetincture", hash)
+except HashVerificationPolicyError as exception:
+    # The hash exceeds the configured budget: force a migration on the
+    # next successful authentication instead of treating it as a wrong password.
+    print(exception.reason)
+```
+
+The default limits match the current Argon2 defaults, but every limit can be relaxed to keep accepting legitimate legacy hashes. When several parameters exceed the budget, the raised [`HashVerificationPolicyError`](./reference/pwdlib.exceptions.md#pwdlib.exceptions.HashVerificationPolicyError) exposes a stable [`reason`](./reference/pwdlib.exceptions.md#pwdlib.exceptions.HashVerificationPolicyError.reason) for the first violation. The raw hash is never included in the error. Without a policy, verification keeps its original behavior.

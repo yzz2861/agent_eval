@@ -1,7 +1,7 @@
 import pytest
 
 from pwdlib import PasswordHash, exceptions
-from pwdlib.hashers.argon2 import Argon2Hasher
+from pwdlib.hashers.argon2 import Argon2Hasher, Argon2VerificationPolicy
 from pwdlib.hashers.bcrypt import BcryptHasher
 
 _PASSWORD = "herminetincture"
@@ -79,6 +79,76 @@ def test_verify_and_update(
 def test_verify_and_update_unknown_hash(password_hash: PasswordHash) -> None:
     with pytest.raises(exceptions.UnknownHashError):
         password_hash.verify_and_update(_PASSWORD, "INVALID_HASH")
+
+
+def test_password_hash_without_policy_keeps_hashers() -> None:
+    argon2_hasher = Argon2Hasher()
+    password_hash = PasswordHash((argon2_hasher, BcryptHasher()))
+    assert password_hash.current_hasher is argon2_hasher
+    assert password_hash.current_hasher.verification_policy is None
+
+
+def test_password_hash_with_policy_wraps_argon2_hashers() -> None:
+    argon2_hasher = Argon2Hasher()
+    policy = Argon2VerificationPolicy()
+    password_hash = PasswordHash(
+        (argon2_hasher, BcryptHasher()), verification_policy=policy
+    )
+    assert isinstance(password_hash.current_hasher, Argon2Hasher)
+    assert password_hash.current_hasher.verification_policy is policy
+    assert isinstance(password_hash.hashers[1], BcryptHasher)
+    # The original hasher is not mutated.
+    assert argon2_hasher.verification_policy is None
+
+
+def test_recommended_with_verification_policy() -> None:
+    policy = Argon2VerificationPolicy(max_memory_cost=32768)
+    password_hash = PasswordHash.recommended_with_verification_policy(policy)
+    assert isinstance(password_hash.current_hasher, Argon2Hasher)
+    assert password_hash.current_hasher.verification_policy is policy
+
+
+def test_verify_with_policy_blocks_tampered_hash() -> None:
+    policy = Argon2VerificationPolicy()
+    password_hash = PasswordHash((Argon2Hasher(),), verification_policy=policy)
+    hash = password_hash.hash(_PASSWORD)
+    tampered = hash.replace("m=65536", "m=4194304")
+    with pytest.raises(exceptions.HashVerificationPolicyError) as exc_info:
+        password_hash.verify(_PASSWORD, tampered)
+    assert exc_info.value.reason == "memory_cost_exceeded"
+
+
+def test_verify_with_policy_still_accepts_valid_hash() -> None:
+    policy = Argon2VerificationPolicy()
+    password_hash = PasswordHash((Argon2Hasher(),), verification_policy=policy)
+    hash = password_hash.hash(_PASSWORD)
+    assert password_hash.verify(_PASSWORD, hash) is True
+    assert password_hash.verify("INVALID_PASSWORD", hash) is False
+
+
+def test_verify_and_update_with_policy_unchanged_for_valid_hash() -> None:
+    policy = Argon2VerificationPolicy()
+    password_hash = PasswordHash(
+        (Argon2Hasher(), BcryptHasher()), verification_policy=policy
+    )
+    valid, updated_hash = password_hash.verify_and_update(_PASSWORD, _ARGON2_HASH_STR)
+    assert valid is True
+    assert updated_hash is None
+
+
+def test_verify_and_update_with_policy_blocks_tampered_hash() -> None:
+    policy = Argon2VerificationPolicy()
+    password_hash = PasswordHash((Argon2Hasher(),), verification_policy=policy)
+    tampered = _ARGON2_HASH_STR.replace("m=65536", "m=4194304")
+    with pytest.raises(exceptions.HashVerificationPolicyError):
+        password_hash.verify_and_update(_PASSWORD, tampered)
+
+
+def test_verify_with_policy_unknown_hash_still_raises_unknown_error() -> None:
+    policy = Argon2VerificationPolicy()
+    password_hash = PasswordHash((Argon2Hasher(),), verification_policy=policy)
+    with pytest.raises(exceptions.UnknownHashError):
+        password_hash.verify(_PASSWORD, "INVALID_HASH")
 
 
 @pytest.mark.parametrize(
