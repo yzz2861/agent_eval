@@ -1,0 +1,255 @@
+# How To Contribute
+
+> [!IMPORTANT]
+> - This document is mainly to help you to get started by codifying tribal knowledge and expectations and make it more accessible to everyone.
+>   But don't be afraid to open half-finished PRs and ask questions if something is unclear!
+>
+> - If you use LLM / "AI" tools for your contributions, please read and follow our [_Generative AI / LLM Policy_][llm].
+
+Please note that this project is released with a Contributor [Code of Conduct](https://github.com/pyca/service-identity/blob/main/.github/CODE_OF_CONDUCT.md).
+By participating in this project you agree to abide by its terms.
+Please report any harm to [Hynek Schlawack] in any way you find appropriate.
+
+
+## Workflow
+
+Thank you for considering contributing to *service-identity*!
+It's people like *you* who make it such a great tool for everyone.
+
+- **Only contribute code that you fully understand.**
+  See also our [AI policy][llm].
+
+- No contribution is too small!
+  Please submit as many fixes for typos and grammar bloopers as you can!
+
+- Before starting big contributions, **talk to us first**.
+  Don't waste energy / tokens on something that we do not want.
+  Rejecting a huge PR is unpleasant for everybody.
+
+- Try to limit each pull request to *one* change only.
+
+- Since we squash on merge, it's up to you how you handle updates to the `main` branch.
+  Whether you prefer to rebase on `main` or merge `main` into your branch, do whatever is more comfortable for you.
+
+  Just remember to [not use your own `main` branch for the pull request](https://hynek.me/articles/pull-requests-branch/).
+
+- *Always* add tests and docs for your code.
+  This is a hard rule; patches with missing tests or documentation won't be merged.
+
+- Make sure your changes pass our [CI].
+  You won't get any feedback until it's green unless you ask for it.
+
+  For the CI to pass, the coverage must be 100%.
+  If you have problems to test something, open anyway and ask for advice.
+  In some situations, we may agree to add an `# pragma: no cover`.
+
+- Once you've addressed review feedback, make sure to bump the pull request with a short note, so we know you're done.
+
+- Don’t break backwards-compatibility.
+
+
+## Local Development Environment
+
+First, **fork** the repository on GitHub.
+Make sure to **uncheck** the `Copy the main branch only` radio button on the `Create a new fork` page.
+If you don't, our test suite will fail because we use Git tags for packaging.
+
+Finally, **clone** it using one of the alternatives that you can copy-paste by pressing the big green button labeled `<> Code`.
+
+You can (and should) run our test suite using [*tox*] (and keep in mind that `tox run-parallel` is much faster than `tox run`).
+However, you'll probably want a more traditional environment as well.
+
+We recommend using the Python version from the `.python-version-default` file in the project's root directory, because that's the one that is used in the CI by default, too.
+
+If you're using [*direnv*](https://direnv.net), you can automate the creation of the project virtual environment with the correct Python version by adding the following `.envrc` to the project root:
+
+```bash
+layout python python$(cat .python-version-default)
+```
+
+or, if you like [*uv*](https://github.com/astral-sh/uv):
+
+```bash
+test -d .venv || (uv venv --python $(cat .python-version-default) && uv pip install -e . --group dev)
+. .venv/bin/activate
+```
+
+> [!WARNING]
+> - **Before** you start working on a new pull request, use the "*Sync fork*" button in GitHub's web UI to ensure your fork is up to date.
+> - **Always create a new branch off `main` for each new pull request.**
+>   Yes, you can work on `main` in your fork and submit pull requests.
+>   But this will *inevitably* lead to you not being able to synchronize your fork with upstream and having to start over.
+>
+>   See also: [Why you shouldn't use your `main` branch for pull requests](https://hynek.me/articles/pull-requests-branch/).
+
+Change into the newly created directory and after activating a virtual environment, install an editable version of *service-identity* along with its tests requirements (requires Pip 25.1 or *uv* 0.4.27 or later that added support for [dependency groups](https://peps.python.org/pep-0735/)):
+
+```console
+$ pip install -e . --group dev  # or `uv pip install -e . --group dev`
+```
+
+Now you can run the test suite:
+
+```console
+$ python -Im pytest
+```
+
+When working on the documentation, use:
+
+```console
+$ tox run -e docs-watch
+```
+
+This will build the documentation, watch for changes, and rebuild it whenever you save a file.
+
+To just build the documentation and exit immediately use:
+
+```console
+$ tox run -e docs-build
+```
+
+You will find the built documentation in `docs/_build/html`.
+
+To run doctests:
+
+```console
+$ tox run -e docs-doctests
+```
+
+To avoid committing code that violates our style guide, we strongly advise you to install [*pre-commit*] and its hooks:
+
+```console
+$ pre-commit install
+```
+
+This is not strictly necessary, because our [*tox*] file contains an environment that runs:
+
+```console
+$ pre-commit run --all-files
+```
+
+But it's way more comfortable to run it locally and catch avoidable errors before pushing them to GitHub.
+
+
+## Code
+
+- Obey [PEP 8](https://www.python.org/dev/peps/pep-0008/) and [PEP 257](https://www.python.org/dev/peps/pep-0257/).
+  We use the `"""`-on-separate-lines style for docstrings with [Napoleon](https://www.sphinx-doc.org/en/master/usage/extensions/napoleon.html)-style API documentation:
+
+  ```python
+  def func(x: str, y: int) -> str:
+      """
+      Do something.
+
+      Args:
+          x: A very important parameter.
+
+          y:
+              Another important parameter but one that doesn't fit a line so
+              it already starts on the next one.
+
+      Raises:
+          Exception: When Something goes wrong.
+
+      Returns:
+          A very important return value.
+      """
+  ```
+
+- If you add or change public APIs, tag the docstring using `..  versionadded:: 16.0.0 WHAT` or `..  versionchanged:: 16.2.0 WHAT`.
+
+- We follow [PEP 8](https://peps.python.org/pep-0008/) as enforced by [Ruff](https://ruff.rs/) with a line length of 79 characters.
+  As long as you run our full [*tox*] suite before committing, or install our [*pre-commit*] hooks (ideally you'll do both – see [*Local Development Environment*](#local-development-environment) above), you won't have to spend any time on formatting your code at all.
+  If you don't, [CI] will catch it for you – but that seems like a waste of your time!
+
+
+## Tests
+
+- Write your asserts as `expected == actual` to line them up nicely:
+
+  ```python
+  x = f()
+
+  assert 42 == x.some_attribute
+  assert "foo" == x._a_private_attribute
+  ```
+
+- To run the test suite, all you need is a recent [*tox*].
+  It will ensure the test suite runs with all dependencies against all Python versions just as it will in our [CI].
+- Write [good test docstrings](https://jml.io/pages/test-docstrings.html).
+- If you've changed or added public APIs, please update our type stubs (files ending in `.pyi`).
+
+
+## Documentation
+
+- We use [Markdown] everywhere except in `docs/api.rst` and docstrings.
+
+- Use [semantic newlines] in [*reStructuredText*] and [Markdown] files (files ending in `.rst` and `.md`):
+
+  ```markdown
+  This is a sentence.
+  This is another sentence.
+  ```
+
+- If you start a new section, add two blank lines before and one blank line after the header, except if two headers follow immediately after each other:
+
+  ```markdown
+  Last line of previous section.
+
+
+  ## Header of New Top Section
+
+  ### Header of New Section
+
+  First line of new section.
+  ```
+
+
+### Changelog
+
+If your change is noteworthy, there needs to be a changelog entry in [`CHANGELOG.md`](https://github.com/pyca/service-identity/blob/main/CHANGELOG.md), so our users can learn about it!
+
+- The changelog follows the [*Keep a Changelog*](https://keepachangelog.com/en/1.0.0/) standard.
+  Please add the best-fitting section if it's missing for the current release.
+  We use the following order: `Security`, `Removed`, `Deprecated`, `Added`, `Changed`, `Fixed`.
+- As with other docs, please use [semantic newlines] in the changelog.
+- Make the last line a link to your pull request.
+  You probably have to open it first to know the number.
+- Wrap symbols like modules, functions, or classes into backticks so they are rendered in a `monospace font`.
+- Wrap arguments into asterisks like in docstrings:
+  `Added new argument *an_argument*.`
+- If you mention functions or other callables, add parentheses at the end of their names:
+  `service-identity.func()` or `service-identity.Class.method()`.
+  This makes the changelog a lot more readable.
+- Prefer simple past tense or constructions with "now".
+  For example:
+
+  * Added `service-identity.func()`.
+  * `service-identity.func()` now doesn't crash the Large Hadron Collider anymore when passed the *foobar* argument.
+
+
+#### Example entries
+
+```markdown
+- Added `service-identity.func()`.
+  The feature really *is* awesome.
+  [#1](https://github.com/pyca/service-identity/pull/1)
+```
+
+or:
+
+```markdown
+- `service-identity.func()` now doesn't crash the Large Hadron Collider anymore when passed the *foobar* argument.
+  The bug really *was* nasty.
+  [#1](https://github.com/pyca/service-identity/pull/1)
+```
+
+
+[CI]: https://github.com/pyca/service-identity/actions
+[Hynek Schlawack]: https://hynek.me/about/
+[*pre-commit*]: https://pre-commit.com/
+[*tox*]: https://tox.wiki/
+[semantic newlines]: https://rhodesmill.org/brandon/2012/one-sentence-per-line/
+[*reStructuredText*]: https://www.sphinx-doc.org/en/stable/usage/restructuredtext/basics.html
+[Markdown]: https://docs.github.com/en/get-started/writing-on-github/getting-started-with-writing-and-formatting-on-github/basic-writing-and-formatting-syntax
+[llm]: https://github.com/pyca/service-identity/blob/main/.github/AI_POLICY.md
