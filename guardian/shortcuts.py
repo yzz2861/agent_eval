@@ -29,7 +29,7 @@ from django.db.models.functions import Cast, Replace
 from django.shortcuts import _get_queryset
 
 from guardian.conf import settings as guardian_settings
-from guardian.core import ObjectPermissionChecker
+from guardian.core import ObjectPermissionChecker, invalidate_permission_cache
 from guardian.ctypes import get_content_type
 from guardian.exceptions import (
     MixedContentTypeError,
@@ -144,9 +144,11 @@ def assign_perm(
         perm = _ensure_permission(perm)
         if user:
             user.user_permissions.add(perm)
+            invalidate_permission_cache()
             return perm
         if group:
             group.permissions.add(perm)
+            invalidate_permission_cache()
             return perm
 
     perm = _normalize_perm(perm)
@@ -216,9 +218,11 @@ def remove_perm(
         perm = _ensure_permission(perm)
         if user:
             user.user_permissions.remove(perm)
+            invalidate_permission_cache()
             return None
         if group:
             group.permissions.remove(perm)
+            invalidate_permission_cache()
             return None
 
     perm = _normalize_perm(perm)

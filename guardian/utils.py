@@ -528,7 +528,11 @@ def get_group_obj_perms_model(obj: Model | None = None) -> type[Model]:
 
 
 def evict_obj_perms_cache(obj: Any) -> bool:
+    evicted = False
     if hasattr(obj, "_guardian_perms_cache"):
         delattr(obj, "_guardian_perms_cache")
-        return True
-    return False
+        evicted = True
+    if hasattr(obj, "_guardian_perms_cache_generation"):
+        delattr(obj, "_guardian_perms_cache_generation")
+        evicted = True
+    return evicted

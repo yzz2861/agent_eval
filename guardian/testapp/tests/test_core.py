@@ -1,4 +1,5 @@
 from itertools import chain
+from unittest import mock
 
 from django.apps import apps as django_apps
 from django.conf import settings
@@ -6,17 +7,17 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.management import create_permissions
 from django.contrib.auth.models import AnonymousUser, Group, Permission
 from django.contrib.contenttypes.models import ContentType
-from django.db import connection
+from django.db import connection, transaction
 from django.template import Context, Template
 from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
 
 from guardian.conf import settings as guardian_settings
-from guardian.core import ObjectPermissionChecker
+from guardian.core import ObjectPermissionChecker, get_permission_generation
 from guardian.exceptions import NotUserNorGroup
 from guardian.management import create_anonymous_user
 from guardian.models import GroupObjectPermission, UserObjectPermission
-from guardian.shortcuts import assign_perm
+from guardian.shortcuts import assign_perm, remove_perm
 from guardian.testapp.models import (
     MixedGroupObjectPermission,
     Project,
@@ -786,3 +787,157 @@ class ObjectPermissionCheckerTest(ObjectPermissionTestCase):
         # Ignore other queries that JOIN this table.
         group_selects = [q for q in queries if q["sql"].endswith(auth_group_from)]
         self.assertEqual(len(group_selects), 1)
+
+
+class ObjectPermissionCacheGenerationTest(ObjectPermissionTestCase):
+    def setUp(self):
+        super().setUp()
+        self.project = Project.objects.create(name=f"project-{self.id()}")
+
+    def test_same_checker_sees_assignment_and_removal(self):
+        checker = ObjectPermissionChecker(self.user)
+
+        self.assertFalse(checker.has_perm("change_project", self.project))
+        assign_perm("change_project", self.user, self.project)
+        self.assertTrue(checker.has_perm("change_project", self.project))
+        self.assertEqual(checker.get_perms(self.project), ["change_project"])
+
+        remove_perm("change_project", self.user, self.project)
+        self.assertFalse(checker.has_perm("change_project", self.project))
+        self.assertEqual(checker.get_perms(self.project), [])
+
+    def test_prefetch_then_bulk_assign_and_remove(self):
+        projects = [Project.objects.create(name=f"bulk-project-{index}-{self.id()}") for index in range(3)]
+        assign_perm("change_project", self.user, projects[0])
+
+        checker = ObjectPermissionChecker(self.user)
+        checker.prefetch_perms(Project.objects.filter(pk__in=[project.pk for project in projects]))
+
+        self.assertTrue(checker.has_perm("change_project", projects[0]))
+        self.assertFalse(checker.has_perm("change_project", projects[1]))
+        self.assertFalse(checker.has_perm("change_project", projects[2]))
+
+        assign_perm("change_project", self.user, projects)
+        self.assertTrue(checker.has_perm("change_project", projects[0]))
+        self.assertTrue(checker.has_perm("change_project", projects[1]))
+        self.assertTrue(checker.has_perm("change_project", projects[2]))
+
+        remove_perm("change_project", self.user, projects)
+        self.assertFalse(checker.has_perm("change_project", projects[0]))
+        self.assertFalse(checker.has_perm("change_project", projects[1]))
+        self.assertFalse(checker.has_perm("change_project", projects[2]))
+
+    def test_two_checkers_each_observe_invalidation(self):
+        projects = [Project.objects.create(name=f"checker-project-{index}-{self.id()}") for index in range(2)]
+        first = ObjectPermissionChecker(self.user)
+        second = ObjectPermissionChecker(self.user)
+
+        self.assertFalse(first.has_perm("change_project", projects[0]))
+        self.assertFalse(second.has_perm("change_project", projects[0]))
+
+        assign_perm("change_project", self.user, projects)
+        self.assertTrue(first.has_perm("change_project", projects[0]))
+        self.assertTrue(second.has_perm("change_project", projects[0]))
+
+        remove_perm("change_project", self.user, projects[0])
+        self.assertFalse(first.has_perm("change_project", projects[0]))
+        self.assertFalse(second.has_perm("change_project", projects[0]))
+
+    def test_transaction_rollback_restores_generation_and_permissions(self):
+        checker = ObjectPermissionChecker(self.user)
+        self.assertFalse(checker.has_perm("change_project", self.project))
+        generation_before = get_permission_generation()
+
+        with transaction.atomic():
+            assign_perm("change_project", self.user, self.project)
+            self.assertTrue(checker.has_perm("change_project", self.project))
+            transaction.set_rollback(True)
+
+        self.assertEqual(get_permission_generation(), generation_before)
+        self.assertFalse(checker.has_perm("change_project", self.project))
+        self.assertEqual(checker.get_perms(self.project), [])
+
+    def test_prefetch_race_does_not_publish_stale_batch(self):
+        checker = ObjectPermissionChecker(self.user)
+        generation = get_permission_generation()
+        newer_generation = (generation[0] + 1, 0)
+        generations = iter([generation, newer_generation, newer_generation])
+
+        with mock.patch("guardian.core.get_permission_generation", side_effect=lambda: next(generations)):
+            checker.prefetch_perms(Project.objects.filter(pk=self.project.pk))
+
+        self.assertNotIn(checker.get_local_cache_key(self.project), checker._obj_perms_cache)
+
+    def test_inactive_and_superuser_keep_existing_behaviour(self):
+        inactive = User.objects.create(username=f"inactive-{self.id()}", is_active=False)
+        assign_perm("change_project", inactive, self.project)
+        inactive_checker = ObjectPermissionChecker(inactive)
+        self.assertFalse(inactive_checker.has_perm("change_project", self.project))
+        self.assertEqual(inactive_checker.get_perms(self.project), [])
+
+        superuser = User.objects.create(username=f"superuser-{self.id()}", is_superuser=True)
+        superuser_checker = ObjectPermissionChecker(superuser)
+        self.assertTrue(superuser_checker.has_perm("change_project", self.project))
+        self.assertIn("change_project", superuser_checker.get_perms(self.project))
+
+    def test_group_permission_inheritance_and_membership_changes(self):
+        checker = ObjectPermissionChecker(self.user)
+        self.assertFalse(checker.has_perm("change_project", self.project))
+
+        assign_perm("change_project", self.group, self.project)
+        self.assertTrue(checker.has_perm("change_project", self.project))
+
+        self.user.groups.remove(self.group)
+        self.assertFalse(checker.has_perm("change_project", self.project))
+
+        self.user.groups.add(self.group)
+        self.assertTrue(checker.has_perm("change_project", self.project))
+
+        remove_perm("change_project", self.group, self.project)
+        self.assertFalse(checker.has_perm("change_project", self.project))
+
+    def test_deleting_group_invalidates_user_cache(self):
+        assign_perm("change_project", self.group, self.project)
+        checker = ObjectPermissionChecker(self.user)
+        self.assertTrue(checker.has_perm("change_project", self.project))
+
+        Group.objects.filter(pk=self.group.pk).delete()
+        self.assertFalse(checker.has_perm("change_project", self.project))
+
+    def test_deleting_user_invalidates_cached_permissions(self):
+        user = User.objects.create(username=f"deleted-user-{self.id()}")
+        assign_perm("change_project", user, self.project)
+        checker = ObjectPermissionChecker(user)
+        self.assertTrue(checker.has_perm("change_project", self.project))
+
+        User.objects.filter(pk=user.pk).delete()
+        self.assertFalse(checker.has_perm("change_project", self.project))
+
+    def test_content_type_changes_invalidate_cache_generation(self):
+        checker = ObjectPermissionChecker(self.user)
+        self.assertFalse(checker.has_perm("change_project", self.project))
+        generation = get_permission_generation()
+
+        content_type = ContentType.objects.create(model="cache-generation", app_label="guardian-cache-tests")
+        self.assertNotEqual(get_permission_generation(), generation)
+        content_type.delete()
+        self.assertFalse(checker.has_perm("change_project", self.project))
+
+    def test_auto_prefetch_object_cache_is_generation_aware(self):
+        guardian_settings.AUTO_PREFETCH = True
+        try:
+            checker = ObjectPermissionChecker(self.user)
+            self.assertFalse(checker.has_perm("change_project", self.project))
+            self.assertTrue(hasattr(self.user, "_guardian_perms_cache"))
+
+            assign_perm("change_project", self.user, self.project)
+            self.assertTrue(checker.has_perm("change_project", self.project))
+            self.assertEqual(
+                self.user._guardian_perms_cache_generation,
+                checker._obj_perms_cache_generation,
+            )
+
+            remove_perm("change_project", self.user, self.project)
+            self.assertFalse(checker.has_perm("change_project", self.project))
+        finally:
+            guardian_settings.AUTO_PREFETCH = False

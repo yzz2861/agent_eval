@@ -11,8 +11,10 @@ class GuardianConfig(AppConfig):
 
     def ready(self):
         from .shortcuts import clear_ct_cache
+        from .signals import connect_permission_cache_signals
 
         post_migrate.connect(clear_ct_cache)
+        connect_permission_cache_signals()
         if settings.GUARDIAN_MONKEY_PATCH_GROUP:
             monkey_patch_group()
         if settings.GUARDIAN_MONKEY_PATCH_USER:

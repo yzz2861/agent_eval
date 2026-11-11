@@ -8,7 +8,7 @@ from django.db import models
 from django.db.models import Model, Q, QuerySet
 
 from guardian.conf import settings as guardian_settings
-from guardian.core import ObjectPermissionChecker
+from guardian.core import ObjectPermissionChecker, invalidate_permission_cache
 from guardian.ctypes import get_content_type, get_default_content_type
 from guardian.exceptions import ObjectNotPersisted
 
@@ -83,7 +83,9 @@ class BaseObjectPermissionManager(models.Manager):
                 kwargs["defaults"] = {"content_object": obj}
         else:
             kwargs["content_object"] = obj
-        obj_perm, _ = self.get_or_create(**kwargs)
+        obj_perm, created = self.get_or_create(**kwargs)
+        if created:
+            invalidate_permission_cache()
         return obj_perm
 
     def bulk_assign_perm(
@@ -115,6 +117,8 @@ class BaseObjectPermissionManager(models.Manager):
                     kwargs["content_object"] = instance
                 assigned_perms.append(self.model(**kwargs))
         self.model.objects.bulk_create(assigned_perms, ignore_conflicts=ignore_conflicts)
+        if assigned_perms:
+            invalidate_permission_cache()
 
         return assigned_perms
 
@@ -140,7 +144,10 @@ class BaseObjectPermissionManager(models.Manager):
             kwargs[field] = user
             to_add.append(self.model(**kwargs))
 
-        return self.model.objects.bulk_create(to_add, ignore_conflicts=ignore_conflicts)
+        assigned_perms = self.model.objects.bulk_create(to_add, ignore_conflicts=ignore_conflicts)
+        if to_add:
+            invalidate_permission_cache()
+        return assigned_perms
 
     def assign(self, perm: _PermType, user_or_group: Any, obj: Model) -> Any:
         """Depreciated function name left in for compatibility"""
@@ -166,7 +173,10 @@ class BaseObjectPermissionManager(models.Manager):
             filters &= Q(object_pk=obj.pk)
         else:
             filters &= Q(content_object__pk=obj.pk)
-        return self.filter(filters).delete()
+        result = self.filter(filters).delete()
+        if result[0]:
+            invalidate_permission_cache()
+        return result
 
     def bulk_remove_perm(self, perm: _PermType, user_or_group: Any, queryset: QuerySet | list) -> tuple[int, dict]:
         """
@@ -193,7 +203,10 @@ class BaseObjectPermissionManager(models.Manager):
         else:
             filters &= Q(content_object__in=queryset)
 
-        return self.filter(filters).delete()
+        result = self.filter(filters).delete()
+        if result[0]:
+            invalidate_permission_cache()
+        return result
 
     def remove_perm_from_many(self, perm: _PermType, users_or_groups: Any, obj: Model) -> tuple[int, dict]:
         """
@@ -213,7 +226,10 @@ class BaseObjectPermissionManager(models.Manager):
 
         filters &= Q(**{f"{self.user_or_group_field}_id__in": to_remove})
 
-        return self.filter(filters).delete()
+        result = self.filter(filters).delete()
+        if result[0]:
+            invalidate_permission_cache()
+        return result
 
 
 class UserObjectPermissionManager(BaseObjectPermissionManager):
