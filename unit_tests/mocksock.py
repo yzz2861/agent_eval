@@ -89,5 +89,11 @@ class MockSocket(socket.socket):
         self.sent.append(data[:self.maxWrite])
         return self.maxWrite
 
+    def sendall(self, data):
+        if self.closed:
+            raise ValueError("Write to closed socket")
+
+        self.sent.append(bytearray(data))
+
     def close(self):
         self.closed = True

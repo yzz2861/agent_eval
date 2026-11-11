@@ -45,6 +45,22 @@ from .utils.cipherfactory import createAESCCM, createAESCCM_8, \
 from .utils.compression import choose_compression_send_algo
 
 
+def _server_hello_random(settings, version, random=None):
+    """Create a ServerHello.random with the RFC 8446 downgrade sentinel."""
+    if random is None:
+        random = getRandomBytes(32)
+
+    if settings.maxVersion > (3, 3) and version <= (3, 3):
+        if version == (3, 3):
+            random[-8:] = TLS_1_2_DOWNGRADE_SENTINEL
+        else:
+            random[-8:] = TLS_1_1_DOWNGRADE_SENTINEL
+    elif settings.maxVersion >= (3, 3) and version < (3, 3):
+        random[-8:] = TLS_1_1_DOWNGRADE_SENTINEL
+
+    return random
+
+
 class TLSConnection(TLSRecordLayer):
     """
     This class wraps a socket and provides TLS handshaking and data transfer.
@@ -2513,11 +2529,7 @@ class TLSConnection(TLSRecordLayer):
 
         serverHello = ServerHello()
         # RFC 8446, section 4.1.3
-        random = getRandomBytes(32)
-        if version == (3, 3) and settings.maxVersion > (3, 3):
-            random[-8:] = TLS_1_2_DOWNGRADE_SENTINEL
-        if version < (3, 3) and settings.maxVersion >= (3, 3):
-            random[-8:] = TLS_1_1_DOWNGRADE_SENTINEL
+        random = _server_hello_random(settings, version)
         serverHello.create(self.version, random, sessionID,
                            cipherSuite, CertificateType.x509, tackExt,
                            nextProtos, extensions=extensions)
@@ -3021,7 +3033,7 @@ class TLSConnection(TLSRecordLayer):
         serverHello = ServerHello()
         # in TLS1.3 the version selected is sent in extension, (3, 3) is
         # just dummy value to workaround broken middleboxes
-        serverHello.create((3, 3), getRandomBytes(32),
+        serverHello.create((3, 3), _server_hello_random(settings, version),
                            clientHello.session_id,
                            cipherSuite, extensions=sh_extensions)
 
@@ -3429,6 +3441,18 @@ class TLSConnection(TLSRecordLayer):
         return session
 
 
+    def _check_client_hello_downgrade(self, settings, client_hello):
+        """Reject a ClientHello carrying a TLS 1.3 downgrade sentinel."""
+        if settings.maxVersion > (3, 3) and \
+                (client_hello.random[-8:] == TLS_1_2_DOWNGRADE_SENTINEL or
+                 client_hello.random[-8:] == TLS_1_1_DOWNGRADE_SENTINEL):
+            for result in self._sendError(
+                    AlertDescription.illegal_parameter,
+                    "Connection terminated because of downgrade protection "
+                    "in ClientHello"):
+                yield result
+
+
     def _serverGetClientHello(self, settings, private_key, cert_chain,
                               verifierDB,
                               sessionCache, anon, alpn, sni):
@@ -3754,15 +3778,18 @@ class TLSConnection(TLSRecordLayer):
             self.version = min(clientHello.client_version, (3, 3))
             version = self.version
 
+        # RFC 8446, section 4.1.3: a ClientHello with a downgrade sentinel
+        # cannot legitimately be sent to a server that supports TLS 1.3.
+        for result in self._check_client_hello_downgrade(settings,
+                                                         clientHello):
+            yield result
+
         #Detect if the client performed an inappropriate fallback.
         if version < settings.maxVersion and \
                 CipherSuite.TLS_FALLBACK_SCSV in clientHello.cipher_suites:
             for result in self._sendError(
                     AlertDescription.inappropriate_fallback):
                 yield result
-
-        # TODO when TLS 1.3 is final, check the client hello random for
-        # downgrade too
 
         # start negotiating the parameters of the connection
 
@@ -4040,7 +4067,8 @@ class TLSConnection(TLSRecordLayer):
                 if not extensions:
                     extensions = None
                 serverHello = ServerHello()
-                serverHello.create(version, getRandomBytes(32),
+                serverHello.create(version,
+                                   _server_hello_random(settings, version),
                                    session.sessionID, session.cipherSuite,
                                    CertificateType.x509, None, None,
                                    extensions=extensions)
@@ -4197,6 +4225,10 @@ class TLSConnection(TLSRecordLayer):
                     else:
                         break
                 clientHello = result
+
+                for result in self._check_client_hello_downgrade(
+                        settings, clientHello):
+                    yield result
 
                 # verify that the new key share is present
                 ext = clientHello.getExtension(ExtensionType.key_share)

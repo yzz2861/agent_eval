@@ -15,7 +15,9 @@ import threading
 from tlslite.recordlayer import RecordLayer
 from tlslite.messages import ServerHello, ClientHello, Alert, RecordHeader3
 from tlslite.constants import CipherSuite, AlertDescription, ContentType, \
-    GroupName, TLS_1_3_HRR
+    GroupName, TLS_1_3_HRR, TLS_1_1_DOWNGRADE_SENTINEL, \
+    TLS_1_2_DOWNGRADE_SENTINEL, ExtensionType, HandshakeType, \
+    SignatureScheme
 from tlslite.tlsconnection import TLSConnection
 from tlslite.errors import TLSLocalAlert, TLSRemoteAlert
 from tlslite.x509 import X509
@@ -23,10 +25,19 @@ from tlslite.x509certchain import X509CertChain
 from tlslite.utils.keyfactory import parsePEMKey
 from tlslite.handshakesettings import HandshakeSettings
 from tlslite.session import Session
+from tlslite.sessioncache import SessionCache
 from tlslite.extensions import SrvSupportedVersionsExtension, \
-    ServerKeyShareExtension, KeyShareEntry, HRRKeyShareExtension
+    ServerKeyShareExtension, KeyShareEntry, HRRKeyShareExtension, \
+    SupportedVersionsExtension, SupportedGroupsExtension, \
+    SignatureAlgorithmsExtension, ClientKeyShareExtension, CookieExtension
+from tlslite.utils.codec import Parser
 
 from unit_tests.mocksock import MockSocket
+
+
+TLS13_CLIENT_KEY_SHARE = bytearray(
+    b'\x99\x38\x1d\xe5\x60\xe4\xbd\x43\xd2\x3d\x8e\x43\x5a\x7d\xba\xfe'
+    b'\xb3\xc0\x6e\x51\xc1\x3c\xae\x4d\x54\x13\x69\x1e\x52\x9a\xaf\x2c')
 
 srv_raw_key = str(
     "-----BEGIN RSA PRIVATE KEY-----\n"\
@@ -63,6 +74,270 @@ srv_raw_certificate = str(
     )
 
 class TestTLSConnection(unittest.TestCase):
+
+    @staticmethod
+    def _server_credentials():
+        return (parsePEMKey(srv_raw_key, private=True),
+                X509CertChain([X509().parse(srv_raw_certificate)]))
+
+    def _record(self, message, version=(3, 3)):
+        sock = MockSocket(bytearray(0))
+        record_layer = RecordLayer(sock)
+        record_layer.version = version
+        for result in record_layer.sendRecord(message):
+            if result in (0, 1):
+                self.fail("Blocking socket")
+            else:
+                break
+        return sock.sent[0]
+
+    def _server_handshake_until(self, records, settings, sent_count=1,
+                                session_cache=None):
+        sock = MockSocket(bytearray(records))
+        conn = TLSConnection(sock)
+        private_key, cert_chain = self._server_credentials()
+        handshake = conn.handshakeServerAsync(
+            certChain=cert_chain, privateKey=private_key,
+            settings=settings, sessionCache=session_cache)
+        while len(sock.sent) < sent_count:
+            next(handshake)
+        return conn, sock, handshake
+
+    def _parse_server_hello(self, record):
+        parser = Parser(record)
+        header = RecordHeader3().parse(parser)
+        self.assertEqual(header.type, ContentType.handshake)
+        payload = parser.getFixBytes(header.length)
+        self.assertEqual(payload[0], HandshakeType.server_hello)
+        return ServerHello().parse(Parser(payload[1:]))
+
+    def _tls13_client_hello(self, key_share=None, random=None,
+                            session_id=None, cookie=None):
+        extensions = [
+            SupportedVersionsExtension().create([(3, 4), (3, 3)]),
+            SupportedGroupsExtension().create([GroupName.x25519]),
+            SignatureAlgorithmsExtension().create(
+                [SignatureScheme.rsa_pss_rsae_sha256]),
+        ]
+        if key_share is not None:
+            extensions.append(ClientKeyShareExtension().create(key_share))
+        if cookie is not None:
+            extensions.append(CookieExtension().create(cookie))
+        return ClientHello().create(
+            version=(3, 3),
+            random=random if random is not None else bytearray(32),
+            session_id=session_id if session_id is not None else bytearray(0),
+            cipher_suites=[CipherSuite.TLS_AES_128_GCM_SHA256],
+            extensions=extensions)
+
+    def test_server_sets_tls12_downgrade_sentinel(self):
+        settings = HandshakeSettings()
+        settings.maxVersion = (3, 4)
+
+        client_hello = ClientHello().create(
+            version=(3, 3), random=bytearray(32), session_id=bytearray(0),
+            cipher_suites=[CipherSuite.TLS_RSA_WITH_AES_128_CBC_SHA256,
+                           CipherSuite.TLS_EMPTY_RENEGOTIATION_INFO_SCSV])
+        record = self._record(client_hello)
+
+        conn, sock, handshake = self._server_handshake_until(
+            record, settings)
+        del conn, handshake
+        server_hello = self._parse_server_hello(sock.sent[0])
+
+        self.assertEqual(server_hello.server_version, (3, 3))
+        self.assertEqual(server_hello.random[-8:],
+                         TLS_1_2_DOWNGRADE_SENTINEL)
+        self.assertIsNone(server_hello.getExtension(
+            ExtensionType.supported_versions))
+
+    def test_server_sets_tls11_downgrade_sentinel(self):
+        settings = HandshakeSettings()
+        settings.maxVersion = (3, 4)
+
+        client_hello = ClientHello().create(
+            version=(3, 2), random=bytearray(32), session_id=bytearray(0),
+            cipher_suites=[CipherSuite.TLS_RSA_WITH_AES_128_CBC_SHA,
+                           CipherSuite.TLS_EMPTY_RENEGOTIATION_INFO_SCSV])
+        record = self._record(client_hello, version=(3, 1))
+
+        conn, sock, handshake = self._server_handshake_until(
+            record, settings)
+        del conn, handshake
+        server_hello = self._parse_server_hello(sock.sent[0])
+
+        self.assertEqual(server_hello.server_version, (3, 2))
+        self.assertEqual(server_hello.random[-8:],
+                         TLS_1_1_DOWNGRADE_SENTINEL)
+
+    def test_server_does_not_set_sentinel_for_tls13(self):
+        settings = HandshakeSettings()
+        settings.maxVersion = (3, 4)
+
+        client_hello = self._tls13_client_hello(
+            key_share=[KeyShareEntry().create(
+                GroupName.x25519, TLS13_CLIENT_KEY_SHARE)])
+        record = self._record(client_hello)
+
+        conn, sock, handshake = self._server_handshake_until(
+            record, settings)
+        del conn, handshake
+        server_hello = self._parse_server_hello(sock.sent[0])
+
+        version_ext = server_hello.getExtension(
+            ExtensionType.supported_versions)
+        self.assertEqual(version_ext.version, (3, 4))
+        self.assertNotEqual(server_hello.random[-8:],
+                            TLS_1_2_DOWNGRADE_SENTINEL)
+        self.assertNotEqual(server_hello.random[-8:],
+                            TLS_1_1_DOWNGRADE_SENTINEL)
+
+    def test_tls12_only_server_does_not_set_tls12_sentinel(self):
+        settings = HandshakeSettings()
+        settings.maxVersion = (3, 3)
+
+        client_hello = ClientHello().create(
+            version=(3, 3), random=bytearray(32), session_id=bytearray(0),
+            cipher_suites=[CipherSuite.TLS_RSA_WITH_AES_128_CBC_SHA256,
+                           CipherSuite.TLS_EMPTY_RENEGOTIATION_INFO_SCSV])
+        record = self._record(client_hello)
+
+        conn, sock, handshake = self._server_handshake_until(
+            record, settings)
+        del conn, handshake
+        server_hello = self._parse_server_hello(sock.sent[0])
+
+        self.assertNotEqual(server_hello.random[-8:],
+                            TLS_1_2_DOWNGRADE_SENTINEL)
+        self.assertNotEqual(server_hello.random[-8:],
+                            TLS_1_1_DOWNGRADE_SENTINEL)
+
+    def test_tls12_only_server_keeps_tls11_sentinel(self):
+        settings = HandshakeSettings()
+        settings.maxVersion = (3, 3)
+
+        client_hello = ClientHello().create(
+            version=(3, 2), random=bytearray(32), session_id=bytearray(0),
+            cipher_suites=[CipherSuite.TLS_RSA_WITH_AES_128_CBC_SHA,
+                           CipherSuite.TLS_EMPTY_RENEGOTIATION_INFO_SCSV])
+        record = self._record(client_hello, version=(3, 1))
+
+        conn, sock, handshake = self._server_handshake_until(
+            record, settings)
+        del conn, handshake
+        server_hello = self._parse_server_hello(sock.sent[0])
+
+        self.assertEqual(server_hello.random[-8:],
+                         TLS_1_1_DOWNGRADE_SENTINEL)
+
+    def test_server_rejects_client_hello_with_downgrade_sentinel(self):
+        settings = HandshakeSettings()
+        settings.maxVersion = (3, 4)
+        private_key, cert_chain = self._server_credentials()
+
+        for sentinel in (TLS_1_2_DOWNGRADE_SENTINEL,
+                         TLS_1_1_DOWNGRADE_SENTINEL):
+            random = bytearray(32)
+            random[-8:] = sentinel
+            client_hello = ClientHello().create(
+                version=(3, 3), random=random,
+                session_id=bytearray(0),
+                cipher_suites=[
+                    CipherSuite.TLS_RSA_WITH_AES_128_CBC_SHA256,
+                    CipherSuite.TLS_EMPTY_RENEGOTIATION_INFO_SCSV])
+            sock = MockSocket(self._record(client_hello))
+            conn = TLSConnection(sock)
+
+            with self.assertRaises(TLSLocalAlert) as err:
+                conn.handshakeServer(certChain=cert_chain,
+                                     privateKey=private_key,
+                                     settings=settings)
+
+            self.assertEqual(err.exception.description,
+                             AlertDescription.illegal_parameter)
+            self.assertEqual(sock.sent[0][0], ContentType.alert)
+
+    def test_tls12_only_server_ignores_client_sentinel(self):
+        settings = HandshakeSettings()
+        settings.maxVersion = (3, 3)
+
+        random = bytearray(32)
+        random[-8:] = TLS_1_2_DOWNGRADE_SENTINEL
+        client_hello = ClientHello().create(
+            version=(3, 3), random=random, session_id=bytearray(0),
+            cipher_suites=[CipherSuite.TLS_RSA_WITH_AES_128_CBC_SHA256,
+                           CipherSuite.TLS_EMPTY_RENEGOTIATION_INFO_SCSV])
+        record = self._record(client_hello)
+
+        conn, sock, handshake = self._server_handshake_until(
+            record, settings)
+        del conn, handshake
+        server_hello = self._parse_server_hello(sock.sent[0])
+
+        self.assertEqual(server_hello.server_version, (3, 3))
+        self.assertEqual(sock.sent[0][0], ContentType.handshake)
+
+    def test_server_sets_sentinel_on_session_resumption(self):
+        settings = HandshakeSettings()
+        settings.maxVersion = (3, 4)
+
+        session_id = bytearray(b'0123456789abcdef0123456789abcdef')
+        session = Session()
+        session.create(bytearray(48), session_id,
+                       CipherSuite.TLS_RSA_WITH_AES_128_CBC_SHA256,
+                       "", None, None, None, False, "",
+                       resumable=True)
+        session_cache = SessionCache()
+        session_cache[session_id] = session
+
+        client_hello = ClientHello().create(
+            version=(3, 3), random=bytearray(32), session_id=session_id,
+            cipher_suites=[CipherSuite.TLS_RSA_WITH_AES_128_CBC_SHA256,
+                           CipherSuite.TLS_EMPTY_RENEGOTIATION_INFO_SCSV])
+        record = self._record(client_hello)
+
+        conn, sock, handshake = self._server_handshake_until(
+            record, settings, session_cache=session_cache)
+        del conn, handshake
+        server_hello = self._parse_server_hello(sock.sent[0])
+
+        self.assertEqual(server_hello.session_id, session_id)
+        self.assertEqual(server_hello.random[-8:],
+                         TLS_1_2_DOWNGRADE_SENTINEL)
+
+    def test_server_sets_no_sentinel_after_hrr(self):
+        settings = HandshakeSettings()
+        settings.maxVersion = (3, 4)
+
+        client_hello = self._tls13_client_hello(key_share=[])
+        first_record = self._record(client_hello)
+
+        conn, sock, handshake = self._server_handshake_until(
+            first_record, settings)
+        hrr = self._parse_server_hello(sock.sent[0])
+        self.assertEqual(hrr.random, TLS_1_3_HRR)
+        self.assertNotEqual(hrr.random[-8:], TLS_1_2_DOWNGRADE_SENTINEL)
+
+        cookie = hrr.getExtension(ExtensionType.cookie)
+        self.assertIsNotNone(cookie)
+
+        second_hello = self._tls13_client_hello(
+            key_share=[KeyShareEntry().create(
+                GroupName.x25519, TLS13_CLIENT_KEY_SHARE)],
+            cookie=cookie.cookie)
+        sock.buf += self._record(second_hello)
+
+        while len(sock.sent) < 2:
+            next(handshake)
+        server_hello = self._parse_server_hello(sock.sent[1])
+
+        version_ext = server_hello.getExtension(
+            ExtensionType.supported_versions)
+        self.assertEqual(version_ext.version, (3, 4))
+        self.assertNotEqual(server_hello.random[-8:],
+                            TLS_1_2_DOWNGRADE_SENTINEL)
+        self.assertNotEqual(server_hello.random[-8:],
+                            TLS_1_1_DOWNGRADE_SENTINEL)
 
     def test_client_with_server_responing_with_SHA256_on_TLSv1_1(self):
         # socket to generate the faux response
