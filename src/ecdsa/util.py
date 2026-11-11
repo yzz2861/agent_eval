@@ -531,3 +531,94 @@ def sigdecode_der(sig_der, order):
             "trailing junk after DER numbers: %s" % binascii.hexlify(empty)
         )
     return r, s
+
+
+def sigdecode_string_strict(signature, order):
+    """
+    Strict decoder for :term:`raw encoding` of ECDSA signatures.
+
+    Works like :func:`sigdecode_string`, but is intended for use with the
+    strict verification policy (see the `strict` parameter of
+    :func:`ecdsa.keys.VerifyingKey.verify`). The signature must be exactly
+    `2 * orderlen(order)` bytes long - no shorter, no longer - so that a
+    signature encoded with a different format (like :term:`DER`) cannot be
+    accepted through this entry point.
+
+    Note: the check that the decoded `r` and `s` values are in the
+    [1, n-1] range and that `s` is not a high-S value is performed by the
+    caller (the `verify`/`verify_digest` methods), not by this function.
+
+    It's expected that this function will be used as the ``sigdecode=``
+    parameter to the :func:`ecdsa.keys.VerifyingKey.verify` method together
+    with ``strict=True``.
+
+    :param signature: encoded signature
+    :type signature: bytes like object
+    :param order: order of the curve over which the signature was computed
+    :type order: int
+
+    :raises MalformedSignature: when the encoding of the signature is invalid
+
+    :return: tuple with decoded ``r`` and ``s`` values of signature
+    :rtype: tuple of ints
+    """
+    signature = normalise_bytes(signature)
+    expected_len = 2 * orderlen(order)
+    if len(signature) != expected_len:
+        raise MalformedSignature(
+            "Invalid length of signature, expected {0} bytes long, "
+            "provided string is {1} bytes long".format(
+                expected_len, len(signature)
+            )
+        )
+    r = string_to_number(signature[: orderlen(order)])
+    s = string_to_number(signature[orderlen(order) :])
+    return r, s
+
+
+def sigdecode_der_strict(sig_der, order):
+    """
+    Strict decoder for DER format of ECDSA signatures.
+
+    Works like :func:`sigdecode_der`, but is intended for use with the
+    strict verification policy (see the `strict` parameter of
+    :func:`ecdsa.keys.VerifyingKey.verify`). The signature must be a single
+    DER SEQUENCE of exactly two INTEGERs, both encoded with the shortest
+    possible encoding, neither negative nor zero, and with no trailing bytes
+    after the SEQUENCE.
+
+    Note: the check that the decoded `r` and `s` values are in the
+    [1, n-1] range and that `s` is not a high-S value is performed by the
+    caller (the `verify`/`verify_digest` methods), not by this function.
+
+    It's expected that this function will be used as the ``sigdecode=``
+    parameter to the :func:`ecdsa.keys.VerifyingKey.verify` method together
+    with ``strict=True``.
+
+    :param sig_der: encoded signature
+    :type sig_der: bytes like object
+    :param order: order of the curve over which the signature was computed
+    :type order: int
+
+    :raises UnexpectedDER: when the encoding of signature is invalid
+
+    :return: tuple with decoded ``r`` and ``s`` values of signature
+    :rtype: tuple of ints
+    """
+    sig_der = normalise_bytes(sig_der)
+    rs_strings, empty = der.remove_sequence(sig_der)
+    if empty != b"":
+        raise der.UnexpectedDER(
+            "trailing junk after DER sig: %s" % binascii.hexlify(empty)
+        )
+    r, rest = der.remove_integer(rs_strings)
+    if r == 0:
+        raise der.UnexpectedDER("r must be a positive integer, got zero")
+    s, empty = der.remove_integer(rest)
+    if s == 0:
+        raise der.UnexpectedDER("s must be a positive integer, got zero")
+    if empty != b"":
+        raise der.UnexpectedDER(
+            "trailing junk after DER numbers: %s" % binascii.hexlify(empty)
+        )
+    return r, s

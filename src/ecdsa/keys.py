@@ -14,6 +14,8 @@ from .curves import NIST192p, Curve, Ed25519, Ed448
 from .ecdsa import RSZeroError
 from .util import string_to_number, number_to_string, randrange
 from .util import sigencode_string, sigdecode_string, bit_length
+from .util import sigdecode_string_strict, sigdecode_der_strict
+from .util import sigdecode_der
 from .util import (
     oid_ecPublicKey,
     encoded_oid_ecPublicKey,
@@ -54,6 +56,30 @@ class BadDigestError(Exception):
     """Raised in case the selected hash is too large for the curve."""
 
     pass
+
+
+# Mapping of signature decoders to their strict counterparts, used when
+# the strict verification policy is enabled. Decoders not present here
+# can't be used with strict verification.
+_strict_sigdecoders = {
+    sigdecode_string: sigdecode_string_strict,
+    sigdecode_der: sigdecode_der_strict,
+}
+
+
+def _strict_sigdecode(sigdecode):
+    """
+    Return the strict variant of the provided signature decoder.
+
+    :raises ValueError: if the decoder has no strict counterpart
+    """
+    try:
+        return _strict_sigdecoders[sigdecode]
+    except KeyError:
+        raise ValueError(
+            "strict verification is supported only with the "
+            "sigdecode_string and sigdecode_der decoders"
+        )
 
 
 def _truncate_and_convert_digest(digest, curve, allow_truncate):
@@ -633,6 +659,7 @@ class VerifyingKey(object):
         hashfunc=None,
         sigdecode=sigdecode_string,
         allow_truncate=True,
+        strict=False,
     ):
         """
         Verify a signature made over provided data.
@@ -664,6 +691,15 @@ class VerifyingKey(object):
             the end of the digest) will be truncated. Use it when verifying
             SHA-384 output using NIST256p or in similar situations. Defaults to
             True.
+        :param bool strict: if True, the signature is verified against a
+            strict policy: the encoding must be canonical (exact length for
+            :term:`raw encoding`, single shortest-form SEQUENCE of two
+            positive integers for :term:`DER`), both `r` and `s` must be
+            in the [1, n-1] range and `s` must be a low-S value
+            (`s <= n/2`). Signatures that are valid only in a different
+            encoding than the one selected with `sigdecode` are rejected.
+            Applies only to ECDSA (Weierstrass) curves; Edwards curves keep
+            their regular verification. Defaults to False.
 
         :raises BadSignatureError: if the signature is invalid or malformed
 
@@ -682,7 +718,9 @@ class VerifyingKey(object):
 
         hashfunc = hashfunc or self.default_hashfunc
         digest = hashfunc(data).digest()
-        return self.verify_digest(signature, digest, sigdecode, allow_truncate)
+        return self.verify_digest(
+            signature, digest, sigdecode, allow_truncate, strict
+        )
 
     def verify_digest(
         self,
@@ -690,6 +728,7 @@ class VerifyingKey(object):
         digest,
         sigdecode=sigdecode_string,
         allow_truncate=False,
+        strict=False,
     ):
         """
         Verify a signature made over provided hash value.
@@ -714,6 +753,14 @@ class VerifyingKey(object):
             bigger bit-size than the order of the curve, the extra bits (at
             the end of the digest) will be truncated. Use it when verifying
             SHA-384 output using NIST256p or in similar situations.
+        :param bool strict: if True, the signature is verified against a
+            strict policy: the encoding must be canonical (exact length for
+            :term:`raw encoding`, single shortest-form SEQUENCE of two
+            positive integers for :term:`DER`), both `r` and `s` must be
+            in the [1, n-1] range and `s` must be a low-S value
+            (`s <= n/2`). Signatures that are valid only in a different
+            encoding than the one selected with `sigdecode` are rejected.
+            Applies only to ECDSA (Weierstrass) curves. Defaults to False.
 
         :raises BadSignatureError: if the signature is invalid or malformed
         :raises BadDigestError: if the provided digest is too big for the curve
@@ -731,10 +778,26 @@ class VerifyingKey(object):
             allow_truncate,
         )
 
+        if strict:
+            sigdecode = _strict_sigdecode(sigdecode)
         try:
             r, s = sigdecode(signature, self.pubkey.order)
         except (der.UnexpectedDER, MalformedSignature) as e:
             raise BadSignatureError("Malformed formatting of signature", e)
+        if strict:
+            order = self.pubkey.order
+            if not 1 <= r <= order - 1:
+                raise BadSignatureError(
+                    "Invalid signature: r not in range [1, n-1]"
+                )
+            if not 1 <= s <= order - 1:
+                raise BadSignatureError(
+                    "Invalid signature: s not in range [1, n-1]"
+                )
+            if s > order // 2:
+                raise BadSignatureError(
+                    "Invalid signature: s is a high-S value (s > n/2)"
+                )
         sig = ecdsa.Signature(r, s)
         if self.pubkey.verifies(number, sig):
             return True
