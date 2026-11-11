@@ -1,0 +1,60 @@
+from typing import Any, cast
+from urllib.parse import urlencode
+
+from social_core.backends.base import ResponseT_co
+from social_core.exceptions import SocialAuthBaseException
+
+from .oauth import BaseOAuth2
+
+
+class UffdOAuth2(BaseOAuth2[ResponseT_co]):
+    """Uffd OAuth2 authentication backend
+
+    You need to set the following config:
+    SOCIAL_AUTH_UFFD_KEY - client id
+    SOCIAL_AUTH_UFFD_SECRET - client secret
+    SOCIAL_AUTH_UFFD_BASE_URL - base url to uffd installation
+    """
+
+    name = "uffd"
+    title = "uffd"
+    REFRESH_TOKEN_METHOD = "POST"
+    SCOPE_SEPARATOR = " "
+    STATE_PARAMETER = True
+    REDIRECT_STATE = False
+    EXTRA_DATA = [
+        ("id", "id"),
+    ]
+
+    def get_user_details(self, response):
+        """Return user details from a Uffd account"""
+        fullname = response.get("name")
+        first_name = None
+        last_name = None
+        return {
+            "username": response.get("nickname"),
+            "email": response.get("email") or "",
+            "fullname": fullname,
+            "first_name": first_name,
+            "last_name": last_name,
+        }
+
+    def user_data(self, access_token: str, *args, **kwargs) -> dict[str, Any] | None:
+        """Loads user data from service"""
+        url = f"{self.userinfo_url()}?{urlencode({'access_token': access_token})}"
+        try:
+            user_data: dict[str, Any] = self.get_json(url)
+        except SocialAuthBaseException:
+            raise
+        except ValueError:
+            return None
+        return user_data
+
+    def authorization_url(self) -> str:
+        return f"{cast('str', self.setting('BASE_URL'))}/oauth2/authorize"
+
+    def access_token_url(self) -> str:
+        return f"{cast('str', self.setting('BASE_URL'))}/oauth2/token"
+
+    def userinfo_url(self) -> str:
+        return f"{cast('str', self.setting('BASE_URL'))}/oauth2/userinfo"

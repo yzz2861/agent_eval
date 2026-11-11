@@ -1,0 +1,152 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Literal
+
+import requests
+
+from social_core.backends.base import ResponseT_co
+from social_core.exceptions import AuthProviderError, AuthResponseError, ErrorStage
+from social_core.utils import handle_http_errors
+
+from .oauth import BaseOAuth2
+
+if TYPE_CHECKING:
+    from social_core.storage import UserProtocol
+
+
+class UntappdOAuth2(BaseOAuth2[ResponseT_co]):
+    """Untappd OAuth2 authentication backend"""
+
+    name = "untappd"
+    title = "Untappd"
+    AUTHORIZATION_URL = "https://untappd.com/oauth/authenticate/"
+    ACCESS_TOKEN_URL = "https://untappd.com/oauth/authorize/"
+    BASE_API_URL = "https://api.untappd.com"
+    USER_INFO_URL = f"{BASE_API_URL}/v4/user/info/"
+    ACCESS_TOKEN_METHOD: Literal["GET", "POST"] = "GET"
+    STATE_PARAMETER = True
+    REDIRECT_STATE = False
+    EXTRA_DATA = [
+        ("id", "id"),
+        ("bio", "bio"),
+        ("date_joined", "date_joined"),
+        ("location", "location"),
+        ("url", "url"),
+        ("user_avatar", "user_avatar"),
+        ("user_avatar_hd", "user_avatar_hd"),
+        ("user_cover_photo", "user_cover_photo"),
+    ]
+
+    def auth_params(self, state=None):
+        client_id, _client_secret = self.get_key_and_secret()
+        params = {
+            "client_id": client_id,
+            "redirect_url": self.get_redirect_uri(),
+            "response_type": self.RESPONSE_TYPE,
+        }
+        if self.STATE_PARAMETER and state:
+            params["state"] = state
+        return params
+
+    def process_error(self, data, *, stage: ErrorStage = "callback") -> None:
+        """
+        All errors from Untappd are contained in the 'meta' key of the
+        response.
+        """
+        if not isinstance(data, dict):
+            raise AuthResponseError(self, code="malformed_response", stage=stage)
+        super().process_error(data, stage=stage)
+        meta = data.get("meta", {})
+        if not isinstance(meta, dict):
+            raise AuthResponseError(self, code="malformed_response", stage=stage)
+        if "http_code" not in meta:
+            return
+        response_code = meta["http_code"]
+        if isinstance(response_code, bool) or not isinstance(response_code, int):
+            raise AuthResponseError(self, code="malformed_response", stage=stage)
+        if response_code != requests.codes.ok:
+            code = (
+                "rate_limited"
+                if response_code == 429
+                else "unavailable"
+                if response_code >= 500
+                else "http_error"
+            )
+            raise AuthProviderError(
+                self,
+                meta.get("error_detail"),
+                code=code,
+                status_code=response_code,
+                stage=stage,
+            )
+
+    @handle_http_errors
+    def auth_complete(self, *args, **kwargs) -> UserProtocol | ResponseT_co | None:
+        """Completes login process, must return user instance"""
+        client_id, client_secret = self.get_key_and_secret()
+        code = self.data.get("code")
+
+        self.process_error(self.data)
+        state = self.validate_state()
+
+        # Untapped sends the access token request with URL parameters,
+        # not a body
+        response = self.request_access_token(
+            self.access_token_url(),
+            method=self.ACCESS_TOKEN_METHOD,
+            params={
+                "response_type": "code",
+                "code": code,
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "redirect_url": self.get_redirect_uri(state),
+            },
+        )
+
+        # Both the access_token and the rest of the response are
+        # buried in the 'response' key
+        token_response = response.get("response")
+        if not isinstance(token_response, dict):
+            raise AuthResponseError(
+                self, code="malformed_response", stage="token_exchange"
+            )
+        return self.do_auth(
+            self.get_access_token(token_response),
+            *args,
+            response=token_response,
+            **kwargs,
+        )
+
+    def get_user_details(self, response):
+        """Return user details from an Untappd account"""
+        # Start with the user data as it was returned
+        user_data = response["user"]
+
+        # Make a few updates to match expected key names
+        user_data.update(
+            {
+                "username": user_data.get("user_name"),
+                "email": user_data.get("settings", {}).get("email_address", ""),
+                "first_name": user_data.get("first_name"),
+                "last_name": user_data.get("last_name"),
+                "fullname": user_data.get("fullname"),
+            }
+        )
+        return user_data
+
+    def get_user_id(self, details, response):
+        """
+        Return a unique ID for the current user, by default from
+        server response.
+        """
+        return self.get_user_id_from_sources(response.get("user"), details)
+
+    def user_data(self, access_token: str, *args, **kwargs) -> dict[str, Any] | None:
+        """Loads user data from service"""
+        response = self.get_json(
+            self.USER_INFO_URL, params={"access_token": access_token, "compact": "true"}
+        )
+        self._process_error(response, stage="user_info")
+
+        # The response data is buried in the 'response' key
+        return response["response"]

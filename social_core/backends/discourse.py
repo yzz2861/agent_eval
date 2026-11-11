@@ -1,0 +1,142 @@
+import hmac
+import time
+from base64 import urlsafe_b64decode, urlsafe_b64encode
+from hashlib import sha256
+from typing import cast
+from urllib.parse import parse_qs, urlencode
+
+from social_core.backends.base import ResponseT_co
+from social_core.exceptions import AuthInputError, AuthResponseError, AuthSessionError
+from social_core.groups import read_groups
+from social_core.utils import constant_time_compare, drop_lists
+
+from .base import BaseAuth
+
+
+class DiscourseAuth(BaseAuth[ResponseT_co]):
+    name = "discourse"
+    title = "Discourse"
+    ID_KEY = "external_id"
+    LEGACY_ID_KEYS = ("email",)
+    MUTABLE_ID_KEYS = ("email",)
+    REQUIRES_USER_ID = True
+    EXTRA_DATA = ["external_id", "username", "name", "avatar_url"]
+
+    def auth_url(self) -> str:
+        """
+        Get the URL to which we must redirect in order to authenticate the user
+        """
+        return_url = self.redirect_uri
+        nonce = self.strategy.random_string(64)
+        self.add_nonce(nonce)
+        self.strategy.session_set(f"{self.name}_nonce", nonce)
+
+        payload = urlencode({"nonce": nonce, "return_sso_url": return_url})
+        base_64_payload = urlsafe_b64encode(payload.encode("utf8")).decode("ascii")
+
+        payload_signature = hmac.new(
+            self.setting("SECRET").encode("utf8"),
+            base_64_payload.encode("utf8"),
+            sha256,
+        ).hexdigest()
+        encoded_params = urlencode({"sso": base_64_payload, "sig": payload_signature})
+        return f"{self.get_idp_url()}?{encoded_params}"
+
+    def get_idp_url(self) -> str:
+        return f"{self.setting('SERVER_URL')}/session/sso_provider"
+
+    def get_user_details(self, response):
+        return {
+            "username": response.get("username"),
+            "email": response.get("email"),
+            "name": response.get("name"),
+            "is_staff": response.get("admin") == "true"
+            or response.get("moderator") == "true",
+            "is_superuser": response.get("admin") == "true",
+        }
+
+    def get_user_groups(self, response) -> list[str] | None:
+        if not self.setting("GROUPS_ENABLED", False):
+            return None
+        data = dict(response)
+        if isinstance(data.get("groups"), str):
+            data["groups"] = data["groups"].split(",") if data["groups"] else []
+        return read_groups(
+            self,
+            data,
+            "groups",
+            missing_as_empty=self.setting("GROUPS_MISSING_AS_EMPTY", False),
+        )
+
+    def add_nonce(self, nonce) -> None:
+        self.strategy.storage.nonce.use(
+            cast("str", self.setting("SERVER_URL")), time.time(), nonce
+        )
+
+    def get_nonce(self, nonce):
+        return self.strategy.storage.nonce.get(
+            cast("str", self.setting("SERVER_URL")), nonce
+        )
+
+    def delete_nonce(self, nonce) -> None:
+        self.strategy.storage.nonce.delete(nonce)
+
+    def validate_session_nonce(self, nonce: object) -> None:
+        """Require the callback nonce from the session that started login."""
+        session_nonce = self.strategy.session_get(f"{self.name}_nonce")
+        if not isinstance(session_nonce, str) or not session_nonce:
+            raise AuthSessionError(
+                self, "nonce", code="session_context_missing", stage="callback"
+            )
+        if not isinstance(nonce, str) or not constant_time_compare(
+            nonce, session_nonce
+        ):
+            raise AuthSessionError(self, code="state_mismatch", stage="callback")
+
+    def auth_complete(self, *args, **kwargs):
+        """
+        The user has been redirected back from the IdP and we should
+        now log them in, if everything checks out.
+        """
+        request_data = self.strategy.request_data()
+
+        sso_params = request_data.get("sso")
+        if not sso_params:
+            raise AuthInputError(
+                self, parameter="sso", code="missing_parameter", stage="callback"
+            )
+        sso_signature = request_data.get("sig")
+
+        param_signature = hmac.new(
+            self.setting("SECRET").encode("utf8"), sso_params.encode("utf8"), sha256
+        ).hexdigest()
+
+        if not isinstance(sso_signature, str) or not constant_time_compare(
+            sso_signature, param_signature
+        ):
+            raise AuthResponseError(
+                self,
+                "Could not verify discourse login",
+                code="invalid_signature",
+                stage="callback",
+            )
+
+        decoded_params = urlsafe_b64decode(sso_params.encode("utf8")).decode("ascii")
+
+        # Bind the signed callback to the session that initiated this login.
+        response = drop_lists(parse_qs(decoded_params, keep_blank_values=True))
+        self.validate_session_nonce(response.get("nonce"))
+        nonce_obj = self.get_nonce(response.get("nonce"))
+        if nonce_obj:
+            self.delete_nonce(nonce_obj)
+            self.strategy.session_pop(f"{self.name}_nonce")
+        else:
+            raise AuthResponseError(
+                self,
+                "Incorrect id_token: nonce",
+                code="nonce_mismatch",
+                stage="callback",
+            )
+
+        kwargs.update({"sso": "", "sig": "", "backend": self, "response": response})
+        return self.strategy.authenticate(*args, **kwargs)

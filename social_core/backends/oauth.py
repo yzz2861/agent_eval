@@ -1,0 +1,882 @@
+from __future__ import annotations
+
+import base64
+import hashlib
+from time import time as _time
+from typing import TYPE_CHECKING, Any, Literal, cast
+
+from oauthlib.oauth1 import SIGNATURE_TYPE_AUTH_HEADER
+from requests_oauthlib import OAuth1
+
+from social_core.backends.base import ResponseT_co
+from social_core.exceptions import (
+    AuthCanceled,
+    AuthConfigurationError,
+    AuthInputError,
+    AuthProviderError,
+    AuthResponseError,
+    AuthSessionError,
+    ErrorStage,
+    SocialAuthBaseException,
+)
+from social_core.utils import (
+    constant_time_compare,
+    handle_http_errors,
+    parse_qs,
+    url_add_parameters,
+    wrap_access_token_error,
+)
+
+from .base import BaseAuth
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from requests import Response
+    from requests.auth import AuthBase
+
+    from social_core.storage import UserProtocol
+
+
+class OAuthAuth(BaseAuth[ResponseT_co]):
+    """OAuth authentication backend base class.
+
+    Settings will be inspected to get more values names that should be
+    stored on extra_data field. The setting name is created following the
+    pattern SOCIAL_AUTH_<uppercase current backend name>_EXTRA_DATA.
+
+    access_token is always stored.
+
+    URLs settings:
+        AUTHORIZATION_URL       Authorization service url
+        ACCESS_TOKEN_URL        Access token URL
+    """
+
+    AUTHORIZATION_URL = ""
+    ACCESS_TOKEN_URL: str = ""
+    ACCESS_TOKEN_METHOD: Literal["GET", "POST"] = "POST"
+    ACCESS_TOKEN_PAYLOAD: Literal["form", "json"] = "form"
+    REVOKE_TOKEN_URL: str = ""
+    REVOKE_TOKEN_METHOD: Literal["GET", "POST", "DELETE"] = "POST"
+    ID_KEY = "id"
+    SCOPE_PARAMETER_NAME = "scope"
+    DEFAULT_SCOPE: list[str] | None = None
+    SCOPE_SEPARATOR = " "
+    REDIRECT_STATE = False
+    STATE_PARAMETER = False
+
+    def extra_data(
+        self,
+        user,
+        uid: str,
+        response: dict[str, Any],
+        details: dict[str, Any],
+        pipeline_kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return access_token and extra defined names to store in
+        extra_data field"""
+        data = super().extra_data(user, uid, response, details, pipeline_kwargs)
+        data["access_token"] = response.get("access_token") or pipeline_kwargs.get(
+            "access_token"
+        )
+        return data
+
+    def state_token(self):
+        """Generate csrf token to include as state parameter."""
+        return self.strategy.random_string(32)
+
+    def get_or_create_state(self) -> str | None:
+        if self.ASSOCIATION_ONLY:
+            return self.get_association_state()
+        if self.STATE_PARAMETER or self.REDIRECT_STATE:
+            # Store state in session for further request validation. The state
+            # value is passed as state parameter (as specified in OAuth2 spec),
+            # but also added to redirect, that way we can still verify the
+            # request if the provider doesn't implement the state parameter.
+            # Reuse token if any.
+            name = f"{self.name}_state"
+            state = self.strategy.session_get(name)
+            if state is None:
+                state = self.state_token()
+                self.strategy.session_set(name, state)
+        else:
+            state = None
+        return state
+
+    def get_session_state(self):
+        if self.ASSOCIATION_ONLY:
+            return self.get_association_state()
+        return self.strategy.session_get(f"{self.name}_state")
+
+    def get_request_state(self):
+        request_state = self.data.get("state") or self.data.get("redirect_state")
+        if request_state and isinstance(request_state, list):
+            request_state = request_state[0]
+        return request_state
+
+    def validate_state(self):
+        """Validate state value. Raises exception on error, returns state
+        value if valid."""
+        if not self.STATE_PARAMETER and not self.REDIRECT_STATE:
+            return None
+        state = self.get_session_state()
+        request_state = self.get_request_state()
+        if not request_state:
+            raise AuthInputError(
+                self, parameter="state", code="missing_parameter", stage="callback"
+            )
+        if not state:
+            raise AuthSessionError(
+                self, "state", code="session_context_missing", stage="callback"
+            )
+        if not constant_time_compare(request_state, state):
+            raise AuthSessionError(self, code="state_mismatch", stage="callback")
+        return state
+
+    def get_redirect_uri(self, state: str | None = None) -> str:
+        """Build redirect with redirect_state parameter."""
+        uri = cast("str", self.redirect_uri)
+        if self.REDIRECT_STATE and state:
+            uri = url_add_parameters(uri, {"redirect_state": state})
+        return uri
+
+    def get_scope(self) -> list[str]:
+        """Return list with needed access scope"""
+        scope = cast("list[str]", self.setting("SCOPE", []))
+        if not self.setting("IGNORE_DEFAULT_SCOPE", False):
+            scope = scope + (self.DEFAULT_SCOPE or [])
+        return scope
+
+    def get_scope_argument(self):
+        param = {}
+        scope = self.get_scope()
+        if scope:
+            param[self.SCOPE_PARAMETER_NAME] = self.SCOPE_SEPARATOR.join(scope)
+        return param
+
+    def user_data(self, access_token, *args, **kwargs) -> dict[str, Any] | None:
+        """Loads user data from service. Implement in subclass"""
+        raise NotImplementedError
+
+    def authorization_url(self) -> str:
+        url = cast("str", self.setting("AUTHORIZATION_URL", self.AUTHORIZATION_URL))
+        if format_params := self.get_authorization_url_format():
+            return url.format(**format_params)
+        return url
+
+    def get_authorization_url_format(self) -> dict[str, str]:
+        return {}
+
+    def access_token_url(self) -> str:
+        url = cast("str", self.setting("ACCESS_TOKEN_URL", self.ACCESS_TOKEN_URL))
+        if format_params := self.get_access_token_url_format():
+            return url.format(**format_params)
+        return url
+
+    def get_access_token_url_format(self) -> dict[str, str]:
+        return {}
+
+    def revoke_token_url(self, token, uid) -> str:
+        return cast("str", self.setting("REVOKE_TOKEN_URL", self.REVOKE_TOKEN_URL))
+
+    def revoke_token_params(self, token, uid) -> dict[str, Any]:
+        return {}
+
+    def revoke_token_headers(self, token, uid) -> dict[str, Any]:
+        return {}
+
+    def process_revoke_token_response(self, response):
+        return response.status_code == 200
+
+    def revoke_token(self, token, uid):
+        if revoke_token_url := self.revoke_token_url(token, uid):
+            params = self.revoke_token_params(token, uid)
+            headers = self.revoke_token_headers(token, uid)
+            data = params if self.REVOKE_TOKEN_METHOD != "GET" else None
+            response = self.request(
+                revoke_token_url,
+                params=params,
+                headers=headers,
+                data=data,
+                method=self.REVOKE_TOKEN_METHOD,
+                stage="disconnect",
+            )
+            return self.process_revoke_token_response(response)
+        return None
+
+
+class BaseOAuth1(OAuthAuth[ResponseT_co]):
+    """Consumer based mechanism OAuth authentication, fill the needed
+    parameters to communicate properly with authentication service.
+
+    URLs settings:
+        REQUEST_TOKEN_URL       Request token URL
+
+    """
+
+    REQUEST_TOKEN_URL: str = ""
+    REQUEST_TOKEN_METHOD: Literal["GET", "POST"] = "GET"
+    OAUTH_TOKEN_PARAMETER_NAME = "oauth_token"
+    REDIRECT_URI_PARAMETER_NAME = "redirect_uri"
+    UNATHORIZED_TOKEN_SUFIX = "unauthorized_token_name"
+
+    def auth_url(self) -> str:
+        """Return redirect url"""
+        token = self.set_unauthorized_token()
+        return self.oauth_authorization_request(token)
+
+    def process_error(self, data, *, stage: ErrorStage = "callback") -> None:
+        if "oauth_problem" in data:
+            if data["oauth_problem"] == "user_refused":
+                raise AuthCanceled(
+                    self,
+                    "User refused the access",
+                    code="authorization_declined",
+                    provider_code=data["oauth_problem"],
+                    stage=stage,
+                )
+            raise AuthProviderError(
+                self,
+                provider_code=data["oauth_problem"],
+                code="http_error",
+                stage=stage,
+            )
+
+    @handle_http_errors
+    def auth_complete(self, *args, **kwargs) -> UserProtocol | ResponseT_co | None:
+        """Return user, might be logged in"""
+        # Multiple unauthorized tokens are supported (see #521)
+        self.process_error(self.data)
+        self.validate_state()
+        token = self.get_unauthorized_token()
+        access_token = self.access_token(token)
+        return self.do_auth(access_token, *args, **kwargs)
+
+    @handle_http_errors
+    def do_auth(self, access_token, *args, **kwargs):
+        """Finish the auth process once the access_token was retrieved"""
+        if not isinstance(access_token, dict):
+            access_token = parse_qs(access_token)
+        data = self.user_data(access_token)
+        if data is not None and "access_token" not in data:
+            data["access_token"] = access_token
+        kwargs.update({"response": data, "backend": self})
+        return self.strategy.authenticate(*args, **kwargs)
+
+    def get_unauthorized_token(self):
+        name = self.name + self.UNATHORIZED_TOKEN_SUFIX
+        unauthed_tokens = self.strategy.session_get(name, [])
+        if not unauthed_tokens:
+            raise AuthSessionError(
+                self,
+                "Missing unauthorized token",
+                code="session_context_missing",
+                stage="callback",
+            )
+
+        data_token = self.data.get(self.OAUTH_TOKEN_PARAMETER_NAME)
+
+        if data_token is None:
+            raise AuthSessionError(
+                self,
+                "Missing unauthorized token",
+                code="session_context_missing",
+                stage="callback",
+            )
+
+        token = None
+        for utoken in unauthed_tokens:
+            orig_utoken = utoken
+            if not isinstance(utoken, dict):
+                utoken = parse_qs(utoken)
+            if utoken.get(self.OAUTH_TOKEN_PARAMETER_NAME) == data_token:
+                self.strategy.session_set(
+                    name, list(set(unauthed_tokens) - {orig_utoken})
+                )
+                token = utoken
+                break
+        else:
+            raise AuthSessionError(
+                self,
+                "Incorrect tokens",
+                code="state_mismatch",
+                stage="callback",
+            )
+        return token
+
+    def set_unauthorized_token(self):
+        token = self.unauthorized_token()
+        name = self.name + self.UNATHORIZED_TOKEN_SUFIX
+        tokens = [*self.strategy.session_get(name, []), token]
+        self.strategy.session_set(name, tokens)
+        return token
+
+    def request_token_extra_arguments(self) -> dict[str, str]:
+        """Return extra arguments needed on request-token process"""
+        return cast("dict[str, str]", self.setting("REQUEST_TOKEN_EXTRA_ARGUMENTS", {}))
+
+    def _validate_token_credentials(self, token: dict, *, stage: ErrorStage) -> None:
+        for parameter in ("oauth_token", "oauth_token_secret"):
+            value = token.get(parameter)
+            if not isinstance(value, str) or not value:
+                raise AuthResponseError(
+                    self, claim=parameter, code="missing_claim", stage=stage
+                )
+
+    def unauthorized_token(self):
+        """Return request for unauthorized token (first stage)"""
+        params = self.request_token_extra_arguments()
+        params.update(self.get_scope_argument())
+        key, secret = self.get_key_and_secret()
+        state = self.get_or_create_state()
+        response = self.request(
+            self.REQUEST_TOKEN_URL,
+            params=params,
+            auth=OAuth1(key, secret, callback_uri=self.get_redirect_uri(state)),
+            method=self.REQUEST_TOKEN_METHOD,
+            stage="begin",
+        )
+        content = response.content
+        if response.encoding or response.apparent_encoding:
+            content = content.decode(response.encoding or response.apparent_encoding)
+        else:
+            content = response.content.decode()
+        token = parse_qs(content)
+        self._process_error(token, stage="begin")
+        self._validate_token_credentials(token, stage="begin")
+        return content
+
+    def oauth_authorization_request(self, token):
+        """Generate OAuth request to authorize token."""
+        if not isinstance(token, dict):
+            token = parse_qs(token)
+        params = self.auth_extra_arguments() or {}
+        params.update(self.get_scope_argument())
+        params[self.OAUTH_TOKEN_PARAMETER_NAME] = cast(
+            "str", token.get(self.OAUTH_TOKEN_PARAMETER_NAME)
+        )
+        state = self.get_or_create_state()
+        params[self.REDIRECT_URI_PARAMETER_NAME] = self.get_redirect_uri(state)
+        return url_add_parameters(self.authorization_url(), params)
+
+    def oauth_auth(
+        self,
+        token: dict | None = None,
+        oauth_verifier=None,
+        signature_type=SIGNATURE_TYPE_AUTH_HEADER,
+        *,
+        stage: ErrorStage = "callback",
+    ):
+        key, secret = self.get_key_and_secret()
+        oauth_verifier = oauth_verifier or self.data.get("oauth_verifier")
+        if token:
+            resource_owner_key = token.get("oauth_token")
+            resource_owner_secret = token.get("oauth_token_secret")
+            if not resource_owner_key:
+                raise AuthResponseError(
+                    self, claim="oauth_token", code="missing_claim", stage=stage
+                )
+            if not resource_owner_secret:
+                raise AuthResponseError(
+                    self,
+                    claim="oauth_token_secret",
+                    code="missing_claim",
+                    stage=stage,
+                )
+        else:
+            resource_owner_key = None
+            resource_owner_secret = None
+        state = self.get_or_create_state()
+        return OAuth1(
+            key,
+            secret,
+            resource_owner_key=resource_owner_key,
+            resource_owner_secret=resource_owner_secret,
+            callback_uri=self.get_redirect_uri(state),
+            verifier=oauth_verifier,
+            signature_type=signature_type,
+        )
+
+    def oauth_request(
+        self, token: dict, url: str, params=None, method: Literal["GET", "POST"] = "GET"
+    ) -> Response:
+        """Generate OAuth request, setups callback url"""
+        return self.request(
+            url,
+            method=method,
+            params=params,
+            auth=self.oauth_auth(token, stage="user_info"),
+        )
+
+    def access_token(self, token: dict) -> dict[str, str]:
+        """Return request for access token value"""
+        response = self.get_querystring(
+            self.access_token_url(),
+            auth=self.oauth_auth(token, stage="token_exchange"),
+            method=self.ACCESS_TOKEN_METHOD,
+            stage="token_exchange",
+        )
+        self._process_error(response, stage="token_exchange")
+        self._validate_token_credentials(response, stage="token_exchange")
+        return response
+
+    def user_data(self, access_token: dict, *args, **kwargs) -> dict[str, Any] | None:
+        """Loads user data from service. Implement in subclass"""
+        return {}
+
+
+class BaseOAuth2(OAuthAuth[ResponseT_co]):
+    """Base class for OAuth2 providers.
+
+    OAuth2 details at:
+        https://datatracker.ietf.org/doc/html/rfc6749
+    """
+
+    REFRESH_TOKEN_URL: str | None = None
+    REFRESH_TOKEN_METHOD: Literal["GET", "POST", "DELETE"] = "POST"
+    RESPONSE_TYPE: str | None = "code"
+    REDIRECT_STATE = True
+    STATE_PARAMETER = True
+    USE_BASIC_AUTH = False
+    STATE_LIFETIME = 1800
+    _oauth2_transaction: dict[str, Any] | None = None
+
+    def transaction_key(self, state: str) -> str:
+        return f"{self.name}_oauth2_state_{state}"
+
+    def _transaction_index_key(self) -> str:
+        return f"{self.name}_oauth2_transaction_index"
+
+    def _nonce_scope(self) -> str:
+        return f"social_core.oauth2.{self.name}"
+
+    def _state_lifetime(self) -> int:
+        lifetime = self.setting("STATE_LIFETIME", self.STATE_LIFETIME)
+        if isinstance(lifetime, bool) or not isinstance(lifetime, int) or lifetime <= 0:
+            raise AuthConfigurationError(
+                self, parameter="STATE_LIFETIME", code="invalid_setting", stage="begin"
+            )
+        return lifetime
+
+    def _prune_transactions(self, now: int, lifetime: int) -> dict[str, int]:
+        """Discard expired session transactions on the next authorization start."""
+        index = self.strategy.session_get(self._transaction_index_key())
+        if not isinstance(index, dict):
+            return {}
+        active = {}
+        for state, timestamp in index.items():
+            if (
+                not isinstance(state, str)
+                or not isinstance(timestamp, int)
+                or isinstance(timestamp, bool)
+            ):
+                continue
+            if timestamp > now or now - timestamp > lifetime:
+                self.strategy.session_pop(self.transaction_key(state))
+            else:
+                active[state] = timestamp
+        return active
+
+    def get_or_create_state(self) -> str | None:
+        if self.ASSOCIATION_ONLY:
+            return self.get_association_state()
+        if not self.STATE_PARAMETER and not self.REDIRECT_STATE:
+            return None
+        lifetime = self._state_lifetime()
+        timestamp = int(_time())
+        active = self._prune_transactions(timestamp, lifetime)
+        for _ in range(3):
+            state = self.state_token()
+            if state in active:
+                continue
+            if self.strategy.storage.nonce.use(self._nonce_scope(), timestamp, state):
+                self.strategy.session_set(
+                    self.transaction_key(state),
+                    {"state": state, "timestamp": timestamp},
+                )
+                active[state] = timestamp
+                self.strategy.session_set(self._transaction_index_key(), active)
+                return state
+        raise AuthSessionError(self, code="session_context_missing", stage="begin")
+
+    def validate_state(self) -> str | None:
+        if self.ASSOCIATION_ONLY:
+            return super().validate_state()
+        if not self.STATE_PARAMETER and not self.REDIRECT_STATE:
+            return None
+        self._oauth2_transaction = None
+        request_state = self.get_request_state()
+        if not request_state:
+            raise AuthInputError(
+                self, parameter="state", code="missing_parameter", stage="callback"
+            )
+        if not isinstance(request_state, str) or len(request_state) > 128:
+            raise AuthSessionError(self, code="state_mismatch", stage="callback")
+        transaction = self.strategy.session_get(self.transaction_key(request_state))
+        stored_state = (
+            transaction.get("state") if isinstance(transaction, dict) else None
+        )
+        if not isinstance(stored_state, str) or not constant_time_compare(
+            request_state, stored_state
+        ):
+            raise AuthSessionError(
+                self, "state", code="session_context_missing", stage="callback"
+            )
+        timestamp = transaction.get("timestamp")
+        if isinstance(timestamp, bool) or not isinstance(timestamp, int):
+            raise AuthSessionError(
+                self, "state", code="session_context_missing", stage="callback"
+            )
+        now = _time()
+        if timestamp > now or now - timestamp > self._state_lifetime():
+            raise AuthSessionError(self, code="state_mismatch", stage="callback")
+        try:
+            claimed = self.strategy.storage.nonce.consume(
+                self._nonce_scope(), timestamp, request_state
+            )
+        except NotImplementedError as error:
+            raise AuthConfigurationError(
+                self,
+                parameter="storage.nonce.consume",
+                code="invalid_setting",
+                stage="callback",
+            ) from error
+        if not claimed:
+            raise AuthSessionError(self, code="state_mismatch", stage="callback")
+        self.strategy.session_pop(self.transaction_key(request_state))
+        index = self.strategy.session_get(self._transaction_index_key())
+        if isinstance(index, dict) and request_state in index:
+            active = {
+                state: timestamp
+                for state, timestamp in index.items()
+                if state != request_state
+            }
+            if active:
+                self.strategy.session_set(self._transaction_index_key(), active)
+            else:
+                self.strategy.session_pop(self._transaction_index_key())
+        self._oauth2_transaction = transaction
+        return request_state
+
+    def use_basic_auth(self) -> bool:
+        return self.USE_BASIC_AUTH
+
+    def auth_params(self, state: str | None = None) -> dict[str, str]:
+        client_id, _client_secret = self.get_key_and_secret()
+        params = {"client_id": client_id, "redirect_uri": self.get_redirect_uri(state)}
+        if self.STATE_PARAMETER and state:
+            params["state"] = state
+        if self.RESPONSE_TYPE:
+            params["response_type"] = self.RESPONSE_TYPE
+        return params
+
+    def auth_url(self) -> str:
+        """Return redirect url"""
+        state = self.get_or_create_state()
+        params = self.auth_params(state)
+        params.update(self.get_scope_argument())
+        params.update(self.auth_extra_arguments())
+
+        # when self.REDIRECT_STATE is False, redirect_uri matching is strictly enforced,
+        # so match the providers value exactly.
+        return url_add_parameters(
+            self.authorization_url(), params, not self.REDIRECT_STATE
+        )
+
+    def auth_complete_params(self, state=None):
+        params = {
+            "grant_type": "authorization_code",  # request auth code
+            "code": self.data.get("code", ""),  # server response code
+            "redirect_uri": self.get_redirect_uri(state),
+        }
+        if not self.use_basic_auth():
+            client_id, client_secret = self.get_key_and_secret()
+            params.update(
+                {
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                }
+            )
+        return params
+
+    def auth_complete_credentials(self):
+        if self.use_basic_auth():
+            return self.get_key_and_secret()
+        return None
+
+    def auth_headers(self) -> Mapping[str, str | bytes]:
+        return {
+            "Content-Type": "application/json"
+            if self.ACCESS_TOKEN_PAYLOAD == "json"
+            else "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+        }
+
+    def extra_data(
+        self,
+        user,
+        uid: str,
+        response: dict[str, Any],
+        details: dict[str, Any],
+        pipeline_kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return access_token, token_type, and extra defined names to store in
+        extra_data field"""
+        data = super().extra_data(user, uid, response, details, pipeline_kwargs)
+        data["token_type"] = response.get("token_type") or pipeline_kwargs.get(
+            "token_type"
+        )
+        return data
+
+    def request_access_token(
+        self,
+        url: str,
+        method: Literal["GET", "POST", "DELETE"] = "GET",
+        headers: Mapping[str, str | bytes] | None = None,
+        data: dict | None = None,
+        json: dict | None = None,
+        auth: tuple[str, str] | AuthBase | None = None,
+        params: dict | None = None,
+        *,
+        stage: ErrorStage = "token_exchange",
+    ) -> dict[Any, Any]:
+        with wrap_access_token_error(self, stage=stage):
+            response = self.get_json(
+                url,
+                method=method,
+                headers=headers,
+                data=data,
+                auth=auth,
+                params=params,
+                json=json,
+                stage=stage,
+            )
+
+        if not isinstance(response, dict):
+            raise AuthResponseError(self, code="malformed_response", stage=stage)
+        self._process_error(response, stage=stage)
+        return response
+
+    def process_error(self, data, *, stage: ErrorStage = "callback") -> None:
+        error = self.get_provider_error(data, stage=stage)
+        if error is not None:
+            raise error
+        if "denied" in data:
+            raise AuthCanceled(self, stage=stage)
+
+    @handle_http_errors
+    def auth_complete(self, *args, **kwargs) -> UserProtocol | ResponseT_co | None:
+        """Completes login process, must return user instance"""
+        state: str | None
+        if self.ASSOCIATION_ONLY:
+            state = self.validate_association_state(
+                self.get_request_state(), kwargs.get("user")
+            )
+            self.process_error(self.data)
+        else:
+            self.process_error(self.data)
+            state = self.validate_state()
+        data = params = json = None
+        auth_params = self.auth_complete_params(state)
+        if self.ACCESS_TOKEN_METHOD == "GET":
+            params = auth_params
+        elif self.ACCESS_TOKEN_PAYLOAD == "json":
+            json = auth_params
+        else:
+            data = auth_params
+
+        response = self.request_access_token(
+            self.access_token_url(),
+            data=data,
+            json=json,
+            params=params,
+            headers=self.auth_headers(),
+            auth=self.auth_complete_credentials(),
+            method=self.ACCESS_TOKEN_METHOD,
+        )
+        access_token = self.get_access_token(response)
+        return self.do_auth(access_token, *args, response=response, **kwargs)
+
+    def get_access_token(self, response: dict[str, Any]) -> str:
+        """Extract a usable access token before profile lookup or pipeline execution."""
+        access_token = response.get("access_token")
+        if not isinstance(access_token, str) or not access_token:
+            raise AuthResponseError(
+                self, code="missing_claim", claim="access_token", stage="token_exchange"
+            )
+        return access_token
+
+    @handle_http_errors
+    def do_auth(self, access_token, *args, **kwargs):
+        """Finish the auth process once the access_token was retrieved"""
+        if self.ASSOCIATION_ONLY:
+            self._bind_association_user(kwargs)
+        data = self.user_data(access_token, *args, **kwargs)
+        response = kwargs.get("response") or {}
+        response.update(data or {})
+        if "access_token" not in response:
+            response["access_token"] = access_token
+        kwargs.update({"response": response, "backend": self})
+        return self.strategy.authenticate(*args, **kwargs)
+
+    def refresh_token_params(self, token: str, *args, **kwargs) -> dict[str, str]:
+        client_id, client_secret = self.get_key_and_secret()
+        return {
+            "refresh_token": token,
+            "grant_type": "refresh_token",
+            "client_id": client_id,
+            "client_secret": client_secret,
+        }
+
+    def refresh_token_auth(self) -> AuthBase | None:
+        return None
+
+    def process_refresh_token_response(self, response, *args, **kwargs) -> dict:
+        data = response.json()
+        if not isinstance(data, dict):
+            raise AuthResponseError(self, code="malformed_response", stage="refresh")
+        return data
+
+    def refresh_token(self, token: str, *args, **kwargs) -> dict:
+        params = self.refresh_token_params(token, *args, **kwargs)
+        url = self.refresh_token_url()
+        method = self.REFRESH_TOKEN_METHOD
+        is_get = method == "GET"
+        request = self.request(
+            url,
+            headers=self.auth_headers(),
+            method=method,
+            auth=self.refresh_token_auth(),
+            data=params if not is_get else None,
+            params=params if is_get else None,
+            stage="refresh",
+        )
+        try:
+            response = self.process_refresh_token_response(request, *args, **kwargs)
+        except SocialAuthBaseException as error:
+            error.stage = "refresh"
+            raise
+        except ValueError as json_error:
+            raise AuthResponseError(
+                self, code="malformed_response", stage="refresh"
+            ) from json_error
+        if not isinstance(response, dict):
+            raise AuthResponseError(self, code="malformed_response", stage="refresh")
+        self._process_error(response, stage="refresh")
+        try:
+            self.get_access_token(response)
+        except SocialAuthBaseException as error:
+            error.stage = "refresh"
+            raise
+        return response
+
+    def refresh_token_url(self):
+        try:
+            return self.REFRESH_TOKEN_URL or self.access_token_url()
+        except SocialAuthBaseException as error:
+            error.stage = "refresh"
+            raise
+
+    def user_data(self, access_token: str, *args, **kwargs) -> dict[str, Any] | None:
+        """Loads user data from service. Implement in subclass"""
+        return {}
+
+
+class BaseOAuth2PKCE(BaseOAuth2[ResponseT_co]):
+    """
+    Base class for providers using OAuth2 with Proof Key for Code Exchange (PKCE).
+
+    OAuth2 details at:
+        https://datatracker.ietf.org/doc/html/rfc6749
+    PKCE details at:
+        https://datatracker.ietf.org/doc/html/rfc7636
+    """
+
+    PKCE_DEFAULT_CODE_CHALLENGE_METHOD = "S256"
+    PKCE_DEFAULT_CODE_VERIFIER_LENGTH = 43
+    DEFAULT_USE_PKCE = True
+
+    def create_code_verifier(self, state: str | None = None) -> str:
+        code_verifier_len = cast(
+            "int",
+            self.setting(
+                "PKCE_CODE_VERIFIER_LENGTH",
+                default=self.PKCE_DEFAULT_CODE_VERIFIER_LENGTH,
+            ),
+        )
+        code_verifier = self.strategy.random_string(code_verifier_len)
+        if state is not None and not self.ASSOCIATION_ONLY:
+            transaction = self.strategy.session_get(self.transaction_key(state))
+            if not isinstance(transaction, dict) or transaction.get("state") != state:
+                raise AuthSessionError(
+                    self, "state", code="session_context_missing", stage="begin"
+                )
+            self.strategy.session_set(
+                self.transaction_key(state),
+                {**transaction, "code_verifier": code_verifier},
+            )
+        else:
+            self.strategy.session_set(f"{self.name}_code_verifier", code_verifier)
+        return code_verifier
+
+    def get_code_verifier(self, state: str | None = None) -> str:
+        if self.ASSOCIATION_ONLY:
+            verifier = self.strategy.session_pop(f"{self.name}_code_verifier")
+        elif state is None:
+            verifier = self.strategy.session_get(f"{self.name}_code_verifier")
+        else:
+            transaction = getattr(self, "_oauth2_transaction", None)
+            verifier = (
+                transaction.get("code_verifier")
+                if isinstance(transaction, dict)
+                else None
+            )
+        if not isinstance(verifier, str) or not verifier:
+            raise AuthSessionError(
+                self, "code_verifier", code="session_context_missing", stage="callback"
+            )
+        return verifier
+
+    def generate_code_challenge(self, code_verifier, challenge_method):
+        method = challenge_method.lower()
+        if method == "s256":
+            hashed = hashlib.sha256(code_verifier.encode()).digest()
+            encoded = base64.urlsafe_b64encode(hashed)
+            return encoded.decode().replace("=", "")  # remove padding
+        if method == "plain":
+            return code_verifier
+        raise AuthConfigurationError(
+            self,
+            "Unsupported code challenge method.",
+            code="invalid_setting",
+            parameter="PKCE_CODE_CHALLENGE_METHOD",
+            stage="begin",
+        )
+
+    def auth_params(self, state=None):
+        params = super().auth_params(state=state)
+
+        if self.setting("USE_PKCE", default=self.DEFAULT_USE_PKCE):
+            code_challenge_method = cast(
+                "str",
+                self.setting(
+                    "PKCE_CODE_CHALLENGE_METHOD",
+                    default=self.PKCE_DEFAULT_CODE_CHALLENGE_METHOD,
+                ),
+            )
+            code_verifier = self.create_code_verifier(state)
+            code_challenge = self.generate_code_challenge(
+                code_verifier, code_challenge_method
+            )
+            params["code_challenge_method"] = code_challenge_method
+            params["code_challenge"] = code_challenge
+        return params
+
+    def auth_complete_params(self, state=None):
+        params = super().auth_complete_params(state=state)
+
+        if self.setting("USE_PKCE", default=self.DEFAULT_USE_PKCE):
+            code_verifier = self.get_code_verifier(state)
+            params["code_verifier"] = code_verifier
+
+        return params

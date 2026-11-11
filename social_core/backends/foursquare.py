@@ -1,0 +1,44 @@
+"""
+Foursquare OAuth2 backend, docs at:
+    https://python-social-auth.readthedocs.io/en/latest/backends/foursquare.html
+"""
+
+from typing import Any
+
+from social_core.backends.base import ResponseT_co
+
+from .oauth import BaseOAuth2
+
+
+class FoursquareOAuth2(BaseOAuth2[ResponseT_co]):
+    name = "foursquare"
+    title = "Foursquare"
+    AUTHORIZATION_URL = "https://foursquare.com/oauth2/authenticate"
+    ACCESS_TOKEN_URL = "https://foursquare.com/oauth2/access_token"
+    API_VERSION = "20140128"
+
+    def get_user_id(self, details, response):
+        data = response.get("response") or {}
+        return self.get_user_id_from_sources(data.get("user"), details)
+
+    def get_user_details(self, response):
+        """Return user details from Foursquare account"""
+        info = response["response"]["user"]
+        email = info["contact"]["email"]
+        fullname = None
+        first_name = info.get("firstName")
+        last_name = info.get("lastName")
+        return {
+            "username": f"{(first_name or '').strip()} {(last_name or '').strip()}",
+            "fullname": fullname,
+            "first_name": first_name,
+            "last_name": last_name,
+            "email": email,
+        }
+
+    def user_data(self, access_token: str, *args, **kwargs) -> dict[str, Any] | None:
+        """Loads user data from service"""
+        return self.get_json(
+            "https://api.foursquare.com/v2/users/self",
+            params={"oauth_token": access_token, "v": self.API_VERSION},
+        )

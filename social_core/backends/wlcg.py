@@ -1,0 +1,42 @@
+from typing import Any
+from urllib.parse import urlencode
+
+from social_core.backends.base import ResponseT_co
+
+from .oauth import BaseOAuth2
+
+
+class WLCGOAuth2(BaseOAuth2[ResponseT_co]):
+    """
+    WLCG IAM Authentication Backend
+    """
+
+    name = "wlcg"
+    title = "WLCG"
+    ID_KEY = "sub"
+    REQUIRES_USER_ID = True
+    EXTRA_DATA = [("sub", "sub")]
+    API_URL = "https://wlcg.cloud.cnaf.infn.it"
+    AUTHORIZATION_URL = "https://wlcg.cloud.cnaf.infn.it/authorize"
+    ACCESS_TOKEN_URL = "https://wlcg.cloud.cnaf.infn.it/token"
+    REFRESH_TOKEN_URL = "https://wlcg.cloud.cnaf.infn.it/token"
+    DEFAULT_SCOPE = ["openid", "email", "profile", "wlcg", "offline_access"]
+    REDIRECT_STATE = False
+
+    def get_user_details(self, response):
+        """Return user details from WLCG IAM service"""
+        fullname = None
+        first_name = response.get("given_name")
+        last_name = response.get("family_name")
+        return {
+            "username": response.get("email"),
+            "email": response.get("email"),
+            "fullname": fullname,
+            "first_name": first_name,
+            "last_name": last_name,
+        }
+
+    def user_data(self, access_token: str, *args, **kwargs) -> dict[str, Any] | None:
+        """Loads user data from service"""
+        url = f"https://wlcg.cloud.cnaf.infn.it/userinfo?{urlencode({'access_token': access_token})}"
+        return self.get_json(url)

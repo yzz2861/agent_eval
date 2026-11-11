@@ -1,0 +1,52 @@
+from typing import Any
+
+from social_core.backends.base import ResponseT_co
+from social_core.exceptions import SocialAuthBaseException
+
+from .oauth import BaseOAuth2
+
+
+class DigitalOceanOAuth(BaseOAuth2[ResponseT_co]):
+    """
+    DigitalOcean OAuth authentication backend.
+
+    Docs: https://developers.digitalocean.com/documentation/oauth/
+    """
+
+    name = "digitalocean"
+    title = "DigitalOcean"
+    icon = "digital-ocean.svg"
+    ID_KEY = "uuid"
+    AUTHORIZATION_URL = "https://cloud.digitalocean.com/v1/oauth/authorize"
+    ACCESS_TOKEN_URL = "https://cloud.digitalocean.com/v1/oauth/token"
+    SCOPE_SEPARATOR = " "
+    EXTRA_DATA = [("expires_in", "expires_in")]
+
+    def get_user_id(self, details, response):
+        """Return user unique id provided by service"""
+        return self.get_user_id_from_sources(response.get("account"), details)
+
+    def get_user_details(self, response):
+        """Return user details from DigitalOcean account"""
+        fullname = response.get("name")
+        first_name = None
+        last_name = None
+
+        return {
+            "username": response["account"].get("email"),
+            "email": response["account"].get("email"),
+            "fullname": fullname,
+            "first_name": first_name,
+            "last_name": last_name,
+        }
+
+    def user_data(self, access_token: str, *args, **kwargs) -> dict[str, Any] | None:
+        """Loads user data from service"""
+        url = "https://api.digitalocean.com/v2/account"
+        auth_header = {"Authorization": f"Bearer {access_token}"}
+        try:
+            return self.get_json(url, headers=auth_header)
+        except SocialAuthBaseException:
+            raise
+        except ValueError:
+            return None

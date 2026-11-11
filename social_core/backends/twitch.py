@@ -1,0 +1,79 @@
+"""
+Twitch OAuth2 backend, docs at:
+    https://python-social-auth.readthedocs.io/en/latest/backends/twitch.html
+"""
+
+from typing import Any
+
+from social_core.backends.base import ResponseT_co
+from social_core.exceptions import AuthResponseError
+
+from .oauth import BaseOAuth2
+from .open_id_connect import OpenIdConnectAuth
+
+
+class TwitchOpenIdConnect(OpenIdConnectAuth[ResponseT_co]):
+    """Twitch OpenID Connect authentication backend"""
+
+    name = "twitch"
+    title = "Twitch"
+    USERNAME_KEY = "preferred_username"
+    OIDC_ENDPOINT = "https://id.twitch.tv/oauth2"
+    DEFAULT_SCOPE = ["openid", "user:read:email"]
+    TWITCH_CLAIMS = (
+        '{"id_token":{"email": null,"email_verified":null,"preferred_username":null}}'
+    )
+
+    def auth_params(self, state=None):
+        params = super().auth_params(state)
+        # Twitch uses a non-compliant OpenID implementation where the claims must be passed as a param
+        params["claims"] = self.TWITCH_CLAIMS
+        return params
+
+    def get_user_details(self, response):
+        if not self.id_token:
+            raise AuthResponseError(
+                self, code="missing_claim", claim="id_token", stage="user_info"
+            )
+
+        return {
+            "username": self.id_token["preferred_username"],
+            "email": self.id_token["email"],
+            # Twitch does not provide this information
+            "fullname": None,
+            "first_name": None,
+            "last_name": None,
+        }
+
+
+class TwitchOAuth2(BaseOAuth2[ResponseT_co]):
+    """Twitch OAuth authentication backend"""
+
+    name = "twitch"
+    title = "Twitch"
+    ID_KEY = "id"
+    REQUIRES_USER_ID = True
+    AUTHORIZATION_URL = "https://id.twitch.tv/oauth2/authorize"
+    ACCESS_TOKEN_URL = "https://id.twitch.tv/oauth2/token"
+    DEFAULT_SCOPE = ["user:read:email"]
+    REDIRECT_STATE = False
+
+    def get_user_details(self, response):
+        return {
+            "username": response.get("login"),
+            "email": response.get("email"),
+            "first_name": None,
+            "last_name": None,
+        }
+
+    def user_data(self, access_token: str, *args, **kwargs) -> dict[str, Any] | None:
+        client_id, _ = self.get_key_and_secret()
+        auth_headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Client-Id": client_id,
+        }
+        url = "https://api.twitch.tv/helix/users"
+
+        data = self.get_json(url, headers=auth_headers)
+
+        return data["data"][0] if data.get("data") else {}

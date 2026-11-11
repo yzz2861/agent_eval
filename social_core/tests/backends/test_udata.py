@@ -1,0 +1,42 @@
+import json
+from urllib.parse import urlencode
+
+from .oauth import BaseAuthUrlTestMixin, OAuth2Test
+
+
+class DatagouvfrOAuth2Test(OAuth2Test, BaseAuthUrlTestMixin):
+    backend_path = "social_core.backends.udata.DatagouvfrOAuth2"
+    user_data_url = "https://www.data.gouv.fr/api/1/me/"
+    expected_username = "foobar"
+    access_token_body = json.dumps(
+        {
+            "access_token": "foobar",
+            "token_type": "bearer",
+            "first_name": "foobar",
+            "email": "foobar@example.com",
+        }
+    )
+    request_token_body = urlencode(
+        {
+            "oauth_token_secret": "foobar-secret",
+            "oauth_token": "foobar",
+            "oauth_callback_confirmed": "true",
+        }
+    )
+    user_data_body = json.dumps(
+        {
+            "id": "5a8f79b9c8d8c919774d6e40",
+            "first_name": "foobar",
+            "email": "foobar@example.com",
+        }
+    )
+
+    def test_login(self) -> None:
+        user = self.do_login()
+        self.assertEqual(
+            (user.social[0].uid, user.social[0].id_key),
+            ("5a8f79b9c8d8c919774d6e40", "id"),
+        )
+
+    def test_partial_pipeline(self) -> None:
+        self.do_partial_pipeline()

@@ -1,0 +1,355 @@
+"""
+Facebook OAuth2, and Canvas Application  backends, docs at:
+    https://python-social-auth.readthedocs.io/en/latest/backends/facebook.html
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import json
+import time
+from math import isfinite
+from typing import TYPE_CHECKING, Any, Literal, cast
+
+from requests import HTTPError
+
+from social_core.backends.base import ResponseT_co
+from social_core.exceptions import (
+    AuthCanceled,
+    AuthInputError,
+    AuthProviderError,
+    AuthResponseError,
+    ErrorStage,
+)
+from social_core.utils import constant_time_compare, handle_http_errors, parse_qs
+
+from .oauth import BaseOAuth2
+
+if TYPE_CHECKING:
+    from requests import Response
+
+    from social_core.storage import UserProtocol
+
+API_VERSION = 24.0
+
+
+class FacebookOAuth2(BaseOAuth2[ResponseT_co]):
+    """Facebook OAuth2 authentication backend"""
+
+    name = "facebook"
+    title = "Facebook"
+    icon = "facebook.svg"
+    REDIRECT_STATE = False
+    RESPONSE_TYPE = None
+    SCOPE_SEPARATOR = ","
+    AUTHORIZATION_URL = "https://www.facebook.com/v{version}/dialog/oauth"
+    ACCESS_TOKEN_URL = "https://graph.facebook.com/v{version}/oauth/access_token"
+    ACCESS_TOKEN_METHOD: Literal["GET", "POST"] = "GET"
+    REVOKE_TOKEN_URL = "https://graph.facebook.com/v{version}/{uid}/permissions"
+    REVOKE_TOKEN_METHOD = "DELETE"
+    USER_DATA_URL = "https://graph.facebook.com/v{version}/me"
+    EXTRA_DATA = [
+        ("id", "id"),
+        ("expires_in", "expires_in"),
+        ("granted_scopes", "granted_scopes"),
+        ("denied_scopes", "denied_scopes"),
+    ]
+
+    def request(self, *args, **kwargs) -> Response:
+        try:
+            return super().request(*args, **kwargs)
+        except AuthProviderError as error:
+            # https://developers.facebook.com/docs/graph-api/overview/rate-limiting/
+            if isinstance(error.__cause__, HTTPError) and error.provider_code in {
+                4,
+                17,
+                32,
+                613,
+            }:
+                raise AuthProviderError(
+                    self,
+                    error.detail,
+                    code="rate_limited",
+                    source=error.source,
+                    stage=error.stage,
+                    provider_code=error.provider_code,
+                    status_code=error.status_code,
+                    retry_after=error.retry_after,
+                    context=error.context,
+                ) from error.__cause__
+            raise
+
+    def auth_params(self, state=None):
+        params = super().auth_params(state)
+        params["return_scopes"] = "true"
+        return params
+
+    def get_authorization_url_format(self) -> dict[str, str]:
+        return {"version": cast("str", self.setting("API_VERSION", API_VERSION))}
+
+    def get_access_token_url_format(self) -> dict[str, str]:
+        return {"version": cast("str", self.setting("API_VERSION", API_VERSION))}
+
+    def get_user_details(self, response):
+        """Return user details from Facebook account"""
+        fullname = response.get("name")
+        first_name = response.get("first_name")
+        last_name = response.get("last_name")
+        return {
+            "username": response.get("username", response.get("name")),
+            "email": response.get("email", ""),
+            "fullname": fullname,
+            "first_name": first_name,
+            "last_name": last_name,
+        }
+
+    def user_data(self, access_token: str, *args, **kwargs) -> dict[str, Any] | None:
+        """Loads user data from service"""
+        params = self.setting("PROFILE_EXTRA_PARAMS", {}).copy()
+        params["access_token"] = access_token
+
+        if self.setting("APPSECRET_PROOF", True):
+            _, secret = self.get_key_and_secret()
+            params["appsecret_proof"] = hmac.new(
+                secret.encode("utf8"),
+                msg=access_token.encode("utf8"),
+                digestmod=hashlib.sha256,
+            ).hexdigest()
+
+        version = self.setting("API_VERSION", API_VERSION)
+        return self.get_json(self.USER_DATA_URL.format(version=version), params=params)
+
+    def process_error(self, data, *, stage: ErrorStage = "callback") -> None:
+        super().process_error(data, stage=stage)
+        if data.get("error_code"):
+            provider_code = data["error_code"]
+            raise AuthProviderError(
+                self,
+                data.get("error_message"),
+                provider_code=provider_code,
+                stage=stage,
+            )
+
+    @handle_http_errors
+    def auth_complete(self, *args, **kwargs) -> UserProtocol | ResponseT_co | None:
+        """Completes login process, must return user instance"""
+        self.process_error(self.data)
+        if not self.data.get("code"):
+            raise AuthInputError(
+                self, parameter="code", code="missing_parameter", stage="callback"
+            )
+        state = self.validate_state()
+        key, secret = self.get_key_and_secret()
+        response = self.request(
+            self.access_token_url(),
+            params={
+                "client_id": key,
+                "redirect_uri": self.get_redirect_uri(state),
+                "client_secret": secret,
+                "code": self.data["code"],
+            },
+            method=self.ACCESS_TOKEN_METHOD,
+            stage="token_exchange",
+        )
+        # API v2.3 returns a JSON, according to the documents linked at issue
+        # #592, but it seems that this needs to be enabled(?), otherwise the
+        # usual querystring type response is returned.
+        try:
+            response = response.json()
+        except ValueError:
+            response = parse_qs(response.text)
+        if not isinstance(response, dict):
+            raise AuthResponseError(
+                self, code="malformed_response", stage="token_exchange"
+            )
+        self._process_error(response, stage="token_exchange")
+        access_token = self.get_access_token(response)
+        return self.do_auth(access_token, response, *args, **kwargs)
+
+    def process_refresh_token_response(self, response, *args, **kwargs):
+        try:
+            return response.json()
+        except ValueError:
+            return parse_qs(response.content)
+
+    def get_refresh_token(self, extra_data: dict[str, Any]) -> str | None:
+        """Facebook renews by exchanging the stored access token."""
+        token = extra_data.get("access_token")
+        return token if isinstance(token, str) and token else None
+
+    def refresh_token_params(self, token, *args, **kwargs):
+        client_id, client_secret = self.get_key_and_secret()
+        return {
+            "fb_exchange_token": token,
+            "grant_type": "fb_exchange_token",
+            "client_id": client_id,
+            "client_secret": client_secret,
+        }
+
+    @handle_http_errors
+    def do_auth(self, access_token, response=None, *args, **kwargs):
+        response = response or {}
+
+        data = self.user_data(access_token)
+
+        if not isinstance(data, dict):
+            # From time to time Facebook responds back a JSON with just
+            # False as value, the reason is still unknown, but since the
+            # data is needed (it contains the user ID used to identify the
+            # account on further logins), this app cannot allow it to
+            # continue with the auth process.
+            raise AuthResponseError(
+                self,
+                "An error occurred while retrieving users Facebook data",
+                code="malformed_response",
+                stage="user_info",
+            )
+
+        data["access_token"] = access_token
+        if "expires_in" in response:
+            data["expires_in"] = response["expires_in"]
+
+        if self.data.get("granted_scopes"):
+            data["granted_scopes"] = self.data["granted_scopes"].split(",")
+
+        if self.data.get("denied_scopes"):
+            data["denied_scopes"] = self.data["denied_scopes"].split(",")
+
+        kwargs.update({"backend": self, "response": data})
+        return self.strategy.authenticate(*args, **kwargs)
+
+    def revoke_token_url(self, token, uid):
+        version = self.setting("API_VERSION", API_VERSION)
+        return self.REVOKE_TOKEN_URL.format(version=version, uid=uid)
+
+    def revoke_token_params(self, token, uid):
+        return {"access_token": token}
+
+    def process_revoke_token_response(self, response):
+        return (
+            super().process_revoke_token_response(response)
+            and response.content == "true"
+        )
+
+
+class FacebookAppOAuth2(FacebookOAuth2[ResponseT_co]):
+    """Facebook Application Authentication support"""
+
+    name = "facebook-app"
+    title = "Facebook"
+    icon = "facebook.svg"
+    REDIRECT_STATE = True
+
+    def uses_redirect(self) -> bool:
+        return False
+
+    def auth_complete(self, *args, **kwargs) -> UserProtocol | ResponseT_co | None:
+        access_token = self.data.get("access_token")
+        response = {}
+
+        if "signed_request" in self.data:
+            _key, _secret = self.get_key_and_secret()
+            response = self.load_signed_request(self.data["signed_request"])
+            if "user_id" not in response and "oauth_token" not in response:
+                raise AuthResponseError(
+                    self,
+                    "Missing user_id or oauth_token",
+                    code="missing_claim",
+                    claim="user_id",
+                    stage="callback",
+                )
+
+            if response is not None:
+                access_token = (
+                    response.get("access_token")
+                    or response.get("oauth_token")
+                    or self.data.get("access_token")
+                )
+
+        if access_token is None:
+            access_error = self.data.get("error")
+            if access_error == "access_denied":
+                raise AuthCanceled(
+                    self, code="authorization_declined", stage="callback"
+                )
+            raise AuthResponseError(
+                self, access_error, code="malformed_response", stage="callback"
+            )
+        self.validate_state()
+        return self.do_auth(access_token, response, *args, **kwargs)
+
+    def auth_html(self):
+        key, _secret = self.get_key_and_secret()
+        state = self.get_or_create_state()
+        namespace = self.setting("NAMESPACE", None)
+        scope = self.setting("SCOPE", "")
+        if scope:
+            scope = self.SCOPE_SEPARATOR.join(scope)
+        ctx = {
+            "FACEBOOK_APP_NAMESPACE": namespace or key,
+            "FACEBOOK_KEY": key,
+            "FACEBOOK_EXTENDED_PERMISSIONS": scope,
+            "FACEBOOK_COMPLETE_URI": self.get_redirect_uri(state),
+        }
+        tpl = self.setting("LOCAL_HTML", "facebook.html")
+        return self.strategy.render_html(tpl=tpl, context=ctx)
+
+    def load_signed_request(self, signed_request) -> dict:
+        def base64_url_decode(data):
+            data = data.encode("ascii")
+            data += b"=" * (4 - (len(data) % 4))
+            return base64.urlsafe_b64decode(data)
+
+        _key, secret = self.get_key_and_secret()
+        if not isinstance(signed_request, str):
+            raise AuthResponseError(self, code="malformed_response", stage="callback")
+        try:
+            sig, payload = signed_request.split(".", 1)
+        except ValueError as error:
+            # ignore if can't split on dot
+            raise AuthResponseError(
+                self,
+                "Invalid signed request",
+                code="invalid_signature",
+                stage="callback",
+            ) from error
+        try:
+            sig = base64_url_decode(sig)
+            payload_json_bytes = base64_url_decode(payload)
+            data = json.loads(payload_json_bytes.decode("utf-8"))
+        except ValueError as error:
+            raise AuthResponseError(
+                self, code="malformed_response", stage="callback"
+            ) from error
+        if not isinstance(data, dict):
+            raise AuthResponseError(self, code="malformed_response", stage="callback")
+        expected_sig = hmac.new(
+            secret.encode("ascii"),
+            msg=payload.encode("ascii"),
+            digestmod=hashlib.sha256,
+        ).digest()
+        if not constant_time_compare(sig, expected_sig):
+            raise AuthResponseError(
+                self, "Invalid signature", code="invalid_signature", stage="callback"
+            )
+        issued_at = data.get("issued_at")
+        if issued_at is None:
+            raise AuthResponseError(
+                self, claim="issued_at", code="missing_claim", stage="callback"
+            )
+        if (
+            isinstance(issued_at, bool)
+            or not isinstance(issued_at, (int, float))
+            or (isinstance(issued_at, float) and not isfinite(issued_at))
+        ):
+            raise AuthResponseError(
+                self, claim="issued_at", code="invalid_claim", stage="callback"
+            )
+        # allow the signed_request to function for upto 1 day
+        if issued_at > time.time() - 86400:
+            return data
+        raise AuthResponseError(
+            self, "Invalid signature", code="invalid_signature", stage="callback"
+        )

@@ -1,0 +1,49 @@
+from typing import Any
+
+from social_core.backends.base import ResponseT_co
+from social_core.exceptions import SocialAuthBaseException
+
+from .oauth import BaseOAuth2
+
+
+class ClasslinkOAuth(BaseOAuth2[ResponseT_co]):
+    """
+    Classlink OAuth authentication backend.
+
+    Docs: https://developer.classlink.com/docs/oauth2-workflow
+    """
+
+    name = "classlink"
+    title = "ClassLink"
+    ID_KEY = "UserId"
+    REQUIRES_USER_ID = True
+    AUTHORIZATION_URL = "https://launchpad.classlink.com/oauth2/v2/auth"
+    ACCESS_TOKEN_URL = "https://launchpad.classlink.com/oauth2/v2/token"
+    DEFAULT_SCOPE = ["profile"]
+    REDIRECT_STATE = False
+    SCOPE_SEPARATOR = " "
+
+    def get_user_details(self, response):
+        """Return user details from Classlink account"""
+        fullname = None
+        first_name = response.get("FirstName")
+        last_name = response.get("LastName")
+
+        return {
+            "username": response.get("Email") or response.get("LoginId"),
+            "email": response.get("Email"),
+            "fullname": fullname,
+            "first_name": first_name,
+            "last_name": last_name,
+        }
+
+    def user_data(self, access_token: str, *args, **kwargs) -> dict[str, Any] | None:
+        """Loads user data from service"""
+        url = "https://nodeapi.classlink.com/v2/my/info"
+        auth_header = {"Authorization": f"Bearer {access_token}"}
+        try:
+            return self.get_json(url, headers=auth_header)
+        except SocialAuthBaseException:
+            raise
+        except ValueError:
+            return None

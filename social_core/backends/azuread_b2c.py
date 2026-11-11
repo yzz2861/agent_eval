@@ -1,0 +1,305 @@
+"""
+Copyright (c) 2018 Noderabbit Inc., d.b.a. Appsembler
+
+All rights reserved.
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+See https://nicksnettravels.builttoroam.com/post/2017/01/24/Verifying-Azure-Active-Directory-JWT-Tokens.aspx
+    for verifying JWT tokens.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Literal, cast
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+from social_core.backends.base import ResponseT_co
+from social_core.exceptions import (
+    AuthConfigurationError,
+    AuthResponseError,
+    ErrorStage,
+)
+
+from .azuread import AzureADOAuth2
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from requests.auth import AuthBase
+
+
+class AzureADB2COAuth2(AzureADOAuth2[ResponseT_co]):
+    name = "azuread-b2c-oauth2"
+    title = "Azure AD B2C"
+    icon = "microsoft.svg"
+    ID_KEY = "sub"
+    # Known ``sub`` spellings issued by flows whose "Subject (sub) claim"
+    # token compatibility setting is "Not supported".
+    UNSUPPORTED_SUBJECT = "Not supported currently. Use oid claim."
+    LEGACY_UNSUPPORTED_SUBJECT = "Not supported currently.Use oid claim."
+    UNSUPPORTED_SUBJECTS = (UNSUPPORTED_SUBJECT, LEGACY_UNSUPPORTED_SUBJECT)
+
+    BASE_URL = "https://{authority_host}/{tenant_name}.onmicrosoft.com"
+    AUTHORIZATION_URL = "{base_url}/oauth2/v2.0/authorize"
+    OPENID_CONFIGURATION_URL = (
+        "{base_url}/v2.0/.well-known/openid-configuration?p={policy}"
+    )
+    ACCESS_TOKEN_URL = "{base_url}/oauth2/v2.0/token?p={policy}"
+    JWKS_URL = "{base_url}/discovery/v2.0/keys?p={policy}"
+    DEFAULT_SCOPE = ["openid", "email"]
+    EXTRA_DATA = [
+        ("access_token", "access_token"),
+        ("id_token", "id_token"),
+        ("refresh_token", "refresh_token"),
+        ("id_token_expires_in", "expires"),
+        ("expires_in", "expires_in"),
+        ("exp", "expires_on"),
+        ("not_before", "not_before"),
+        ("given_name", "first_name"),
+        ("family_name", "last_name"),
+        ("tfp", "policy"),
+        ("token_type", "token_type"),
+    ]
+
+    @property
+    def authority_host(self) -> str:
+        return cast(
+            "str", self.setting("AUTHORITY_HOST", f"{self.tenant_name}.b2clogin.com")
+        )
+
+    @property
+    def tenant_name(self):
+        return self.setting("TENANT_NAME")
+
+    @property
+    def policy(self):
+        policy = self.setting("POLICY")
+        if not isinstance(policy, str) or not policy.lower().startswith("b2c_"):
+            raise AuthConfigurationError(
+                self,
+                "SOCIAL_AUTH_AZUREAD_B2C_OAUTH2_POLICY is "
+                "required and should start with `b2c_`",
+                code="invalid_setting",
+                parameter="POLICY",
+            )
+        return policy
+
+    def _get_policy(self, *, stage: ErrorStage) -> str:
+        try:
+            return self.policy
+        except AuthConfigurationError as error:
+            error.stage = stage
+            raise
+
+    @property
+    def base_url(self):
+        if authority_url := self.configured_authority_url():
+            return authority_url
+        return self.BASE_URL.format(
+            tenant_name=self.tenant_name, authority_host=self.authority_host
+        )
+
+    def get_openid_configuration_url_format(self) -> dict[str, str]:
+        return {
+            **super().get_openid_configuration_url_format(),
+            "policy": self._get_policy(stage="token_validation"),
+        }
+
+    def get_authorization_url_format(self) -> dict[str, str]:
+        return {
+            **super().get_authorization_url_format(),
+            "policy": self._get_policy(stage="begin"),
+        }
+
+    def logout_url(
+        self,
+        *,
+        post_logout_redirect_uri: str | None = None,
+        id_token_hint: str | None = None,
+        state: str | None = None,
+    ) -> str:
+        """Build a provider logout URL for the configured sign-in policy."""
+        endpoint = self.openid_configuration().get("end_session_endpoint")
+        if not isinstance(endpoint, str):
+            raise AuthResponseError(
+                self,
+                claim="end_session_endpoint",
+                code="missing_claim",
+                stage="begin",
+            )
+        try:
+            parsed = urlsplit(endpoint)
+            valid = (
+                parsed.scheme == "https"
+                and parsed.hostname
+                and parsed.port != 0
+                and parsed.username is None
+                and parsed.password is None
+                and not parsed.fragment
+                and not any(character.isspace() for character in endpoint)
+            )
+        except ValueError:
+            valid = False
+        if not valid:
+            raise AuthResponseError(
+                self,
+                claim="end_session_endpoint",
+                code="invalid_claim",
+                stage="begin",
+            )
+        params = {
+            "client_id": self.setting("KEY"),
+            "post_logout_redirect_uri": post_logout_redirect_uri,
+            "id_token_hint": id_token_hint,
+            "state": state,
+        }
+        supplied = {name: value for name, value in params.items() if value is not None}
+        query = [
+            (name, value)
+            for name, value in parse_qsl(parsed.query, keep_blank_values=True)
+            if name not in supplied
+        ]
+        query.extend(supplied.items())
+        return urlunsplit(parsed._replace(query=urlencode(query)))
+
+    def get_access_token_url_format(self) -> dict[str, str]:
+        params = super().get_access_token_url_format()
+        params["policy"] = self._get_policy(stage="token_exchange")
+        return params
+
+    def jwks_url(self):
+        return self.JWKS_URL.format(
+            base_url=self._get_base_url(stage="token_validation"),
+            policy=self._get_policy(stage="token_validation"),
+        )
+
+    def request_access_token(
+        self,
+        url: str,
+        method: Literal["GET", "POST", "DELETE"] = "GET",
+        headers: Mapping[str, str | bytes] | None = None,
+        data: dict | None = None,
+        json: dict | None = None,
+        auth: tuple[str, str] | AuthBase | None = None,
+        params: dict | None = None,
+        *,
+        stage: ErrorStage = "token_exchange",
+    ) -> dict[Any, Any]:
+        """
+        This is probably a hack, but otherwise AzureADOAuth2 expects
+        `access_token`.
+
+        However, B2C backends provides `id_token`.
+        """
+        response = super().request_access_token(
+            url,
+            method=method,
+            stage=stage,
+            headers=headers,
+            data=data,
+            json=json,
+            auth=auth,
+            params=params,
+        )
+        if "access_token" not in response:
+            id_token = response.get("id_token")
+            if not isinstance(id_token, str) or not id_token:
+                raise AuthResponseError(
+                    self, claim="id_token", code="missing_claim", stage=stage
+                )
+            response["access_token"] = id_token
+        return response
+
+    def auth_extra_arguments(self):
+        """Return extra arguments needed on auth process."""
+        extra_arguments = super().auth_extra_arguments()
+        extra_arguments["p"] = self._get_policy(stage="begin")
+        return extra_arguments
+
+    def get_user_id(
+        self, details: Mapping[str, Any], response: Mapping[str, Any]
+    ) -> Any:
+        """Return the configured stable user identifier.
+
+        User flows that do not support the ``sub`` claim put the same
+        placeholder text there for every user; refuse it instead of binding
+        all of them to one association. Such flows expose the object ID as
+        ``oid``, which can be selected with the ``ID_KEY`` setting.
+        """
+        user_id = super().get_user_id(details, response)
+        if user_id in self.UNSUPPORTED_SUBJECTS:
+            raise AuthResponseError(
+                self, claim=self.id_key(), code="invalid_claim", stage="user_info"
+            )
+        return user_id
+
+    def get_user_details(self, response):
+        """
+        Email address is returned on a different attribute for AzureAD
+        B2C backends.
+        """
+        details = super().get_user_details(response)
+        if not details["email"] and response.get("emails"):
+            details["email"] = response["emails"]
+        if isinstance(details.get("email"), (list, tuple)):
+            details["email"] = details["email"][0]
+        return details
+
+    def get_id_token_policy(self, claims: dict[str, Any]) -> str:
+        policy = claims.get("tfp")
+        if policy is None:
+            policy = claims.get("acr")
+        if not isinstance(policy, str) or not policy:
+            raise AuthResponseError(
+                self, claim="tfp", code="missing_claim", stage="token_validation"
+            )
+        return policy
+
+    def validate_id_token_policy(self, claims: dict[str, Any]) -> None:
+        if (
+            self.get_id_token_policy(claims).lower()
+            != self._get_policy(stage="token_validation").lower()
+        ):
+            raise AuthResponseError(
+                self,
+                "Token policy does not match configured policy",
+                code="invalid_claim",
+                stage="token_validation",
+            )
+
+    def validate_and_return_id_token(self, id_token: str) -> dict[str, Any]:
+        claims = super().validate_and_return_id_token(id_token)
+        self.validate_id_token_policy(claims)
+        return claims
+
+    def extra_data(
+        self,
+        user,
+        uid: str,
+        response: dict[str, Any],
+        details: dict[str, Any],
+        pipeline_kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        data = super().extra_data(user, uid, response, details, pipeline_kwargs)
+        if not data.get("policy") and response.get("acr"):
+            data["policy"] = response["acr"]
+        return data

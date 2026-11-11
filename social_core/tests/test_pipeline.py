@@ -1,0 +1,492 @@
+from __future__ import annotations
+
+import json
+import unittest
+from typing import TYPE_CHECKING, cast
+from unittest.mock import Mock, patch
+
+from social_core.backends.base import BaseAuth
+from social_core.exceptions import AuthException
+from social_core.pipeline.user import create_user, user_details
+from social_core.utils import PARTIAL_TOKEN_SESSION_NAME
+
+from .actions.actions import BaseActionTest
+from .models import TestStorage, TestUserSocialAuth, User
+from .strategy import Redirect, TestStrategy
+
+if TYPE_CHECKING:
+    from social_core.storage import PartialMixin, UserMixin
+
+
+class PipelineResultTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.strategy = TestStrategy(TestStorage)
+        self.backend: BaseAuth[object] = BaseAuth(self.strategy)
+
+    def test_pipeline_returns_final_user_with_social_metadata(self) -> None:
+        User.reset_cache()
+        TestUserSocialAuth.reset_cache()
+        self.addCleanup(User.reset_cache)
+        self.addCleanup(TestUserSocialAuth.reset_cache)
+        initial = User("initial")
+        replacement = User("replacement")
+        social = TestUserSocialAuth(replacement, "github", "1")
+        for user in (initial, replacement):
+            for is_new in (False, True):
+                with self.subTest(replaced=user is replacement, is_new=is_new):
+                    step = Mock(
+                        return_value={"user": user, "social": social, "is_new": is_new}
+                    )
+                    with patch(
+                        "social_core.backends.base.module_member", return_value=step
+                    ):
+                        result = self.backend.pipeline(["select_user"], user=initial)
+
+                    self.assertIs(result, user)
+                    self.assertIs(user.social_user, social)
+                    self.assertIs(user.is_new, is_new)
+                    self.assertIs(step.call_args.kwargs["user"], initial)
+
+    def test_response_stops_pipeline(self) -> None:
+        response = Redirect("/pause")
+        step = Mock(return_value=response)
+        with patch(
+            "social_core.backends.base.module_member", return_value=step
+        ) as load:
+            result = self.backend.run_pipeline(["first", "second"])
+        self.assertIs(result, response)
+        load.assert_called_once_with("first")
+        step.assert_called_once()
+
+    def test_response_stops_disconnect_pipeline(self) -> None:
+        self.strategy.set_settings(
+            {"SOCIAL_AUTH_DISCONNECT_PIPELINE": ["first", "second"]}
+        )
+        response = Redirect("/pause")
+        step = Mock(return_value=response)
+        with patch(
+            "social_core.backends.base.module_member", return_value=step
+        ) as load:
+            result = self.backend.disconnect()
+        self.assertIs(result, response)
+        load.assert_called_once_with("first")
+        step.assert_called_once()
+
+    def test_dictionary_results_merge_and_falsy_results_continue(self) -> None:
+        empty_results: tuple[object, ...] = (None, {}, False, 0, "")
+        for empty_result in empty_results:
+            with self.subTest(empty_result=empty_result):
+                first = Mock(return_value={"value": "updated", "added": True})
+                second = Mock(return_value=empty_result)
+                third = Mock(return_value={"done": True})
+                with patch(
+                    "social_core.backends.base.module_member",
+                    side_effect=[first, second, third],
+                ):
+                    result = self.backend.run_pipeline(
+                        ["first", "second", "third"], value="initial"
+                    )
+                self.assertIsInstance(result, dict)
+                assert isinstance(result, dict)
+                self.assertEqual(result["value"], "updated")
+                self.assertTrue(result["added"])
+                self.assertTrue(result["done"])
+                self.assertEqual(second.call_args.kwargs["value"], "updated")
+                third.assert_called_once()
+
+
+class IntegrityError(Exception):
+    pass
+
+
+class UnknownError(Exception):
+    pass
+
+
+class IntegrityErrorUserSocialAuth(TestUserSocialAuth):
+    @classmethod
+    def create_social_auth(cls, user, uid, provider, id_key=""):
+        raise IntegrityError
+
+    @classmethod
+    def get_social_auth(cls, provider, uid, id_key=None):
+        social = super().get_social_auth(provider, uid, id_key=id_key)
+        if social is not None:
+            return social
+        if User.cache:
+            user = next(iter(User.cache.values()))
+            return IntegrityErrorUserSocialAuth(
+                user, provider, uid, id_key=id_key or ""
+            )
+        return None
+
+
+class IntegrityErrorStorage(TestStorage):
+    user: type[UserMixin] = IntegrityErrorUserSocialAuth
+
+    @classmethod
+    def is_integrity_error(cls, exception):
+        """Check if given exception flags an integrity error in the DB"""
+        return isinstance(exception, IntegrityError)
+
+
+class UnknownErrorUserSocialAuth(TestUserSocialAuth):
+    @classmethod
+    def create_social_auth(cls, user, uid, provider, id_key=""):
+        raise UnknownError
+
+
+class UnknownErrorStorage(IntegrityErrorStorage):
+    user: type[UserMixin] = UnknownErrorUserSocialAuth
+
+
+class IntegrityErrorOnLoginTest(BaseActionTest):
+    def setUp(self) -> None:
+        self.strategy = TestStrategy(IntegrityErrorStorage)
+        super().setUp()
+
+    def test_integrity_error(self) -> None:
+        self.do_login()
+
+
+class UnknownErrorOnLoginTest(BaseActionTest):
+    def setUp(self) -> None:
+        self.strategy = TestStrategy(UnknownErrorStorage)
+        super().setUp()
+
+    def test_unknown_error(self) -> None:
+        with self.assertRaises(UnknownError):
+            self.do_login()
+
+
+class EmailAsUsernameTest(BaseActionTest):
+    expected_username = "foo@bar.com"
+
+    def test_email_as_username(self) -> None:
+        self.strategy.set_settings({"SOCIAL_AUTH_USERNAME_IS_FULL_EMAIL": True})
+        self.do_login()
+
+
+class RandomUsernameTest(BaseActionTest):
+    user_data_body = json.dumps(
+        {
+            "id": 1,
+            "avatar_url": "https://github.com/images/error/foobar_happy.gif",
+            "gravatar_id": "somehexcode",
+            "url": "https://api.github.com/users/foobar",
+            "name": "monalisa foobar",
+            "company": "GitHub",
+            "blog": "https://github.com/blog",
+            "location": "San Francisco",
+            "email": "foo@bar.com",
+            "hireable": False,
+            "bio": "There once was...",
+            "public_repos": 2,
+            "public_gists": 1,
+            "followers": 20,
+            "following": 0,
+            "html_url": "https://github.com/foobar",
+            "created_at": "2008-01-14T04:33:35Z",
+            "type": "User",
+            "total_private_repos": 100,
+            "owned_private_repos": 100,
+            "private_gists": 81,
+            "disk_usage": 10000,
+            "collaborators": 8,
+            "plan": {
+                "name": "Medium",
+                "space": 400,
+                "collaborators": 10,
+                "private_repos": 20,
+            },
+        }
+    )
+
+    def test_random_username(self) -> None:
+        self.do_login(after_complete_checks=False)
+
+
+class SluggedUsernameTest(BaseActionTest):
+    expected_username = "foo-bar"
+    user_data_body = json.dumps(
+        {
+            "login": "Foo Bar",
+            "id": 1,
+            "avatar_url": "https://github.com/images/error/foobar_happy.gif",
+            "gravatar_id": "somehexcode",
+            "url": "https://api.github.com/users/foobar",
+            "name": "monalisa foobar",
+            "company": "GitHub",
+            "blog": "https://github.com/blog",
+            "location": "San Francisco",
+            "email": "foo@bar.com",
+            "hireable": False,
+            "bio": "There once was...",
+            "public_repos": 2,
+            "public_gists": 1,
+            "followers": 20,
+            "following": 0,
+            "html_url": "https://github.com/foobar",
+            "created_at": "2008-01-14T04:33:35Z",
+            "type": "User",
+            "total_private_repos": 100,
+            "owned_private_repos": 100,
+            "private_gists": 81,
+            "disk_usage": 10000,
+            "collaborators": 8,
+            "plan": {
+                "name": "Medium",
+                "space": 400,
+                "collaborators": 10,
+                "private_repos": 20,
+            },
+        }
+    )
+
+    def test_random_username(self) -> None:
+        self.strategy.set_settings(
+            {
+                "SOCIAL_AUTH_CLEAN_USERNAMES": False,
+                "SOCIAL_AUTH_SLUGIFY_USERNAMES": True,
+            }
+        )
+        self.do_login()
+
+
+class RepeatedUsernameTest(BaseActionTest):
+    def test_random_username(self) -> None:
+        User(username="foobar")
+        self.do_login(after_complete_checks=False)
+        self.assertTrue(self.strategy.session_get("username").startswith("foobar"))
+
+
+class AssociateByEmailTest(BaseActionTest):
+    def test_multiple_accounts_with_same_email(self) -> None:
+        user = User(username="foobar1")
+        user.email = "foo@bar.com"
+        self.do_login(after_complete_checks=False)
+        self.assertTrue(self.strategy.session_get("username").startswith("foobar"))
+
+
+class MultipleAccountsWithSameEmailTest(BaseActionTest):
+    def test_multiple_accounts_with_same_email(self) -> None:
+        user1 = User(username="foobar1")
+        user2 = User(username="foobar2")
+        user1.email = "foo@bar.com"
+        user2.email = "foo@bar.com"
+        with self.assertRaises(AuthException):
+            self.do_login(after_complete_checks=False)
+
+
+class UserPersistsInPartialPipeline(BaseActionTest):
+    def test_user_persists_in_partial_pipeline_kwargs(self) -> None:
+        user = User(username="foobar1")
+        user.email = "foo@bar.com"
+
+        self.strategy.set_settings(
+            {
+                "SOCIAL_AUTH_PIPELINE": (
+                    "social_core.pipeline.social_auth.social_details",
+                    "social_core.pipeline.social_auth.social_uid",
+                    "social_core.pipeline.social_auth.associate_by_email",
+                    "social_core.tests.pipeline.set_user_from_kwargs",
+                )
+            }
+        )
+
+        self.do_login(after_complete_checks=False)
+
+        # Handle the partial pipeline
+        self.strategy.session_set("attribute", "testing")
+        token = self.strategy.session_pop(PARTIAL_TOKEN_SESSION_NAME)
+        partial = cast("PartialMixin", self.strategy.partial_load(token))
+        self.assertIsNotNone(partial)
+        self.backend.continue_pipeline(partial)
+
+    def test_user_persists_in_partial_pipeline(self) -> None:
+        user = User(username="foobar1")
+        user.email = "foo@bar.com"
+
+        self.strategy.set_settings(
+            {
+                "SOCIAL_AUTH_PIPELINE": (
+                    "social_core.pipeline.social_auth.social_details",
+                    "social_core.pipeline.social_auth.social_uid",
+                    "social_core.pipeline.social_auth.associate_by_email",
+                    "social_core.tests.pipeline.set_user_from_args",
+                )
+            }
+        )
+
+        self.do_login(after_complete_checks=False)
+
+        # Handle the partial pipeline
+        self.strategy.session_set("attribute", "testing")
+        token = self.strategy.session_pop(PARTIAL_TOKEN_SESSION_NAME)
+        partial = cast("PartialMixin", self.strategy.partial_load(token))
+        self.assertIsNotNone(partial)
+        self.backend.continue_pipeline(partial)
+
+
+class UserCreationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.strategy = TestStrategy(TestStorage)
+        self.backend: BaseAuth[object] = BaseAuth(self.strategy)
+        self.strategy.set_settings(
+            {
+                "SOCIAL_AUTH_USER_FIELDS": [
+                    "username",
+                    "email",
+                    "fullname",
+                    "first_name",
+                    "last_name",
+                ]
+            }
+        )
+
+    def test_unavailable_names_use_model_defaults(self) -> None:
+        def model_create_user(
+            username,
+            email,
+            fullname="Default Full",
+            first_name="Default",
+            last_name="Full",
+        ):
+            self.assertIsNotNone(fullname)
+            self.assertIsNotNone(first_name)
+            self.assertIsNotNone(last_name)
+            return (username, email, fullname, first_name, last_name)
+
+        for names in ({}, {"fullname": None, "first_name": None, "last_name": None}):
+            with (
+                self.subTest(names=names),
+                patch.object(
+                    self.strategy, "create_user", side_effect=model_create_user
+                ) as create,
+            ):
+                result = create_user(
+                    self.strategy,
+                    {"username": "ada", "email": None, **names},
+                    self.backend,
+                )
+                create.assert_called_once_with(username="ada", email=None)
+                self.assertEqual(
+                    result,
+                    {
+                        "is_new": True,
+                        "user": ("ada", None, "Default Full", "Default", "Full"),
+                    },
+                )
+
+    def test_supplied_names_and_overrides_are_preserved(self) -> None:
+        with patch.object(self.strategy, "create_user") as create:
+            create_user(
+                self.strategy,
+                {
+                    "username": "ada",
+                    "fullname": "Ada Lovelace",
+                    "first_name": "Ada",
+                    "last_name": "Lovelace",
+                },
+                self.backend,
+                first_name="",
+                last_name=None,
+            )
+            create.assert_called_once_with(
+                username="ada", email=None, fullname="Ada Lovelace", first_name=""
+            )
+
+    def test_name_only_registration_uses_model_defaults(self) -> None:
+        self.strategy.set_settings(
+            {"SOCIAL_AUTH_USER_FIELDS": ["fullname", "first_name", "last_name"]}
+        )
+        for details in ({}, {"fullname": None, "first_name": None, "last_name": None}):
+            with (
+                self.subTest(details=details),
+                patch.object(self.strategy, "create_user") as create,
+            ):
+                result = create_user(self.strategy, details, self.backend)
+                create.assert_called_once_with()
+                self.assertEqual(result, {"is_new": True, "user": create.return_value})
+
+    def test_no_configured_fields_skips_creation(self) -> None:
+        self.strategy.set_settings({"SOCIAL_AUTH_USER_FIELDS": []})
+        with patch.object(self.strategy, "create_user") as create:
+            self.assertIsNone(create_user(self.strategy, {}, self.backend))
+            create.assert_not_called()
+
+
+class TestUserDetails(BaseActionTest):
+    def test_user_details(self) -> None:
+        self.strategy.set_settings({})
+        details = {"first_name": "Test"}
+        user = User(username="foobar")
+        backend = None
+        user_details(self.strategy, details, backend, user)
+        self.assertEqual(user.first_name, "Test")
+
+        # Also test mutation
+        details = {"first_name": "Test2"}
+        user_details(self.strategy, details, backend, user)
+        self.assertEqual(user.first_name, "Test2")
+
+    def test_user_details_(self) -> None:
+        self.strategy.set_settings(
+            {"SOCIAL_AUTH_IMMUTABLE_USER_FIELDS": ("first_name",)}
+        )
+        details = {"first_name": "Test"}
+        user = User(username="foobar")
+        backend = None
+        user_details(self.strategy, details, backend, user)
+        self.assertEqual(user.first_name, "Test")
+
+        # Also test mutation does not change field
+        details = {"first_name": "Test2"}
+        user_details(self.strategy, details, backend, user)
+        self.assertEqual(user.first_name, "Test")
+
+
+class TestLowerCaseEmailOverride(BaseActionTest):
+    user_data_body = json.dumps(
+        {
+            "login": "foobar",
+            "id": 1,
+            "avatar_url": "https://github.com/images/error/foobar_happy.gif",
+            "gravatar_id": "somehexcode",
+            "url": "https://api.github.com/users/foobar",
+            "name": "monalisa foobar",
+            "company": "GitHub",
+            "blog": "https://github.com/blog",
+            "location": "San Francisco",
+            "email": "Foo@bar.com",
+            "hireable": False,
+            "bio": "There once was...",
+            "public_repos": 2,
+            "public_gists": 1,
+            "followers": 20,
+            "following": 0,
+            "html_url": "https://github.com/foobar",
+            "created_at": "2008-01-14T04:33:35Z",
+            "type": "User",
+            "total_private_repos": 100,
+            "owned_private_repos": 100,
+            "private_gists": 81,
+            "disk_usage": 10000,
+            "collaborators": 8,
+            "plan": {
+                "name": "Medium",
+                "space": 400,
+                "collaborators": 10,
+                "private_repos": 20,
+            },
+        }
+    )
+
+    def test_lowercase_email(self) -> None:
+        self.strategy.set_settings(
+            {
+                "SOCIAL_AUTH_FORCE_EMAIL_LOWERCASE": True,
+            }
+        )
+        self.do_login(after_complete_checks=False)
+        self.assertEqual(self.strategy.session_get("email"), "foo@bar.com")

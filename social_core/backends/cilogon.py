@@ -1,0 +1,54 @@
+from typing import Any
+
+from social_core.backends.base import ResponseT_co
+from social_core.exceptions import SocialAuthBaseException
+
+from .oauth import BaseOAuth2
+
+
+class CILogonOAuth2(BaseOAuth2[ResponseT_co]):
+    """
+    CI Logon Authentication Backend
+
+    Docs: https://www.cilogon.org/oidc
+    """
+
+    name = "cilogon-oauth2"
+    title = "CILogon"
+    ID_KEY = "sub"
+    AUTHORIZATION_URL = "https://cilogon.org/authorize"
+    ACCESS_TOKEN_URL = "https://cilogon.org/oauth2/token"
+    DEFAULT_SCOPE = ["openid", "email", "profile", "org.cilogon.userinfo"]
+    REDIRECT_STATE = False
+    SCOPE_SEPARATOR = "+"
+
+    def user_data(self, access_token: str, *args, **kwargs) -> dict[str, Any] | None:
+        """Loads user data from endpoint"""
+        url = "https://cilogon.org/oauth2/userinfo"
+        data = {"access_token": access_token}
+        try:
+            return self.get_json(url, method="POST", data=data)
+        except SocialAuthBaseException:
+            raise
+        except ValueError:
+            return None
+
+    def get_user_id(self, details, response) -> str:
+        """Return user unique id provided by service
+        In this case it is a combination of the `sub`
+        and `iss` respective values."""
+        user_id = self.get_user_id_from_sources(response, details)
+        return f"{user_id} {response.get('iss', '')}"
+
+    def get_user_details(self, response):
+        """Return user details from CI Logon service"""
+        fullname = None
+        first_name = response.get("given_name")
+        last_name = response.get("family_name")
+        return {
+            "username": response.get("email"),
+            "email": response.get("email"),
+            "fullname": fullname,
+            "first_name": first_name,
+            "last_name": last_name,
+        }

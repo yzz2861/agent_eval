@@ -1,0 +1,380 @@
+# pyright: reportAttributeAccessIssue=false
+from __future__ import annotations
+
+import base64
+from typing import TYPE_CHECKING, Any, Self, TypeVar, cast
+
+from social_core.identifiers import identifier_matches
+from social_core.storage import (
+    AssociationMixin,
+    BaseStorage,
+    CodeMixin,
+    NonceMixin,
+    PartialMixin,
+    UserMixin,
+)
+
+if TYPE_CHECKING:
+    from social_core.storage import (
+        UserProtocol,
+    )
+
+ModelT = TypeVar("ModelT", bound="BaseModel")
+
+
+class AnonymousUser:
+    """A truthy framework user that has not authenticated."""
+
+    is_authenticated = False
+
+
+class BaseModel:
+    NEXT_ID: int = 1
+    cache: dict[Any, Any] = {}
+
+    @classmethod
+    def next_id(cls) -> int:
+        cls.NEXT_ID += 1
+        return cls.NEXT_ID - 1
+
+    @classmethod
+    def reset_cache(cls) -> None:
+        cls.cache = {}
+
+
+class User(BaseModel):
+    NEXT_ID = 1
+    cache: dict[str, User] = {}
+    _is_active = True
+    is_authenticated = True
+    username: str
+    email: str | None
+    first_name: str | None
+    password: str | None
+    slug: str | None
+    social: list[TestUserSocialAuth]
+    social_user: TestUserSocialAuth | None
+    is_new: bool
+    extra_data: dict[str, str]
+    extra_user_fields: dict[str, str]
+
+    def __init__(
+        self, username: str, email: str | None = None, **extra_user_fields
+    ) -> None:
+        self.id = User.next_id()
+        self.username = username
+        self.email = email
+        self.first_name = None
+        self.password = None
+        self.slug = None
+        self.social = []
+        self.extra_data = {}
+        self.extra_user_fields = extra_user_fields
+        self.save()
+
+    @property
+    def is_active(self):
+        return self._is_active
+
+    @classmethod
+    def set_active(cls, is_active=True) -> None:
+        cls._is_active = is_active
+
+    def set_password(self, password) -> None:
+        self.password = password
+
+    def save(self) -> None:
+        User.cache[self.username] = self
+
+    @classmethod
+    def get(cls, key) -> Self | None:
+        return cast("Self | None", cls.cache.get(key))
+
+
+class UserWithNames(User):
+    """User fixture with both component names and a custom full-name field."""
+
+    fullname: str | None = None
+    last_name: str | None = None
+
+
+class TestUserSocialAuth(UserMixin, BaseModel):
+    __test__ = False
+
+    NEXT_ID = 1
+    cache: dict[int, TestUserSocialAuth] = {}
+    cache_by_uid: dict[tuple[str, str], TestUserSocialAuth] = {}
+
+    def __init__(
+        self, user: User, provider, uid, extra_data=None, id_key: str = ""
+    ) -> None:
+        self.id = TestUserSocialAuth.next_id()
+        self.user = user
+        self.provider = provider
+        self.uid = uid
+        self.id_key = id_key
+        self.extra_data = extra_data or {}
+        self.user.social.append(self)
+        TestUserSocialAuth.cache_by_uid[(provider, uid)] = self
+
+    def save(self) -> None:
+        for uid, social_auth in list(TestUserSocialAuth.cache_by_uid.items()):
+            if social_auth is self:
+                del TestUserSocialAuth.cache_by_uid[uid]
+        TestUserSocialAuth.cache_by_uid[(self.provider, self.uid)] = self
+
+    @classmethod
+    def reset_cache(cls) -> None:
+        cls.cache = {}
+        cls.cache_by_uid = {}
+
+    @classmethod
+    def changed(cls, user) -> None:
+        pass
+
+    @classmethod
+    def get_username(cls, user):
+        return user.username
+
+    @classmethod
+    def user_model(cls) -> type[UserProtocol]:
+        return User
+
+    @classmethod
+    def username_max_length(cls) -> int:
+        return 1024
+
+    @classmethod
+    def allowed_to_disconnect(cls, user, backend_name, association_id=None):
+        return user.password or len(user.social) > 1
+
+    @classmethod
+    def disconnect(cls, entry) -> None:
+        cls.cache.pop(entry.id, None)
+        entry.user.social = [s for s in entry.user.social if entry != s]
+
+    @classmethod
+    def user_exists(cls, username):
+        return User.cache.get(username) is not None
+
+    @classmethod
+    def create_user(cls, username, email=None, **extra_user_fields):
+        return User(username=username, email=email, **extra_user_fields)
+
+    @classmethod
+    def get_user(cls, pk):
+        for user in User.cache.values():
+            if user.id == pk:
+                return user
+        return None
+
+    @classmethod
+    def get_social_auth(cls, provider: str, uid: str, id_key: str | None = None):
+        social_user = cls.cache_by_uid.get((provider, uid))
+        if social_user and (id_key is None or social_user.id_key == id_key):
+            return social_user
+        return None
+
+    @classmethod
+    def get_social_auth_by_extra_data(
+        cls, provider: str, key: str, value: str, id_key: str = ""
+    ):
+        matches = [
+            social
+            for social in cls.cache_by_uid.values()
+            if social.provider == provider
+            and social.id_key == id_key
+            and str(social.extra_data.get(key)) == value
+        ]
+        if len(matches) > 1:
+            raise ValueError("Multiple social-auth associations matched extra data")
+        return matches[0] if len(matches) == 1 else None
+
+    @classmethod
+    def get_social_auth_for_user(
+        cls,
+        user: UserProtocol,
+        provider: str | None = None,
+        # pylint: disable-next=redefined-builtin
+        id: int | None = None,
+    ):
+        return [
+            usa
+            for usa in getattr(user, "social", [])
+            if provider in (None, usa.provider) and id in (None, usa.id)
+        ]
+
+    @classmethod
+    def create_social_auth(
+        cls, user: UserProtocol, uid: str, provider: str, id_key: str = ""
+    ):
+        return cls(user=cast("User", user), provider=provider, uid=uid, id_key=id_key)
+
+    @classmethod
+    def migrate_social_auth(
+        cls, social, uid: str, id_key: str, *, evidence_key: str | None = None
+    ):
+        if evidence_key is not None and not identifier_matches(
+            social.extra_data.get(evidence_key), uid
+        ):
+            raise ValueError("Social-auth identifier evidence changed during migration")
+        existing = cls.get_social_auth(social.provider, uid)
+        if existing is not None and existing is not social:
+            raise ValueError("Social-auth identifier migration conflict")
+        social.uid = uid
+        social.id_key = id_key
+        social.save()
+        return social
+
+    @classmethod
+    def get_users_by_email(cls, email: str):
+        return [user for user in User.cache.values() if user.email == email]
+
+    @classmethod
+    def get(cls, key) -> Self | None:
+        return cast("Self | None", cls.cache.get(key))
+
+
+class TestNonce(NonceMixin, BaseModel):
+    __test__ = False
+
+    NEXT_ID = 1
+    cache: dict[str, TestNonce] = {}
+
+    def __init__(self, server_url, timestamp, salt) -> None:
+        self.id = TestNonce.next_id()
+        self.server_url = server_url
+        self.timestamp = timestamp
+        self.salt = salt
+
+    @classmethod
+    def use(cls, server_url, timestamp, salt):
+        if f"{server_url}:{timestamp}:{salt}" in cls.cache:
+            return False
+        nonce = TestNonce(server_url, timestamp, salt)
+        TestNonce.cache[f"{server_url}:{timestamp}:{salt}"] = nonce
+        return nonce
+
+    @classmethod
+    def get(cls, server_url: str, salt: str):
+        return next(
+            (
+                nonce
+                for nonce in cls.cache.values()
+                if nonce.server_url == server_url and nonce.salt == salt
+            ),
+            None,
+        )
+
+    @classmethod
+    def delete(cls, nonce) -> None:
+        del TestNonce.cache[f"{nonce.server_url}:{nonce.timestamp}:{nonce.salt}"]
+
+    @classmethod
+    def consume(cls, server_url: str, timestamp: int, salt: str) -> bool:
+        return cls.cache.pop(f"{server_url}:{timestamp}:{salt}", None) is not None
+
+
+class TestAssociation(AssociationMixin, BaseModel):
+    __test__ = False
+
+    NEXT_ID = 1
+    cache: dict[tuple[str, str], TestAssociation] = {}
+    secret: str | bytes = b""
+
+    def __init__(self, server_url, handle) -> None:
+        self.id = TestAssociation.next_id()
+        self.server_url = server_url
+        self.handle = handle
+
+    def save(self) -> None:
+        TestAssociation.cache[(self.server_url, self.handle)] = self
+
+    @classmethod
+    def store(cls, server_url, association) -> None:
+        assoc = TestAssociation.cache.get((server_url, association.handle))
+        if assoc is None:
+            assoc = TestAssociation(server_url=server_url, handle=association.handle)
+        assoc.secret = base64.encodebytes(association.secret)
+        assoc.issued = association.issued
+        assoc.lifetime = association.lifetime
+        assoc.assoc_type = association.assoc_type
+        assoc.save()
+
+    @classmethod
+    def get(
+        cls: type[TestAssociation],
+        server_url: str | None = None,
+        handle: str | None = None,
+    ) -> list[AssociationMixin]:
+        result: list[AssociationMixin] = []
+        for assoc in TestAssociation.cache.values():
+            if server_url and assoc.server_url != server_url:
+                continue
+            if handle and assoc.handle != handle:
+                continue
+            result.append(assoc)
+        return result
+
+    @classmethod
+    def remove(cls, ids_to_delete) -> None:
+        assoc = filter(lambda a: a.id in ids_to_delete, TestAssociation.cache.values())
+        for a in list(assoc):
+            TestAssociation.cache.pop((a.server_url, a.handle), None)
+
+
+class TestCode(CodeMixin, BaseModel):
+    __test__ = False
+
+    NEXT_ID = 1
+    cache: dict[str, TestCode] = {}
+
+    def save(self) -> None:
+        TestCode.cache[self.code] = self
+
+    @classmethod
+    def get_code(cls, code):
+        for c in cls.cache.values():
+            if c.code == code:
+                return c
+        return None
+
+    @classmethod
+    def get(cls, key) -> Self | None:
+        return cast("Self | None", cls.cache.get(key))
+
+
+class TestPartial(PartialMixin, BaseModel):
+    __test__ = False
+
+    NEXT_ID = 1
+    cache: dict[str, TestPartial] = {}
+
+    def save(self) -> None:
+        TestPartial.cache[self.token] = self
+
+    @classmethod
+    def load(cls, token):
+        return cls.cache.get(token)
+
+    @classmethod
+    def destroy(cls, token) -> None:
+        cls.cache.pop(token)
+
+    @classmethod
+    def get(cls, key) -> TestPartial | None:
+        return cls.cache.get(key)
+
+
+class TestStorage(BaseStorage):
+    __test__ = False
+
+    user: type[UserMixin] = TestUserSocialAuth
+    nonce: type[NonceMixin] = TestNonce
+    association: type[AssociationMixin] = TestAssociation
+    code: type[CodeMixin] = TestCode
+    partial: type[PartialMixin] = TestPartial
+
+    @classmethod
+    def is_integrity_error(cls, exception) -> bool:
+        return False

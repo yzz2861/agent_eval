@@ -1,0 +1,46 @@
+from typing import cast
+
+from social_core.backends.base import ResponseT_co
+from social_core.exceptions import AuthInputError
+
+from .base import BaseAuth
+
+
+class LegacyAuth(BaseAuth[ResponseT_co]):
+    def auth_url(self) -> str:
+        return cast("str", self.setting("FORM_URL"))
+
+    def auth_html(self) -> str:
+        return self.strategy.render_html(tpl=cast("str", self.setting("FORM_HTML")))
+
+    def uses_redirect(self) -> bool:
+        return bool(cast("str", self.setting("FORM_URL"))) and not cast(
+            "str", self.setting("FORM_HTML")
+        )
+
+    def auth_complete(self, *args, **kwargs):
+        """Completes login process, must return user instance"""
+        id_key = self.id_key()
+        if id_key not in self.data:
+            raise AuthInputError(
+                self, parameter=id_key, code="missing_parameter", stage="callback"
+            )
+        kwargs.update({"response": self.data, "backend": self})
+        return self.strategy.authenticate(*args, **kwargs)
+
+    def get_user_details(self, response):
+        """Return user details"""
+        email = response.get("email", "")
+        username = response.get("username", "")
+        fullname = response.get("fullname")
+        first_name = response.get("first_name")
+        last_name = response.get("last_name")
+        if email and not username:
+            username = email.split("@", 1)[0]
+        return {
+            "username": username,
+            "email": email,
+            "fullname": fullname,
+            "first_name": first_name,
+            "last_name": last_name,
+        }

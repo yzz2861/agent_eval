@@ -1,0 +1,44 @@
+"""
+Uber OAuth2 backend, docs at:
+    https://python-social-auth.readthedocs.io/en/latest/backends/uber.html
+"""
+
+from typing import Any
+
+from social_core.backends.base import ResponseT_co
+
+from .oauth import BaseOAuth2
+
+
+class UberOAuth2(BaseOAuth2[ResponseT_co]):
+    name = "uber"
+    title = "Uber"
+    ID_KEY = "uuid"
+    SCOPE_SEPARATOR = " "
+    AUTHORIZATION_URL = "https://login.uber.com/oauth/authorize"
+    ACCESS_TOKEN_URL = "https://login.uber.com/oauth/token"
+
+    def auth_complete_credentials(self):
+        return self.get_key_and_secret()
+
+    def get_user_details(self, response):
+        """Return user details from Uber account"""
+        email = response.get("email", "")
+        fullname = None
+        first_name = response.get("first_name")
+        last_name = response.get("last_name")
+        return {
+            "username": email,
+            "email": email,
+            "fullname": fullname,
+            "first_name": first_name,
+            "last_name": last_name,
+        }
+
+    def user_data(self, access_token: str, *args, **kwargs) -> dict[str, Any] | None:
+        """Loads user data from service"""
+        response = kwargs.pop("response")
+        return self.get_json(
+            "https://api.uber.com/v1/me",
+            headers={"Authorization": f"{response.get('token_type')} {access_token}"},
+        )

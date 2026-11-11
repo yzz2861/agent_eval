@@ -1,0 +1,33 @@
+"""
+DailyMotion OAuth2 backend, docs at:
+    https://python-social-auth.readthedocs.io/en/latest/backends/dailymotion.html
+"""
+
+from typing import Any
+
+from social_core.backends.base import ResponseT_co
+
+from .oauth import BaseOAuth2
+
+
+class DailymotionOAuth2(BaseOAuth2[ResponseT_co]):
+    """Dailymotion OAuth authentication backend"""
+
+    name = "dailymotion"
+    title = "Dailymotion"
+    EXTRA_DATA = [("id", "id")]
+    ID_KEY = "id"
+    LEGACY_ID_KEYS = ("username",)
+    MUTABLE_ID_KEYS = ("username", "screenname")
+    AUTHORIZATION_URL = "https://api.dailymotion.com/oauth/authorize"
+    REQUEST_TOKEN_URL = "https://api.dailymotion.com/oauth/token"
+    ACCESS_TOKEN_URL = "https://api.dailymotion.com/oauth/token"
+
+    def get_user_details(self, response):
+        return {"username": response.get("screenname")}
+
+    def user_data(self, access_token: str, *args, **kwargs) -> dict[str, Any] | None:
+        """Return user data provided"""
+        return self.get_json(
+            "https://api.dailymotion.com/auth/", params={"access_token": access_token}
+        )

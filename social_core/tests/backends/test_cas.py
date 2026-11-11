@@ -1,0 +1,101 @@
+import json
+
+import responses
+
+from .oauth import BaseAuthUrlTestMixin
+from .open_id_connect import OpenIdConnectTest
+
+ROOT_URL = "https://cas.example.net/"
+
+
+class CASOpenIdConnectTest(OpenIdConnectTest, BaseAuthUrlTestMixin):
+    backend_path = "social_core.backends.cas.CASOpenIdConnectAuth"
+    issuer = f"{ROOT_URL}oidc"
+    user_id = "Cartman"
+    openid_config_body = json.dumps(
+        {
+            "issuer": f"{ROOT_URL}oidc",
+            "jwks_uri": f"{ROOT_URL}oidc/jwks",
+            "authorization_endpoint": f"{ROOT_URL}oidc/oidcAuthorize",
+            "token_endpoint": f"{ROOT_URL}oidc/oidcAccessToken",
+            "userinfo_endpoint": f"{ROOT_URL}oidc/oidcProfile",
+            "request_uri_parameter_supported": False,
+            "grant_types_supported": ["authorization_code"],
+            "token_endpoint_auth_methods_supported": ["client_secret_basic"],
+        }
+    )
+
+    expected_username = "cartman"
+
+    user_data_body = json.dumps(
+        {
+            "sub": user_id,
+            "service": "https://cas.example.net/complete/cas/",
+            "auth_time": 1677057708,
+            "attributes": {
+                "name": "Eric",
+                "groups": ["users", "admins"],
+                "preferred_username": "cartman",
+                "email": "cartman@example.net",
+            },
+            "id": "Cartman",
+            "client_id": "dev",
+        }
+    )
+
+    def extra_settings(self):
+        settings = super().extra_settings()
+        settings.update(
+            {
+                f"SOCIAL_AUTH_{self.name}_OIDC_ENDPOINT": f"{ROOT_URL}oidc",
+                f"SOCIAL_AUTH_{self.name}_ALLOW_GROUPS": [
+                    "users",
+                ],
+                f"SOCIAL_AUTH_{self.name}_WHITELISTED_DOMAINS": [
+                    "example.net",
+                ],
+            }
+        )
+        return settings
+
+    def pre_complete_callback(self, start_url) -> None:
+        self.access_token_kwargs.setdefault("subject", self.user_id)
+        super().pre_complete_callback(start_url)
+        responses.add(
+            responses.GET,
+            url=self.backend.userinfo_url(),
+            status=200,
+            body=self.user_data_body,
+            content_type="text/json",
+        )
+
+    def test_everything_works(self) -> None:
+        self.do_login()
+
+    def test_scalar_groups_do_not_block_login_without_group_handling(self) -> None:
+        self.strategy.set_settings({"SOCIAL_AUTH_CAS_ALLOW_GROUPS": []})
+        assert self.user_data_body is not None
+        data = json.loads(self.user_data_body)
+        data["attributes"]["groups"] = "users"
+        self.user_data_body = json.dumps(data)
+        self.do_login()
+
+    def test_partial_pipeline(self) -> None:
+        self.do_partial_pipeline()
+
+    def test_configured_id_key_uses_raw_attribute(self) -> None:
+        self.strategy.set_settings({"SOCIAL_AUTH_CAS_ID_KEY": "preferred_username"})
+
+        user = self.do_login()
+
+        self.assertEqual(user.social[0].uid, "cartman")
+
+    def test_refresh_with_uid_different_from_id_token_subject(self) -> None:
+        social = self.login_for_refresh()
+
+        self.refresh_social(
+            social,
+            self.refresh_response(subject=self.user_id),
+        )
+
+        self.assertEqual(social.extra_data["access_token"], "refreshed-access-token")

@@ -1,0 +1,858 @@
+"""
+Backend for SAML 2.0 support
+
+Terminology:
+
+"Service Provider" (SP): Your web app
+"Identity Provider" (IdP): The third-party site that is authenticating
+                           users via SAML
+"""
+
+from __future__ import annotations
+
+import json
+from html import escape
+from secrets import token_urlsafe
+from typing import Any, cast
+
+# lxml exposes this exception from its C extension.
+# pylint: disable-next=no-name-in-module
+from lxml.etree import XMLSyntaxError
+from onelogin.saml2.auth import OneLogin_Saml2_Auth
+from onelogin.saml2.constants import OneLogin_Saml2_Constants
+from onelogin.saml2.errors import OneLogin_Saml2_Error, OneLogin_Saml2_ValidationError
+from onelogin.saml2.response import OneLogin_Saml2_Response
+from onelogin.saml2.settings import OneLogin_Saml2_Settings
+from onelogin.saml2.utils import OneLogin_Saml2_Utils
+from onelogin.saml2.xml_utils import OneLogin_Saml2_XML
+from xmlsec import Error as XMLSecError
+
+from social_core.backends.base import ResponseT_co
+from social_core.exceptions import (
+    AuthConfigurationError,
+    AuthInputError,
+    AuthResponseError,
+    AuthSessionError,
+    ErrorStage,
+)
+from social_core.groups import read_groups
+from social_core.utils import constant_time_compare, user_is_authenticated
+
+from .base import BaseAuth
+
+# Helpful constants:
+OID_COMMON_NAME = "urn:oid:2.5.4.3"
+OID_EDU_PERSON_PRINCIPAL_NAME = "urn:oid:1.3.6.1.4.1.5923.1.1.1.6"
+OID_EDU_PERSON_ENTITLEMENT = "urn:oid:1.3.6.1.4.1.5923.1.1.1.7"
+OID_GIVEN_NAME = "urn:oid:2.5.4.42"
+OID_MAIL = "urn:oid:0.9.2342.19200300.100.1.3"
+OID_SURNAME = "urn:oid:2.5.4.4"
+OID_USERID = "urn:oid:0.9.2342.19200300.100.1.1"
+
+
+FULLNAME_FIELDS = (
+    OID_COMMON_NAME,
+    "http://schemas.xmlsoap.org/claims/CommonName",
+    "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/fullname",
+    "http://schemas.microsoft.com/identity/claims/displayname",
+    "full_name",
+    "fullname",
+    "fullName",
+)
+
+FIRST_NAME_FIELDS = (
+    OID_GIVEN_NAME,
+    "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/givenname",
+    "first_name",
+    "firstname",
+    "firstName",
+    "given_name",
+    "givenname",
+    "givenName",
+)
+LAST_NAME_FIELDS = (
+    OID_SURNAME,
+    "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/surname",
+    "last_name",
+    "lastname",
+    "lastName",
+    "surname",
+)
+EMAIL_FIELDS = (
+    OID_MAIL,
+    "http://schemas.xmlsoap.org/claims/EmailAddress",
+    "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
+    "email",
+    "mail",
+)
+
+USERNAME_FIELDS = (
+    OID_USERID,
+    "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name",
+    "subjectNameID",
+    "username",
+)
+
+PERSISTENT_FIELDS = (
+    OID_USERID,
+    "name_id",
+)
+
+# The toolkit can raise parser and crypto errors before its validation error
+# handling runs (including while decrypting an assertion in its constructor).
+SAML_RESPONSE_ERRORS = (
+    OneLogin_Saml2_Error,
+    OneLogin_Saml2_ValidationError,
+    XMLSyntaxError,
+    XMLSecError,
+    ValueError,
+)
+
+
+class SAMLIdentityProvider:
+    """Wrapper around configuration for a SAML Identity provider"""
+
+    def __init__(self, backend: BaseAuth[object], name: str, **kwargs) -> None:
+        """Load and parse configuration"""
+        self.backend: BaseAuth[object] = backend
+        self.name: str = name
+        # name should be a slug and must not contain a colon, which
+        # could conflict with uid prefixing:
+        if ":" in self.name or " " in self.name:
+            raise AuthConfigurationError(
+                self.backend,
+                'IdP "name" should be a slug (short, no spaces)',
+                code="invalid_setting",
+            )
+        self.conf = kwargs
+
+    def get_user_permanent_id(
+        self, attributes: dict[str, str | list[str] | None]
+    ) -> str:
+        """
+        The most important method: Get a permanent, unique identifier
+        for this user from the attributes supplied by the IdP.
+
+        If you want to use the NameID, it's available via
+        attributes['name_id']
+        """
+        setting = "attr_user_permanent_id"
+        uid = self.get_attr(attributes, setting, PERSISTENT_FIELDS)
+        if not uid:
+            raise AuthResponseError(
+                self.backend,
+                claim="attr_user_permanent_id",
+                code="invalid_claim",
+                stage="user_info",
+            )
+        return uid
+
+    # Attributes processing:
+    def get_user_details(
+        self, attributes: dict[str, str | list[str] | None]
+    ) -> dict[str, str | None]:
+        """
+        Given the SAML attributes extracted from the SSO response, get
+        the user data like name.
+        """
+        return {
+            "fullname": self.get_attr(attributes, "attr_full_name", FULLNAME_FIELDS),
+            "first_name": self.get_attr(
+                attributes, "attr_first_name", FIRST_NAME_FIELDS
+            ),
+            "last_name": self.get_attr(attributes, "attr_last_name", LAST_NAME_FIELDS),
+            "username": self.get_attr(attributes, "attr_username", USERNAME_FIELDS),
+            "email": self.get_attr(attributes, "attr_email", EMAIL_FIELDS),
+        }
+
+    def get_attr(
+        self,
+        attributes: dict[str, str | list[str] | None],
+        conf_key: str,
+        default_attributes: tuple[str, ...],
+        *,
+        validate_defaults: bool = False,
+    ) -> str | None:
+        """
+        Internal helper method.
+        Get the attribute 'default_attribute' out of the attributes,
+        unless self.conf[conf_key] overrides the default by specifying
+        another attribute to use.
+        """
+        validate = True
+
+        try:
+            # Use configured value
+            attribute_name = self.conf[conf_key]
+        except KeyError:
+            # Find first matching attribute from default ones
+            for attribute_name in default_attributes:
+                if attribute_name in attributes:
+                    break
+            else:
+                return None
+            validate = validate_defaults
+        else:
+            # Value explicitly set to None, ignore the attribute
+            if attribute_name is None:
+                return None
+
+        try:
+            value = attributes[attribute_name]
+        except KeyError as error:
+            if validate:
+                # Fail if configured or required attribute is not present
+                raise AuthResponseError(
+                    self.backend,
+                    claim=attribute_name,
+                    code="missing_claim",
+                    stage="user_info",
+                ) from error
+            return None
+
+        # Convert values list to the first value (if present)
+        if isinstance(value, list):
+            value = value[0] if value else None
+
+        return value
+
+    @property
+    def entity_id(self):
+        """Get the entity ID for this IdP"""
+        # Required. e.g. "https://idp.testshib.org/idp/shibboleth"
+        return self.conf["entity_id"]
+
+    @property
+    def sso_url(self):
+        """Get the SSO URL for this IdP"""
+        # Required. e.g.
+        # "https://idp.testshib.org/idp/profile/SAML2/Redirect/SSO"
+        return self.conf["url"]
+
+    @property
+    def slo_url(self):
+        """Get the SLO URL for this IdP"""
+        return self.conf.get("slo_url")
+
+    @property
+    def saml_config_dict(self):
+        """Get the IdP configuration dict in the format required by
+        python-saml"""
+        result = {
+            "entityId": self.entity_id,
+            "singleSignOnService": {
+                "url": self.sso_url,
+                # python-saml only supports Redirect
+                "binding": "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect",
+            },
+        }
+
+        if self.slo_url:
+            result["singleLogoutService"] = {
+                "url": self.slo_url,
+                "binding": "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect",
+            }
+
+        cert = self.conf.get("x509cert", None)
+        if cert:
+            result["x509cert"] = cert
+            return result
+        cert = self.conf.get("x509certMulti", None)
+        if cert:
+            result["x509certMulti"] = cert
+            return result
+        raise AuthConfigurationError(
+            self.backend, parameter="x509cert", code="missing_setting"
+        )
+
+
+class SAMLAuth(BaseAuth[ResponseT_co]):
+    """
+    PSA Backend that implements SAML 2.0 Service Provider (SP) functionality.
+
+    Unlike all of the other backends, this one can be configured to work with
+    many identity providers (IdPs). For example, a University that belongs to a
+    Shibboleth federation may support authentication via ~100 partner
+    universities. Also, the IdP configuration can be changed at runtime if you
+    require that functionality - just subclass this and override `get_idp()`.
+
+    Several settings are required. Here's an example:
+
+    SOCIAL_AUTH_SAML_SP_ENTITY_ID = "https://saml.example.com/"
+    SOCIAL_AUTH_SAML_SP_PUBLIC_CERT = "... X.509 certificate string ..."
+    SOCIAL_AUTH_SAML_SP_PRIVATE_KEY = "... private key ..."
+    SOCIAL_AUTH_SAML_ORG_INFO = {
+        "en-US": {
+            "name": "example",
+            "displayname": "Example Inc.",
+            "url": "http://example.com"
+        }
+    }
+    SOCIAL_AUTH_SAML_TECHNICAL_CONTACT = {
+        "givenName": "Tech Gal",
+        "emailAddress": "technical@example.com"
+    }
+    SOCIAL_AUTH_SAML_SUPPORT_CONTACT = {
+        "givenName": "Support Guy",
+        "emailAddress": "support@example.com"
+    }
+    SOCIAL_AUTH_SAML_ENABLED_IDPS = {
+        "testshib": {
+            "entity_id": "https://idp.testshib.org/idp/shibboleth",
+            "url": "https://idp.testshib.org/idp/profile/SAML2/Redirect/SSO",
+            "x509cert": "MIIEDjCCAvagAwIBAgIBADANBgkqhkiG9w0B...
+                        ...8Bbnl+ev0peYzxFyF5sQA==",
+        }
+    }
+
+    Optional settings:
+    SOCIAL_AUTH_SAML_SP_EXTRA = {}
+    SOCIAL_AUTH_SAML_SECURITY_CONFIG = {}
+    """
+
+    name = "saml"
+    title = "SAML"
+    EXTRA_DATA = []
+    BROWSER_RETURN_FIELD = "psa_saml_browser_return"
+
+    def _browser_return(self, saml_response: Any, relay_state: Any) -> ResponseT_co:
+        if not isinstance(saml_response, str):
+            raise AuthInputError(
+                self,
+                parameter="SAMLResponse",
+                code="invalid_parameter",
+                stage="callback",
+            )
+        if relay_state is not None and not isinstance(relay_state, str):
+            raise AuthInputError(
+                self,
+                parameter="RelayState",
+                code="invalid_parameter",
+                stage="callback",
+            )
+        nonce = token_urlsafe(16)
+        relay_field = (
+            f'<input type="hidden" name="RelayState" value="{escape(relay_state, quote=True)}">'
+            if relay_state is not None
+            else ""
+        )
+        content = (
+            '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+            "<title>Completing sign in...</title></head><body>"
+            f'<form id="samlReturnForm" method="post" action="{escape(self.redirect_uri or "", quote=True)}">'
+            f'<input type="hidden" name="SAMLResponse" value="{escape(saml_response, quote=True)}">'
+            f"{relay_field}"
+            f'<input type="hidden" name="{self.BROWSER_RETURN_FIELD}" value="1">'
+            '<button type="submit">Continue signing in</button></form>'
+            f'<script nonce="{nonce}">document.getElementById("samlReturnForm").submit();</script>'
+            "</body></html>"
+        )
+        return self.strategy.html_with_headers(
+            content,
+            {
+                "Cache-Control": "no-store, no-cache, must-revalidate",
+                "Pragma": "no-cache",
+                "Referrer-Policy": "no-referrer",
+                "X-Frame-Options": "DENY",
+                "Content-Security-Policy": (
+                    f"default-src 'none'; script-src 'nonce-{nonce}'; "
+                    "form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+                ),
+            },
+        )
+
+    def _authn_request_id_session_key(self, idp_name: str) -> str:
+        return f"{self.name}_{idp_name}_authn_request_id"
+
+    def _process_response(
+        self, auth: OneLogin_Saml2_Auth, request_id: str | None = None
+    ) -> None:
+        try:
+            auth.process_response(request_id=request_id)
+        except SAML_RESPONSE_ERRORS as error:
+            if (
+                isinstance(error, OneLogin_Saml2_Error)
+                and error.code == OneLogin_Saml2_Error.SAML_RESPONSE_NOT_FOUND
+            ):
+                raise AuthInputError(
+                    self,
+                    code="missing_parameter",
+                    parameter="SAMLResponse",
+                    stage="callback",
+                ) from error
+            raise AuthResponseError(
+                self,
+                f"SAML login failed: {error}",
+                code="malformed_response",
+                stage="callback",
+            ) from error
+        errors = auth.get_errors()
+        if errors or not auth.is_authenticated():
+            reason = auth.get_last_error_reason()
+            raise AuthResponseError(
+                self,
+                f"SAML login failed: {errors} ({reason})",
+                code="malformed_response",
+                stage="callback",
+            )
+
+    def _validate_in_response_to(
+        self, auth: OneLogin_Saml2_Auth, request_id: str
+    ) -> None:
+        in_response_to_values = self._processed_response_in_response_to(auth)
+        if not any(
+            constant_time_compare(in_response_to, request_id)
+            for in_response_to in in_response_to_values
+        ):
+            raise AuthSessionError(
+                self,
+                "SAML login failed: invalid InResponseTo",
+                code="state_mismatch",
+                stage="callback",
+            )
+
+    def _processed_response_in_response_to(
+        self, auth: OneLogin_Saml2_Auth
+    ) -> tuple[str, ...]:
+        """Return ``InResponseTo`` values from a response validated by ``auth``.
+
+        When only the assertion is signed, ``samlp:Response/@InResponseTo`` is
+        outside the signature and can be stripped in transit. Fall back to the
+        signed copies in bearer ``SubjectConfirmationData`` elements, since
+        python3-saml accepts any usable bearer confirmation.
+        """
+        get_in_response_to = getattr(auth, "get_last_response_in_response_to", None)
+        in_response_to = get_in_response_to() if get_in_response_to else None
+        if in_response_to:
+            return (cast("str", in_response_to),)
+        get_response_xml = getattr(auth, "get_last_response_xml", None)
+        response_xml = get_response_xml() if get_response_xml else None
+        if not response_xml:
+            return ()
+        document = OneLogin_Saml2_XML.to_etree(response_xml)
+        confirmations = OneLogin_Saml2_XML.query(
+            document,
+            "/samlp:Response/saml:Assertion/saml:Subject/saml:SubjectConfirmation",
+        )
+        current_url = OneLogin_Saml2_Utils.get_self_url_no_query(
+            self._saml_request_data()
+        )
+        # Match python3-saml's strict SubjectConfirmationData checks. Its
+        # ALLOWED_CLOCK_DRIFT applies to assertion Conditions, not confirmations.
+        now = OneLogin_Saml2_Utils.now()
+        values = []
+        for confirmation in confirmations:
+            method = confirmation.get("Method")
+            if method and method != OneLogin_Saml2_Constants.CM_BEARER:
+                continue
+            data = confirmation.find(
+                "saml:SubjectConfirmationData",
+                namespaces=OneLogin_Saml2_Constants.NSMAP,
+            )
+            if data is None:
+                continue
+            recipient = data.get("Recipient")
+            if recipient and current_url not in recipient:
+                continue
+            not_on_or_after = data.get("NotOnOrAfter")
+            if (
+                not_on_or_after
+                and OneLogin_Saml2_Utils.parse_SAML_to_time(not_on_or_after) <= now
+            ):
+                continue
+            not_before = data.get("NotBefore")
+            if not_before and OneLogin_Saml2_Utils.parse_SAML_to_time(not_before) > now:
+                continue
+            if value := data.get("InResponseTo"):
+                values.append(value)
+        return tuple(values)
+
+    def _response_in_response_to(self, idp: SAMLIdentityProvider) -> str | None:
+        try:
+            saml_response = self.strategy.request_post()["SAMLResponse"]
+            response = OneLogin_Saml2_Response(
+                OneLogin_Saml2_Settings(self.generate_saml_config(idp)),
+                saml_response,
+            )
+        except AuthConfigurationError as error:
+            error.stage = "callback"
+            raise
+        except (*SAML_RESPONSE_ERRORS, KeyError):
+            return None
+        return cast("str | None", response.get_in_response_to())
+
+    def _request_id_required(
+        self, request_id: str | None, kwargs: dict[str, Any]
+    ) -> bool:
+        return bool(request_id) or user_is_authenticated(kwargs.get("user"))
+
+    def _check_missing_request_id(
+        self, request_id: str | None, kwargs: dict[str, Any]
+    ) -> None:
+        if self._request_id_required(request_id, kwargs) and not request_id:
+            raise AuthSessionError(
+                self,
+                "SAML login failed: missing AuthnRequest ID",
+                code="session_context_missing",
+                stage="callback",
+            )
+
+    def _validate_processed_response_request_id(
+        self,
+        auth: OneLogin_Saml2_Auth,
+        request_id: str | None,
+        kwargs: dict[str, Any],
+    ) -> bool:
+        in_response_to_values = self._processed_response_in_response_to(auth)
+        if in_response_to_values:
+            if not request_id:
+                raise AuthSessionError(
+                    self,
+                    "SAML login failed: missing AuthnRequest ID",
+                    code="session_context_missing",
+                    stage="callback",
+                )
+            self._validate_in_response_to(auth, request_id)
+            return True
+        if user_is_authenticated(kwargs.get("user")):
+            raise AuthSessionError(
+                self,
+                "SAML login failed: invalid InResponseTo",
+                code="state_mismatch",
+                stage="callback",
+            )
+        if not self.setting("ALLOW_IDP_INITIATED", False):
+            raise AuthSessionError(
+                self,
+                "SAML login failed: missing AuthnRequest ID",
+                code="session_context_missing",
+                stage="callback",
+            )
+        return False
+
+    def _validate_auth_response(
+        self,
+        auth: OneLogin_Saml2_Auth,
+        request_id: str | None,
+        kwargs: dict[str, Any],
+        response_in_response_to: str | None,
+    ) -> bool:
+        self._check_missing_request_id(request_id, kwargs)
+        if response_in_response_to:
+            if not request_id:
+                raise AuthSessionError(
+                    self,
+                    "SAML login failed: missing AuthnRequest ID",
+                    code="session_context_missing",
+                    stage="callback",
+                )
+            self._process_response(auth, request_id)
+            self._validate_in_response_to(auth, request_id)
+            return True
+        self._process_response(auth)
+        return self._validate_processed_response_request_id(auth, request_id, kwargs)
+
+    def get_idp(self, idp_name: str | None) -> SAMLIdentityProvider:
+        """Given the name of an IdP, get a SAMLIdentityProvider instance"""
+        enabled_idps: dict[str, dict] = cast(
+            "dict[str, dict]", self.setting("ENABLED_IDPS")
+        )
+        if idp_name is None:
+            # RelayState was missing, perhaps an IdP initiated flow
+            if len(enabled_idps) != 1:
+                raise AuthInputError(
+                    self,
+                    parameter="RelayState.idp",
+                    code="missing_parameter",
+                    stage="callback",
+                )
+            # Use the only configured IDP
+            idp_name = next(iter(enabled_idps))
+        if not isinstance(idp_name, str) or idp_name not in enabled_idps:
+            raise AuthInputError(
+                self, parameter="idp", code="invalid_parameter", stage="callback"
+            )
+        idp_config = enabled_idps[idp_name]
+        return SAMLIdentityProvider(self, idp_name, **idp_config)
+
+    def generate_saml_config(self, idp: SAMLIdentityProvider | None = None):
+        """
+        Generate the configuration required to instantiate OneLogin_Saml2_Auth
+        """
+        # The shared absolute URL that all IdPs redirect back to -
+        # this is specified in our metadata.xml:
+        abs_completion_url = self.redirect_uri
+        config = {
+            "contactPerson": {
+                "technical": self.setting("TECHNICAL_CONTACT"),
+                "support": self.setting("SUPPORT_CONTACT"),
+            },
+            "debug": True,
+            "idp": idp.saml_config_dict if idp else {},
+            "organization": self.setting("ORG_INFO"),
+            "security": {
+                "metadataValidUntil": "",
+                "metadataCacheDuration": "P10D",  # metadata valid for ten days
+            },
+            "sp": {
+                "assertionConsumerService": {
+                    "url": abs_completion_url,
+                    # python-saml only supports HTTP-POST
+                    "binding": "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST",
+                },
+                "entityId": self.setting("SP_ENTITY_ID"),
+                "x509cert": self.setting("SP_PUBLIC_CERT"),
+                "privateKey": self.setting("SP_PRIVATE_KEY"),
+            },
+            "strict": True,  # We must force strict mode - for security
+        }
+        cast("dict", config["security"]).update(
+            cast("dict", self.setting("SECURITY_CONFIG", {}))
+        )
+        cast("dict", config["sp"]).update(cast("dict", self.setting("SP_EXTRA", {})))
+        return config
+
+    def generate_metadata_xml(self):
+        """
+        Helper method that can be used from your web app to generate the XML
+        metadata required to link your web app as a Service Provider.
+
+        Returns (metadata XML string, list of errors)
+
+        Example usage (Django):
+            from ..apps.django_app.utils import load_strategy, \
+                                                     load_backend
+            def saml_metadata_view(request):
+                complete_url = reverse('social:complete', args=("saml", ))
+                saml_backend = load_backend(load_strategy(request), "saml",
+                                            complete_url)
+                metadata, errors = saml_backend.generate_metadata_xml()
+                if not errors:
+                    return HttpResponse(content=metadata,
+                                        content_type='text/xml')
+                return HttpResponseServerError(content=', '.join(errors))
+        """
+        config = self.generate_saml_config()
+        saml_settings = OneLogin_Saml2_Settings(config, sp_validation_only=True)
+        metadata = saml_settings.get_sp_metadata()
+        errors = saml_settings.validate_metadata(metadata)
+        return metadata, errors
+
+    def _saml_request_data(self) -> dict[str, Any]:
+        return {
+            "https": "on" if self.strategy.request_is_secure() else "off",
+            "http_host": self.strategy.request_host(),
+            "script_name": self.strategy.request_path(),
+            "get_data": self.strategy.request_get(),
+            "post_data": self.strategy.request_post(),
+        }
+
+    def _create_saml_auth(self, idp: SAMLIdentityProvider):
+        """Get an instance of OneLogin_Saml2_Auth"""
+        config = self.generate_saml_config(idp)
+        return OneLogin_Saml2_Auth(self._saml_request_data(), config)
+
+    def _get_saml_auth(self, idp: SAMLIdentityProvider, *, stage: ErrorStage):
+        try:
+            return self._create_saml_auth(idp)
+        except AuthConfigurationError as error:
+            error.stage = stage
+            raise
+
+    def auth_url(self):
+        """Get the URL to which we must redirect in order to
+        authenticate the user"""
+        try:
+            idp_name = self.strategy.request_data()["idp"]
+        except KeyError as error:
+            raise AuthInputError(
+                self, parameter="idp", code="missing_parameter", stage="begin"
+            ) from error
+        idp = self.get_idp(idp_name)
+        auth = self._get_saml_auth(idp, stage="begin")
+        # Below, return_to sets the RelayState, which can contain
+        # arbitrary data.  We use it to store the specific SAML IdP
+        # name, since we multiple IdPs share the same auth_complete
+        # URL, and the URL to redirect to after auth completes.
+        relay_state = {
+            "idp": idp_name,
+            "next": self.data.get("next"),
+        }
+        url = auth.login(return_to=json.dumps(relay_state))
+        self.strategy.session_set(
+            self._authn_request_id_session_key(idp.name), auth.get_last_request_id()
+        )
+        return url
+
+    def get_group_setting(self, name: str, response, default=None):
+        idp = self.get_idp(response["idp_name"])
+        if name == "GROUPS_MAP":
+            return idp.conf.get("groups_map", default)
+        return idp.conf.get(name.lower(), self.setting(name, default))
+
+    def get_group_mappings(self):
+        return [
+            (name, conf.get("groups_map", {}))
+            for name, conf in self.setting("ENABLED_IDPS", {}).items()
+        ]
+
+    def get_group_source(self, response) -> str:
+        return response["idp_name"]
+
+    def get_user_groups(self, response) -> list[str] | None:
+        idp = self.get_idp(response["idp_name"])
+        key = idp.conf.get("attr_groups")
+        if key is None:
+            return None
+        return read_groups(
+            self,
+            response["attributes"],
+            key,
+            singleton=True,
+            missing_as_empty=idp.conf.get("groups_missing_as_empty", False),
+        )
+
+    def get_user_details(self, response):
+        """Get user details like full name, email, etc. from the
+        response - see auth_complete"""
+        idp = self.get_idp(response["idp_name"])
+        return idp.get_user_details(response["attributes"])
+
+    def get_user_id(self, details, response) -> str:
+        """
+        Get the permanent ID for this user from the response.
+        We prefix each ID with the name of the IdP so that we can
+        connect multiple IdPs to this user.
+
+        SAML identities use the per-IdP ``attr_user_permanent_id`` mapping,
+        rather than the generic configurable ID_KEY.
+        """
+        idp = self.get_idp(response["idp_name"])
+        uid = idp.get_user_permanent_id(response["attributes"])
+        return f"{idp.name}:{uid}"
+
+    def parse_relay_state(self, relay_state_str: str) -> dict:
+        """Parse RelayState JSON or simple string into a dict"""
+        try:
+            relay_state: dict = json.loads(relay_state_str)
+        except json.JSONDecodeError:
+            # this is for backward compatibility; also some identity providers
+            # (like Okta) send a simple string with the IdP name in RelayState
+            # during IdP-initiated SSO:
+            relay_state = {"idp": relay_state_str}
+
+        # Validate that the data is dict
+        if not isinstance(relay_state, dict):
+            raise AuthInputError(
+                self, parameter="RelayState", code="invalid_parameter", stage="callback"
+            )
+
+        return relay_state
+
+    def auth_complete(self, *args, **kwargs):
+        """
+        The user has been redirected back from the IdP and we should
+        now log them in, if everything checks out.
+        """
+        post = self.strategy.request_post()
+        if "SAMLResponse" in post and self.BROWSER_RETURN_FIELD not in post:
+            return self._browser_return(
+                post["SAMLResponse"], self.strategy.request_data().get("RelayState")
+            )
+
+        idp_name: str | None
+        next_url: str | None = None
+        try:
+            relay_state_str = self.strategy.request_data()["RelayState"]
+        except KeyError:
+            idp_name = None
+        else:
+            relay_state = self.parse_relay_state(relay_state_str)
+
+            # Get IdP name
+            idp_name = relay_state.get("idp")
+
+            if not idp_name:
+                raise AuthInputError(
+                    self,
+                    parameter="RelayState.idp",
+                    code="invalid_parameter",
+                    stage="callback",
+                )
+
+            next_url = relay_state.get("next")
+
+        idp = self.get_idp(idp_name)
+        request_id_key = self._authn_request_id_session_key(idp.name)
+        request_id = cast("str | None", self.strategy.session_get(request_id_key))
+        self._check_missing_request_id(request_id, kwargs)
+        response_in_response_to = self._response_in_response_to(idp)
+
+        auth = self._get_saml_auth(idp, stage="callback")
+        request_id_validated = self._validate_auth_response(
+            auth,
+            request_id,
+            kwargs,
+            response_in_response_to,
+        )
+        if request_id_validated:
+            self.strategy.session_pop(request_id_key)
+        attributes = auth.get_attributes()
+        attributes["name_id"] = auth.get_nameid()
+        self._check_entitlements(idp, attributes)
+        if next_url:
+            # The do_complete action expects the "next" URL to be in
+            # session state or the request params.
+            self.strategy.session_set(kwargs.get("redirect_name", "next"), next_url)
+        response = {
+            "idp_name": idp.name,
+            "attributes": attributes,
+            "session_index": auth.get_session_index(),
+        }
+        kwargs.update({"response": response, "backend": self})
+        return self.strategy.authenticate(*args, **kwargs)
+
+    def extra_data(
+        self,
+        user,
+        uid: str,
+        response: dict[str, Any],
+        details: dict[str, Any],
+        pipeline_kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        extra_data = super().extra_data(
+            user, uid, response["attributes"], details, pipeline_kwargs
+        )
+        extra_data["session_index"] = response["session_index"]
+        extra_data["name_id"] = response["attributes"]["name_id"]
+        return extra_data
+
+    def request_logout(self, idp_name, social_auth, return_to=None):
+        idp = self.get_idp(idp_name)
+        auth = self._get_saml_auth(idp, stage="disconnect")
+        name_id = social_auth.extra_data["name_id"]
+        session_index = social_auth.extra_data["session_index"]
+        return auth.logout(
+            name_id=name_id, session_index=session_index, return_to=return_to
+        )
+
+    def process_logout(self, idp_name, delete_session_cb):
+        idp = self.get_idp(idp_name)
+        auth = self._get_saml_auth(idp, stage="disconnect")
+        url = auth.process_slo(delete_session_cb=delete_session_cb)
+        errors = auth.get_errors()
+        return url, errors
+
+    def _check_entitlements(self, idp, attributes) -> None:
+        """
+        Additional verification of a SAML response before
+        authenticating the user.
+
+        Subclasses can override this method if they need custom
+        validation code, such as requiring the presence of an
+        eduPersonEntitlement.
+
+        raise social_core.exceptions.AuthForbidden if the user should not
+        be authenticated, or do nothing to allow the login pipeline to
+        continue.
+        """

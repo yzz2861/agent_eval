@@ -1,0 +1,39 @@
+"""
+Google OpenIdConnect:
+    https://python-social-auth.readthedocs.io/en/latest/backends/google.html
+"""
+
+from typing import Any
+
+from social_core.backends.base import ResponseT_co
+
+from .google import GoogleOAuth2
+from .open_id_connect import OpenIdConnectAuth
+
+
+class GoogleOpenIdConnect(GoogleOAuth2[ResponseT_co], OpenIdConnectAuth[ResponseT_co]):
+    name = "google-openidconnect"
+    title = "Google"
+    icon = "google.svg"
+    OIDC_ENDPOINT = "https://accounts.google.com"
+    # differs from value in discovery document
+    # http://openid.net/specs/openid-connect-core-1_0.html#rfc.section.15.6.2
+    ID_TOKEN_ISSUER = "accounts.google.com"
+
+    def get_user_id(self, details, response):
+        if self.setting("ID_KEY"):
+            return super(GoogleOAuth2, self).get_user_id(details, response)
+        if self.setting("USE_UNIQUE_USER_ID", False) and self.id_token is not None:
+            return self.id_token.get("sub")
+        return super(GoogleOAuth2, self).get_user_id(details, response)
+
+    def user_data(self, access_token: str, *args, **kwargs) -> dict[str, Any] | None:
+        """Return user data from Google API"""
+        response = self.validate_userinfo_sub(
+            self.get_json(
+                "https://openidconnect.googleapis.com/v1/userinfo",
+                params={"access_token": access_token, "alt": "json"},
+            )
+        )
+        self.validate_email_verified(response)
+        return response

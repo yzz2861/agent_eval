@@ -1,0 +1,66 @@
+"""
+Fitbit OAuth backend, docs at:
+    https://python-social-auth.readthedocs.io/en/latest/backends/fitbit.html
+"""
+
+from typing import Any
+
+from social_core.backends.base import ResponseT_co
+
+from .oauth import BaseOAuth1, BaseOAuth2
+
+
+class FitbitOAuth1(BaseOAuth1[ResponseT_co]):
+    """Fitbit OAuth1 authentication backend"""
+
+    name = "fitbit"
+    title = "Fitbit"
+    AUTHORIZATION_URL = "https://www.fitbit.com/oauth/authorize"
+    REQUEST_TOKEN_URL = "https://api.fitbit.com/oauth/request_token"
+    ACCESS_TOKEN_URL = "https://api.fitbit.com/oauth/access_token"
+    ID_KEY = "encodedId"
+    EXTRA_DATA = [("encodedId", "id"), ("displayName", "username")]
+
+    def get_user_details(self, response):
+        """Return user details from Fitbit account"""
+        return {"username": response.get("displayName"), "email": ""}
+
+    def user_data(self, access_token: dict, *args, **kwargs) -> dict[str, Any] | None:
+        """Loads user data from service"""
+        return self.get_json(
+            "https://api.fitbit.com/1/user/-/profile.json",
+            auth=self.oauth_auth(access_token, stage="user_info"),
+        )["user"]
+
+
+class FitbitOAuth2(BaseOAuth2[ResponseT_co]):
+    """Fitbit OAuth2 authentication backend"""
+
+    name = "fitbit"
+    title = "Fitbit"
+    AUTHORIZATION_URL = "https://www.fitbit.com/oauth2/authorize"
+    ACCESS_TOKEN_URL = "https://api.fitbit.com/oauth2/token"
+    REFRESH_TOKEN_URL = "https://api.fitbit.com/oauth2/token"
+    DEFAULT_SCOPE = ["profile"]
+    ID_KEY = "encodedId"
+    REDIRECT_STATE = False
+    EXTRA_DATA = [
+        ("expires_in", "expires_in"),
+        ("refresh_token", "refresh_token", True),
+        ("encodedId", "id"),
+        ("displayName", "username"),
+    ]
+
+    def get_user_details(self, response):
+        """Return user details from Fitbit account"""
+        return {"username": response.get("displayName"), "email": ""}
+
+    def user_data(self, access_token: str, *args, **kwargs) -> dict[str, Any] | None:
+        """Loads user data from service"""
+        auth_header = {"Authorization": f"Bearer {access_token}"}
+        return self.get_json(
+            "https://api.fitbit.com/1/user/-/profile.json", headers=auth_header
+        )["user"]
+
+    def auth_headers(self):
+        return {"Authorization": self.get_key_and_secret_basic_auth()}

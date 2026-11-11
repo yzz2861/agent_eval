@@ -1,0 +1,44 @@
+"""
+Upwork OAuth1 backend
+"""
+
+from typing import Any
+
+from social_core.backends.base import ResponseT_co
+
+from .oauth import BaseOAuth1
+
+
+class UpworkOAuth(BaseOAuth1[ResponseT_co]):
+    """Upwork OAuth authentication backend"""
+
+    name = "upwork"
+    title = "Upwork"
+    ID_KEY = "id"
+    AUTHORIZATION_URL = "https://www.upwork.com/services/api/auth"
+    REQUEST_TOKEN_URL = "https://www.upwork.com/api/auth/v1/oauth/token/request"
+    REQUEST_TOKEN_METHOD = "POST"
+    ACCESS_TOKEN_URL = "https://www.upwork.com/api/auth/v1/oauth/token/access"
+    REDIRECT_URI_PARAMETER_NAME = "oauth_callback"
+
+    def get_user_details(self, response):
+        """Return user details from Upwork account"""
+        info = response.get("info", {})
+        auth_user = response.get("auth_user", {})
+        first_name = auth_user.get("first_name")
+        last_name = auth_user.get("last_name")
+        profile_url = info.get("profile_url", "")
+        username = profile_url.rsplit("/")[-1].replace("~", "")
+        return {
+            "username": username,
+            "fullname": None,
+            "first_name": first_name,
+            "last_name": last_name,
+        }
+
+    def user_data(self, access_token: dict, *args, **kwargs) -> dict[str, Any] | None:
+        """Loads user data from service"""
+        return self.get_json(
+            "https://www.upwork.com/api/auth/v1/info.json",
+            auth=self.oauth_auth(access_token, stage="user_info"),
+        )

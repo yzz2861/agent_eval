@@ -1,0 +1,46 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, TypeVar, cast
+
+from social_core.exceptions import AuthCredentialError
+
+from .partial import partial_step
+
+if TYPE_CHECKING:
+    from social_core.backends.base import BaseAuth
+
+ResponseT = TypeVar("ResponseT")
+
+
+@partial_step(save_to_session=True, allow_external_resume=True)
+def mail_validation(
+    backend: BaseAuth[ResponseT], details, is_new=False, *args, **kwargs
+) -> ResponseT | None:
+    requires_validation = backend.REQUIRES_EMAIL_VALIDATION or backend.setting(
+        "FORCE_EMAIL_VALIDATION", False
+    )
+    send_validation = details.get("email") and (
+        is_new or backend.setting("PASSWORDLESS", False)
+    )
+    if requires_validation and send_validation:
+        # External partial resumes may replay the original validation-link data
+        # after a local confirmation request.
+        data = backend.strategy.request_data()
+        if "verification_code" in data:
+            backend.strategy.session_pop("email_validation_address")
+            if not backend.strategy.validate_email(
+                details["email"], data["verification_code"]
+            ):
+                raise AuthCredentialError(
+                    backend, code="email_verification_rejected", stage="pipeline"
+                )
+            return None
+        current_partial = kwargs["current_partial"]
+        backend.strategy.send_email_validation(
+            backend, details["email"], current_partial.token
+        )
+        backend.strategy.session_set("email_validation_address", details["email"])
+        return backend.strategy.redirect(
+            cast("str", backend.strategy.setting("EMAIL_VALIDATION_URL"))
+        )
+    return None

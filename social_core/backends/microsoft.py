@@ -1,0 +1,93 @@
+"""
+OAuth2 Backend to work with microsoft graph.
+"""
+
+from typing import Any
+
+from social_core.backends.base import ResponseT_co
+from social_core.exceptions import AuthResponseError
+
+from .oauth import BaseOAuth2
+
+
+class MicrosoftOAuth2(BaseOAuth2[ResponseT_co]):
+    name = "microsoft-graph"
+    title = "Microsoft"
+    icon = "microsoft.svg"
+    REQUIRES_USER_ID = True
+    SCOPE_SEPARATOR = " "
+    AUTHORIZATION_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+    ACCESS_TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+
+    REDIRECT_STATE = False
+    DEFAULT_SCOPE = ["User.Read"]
+    EXTRA_DATA = [
+        ("refresh_token", "refresh_token", True),
+        ("expires_in", "expires_in"),
+    ]
+
+    def auth_complete(self, *args, **kwargs):
+        """Completes login process, must return user instance"""
+        self.process_error(self.data)
+        state = self.validate_state()
+
+        response = self.request_access_token(
+            self.access_token_url(),
+            data=self.auth_complete_params(state),
+            headers=self.auth_headers(),
+            auth=self.auth_complete_credentials(),
+            method=self.ACCESS_TOKEN_METHOD,
+        )
+
+        return self.do_auth(
+            self.get_access_token(response), *args, response=response, **kwargs
+        )
+
+    def get_user_details(self, response):
+        """Return user details from Microsoft online account"""
+        email = response.get("mail")
+        username = response.get("userPrincipalName")
+
+        if not username:
+            raise AuthResponseError(
+                self, claim="userPrincipalName", code="missing_claim", stage="user_info"
+            )
+
+        if "@" in username:
+            if not email:
+                email = username
+            username = username.split("@", 1)[0]
+
+        return {
+            "username": username,
+            "email": email,
+            "fullname": response.get("displayName"),
+            "first_name": response.get("givenName"),
+            "last_name": response.get("surname"),
+        }
+
+    def user_data(self, access_token: str, *args, **kwargs) -> dict[str, Any] | None:
+        """Return user data by querying Microsoft service"""
+        return self.get_json(
+            "https://graph.microsoft.com/v1.0/me",
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+                "Authorization": f"Bearer {access_token}",
+            },
+            method="GET",
+        )
+
+    def refresh_token_params(self, token, *args, **kwargs):
+        return {
+            "client_id": self.setting("KEY"),
+            "client_secret": self.setting("SECRET"),
+            "refresh_token": token,
+            "grant_type": "refresh_token",
+        }
+
+    def get_auth_token(self, user_id):
+        """Return the access token for the given user, after ensuring that it
+        has not expired, or refreshing it if so."""
+        user = self.get_user(user_id=user_id)
+        return user.social_user.get_access_token(self.strategy)

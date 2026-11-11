@@ -1,0 +1,44 @@
+"""
+Orbi OAuth2 backend
+"""
+
+from typing import Any
+
+from social_core.backends.base import ResponseT_co
+
+from .oauth import BaseOAuth2
+
+
+class OrbiOAuth2(BaseOAuth2[ResponseT_co]):
+    """Orbi OAuth2 authentication backend"""
+
+    name = "orbi"
+    title = "Orbi"
+    AUTHORIZATION_URL = "https://login.orbi.kr/oauth/authorize"
+    ACCESS_TOKEN_URL = "https://login.orbi.kr/oauth/token"
+    EXTRA_DATA = [
+        ("imin", "imin"),
+        ("nick", "nick"),
+        ("photo", "photo"),
+        ("sex", "sex"),
+        ("birth", "birth"),
+    ]
+
+    def get_user_details(self, response):
+        fullname = response.get("name")
+        first_name = response.get("first_name")
+        last_name = response.get("last_name")
+        return {
+            "username": response.get("username", response.get("name")),
+            "email": response.get("email", ""),
+            "fullname": fullname,
+            "first_name": first_name,
+            "last_name": last_name,
+        }
+
+    def user_data(self, access_token: str, *args, **kwargs) -> dict[str, Any] | None:
+        """Load user data from orbi"""
+        return self.get_json(
+            "https://login.orbi.kr/oauth/user/get",
+            params={"access_token": access_token},
+        )

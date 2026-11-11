@@ -1,0 +1,28 @@
+"""
+Okta OAuth2 and OpenIdConnect:
+    https://python-social-auth.readthedocs.io/en/latest/backends/okta.html
+"""
+
+from typing import Any
+
+from social_core.backends.base import ResponseT_co
+
+from .okta import OktaOAuth2
+from .open_id_connect import OpenIdConnectAuth
+
+
+class OktaOpenIdConnect(OktaOAuth2[ResponseT_co], OpenIdConnectAuth[ResponseT_co]):
+    """Okta OpenID-Connect authentication backend"""
+
+    name = "okta-openidconnect"
+    title = "Okta"
+    REDIRECT_STATE = False
+    RESPONSE_TYPE = "code"
+
+    def get_user_groups(self, response) -> list[str] | None:
+        return OpenIdConnectAuth.get_user_groups(self, response)
+
+    def user_data(self, access_token: str, *args, **kwargs) -> dict[str, Any] | None:
+        return self.validate_userinfo_sub(
+            super().user_data(access_token, *args, **kwargs)
+        )

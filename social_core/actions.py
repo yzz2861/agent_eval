@@ -1,0 +1,284 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
+from urllib.parse import quote
+
+from .utils import (
+    get_allowed_redirect_schemes,
+    is_private_use_redirect,
+    is_url,
+    partial_pipeline_result,
+    sanitize_redirect,
+    setting_url,
+    user_is_active,
+    user_is_authenticated,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from .backends.base import BaseAuth
+    from .storage import PartialMixin, PipelineUserProtocol, UserMixin, UserProtocol
+
+
+_PartialResult = TypeVar("_PartialResult")
+ResponseT = TypeVar("ResponseT")
+
+
+def _get_social_user(user: PipelineUserProtocol) -> UserMixin:
+    social_user = user.social_user
+    if social_user is None:
+        raise ValueError("Expected social_user to be set during authentication")
+    return social_user
+
+
+def _login_user(
+    backend: BaseAuth[object], login: Callable, authenticated_user: PipelineUserProtocol
+) -> bool:
+    social_user = _get_social_user(authenticated_user)
+    is_new = authenticated_user.is_new
+    login(backend, authenticated_user, social_user)
+    backend.strategy.session_set("social_auth_last_login_backend", social_user.provider)
+    return is_new
+
+
+def _sanitize_redirect_url(backend: BaseAuth[object], url: str) -> str:
+    if backend.setting("SANITIZE_REDIRECTS", True):
+        allowed_hosts = [
+            *cast("list[str]", backend.setting("ALLOWED_REDIRECT_HOSTS", [])),
+            backend.strategy.request_host(),
+        ]
+        sanitized_url = sanitize_redirect(
+            allowed_hosts, url, get_allowed_redirect_schemes(backend)
+        ) or backend.setting("LOGIN_REDIRECT_URL")
+        if sanitized_url is None:
+            raise ValueError("Disallowed URL")
+        url = cast("str", sanitized_url)
+    return url
+
+
+def _handle_partial(
+    backend: BaseAuth[ResponseT],
+    user: UserProtocol | None,
+    resume_partial: Callable[[PartialMixin], _PartialResult],
+    halt_url_names: tuple[str, ...],
+    halt_error: str,
+    *args,
+    pipeline_type: str = "authentication",
+    **kwargs,
+) -> tuple[Literal[True], _PartialResult | ResponseT] | tuple[Literal[False], None]:
+    partial = partial_pipeline_result(
+        backend, user, *args, pipeline_type=pipeline_type, **kwargs
+    )
+    if partial.response is not None:
+        return True, partial.response
+    if partial.partial:
+        response = resume_partial(partial.partial)
+        backend.strategy.clean_partial_pipeline(partial.partial.token)
+        return True, response
+    if partial.halt:
+        halt_url = setting_url(backend, *halt_url_names)
+        if not halt_url:
+            raise ValueError(halt_error)
+        halt_url = _sanitize_redirect_url(backend, halt_url)
+        return True, backend.strategy.redirect(halt_url)
+    return False, None
+
+
+def do_auth(
+    backend: BaseAuth[ResponseT],
+    redirect_name: str = "next",
+    *,
+    user: UserProtocol | None = None,
+) -> ResponseT:
+    # Save any defined next value into session
+    data = backend.strategy.request_data(merge=False)
+
+    # Save extra data into session.
+    for field_name in cast(
+        "list[str]", backend.setting("FIELDS_STORED_IN_SESSION", [])
+    ):
+        if field_name in data:
+            backend.strategy.session_set(field_name, data[field_name])
+        else:
+            backend.strategy.session_set(field_name, None)
+
+    if redirect_name in data:
+        # Check and sanitize a user-defined GET/POST next field value
+        redirect_uri = data[redirect_name]
+        if backend.setting("SANITIZE_REDIRECTS", True):
+            allowed_hosts = [
+                *cast("list[str]", backend.setting("ALLOWED_REDIRECT_HOSTS", [])),
+                backend.strategy.request_host(),
+            ]
+            redirect_uri = sanitize_redirect(
+                allowed_hosts, redirect_uri, get_allowed_redirect_schemes(backend)
+            )
+        backend.strategy.session_set(
+            redirect_name, redirect_uri or backend.setting("LOGIN_REDIRECT_URL")
+        )
+    backend.prepare_auth(user=user)
+    return backend.start()
+
+
+def do_complete(
+    backend: BaseAuth[ResponseT],
+    login: Callable,
+    user: UserProtocol | None = None,
+    redirect_name: str = "next",
+    *args,
+    **kwargs,
+) -> ResponseT:
+    data = backend.strategy.request_data()
+
+    is_authenticated = user_is_authenticated(user)
+    partial_user = user if is_authenticated else None
+    authenticated_user: UserProtocol | ResponseT | None = partial_user
+
+    partial_result = _handle_partial(
+        backend,
+        partial_user,
+        backend.continue_pipeline,
+        ("LOGIN_ERROR_URL", "LOGIN_URL"),
+        "By this point URL has to have been set",
+        *args,
+        **kwargs,
+    )
+    if partial_result[0] is True:
+        authenticated_user = partial_result[1]
+    else:
+        authenticated_user = backend.complete(
+            *args, user=authenticated_user, redirect_name=redirect_name, **kwargs
+        )
+
+    # pop redirect value before the session is trashed on login(), but after
+    # the pipeline so that the pipeline can change the redirect if needed
+    redirect_value = backend.strategy.session_get(redirect_name, "") or data.get(
+        redirect_name, ""
+    )
+
+    # check if the output value is something else than a user and just
+    # return it to the client
+    user_model = backend.strategy.storage.user.user_model()
+    if authenticated_user and not isinstance(authenticated_user, user_model):
+        return cast("ResponseT", authenticated_user)
+
+    authenticated_user = cast("PipelineUserProtocol | None", authenticated_user)
+    # A request value may be a redirect URL, but never a setting name.
+    redirect_url = (
+        redirect_value
+        if isinstance(redirect_value, str)
+        and is_url(redirect_value, get_allowed_redirect_schemes(backend))
+        else None
+    )
+    url: str | None
+
+    if is_authenticated:
+        if not authenticated_user:
+            url = setting_url(backend, redirect_url, "LOGIN_REDIRECT_URL")
+        else:
+            url = setting_url(
+                backend,
+                redirect_url,
+                "NEW_ASSOCIATION_REDIRECT_URL",
+                "LOGIN_REDIRECT_URL",
+            )
+    elif authenticated_user:
+        # check if inactive users are allowed to login
+        bypass_inactivation = backend.strategy.setting(
+            "ALLOW_INACTIVE_USERS_LOGIN", False
+        )
+        if bypass_inactivation or user_is_active(authenticated_user):
+            is_new = _login_user(backend, login, authenticated_user)
+
+            if is_new:
+                url = setting_url(
+                    backend,
+                    "NEW_USER_REDIRECT_URL",
+                    redirect_url,
+                    "LOGIN_REDIRECT_URL",
+                )
+            else:
+                url = setting_url(backend, redirect_url, "LOGIN_REDIRECT_URL")
+        else:
+            if backend.setting("INACTIVE_USER_LOGIN", False):
+                login(backend, authenticated_user, _get_social_user(authenticated_user))
+            url = setting_url(
+                backend, "INACTIVE_USER_URL", "LOGIN_ERROR_URL", "LOGIN_URL"
+            )
+    else:
+        url = setting_url(backend, "LOGIN_ERROR_URL", "LOGIN_URL")
+
+    if not url:
+        raise ValueError("By this point URL has to have been set")
+
+    if redirect_value and redirect_value != url:
+        redirect_value = quote(redirect_value)
+        url += f"{'&' if '?' in url else '?'}{redirect_name}={redirect_value}"
+
+    url = _sanitize_redirect_url(backend, url)
+    return backend.strategy.redirect(url)
+
+
+def do_disconnect(
+    backend: BaseAuth[ResponseT],
+    user: UserProtocol,
+    association_id=None,
+    redirect_name: str = "next",
+    *args,
+    **kwargs,
+) -> ResponseT:
+    response: dict[str, Any] | ResponseT
+
+    def resume_disconnect(
+        partial: PartialMixin,
+    ) -> dict[str, Any] | ResponseT:
+        if association_id and not partial.kwargs.get("association_id"):
+            partial.extend_kwargs({"association_id": association_id})
+        return backend.continue_disconnect_pipeline(partial)
+
+    partial_result = _handle_partial(
+        backend,
+        user,
+        resume_disconnect,
+        ("DISCONNECT_REDIRECT_URL", "LOGIN_REDIRECT_URL"),
+        "Disallowed URL",
+        *args,
+        pipeline_type="disconnect",
+        **kwargs,
+    )
+    if partial_result[0] is True:
+        response = partial_result[1]
+    else:
+        response = backend.disconnect(
+            *args, user=user, association_id=association_id, **kwargs
+        )
+
+    if isinstance(response, dict):
+        allowed_schemes = get_allowed_redirect_schemes(backend)
+        candidate = (
+            backend.strategy.request_data().get(redirect_name, "")
+            or backend.setting("DISCONNECT_REDIRECT_URL")
+            or backend.setting("LOGIN_REDIRECT_URL")
+        )
+        # absolute_uri() only preserves http and https, so an allowed
+        # private-use scheme has to bypass it to survive intact.
+        url: str | None = (
+            cast("str", candidate)
+            if is_private_use_redirect(cast("str | None", candidate), allowed_schemes)
+            else backend.strategy.absolute_uri(cast("str | None", candidate))
+        )
+        if backend.setting("SANITIZE_REDIRECTS", True):
+            allowed_hosts = [
+                *cast("list[str]", backend.setting("ALLOWED_REDIRECT_HOSTS", [])),
+                backend.strategy.request_host(),
+            ]
+            url = (
+                sanitize_redirect(allowed_hosts, url, allowed_schemes)
+                or backend.setting("DISCONNECT_REDIRECT_URL")
+                or backend.setting("LOGIN_REDIRECT_URL")
+            )
+        if not url:
+            raise ValueError("Disallowed URL")
+        return backend.strategy.redirect(url)
+    return response

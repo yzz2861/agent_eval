@@ -1,0 +1,28 @@
+import base64
+
+from social_core.backends.base import ResponseT_co
+
+from .oauth import BaseOAuth2
+
+
+class PushbulletOAuth2(BaseOAuth2[ResponseT_co]):
+    """pushbullet OAuth authentication backend"""
+
+    name = "pushbullet"
+    title = "Pushbullet"
+    EXTRA_DATA = [("id", "id")]
+    ID_KEY = "iden"
+    AUTHORIZATION_URL = "https://www.pushbullet.com/authorize"
+    REQUEST_TOKEN_URL = "https://api.pushbullet.com/oauth2/token"
+    ACCESS_TOKEN_URL = "https://api.pushbullet.com/oauth2/token"
+    STATE_PARAMETER = False
+
+    def get_user_details(self, response):
+        return {"username": response.get("access_token")}
+
+    def get_user_id(self, details, response):
+        auth = f"Basic {base64.b64encode(details['username']).decode()}"
+        user = self.get_json(
+            "https://api.pushbullet.com/v2/users/me", headers={"Authorization": auth}
+        )
+        return self.get_user_id_from_sources(user)

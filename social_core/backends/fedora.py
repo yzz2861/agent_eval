@@ -1,0 +1,44 @@
+"""
+Fedora OpenId backend, docs at:
+    https://python-social-auth.readthedocs.io/en/latest/backends/fedora.html
+"""
+
+from social_core.backends.base import ResponseT_co
+
+from .open_id import OpenIdAuth
+from .open_id_connect import OpenIdConnectAuth
+
+
+class FedoraOpenIdConnect(OpenIdConnectAuth[ResponseT_co]):
+    """
+    Fedora OpenID Connect backend.
+
+    To use it, you need to set the SOCIAL_AUTH_FEDORA_OIDC_KEY and
+    SOCIAL_AUTH_FEDORA_OIDC_SECRET configuration variables to the client_id and
+    client_secret values that the Fedora Infrastructure gave you.
+    """
+
+    name = "fedora-oidc"
+    title = "Fedora"
+    icon = "fedora.svg"
+    USERNAME_KEY = "nickname"
+    OIDC_ENDPOINT = "https://id.fedoraproject.org"
+    DEFAULT_SCOPE = [
+        "openid",
+        "profile",
+        "email",
+        "https://id.fedoraproject.org/scope/agreements",
+        "https://id.fedoraproject.org/scope/groups",
+    ]
+
+
+class FedoraOpenId(OpenIdAuth[ResponseT_co]):
+    """
+    Fedora OpenID backend. DEPRECATED, please use the OpenID Connect backend.
+    """
+
+    name = "fedora"
+    title = "Fedora OpenID"
+    icon = "fedora.svg"
+    URL = "https://id.fedoraproject.org"
+    USERNAME_KEY = "nickname"

@@ -1,0 +1,50 @@
+"""
+Stocktwits OAuth2 backend, docs at:
+    https://python-social-auth.readthedocs.io/en/latest/backends/stocktwits.html
+"""
+
+from typing import Any
+
+from social_core.backends.base import ResponseT_co
+
+from .oauth import BaseOAuth2
+
+
+class StocktwitsOAuth2(BaseOAuth2[ResponseT_co]):
+    """Stockwiths OAuth2 backend"""
+
+    name = "stocktwits"
+    title = "Stocktwits"
+    AUTHORIZATION_URL = "https://api.stocktwits.com/api/2/oauth/authorize"
+    ACCESS_TOKEN_URL = "https://api.stocktwits.com/api/2/oauth/token"
+    SCOPE_SEPARATOR = ","
+    DEFAULT_SCOPE = [
+        "read",
+        "publish_messages",
+        "publish_watch_lists",
+        "follow_users",
+        "follow_stocks",
+    ]
+
+    def get_user_id(self, details, response):
+        return self.get_user_id_from_sources(response.get("user"), details)
+
+    def get_user_details(self, response):
+        """Return user details from Stocktwits account"""
+        fullname = response["user"]["name"]
+        first_name = None
+        last_name = None
+        return {
+            "username": response["user"]["username"],
+            "email": "",  # not supplied
+            "fullname": fullname,
+            "first_name": first_name,
+            "last_name": last_name,
+        }
+
+    def user_data(self, access_token: str, *args, **kwargs) -> dict[str, Any] | None:
+        """Loads user data from service"""
+        return self.get_json(
+            "https://api.stocktwits.com/api/2/account/verify.json",
+            params={"access_token": access_token},
+        )

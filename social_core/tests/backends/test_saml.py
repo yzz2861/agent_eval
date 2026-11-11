@@ -1,0 +1,548 @@
+import json
+import re
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+
+import requests
+import responses
+
+try:
+    from onelogin.saml2.utils import OneLogin_Saml2_Utils
+
+    SAML_MODULE_ENABLED = True
+except ImportError:
+    SAML_MODULE_ENABLED = False
+
+from social_core.exceptions import (
+    AuthConfigurationError,
+    AuthInputError,
+    AuthSessionError,
+)
+from social_core.pipeline.social_auth import social_names
+from social_core.tests.exception_helpers import assert_auth_error
+from social_core.tests.models import User
+
+from .base import BaseBackendTest
+
+DATA_DIR = Path(__file__).parent / "data"
+
+
+@unittest.skipIf(
+    "__pypy__" in sys.builtin_module_names, "dm.xmlsec not compatible with pypy"
+)
+@unittest.skipUnless(SAML_MODULE_ENABLED, "Only run if onelogin.saml2 is installed")
+class SAMLTest(BaseBackendTest):
+    backend_path = "social_core.backends.saml.SAMLAuth"
+    expected_username = "myself"
+    response_fixture = "saml_response.txt"
+
+    def test_invalid_idp_names(self) -> None:
+        for name in ("invalid:name", "invalid name"):
+            self.strategy.set_settings({"SOCIAL_AUTH_SAML_ENABLED_IDPS": {name: {}}})
+            with (
+                self.subTest(name=name),
+                self.assertRaises(AuthConfigurationError) as caught,
+            ):
+                self.backend.get_idp(name)
+            self.assertEqual(caught.exception.code, "invalid_setting")
+            self.assertIn('IdP "name" should be a slug', caught.exception.detail)
+
+    def test_missing_idp_certificates_report_the_active_operation(self) -> None:
+        config = self.backend.get_idp("testshib").conf.copy()
+        config.pop("x509cert", None)
+        config.pop("x509certMulti", None)
+        self.strategy.set_settings(
+            {"SOCIAL_AUTH_SAML_ENABLED_IDPS": {"testshib": config}}
+        )
+        self.strategy.set_request_data(
+            {
+                "idp": "testshib",
+                "RelayState": json.dumps({"idp": "testshib"}),
+                "SAMLResponse": "response",
+                self.backend.BROWSER_RETURN_FIELD: "1",
+            },
+            self.backend,
+        )
+        self.strategy.session_set(
+            self.authn_request_id_session_key("testshib"), "request-id"
+        )
+        for operation, stage in (
+            (self.backend.auth_url, "begin"),
+            (self.backend.auth_complete, "callback"),
+            (lambda: self.backend.request_logout("testshib", None), "disconnect"),
+            (
+                lambda: self.backend.process_logout("testshib", lambda: None),
+                "disconnect",
+            ),
+        ):
+            with (
+                self.subTest(stage=stage),
+                self.assertRaises(AuthConfigurationError) as caught,
+            ):
+                operation()
+            self.assertEqual(caught.exception.stage, stage)
+            self.assertEqual(caught.exception.code, "missing_setting")
+            self.assertEqual(caught.exception.parameter, "x509cert")
+        with (
+            patch.object(self.backend, "_response_in_response_to", return_value=None),
+            self.assertRaises(AuthConfigurationError) as caught,
+        ):
+            self.backend.auth_complete()
+        self.assertEqual(caught.exception.stage, "callback")
+
+    def authn_request_id_session_key(self, idp_name: str) -> str:
+        return f"{self.backend.name}_{idp_name}_authn_request_id"
+
+    def test_full_name_only_details(self) -> None:
+        self.strategy.set_settings(
+            {
+                "SOCIAL_AUTH_SAML_ENABLED_IDPS": {
+                    "names": {
+                        "attr_full_name": "fullname",
+                        "attr_first_name": None,
+                        "attr_last_name": None,
+                    }
+                }
+            }
+        )
+        details = self.backend.get_user_details(
+            {"idp_name": "names", "attributes": {"fullname": ["Mary Jane Watson"]}}
+        )
+        self.assertIsNone(details["first_name"])
+        self.assertIsNone(details["last_name"])
+        normalized = social_names(self.backend, details)["details"]
+        self.assertEqual(normalized["first_name"], "Mary")
+        self.assertEqual(normalized["last_name"], "Jane Watson")
+
+    def extra_settings(self):
+        file = DATA_DIR / "saml_config.json"
+        config_str = file.read_text()
+        return json.loads(config_str)
+
+    def setUp(self) -> None:
+        """Patch the time so that we can replay canned
+        request/response pairs"""
+        super().setUp()
+
+        def fixed_time():
+            return OneLogin_Saml2_Utils.parse_SAML_to_time("2015-05-09T03:57:22Z")
+
+        now_patch = patch.object(OneLogin_Saml2_Utils, "now", fixed_time)
+        now_patch.start()
+        self.addCleanup(now_patch.stop)
+
+    def install_http_intercepts(self, start_url, return_url) -> None:
+        # When we request start_url
+        # (https://idp.testshib.org/idp/profile/SAML2/Redirect/SSO...)
+        # we will eventually get a redirect back, with SAML assertion
+        # data in the query string.  A pre-recorded correct response
+        # is kept in this .txt file:
+        file = DATA_DIR / self.response_fixture
+        response_url = file.read_text()
+        responses.add(
+            responses.GET,
+            start_url,
+            status=301,
+            headers={"Location": response_url},
+        )
+        responses.add(responses.GET, return_url, status=200, body="foobar")
+
+    def do_start(self):
+        start_url = self.backend.start().url
+        # Modify the start URL to make the SAML request consistent
+        # from test to test:
+        start_url = self.modify_start_url(start_url)
+        # If the SAML Identity Provider recognizes the user, we will
+        # be redirected back to:
+        return_url = self.backend.redirect_uri
+        self.install_http_intercepts(start_url, return_url)
+        response = requests.get(start_url, timeout=1)
+        self.assertTrue(response.url.startswith(return_url))
+        self.assertEqual(response.text, "foobar")
+        query_values = {
+            k: v[0] for k, v in parse_qs(urlparse(response.url).query).items()
+        }
+        self.assertNotIn(" ", query_values["SAMLResponse"])
+        query_values[self.backend.BROWSER_RETURN_FIELD] = "1"
+        self.strategy.set_request_data(query_values, self.backend)
+        return self.backend.complete()
+
+    def test_metadata_generation(self) -> None:
+        """Test that we can generate the metadata without error"""
+        xml, errors = self.backend.generate_metadata_xml()
+        self.assertEqual(len(errors), 0)
+        self.assertEqual(xml.decode()[0], "<")
+
+    def test_login_with_next_url(self) -> None:
+        """
+        Test that we login and then redirect to the "next" URL.
+        """
+        # pretend we've started with a URL like /login/saml/?idp=testshib&next=/foo/bar
+        self.strategy.set_request_data(
+            {"idp": "testshib", "next": "/foo/bar"}, self.backend
+        )
+        self.do_login()
+        # The core `do_complete` action assumes the "next" URL is stored in session state or the request data.
+        self.assertEqual(self.strategy.session_get("next"), "/foo/bar")
+
+    def test_login_no_next_url(self) -> None:
+        """
+        Test that we handle "next" being omitted from the request data and RelayState.
+        """
+        self.response_fixture = "saml_response_no_next_url.txt"
+
+        # pretend we've started with a URL like /login/saml/?idp=testshib
+        self.strategy.set_request_data({"idp": "testshib"}, self.backend)
+        self.do_login()
+        self.assertEqual(self.strategy.session_get("next"), None)
+
+    def test_login_with_legacy_relay_state(self) -> None:
+        """
+        Test that we handle legacy RelayState (i.e. just the IDP name, not a JSON object).
+
+        This is the form that RelayState had in prior versions of this library. It should be supported for backwards
+        compatibility. It is also sent by some identity providers (like Okta) on IdP-initiated login.
+        """
+        self.response_fixture = "saml_response_legacy.txt"
+
+        self.strategy.set_request_data({"idp": "testshib"}, self.backend)
+        self.do_login()
+
+    def test_login_no_idp_in_initial_request(self) -> None:
+        """
+        Logging in without an idp param should raise AuthMissingParameter
+        """
+        with self.assertRaises(AuthInputError):
+            self.do_start()
+
+    def test_login_no_idp_in_saml_response(self) -> None:
+        """
+        The RelayState should always contain a JSON object with an "idp" key, or be just the IDP name as a string.
+        This tests that an exception is raised if it is a JSON object, but is missing the "idp" key.
+        """
+        self.response_fixture = "saml_response_no_idp_name.txt"
+
+        with self.assertRaises(AuthInputError):
+            self.do_start()
+
+    def test_authenticated_user_requires_stored_authn_request_id(self) -> None:
+        self.strategy.set_request_data(
+            {
+                "RelayState": json.dumps({"idp": "testshib"}),
+                "SAMLResponse": "irrelevant",
+                self.backend.BROWSER_RETURN_FIELD: "1",
+            },
+            self.backend,
+        )
+
+        with (
+            patch.object(self.backend, "_create_saml_auth") as create_saml_auth,
+            assert_auth_error(self, AuthSessionError, "session_context_missing"),
+        ):
+            self.backend.complete(user=User("victim"))
+
+        create_saml_auth.assert_not_called()
+
+    def test_authenticated_user_requires_matching_in_response_to(self) -> None:
+        request_ids = []
+
+        class ValidAuth:
+            def __init__(self, in_response_to):
+                self.in_response_to = in_response_to
+
+            def process_response(self, request_id=None):
+                request_ids.append(request_id)
+
+            def get_errors(self):
+                return []
+
+            def is_authenticated(self):
+                return True
+
+            def get_last_response_in_response_to(self):
+                return self.in_response_to
+
+        for in_response_to in (None, "OTHER_ID"):
+            with self.subTest(in_response_to=in_response_to):
+                key = self.authn_request_id_session_key("testshib")
+                self.strategy.session_set(key, "TEST_ID")
+                self.strategy.set_request_data(
+                    {
+                        "RelayState": json.dumps({"idp": "testshib"}),
+                        "SAMLResponse": "irrelevant",
+                        self.backend.BROWSER_RETURN_FIELD: "1",
+                    },
+                    self.backend,
+                )
+
+                with (
+                    patch.object(
+                        self.backend,
+                        "_response_in_response_to",
+                        return_value=in_response_to,
+                    ),
+                    patch.object(
+                        self.backend,
+                        "_create_saml_auth",
+                        return_value=ValidAuth(in_response_to),
+                    ),
+                    assert_auth_error(self, AuthSessionError, "state_mismatch"),
+                ):
+                    self.backend.complete(user=User("victim"))
+
+                self.assertEqual(self.strategy.session_get(key), "TEST_ID")
+
+        self.assertEqual(request_ids, [None, "TEST_ID"])
+
+    def test_authenticated_user_accepts_matching_in_response_to(self) -> None:
+        events = []
+        victim = User("victim")
+        key = self.authn_request_id_session_key("testshib")
+        self.strategy.session_set(key, "TEST_ID")
+
+        class ValidAuth:
+            def process_response(self, request_id=None):
+                events.append(("process_response", request_id))
+
+            def get_errors(self):
+                return []
+
+            def is_authenticated(self):
+                return True
+
+            def get_last_response_in_response_to(self):
+                return "TEST_ID"
+
+            def get_attributes(self):
+                return {}
+
+            def get_nameid(self):
+                return "name-id"
+
+            def get_session_index(self):
+                return "session-index"
+
+        def authenticate(*args, **kwargs):
+            events.append(("authenticate", kwargs["user"]))
+            return "user"
+
+        self.strategy.set_request_data(
+            {
+                "RelayState": json.dumps({"idp": "testshib"}),
+                "SAMLResponse": "irrelevant",
+                self.backend.BROWSER_RETURN_FIELD: "1",
+            },
+            self.backend,
+        )
+
+        with (
+            patch.object(self.strategy, "authenticate", authenticate),
+            patch.object(
+                self.backend,
+                "_response_in_response_to",
+                return_value="TEST_ID",
+            ),
+            patch.object(self.backend, "_create_saml_auth", return_value=ValidAuth()),
+        ):
+            self.assertEqual(self.backend.complete(user=victim), "user")
+
+        self.assertEqual(
+            events,
+            [("process_response", "TEST_ID"), ("authenticate", victim)],
+        )
+        self.assertIsNone(self.strategy.session_get(key))
+
+    def test_anonymous_user_allows_unsolicited_saml_response(self) -> None:
+        self.strategy.set_settings({"SOCIAL_AUTH_SAML_ALLOW_IDP_INITIATED": True})
+        events = []
+
+        class ValidAuth:
+            def process_response(self, request_id=None):
+                events.append(("process_response", request_id))
+
+            def get_errors(self):
+                return []
+
+            def is_authenticated(self):
+                return True
+
+            def get_attributes(self):
+                return {}
+
+            def get_nameid(self):
+                return "name-id"
+
+            def get_session_index(self):
+                return "session-index"
+
+        def authenticate(*args, **kwargs):
+            events.append(("authenticate", kwargs.get("user")))
+            return "user"
+
+        self.strategy.set_request_data(
+            {
+                "RelayState": json.dumps({"idp": "testshib"}),
+                "SAMLResponse": "irrelevant",
+                self.backend.BROWSER_RETURN_FIELD: "1",
+            },
+            self.backend,
+        )
+
+        with (
+            patch.object(self.strategy, "authenticate", authenticate),
+            patch.object(self.backend, "_create_saml_auth", return_value=ValidAuth()),
+        ):
+            self.assertEqual(self.backend.complete(), "user")
+
+        self.assertEqual(
+            events,
+            [("process_response", None), ("authenticate", None)],
+        )
+
+    def test_anonymous_user_allows_unsolicited_response_with_stale_request_id(
+        self,
+    ) -> None:
+        self.strategy.set_settings({"SOCIAL_AUTH_SAML_ALLOW_IDP_INITIATED": True})
+        events = []
+        key = self.authn_request_id_session_key("testshib")
+        self.strategy.session_set(key, "STALE_ID")
+
+        class ValidAuth:
+            def process_response(self, request_id=None):
+                events.append(("process_response", request_id))
+
+            def get_errors(self):
+                return []
+
+            def is_authenticated(self):
+                return True
+
+            def get_last_response_in_response_to(self):
+                return None
+
+            def get_attributes(self):
+                return {}
+
+            def get_nameid(self):
+                return "name-id"
+
+            def get_session_index(self):
+                return "session-index"
+
+        def authenticate(*args, **kwargs):
+            events.append(("authenticate", kwargs.get("user")))
+            return "user"
+
+        self.strategy.set_request_data(
+            {
+                "RelayState": json.dumps({"idp": "testshib"}),
+                "SAMLResponse": "irrelevant",
+                self.backend.BROWSER_RETURN_FIELD: "1",
+            },
+            self.backend,
+        )
+
+        with (
+            patch.object(self.strategy, "authenticate", authenticate),
+            patch.object(self.backend, "_create_saml_auth", return_value=ValidAuth()),
+        ):
+            self.assertEqual(self.backend.complete(), "user")
+
+        self.assertEqual(
+            events,
+            [("process_response", None), ("authenticate", None)],
+        )
+        self.assertEqual(self.strategy.session_get(key), "STALE_ID")
+
+    def test_anonymous_user_with_stored_request_requires_matching_in_response_to(
+        self,
+    ) -> None:
+        class ValidAuth:
+            def process_response(self, request_id=None):
+                if request_id != "TEST_ID":
+                    raise AssertionError("request_id should be TEST_ID")
+
+            def get_errors(self):
+                return []
+
+            def is_authenticated(self):
+                return True
+
+            def get_last_response_in_response_to(self):
+                return "OTHER_ID"
+
+        key = self.authn_request_id_session_key("testshib")
+        self.strategy.session_set(key, "TEST_ID")
+        self.strategy.set_request_data(
+            {
+                "RelayState": json.dumps({"idp": "testshib"}),
+                "SAMLResponse": "irrelevant",
+                self.backend.BROWSER_RETURN_FIELD: "1",
+            },
+            self.backend,
+        )
+
+        with (
+            patch.object(
+                self.backend,
+                "_response_in_response_to",
+                return_value="OTHER_ID",
+            ),
+            patch.object(self.backend, "_create_saml_auth", return_value=ValidAuth()),
+            assert_auth_error(self, AuthSessionError, "state_mismatch"),
+        ):
+            self.backend.complete()
+
+        self.assertEqual(self.strategy.session_get(key), "TEST_ID")
+
+    def test_anonymous_user_rejects_untracked_in_response_to(self) -> None:
+        class ValidAuth:
+            def process_response(self, request_id=None):
+                raise AssertionError("SAML response should not be processed")
+
+        self.strategy.set_request_data(
+            {
+                "RelayState": json.dumps({"idp": "testshib"}),
+                "SAMLResponse": "irrelevant",
+                self.backend.BROWSER_RETURN_FIELD: "1",
+            },
+            self.backend,
+        )
+
+        with (
+            patch.object(
+                self.backend,
+                "_response_in_response_to",
+                return_value="TEST_ID",
+            ),
+            patch.object(self.backend, "_create_saml_auth", return_value=ValidAuth()),
+            assert_auth_error(self, AuthSessionError, "session_context_missing"),
+        ):
+            self.backend.complete()
+
+    def modify_start_url(self, start_url):
+        """
+        Given a SAML redirect URL, parse it and change the ID to
+        a consistent value, so the request is always identical.
+        """
+        # Parse the SAML Request URL to get the XML being sent to TestShib
+        url_parts = urlparse(start_url)
+        query = {k: v[0] for (k, v) in parse_qs(url_parts.query).items()}
+        xml = OneLogin_Saml2_Utils.decode_base64_and_inflate(query["SAMLRequest"])
+        # Modify the XML:
+        xml = xml.decode()
+        xml, changed = re.subn(r'ID="[^"]+"', 'ID="TEST_ID"', xml)
+        self.assertEqual(changed, 1)
+        relay_state = self.backend.parse_relay_state(query["RelayState"])
+        self.strategy.session_set(
+            self.authn_request_id_session_key(relay_state["idp"]),
+            "TEST_ID",
+        )
+        # Update the URL to use the modified query string:
+        query["SAMLRequest"] = OneLogin_Saml2_Utils.deflate_and_base64_encode(xml)
+        url_parts = list(url_parts)
+        url_parts[4] = urlencode(query)
+        return urlunparse(url_parts)

@@ -1,0 +1,152 @@
+from __future__ import annotations
+
+from typing import cast
+
+import requests
+import responses
+
+from social_core.actions import do_disconnect
+from social_core.exceptions import AuthPolicyError
+from social_core.pipeline.utils import partial_prepare
+from social_core.tests.exception_helpers import assert_auth_error
+from social_core.tests.models import TestPartial, TestUserSocialAuth, User
+from social_core.utils import PARTIAL_TOKEN_SESSION_NAME, parse_qs
+
+from .actions import BaseActionTest
+
+
+class DisconnectActionTest(BaseActionTest):
+    def test_authentication_partial_cannot_skip_disconnect_guard(self) -> None:
+        self.do_login()
+        user = cast("User", User.get(self.expected_username))
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                partial = partial_prepare(self.strategy, self.backend, 1, user=user)
+                if legacy:
+                    partial.data.pop("pipeline_type")
+                partial.save()
+                self.strategy.session_set(PARTIAL_TOKEN_SESSION_NAME, partial.token)
+                with self.assertRaises(AuthPolicyError):
+                    do_disconnect(self.backend, user)
+                self.assertEqual(len(user.social), 1)
+                self.assertIsNone(TestPartial.load(partial.token))
+
+    def test_not_allowed_to_disconnect(self) -> None:
+        self.do_login()
+        user = cast("User", User.get(self.expected_username))
+        self.assertIsNotNone(user)
+        with assert_auth_error(self, AuthPolicyError, "disconnect_disallowed"):
+            do_disconnect(self.backend, user)
+
+    def test_disconnect(self) -> None:
+        self.do_login()
+        user = cast("User", User.get(self.expected_username))
+        user.password = "password"
+        do_disconnect(self.backend, user)
+        self.assertEqual(len(user.social), 0)
+
+    def test_disconnect_redirects_to_allowed_private_use_scheme(self) -> None:
+        deeplink = "com.example.app://oauth2redirect"
+        self.strategy.set_settings(
+            {
+                "SOCIAL_AUTH_DISCONNECT_REDIRECT_URL": deeplink,
+                "SOCIAL_AUTH_ALLOWED_REDIRECT_SCHEMES": [
+                    "http",
+                    "https",
+                    "com.example.app",
+                ],
+            }
+        )
+        self.do_login()
+        user = cast("User", User.get(self.expected_username))
+        user.password = "password"
+        redirect = do_disconnect(self.backend, user)
+        self.assertEqual(redirect.url, deeplink)
+
+    def test_disconnect_ignores_disallowed_scheme_from_request(self) -> None:
+        self.strategy.set_settings(
+            {
+                "SOCIAL_AUTH_DISCONNECT_REDIRECT_URL": "/disconnected",
+                "SOCIAL_AUTH_ALLOWED_REDIRECT_SCHEMES": [
+                    "http",
+                    "https",
+                    "com.example.app",
+                ],
+            }
+        )
+        self.do_login()
+        user = cast("User", User.get(self.expected_username))
+        user.password = "password"
+        self.strategy.set_request_data({"next": "com.evil.app://steal"}, self.backend)
+        redirect = do_disconnect(self.backend, user)
+        self.assertNotEqual(redirect.url, "com.evil.app://steal")
+
+    def test_disconnect_keeps_allowed_scheme_from_request(self) -> None:
+        deeplink = "com.example.app://oauth2redirect"
+        self.strategy.set_settings(
+            {
+                "SOCIAL_AUTH_DISCONNECT_REDIRECT_URL": "/disconnected",
+                "SOCIAL_AUTH_ALLOWED_REDIRECT_SCHEMES": [
+                    "http",
+                    "https",
+                    "com.example.app",
+                ],
+            }
+        )
+        self.do_login()
+        user = cast("User", User.get(self.expected_username))
+        user.password = "password"
+        self.strategy.set_request_data({"next": deeplink}, self.backend)
+        redirect = do_disconnect(self.backend, user)
+        self.assertEqual(redirect.url, deeplink)
+
+    def test_disconnect_with_association_id(self) -> None:
+        self.do_login()
+        user = cast("User", User.get(self.expected_username))
+        user.password = "password"
+        association_id = user.social[0].id
+        second_usa = TestUserSocialAuth(user, user.social[0].provider, "uid2")
+        self.assertEqual(len(user.social), 2)
+        do_disconnect(self.backend, user, association_id)
+        self.assertEqual(len(user.social), 1)
+        self.assertEqual(user.social[0], second_usa)
+
+    @responses.activate
+    def test_disconnect_with_partial_pipeline(self) -> None:
+        self.strategy.set_settings(
+            {
+                "SOCIAL_AUTH_DISCONNECT_PIPELINE": (
+                    "social_core.tests.pipeline.ask_for_password",
+                    "social_core.tests.pipeline.set_password",
+                    "social_core.pipeline.disconnect.allowed_to_disconnect",
+                    "social_core.pipeline.disconnect.get_entries",
+                    "social_core.pipeline.disconnect.revoke_tokens",
+                    "social_core.pipeline.disconnect.disconnect",
+                )
+            }
+        )
+        self.do_login()
+        user = cast("User", User.get(self.expected_username))
+        redirect = do_disconnect(self.backend, user)
+
+        url = self.strategy.build_absolute_uri("/password")
+        self.assertEqual(redirect.url, url)
+        token = self.strategy.session_get(PARTIAL_TOKEN_SESSION_NAME)
+        assert isinstance(token, str)
+        partial = TestPartial.load(token)
+        assert partial is not None
+        self.assertEqual(partial.pipeline_type, "disconnect")
+        responses.add(responses.GET, redirect.url, status=200, body="foobar")
+        responses.add(responses.POST, redirect.url, status=200)
+
+        password = "foobar"
+        requests.get(url, timeout=1)
+        requests.post(url, data={"password": password}, timeout=1)
+        data = parse_qs(responses.calls[-1].request.body)
+        self.assertEqual(data["password"], password)
+        self.strategy.session_set("password", data["password"])
+
+        redirect = do_disconnect(self.backend, user)
+        self.assertEqual(len(user.social), 0)
+        url = self.strategy.build_absolute_uri("/success")
+        self.assertEqual(redirect.url, url)

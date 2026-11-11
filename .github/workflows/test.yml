@@ -1,0 +1,55 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  schedule:
+  - cron: 0 0 * * 0
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+        - '3.11'
+        - '3.12'
+        - '3.13'
+        - '3.14'
+        - '3.15'
+    env:
+      PYTHON_VERSION: ${{ matrix.python-version }}
+      PYTHONUNBUFFERED: 1
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Python ${{ matrix.python-version }}
+      id: setup_python
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      with:
+        cache-suffix: ${{ steps.setup_python.outputs.python-version }}
+
+    - name: Install System dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -qq -y --no-install-recommends libxmlsec1-dev
+
+    - name: Test with tox
+      run: uvx tox -e "py${PYTHON_VERSION/\./}"
+
+    - uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+      with:
+        flags: unittests
+        name: Python ${{ matrix.python-version }}
+        token: ${{secrets.CODECOV_TOKEN}} # zizmor: ignore[secrets-outside-env]

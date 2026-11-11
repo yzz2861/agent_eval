@@ -1,0 +1,105 @@
+"""
+Yandex OpenID and OAuth2 support.
+
+This contribution adds support for Yandex.ru OpenID service in the form
+openid.yandex.ru/user. Username is retrieved from the identity url.
+
+If username is not specified, OpenID 2.0 url used for authentication.
+"""
+
+from typing import Any
+from urllib.parse import urlsplit
+
+from social_core.backends.base import ResponseT_co
+
+from .oauth import BaseOAuth2
+from .open_id import OpenIdAuth
+
+
+class YandexOpenId(OpenIdAuth[ResponseT_co]):
+    """Yandex OpenID authentication backend"""
+
+    name = "yandex-openid"
+    title = "Yandex"
+    ID_KEY = "identity_url"
+    LEGACY_ID_KEYS = ("email",)
+    MUTABLE_ID_KEYS = ("email",)
+    URL = "https://openid.yandex.ru"
+
+    def get_user_id(self, details, response):
+        return self.get_user_id_for_key(details, response, self.id_key())
+
+    def get_user_details(self, response):
+        """Generate username from identity url"""
+        values = super().get_user_details(response)
+        values["username"] = values.get("username") or urlsplit(
+            response.identity_url
+        ).path.strip("/")
+        values["email"] = values.get("email", "")
+        return values
+
+
+class YandexOAuth2(BaseOAuth2[ResponseT_co]):
+    """Legacy Yandex OAuth2 authentication backend"""
+
+    name = "yandex-oauth2"
+    title = "Yandex"
+    AUTHORIZATION_URL = "https://oauth.yandex.com/authorize"
+    ACCESS_TOKEN_URL = "https://oauth.yandex.com/token"
+    REDIRECT_STATE = False
+
+    def get_user_details(self, response):
+        fullname = response.get("real_name")
+        if fullname is None:
+            fullname = response.get("display_name")
+        first_name = None
+        last_name = None
+        email = response.get("default_email")
+        if not email:
+            emails = response.get("emails")
+            email = emails[0] if emails else ""
+        return {
+            "username": response.get("display_name"),
+            "email": email,
+            "fullname": fullname,
+            "first_name": first_name,
+            "last_name": last_name,
+        }
+
+    def user_data(self, access_token: str, *args, **kwargs) -> dict[str, Any] | None:
+        return self.get_json(
+            "https://login.yandex.ru/info",
+            params={"oauth_token": access_token, "format": "json"},
+        )
+
+
+class YaruOAuth2(BaseOAuth2[ResponseT_co]):
+    name = "yaru"
+    title = "Я.ру"
+    AUTHORIZATION_URL = "https://oauth.yandex.com/authorize"
+    ACCESS_TOKEN_URL = "https://oauth.yandex.com/token"
+    REDIRECT_STATE = False
+
+    def get_user_details(self, response):
+        fullname = response.get("real_name")
+        if fullname is None:
+            fullname = response.get("display_name")
+        first_name = None
+        last_name = None
+        email = response.get("default_email")
+        if not email:
+            emails = response.get("emails")
+            email = emails[0] if emails else ""
+        return {
+            "username": response.get("display_name"),
+            "email": email,
+            "fullname": fullname,
+            "first_name": first_name,
+            "last_name": last_name,
+        }
+
+    def user_data(self, access_token: str, *args, **kwargs) -> dict[str, Any] | None:
+        return self.get_json(
+            "https://login.yandex.ru/info",
+            params={"oauth_token": access_token, "format": "json"},
+        )

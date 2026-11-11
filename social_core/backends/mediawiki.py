@@ -1,0 +1,289 @@
+"""
+MediaWiki OAuth1 backend, docs at:
+    https://python-social-auth.readthedocs.io/en/latest/backends/mediawiki.html
+"""
+
+import re
+import time
+from math import isfinite
+from typing import cast
+from urllib.parse import parse_qs, urlencode, urlparse
+
+import jwt
+from requests_oauthlib import OAuth1
+
+from social_core.backends.base import ResponseT_co
+from social_core.backends.utils import jwt_error
+from social_core.exceptions import AuthResponseError
+from social_core.groups import read_groups
+from social_core.utils import parse_qs as parse_oauth_response
+
+from .oauth import BaseOAuth1
+
+
+def force_unicode(value):
+    """
+    Return string in unicode.
+    """
+    if isinstance(value, str):
+        return value
+    return str(value, "unicode-escape")
+
+
+class MediaWiki(BaseOAuth1[ResponseT_co]):
+    """
+    Handles the handshake with Mediawiki and fetching of user data.
+    """
+
+    name = "mediawiki"
+    title = "MediaWiki"
+    ID_KEY = "userID"
+    MEDIAWIKI_URL = "https://meta.wikimedia.org/w/index.php"
+    SOCIAL_AUTH_MEDIAWIKI_CALLBACK = "oob"
+    LEEWAY = 10.0
+
+    def unauthorized_token(self):
+        """
+        Return request for unauthorized token (first stage)
+
+        Mediawiki request token is requested from e.g.:
+         * https://en.wikipedia.org/w/index.php?title=Special:OAuth/initiate
+        """
+        params = self.request_token_extra_arguments()
+        params.update(self.get_scope_argument())
+        params["title"] = "Special:OAuth/initiate"
+        key, secret = self.get_key_and_secret()
+        response = self.request(
+            cast("str", self.setting("MEDIAWIKI_URL")),
+            params=params,
+            auth=OAuth1(key, secret, callback_uri=self.setting("CALLBACK")),
+            method=self.REQUEST_TOKEN_METHOD,
+            stage="begin",
+        )
+
+        if response.content.decode().startswith("Error"):
+            raise AuthResponseError(
+                self,
+                response.content.decode(),
+                code="malformed_response",
+                stage="begin",
+            )
+
+        content = response.content.decode()
+        token = parse_oauth_response(content)
+        self._process_error(token, stage="begin")
+        self._validate_token_credentials(token, stage="begin")
+        return content
+
+    def oauth_authorization_request(self, token) -> str:
+        """
+        Generates the URL for the authorization link
+        """
+        if not isinstance(token, dict):
+            token = parse_qs(token)
+        oauth_tokens = token.get(self.OAUTH_TOKEN_PARAMETER_NAME)
+        if not oauth_tokens:
+            raise AuthResponseError(
+                self,
+                claim=self.OAUTH_TOKEN_PARAMETER_NAME,
+                code="missing_claim",
+                stage="begin",
+            )
+        oauth_token = oauth_tokens[0]
+        state = self.get_or_create_state()
+        base_url = self.setting("MEDIAWIKI_URL")
+        params = urlencode(
+            {
+                "title": "Special:Oauth/authenticate",
+                self.OAUTH_TOKEN_PARAMETER_NAME: oauth_token,
+                self.REDIRECT_URI_PARAMETER_NAME: self.get_redirect_uri(state),
+            }
+        )
+
+        return f"{base_url}?{params}"
+
+    def access_token(self, token):
+        """
+        Fetches the Mediawiki access token.
+        """
+        auth_token = self.oauth_auth(token, stage="token_exchange")
+
+        response = self.request(
+            cast("str", self.setting("MEDIAWIKI_URL")),
+            method="POST",
+            params={"title": "Special:Oauth/token"},
+            auth=auth_token,
+            stage="token_exchange",
+        )
+        if response.content.decode().startswith("Error"):
+            raise AuthResponseError(
+                self,
+                response.content.decode(),
+                code="malformed_response",
+                stage="token_exchange",
+            )
+        self._process_error(
+            parse_oauth_response(response.content.decode()), stage="token_exchange"
+        )
+        credentials = parse_qs(response.content)
+        oauth_token_keys = credentials.get(b"oauth_token")
+        oauth_token_secrets = credentials.get(b"oauth_token_secret")
+        if not oauth_token_keys:
+            raise AuthResponseError(
+                self, claim="oauth_token", code="missing_claim", stage="token_exchange"
+            )
+        if not oauth_token_secrets:
+            raise AuthResponseError(
+                self,
+                claim="oauth_token_secret",
+                code="missing_claim",
+                stage="token_exchange",
+            )
+        oauth_token_key = oauth_token_keys[0]
+        oauth_token_secret = oauth_token_secrets[0]
+        oauth_token_key = oauth_token_key.decode()
+        oauth_token_secret = oauth_token_secret.decode()
+
+        return {
+            "oauth_token": oauth_token_key,
+            "oauth_token_secret": oauth_token_secret,
+        }
+
+    def user_data(self, access_token, *args, **kwargs):
+        """Retrieve and validate Special:OAuth/identify once per authentication."""
+        key, secret = self.get_key_and_secret()
+
+        auth = OAuth1(
+            key,
+            client_secret=secret,
+            resource_owner_key=access_token["oauth_token"],
+            resource_owner_secret=access_token["oauth_token_secret"],
+        )
+
+        req_resp = self.request(
+            cast("str", self.setting("MEDIAWIKI_URL")),
+            method="POST",
+            params={"title": "Special:OAuth/identify"},
+            auth=auth,
+        )
+
+        try:
+            identity = jwt.decode(
+                req_resp.content,
+                secret,
+                audience=key,
+                algorithms=["HS256"],
+                leeway=self.LEEWAY,
+                options={"verify_iat": False},
+            )
+        except jwt.PyJWTError as exception:
+            raise jwt_error(self, exception, stage="user_info") from exception
+
+        issued_at = self._validate_identity_claims(identity)
+
+        try:
+            issuer = urlparse(identity["iss"]).netloc
+        except ValueError as error:
+            raise AuthResponseError(
+                self, claim="iss", code="invalid_claim", stage="user_info"
+            ) from error
+        expected_domain = urlparse(self.setting("MEDIAWIKI_URL")).netloc
+
+        if not issuer == expected_domain:
+            raise AuthResponseError(
+                self,
+                f"Unexpected issuer {issuer}, expected {expected_domain}",
+                code="invalid_claim",
+                stage="user_info",
+            )
+
+        now = time.time()
+        if not now >= (issued_at - self.LEEWAY):
+            raise AuthResponseError(
+                self,
+                f"Identity issued {issued_at - now} seconds in the future",
+                code="invalid_claim",
+                stage="user_info",
+            )
+
+        authorization_header = force_unicode(req_resp.request.headers["Authorization"])
+        match = re.search(r'oauth_nonce="(.*?)"', authorization_header)
+        if match is None:
+            raise AuthResponseError(
+                self, claim="oauth_nonce", code="missing_claim", stage="user_info"
+            )
+        request_nonce = match.group(1)
+
+        if identity["nonce"] != request_nonce:
+            raise AuthResponseError(
+                self,
+                f"Replay attack detected: {identity['nonce']} != {request_nonce}",
+                code="nonce_mismatch",
+                stage="user_info",
+            )
+
+        return identity
+
+    def get_user_groups(self, response) -> list[str] | None:
+        if not self.setting("GROUPS_ENABLED", False):
+            return None
+        return read_groups(
+            self,
+            response,
+            "groups",
+            missing_as_empty=self.setting("GROUPS_MISSING_AS_EMPTY", False),
+        )
+
+    def get_user_details(self, response):
+        identity = response
+        details = {
+            "username": identity["username"],
+            "userID": identity["sub"],
+            "email": identity.get("email"),
+            "confirmed_email": identity.get("confirmed_email"),
+            "editcount": identity.get("editcount"),
+            "rights": identity.get("rights"),
+            "registered": identity.get("registered"),
+            "blocked": identity.get("blocked"),
+        }
+        id_key = self.id_key()
+        if id_key not in details:
+            user_id = identity.get(id_key)
+            if user_id is None:
+                raise AuthResponseError(
+                    self, claim=id_key, code="missing_claim", stage="user_info"
+                )
+            details[id_key] = user_id
+        return details
+
+    def get_user_id(self, details, response):
+        """
+        Get the unique Mediawiki user ID.
+        """
+        return self.get_user_id_from_sources(details)
+
+    def _validate_identity_claims(self, identity) -> float:
+        """Require identity claims before comparing or returning their values."""
+        for claim in ("iss", "iat", "nonce", "username", "sub"):
+            if claim not in identity:
+                raise AuthResponseError(
+                    self, claim=claim, code="missing_claim", stage="user_info"
+                )
+            if claim != "iat" and (
+                not isinstance(identity[claim], str) or not identity[claim]
+            ):
+                raise AuthResponseError(
+                    self, claim=claim, code="invalid_claim", stage="user_info"
+                )
+        try:
+            issued_at = float(identity["iat"])
+        except (ValueError, TypeError, OverflowError) as error:
+            raise AuthResponseError(
+                self, claim="iat", code="invalid_claim", stage="user_info"
+            ) from error
+
+        if isinstance(identity["iat"], bool) or not isfinite(issued_at):
+            raise AuthResponseError(
+                self, claim="iat", code="invalid_claim", stage="user_info"
+            )
+        return issued_at

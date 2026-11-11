@@ -1,0 +1,92 @@
+"""
+Deezer backend, docs at:
+    https://developers.deezer.com/api/oauth
+    https://developers.deezer.com/api/permissions
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import parse_qsl
+
+from social_core.backends.base import ResponseT_co
+from social_core.utils import wrap_access_token_error
+
+from .oauth import BaseOAuth2
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from requests.auth import AuthBase
+
+    from social_core.exceptions import ErrorStage
+
+
+class DeezerOAuth2(BaseOAuth2[ResponseT_co]):
+    """Deezer OAuth2 authentication backend"""
+
+    name = "deezer"
+    title = "Deezer"
+    ID_KEY = "id"
+    REQUIRES_USER_ID = True
+    LEGACY_ID_KEYS = ("name",)
+    MUTABLE_ID_KEYS = ("name",)
+    EXTRA_DATA = ["id"]
+    AUTHORIZATION_URL = "https://connect.deezer.com/oauth/auth.php"
+    ACCESS_TOKEN_URL = "https://connect.deezer.com/oauth/access_token.php"
+    SCOPE_SEPARATOR = ","
+    REDIRECT_STATE = False
+
+    def auth_complete_params(self, state=None):
+        client_id, client_secret = self.get_key_and_secret()
+        return {
+            "app_id": client_id,
+            "secret": client_secret,
+            "code": self.data.get("code"),
+        }
+
+    def request_access_token(
+        self,
+        url: str,
+        method: Literal["GET", "POST", "DELETE"] = "GET",
+        headers: Mapping[str, str | bytes] | None = None,
+        data: dict | None = None,
+        json: dict | None = None,
+        auth: tuple[str, str] | AuthBase | None = None,
+        params: dict | None = None,
+        *,
+        stage: ErrorStage = "token_exchange",
+    ) -> dict[Any, Any]:
+        with wrap_access_token_error(self, stage=stage):
+            response = self.request(
+                url,
+                method=method,
+                stage=stage,
+                headers=headers,
+                data=data,
+                json=json,
+                auth=auth,
+                params=params,
+            )
+        data = dict(parse_qsl(response.text))
+        self._process_error(data, stage=stage)
+        return data
+
+    def get_user_details(self, response):
+        """Return user details from Deezer account"""
+        fullname = None
+        first_name = response.get("firstname")
+        last_name = response.get("lastname")
+        return {
+            "username": response.get("name"),
+            "email": response.get("email"),
+            "fullname": fullname,
+            "first_name": first_name,
+            "last_name": last_name,
+        }
+
+    def user_data(self, access_token: str, *args, **kwargs) -> dict[str, Any] | None:
+        """Loads user data from service"""
+        return self.get_json(
+            "https://api.deezer.com/user/me", params={"access_token": access_token}
+        )

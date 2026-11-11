@@ -1,0 +1,46 @@
+"""
+Instagram OAuth2 backend, docs at:
+    https://python-social-auth.readthedocs.io/en/latest/backends/instagram.html
+"""
+
+from typing import Any
+
+from social_core.backends.base import ResponseT_co
+
+from .oauth import BaseOAuth2
+
+
+class InstagramOAuth2(BaseOAuth2[ResponseT_co]):
+    name = "instagram"
+    title = "Instagram"
+    AUTHORIZATION_URL = "https://api.instagram.com/oauth/authorize"
+    ACCESS_TOKEN_URL = "https://api.instagram.com/oauth/access_token"
+
+    def get_user_id(self, details, response):
+        return self.get_user_id_from_sources(response.get("user"), details)
+
+    def get_user_details(self, response):
+        """Return user details from Instagram account"""
+        user = response.get("user") or {}
+        username = user["username"]
+        email = user.get("email", "")
+        fullname = user.get("full_name")
+        first_name = None
+        last_name = None
+        return {
+            "username": username,
+            "fullname": fullname,
+            "first_name": first_name,
+            "last_name": last_name,
+            "email": email,
+        }
+
+    def user_data(self, access_token: str, *args, **kwargs) -> dict[str, Any] | None:
+        """Loads user data from service"""
+        # For more fields see:
+        # https://developers.facebook.com/docs/instagram-basic-display-api/reference/user#fields
+        # In fact there are not very many of them.
+        fields = "id,username"
+        params = {"access_token": access_token, "fields": fields}
+        response = self.get_json("https://graph.instagram.com/me", params=params)
+        return {"user": response}

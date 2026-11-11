@@ -1,0 +1,83 @@
+"""
+Stackoverflow OAuth2 backend, docs at:
+    https://python-social-auth.readthedocs.io/en/latest/backends/stackoverflow.html
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Literal
+
+from social_core.backends.base import ResponseT_co
+from social_core.utils import parse_qs, wrap_access_token_error
+
+from .oauth import BaseOAuth2
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from requests.auth import AuthBase
+
+    from social_core.exceptions import ErrorStage
+
+
+class StackoverflowOAuth2(BaseOAuth2[ResponseT_co]):
+    """Stackoverflow OAuth2 authentication backend"""
+
+    name = "stackoverflow"
+    title = "Stack Overflow"
+    icon = "stackoverflow.svg"
+    ID_KEY = "user_id"
+    AUTHORIZATION_URL = "https://stackexchange.com/oauth"
+    ACCESS_TOKEN_URL = "https://stackexchange.com/oauth/access_token"
+    SCOPE_SEPARATOR = ","
+    EXTRA_DATA = [("id", "id"), ("expires", "expires")]
+
+    def get_user_details(self, response):
+        """Return user details from Stackoverflow account"""
+        fullname = response.get("display_name")
+        first_name = None
+        last_name = None
+        return {
+            "username": response.get("link").rsplit("/", 1)[-1],
+            "fullname": fullname,
+            "first_name": first_name,
+            "last_name": last_name,
+        }
+
+    def user_data(self, access_token: str, *args, **kwargs) -> dict[str, Any] | None:
+        """Loads user data from service"""
+        return self.get_json(
+            "https://api.stackexchange.com/2.1/me",
+            params={
+                "site": "stackoverflow",
+                "access_token": access_token,
+                "key": self.setting("API_KEY"),
+            },
+        )["items"][0]
+
+    def request_access_token(
+        self,
+        url: str,
+        method: Literal["GET", "POST", "DELETE"] = "GET",
+        headers: Mapping[str, str | bytes] | None = None,
+        data: dict | None = None,
+        json: dict | None = None,
+        auth: tuple[str, str] | AuthBase | None = None,
+        params: dict | None = None,
+        *,
+        stage: ErrorStage = "token_exchange",
+    ) -> dict[Any, Any]:
+        with wrap_access_token_error(self, stage=stage):
+            response = self.request(
+                url,
+                method=method,
+                stage=stage,
+                headers=headers,
+                data=data,
+                json=json,
+                auth=auth,
+                params=params,
+            )
+        data = parse_qs(response.text)
+        self._process_error(data, stage=stage)
+        return data

@@ -1,0 +1,48 @@
+"""
+Podio OAuth2 backend, docs at:
+    https://python-social-auth.readthedocs.io/en/latest/backends/podio.html
+"""
+
+from typing import Any
+
+from social_core.backends.base import ResponseT_co
+
+from .oauth import BaseOAuth2
+
+
+class PodioOAuth2(BaseOAuth2[ResponseT_co]):
+    """Podio OAuth authentication backend"""
+
+    name = "podio"
+    title = "Podio"
+    AUTHORIZATION_URL = "https://podio.com/oauth/authorize"
+    ACCESS_TOKEN_URL = "https://podio.com/oauth/token"
+    EXTRA_DATA = [
+        ("access_token", "access_token"),
+        ("token_type", "token_type"),
+        ("expires_in", "expires_in"),
+        ("refresh_token", "refresh_token"),
+    ]
+
+    def get_user_id(self, details, response):
+        return self.get_user_id_from_sources(
+            response.get("ref"), response.get("user"), details
+        )
+
+    def get_user_details(self, response):
+        fullname = response["profile"]["name"]
+        first_name = None
+        last_name = None
+        return {
+            "username": f"user_{response['user']['user_id']}",
+            "email": response["user"]["mail"],
+            "fullname": fullname,
+            "first_name": first_name,
+            "last_name": last_name,
+        }
+
+    def user_data(self, access_token: str, *args, **kwargs) -> dict[str, Any] | None:
+        return self.get_json(
+            "https://api.podio.com/user/status",
+            headers={"Authorization": f"OAuth2 {access_token}"},
+        )

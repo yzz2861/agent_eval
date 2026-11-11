@@ -1,0 +1,1348 @@
+# Change Log
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](http://keepachangelog.com/)
+and this project adheres to [Semantic Versioning](http://semver.org/).
+
+## [Unreleased]
+
+## [7.0.0](https://github.com/python-social-auth/social-core/releases/tag/7.0.0) - 2026-11-09
+
+### Security
+
+- Bind SAML responses to the initiating browser's pending AuthnRequest instead
+  of restoring a session selected through RelayState. A same-origin return page
+  supports SameSite=Lax cookies across framework integrations. IdP-initiated
+  login is now disabled by default and requires explicit opt-in. In-progress
+  SAML logins must restart after upgrading.
+- Bind OpenID assertions to the initiating browser session instead of restoring
+  a session selected by the assertion's signed return URL. In-progress OpenID
+  logins must restart after upgrading.
+
+### Added
+
+- Add a `BaseAuth.get_provider_error()` hook for classifying provider errors in
+  callbacks and HTTP responses.
+- Add a Casdoor OpenID Connect backend for self-hosted Casdoor servers, with
+  PKCE enabled by default.
+
+### Changed
+
+- `BaseAuth.authenticate()` now runs the pipeline on the backend passed in the
+  `backend` keyword argument through its new `run_authentication()` method.
+  This preserves the original backend's state when a framework such as Django
+  calls `authenticate()` on a separate backend instance. Passing a `strategy`
+  different from the supplied backend's strategy now raises
+  `AuthConfigurationError`; create the backend with the intended strategy.
+- Assigning `BaseAuth.strategy` is deprecated and emits a `DeprecationWarning`.
+  Type checkers now treat it as read-only. Create the backend with the intended
+  strategy instead.
+- Make backends and strategies generic in their framework response type,
+  preserving that type through authentication actions and decorated partial
+  pipeline steps, including steps returning HTML responses.
+
+### Fixed
+
+- Bitbucket's rejection of a revoked refresh token (400 `invalid_request`) or
+  of a deactivated user's refresh token (401 `User is inactive`) now raises
+  `AuthCredentialError` with `reauthentication_required` instead of
+  `AuthProviderError` or `AuthCanceled`.
+- Classify OAuth `invalid_request` failures as `AuthConfigurationError`.
+- Log configuration guidance when Azure AD returns `AADSTS9002325`, explaining
+  that server-side callbacks must use the Web platform in the app registration.
+
+### Removed
+
+- Drop support for Python 3.10. Python 3.11 or newer is now required.
+- Remove `BaseStrategy.get_session_id()`, `BaseStrategy.restore_session()`, and
+  `BaseStrategy.SESSION_SAVE_KEY`. Custom strategies and backends using them
+  must migrate to browser-bound callback correlation.
+
+## [6.2.0](https://github.com/python-social-auth/social-core/releases/tag/6.2.0) - 2026-10-20
+
+### Added
+
+- Add a Weblate OpenID Connect backend with Hosted Weblate defaults, configurable
+  issuer, PKCE, official branding, and optional legal-version storage.
+- Add a strategy-aware backend `get_title()` method for sign-in labels.
+
+### Security
+
+- Bind OpenID Connect nonces to the initiating browser session and OAuth2 state,
+  rejecting authorization codes from other login attempts. In-progress OIDC
+  logins must restart after upgrading.
+- OpenID callbacks now require a transaction value signed into the return URL
+  and stored in the initiating session. This prevents a callback from another
+  browser from linking an account while a login at the same provider is pending.
+  In-progress OpenID logins must restart after upgrading; unsolicited assertions
+  are no longer accepted.
+- Reject EVE Online sign-ins when a character's owner hash changes, preventing
+  transferred characters from authenticating as the previous local user. The
+  old association must be removed before the new owner can sign in.
+- Enforce `SOCIAL_AUTH_SLACK_TEAM` against the workspace ID returned by Slack
+  before login. Configurations using a workspace name or Enterprise organization
+  ID must change to a workspace ID.
+- Scope Mailchimp sign-in identities to both the account and the authorizing
+  login, preventing different Mailchimp users on one account from sharing a
+  local user. Account-keyed associations migrate only when their stored login
+  identifier matches; rows without that evidence require authenticated linking
+  or account recovery. Mailchimp now rejects configured `ID_KEY` values other
+  than `mailchimp_identity`; remove any old `user_id` override before upgrading.
+- Google One Tap now requires a configured client ID before validating ID
+  tokens. Deployments without one must set `SOCIAL_AUTH_GOOGLE_ONETAP_KEY` to
+  keep One Tap sign-in working.
+- Reject Telegram callback fields containing a line feed before checking their
+  signature, preventing one signed identity from authenticating as another UID.
+- Discourse callbacks now require the session that started login, preventing
+  login CSRF and unauthorized account linking. In-progress logins from before
+  this upgrade, or those that lose their session, must restart.
+- OAuth2 authorization starts now use distinct, session-bound, expiring states
+  that are claimed once before token exchange, with PKCE verifiers kept per
+  transaction. In-progress OAuth2 logins from before this upgrade must restart;
+  custom storage implementations must provide atomic ``NonceMixin.consume()``.
+  New abandoned session transactions are pruned on a subsequent authorization start.
+- Prevent request-provided `next` values from resolving configuration settings
+  into post-login redirects, which could disclose URL-like setting values.
+- Odnoklassniki iframe logins now confirm that the signed launch's user ID
+  belongs to the presented provider session, preventing account substitution
+  by moving digits between undelimited signature fields.
+- Reject unverified historical-identifier matches when `ID_KEY` is configured,
+  preventing an account with a matching username from claiming a pre-6.0
+  association created under a stable identifier. Existing same-identifier
+  associations still re-key; deployments with older rows should review their
+  stored identifier keys before changing `ID_KEY` settings. Compatibility UID
+  hooks retain empty-key policy semantics and require an explicit opt-in for
+  unverified matches when `ID_KEY` is configured.
+- Box and ORCID no longer write access tokens into the shared
+  `PROFILE_EXTRA_PARAMS` setting, preventing concurrent profile requests from
+  using another login's token.
+- Email and domain allowlists now refuse authentication and account linking
+  when a provider's e-mail address is missing or malformed. Deployments using a
+  global allowlist with backends that omit e-mail addresses must configure the
+  provider to supply one or scope the allowlist to compatible backends.
+- VK iframe app launches can no longer associate a new VK identity with the
+  local user already logged in to the receiving browser. Authenticated sessions
+  now accept only a VK identity already associated with that user; anonymous
+  launches remain unbound and replayable as documented for the
+  [VK backend](https://python-social-auth.readthedocs.io/en/latest/backends/vk.html).
+- Odnoklassniki iframe app launches can no longer associate a new OK identity
+  with the local user already logged in to the receiving browser. Authenticated
+  sessions now accept only an OK identity already associated with that user.
+- Keep externally resumed partial pipelines bound to the local user who
+  initiated them, preventing a validation link from associating its provider
+  identity with a different authenticated account.
+- Fixed-provider OpenID backends now require authentication to start in the
+  current session and accept assertions only from the exact HTTPS provider
+  endpoint discovered at that time. Previously, an attacker-controlled OpenID
+  provider could complete authentication under another provider's backend name
+  and, for some unmigrated legacy associations, take over an existing account.
+- Generic OpenID callbacks now require backend-scoped discovery state from the
+  initiating or provider-authenticated restored browser session. This prevents
+  a valid assertion initiated by an attacker from being associated with a user
+  in another browser session.
+- Document the project's security boundaries, assumptions, downstream
+  responsibilities and triage dispositions in the
+  [threat model](https://github.com/python-social-auth/social-core/blob/master/THREAT_MODEL.md).
+- Correlate SAML responses with the AuthnRequest using the signed
+  `SubjectConfirmationData` `InResponseTo` when the unsigned response envelope
+  attribute is missing, so a solicited response cannot be replayed as
+  IdP-initiated by stripping it.
+- Reject the Azure AD B2C placeholder `sub` claims
+  (`Not supported currently. Use oid claim.` and the legacy spelling without
+  the space after the period) issued by user flows whose "Subject (sub) claim"
+  setting is "Not supported", preventing every user of such a flow from being
+  bound to one association. Configure
+  `SOCIAL_AUTH_AZUREAD_B2C_OAUTH2_ID_KEY = "oid"` to use the object ID claim
+  on those flows. Existing rows stored under the placeholder UID cannot be
+  attributed to a specific account and should be reviewed and removed.
+
+### Changed
+
+- Consolidate the core and Django threat models around security boundaries and
+  guarantees, with operational guidance in the
+  [security documentation](https://python-social-auth.readthedocs.io/en/latest/security.html).
+- Verified compatibility with Python 3.15.
+
+### Fixed
+
+- Redact request URLs from chained HTTP and transport exception messages so
+  ordinary tracebacks omit credentials in URL paths and query strings.
+- OpenID Connect partial pipelines now save the validated ID token claims when
+  the framework authenticates with a new backend instance, as Django does.
+  Resuming previously failed with `invalid_claim`.
+- Facebook Limited Login no longer loses its validated claims and partial resume
+  authorization when the framework authenticates with a new backend instance.
+- Raise structured authentication errors for missing, malformed, invalid, or
+  expired VK OpenAPI callback state.
+- GitHub's `bad_refresh_token` response now raises `AuthCredentialError` with
+  `reauthentication_required`, like `invalid_grant`, instead of an
+  `AuthProviderError`.
+
+## [6.1.1](https://github.com/python-social-auth/social-core/releases/tag/6.1.1) - 2026-10-10
+
+### Security
+
+- Reject missing provider user identifiers before converting them to strings,
+  preventing absent identifiers from being stored and matched as the shared UID
+  `"None"`.
+- Use documented stable identifiers for HubSpot (`hub_id` and `user_id`), Monzo
+  (`user_id`), WLCG (`sub`), Asana (`data.gid`), and Dropbox (`account_id`).
+  HubSpot identities are scoped to both the portal and installing user.
+- MineID and the legacy Upwork OAuth1 backend now fail closed because their
+  profile responses do not expose a documented immutable account identifier.
+  Custom MineID deployments can configure `ID_KEY` after adding such a field to
+  their profile response.
+
+Existing social-auth rows whose UID is `"None"` cannot be attributed to a
+specific provider account. Administrators should review and remove those rows,
+then require affected users to authenticate again; they are not migrated
+automatically.
+
+## [6.1.0](https://github.com/python-social-auth/social-core/releases/tag/6.1.0) - 2026-10-08
+
+### Removed
+
+- Removed the Docker Hub OAuth2 backend (`docker`) because its authorization,
+  token, and profile endpoints are no longer available. Remove
+  `social_core.backends.docker.DockerOAuth2` from backend configuration.
+  See [#1176](https://github.com/python-social-auth/social-core/issues/1176).
+- Removed obsolete authentication backends: Microsoft Live Connect (`live`),
+  Evernote Sandbox (`evernote-sandbox`), PixelPin (`pixelpin-openidconnect`),
+  Behance (`behance`), and NGP VAN ActionID OpenID (`actionid-openid`). Their
+  authentication endpoints have been retired or are no longer available; see
+  [#1176](https://github.com/python-social-auth/social-core/issues/1176).
+  Remove `social_core.backends.live.LiveOAuth2`,
+  `social_core.backends.evernote.EvernoteSandboxOAuth`,
+  `social_core.backends.pixelpin.PixelPinOpenIDConnect`,
+  `social_core.backends.behance.BehanceOAuth2`, and
+  `social_core.backends.ngpvan.ActionIDOpenID` from backend configuration.
+  Live Connect users can configure `social_core.backends.microsoft.MicrosoftOAuth2`
+  (`microsoft-graph`), but identifiers are not compatible and existing account
+  associations are not migrated automatically. Production Evernote remains
+  supported. This removes the old ActionID OpenID integration, not the ActionID
+  service. Existing stored account associations are not deleted.
+
+### Security
+
+- OpenID session state uses explicit JSON-compatible serialization instead of
+  pickle. In-progress OpenID logins with old session state must restart; existing
+  linked accounts, provider associations, and authenticated sessions are unchanged.
+
+### Fixed
+
+- Resolve historical identifiers through indexed `(provider, id_key, uid)`
+  lookups instead of scanning stored JSON during authentication. Configure
+  backend-scoped `LEGACY_ID_KEYS` for explicit identifier changes.
+- Require matching stored identifier evidence for migration by default, except
+  for audited built-in transitions that lacked evidence in social-core 5.2.0.
+  Conflicting evidence always stops authentication, including when
+  `ALLOW_UNVERIFIED_LEGACY_UID_MIGRATION` is explicitly enabled. Missing evidence
+  stops authentication unless the transition's compatibility policy allows it.
+- Preserve historical OIDC subject aliases and atomic Vend shop-scoped migration.
+- Backends return `None` for unavailable names instead of invented empty
+  strings, preventing logins and account associations from clearing existing
+  names. Name normalization still fills missing or blank fields from available
+  names, but preserves unavailable components when derivation produces nothing.
+  Explicit provider-supplied empty strings remain valid profile updates.
+- New-user creation omits unavailable configured name fields so user model
+  defaults apply instead of inserting null values into non-null columns,
+  including when only name fields are configured.
+- OpenID keeps usable names from earlier response schemas when a later
+  alias is blank, while preserving blanks when no usable name is supplied.
+- Required Auth0, Fence, SAML, and Twitch validation remains active when Python
+  runs with optimization enabled.
+- Okta reuses the validated, cached OpenID Connect discovery loader.
+- Cached methods retain argument and return type checking, including their
+  `invalidate()` and `refresh()` controls.
+
+### Breaking
+
+- Storage implementations must accept the optional keyword-only `evidence_key`
+  argument to `migrate_social_auth()` and revalidate supplied evidence atomically.
+  The pipeline now passes keyed `legacy_identifiers`; `legacy_uids` and
+  `get_legacy_user_ids()` remain available for compatibility.
+
+### Changed
+
+- Allowed newer Google Auth versions for the Google One Tap backend.
+- Updated development dependencies, lint configuration, and CI actions.
+
+## [6.0.0](https://github.com/python-social-auth/social-core/releases/tag/6.0.0) - 2026-10-06
+
+### Security
+
+- OpenID Connect nonces expire after 30 minutes by default. Configure
+  `SOCIAL_AUTH_<BACKEND>_NONCE_LIFETIME` to change the duration. Storage
+  integrations must persist `issued` and `lifetime`; stored nonces without
+  a valid lifetime are rejected.
+- LinkedIn OpenID Connect no longer stores unused nonces.
+- Backend signatures, hashes, and CSRF tokens use constant-time comparisons.
+  Malformed signatures, including non-ASCII Discourse signatures, raise
+  authentication errors instead of type errors.
+- Facebook Limited Login reuses validated claims only during a saved partial
+  pipeline resume, preventing forged resumes from authenticating a previous user.
+- Google OAuth2 and Google OpenID Connect now reject UserInfo responses that do
+  not explicitly confirm email verification. Google One Tap requires the same
+  confirmation in its ID token.
+- Email validation codes expire after seven days by default. Configure
+  `SOCIAL_AUTH_EMAIL_VALIDATION_EXPIRED_THRESHOLD` to change their lifetime.
+  Storage integrations must persist each code's creation `timestamp`; undated
+  codes are rejected when expiry is enabled.
+- Tumblr, Deezer, Discourse, SciStarter, Okta, Google, Trello, Qiita, Keycloak,
+  Fence, CAS, Cognito, Dailymotion, Mail.ru, ArcGIS, Ubuntu, openSUSE, Yandex,
+  and affected Microsoft Entra ID backends now bind accounts to stable provider
+  or protocol identifiers. Existing associations record their identifier key
+  and migrate on authentication; strict deployments can disable unverified
+  legacy-identifier migration with
+  `SOCIAL_AUTH_<BACKEND>_ALLOW_UNVERIFIED_LEGACY_UID_MIGRATION`.
+- Drip, Last.fm, and Mixcloud are now association-only: connecting requires the
+  same authenticated local user at initiation, callback, and partial resumption.
+  Mutable provider identifiers can no longer create or authenticate local users,
+  and connecting preserves local profile fields.
+
+### Breaking
+
+- Name normalization now runs in the shared authentication pipeline. Custom
+  pipelines must add `social_core.pipeline.social_auth.social_names` immediately
+  after `social_core.pipeline.social_auth.social_details` to retain automatic
+  conversion between full names and first/last names.
+- Storage integrations must persist association `id_key` values, accept `id_key`
+  in `get_social_auth()` and `create_social_auth()`, and implement
+  `get_social_auth_by_extra_data()` and atomic `migrate_social_auth()`.
+  Existing associations use an empty identifier key until migration.
+- Token renewal raises `AuthCredentialError` with `reauthentication_required`
+  when a stored access token is expired and no renewal credential is available.
+  Custom backends that exchange access tokens must override `get_refresh_token()`.
+- MediaWiki and Discourse groups are exposed separately from profile details.
+  Enable group extraction and update custom pipeline consumers to use `groups`
+  instead of `details["groups"]`. MediaWiki identity retrieval now runs in
+  `user_data()` rather than `get_user_details()`.
+- Authentication exceptions now expose stable reason codes, failure sources,
+  operation stages, and suggested recovery. Only `SocialAuthBaseException` and
+  `AuthException` retain broad catch compatibility; migrate removed specialized
+  classes using the exception reference in social-docs.
+- HTTP failures no longer infer cancellation from HTTP 400 or token expiry from
+  HTTP 401. Provider diagnostics are separate from safe exception messages.
+- Strategies must implement `get_request_data()` instead of overriding
+  `request_data()`. The latter now returns effective data for the active partial
+  pipeline, including confirmed external-link data.
+- Pipeline steps no longer receive an automatic `request` argument. Use
+  `strategy.request_data()` for parameters and the framework strategy's
+  `request` attribute for its native request object.
+- Legacy disconnect partials without a pipeline type must restart the disconnect
+  flow. Legacy authentication partials remain resumable.
+
+### Added
+
+- Configurable external group extraction and login allow lists for Azure, OIDC,
+  Keycloak, Okta OAuth2, SAML, GitLab, MediaWiki, and Discourse, with a strategy
+  hook and optional pipeline step for local group synchronization. Existing CAS
+  allow lists continue to work without pipeline changes.
+- Human-readable `title` and optional `icon` metadata for authentication
+  backends, with packaged icons shared with Django applications. Backend
+  identifiers remain unchanged; display labels follow current service branding.
+- VK ID OAuth2 backend (`vk-id`) with mandatory S256 PKCE, payload callbacks,
+  server-side profiles, and device-bound refresh tokens with automatic renewal.
+- Azure AD backends support an explicit `AUTHORITY_URL` and opt-in PKCE through
+  `USE_PKCE`. Azure AD B2C exposes a `logout_url()` helper using policy discovery.
+- Reusable `BaseAuth.ASSOCIATION_ONLY` capability for user-bound connections,
+  shared by Drip, Last.fm, Mixcloud, and Twilio Connect.
+- Scoped pipeline request data, stored separately from pipeline arguments.
+  Existing partials with request data in their arguments remain readable.
+- Life Science EOSC OpenID Connect backend (`life_science_eosc`) with temporary
+  configuration for the EOSC federation.
+- Name normalization controls `SOCIAL_AUTH_<BACKEND>_FIRSTLAST_FROM_FULL` and
+  `SOCIAL_AUTH_<BACKEND>_FULL_FROM_FIRSTLAST`, both enabled by default.
+
+### Changed
+
+- Updated development dependencies and CI actions.
+- Allowed newer Google Auth versions for the Google One Tap backend.
+
+### Deprecated
+
+- `BaseAuth.get_user_names()` is deprecated. Backends should return
+  provider-supplied names from `get_user_details()` and leave normalization
+  to the `social_names` pipeline step.
+
+### Fixed
+
+- Facebook Graph API quota errors are classified as `rate_limited`, including
+  responses with HTTP 400 or 403, so callers receive retry guidance.
+- Facebook Limited Login partial pipelines preserve validated claims across
+  repeated resumes, including after the original ID token expires.
+- OAuth2 renewal no longer substitutes access tokens for missing refresh tokens.
+  Facebook retains its access-token exchange, and Zoom and PayPal now store
+  refresh tokens by default. Existing accounts without a refresh token need
+  another provider login to obtain one.
+- Auth0 caches signing keys by JWKS URL for 24 hours and refreshes them when
+  a token references an unknown key ID or a token without a key ID fails
+  signature verification. Refreshes preserve other domains' cached keys and
+  retain existing keys if fetching or parsing replacements fails.
+- Exclude tests and their key fixtures from wheels while retaining them in
+  source distributions for downstream testing.
+- VK OAuth2 accepts aliased and conditional `EXTRA_DATA` entries when requesting
+  profile fields, and requests the supported `photo_50` field while preserving
+  the legacy `photo` and `user_photo` response keys.
+- Azure tenant and B2C backends honor `OPENID_CONFIGURATION_URL` overrides.
+- Azure's `get_auth_token()` uses stored refresh tokens and persists refreshed
+  credentials instead of sending an access token as a refresh token.
+- Resumed authentication and disconnect pipelines consistently expose their
+  effective request data without replacing the native framework request.
+- Saved request data is deserialized before use, including strategies that
+  encode mappings as strings or bytes.
+- Partial pipelines are bound to authentication or disconnect so an unrelated
+  saved step cannot skip disconnect permission checks.
+- OpenID Connect partial pipelines now preserve validated ID token claims when
+  resuming with a new backend instance, fixing login failures since 5.1.0.
+- Shopify partial pipelines now use the saved shop instead of resume request
+  parameters, and Apple preserves callback names across early pipeline pauses.
+- Legacy OpenID partial pipelines now preserve verified responses and signed
+  extension data instead of repeating callback verification on resume.
+
+## [5.2.0](https://github.com/python-social-auth/social-core/releases/tag/5.2.0) - 2026-09-30
+
+### Added
+
+- Added a CESID AAI OpenID Connect backend.
+- Added an optional `user` argument to `do_auth()` and a `BaseAuth.prepare_auth()`
+  hook for backend-specific authentication initiation.
+
+### Security
+
+- Twilio Connect is now association-only: starting and completing a connection
+  requires the same authenticated local user. Twilio callback data can no
+  longer create or authenticate users.
+- Facebook App authentication now binds access-token and signed-request
+  callbacks to the browser session, preventing login CSRF and unauthorized
+  account linking. Custom Facebook App templates must preserve the query string
+  in `FACEBOOK_COMPLETE_URI` when submitting the callback.
+- Weixin app authentication now validates OAuth state before exchanging codes,
+  preventing login CSRF and unauthorized account linking.
+- Last.fm authentication now binds callbacks to the browser session that
+  initiated the login, preventing login CSRF and unauthorized account linking.
+- GitHub App authentication now validates OAuth state before exchanging codes.
+  Stateless installation callbacks restart a state-protected OAuth flow,
+  preventing forged installation parameters from enabling login CSRF.
+- VK OpenAPI authentication now uses the signed session's user ID instead of
+  trusting the ID supplied in callback data.
+
+### Changed
+
+- Updated development dependencies and CI actions.
+- Allowed newer Google Auth versions for the Google One Tap backend.
+
+## [5.1.1](https://github.com/python-social-auth/social-core/releases/tag/5.1.1) - 2026-09-18
+
+### Security
+
+- VK app authentication now fetches user profiles directly from VK and verifies
+  that the profile ID matches the signed viewer ID, preventing forged callback
+  data from overriding the authenticated identity and profile.
+
+### Added
+
+- Added `AuthReauthenticationRequired`, a subclass of `AuthTokenError`, for
+  OpenID Connect token refreshes that require the user to sign in again.
+
+### Changed
+
+- Updated development dependencies and CI actions.
+- Allowed newer Google Auth versions for the Google One Tap backend.
+
+### Fixed
+
+- Authentication backends now consistently honor configurable user ID keys.
+- Auth0 now requests the required `openid`, `profile`, and `email` scopes and
+  raises `AuthTokenError` when the token response lacks an ID token.
+- OpenID Connect now validates required ID token claims consistently and handles
+  legacy token refresh identity context more reliably.
+- SAML parsing, decryption, and validation failures now consistently raise
+  authentication exceptions, as do unknown or invalid identity provider names.
+- SAML responses without RelayState now include the resolved identity provider
+  name when only one provider is configured.
+
+### Removed
+
+- Discontinued OAuth backends: EchoSign, ExactTarget, Pocket, Runkeeper,
+  Skyrock, and Withings.
+
+## [5.1.0](https://github.com/python-social-auth/social-core/releases/tag/5.1.0) - 2026-08-06
+
+### Added
+
+- Added a Helmholtz AAI OpenID Connect backend.
+- Native applications can allow private-use redirect URI schemes with the
+  `ALLOWED_REDIRECT_SCHEMES` setting.
+
+### Security
+
+- OpenID Connect backends now validate ID tokens returned during token refresh
+  and reject changes to the authenticated identity.
+
+### Changed
+
+- Updated development dependencies and CI actions.
+
+### Fixed
+
+- Updated the Coinbase backend to use current OAuth endpoints, scopes, API
+  versioning, and token revocation parameters.
+- HTTP 403 responses from authentication providers now raise `AuthForbidden`.
+- JWT verification failures are now consistently wrapped in social-core
+  authentication exceptions.
+
+## [5.0.2](https://github.com/python-social-auth/social-core/releases/tag/5.0.2) - 2026-06-26
+
+### Security
+
+- LINE backend now validates callback state before exchanging authorization
+  codes, preventing login CSRF.
+- Shopify backend now sends and validates OAuth state, preventing login CSRF.
+
+### Changed
+
+- Updated development dependencies and CI actions.
+
+### Fixed
+
+- Updated the Google OAuth documentation link.
+
+## [5.0.1](https://github.com/python-social-auth/social-core/releases/tag/5.0.1) - 2026-06-24
+
+### Security
+
+- Externally resumable partial request links now require confirmation even in
+  the browser session that created the partial, preventing validation links from
+  being consumed by a plain GET.
+
+## [5.0.0](https://github.com/python-social-auth/social-core/releases/tag/5.0.0) - 2026-06-23
+
+### Security
+
+- LoginRadius backend now validates callback state to prevent login CSRF.
+- Odnoklassniki app backend now ignores untrusted callback API hosts and
+  validates returned user details.
+- Partial pipeline resume now requires session ownership or explicit external
+  resume confirmation to prevent login CSRF.
+- SAML responses are now validated against the original AuthnRequest when
+  possible.
+- Twilio backend now preserves HTTPS callback URLs and validates callback state
+  to prevent login CSRF.
+
+### Fixed
+
+- Auth0 OpenID Connect configuration now uses the correct base URLs.
+- Authentication now handles invalid email addresses without crashing.
+- Vend OAuth user IDs are now scoped by shop.
+- VK app authentication now requires an auth key.
+
+### Removed
+
+- Discontinued OAuth backends: AppsFuel, Beats Music, ChangeTip, Clef,
+  Edmodo, 500px (`five_hundred_px`), legacy Google App Engine bundled Users
+  (`gae`), Jawbone, Moves, Mozilla Persona, Readability Parser API, and Wunderlist.
+- Discontinued Google+ Sign-In backend (`google-plus` / `GooglePlusAuth`).
+
+## [4.9.1](https://github.com/python-social-auth/social-core/releases/tag/4.9.1) - 2026-04-30
+
+### Changed
+
+- GitHub backend now handles scoped email fetching deterministically.
+
+### Fixed
+
+- OpenID Connect missing token handling.
+- Microsoft refresh token and expiry handling.
+- Partial pipeline handling for Django `QueryDict` values.
+
+## [4.9.0](https://github.com/python-social-auth/social-core/releases/tag/4.9.0) - 2026-04-29
+
+This release might contain breaking changes. Review the removed backends and
+stricter OAuth, OpenID Connect, and Azure AD validation before upgrading.
+
+### Added
+
+- OpenID Connect claim names for email, first name, last name, and full name can
+  now be configured.
+- GitHub backend now stores fetched emails in pipeline data.
+
+### Changed
+
+- Azure AD backends now use OpenID configuration and JWKS for token validation.
+- Built-in provider URLs now consistently use HTTPS.
+- `AUTH_EXTRA_ARGUMENTS` values are no longer overridden by request data unless
+  the key is listed in `AUTH_EXTRA_ARGUMENTS_OVERRIDE_ALLOWLIST`.
+- Requests now fall back to a default timeout when no timeout is configured.
+- Improved the publishing workflow.
+
+### Removed
+
+- Removed obsolete Rdio, Shimmering, and ThisIsMyJam backends.
+- Removed legacy OAuth1 backends for Douban and Mendeley.
+
+### Security
+
+- Apple ID backend now validates the ID token issuer.
+- Azure AD backends now validate ID token signatures, issuer, audience, tenant,
+  and policy claims. Tokens accepted by earlier versions might now be rejected.
+- OpenID Connect backends now reject UserInfo responses whose `sub` does not
+  match the validated ID token subject.
+
+## [4.8.7](https://github.com/python-social-auth/social-core/releases/tag/4.8.7) - 2026-04-23
+
+### Added
+
+- OpenID Connect backends can now opt in to PKCE support
+
+### Changed
+
+- PKCE defaults now match RFC 7636 requirements
+
+### Security
+
+- Tightened redirect URL validation
+- Tightened OAuth state handling for Clever, Eventbrite, GoClio, MailChimp, SurveyMonkey and Untappd backends
+- SAML authentication now restores saved sessions only after response validation
+
+## [4.8.6](https://github.com/python-social-auth/social-core/releases/tag/4.8.6) - 2026-04-20
+
+### Changed
+
+- `storage.UserProtocol` now supports read-only attributes for better type-checker compatibility
+- Improved type annotations and enabled mypy type checking in CI
+
+### Fixed
+
+- `sanitize_redirect()` now handles invalid redirect values that raise `ValueError`
+- Fixed timezone handling when working with dates
+
+### Security
+
+- Require `PyJWT >= 2.12.0` to address CVE-2026-32597
+
+## [4.8.5](https://github.com/python-social-auth/social-core/releases/tag/4.8.5) - 2026-02-10
+
+### Changed
+
+- Fixed partial pipeline handling for unauthenticated users
+
+## [4.8.4](https://github.com/python-social-auth/social-core/releases/tag/4.8.4) - 2026-02-10
+
+### Changed
+
+- Improved type annotations
+- Code cleanups
+- Improved error handling in SAML
+
+### Added
+
+- Add Azure AD(Entra ID) federated client assertion support (FIC)
+
+## [4.8.3](https://github.com/python-social-auth/social-core/releases/tag/4.8.3) - 2025-12-18
+
+### Changed
+
+- Added registry to configured default strategy
+
+## [4.8.2](https://github.com/python-social-auth/social-core/releases/tag/4.8.2) - 2025-12-18
+
+### Changed
+
+- The timeout parameter can be again configured
+- Refactored HTTP authentication code
+- Loosened some type checks for better downstream compatibility
+- `ID_KEY` is now configurable
+- Improved token expiry validation
+- Additional OIDC parameters are now supported
+- Improved refresh token logic
+- Extended type annotations
+- String RelayState in SAML is again supported
+- Better handle OpenID exceptions
+
+### Removed
+
+- itembase backend
+- nk backend
+- OAuth1 backend for Yahoo
+- *Do you see more backends where matching service is no longer available? Tell us to help identify unused code.*
+
+## [4.8.1](https://github.com/python-social-auth/social-core/releases/tag/4.8.1) - 2025-10-09
+
+### Changed
+
+- Fixed `extra_data()` invocation from `refresh_token()`
+- Replaced jose with PyJWT in Ping backend
+- Dropped OAuth1 backend for OpenStreetMap
+
+### Added
+
+- OAuth2 URLs can now be overridden in the configuration
+
+## [4.8.0](https://github.com/python-social-auth/social-core/releases/tag/4.8.0) - 2025-10-07
+
+### Changed
+
+- Fixed Gitea backend API authentication headers
+- Improved `RelayState` and attributes handling in the SAML backend
+- Changed domains for VK backend
+- All API calls now include User-Agent header
+- OIDC uses info from `id_token` when not present in the response
+- Bring back option to skip and customize `at_hash` validation in OIDC
+- Dropped support for Python 3.9 and added support for Python 3.14
+- Invalid API token will now raise `AuthTokenError`
+- The `extra_data` method of backends now receives pipeline arguments as `pipeline_kwargs`
+
+### Added
+
+- Auth0 OIDC backend
+- Inactive users can be allowed to authenticate using `ALLOW_INACTIVE_USERS_LOGIN`
+- Support group whitelisting in CAS
+
+## [4.7.0](https://github.com/python-social-auth/social-core/releases/tag/4.7.0) - 2025-06-27
+
+### Changed
+
+- Fixed getting user info in LinkedIn authentication.
+- Fixed okta OIDC authentication URLs.
+- Dropped AOL OpenID backend.
+- Improved error handling in ORCID.
+- Fixed Soundcloud OAuth2 authorization.
+
+### Added
+
+- More OIDC configuration options.
+- Session restore with stricter SameSite cookie policy.
+- JWT leeway configuration for some backends.
+
+## [4.6.1](https://github.com/python-social-auth/social-core/releases/tag/4.6.1) - 2025-04-28
+
+### Changed
+
+- Fixed crash in partial pipelines for some backends
+
+## [4.6.0](https://github.com/python-social-auth/social-core/releases/tag/4.6.0) - 2025-04-25
+
+### Changed
+
+- Added type annotations
+- Modernized build system
+- OAuth2 backends now default to POST method
+- Code cleanups
+- Tests use responses instead of HTTPretty
+- Improved error handling in case of missing parameters
+
+### Added
+
+- Kick OAuth2 backend
+- OpenIdConnect-based backend for Fedora
+- Lifescience AAI backend
+- NFDI (OpenID Connect) backend
+
+### Removed
+
+- Removed no longer available backends: khanacademy, professionali.ru, BitBucket OAuth 1.0
+
+## [4.5.6](https://github.com/python-social-auth/social-core/releases/tag/4.5.6) - 2025-02-13
+
+### Changed
+
+- Reverted unintended change in OpenId storage API.
+
+## [4.5.5](https://github.com/python-social-auth/social-core/releases/tag/4.5.5) - 2025-02-13
+
+### Added
+
+- Allow per-backend user pipeline settings.
+- Add AzureADOauth2 backend using the v2.0 API.
+- Google One Tap implementation.
+
+### Changed
+
+- Handle case where user has not registered a `family-name` with ORCID
+- Fix access token expiration and refresh token handling in GitHub backend
+- Allow overriding emails to always be fully lowercase with `SOCIAL_AUTH_FORCE_EMAIL_LOWERCASE`.
+- Dropped `tokens` alias for `access_token` on `UserMixin` which has been deprecated for 10 years now.
+- LinkedIn OAuth API updates.
+- Modernize release process.
+- Code cleanups.
+- Initial type annotations.
+
+## [4.5.4](https://github.com/python-social-auth/social-core/releases/tag/4.5.4) - 2024-04-25
+
+### Added
+
+- LinkedIn supports refresh token
+
+### Changed
+
+- SteamOpenId validation of identify URL
+- Box state redirection
+- The `uid` is automatically converted to string in the pipeline
+- Mediawiki error handling
+
+## [4.5.3](https://github.com/python-social-auth/social-core/releases/tag/4.5.3) - 2024-02-14
+
+### Added
+
+- OpenStreetMap OAuth2
+
+### Changed
+
+- Etsy backend fixes
+
+## [4.5.2](https://github.com/python-social-auth/social-core/releases/tag/4.5.2) - 2024-01-26
+
+### Added
+
+- Etsy backend
+
+### Changed
+
+- Updated Facebook API version to 18.0
+- Make AppleID work with multiple identifiers
+
+## [4.5.1](https://github.com/python-social-auth/social-core/releases/tag/4.5.1) - 2023-11-29
+
+### Changed
+
+- OpenID Connect skips `at_hash` validation when missing
+- `redirect_name` is now passed to backend on `do_complete`
+- `next` is preserved through SAML RelayState
+- Add Discogs backend
+- Add BitbucketDataCenterOAuth2 backend
+- Keycloak's `ID_KEY` is no longer configurable (it never worked)
+
+## [4.5.0](https://github.com/python-social-auth/social-core/releases/tag/4.5.0) - 2023-10-31
+
+### Changed
+
+- Add backend for LinkedIn OpenID Connect
+- Add backend for EGI Check-in
+- Support Python 3.12 (and 3.11)
+- Add backend for the WLCG IAM testing site
+- Add ping identity OIDC backend
+- Add uffd oauth2 backend
+- Add Clever backend
+- Add Twitter OAuth2 backend
+- Add backend for e-infra.cz
+- Replace jose with pyjwt
+
+## [4.4.2](https://github.com/python-social-auth/social-core/releases/tag/4.4.2) - 2023-04-22
+
+### Changed
+
+- Fixed Azure AD Tenant authentication with custom signing keys
+- Added CAS OIDC backend
+- Made Keycloak `ID_KEY` configurable
+
+## [4.4.1](https://github.com/python-social-auth/social-core/releases/tag/4.4.1) - 2023-03-30
+
+### Changed
+
+- Moved Facebook Limited Login to a separate module to avoid extra dependency
+- Update Azure AD B2C base URL to match updated endpoints
+
+## [4.4.0](https://github.com/python-social-auth/social-core/releases/tag/4.4.0) - 2023-03-15
+
+### Added
+
+- Backend for OpenInfra OpenID
+- Facebook Limited Login backend
+- Add support for Python 3.11
+
+### Changed
+
+- Removed OpenStackDevOpenId backend
+- Updated `user_data` method in `StripeOAuth2` to return `email` in `get_user_details`
+- Removes fixed version of `lxml`
+- Fixed OIDC crash on groups
+- Fixed Qiita users identification
+- Dropped support for TLSv1
+- Coding style improvements
+
+## [4.3.0](https://github.com/python-social-auth/social-core/releases/tag/4.3.0) - 2022-06-13
+
+### Added
+
+- Add backend for Hashicorp Vault OIDC backend
+- Add generic OpenID Connect backend
+- Add Grafana OAuth2 backend
+- Add MusicBrainz OAuth2 backend
+
+### Changed
+
+- Fixed redirect state for Keycloak backend
+- Add fallback to RSA256 in OpenID Connect when alg is not set
+- Fixed Azure backend so it can be used with all Azure authority hosts
+
+## [4.2.0](https://github.com/python-social-auth/social-core/releases/tag/4.2.0) - 2022-01-17
+
+### Added
+
+- Add fields that populate on create but not update `SOCIAL_AUTH_IMMUTABLE_USER_FIELDS`
+- Add Gitea oauth2 backend
+- Add Twitch OpenId backend
+- Add CI Logon backend
+- Add support for Python 3.10
+
+### Changed
+
+- Fixed Slack user identity API call with Bearer headers
+- Fixed microsoft-graph login error
+- Fixed Twitch OAuth2 backend
+- Fixed Facebook API version
+- Fixed Okta authentication URLs
+- Fixed Globus JWT signature algorithm
+- Fixed kid key rotation for OpenID Connect
+- Fixed e-mail fetching from Azure
+- Fixed vkontakte API version
+- Restricted lxml to 4.6.x to avoid problems in SAML
+
+## [4.1.0](https://github.com/python-social-auth/social-core/releases/tag/4.1.0) - 2021-03-01
+
+### Added
+
+- Discourse backend
+- Osso backend
+- Add `get` and `delete` class methods for `NonceMixin`
+- Use strategies as interface to fetch backends
+
+### Changed
+
+- Get Apple user first and last name from `self.data`
+- Instagram Legacy API has been replaced with Instagram Basic Display API since the first one was deprecated, [see](https://www.instagram.com/developer/).
+- Store `expires_in` for Zoom backend
+- Dropped support no longer working Dropbox v1 API
+- Several improvements to the ORCIDOAuth2 backend
+- Make WHITELIST\_\* settings properly case insensitive
+- Fixed token validation in the AzureADV2TenantOAuth2 backend
+
+## [4.0.3](https://github.com/python-social-auth/social-core/releases/tag/4.0.3) - 2021-01-12
+
+### Changed
+
+- Updated PyJWT version to 2.0.0
+- Remove six dependency
+
+## [4.0.2](https://github.com/python-social-auth/social-core/releases/tag/4.0.2) - 2021-01-10
+
+### Changed
+
+- Fixes to Github-action release mechanism
+
+## [4.0.1](https://github.com/python-social-auth/social-core/releases/tag/4.0.1) - 2021-01-10
+
+### Changed
+
+- Fixes to Github-action release mechanism
+
+## [4.0.0](https://github.com/python-social-auth/social-core/releases/tag/4.0.0) - 2021-01-10
+
+### Added
+
+- PayPal backend
+- Fence OIDC-based backend
+
+### Changed
+
+- Dropped Python 2 support from testing stack
+- Remove discontinued Google OpenId backend
+- Remove discontinued Yahoo OpenId backend
+- Fix `jwt.decode()` passed algorithm
+- Prevent `PyJWT` v2.0.0 being installed
+- Update Facebook Graph API to 8.0
+- Update Amazon fetch-profile URL
+- Fix Azure AD Tenant, unable to load certificate
+- Fix Okta well-known URL
+- Updated Discord's API hostname from discordapp.com to discord.com
+- Pass `client_secret` in auth-complete on Kakao backend
+
+## [3.4.0](https://github.com/python-social-auth/social-core/releases/tag/3.4.0) - 2020-06-21
+
+### Added
+
+- Zoom backend
+
+### Changed
+
+- Directly use `access_token` in Azure Tenant backend
+- Support Apple JWT audience
+- Update partial session cleanup to remove old token from session too
+- Fetch user email in Okta integration
+- Improve Python 3.9 compatibility
+- Send proxies in request
+- Improve error handling in Apple backend
+- Properly support case insensitive matching of whitelist settings
+
+## [3.3.3](https://github.com/python-social-auth/social-core/releases/tag/3.3.3) - 2020-04-16
+
+### Changed
+
+- Updated list of default user protected fields to include admin flags and password
+
+## [3.3.2](https://github.com/python-social-auth/social-core/releases/tag/3.3.2) - 2020-03-25
+
+### Changed
+
+- Updated package upload method to use `twine`
+
+## [3.3.1](https://github.com/python-social-auth/social-core/releases/tag/3.3.1) - 2020-03-25
+
+### Changed
+
+- Reverted [PR #388](https://github.com/python-social-auth/social-core/pull/388/) due to
+  dependency license incompatibility
+
+## [3.3.0](https://github.com/python-social-auth/social-core/releases/tag/3.3.0) - 2020-03-17
+
+### Added
+
+- Okta backend
+- Support for SAML Single Logout
+- SimpleLogin backend
+- SurveyMonkey backend
+- HubSpot backend
+- MRG backend
+- Sign in with Apple backend
+- Allow ignoring of default protected user fields with option `SOCIAL_AUTH_NO_DEFAULT_PROTECTED_USER_FIELDS`
+- Support for users field names mapping
+- Added GithubAppAuth backend
+
+### Changed
+
+- Add refresh token to Strava backend, change username and remove email
+- Update test runner to PyTest
+- Add python 3.7 CI target
+- Send User-Agent header on Untappd backend
+- Updated Naver API support from XML to JSON format
+- Use `unidecode` to cleanup usernames from unicode characters
+- Update Twitch API support from v3 to v5
+- Properly setup `pytest` version for Python2 and Python3
+- Fix some spelling mistakes in docstrings
+- Fix old fields from FIELDS_STORED_IN_SESSION persisting in session
+- Github: pass access token in a header instead of in a query parameter.
+- Update Kakao API support from v1 to v2
+- Update Twitch API support to v5
+- Updated Patreon API support from v1 to v2 per issue #307
+- Fix `user_details` in user pipeline to allow model attributes to be updated
+- Updated Atlassian API urls
+
+## [3.2.0](https://github.com/python-social-auth/social-core/releases/tag/3.2.0) - 2019-05-30
+
+### Added
+
+- Cognito backend
+- OpenStack (openstackid and openstackid-dev) backends
+
+### Changed
+
+- Updated Linkedin backend to v2 API
+- Facebook: Update to use the latest Graph API v3.2
+- Send User-Agent header on GitHub backend
+- Remove profile scope and verification at hash on Elixir backend
+- Mark description as Markdown for PyPI
+- Use `hmac.compare_digest` for constant time comparison
+- Replace deprecated Google+ API usage in GoogleOpenIdConnect
+- Defined scope separator for Strava backend
+- Ensure `saml_config.json` is included by addint it to `MANIFEST.in`
+- Include `email_verified` as part of user details on Auth0 backend
+- Include Shopify `version` parameter on Shopify session setup
+- Define `SOCIAL_AUTH_SHOPIFY_API_VERSION` setting to override default API version
+- Check user `id` attribute existence before using it
+- Pull `last_name` from `family_name` in Cognito backend
+- Ignore key errors on Naver backend for missing attributes
+
+## [3.1.0](https://github.com/python-social-auth/social-core/releases/tag/3.1.0) - 2019-02-20
+
+### Added
+
+- Universe Ticketing backend
+- Auth0.com authentication backend
+
+### Changed
+
+- Update Bungie backend dropping any Django reference
+- Enable and fix JWT related tests
+- Remove PyPy support from Tox
+- Drop support for Python 3.4 in Tox
+- Allow to override JWT decode options in Open ID Connect base backend
+- Pass access token via Authorization header to Google user data url
+- Updated `user_data` method in `AzureADOAuth2` to return `access_token` if
+  `id_token` is not present in response
+
+## [3.0.0](https://github.com/python-social-auth/social-core/releases/tag/3.0.0) - 2019-01-14
+
+### Changed
+
+- Updated Azure B2C to extract first email from list if it's a list
+- Replace deprecated Google+ API usage with <https://www.googleapis.com/oauth2/v3/userinfo>
+- Updated Azure Tenant to fix Nonetype error
+- Updated comment denoting incorrect setting name
+- Yandex: do not fail when no email is present
+- Mediawiki: do not fail when no email is present
+- Mediawiki: enhance `get_user_details` to return more details
+
+## [2.0.0](https://github.com/python-social-auth/social-core/releases/tag/2.0.0) - 2018-10-28
+
+### Added
+
+- Telegram authentication backend
+- Keycloak backend is added with preliminary OAuth2 support
+- Globus OpenId Connect backend
+- Discord OAuth2 backend
+- SciStarter OAuth2 backend
+- Flat OAuth2 backend
+- ELIXIR OpenId Connect backend
+- Atlassian OAuth2 backend
+
+### Changed
+
+- GitHub backend now uses `state` parameter instead of `redirect_state`
+- Correct setting name on AzureAD Tenant backend
+- Introduce access token expired threshold of 5 seconds by default
+- Delete partial token from session if still present
+- Use `userPrincipalName` to set `username` and `email` accordingly
+- Send authorization headers to Kakao OAuth2, properly fill user details
+- LINE API update to v2.1
+- Use `unitest2` with Python 3
+- Update Slack backend to use computed usename on teams setups
+- Enforce `unicode_literals` on Slack backend
+- Update ORCID backend to support Member API
+- Updated Pixelpin backend to use the new OpenId Connect service
+- Update `sanitize_redirect` to invalidate redirects like `///evil.com`
+- Update Coinbase API endpoint
+- Dropped Python 3.3 support
+- Updated Weixin backend to use `urlencode` from `six`
+- Updated Google+ backend to properly process requests with `id_token`
+- Updated OpenId connect dependencies
+
+## [1.7.0](https://github.com/python-social-auth/social-core/releases/tag/1.7.0) - 2018-02-20
+
+### Changed
+
+- Update EvenOnline token expiration key
+- Update OpenStreetMap URL to `https`
+- Fix LinkedIn backend to send the oauth_token as `Authorization` header
+- Fixed `extra_data` update to use the `alias` as key too
+- Make `signed_request` optional in Facebook App OAuth2 backend
+- Support string and lists on SAML permanent id value
+- Correct sending `params` sending on `GET` access-token retrieval case
+- Ensure b2c policy name check
+- Use `extras_requrie` to specify python specific version dependencies
+
+### Added
+
+- Added support for AzureAD B2C OAuth2
+- Added LinkedIn Mobile OAuth2 backend
+
+## [1.6.0](https://github.com/python-social-auth/social-core/releases/tag/1.6.0) - 2017-12-22
+
+### Changed
+
+- Fix coinbase backend to use api v2
+- Default `REDIRECT_STATE` to `False` in `FacebookOAuth2` backend.
+- Add revoke token url for Coinbase OAuth2 backend
+- Fix LinkedIn backend to send `oauth_token` as request header
+- Make partial step decorator handle arguments
+
+### Added
+
+- Added support for ChatWork OAuth2 backend
+
+## [1.5.0](https://github.com/python-social-auth/social-core/releases/tag/1.5.0) - 2017-10-28
+
+### Changed
+
+- Fix using the entire SAML2 nameid string
+- Prevent timing attacks against state token
+- Updated GitLab API version to v4
+- Enforce UTC when calculating access token expiration time
+- Cleanup user attributes update from social details
+- Send authorization header on Reddit auth
+
+### Added
+
+- Added support for tenant for Azure AD backend
+- Added JWT validation for Azure AD backend
+- Added support for Bungie.net OAuth2 backend
+- Added support for Eventbrite OAuth2 backend
+- Added support for OpenShift OAuth2 backend
+- Added support for Microsoft Graph OAuth2 backend
+
+## [1.4.0](https://github.com/python-social-auth/social-core/releases/tag/1.4.0) - 2017-06-09
+
+### Changed
+
+- Fix path in import BaseOAuth2 for Monzo
+- Fix auth header formatting problem for Fitbit OAuth2
+- Raise AuthForbidden when provider returns 401.
+- Update Facebook API to version 2.9
+- Speed up authorization process for VKAppOAuth2
+- Apply same sanitization as on connect to disconnect.
+- Disable `redirect_state` usage on Disqus backend
+
+### Added
+
+- Added Udata OAuth2 backend
+- Added ORCID backend
+- Added feature to get all extra data from backend through `GET_ALL_EXTRA_DATA` boolean flag.
+- Added Patreon provider
+
+## [1.3.0](https://github.com/python-social-auth/social-core/releases/tag/1.3.0) - 2017-05-06
+
+### Added
+
+- Use extra_data method when refreshing an `access_token`, ensure that
+  auth-time is updated then
+- Added 500px OAuth1 backend
+- Added Monzo OAuth2 backend
+- Added `get_access_token` method that will refresh if expired
+
+### Changed
+
+- Updated email validation to pass the partial pipeline token if given.
+- Prefer passed parameters in `authenticate` method
+- Properly discard already used verification codes
+- Save SAML attributes in `extra_data`
+- Note `id_token` in GooglePlusAuth's AuthMissingParameter
+
+## [1.2.0](https://github.com/python-social-auth/social-core/releases/tag/1.2.0) - 2017-02-10
+
+### Added
+
+- Limit Slack by team through `SOCIAL_AUTH_SLACK_TEAM` setting
+
+### Changed
+
+- Enable defining extra arguments for AzureAD backend.
+- Updated key `expires` to `expires_in` for Facebook OAuth2 backend
+- Updated Slack `id` fetch to default to user `id` if not present in response
+
+## [1.1.0](https://github.com/python-social-auth/social-core/releases/tag/1.1.0) - 2017-01-31
+
+### Added
+
+- Mediawiki backend
+- Strategy method to let implementation cleanup arguments passed to
+  the authenticate method
+
+### Changed
+
+- Removed OneLogin SAML IDP dummy settings while generating metadata xml
+- Fixed Asana user details response handling
+- Enforce defusedxml version with support for Python 3.6
+- Updated documentation URL in backends
+
+## [1.0.1](https://github.com/python-social-auth/social-core/releases/tag/1.0.1) - 2017-01-23
+
+### Changed
+
+- Fixed broken dependencies while building the package
+
+## [1.0.0](https://github.com/python-social-auth/social-core/releases/tag/1.0.0) - 2017-01-22
+
+### Added
+
+- Store partial pipeline data in an storage class
+- Store `auth_time` with the last time authentication took place, use
+  `auth_time` to determine if access token expired
+- Ensure that `testkey.pem` is distributed
+- Added Asana OAuth2 backend
+
+### Changed
+
+- Removed the old `save_status_to_session` to partialize a pipeline run
+
+## [0.2.1](https://github.com/python-social-auth/social-core/releases/tag/0.2.1) - 2016-12-31
+
+### Added
+
+- Defined `extras` for SAML, and "all" that will install SAML and OpenIdConnect
+- Added `auth_time` in extra data by default to store the time that the authentication took place
+
+### Changed
+
+- Remove set/get current strategy methods
+- Fixed the `extras` requirements defined in the setup.py script
+
+## [0.2.0](https://github.com/python-social-auth/social-core/releases/tag/0.2.0) - 2016-12-31
+
+### Changed
+
+- Reorganize requirements, make OpenIdConnect optional
+- Split OpenIdConnect from OpenId module, install with `social-core[openidconnect]`
+
+## [0.1.0](https://github.com/python-social-auth/social-core/releases/tag/0.1.0) - 2016-12-28
+
+### Added
+
+- Added support for GitLab OAuth2 backend.
+  Refs [#2](https://github.com/python-social-auth/social-core/issues/2)
+- Added support for Facebook OAuth2 return_scopes parameter.
+  Refs [#818](https://github.com/omab/python-social-auth/issues/818)
+- Added support for per-backend USER_FIELDS setting. Refs [#661](https://github.com/omab/python-social-auth/issues/661)
+- Added `expires_in` as `expires` for LinkedIn OAuth2. Refs [#666](https://github.com/omab/python-social-auth/issues/666)
+- Added `SOCIAL_AUTH_USER_AGENT` setting to override the default User-Agent header.
+  Refs [#752](https://github.com/omab/python-social-auth/issues/752)
+- Enabled Python 3 SAML support through python3-saml package.
+  Refs [#846](https://github.com/omab/python-social-auth/issues/846)
+- Added better username characters cleanup rules, support for a configurable
+  cleanup function through SOCIAL_AUTH_CLEAN_USERNAME_FUNCTION (import path)
+  setting.
+- Added configurable option SOCIAL_AUTH_FACEBOOK\_\*\_API_VERSION to
+  override the default Facebook API version used.
+- Add Lyft OAuth2 implementation to Python Social Auth (port from [#1036](https://github.com/omab/python-social-auth/pull/1036/files)
+  by iampark)
+- Added the ability to specify a pipeline on a per backend basis (port from [#1019](https://github.com/omab/python-social-auth/pull/1019)
+  by keattang)
+- Add support for MailChimp as an OAuth v2 backend (port from [#1037](https://github.com/omab/python-social-auth/pull/1037)
+  by svvitale)
+- Added Shimmering backend (port from [#1054](https://github.com/omab/python-social-auth/pull/1054)
+  by iamkhush)
+- Added Quizlet backend (port from [#1012](https://github.com/omab/python-social-auth/pull/1012)
+  by s-alexey)
+- Added Dockerfile to simplify the running of tests (`make docker-tox`)
+
+### Changed
+
+- Changed Facebook refresh token processing. Refs [#866](https://github.com/omab/python-social-auth/issues/866)
+- Update Google+ Auth tokeninfo API version, drop support for deprecated API scopes.
+  Refs [#791](https://github.com/omab/python-social-auth/issues/791).
+- Fixed OAuth1/2 early state validation on error responses.
+- Disabled SAML test when running on Travis-ci on Python 3.5 since it [segfaults](https://travis-ci.org/python-social-auth/social-core/jobs/186790227)
+  probably by a bad build in one of the dependencies
+- Fixed Xing backend testing broken by previous change
+- Fixed Xing backend dropping `callback_uri` and `oauth_verifier` parameters on authenticated API calls.
+  Refs [#871](https://github.com/omab/python-social-auth/issues/871)
+- Updated slack backend implementation, update API endpoints used, add test case.
+- Changed Dailymotion user data API endpoint
+- Changed how "false" values are treated in the user attributes update pipeline
+- Fix google OpenID Connect (port from [#747](https://github.com/omab/python-social-auth/pull/747)
+  by mvschaik)
+- Update Facebook api version to v2.8 (port from [#1047](https://github.com/omab/python-social-auth/pull/1047)
+  by browniebroke)
+- Remove Facebook2OAuth2 and Facebook2AppOAuth2 backends (port from [#1046](https://github.com/omab/python-social-auth/pull/1046)
+  by browniebroke)
+- change username, email and fullname keys (port from [#1028](https://github.com/omab/python-social-auth/pull/1028)
+  by inlanger)
+- Moves fix convert username to string (port from [#1021](https://github.com/omab/python-social-auth/pull/1021)
+  by WarmongeR1)
+- Fix auth_params for Stripe backend (port from [#1034](https://github.com/omab/python-social-auth/pull/1034)
+  by dchanm)
+- Preserve order of backends in BACKENDSCACHE (port from [#1004](https://github.com/omab/python-social-auth/pull/1004)
+  by tsouvarev)
+- Don't lose custom exception message on raising AuthCanceled (port from [#1062](https://github.com/omab/python-social-auth/pull/1062)
+  by dotsbb)
+- Fixed VK backend (port from [#1007](https://github.com/omab/python-social-auth/pull/1007)
+  by DeKaN)
+- Updated Dropbox backend (port from [#1018](https://github.com/omab/python-social-auth/pull/1018)
+  by illing2005)
+
+## [0.0.1](https://github.com/python-social-auth/social-core/releases/tag/0.0.1) - 2016-11-27
+
+### Changed
+
+- Split from the monolitic [python-social-auth](https://github.com/omab/python-social-auth)
+  codebase

@@ -1,0 +1,36 @@
+"""
+Flat OAuth2 backend, docs at:
+    https://python-social-auth.readthedocs.io/en/latest/backends/flat.html
+"""
+
+from typing import Any
+
+from social_core.backends.base import ResponseT_co
+
+from .oauth import BaseOAuth2
+
+
+class FlatOAuth2(BaseOAuth2[ResponseT_co]):
+    """Flat OAuth2"""
+
+    name = "flat"
+    title = "Flat"
+    REQUIRES_USER_ID = True
+    DEFAULT_SCOPE = ["account.public_profile"]
+    AUTHORIZATION_URL = "https://flat.io/auth/oauth"
+    ACCESS_TOKEN_URL = "https://api.flat.io/oauth/access_token"
+
+    def get_user_details(self, response):
+        """Return user details from Flat account"""
+        return {
+            "email": response.get("email"),
+            "username": response.get("username"),
+            "fullname": response.get("printableName"),
+        }
+
+    def user_data(self, access_token: str, *args, **kwargs) -> dict[str, Any] | None:
+        """Loads user data from service"""
+        return self.get_json(
+            "https://api.flat.io/v2/me",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )

@@ -1,0 +1,53 @@
+"""
+Udata related backends.
+
+Docs at:
+    https://python-social-auth.readthedocs.io/en/latest/backends/udata.html
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from social_core.backends.base import ResponseT_co
+from social_core.exceptions import AuthConfigurationError
+
+from .oauth import BaseOAuth2
+
+
+class UdataBaseOAuth2(BaseOAuth2[ResponseT_co]):
+    """Udata base OAuth authentication backend."""
+
+    SCOPE_SEPARATOR = ","
+    REDIRECT_STATE = False
+    DEFAULT_SCOPE = ["default"]
+    USER_DATA_URL: str | None = None
+
+    def get_user_details(self, response):
+        """Return user details from Udata account."""
+        return {
+            "username": response.get("first_name"),
+            "email": response.get("email") or "",
+            "first_name": response.get("first_name"),
+        }
+
+    def user_data(self, access_token: str, *args, **kwargs) -> dict[str, Any] | None:
+        """Load user data from service."""
+        if self.USER_DATA_URL is None:
+            raise AuthConfigurationError(
+                self,
+                parameter="USER_DATA_URL",
+                code="missing_setting",
+                stage="user_info",
+            )
+        return self.get_json(self.USER_DATA_URL, params={"access_token": access_token})
+
+
+class DatagouvfrOAuth2(UdataBaseOAuth2[ResponseT_co]):
+    """Datagouvfr OAuth authentication backend."""
+
+    name = "datagouv"
+    title = "data.gouv.fr"
+    ACCESS_TOKEN_URL = "https://www.data.gouv.fr/oauth/token"
+    AUTHORIZATION_URL = "https://www.data.gouv.fr/oauth/authorize"
+    USER_DATA_URL = "https://www.data.gouv.fr/api/1/me/"

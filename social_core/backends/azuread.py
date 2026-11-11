@@ -1,0 +1,507 @@
+"""
+Copyright (c) 2015 Microsoft Open Technologies, Inc.
+
+All rights reserved.
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Azure AD OAuth2 backend, docs at:
+    https://python-social-auth.readthedocs.io/en/latest/backends/azuread.html
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Any, cast
+from urllib.parse import urlsplit
+
+import jwt
+
+from social_core.backends.base import ResponseT_co
+from social_core.backends.utils import jwt_error, load_oidc_config
+from social_core.exceptions import (
+    AuthConfigurationError,
+    AuthResponseError,
+    ErrorStage,
+    SocialAuthBaseException,
+)
+from social_core.groups import configured_group_key, read_groups
+from social_core.utils import cache, social_logger
+
+from .oauth import BaseOAuth2PKCE
+
+
+class AzureADOAuth2(BaseOAuth2PKCE[ResponseT_co]):
+    name = "azuread-oauth2"
+    title = "Microsoft"
+    icon = "microsoft.svg"
+    ID_KEY = "sub"
+    LEGACY_ID_KEYS: tuple[str, ...] = ("upn",)
+    MUTABLE_ID_KEYS = ("upn", "preferred_username")
+    SCOPE_SEPARATOR = " "
+    BASE_URL = "https://{authority_host}/{tenant_id}"
+    AUTHORIZATION_URL = "{base_url}/oauth2/authorize"
+    ACCESS_TOKEN_URL = "{base_url}/oauth2/token"
+    OPENID_CONFIGURATION_URL = "{base_url}/.well-known/openid-configuration"
+    REDIRECT_STATE = False
+    DEFAULT_SCOPE = ["openid", "profile", "user_impersonation", "email"]
+    JWT_ALGORITHMS = ["RS256"]
+    DEFAULT_USE_PKCE = False
+    EXTRA_DATA = [
+        ("access_token", "access_token"),
+        ("id_token", "id_token"),
+        ("refresh_token", "refresh_token"),
+        ("expires_in", "expires_in"),
+        ("expires_on", "expires_on"),
+        ("not_before", "not_before"),
+        ("given_name", "first_name"),
+        ("family_name", "last_name"),
+        ("sub", "sub"),
+        ("oid", "oid"),
+        ("tid", "tid"),
+        ("token_type", "token_type"),
+    ]
+
+    def get_provider_error(
+        self,
+        data: object,
+        *,
+        stage: ErrorStage = "callback",
+        status_code: int | None = None,
+        retry_after: str | None = None,
+    ) -> SocialAuthBaseException | None:
+        if isinstance(data, dict) and data.get("error") == "invalid_request":
+            codes = data.get("error_codes")
+            description = data.get("error_description")
+            if (
+                isinstance(codes, list)
+                and any(isinstance(code, int) and code == 9002325 for code in codes)
+            ) or (
+                isinstance(description, str)
+                and description.lstrip().startswith("AADSTS9002325:")
+            ):
+                social_logger.warning(
+                    "Microsoft Entra ID rejected sign-in with AADSTS9002325. "
+                    "Check the app registration: a server-side callback must be "
+                    "registered under the Web platform. If it is registered as "
+                    "Single-page application (SPA), move it to Web. "
+                    "Enabling PKCE alone does not correct the platform registration."
+                )
+        return super().get_provider_error(
+            data, stage=stage, status_code=status_code, retry_after=retry_after
+        )
+
+    @property
+    def authority_host(self) -> str:
+        return cast("str", self.setting("AUTHORITY_HOST", "login.microsoftonline.com"))
+
+    @property
+    def tenant_id(self) -> str:
+        return "common"
+
+    @property
+    def base_url(self) -> str:
+        if authority_url := self.configured_authority_url():
+            return authority_url
+        return self.BASE_URL.format(
+            authority_host=self.authority_host, tenant_id=self.tenant_id
+        )
+
+    def configured_authority_url(self) -> str | None:
+        authority_url = self.setting("AUTHORITY_URL")
+        if authority_url is None:
+            return None
+        if isinstance(authority_url, str):
+            try:
+                parsed = urlsplit(authority_url)
+                valid_origin = (
+                    parsed.scheme == "https"
+                    and parsed.hostname
+                    and parsed.port != 0
+                    and parsed.username is None
+                    and parsed.password is None
+                )
+                valid_path = bool(parsed.path.strip("/"))
+                valid_characters = not any(
+                    character.isspace() or character in "?#"
+                    for character in authority_url
+                )
+                if valid_origin and valid_path and valid_characters:
+                    return authority_url.rstrip("/")
+            except ValueError:
+                pass
+        raise AuthConfigurationError(
+            self,
+            "AUTHORITY_URL must be an HTTPS base authority URL",
+            code="invalid_setting",
+            parameter="AUTHORITY_URL",
+        )
+
+    def _get_base_url(self, *, stage: ErrorStage) -> str:
+        """Resolve the authority through subclass properties at the caller's stage."""
+        try:
+            return self.base_url
+        except AuthConfigurationError as error:
+            error.stage = stage
+            raise
+
+    def get_openid_configuration_url_format(self) -> dict[str, str]:
+        return {
+            "authority_host": self.authority_host,
+            "base_url": self._get_base_url(stage="token_validation"),
+            "tenant_id": self.tenant_id,
+        }
+
+    def get_authorization_url_format(self) -> dict[str, str]:
+        return {"base_url": self._get_base_url(stage="begin")}
+
+    def get_access_token_url_format(self) -> dict[str, str]:
+        return {"base_url": self._get_base_url(stage="token_exchange")}
+
+    def openid_configuration_url(self) -> str:
+        url = cast(
+            "str",
+            self.setting("OPENID_CONFIGURATION_URL", self.OPENID_CONFIGURATION_URL),
+        )
+        return url.format(**self.get_openid_configuration_url_format())
+
+    @cache(ttl=86400)
+    def get_openid_configuration(self, url: str) -> dict[str, Any]:
+        return load_oidc_config(self, url, stage="token_validation")
+
+    def openid_configuration(self) -> dict[str, Any]:
+        return self.get_openid_configuration(self.openid_configuration_url())
+
+    def jwks_uri(self) -> str:
+        uri = self.setting("JWKS_URI") or self.openid_configuration().get("jwks_uri")
+        if not isinstance(uri, str):
+            raise AuthResponseError(
+                self, claim="jwks_uri", code="missing_claim", stage="token_validation"
+            )
+        return uri
+
+    @cache(ttl=86400)
+    def get_jwks_keys_for_uri(self, uri: str) -> list[dict[str, Any]]:
+        jwks = self.get_json(uri, stage="token_validation")
+        if not isinstance(jwks, dict):
+            raise AuthResponseError(
+                self, code="malformed_response", stage="token_validation"
+            )
+        keys = jwks.get("keys")
+        if keys is None:
+            raise AuthResponseError(
+                self, claim="keys", code="missing_claim", stage="token_validation"
+            )
+        if not isinstance(keys, list) or not all(isinstance(key, dict) for key in keys):
+            raise AuthResponseError(
+                self, claim="keys", code="malformed_response", stage="token_validation"
+            )
+        return cast("list[dict[str, Any]]", keys)
+
+    def get_jwks_keys(self) -> list[dict[str, Any]]:
+        return self.get_jwks_keys_for_uri(self.jwks_uri())
+
+    def get_user_id(self, details, response):
+        """Return the configured stable user identifier."""
+        return self.get_user_id_from_sources(details, response)
+
+    def get_user_groups(self, response) -> list[str] | None:
+        key = configured_group_key(self)
+        if key is None:
+            return None
+        return read_groups(
+            self,
+            response,
+            key,
+            missing_as_empty=self.setting("GROUPS_MISSING_AS_EMPTY", False),
+        )
+
+    def get_user_details(self, response):
+        """Return user details from Azure AD account"""
+        fullname, first_name, last_name = (
+            response.get("name"),
+            response.get("given_name"),
+            response.get("family_name"),
+        )
+        return {
+            "username": fullname,
+            "email": response.get("email", response.get("upn")),
+            "fullname": fullname,
+            "first_name": first_name,
+            "last_name": last_name,
+        }
+
+    def user_data(self, access_token: str, *args, **kwargs) -> dict[str, Any] | None:
+        response = kwargs.get("response")
+        if response and response.get("id_token"):
+            id_token = response.get("id_token")
+        else:
+            id_token = access_token
+
+        return self.validate_and_return_id_token(id_token)
+
+    def get_unverified_claims(self, id_token: str) -> dict[str, Any]:
+        try:
+            return jwt.decode(
+                id_token,
+                options={
+                    "verify_signature": False,
+                    "verify_aud": False,
+                    "verify_exp": False,
+                    "verify_iat": False,
+                    "verify_iss": False,
+                    "verify_nbf": False,
+                },
+            )
+        except jwt.PyJWTError as error:
+            raise jwt_error(self, error) from error
+
+    def resolve_tenant_issuer(
+        self, issuer: str, claims: dict[str, Any], parameter: str
+    ) -> str:
+        if "{tenantid}" not in issuer and "{tenantId}" not in issuer:
+            return issuer
+
+        tenant_id = claims.get("tid")
+        if not isinstance(tenant_id, str) or not tenant_id:
+            raise AuthResponseError(
+                self, claim=parameter, code="missing_claim", stage="token_validation"
+            )
+        return issuer.replace("{tenantid}", tenant_id).replace("{tenantId}", tenant_id)
+
+    def get_id_token_issuer(self, claims: dict[str, Any]) -> str:
+        issuer = self.openid_configuration().get("issuer")
+        if not isinstance(issuer, str):
+            raise AuthResponseError(
+                self, claim="issuer", code="missing_claim", stage="token_validation"
+            )
+        return self.resolve_tenant_issuer(issuer, claims, "tid")
+
+    def get_id_token_key(self, id_token: str) -> dict[str, Any]:
+        try:
+            header = jwt.get_unverified_header(id_token)
+        except jwt.PyJWTError as error:
+            raise jwt_error(self, error) from error
+
+        key_id = header.get("kid")
+        if not key_id:
+            raise AuthResponseError(
+                self, claim="kid", code="missing_claim", stage="token_validation"
+            )
+
+        for key in self.get_jwks_keys():
+            if key.get("kid") == key_id:
+                return key
+
+        self.get_jwks_keys_for_uri.invalidate()
+        for key in self.get_jwks_keys():
+            if key.get("kid") == key_id:
+                return key
+        raise AuthResponseError(
+            self,
+            "Signature key not found",
+            code="invalid_signature",
+            stage="token_validation",
+        )
+
+    def validate_key_issuer(self, key: dict[str, Any], claims: dict[str, Any]) -> None:
+        key_issuer = key.get("issuer")
+        if not isinstance(key_issuer, str):
+            return
+
+        expected_issuer = self.resolve_tenant_issuer(key_issuer, claims, "tid")
+        if expected_issuer != claims.get("iss"):
+            raise AuthResponseError(
+                self,
+                "Token issuer does not match signing key issuer",
+                code="invalid_claim",
+                stage="token_validation",
+            )
+
+    def get_jwt_algorithms(self) -> list[str]:
+        return cast("list[str]", self.setting("JWT_ALGORITHMS", self.JWT_ALGORITHMS))
+
+    def validate_and_return_id_token(self, id_token: str) -> dict[str, Any]:
+        unverified_claims = self.get_unverified_claims(id_token)
+        key = self.get_id_token_key(id_token)
+        self.validate_key_issuer(key, unverified_claims)
+
+        if "alg" not in key:
+            key = {**key, "alg": self.get_jwt_algorithms()[0]}
+
+        try:
+            return jwt.decode(
+                id_token,
+                key=jwt.PyJWK(key).key,
+                algorithms=self.get_jwt_algorithms(),
+                audience=self.setting("KEY"),
+                issuer=self.get_id_token_issuer(unverified_claims),
+                leeway=cast("int", self.setting("JWT_LEEWAY", default=0)),
+            )
+        except jwt.PyJWTError as error:
+            raise jwt_error(self, error) from error
+
+    def auth_extra_arguments(self):
+        """Return extra arguments needed on auth process."""
+        extra_arguments = super().auth_extra_arguments()
+        resource = self.setting("RESOURCE")
+        if resource:
+            extra_arguments.update({"resource": resource})
+        return extra_arguments
+
+    def extra_data(
+        self,
+        user,
+        uid: str,
+        response: dict[str, Any],
+        details: dict[str, Any],
+        pipeline_kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return access_token and extra defined names to store in
+        extra_data field"""
+        data = super().extra_data(user, uid, response, details, pipeline_kwargs)
+        # Refresh responses can provide only a relative lifetime. Do not let
+        # the expired timestamp from the previous token override that lifetime.
+        if (
+            response.get("expires_in") is not None
+            and response.get("expires_on") is None
+            and response.get("exp") is None
+        ):
+            data["expires_on"] = None
+        data["resource"] = self.setting("RESOURCE")
+        return data
+
+    def refresh_token_params(self, token, *args, **kwargs):
+        client_secret = cast("str | None", self.setting("SECRET"))
+        params = {
+            "client_id": self.setting("KEY"),
+            "refresh_token": token,
+            "grant_type": "refresh_token",
+            "resource": self.setting("RESOURCE"),
+        }
+
+        if client_secret:
+            params["client_secret"] = client_secret
+            return params
+
+        assertion = self.client_assertion(required=True, stage="refresh")
+        params.update(
+            {
+                "client_assertion_type": self.client_assertion_type(),
+                "client_assertion": assertion,
+            }
+        )
+
+        return params
+
+    def get_auth_token(self, user_id):
+        """Return the stored access token, refreshing it when possible."""
+        user = self.get_user(user_id=user_id)
+        return user.social_user.get_access_token(self.strategy)
+
+    def auth_complete_params(self, state=None):
+        params = super().auth_complete_params(state)
+        if params.get("client_secret"):
+            return params
+
+        assertion = self.client_assertion(required=True, stage="token_exchange")
+        params.update(
+            {
+                "client_assertion_type": self.client_assertion_type(),
+                "client_assertion": assertion,
+            }
+        )
+        return params
+
+    def client_assertion(
+        self, *, required: bool = False, stage: ErrorStage = "callback"
+    ) -> str | None:
+        if cast("str | None", self.setting("SECRET")):
+            return None
+
+        assertion = self.setting("CLIENT_ASSERTION")
+        if assertion:
+            return assertion
+
+        token_path = (
+            os.environ.get(
+                "OAUTH2_FEDERATED_TOKEN_FILE"
+            )  # supports OAUTH2_ naming convention
+            or os.environ.get("AZURE_FEDERATED_TOKEN_FILE")  # canonical name
+            or self.setting("FEDERATED_TOKEN_FILE")
+        )
+        if not token_path:
+            if required:
+                raise AuthConfigurationError(
+                    self,
+                    parameter="client_assertion",
+                    code="missing_setting",
+                    stage=stage,
+                )
+            return None
+
+        try:
+            assertion = Path(token_path).read_text(encoding="utf-8").strip()
+        except OSError as error:
+            if required:
+                raise AuthConfigurationError(
+                    self,
+                    parameter="client_assertion",
+                    code="missing_setting",
+                    stage=stage,
+                ) from error
+            return None
+
+        if not assertion:
+            if required:
+                raise AuthConfigurationError(
+                    self,
+                    parameter="client_assertion",
+                    code="missing_setting",
+                    stage=stage,
+                )
+            return None
+
+        return assertion
+
+    def client_assertion_type(self) -> str:
+        return cast(
+            "str",
+            self.setting(
+                "CLIENT_ASSERTION_TYPE",
+                "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+            ),
+        )
+
+
+class AzureADOAuth2V2(AzureADOAuth2[ResponseT_co]):
+    """Version of the AzureADOAuth2 backend that uses the v2.0 API endpoints,
+    supporting users with personal Microsoft accounts, if the app settings
+    allow them."""
+
+    name = "azuread-oauth2-v2"
+    title = "Microsoft"
+    icon = "microsoft.svg"
+    AUTHORIZATION_URL = "{base_url}/oauth2/v2.0/authorize"
+    ACCESS_TOKEN_URL = "{base_url}/oauth2/v2.0/token"
+    OPENID_CONFIGURATION_URL = "{base_url}/v2.0/.well-known/openid-configuration"
+    DEFAULT_SCOPE = ["User.Read profile openid email"]

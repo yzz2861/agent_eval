@@ -1,0 +1,85 @@
+"""
+Slack OAuth2 backend, docs at:
+    https://python-social-auth.readthedocs.io/en/latest/backends/slack.html
+    https://api.slack.com/docs/oauth
+"""
+
+from __future__ import annotations
+
+from typing import Any, cast
+
+from social_core.backends.base import ResponseT_co
+from social_core.exceptions import AuthPolicyError, AuthResponseError
+
+from .oauth import BaseOAuth2
+
+
+class SlackOAuth2(BaseOAuth2[ResponseT_co]):
+    """Slack OAuth authentication backend"""
+
+    name = "slack"
+    title = "Slack"
+    AUTHORIZATION_URL = "https://slack.com/oauth/authorize"
+    ACCESS_TOKEN_URL = "https://slack.com/api/oauth.access"
+    DEFAULT_SCOPE = ["identity.basic", "identity.email"]
+    SCOPE_SEPARATOR = ","
+    REDIRECT_STATE = False
+    EXTRA_DATA = [("id", "id"), ("name", "name"), ("real_name", "real_name")]
+
+    def auth_extra_arguments(self):
+        params = super().auth_extra_arguments() or {}
+        if team := self.setting("TEAM"):
+            params["team"] = cast("str", team)
+        return params
+
+    def get_user_details(self, response):
+        """Return user details from Slack account"""
+        # Build the username with the team $username@$team_url
+        # Necessary to get unique names for all of slack
+        user = response["user"]
+        team = response.get("team")
+        name = user["name"]
+        email = user.get("email")
+        username = (email and email.split("@", 1)[0]) or name
+        fullname = name
+        first_name = None
+        last_name = None
+
+        if self.setting("USERNAME_WITH_TEAM", True) and team and "name" in team:
+            username = f"{username}@{response['team']['name']}"
+
+        return {
+            "username": username,
+            "email": email,
+            "fullname": fullname,
+            "first_name": first_name,
+            "last_name": last_name,
+        }
+
+    def user_data(self, access_token: str, *args, **kwargs) -> dict[str, Any] | None:
+        """Loads user data from service"""
+        response = self.get_json(
+            "https://slack.com/api/users.identity",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        if team := self.setting("TEAM"):
+            if not isinstance(response, dict) or response.get("ok") is not True:
+                raise AuthResponseError(
+                    self, code="malformed_response", stage="user_info"
+                )
+            slack_team = response.get("team")
+            if (
+                not isinstance(slack_team, dict)
+                or not isinstance(slack_team.get("id"), str)
+                or not slack_team["id"]
+            ):
+                raise AuthResponseError(
+                    self, code="missing_claim", claim="team.id", stage="user_info"
+                )
+            if slack_team["id"] != str(team):
+                raise AuthPolicyError(
+                    self, code="membership_required", stage="user_info"
+                )
+        if not response.get("id", None):
+            response["id"] = response["user"]["id"]
+        return response
