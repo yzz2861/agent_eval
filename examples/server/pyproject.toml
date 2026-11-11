@@ -1,0 +1,28 @@
+[project]
+name = "fido2-example-server"
+version = "0.1.0"
+description = "Example server for python-fido2"
+authors = [
+  { name = "Dain Nilsson", email = "dain@yubico.com" }
+]
+requires-python = ">=3.10, <4"
+license = "Apache-2.0"
+dependencies = [
+  "Flask>=2.0,<3",
+  "fido2",
+]
+
+[tool.uv.sources]
+fido2 = { path = "../..", editable = true }
+
+[tool.poetry]
+packages = [
+  { include = "server" },
+]
+
+[build-system]
+requires = ["poetry-core>=2.0"]
+build-backend = "poetry.core.masonry.api"
+
+[project.scripts]
+server = "server.server:main"
