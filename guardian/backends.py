@@ -1,0 +1,156 @@
+from collections.abc import Iterable
+from typing import Any
+
+from django.db import models
+from django.db.models import Model
+from django.http import HttpRequest
+
+from guardian.conf import settings
+from guardian.core import ObjectPermissionChecker
+from guardian.ctypes import get_content_type
+from guardian.exceptions import WrongAppError
+from guardian.utils import get_anonymous_user
+
+
+def check_object_support(obj: Model) -> bool:
+    """Checks if given `obj` is supported
+
+    Returns:
+         `True` if given `obj` is supported
+    """
+    # Backend checks only object permissions (isinstance implies that obj
+    # is not None)
+    # Backend checks only permissions for Django models
+    return isinstance(obj, models.Model)
+
+
+def check_user_support(user_obj: Any) -> tuple[bool, Any]:
+    """Checks if given user is supported.
+
+    Checks if the given user is supported. Anonymous users need explicit
+    activation via ANONYMOUS_USER_NAME
+
+    Returns:
+        A tuple of checkresult and `user_obj` which should be used for permission checks
+    """
+    # This is how we support anonymous users - simply try to retrieve User
+    # instance and perform checks for that predefined user
+    if not user_obj.is_authenticated:
+        # If anonymous user permission is disabled, then they are always unauthorized
+        if settings.ANONYMOUS_USER_NAME is None:
+            return False, user_obj
+        # get_anonymous_user() honours GUARDIAN_ANONYMOUS_USER_CACHE_TTL
+        user_obj = get_anonymous_user()
+
+    return True, user_obj
+
+
+def check_support(user_obj: Any, obj: Model) -> Any:
+    """Checks if given user and object are supported.
+
+    Combination of `check_object_support` and `check_user_support`
+    """
+    obj_support = check_object_support(obj)
+    user_support, user_obj = check_user_support(user_obj)
+    return obj_support and user_support, user_obj
+
+
+class ObjectPermissionBackend:
+    """Django backend for checking object-level permissions."""
+
+    supports_object_permissions = True
+    supports_anonymous_user = True
+    supports_inactive_user = True
+
+    def authenticate(self, request: HttpRequest, username: str | None = None, password: str | None = None) -> Any:
+        return None
+
+    def has_perm(self, user_obj: Any, perm: str, obj: Model | None = None) -> bool:
+        """Check if a user has the permission for a given object.
+
+        Returns `True` if given `user_obj` has `perm` for `obj`.
+        If no `obj` is given, `False` is returned.
+        The main difference between Django's `ModelBackend` is that we can pass
+        `obj` instance here and `perm` doesn't have to contain
+        `app_label` as it can be retrieved from given `obj`.
+
+        **Inactive user support**
+
+        If `user` is authenticated but inactive at the same time, all checks
+        always return `False`.
+
+        Note:
+           Remember, that if user is not *active*, all checks would return `False`.
+
+        Parameters:
+            user_obj (User): User instance.
+            perm (str): Permission string.
+            obj (Model): Model instance.
+
+        Returns:
+            `True` if `user_obj` has permission, `False` otherwise.
+        """
+
+        # check if user_obj and object are supported
+        support, user_obj = check_support(user_obj, obj)
+        if not support:
+            return False
+
+        if "." in perm:
+            app_label, _ = perm.split(".", 1)
+            # TODO (David Graham): Check if obj is None or change the method signature
+            if app_label != obj._meta.app_label:  # type: ignore[union-attr]
+                # Check the content_type app_label when permission
+                # and obj app labels don't match.
+                ctype = get_content_type(obj)
+                if app_label != ctype.app_label:
+                    raise WrongAppError(
+                        f"Passed perm has app label of '{app_label}' while "
+                        f"given obj has app label '{obj._meta.app_label}' and given obj"  # type: ignore[union-attr]
+                        f"content_type has app label '{ctype.app_label}'"
+                    )
+
+        check = ObjectPermissionChecker(user_obj)
+        return check.has_perm(perm, obj)
+
+    def get_group_permissions(self, user_obj: Any, obj: Model | None = None) -> Iterable[str]:
+        """Returns group permissions for a given object.
+
+        Parameters:
+            user_obj (User): User instance.
+            obj (Model): Django Model instance. If None, returns empty set
+                        since this backend only handles object-level permissions.
+
+        Returns:
+             a set of permission strings that the given `user_obj` has for `obj`
+             through their group memberships.
+        """
+        # This backend only handles object-level permissions
+        if obj is None:
+            return set()
+
+        # check if user_obj and object are supported
+        support, user_obj = check_support(user_obj, obj)
+        if not support:
+            return set()
+
+        check = ObjectPermissionChecker(user_obj)
+        return set(check.get_group_perms(obj))
+
+    def get_all_permissions(self, user_obj: Any, obj: Model | None = None) -> Iterable[str]:
+        """Returns all permissions for a given object.
+
+        Parameters:
+            user_obj (User): User instance.
+            obj (Model): Django Model instance.
+
+        Returns:
+             a set of permission strings that the given `user_obj` has for `obj`.
+        """
+        # check if user_obj and object are supported
+        support, user_obj = check_support(user_obj, obj)
+        if not support:
+            return set()
+
+        check = ObjectPermissionChecker(user_obj)
+        return set(check.get_perms(obj))

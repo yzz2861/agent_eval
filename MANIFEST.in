@@ -1,0 +1,8 @@
+include LICENSE
+include README.rst
+include *.py
+include *.txt
+recursive-include guardian *.py
+recursive-include guardian/locale *.po *.mo
+recursive-include guardian *.html
+recursive-include guardian *.svg
