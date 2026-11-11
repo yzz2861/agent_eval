@@ -1,11 +1,43 @@
 from __future__ import annotations
 
+import h11
 import pytest
 
 from wsproto.connection import CLIENT, SERVER, ConnectionState
-from wsproto.events import AcceptConnection, Ping, Request
+from wsproto.events import AcceptConnection, Ping, RejectConnection, Request
+from wsproto.extensions import PerMessageDeflate
 from wsproto.handshake import H11Handshake
-from wsproto.utilities import LocalProtocolError, RemoteProtocolError
+from wsproto.utilities import (
+    LocalProtocolError,
+    RemoteProtocolError,
+    generate_accept_token,
+)
+
+
+def _extension_request(extension_headers: list[tuple[bytes, bytes]]) -> bytes:
+    nonce = b"VQr8cvwwZ1fEk62PDq8J3A=="
+    client = h11.Connection(h11.CLIENT)
+    return client.send(
+        h11.Request(
+            method="GET",
+            target="/",
+            headers=[
+                (b"Host", b"localhost"),
+                (b"Connection", b"Upgrade"),
+                (b"Upgrade", b"websocket"),
+                (b"Sec-WebSocket-Version", b"13"),
+                (b"Sec-WebSocket-Key", nonce),
+                *extension_headers,
+            ],
+        ),
+    )
+
+
+def _server_with_extensions(extension_headers: list[tuple[bytes, bytes]]) -> H11Handshake:
+    server = H11Handshake(SERVER)
+    server.receive_data(_extension_request(extension_headers))
+    next(server.events())
+    return server
 
 
 def test_successful_handshake() -> None:
@@ -102,3 +134,152 @@ def test_h11_multiple_headers_handshake() -> None:
         "this-extension; were-gonna-see",
         "and-another-extension; were-also; gonna-see=100; percent",
     ]
+
+
+@pytest.mark.parametrize(
+    "extension_header",
+    [
+        b"permessage-deflate; client_max_window_bits=8; client_max_window_bits=15",
+        b"permessage-deflate; server_max_window_bits=15; server_max_window_bits=12",
+        b"permessage-deflate; server_no_context_takeover=evil",
+        b"permessage-deflate; client_no_context_takeoverX",
+        b"permessage-deflate; client_max_window_bits=",
+        b"permessage-deflate; client_max_window_bits=0x10",
+        b"permessage-deflate; client_max_window_bits=010",
+        b"permessage-deflate; client_max_window_bits=8",
+        b"permessage-deflate; client_max_window_bits=16",
+        b"permessage-deflate; bogus_parameter",
+        b"permessage-deflate, permessage-deflate; client_max_window_bits=12",
+    ],
+)
+def test_server_rejects_malformed_extension_offer(extension_header: bytes) -> None:
+    server = H11Handshake(SERVER)
+    with pytest.raises(RemoteProtocolError) as excinfo:
+        server.receive_data(
+            _extension_request(
+                [(b"Sec-WebSocket-Extensions", extension_header)],
+            ),
+        )
+    assert excinfo.value.event_hint == RejectConnection(status_code=400)
+    assert server.state is ConnectionState.CONNECTING
+
+
+def test_malformed_extension_never_reaches_upgrade_response() -> None:
+    request = _extension_request(
+        [
+            (
+                b"Sec-WebSocket-Extensions",
+                b"permessage-deflate; client_max_window_bits=8; "
+                b"client_max_window_bits=15",
+            ),
+        ],
+    )
+    server = H11Handshake(SERVER)
+    with pytest.raises(RemoteProtocolError) as excinfo:
+        server.receive_data(request)
+    rejection = server.send(excinfo.value.event_hint)
+    assert b"HTTP/1.1 400" in rejection
+    assert b"Sec-WebSocket-Extensions" not in rejection
+    assert b"client_max_window_bits" not in rejection
+
+
+def test_server_accepts_browser_style_extension_offer() -> None:
+    extension = PerMessageDeflate()
+    server = _server_with_extensions(
+        [
+            (
+                b"Sec-WebSocket-Extensions",
+                b"permessage-deflate; CLIENT_MAX_WINDOW_BITS ; "
+                b"SERVER_MAX_WINDOW_BITS = 12 ; SERVER_NO_CONTEXT_TAKEOVER",
+            ),
+        ],
+    )
+
+    response = server.send(AcceptConnection(extensions=[extension]))
+    assert b"HTTP/1.1 101" in response
+    assert (
+        b"Sec-WebSocket-Extensions: permessage-deflate; "
+        b"server_no_context_takeover; client_max_window_bits=15; "
+        b"server_max_window_bits=12"
+    ) in response
+    assert extension.enabled()
+    assert extension.server_no_context_takeover is True
+    assert extension.server_max_window_bits == 12
+    assert extension.client_max_window_bits == 15
+
+
+def test_server_ignores_unknown_extension_without_echoing_it() -> None:
+    extension = PerMessageDeflate()
+    server = _server_with_extensions(
+        [
+            (
+                b"Sec-WebSocket-Extensions",
+                b"x-unknown; client_max_window_bits=8, "
+                b"permessage-deflate; client_max_window_bits=12",
+            ),
+        ],
+    )
+
+    response = server.send(AcceptConnection(extensions=[extension]))
+    assert b"HTTP/1.1 101" in response
+    assert b"x-unknown" not in response
+    assert b"Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits=12" in response
+
+
+def test_server_ignores_unknown_extension_even_when_it_looks_invalid() -> None:
+    server = _server_with_extensions(
+        [(b"Sec-WebSocket-Extensions", b"x-unknown; client_max_window_bits=8")],
+    )
+    response = server.send(AcceptConnection(extensions=[PerMessageDeflate()]))
+    assert b"HTTP/1.1 101" in response
+    assert b"Sec-WebSocket-Extensions" not in response
+
+
+def test_client_rejects_malformed_extension_response() -> None:
+    client = H11Handshake(CLIENT)
+    request_bytes = client.send(Request(host="localhost", target="/"))
+    parsed = h11.Connection(h11.SERVER)
+    parsed.receive_data(request_bytes)
+    request = parsed.next_event()
+    nonce = dict(request.headers)[b"sec-websocket-key"]
+    response = (
+        b"HTTP/1.1 101 Switching Protocols\r\n"
+        b"Upgrade: websocket\r\n"
+        b"Connection: Upgrade\r\n"
+        b"Sec-WebSocket-Accept: " + generate_accept_token(nonce) + b"\r\n"
+        b"Sec-WebSocket-Extensions: permessage-deflate; "
+        b"server_no_context_takeover=evil\r\n"
+        b"\r\n"
+    )
+    with pytest.raises(RemoteProtocolError) as excinfo:
+        client.receive_data(response)
+    assert excinfo.value.event_hint == RejectConnection(status_code=400)
+    assert client.state is ConnectionState.CONNECTING
+
+
+def test_client_accepts_well_formed_extension_response() -> None:
+    extension = PerMessageDeflate()
+    client = H11Handshake(CLIENT)
+    request_bytes = client.send(
+        Request(host="localhost", target="/", extensions=[extension]),
+    )
+    parsed = h11.Connection(h11.SERVER)
+    parsed.receive_data(request_bytes)
+    request = parsed.next_event()
+    nonce = dict(request.headers)[b"sec-websocket-key"]
+    response = (
+        b"HTTP/1.1 101 Switching Protocols\r\n"
+        b"Upgrade: websocket\r\n"
+        b"Connection: Upgrade\r\n"
+        b"Sec-WebSocket-Accept: " + generate_accept_token(nonce) + b"\r\n"
+        b"Sec-WebSocket-Extensions: permessage-deflate; "
+        b"client_max_window_bits=12; server_max_window_bits=13\r\n"
+        b"\r\n"
+    )
+    client.receive_data(response)
+    event = next(client.events())
+    assert isinstance(event, AcceptConnection)
+    assert client.state is ConnectionState.OPEN
+    assert extension.enabled()
+    assert extension.client_max_window_bits == 12
+    assert extension.server_max_window_bits == 13

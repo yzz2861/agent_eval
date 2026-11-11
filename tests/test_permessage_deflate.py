@@ -8,6 +8,7 @@ import pytest
 
 from wsproto import extensions as wpext
 from wsproto import frame_protocol as fp
+from wsproto.extensions import ExtensionParsingError
 
 if TYPE_CHECKING:
     from typing import TypedDict
@@ -175,6 +176,110 @@ class TestPerMessageDeflate:
 
         ext.accept("i am the lizard queen; worship me")
 
+        assert ext.enabled()
+
+    @pytest.mark.parametrize(
+        "offer",
+        [
+            "permessage-deflate; client_max_window_bits=8; client_max_window_bits=15",
+            "permessage-deflate; server_max_window_bits=15; server_max_window_bits=12",
+            "permessage-deflate; client_no_context_takeover; client_no_context_takeover",
+        ],
+    )
+    def test_accept_rejects_duplicate_parameters(self, offer: str) -> None:
+        ext = wpext.PerMessageDeflate()
+        with pytest.raises(ExtensionParsingError):
+            ext.accept(offer)
+        assert not ext.enabled()
+
+    @pytest.mark.parametrize(
+        "offer",
+        [
+            "permessage-deflate; client_max_window_bits=",
+            "permessage-deflate; client_max_window_bits=0x10",
+            "permessage-deflate; client_max_window_bits=010",
+        ],
+    )
+    def test_accept_rejects_non_decimal_or_empty_values(self, offer: str) -> None:
+        ext = wpext.PerMessageDeflate()
+        with pytest.raises(ExtensionParsingError):
+            ext.accept(offer)
+        assert not ext.enabled()
+
+    @pytest.mark.parametrize("bits", ["8", "16", "0", "-1", "100"])
+    def test_accept_rejects_out_of_range_window_bits(self, bits: str) -> None:
+        ext = wpext.PerMessageDeflate()
+        with pytest.raises(ExtensionParsingError):
+            ext.accept(f"permessage-deflate; client_max_window_bits={bits}")
+        with pytest.raises(ExtensionParsingError):
+            ext.accept(f"permessage-deflate; server_max_window_bits={bits}")
+        assert not ext.enabled()
+
+    def test_accept_rejects_unknown_parameter_variant(self) -> None:
+        ext = wpext.PerMessageDeflate()
+        with pytest.raises(ExtensionParsingError):
+            ext.accept("permessage-deflate; client_no_context_takeoverX")
+        with pytest.raises(ExtensionParsingError):
+            ext.accept("permessage-deflate; server_no_context_takeover=evil")
+        assert not ext.enabled()
+
+    def test_accept_rejects_role_disallowed_parameter(self) -> None:
+        ext = wpext.PerMessageDeflate()
+        # A bare window parameter is not legal in a server response.
+        with pytest.raises(ExtensionParsingError):
+            ext.finalize("permessage-deflate; client_max_window_bits")
+        assert not ext.enabled()
+
+    def test_accept_is_case_insensitive_and_ows_tolerant(self) -> None:
+        ext = wpext.PerMessageDeflate()
+        response = ext.accept(
+            "permessage-deflate ; CLIENT_MAX_WINDOW_BITS = 12 ; "
+            "SERVER_NO_CONTEXT_TAKEOVER ; SERVER_MAX_WINDOW_BITS = 10",
+        )
+        assert response == (
+            "server_no_context_takeover; client_max_window_bits=12; "
+            "server_max_window_bits=10"
+        )
+        assert ext.client_max_window_bits == 12
+        assert ext.server_max_window_bits == 10
+        assert ext.server_no_context_takeover is True
+        assert ext.enabled()
+
+    def test_accept_bare_client_window_bits_inherits_default(self) -> None:
+        ext = wpext.PerMessageDeflate()
+        response = ext.accept("permessage-deflate; client_max_window_bits")
+        assert response == "client_max_window_bits=15"
+        assert ext.client_max_window_bits == 15
+        assert ext.enabled()
+
+    def test_validate_offer_rejects_bad_extension_name_token(self) -> None:
+        with pytest.raises(ExtensionParsingError):
+            wpext.PerMessageDeflate.validate_offer("permessage deflate")
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            "permessage-deflate; client_max_window_bits=8; client_max_window_bits=15",
+            "permessage-deflate; server_no_context_takeover=evil",
+            "permessage-deflate; client_max_window_bits",
+            "permessage-deflate; client_no_context_takeoverX",
+            "permessage-deflate; client_max_window_bits=16",
+        ],
+    )
+    def test_finalize_rejects_malformed_response(self, response: str) -> None:
+        ext = wpext.PerMessageDeflate()
+        with pytest.raises(ExtensionParsingError):
+            ext.finalize(response)
+        assert not ext.enabled()
+
+    def test_finalize_is_case_insensitive_and_ows_tolerant(self) -> None:
+        ext = wpext.PerMessageDeflate()
+        ext.finalize(
+            "permessage-deflate ; CLIENT_MAX_WINDOW_BITS = 12 ; "
+            "SERVER_NO_CONTEXT_TAKEOVER",
+        )
+        assert ext.client_max_window_bits == 12
+        assert ext.server_no_context_takeover is True
         assert ext.enabled()
 
     def test_inbound_uncompressed_control_frame(self) -> None:

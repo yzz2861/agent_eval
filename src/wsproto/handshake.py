@@ -16,7 +16,7 @@ import h11
 
 from .connection import Connection, ConnectionState, ConnectionType
 from .events import AcceptConnection, Event, RejectConnection, RejectData, Request
-from .extensions import Extension
+from .extensions import SUPPORTED_EXTENSIONS, Extension, ExtensionParsingError
 from .utilities import (
     LocalProtocolError,
     RemoteProtocolError,
@@ -258,6 +258,8 @@ class H11Handshake:
                 msg, event_hint=RejectConnection(),
             )
 
+        validate_request_extensions(extensions)
+
         self._initiating_request = Request(
             extensions=extensions,
             extra_headers=headers,
@@ -290,10 +292,16 @@ class H11Handshake:
             )
 
         if event.extensions:
-            accepts = server_extensions_handshake(
-                cast("Sequence[str]", self._initiating_request.extensions),
-                event.extensions,
-            )
+            try:
+                accepts = server_extensions_handshake(
+                    cast("Sequence[str]", self._initiating_request.extensions),
+                    event.extensions,
+                )
+            except ExtensionParsingError as exc:
+                msg = f"Invalid extension offer: {exc}"
+                raise RemoteProtocolError(
+                    msg, event_hint=RejectConnection(),
+                ) from exc
             if accepts:
                 headers.append((b"Sec-WebSocket-Extensions", accepts))
 
@@ -494,6 +502,39 @@ def server_extensions_handshake(
     return None
 
 
+def validate_request_extensions(requested: Iterable[str]) -> None:
+    """
+    Validate offers for known extensions in a client request.
+
+    Unknown extensions are ignored per RFC 6455, but malformed offers for an
+    extension the server implements make the whole handshake invalid.
+    """
+    seen: set[str] = set()
+    for offer in requested:
+        name = offer.split(";", 1)[0].strip().lower()
+        if not name:
+            msg = "Invalid extension offer: Extension header value is missing an extension name"
+            raise RemoteProtocolError(
+                msg, event_hint=RejectConnection(),
+            )
+        if name not in SUPPORTED_EXTENSIONS:
+            continue
+        if name in seen:
+            msg = f"Duplicate extension '{name}'"
+            raise RemoteProtocolError(
+                msg, event_hint=RejectConnection(),
+            )
+        seen.add(name)
+        extension_class = SUPPORTED_EXTENSIONS[name]
+        try:
+            extension_class.validate_offer(offer)
+        except ExtensionParsingError as exc:
+            msg = f"Invalid extension offer: {exc}"
+            raise RemoteProtocolError(
+                msg, event_hint=RejectConnection(),
+            ) from exc
+
+
 def client_extensions_handshake(
     accepted: Iterable[str], supported: Sequence[Extension],
 ) -> list[Extension]:
@@ -504,7 +545,13 @@ def client_extensions_handshake(
         name = accept.split(";", 1)[0].strip()
         for extension in supported:
             if extension.name == name:
-                extension.finalize(accept)
+                try:
+                    extension.finalize(accept)
+                except ExtensionParsingError as exc:
+                    msg = f"Invalid extension response: {exc}"
+                    raise RemoteProtocolError(
+                        msg, event_hint=RejectConnection(),
+                    ) from exc
                 extensions.append(extension)
                 break
         else:
