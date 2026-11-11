@@ -166,7 +166,7 @@ def verify_authentication_response(
         )
 
     client_data_hash = hashlib.sha256()
-    client_data_hash.update(client_data_bytes)
+    client_data_hash.update(client_data.raw_bytes)
     client_data_hash_bytes = client_data_hash.digest()
 
     signature_base = authenticator_data_bytes + client_data_hash_bytes

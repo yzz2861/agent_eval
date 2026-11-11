@@ -1,6 +1,6 @@
 from enum import Enum
 from dataclasses import dataclass, field
-from typing import List, Literal, Optional
+from typing import Dict, List, Literal, Optional, Tuple
 
 from .cose import COSEAlgorithmIdentifier
 
@@ -282,6 +282,9 @@ class CollectedClientData:
         `origin`: The base domain with protocol on which the registration or authentication ceremony took place (e.g. "https://foo.bar")
         (optional) `cross_origin`: Whether or not the registration or authentication ceremony took place on a different origin (think within an <iframe>)
         (optional) `token_binding`: Information on the state of the Token Binding protocol
+        (optional) `top_origin`: The origin of the top-level frame when `cross_origin` is true
+        `raw_bytes`: The exact bytes that were parsed and signed by the authenticator
+        `raw_field_ranges`: Byte ranges, keyed by property path, identifying each parsed value in `raw_bytes`
 
     https://www.w3.org/TR/webauthn-2/#dictdef-collectedclientdata
     """
@@ -291,6 +294,21 @@ class CollectedClientData:
     origin: str
     cross_origin: Optional[bool] = None
     token_binding: Optional[TokenBinding] = None
+    top_origin: Optional[str] = None
+    raw_bytes: bytes = field(default=b"", repr=False)
+    raw_field_ranges: Dict[str, Tuple[int, int]] = field(
+        default_factory=dict,
+        repr=False,
+    )
+
+    def get_raw_field_bytes(self, name: str) -> bytes:
+        """Get the exact bytes of a parsed property, including string quotes."""
+        bounds = self.raw_field_ranges.get(name)
+        if bounds is None:
+            raise KeyError(f'No raw byte range was recorded for property "{name}"')
+
+        start, end = bounds
+        return self.raw_bytes[start:end]
 
 
 ################
