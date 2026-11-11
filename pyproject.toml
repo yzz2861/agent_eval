@@ -1,0 +1,80 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["Evtx*", "evtx_scripts*"]
+exclude = ["tests", "tests.*"]
+
+[project]
+name = "python-evtx"
+version = "0.8.1"
+description = "Pure Python parser for Windows event log files (.evtx)."
+readme = "README.md"
+license = "Apache-2.0"
+authors = [
+    { name = "Willi Ballenthin", email = "willi.ballenthin@gmail.com" },
+]
+requires-python = ">=3.9"
+dependencies = [
+    "hexdump>=3.3",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable", # Assuming based on version 0.8.0
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Logging",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Security",
+]
+
+[project.urls]
+Homepage = "https://github.com/williballenthin/python-evtx"
+Repository = "https://github.com/williballenthin/python-evtx"
+Bug-Tracker = "https://github.com/williballenthin/python-evtx/issues"
+
+[project.optional-dependencies]
+test = [
+    "pytest-cov>=5.0.0",
+    "pytest>=8.2.2",
+    "lxml>=5.2.2",
+    "black>=24.4.2",
+    "isort>=5.13.2",
+    "ruff>=0.4.10",
+]
+
+[project.scripts]
+evtx_dump = "evtx_scripts.evtx_dump:main"
+evtx_dump_json = "evtx_scripts.evtx_dump_json:main"
+evtx_dump_chunk_slack = "evtx_scripts.evtx_dump_chunk_slack:main"
+evtx_eid_record_numbers = "evtx_scripts.evtx_eid_record_numbers:main"
+evtx_extract_record = "evtx_scripts.evtx_extract_record:main"
+evtx_filter_records = "evtx_scripts.evtx_filter_records:main"
+evtx_info = "evtx_scripts.evtx_info:main"
+evtx_record_structure = "evtx_scripts.evtx_record_structure:main"
+evtx_structure = "evtx_scripts.evtx_structure:main"
+evtx_templates = "evtx_scripts.evtx_templates:main"
+
+[tool.black]
+line-length = 120
+
+[tool.isort]
+profile = "black"
+line_length = 120
+length_sort = true
+
+[tool.ruff]
+line-length = 120
+
+[dependency-groups]
+build = [
+    "build>=1.2.2.post1",
+]
