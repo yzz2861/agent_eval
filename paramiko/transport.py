@@ -864,6 +864,10 @@ class Transport(threading.Thread, ClosingContextManager):
         if not self.active:
             return
         self.stop_thread()
+        if self.auth_handler is not None:
+            # Never allow partial auth state to bleed into a later session
+            # that may reuse this handler/transport pairing.
+            self.auth_handler._reset_server_auth_state()
         for chan in list(self._channels.values()):
             chan._unlink()
         self.sock.close()
@@ -2762,6 +2766,11 @@ class Transport(threading.Thread, ClosingContextManager):
         if self.server_mode and (self.auth_handler is None):
             # create auth handler for server mode
             self.auth_handler = AuthHandler(self)
+        elif self.server_mode and self.initial_kex_done:
+            # A re-key starts a fresh SSH connection context; any partial
+            # authentication progress from the previous key exchange must not
+            # carry over into the new one.
+            self.auth_handler._reset_server_auth_state()
         if not self.initial_kex_done:
             # this was the first key exchange
             # (also signal to packetizer as it sometimes wants to know this

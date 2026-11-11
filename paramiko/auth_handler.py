@@ -82,6 +82,13 @@ class AuthHandler:
         # for server mode:
         self.auth_username = None
         self.auth_fail_count = 0
+        # Per-connection server-side auth state. ``auth_method`` records the
+        # method currently in progress (eg while a keyboard-interactive query
+        # is outstanding), ``completed_auth_methods`` the methods that already
+        # returned AUTH_PARTIALLY_SUCCESSFUL, and ``interactive_query_open``
+        # whether the server is waiting on an interactive info response.
+        self.completed_auth_methods = set()
+        self.interactive_query_open = False
 
     def _log(self, *args):
         return self.transport._log(*args)
@@ -143,8 +150,23 @@ class AuthHandler:
             self.transport.lock.release()
 
     def abort(self):
+        self._reset_server_auth_state()
         if self.auth_event is not None:
             self.auth_event.set()
+
+    def _reset_server_auth_state(self):
+        """
+        Clear all per-connection server-mode authentication state.
+
+        Invoked when the connection is closed, aborted, or a new key exchange
+        starts, so a partial success from one connection can never leak into
+        the next one.
+        """
+        self.auth_username = None
+        self.auth_fail_count = 0
+        self.auth_method = ""
+        self.completed_auth_methods = set()
+        self.interactive_query_open = False
 
     # ...internals...
 
@@ -373,6 +395,8 @@ class AuthHandler:
             self._log(INFO, "Auth granted ({}).".format(method))
             m.add_byte(cMSG_USERAUTH_SUCCESS)
             self.authenticated = True
+            self.auth_fail_count = 0
+            self.interactive_query_open = False
         else:
             self._log(INFO, "Auth rejected ({}).".format(method))
             m.add_byte(cMSG_USERAUTH_FAILURE)
@@ -381,9 +405,13 @@ class AuthHandler:
             )
             if result == AUTH_PARTIALLY_SUCCESSFUL:
                 m.add_boolean(True)
+                # A partial success is not a failure: record the method that
+                # completed instead of bumping the failure counter.
+                self.completed_auth_methods.add(method)
             else:
                 m.add_boolean(False)
                 self.auth_fail_count += 1
+            self.interactive_query_open = False
         self.transport._send_message(m)
         if self.auth_fail_count >= 10:
             self._disconnect_no_more_auth()
@@ -437,6 +465,9 @@ class AuthHandler:
             self._disconnect_no_more_auth()
             return
         self.auth_username = username
+
+        if not self._validate_auth_method(username, method):
+            return
 
         if method == "none":
             result = self.transport.server_object.check_auth_none(username)
@@ -518,12 +549,77 @@ class AuthHandler:
             )
             if isinstance(result, InteractiveQuery):
                 # make interactive query instead of response
+                self.auth_method = method
+                self.interactive_query_open = True
                 self._interactive_query(result)
                 return
         else:
-            result = self.transport.server_object.check_auth_none(username)
+            # Unknown auth methods must never be silently downgraded to
+            # "none": reject them outright and drop the connection.
+            self._log(
+                WARNING,
+                'Auth rejected: unknown auth method "{}"'.format(method),
+            )
+            self._disconnect_no_more_auth()
+            return
         # okay, send result
         self._send_auth_result(username, method, result)
+
+    def _validate_auth_method(self, username, method):
+        """
+        Enforce the per-connection server-side auth state machine.
+
+        Returns ``True`` if the request may proceed, otherwise terminates the
+        connection and returns ``False``.
+
+        The rules, per RFC 4252, are:
+
+        * only methods advertised by ``get_allowed_auths`` may be used;
+        * a method that already completed (returned
+          ``AUTH_PARTIALLY_SUCCESSFUL``) may not be retried;
+        * once every advertised method has been completed, no further
+          ``MSG_USERAUTH_REQUEST`` is permitted.
+        """
+        allowed = [
+            candidate.strip()
+            for candidate in (
+                self.transport.server_object.get_allowed_auths(username)
+                or ""
+            ).split(",")
+            if candidate.strip()
+        ]
+        if method not in allowed:
+            self._log(
+                WARNING,
+                'Auth rejected: method "{}" is not among the allowed '
+                "methods {}".format(method, allowed),
+            )
+            self._disconnect_no_more_auth()
+            return False
+        if method in self.completed_auth_methods:
+            self._log(
+                WARNING,
+                'Auth rejected: method "{}" was already completed '
+                "for this connection".format(method),
+            )
+            self._disconnect_no_more_auth()
+            return False
+        remaining = [
+            name for name in allowed if name not in self.completed_auth_methods
+        ]
+        if not remaining:
+            self._log(
+                WARNING,
+                "Auth rejected: no remaining auth methods for this "
+                "connection",
+            )
+            self._disconnect_no_more_auth()
+            return False
+        # A new request supersedes any previously outstanding exchange (eg a
+        # client that abandoned an interactive query), so clear that marker.
+        self.interactive_query_open = False
+        self.auth_method = method
+        return True
 
     def _parse_userauth_success(self, m):
         self._log(
@@ -594,6 +690,14 @@ class AuthHandler:
     def _parse_userauth_info_response(self, m):
         if not self.transport.server_mode:
             raise SSHException("Illegal info response from server")
+        if not self.interactive_query_open:
+            self._log(
+                WARNING,
+                "Auth rejected: keyboard-interactive info response "
+                "received without an outstanding query",
+            )
+            self._disconnect_no_more_auth()
+            return
         n = m.get_int()
         responses = []
         for i in range(n):
@@ -603,8 +707,10 @@ class AuthHandler:
         )
         if isinstance(result, InteractiveQuery):
             # make interactive query instead of response
+            # Another query is now outstanding, so the marker stays set.
             self._interactive_query(result)
             return
+        self.interactive_query_open = False
         self._send_auth_result(
             self.auth_username, "keyboard-interactive", result
         )

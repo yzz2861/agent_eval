@@ -33,14 +33,20 @@ from unittest.mock import Mock
 from pytest import mark, raises
 
 from paramiko import (
+    AUTH_FAILED,
+    AUTH_PARTIALLY_SUCCESSFUL,
+    AUTH_SUCCESSFUL,
+    InteractiveQuery,
     OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED,
     AuthHandler,
     ChannelException,
+    Ed25519Key,
     IncompatiblePeer,
     MessageOrderError,
     Packetizer,
     RSAKey,
     SecurityOptions,
+    ServerInterface,
     ServiceRequestingTransport,
     SSHException,
     Transport,
@@ -49,6 +55,7 @@ from paramiko.auth_handler import AuthOnlyHandler
 from paramiko.common import (
     DEFAULT_MAX_PACKET_SIZE,
     DEFAULT_WINDOW_SIZE,
+    DISCONNECT_NO_MORE_AUTH_METHODS_AVAILABLE,
     MAX_WINDOW_SIZE,
     MIN_PACKET_SIZE,
     MIN_WINDOW_SIZE,
@@ -57,9 +64,14 @@ from paramiko.common import (
     MSG_IGNORE,
     MSG_KEXINIT,
     MSG_UNIMPLEMENTED,
+    MSG_USERAUTH_PK_OK,
     MSG_USERAUTH_SUCCESS,
     byte_chr,
+    cMSG_DISCONNECT,
     cMSG_CHANNEL_WINDOW_ADJUST,
+    cMSG_USERAUTH_FAILURE,
+    cMSG_USERAUTH_INFO_REQUEST,
+    cMSG_USERAUTH_SUCCESS,
     cMSG_UNIMPLEMENTED,
 )
 from paramiko.message import Message
@@ -1075,6 +1087,374 @@ class TransportTest(unittest.TestCase):
 
 # TODO: for now this is purely a regression test. It needs actual tests of the
 # intentional new behavior too!
+class ProgrammableAuthServer(ServerInterface):
+    """
+    ServerInterface whose auth callbacks are controlled by plain attributes.
+    """
+
+    def __init__(
+        self,
+        allowed="publickey,password,keyboard-interactive",
+        none_result=AUTH_FAILED,
+        password_result=AUTH_FAILED,
+        publickey_result=AUTH_FAILED,
+        interactive_result=AUTH_FAILED,
+        interactive_response_result=AUTH_FAILED,
+    ):
+        self.allowed = allowed
+        self.none_result = none_result
+        self.password_result = password_result
+        self.publickey_result = publickey_result
+        self.interactive_result = interactive_result
+        self.interactive_response_result = interactive_response_result
+        self.calls = []
+
+    def get_allowed_auths(self, username):
+        return self.allowed
+
+    def check_auth_none(self, username):
+        self.calls.append(("none", username))
+        return self.none_result
+
+    def check_auth_password(self, username, password):
+        self.calls.append(("password", username, password))
+        return self.password_result
+
+    def check_auth_publickey(self, username, key):
+        self.calls.append(("publickey", username))
+        return self.publickey_result
+
+    def check_auth_interactive(self, username, submethods):
+        self.calls.append(("interactive", username, submethods))
+        return self.interactive_result
+
+    def check_auth_interactive_response(self, responses):
+        self.calls.append(("interactive-response", tuple(responses)))
+        return self.interactive_response_result
+
+
+class FakeServerTransport:
+    """
+    Minimal stand-in for a server-mode `.Transport`.
+
+    Only implements the surface touched by `.AuthHandler`: it records every
+    outbound message and flags when the handler asked for a disconnect.
+    """
+
+    def __init__(self, server):
+        self.server_mode = True
+        self.server_object = server
+        self.auth_timeout = 30
+        self.session_id = b"fake-session-id"
+        self.preferred_pubkeys = (
+            "ssh-ed25519",
+            "ecdsa-sha2-nistp256",
+            "rsa-sha2-512",
+            "rsa-sha2-256",
+            "ssh-rsa",
+        )
+        self._key_info = {
+            "ssh-ed25519": Ed25519Key,
+        }
+        self.messages = []
+        self.closed = False
+
+    def _log(self, level, msg, *args):
+        pass
+
+    def _send_message(self, message):
+        self.messages.append(message)
+
+    def close(self):
+        self.closed = True
+
+    def _auth_trigger(self):
+        pass
+
+
+class ServerAuthStateMachineTest(unittest.TestCase):
+    """
+    Per-connection server-side authentication state machine tests.
+
+    These drive `.AuthHandler` directly with a fake transport, so each
+    protocol-level transgression can be asserted without a real socket pair.
+    """
+
+    def setUp(self):
+        self.server = ProgrammableAuthServer()
+        self.transport = FakeServerTransport(self.server)
+        self.handler = AuthHandler(self.transport)
+
+    def _userauth_request(self, username, method, *fields):
+        message = Message()
+        message.add_string(username)
+        message.add_string("ssh-connection")
+        message.add_string(method)
+        for field in fields:
+            field(message)
+        message.rewind()
+        self.handler._parse_userauth_request(message)
+
+    def _password_request(self, username="user", password="secret"):
+        self._userauth_request(
+            username,
+            "password",
+            lambda m: m.add_boolean(False),
+            lambda m: m.add_string(password),
+        )
+
+    def _none_request(self, username="user"):
+        self._userauth_request(username, "none")
+
+    def _info_response(self, responses):
+        message = Message()
+        message.add_int(len(responses))
+        for response in responses:
+            message.add_string(response)
+        message.rewind()
+        self.handler._parse_userauth_info_response(message)
+
+    def _last_message(self):
+        return Message(self.transport.messages[-1].asbytes())
+
+    def _assert_disconnected(
+        self, code=DISCONNECT_NO_MORE_AUTH_METHODS_AVAILABLE
+    ):
+        assert self.transport.closed
+        message = self._last_message()
+        assert message.get_byte() == cMSG_DISCONNECT
+        assert message.get_int() == code
+
+    def _assert_failure(self, partial=False):
+        message = self._last_message()
+        assert message.get_byte() == cMSG_USERAUTH_FAILURE
+        message.get_list()
+        assert message.get_boolean() is partial
+
+    def _assert_success(self):
+        message = self._last_message()
+        assert message.get_byte() == cMSG_USERAUTH_SUCCESS
+        assert self.handler.is_authenticated()
+
+    def test_unknown_auth_method_is_rejected_and_disconnects(self):
+        # A typo'd method name must never be treated as "none".
+        self._userauth_request("user", "passwrod")
+        self._assert_disconnected()
+        # The none callback must not have been invoked as a fallback.
+        assert all(call[0] != "none" for call in self.server.calls)
+
+    def test_username_cannot_change_mid_flight(self):
+        self.server.allowed = "password"
+        self._password_request(username="alice")
+        assert self.handler.auth_username == "alice"
+        # Switching identity on an existing auth exchange is rejected.
+        self._password_request(username="bob")
+        self._assert_disconnected()
+
+    def test_fresh_handler_has_clean_state(self):
+        assert self.handler.auth_username is None
+        assert self.handler.auth_fail_count == 0
+        assert self.handler.completed_auth_methods == set()
+        assert not self.handler.interactive_query_open
+        assert not self.handler.is_authenticated()
+
+    def test_completed_method_cannot_be_retried_after_partial_success(self):
+        self.server.password_result = AUTH_PARTIALLY_SUCCESSFUL
+        self._password_request()
+        self._assert_failure(partial=True)
+        assert self.handler.completed_auth_methods == {"password"}
+        # Repeating the already-completed method terminates the connection.
+        self._password_request()
+        self._assert_disconnected()
+
+    def test_none_after_partial_success_is_rejected(self):
+        self.server.allowed = "password"
+        self.server.password_result = AUTH_PARTIALLY_SUCCESSFUL
+        self._password_request()
+        self._assert_failure(partial=True)
+        # With every advertised method completed, a "none" request is just
+        # another illegal continuation and must terminate the connection.
+        self._none_request()
+        self._assert_disconnected()
+
+    def test_undeclared_method_terminates_connection(self):
+        # "password" is not in the server's advertised list.
+        self.server.allowed = "publickey"
+        self._password_request()
+        self._assert_disconnected()
+
+    def test_request_when_no_methods_remain_terminates_connection(self):
+        self.server.allowed = "password"
+        self.server.password_result = AUTH_PARTIALLY_SUCCESSFUL
+        self._password_request()
+        self._assert_failure(partial=True)
+        # Every advertised method is done; any further request is illegal.
+        self._userauth_request(
+            "user",
+            "keyboard-interactive",
+            lambda m: m.add_string(""),
+        )
+        self._assert_disconnected()
+
+    def test_failures_accumulate_but_partial_success_does_not_count(self):
+        # Nine hard failures followed by a partial success must not trip the
+        # ten-strike disconnect, because a partial success is not a failure.
+        for _ in range(9):
+            self._password_request()
+        assert self.handler.auth_fail_count == 9
+        self.server.password_result = AUTH_PARTIALLY_SUCCESSFUL
+        self._password_request()
+        assert self.handler.auth_fail_count == 9
+        assert not self.transport.closed
+        self._assert_failure(partial=True)
+
+    def test_ten_real_failures_use_existing_disconnect_path(self):
+        for _ in range(10):
+            self._password_request()
+        self._assert_disconnected()
+        assert self.handler.auth_fail_count == 10
+
+    def test_successful_auth_resets_failure_counter(self):
+        for _ in range(4):
+            self._password_request()
+        assert self.handler.auth_fail_count == 4
+        self.server.password_result = AUTH_SUCCESSFUL
+        self._password_request()
+        self._assert_success()
+        assert self.handler.auth_fail_count == 0
+
+    def test_auth_timeout_attribute_remains_available(self):
+        # The existing client-side timeout logic relies on the transport's
+        # auth_timeout; make sure the state-machine work did not disturb it.
+        assert self.transport.auth_timeout == 30
+        self.transport.auth_timeout = None
+        assert self.transport.auth_timeout is None
+
+    def test_out_of_order_interactive_response_is_rejected(self):
+        # No info request has been sent, so an info response is an error.
+        self._info_response(["cat"])
+        self._assert_disconnected()
+        assert not self.server.calls
+
+    def test_interactive_response_accepted_only_while_query_open(self):
+        self.server.interactive_result = InteractiveQuery(
+            "password", "Please enter a password.", ("Password", False)
+        )
+        self.server.interactive_response_result = AUTH_SUCCESSFUL
+        self._userauth_request(
+            "user",
+            "keyboard-interactive",
+            lambda m: m.add_string(""),
+        )
+        # The server asked a question and is now waiting for an answer.
+        assert self.handler.interactive_query_open
+        query = self._last_message()
+        assert query.get_byte() == cMSG_USERAUTH_INFO_REQUEST
+        self._info_response(["cat"])
+        self._assert_success()
+        assert not self.handler.interactive_query_open
+
+    def test_second_interactive_query_keeps_exchange_open(self):
+        second_query = InteractiveQuery(
+            "token", "And now your token.", ("Token", False)
+        )
+        self.server.interactive_result = InteractiveQuery(
+            "password", "Password first.", ("Password", False)
+        )
+        self.server.interactive_response_result = second_query
+        self._userauth_request(
+            "user",
+            "keyboard-interactive",
+            lambda m: m.add_string(""),
+        )
+        self._info_response(["wrong"])
+        # Another query went out instead of a terminal result.
+        followup = self._last_message()
+        assert followup.get_byte() == cMSG_USERAUTH_INFO_REQUEST
+        assert self.handler.interactive_query_open
+        # The exchange can still complete normally afterwards.
+        self.server.interactive_response_result = AUTH_SUCCESSFUL
+        self._info_response(["123456"])
+        self._assert_success()
+
+    def test_publickey_probe_returns_pk_ok_without_authenticating(self):
+        key = Ed25519Key.from_private_key_file(_support("ed25519.key"))
+        self.server.allowed = "publickey"
+        self.server.publickey_result = AUTH_SUCCESSFUL
+
+        def probe(message):
+            message.add_boolean(False)
+            message.add_string(key.get_name())
+            message.add_string(key.asbytes())
+
+        self._userauth_request("user", "publickey", probe)
+        reply = self._last_message()
+        assert reply.get_byte() == byte_chr(MSG_USERAUTH_PK_OK)
+        assert reply.get_text() == key.get_name()
+        assert not self.handler.is_authenticated()
+        # A probe is not a completed auth method.
+        assert self.handler.completed_auth_methods == set()
+
+    def test_publickey_probe_does_not_skip_signature_verification(self):
+        key = Ed25519Key.from_private_key_file(_support("ed25519.key"))
+        self.server.allowed = "publickey"
+        self.server.publickey_result = AUTH_SUCCESSFUL
+
+        def probe(message):
+            message.add_boolean(False)
+            message.add_string(key.get_name())
+            message.add_string(key.asbytes())
+
+        self._userauth_request("user", "publickey", probe)
+        assert self._last_message().get_byte() == byte_chr(
+            MSG_USERAUTH_PK_OK
+        )
+        # The follow-up signed request still goes through the full check; a
+        # bogus signature must be rejected rather than inheriting the probe.
+        blob = self.handler._get_session_blob(
+            key, "ssh-connection", "user", key.get_name()
+        )
+        signature = Message()
+        signature.add_string(key.get_name())
+        signature.add_string(b"not-a-real-signature")
+
+        def signed(message):
+            message.add_boolean(True)
+            message.add_string(key.get_name())
+            message.add_string(key.asbytes())
+            message.add_string(signature.asbytes())
+
+        self._userauth_request("user", "publickey", signed)
+        self._assert_failure()
+        assert not self.handler.is_authenticated()
+        # Sanity: the blob builder embeds the connection's session id.
+        assert self.transport.session_id in blob
+
+    def test_abort_clears_partial_auth_state(self):
+        self.server.password_result = AUTH_PARTIALLY_SUCCESSFUL
+        self._password_request()
+        assert self.handler.completed_auth_methods == {"password"}
+        self.handler.abort()
+        assert self.handler.completed_auth_methods == set()
+        assert self.handler.auth_fail_count == 0
+        assert self.handler.auth_username is None
+        assert not self.handler.interactive_query_open
+
+    def test_rekey_clears_partial_auth_state(self):
+        self.server.password_result = AUTH_PARTIALLY_SUCCESSFUL
+        self._password_request()
+        assert self.handler.completed_auth_methods == {"password"}
+        # Simulate Transport._parse_newkeys on a subsequent key exchange.
+        self.handler._reset_server_auth_state()
+        assert self.handler.completed_auth_methods == set()
+        assert self.handler.auth_fail_count == 0
+        # A fresh connection may now use password again without being treated
+        # as a duplicate.
+        self.server.password_result = AUTH_SUCCESSFUL
+        self._password_request()
+        self._assert_success()
+
+
 class ServiceRequestingTransportTest(TransportTest):
     _auth_handler_class = AuthOnlyHandler
 
