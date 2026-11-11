@@ -15,12 +15,18 @@ _IDENTIFY_REGEX = (
     r"\$(?P<salt>[A-Za-z0-9+/.]{22})(?P<hash>[A-Za-z0-9+/.]{31})$"
 )
 
+# Matches the bcrypt algorithm prefix (`$2a$`, `$2b$`, ...) even when the
+# rounds, salt or digest that follow are truncated or otherwise invalid.
+_IDENTIFY_PREFIX_REGEX = r"^\$2[abxy]\$"
+
 
 def _match_regex_hash(hash: str | bytes) -> re.Match[str] | None:
     return re.match(_IDENTIFY_REGEX, ensure_str(hash))
 
 
 class BcryptHasher(HasherProtocol):
+    algorithm: typing.ClassVar[str] = "bcrypt"
+
     def __init__(
         self, rounds: int = 12, prefix: typing.Literal["2a", "2b"] = "2b"
     ) -> None:
@@ -36,6 +42,35 @@ class BcryptHasher(HasherProtocol):
     def identify(cls, hash: str | bytes) -> bool:
         validate_str_or_bytes(hash, "hash")
         return _match_regex_hash(hash) is not None
+
+    @classmethod
+    def is_valid(cls, hash: str | bytes) -> bool:
+        """
+        Strict structural check: rounds, a 22-char salt and a 31-char digest
+        must all be present.
+        """
+        validate_str_or_bytes(hash, "hash")
+        try:
+            return _match_regex_hash(hash) is not None
+        except UnicodeDecodeError:
+            return False
+
+    @classmethod
+    def identify_prefix(cls, hash: str | bytes) -> bool:
+        validate_str_or_bytes(hash, "hash")
+        try:
+            hash_str = ensure_str(hash)
+        except UnicodeDecodeError:
+            return False
+        return re.match(_IDENTIFY_PREFIX_REGEX, hash_str) is not None
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, BcryptHasher):
+            return NotImplemented
+        return self.rounds == other.rounds and self.prefix == other.prefix
+
+    def __hash__(self) -> int:
+        return hash((self.rounds, self.prefix))
 
     def hash(self, password: str | bytes, *, salt: bytes | None = None) -> str:
         validate_str_or_bytes(password, "password")

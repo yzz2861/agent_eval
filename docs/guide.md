@@ -103,3 +103,67 @@ valid, updated_hash = password_hash.verify_and_update("herminetincture", hash)
 If the hash needs to be updated, `updated_hash` will be a string. Otherwise, it's `None`. Then, don't forget to update it in your database.
 
 It's worth to note that the hash is also upgraded if the **settings of the algorithm** has been changed, like the time or memory cost.
+
+### Migrate hashes as a transaction
+
+`verify_and_update` is convenient, but it leaves the tricky parts to the caller: it can't tell a wrong password from a corrupted hash, and two concurrent logins on the same legacy hash may both generate and store a new hash. For a real migration, use the explicit [`PasswordMigrationPolicy`](./reference/pwdlib.md#pwdlib.PasswordMigrationPolicy).
+
+```py
+from pwdlib import CorruptedHashHandling, PasswordHash, PasswordMigrationPolicy
+
+password_hash = PasswordHash((
+    Argon2Hasher(),
+    BcryptHasher(),
+))
+
+migration_policy = PasswordMigrationPolicy(
+    password_hash,
+    # Hashers accepted for verification but eligible for an upgrade.
+    # Defaults to every hasher except the current one.
+    legacy_hashers=(BcryptHasher(),),
+    # Return an explicit corrupted-hash result instead of raising (default).
+    corrupted_hash_handling=CorruptedHashHandling.RETURN_RESULT,
+    # Upgrade legacy/obsolete hashes after a successful login (default).
+    upgrade_on_success=True,
+    # Optional minimum duration of a verification, to flatten timing leaks.
+    min_verification_time=0.2,
+)
+```
+
+The policy needs a storage boundary so it can commit the upgrade atomically. You can pass a store object implementing `load_hash` and `update_hash`, or a plain `update_hash` callable plus an optional `load` callable:
+
+```py
+class UserHashStore:
+    def __init__(self, user):
+        self.user = user
+
+    def load_hash(self, old_hash: str) -> str | None:
+        return self.user.hashed_password
+
+    def update_hash(self, old_hash: str, new_hash: str) -> None:
+        # Use a compare-and-swap on old_hash in your database update clause.
+        self.user.hashed_password = new_hash
+
+
+result = migration_policy.verify_and_migrate(
+    "herminetincture", user.hashed_password, UserHashStore(user)
+)
+```
+
+The returned [`MigrationResult`](./reference/pwdlib.md#pwdlib.MigrationResult) is fully structured — callers never parse hash strings or guess the meaning of a boolean:
+
+- `authenticated` tells whether the password was correct;
+- `upgraded` tells whether this transaction committed a new hash;
+- `status` distinguishes `success`, `upgraded`, `already_migrated`, `invalid_password`, `corrupted_hash` and `storage_error`;
+- `failure_reason` gives the machine-readable failure cause (`none` otherwise);
+- `algorithm` is the algorithm that verified the hash;
+- `final_hash` is the hash the transaction ends with.
+
+Failure modes are first-class:
+
+- an unknown algorithm prefix still raises [`UnknownHashError`](./reference/pwdlib.exceptions.md);
+- a recognized prefix with truncated or invalid parameters is reported as `corrupted_hash` (or raises `CorruptedHashError` when configured to), never as a wrong password;
+- if storing the upgraded hash fails, authentication stays successful: the result is `storage_error` and `final_hash` carries the freshly generated hash so the commit can be retried without forcing the user out;
+- two concurrent logins using the same legacy hash are serialized per hash: only the first one writes, the other gets `already_migrated` with the already committed hash.
+
+This prevents a single corrupted record from turning into a logout storm: a bad hash is quarantined through its explicit status while valid users keep logging in.

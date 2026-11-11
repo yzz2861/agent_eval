@@ -25,8 +25,16 @@ def ensure_bytes(v: str | bytes, *, encoding: str = "utf-8") -> bytes:
 
 
 class HasherProtocol(typing.Protocol):
+    algorithm: typing.ClassVar[str]
+
     @classmethod
     def identify(cls, hash: str | bytes) -> bool: ...
+
+    @classmethod
+    def identify_prefix(cls, hash: str | bytes) -> bool: ...
+
+    @classmethod
+    def is_valid(cls, hash: str | bytes) -> bool: ...
 
     def hash(self, password: str | bytes, *, salt: bytes | None = None) -> str: ...
 

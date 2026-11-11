@@ -1,4 +1,5 @@
 import re
+import typing
 
 try:
     import argon2.exceptions
@@ -20,8 +21,15 @@ ARGON2_ENCODED_HASH_REGEX: re.Pattern = re.compile(
     r"(?:\$(?P<salt>[^$]+)(?:\$(?P<digest>.+?))?)?$"
 )
 
+# Matches any string starting with a supported Argon2 algorithm prefix,
+# regardless of whether the parameters, salt and digest are valid. It is used
+# to distinguish a corrupted Argon2 hash from a completely unknown hash.
+ARGON2_PREFIX_REGEX: re.Pattern = re.compile(r"^\$argon2(id|i|d)\$")
+
 
 class Argon2Hasher(HasherProtocol):
+    algorithm: typing.ClassVar[str] = "argon2"
+
     def __init__(
         self,
         time_cost: int = argon2.DEFAULT_TIME_COST,
@@ -62,6 +70,54 @@ class Argon2Hasher(HasherProtocol):
             return False
         variant: str = match.group("variant")
         return variant in {"argon2id", "argon2i", "argon2d"}
+
+    @classmethod
+    def is_valid(cls, hash: str | bytes) -> bool:
+        """
+        Strict structural check: a complete Argon2 hash must carry both a
+        salt and a digest, not only parameters.
+        """
+        validate_str_or_bytes(hash, "hash")
+        try:
+            hash_str = ensure_str(hash)
+        except UnicodeDecodeError:
+            return False
+        match = ARGON2_ENCODED_HASH_REGEX.fullmatch(hash_str)
+        if match is None:
+            return False
+        return bool(match.group("salt")) and bool(match.group("digest"))
+
+    @classmethod
+    def identify_prefix(cls, hash: str | bytes) -> bool:
+        validate_str_or_bytes(hash, "hash")
+        try:
+            hash_str = ensure_str(hash)
+        except UnicodeDecodeError:
+            return False
+        return ARGON2_PREFIX_REGEX.match(hash_str) is not None
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Argon2Hasher):
+            return NotImplemented
+        return (
+            self._hasher._parameters == other._hasher._parameters
+            and self._hasher.encoding == other._hasher.encoding
+        )
+
+    def __hash__(self) -> int:
+        parameters = self._hasher._parameters
+        return hash(
+            (
+                parameters.type,
+                parameters.version,
+                parameters.salt_len,
+                parameters.hash_len,
+                parameters.time_cost,
+                parameters.memory_cost,
+                parameters.parallelism,
+                self._hasher.encoding,
+            )
+        )
 
     def hash(self, password: str | bytes, *, salt: bytes | None = None) -> str:
         validate_str_or_bytes(password, "password")

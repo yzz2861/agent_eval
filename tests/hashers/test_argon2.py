@@ -64,6 +64,32 @@ def test_identify_large_hash() -> None:
     assert Argon2Hasher.identify(large_hash)
 
 
+@pytest.mark.parametrize(
+    "hash,result",
+    [
+        (ARGON2ID_HASH_STR, True),
+        (ARGON2_MALFORMED_HASH, False),
+        (INVALID_UTF8_BYTES, False),
+    ],
+)
+def test_is_valid(hash: str | bytes, result: bool) -> None:
+    assert Argon2Hasher.is_valid(hash) is result
+
+
+@pytest.mark.parametrize(
+    "hash,result",
+    [
+        (ARGON2ID_HASH_STR, True),
+        (ARGON2_MALFORMED_HASH, True),
+        ("$argon2id$v=19$m=65536,t=3,p=4", True),
+        (INVALID_UTF8_BYTES, False),
+        ("INVALID_HASH", False),
+    ],
+)
+def test_identify_prefix(hash: str | bytes, result: bool) -> None:
+    assert Argon2Hasher.identify_prefix(hash) is result
+
+
 def test_hash(argon2_hasher: Argon2Hasher) -> None:
     hash = argon2_hasher.hash("herminetincture")
     assert isinstance(hash, str)

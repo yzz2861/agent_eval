@@ -27,6 +27,40 @@ def test_identify(hash: str | bytes, result: bool) -> None:
     assert BcryptHasher.identify(hash) == result
 
 
+@pytest.mark.parametrize(
+    "hash,result",
+    [
+        (_HASH_STR, True),
+        (_HASH_BYTES, True),
+        ("$2b$12$" + "C" * 20, False),
+        (b"\xc3\x28", False),
+    ],
+)
+def test_is_valid(hash: str | bytes, result: bool) -> None:
+    assert BcryptHasher.is_valid(hash) is result
+
+
+@pytest.mark.parametrize(
+    "hash,result",
+    [
+        (_HASH_STR, True),
+        ("$2b$12$" + "C" * 20, True),
+        (b"\xc3\x28", False),
+        ("INVALID_HASH", False),
+    ],
+)
+def test_identify_prefix(hash: str | bytes, result: bool) -> None:
+    assert BcryptHasher.identify_prefix(hash) is result
+
+
+def test_equality() -> None:
+    assert BcryptHasher() == BcryptHasher()
+    assert BcryptHasher(rounds=10) != BcryptHasher(rounds=12)
+    assert BcryptHasher(prefix="2a") != BcryptHasher()
+    assert BcryptHasher().__eq__(object()) is NotImplemented
+    assert hash(BcryptHasher()) == hash(BcryptHasher())
+
+
 def test_hash(bcrypt_hasher: BcryptHasher) -> None:
     hash = bcrypt_hasher.hash("herminetincture")
     assert isinstance(hash, str)

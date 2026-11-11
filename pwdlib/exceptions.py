@@ -50,3 +50,30 @@ class UnknownHashError(PwdlibError):
             "Make sure it's valid and that its corresponding hasher is enabled."
         )
         super().__init__(message)
+
+
+class CorruptedHashError(PwdlibError):
+    """
+    Error raised when a hash has a recognizable algorithm prefix but its
+    content is malformed (truncated, invalid parameters, ...).
+
+    This is distinct from :class:`UnknownHashError` (no matching hasher at
+    all) and from a plain password mismatch, so callers don't have to infer
+    corruption from a ``False`` result.
+    """
+
+    def __init__(self, hash: str | bytes, algorithm: str) -> None:
+        """
+        Args:
+            hash:
+                The corrupted hash.
+            algorithm:
+                Name of the hasher that recognized the hash prefix.
+        """
+        self.hash = hash
+        self.algorithm = algorithm
+        message = (
+            f"This {algorithm} hash is corrupted: its prefix is recognized "
+            "but its content can't be parsed or verified."
+        )
+        super().__init__(message)
