@@ -1,0 +1,50 @@
+/.coverage
+/build
+/dist
+/docs/build
+/ossfuzz
+/images/benchmark-*.svg
+/images/benchmark-data
+/images/benchmark-compare*.png
+/images/benchmark-summary*.png
+/benchmarking/*_old*.py
+/benchmarking/images/
+/metrics/
+/.eggs
+/env*
+/htmlcov
+/tags
+/pages
+/.pytest_cache
+/.tox
+/.idea
+/.vscode
+__pycache__
+*.py[cod]
+*.egg-info
+*.swp
+*#*
+*~
+*.tar.gz
+examples/example.json
+
+# Local benchmarking files for Theelx
+kern*.py
+*.lprof
+benchmark-*.json
+perf.csv
+perf.svg
+# Files created by OSS-Fuzz when running locally
+fuzz_*.pkg.spec
+*.dict
+monkeytype.sqlite3
+# pyenv files
+.python-version
+# type checking config
+.pyre*
+# vscode workspaces
+*.code-workspace
+# benchmarking code
+.bench-venvs/
+.bench-worktrees/
+/benchmarking/.bench-common-tests.json
