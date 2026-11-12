@@ -21,8 +21,13 @@ from python_multipart.exceptions import (
     QuerystringParseError,
 )
 from python_multipart.multipart import (
+    DUPLICATE_HEADER,
     END,
     FIELD_DATA,
+    INVALID_HEADER_ENCODING,
+    INVALID_HEADER_FIELD,
+    INVALID_HEADER_FOLD,
+    INVALID_HEADER_VALUE,
     BaseParser,
     Field,
     File,
@@ -895,6 +900,215 @@ def test_parser_states_remain_enum_members() -> None:
     querystring_parser.write(b"field=value")
     querystring_parser.finalize()
     assert querystring_parser.state is QuerystringState.FIELD_DATA is FIELD_DATA
+
+
+HeaderEvent = tuple[str, bytes | None]
+
+
+def collect_header_events(
+    chunks: list[bytes], *, strict_parsing: bool = False
+) -> tuple[list[HeaderEvent], MultipartParseError | None]:
+    events: list[HeaderEvent] = []
+    parser = MultipartParser(
+        b"b",
+        callbacks={
+            "on_header_begin": lambda: events.append(("begin", None)),
+            "on_header_field": lambda data, start, end: events.append(("field", data[start:end])),
+            "on_header_value": lambda data, start, end: events.append(("value", data[start:end])),
+            "on_header_end": lambda: events.append(("end", None)),
+            "on_headers_finished": lambda: events.append(("headers_finished", None)),
+        },
+        strict_parsing=strict_parsing,
+    )
+    error = None
+    try:
+        for chunk in chunks:
+            parser.write(chunk)
+    except MultipartParseError as exc:
+        error = exc
+    return events, error
+
+
+def header_summary(events: list[HeaderEvent]) -> list[tuple[bytes, bytes]]:
+    headers: list[tuple[bytes, bytes]] = []
+    field = b""
+    value = b""
+    for event, data in events:
+        if event == "field":
+            assert data is not None
+            field += data
+        elif event == "value":
+            assert data is not None
+            value += data
+        elif event == "end":
+            headers.append((field, value))
+            field = b""
+            value = b""
+    return headers
+
+
+@pytest.mark.parametrize("strict_parsing", [False, True])
+def test_legal_header_fold_is_unfolded_without_creating_a_field(strict_parsing: bool) -> None:
+    body = b'--b\r\nContent-Disposition: form-data; name="safe"\r\n Bcc: victim@example.com\r\n\r\nvalue\r\n--b--\r\n'
+
+    events, error = collect_header_events([body], strict_parsing=strict_parsing)
+
+    assert error is None
+    assert header_summary(events) == [(b"Content-Disposition", b'form-data; name="safe" Bcc: victim@example.com')]
+    assert ("headers_finished", None) in events
+
+
+@pytest.mark.parametrize("strict_parsing", [False, True])
+def test_bare_lf_in_header_value_is_rejected(strict_parsing: bool) -> None:
+    body = b'--b\r\nContent-Disposition: form-data; name="a"\nBcc: victim\r\n\r\nv\r\n--b--\r\n'
+
+    _, error = collect_header_events([body], strict_parsing=strict_parsing)
+
+    assert error is not None
+    assert error.category == INVALID_HEADER_VALUE
+    assert error.offset == body.index(b"\n", body.index(b"Content-Disposition"))
+    assert error.part_offset == error.offset
+
+
+def test_bare_cr_in_header_value_is_rejected() -> None:
+    body = b'--b\r\nContent-Disposition: form-data; name="a"\rBcc: victim\r\n\r\nv\r\n--b--\r\n'
+
+    _, error = collect_header_events([body], strict_parsing=True)
+
+    assert error is not None
+    assert error.category == INVALID_HEADER_VALUE
+    assert error.offset == body.index(b"Bcc")
+
+
+@pytest.mark.parametrize("header", [b"X\x00-Test: value", b"X-Test: va\x00lue", b"X-Test: value\nX-Other: v"])
+def test_control_bytes_in_part_headers_are_rejected(header: bytes) -> None:
+    body = b"--b\r\n" + header + b"\r\n\r\nv\r\n--b--\r\n"
+    expected_category = INVALID_HEADER_FIELD if b"X\x00-Test" in header else INVALID_HEADER_VALUE
+
+    _, error = collect_header_events([body], strict_parsing=True)
+
+    assert error is not None
+    assert error.category == expected_category
+
+
+def test_rejected_header_value_is_not_logged(caplog: pytest.LogCaptureFixture) -> None:
+    secret = b"do-not-log-this-value"
+    body = b"--b\r\nX-Secret: " + secret + b"\x00\r\n\r\nv\r\n--b--\r\n"
+
+    _, error = collect_header_events([body], strict_parsing=True)
+
+    assert error is not None
+    assert secret.decode() not in caplog.text
+
+
+def test_header_fold_before_first_field_is_rejected() -> None:
+    body = b"--b\r\n Indented-Field: value\r\n\r\nv\r\n--b--\r\n"
+
+    _, error = collect_header_events([body], strict_parsing=True)
+
+    assert error is not None
+    assert error.category == INVALID_HEADER_FOLD
+    assert error.offset == body.index(b" Indented-Field")
+
+
+@pytest.mark.parametrize("header_name", [b"Content-Disposition", b"Content-Type", b"Content-Transfer-Encoding"])
+def test_strict_mode_rejects_duplicate_critical_headers(header_name: bytes) -> None:
+    if header_name == b"Content-Disposition":
+        header_value = b'form-data; name="a"'
+    elif header_name == b"Content-Type":
+        header_value = b"text/plain"
+    else:
+        header_value = b"7bit"
+    first = header_name + b": " + header_value
+    second = header_name.lower() + b": " + header_value
+    body = b"--b\r\n" + first + b"\r\n" + second + b"\r\n\r\nv\r\n--b--\r\n"
+
+    _, error = collect_header_events([body], strict_parsing=True)
+
+    assert error is not None
+    assert error.category == DUPLICATE_HEADER
+    assert error.offset == body.index(second)
+
+
+def test_compatibility_mode_keeps_first_duplicate_critical_header() -> None:
+    fields: list[Field] = []
+    body = (
+        b'--b\r\nContent-Disposition: form-data; name="first"\r\n'
+        b"Content-Type: text/plain\r\n"
+        b'Content-Disposition: form-data; name="second"\r\n'
+        b"Content-Type: application/json\r\n\r\nvalue\r\n--b--\r\n"
+    )
+    parser = FormParser("multipart/form-data", fields.append, None, boundary=b"b")
+
+    parser.write(body)
+    parser.finalize()
+
+    assert [(field.field_name, field.content_type) for field in fields] == [(b"first", "text/plain")]
+
+
+def test_strict_mode_rejects_invalid_utf8_but_compatibility_mode_accepts_it() -> None:
+    body = b"--b\r\nX-Name: \xff\r\n\r\nv\r\n--b--\r\n"
+
+    events, error = collect_header_events([body], strict_parsing=True)
+    assert error is not None
+    assert error.category == INVALID_HEADER_ENCODING
+    assert error.offset == body.index(b"\xff")
+    assert ("end", None) not in events
+    assert ("field", b"X-Name") in events
+    assert ("value", b"\xff") in events
+
+    events, error = collect_header_events([body])
+    assert error is None
+    assert header_summary(events) == [(b"X-Name", b"\xff")]
+
+
+def test_strict_mode_accepts_valid_multibyte_filename_and_quoted_escapes() -> None:
+    files: list[File] = []
+    body = (
+        b'--b\r\nContent-Disposition: form-data; name="upload"; '
+        b'filename="\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e.txt"\r\n\r\ncontent\r\n--b--\r\n'
+    )
+    parser = FormParser("multipart/form-data", None, files.append, boundary=b"b", config={"STRICT_PARSING": True})
+
+    parser.write(body)
+    parser.finalize()
+
+    assert files[0].file_name == "日本語.txt".encode()
+
+    escaped_body = b'--b\r\nX-Name: "line\\r\\nnext.txt"\r\n\r\nv\r\n--b--\r\n'
+    events, error = collect_header_events([escaped_body], strict_parsing=True)
+    assert error is None
+    assert header_summary(events) == [(b"X-Name", b'"line\\r\\nnext.txt"')]
+
+
+@pytest.mark.parametrize("chunk_size", [1, 2, 7, 16])
+def test_strict_header_parsing_is_stable_across_chunks(chunk_size: int) -> None:
+    body = b'--b\r\nContent-Disposition: form-data; name="\xe6\x97\xa5"\r\nX-Long: one\r\n\ttwo\r\n\r\nv\r\n--b--\r\n'
+    chunks = [body[index : index + chunk_size] for index in range(0, len(body), chunk_size)]
+
+    events, error = collect_header_events(chunks, strict_parsing=True)
+
+    assert error is None
+    assert header_summary(events) == [
+        (b"Content-Disposition", b'form-data; name="\xe6\x97\xa5"'),
+        (b"X-Long", b"one\ttwo"),
+    ]
+
+
+@pytest.mark.parametrize("boundary_split", [0, 1, 3, 12])
+def test_header_error_offset_is_relative_to_current_part(boundary_split: int) -> None:
+    first_part = b"--b\r\nX-First: ok\r\n\r\none\r\n"
+    second_part = b"--b\r\nX-Second: bad\nvalue\r\n\r\ntwo\r\n--b--\r\n"
+    body = first_part + second_part
+    second_start = len(first_part)
+
+    split_at = second_start + boundary_split
+    _, error = collect_header_events([body[:split_at], body[split_at:]], strict_parsing=True)
+
+    assert error is not None
+    assert error.category == INVALID_HEADER_VALUE
+    assert error.offset == second_part.index(b"\n", second_part.index(b"X-Second"))
+    assert second_start + error.offset == body.index(b"\n", body.index(b"X-Second"))
 
 
 def test_multipart_opening_boundary_max_size() -> None:

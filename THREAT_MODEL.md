@@ -18,6 +18,8 @@
 
 - Malformed input raises `FormParserError` or one of its subclasses.
 - `MAX_HEADER_COUNT`, `MAX_HEADER_SIZE`, and `MAX_BODY_SIZE` are enforced.
+- Part headers are parsed line-by-line: legal obs-fold is unfolded without exposing the CRLF, while `strict_parsing`
+  rejects control bytes, invalid UTF-8 values, illegal continuations, and duplicate critical headers.
 - CPU use stays proportional to the size of the input.
 - Uploaded files stay inside `UPLOAD_DIR`.
 - Temporary files are deleted when `UPLOAD_DELETE_TMP` is `True`.

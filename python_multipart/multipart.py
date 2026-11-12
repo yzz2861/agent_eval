@@ -57,6 +57,7 @@ if TYPE_CHECKING:
         MAX_FIELD_SIZE: int | float
         MAX_HEADER_COUNT: int
         MAX_HEADER_SIZE: int
+        STRICT_PARSING: bool
 
     CallbackName: TypeAlias = Literal[
         "start",
@@ -156,6 +157,7 @@ CR = b"\r"[0]
 LF = b"\n"[0]
 COLON = b":"[0]
 SPACE = b" "[0]
+TAB = b"\t"[0]
 HYPHEN = b"-"[0]
 AMPERSAND = b"&"[0]
 LOWER_A = b"a"[0]
@@ -173,6 +175,19 @@ TOKEN_CHARS = (
     b"!#$%&'*+-.^_`|~")
 TOKEN_CHARS_SET = frozenset(TOKEN_CHARS)
 # fmt: on
+
+# Part headers that control how a multipart body is interpreted.  A second
+# occurrence is ambiguous, so strict mode rejects it and FormParser keeps the
+# first occurrence in compatibility mode.
+CRITICAL_PART_HEADERS = frozenset((b"content-disposition", b"content-type", b"content-transfer-encoding"))
+
+# Stable rejection categories exposed on MultipartParseError.category.
+INVALID_HEADER_FIELD = "invalid_header_field"
+INVALID_HEADER_VALUE = "invalid_header_value"
+INVALID_HEADER_ENCODING = "invalid_header_encoding"
+INVALID_HEADER_FOLD = "invalid_header_fold"
+DUPLICATE_HEADER = "duplicate_header"
+INVALID_HEADER_TERMINATOR = "invalid_header_terminator"
 
 DEFAULT_MAX_HEADER_COUNT = 8
 """Default maximum number of headers allowed per multipart part."""
@@ -1060,6 +1075,10 @@ class MultipartParser(BaseParser):
         max_size: The maximum size of body to parse.  Defaults to infinity - i.e. unbounded.
         max_header_count: The maximum number of headers allowed per part.
         max_header_size: The maximum size of a single header line (excluding the trailing CRLF).
+        strict_parsing: Whether to enforce the strict RFC header policy.  In compatibility mode the parser
+            accepts legacy header folding (unfolding CRLF followed by SP/HTAB) but does not validate UTF-8.
+            In strict mode only CRLF-terminated header fields and legal whitespace folding are accepted; invalid
+            control bytes, invalid UTF-8 values, and duplicate critical headers are rejected.
     """  # noqa: E501
 
     def __init__(
@@ -1070,6 +1089,7 @@ class MultipartParser(BaseParser):
         *,
         max_header_count: int = DEFAULT_MAX_HEADER_COUNT,
         max_header_size: int = DEFAULT_MAX_HEADER_SIZE,
+        strict_parsing: bool = False,
     ) -> None:
         # Initialize parser state.
         super().__init__()
@@ -1088,6 +1108,17 @@ class MultipartParser(BaseParser):
 
         self.max_header_size = max_header_size
         self._current_header_size = 0
+
+        # Header policy state.  Marks and callback state survive writes, so all
+        # of this must live on the parser rather than in _internal_write.
+        self.strict_parsing = strict_parsing
+        self._part_start_offset = 0
+        self._seen_critical_headers: set[bytes] = set()
+        self._header_in_progress = False
+        self._header_field_start_offset = 0
+        self._header_field_parts: list[bytes] = []
+        self._header_value_segments: list[tuple[bytes, int]] = []
+        self._pending_boundary_start = 0
 
         # Setup marks.  These are used to track the state of data received.
         self.marks: dict[str, int] = {}
@@ -1151,11 +1182,24 @@ class MultipartParser(BaseParser):
         # Our index defaults to 0.
         i = 0
 
+        # Absolute stream position of data[0].  Error offsets exposed to the
+        # caller are relative to the beginning of the current part.
+        stream_base = self._current_size
+
+        def part_offset(index_in_data: int) -> int:
+            return stream_base + index_in_data - self._part_start_offset
+
+        def parse_error(message: str, *, offset: int, category: str) -> MultipartParseError:
+            return MultipartParseError(f"{category}: {message}", offset=offset, category=category)
+
+        def error_at(index_in_data: int, message: str, category: str) -> MultipartParseError:
+            return parse_error(message, offset=part_offset(index_in_data), category=category)
+
         def advance_header_size(amount: int = 1) -> None:
             nonlocal current_header_size
             current_header_size += amount
             if current_header_size > self.max_header_size:
-                raise MultipartParseError("Maximum header size exceeded", offset=i)
+                raise error_at(i, "Maximum header size exceeded", "header_too_large")
 
         # Set a mark.
         def set_mark(name: str) -> None:
@@ -1182,6 +1226,11 @@ class MultipartParser(BaseParser):
                 pass
             elif marked_index >= 0:
                 # We are emitting data from the local buffer.
+                if name == "header_field":
+                    self._header_field_parts.append(data[marked_index:end_i])
+                elif name == "header_value":
+                    segment = data[marked_index:end_i]
+                    self._header_value_segments.append((segment, part_offset(marked_index)))
                 self.callback(name, data, marked_index, end_i)
             else:
                 # Some of the data comes from a partial boundary match.
@@ -1209,6 +1258,56 @@ class MultipartParser(BaseParser):
             else:
                 self.marks.pop(name, None)
 
+        def start_part(part_start: int) -> None:
+            self._part_start_offset = part_start
+            self._seen_critical_headers.clear()
+            self._header_in_progress = False
+            self._header_field_parts.clear()
+            self._header_value_segments.clear()
+
+        def invalid_utf8_offset(err: UnicodeDecodeError) -> int:
+            # Header values are bounded by max_header_size, so only walk the
+            # segments when an error has actually been found.
+            seen = 0
+            for segment, segment_offset in self._header_value_segments:
+                if err.start < seen + len(segment):
+                    return segment_offset + err.start - seen
+                seen += len(segment)
+            return self._header_field_start_offset
+
+        def finish_header() -> None:
+            nonlocal current_header_size
+
+            field = b"".join(self._header_field_parts)
+            normalized_field = field.lower()
+
+            if self.strict_parsing:
+                if normalized_field in CRITICAL_PART_HEADERS:
+                    if normalized_field in self._seen_critical_headers:
+                        raise parse_error(
+                            "Duplicate critical part header",
+                            offset=self._header_field_start_offset,
+                            category=DUPLICATE_HEADER,
+                        )
+                    self._seen_critical_headers.add(normalized_field)
+
+                if self._header_value_segments:
+                    value = b"".join(segment for segment, _ in self._header_value_segments)
+                    try:
+                        value.decode("utf-8")
+                    except UnicodeDecodeError as err:
+                        raise parse_error(
+                            "Header value is not valid UTF-8",
+                            offset=invalid_utf8_offset(err),
+                            category=INVALID_HEADER_ENCODING,
+                        ) from None
+
+            self.callback("header_end")
+            self._header_in_progress = False
+            self._header_field_parts.clear()
+            self._header_value_segments.clear()
+            current_header_size = 0
+
         # For each byte...
         while i < length:
             c = data[i]
@@ -1233,6 +1332,7 @@ class MultipartParser(BaseParser):
 
             elif state == START_BOUNDARY:
                 if index == 0 and data.startswith(boundary[2:], i, length):
+                    self._pending_boundary_start = stream_base + i
                     index = boundary_length - 2
                     i += index
                     continue
@@ -1246,22 +1346,21 @@ class MultipartParser(BaseParser):
                     elif c != CR:
                         # Error!
                         msg = "Did not find CR at end of boundary (%d)" % (i,)
-                        self.logger.warning(msg)
-                        raise MultipartParseError(msg, offset=i)
+                        raise error_at(i, msg, "invalid_boundary")
 
                     index += 1
 
                 elif index == boundary_length - 1:
                     if c != LF:
                         msg = "Did not find LF at end of boundary (%d)" % (i,)
-                        self.logger.warning(msg)
-                        raise MultipartParseError(msg, offset=i)
+                        raise error_at(i, msg, "invalid_boundary")
 
                     # The index is now used for indexing into our boundary.
                     index = 0
 
                     # Callback for the start of a part.
                     self.callback("part_begin")
+                    start_part(self._pending_boundary_start)
                     current_header_count = 0
                     current_header_size = 0
 
@@ -1269,11 +1368,13 @@ class MultipartParser(BaseParser):
                     state = HEADER_FIELD_START
 
                 else:
+                    if index == 0:
+                        self._pending_boundary_start = stream_base + i
+
                     # Check to ensure our boundary matches
                     if c != boundary[index + 2]:
                         msg = "Expected boundary character %r, got %r at index %d" % (boundary[index + 2], c, index + 2)
-                        self.logger.warning(msg)
-                        raise MultipartParseError(msg, offset=i)
+                        raise error_at(i, msg, "invalid_boundary")
 
                     # Increment index into boundary and continue.
                     index += 1
@@ -1283,21 +1384,45 @@ class MultipartParser(BaseParser):
                 # continue parsing our header field.
                 index = 0
 
-                if c != CR:
-                    current_header_count += 1
-                    if current_header_count > self.max_header_count:
-                        raise MultipartParseError("Maximum header count exceeded", offset=i)
-                    current_header_size = 0
+                if self._header_in_progress:
+                    if c == SPACE or c == TAB:
+                        # RFC 5322 obs-fold: CRLF followed by whitespace is
+                        # part of the current field value.  Drop the CRLF and
+                        # keep the whitespace, so callbacks never expose a raw
+                        # line break that a downstream header serializer could
+                        # mistake for a new field.
+                        set_mark("header_value")
+                        state = HEADER_VALUE
+                        continue
+                    else:
+                        # The next line is a new field (or the blank line that
+                        # ends the headers), so the previous field is complete.
+                        finish_header()
 
-                # Set a mark of our header field.
+                else:
+                    if c == SPACE or c == TAB:
+                        raise error_at(i, "Found header continuation without a preceding field", INVALID_HEADER_FOLD)
+
+                # A CR at the beginning of a line ends the header block.  The
+                # following LF is checked in HEADERS_ALMOST_DONE.
+                if c == CR:
+                    state = HEADERS_ALMOST_DONE
+                    i += 1
+                    continue
+
+                current_header_count += 1
+                if current_header_count > self.max_header_count:
+                    raise error_at(i, "Maximum header count exceeded", "header_count")
+                current_header_size = 0
+
+                self._header_field_start_offset = part_offset(i)
+                self._header_field_parts.clear()
+                self._header_value_segments.clear()
+                self._header_in_progress = True
+
+                # Set a mark of our header field and notify the caller.
                 set_mark("header_field")
-
-                # Notify that we're starting a header if the next character is
-                # not a CR; a CR at the beginning of the header will cause us
-                # to stop parsing headers in the MultipartState.HEADER_FIELD state,
-                # below.
-                if c != CR:
-                    self.callback("header_begin")
+                self.callback("header_begin")
 
                 # Move to parsing header fields.
                 state = HEADER_FIELD
@@ -1326,9 +1451,7 @@ class MultipartParser(BaseParser):
                 if field.translate(None, TOKEN_CHARS):
                     bad = next(b for b in field if b not in TOKEN_CHARS_SET)
                     bad_i = i + field.index(bad)
-                    msg = "Found invalid character %r in header at %d" % (bad, bad_i)
-                    self.logger.warning(msg)
-                    raise MultipartParseError(msg, offset=bad_i)
+                    raise error_at(bad_i, "Found invalid character in header field", INVALID_HEADER_FIELD)
 
                 index += end - i
                 if colon == -1:
@@ -1337,9 +1460,7 @@ class MultipartParser(BaseParser):
                 else:
                     # A 0-length header is an error.
                     if index == 0:
-                        msg = "Found 0-length header at %d" % (i,)
-                        self.logger.warning(msg)
-                        raise MultipartParseError(msg, offset=i)
+                        raise error_at(i, "Found 0-length header", INVALID_HEADER_FIELD)
 
                     # Call our callback with the header field.
                     i = colon
@@ -1349,8 +1470,8 @@ class MultipartParser(BaseParser):
                     state = HEADER_VALUE_START
 
             elif state == HEADER_VALUE_START:
-                # Skip leading spaces.
-                if c == SPACE:
+                # Skip optional whitespace before the value.
+                if c == SPACE or c == TAB:
                     advance_header_size()
                     i += 1
                     continue
@@ -1367,12 +1488,20 @@ class MultipartParser(BaseParser):
                 # instead of inspecting every byte.
                 cr = data.find(b"\r", i, length)
                 end = cr if cr != -1 else length
+
+                # A LF inside a value is only legal when it belongs to the
+                # CRLF terminator handled in HEADER_VALUE_ALMOST_DONE.  NUL is
+                # never valid in a header value.
+                lf = data.find(b"\n", i, end)
+                nul = data.find(b"\x00", i, end)
+                bad_i = min((pos for pos in (lf, nul) if pos != -1), default=-1)
+                if bad_i != -1:
+                    raise error_at(bad_i, "Found invalid control character in header value", INVALID_HEADER_VALUE)
+
                 advance_header_size(end - i)
                 if cr != -1:
                     i = cr
                     data_callback("header_value", i)
-                    self.callback("header_end")
-                    current_header_size = 0
                     state = HEADER_VALUE_ALMOST_DONE
                 else:
                     i = length
@@ -1381,8 +1510,7 @@ class MultipartParser(BaseParser):
                 # The last character should be a LF.  If not, it's an error.
                 if c != LF:
                     msg = f"Did not find LF character at end of header (found {c!r})"
-                    self.logger.warning(msg)
-                    raise MultipartParseError(msg, offset=i)
+                    raise error_at(i, msg, INVALID_HEADER_VALUE)
 
                 # Move back to the start of another header.  Note that if that
                 # state detects ANOTHER newline, it'll trigger the end of our
@@ -1395,8 +1523,7 @@ class MultipartParser(BaseParser):
                 # should be a LF, or it's an error.
                 if c != LF:
                     msg = f"Did not find LF at end of headers (found {c!r})"
-                    self.logger.warning(msg)
-                    raise MultipartParseError(msg, offset=i)
+                    raise error_at(i, msg, INVALID_HEADER_TERMINATOR)
 
                 self.callback("headers_finished")
                 state = PART_DATA_START
@@ -1427,6 +1554,7 @@ class MultipartParser(BaseParser):
                     i0 = data.find(boundary, i, length)
                     if i0 >= 0:
                         # We matched the whole boundary string.
+                        self._pending_boundary_start = stream_base + i0 + 2
                         index = boundary_length - 1
                         i = i0 + boundary_length - 1
                         c = data[i]
@@ -1437,6 +1565,7 @@ class MultipartParser(BaseParser):
                         # last CR in the tail is the only candidate prefix start.
                         k = data.rfind(boundary[:1], max(i, length - boundary_length + 1), length)
                         if k != -1 and boundary.startswith(data[k:length]):
+                            self._pending_boundary_start = stream_base + k + 2
                             index = length - k
                         # Carry the partial via index; the end-of-chunk flush
                         # emits the data before it and re-marks the lookbehind.
@@ -1497,6 +1626,7 @@ class MultipartParser(BaseParser):
                             # a part, and are starting a new one.
                             self.callback("part_end")
                             self.callback("part_begin")
+                            start_part(self._pending_boundary_start)
                             current_header_count = 0
                             current_header_size = 0
 
@@ -1545,21 +1675,20 @@ class MultipartParser(BaseParser):
                 elif index == 1 and c == LF:
                     self.callback("part_end")
                     self.callback("part_begin")
+                    start_part(self._pending_boundary_start)
                     current_header_count = 0
                     current_header_size = 0
                     index = 0
                     state = HEADER_FIELD_START
                 elif index == 1 or c not in b" \t":
                     msg = "Did not find CRLF after boundary padding at %d" % (i,)
-                    self.logger.warning(msg)
-                    raise MultipartParseError(msg, offset=i)
+                    raise error_at(i, msg, "invalid_boundary")
 
             elif state == END_BOUNDARY:
                 if index == boundary_length - 1:
                     if c != HYPHEN:
                         msg = "Did not find - at end of boundary (%d)" % (i,)
-                        self.logger.warning(msg)
-                        raise MultipartParseError(msg, offset=i)
+                        raise error_at(i, msg, "invalid_boundary")
                     index += 1
                     self.callback("end")
                     state = END
@@ -1573,8 +1702,7 @@ class MultipartParser(BaseParser):
             else:  # pragma: no cover (error case)
                 # We got into a strange state somehow!  Just stop processing.
                 msg = "Reached an unknown state %d at %d" % (state, i)
-                self.logger.warning(msg)
-                raise MultipartParseError(msg, offset=i)
+                raise error_at(i, msg, "invalid_parser_state")
 
             # Move to the next byte.
             i += 1
@@ -1614,7 +1742,7 @@ class MultipartParser(BaseParser):
         pass
 
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}(boundary={self.boundary!r})"
+        return f"{self.__class__.__name__}(boundary={self.boundary!r}, strict_parsing={self.strict_parsing!r})"
 
 
 class FormParser:
@@ -1636,6 +1764,8 @@ class FormParser:
             manually.
         config: Configuration to use for this FormParser.  The default values are taken from the DEFAULT_CONFIG value,
             and then any keys present in this dictionary will overwrite the default values.
+        strict_parsing: Convenience override for the ``STRICT_PARSING`` configuration key.  When left as ``None``,
+            the configuration value is used.
     """
 
     #: This is the default configuration for our form parser.
@@ -1653,6 +1783,8 @@ class FormParser:
         "UPLOAD_KEEP_EXTENSIONS": False,
         # Error on invalid Content-Transfer-Encoding?
         "UPLOAD_ERROR_ON_BAD_CTE": False,
+        # Enforce the strict multipart part-header policy?
+        "STRICT_PARSING": False,
     }
 
     def __init__(
@@ -1664,6 +1796,8 @@ class FormParser:
         boundary: bytes | str | None = None,
         file_name: bytes | None = None,
         config: dict[Any, Any] = {},
+        *,
+        strict_parsing: bool | None = None,
     ) -> None:
         self.logger = logging.getLogger(__name__)
 
@@ -1681,6 +1815,8 @@ class FormParser:
         # Set configuration options.
         self.config: FormParserConfig = self.DEFAULT_CONFIG.copy()
         self.config.update(config)  # type: ignore[typeddict-item]
+        if strict_parsing is not None:
+            self.config["STRICT_PARSING"] = strict_parsing
 
         parser: OctetStreamParser | MultipartParser | QuerystringParser | None = None
 
@@ -1828,7 +1964,16 @@ class FormParser:
                 header_value.append(data[start:end])
 
             def on_header_end() -> None:
-                headers[b"".join(header_name).lower()] = b"".join(header_value)
+                key = b"".join(header_name).lower()
+                value = b"".join(header_value)
+                # Critical part headers are security-sensitive.  In
+                # compatibility mode keep the first occurrence instead of
+                # allowing a later duplicate to silently replace it.  Strict
+                # mode rejects duplicates in MultipartParser before this runs.
+                if key not in CRITICAL_PART_HEADERS or key not in headers:
+                    headers[key] = value
+                else:
+                    self.logger.warning("Ignoring duplicate critical part header: %s", key.decode("ascii"))
                 del header_name[:]
                 del header_value[:]
 
@@ -1902,6 +2047,7 @@ class FormParser:
                 max_size=self.config["MAX_BODY_SIZE"],
                 max_header_count=self.config["MAX_HEADER_COUNT"],
                 max_header_size=self.config["MAX_HEADER_SIZE"],
+                strict_parsing=self.config["STRICT_PARSING"],
             )
 
         else:
@@ -1944,6 +2090,8 @@ def create_form_parser(
     on_field: Callable[[Field], None] | None,
     on_file: Callable[[File], None] | None,
     config: dict[Any, Any] = {},
+    *,
+    strict_parsing: bool | None = None,
 ) -> FormParser:
     """This function is a helper function to aid in creating a FormParser
     instances.  Given a dictionary-like headers object, it will determine
@@ -1956,6 +2104,7 @@ def create_form_parser(
         on_field: Callback to call with each parsed field.
         on_file: Callback to call with each parsed file.
         config: Configuration variables to pass to the FormParser.
+        strict_parsing: Convenience override for the multipart header policy.
     """
     content_type: str | bytes | None = headers.get("Content-Type")
     if content_type is None:
@@ -1971,7 +2120,9 @@ def create_form_parser(
     content_type = content_type.decode("latin-1")
 
     # Instantiate a form parser.
-    form_parser = FormParser(content_type, on_field, on_file, boundary=boundary, config=config)
+    form_parser = FormParser(
+        content_type, on_field, on_file, boundary=boundary, config=config, strict_parsing=strict_parsing
+    )
 
     # Return our parser.
     return form_parser
@@ -1983,6 +2134,8 @@ def parse_form(
     on_field: Callable[[Field], None] | None,
     on_file: Callable[[File], None] | None,
     chunk_size: int = 1048576,
+    *,
+    strict_parsing: bool | None = None,
 ) -> None:
     """This function is useful if you just want to parse a request body,
     without too much work.  Pass it a dictionary-like object of the request's
@@ -1996,12 +2149,13 @@ def parse_form(
         on_file: Callback to call with each parsed file.
         chunk_size: The maximum size to read from the input stream and write to the parser at one time.
             Defaults to 1 MiB.
+        strict_parsing: Enable the strict multipart part-header policy.
     """
     if chunk_size < 1:
         raise ValueError(f"chunk_size must be a positive number, not {chunk_size!r}")
 
     # Create our form parser.
-    parser = create_form_parser(headers, on_field, on_file)
+    parser = create_form_parser(headers, on_field, on_file, strict_parsing=strict_parsing)
 
     # Read chunks of 1MiB and write to the parser, but never read more than
     # the given Content-Length, if any.

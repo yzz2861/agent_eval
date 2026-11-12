@@ -7,9 +7,25 @@ class ParseError(FormParserError):
     parsing something.
     """
 
-    def __init__(self, message: str, *, offset: int = -1) -> None:
+    def __init__(self, message: str, *, offset: int = -1, category: str | None = None) -> None:
         super().__init__(message)
         self.offset = offset
+        self.category = category
+
+    @property
+    def reason(self) -> str | None:
+        """Alias for :attr:`category`, kept for callers that use reason codes."""
+        return self.category
+
+    @property
+    def rejection_category(self) -> str | None:
+        """Alias for :attr:`category`, expressing the rejection class."""
+        return self.category
+
+    @property
+    def part_offset(self) -> int:
+        """Offset relative to the start of the current multipart part."""
+        return self.offset
 
 
 class MultipartParseError(ParseError):
