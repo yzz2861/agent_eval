@@ -18,9 +18,11 @@
 """DNS TSIG support."""
 
 import base64
+import collections
 import hashlib
 import hmac
 import struct
+import time
 
 import dns.exception
 import dns.name
@@ -35,6 +37,14 @@ class BadTime(dns.exception.DNSException):
 
 class BadSignature(dns.exception.DNSException):
     """The TSIG signature fails to verify."""
+
+
+class BadTruncation(BadSignature):
+    """The TSIG MAC is truncated below the algorithm's minimum size."""
+
+
+class ReplayError(BadSignature):
+    """The TSIG-signed message is a replay of an already validated message."""
 
 
 class BadKey(dns.exception.DNSException):
@@ -260,6 +270,21 @@ def _maybe_start_digest(key, mac, multi):
         return None
 
 
+def _check_mac_length(rdata):
+    """Reject a MAC that is truncated below the size defined for its
+    algorithm.
+
+    @raises BadTruncation: The MAC is too short for the algorithm.
+    """
+    minimum = mac_sizes.get(rdata.algorithm)
+    if minimum is not None and rdata.algorithm != GSS_TSIG:
+        if len(rdata.mac) < minimum:
+            raise BadTruncation(
+                f"TSIG MAC is truncated: {len(rdata.mac)} bytes is less "
+                f"than the {minimum} bytes required for the algorithm"
+            )
+
+
 def sign(wire, key, rdata, time=None, request_mac=None, ctx=None, multi=False):
     """Return a (tsig_rdata, mac, ctx) tuple containing the HMAC TSIG rdata
     for the input parameters, the HMAC MAC calculated by applying the
@@ -282,6 +307,8 @@ def validate(
     """Validate the specified TSIG rdata against the other input parameters.
 
     @raises FormError: The TSIG is badly formed.
+    @raises BadTruncation: The TSIG MAC is truncated below the minimum size
+    for its algorithm.
     @raises BadTime: There is too much time skew between the client and the
     server.
     @raises BadSignature: The TSIG signature did not validate
@@ -307,6 +334,7 @@ def validate(
         raise BadKey
     if key.algorithm != rdata.algorithm:
         raise BadAlgorithm
+    _check_mac_length(rdata)
     ctx = _digest(new_wire, key, rdata, None, request_mac, ctx, multi)
     ctx.verify(rdata.mac)
     if abs(rdata.time_signed - now) > rdata.fudge:
@@ -358,3 +386,189 @@ class Key:
             r += f", secret='{base64.b64encode(self.secret).decode()}'"
         r += ">"
         return r
+
+
+def _key_valid_at(key, when):
+    """Is the key within its validity window at *when*?  Plain
+    :py:class:`Key` objects have no window and are always valid."""
+    not_before = getattr(key, "not_before", None)
+    not_after = getattr(key, "not_after", None)
+    if not_before is not None and when < not_before:
+        return False
+    if not_after is not None and when > not_after:
+        return False
+    return True
+
+
+class RotationKey(Key):
+    """A TSIG key with a validity window, for use in key rotation.
+
+    *not_before* and *not_after* are absolute UTC times in seconds since the
+    epoch; ``None`` (the default) means unbounded.  During a rotation, the
+    old key is given a *not_after* and the new key a *not_before*, so both
+    are accepted for validation while their windows overlap, while only the
+    newest valid key is used for signing.
+    """
+
+    def __init__(
+        self,
+        name: dns.name.Name | str,
+        secret: bytes | str,
+        algorithm: dns.name.Name | str = default_algorithm,
+        not_before: int | None = None,
+        not_after: int | None = None,
+    ):
+        super().__init__(name, secret, algorithm)
+        self.not_before = not_before
+        self.not_after = not_after
+
+    def valid_at(self, when: int) -> bool:
+        """Is the key within its validity window at *when*?"""
+        return _key_valid_at(self, when)
+
+
+class KeyRing:
+    """An explicit TSIG key ring with rotation windows and replay protection.
+
+    Validation selects candidate keys by the TSIG owner name and algorithm;
+    every candidate whose validity window covers the validation time is
+    tried until one verifies.  Signing uses the most recently activated
+    currently valid key, so during a rotation the new key signs while the
+    old key can still verify.
+
+    Fingerprints of successfully validated messages are remembered (up to
+    *replay_cache_size*), and a replayed message is rejected with
+    :py:exc:`ReplayError`.  Note that this means legitimate retransmissions
+    of an identical message are also rejected; set *replay_cache_size* to 0
+    to disable replay protection.
+
+    All failures are reported with the auditable exception categories
+    :py:exc:`BadKey`, :py:exc:`BadAlgorithm`, :py:exc:`BadSignature` (and
+    its subclasses :py:exc:`BadTruncation` and :py:exc:`ReplayError`), and
+    :py:exc:`BadTime`.  Exception messages never contain key material or
+    MACs.
+    """
+
+    def __init__(self, keys=(), replay_cache_size: int = 1024):
+        self._keys: dict[dns.name.Name, list[Key]] = {}
+        self.replay_cache_size = replay_cache_size
+        self._seen: collections.OrderedDict = collections.OrderedDict()
+        for key in keys:
+            self.add(key)
+
+    def add(self, key: Key) -> None:
+        """Add *key* to the ring."""
+        self._keys.setdefault(key.name, []).append(key)
+
+    def __contains__(self, name):
+        return name in self._keys
+
+    def __len__(self):
+        return sum(len(keys) for keys in self._keys.values())
+
+    def signing_key(self, now: int | None = None) -> Key | None:
+        """Return the key to sign with: the currently valid key with the
+        latest activation time, or ``None`` if no key is valid.  *now*
+        defaults to the current UTC time."""
+        if now is None:
+            now = int(time.time())
+        best = None
+        for keys in self._keys.values():
+            for key in keys:
+                if _key_valid_at(key, now):
+                    activated = getattr(key, "not_before", None) or 0
+                    if best is None or activated >= best[0]:
+                        best = (activated, key)
+        if best is None:
+            return None
+        return best[1]
+
+    def candidates(self, name, algorithm, now: int) -> list[Key]:
+        """Return the keys matching *name* and *algorithm* whose validity
+        window covers *now*."""
+        return [
+            key
+            for key in self._keys.get(name, [])
+            if key.algorithm == algorithm and _key_valid_at(key, now)
+        ]
+
+    def _replay_fingerprint(self, owner, rdata):
+        # Only a digest of the MAC is stored, never the MAC itself.
+        return (
+            owner,
+            rdata.time_signed,
+            hashlib.sha256(rdata.mac).digest(),
+        )
+
+    def _remember(self, fingerprint):
+        if self.replay_cache_size <= 0:
+            return
+        self._seen[fingerprint] = None
+        while len(self._seen) > self.replay_cache_size:
+            self._seen.popitem(last=False)
+
+    def validate(
+        self,
+        wire,
+        owner,
+        rdata,
+        now=None,
+        request_mac=b"",
+        tsig_start=0,
+        ctx=None,
+        multi=False,
+    ):
+        """Validate the specified TSIG rdata using the keys in this ring.
+
+        The parameters are as for :py:func:`validate`; *now* defaults to
+        the current UTC time.
+
+        @raises BadKey: No key with the TSIG owner name is known, or no
+        matching key is currently valid.
+        @raises BadAlgorithm: No key for the owner name matches the TSIG
+        algorithm.
+        @raises BadTruncation: The MAC is truncated below the minimum size
+        for its algorithm.
+        @raises ReplayError: The message was already validated.
+        @raises BadSignature: The MAC did not verify with any candidate key.
+        @raises BadTime: The MAC verified, but the time is outside the
+        fudge window.
+        @rtype: dns.tsig.HMACTSig or dns.tsig.GSSTSig object"""
+        if now is None:
+            now = int(time.time())
+        fingerprint = self._replay_fingerprint(owner, rdata)
+        if fingerprint in self._seen:
+            raise ReplayError(f"TSIG-signed message from key '{owner}' is a replay")
+        keys = self._keys.get(owner)
+        if not keys:
+            raise BadKey(f"unknown TSIG key '{owner}'")
+        if not any(key.algorithm == rdata.algorithm for key in keys):
+            raise BadAlgorithm(f"no key for '{owner}' matches the TSIG algorithm")
+        candidates = self.candidates(owner, rdata.algorithm, now)
+        if not candidates:
+            raise BadKey(f"no currently valid key for '{owner}'")
+        _check_mac_length(rdata)
+        for key in candidates:
+            try:
+                result = validate(
+                    wire,
+                    key,
+                    owner,
+                    rdata,
+                    now,
+                    request_mac,
+                    tsig_start,
+                    ctx,
+                    multi,
+                )
+            except BadSignature:
+                # Wrong key material for this candidate; try the next one.
+                # BadTime, in contrast, only arises after the MAC has
+                # verified, and propagates immediately so that MAC validity
+                # is always established before time errors are reported.
+                continue
+            self._remember(fingerprint)
+            return result
+        raise BadSignature(
+            f"TSIG MAC did not verify with any candidate key for '{owner}'"
+        )

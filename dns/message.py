@@ -719,8 +719,10 @@ class Message:
             :py:class:`dns.name.Name` keys to :py:class:`dns.tsig.Key` objects
             or ``bytes`` secrets. If a ``dict`` is given without *keyname*, the
             first key in the dict is used. A callable is invoked with the message
-            and *keyname* and must return a key.
-        :type keyring: dict, callable, or :py:class:`dns.tsig.Key`
+            and *keyname* and must return a key. A :py:class:`dns.tsig.KeyRing`
+            signs with its currently valid signing key, ignoring *keyname*.
+        :type keyring: dict, callable, :py:class:`dns.tsig.Key`, or
+            :py:class:`dns.tsig.KeyRing`
         :param keyname: The TSIG key name. Ignored if *keyring* is a
             :py:class:`dns.tsig.Key`. Defaults to ``None``.
         :type keyname: :py:class:`dns.name.Name`, ``str``, or ``None``
@@ -737,7 +739,12 @@ class Message:
         :type algorithm: :py:class:`dns.name.Name` or ``str``
         """
 
-        if isinstance(keyring, dns.tsig.Key):
+        if isinstance(keyring, dns.tsig.KeyRing):
+            key = keyring.signing_key()
+            if key is None:
+                raise ValueError("key ring has no currently valid signing key")
+            keyname = key.name
+        elif isinstance(keyring, dns.tsig.Key):
             key = keyring
             keyname = key.name
         elif callable(keyring):
@@ -1258,23 +1265,13 @@ class _WireReader:
                     self.message.opt = dns.rrset.from_rdata(name, ttl, rd)
                 elif rdtype == dns.rdatatype.TSIG:
                     trd = cast(dns.rdtypes.ANY.TSIG.TSIG, rd)
-                    if self.keyring is None or self.keyring is True:
-                        raise UnknownTSIGKey("got signed message without keyring")
-                    elif isinstance(self.keyring, dict):
-                        key = self.keyring.get(absolute_name)
-                        if isinstance(key, bytes):
-                            key = dns.tsig.Key(absolute_name, key, trd.algorithm)
-                    elif callable(self.keyring):
-                        key = self.keyring(self.message, absolute_name)
-                    else:
-                        key = self.keyring
-                    if key is None:
-                        raise UnknownTSIGKey(f"key '{name}' unknown")
-                    if key:
-                        self.message.keyring = key
-                        self.message.tsig_ctx = dns.tsig.validate(
+                    if isinstance(self.keyring, dns.tsig.KeyRing):
+                        # An explicit key ring with rotation support; it
+                        # selects candidate keys by name and algorithm and
+                        # reports auditable dns.tsig errors.
+                        self.message.keyring = self.keyring.signing_key()
+                        self.message.tsig_ctx = self.keyring.validate(
                             self.parser.wire,
-                            key,
                             absolute_name,
                             rd,
                             int(time.time()),
@@ -1283,6 +1280,32 @@ class _WireReader:
                             self.message.tsig_ctx,
                             self.multi,
                         )
+                    else:
+                        if self.keyring is None or self.keyring is True:
+                            raise UnknownTSIGKey("got signed message without keyring")
+                        elif isinstance(self.keyring, dict):
+                            key = self.keyring.get(absolute_name)
+                            if isinstance(key, bytes):
+                                key = dns.tsig.Key(absolute_name, key, trd.algorithm)
+                        elif callable(self.keyring):
+                            key = self.keyring(self.message, absolute_name)
+                        else:
+                            key = self.keyring
+                        if key is None:
+                            raise UnknownTSIGKey(f"key '{name}' unknown")
+                        if key:
+                            self.message.keyring = key
+                            self.message.tsig_ctx = dns.tsig.validate(
+                                self.parser.wire,
+                                key,
+                                absolute_name,
+                                rd,
+                                int(time.time()),
+                                self.message.request_mac,
+                                rr_start,
+                                self.message.tsig_ctx,
+                                self.multi,
+                            )
                     self.message.tsig = dns.rrset.from_rdata(absolute_name, 0, rd)
                 else:
                     rrset = self.message.find_rrset(
@@ -1373,8 +1396,11 @@ def from_wire(
         validation.  When used to validate responses to TSIG-signed requests,
         the keyring should only have the key used to sign the request, otherwise
         the validation will not correctly check that the key name and algorithm
-        match the request.
-    :type keyring: :py:class:`dns.tsig.Key`, dict, bool, or ``None``
+        match the request.  A :py:class:`dns.tsig.KeyRing` validates against
+        all currently valid candidate keys, supporting key rotation, and
+        rejects replays of previously validated messages.
+    :type keyring: :py:class:`dns.tsig.Key`, dict, bool,
+        :py:class:`dns.tsig.KeyRing`, or ``None``
     :param request_mac: MAC of the TSIG-signed request this message responds
         to, if any.  If nonempty, the message must have a TSIG unless *multi*
         is ``True`` or *keyring* is ``False``.

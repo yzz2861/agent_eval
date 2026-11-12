@@ -531,3 +531,209 @@ example. 300 IN SOA . . 1 2 3 4 5
         q4 = dns.message.from_wire(wire, keyring=keyring)
         q4.use_tsig(dns.tsig.Key(keyname, "abcd"))
         self.assertNotEqual(q4.to_wire(), wire)
+
+
+secret1 = "NjHwPsMKjdN++dOfE5iAiQ=="
+secret2 = "Bm9wc2VjcmV0c2VjcmV0c2VjcmV0cw=="
+
+
+class TSIGKeyRingTestCase(unittest.TestCase):
+    """Tests for dns.tsig.KeyRing explicit key rings and rotation."""
+
+    def make_ring(self, *keys, **kwargs):
+        return dns.tsig.KeyRing(keys, **kwargs)
+
+    def make_key(self, secret=secret1, name="keyname.", **kwargs):
+        return dns.tsig.RotationKey(name, secret, "hmac-sha256", **kwargs)
+
+    def sign(self, key, qname="example"):
+        q = dns.message.make_query(qname, "a")
+        q.use_tsig(key)
+        return q.to_wire()
+
+    def tsig_start(self, wire):
+        captured = {}
+
+        def spy(*args, **kwargs):
+            captured["tsig_start"] = args[6]
+            # Do not actually validate; the wire may be signed with a key
+            # the global keyring does not hold.
+            return None
+
+        with patch("dns.tsig.validate", side_effect=spy):
+            dns.message.from_wire(wire, keyring)
+        return captured["tsig_start"]
+
+    def parsed_tsig(self, wire):
+        m = dns.message.from_wire(wire, False)
+        return m.tsig[0]
+
+    def test_valid_signature(self):
+        key = self.make_key()
+        ring = self.make_ring(key)
+        w = self.sign(key)
+        m = dns.message.from_wire(w, ring)
+        # The original message is not tampered with by validation.
+        self.assertEqual(m.wire, w)
+        self.assertEqual(m.to_wire(), w)
+
+    def test_wrong_mac_is_bad_signature(self):
+        key = self.make_key()
+        ring = self.make_ring(key)
+        w = self.sign(key)
+        b = bytearray(w)
+        b[-7] = (b[-7] + 1) & 0xFF
+        with self.assertRaises(dns.tsig.BadSignature):
+            dns.message.from_wire(bytes(b), ring)
+
+    def test_unknown_key_is_bad_key(self):
+        key = self.make_key()
+        ring = self.make_ring(self.make_key(name="othername."))
+        w = self.sign(key)
+        with self.assertRaises(dns.tsig.BadKey):
+            dns.message.from_wire(w, ring)
+
+    def test_wrong_algorithm_is_bad_algorithm(self):
+        key = self.make_key()
+        other = dns.tsig.RotationKey("keyname.", secret1, "hmac-sha512")
+        ring = self.make_ring(other)
+        w = self.sign(key)
+        with self.assertRaises(dns.tsig.BadAlgorithm):
+            dns.message.from_wire(w, ring)
+
+    def test_expired_and_future_times_are_bad_time(self):
+        key = self.make_key()
+        w = self.sign(key)
+        tsig = self.parsed_tsig(w)
+        tsig_start = self.tsig_start(w)
+        now = int(time.time())
+        # signature time too far in the past
+        ring = self.make_ring(key)
+        with self.assertRaises(dns.tsig.BadTime):
+            ring.validate(w, keyname, tsig, now + 1000, b"", tsig_start)
+        # signature time too far in the future
+        ring = self.make_ring(key)
+        with self.assertRaises(dns.tsig.BadTime):
+            ring.validate(w, keyname, tsig, now - 1000, b"", tsig_start)
+        # a normal offset within the fudge window still validates
+        ring = self.make_ring(key)
+        ring.validate(w, keyname, tsig, now + 100, b"", tsig_start)
+
+    def test_rotation_old_key_verifies_new_key_signs(self):
+        now = int(time.time())
+        old_key = self.make_key(secret1, not_after=now + 3600)
+        new_key = self.make_key(secret2, not_before=now - 60)
+        ring = self.make_ring(old_key, new_key)
+
+        # A message signed with the old key still validates.
+        w_old = self.sign(old_key)
+        dns.message.from_wire(w_old, ring)
+
+        # Signing uses the new key.
+        q = dns.message.make_query("example", "a")
+        q.use_tsig(ring)
+        self.assertIs(q.keyring, new_key)
+        w_new = q.to_wire()
+        # The new signature verifies against the new key only.
+        self.make_ring(new_key).validate(
+            w_new,
+            keyname,
+            self.parsed_tsig(w_new),
+            now,
+            b"",
+            self.tsig_start(w_new),
+        )
+        old_only = self.make_ring(old_key)
+        with self.assertRaises(dns.tsig.BadSignature):
+            old_only.validate(
+                w_new,
+                keyname,
+                self.parsed_tsig(w_new),
+                now,
+                b"",
+                self.tsig_start(w_new),
+            )
+
+    def test_expired_key_is_bad_key(self):
+        now = int(time.time())
+        old_key = self.make_key(secret1, not_after=now - 10)
+        ring = self.make_ring(old_key)
+        w = self.sign(old_key)
+        with self.assertRaises(dns.tsig.BadKey):
+            dns.message.from_wire(w, ring)
+
+    def test_replay_is_rejected(self):
+        key = self.make_key()
+        ring = self.make_ring(key)
+        w = self.sign(key)
+        dns.message.from_wire(w, ring)
+        with self.assertRaises(dns.tsig.ReplayError):
+            dns.message.from_wire(w, ring)
+        # A ReplayError is a BadSignature category error.
+        with self.assertRaises(dns.tsig.BadSignature):
+            dns.message.from_wire(w, ring)
+
+    def test_replay_protection_can_be_disabled(self):
+        key = self.make_key()
+        ring = self.make_ring(key, replay_cache_size=0)
+        w = self.sign(key)
+        dns.message.from_wire(w, ring)
+        dns.message.from_wire(w, ring)
+
+    def test_truncated_mac_is_rejected(self):
+        key = self.make_key()
+        w = self.sign(key)
+        m = dns.message.from_wire(w, False)
+        truncated = m.tsig[0].replace(mac=m.tsig[0].mac[:8])
+        m.tsig = dns.rrset.from_rdata(m.tsig.name, 0, truncated)
+        w2 = m.to_wire()
+        with self.assertRaises(dns.tsig.BadTruncation):
+            dns.message.from_wire(w2, self.make_ring(key))
+        # The legacy single-key API rejects it too, as a BadSignature.
+        now = int(time.time())
+        with self.assertRaises(dns.tsig.BadSignature) as cm:
+            dns.tsig.validate(w2, key, keyname, truncated, now, b"", self.tsig_start(w))
+        self.assertIsInstance(cm.exception, dns.tsig.BadTruncation)
+
+    def test_duplicate_tsig_is_rejected(self):
+        key = self.make_key()
+        w = self.sign(key)
+        m = dns.message.from_wire(w, False)
+        m.additional.append(m.tsig)
+        with self.assertRaises(dns.message.BadTSIG):
+            dns.message.from_wire(m.to_wire(), self.make_ring(key))
+
+    def test_record_modified_after_signing_is_rejected(self):
+        key = self.make_key()
+        ring = self.make_ring(key)
+        w = self.sign(key)
+        b = bytearray(w)
+        # Corrupt a byte of the qname, which is covered by the signature.
+        b[13] = ord("X")
+        with self.assertRaises(dns.tsig.BadSignature):
+            dns.message.from_wire(bytes(b), ring)
+
+    def test_errors_do_not_leak_key_material_or_mac(self):
+        key = self.make_key()
+        ring = self.make_ring(key)
+        w = self.sign(key)
+        mac = self.parsed_tsig(w).mac
+        b = bytearray(w)
+        b[-7] = (b[-7] + 1) & 0xFF
+        try:
+            dns.message.from_wire(bytes(b), ring)
+            self.fail("expected BadSignature")
+        except dns.tsig.BadSignature as e:
+            text = str(e)
+        self.assertNotIn(secret1, text)
+        self.assertNotIn(mac.hex(), text)
+        self.assertNotIn(base64.b64encode(mac).decode(), text)
+
+    def test_legacy_apis_still_work(self):
+        # Single Key and dict keyrings still sign and validate.
+        q = dns.message.make_query("example", "a")
+        q.use_tsig(keyring, keyname)
+        w = q.to_wire()
+        dns.message.from_wire(w, keyring)
+        key = dns.tsig.Key(keyname, keyring[keyname], dns.tsig.HMAC_SHA256)
+        dns.message.from_wire(w, key)
