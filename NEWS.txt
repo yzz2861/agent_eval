@@ -1,0 +1,103 @@
+News
+====
+
+1.3.1
+-----
+
+* Fix invalid/deprecated escape sequences #63.
+
+1.3.0
+-----
+
+ * Primitive implementation of NVD JSON configuration #55.
+ * Fix typo in CPESet2_3 version exception #33.
+ * Fixed problem when comparing with _compare_strings #41.
+ * Updated _VALUE_PATTERN for CPE 2.2 #56.
+ * Fix DeprecationWarning issues in Python code #57.
+
+1.2.1
+-----
+
+ * Fixed #28.
+ * Some tests marked as xfail until we carify the proper behaviour for
+   ANY values.
+
+
+1.2.0
+-----
+
+ * Python3 support.
+ * Using tox for testing Python2.7 and Python3.4.
+ * Test directory outside of the package.
+ * Fixed sphinx warnings.
+ * Fixed problems parsing colons. Thanks to @damiengermonville. 
+ * Using a new system for package metadata management.
+
+
+1.1.0
+-----
+
+ * Closed pending issues:
+   * Fix wildcard matching #6
+   * fix multiple %01 wildcards #8
+   * turn CPESet2_3.compare_wfns into a generator #9
+   * correctly transform not applicable values for edition #11
+ * Contributing.md file.
+
+
+1.0.6
+-----
+
+ * Using OrderedDict for `_system_and_parts` and `_CPE_VERSIONS`. For force evaluation order. Tests was failing randomly.
+ * Changed testing tools: tox + pytest + coverage.
+ * Changed license to LGPLv3.
+
+
+1.0.5
+-----
+
+ * Fixed an issue reported by @TauPan. Added cpe.comp as sub-package. https://github.com/galindale/cpe/pull/2. (@TauPan)
+
+
+1.0.4
+-----
+
+ New funtionality has not added, only there are small changes:
+
+ * Add NEWS.txt file with the updates in the cpe package releases.
+ * Added issue about language attribute in CPE Names in documentation.
+ * Changed some files to follow PEP8.
+ * Fixed language validation method in CPE components with version 2.3.
+ * Added integration with travis-ci and version badge and Pypi shield/pin images.
+ * Added option "packages" in setup.py.
+
+
+1.0.3
+-----
+
+ * Fixed an error to check logical values in parsing with CPE names with WFN style.
+ * Fixed example about convertion methods between CPE styles in naming section.
+
+
+1.0.2
+-----
+
+ * New release.
+
+
+1.0.1
+-----
+
+ * New release.
+
+
+1.0.0
+-----
+
+ * New release.
+
+
+0.1.0
+-----
+
+ * Starting development.
