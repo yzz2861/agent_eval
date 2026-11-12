@@ -1,0 +1,13 @@
+EXPECTED = {'Foo': {'extensibility-implied': False,
+         'imports': {},
+         'object-classes': {},
+         'object-sets': {},
+         'types': {'Answer': {'members': [{'name': 'id', 'type': 'INTEGER'},
+                                          {'name': 'answer',
+                                           'type': 'BOOLEAN'}],
+                              'type': 'SEQUENCE'},
+                   'Question': {'members': [{'name': 'id', 'type': 'INTEGER'},
+                                            {'name': 'question',
+                                             'type': 'IA5String'}],
+                                'type': 'SEQUENCE'}},
+         'values': {}}}
