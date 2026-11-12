@@ -2,10 +2,21 @@ import os
 
 import pytest
 
+from bleach import html5lib_shim
 from bleach import clean
 from bleach.html5lib_shim import Filter
-from bleach.sanitizer import ALLOWED_PROTOCOLS, Cleaner, NoCssSanitizerWarning
+from bleach.sanitizer import (
+    ALLOWED_PROTOCOLS,
+    BleachSanitizerFilter,
+    Cleaner,
+    NoCssSanitizerWarning,
+)
 from bleach._vendor.html5lib.constants import rcdataElements
+
+try:
+    from bleach.css_sanitizer import CSSSanitizer
+except ImportError:  # pragma: no cover - tinycss2 is an optional dependency
+    CSSSanitizer = None
 
 
 @pytest.mark.parametrize(
@@ -1266,3 +1277,331 @@ class TestCleaner:
 
         dirty = 'this is cute! <img src="http://example.com/puppy.jpg" rel="nofollow">'
         assert cleaner.clean(dirty) == 'this is cute! <img src="moo" rel="moo">'
+
+
+# ---------------------------------------------------------------------------
+# Explicit SVG safe subset mode
+# ---------------------------------------------------------------------------
+
+SVG_NS = "http://www.w3.org/2000/svg"
+XLINK_NS = "http://www.w3.org/1999/xlink"
+
+# Tags/attributes that must never survive as active nodes in SVG mode.
+SVG_FORBIDDEN_TAGS = {
+    "script",
+    "foreignobject",
+    "image",
+    "animate",
+    "animatemotion",
+    "animatetransform",
+    "set",
+    "filter",
+    "fegaussianblur",
+    "style",
+    "audio",
+    "video",
+    "iframe",
+}
+
+
+def _reparse_tokens(fragment):
+    """Parses a cleaned fragment back into html5lib tokens for DOM checks"""
+    parser = html5lib_shim.BleachHTMLParser(
+        tags=None,
+        strip=False,
+        consume_entities=False,
+        namespaceHTMLElements=False,
+    )
+    walker = html5lib_shim.getTreeWalker("etree")
+    return list(walker(parser.parseFragment(fragment)))
+
+
+def _assert_no_active_svg(fragment):
+    for token in _reparse_tokens(fragment):
+        if token["type"] not in ("StartTag", "EmptyTag"):
+            continue
+        assert token["name"].lower() not in SVG_FORBIDDEN_TAGS, token
+        for (namespace, attr_name), attr_value in token.get("data", {}).items():
+            lowered = attr_name.lower()
+            assert not lowered.startswith("on"), token
+            assert lowered != "filter", token
+            if lowered == "href":
+                assert attr_value.strip().startswith("#"), token
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        # geometry and paths
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">'
+        '<g><circle cx="10" cy="10" r="5" fill="red"/>'
+        '<ellipse rx="2" ry="3"/><line x1="0" y1="0" x2="1" y2="1"/>'
+        '<rect x="0" y="0" width="5" height="5"/>'
+        '<polygon points="0,0 1,1"/><polyline points="0,0 1,1"/>'
+        '<path d="M0 0 L10 10"/></g></svg>',
+        # text
+        '<svg xmlns="http://www.w3.org/2000/svg">'
+        '<text x="1" y="2"><tspan>hi</tspan></text></svg>',
+        # gradients and local references
+        '<svg xmlns="http://www.w3.org/2000/svg" '
+        'xmlns:xlink="http://www.w3.org/1999/xlink">'
+        '<defs><linearGradient id="g1"><stop offset="0"/></linearGradient>'
+        "</defs><rect fill=\"url(#g1)\"/>"
+        '<use href="#g1"/><use xlink:href="#g1"/></svg>',
+        # clipPath / mask / marker / pattern containers
+        '<svg xmlns="http://www.w3.org/2000/svg">'
+        '<clipPath id="c"><rect/></clipPath><mask id="m"/>'
+        '<marker id="k"/><pattern id="p"/></svg>',
+        # empty svg stays an element rather than collapsing to blank text
+        '<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+    ],
+)
+def test_svg_safe_subset_keeps_safe_graphics(data):
+    cleaned = clean(data, svg=True)
+
+    tokens = _reparse_tokens(cleaned)
+    svg_tokens = [
+        token
+        for token in tokens
+        if token["type"] in ("StartTag", "EmptyTag")
+        and token.get("namespace") == SVG_NS
+    ]
+    assert svg_tokens, "safe graphic was removed entirely"
+
+    # round trip must be stable and re-parse identically
+    assert clean(cleaned, svg=True) == cleaned
+
+
+def test_svg_namespace_prefixes_are_stable():
+    data = (
+        '<svg xmlns="http://www.w3.org/2000/svg" '
+        'xmlns:xlink="http://www.w3.org/1999/xlink">'
+        '<use xlink:href="#a"/><use href="#b"/></svg>'
+    )
+    cleaned = clean(data, svg=True)
+
+    assert 'xmlns="http://www.w3.org/2000/svg"' in cleaned
+    assert 'xmlns:xlink="http://www.w3.org/1999/xlink"' in cleaned
+    assert 'xlink:href="#a"' in cleaned
+    assert 'href="#b"' in cleaned
+    # The stock serializer used to emit a bogus "xlink=" declaration.
+    assert " xlink=" not in cleaned
+
+    tokens = _reparse_tokens(cleaned)
+    use_tokens = [
+        t
+        for t in tokens
+        if t["type"] in ("StartTag", "EmptyTag") and t["name"] == "use"
+    ]
+    combined = {}
+    for token in use_tokens:
+        combined.update(token["data"])
+    assert (XLINK_NS, "href") in combined
+    assert (None, "href") in combined
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        '<svg xmlns="http://www.w3.org/2000/svg">'
+        "<script>alert(1)</script><circle r=\"1\"/></svg>",
+        '<svg xmlns="http://www.w3.org/2000/svg">'
+        '<circle onclick="alert(1)" OnClick="alert(2)" r="1"/>'
+        '<rect ONLOAD="alert(3)"/></svg>',
+        '<svg xmlns="http://www.w3.org/2000/svg">'
+        "<foreignObject width=\"100\">"
+        '<body xmlns="http://www.w3.org/1999/xhtml">'
+        "<img src=x onerror=alert(1)></body></foreignObject></svg>",
+        '<svg xmlns="http://www.w3.org/2000/svg">'
+        '<animate attributeName="x" onbegin="alert(1)"/>'
+        '<animateTransform attributeName="transform"/>'
+        '<set attributeName="x"/></svg>',
+        '<svg xmlns="http://www.w3.org/2000/svg">'
+        '<filter id="f"><feGaussianBlur/></filter>'
+        '<rect filter="url(#f)"/></svg>',
+        '<svg xmlns="http://www.w3.org/2000/svg">'
+        '<image href="http://example.com/x.png"/></svg>',
+        '<svg xmlns="http://www.w3.org/2000/svg"><style>.a{}</style></svg>',
+    ],
+)
+def test_svg_drops_active_content(data):
+    cleaned = clean(data, svg=True)
+    _assert_no_active_svg(cleaned)
+    assert clean(cleaned, svg=True) == cleaned
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        '<svg xmlns="http://www.w3.org/2000/svg">'
+        '<use href="http://example.com/x"/></svg>',
+        '<svg xmlns="http://www.w3.org/2000/svg" '
+        'xmlns:xlink="http://www.w3.org/1999/xlink">'
+        '<use xlink:href="http://example.com/x"/></svg>',
+        '<svg xmlns="http://www.w3.org/2000/svg">'
+        '<use href="https://example.com/x"/></svg>',
+        '<svg xmlns="http://www.w3.org/2000/svg">'
+        '<use href="data:text/html,alert(1)"/></svg>',
+        '<svg xmlns="http://www.w3.org/2000/svg">'
+        '<use href="javascript:alert(1)"/></svg>',
+        '<svg xmlns="http://www.w3.org/2000/svg">'
+        '<use href="relative/path"/></svg>',
+    ],
+)
+def test_svg_external_hrefs_are_removed(data):
+    cleaned = clean(data, svg=True)
+    use_token = next(
+        token
+        for token in _reparse_tokens(cleaned)
+        if token["type"] in ("StartTag", "EmptyTag") and token["name"] == "use"
+    )
+    assert not use_token["data"]
+
+
+def test_svg_keeps_only_fragment_hrefs():
+    data = (
+        '<svg xmlns="http://www.w3.org/2000/svg" '
+        'xmlns:xlink="http://www.w3.org/1999/xlink">'
+        '<use href="#local"/><use xlink:href="#also"/>'
+        '<use href="http://evil.example/x"/></svg>'
+    )
+    cleaned = clean(data, svg=True)
+    assert 'href="#local"' in cleaned
+    assert 'xlink:href="#also"' in cleaned
+    assert "evil.example" not in cleaned
+    _assert_no_active_svg(cleaned)
+
+
+@pytest.mark.skipif(CSSSanitizer is None, reason="tinycss2 not installed")
+def test_svg_css_url_values_are_cleaned():
+    data = (
+        '<svg xmlns="http://www.w3.org/2000/svg">'
+        '<rect style="fill: red; '
+        'background: url(http://evil.example/x)"/></svg>'
+    )
+    cleaned = clean(data, svg=True, css_sanitizer=CSSSanitizer())
+    assert "evil.example" not in cleaned
+    assert "fill: red" in cleaned
+
+
+def test_svg_iri_attributes_keep_only_fragment_references():
+    data = (
+        '<svg xmlns="http://www.w3.org/2000/svg">'
+        '<rect fill="url(#safe)"/>'
+        '<rect fill="url(javascript:alert(1))"/>'
+        '<rect mask="url(http://evil.example/m)"/>'
+        '<rect clip-path="url(#clip)"/></svg>'
+    )
+    cleaned = clean(data, svg=True)
+    assert 'fill="url(#safe)"' in cleaned
+    assert 'clip-path="url(#clip)"' in cleaned
+    assert "javascript" not in cleaned
+    assert "evil.example" not in cleaned
+
+
+def test_svg_style_attribute_requires_css_sanitizer():
+    data = '<svg xmlns="http://www.w3.org/2000/svg"><rect style="fill: red"/></svg>'
+    cleaned = clean(data, svg=True)
+    assert "style" not in cleaned
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        # casing variants of tags and attributes
+        '<SVG OnClick="alert(1)" VIEWBOX="0 0 1 1">'
+        "<CiRcLe CX=\"1\"/><SCRIPT/></SVG>",
+        # unknown prefix bound to the xlink namespace
+        '<svg xmlns="http://www.w3.org/2000/svg" '
+        'xmlns:zz="http://www.w3.org/1999/xlink">'
+        '<use zz:href="http://evil.example/x"/></svg>',
+        # duplicate / alternative namespace declarations
+        '<svg xmlns="http://www.w3.org/2000/svg" '
+        'xmlns:xl="http://www.w3.org/1999/xlink">'
+        '<use xl:href="http://evil.example/x"/></svg>',
+    ],
+)
+def test_svg_namespace_and_case_variants_cannot_bypass(data):
+    cleaned = clean(data, svg=True)
+    _assert_no_active_svg(cleaned)
+    assert "evil.example" not in cleaned
+
+
+def test_svg_mode_is_opt_in():
+    data = (
+        '<svg xmlns="http://www.w3.org/2000/svg">'
+        '<script>alert(1)</script><circle r="1"/></svg>'
+    )
+    # Default pure-HTML path keeps escaping svg markup and must not change.
+    defaulted = clean(data)
+    assert defaulted.startswith("&lt;svg")
+    assert "<svg" not in defaulted
+    assert clean(data, svg=False) == defaulted
+
+
+def test_svg_mode_coexists_with_html_policy():
+    data = (
+        "<p>keep</p>"
+        '<svg xmlns="http://www.w3.org/2000/svg">'
+        '<circle r="1" onclick="alert(1)"/></svg>'
+    )
+    cleaned = Cleaner(svg=True, tags={"p"}).clean(data)
+    assert "<p>keep</p>" in cleaned
+    assert "<circle" in cleaned
+    assert "onclick" not in cleaned
+
+
+def test_svg_namespace_declarations_are_scoped_per_subtree():
+    data = (
+        '<svg xmlns="http://www.w3.org/2000/svg" '
+        'xmlns:xlink="http://www.w3.org/1999/xlink">'
+        '<use xlink:href="#a"/></svg>'
+        '<svg xmlns="http://www.w3.org/2000/svg"><circle r="1"/></svg>'
+    )
+    cleaned = clean(data, svg=True)
+    first_svg, second_svg = cleaned.split("</svg>")[:2]
+    assert 'xmlns:xlink="http://www.w3.org/1999/xlink"' in first_svg
+    assert "xmlns:xlink" not in second_svg
+    assert clean(cleaned, svg=True) == cleaned
+
+
+def test_svg_cleaner_uses_namespace_aware_serializer():
+    html_cleaner = Cleaner()
+    svg_cleaner = Cleaner(svg=True)
+
+    assert html_cleaner.svg is False
+    assert svg_cleaner.svg is True
+    assert isinstance(
+        html_cleaner.serializer, html5lib_shim.BleachHTMLSerializer
+    )
+    assert isinstance(
+        svg_cleaner.serializer, html5lib_shim.BleachSVGSerializer
+    )
+
+
+def test_svg_filter_is_usable_directly():
+    parser = html5lib_shim.BleachHTMLParser(
+        tags=None,
+        strip=False,
+        consume_entities=False,
+        namespaceHTMLElements=False,
+        svg=True,
+    )
+    walker = html5lib_shim.getTreeWalker("etree")
+    dom = parser.parseFragment(
+        '<svg xmlns="http://www.w3.org/2000/svg">'
+        "<script>alert(1)</script><circle r=\"1\"/></svg>"
+    )
+    stream = BleachSanitizerFilter(source=walker(dom), svg=True)
+    serializer = html5lib_shim.BleachSVGSerializer(
+        quote_attr_values="always",
+        omit_optional_tags=False,
+        escape_lt_in_attrs=True,
+        resolve_entities=False,
+        sanitize=False,
+        alphabetical_attributes=False,
+    )
+
+    rendered = serializer.render(stream)
+    assert "script" not in rendered
+    assert "<circle" in rendered

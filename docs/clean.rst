@@ -405,6 +405,52 @@ Trivial Filter example:
 .. versionadded:: 2.0
 
 
+SVG safe subset (``svg``)
+-------------------------
+
+By default bleach treats every tag through the HTML tag name policy, so an
+``<svg>`` fragment is escaped like any other unknown markup. Passing
+``svg=True`` (or constructing ``Cleaner(svg=True)``) opts in to an explicit
+SVG safe subset::
+
+   >>> import bleach
+   >>> bleach.clean(
+   ...     '<svg xmlns="http://www.w3.org/2000/svg">'
+   ...     '<circle cx="1" cy="2" r="3" onclick="alert(1)"/></svg>',
+   ...     svg=True,
+   ... )
+   '<svg xmlns="http://www.w3.org/2000/svg"><circle cx="1" cy="2" r="3"></circle></svg>'
+
+The mode is opt-in: with ``svg=False`` (the default) pure-HTML cleaning
+behavior is unchanged.
+
+Policy details:
+
+* Tags and attributes are compared by namespace, not by prefix or local name
+  alone, so duplicate namespace declarations and prefix or casing variants
+  can't bypass the allowlist.
+* Only the geometry, path, text, gradient and basic presentation tags in
+  ``bleach.sanitizer.ALLOWED_SVG_TAGS`` and the attributes in
+  ``bleach.sanitizer.ALLOWED_SVG_ATTRIBUTES`` survive.
+* ``script``, ``style``, ``foreignObject``, animation elements
+  (``animate``, ``animateMotion``, ``animateTransform``, ``set`` ...),
+  remote loaders (``image``, ``iframe`` ...) and filter primitives are
+  removed together with their contents.
+* Event handler attributes (``on*``) and the ``filter`` attribute are always
+  dropped.
+* ``href``/``xlink:href`` on ``use`` and gradient elements only accept
+  same-document fragment references such as ``#id``; ``http(s)``,
+  ``data:``, ``javascript:`` and relative references are removed.
+* Presentation attributes that take an IRI (``fill``, ``clip-path``,
+  ``mask``, ``marker*`` ...) keep fragment references but lose remote or
+  scripted ``url(...)`` values.
+* Allowed ``style`` attributes go through the configured
+  :py:class:`bleach.css_sanitizer.CSSSanitizer` plus the same ``url()``
+  cleaning; without a CSS sanitizer the ``style`` attribute is dropped.
+* Output is a valid HTML/XML fragment that re-parses to the same DOM, with
+  stable ``xmlns`` and ``xlink`` prefixes, so safe graphics are never
+  flattened to blank content.
+
 Using ``bleach.sanitizer.BleachSanitizerFilter``
 ================================================
 

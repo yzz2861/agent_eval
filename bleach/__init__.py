@@ -27,6 +27,7 @@ def clean(
     strip=False,
     strip_comments=True,
     css_sanitizer=None,
+    svg=False,
 ):
     """Clean an HTML fragment of malicious content and return it
 
@@ -68,6 +69,12 @@ def clean(
     :arg CSSSanitizer css_sanitizer: instance with a "sanitize_css" method for
         sanitizing style attribute values and style text; defaults to None
 
+    :arg bool svg: enable the explicit SVG safe subset mode; defaults to
+        False so pure-HTML cleaning behavior is unchanged. When enabled, SVG
+        namespace tags and attributes are matched by namespace against the
+        SVG allowlists and active content (``script``, ``foreignObject``,
+        animation, event attributes, external references, filters) is removed.
+
     :returns: cleaned text as unicode
 
     """
@@ -78,6 +85,7 @@ def clean(
         strip=strip,
         strip_comments=strip_comments,
         css_sanitizer=css_sanitizer,
+        svg=svg,
     )
     return cleaner.clean(text)
 

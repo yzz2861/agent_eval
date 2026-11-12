@@ -37,6 +37,178 @@ ALLOWED_ATTRIBUTES = {
 #: Set of allowed protocols
 ALLOWED_PROTOCOLS = frozenset(("http", "https", "mailto"))
 
+#: Namespaces that bleach recognizes when comparing SVG tags and attributes
+SVG_NAMESPACE = html5lib_shim.namespaces["svg"]
+XLINK_NAMESPACE = html5lib_shim.namespaces["xlink"]
+XML_NAMESPACE = html5lib_shim.namespaces["xml"]
+XMLNS_NAMESPACE = html5lib_shim.namespaces["xmlns"]
+
+#: Safe SVG subset--geometry, paths, text, gradients and basic presentation.
+#:
+#: ``script``, ``foreignObject``, animation elements (``animate``,
+#: ``animateMotion``, ``animateTransform``, ``set`` ...), remote-loading
+#: elements (``image``, ``audio``, ``video``, ``iframe`` ...) and filter
+#: primitives are intentionally excluded.
+ALLOWED_SVG_TAGS = frozenset(
+    (
+        "svg",
+        "g",
+        "defs",
+        "desc",
+        "title",
+        "symbol",
+        "use",
+        "circle",
+        "ellipse",
+        "line",
+        "path",
+        "polygon",
+        "polyline",
+        "rect",
+        "text",
+        "tspan",
+        "textPath",
+        "linearGradient",
+        "radialGradient",
+        "stop",
+        "clipPath",
+        "mask",
+        "pattern",
+        "marker",
+        "view",
+    )
+)
+
+#: Attributes allowed on safe SVG elements, keyed by namespace.
+#:
+#: Namespaced names are compared exactly so prefix tricks can't smuggle
+#: attributes in. Event handler attributes (``on*``), ``style`` element
+#: embedding and remote-loading attributes such as ``filter`` are excluded.
+ALLOWED_SVG_ATTRIBUTES = frozenset(
+    (
+        # core / structural
+        (None, "id"),
+        (None, "class"),
+        (None, "lang"),
+        (None, "tabindex"),
+        (None, "role"),
+        (None, "focusable"),
+        (None, "contentStyleType"),
+        (None, "contentScriptType"),
+        (None, "viewBox"),
+        (None, "preserveAspectRatio"),
+        (None, "version"),
+        (None, "width"),
+        (None, "height"),
+        (None, "x"),
+        (None, "y"),
+        (None, "x1"),
+        (None, "y1"),
+        (None, "x2"),
+        (None, "y2"),
+        (None, "cx"),
+        (None, "cy"),
+        (None, "r"),
+        (None, "rx"),
+        (None, "ry"),
+        (None, "d"),
+        (None, "points"),
+        (None, "pathLength"),
+        (None, "offset"),
+        (None, "gradientUnits"),
+        (None, "gradientTransform"),
+        (None, "patternUnits"),
+        (None, "patternContentUnits"),
+        (None, "patternTransform"),
+        (None, "clipPathUnits"),
+        (None, "markerUnits"),
+        (None, "markerWidth"),
+        (None, "markerHeight"),
+        (None, "refX"),
+        (None, "refY"),
+        (None, "orient"),
+        (None, "spreadMethod"),
+        (None, "href"),
+        (None, "transform"),
+        (None, "systemLanguage"),
+        (None, "text-anchor"),
+        (None, "text-decoration"),
+        (None, "text-rendering"),
+        (None, "textLength"),
+        (None, "lengthAdjust"),
+        (None, "startOffset"),
+        (None, "font-family"),
+        (None, "font-size"),
+        (None, "font-size-adjust"),
+        (None, "font-stretch"),
+        (None, "font-style"),
+        (None, "font-variant"),
+        (None, "font-weight"),
+        (None, "direction"),
+        (None, "unicode-bidi"),
+        (None, "dominant-baseline"),
+        (None, "alignment-baseline"),
+        (None, "baseline-shift"),
+        (None, "letter-spacing"),
+        (None, "word-spacing"),
+        (None, "writing-mode"),
+        (None, "overflow"),
+        (None, "clip-rule"),
+        (None, "clip-path"),
+        (None, "fill-rule"),
+        (None, "opacity"),
+        (None, "fill"),
+        (None, "fill-opacity"),
+        (None, "stroke"),
+        (None, "stroke-dasharray"),
+        (None, "stroke-dashoffset"),
+        (None, "stroke-linecap"),
+        (None, "stroke-linejoin"),
+        (None, "stroke-miterlimit"),
+        (None, "stroke-opacity"),
+        (None, "stroke-width"),
+        (None, "color"),
+        (None, "cursor"),
+        (None, "display"),
+        (None, "visibility"),
+        (None, "stop-color"),
+        (None, "stop-opacity"),
+        (None, "style"),
+        # xlink--only local fragment references survive value sanitizing
+        (XLINK_NAMESPACE, "href"),
+        (XLINK_NAMESPACE, "title"),
+        (XLINK_NAMESPACE, "role"),
+        # xml
+        (XML_NAMESPACE, "lang"),
+        (XML_NAMESPACE, "space"),
+    )
+)
+
+#: SVG elements allowed to carry ``href``/``xlink:href``; in safe mode these
+#: only accept same-document fragment references (``#fragment``).
+SVG_LOCAL_HREF_TAGS = frozenset(("use", "lineargradient", "radialgradient"))
+
+#: Matches a same-document fragment reference after surrounding whitespace
+SVG_LOCAL_HREF_RE = re.compile(r"^\s*#")
+
+#: Disallowed SVG elements whose entire subtree--including the raw text the
+#: HTML tokenizer exposes as Characters tokens--is dropped. This covers script
+#: bodies, embedded style sheets and HTML embedded through foreignObject, none
+#: of which may survive even as inert text.
+SVG_DROP_SUBTREE_TAGS = frozenset(
+    (
+        "script",
+        "style",
+        "foreignobject",
+    )
+)
+
+#: Matches the opening of an SVG CSS/IRI ``url(`` reference
+SVG_URL_OPEN_RE = re.compile(r"url\s*\(", re.IGNORECASE)
+
+#: Collapses runs of whitespace left behind after IRI cleaning
+SVG_WHITESPACE_RE = re.compile(r"\s+")
+
 #: Invisible characters--0 to and including 31 except 9 (tab), 10 (lf), and 13 (cr)
 INVISIBLE_CHARACTERS = "".join(
     [chr(c) for c in chain(range(0, 9), range(11, 13), range(14, 32))]
@@ -92,6 +264,7 @@ class Cleaner:
         strip_comments=True,
         filters=None,
         css_sanitizer=None,
+        svg=False,
     ):
         """Initializes a Cleaner
 
@@ -120,6 +293,15 @@ class Cleaner:
         :arg CSSSanitizer css_sanitizer: instance with a "sanitize_css" method for
             sanitizing style attribute values and style text; defaults to None
 
+        :arg bool svg: whether or not to enable the explicit SVG safe subset
+            mode. When enabled, SVG namespace tags and attributes are compared
+            by namespace against ``ALLOWED_SVG_TAGS`` and
+            ``ALLOWED_SVG_ATTRIBUTES``; ``script``, ``foreignObject``,
+            animation elements, event handler attributes, external
+            ``href``/``xlink:href`` references and dangerous filters are
+            removed. This is opt-in--the default ``False`` preserves the
+            pure-HTML cleaning behavior.
+
         """
         self.tags = tags
         self.attributes = attributes
@@ -128,15 +310,30 @@ class Cleaner:
         self.strip_comments = strip_comments
         self.filters = filters or []
         self.css_sanitizer = css_sanitizer
+        self.svg = svg
+
+        # The tokenizer converts any tag not in this set into characters
+        # before the sanitizer filter runs, so in SVG mode the SVG subset
+        # has to be visible to the parser. Namespace-based policy is still
+        # enforced by BleachSanitizerFilter--this only keeps the tokens alive.
+        parser_tags = self.tags
+        if svg:
+            parser_tags = frozenset(self.tags) | frozenset(ALLOWED_SVG_TAGS)
 
         self.parser = html5lib_shim.BleachHTMLParser(
-            tags=self.tags,
+            tags=parser_tags,
             strip=self.strip,
             consume_entities=False,
             namespaceHTMLElements=False,
+            svg=svg,
         )
         self.walker = html5lib_shim.getTreeWalker("etree")
-        self.serializer = html5lib_shim.BleachHTMLSerializer(
+        serializer_class = (
+            html5lib_shim.BleachSVGSerializer
+            if svg
+            else html5lib_shim.BleachHTMLSerializer
+        )
+        self.serializer = serializer_class(
             quote_attr_values="always",
             omit_optional_tags=False,
             escape_lt_in_attrs=True,
@@ -197,6 +394,7 @@ class Cleaner:
             strip_html_comments=self.strip_comments,
             css_sanitizer=self.css_sanitizer,
             allowed_protocols=self.protocols,
+            svg=self.svg,
         )
 
         # Apply any filters after the BleachSanitizerFilter
@@ -268,6 +466,7 @@ class BleachSanitizerFilter(html5lib_shim.SanitizerFilter):
         strip_disallowed_tags=False,
         strip_html_comments=True,
         css_sanitizer=None,
+        svg=False,
     ):
         """Creates a BleachSanitizerFilter instance
 
@@ -298,6 +497,11 @@ class BleachSanitizerFilter(html5lib_shim.SanitizerFilter):
         :arg CSSSanitizer css_sanitizer: instance with a "sanitize_css" method for
             sanitizing style attribute values and style text; defaults to None
 
+        :arg bool svg: whether or not the explicit SVG safe subset is enabled.
+            When True, SVG namespace tags and attributes are matched by
+            namespace against the SVG allowlists instead of the HTML tag
+            name based policy.
+
         """
         # NOTE(willkg): This is the superclass of
         # html5lib.filters.sanitizer.Filter. We call this directly skipping the
@@ -317,9 +521,47 @@ class BleachSanitizerFilter(html5lib_shim.SanitizerFilter):
         self.svg_attr_val_allows_ref = svg_attr_val_allows_ref
         self.css_sanitizer = css_sanitizer
         self.svg_allow_local_href = svg_allow_local_href
+        self.svg = svg
+
+        if svg:
+            self.allowed_svg_tags = frozenset(
+                tag.lower() for tag in ALLOWED_SVG_TAGS
+            )
+            # Attribute local names stored lowercased so case variants can't
+            # bypass the policy; the namespace part of the tuple is compared
+            # exactly.
+            self.allowed_svg_attributes = frozenset(
+                (namespace, name.lower())
+                for namespace, name in ALLOWED_SVG_ATTRIBUTES
+            )
 
     def sanitize_stream(self, token_iterator):
+        # Depth of open subtrees rooted at a disallowed SVG element
+        # (script, style, foreignObject ...). The tokenizer turns rawtext
+        # contents into Characters tokens, so the element and everything below
+        # it have to be swallowed together.
+        drop_depth = 0
+
         for token in token_iterator:
+            token_type = token.get("type")
+
+            if self.svg and drop_depth:
+                if token_type == "StartTag":
+                    drop_depth += 1
+                elif token_type == "EndTag":
+                    drop_depth -= 1
+                continue
+
+            if (
+                self.svg
+                and token_type in ("StartTag", "EmptyTag")
+                and token.get("namespace") == SVG_NAMESPACE
+                and token.get("name", "").lower() in SVG_DROP_SUBTREE_TAGS
+            ):
+                if token_type == "StartTag":
+                    drop_depth = 1
+                continue
+
             ret = self.sanitize_token(token)
 
             if not ret:
@@ -386,6 +628,18 @@ class BleachSanitizerFilter(html5lib_shim.SanitizerFilter):
         """
         token_type = token["type"]
         if token_type in ["StartTag", "EndTag", "EmptyTag"]:
+            if self.svg and token.get("namespace") == SVG_NAMESPACE:
+                if token["name"].lower() in self.allowed_svg_tags:
+                    return self.allow_svg_token(token)
+
+                # Disallowed SVG elements (script, foreignObject, animation
+                # and filter primitives, remote loaders ...) are always
+                # unwrapped rather than HTML-escaped: escaping would leave
+                # the tag text inside the graphic and re-parsing would not
+                # round-trip it as XML. Descendants keep going through the
+                # policy, so active content can't survive inside them.
+                return None
+
             if token["name"] in self.allowed_tags:
                 return self.allow_token(token)
 
@@ -530,6 +784,149 @@ class BleachSanitizerFilter(html5lib_shim.SanitizerFilter):
                 return value
 
         return None
+
+    def sanitize_svg_style(self, value):
+        """Sanitizes an SVG ``style`` attribute value
+
+        Runs the value through the configured CSS sanitizer (which limits the
+        declaration to an allowlist of properties) and additionally strips
+        any ``url(...)`` reference that isn't a same-document fragment, since
+        a CSS URL can load remote active content even when the property itself
+        is benign.
+
+        """
+        if self.css_sanitizer:
+            value = self.css_sanitizer.sanitize_css(value)
+        else:
+            # No CSS sanitizer configured--the style can't be verified, so
+            # drop it rather than letting arbitrary CSS through.
+            return ""
+
+        if not value:
+            return ""
+
+        # Remove every non-fragment url() reference. Fragment references such
+        # as url(#clip) are left intact.
+        return self.sanitize_svg_iri(value)
+
+    def sanitize_svg_iri(self, value):
+        """Sanitizes an SVG presentation attribute that may hold IRIs
+
+        Fragment references such as ``url(#clip)`` are preserved. Any
+        ``url(...)`` pointing elsewhere--including ``javascript:``,
+        ``data:`` or remote ``http(s)`` URLs--is removed together with its
+        wrapping ``url(...)`` so the remainder stays valid SVG. Non-IRI
+        keywords and colors are untouched.
+
+        :returns: cleaned value, or None when nothing safe remains
+
+        """
+        cleaned_parts = []
+        remainder = unescape(value)
+
+        while True:
+            match = SVG_URL_OPEN_RE.search(remainder)
+            if not match:
+                cleaned_parts.append(remainder)
+                break
+
+            cleaned_parts.append(remainder[: match.start()])
+            depth = 0
+            end = None
+            tail = remainder[match.start() :]
+            for index, char in enumerate(tail, start=match.start()):
+                if char == "(":
+                    depth += 1
+                elif char == ")":
+                    depth -= 1
+                    if depth == 0:
+                        end = index + 1
+                        break
+
+            if end is None:
+                # Unbalanced url( ... --nothing after it is trustworthy.
+                break
+
+            reference = remainder[match.end() : end - 1].strip()
+            if reference.startswith("#"):
+                cleaned_parts.append(remainder[match.start() : end])
+            else:
+                cleaned_parts.append(" ")
+            remainder = remainder[end:]
+
+        cleaned = "".join(cleaned_parts)
+        cleaned = SVG_WHITESPACE_RE.sub(" ", cleaned).strip()
+        return cleaned or None
+
+    def allow_svg_token(self, token):
+        """Handles an allowed SVG namespace tag
+
+        Tags and attributes are compared by namespace, not by prefix, so
+        duplicate namespace declarations and prefix or case variants can't
+        bypass the policy. Allowed URI-valued attributes still go through the
+        protocol and local-reference checks.
+
+        """
+        if "data" not in token:
+            return token
+
+        attrs = {}
+        tag = token["name"].lower()
+
+        for namespaced_name, val in token["data"].items():
+            namespace, name = namespaced_name
+
+            # Namespace declarations are rewritten by the serializer--never
+            # trust user-supplied ones.
+            if namespace == XMLNS_NAMESPACE:
+                continue
+
+            # Compare on the exact (namespace, lowercased local name) tuple.
+            # Event handler attributes (on*) are not on the allowlist, but
+            # reject them explicitly so casing tricks can never sneak one in.
+            normalized_name = name.lower()
+            if normalized_name.startswith("on"):
+                continue
+
+            if (namespace, normalized_name) not in self.allowed_svg_attributes:
+                continue
+
+            # href / xlink:href on the elements that may carry them only
+            # accept same-document fragment references. Everything else--
+            # http(s), data:, javascript:, relative paths--is dropped.
+            if normalized_name == "href" and (
+                namespace is None or namespace == XLINK_NAMESPACE
+            ):
+                if tag not in SVG_LOCAL_HREF_TAGS:
+                    continue
+                if not SVG_LOCAL_HREF_RE.match(val):
+                    continue
+
+            # Presentation attributes that take an IRI reference: drop the
+            # attribute when it contains a non-fragment url() reference.
+            if namespaced_name in self.svg_attr_val_allows_ref:
+                new_val = self.sanitize_svg_iri(val)
+                if new_val is None:
+                    continue
+                val = new_val
+
+            # Any other URI-valued attribute still goes through the protocol
+            # allowlist cleaning.
+            if namespaced_name in self.attr_val_is_uri:
+                new_value = self.sanitize_uri_value(val, self.allowed_protocols)
+                if new_value is None:
+                    continue
+                val = new_value
+
+            if namespaced_name == (None, "style"):
+                val = self.sanitize_svg_style(val)
+                if not val:
+                    continue
+
+            attrs[namespaced_name] = val
+
+        token["data"] = attrs
+        return token
 
     def allow_token(self, token):
         """Handles the case where we're allowing the tag"""

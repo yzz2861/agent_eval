@@ -482,6 +482,7 @@ class BleachHTMLTokenizer(HTMLTokenizer):
             self.parser.tags is not None
             and token["type"] in TAG_TOKEN_TYPES
             and token["name"].lower() not in self.parser.tags
+            and not self._in_svg_foreign_content()
         ):
             # If this is a start/end/empty tag for a tag that's not in our
             # allowed list, then it gets stripped or escaped. In both of these
@@ -519,11 +520,33 @@ class BleachHTMLTokenizer(HTMLTokenizer):
         self.emitted_last_token = self.currentToken
         super().emitCurrentToken()
 
+    def _in_svg_foreign_content(self):
+        """Whether the tokenizer is currently inside SVG foreign content
+
+        The token doesn't carry its namespace yet at emit time, but the tree
+        builder has already pushed the current element onto the open elements
+        stack. In SVG safe mode tags emitted while an SVG element is open have
+        to reach the sanitizer filter as tokens instead of being HTML-escaped
+        here: escaping a tag such as a ``foreignObject`` child corrupts the
+        foreign-content stream and flattens everything after it into text.
+        The namespace based policy in the sanitizer filter still decides what
+        survives, so this doesn't weaken the allowlist.
+
+        """
+        if not getattr(self.parser, "svg", False):
+            return False
+
+        open_elements = getattr(self.parser.tree, "openElements", None)
+        if not open_elements:
+            return False
+
+        return open_elements[-1].namespace == namespaces["svg"]
+
 
 class BleachHTMLParser(HTMLParser):
     """Parser that uses BleachHTMLTokenizer"""
 
-    def __init__(self, tags, strip, consume_entities, **kwargs):
+    def __init__(self, tags, strip, consume_entities, svg=False, **kwargs):
         """
         :arg tags: set of allowed tags--everything else is either stripped or
             escaped; if None, then this doesn't look at tags at all
@@ -531,6 +554,9 @@ class BleachHTMLParser(HTMLParser):
             if tags=None, then this doesn't have any effect
         :arg consume_entities: whether to consume entities (default behavior) or
             leave them as is when tokenizing (BleachHTMLTokenizer-added behavior)
+        :arg svg: whether SVG safe subset mode is enabled; when True the
+            tokenizer leaves SVG namespace tags alone so the sanitizer can
+            enforce the namespace based policy
 
         """
         self.tags = (
@@ -538,6 +564,7 @@ class BleachHTMLParser(HTMLParser):
         )
         self.strip = strip
         self.consume_entities = consume_entities
+        self.svg = svg
         super().__init__(**kwargs)
 
     def _parse(
@@ -786,3 +813,130 @@ class BleachHTMLSerializer(HTMLSerializer):
                 if stoken.startswith("<"):
                     in_tag = True
                 yield stoken
+
+
+class BleachSVGSerializer(BleachHTMLSerializer):
+    """Serializer that preserves XML namespaces on SVG attributes
+
+    The stock html5lib serializer only writes the local name of an attribute,
+    which turns an ``xlink:href`` token into a second ``href`` attribute and
+    turns the ``xmlns:xlink`` declaration into a bogus ``xlink`` attribute.
+    Both break re-parsing in browsers.
+
+    This serializer rewrites namespaced attribute keys to their stable
+    ``prefix:localname`` form and makes sure an ``<svg>`` root that uses a
+    prefixed namespace also carries the matching ``xmlns:prefix`` declaration,
+    so the output is a valid HTML/XML fragment that re-parses to the same DOM.
+
+    """
+
+    # Prefixes that are implicitly bound and therefore never need an explicit
+    # xmlns declaration in the output.
+    _IMPLICIT_PREFIXES = frozenset(("xml", "xmlns"))
+
+    def _rewrite_tokens(self, treewalker):
+        # Materialize the stream first so the prefixes needed anywhere in the
+        # fragment are known before an outermost <svg> is emitted.
+        tokens = list(treewalker)
+
+        # Compute the set of prefixed namespaces each outermost SVG subtree
+        # actually uses so declarations are scoped instead of global.
+        subtree_prefixes = []
+        active_svg_depth = 0
+        for token in tokens:
+            token_type = token.get("type")
+            if (
+                token_type == "StartTag"
+                and token.get("namespace") == namespaces["svg"]
+                and active_svg_depth == 0
+            ):
+                subtree_prefixes.append(set())
+                active_svg_depth = 1
+            elif (
+                token_type == "StartTag"
+                and token.get("namespace") == namespaces["svg"]
+            ):
+                active_svg_depth += 1
+            elif (
+                token_type == "EndTag"
+                and token.get("namespace") == namespaces["svg"]
+            ):
+                active_svg_depth = max(0, active_svg_depth - 1)
+
+            if subtree_prefixes and token_type in ("StartTag", "EmptyTag"):
+                for namespace, _name in token.get("data", {}):
+                    prefix = prefixes.get(namespace) if namespace else None
+                    if prefix and prefix not in self._IMPLICIT_PREFIXES:
+                        subtree_prefixes[-1].add(prefix)
+
+        # Depth of open SVG elements--only an outermost <svg> receives
+        # namespace declarations; descendants inherit them.
+        svg_depth = 0
+        subtree_index = -1
+
+        for token in tokens:
+            token_type = token.get("type")
+
+            if token_type in ("StartTag", "EmptyTag"):
+                data = token["data"]
+                new_data = data.__class__()
+                is_svg_element = token.get("namespace") == namespaces["svg"]
+
+                if is_svg_element and token_type == "StartTag" and svg_depth == 0:
+                    subtree_index += 1
+
+                for (namespace, name), value in data.items():
+                    if namespace is None:
+                        # Parser keeps unknown namespace declarations such as
+                        # "xmlns:foo" as unprefixed attributes--pass the local
+                        # name through unchanged.
+                        new_data[(None, name)] = value
+                        continue
+
+                    prefix = prefixes.get(namespace)
+                    if prefix is None:
+                        # Unknown namespace--the attribute can't be serialized
+                        # with a stable prefix, so drop it.
+                        continue
+
+                    if prefix == "xmlns":
+                        attr_name = "xmlns" if name == "xmlns" else f"xmlns:{name}"
+                        new_data[(None, attr_name)] = value
+                        continue
+
+                    if prefix in self._IMPLICIT_PREFIXES:
+                        new_data[(None, f"{prefix}:{name}")] = value
+                        continue
+
+                    new_data[(None, f"{prefix}:{name}")] = value
+
+                is_svg_root = is_svg_element and svg_depth == 0
+                if is_svg_root:
+                    injected = data.__class__()
+
+                    if not any(
+                        attr_name == "xmlns" for (_, attr_name) in new_data
+                    ):
+                        injected[(None, "xmlns")] = namespaces["svg"]
+
+                    for prefix in sorted(subtree_prefixes[subtree_index]):
+                        injected[(None, f"xmlns:{prefix}")] = namespaces[prefix]
+
+                    if injected:
+                        injected.update(new_data)
+                        new_data = injected
+
+                token["data"] = new_data
+
+                if is_svg_element:
+                    if token_type == "StartTag":
+                        svg_depth += 1
+
+            elif token_type == "EndTag":
+                if token.get("namespace") == namespaces["svg"]:
+                    svg_depth = max(0, svg_depth - 1)
+
+            yield token
+
+    def serialize(self, treewalker, encoding=None):
+        return super().serialize(self._rewrite_tokens(treewalker), encoding)
