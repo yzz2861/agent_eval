@@ -38,6 +38,21 @@ See issue: `<https://github.com/mozilla/bleach/issues/698>`__
 
   See the advisory for details.
 
+* Harden ``CSSSanitizer`` against tokens hidden behind CSS escapes or comment
+  boundaries.
+
+  Identifier escapes (``u\\72l``) and comment-split identifiers
+  (``@im/**/\\port``, ``ur/**/l(...)``) are now normalized before the policy
+  checks run, so they can no longer bypass the property, function and at-rule
+  filters.  At-rules (``@import``, ``@font-face``, ``@supports`` and others)
+  and parse errors are always dropped instead of being silently kept.
+
+  ``url()``, ``image-set()`` and the other resource-loading functions are now
+  rejected by default.  Pass ``url_policy`` to ``CSSSanitizer`` to accept
+  references after checking their scheme and length.  Legitimate colors,
+  fonts, widths and other allowed declarations keep their original meaning and
+  the sanitized output re-parses without creating new declarations.
+
 **Bug fixes**
 
 * Add support for pypy 3.11. (#764)

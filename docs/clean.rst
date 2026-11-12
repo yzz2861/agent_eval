@@ -332,14 +332,50 @@ Defaults are stored in ``bleach.css_sanitizer.ALLOWED_CSS_PROPERTIES`` and
 
 .. Note::
 
-   This silently drops ParseError and AtRule tokens in CSS parsing. If you need
-   to sanitize style values that have ``@media`` or need to do something with
-   CSS parse errors, you should implement your own
-   :py:class:`bleach.css_sanitizer.CSSSanitizer`.
+   CSS escapes are decoded and comments are removed before any policy
+   decision, so constructs such as ``u\\72l(...)`` or ``ur/**/l(...)`` are
+   evaluated as ``url(...)`` instead of being treated as unknown tokens.
+
+   At-rules (``@import``, ``@font-face``, ``@supports`` and so on), parse
+   errors and unknown tokens are always dropped rather than passed through.
+
+External resources
+------------------
+
+``url()``, ``image-set()`` and the other resource-loading functions are
+rejected by default.  Pass a URL policy to keep references you want to
+allow.  The policy is a callable taking the URL text and returning the URL
+to keep, or ``None`` to reject it:
+
+.. doctest::
+
+   >>> from bleach.css_sanitizer import CSSSanitizer, URLPolicy
+
+   >>> css_sanitizer = CSSSanitizer(
+   ...     allowed_css_properties=["background"],
+   ...     url_policy=URLPolicy(allowed_protocols=["http", "https"]),
+   ... )
+
+   >>> bleach.clean(
+   ...     '<p style="background: url(https://example.com/logo.png);">my html</p>',
+   ...     tags=tags,
+   ...     attributes=attrs,
+   ...     css_sanitizer=css_sanitizer
+   ... )
+   '<p style="background: url(https://example.com/logo.png);">my html</p>'
+
+``URLPolicy`` rejects references using another scheme, relative references
+(unless ``allow_relative=True``) and references longer than
+``max_url_length``.  Document-local fragment references (``#fragment``) are
+always accepted when a policy is configured.  Every URL inside an
+``image-set()`` must pass the policy, otherwise the whole declaration is
+dropped.
 
 .. autodata:: bleach.css_sanitizer.ALLOWED_CSS_PROPERTIES
 
 .. autodata:: bleach.css_sanitizer.ALLOWED_SVG_PROPERTIES
+
+.. autoclass:: bleach.css_sanitizer.URLPolicy
 
 .. autoclass:: bleach.css_sanitizer.CSSSanitizer
 
