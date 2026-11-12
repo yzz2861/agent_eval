@@ -1,0 +1,7 @@
+include README.rst
+include CHANGES.rst
+include LICENSE.txt
+recursive-include example *
+recursive-include docs *
+recursive-include pyrad/tests/data *
+global-exclude *.py[co] __pycache__ *.log

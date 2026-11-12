@@ -1,0 +1,67 @@
+# Copyright (C) 2019 The FreeRADIUS Server project and contributors
+# This work is licensed under CC-BY version 4.0 https://creativecommons.org/licenses/by/4.0
+#
+# Excerpts of the FreeRADIUS 3.2 dictionaries (share/dictionary.*), with
+# the constructs pyrad does not support (issue #173). Changes: only a few
+# lines of each file are included, and some definitions are modified or
+# added to cover a parser case.
+
+# dictionary.rfc2865
+ATTRIBUTE	User-Name				1	string
+ATTRIBUTE	User-Password				2	string encrypt=1
+ATTRIBUTE	CHAP-Password				3	octets secret
+ATTRIBUTE	Vendor-Specific				26	vsa
+
+# dictionary.rfc2869
+ATTRIBUTE	EAP-Message				79	octets concat
+
+# dictionary.rfc2868
+ATTRIBUTE	Tunnel-Password				69	string has_tag,encrypt=2
+
+# dictionary.rfc6572
+ATTRIBUTE	Mobile-Node-Home-Address-IPv4		160	ipv4prefix
+
+# dictionary.rfc6929
+ATTRIBUTE	Extended-Attribute-1			241	extended
+ATTRIBUTE	Extended-Attribute-5			245	long-extended
+ATTRIBUTE	Extended-Vendor-Specific-1		241.26	evs
+ATTRIBUTE	Extended-Vendor-Specific-5		245.26	evs
+
+# dictionary.rfc7268
+ATTRIBUTE	Allowed-Called-Station-Id		241.5	string
+VALUE	Allowed-Called-Station-Id	Any			any
+
+# dictionary.freeradius.internal
+ATTRIBUTE	Packet-Type				1000	integer virtual
+ATTRIBUTE	Proxy-To-Realm				1031	string
+
+# dictionary.freeradius.evs5
+VENDOR		FreeRADIUS			11344
+BEGIN-VENDOR	FreeRADIUS	format=Extended-Vendor-Specific-5
+ATTRIBUTE	FreeRADIUS-Attr			1	string
+END-VENDOR	FreeRADIUS
+
+# dictionary.freeradius
+BEGIN-VENDOR	FreeRADIUS
+ATTRIBUTE	FreeRADIUS-Proxied-To			1	ipaddr
+ATTRIBUTE	FreeRADIUS-EAP-FAST-TLV			186	tlv
+ATTRIBUTE	FreeRADIUS-EAP-FAST-PAC			186.11	tlv
+ATTRIBUTE	FreeRADIUS-EAP-FAST-PAC-Key		186.11.1	octets
+END-VENDOR	FreeRADIUS
+
+# dictionary.wimax
+VENDOR		WiMAX				24757	format=1,1,c
+BEGIN-VENDOR	WiMAX
+ATTRIBUTE	WiMAX-Capability			1	tlv
+ATTRIBUTE	WiMAX-Release				1.1	string
+ATTRIBUTE	WiMAX-DNS-Server			52	combo-ip
+END-VENDOR	WiMAX
+
+# dictionary.lucent
+VENDOR		Lucent				4846	format=2,1
+BEGIN-VENDOR	Lucent
+ATTRIBUTE	Lucent-Max-Shared-Users			2	integer
+END-VENDOR	Lucent
+
+# dictionary.freedhcp
+ATTRIBUTE	DHCP-Router-Address			3	ipaddr array

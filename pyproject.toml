@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyrad"
+dynamic = ["version"]
+description = "RADIUS tools"
+readme = "README.rst"
+license = "BSD-3-Clause"
+license-files = ["LICENSE.txt"]
+requires-python = ">=3.10"
+authors = [
+  { name = "Christian Giese (GIC-de)" }
+]
+keywords = ["radius", "authentication", "AAA", "accounting", "authorization", "RADIUS"]
+classifiers = [
+  "Development Status :: 6 - Mature",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Topic :: System :: Systems Administration :: Authentication/Directory",
+]
+
+dependencies = []
+
+[dependency-groups]
+lint = [
+  "ruff",
+]
+test = [
+  "coverage",
+  "netaddr>=0.8.0",
+  "pytest>=8",
+]
+docs = [
+  "sphinx>=7.0",
+  "sphinx-rtd-theme>=2.0",
+]
+
+[project.urls]
+Repository = "https://github.com/pyradius/pyrad"
+Documentation = "https://pyradius-pyrad.readthedocs.io"
+
+[tool.setuptools]
+packages = { find = { exclude = ["tests*"] } }
+include-package-data = true
+zip-safe = true
+
+[tool.pytest.ini_options]
+testpaths = ["pyrad/tests"]
+addopts = "-ra"
+
+[tool.setuptools.dynamic]
+version = { attr = "pyrad.__version__" }
+
+[tool.ruff.lint]
+# Pin the rule set so newer ruff releases do not enable additional rules.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.coverage.run]
+# Measure the whole package, including modules not imported by any test
+source = ["pyrad"]
+omit = ["pyrad/tests/*"]
+
+[tool.coverage.report]
+# demo code run as a script, e.g. starting the Twisted reactor
+exclude_also = ['if __name__ == .__main__.:']
