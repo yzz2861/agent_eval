@@ -290,6 +290,8 @@ class CoreEnforcer:
                 if ptype in self.rm_map:
                     rm = self.rm_map[ptype]
                     rm.clear()
+                    if ptype in self.cond_rm_map:
+                        self.cond_rm_map[ptype].clear()
                     continue
 
                 if len(assertion.tokens) <= 2 and len(assertion.params_tokens) == 0:
@@ -368,19 +370,32 @@ class CoreEnforcer:
 
     def load_filtered_policy(self, filter):
         """reloads a filtered policy from file/database."""
-        self.model.clear_policy()
-
         if not hasattr(self.adapter, "is_filtered"):
             raise ValueError("filtered policies are not supported by this adapter")
 
-        self.adapter.load_filtered_policy(self.model, filter)
+        # Load into a copy first: a failing adapter must not erase the
+        # currently active policy or role links. The live model is replaced
+        # and its role links rebuilt only after the load has succeeded.
+        new_model = copy.deepcopy(self.model)
+        new_model.clear_policy()
 
-        self.model.sort_policies_by_priority()
+        self.adapter.load_filtered_policy(new_model, filter)
+
+        new_model.sort_policies_by_subject_hierarchy()
+        new_model.sort_policies_by_priority()
 
         self.init_rm_map()
-        self.model.print_policy()
+        new_model.print_policy()
         if self.auto_build_role_links:
-            self.build_role_links()
+            try:
+                self._build_role_links(new_model)
+            except Exception:
+                # Keep the old view usable if rebuilding fails.
+                self._build_role_links(self.model)
+                raise
+
+        self.model = new_model
+        self._reset_policy_caches()
 
     def load_increment_filtered_policy(self, filter):
         """LoadIncrementalFilteredPolicy append a filtered policy from file/database."""
@@ -431,10 +446,16 @@ class CoreEnforcer:
     def build_role_links(self):
         """manually rebuild the role inheritance relations."""
 
+        self._build_role_links(self.model)
+
+    def _build_role_links(self, model):
         for rm in self.rm_map.values():
             rm.clear()
+        for crm in self.cond_rm_map.values():
+            crm.clear()
 
-        self.model.build_role_links(self.rm_map)
+        model.build_role_links(self.rm_map)
+        model.build_conditional_role_links(self.cond_rm_map)
 
     def add_named_matching_func(self, ptype, fn):
         """add_named_matching_func add MatchingFunc by ptype RoleManager"""

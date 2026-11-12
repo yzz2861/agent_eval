@@ -338,3 +338,43 @@ class TestDomainManager(TestRoleManager):
         self.assertTrue(rm.has_link("alice", "users", "domain1"))
         self.assertTrue(rm.has_link("alice", "user", "domain2"))
         self.assertFalse(rm.has_link("alice", "users", "domain2"))
+
+    def test_duplicate_domain_links_are_idempotent(self):
+        rm = self.get_role_manager()
+        rm.add_link("alice", "admin", "domain1")
+        rm.add_link("alice", "admin", "domain1")
+
+        self.assertEqual(len(rm.all_links["domain1"]), 1)
+        self.assertEqual(tuple(rm.all_links["domain1"][0]), ("alice", "admin"))
+        self.assertTrue(rm.has_link("alice", "admin", "domain1"))
+
+        self.assertTrue(rm.delete_link("alice", "admin", "domain1"))
+        self.assertFalse(rm.delete_link("alice", "admin", "domain1"))
+        self.assertFalse(rm.has_link("alice", "admin", "domain1"))
+
+    def test_rebuild_restores_links_after_role_manager_restart(self):
+        rm = self.get_role_manager()
+        rm.add_link("alice", "admin", "domain1")
+        rm.add_link("bob", "admin", "domain2")
+
+        rm.clear()
+        self.assertFalse(rm.has_link("alice", "admin", "domain1"))
+
+        # A restarted manager is rebuilt from the policy-owned link store.
+        for domain, user in (("domain1", "alice"), ("domain2", "bob")):
+            rm.add_link(user, "admin", domain)
+
+        self.assertTrue(rm.has_link("alice", "admin", "domain1"))
+        self.assertFalse(rm.has_link("alice", "admin", "domain2"))
+        self.assertTrue(rm.has_link("bob", "admin", "domain2"))
+        self.assertFalse(rm.has_link("bob", "admin", "domain1"))
+
+    def test_empty_and_missing_domains_are_distinct(self):
+        rm = self.get_role_manager()
+        rm.add_link("empty", "admin", "")
+        rm.add_link("missing", "admin")
+
+        self.assertTrue(rm.has_link("empty", "admin", ""))
+        self.assertFalse(rm.has_link("empty", "admin"))
+        self.assertTrue(rm.has_link("missing", "admin"))
+        self.assertFalse(rm.has_link("missing", "admin", ""))

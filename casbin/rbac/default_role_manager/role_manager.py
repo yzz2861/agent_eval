@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+import threading
 from collections import OrderedDict, namedtuple
 from enum import Enum
 
@@ -20,6 +21,21 @@ from casbin.rbac import RoleManager as RM
 from casbin.rbac import ConditionalRoleManager as CRM
 
 Link = namedtuple("Link", ["user", "role"])
+
+
+# Role links are stored without a domain when the caller did not supply one.
+# It must stay distinct from an explicitly supplied empty domain ("") so that
+# an empty domain can never accidentally address the domain-less graph.
+class _NoDomain:
+    def __deepcopy__(self, memo):
+        return self
+
+    def __reduce__(self):
+        return (_NoDomain, ())
+
+
+NO_DOMAIN = _NoDomain()
+GLOBAL_DOMAIN = "*"
 
 
 class MatchOrder(Enum):
@@ -103,13 +119,24 @@ class RoleManager(RM):
         self.domain_matching_func = None
         self.all_links = list()
         self.all_roles = dict()
+        self._lock = threading.RLock()
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state.pop("_lock", None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._lock = threading.RLock()
 
     def _rebuild(self):
-        self.all_roles = dict()
-        links = self.all_links
-        self.all_links = list()
-        for link in links:
-            self.add_link(link.user, link.role)
+        with self._lock:
+            self.all_roles = dict()
+            links = self.all_links
+            self.all_links = list()
+            for link in links:
+                self.add_link(link.user, link.role)
 
     def _matching_fn(self, str1, str2, match_order=MatchOrder.STR_PATTERN):
         if match_order == MatchOrder.PATTERN_STR:
@@ -131,61 +158,78 @@ class RoleManager(RM):
         ]
 
     def _get_role(self, name):
-        if name not in self.all_roles:
-            role = Role(name)
-            if self.matching_func != None:
-                for pattern_role in self._matching_roles(name):
-                    role.copy_from(pattern_role)
-            self.all_roles[name] = role
-        return self.all_roles[name]
+        with self._lock:
+            if name not in self.all_roles:
+                role = Role(name)
+                if self.matching_func != None:
+                    for pattern_role in self._matching_roles(name):
+                        role.copy_from(pattern_role)
+                self.all_roles[name] = role
+            return self.all_roles[name]
 
     def add_matching_func(self, fn):
-        self.matching_func = fn
-        self._rebuild()
+        with self._lock:
+            self.matching_func = fn
+            self._rebuild()
 
     def add_domain_matching_func(self, fn=None):
-        self.domain_matching_func = fn
+        with self._lock:
+            self.domain_matching_func = fn
 
     def clear(self):
-        self.all_roles = dict()
-        self.all_links = list()
+        with self._lock:
+            self.all_roles = dict()
+            self.all_links = list()
 
     def add_link(self, name1, name2, *domain):
-        self.all_links.append(Link(name1, name2))
+        with self._lock:
+            link = Link(name1, name2)
+            if link in self.all_links:
+                return False
+            self.all_links.append(link)
 
-        user = self._get_role(name1)
-        role = self._get_role(name2)
+            user = self._get_role(name1)
+            role = self._get_role(name2)
 
-        user.add_role(role)
+            user.add_role(role)
 
-        if self.matching_func != None:
-            for r in self.all_roles.values():
-                if r.name != user.name and self._matching_fn(user.name, r.name, MatchOrder.PATTERN_STR):
-                    r.add_role(role)
-                if r.name != role.name and self._matching_fn(role.name, r.name, MatchOrder.PATTERN_STR):
-                    role.add_role(r)
+            if self.matching_func != None:
+                for r in self.all_roles.values():
+                    if r.name != user.name and self._matching_fn(user.name, r.name, MatchOrder.PATTERN_STR):
+                        r.add_role(role)
+                    if r.name != role.name and self._matching_fn(role.name, r.name, MatchOrder.PATTERN_STR):
+                        role.add_role(r)
+            return True
 
     def delete_link(self, name1, name2, *domain):
-        if Link(name1, name2) not in self.all_links:
-            return
-        self.all_links.remove(Link(name1, name2))
+        with self._lock:
+            link = Link(name1, name2)
+            if link not in self.all_links:
+                return False
+            self.all_links.remove(link)
 
-        user = self._get_role(name1)
-        role = self._get_role(name2)
-        user.remove_role(role)
+            user = self._get_role(name1)
+            role = self._get_role(name2)
+            if role in user.roles:
+                user.remove_role(role)
 
-        if self.matching_func != None:
-            for r in self.all_roles.values():
-                if r.name != user.name and self._matching_fn(user.name, r.name, MatchOrder.PATTERN_STR):
-                    r.remove_role(role)
-                if r.name != role.name and self._matching_fn(role.name, r.name, MatchOrder.PATTERN_STR):
-                    role.remove_role(r)
+            if self.matching_func != None:
+                for r in self.all_roles.values():
+                    if r.name != user.name and self._matching_fn(user.name, r.name, MatchOrder.PATTERN_STR):
+                        if role in r.roles:
+                            r.remove_role(role)
+                    if r.name != role.name and self._matching_fn(role.name, r.name, MatchOrder.PATTERN_STR):
+                        if r in role.roles:
+                            role.remove_role(r)
+            return True
 
     def has_link(self, name1, name2, *domain):
-        user = self._get_role(name1)
-        role = self._get_role(name2)
-
-        return self._has_link(name2, [user], self.max_hierarchy_level)
+        with self._lock:
+            user = self._get_role(name1)
+            # Materializing the target role also applies matching-function
+            # copies, which is required for pattern links to be visible.
+            self._get_role(name2)
+            return self._has_link(name2, [user], self.max_hierarchy_level)
 
     def _has_link(self, name, roles, level):
         if level <= 0 or len(roles) == 0:
@@ -200,12 +244,14 @@ class RoleManager(RM):
         return self._has_link(name, list(next_roles), level - 1)
 
     def get_roles(self, name, *domain):
-        user = self._get_role(name)
-        return [r.name for r in user.roles]
+        with self._lock:
+            user = self._get_role(name)
+            return [r.name for r in user.roles]
 
     def get_users(self, name, *domain):
-        role = self._get_role(name)
-        return [u.name for u in role.users]
+        with self._lock:
+            role = self._get_role(name)
+            return [u.name for u in role.users]
 
     def to_string(self):
         line = []
@@ -227,12 +273,24 @@ class DomainManagerBase(RM):
         self.matching_func = None
         self.domain_matching_func = None
         self.matching_func = lambda name1, name2: name1 == name2
+        self._lock = threading.RLock()
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state.pop("_lock", None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._lock = threading.RLock()
 
     def add_matching_func(self, fn):
-        self.matching_func = fn
+        with self._lock:
+            self.matching_func = fn
 
     def add_domain_matching_func(self, fn=None):
-        self.domain_matching_func = fn
+        with self._lock:
+            self.domain_matching_func = fn
 
     def _get_domain(self, *domain):
         if len(domain) > 1:
@@ -240,7 +298,7 @@ class DomainManagerBase(RM):
         elif len(domain) == 1:
             domain = domain[0]
         else:
-            domain = ""
+            domain = NO_DOMAIN
 
         return domain
 
@@ -252,45 +310,84 @@ class DomainManagerBase(RM):
 
         return self.all_links[domain]
 
+    @staticmethod
+    def _is_concrete_domain(domain):
+        return domain is not NO_DOMAIN and domain not in ("", GLOBAL_DOMAIN)
+
+    def _links_for_domain(self, domain):
+        """Collect links visible from a domain without exposing other domains.
+
+        An explicitly configured "*" domain is the only built-in global
+        marker. Missing domains and empty domains keep their own bucket and
+        never act as wildcard patterns.
+        """
+        links = list(self.all_links.get(domain, []))
+        if self._is_concrete_domain(domain):
+            links.extend(self.all_links.get(GLOBAL_DOMAIN, []))
+
+        if self.domain_matching_func is not None and domain is not NO_DOMAIN and domain != GLOBAL_DOMAIN:
+            for link_domain, domain_links in self.all_links.items():
+                if link_domain in (domain, NO_DOMAIN, GLOBAL_DOMAIN):
+                    continue
+                if match_error_handler(self.domain_matching_func, domain, link_domain):
+                    links.extend(domain_links)
+
+        # Duplicate rows and overlapping pattern domains can produce the same
+        # visible link more than once. The graph itself only needs one edge.
+        seen = set()
+        result = []
+        for link in links:
+            if link not in seen:
+                seen.add(link)
+                result.append(link)
+        return result
+
     def _get_role_manager(self, *domain):
-        domain1 = self._get_domain(*domain)
-        domain_links = self.all_links.get(domain1, [])
-
-        if self.domain_matching_func != None:
-            for domain2, links in self.all_links.items():
-                if domain1 != domain2 and match_error_handler(self.domain_matching_func, domain1, domain2):
-                    domain_links = domain_links + links
-
-        rm = RoleManager(max_hierarchy_level=self.max_hierarchy_level)
-        rm.add_matching_func(self.matching_func)
-        for link in domain_links:
-            rm.add_link(link[0], link[1])
-        return rm
+        with self._lock:
+            domain1 = self._get_domain(*domain)
+            rm = RoleManager(max_hierarchy_level=self.max_hierarchy_level)
+            rm.add_matching_func(self.matching_func)
+            for link in self._links_for_domain(domain1):
+                rm.add_link(link[0], link[1])
+            return rm
 
     def clear(self):
-        self.all_links = dict()
+        with self._lock:
+            self.all_links = dict()
 
     def add_link(self, name1, name2, *domain):
-        links = self._get_links(*domain)
-        links.append(Link(name1, name2))
+        with self._lock:
+            links = self._get_links(*domain)
+            link = Link(name1, name2)
+            if link in links:
+                return False
+            links.append(link)
+            return True
 
     def delete_link(self, name1, name2, *domain):
-        links = self._get_links(*domain)
-        if Link(name1, name2) not in links:
-            raise RuntimeError(f"error: link between {name1} and {name2} does not exist")
-        links.remove(Link(name1, name2))
+        with self._lock:
+            domain1 = self._get_domain(*domain)
+            links = self.all_links.get(domain1, [])
+            link = Link(name1, name2)
+            if link not in links:
+                return False
+            links.remove(link)
+            return True
 
     def has_link(self, name1, name2, *domain):
-        rm = self._get_role_manager(*domain)
-        return rm.has_link(name1, name2)
+        with self._lock:
+            rm = self._get_role_manager(*domain)
+            return rm.has_link(name1, name2)
 
     def get_roles(self, name, *domain):
-        rm = self._get_role_manager(*domain)
-        return rm.get_roles(name)
+        with self._lock:
+            rm = self._get_role_manager(*domain)
+            return rm.get_roles(name)
 
     def get_users(self, name, *domain):
-        rm = self._get_role_manager(*domain)
-        return rm.get_users(name)
+        with self._lock:
+            rm = self._get_role_manager(*domain)
+            return rm.get_users(name)
 
     def print_roles(self):
         pass
@@ -310,21 +407,23 @@ class DomainManager(DomainManagerBase):
         self.rm_map = OrderedDict()  # type: OrderedDict[str, RoleManager]
 
     def _rebuild(self):
-        self.rm_map = OrderedDict()
+        with self._lock:
+            self.rm_map = OrderedDict()
 
     def _get_role_manager(self, *domain):
-        domain1 = self._get_domain(*domain)
-        rm = self.rm_map.get(domain1)
-        if rm is None:
-            rm = super()._get_role_manager(*domain)
-            self.rm_map[domain1] = rm
-            if self.max_cached_role_managers and self.max_cached_role_managers > 0:
-                while len(self.rm_map) > self.max_cached_role_managers:
-                    self.rm_map.popitem(last=False)
-        else:
-            self.rm_map.move_to_end(domain1)
+        with self._lock:
+            domain1 = self._get_domain(*domain)
+            rm = self.rm_map.get(domain1)
+            if rm is None:
+                rm = super()._get_role_manager(*domain)
+                self.rm_map[domain1] = rm
+                if self.max_cached_role_managers and self.max_cached_role_managers > 0:
+                    while len(self.rm_map) > self.max_cached_role_managers:
+                        self.rm_map.popitem(last=False)
+            else:
+                self.rm_map.move_to_end(domain1)
 
-        return rm
+            return rm
 
     def _affected_role_managers(self, *domain):
         domain_pattern = self._get_domain(*domain)
@@ -339,38 +438,60 @@ class DomainManager(DomainManagerBase):
             return [self.rm_map[domain_pattern]] if domain_pattern in self.rm_map else []
 
     def add_matching_func(self, fn):
-        super().add_matching_func(fn)
-        for rm in self.rm_map.values():
-            rm.add_matching_func(fn)
+        with self._lock:
+            super().add_matching_func(fn)
+            for rm in self.rm_map.values():
+                rm.add_matching_func(fn)
 
     def add_domain_matching_func(self, fn):
-        super().add_domain_matching_func(fn)
-        for rm in self.rm_map.values():
-            rm.add_domain_matching_func(fn)
-        self._rebuild()
+        with self._lock:
+            super().add_domain_matching_func(fn)
+            for rm in self.rm_map.values():
+                rm.add_domain_matching_func(fn)
+            self._rebuild()
 
     def clear(self):
-        super().clear()
-        self.rm_map = OrderedDict()
+        with self._lock:
+            super().clear()
+            self.rm_map = OrderedDict()
 
     def add_link(self, name1, name2, *domain):
-        super().add_link(name1, name2, *domain)
-        for rm in self._affected_role_managers(*domain):
-            rm.add_link(name1, name2, *domain)
+        with self._lock:
+            if not super().add_link(name1, name2, *domain):
+                return False
+            domain1 = self._get_domain(*domain)
+            if domain1 == GLOBAL_DOMAIN:
+                # A global link is visible from every concrete domain; drop
+                # every cached snapshot so they are rebuilt from all_links.
+                self.rm_map = OrderedDict()
+                return True
+            for rm in self._affected_role_managers(domain1):
+                rm.add_link(name1, name2, *domain)
+            return True
 
     def delete_link(self, name1, name2, *domain):
-        super().delete_link(name1, name2, *domain)
-        for rm in self._affected_role_managers(*domain):
-            rm.delete_link(name1, name2, *domain)
+        with self._lock:
+            if not super().delete_link(name1, name2, *domain):
+                return False
+            domain1 = self._get_domain(*domain)
+            if domain1 == GLOBAL_DOMAIN:
+                self.rm_map = OrderedDict()
+                return True
+            for rm in self._affected_role_managers(domain1):
+                rm.delete_link(name1, name2, *domain)
+            return True
 
     def has_link(self, name1, name2, *domain):
-        return super().has_link(name1, name2, *domain)
+        with self._lock:
+            return super().has_link(name1, name2, *domain)
 
     def get_roles(self, name, *domain):
-        return super().get_roles(name, *domain)
+        with self._lock:
+            return super().get_roles(name, *domain)
 
     def get_users(self, name, *domain):
-        return super().get_users(name, *domain)
+        with self._lock:
+            return super().get_users(name, *domain)
 
     def print_roles(self):
         for domain, rm in self.rm_map.items():
@@ -483,59 +604,75 @@ class ConditionalRoleManager(RoleManager, CRM):
 
 class ConditionalDomainManager(DomainManager, ConditionalRoleManager):
     def _get_role_manager(self, *domain):
-        domain1 = self._get_domain(*domain)
-        if domain1 not in self.rm_map:
-            self.rm_map[domain1] = self._get_conditional_role_manager(*domain)
+        with self._lock:
+            domain1 = self._get_domain(*domain)
+            if domain1 not in self.rm_map:
+                self.rm_map[domain1] = self._get_conditional_role_manager(*domain)
 
-        return self.rm_map[domain1]
+            return self.rm_map[domain1]
 
     def _get_conditional_role_manager(self, *domain, store=False):
-        domain1 = self._get_domain(*domain)
-        domain_links = self.all_links.get(domain1, [])
+        with self._lock:
+            domain1 = self._get_domain(*domain)
 
-        rm = self.rm_map.get(domain1, None)
+            rm = self.rm_map.get(domain1, None)
 
-        if rm is None:
-            rm = ConditionalRoleManager(max_hierarchy_level=self.max_hierarchy_level)
-            if store:
-                self.rm_map[domain1] = rm
-            if self.domain_matching_func is not None:
-                for domain2, links in self.all_links.items():
-                    if domain1 != domain2 and match_error_handler(self.domain_matching_func, domain1, domain2):
-                        domain_links = domain_links + links
+            if rm is None:
+                rm = ConditionalRoleManager(max_hierarchy_level=self.max_hierarchy_level)
+                if store:
+                    self.rm_map[domain1] = rm
 
-            rm.add_matching_func(self.matching_func)
-            for link in domain_links:
-                rm.add_link(link[0], link[1])
-        return rm
+                rm.add_matching_func(self.matching_func)
+                for link in self._links_for_domain(domain1):
+                    rm.add_link(link[0], link[1])
+            return rm
 
     def has_link(self, name1, name2, *domain):
-        domain = self._get_domain(*domain)
-        rm = self._get_conditional_role_manager(domain)
-        return rm.has_link(name1, name2, domain)
+        with self._lock:
+            domain = self._get_domain(*domain)
+            rm = self._get_conditional_role_manager(domain)
+            return rm.has_link(name1, name2, domain)
 
     def add_link(self, name1, name2, *domain):
-        domain = self._get_domain(*domain)
-        rm = self._get_conditional_role_manager(domain, store=True)
-        rm.add_link(name1, name2, domain)
+        with self._lock:
+            domain_args = domain
+            domain = self._get_domain(*domain_args)
+            if not super().add_link(name1, name2, *domain_args):
+                return False
+            if domain == GLOBAL_DOMAIN:
+                self.rm_map = OrderedDict()
+            rm = self._get_conditional_role_manager(domain, store=True)
+            rm.add_link(name1, name2, domain)
+            return True
 
     def delete_link(self, name1, name2, *domain):
-        domain = self._get_domain(*domain)
-        rm = self._get_conditional_role_manager(domain, store=True)
-        rm.delete_link(name1, name2, domain)
+        with self._lock:
+            domain_args = domain
+            domain = self._get_domain(*domain_args)
+            if not super().delete_link(name1, name2, *domain_args):
+                return False
+            if domain == GLOBAL_DOMAIN:
+                self.rm_map = OrderedDict()
+            rm = self._get_conditional_role_manager(domain, store=True)
+            rm.delete_link(name1, name2, domain)
+            return True
 
     def add_link_condition_func(self, user_name, role_name, fn):
-        for rm in self.rm_map.values():
-            rm.add_link_condition_func(user_name, role_name, fn)
+        with self._lock:
+            for rm in self.rm_map.values():
+                rm.add_link_condition_func(user_name, role_name, fn)
 
     def add_domain_link_condition_func(self, user_name, role_name, domain, fn):
-        for rm in self.rm_map.values():
-            rm.add_domain_link_condition_func(user_name, role_name, domain, fn)
+        with self._lock:
+            for rm in self.rm_map.values():
+                rm.add_domain_link_condition_func(user_name, role_name, domain, fn)
 
     def set_link_condition_func_params(self, user_name, role_name, *params):
-        for rm in self.rm_map.values():
-            rm.set_link_condition_func_params(user_name, role_name, *params)
+        with self._lock:
+            for rm in self.rm_map.values():
+                rm.set_link_condition_func_params(user_name, role_name, *params)
 
     def set_domain_link_condition_func_params(self, user_name, role_name, domain, *params):
-        for rm in self.rm_map.values():
-            rm.set_domain_link_condition_func_params(user_name, role_name, domain, *params)
+        with self._lock:
+            for rm in self.rm_map.values():
+                rm.set_domain_link_condition_func_params(user_name, role_name, domain, *params)

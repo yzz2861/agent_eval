@@ -19,11 +19,14 @@ from casbin import persist
 from .file_adapter import FileAdapter
 from ..adapter_filtered import FilteredAdapter
 
+DOMAIN_TOKEN_NAMES = frozenset(("dom", "domain", "tenant", "workspace"))
+
 
 class Filter:
     # P,G are string []
-    P = []
-    G = []
+    def __init__(self):
+        self.P = []
+        self.G = []
 
 
 class FilteredFileAdapter(FileAdapter, FilteredAdapter):
@@ -70,7 +73,7 @@ class FilteredFileAdapter(FileAdapter, FilteredAdapter):
                 if not line or line == "\n":
                     continue
 
-                if filter_line(line, filter):
+                if filter_line(line, filter, model):
                     continue
 
                 handler(line, model)
@@ -86,7 +89,46 @@ class FilteredFileAdapter(FileAdapter, FilteredAdapter):
         self._save_policy_file(model)
 
 
-def filter_line(line, filter):
+def _domain_filter_index(model, key):
+    """Return the filter position of a policy/role domain field.
+
+    The filter arrays are positional and start at the first policy field
+    (the line's section key is not part of them). ``None`` means that the
+    section has no domain field.
+    """
+    if model is None or not key:
+        return None
+
+    sec = key[0]
+    if sec not in model.keys():
+        return None
+    assertion = (model[sec] or {}).get(key)
+    if assertion is None:
+        return None
+
+    if sec == "g":
+        # Role definitions are positional: g = user, role, domain, ...
+        return 2 if len(assertion.tokens) > 2 else None
+
+    if sec == "p":
+        tokens = assertion.tokens
+        for index, token in enumerate(tokens):
+            token_name = token.split("_", 1)[1] if "_" in token else token
+            if token_name in DOMAIN_TOKEN_NAMES:
+                return index
+
+        # Custom domain token names are conventionally the second field and
+        # are matched against the request definition's second token.
+        request = (model["r"] or {}).get("r") if "r" in model.keys() else None
+        if request is not None and len(request.tokens) > 1 and len(tokens) > 1:
+            request_name = request.tokens[1].split("_", 1)[1]
+            if request_name in DOMAIN_TOKEN_NAMES and tokens[1].split("_", 1)[1] == request_name:
+                return 1
+
+    return None
+
+
+def filter_line(line, filter, model=None):
     if filter == None:
         return False
 
@@ -94,23 +136,38 @@ def filter_line(line, filter):
     if len(p) == 0:
         return True
     filter_slice = []
+    domain_index = None
+    key = p[0].strip()
 
-    if p[0].strip() == "g":
+    if key.startswith("g"):
         if not filter[1] or all(not x.strip() for x in filter[1]):
             return False
         filter_slice = filter[1]
-    elif p[0].strip() == "p":
+        domain_index = _domain_filter_index(model, key)
+    elif key.startswith("p"):
         filter_slice = filter[0]
+        domain_index = _domain_filter_index(model, key)
 
-    return filter_words(p, filter_slice)
+    return filter_words(p, filter_slice, domain_index)
 
 
-def filter_words(line, filter):
+def filter_words(line, filter, domain_index=None):
     if len(line) < len(filter) + 1:
         return True
     skip_line = False
     for i, v in enumerate(filter):
-        if v and v.strip() and (v.strip() != line[i + 1].strip()):
+        value = line[i + 1].strip()
+        if not v or not v.strip():
+            continue
+
+        # An explicit "*" in the domain position is a global role/policy
+        # declaration. Keep it when loading any tenant's subset; the role
+        # manager decides which domains it is visible from. Empty domains
+        # are intentionally not treated as wildcards.
+        if i == domain_index and value == "*":
+            continue
+
+        if v.strip() != value:
             skip_line = True
             break
 

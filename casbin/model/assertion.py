@@ -41,7 +41,8 @@ class Assertion:
 
         for rule in self.policy:
             if len(rule) < count:
-                raise RuntimeError("grouping policy elements do not meet role definition")
+                self.logger.warning("skipping grouping policy row %r: expected at least %d fields", rule, count)
+                continue
             if len(rule) > count:
                 rule = rule[:count]
 
@@ -57,7 +58,8 @@ class Assertion:
             raise RuntimeError('the number of "_" in role definition should be at least 2')
         for rule in rules:
             if len(rule) < count:
-                raise TypeError("grouping policy elements do not meet role definition")
+                self.logger.warning("skipping grouping policy row %r: expected at least %d fields", rule, count)
+                continue
             if len(rule) > count:
                 rule = rule[:count]
             if op == PolicyOp.Policy_add:
@@ -75,7 +77,8 @@ class Assertion:
 
         for rule in rules:
             if len(rule) < count:
-                raise TypeError("grouping policy elements do not meet role definition")
+                self.logger.warning("skipping grouping policy row %r: expected at least %d fields", rule, count)
+                continue
             if len(rule) > count:
                 rule = rule[:count]
 
@@ -95,7 +98,8 @@ class Assertion:
             raise RuntimeError('the number of "_" in role definition should be at least 2')
         for rule in self.policy:
             if len(rule) < count:
-                raise TypeError("grouping policy elements do not meet role definition")
+                self.logger.warning("skipping grouping policy row %r: expected at least %d fields", rule, count)
+                continue
             if len(rule) > count:
                 rule = rule[:count]
 
