@@ -6,7 +6,7 @@ import hashlib
 import os
 import sys
 import unittest
-from urllib.parse import parse_qsl, urlparse
+from urllib.parse import parse_qsl, quote, urlparse
 from warnings import warn
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
@@ -363,6 +363,146 @@ class DigestFunctionTest(unittest.TestCase):
         self.assertEqual(
             "selected digest function must generate digest size greater than or equals to 18 bytes", str(cm.exception)
         )
+
+
+class ProvisioningUriValidationTest(unittest.TestCase):
+    SECRET = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+
+    def test_reserved_parameters_cannot_be_supplied_as_extensions(self):
+        totp = pyotp.TOTP(self.SECRET, name="alice", issuer="Registered Org")
+        hotp = pyotp.HOTP(self.SECRET, name="alice", issuer="Registered Org")
+        reserved_keys = (
+            "type",
+            "otp_type",
+            "secret",
+            "issuer",
+            "algorithm",
+            "digits",
+            "period",
+            "counter",
+            "label",
+            "encoder",
+        )
+        for otp in (totp, hotp):
+            for key in reserved_keys:
+                with self.subTest(otp_type=type(otp).__name__, key=key):
+                    with self.assertRaises(ValueError):
+                        otp.provisioning_uri(**{key: "attacker-controlled"})
+
+    def test_secret_value_is_not_included_in_errors(self):
+        leaked_secret = "DO-NOT-LEAK-THIS-SECRET"
+        totp = pyotp.TOTP(self.SECRET, name="alice", issuer="Registered Org")
+        with self.assertRaises(ValueError) as cm:
+            totp.provisioning_uri(secret=leaked_secret)
+        self.assertNotIn(leaked_secret, str(cm.exception))
+
+    def test_issuer_is_not_duplicated_or_overridden(self):
+        totp = pyotp.TOTP(self.SECRET, name="alice", issuer="Registered Org")
+        uri = totp.provisioning_uri()
+        query = parse_qsl(urlparse(uri).query, keep_blank_values=True)
+        self.assertEqual([value for key, value in query if key == "issuer"], ["Registered Org"])
+        self.assertEqual(len(query), len({key for key, _ in query}))
+
+        with self.assertRaises(ValueError):
+            totp.provisioning_uri(issuer="Attacker Org")
+
+        unregistered = pyotp.TOTP(self.SECRET, name="alice")
+        with self.assertRaises(ValueError):
+            unregistered.provisioning_uri(issuer="Attacker Org")
+
+    def test_control_characters_surrogates_and_long_inputs_are_rejected(self):
+        totp = pyotp.TOTP(self.SECRET, name="alice", issuer="Registered Org")
+        for bad_label in ("alice\x00", "alice\n", "alice\ud800", "alice\u202e"):
+            with self.subTest(label=repr(bad_label)):
+                with self.assertRaises(ValueError):
+                    totp.provisioning_uri(name=bad_label)
+
+        with self.assertRaises(ValueError):
+            totp.provisioning_uri(issuer_name="Org\ud800")
+        with self.assertRaises(ValueError):
+            totp.provisioning_uri(name="a" * (pyotp.utils.MAX_LABEL_COMPONENT_LENGTH + 1))
+        with self.assertRaises(ValueError):
+            pyotp.TOTP("A\x00" * 20, name="alice").provisioning_uri()
+
+        with self.assertRaises(ValueError):
+            totp.provisioning_uri(**{"x" * (pyotp.utils.MAX_EXTENSION_KEY_LENGTH + 1): "value"})
+        with self.assertRaises(ValueError):
+            totp.provisioning_uri(extra="v" * (pyotp.utils.MAX_EXTENSION_VALUE_LENGTH + 1))
+        with self.assertRaises(ValueError):
+            totp.provisioning_uri(**{"bad\x00key": "value"})
+        with self.assertRaises(ValueError):
+            totp.provisioning_uri(extra="bad\x00value")
+
+    def test_valid_extensions_are_added_once(self):
+        totp = pyotp.TOTP(self.SECRET, digits=8, interval=60, digest=hashlib.sha256, name="alice", issuer="Acme")
+        uri = totp.provisioning_uri(tenant="production", color="#123456")
+        url = urlparse(uri)
+        query = parse_qsl(url.query, keep_blank_values=True)
+        values = dict(query)
+        self.assertEqual(values["tenant"], "production")
+        self.assertEqual(values["color"], "#123456")
+        self.assertEqual(len(query), len({key for key, _ in query}))
+
+        parsed = pyotp.parse_uri(uri)
+        self.assertEqual(parsed.name, "alice")
+        self.assertEqual(parsed.issuer, "Acme")
+        self.assertEqual(parsed.digits, 8)
+        self.assertEqual(parsed.interval, 60)
+        self.assertEqual(hashlib.sha256, parsed.digest)
+
+    def test_image_must_be_https_without_userinfo(self):
+        totp = pyotp.TOTP(self.SECRET, name="alice", issuer="Acme")
+        image = "https://cdn.example.test/logo.png"
+        uri = totp.provisioning_uri(image=image)
+        self.assertEqual(dict(parse_qsl(urlparse(uri).query))["image"], image)
+        self.assertEqual(pyotp.parse_uri(uri).name, "alice")
+
+        invalid_images = (
+            "http://cdn.example.test/logo.png",
+            "ftp://cdn.example.test/logo.png",
+            "https://user@cdn.example.test/logo.png",
+            "https://user:supersecret@cdn.example.test/logo.png",
+            "https://cdn.example.test",
+            "https://[bad/path",
+        )
+        for invalid_image in invalid_images:
+            with self.subTest(image=invalid_image):
+                with self.assertRaises(ValueError) as cm:
+                    totp.provisioning_uri(image=invalid_image)
+                self.assertNotIn("supersecret", str(cm.exception))
+
+    def test_totp_and_hotp_label_encoding_round_trip(self):
+        issuer = "Acme / Text: More"
+        name = "alice@example.com / 用户:one"
+
+        totp = pyotp.TOTP(
+            self.SECRET, digits=8, interval=60, digest=hashlib.sha256, name=name, issuer=issuer
+        )
+        uri = totp.provisioning_uri()
+        url = urlparse(uri)
+        self.assertEqual(url.path, "/{}:{}".format(quote(issuer, safe=""), quote(name, safe="")))
+        self.assertEqual(dict(parse_qsl(url.query))["issuer"], issuer)
+        parsed = pyotp.parse_uri(uri)
+        self.assertEqual(parsed.name, name)
+        self.assertEqual(parsed.issuer, issuer)
+        self.assertEqual(parsed.digits, 8)
+        self.assertEqual(parsed.interval, 60)
+        self.assertEqual(hashlib.sha256, parsed.digest)
+        self.assertEqual(uri, parsed.provisioning_uri())
+
+        hotp = pyotp.HOTP(
+            self.SECRET, digits=8, digest=hashlib.sha256, name=name, issuer=issuer, initial_count=7
+        )
+        uri = hotp.provisioning_uri()
+        url = urlparse(uri)
+        self.assertEqual(url.netloc, "hotp")
+        self.assertEqual(url.path, "/{}:{}".format(quote(issuer, safe=""), quote(name, safe="")))
+        self.assertEqual(dict(parse_qsl(url.query))["counter"], "7")
+        parsed = pyotp.parse_uri(uri)
+        self.assertEqual(parsed.name, name)
+        self.assertEqual(parsed.issuer, issuer)
+        self.assertEqual(parsed.initial_count, 7)
+        self.assertEqual(uri, parsed.provisioning_uri())
 
 
 class ParseUriTest(unittest.TestCase):

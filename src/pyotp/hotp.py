@@ -74,6 +74,7 @@ class HOTP(OTP):
             organization title of the OTP entry in Authenticator
         :returns: provisioning URI
         """
+        utils._validate_extra_parameters(kwargs)
         return utils.build_uri(
             self.secret,
             name=name if name else self.name,

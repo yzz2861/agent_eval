@@ -124,6 +124,7 @@ class TOTP(OTP):
             https://github.com/google/google-authenticator/wiki/Key-Uri-Format
 
         """
+        utils._validate_extra_parameters(kwargs)
         return utils.build_uri(
             self.secret,
             name if name else self.name,
