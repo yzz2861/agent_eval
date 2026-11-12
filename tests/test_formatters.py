@@ -1164,6 +1164,239 @@ def test_stack_info_as_array_no_stack_info(
     return
 
 
+## Exception Sanitization
+## -----------------------------------------------------------------------------
+@pytest.mark.parametrize("class_", ALL_FORMATTERS)
+def test_sanitize_exception_chain_and_sensitive_locals(
+    env: LoggingEnvironment, class_: type[BaseJsonFormatter]
+):
+    env.set_formatter(class_(sanitize_exceptions=True))
+
+    denied_request_reprs: list[object] = []
+
+    class DangerousRequest:
+        def __repr__(self) -> str:
+            denied_request_reprs.append(self)
+            raise AssertionError("repr must not be called")
+
+    db_secret = "db-password-very-secret"
+    authorization_secret = "auth-token-very-secret"
+    cookie_secret = "cookie-value-very-secret"
+    local_password = "local-password-very-secret"
+    local_token = "local-token-very-secret"
+    outer_password = "outer-password-very-secret"
+
+    def deepest():
+        password = local_password
+        token = local_token
+        headers = {
+            "Authorization": f"Bearer {authorization_secret}",
+            "Cookie": f"session={cookie_secret}",
+        }
+        endpoint = f"postgresql://admin:{db_secret}@db.internal/prod"
+        request = DangerousRequest()
+        cycle: list[object] = []
+        cycle.append(cycle)
+        raise ValueError(f"root failure endpoint={endpoint} headers={headers}")
+
+    def outer():
+        try:
+            deepest()
+        except ValueError as exc:
+            raise RuntimeError(f"outer failure password={outer_password}") from exc
+
+    try:
+        outer()
+    except Exception:
+        env.logger.exception("hello")
+
+    trace = env.load_json()["exc_info"]
+    for secret in (
+        db_secret,
+        authorization_secret,
+        cookie_secret,
+        local_password,
+        local_token,
+        outer_password,
+    ):
+        assert secret not in trace
+
+    assert denied_request_reprs == []
+    assert "RuntimeError: outer failure" in trace
+    assert "Root exception: ValueError" in trace
+    assert "in deepest" in trace
+    assert "in outer" in trace
+    assert "<DangerousRequest [REDACTED]>" in trace
+    assert "<cycle>" in trace
+    assert trace.count("[REDACTED]") >= 6
+    return
+
+
+def test_sanitize_caller_patterns_and_unicode(env: LoggingEnvironment):
+    env.set_formatter(
+        JsonFormatter(
+            sanitize_exceptions=True,
+            redact_patterns=[r"TICKET-[A-Z0-9]+"],
+        )
+    )
+
+    ticket = "TICKET-ABC123"
+    password = "中文密码-very-secret"
+    try:
+        raise ValueError(f"处理失败 {ticket} 数据库连接失败 password={password}")
+    except ValueError:
+        env.logger.exception("oops")
+
+    trace = env.load_json()["exc_info"]
+    assert ticket not in trace
+    assert password not in trace
+    assert "处理失败" in trace
+    assert "数据库连接失败" in trace
+    assert "ValueError" in trace
+    return
+
+
+def test_sanitize_bad_repr_and_circular_values(env: LoggingEnvironment):
+    env.set_formatter(JsonFormatter(sanitize_exceptions=True))
+    env.logger.propagate = False
+
+    calls: list[str] = []
+
+    class BadRepr:
+        def __repr__(self) -> str:
+            calls.append("repr")
+            raise RuntimeError("database query triggered")
+
+        def __str__(self) -> str:
+            calls.append("str")
+            raise RuntimeError("database query triggered")
+
+    class BadException(Exception):
+        def __repr__(self) -> str:
+            calls.append("exception-repr")
+            raise RuntimeError("database query triggered")
+
+        def __str__(self) -> str:
+            calls.append("exception-str")
+            raise RuntimeError("database query triggered")
+
+        def __getattr__(self, name: str) -> object:
+            calls.append(f"exception-getattr:{name}")
+            raise RuntimeError("database query triggered")
+
+    def explode():
+        bad = BadRepr()
+        cycle: dict[str, object] = {}
+        cycle["self"] = cycle
+        raise BadException("boom")
+
+    try:
+        explode()
+    except BadException:
+        env.logger.exception("oops")
+
+    trace = env.load_json()["exc_info"]
+    assert calls == []
+    assert "BadException: boom" in trace
+    assert "<BadRepr [REDACTED]>" in trace
+    assert "<cycle>" in trace
+    return
+
+
+def test_sanitize_limits_long_traceback(env: LoggingEnvironment):
+    max_frames = 6
+    max_frame_chars = 160
+    max_total_bytes = 1600
+    env.set_formatter(
+        JsonFormatter(
+            sanitize_exceptions=True,
+            exception_max_frames=max_frames,
+            exception_max_frame_chars=max_frame_chars,
+            exception_max_total_bytes=max_total_bytes,
+        )
+    )
+
+    def recurse(depth: int):
+        if depth:
+            return recurse(depth - 1)
+        raise RuntimeError("root token=long-stack-secret")
+
+    try:
+        recurse(120)
+    except RuntimeError:
+        env.logger.exception("oops")
+
+    trace = env.load_json()["exc_info"]
+    assert "long-stack-secret" not in trace
+    assert len(trace.encode("utf-8")) <= max_total_bytes
+    assert sum(line.lstrip().startswith('File "') for line in trace.splitlines()) <= max_frames
+    assert all(len(line) <= max_frame_chars for line in trace.splitlines())
+    assert "RuntimeError: root" in trace
+    assert "Root exception: RuntimeError" in trace
+    assert "[TRUNCATED]" in trace
+    return
+
+
+@pytest.mark.parametrize("exc_info_as_array", [False, True])
+def test_sanitize_stack_info_and_array(env: LoggingEnvironment, exc_info_as_array: bool):
+    env.set_formatter(
+        JsonFormatter(
+            sanitize_exceptions=True,
+            exc_info_as_array=exc_info_as_array,
+            stack_info_as_array=exc_info_as_array,
+        )
+    )
+
+    stack_secret = "stack-password-very-secret"
+    stack_info = (
+        "Stack (most recent call last):\n"
+        '  File "/tmp/example.py", line 12, in example\n'
+        f'    password = "{stack_secret}"\n'
+        '  File "/tmp/other.py", line 20, in other\n'
+        "    Authorization: Bearer stack-token-very-secret"
+    )
+    record = logging.makeLogRecord(
+        {
+            "name": env.logger.name,
+            "levelno": logging.INFO,
+            "msg": "hello",
+            "exc_info": None,
+            "stack_info": stack_info,
+        }
+    )
+
+    log_json = json.loads(env.handler.format(record))
+    stack = log_json["stack_info"]
+    if exc_info_as_array:
+        assert isinstance(stack, list)
+        stack = "\n".join(stack)
+    assert stack_secret not in stack
+    assert "stack-token-very-secret" not in stack
+    assert "File" in stack
+    return
+
+
+@pytest.mark.parametrize("class_", ALL_FORMATTERS)
+def test_sanitize_ordinary_logger_exception(
+    env: LoggingEnvironment, class_: type[BaseJsonFormatter]
+):
+    env.set_formatter(class_(sanitize_exceptions=True))
+
+    secret = "ordinary-log-secret"
+
+    try:
+        raise KeyError(f"token={secret}")
+    except KeyError:
+        env.logger.exception("request failed")
+
+    log_json = env.load_json()
+    assert log_json["message"] == "request failed"
+    assert "KeyError" in log_json["exc_info"]
+    assert secret not in log_json["exc_info"]
+    assert "Root exception" in log_json["exc_info"]
+    return
+
+
 ## JsonFormatter Specific
 ## -----------------------------------------------------------------------------
 def test_json_ensure_ascii_true(env: LoggingEnvironment):
