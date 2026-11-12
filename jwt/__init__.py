@@ -6,13 +6,25 @@ from .api_jws import (
     register_algorithm,
     unregister_algorithm,
 )
-from .api_jwt import PyJWT, decode, decode_complete, encode
+from .api_jwt import CompressedPyJWT, PyJWT, decode, decode_complete, encode
+from .compression import (
+    COMPRESSION_ALGORITHMS,
+    CompressionAlgorithm,
+    CompressionBudget,
+)
 from .exceptions import (
+    ClaimDepthLimitExceededError,
+    ClaimLimitExceededError,
+    ClaimNodeLimitExceededError,
+    CompressedPayloadSizeError,
+    CompressionError,
+    CompressionRatioError,
     DecodeError,
     ExpiredSignatureError,
     ImmatureSignatureError,
     InvalidAlgorithmError,
     InvalidAudienceError,
+    InvalidCompressedPayloadError,
     InvalidIssuedAtError,
     InvalidIssuerError,
     InvalidKeyError,
@@ -24,6 +36,9 @@ from .exceptions import (
     PyJWKError,
     PyJWKSetError,
     PyJWTError,
+    TrailingCompressedDataError,
+    TruncatedCompressedPayloadError,
+    UnsupportedCompressionAlgorithmError,
 )
 from .jwks_client import PyJWKClient
 from .warnings import InsecureKeyLengthWarning
@@ -46,9 +61,13 @@ __copyright__ = "Copyright 2015-2026 José Padilla"
 __all__ = [
     "PyJWS",
     "PyJWT",
+    "CompressedPyJWT",
     "PyJWKClient",
     "PyJWK",
     "PyJWKSet",
+    "CompressionBudget",
+    "CompressionAlgorithm",
+    "COMPRESSION_ALGORITHMS",
     "decode",
     "decode_complete",
     "encode",
@@ -59,6 +78,16 @@ __all__ = [
     # Warnings
     "InsecureKeyLengthWarning",
     # Exceptions
+    "CompressionError",
+    "UnsupportedCompressionAlgorithmError",
+    "CompressedPayloadSizeError",
+    "CompressionRatioError",
+    "TruncatedCompressedPayloadError",
+    "TrailingCompressedDataError",
+    "InvalidCompressedPayloadError",
+    "ClaimLimitExceededError",
+    "ClaimNodeLimitExceededError",
+    "ClaimDepthLimitExceededError",
     "DecodeError",
     "ExpiredSignatureError",
     "ImmatureSignatureError",

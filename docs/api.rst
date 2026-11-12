@@ -13,6 +13,10 @@ API Reference
     :class-doc-from: init
     :members:
 
+.. autoclass:: CompressedPyJWT
+    :class-doc-from: init
+    :members:
+
 .. autoclass:: PyJWK
     :class-doc-from: init
     :members:
@@ -45,6 +49,21 @@ Algorithms
 
 .. automodule:: jwt.algorithms
     :members: Algorithm, AllowedPrivateKeys, AllowedPublicKeys
+
+
+Compression
+-----------
+
+.. module:: jwt.compression
+    :synopsis: Budgeted decompression for compressed JWT payloads
+
+.. autoclass:: jwt.compression.CompressionBudget
+    :members:
+    :undoc-members:
+
+.. autoclass:: jwt.compression.CompressionAlgorithm
+    :members:
+    :undoc-members:
 
 
 Types

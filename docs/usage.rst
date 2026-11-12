@@ -150,6 +150,74 @@ key in the header.
     >>> jwt.get_unverified_header(encoded)
     {'alg': 'HS256', 'kid': '230498151c214b788dd97f22b85410a5', 'typ': 'JWT'}
 
+Compressed JWT Payloads
+------------------------
+
+Some issuers compress the JWT payload and advertise the algorithm with the
+JWT ``zip`` header parameter. Use :class:`jwt.CompressedPyJWT` instead of the
+global :func:`jwt.encode`/:func:`jwt.decode` helpers. Raw deflate
+(``"DEFLATE"``), zlib-wrapped deflate (``"DEF"``) and gzip (``"GZIP"``) are
+supported.
+
+.. code-block:: python
+
+    import jwt
+
+    codec = jwt.CompressedPyJWT()
+    token = codec.encode(
+        {"hello": "world"}, "secret", algorithm="HS256", compression="GZIP"
+    )
+    codec.decode(token, "secret", algorithms=["HS256"])
+    # {'hello': 'world'}
+
+Every compressed decode is bounded by a per-decode
+:class:`jwt.CompressionBudget`. The budget is immutable and all counters and
+buffers are local to a single decode, so sharing one budget object across
+tokens, keys or threads can never leak state. Decompression is streamed in
+fixed-size chunks and every size/ratio check runs before the output buffer
+grows; the JSON claim node count and nesting depth are validated before the
+claims object is built.
+
+.. code-block:: python
+
+    import jwt
+
+    tight_budget = jwt.CompressionBudget(
+        max_compressed_size=4096,
+        max_decompressed_size=65536,
+        max_compression_ratio=25.0,
+        max_claim_nodes=1000,
+        max_claim_depth=10,
+        # Only trust the algorithms your issuers actually use.
+        allowed_algorithms=frozenset({"GZIP"}),
+    )
+    codec = jwt.CompressedPyJWT(budget=tight_budget)
+
+Budget violations and malformed streams raise distinct, catchable
+exceptions (all subclasses of :class:`jwt.DecodeError`):
+
+- :class:`jwt.UnsupportedCompressionAlgorithmError` for an unknown or
+  disallowed ``zip`` value (fails before any decompression)
+- :class:`jwt.CompressedPayloadSizeError` for compressed/decompressed byte
+  limits
+- :class:`jwt.CompressionRatioError` for an excessive inflation ratio
+- :class:`jwt.TruncatedCompressedPayloadError`,
+  :class:`jwt.TrailingCompressedDataError` and
+  :class:`jwt.InvalidCompressedPayloadError` for malformed streams
+- :class:`jwt.ClaimNodeLimitExceededError` and
+  :class:`jwt.ClaimDepthLimitExceededError` for claim structure limits
+
+Error messages never include bytes from the payload itself.
+
+Legacy tokens whose payload is compressed but whose header omits ``zip`` (for
+example pako ``deflateRaw`` output) require an explicit default algorithm;
+without it they continue to be treated as plain JSON, matching the base
+:class:`jwt.PyJWT` behavior.
+
+.. code-block:: python
+
+    codec = jwt.CompressedPyJWT(default_algorithm="DEFLATE")
+
 Registered Claim Names
 ----------------------
 

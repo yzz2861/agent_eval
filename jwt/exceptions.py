@@ -111,3 +111,78 @@ class InvalidJTIError(InvalidTokenError):
     """Raised when a token's ``jti`` claim is not a string"""
 
     pass
+
+
+class CompressionError(DecodeError):
+    """Base class for failures while decompressing a compressed JWT payload.
+
+    Every subclass is a :class:`DecodeError`, so existing callers that catch
+    ``DecodeError`` keep working, while the concrete subclass distinguishes
+    budget violations from malformed streams.
+    """
+
+    pass
+
+
+class UnsupportedCompressionAlgorithmError(CompressionError):
+    """Raised when the JWT ``zip`` header names a compression algorithm that
+    the decoder does not support or has not been configured to allow."""
+
+    pass
+
+
+class CompressedPayloadSizeError(CompressionError):
+    """Raised when a compressed payload exceeds the configured compressed or
+    decompressed byte budget. The check happens before a large buffer is
+    allocated, so an oversized token cannot exhaust worker memory."""
+
+    pass
+
+
+class CompressionRatioError(CompressionError):
+    """Raised when the ratio between decompressed and compressed bytes would
+    exceed the configured budget, i.e. a decompression bomb."""
+
+    pass
+
+
+class TruncatedCompressedPayloadError(CompressionError):
+    """Raised when a compressed payload ends before the compression stream's
+    own end-of-stream marker."""
+
+    pass
+
+
+class TrailingCompressedDataError(CompressionError):
+    """Raised when bytes remain after the compression stream's end-of-stream
+    marker."""
+
+    pass
+
+
+class InvalidCompressedPayloadError(CompressionError):
+    """Raised when a compressed payload cannot be decompressed because the
+    stream itself is corrupt."""
+
+    pass
+
+
+class ClaimLimitExceededError(DecodeError):
+    """Base class for claim structure budget violations discovered while
+    parsing a decompressed payload."""
+
+    pass
+
+
+class ClaimNodeLimitExceededError(ClaimLimitExceededError):
+    """Raised when a decompressed payload contains more JSON value nodes than
+    the per-decode budget allows."""
+
+    pass
+
+
+class ClaimDepthLimitExceededError(ClaimLimitExceededError):
+    """Raised when a decompressed payload nests JSON containers more deeply
+    than the per-decode budget allows."""
+
+    pass

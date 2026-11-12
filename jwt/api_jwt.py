@@ -9,6 +9,15 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Union, cast
 
 from .api_jws import PyJWS, _ALGORITHM_UNSET, _jws_global_obj
+from .compression import (
+    COMPRESSION_ALGORITHMS,
+    CompressionAlgorithm,
+    CompressionBudget,
+    bounded_decompress,
+    compress_payload,
+    get_algorithm,
+    scan_claim_limits,
+)
 from .exceptions import (
     DecodeError,
     ExpiredSignatureError,
@@ -19,6 +28,7 @@ from .exceptions import (
     InvalidJTIError,
     InvalidSubjectError,
     MissingRequiredClaimError,
+    UnsupportedCompressionAlgorithmError,
 )
 from .warnings import RemovedInPyjwt3Warning
 
@@ -586,6 +596,147 @@ class PyJWT:
                 raise InvalidIssuerError(
                     'Issuer param must be "str" or "Container[str]"'
                 ) from None
+
+
+class CompressedPyJWT(PyJWT):
+    """JWT handler that supports compressed payloads (JWT ``zip`` header).
+
+    Compression is only applied when a ``zip`` header parameter is present.
+    The supported algorithms are raw deflate (``"DEFLATE"``), zlib-wrapped
+    deflate (``"DEF"``) and gzip (``"GZIP"``). Every decode that actually
+    inflates a payload runs against a fresh, immutable
+    :class:`~jwt.compression.CompressionBudget` so that resource counters and
+    buffers can never be shared between tokens, keys or calls.
+
+    :param options: standard PyJWT decode/encode options.
+    :param budget: per-decode compression budget. Defaults to a permissive
+        budget that still rejects decompression bombs. A tighter budget only
+        affects compressed tokens; uncompressed tokens decode unchanged.
+    :param default_algorithm: algorithm used for legacy tokens whose header
+        carries no ``zip`` parameter but whose payload is known to be
+        compressed (e.g. tokens produced by the pako ``deflateRaw`` sample).
+        When ``None`` such payloads are treated as plain JSON, matching the
+        base :class:`PyJWT` behavior.
+    :param compression: default algorithm applied by :meth:`encode` when the
+        caller does not pass an explicit ``zip`` header.
+    """
+
+    def __init__(
+        self,
+        options: Options | None = None,
+        *,
+        budget: CompressionBudget | None = None,
+        default_algorithm: str | None = None,
+        compression: str | None = None,
+    ) -> None:
+        super().__init__(options=options)
+        self._budget: CompressionBudget = budget or CompressionBudget()
+        self._default_algorithm = self._resolve_algorithm_name(
+            default_algorithm, "default_algorithm"
+        )
+        self._compression = self._resolve_algorithm_name(compression, "compression")
+
+    @staticmethod
+    def _resolve_algorithm_name(name: str | None, parameter: str) -> str | None:
+        if name is None:
+            return None
+        if not isinstance(name, str) or name not in COMPRESSION_ALGORITHMS:
+            raise UnsupportedCompressionAlgorithmError(
+                f"Unknown compression algorithm for {parameter}: {name!r}"
+            )
+        return name
+
+    def encode(
+        self,
+        payload: dict[str, Any],
+        key: AllowedPrivateKeyTypes,
+        algorithm: str | None = _ALGORITHM_UNSET,  # type: ignore[assignment]
+        headers: dict[str, Any] | None = None,
+        json_encoder: type[json.JSONEncoder] | None = None,
+        sort_headers: bool = True,
+        compression: str | None = None,
+    ) -> str:
+        """Encode a JWT, compressing the payload when a ``zip`` algorithm is
+        configured via ``compression``, the instance default, or
+        ``headers``.
+        """
+        requested = compression or self._compression
+        headers = dict(headers) if headers is not None else {}
+        if "zip" in headers:
+            header_zip = headers["zip"]
+            if not isinstance(header_zip, str):
+                raise UnsupportedCompressionAlgorithmError(
+                    "The 'zip' header must be a string naming a compression algorithm"
+                )
+            if requested is not None and requested != header_zip:
+                raise UnsupportedCompressionAlgorithmError(
+                    "Conflicting compression algorithms between 'compression' "
+                    "and the 'zip' header"
+                )
+            requested = header_zip
+        if requested is not None:
+            self._resolve_algorithm_name(requested, "compression")
+            headers.setdefault("zip", requested)
+        return super().encode(
+            payload,
+            key,
+            algorithm,
+            headers=headers,
+            json_encoder=json_encoder,
+            sort_headers=sort_headers,
+        )
+
+    def _encode_payload(
+        self,
+        payload: dict[str, Any],
+        headers: dict[str, Any] | None = None,
+        json_encoder: type[json.JSONEncoder] | None = None,
+    ) -> bytes:
+        json_payload = super()._encode_payload(
+            payload,
+            headers=headers,
+            json_encoder=json_encoder,
+        )
+        zip_name = headers.get("zip") if headers else None
+        if zip_name is None:
+            return json_payload
+        algorithm = get_algorithm(zip_name, self._budget)
+        return compress_payload(json_payload, algorithm)
+
+    def _decode_payload(self, decoded: dict[str, Any]) -> dict[str, Any]:
+        header = decoded["header"]
+        raw_payload: bytes = decoded["payload"]
+        zip_name = header.get("zip")
+
+        if zip_name is None:
+            if self._default_algorithm is None or not raw_payload:
+                return super()._decode_payload(decoded)
+            zip_name = self._default_algorithm
+
+        # Algorithm allow-listing happens before any decompression work, so an
+        # unknown 'zip' value cannot trigger allocations or CPU use.
+        algorithm: CompressionAlgorithm = get_algorithm(zip_name, self._budget)
+
+        # Fresh local budget enforcement state per decode: bounded_decompress
+        # and scan_claim_limits hold all counters/buffers in locals and never
+        # touch instance state.
+        inflated = bounded_decompress(
+            raw_payload,
+            self._budget,
+            algorithm=algorithm,
+        )
+
+        # Reject structurally oversized claims before json.loads allocates the
+        # claims object. No extra copy is made: json.loads accepts bytearray.
+        scan_claim_limits(inflated, self._budget)
+
+        try:
+            payload = json.loads(inflated)
+        except (ValueError, RecursionError) as e:
+            raise DecodeError(f"Invalid payload string: {e}") from e
+        if not isinstance(payload, dict):
+            raise DecodeError("Invalid payload string: must be a json object")
+        return payload
 
 
 _jwt_global_obj = PyJWT()
