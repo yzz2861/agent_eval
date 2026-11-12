@@ -1,0 +1,13 @@
+*.pyc
+build
+dist
+MANIFEST
+.idea
+.vscode
+venv
+.eggs/
+.coverage
+coverage.xml
+simpleeval.egg-info/
+
+testfile.txt
