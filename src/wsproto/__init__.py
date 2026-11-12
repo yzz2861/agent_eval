@@ -9,7 +9,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from .connection import Connection, ConnectionState, ConnectionType
-from .handshake import H11Handshake
+from .handshake import (
+    WEBSOCKET_REJECT_REASON_HEADER,
+    H11Handshake,
+    OriginPolicy,
+    OriginRejectionReason,
+    ServerOriginPolicy,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -25,15 +31,20 @@ class WSConnection:
     Represents the local end of a WebSocket connection to a remote peer.
     """
 
-    def __init__(self, connection_type: ConnectionType) -> None:
+    def __init__(
+        self,
+        connection_type: ConnectionType,
+        origin_policy: ServerOriginPolicy | None = None,
+    ) -> None:
         """
         Constructor
 
         :param wsproto.connection.ConnectionType connection_type: Controls
             whether the library behaves as a client or as a server.
+        :param origin_policy: Optional explicit server Origin/Host policy.
         """
         self.client = connection_type is ConnectionType.CLIENT
-        self.handshake = H11Handshake(connection_type)
+        self.handshake = H11Handshake(connection_type, origin_policy=origin_policy)
         self.connection: Connection | None = None
 
     @property
@@ -47,9 +58,16 @@ class WSConnection:
         return self.connection.state
 
     def initiate_upgrade_connection(
-        self, headers: Headers, path: bytes | str,
+        self,
+        headers: Headers,
+        path: bytes | str,
+        origin_policy: ServerOriginPolicy | None = None,
     ) -> None:
-        self.handshake.initiate_upgrade_connection(headers, path)
+        self.handshake.initiate_upgrade_connection(
+            headers,
+            path,
+            origin_policy=origin_policy,
+        )
 
     def send(self, event: Event) -> bytes:
         """
@@ -97,4 +115,11 @@ class WSConnection:
             yield from self.connection.events()
 
 
-__all__ = ("ConnectionType", "WSConnection")
+__all__ = (
+    "WEBSOCKET_REJECT_REASON_HEADER",
+    "ConnectionType",
+    "OriginPolicy",
+    "OriginRejectionReason",
+    "ServerOriginPolicy",
+    "WSConnection",
+)

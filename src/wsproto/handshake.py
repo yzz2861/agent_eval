@@ -11,6 +11,7 @@ from typing import (
     TYPE_CHECKING,
     cast,
 )
+from urllib.parse import urlsplit
 
 import h11
 
@@ -28,6 +29,7 @@ from .utilities import (
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterable, Sequence
+    from typing import NoReturn
 
     from .typing import Headers
 
@@ -37,13 +39,352 @@ WEBSOCKET_VERSION = b"13"
 # RFC6455, Section 4.2.1/3 - Value of the Upgrade header
 WEBSOCKET_UPGRADE = b"websocket"
 
+# Rejection responses must not disclose proxy internals, so the response only
+# carries a stable reason code (never the rejected Host/Origin values).
+WEBSOCKET_REJECT_REASON_HEADER = b"x-websocket-reject-reason"
+
+
+class OriginRejectionReason:
+    """Stable reason codes for server origin-policy rejections."""
+
+    DUPLICATE_HOST = "duplicate_host"
+    DUPLICATE_ORIGIN = "duplicate_origin"
+    DUPLICATE_PROXY_HOST = "duplicate_proxy_host"
+    HOST_NOT_ALLOWED = "host_not_allowed"
+    INVALID_HOST = "invalid_host"
+    INVALID_ORIGIN = "invalid_origin"
+    MISSING_ORIGIN = "missing_origin"
+    ORIGIN_HOST_MISMATCH = "origin_host_mismatch"
+    ORIGIN_NOT_ALLOWED = "origin_not_allowed"
+    ORIGIN_SCHEME_NOT_ALLOWED = "origin_scheme_not_allowed"
+    ORIGIN_USERINFO_NOT_ALLOWED = "origin_userinfo_not_allowed"
+
+
+# A shorter alias for callers that already know the codes are origin-related.
+RejectionReason = OriginRejectionReason
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+class _PolicyViolationError(Exception):
+    def __init__(self, reason_code: str) -> None:
+        self.reason_code = reason_code
+        super().__init__(reason_code)
+
+
+def _text(value: str | bytes) -> str:
+    if isinstance(value, bytes):
+        return value.decode("ascii")
+    return value
+
+
+def _normalize_hostname(hostname: str) -> str:
+    hostname = hostname.rstrip(".")
+    if ":" in hostname:
+        return hostname.lower()
+    try:
+        return hostname.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        return hostname.lower()
+
+
+def _parse_authority(value: str) -> tuple[str, int | None]:
+    value = value.strip()
+    if not value or "," in value or "@" in value:
+        raise _PolicyViolationError(OriginRejectionReason.INVALID_HOST)
+    if any(character.isspace() for character in value):
+        raise _PolicyViolationError(OriginRejectionReason.INVALID_HOST)
+    try:
+        parsed = urlsplit("//" + value)
+        port = parsed.port
+    except ValueError as exc:
+        raise _PolicyViolationError(OriginRejectionReason.INVALID_HOST) from exc
+    if parsed.scheme or parsed.query or parsed.fragment:
+        raise _PolicyViolationError(OriginRejectionReason.INVALID_HOST)
+    if parsed.path:
+        raise _PolicyViolationError(OriginRejectionReason.INVALID_HOST)
+    if parsed.username is not None or parsed.password is not None:
+        raise _PolicyViolationError(OriginRejectionReason.INVALID_HOST)
+    if parsed.hostname is None:
+        raise _PolicyViolationError(OriginRejectionReason.INVALID_HOST)
+    return _normalize_hostname(parsed.hostname), port
+
+
+def _parse_origin(value: str) -> tuple[str, str, int]:
+    value = value.strip()
+    if not value or any(character.isspace() for character in value):
+        raise _PolicyViolationError(OriginRejectionReason.INVALID_ORIGIN)
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise _PolicyViolationError(OriginRejectionReason.INVALID_ORIGIN) from exc
+    scheme = parsed.scheme.lower()
+    if not scheme or not parsed.netloc:
+        raise _PolicyViolationError(OriginRejectionReason.INVALID_ORIGIN)
+    if scheme not in _DEFAULT_PORTS:
+        raise _PolicyViolationError(OriginRejectionReason.ORIGIN_SCHEME_NOT_ALLOWED)
+    if parsed.username is not None or parsed.password is not None:
+        raise _PolicyViolationError(OriginRejectionReason.ORIGIN_USERINFO_NOT_ALLOWED)
+    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        raise _PolicyViolationError(OriginRejectionReason.INVALID_ORIGIN)
+    if parsed.hostname is None:
+        raise _PolicyViolationError(OriginRejectionReason.INVALID_ORIGIN)
+    return (
+        scheme,
+        _normalize_hostname(parsed.hostname),
+        port if port is not None else _DEFAULT_PORTS[scheme],
+    )
+
+
+def _as_sequence(
+    value: str | bytes | Iterable[str | bytes] | None,
+) -> tuple[str | bytes, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, (str, bytes)):
+        return (value,)
+    return tuple(value)
+
+
+def _is_duplicate_host_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "multiple host" in message or "more than one host" in message
+
+
+def _reason_code_from_headers(
+    headers: Iterable[tuple[bytes, bytes]],
+) -> str | None:
+    for name, value in headers:
+        if name.lower() != WEBSOCKET_REJECT_REASON_HEADER:
+            continue
+        try:
+            return value.decode("ascii")
+        except UnicodeError:
+            return None
+    return None
+
+
+class ServerOriginPolicy:
+    """
+    Explicit server-side Origin and Host trust policy.
+
+    The policy is disabled unless it is passed to :class:`H11Handshake` or
+    :class:`~wsproto.WSConnection`. Rejections use HTTP 403 and expose one of
+    the stable :class:`OriginRejectionReason` codes. Rejected values are never
+    echoed back to the client.
+
+    :param allowed_origins: Exact origins that may be used by browser clients.
+    :param allowed_hosts: Host authorities that may serve the WebSocket. When
+        omitted, hostnames are derived from ``allowed_origins``.
+    :param trust_proxy_host: Use the host from ``proxy_host_header`` instead of
+        the ``Host`` header. This is disabled by default.
+    :param allow_missing_origin: Permit clients without an ``Origin`` header,
+        such as non-browser clients.
+    :param proxy_host_header: The only header consulted when
+        ``trust_proxy_host`` is enabled. It must be configured explicitly; no
+        header (including ``X-Forwarded-Host``) is trusted by default.
+    """
+
+    _ALIASES = {
+        "allowed_origin": "allowed_origins",
+        "allowed_host": "allowed_hosts",
+        "origin_allowlist": "allowed_origins",
+        "origin_whitelist": "allowed_origins",
+        "host_allowlist": "allowed_hosts",
+        "host_whitelist": "allowed_hosts",
+        "trust_proxy": "trust_proxy_host",
+        "trust_proxy_headers": "trust_proxy_host",
+        "trust_forwarded_host": "trust_proxy_host",
+        "trusted_proxy": "trust_proxy_host",
+        "allow_no_origin": "allow_missing_origin",
+        "allow_origin_missing": "allow_missing_origin",
+        "allow_absent_origin": "allow_missing_origin",
+        "allow_non_browser": "allow_missing_origin",
+        "allow_non_browser_clients": "allow_missing_origin",
+        "forwarded_host_header": "proxy_host_header",
+        "proxy_header": "proxy_host_header",
+        "proxy_header_name": "proxy_host_header",
+        "trusted_host_header": "proxy_host_header",
+        "trusted_proxy_header": "proxy_host_header",
+    }
+
+    def __init__(
+        self,
+        allowed_origins: str | bytes | Iterable[str | bytes] | None = (),
+        allowed_hosts: str | bytes | Iterable[str | bytes] | None = (),
+        trust_proxy_host: bool = False,
+        allow_missing_origin: bool = False,
+        proxy_host_header: str | bytes | None = None,
+        **aliases: object,
+    ) -> None:
+        arguments: dict[str, object] = {
+            "allowed_origins": allowed_origins,
+            "allowed_hosts": allowed_hosts,
+            "trust_proxy_host": trust_proxy_host,
+            "allow_missing_origin": allow_missing_origin,
+            "proxy_host_header": proxy_host_header,
+        }
+        for alias, canonical in self._ALIASES.items():
+            if alias in aliases:
+                arguments[canonical] = aliases.pop(alias)
+        if aliases:
+            msg = f"unexpected policy argument(s): {', '.join(sorted(aliases))}"
+            raise TypeError(msg)
+
+        allowed_origins = cast(
+            "str | bytes | Iterable[str | bytes] | None",
+            arguments["allowed_origins"],
+        )
+        allowed_hosts = cast(
+            "str | bytes | Iterable[str | bytes] | None",
+            arguments["allowed_hosts"],
+        )
+        trust_proxy_host = cast("bool", arguments["trust_proxy_host"])
+        allow_missing_origin = cast("bool", arguments["allow_missing_origin"])
+        proxy_host_header = cast("str | bytes | None", arguments["proxy_host_header"])
+
+        self.allowed_origins = tuple(
+            _text(value) for value in _as_sequence(allowed_origins)
+        )
+        self.allowed_hosts = tuple(
+            _text(value) for value in _as_sequence(allowed_hosts)
+        )
+        self.trust_proxy_host = bool(trust_proxy_host)
+        self.allow_missing_origin = bool(allow_missing_origin)
+
+        if proxy_host_header is None:
+            self.proxy_host_header = None
+        else:
+            header = _text(proxy_host_header).strip().lower()
+            if not header:
+                msg = "proxy_host_header must not be empty"
+                raise ValueError(msg)
+            self.proxy_host_header = header
+        if self.trust_proxy_host and self.proxy_host_header is None:
+            msg = "trust_proxy_host requires an explicitly configured proxy_host_header"
+            raise ValueError(msg)
+
+        try:
+            self._allowed_origin_keys = tuple(
+                _parse_origin(origin) for origin in self.allowed_origins
+            )
+        except _PolicyViolationError as exc:
+            msg = f"invalid allowed origin: {exc.reason_code}"
+            raise ValueError(msg) from exc
+        try:
+            self._allowed_host_entries = tuple(
+                _parse_authority(host) for host in self.allowed_hosts
+            )
+        except _PolicyViolationError as exc:
+            msg = f"invalid allowed host: {exc.reason_code}"
+            raise ValueError(msg) from exc
+
+        if not self._allowed_host_entries and self._allowed_origin_keys:
+            self._allowed_host_entries = tuple(
+                (origin_host, None)
+                for _, origin_host, _ in self._allowed_origin_keys
+            )
+
+    @property
+    def trust_proxy(self) -> bool:
+        return self.trust_proxy_host
+
+    @property
+    def allow_no_origin(self) -> bool:
+        return self.allow_missing_origin
+
+    def validate(self, origin: str | None, host: str) -> str | None:
+        """Return a rejection reason code, or ``None`` when the request passes."""
+        try:
+            hostname, host_port = _parse_authority(host)
+        except _PolicyViolationError as exc:
+            return exc.reason_code
+        if origin is None:
+            return self._validate_without_origin(hostname, host_port)
+        try:
+            scheme, origin_hostname, origin_port = _parse_origin(origin)
+        except _PolicyViolationError as exc:
+            return exc.reason_code
+        return self._validate_with_origin(
+            hostname,
+            host_port,
+            scheme,
+            origin_hostname,
+            origin_port,
+        )
+
+    def check(self, origin: str | None, host: str) -> str | None:
+        """Alias for :meth:`validate`."""
+        return self.validate(origin, host)
+
+    def _validate_without_origin(
+        self, hostname: str, host_port: int | None,
+    ) -> str | None:
+        default_ports = frozenset(_DEFAULT_PORTS.values())
+        if not self._host_is_allowed(hostname, host_port, default_ports):
+            return OriginRejectionReason.HOST_NOT_ALLOWED
+        if not self.allow_missing_origin:
+            return OriginRejectionReason.MISSING_ORIGIN
+        return None
+
+    def _validate_with_origin(
+        self,
+        hostname: str,
+        host_port: int | None,
+        scheme: str,
+        origin_hostname: str,
+        origin_port: int,
+    ) -> str | None:
+        default_ports = frozenset({_DEFAULT_PORTS[scheme]})
+        effective_host_port = (
+            host_port if host_port is not None else _DEFAULT_PORTS[scheme]
+        )
+        if not self._host_is_allowed(hostname, host_port, default_ports):
+            return OriginRejectionReason.HOST_NOT_ALLOWED
+        if origin_hostname != hostname or origin_port != effective_host_port:
+            return OriginRejectionReason.ORIGIN_HOST_MISMATCH
+        if (scheme, origin_hostname, origin_port) not in self._allowed_origin_keys:
+            return OriginRejectionReason.ORIGIN_NOT_ALLOWED
+        return None
+
+    def _host_is_allowed(
+        self,
+        hostname: str,
+        port: int | None,
+        default_ports: frozenset[int],
+    ) -> bool:
+        for allowed_hostname, allowed_port in self._allowed_host_entries:
+            if allowed_hostname != hostname:
+                continue
+            if (
+                allowed_port is None
+                or allowed_port == port
+                or (port is None and allowed_port in default_ports)
+            ):
+                return True
+        return False
+
+
+# These aliases are intentionally public so callers can use the policy under
+# the name that best describes their integration point.
+OriginPolicy = ServerOriginPolicy
+OriginValidationPolicy = ServerOriginPolicy
+WebSocketOriginPolicy = ServerOriginPolicy
+REJECTION_REASON_HEADER = WEBSOCKET_REJECT_REASON_HEADER
+
 
 class H11Handshake:
     """A Handshake implementation for HTTP/1.1 connections."""
 
-    def __init__(self, connection_type: ConnectionType) -> None:
+    def __init__(
+        self,
+        connection_type: ConnectionType,
+        origin_policy: ServerOriginPolicy | None = None,
+    ) -> None:
         self.client = connection_type is ConnectionType.CLIENT
         self._state = ConnectionState.CONNECTING
+        self.origin_policy = origin_policy
 
         if self.client:
             self._h11_connection = h11.Connection(h11.CLIENT)
@@ -73,7 +414,10 @@ class H11Handshake:
         return self._connection
 
     def initiate_upgrade_connection(
-        self, headers: Headers, path: bytes | str,
+        self,
+        headers: Headers,
+        path: bytes | str,
+        origin_policy: ServerOriginPolicy | None = None,
     ) -> None:
         """
         Initiate an upgrade connection.
@@ -83,12 +427,18 @@ class H11Handshake:
 
         :param list headers: HTTP headers represented as a list of 2-tuples.
         :param str path: A URL path.
+        :param origin_policy: Optional explicit server Origin/Host policy for
+            this upgrade request, overriding any policy on the handshake.
         """
         if self.client:
             msg = "Cannot initiate an upgrade connection when acting as the client"
             raise LocalProtocolError(
                 msg,
             )
+        if origin_policy is not None:
+            self.origin_policy = origin_policy
+        if self.origin_policy is not None:
+            self._check_policy_headers(headers)
         upgrade_request = h11.Request(method=b"GET", target=path, headers=headers)
         h11_client = h11.Connection(h11.CLIENT)
         self.receive_data(h11_client.send(upgrade_request))
@@ -133,11 +483,8 @@ class H11Handshake:
         while True:
             try:
                 event = self._h11_connection.next_event()
-            except h11.RemoteProtocolError:
-                msg = "Bad HTTP message"
-                raise RemoteProtocolError(
-                    msg, event_hint=RejectConnection(),
-                )
+            except h11.RemoteProtocolError as exc:
+                self._raise_bad_http(exc)
             if (
                 isinstance(event, h11.ConnectionClosed)
                 or event is h11.NEED_DATA
@@ -155,6 +502,9 @@ class H11Handshake:
                                 headers=list(event.headers),
                                 status_code=event.status_code,
                                 has_body=False,
+                                reason_code=_reason_code_from_headers(
+                                    event.headers,
+                                ),
                             ),
                         )
                         self._state = ConnectionState.CLOSED
@@ -165,6 +515,9 @@ class H11Handshake:
                             headers=list(event.headers),
                             status_code=event.status_code,
                             has_body=True,
+                            reason_code=_reason_code_from_headers(
+                                event.headers,
+                            ),
                         ),
                     )
                 elif isinstance(event, h11.Data):
@@ -192,6 +545,9 @@ class H11Handshake:
     def _process_connection_request(
         self, event: h11.Request,
     ) -> Request:
+        policy = self.origin_policy
+        if policy is not None:
+            self._check_policy_headers(event.headers)
         if event.method != b"GET":
             msg = "Request method must be GET"
             raise RemoteProtocolError(
@@ -201,16 +557,30 @@ class H11Handshake:
         extensions: list[str] = []
         host = None
         key = None
+        origin_value = None
+        proxy_host_value = None
         subprotocols: list[str] = []
         upgrade = b""
         version = None
         headers: Headers = []
+        proxy_header_name = (
+            policy.proxy_host_header.encode("ascii")
+            if policy is not None and policy.proxy_host_header is not None
+            else None
+        )
         for name, value in event.headers:
             name = name.lower()
             if name == b"connection":
                 connection_tokens = split_comma_header(value)
             elif name == b"host":
-                host = value.decode("idna")
+                try:
+                    host = value.decode("idna")
+                except UnicodeError:
+                    if policy is not None:
+                        self._reject_origin_policy(
+                            OriginRejectionReason.INVALID_HOST,
+                        )
+                    raise
                 continue  # Skip appending to headers
             elif name == b"sec-websocket-extensions":
                 extensions.extend(split_comma_header(value))
@@ -224,6 +594,15 @@ class H11Handshake:
                 version = value
             elif name == b"upgrade":
                 upgrade = value
+            elif name == b"origin":
+                origin_value = value
+            elif (
+                policy is not None
+                and policy.trust_proxy_host
+                and proxy_header_name is not None
+                and name == proxy_header_name
+            ):
+                proxy_host_value = value
             headers.append((name, value))
         if connection_tokens is None or not any(
             token.lower() == "upgrade" for token in connection_tokens
@@ -258,6 +637,13 @@ class H11Handshake:
                 msg, event_hint=RejectConnection(),
             )
 
+        if policy is not None:
+            host = self._apply_origin_policy(
+                host,
+                origin_value,
+                proxy_host_value,
+            )
+
         self._initiating_request = Request(
             extensions=extensions,
             extra_headers=headers,
@@ -266,6 +652,85 @@ class H11Handshake:
             target=event.target.decode("ascii"),
         )
         return self._initiating_request
+
+    def _apply_origin_policy(
+        self,
+        host: str,
+        origin_value: bytes | None,
+        proxy_host_value: bytes | None,
+    ) -> str:
+        policy = self.origin_policy
+        assert policy is not None
+        if policy.trust_proxy_host and proxy_host_value is not None:
+            try:
+                policy_host = proxy_host_value.decode("idna")
+            except UnicodeError:
+                self._reject_origin_policy(OriginRejectionReason.INVALID_HOST)
+        else:
+            policy_host = host
+
+        if origin_value is None:
+            origin = None
+        else:
+            try:
+                origin = origin_value.decode("ascii")
+            except UnicodeError:
+                self._reject_origin_policy(OriginRejectionReason.INVALID_ORIGIN)
+
+        reason_code = policy.validate(origin, policy_host)
+        if reason_code is not None:
+            self._reject_origin_policy(reason_code)
+        return policy_host
+
+    def _raise_bad_http(self, exc: h11.RemoteProtocolError) -> NoReturn:
+        if self.origin_policy is not None and _is_duplicate_host_error(exc):
+            self._reject_origin_policy(OriginRejectionReason.DUPLICATE_HOST)
+        msg = "Bad HTTP message"
+        raise RemoteProtocolError(msg, event_hint=RejectConnection()) from exc
+
+    def _check_policy_headers(self, headers: Headers) -> None:
+        assert self.origin_policy is not None
+        values: dict[bytes, list[bytes]] = {}
+        for raw_name, raw_value in headers:
+            name = (
+                raw_name.encode("latin-1")
+                if isinstance(raw_name, str)
+                else raw_name
+            )
+            value = (
+                raw_value.encode("latin-1")
+                if isinstance(raw_value, str)
+                else raw_value
+            )
+            values.setdefault(name.lower(), []).append(value)
+
+        origins = values.get(b"origin", [])
+        if len(origins) > 1 or (origins and b"," in origins[0]):
+            self._reject_origin_policy(OriginRejectionReason.DUPLICATE_ORIGIN)
+        hosts = values.get(b"host", [])
+        if len(hosts) > 1 or (hosts and b"," in hosts[0]):
+            self._reject_origin_policy(OriginRejectionReason.DUPLICATE_HOST)
+        if self.origin_policy.trust_proxy_host:
+            proxy_header = self.origin_policy.proxy_host_header
+            assert proxy_header is not None
+            proxy_hosts = values.get(proxy_header.encode("ascii"), [])
+            if len(proxy_hosts) > 1 or (proxy_hosts and b"," in proxy_hosts[0]):
+                self._reject_origin_policy(
+                    OriginRejectionReason.DUPLICATE_PROXY_HOST,
+                )
+
+    def _reject_origin_policy(self, reason_code: str) -> NoReturn:
+        headers = [(WEBSOCKET_REJECT_REASON_HEADER, reason_code.encode("ascii"))]
+        msg = f"Handshake rejected by server origin policy ({reason_code})"
+        raise RemoteProtocolError(
+            msg,
+            event_hint=RejectConnection(
+                status_code=403,
+                headers=headers,
+                reason_code=reason_code,
+            ),
+            reason_code=reason_code,
+        )
 
     def _accept(self, event: AcceptConnection) -> bytes:
         # _accept is always called after _process_connection_request.
@@ -317,6 +782,13 @@ class H11Handshake:
             )
 
         headers = list(event.headers)
+        if event.reason_code is not None and not any(
+            name.lower() == WEBSOCKET_REJECT_REASON_HEADER
+            for name, _ in headers
+        ):
+            headers.append(
+                (WEBSOCKET_REJECT_REASON_HEADER, event.reason_code.encode("ascii")),
+            )
         if not event.has_body:
             headers.append((b"content-length", b"0"))
         response = h11.Response(status_code=event.status_code, headers=headers)

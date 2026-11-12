@@ -50,13 +50,20 @@ class RemoteProtocolError(ProtocolError):
        This is the suggested wsproto Event to send to the client based
        on the error.
 
+    .. attribute:: reason_code
+
+       An optional stable reason code for policy-driven rejections.
+
     .. versionchanged:: 1.4.0
        Made ``event_hint`` a required argument.
 
     """
 
-    def __init__(self, message: str, event_hint: Event) -> None:
+    def __init__(
+        self, message: str, event_hint: Event, reason_code: str | None = None,
+    ) -> None:
         self.event_hint = event_hint
+        self.reason_code = reason_code
         super().__init__(message)
 
 

@@ -131,11 +131,17 @@ class RejectConnection(Event):
 
        The response status code.
 
+    .. attribute:: reason_code
+
+       A stable machine-readable reason for origin-policy rejections. This is
+       never derived from the rejected Host or Origin value.
+
     """
 
     status_code: int = 400
     headers: Headers = field(default_factory=list)
     has_body: bool = False
+    reason_code: str | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)

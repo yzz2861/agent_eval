@@ -5,6 +5,42 @@ This document explains some of the more advanced usage concepts with
 `wsproto`. This is assume you are familiar with `wsproto` and I/O in
 Python.
 
+Origin and Host policy
+----------------------
+
+Servers can opt in to checking browser ``Origin`` headers and the host used to
+serve the endpoint. With no policy, the handshake behaves exactly as before.
+
+.. code-block:: python
+
+    from wsproto import ServerOriginPolicy, WSConnection
+    from wsproto.connection import SERVER
+
+    policy = ServerOriginPolicy(
+        allowed_origins=["https://example.com"],
+        allowed_hosts=["example.com"],
+        allow_missing_origin=True,  # for non-browser clients
+    )
+    server = WSConnection(SERVER, origin_policy=policy)
+
+If a trusted reverse proxy overwrites ``Host``, enable proxy-host trust and
+name the single header the proxy is expected to set. No proxy header, including
+``X-Forwarded-Host``, is trusted unless it is named explicitly.
+
+.. code-block:: python
+
+    policy = ServerOriginPolicy(
+        allowed_origins=["https://example.com"],
+        allowed_hosts=["example.com"],
+        trust_proxy_host=True,
+        proxy_host_header="x-real-host",
+    )
+
+Policy rejections use HTTP 403. The rejection event carries a stable
+``reason_code`` and the response includes an
+``X-WebSocket-Reject-Reason`` header. Rejected Origin/Host values are not
+echoed in the response.
+
 Back-pressure
 -------------
 

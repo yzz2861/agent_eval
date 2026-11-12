@@ -41,6 +41,12 @@ Handshake
 .. autoclass:: wsproto.handshake.H11Handshake
    :members:
 
+.. autoclass:: wsproto.handshake.ServerOriginPolicy
+   :members:
+
+.. autoclass:: wsproto.handshake.OriginRejectionReason
+   :members:
+
 .. autofunction:: wsproto.handshake.client_extensions_handshake
 
 .. autofunction:: wsproto.handshake.server_extensions_handshake
