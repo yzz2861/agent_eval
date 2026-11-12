@@ -5,6 +5,7 @@ from calendar import timegm
 from collections.abc import Iterator, MutableMapping
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from typing import Any, ContextManager
 from unittest import mock
 
 import pytest
@@ -13,7 +14,7 @@ import jwt as pyjwt
 from jwt.algorithms import get_default_algorithms
 from jwt.types import Options
 from jwt.api_jwk import PyJWK
-from jwt.api_jwt import PyJWT
+from jwt.api_jwt import MAX_LEEWAY_SECONDS, PyJWT
 from jwt.exceptions import (
     DecodeError,
     ExpiredSignatureError,
@@ -30,6 +31,13 @@ from jwt.utils import base64url_decode
 from jwt.warnings import RemovedInPyjwt3Warning
 
 from .utils import crypto_required, key_path, utc_timestamp
+
+
+FIXED_NOW = 1_700_000_000.0
+
+
+def fixed_clock(now: float = FIXED_NOW) -> ContextManager[Any]:
+    return mock.patch.object(PyJWT, "_get_now", return_value=now)
 
 
 @pytest.fixture
@@ -348,14 +356,15 @@ class TestJWT:
         with pytest.raises(ImmatureSignatureError):
             jwt.decode(jwt_message, secret, algorithms=["HS256"])
 
-    def test_decode_works_if_iat_is_str_of_a_number(
+    def test_decode_rejects_iat_as_numeric_string(
         self, jwt: PyJWT, payload: dict[str, object]
     ) -> None:
         payload["iat"] = "1638202770"
         secret = "secret"
         jwt_message = jwt.encode(payload, secret)
-        data = jwt.decode(jwt_message, secret, algorithms=["HS256"])
-        assert data["iat"] == "1638202770"
+        with pytest.raises(InvalidIssuedAtError) as exc:
+            jwt.decode(jwt_message, secret, algorithms=["HS256"])
+        assert "iat" in str(exc.value)
 
     def test_decode_raises_exception_if_nbf_is_not_int(self, jwt: PyJWT) -> None:
         # >>> jwt.encode({'nbf': 'not-an-int'}, 'secret')
@@ -369,7 +378,23 @@ class TestJWT:
             jwt.decode(example_jwt, "secret", algorithms=["HS256"])
 
     @pytest.mark.parametrize("claim", ["exp", "nbf", "iat"])
-    @pytest.mark.parametrize("value", [[1], {"a": 1}, None, float("inf")])
+    @pytest.mark.parametrize(
+        "value",
+        [
+            [1],
+            {"a": 1},
+            None,
+            True,
+            False,
+            "1700000000",
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            10**100,
+            253402300800.0,
+            -62135596801.0,
+        ],
+    )
     def test_decode_raises_clean_error_if_claim_is_non_numeric_type(
         self, jwt: PyJWT, claim: str, value: object
     ) -> None:
@@ -382,6 +407,181 @@ class TestJWT:
         with pytest.raises(expected) as exc:
             jwt.decode(jwt_message, secret, algorithms=["HS256"])
         assert claim in str(exc.value)
+        assert not isinstance(
+            exc.value, (ExpiredSignatureError, ImmatureSignatureError)
+        )
+        assert repr(value) not in str(exc.value)
+
+    def test_decode_accepts_finite_fractional_numeric_dates(self, jwt: PyJWT) -> None:
+        payload = {
+            "exp": FIXED_NOW + 10.5,
+            "nbf": FIXED_NOW - 0.5,
+            "iat": FIXED_NOW - 0.5,
+        }
+        token = jwt.encode(payload, "secret")
+
+        with fixed_clock():
+            assert jwt.decode(token, "secret", algorithms=["HS256"]) == payload
+
+    def test_decode_uses_one_clock_snapshot_for_all_time_claims(
+        self, jwt: PyJWT
+    ) -> None:
+        payload = {
+            "exp": FIXED_NOW + 1,
+            "nbf": FIXED_NOW + 1,
+            "iat": FIXED_NOW + 1,
+        }
+        token = jwt.encode(payload, "secret")
+
+        with mock.patch.object(
+            PyJWT, "_get_now", side_effect=[FIXED_NOW, FIXED_NOW + 10]
+        ) as clock:
+            assert (
+                jwt.decode(token, "secret", leeway=1, algorithms=["HS256"]) == payload
+            )
+
+        assert clock.call_count == 1
+
+    def test_decode_missing_time_claims_is_observable(self, jwt: PyJWT) -> None:
+        payload = {"claim": "value"}
+        token = jwt.encode(payload, "secret")
+
+        with fixed_clock():
+            assert jwt.decode(token, "secret", algorithms=["HS256"]) == payload
+
+    def test_decode_zero_time_claim_boundaries(self, jwt: PyJWT) -> None:
+        with fixed_clock():
+            with pytest.raises(ExpiredSignatureError):
+                jwt.decode(
+                    jwt.encode({"exp": 0}, "secret"),
+                    "secret",
+                    algorithms=["HS256"],
+                )
+            assert jwt.decode(
+                jwt.encode({"nbf": 0}, "secret"),
+                "secret",
+                algorithms=["HS256"],
+            ) == {"nbf": 0}
+            assert jwt.decode(
+                jwt.encode({"iat": 0}, "secret"),
+                "secret",
+                algorithms=["HS256"],
+            ) == {"iat": 0}
+
+    def test_decode_time_claim_boundary_equality(self, jwt: PyJWT) -> None:
+        with fixed_clock():
+            with pytest.raises(ExpiredSignatureError):
+                jwt.decode(
+                    jwt.encode({"exp": FIXED_NOW - 1}, "secret"),
+                    "secret",
+                    leeway=1,
+                    algorithms=["HS256"],
+                )
+            jwt.decode(
+                jwt.encode({"nbf": FIXED_NOW + 1}, "secret"),
+                "secret",
+                leeway=1,
+                algorithms=["HS256"],
+            )
+            jwt.decode(
+                jwt.encode({"iat": FIXED_NOW + 1}, "secret"),
+                "secret",
+                leeway=1,
+                algorithms=["HS256"],
+            )
+            with pytest.raises(ImmatureSignatureError):
+                jwt.decode(
+                    jwt.encode({"nbf": FIXED_NOW + 2}, "secret"),
+                    "secret",
+                    leeway=1,
+                    algorithms=["HS256"],
+                )
+            with pytest.raises(ImmatureSignatureError):
+                jwt.decode(
+                    jwt.encode({"iat": FIXED_NOW + 2}, "secret"),
+                    "secret",
+                    leeway=1,
+                    algorithms=["HS256"],
+                )
+
+    def test_leeway_global_default_and_per_call_override(self, jwt: PyJWT) -> None:
+        token = jwt.encode({"exp": FIXED_NOW - 5}, "secret")
+
+        with fixed_clock():
+            for configured in (
+                PyJWT(options={"leeway": 10}),
+                PyJWT(leeway=10),
+            ):
+                assert configured.decode(token, "secret", algorithms=["HS256"]) == {
+                    "exp": FIXED_NOW - 5
+                }
+                with pytest.raises(ExpiredSignatureError):
+                    configured.decode(token, "secret", leeway=1, algorithms=["HS256"])
+                configured.decode(token, "secret", leeway=10, algorithms=["HS256"])
+
+    @pytest.mark.parametrize(
+        "leeway",
+        [
+            -1,
+            -0.5,
+            timedelta(seconds=-1),
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            10**100,
+            MAX_LEEWAY_SECONDS + 1,
+            timedelta.max,
+        ],
+    )
+    def test_decode_rejects_invalid_leeway(self, jwt: PyJWT, leeway: object) -> None:
+        token = jwt.encode({"exp": FIXED_NOW + 1}, "secret")
+
+        with fixed_clock():
+            with pytest.raises(ValueError) as exc:
+                jwt.decode(
+                    token,
+                    "secret",
+                    leeway=leeway,  # type: ignore[arg-type]
+                    algorithms=["HS256"],
+                )
+
+        assert isinstance(exc.value, DecodeError)
+        assert "leeway" in str(exc.value)
+        assert token not in str(exc.value)
+
+    def test_decode_rejects_invalid_global_leeway(self, jwt: PyJWT) -> None:
+        token = jwt.encode({"exp": FIXED_NOW + 1}, "secret")
+        configured = PyJWT(options={"leeway": -1})
+
+        with fixed_clock():
+            with pytest.raises(ValueError, match="leeway"):
+                configured.decode(token, "secret", algorithms=["HS256"])
+
+    def test_strict_iat_caps_future_offset(self, jwt: PyJWT) -> None:
+        token = jwt.encode({"iat": FIXED_NOW + 120}, "secret")
+
+        with fixed_clock():
+            jwt.decode(token, "secret", leeway=3600, algorithms=["HS256"])
+            with pytest.raises(ImmatureSignatureError):
+                jwt.decode(
+                    token,
+                    "secret",
+                    leeway=3600,
+                    options={"strict_iat": True},
+                    algorithms=["HS256"],
+                )
+
+    def test_strict_iat_accepts_boundary_offset(self, jwt: PyJWT) -> None:
+        token = jwt.encode({"iat": FIXED_NOW + 60}, "secret")
+
+        with fixed_clock():
+            jwt.decode(
+                token,
+                "secret",
+                leeway=60,
+                options={"strict_iat": True},
+                algorithms=["HS256"],
+            )
 
     def test_decode_allows_aud_to_be_none(self, jwt: PyJWT) -> None:
         # >>> jwt.encode({'aud': None}, 'secret')

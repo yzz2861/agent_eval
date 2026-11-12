@@ -18,6 +18,13 @@ class DecodeError(InvalidTokenError):
     pass
 
 
+class InvalidLeewayError(DecodeError, ValueError):
+    """Raised when the configured ``leeway`` is not a valid non-negative,
+    finite number of seconds that fits within the supported limit."""
+
+    pass
+
+
 class InvalidSignatureError(DecodeError):
     """Raised when a token's signature doesn't match the one provided as part of
     the token."""

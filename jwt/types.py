@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+from datetime import timedelta
 from typing import Any, Callable, TypedDict
 
 JWKDict = dict[str, Any]
@@ -40,17 +43,21 @@ class Options(TypedDict, total=False):
     verify_exp: bool
     """Default: ``verify_signature``. Check that ``exp`` (expiration) claim value is in the future (if present in payload). """
     verify_iat: bool
-    """Default: ``verify_signature``. Check that ``iat`` (issued at) claim value is an integer (if present in payload). """
+    """Default: ``verify_signature``. Check that ``iat`` (issued at) claim value is a finite number (if present in payload). """
+    strict_iat: bool
+    """Default: ``False``. Require a future ``iat`` claim to stay within the strict 60-second allowed offset, regardless of a larger configured leeway."""
     verify_iss: bool
     """Default: ``verify_signature``. Check that ``iss`` (issuer) claim matches ``issuer``. """
     verify_jti: bool
     """Default: ``verify_signature``. Check that ``jti`` (JWT ID) claim is a string (if present in payload). """
     verify_nbf: bool
-    """Default: ``verify_signature``. Check that ``nbf`` (not before) claim value is in the past (if present in payload). """
+    """Default: ``verify_signature``. Check that ``nbf`` (not before) claim value is a finite number in the past (if present in payload). """
     verify_sub: bool
     """Default: ``verify_signature``. Check that ``sub`` (subject) claim is a string and matches ``subject`` (if present in payload). """
     enforce_minimum_key_length: bool
     """Default: ``False``. Raise :py:class:`jwt.exceptions.InvalidKeyError` instead of warning when keys are below minimum recommended length."""
+    leeway: float | timedelta | None
+    """Default: ``0``. Non-negative, finite time-claim leeway in seconds, capped at one day. ``decode(..., leeway=...)`` overrides it for one call."""
 
 
 # The only difference between Options and FullOptions is that FullOptions
@@ -62,8 +69,10 @@ class FullOptions(TypedDict):
     verify_aud: bool
     verify_exp: bool
     verify_iat: bool
+    strict_iat: bool
     verify_iss: bool
     verify_jti: bool
     verify_nbf: bool
     verify_sub: bool
+    leeway: float | timedelta | None
     enforce_minimum_key_length: bool

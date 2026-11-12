@@ -230,6 +230,21 @@ instance can be used. The last line in the example above is equivalent to:
     ...     token, "secret", leeway=datetime.timedelta(seconds=5), algorithms=["HS256"]
     ... )
 
+A leeway can also be configured as the default for a ``PyJWT`` instance, or
+globally through the module-level decoder's options. A value passed directly to
+``jwt.decode()`` overrides that default for one call::
+
+    >>> decoder = jwt.PyJWT(options={"leeway": 5})
+    >>> decoder.decode(token, "secret", algorithms=["HS256"])
+
+Leeway must be a non-negative, finite number of seconds or a
+``datetime.timedelta``. Values above one day are rejected so a misconfiguration
+cannot turn a time-claim check into an unconditional accept. ``exp``, ``nbf``,
+and ``iat`` are all evaluated against the same clock snapshot for a token, and
+the accepted claim values must be finite JSON numbers in the supported UTC
+datetime range; booleans, numeric strings, ``NaN``, and infinities are rejected
+as claim-format errors.
+
 Not Before Time Claim (nbf)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -346,6 +361,18 @@ Issued At Claim (iat)
     number containing a NumericDate value. Use of this claim is OPTIONAL.
 
     If the `iat` claim is not a number, an `jwt.InvalidIssuedAtError` exception will be raised.
+
+By default, a future ``iat`` beyond the configured leeway is rejected, matching
+the existing behavior. Set ``options={"strict_iat": True}`` to cap the tolerated
+future offset at 60 seconds even when a larger leeway is configured::
+
+    >>> jwt.decode(
+    ...     token,
+    ...     "secret",
+    ...     leeway=300,
+    ...     options={"strict_iat": True},
+    ...     algorithms=["HS256"],
+    ... )
 
 .. code-block:: pycon
 

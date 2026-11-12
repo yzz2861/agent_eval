@@ -7,12 +7,23 @@ This project adheres to `Semantic Versioning <https://semver.org/>`__.
 `Unreleased <https://github.com/jpadilla/pyjwt/compare/2.15.1...HEAD>`__
 -------------------------------------------------------------------------
 
+Security
+~~~~~~~~
+
+- Harden ``exp``, ``nbf``, and ``iat`` validation to use one clock snapshot
+  per token, reject booleans, numeric strings, non-finite values, and values
+  outside the supported UTC datetime range as claim-format errors, and bound
+  leeway to a non-negative, finite maximum of one day.
+
 Changed
 ~~~~~~~
 
 - Add public ``jwt.decode`` regression coverage for AWS ALB-style padded
   ES256 tokens, including rejection of tampered payloads and signatures,
   in `#1211 <https://github.com/jpadilla/pyjwt/pull/1211>`__.
+- ``leeway`` can be configured as a ``PyJWT`` instance default and overridden
+  for a single ``decode`` call. ``options={"strict_iat": True}`` limits future
+  ``iat`` skew to 60 seconds even when a larger leeway is configured.
 
 `v2.15.1 <https://github.com/jpadilla/pyjwt/compare/2.15.0...2.15.1>`__
 -----------------------------------------------------------------------

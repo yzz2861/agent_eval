@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import warnings
 from calendar import timegm
@@ -17,6 +18,7 @@ from .exceptions import (
     InvalidIssuedAtError,
     InvalidIssuerError,
     InvalidJTIError,
+    InvalidLeewayError,
     InvalidSubjectError,
     MissingRequiredClaimError,
 )
@@ -39,12 +41,33 @@ if TYPE_CHECKING or bool(os.getenv("SPHINX_BUILD", "")):
     AllowedPublicKeyTypes: TypeAlias = Union[AllowedPublicKeys, PyJWK, str, bytes]
 
 
+# NumericDate values must be representable as a UTC datetime. This avoids
+# accepting arbitrary-precision integers that effectively never expire.
+_MIN_NUMERIC_DATE = -62135596800  # 0001-01-01T00:00:00Z
+_MAX_NUMERIC_DATE = 253402300799  # 9999-12-31T23:59:59Z
+
+# A bounded leeway keeps a misconfiguration from turning a time check into an
+# unconditional accept. One day is already far beyond typical clock skew.
+MAX_LEEWAY_SECONDS = 86400.0
+
+# Strict future-`iat` validation still tolerates a small amount of clock skew,
+# but a large general leeway cannot widen that allowance without bound.
+STRICT_IAT_MAX_FUTURE_OFFSET = 60.0
+
+
 class PyJWT:
-    def __init__(self, options: Options | None = None) -> None:
+    def __init__(
+        self,
+        options: Options | None = None,
+        *,
+        leeway: float | timedelta | None = None,
+    ) -> None:
         self.options: FullOptions
         self.options = self._get_default_options()
         if options is not None:
             self.options = self._merge_options(options)
+        if leeway is not None:
+            self.options["leeway"] = leeway
 
         self._jws = PyJWS(options=self._get_sig_options())
 
@@ -55,11 +78,13 @@ class PyJWT:
             "verify_exp": True,
             "verify_nbf": True,
             "verify_iat": True,
+            "strict_iat": False,
             "verify_aud": True,
             "verify_iss": True,
             "verify_sub": True,
             "verify_jti": True,
             "require": [],
+            "leeway": 0,
             "strict_aud": False,
             "enforce_minimum_key_length": False,
         }
@@ -188,7 +213,7 @@ class PyJWT:
         audience: str | Iterable[str] | None = None,
         issuer: str | Container[str] | None = None,
         subject: str | None = None,
-        leeway: float | timedelta = 0,
+        leeway: float | timedelta | None = None,
         # kwargs
         **kwargs: Any,
     ) -> dict[str, Any]:
@@ -224,8 +249,10 @@ class PyJWT:
         :type audience: str or typing.Iterable[str] or None
         :param issuer: optional, the value for ``verify_iss`` check
         :type issuer: str or typing.Container[str] or None
-        :param leeway: a time margin in seconds for the expiration check
-        :type leeway: float or datetime.timedelta
+        :param leeway: a non-negative time margin in seconds for the time-claim
+            checks. If omitted, the instance/global default configured in
+            ``options["leeway"]`` is used.
+        :type leeway: float or datetime.timedelta or None
         :rtype: dict[str, typing.Any]
         :returns: Decoded JWT with the JOSE Header on the key ``header``, the JWS
          Payload on the key ``payload``, and the JWS Signature on the key ``signature``.
@@ -317,7 +344,7 @@ class PyJWT:
         audience: str | Iterable[str] | None = None,
         subject: str | None = None,
         issuer: str | Container[str] | None = None,
-        leeway: float | timedelta = 0,
+        leeway: float | timedelta | None = None,
         # kwargs
         **kwargs: Any,
     ) -> dict[str, Any]:
@@ -354,8 +381,10 @@ class PyJWT:
         :type subject: str or None
         :param issuer: optional, the value for ``verify_iss`` check
         :type issuer: str or typing.Container[str] or None
-        :param leeway: a time margin in seconds for the expiration check
-        :type leeway: float or datetime.timedelta
+        :param leeway: a non-negative time margin in seconds for the time-claim
+            checks. If omitted, the instance/global default configured in
+            ``options["leeway"]`` is used.
+        :type leeway: float or datetime.timedelta or None
         :rtype: dict[str, typing.Any]
         :returns: the JWT claims
         """
@@ -388,20 +417,23 @@ class PyJWT:
         audience: Iterable[str] | str | None = None,
         issuer: Container[str] | str | None = None,
         subject: str | None = None,
-        leeway: float | timedelta = 0,
+        leeway: float | timedelta | None = None,
     ) -> None:
-        if isinstance(leeway, timedelta):
-            leeway = leeway.total_seconds()
-
         if audience is not None and not isinstance(audience, (str, Iterable)):
             raise TypeError("audience must be a string, iterable or None")
 
         self._validate_required_claims(payload, options["require"])
 
-        now = datetime.now(tz=timezone.utc).timestamp()
+        leeway = self._resolve_leeway(options, leeway)
+        now = self._get_now()
 
         if "iat" in payload and options["verify_iat"]:
-            self._validate_iat(payload, now, leeway)
+            self._validate_iat(
+                payload,
+                now,
+                leeway,
+                strict=options.get("strict_iat", False),
+            )
 
         if "nbf" in payload and options["verify_nbf"]:
             self._validate_nbf(payload, now, leeway)
@@ -422,6 +454,50 @@ class PyJWT:
 
         if options["verify_jti"]:
             self._validate_jti(payload)
+
+    def _resolve_leeway(
+        self,
+        options: FullOptions,
+        leeway: float | timedelta | None,
+    ) -> float:
+        if leeway is None:
+            leeway = options.get("leeway", 0)
+        if leeway is None:
+            leeway = 0
+        if isinstance(leeway, timedelta):
+            leeway = leeway.total_seconds()
+        if isinstance(leeway, bool) or not isinstance(leeway, (int, float)):
+            raise InvalidLeewayError(
+                "leeway must be a number of seconds or a datetime.timedelta"
+            )
+        if isinstance(leeway, float) and not math.isfinite(leeway):
+            raise InvalidLeewayError("leeway must be finite")
+        if leeway < 0:
+            raise InvalidLeewayError("leeway must be greater than or equal to 0")
+        if leeway > MAX_LEEWAY_SECONDS:
+            raise InvalidLeewayError(
+                f"leeway must not exceed {MAX_LEEWAY_SECONDS:g} seconds"
+            )
+        return float(leeway)
+
+    def _get_now(self) -> float:
+        return datetime.now(tz=timezone.utc).timestamp()
+
+    def _validate_numeric_date(
+        self,
+        payload: dict[str, Any],
+        claim: str,
+        description: str,
+        error_type: type[Exception],
+    ) -> int | float:
+        value = payload[claim]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise error_type(f"{description} claim ({claim}) must be a finite number.")
+        if isinstance(value, float) and not math.isfinite(value):
+            raise error_type(f"{description} claim ({claim}) must be a finite number.")
+        if value < _MIN_NUMERIC_DATE or value > _MAX_NUMERIC_DATE:
+            raise error_type(f"{description} claim ({claim}) must be a finite number.")
+        return value
 
     def _validate_required_claims(
         self,
@@ -472,14 +548,16 @@ class PyJWT:
         payload: dict[str, Any],
         now: float,
         leeway: float,
+        *,
+        strict: bool = False,
     ) -> None:
-        try:
-            iat = int(payload["iat"])
-        except (ValueError, TypeError, OverflowError):
-            raise InvalidIssuedAtError(
-                "Issued At claim (iat) must be an integer."
-            ) from None
-        if iat > (now + leeway):
+        iat = self._validate_numeric_date(
+            payload, "iat", "Issued At", InvalidIssuedAtError
+        )
+        allowed_future_offset = leeway
+        if strict:
+            allowed_future_offset = min(leeway, STRICT_IAT_MAX_FUTURE_OFFSET)
+        if iat > (now + allowed_future_offset):
             raise ImmatureSignatureError("The token is not yet valid (iat)")
 
     def _validate_nbf(
@@ -488,10 +566,7 @@ class PyJWT:
         now: float,
         leeway: float,
     ) -> None:
-        try:
-            nbf = int(payload["nbf"])
-        except (ValueError, TypeError, OverflowError):
-            raise DecodeError("Not Before claim (nbf) must be an integer.") from None
+        nbf = self._validate_numeric_date(payload, "nbf", "Not Before", DecodeError)
 
         if nbf > (now + leeway):
             raise ImmatureSignatureError("The token is not yet valid (nbf)")
@@ -502,12 +577,9 @@ class PyJWT:
         now: float,
         leeway: float,
     ) -> None:
-        try:
-            exp = int(payload["exp"])
-        except (ValueError, TypeError, OverflowError):
-            raise DecodeError(
-                "Expiration Time claim (exp) must be an integer."
-            ) from None
+        exp = self._validate_numeric_date(
+            payload, "exp", "Expiration Time", DecodeError
+        )
 
         if exp <= (now - leeway):
             raise ExpiredSignatureError("Signature has expired")
