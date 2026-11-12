@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pycparser"
+version = "3.12"
+description = "C parser in Python"
+readme = "README.rst"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{name = "Eli Bendersky", email = "eliben@gmail.com"}]
+maintainers = [{name = "Eli Bendersky", email = "eliben@gmail.com"}]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: 3.15",
+]
+
+[project.urls]
+Homepage = "https://github.com/eliben/pycparser"
+
+[tool.setuptools]
+packages = ["pycparser"]
+
+[tool.setuptools.package-data]
+pycparser = ["*.cfg"]
+
+[tool.ruff.lint]
+ignore = ["F403", "F405"]
+
+[tool.ty.src]
+exclude = ["setup.py", "utils/internal/memprofiling.py"]
