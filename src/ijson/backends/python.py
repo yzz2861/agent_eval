@@ -288,6 +288,30 @@ def parse_string(symbol):
     return scanstring(symbol, 1)[0]
 
 
+@utils.coroutine
+def multivalue_gate(target):
+    '''Buffer events per top-level value, releasing them only when complete.'''
+    pending = []
+    depth = 0
+    send = target.send
+    while True:
+        event, value = (yield)
+        if event in ('start_map', 'start_array'):
+            depth += 1
+            pending.append((event, value))
+        elif event in ('end_map', 'end_array'):
+            depth -= 1
+            pending.append((event, value))
+            if depth == 0:
+                for pending_event in pending:
+                    send(pending_event)
+                del pending[:]
+        elif depth:
+            pending.append((event, value))
+        else:
+            send((event, value))
+
+
 def basic_parse_basecoro(target, multiple_values=False, allow_comments=False,
                          use_float=False):
     '''
@@ -299,6 +323,8 @@ def basic_parse_basecoro(target, multiple_values=False, allow_comments=False,
     '''
     if allow_comments:
         raise ValueError("Comments are not supported by the python backend")
+    if multiple_values:
+        target = multivalue_gate(target)
     return utf8_encoder(Lexer(parse_value(target, multiple_values, use_float)))
 
 

@@ -403,6 +403,7 @@ to give users more fine-grained control over certain operations:
   By default ijson will fail to process these
   with a ``parse error: trailing garbage`` error
   unless ``multiple_values=True`` is specified.
+
 - Similarly the ``allow_comments`` option (defaults to ``False``)
   controls whether C-style comments (e.g., ``/* a comment */``),
   which are not supported by the JSON standard,
@@ -415,6 +416,43 @@ to give users more fine-grained control over certain operations:
   have an optional ``map_type`` argument (defaults to ``dict``)
   used to construct objects from the JSON stream.
   This should be a dict-like type supporting item assignment.
+
+Multi-value byte streams
+------------------------
+
+For sources that contain a sequence of complete JSON values, such as NDJSON
+or concatenated JSON, use ``ijson.multi_value_stream``.  This is an explicit
+opt-in API; the regular parsing functions keep their single-value default.
+
+.. code-block:: python
+
+   import ijson
+
+   for batch in ijson.multi_value_stream(source):
+       commit(batch.value)
+       checkpoint(batch.cursor)
+
+Each batch represents one *complete* top-level value.  ``batch.events`` holds
+the parser events for that value, ``batch.value`` is the constructed value,
+and ``batch.cursor`` is the absolute byte offset just after the value.  No
+events or values are exposed for a truncated tail value; that condition is
+reported as ``IncompleteJSONError`` when EOF is reached.  ``MultiValueStream``
+also exposes ``stream.cursor`` and ``stream.count`` after each commit, and
+accepts ``callback=``/``on_batch=`` callbacks for callback-driven consumers.
+When resuming from a previous checkpoint, pass the saved offset as
+``start_cursor=`` so that newly reported cursors stay relative to the original
+input rather than the remaining slice.
+
+The existing ``items``/``parse``/``basic_parse`` entry points also accept
+``with_cursor=True`` (or ``multiple_values="stream"``) to return the same
+batch objects instead of their usual values/events.
+
+Values may be directly adjacent when the preceding value ended with ``}`` or
+``]``.  After a scalar value (number, string, ``true``, ``false`` or ``null``),
+JSON whitespace is required before the next value; this removes the ambiguity
+between e.g. ``12`` (one number) and ``1 2`` (two numbers).  Adjacent strings
+such as ``"a""b"`` and numbers such as ``1{}`` are therefore rejected with an
+offset-bearing ``JSONError`` rather than guessed at.
 
 
 Events
