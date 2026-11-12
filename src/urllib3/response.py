@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import collections
+import dataclasses
+import enum
 import io
 import json as _json
 import logging
@@ -13,6 +15,7 @@ import zlib
 from contextlib import contextmanager
 from http.client import HTTPMessage as _HttplibHTTPMessage
 from http.client import HTTPResponse as _HttplibHTTPResponse
+from http.client import IncompleteRead as _HttplibIncompleteRead
 from socket import timeout as SocketTimeout
 
 if typing.TYPE_CHECKING:
@@ -40,6 +43,7 @@ from .exceptions import (
     InvalidHeader,
     ProtocolError,
     ReadTimeoutError,
+    ResponseFramingError,
     ResponseNotChunked,
     SSLError,
 )
@@ -65,6 +69,242 @@ _CHUNK_SIZE_RE = re.compile(rb"[0-9A-Fa-f]+")
 # preventing a malicious server from forcing unbounded buffering (memory exhaustion)
 # via an unterminated chunk-size line.
 _MAX_CHUNK_LINE_LENGTH = 2**16
+
+# Chunk sizes are protocol integers. Limiting them to the platform's signed
+# addressable range prevents pathologically large values from reaching
+# ``_safe_read()`` where they would otherwise behave like a truncated response.
+_MAX_CHUNK_SIZE = sys.maxsize
+
+_CHUNK_EXT_TOKEN_RE = re.compile(rb"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+
+
+class FramingPolicy(str, enum.Enum):
+    """Available response-body framing strategies."""
+
+    COMPAT = "compat"
+    STRICT = "strict"
+
+
+ResponseFramingPolicy = FramingPolicy
+
+
+@dataclasses.dataclass
+class ResponseFraming:
+    """The framing decision for a response.
+
+    ``body_length`` is the number of body bytes the caller may consume. It is
+    ``None`` only when the body is delimited by connection close.
+    """
+
+    framing: str
+    body_length: int | None
+    has_trailer: bool = False
+    error: str | None = None
+    reusable: bool = True
+
+    @property
+    def framing_type(self) -> str:
+        return self.framing
+
+    @property
+    def allowed_body_length(self) -> int | None:
+        return self.body_length
+
+    @property
+    def allowed_length(self) -> int | None:
+        return self.body_length
+
+    @property
+    def error_reason(self) -> str | None:
+        return self.error
+
+    @property
+    def reason(self) -> str | None:
+        return self.error
+
+    @property
+    def is_reusable(self) -> bool:
+        return self.reusable
+
+    @property
+    def can_reuse(self) -> bool:
+        return self.reusable
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "framing_type": self.framing,
+            "body_length": self.body_length,
+            "has_trailer": self.has_trailer,
+            "error_reason": self.error,
+            "reusable": self.reusable,
+        }
+
+
+# Convenient names for callers that prefer a result/decision-oriented API.
+ResponseFramingResult = ResponseFraming
+FramingResult = ResponseFraming
+FramingDecision = ResponseFraming
+FramingPolicyResult = ResponseFraming
+ResponseFramingPolicyResult = ResponseFraming
+ResponseFramingDecision = ResponseFraming
+
+
+def _is_bodyless_response(status: int, request_method: str | None) -> bool:
+    if request_method is not None and request_method.upper() == "HEAD":
+        return True
+    return status in (204, 304) or 100 <= status < 200
+
+
+def _strict_framing(
+    headers: HTTPHeaderDict,
+    *,
+    status: int,
+    request_method: str | None,
+) -> ResponseFraming:
+    """Determine the sole body-framing source or raise ResponseFramingError."""
+    if _is_bodyless_response(status, request_method):
+        return ResponseFraming("no-body", 0)
+
+    transfer_encoding = headers.get("transfer-encoding")
+    content_length = headers.get("content-length")
+
+    if transfer_encoding is not None and content_length is not None:
+        raise ResponseFramingError(
+            "Received response with both Transfer-Encoding and Content-Length"
+        )
+
+    if transfer_encoding is not None:
+        codings = [coding.strip().lower() for coding in transfer_encoding.split(",")]
+        if not codings or any(not coding for coding in codings):
+            raise ResponseFramingError("Empty Transfer-Encoding value")
+        if codings[-1] != "chunked":
+            raise ResponseFramingError("Transfer-Encoding chain must end with chunked")
+        return ResponseFraming(
+            "chunked",
+            None,
+            has_trailer=headers.get("trailer") is not None,
+        )
+
+    if content_length is not None:
+        lengths: set[int] = set()
+        saw_empty = False
+        for value in content_length.split(","):
+            value = value.strip()
+            if not value:
+                saw_empty = True
+                continue
+            if not _CONTENT_LENGTH_RE.fullmatch(value):
+                raise ResponseFramingError(f"Invalid Content-Length value: {value!r}")
+            try:
+                lengths.add(int(value))
+            except ValueError:
+                raise ResponseFramingError(
+                    "Content-Length value is too large"
+                ) from None
+        if saw_empty or not lengths:
+            raise ResponseFramingError("Empty Content-Length value")
+        if len(lengths) != 1:
+            raise ResponseFramingError(
+                "Content-Length contained multiple unmatching values: "
+                f"{content_length!r}"
+            )
+        return ResponseFraming("content-length", lengths.pop())
+
+    # Without Content-Length or Transfer-Encoding the body ends when the
+    # connection closes, so the connection cannot be reused.
+    return ResponseFraming("none", None, reusable=False)
+
+
+def _skip_bws(data: bytes, index: int) -> int:
+    while index < len(data) and data[index : index + 1] in (b" ", b"\t"):
+        index += 1
+    return index
+
+
+def _validate_chunk_extensions(data: bytes, index: int) -> bool:
+    """Validate the ``chunk-ext`` portion of a chunk-size line."""
+    while index < len(data):
+        if data[index : index + 1] != b";":
+            return False
+        index = _skip_bws(data, index + 1)
+        match = _CHUNK_EXT_TOKEN_RE.match(data, index)
+        if match is None:
+            return False
+        index = _skip_bws(data, match.end())
+        if index < len(data) and data[index : index + 1] == b"=":
+            index = _skip_bws(data, index + 1)
+            if index >= len(data):
+                return False
+            if data[index : index + 1] == b'"':
+                index += 1
+                while index < len(data):
+                    char = data[index : index + 1]
+                    if char == b'"':
+                        index += 1
+                        break
+                    if char == b"\\":
+                        index += 1
+                        if index >= len(data):
+                            return False
+                        escaped = data[index : index + 1]
+                        if not (
+                            escaped == b"\t"
+                            or escaped == b" "
+                            or 0x21 <= ord(escaped) <= 0xFF
+                        ):
+                            return False
+                        index += 1
+                        continue
+                    codepoint = ord(char)
+                    if not (
+                        codepoint == 0x09
+                        or codepoint == 0x20
+                        or codepoint == 0x21
+                        or 0x23 <= codepoint <= 0x5B
+                        or 0x5D <= codepoint <= 0x7E
+                        or 0x80 <= codepoint <= 0xFF
+                    ):
+                        return False
+                    index += 1
+                else:
+                    return False
+            else:
+                match = _CHUNK_EXT_TOKEN_RE.match(data, index)
+                if match is None:
+                    return False
+                index = match.end()
+        index = _skip_bws(data, index)
+    return True
+
+
+def _parse_strict_chunk_size(line: bytes) -> int:
+    """Parse and validate a strict chunk-size line without its CRLF."""
+    match = _CHUNK_SIZE_RE.match(line)
+    if match is None:
+        raise ResponseFramingError("Invalid chunk size")
+
+    size_text = match.group(0)
+    index = match.end()
+    significant = size_text.lstrip(b"0") or b"0"
+    if len(significant) > len(f"{_MAX_CHUNK_SIZE:x}"):
+        raise ResponseFramingError("Chunk size overflow")
+    try:
+        chunk_size = int(significant, 16)
+    except ValueError:
+        raise ResponseFramingError("Chunk size overflow") from None
+    if chunk_size > _MAX_CHUNK_SIZE:
+        raise ResponseFramingError("Chunk size overflow")
+
+    extension_start = index
+    index = _skip_bws(line, index)
+    if index < len(line):
+        if line[index : index + 1] != b";" or not _validate_chunk_extensions(
+            line, index
+        ):
+            raise ResponseFramingError("Invalid chunk extension")
+    elif index != extension_start:
+        raise ResponseFramingError("Invalid chunk extension")
+    return chunk_size
 
 
 class ContentDecoder:
@@ -777,6 +1017,9 @@ class HTTPResponse(BaseHTTPResponse):
         request_url: str | None = None,
         auto_close: bool = True,
         sock_shutdown: typing.Callable[[int], None] | None = None,
+        strict_framing: bool = False,
+        framing_policy: FramingPolicy | str | None = None,
+        framing: FramingPolicy | str | bool | None = None,
     ) -> None:
         super().__init__(
             headers=headers,
@@ -789,6 +1032,26 @@ class HTTPResponse(BaseHTTPResponse):
             retries=retries,
         )
 
+        if isinstance(framing, bool):
+            strict_framing = strict_framing or framing
+        elif framing is not None:
+            framing_policy = framing
+
+        if isinstance(framing_policy, FramingPolicy):
+            framing_policy = framing_policy.value
+        if framing_policy is None:
+            policy = FramingPolicy.STRICT if strict_framing else FramingPolicy.COMPAT
+        elif framing_policy in (FramingPolicy.COMPAT.value, "legacy"):
+            policy = FramingPolicy.COMPAT
+        elif framing_policy in (FramingPolicy.STRICT.value, "rfc9112"):
+            policy = FramingPolicy.STRICT
+        else:
+            raise ValueError(f"Unknown framing policy: {framing_policy!r}")
+
+        self.framing_policy = policy.value
+        self._strict_framing_enabled = policy is FramingPolicy.STRICT
+        self.strict_framing = self._strict_framing_enabled
+        self._framing_reusable = True
         self.enforce_content_length = enforce_content_length
         self.auto_close = auto_close
 
@@ -812,22 +1075,150 @@ class HTTPResponse(BaseHTTPResponse):
         # Are we using the chunked-style of transfer encoding?
         self.chunk_left: int | None = None
 
-        # Determine length of response
-        self.length_remaining = self._init_length(request_method)
+        if self._strict_framing_enabled:
+            try:
+                status_code = int(status)
+            except (TypeError, ValueError):
+                status_code = 0
+            effective_request_method = request_method
+            if effective_request_method is None and original_response is not None:
+                try:
+                    if is_response_to_head(original_response):
+                        effective_request_method = "HEAD"
+                except AttributeError:
+                    pass
+            try:
+                result = _strict_framing(
+                    self.headers,
+                    status=status_code,
+                    request_method=effective_request_method,
+                )
+            except ResponseFramingError as error:
+                self._framing_reusable = False
+                self.framing_result = ResponseFraming(
+                    "invalid",
+                    None,
+                    error=str(error),
+                    reusable=False,
+                )
+                error.framing_result = self.framing_result
+                if self._fp is not None:
+                    self._fp.close()
+                if self._connection is not None:
+                    self._connection.close()
+                if self._original_response is not None:
+                    self._original_response.close()
+                raise
+            self.chunked = result.framing == "chunked"
+            self.framing_result = result
+            self.length_remaining = result.body_length
+            if result.framing == "no-body":
+                self._body = None
+        else:
+            self.length_remaining = self._init_length(request_method)
+            self.framing_result = ResponseFraming(
+                "chunked"
+                if self.chunked
+                else "content-length"
+                if self.length_remaining is not None
+                else "none",
+                self.length_remaining,
+            )
 
         # Used to return the correct amount of bytes for partial read()s
         self._decoded_buffer = BytesQueueBuffer()
+        self._strict_chunked_iterator: typing.Iterator[bytes] | None = None
+        self._strict_chunked_buffer = b""
 
         # If requested, preload the body.
         if preload_content and not self._body:
             self._body = self.read(decode_content=decode_content)
 
     def release_conn(self) -> None:
+        if (
+            not getattr(self, "_framing_reusable", True)
+            or not self.framing_result.reusable
+        ):
+            if self._connection is not None:
+                self._connection.close()
+                self._connection = None
+            return None
         if not self._pool or not self._connection:
             return None
 
         self._pool._put_conn(self._connection)
         self._connection = None
+
+    @property
+    def framing(self) -> str:
+        return self.framing_result.framing
+
+    @property
+    def framing_type(self) -> str:
+        return self.framing_result.framing
+
+    @property
+    def framing_decision(self) -> ResponseFraming:
+        return self.framing_result
+
+    @property
+    def framing_info(self) -> ResponseFraming:
+        return self.framing_result
+
+    @property
+    def body_length(self) -> int | None:
+        return self.framing_result.body_length
+
+    @property
+    def allowed_body_length(self) -> int | None:
+        return self.framing_result.body_length
+
+    @property
+    def allowed_length(self) -> int | None:
+        return self.framing_result.body_length
+
+    @property
+    def has_trailer(self) -> bool:
+        return self.framing_result.has_trailer
+
+    @property
+    def error_reason(self) -> str | None:
+        return self.framing_result.error
+
+    @property
+    def reusable(self) -> bool:
+        return self._framing_reusable and self.framing_result.reusable
+
+    @property
+    def is_reusable(self) -> bool:
+        return self.reusable
+
+    @property
+    def can_reuse(self) -> bool:
+        return self.reusable
+
+    def _fail_framing(
+        self, reason: str, *, framing: str | None = None
+    ) -> ResponseFramingError:
+        """Record a fatal framing error and poison this response connection."""
+        self._framing_reusable = False
+        if framing is not None:
+            self.framing_result.framing = framing
+        self.framing_result.error = reason
+        self.framing_result.reusable = False
+
+        if self._fp is not None:
+            self._fp.close()
+        if self._original_response is not None:
+            self._original_response.close()
+        if self._connection is not None:
+            self._connection.close()
+
+        return ResponseFramingError(
+            reason,
+            reusable=False,
+            framing_result=self.framing_result,
+        )
 
     def drain_conn(self) -> None:
         """
@@ -848,6 +1239,8 @@ class HTTPResponse(BaseHTTPResponse):
 
     @property
     def data(self) -> bytes:
+        if self._strict_framing_enabled and self.framing == "no-body":
+            return b""  # type: ignore[return-value]
         # For backwards-compat with earlier urllib3 0.4 and earlier.
         if self._body:
             return self._body  # type: ignore[return-value]
@@ -957,6 +1350,10 @@ class HTTPResponse(BaseHTTPResponse):
                 raise SSLError(e) from e
 
             except IncompleteRead as e:
+                if self._strict_framing_enabled:
+                    raise self._fail_framing(
+                        f"Response body ended before framing was complete: {e!r}"
+                    ) from e
                 if (
                     e.expected is not None
                     and e.partial is not None
@@ -966,6 +1363,13 @@ class HTTPResponse(BaseHTTPResponse):
                 else:
                     arg = f"Connection broken: {e!r}"
                 raise ProtocolError(arg, e) from e
+
+            except _HttplibIncompleteRead as e:
+                if self._strict_framing_enabled:
+                    raise self._fail_framing(
+                        f"Response body ended before framing was complete: {e!r}"
+                    ) from e
+                raise ProtocolError(f"Connection broken: {e!r}", e) from e
 
             except (HTTPException, OSError) as e:
                 raise ProtocolError(f"Connection broken: {e!r}", e) from e
@@ -977,6 +1381,12 @@ class HTTPResponse(BaseHTTPResponse):
             # If we didn't terminate cleanly, we need to throw away our
             # connection.
             if not clean_exit:
+                if self._strict_framing_enabled:
+                    self._framing_reusable = False
+                    self.framing_result.reusable = False
+                    if self.framing_result.error is None:
+                        self.framing_result.error = "Response framing failed"
+
                 # The response may not be closed but we're not going to use it
                 # anymore so close it now to ensure that the connection is
                 # released back to the pool.
@@ -991,7 +1401,12 @@ class HTTPResponse(BaseHTTPResponse):
 
             # If we hold the original response but it's closed now, we should
             # return the connection back to the pool.
-            if self._original_response and self._original_response.isclosed():
+            if (
+                self._framing_reusable
+                and self.framing_result.reusable
+                and self._original_response
+                and self._original_response.isclosed()
+            ):
                 self.release_conn()
 
     def _fp_read(
@@ -1059,6 +1474,13 @@ class HTTPResponse(BaseHTTPResponse):
         if self._fp is None:
             return None  # type: ignore[return-value]
 
+        if self._strict_framing_enabled and self.length_remaining is not None:
+            if self.length_remaining == 0:
+                self._fp.close()
+                return b""
+            if amt is None or amt > self.length_remaining:
+                amt = self.length_remaining
+
         fp_closed = getattr(self._fp, "closed", False)
 
         with self._error_catcher():
@@ -1097,6 +1519,8 @@ class HTTPResponse(BaseHTTPResponse):
             self._fp_bytes_read += len(data)
             if self.length_remaining is not None:
                 self.length_remaining -= len(data)
+                if self._strict_framing_enabled and self.length_remaining == 0:
+                    self._fp.close()
         return data
 
     def read(
@@ -1135,6 +1559,19 @@ class HTTPResponse(BaseHTTPResponse):
         elif amt is not None:
             cache_content = False
 
+        if (
+            self._strict_framing_enabled
+            and self.framing == "no-body"
+            and self._fp is None
+        ):
+            return b""
+
+        if self._strict_framing_enabled and self.chunked:
+            if amt is not None:
+                cache_content = False
+            return self._strict_chunked_read(amt, decode_content, cache_content)
+
+        if amt is not None:
             if (
                 self._decoder
                 and self._decoder.has_unconsumed_tail
@@ -1229,6 +1666,14 @@ class HTTPResponse(BaseHTTPResponse):
         if amt and amt < 0:
             # Negative numbers and `None` should be treated the same.
             amt = None
+        if (
+            self._strict_framing_enabled
+            and self.framing == "no-body"
+            and self._fp is None
+        ):
+            return b""
+        if self._strict_framing_enabled and self.chunked:
+            return self._strict_chunked_read(amt, decode_content, False)
         # try and respond without going to the network
         if self._has_decoded_content:
             if not decode_content:
@@ -1385,10 +1830,24 @@ class HTTPResponse(BaseHTTPResponse):
             return None
         line = self._fp.fp.readline(_MAX_CHUNK_LINE_LENGTH + 1)  # type: ignore[union-attr]
         if len(line) > _MAX_CHUNK_LINE_LENGTH:
+            reason = "Response chunk size line exceeded maximum allowed length"
+            if self._strict_framing_enabled:
+                raise self._fail_framing(reason) from None
             self.close()
-            raise ProtocolError(
-                "Response chunk size line exceeded maximum allowed length"
-            ) from None
+            raise ProtocolError(reason) from None
+        if self._strict_framing_enabled:
+            if not line.endswith(b"\r\n"):
+                reason = (
+                    "Response ended prematurely"
+                    if not line
+                    else "Chunk size line is not terminated by CRLF"
+                )
+                raise self._fail_framing(reason) from None
+            try:
+                self.chunk_left = _parse_strict_chunk_size(line[:-2])
+            except ResponseFramingError as error:
+                raise self._fail_framing(str(error)) from None
+            return None
         line = line.split(b";", 1)[0]
         try:
             chunk_size = line.rstrip()
@@ -1404,27 +1863,90 @@ class HTTPResponse(BaseHTTPResponse):
                 # Truncated at start of next chunk
                 raise ProtocolError("Response ended prematurely") from None
 
+    def _safe_read_chunk(self, amt: int) -> bytes:
+        try:
+            return self._fp._safe_read(amt)  # type: ignore[union-attr]
+        except _HttplibIncompleteRead as error:
+            if self._strict_framing_enabled:
+                raise self._fail_framing("Incomplete chunked response") from error
+            raise
+
+    def _read_chunk_terminator(self) -> None:
+        terminator = self._safe_read_chunk(2)
+        if self._strict_framing_enabled and terminator != b"\r\n":
+            raise self._fail_framing("Invalid chunk terminator")
+
     def _handle_chunk(self, amt: int | None) -> bytes:
         returned_chunk = None
         if amt is None:
-            chunk = self._fp._safe_read(self.chunk_left)  # type: ignore[union-attr]
+            assert self.chunk_left is not None
+            chunk = self._safe_read_chunk(self.chunk_left)
             returned_chunk = chunk
-            self._fp._safe_read(2)  # type: ignore[union-attr] # Toss the CRLF at the end of the chunk.
+            self._read_chunk_terminator()
             self.chunk_left = None
         elif self.chunk_left is not None and amt < self.chunk_left:
-            value = self._fp._safe_read(amt)  # type: ignore[union-attr]
+            value = self._safe_read_chunk(amt)
             self.chunk_left = self.chunk_left - amt
             returned_chunk = value
         elif amt == self.chunk_left:
-            value = self._fp._safe_read(amt)  # type: ignore[union-attr]
-            self._fp._safe_read(2)  # type: ignore[union-attr] # Toss the CRLF at the end of the chunk.
+            value = self._safe_read_chunk(amt)
+            self._read_chunk_terminator()
             self.chunk_left = None
             returned_chunk = value
         else:  # amt > self.chunk_left
-            returned_chunk = self._fp._safe_read(self.chunk_left)  # type: ignore[union-attr]
-            self._fp._safe_read(2)  # type: ignore[union-attr] # Toss the CRLF at the end of the chunk.
+            assert self.chunk_left is not None
+            returned_chunk = self._safe_read_chunk(self.chunk_left)
+            self._read_chunk_terminator()
             self.chunk_left = None
         return returned_chunk  # type: ignore[no-any-return]
+
+    def _strict_chunked_read(
+        self,
+        amt: int | None,
+        decode_content: bool | None,
+        cache_content: bool,
+    ) -> bytes:
+        if amt == 0:
+            return b""
+        if decode_content is None:
+            decode_content = self.decode_content
+        if self._strict_chunked_iterator is None:
+            self._strict_chunked_iterator = iter(
+                self.read_chunked(amt, decode_content=decode_content)
+            )
+
+        if amt is None:
+            chunks = []
+            if self._strict_chunked_buffer:
+                chunks.append(self._strict_chunked_buffer)
+                self._strict_chunked_buffer = b""
+            chunks.extend(self._strict_chunked_iterator)
+            data = b"".join(chunks)
+            if not cache_content:
+                self._uncached_read_occurred = True
+            if cache_content and not self._uncached_read_occurred:
+                self._body = data
+            return data
+
+        chunks = []
+        buffered = len(self._strict_chunked_buffer)
+        while buffered < amt:
+            try:
+                chunk = next(self._strict_chunked_iterator)
+            except StopIteration:
+                break
+            chunks.append(chunk)
+            buffered += len(chunk)
+
+        data = self._strict_chunked_buffer + b"".join(chunks)
+        if not cache_content:
+            self._uncached_read_occurred = True
+        if len(data) <= amt:
+            self._strict_chunked_buffer = b""
+            return data
+
+        result, self._strict_chunked_buffer = data[:amt], data[amt:]
+        return result
 
     def read_chunked(
         self, amt: int | None = None, decode_content: bool | None = None
@@ -1444,6 +1966,11 @@ class HTTPResponse(BaseHTTPResponse):
         """
         self._init_decoder()
         # FIXME: Rewrite this method and make it a class with a better structured logic.
+        if self._strict_framing_enabled and self.framing == "no-body":
+            if self._original_response:
+                self._original_response.close()
+            self.release_conn()
+            return None
         if not self.chunked:
             raise ResponseNotChunked(
                 "Response is not chunked. "
@@ -1504,14 +2031,23 @@ class HTTPResponse(BaseHTTPResponse):
             while self._fp is not None:
                 line = self._fp.fp.readline(_MAX_CHUNK_LINE_LENGTH + 1)
                 if len(line) > _MAX_CHUNK_LINE_LENGTH:
-                    raise ProtocolError(
+                    reason = (
                         "Response chunk trailer line exceeded maximum allowed length"
                     )
+                    if self._strict_framing_enabled:
+                        raise self._fail_framing(reason)
+                    raise ProtocolError(reason)
                 if not line:
                     # Some sites may not end with '\r\n'.
                     break
                 if line == b"\r\n":
                     break
+                if self._strict_framing_enabled:
+                    if not line.endswith(b"\r\n"):
+                        raise self._fail_framing(
+                            "Chunk trailer line is not terminated by CRLF"
+                        )
+                    self.framing_result.has_trailer = True
 
             # We read everything; close the "file".
             if self._original_response:

@@ -23,6 +23,7 @@ from urllib3.exceptions import (
     InvalidChunkLength,
     InvalidHeader,
     ProtocolError,
+    ResponseFramingError,
     ResponseNotChunked,
     SSLError,
 )
@@ -2203,6 +2204,211 @@ class TestResponse:
             resp = HTTPResponse(fp, status=204)
             resp.read(16)
         assert "Response may not contain content" in str(excinfo.value)
+
+
+class TestStrictResponseFraming:
+    def _chunked_response(
+        self, data: bytes, method: str = "GET"
+    ) -> httplib.HTTPResponse:
+        response = httplib.HTTPResponse(MockSock, method=method)  # type: ignore[arg-type]
+        response.fp = BytesIO(data)  # type: ignore[assignment]
+        response.chunked = True
+        response.chunk_left = None
+        return response
+
+    @pytest.mark.parametrize(
+        ("headers", "message"),
+        [
+            (
+                {"transfer-encoding": "chunked", "content-length": "0"},
+                "both Transfer-Encoding and Content-Length",
+            ),
+            ({"content-length": "5, 6"}, "multiple unmatching values"),
+            ({"content-length": ""}, "Empty Content-Length"),
+            ({"content-length": "+5"}, "Invalid Content-Length"),
+            ({"content-length": "\u0661\u0662"}, "Invalid Content-Length"),
+            ({"transfer-encoding": "gzip"}, "must end with chunked"),
+            ({"transfer-encoding": "chunked, gzip"}, "must end with chunked"),
+        ],
+    )
+    def test_invalid_framing_headers(
+        self, headers: dict[str, str], message: str
+    ) -> None:
+        connection = mock.Mock()
+        with pytest.raises(ResponseFramingError, match=message) as excinfo:
+            HTTPResponse(
+                BytesIO(b"body"),
+                headers=headers,
+                preload_content=False,
+                connection=connection,
+                strict_framing=True,
+            )
+
+        result = excinfo.value.framing_result
+        assert excinfo.value.reusable is False
+        assert result is not None
+        assert result.reusable is False
+        assert result.error
+        connection.close.assert_called_once_with()
+
+    @pytest.mark.parametrize(
+        ("status", "method"),
+        [(200, "HEAD"), (204, None), (304, None), (101, None)],
+    )
+    def test_bodyless_responses_ignore_length(
+        self, status: int, method: str | None
+    ) -> None:
+        response = HTTPResponse(
+            BytesIO(b"must not be read"),
+            headers={"content-length": "100"},
+            status=status,
+            request_method=method,
+            preload_content=False,
+            strict_framing=True,
+        )
+        assert response.framing == "no-body"
+        assert response.body_length == 0
+        assert response.length_remaining == 0
+        assert response.read() == b""
+        assert response.reusable is True
+
+    @pytest.mark.parametrize("value", ["5", " 5 , 5 , 5 "])
+    def test_valid_content_length(self, value: str) -> None:
+        response = HTTPResponse(
+            BytesIO(b"abcde"),
+            headers={"content-length": value},
+            preload_content=False,
+            strict_framing=True,
+        )
+        assert response.framing == "content-length"
+        assert response.body_length == 5
+        assert response.read() == b"abcde"
+        assert response.reusable is True
+
+    def test_head_detected_from_original_response(self) -> None:
+        raw = self._chunked_response(b"must not be read", method="HEAD")
+        response = HTTPResponse(
+            raw,
+            headers={"transfer-encoding": "chunked", "content-length": "100"},
+            preload_content=False,
+            original_response=raw,
+            strict_framing=True,
+        )
+        assert response.framing == "no-body"
+        assert response.read() == b""
+
+    def test_valid_chunked_trailer_and_reuse(self) -> None:
+        pool = mock.Mock()
+        connection = mock.Mock()
+        raw = self._chunked_response(b"3\r\nfoo\r\n0\r\nX-Checksum: abc\r\n\r\n")
+        response = HTTPResponse(
+            raw,
+            headers={"transfer-encoding": "chunked"},
+            preload_content=False,
+            original_response=raw,
+            connection=connection,
+            pool=pool,
+            strict_framing=True,
+        )
+
+        assert response.read() == b"foo"
+        assert response.framing == "chunked"
+        assert response.has_trailer is True
+        assert response.reusable is True
+        pool._put_conn.assert_called_once_with(connection)
+        assert response.connection is None
+
+    def test_valid_gzip_chunked(self) -> None:
+        payload = gzip.compress(b"foobar")
+        chunks = b"".join(
+            f"{len(payload[i : i + 2]):X}\r\n".encode() + payload[i : i + 2] + b"\r\n"
+            for i in range(0, len(payload), 2)
+        )
+        raw = self._chunked_response(chunks + b"0\r\n\r\n")
+        response = HTTPResponse(
+            raw,
+            headers={
+                "transfer-encoding": "chunked",
+                "content-encoding": "gzip",
+            },
+            preload_content=False,
+            strict_framing=True,
+        )
+        assert response.read() == b"foobar"
+
+    @pytest.mark.parametrize(
+        ("chunk", "message"),
+        [
+            (b"Z\r\n", "Invalid chunk size"),
+            (b"FFFFFFFFFFFFFFFF\r\n", "Chunk size overflow"),
+            (b"5;foo=\r\n", "Invalid chunk extension"),
+            (b'5;foo="unterminated\r\n', "Invalid chunk extension"),
+        ],
+    )
+    def test_invalid_chunk_is_not_reusable(self, chunk: bytes, message: str) -> None:
+        pool = mock.Mock()
+        connection = mock.Mock()
+        raw = self._chunked_response(chunk + b"HELLO\r\n0\r\n\r\n")
+        response = HTTPResponse(
+            raw,
+            headers={"transfer-encoding": "chunked"},
+            preload_content=False,
+            original_response=raw,
+            connection=connection,
+            pool=pool,
+            strict_framing=True,
+        )
+
+        with pytest.raises(ResponseFramingError, match=message) as excinfo:
+            response.read()
+
+        assert excinfo.value.reusable is False
+        assert response.reusable is False
+        assert response.error_reason
+        connection.close.assert_called()
+        response.release_conn()
+        pool._put_conn.assert_not_called()
+
+    def test_error_after_partial_body_poisons_connection(self) -> None:
+        pool = mock.Mock()
+        connection = mock.Mock()
+        raw = self._chunked_response(b"5\r\nHELLO\r\nZ\r\n")
+        response = HTTPResponse(
+            raw,
+            headers={"transfer-encoding": "chunked"},
+            preload_content=False,
+            original_response=raw,
+            connection=connection,
+            pool=pool,
+            strict_framing=True,
+        )
+
+        assert response.read(3) == b"HEL"
+        with pytest.raises(ResponseFramingError):
+            response.read()
+
+        assert response.reusable is False
+        connection.close.assert_called()
+        response.release_conn()
+        pool._put_conn.assert_not_called()
+
+    def test_overlong_trailer_is_rejected(self) -> None:
+        trailer = b"X:" + b"x" * (_MAX_CHUNK_LINE_LENGTH + 1)
+        raw = self._chunked_response(b"3\r\nfoo\r\n0\r\n" + trailer + b"\r\n")
+        response = HTTPResponse(
+            raw,
+            headers={"transfer-encoding": "chunked"},
+            preload_content=False,
+            original_response=raw,
+            strict_framing=True,
+        )
+
+        with pytest.raises(
+            ResponseFramingError,
+            match="trailer line exceeded maximum allowed length",
+        ):
+            response.read()
+        assert response.reusable is False
 
 
 class MockChunkedEncodingResponse:

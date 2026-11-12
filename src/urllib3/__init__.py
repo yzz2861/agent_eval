@@ -16,9 +16,15 @@ from ._base_connection import _TYPE_BODY
 from ._collections import HTTPHeaderDict
 from ._version import __version__
 from .connectionpool import HTTPConnectionPool, HTTPSConnectionPool, connection_from_url
+from .exceptions import ResponseFramingError
 from .filepost import _TYPE_FIELDS, encode_multipart_formdata
 from .poolmanager import PoolManager, ProxyManager, proxy_from_url
-from .response import BaseHTTPResponse, HTTPResponse
+from .response import (
+    BaseHTTPResponse,
+    FramingPolicy,
+    HTTPResponse,
+    ResponseFraming,
+)
 from .util.request import make_headers
 from .util.retry import Retry
 from .util.timeout import Timeout
@@ -66,6 +72,9 @@ __all__ = (
     "proxy_from_url",
     "request",
     "BaseHTTPResponse",
+    "FramingPolicy",
+    "ResponseFraming",
+    "ResponseFramingError",
 )
 
 logging.getLogger(__name__).addHandler(NullHandler())

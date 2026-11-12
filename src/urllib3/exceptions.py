@@ -9,7 +9,7 @@ from http.client import IncompleteRead as httplib_IncompleteRead
 if typing.TYPE_CHECKING:
     from .connection import HTTPConnection
     from .connectionpool import ConnectionPool
-    from .response import HTTPResponse
+    from .response import HTTPResponse, ResponseFraming
     from .util.retry import Retry
 
 # Base Exceptions
@@ -72,6 +72,27 @@ class DecodeError(HTTPError):
 
 class ProtocolError(HTTPError):
     """Raised when something unexpected happens mid-request/response."""
+
+
+class ResponseFramingError(ProtocolError):
+    """Raised when a response has an invalid or ambiguous body framing.
+
+    The response is not safe to reuse after this error is raised. Callers can
+    inspect ``reusable`` and ``framing_result`` to make connection-pooling
+    decisions.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reusable: bool = False,
+        framing_result: ResponseFraming | None = None,
+    ) -> None:
+        self.reason = message
+        self.reusable = reusable
+        self.framing_result = framing_result
+        super().__init__(message)
 
 
 #: Renamed to ProtocolError but aliased for backwards compatibility.
