@@ -21,21 +21,29 @@ def parse(
     forbid_dtd=False,
     forbid_entities=True,
     forbid_external=True,
+    security_mode=None,
 ):
     if parser is None:
         parser = make_parser()
         parser.forbid_dtd = forbid_dtd
         parser.forbid_entities = forbid_entities
         parser.forbid_external = forbid_external
+        parser.security_mode = security_mode
     return _parse(stream_or_string, parser, bufsize)
 
 
 def parseString(
-    string, parser=None, forbid_dtd=False, forbid_entities=True, forbid_external=True
+    string,
+    parser=None,
+    forbid_dtd=False,
+    forbid_entities=True,
+    forbid_external=True,
+    security_mode=None,
 ):
     if parser is None:
         parser = make_parser()
         parser.forbid_dtd = forbid_dtd
         parser.forbid_entities = forbid_entities
         parser.forbid_external = forbid_external
+        parser.security_mode = security_mode
     return _parseString(string, parser)

@@ -16,10 +16,21 @@ from pyexpat import ExpatError
 from defusedxml import ElementTree, minidom, pulldom, sax, xmlrpc, expatreader
 from defusedxml import defuse_stdlib
 from defusedxml import (
+    KEEP,
+    SAFE,
     DTDForbidden,
     EntitiesForbidden,
     ExternalReferenceForbidden,
     NotSupportedError,
+)
+from defusedxml.common import (
+    AuditRecord,
+    clear_audit_records,
+    get_audit_record,
+    security_mode,
+    set_security_mode,
+    source_category,
+    summarize_name,
 )
 
 from xml.etree.ElementTree import Element as ElementAfterImport
@@ -92,6 +103,10 @@ class BaseTests(DefusedTestCase):
     external_ref_exception = ExternalReferenceForbidden
     cyclic_error = None
     iterparse = None
+
+    def setUp(self):
+        if type(self) is BaseTests:
+            self.skipTest("abstract base test class")
 
     def test_simple_parse(self):
         self.parse(self.xml_simple)
@@ -252,9 +267,17 @@ class TestDefusedcElementTree(TestDefusedElementTree):
     module = cElementTree
 
     def test_celementtree_warnings(self):
-        self.assertTrue(cetree_warnings)
-        self.assertEqual(cetree_warnings[0].category, DeprecationWarning)
-        self.assertIn("tests.py", cetree_warnings[0].filename)
+        # The deprecation warning is emitted once per process at import
+        # time; re-import to make the test independent of collection order.
+        import importlib
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            importlib.reload(cElementTree)
+        self.addCleanup(importlib.reload, cElementTree)
+        self.assertTrue(caught)
+        self.assertEqual(caught[0].category, DeprecationWarning)
+        self.assertIn("cElementTree", str(caught[0].message))
 
 
 class TestDefusedMinidom(BaseTests):
@@ -524,6 +547,35 @@ class TestXmlRpc(DefusedTestCase):
         finally:
             xmlrpc.unmonkey_patch()
 
+    def test_monkeypatch_safe_mode_no_leak(self):
+        import xmlrpc.client as client
+
+        secret_http = "http://intranet.corp.local/secret.dtd"
+        fragments = ("intranet.corp.local", secret_http, "/srv/")
+
+        request = (
+            '<?xml version="1.0"?>'
+            '<!DOCTYPE methodCall [<!ENTITY x SYSTEM "%s">]>'
+            "<methodCall><methodName>ping</methodName>"
+            "<params><param><value><string>&x;</string></value></param>"
+            "</params></methodCall>" % secret_http
+        ).encode("utf-8")
+        try:
+            xmlrpc.monkey_patch()
+            with security_mode(SAFE):
+                with self.assertRaises(EntitiesForbidden) as ctx:
+                    client.loads(request)
+            rendered = str(ctx.exception) + repr(ctx.exception)
+            for fragment in fragments:
+                self.assertNotIn(fragment, rendered)
+            self.assertTrue(ctx.exception.audit_id)
+            record = get_audit_record(ctx.exception.audit_id)
+            serialized = str(record.to_dict())
+            for fragment in fragments:
+                self.assertNotIn(fragment, serialized)
+        finally:
+            xmlrpc.unmonkey_patch()
+
 
 @unittest.skipUnless(gzip is not None, "test requires gzip")
 class TestDefusedGzip(DefusedTestCase):
@@ -579,6 +631,370 @@ class TestDefusedGzip(DefusedTestCase):
             self.decode_response(response, 4095, 8192)
 
 
+class SafeModeTestCase(unittest.TestCase):
+    """Coverage for the explicit safe security mode.
+
+    Every assertion scans both the client facing representation and the
+    server side audit view for environment information.
+    """
+
+    secret_file = "file:///srv/app/secrets/db.env"
+    secret_http = "http://intranet.corp.local/secret.dtd"
+    secret_value = "TOPSECRET_ENTITY_VALUE_789"
+    secret_fragments = (
+        "file:///srv",
+        "/srv/app",
+        "intranet.corp.local",
+        secret_file,
+        secret_http,
+        secret_value,
+        "TOPSECRET",
+    )
+
+    entity_xml = (
+        '<!DOCTYPE bomb [<!ENTITY a "%s">]><bomb>&a;</bomb>' % secret_value
+    ).encode("utf-8")
+    file_xml = (
+        '<!DOCTYPE external [<!ENTITY ee SYSTEM "%s">]><root>&ee;</root>'
+        % secret_file
+    ).encode("utf-8")
+    http_xml = (
+        '<!DOCTYPE external [<!ENTITY ee SYSTEM "%s">]><root>&ee;</root>'
+        % secret_http
+    ).encode("utf-8")
+    dtd_xml = (
+        '<!DOCTYPE dtd PUBLIC "-//W3C//DTD DTD//EN" "%s"><root/>' % secret_http
+    ).encode("utf-8")
+
+    def setUp(self):
+        clear_audit_records()
+        self.addCleanup(set_security_mode, KEEP)
+
+    def assertNoSecret(self, text):
+        rendered = str(text)
+        for fragment in self.secret_fragments:
+            self.assertNotIn(fragment, rendered)
+
+    def assertSafeException(self, exc, expected_cls, expected_category):
+        self.assertIsInstance(exc, expected_cls)
+        self.assertIsInstance(exc, ValueError)
+        self.assertEqual(exc.security_mode, SAFE)
+        self.assertEqual(exc.exception_category, expected_category)
+        self.assertIsInstance(exc.line, int)
+        self.assertGreaterEqual(exc.line, 1)
+        self.assertIsInstance(exc.column, int)
+        self.assertGreaterEqual(exc.column, 0)
+        self.assertTrue(exc.audit_id)
+        # str / repr are identical and free of environment data
+        self.assertEqual(str(exc), repr(exc))
+        self.assertNoSecret(str(exc))
+        # no attribute on the exception object carries a secret
+        for value in vars(exc).values():
+            if isinstance(value, str):
+                self.assertNoSecret(value)
+        self.assertIsNone(exc.sysid)
+        if isinstance(exc, EntitiesForbidden):
+            self.assertIsNone(exc.value)
+        # client mapping is redacted as well
+        client = exc.client_dict()
+        self.assertEqual(client["category"], expected_category)
+        self.assertNoSecret(str(client))
+        # audit record exposes only a redacted view
+        record = get_audit_record(exc.audit_id)
+        self.assertIsInstance(record, AuditRecord)
+        self.assertEqual(record.exception_category, expected_category)
+        self.assertNoSecret(str(record.to_dict()))
+        self.assertNoSecret(repr(record))
+        return record
+
+    def test_mode_switch_and_validation(self):
+        from defusedxml import common
+
+        self.assertEqual(common.get_security_mode(), KEEP)
+        with security_mode(SAFE):
+            self.assertEqual(common.get_security_mode(), SAFE)
+        self.assertEqual(common.get_security_mode(), KEEP)
+        with self.assertRaises(ValueError):
+            set_security_mode("bogus")
+        with self.assertRaises(ValueError):
+            with security_mode("bogus"):
+                pass
+
+    def test_keep_mode_string_compatibility(self):
+        # historical representations must remain byte for byte identical
+        dtd = DTDForbidden("xmlbomb", None, None)
+        self.assertEqual(
+            str(dtd), "DTDForbidden(name='xmlbomb', system_id=None, public_id=None)"
+        )
+        entity = EntitiesForbidden("a", "value", None, None, None, None)
+        self.assertEqual(
+            str(entity),
+            "EntitiesForbidden(name='a', system_id=None, public_id=None)",
+        )
+        external = ExternalReferenceForbidden(
+            "context", None, "http://example.invalid/note.xml", None
+        )
+        self.assertEqual(
+            str(external),
+            "ExternalReferenceForbidden(system_id='http://example.invalid/note.xml', "
+            "public_id=None)",
+        )
+        self.assertEqual(repr(dtd), str(dtd))
+        self.assertIsNone(dtd.audit_id)
+        self.assertIsNone(dtd.line)
+
+    def test_safe_repr_etree(self):
+        with security_mode(SAFE):
+            with self.assertRaises(EntitiesForbidden) as ctx:
+                ElementTree.fromstring(self.entity_xml)
+            record = self.assertSafeException(
+                ctx.exception, EntitiesForbidden, "entity_forbidden"
+            )
+            self.assertEqual(record.source_category, "none")
+            self.assertIn("sha256=", ctx.exception.name_summary)
+
+            with self.assertRaises(ExternalReferenceForbidden) as ctx:
+                ElementTree.fromstring(
+                    self.file_xml, forbid_entities=False
+                )
+            record = self.assertSafeException(
+                ctx.exception,
+                ExternalReferenceForbidden,
+                "external_reference_forbidden",
+            )
+            self.assertEqual(record.source_category, "file")
+
+            with self.assertRaises(ExternalReferenceForbidden) as ctx:
+                ElementTree.fromstring(
+                    self.http_xml, forbid_entities=False
+                )
+            record = self.assertSafeException(
+                ctx.exception,
+                ExternalReferenceForbidden,
+                "external_reference_forbidden",
+            )
+            self.assertEqual(record.source_category, "http")
+
+            with self.assertRaises(DTDForbidden) as ctx:
+                ElementTree.fromstring(self.dtd_xml, forbid_dtd=True)
+            record = self.assertSafeException(
+                ctx.exception, DTDForbidden, "dtd_forbidden"
+            )
+            self.assertEqual(record.source_category, "http")
+
+    def test_parser_level_mode_override(self):
+        # global mode stays keep, a single parser opts into safe mode
+        with self.assertRaises(EntitiesForbidden) as ctx:
+            ElementTree.fromstring(
+                self.entity_xml, security_mode=SAFE
+            )
+        exc = ctx.exception
+        self.assertEqual(exc.security_mode, SAFE)
+        self.assertNoSecret(str(exc))
+        self.assertTrue(exc.audit_id)
+
+    def test_cross_chunk_position(self):
+        document = (
+            '<?xml version="1.0"?>\n'
+            "<!-- comment line -->\n"
+            '<!DOCTYPE dtd SYSTEM "%s">\n'
+            "<root/>\n" % self.secret_http
+        ).encode("utf-8")
+        with security_mode(SAFE):
+            with self.assertRaises(DTDForbidden) as whole_ctx:
+                ElementTree.fromstring(document, forbid_dtd=True)
+            expected = (whole_ctx.exception.line, whole_ctx.exception.column)
+
+            # split the doctype declaration across several feed() calls
+            cuts = (3, 10, 25, 45, 63)
+            chunks = []
+            start = 0
+            for cut in cuts:
+                chunks.append(document[start:cut])
+                start = cut
+            chunks.append(document[start:])
+            with self.assertRaises(DTDForbidden) as split_ctx:
+                ElementTree.fromstringlist(chunks, forbid_dtd=True)
+            self.assertEqual(
+                (split_ctx.exception.line, split_ctx.exception.column), expected
+            )
+            self.assertNoSecret(str(split_ctx.exception))
+
+    def test_safe_minidom_and_sax(self):
+        with security_mode(SAFE):
+            with self.assertRaises(ExternalReferenceForbidden) as ctx:
+                minidom.parseString(
+                    self.file_xml, forbid_entities=False
+                )
+            self.assertSafeException(
+                ctx.exception,
+                ExternalReferenceForbidden,
+                "external_reference_forbidden",
+            )
+
+            with self.assertRaises(EntitiesForbidden) as ctx:
+                minidom.parseString(self.entity_xml)
+            self.assertSafeException(
+                ctx.exception, EntitiesForbidden, "entity_forbidden"
+            )
+
+            stream = io.StringIO()
+            with self.assertRaises(DTDForbidden) as ctx:
+                sax.parseString(
+                    self.dtd_xml,
+                    XMLGenerator(stream),
+                    forbid_dtd=True,
+                )
+            self.assertSafeException(
+                ctx.exception, DTDForbidden, "dtd_forbidden"
+            )
+
+            # pulldom path
+            with self.assertRaises(EntitiesForbidden) as ctx:
+                list(pulldom.parseString(self.entity_xml.decode("utf-8")))
+            self.assertSafeException(
+                ctx.exception, EntitiesForbidden, "entity_forbidden"
+            )
+
+    def test_safe_xmlrpc(self):
+        class Target(XmlRpcTarget):
+            pass
+
+        with security_mode(SAFE):
+            parser = xmlrpc.DefusedExpatParser(Target())
+            with self.assertRaises(EntitiesForbidden) as ctx:
+                parser.feed(self.entity_xml)
+                parser.close()
+            self.assertSafeException(
+                ctx.exception, EntitiesForbidden, "entity_forbidden"
+            )
+
+            parser = xmlrpc.DefusedExpatParser(
+                Target(), forbid_entities=False
+            )
+            with self.assertRaises(ExternalReferenceForbidden) as ctx:
+                parser.feed(self.file_xml)
+                parser.close()
+            record = self.assertSafeException(
+                ctx.exception,
+                ExternalReferenceForbidden,
+                "external_reference_forbidden",
+            )
+            self.assertEqual(record.source_category, "file")
+
+    def test_log_serialization(self):
+        import logging
+
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        logger = logging.getLogger("defusedxml.safe.test")
+        logger.addHandler(handler)
+        try:
+            with security_mode(SAFE):
+                with self.assertRaises(ExternalReferenceForbidden) as ctx:
+                    ElementTree.fromstring(
+                        self.file_xml, forbid_entities=False
+                    )
+                logger.exception("gateway error: %s", ctx.exception)
+                logger.warning("audit %s", ctx.exception.client_dict())
+                record = get_audit_record(ctx.exception.audit_id)
+                logger.warning("audit record %s", record.to_dict())
+        finally:
+            logger.removeHandler(handler)
+        output = stream.getvalue()
+        for fragment in self.secret_fragments:
+            self.assertNotIn(fragment, output)
+
+    def test_isinstance_and_categories(self):
+        with security_mode(SAFE):
+            instances = (
+                DTDForbidden("n", None, None),
+                EntitiesForbidden("n", "v", None, None, None, None),
+                ExternalReferenceForbidden("c", None, None, None),
+                NotSupportedError("boom"),
+            )
+        categories = (
+            "dtd_forbidden",
+            "entity_forbidden",
+            "external_reference_forbidden",
+            "not_supported",
+        )
+        classes = (
+            DTDForbidden,
+            EntitiesForbidden,
+            ExternalReferenceForbidden,
+            NotSupportedError,
+        )
+        for instance, cls, category in zip(instances, classes, categories):
+            self.assertIsInstance(instance, cls)
+            self.assertIsInstance(instance, ValueError)
+            self.assertEqual(instance.exception_category, category)
+            self.assertNoSecret(str(instance))
+
+    def test_not_supported_safe_repr(self):
+        with security_mode(SAFE):
+            exc = NotSupportedError("internal detail with /srv/app path")
+        self.assertNoSecret(str(exc))
+        self.assertIn("not_supported", str(exc))
+        self.assertIn(exc.audit_id, str(exc))
+        # keep mode preserves the message
+        keep_exc = NotSupportedError("internal detail")
+        self.assertEqual(str(keep_exc), "internal detail")
+
+    def test_legal_xml_parse_error_unchanged(self):
+        # malformed but otherwise benign documents keep raising the
+        # standard parser exceptions, unaffected by the security mode
+        with security_mode(SAFE):
+            with self.assertRaises(ElementTree.ParseError):
+                ElementTree.fromstring("<root><unclosed>")
+            with self.assertRaises(SAXParseException):
+                sax.parseString(
+                    b"<root><unclosed>", XMLGenerator(io.StringIO())
+                )
+
+    def test_source_category_and_name_summary(self):
+        self.assertEqual(source_category(None), "none")
+        self.assertEqual(source_category(""), "none")
+        self.assertEqual(
+            source_category("file:///srv/app/secrets.db"), "file"
+        )
+        self.assertEqual(source_category("/srv/app/secrets.db"), "file")
+        self.assertEqual(
+            source_category("http://intranet.example/dtd"), "http"
+        )
+        self.assertEqual(
+            source_category("https://intranet.example/dtd"), "http"
+        )
+        self.assertEqual(source_category("relative/entity.dtd"), "relative")
+        self.assertEqual(source_category("ftp://host/file"), "ftp")
+        self.assertEqual(source_category("data:,%3C%3Fxml"), "data")
+
+        self.assertIsNone(summarize_name(None))
+        summary = summarize_name("entity-name")
+        self.assertIn("entity-name", summary)
+        self.assertIn("sha256=", summary)
+        long_name = "x" * 100
+        long_summary = summarize_name(long_name)
+        self.assertIn("len=100", long_summary)
+        self.assertNotIn(long_name, long_summary)
+        # control characters are neutralized to avoid log forging
+        forged = summarize_name("a\nFAKE_LOG_LINE")
+        self.assertNotIn("\n", forged)
+
+
+@unittest.skipUnless(lxml is not None, "test requires lxml")
+class SafeModeLxmlTestCase(SafeModeTestCase):
+    def test_safe_lxml_constructors(self):
+        dtd_xml = (
+            '<!DOCTYPE dtd SYSTEM "%s"><root/>' % self.secret_http
+        ).encode("utf-8")
+        with security_mode(SAFE):
+            with self.assertRaises(DTDForbidden) as ctx:
+                lxml.fromstring(dtd_xml, forbid_dtd=True)
+            self.assertNoSecret(str(ctx.exception))
+            self.assertEqual(ctx.exception.security_mode, SAFE)
+
+
 def test_main():
     suite = unittest.TestSuite()
     cls = [
@@ -591,6 +1007,8 @@ def test_main():
         TestDefusedLxml,
         TestXmlRpc,
         TestDefusedGzip,
+        SafeModeTestCase,
+        SafeModeLxmlTestCase,
     ]
     for c in cls:
         suite.addTest(unittest.defaultTestLoader.loadTestsFromTestCase(c))

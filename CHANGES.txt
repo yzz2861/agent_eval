@@ -1,6 +1,26 @@
 Changelog
 =========
 
+defusedxml 0.8.0 (unreleased)
+-----------------------------
+
+- Add an explicit safe security mode (``defusedxml.SAFE``) alongside the
+  default ``defusedxml.KEEP`` mode. In safe mode the
+  ``DTDForbidden``, ``EntitiesForbidden``,
+  ``ExternalReferenceForbidden`` and ``NotSupportedError`` exceptions no
+  longer carry absolute paths, internal system / public ids, entity values
+  or document fragments in ``str()``, ``repr()`` or their attributes. The
+  redacted client representation contains the error category, XML line and
+  column, a hashed entity name summary and an opaque audit id.
+- Add a bounded, serialization safe audit registry
+  (``get_audit_record`` / ``clear_audit_records``) and an
+  ``AuditRecord`` view that only exposes a coarse ``source_category``
+  instead of the raw system id.
+- Parser backends now capture expat line and column information, including
+  across chunked ``feed()`` parsing.
+- The default keep mode preserves the historical exception strings and
+  ``isinstance`` semantics byte for byte.
+
 defusedxml 0.8.0
 ----------------
 

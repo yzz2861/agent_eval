@@ -98,11 +98,19 @@ class DefusedGzipDecodedResponse(gzip.GzipFile if gzip else object):
 
 
 class DefusedExpatParser(ExpatParser):
-    def __init__(self, target, forbid_dtd=False, forbid_entities=True, forbid_external=True):
+    def __init__(
+        self,
+        target,
+        forbid_dtd=False,
+        forbid_entities=True,
+        forbid_external=True,
+        security_mode=None,
+    ):
         super().__init__(target)
         self.forbid_dtd = forbid_dtd
         self.forbid_entities = forbid_entities
         self.forbid_external = forbid_external
+        self.security_mode = security_mode
         parser = self._parser
         if self.forbid_dtd:
             parser.StartDoctypeDeclHandler = self.defused_start_doctype_decl
@@ -113,19 +121,41 @@ class DefusedExpatParser(ExpatParser):
             parser.ExternalEntityRefHandler = self.defused_external_entity_ref_handler
 
     def defused_start_doctype_decl(self, name, sysid, pubid, has_internal_subset):
-        raise DTDForbidden(name, sysid, pubid)
+        raise DTDForbidden(
+            name, sysid, pubid, security_mode=self.security_mode, parser=self
+        )
 
     def defused_entity_decl(
         self, name, is_parameter_entity, value, base, sysid, pubid, notation_name
     ):
-        raise EntitiesForbidden(name, value, base, sysid, pubid, notation_name)
+        raise EntitiesForbidden(
+            name,
+            value,
+            base,
+            sysid,
+            pubid,
+            notation_name,
+            security_mode=self.security_mode,
+            parser=self,
+        )
 
     def defused_unparsed_entity_decl(self, name, base, sysid, pubid, notation_name):
         # expat 1.2
-        raise EntitiesForbidden(name, None, base, sysid, pubid, notation_name)  # pragma: no cover
+        raise EntitiesForbidden(  # pragma: no cover
+            name,
+            None,
+            base,
+            sysid,
+            pubid,
+            notation_name,
+            security_mode=self.security_mode,
+            parser=self,
+        )
 
     def defused_external_entity_ref_handler(self, context, base, sysid, pubid):
-        raise ExternalReferenceForbidden(context, base, sysid, pubid)
+        raise ExternalReferenceForbidden(
+            context, base, sysid, pubid, security_mode=self.security_mode, parser=self
+        )
 
 
 def monkey_patch():

@@ -328,6 +328,48 @@ forbid_external (default: True)
   or DTD and raising an *ExternalReferenceForbidden* exception when a DTD
   or entity references an external resource.
 
+Security modes
+~~~~~~~~~~~~~~
+
+By default the exception classes ``DTDForbidden``, ``EntitiesForbidden`` and
+``ExternalReferenceForbidden`` retain their historical, verbose string
+representation. It contains the system id, public id and (for entities) the
+name of the offending declaration and is therefore convenient for debugging.
+The information may leak environment details such as absolute file paths
+(``file:///srv/app/secrets/db.env``), internal URLs or entity values when an
+exception is rendered into a client response or a gateway log.
+
+The package provides an explicit opt-in safe mode. It can be enabled
+process wide or for a single parser::
+
+    from defusedxml import SAFE, security_mode
+    from defusedxml import ElementTree
+
+    # process wide, e.g. in application startup code
+    # defusedxml.set_security_mode(SAFE)
+
+    # or per request / per parser
+    with security_mode(SAFE):
+        ElementTree.fromstring(payload, forbid_entities=False)
+
+    # or without any global state
+    ElementTree.fromstring(payload, security_mode=SAFE)
+
+In safe mode the client facing exception only carries the error category,
+the XML line and column, a non-reversible summary of the entity / DTD name
+and an opaque audit id. It never contains absolute paths, internal URLs,
+entity values or document fragments. ``str()``, ``repr()``,
+``vars(exc)`` and structured logging of the exception are all redacted.
+The original exception classes, ``isinstance`` checks and existing
+``except`` clauses keep working unchanged.
+
+Server side auditing code can look up the audit id through
+``defusedxml.get_audit_record(audit_id)``. The returned
+``AuditRecord`` exposes a redacted, serialization safe view with a coarse
+``source_category`` (e.g. ``file``, ``http``, ``relative``) but never the
+raw system id. ``clear_audit_records()`` empties the bounded audit
+registry.
+
 
 defusedxml (package)
 --------------------

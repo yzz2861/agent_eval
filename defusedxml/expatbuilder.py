@@ -19,27 +19,60 @@ class DefusedExpatBuilder(_ExpatBuilder):
     """Defused document builder"""
 
     def __init__(
-        self, options=None, forbid_dtd=False, forbid_entities=True, forbid_external=True
+        self,
+        options=None,
+        forbid_dtd=False,
+        forbid_entities=True,
+        forbid_external=True,
+        security_mode=None,
     ):
         _ExpatBuilder.__init__(self, options)
         self.forbid_dtd = forbid_dtd
         self.forbid_entities = forbid_entities
         self.forbid_external = forbid_external
+        self.security_mode = security_mode
 
     def defused_start_doctype_decl(self, name, sysid, pubid, has_internal_subset):
-        raise DTDForbidden(name, sysid, pubid)
+        raise DTDForbidden(
+            name, sysid, pubid, security_mode=self.security_mode, parser=self._parser
+        )
 
     def defused_entity_decl(
         self, name, is_parameter_entity, value, base, sysid, pubid, notation_name
     ):
-        raise EntitiesForbidden(name, value, base, sysid, pubid, notation_name)
+        raise EntitiesForbidden(
+            name,
+            value,
+            base,
+            sysid,
+            pubid,
+            notation_name,
+            security_mode=self.security_mode,
+            parser=self._parser,
+        )
 
     def defused_unparsed_entity_decl(self, name, base, sysid, pubid, notation_name):
         # expat 1.2
-        raise EntitiesForbidden(name, None, base, sysid, pubid, notation_name)  # pragma: no cover
+        raise EntitiesForbidden(  # pragma: no cover
+            name,
+            None,
+            base,
+            sysid,
+            pubid,
+            notation_name,
+            security_mode=self.security_mode,
+            parser=self._parser,
+        )
 
     def defused_external_entity_ref_handler(self, context, base, sysid, pubid):
-        raise ExternalReferenceForbidden(context, base, sysid, pubid)
+        raise ExternalReferenceForbidden(
+            context,
+            base,
+            sysid,
+            pubid,
+            security_mode=self.security_mode,
+            parser=self._parser,
+        )
 
     def install(self, parser):
         _ExpatBuilder.install(self, parser)
@@ -67,7 +100,14 @@ class DefusedExpatBuilderNS(_Namespaces, DefusedExpatBuilder):
         self._initNamespaces()
 
 
-def parse(file, namespaces=True, forbid_dtd=False, forbid_entities=True, forbid_external=True):
+def parse(
+    file,
+    namespaces=True,
+    forbid_dtd=False,
+    forbid_entities=True,
+    forbid_external=True,
+    security_mode=None,
+):
     """Parse a document, returning the resulting Document node.
 
     'file' may be either a file name or an open file object.
@@ -77,7 +117,10 @@ def parse(file, namespaces=True, forbid_dtd=False, forbid_entities=True, forbid_
     else:
         build_builder = DefusedExpatBuilder
     builder = build_builder(
-        forbid_dtd=forbid_dtd, forbid_entities=forbid_entities, forbid_external=forbid_external
+        forbid_dtd=forbid_dtd,
+        forbid_entities=forbid_entities,
+        forbid_external=forbid_external,
+        security_mode=security_mode,
     )
 
     if isinstance(file, str):
@@ -92,7 +135,12 @@ def parse(file, namespaces=True, forbid_dtd=False, forbid_entities=True, forbid_
 
 
 def parseString(
-    string, namespaces=True, forbid_dtd=False, forbid_entities=True, forbid_external=True
+    string,
+    namespaces=True,
+    forbid_dtd=False,
+    forbid_entities=True,
+    forbid_external=True,
+    security_mode=None,
 ):
     """Parse a document from a string, returning the resulting
     Document node.
@@ -102,6 +150,9 @@ def parseString(
     else:
         build_builder = DefusedExpatBuilder
     builder = build_builder(
-        forbid_dtd=forbid_dtd, forbid_entities=forbid_entities, forbid_external=forbid_external
+        forbid_dtd=forbid_dtd,
+        forbid_entities=forbid_entities,
+        forbid_external=forbid_external,
+        security_mode=security_mode,
     )
     return builder.parseString(string)

@@ -107,7 +107,12 @@ _parser_tls = GlobalParserTLS()
 getDefaultParser = _parser_tls.getDefaultParser
 
 
-def check_docinfo(elementtree, forbid_dtd=False, forbid_entities=True):
+def check_docinfo(
+    elementtree,
+    forbid_dtd=False,
+    forbid_entities=True,
+    security_mode=None,
+):
     """Check docinfo of an element tree for DTD and entity declarations
 
     The check for entity declarations needs lxml 3 or newer. lxml 2.x does
@@ -116,33 +121,63 @@ def check_docinfo(elementtree, forbid_dtd=False, forbid_entities=True):
     docinfo = elementtree.docinfo
     if docinfo.doctype:
         if forbid_dtd:
-            raise DTDForbidden(docinfo.doctype, docinfo.system_url, docinfo.public_id)
+            raise DTDForbidden(
+                docinfo.doctype,
+                docinfo.system_url,
+                docinfo.public_id,
+                security_mode=security_mode,
+            )
         if forbid_entities and not LXML3:
             # lxml < 3 has no iterentities()
-            raise NotSupportedError("Unable to check for entity declarations " "in lxml 2.x")
+            raise NotSupportedError(
+                "Unable to check for entity declarations in lxml 2.x",
+                security_mode=security_mode,
+            )
 
     if forbid_entities:
         for dtd in docinfo.internalDTD, docinfo.externalDTD:
             if dtd is None:
                 continue
             for entity in dtd.iterentities():
-                raise EntitiesForbidden(entity.name, entity.content, None, None, None, None)
+                raise EntitiesForbidden(
+                    entity.name,
+                    entity.content,
+                    None,
+                    None,
+                    None,
+                    None,
+                    security_mode=security_mode,
+                )
 
 
-def parse(source, parser=None, base_url=None, forbid_dtd=False, forbid_entities=True):
+def parse(
+    source,
+    parser=None,
+    base_url=None,
+    forbid_dtd=False,
+    forbid_entities=True,
+    security_mode=None,
+):
     if parser is None:
         parser = getDefaultParser()
     elementtree = _etree.parse(source, parser, base_url=base_url)
-    check_docinfo(elementtree, forbid_dtd, forbid_entities)
+    check_docinfo(elementtree, forbid_dtd, forbid_entities, security_mode)
     return elementtree
 
 
-def fromstring(text, parser=None, base_url=None, forbid_dtd=False, forbid_entities=True):
+def fromstring(
+    text,
+    parser=None,
+    base_url=None,
+    forbid_dtd=False,
+    forbid_entities=True,
+    security_mode=None,
+):
     if parser is None:
         parser = getDefaultParser()
     rootelement = _etree.fromstring(text, parser, base_url=base_url)
     elementtree = rootelement.getroottree()
-    check_docinfo(elementtree, forbid_dtd, forbid_entities)
+    check_docinfo(elementtree, forbid_dtd, forbid_entities, security_mode)
     return rootelement
 
 
@@ -150,4 +185,7 @@ XML = fromstring
 
 
 def iterparse(*args, **kwargs):
-    raise NotSupportedError("defused lxml.etree.iterparse not available")
+    raise NotSupportedError(
+        "defused lxml.etree.iterparse not available",
+        security_mode=kwargs.get("security_mode"),
+    )

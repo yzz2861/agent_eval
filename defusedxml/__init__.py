@@ -10,12 +10,22 @@ from __future__ import print_function, absolute_import
 import warnings
 
 from .common import (
+    KEEP,
+    SAFE,
+    AuditRecord,
     DefusedXmlException,
     DTDForbidden,
     EntitiesForbidden,
     ExternalReferenceForbidden,
     NotSupportedError,
     _apply_defusing,
+    clear_audit_records,
+    get_audit_record,
+    get_security_mode,
+    security_mode,
+    set_security_mode,
+    source_category,
+    summarize_name,
 )
 
 
@@ -60,9 +70,19 @@ def defuse_stdlib():
 __version__ = "0.8.0rc2"
 
 __all__ = [
+    "KEEP",
+    "SAFE",
+    "AuditRecord",
     "DefusedXmlException",
     "DTDForbidden",
     "EntitiesForbidden",
     "ExternalReferenceForbidden",
     "NotSupportedError",
+    "clear_audit_records",
+    "get_audit_record",
+    "get_security_mode",
+    "security_mode",
+    "set_security_mode",
+    "source_category",
+    "summarize_name",
 ]
