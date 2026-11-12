@@ -4,6 +4,8 @@ from contextlib import nullcontext
 import pytest
 from flask import json
 from joserfc import jwt
+from joserfc.errors import InvalidClaimError
+from joserfc.errors import MissingClaimError
 from joserfc.jwk import OctKey
 
 from authlib.common.urls import url_decode
@@ -19,6 +21,7 @@ from authlib.oauth2.rfc6749.requests import OAuth2Request
 from authlib.oidc.core import HybridIDToken
 from authlib.oidc.core.grants import OpenIDCode as _OpenIDCode
 from authlib.oidc.core.grants import OpenIDHybridGrant as _OpenIDHybridGrant
+from authlib.oidc.core.util import create_half_hash
 from tests.util import HMAC_SECRET
 from tests.util import parse_form
 
@@ -661,3 +664,138 @@ def test_response_mode_form_post_non_http_redirect_uri(
     assert rv.json["error"] == "invalid_request"
     assert rv.location is None
     assert b"<form" not in rv.data
+
+
+def _authorize_hybrid_id_token(test_client):
+    """Run a code id_token request and return the decoded front-channel
+    ID token with its response parameters."""
+    rv = test_client.post(
+        "/oauth/authorize",
+        data={
+            "client_id": "client-id",
+            "response_type": "code id_token",
+            "state": "bar",
+            "nonce": "abc",
+            "scope": "openid profile",
+            "redirect_uri": "https://client.test",
+            "user_id": "1",
+        },
+    )
+    params = dict(url_decode(urlparse.urlparse(rv.location).fragment))
+    params["client_id"] = "client-id"
+    token = jwt.decode(
+        params["id_token"], OctKey.import_key(HMAC_SECRET), algorithms=["HS256"]
+    )
+    return token, params
+
+
+def test_hybrid_c_hash_tampered(test_client):
+    """A truncated c_hash fails validation while the error only names the
+    claim."""
+    token, params = _authorize_hybrid_id_token(test_client)
+    token.claims["c_hash"] = token.claims["c_hash"][:-1]
+    forged = jwt.encode(token.header, token.claims, OctKey.import_key(HMAC_SECRET))
+
+    claims = HybridIDToken(
+        jwt.decode(forged, OctKey.import_key(HMAC_SECRET), algorithms=["HS256"]).claims,
+        token.header,
+        params=params,
+    )
+    with pytest.raises(InvalidClaimError) as exc:
+        claims.validate()
+    assert exc.value.claim == "c_hash"
+    assert params["code"] not in str(exc.value)
+
+
+def test_hybrid_c_hash_wrong_case(test_client):
+    """The c_hash comparison is case-sensitive."""
+    token, params = _authorize_hybrid_id_token(test_client)
+    token.claims["c_hash"] = token.claims["c_hash"].swapcase()
+    forged = jwt.encode(token.header, token.claims, OctKey.import_key(HMAC_SECRET))
+
+    claims = HybridIDToken(
+        jwt.decode(forged, OctKey.import_key(HMAC_SECRET), algorithms=["HS256"]).claims,
+        token.header,
+        params=params,
+    )
+    with pytest.raises(InvalidClaimError):
+        claims.validate()
+
+
+def test_hybrid_missing_c_hash(test_client):
+    """code id_token requires c_hash."""
+    token, params = _authorize_hybrid_id_token(test_client)
+    del token.claims["c_hash"]
+    forged = jwt.encode(token.header, token.claims, OctKey.import_key(HMAC_SECRET))
+
+    claims = HybridIDToken(
+        jwt.decode(forged, OctKey.import_key(HMAC_SECRET), algorithms=["HS256"]).claims,
+        token.header,
+        params=params,
+    )
+    with pytest.raises(MissingClaimError) as exc:
+        claims.validate()
+    assert exc.value.claim == "c_hash"
+
+
+def test_hybrid_nonce_mismatch(test_client):
+    """An ID token replayed with a different request nonce is rejected."""
+    token, params = _authorize_hybrid_id_token(test_client)
+    params["nonce"] = "different-nonce"
+
+    claims = HybridIDToken(token.claims, token.header, params=params)
+    with pytest.raises(InvalidClaimError) as exc:
+        claims.validate()
+    assert exc.value.claim == "nonce"
+    assert "abc" not in str(exc.value)
+
+
+def test_hybrid_multi_audience_requires_azp(test_client):
+    """A token with several audiences but no azp cannot be used by the
+    client."""
+    token, params = _authorize_hybrid_id_token(test_client)
+    token.claims["aud"] = ["client-id", "another-client"]
+    token.claims.pop("azp", None)
+    forged = jwt.encode(token.header, token.claims, OctKey.import_key(HMAC_SECRET))
+
+    claims = HybridIDToken(
+        jwt.decode(forged, OctKey.import_key(HMAC_SECRET), algorithms=["HS256"]).claims,
+        token.header,
+        params=params,
+    )
+    with pytest.raises(MissingClaimError) as exc:
+        claims.validate()
+    assert exc.value.claim == "azp"
+
+
+def test_hybrid_wrong_azp_rejects_other_client_token(test_client):
+    """A token issued to another client is rejected even if its aud lists
+    the current client."""
+    token, params = _authorize_hybrid_id_token(test_client)
+    token.claims["aud"] = ["client-id", "another-client"]
+    token.claims["azp"] = "another-client"
+    forged = jwt.encode(token.header, token.claims, OctKey.import_key(HMAC_SECRET))
+
+    claims = HybridIDToken(
+        jwt.decode(forged, OctKey.import_key(HMAC_SECRET), algorithms=["HS256"]).claims,
+        token.header,
+        params=params,
+    )
+    with pytest.raises(InvalidClaimError) as exc:
+        claims.validate()
+    assert exc.value.claim == "azp"
+
+
+def test_hybrid_hash_uses_response_alg(test_client):
+    """A c_hash computed with another JWS alg is rejected."""
+    token, params = _authorize_hybrid_id_token(test_client)
+    token.claims["c_hash"] = create_half_hash(params["code"], "HS384").decode("utf-8")
+    forged = jwt.encode(token.header, token.claims, OctKey.import_key(HMAC_SECRET))
+
+    claims = HybridIDToken(
+        jwt.decode(forged, OctKey.import_key(HMAC_SECRET), algorithms=["HS256"]).claims,
+        token.header,
+        params=params,
+    )
+    with pytest.raises(InvalidClaimError):
+        claims.validate()

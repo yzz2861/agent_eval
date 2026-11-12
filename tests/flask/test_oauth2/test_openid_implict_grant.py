@@ -16,6 +16,7 @@ from authlib.oidc.core.grants import OpenIDImplicitGrant as _OpenIDImplicitGrant
 from tests.util import HMAC_SECRET
 from tests.util import parse_form
 
+from .models import AuthorizationCode
 from .models import AuthorizationSession
 from .models import exists_nonce
 from .oauth2_server import SupportedPromptValues
@@ -133,6 +134,35 @@ def test_multiple_nonce(test_client):
     )
     assert rv.json["error"] == "invalid_request"
     assert rv.json["error_description"] == "Multiple 'nonce' in request."
+
+
+def test_nonce_replay(test_client, db):
+    """An implicit request reusing a stored nonce is rejected as a replay."""
+    db.session.add(
+        AuthorizationCode(
+            client_id="client-id",
+            code="previous-code",
+            redirect_uri="https://client.test/callback",
+            scope="openid profile",
+            nonce="abc",
+            user_id=1,
+        )
+    )
+    db.session.commit()
+
+    data = {
+        "response_type": "id_token",
+        "client_id": "client-id",
+        "scope": "openid profile",
+        "state": "bar",
+        "nonce": "abc",
+        "redirect_uri": "https://client.test/callback",
+        "user_id": "1",
+    }
+    rv = test_client.post("/oauth/authorize", data=data)
+    params = dict(url_decode(urlparse.urlparse(rv.location).fragment))
+    assert params["error"] == "invalid_request"
+    assert params["error_description"] == "Replay attack"
 
 
 def test_missing_openid_in_scope(test_client):

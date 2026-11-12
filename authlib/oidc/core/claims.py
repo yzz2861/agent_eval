@@ -55,17 +55,25 @@ class IDToken(JWTClaims):
         self.validate_at_hash()
 
     def validate_aud(self):
-        """REQUIRED. Audience(s) that this ID Token is intended for. It MUST
-        contain the OAuth 2.0 client_id of the Relying Party as an audience
-        value. The Client MUST validate that the aud (audience) Claim contains
-        its client_id value registered at the Issuer identified by the iss
-        (issuer) Claim as an audience.
+        """REQUIRED. Audience(s) that this ID Token is intended for.
+
+        Per OpenID Connect Core §2, a single audience is a
+        case-sensitive string and multiple audiences are an array of
+        strings. A single-element array is accepted for compatibility with
+        issuers that always encode ``aud`` as an array. The Client MUST
+        validate that ``aud`` contains its ``client_id``.
         """
         client_id = self.params.get("client_id")
+        aud = self["aud"]
+        if isinstance(aud, list):
+            if not aud or not all(isinstance(item, str) for item in aud):
+                raise InvalidClaimError("aud")
+        elif not isinstance(aud, str):
+            raise InvalidClaimError("aud")
+
         if not client_id:
             return
 
-        aud = self["aud"]
         audiences = aud if isinstance(aud, list) else [aud]
         if client_id not in audiences:
             raise InvalidClaimError("aud")
@@ -100,7 +108,7 @@ class IDToken(JWTClaims):
         if nonce_value:
             if "nonce" not in self:
                 raise MissingClaimError("nonce")
-            if nonce_value != self["nonce"]:
+            if not hmac.compare_digest(to_bytes(nonce_value), to_bytes(self["nonce"])):
                 raise InvalidClaimError("nonce")
 
     def validate_amr(self):
@@ -120,11 +128,11 @@ class IDToken(JWTClaims):
     def validate_azp(self):
         """OPTIONAL. Authorized party - the party to which the ID Token was
         issued. If present, it MUST contain the OAuth 2.0 Client ID of this
-        party. This Claim is only needed when the ID Token has a single
-        audience value and that audience is different than the authorized
-        party. It MAY be included even when the authorized party is the same
-        as the sole audience. The azp value is a case sensitive string
-        containing a StringOrURI value.
+        party. When the ID Token has several audiences, ``azp`` is REQUIRED
+        and MUST be the client ID of the current client, so a token issued
+        to another client is rejected. It MAY be included even when the
+        authorized party is the same as the sole audience. The azp value is
+        a case sensitive string containing a StringOrURI value.
         """
         aud = self.get("aud")
         client_id = self.params.get("client_id")
@@ -133,7 +141,14 @@ class IDToken(JWTClaims):
         if required and not azp:
             raise MissingClaimError("azp")
 
-        if azp and client_id and azp != client_id:
+        if azp and not isinstance(azp, str):
+            raise InvalidClaimError("azp")
+
+        if (
+            azp
+            and client_id
+            and not hmac.compare_digest(to_bytes(azp), to_bytes(client_id))
+        ):
             raise InvalidClaimError("azp")
 
     def validate_at_hash(self):
@@ -145,11 +160,32 @@ class IDToken(JWTClaims):
         access_token value with SHA-256, then take the left-most 128 bits and
         base64url encode them. The at_hash value is a case sensitive string.
         """
-        access_token = self.params.get("access_token")
-        at_hash = self.get("at_hash")
-        if at_hash and access_token:
-            if not _verify_hash(at_hash, access_token, self.header["alg"]):
-                raise InvalidClaimError("at_hash")
+        self._validate_hash_claim("at_hash", self.params.get("access_token"))
+
+    def validate_c_hash(self):
+        """Validate the ``c_hash`` claim when the flow returns a code from
+        the authorization endpoint. The base class does not require it:
+        :class:`HybridIDToken` overrides this method.
+        """
+
+    def _validate_hash_claim(self, claim_name, value):
+        """Validate an ``at_hash`` or ``c_hash`` claim.
+
+        The hash is the base64url encoding of the left-most half of the hash
+        of the value, with the hash algorithm of the JWS ``alg`` header. The
+        comparison is constant-time and case-sensitive, so truncated or
+        differently cased hashes are rejected. Error messages only name the
+        claim, never the token value.
+        """
+        hash_claim = self.get(claim_name)
+        if not hash_claim:
+            return
+        if (
+            not isinstance(hash_claim, str)
+            or not value
+            or not _verify_hash(hash_claim, value, self.header["alg"])
+        ):
+            raise InvalidClaimError(claim_name)
 
 
 class CodeIDToken(IDToken):
@@ -159,19 +195,18 @@ class CodeIDToken(IDToken):
 
 class ImplicitIDToken(IDToken):
     RESPONSE_TYPES = ("id_token", "id_token token")
-    ESSENTIAL_CLAIMS = ["iss", "sub", "aud", "exp", "iat", "nonce"]
     REGISTERED_CLAIMS = _REGISTERED_CLAIMS
 
     def validate_at_hash(self):
-        """If the ID Token is issued from the Authorization Endpoint with an
-        access_token value, which is the case for the response_type value
-        id_token token, this is REQUIRED; it MAY NOT be used when no Access
-        Token is issued, which is the case for the response_type value
-        id_token.
+        """``at_hash`` is REQUIRED with ``response_type=id_token token`` and
+        forbidden with ``response_type=id_token``, which never returns an
+        Access Token from the authorization endpoint.
         """
         access_token = self.params.get("access_token")
         if access_token and "at_hash" not in self:
             raise MissingClaimError("at_hash")
+        if not access_token and "at_hash" in self:
+            raise InvalidClaimError("at_hash")
         super().validate_at_hash()
 
 
@@ -196,12 +231,9 @@ class HybridIDToken(ImplicitIDToken):
         id_token token, this is REQUIRED; otherwise, its inclusion is OPTIONAL.
         """
         code = self.params.get("code")
-        c_hash = self.get("c_hash")
-        if code:
-            if not c_hash:
-                raise MissingClaimError("c_hash")
-            if not _verify_hash(c_hash, code, self.header["alg"]):
-                raise InvalidClaimError("c_hash")
+        if code and "c_hash" not in self:
+            raise MissingClaimError("c_hash")
+        self._validate_hash_claim("c_hash", code)
 
 
 class UserInfo(dict):

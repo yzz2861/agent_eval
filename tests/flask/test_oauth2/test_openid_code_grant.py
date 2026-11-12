@@ -146,6 +146,7 @@ def test_authorize_token(test_client, server, grant_cls):
         token.claims,
         token.header,
         {"iss": {"value": "Authlib"}},
+        params={"client_id": "client-id", "access_token": resp["access_token"]},
     )
     claims.validate()
     assert claims["auth_time"] >= int(auth_request_time)
@@ -704,6 +705,7 @@ def test_client_metadata_alg_none(test_client, server, db, client):
         token.claims,
         token.header,
         {"iss": {"value": "Authlib"}},
+        params={"client_id": "client-id"},
     )
     claims.validate()
     assert claims.header["alg"] == "none"
@@ -785,6 +787,7 @@ def test_authorize_token_algs(
         token.claims,
         token.header,
         {"iss": {"value": "Authlib"}},
+        params={"client_id": "client-id", "access_token": resp["access_token"]},
     )
     claims.validate()
 
