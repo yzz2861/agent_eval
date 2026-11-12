@@ -116,8 +116,10 @@ class MetadataEndpoint(BaseEndpoint):
             if not isinstance(code_grant, grant_types.AuthorizationCodeGrant) and hasattr(code_grant, "default_grant"):
                 code_grant = code_grant.default_grant
 
-            claims.setdefault("code_challenge_methods_supported",
-                              list(code_grant._code_challenge_methods.keys()))
+            methods = getattr(code_grant, 'code_challenge_methods_supported', None)
+            if methods is None:
+                methods = list(code_grant._code_challenge_methods.keys())
+            claims.setdefault("code_challenge_methods_supported", methods)
             self.validate_metadata(claims, "code_challenge_methods_supported", is_list=True)
         self.validate_metadata(claims, "authorization_endpoint", is_required=True, is_url=True)
 

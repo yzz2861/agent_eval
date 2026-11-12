@@ -272,6 +272,18 @@ the token.
     If you want to support PKCE, you have to associate a `code_challenge`
     and a `code_challenge_method` to the actual Authorization Code.
 
+    Authorization codes are bound to the challenge and method stored at
+    issuance.  ``S256`` hashes the original ``code_verifier`` and compares
+    in constant time; a code cannot be redeemed using a different method.
+    The default policy still accepts ``plain`` during migration.  To reject
+    it, configure the grant as S256-only::
+
+        AuthorizationCodeGrant(request_validator, pkce_policy="S256_ONLY")
+
+    A ``RequestValidator`` can also implement ``is_pkce_plain_allowed`` to
+    make an explicit per-client migration decision, and
+    ``is_authorization_code_consumed`` to report replay attempts.
+
     .. code-block:: python
 
         challenge = django.db.models.CharField(max_length=128)

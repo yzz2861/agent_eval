@@ -33,7 +33,7 @@ UNICODE_ASCII_CHARACTER_SET = ('abcdefghijklmnopqrstuvwxyz'
 CLIENT_ID_CHARACTER_SET = (r' !"#$%&\'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMN'
                            'OPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}')
 
-SANITIZE_KEY_PATTERN = re.compile(r'password|token', re.IGNORECASE)
+SANITIZE_KEY_PATTERN = re.compile(r'password|token|code', re.IGNORECASE)
 INVALID_HEX_PATTERN = re.compile(r'%[^0-9A-Fa-f]|%[0-9A-Fa-f][^0-9A-Fa-f]')
 
 always_safe = ('ABCDEFGHIJKLMNOPQRSTUVWXYZ'
@@ -398,7 +398,7 @@ def to_unicode(data, encoding='UTF-8'):
 
 
 def _sanitize_body(body):
-    """Redact values of parameters whose name mentions password or token.
+    """Redact values of parameters whose name mentions password, token or code.
 
     Linear-time replacement for the former SANITIZE_PATTERN regex, whose
     backtracking made ``repr(Request)`` pathological on adversarial bodies
@@ -410,6 +410,15 @@ def _sanitize_body(body):
         if sep and value and SANITIZE_KEY_PATTERN.search(name):
             parts[i] = name + '=<SANITIZED>'
     return ''.join(parts)
+
+
+def _sanitize_url(url):
+    """Redact sensitive parameter values from a request URI."""
+    parsed = urlparse.urlsplit(url)
+    return urlparse.urlunsplit(parsed._replace(
+        query=_sanitize_body(parsed.query),
+        fragment=_sanitize_body(parsed.fragment),
+    ))
 
 
 class CaseInsensitiveDict(dict):
@@ -532,7 +541,7 @@ class Request:
         if 'Authorization' in headers:
             headers['Authorization'] = '<SANITIZED>'
         return '<oauthlib.Request url="{}", http_method="{}", headers="{}", body="{}">'.format(
-            self.uri, self.http_method, headers, body)
+            _sanitize_url(self.uri), self.http_method, headers, body)
 
     @property
     def uri_query(self):

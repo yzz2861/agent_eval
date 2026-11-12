@@ -10,6 +10,7 @@ import logging
 import re
 
 from oauthlib import common
+from oauthlib.common import log_safe
 
 from .. import errors
 from .base import GrantTypeBase, revalidate_response_mode
@@ -26,13 +27,38 @@ _code_verifier_re = re.compile(r'[A-Za-z0-9\-._~]{43,128}\Z')
 _code_challenge_plain_re = _code_verifier_re
 _code_challenge_s256_re = re.compile(r'[A-Za-z0-9\-._~]{43}\Z')
 
+# PKCE policies.  The migration policy is the backwards compatible
+# default: new codes should use S256, while plain remains available for
+# clients that have not migrated yet.  Deployments can opt in to the
+# strict policy to reject plain altogether.
+PKCE_POLICY_S256_ONLY = 'S256_ONLY'
+PKCE_POLICY_MIGRATION = 'MIGRATION'
+
+_PKCE_POLICIES = {
+    's256': PKCE_POLICY_S256_ONLY,
+    's256_only': PKCE_POLICY_S256_ONLY,
+    's256-only': PKCE_POLICY_S256_ONLY,
+    'strict': PKCE_POLICY_S256_ONLY,
+    'migration': PKCE_POLICY_MIGRATION,
+    'both': PKCE_POLICY_MIGRATION,
+    'compat': PKCE_POLICY_MIGRATION,
+}
+
+_PKCE_METHOD_ALIASES = {
+    's256': 'S256',
+    'plain': 'plain',
+}
 
 def is_valid_code_verifier(code_verifier):
     """Check a code_verifier against the ABNF of `Section 4.1`_.
 
     .. _`Section 4.1`: https://tools.ietf.org/html/rfc7636#section-4.1
     """
-    return isinstance(code_verifier, str) and _code_verifier_re.match(code_verifier) is not None
+    return (
+        isinstance(code_verifier, str)
+        and bool(code_verifier)
+        and _code_verifier_re.match(code_verifier) is not None
+    )
 
 
 def is_valid_code_challenge(code_challenge, code_challenge_method):
@@ -191,6 +217,126 @@ class AuthorizationCodeGrant(GrantTypeBase):
         'S256': code_challenge_method_s256
     }
 
+    # Migration is the backwards compatible default.  Set this to
+    # ``PKCE_POLICY_S256_ONLY`` (or pass ``pkce_policy="S256_ONLY"``) to
+    # reject plain for newly issued authorization codes.
+    pkce_policy = PKCE_POLICY_MIGRATION
+
+    def __init__(self, request_validator=None, **kwargs):
+        super().__init__(request_validator=request_validator, **kwargs)
+        # Normalize every supported constructor spelling to one policy view.
+        override = self._read_pkce_policy_override(kwargs)
+        if override is not None:
+            self.pkce_policy = override
+
+    @staticmethod
+    def _normalize_pkce_policy(value):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            normalized = _PKCE_POLICIES.get(value.strip().lower())
+            if normalized is not None:
+                return normalized
+            # A single method name is also an explicit policy.
+            method = _PKCE_METHOD_ALIASES.get(value.strip().lower())
+            if method == 'S256':
+                return PKCE_POLICY_S256_ONLY
+            if method == 'plain':
+                return PKCE_POLICY_MIGRATION
+            raise ValueError('Unsupported PKCE policy: %r' % (value,))
+        try:
+            methods = frozenset(
+                _PKCE_METHOD_ALIASES.get(item.strip().lower(), item)
+                for item in value
+            )
+        except TypeError:
+            raise ValueError('Unsupported PKCE policy: %r' % (value,))
+        if methods == frozenset({'S256'}):
+            return PKCE_POLICY_S256_ONLY
+        if methods == frozenset({'S256', 'plain'}):
+            return PKCE_POLICY_MIGRATION
+        raise ValueError('Unsupported PKCE policy: %r' % (value,))
+
+    @staticmethod
+    def _read_pkce_policy_override(kwargs):
+        for name in ('pkce_policy', 'pkce_methods',
+                     'code_challenge_methods',
+                     'allowed_code_challenge_methods'):
+            if name in kwargs:
+                return AuthorizationCodeGrant._normalize_pkce_policy(
+                    kwargs[name])
+        if (kwargs.get('require_s256') is True
+                or kwargs.get('pkce_strict') is True
+                or kwargs.get('allow_plain_pkce') is False
+                or kwargs.get('allow_plain') is False):
+            return PKCE_POLICY_S256_ONLY
+        if kwargs.get('allow_plain_pkce') is True or kwargs.get('allow_plain') is True:
+            return PKCE_POLICY_MIGRATION
+        return None
+
+    @property
+    def allowed_code_challenge_methods(self):
+        """Return the PKCE methods enabled by the grant's policy."""
+        if (getattr(self, 'allow_plain_pkce', None) is False
+                or getattr(self, 'allow_plain', None) is False
+                or getattr(self, 'require_s256', False) is True
+                or getattr(self, 'pkce_strict', False) is True):
+            policy = PKCE_POLICY_S256_ONLY
+        elif (getattr(self, 'allow_plain_pkce', None) is True
+              or getattr(self, 'allow_plain', None) is True):
+            policy = PKCE_POLICY_MIGRATION
+        else:
+            policy = None
+            for name in ('pkce_methods', 'code_challenge_methods'):
+                configured = getattr(self, name, None)
+                if configured is not None:
+                    policy = self._normalize_pkce_policy(configured)
+                    break
+            if policy is None:
+                policy = self._normalize_pkce_policy(
+                    getattr(self, 'pkce_policy', PKCE_POLICY_MIGRATION))
+        configured = (
+            {'S256'} if policy == PKCE_POLICY_S256_ONLY
+            else set(self._code_challenge_methods)
+        )
+        return configured.intersection(self._code_challenge_methods)
+
+    @allowed_code_challenge_methods.setter
+    def allowed_code_challenge_methods(self, value):
+        self.pkce_policy = self._normalize_pkce_policy(value)
+
+    @property
+    def code_challenge_methods_supported(self):
+        """Methods advertised in authorization-server metadata."""
+        return [method for method in self._code_challenge_methods
+                if method in self.allowed_code_challenge_methods]
+
+    def _validator_flag(self, name, *args):
+        """Call an optional boolean validator hook without changing its API.
+
+        ``None`` means the validator has no opinion and lets the grant policy
+        decide.  Non-boolean return values (for example from a test double)
+        are ignored rather than treated as truthy.
+        """
+        callback = getattr(self.request_validator, name, None)
+        if not callable(callback):
+            return None
+        result = callback(*args)
+        return result if isinstance(result, bool) else None
+
+    def _is_plain_allowed(self, request):
+        explicit = self._validator_flag(
+            'is_pkce_plain_allowed', request.client_id, request)
+        if explicit is not None:
+            return explicit
+        return 'plain' in self.allowed_code_challenge_methods
+
+    def _is_method_allowed(self, method, request):
+        if method == 'plain':
+            return ('plain' in self._code_challenge_methods
+                    and self._is_plain_allowed(request))
+        return method in self.allowed_code_challenge_methods
+
     def create_authorization_code(self, request):
         """
         Generates an authorization grant represented as a dictionary.
@@ -202,7 +348,7 @@ class AuthorizationCodeGrant(GrantTypeBase):
         if hasattr(request, 'state') and request.state:
             grant['state'] = request.state
         log.debug('Created authorization code grant %r for request %r.',
-                  grant, request)
+                  log_safe(grant), request)
         return grant
 
     def create_authorization_response(self, request, token_handler):
@@ -314,7 +460,7 @@ class AuthorizationCodeGrant(GrantTypeBase):
         self._validate_response_mode(request)
         if 'access_token' in grant:
             self.request_validator.save_token(grant, request)
-        log.debug('Saving grant %r for %r.', grant, request)
+        log.debug('Saving grant %r for %r.', log_safe(grant), request)
         self.request_validator.save_authorization_code(
             request.client_id, grant, request)
         return self.prepare_authorization_response(
@@ -450,11 +596,17 @@ class AuthorizationCodeGrant(GrantTypeBase):
 
         if request.code_challenge is not None:
 
-            # OPTIONAL, defaults to "plain" if not present in the request.
+            # RFC 7636 defaults an omitted method to "plain".  That is only
+            # safe when the deployment explicitly permits plain during the
+            # migration period.  A strict deployment must reject an omitted
+            # method rather than silently downgrade to plain.
             if request.code_challenge_method is None:
                 request.code_challenge_method = "plain"
 
             if request.code_challenge_method not in self._code_challenge_methods:
+                raise errors.UnsupportedCodeChallengeMethodError(request=request)
+
+            if not self._is_method_allowed(request.code_challenge_method, request):
                 raise errors.UnsupportedCodeChallengeMethodError(request=request)
 
             # RFC 7636 Section 4.2: check the code_challenge syntax
@@ -517,44 +669,13 @@ class AuthorizationCodeGrant(GrantTypeBase):
                       request.client_id, request.client, request.scopes)
             raise errors.InvalidGrantError(request=request)
 
+        if self._validator_flag('is_authorization_code_consumed',
+                                request.code, request) is True:
+            raise errors.InvalidGrantError(request=request)
+
         # OPTIONAL. Validate PKCE code_verifier
         challenge = self.request_validator.get_code_challenge(request.code, request)
-
-        if challenge is not None:
-            if request.code_verifier is None:
-                raise errors.MissingCodeVerifierError(request=request)
-
-            # RFC 7636 Section 4.1: check the code_verifier syntax
-            if not is_valid_code_verifier(request.code_verifier):
-                raise errors.InvalidGrantError(
-                    description='Invalid code_verifier parameter.', request=request)
-
-            challenge_method = self.request_validator.get_code_challenge_method(request.code, request)
-            if challenge_method is None:
-                raise errors.InvalidGrantError(request=request, description="Challenge method not found")
-
-            if challenge_method not in self._code_challenge_methods:
-                raise errors.ServerError(
-                    description="code_challenge_method {} is not supported.".format(challenge_method),
-                    request=request
-                )
-
-            if not self.validate_code_challenge(challenge,
-                                                challenge_method,
-                                                request.code_verifier):
-                log.debug('request provided a invalid code_verifier.')
-                raise errors.InvalidGrantError(request=request)
-        elif request.code_verifier is not None:
-            # RFC 9700 Section 4.8.2: a code_verifier MUST NOT be accepted
-            # when the authorization request had no code_challenge, as this
-            # indicates an authorization code injection / PKCE downgrade.
-            raise errors.InvalidGrantError(
-                request=request,
-                description='code_verifier provided but no code_challenge was associated with this authorization code.')
-        elif self.request_validator.is_pkce_required(request.client_id, request) is True:
-            if request.code_verifier is None:
-                raise errors.MissingCodeVerifierError(request=request)
-            raise errors.InvalidGrantError(request=request, description="Challenge not found")
+        self._validate_pkce_token_request(request, challenge)
 
         for attr in ('user', 'scopes'):
             if getattr(request, attr, None) is None:
@@ -588,3 +709,65 @@ class AuthorizationCodeGrant(GrantTypeBase):
         if challenge_method in self._code_challenge_methods:
             return self._code_challenge_methods[challenge_method](verifier, challenge)
         raise NotImplementedError('Unknown challenge_method %s' % challenge_method)
+
+    def _validate_pkce_token_request(self, request, challenge):
+        """Validate the verifier against the method bound to the code."""
+        if challenge is None:
+            if request.code_verifier not in (None, ''):
+                # RFC 9700 Section 4.8.2: a code_verifier MUST NOT be
+                # accepted when no challenge was associated with the code.
+                raise errors.InvalidGrantError(
+                    request=request,
+                    description='code_verifier provided but no code_challenge was associated with this authorization code.')
+            if self.request_validator.is_pkce_required(request.client_id, request) is True:
+                raise errors.MissingCodeVerifierError(request=request)
+            return
+
+        if request.code_verifier in (None, ''):
+            raise errors.MissingCodeVerifierError(request=request)
+
+        # RFC 7636 Section 4.1: check the code_verifier syntax
+        if not is_valid_code_verifier(request.code_verifier):
+            raise errors.InvalidGrantError(
+                description='Invalid code_verifier parameter.', request=request)
+
+        try:
+            challenge_method = self.request_validator.get_code_challenge_method(
+                request.code, request)
+        except NotImplementedError:
+            # A code with a challenge but no stored method cannot be safely
+            # verified.  Fail closed with a stable OAuth2 error.
+            raise errors.InvalidGrantError(request=request)
+        if challenge_method is None:
+            raise errors.InvalidGrantError(
+                request=request,
+                description='Challenge method not found')
+
+        if challenge_method not in self._code_challenge_methods:
+            if challenge_method in ('plain', 'S256'):
+                # The algorithm is known but disabled by the grant's policy.
+                raise errors.InvalidGrantError(request=request)
+            raise errors.ServerError(
+                description="code_challenge_method {} is not supported.".format(challenge_method),
+                request=request
+            )
+
+        # A code's method is fixed at the authorization endpoint.  A token
+        # request cannot select, override, or downgrade it.
+        requested_method = request.code_challenge_method
+        if requested_method is not None and requested_method != challenge_method:
+            raise errors.InvalidGrantError(request=request)
+
+        if not self._is_method_allowed(challenge_method, request):
+            raise errors.InvalidGrantError(request=request)
+
+        # Expose the stored binding to post-token custom validators.  It is
+        # deliberately not taken from the token request.
+        request.code_challenge = challenge
+        request.code_challenge_method = challenge_method
+
+        if not self.validate_code_challenge(challenge,
+                                            challenge_method,
+                                            request.code_verifier):
+            log.debug('request provided a invalid code_verifier.')
+            raise errors.InvalidGrantError(request=request)

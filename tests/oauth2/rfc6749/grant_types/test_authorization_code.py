@@ -14,6 +14,7 @@ from tests.unittest import TestCase
 # RFC 7636 Section 4.1/4.2 compliant values
 valid_code_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
 valid_code_challenge_plain = valid_code_verifier
+valid_code_challenge_s256 = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
 
 
 class AuthorizationCodeGrantTest(TestCase):
@@ -620,6 +621,173 @@ class AuthorizationCodeGrantTest(TestCase):
         self.mock_validator.is_origin_allowed.assert_called_once_with(
             'abcdef', 'https://foo.bar', self.request
         )
+
+
+class PKCESecurityTest(TestCase):
+
+    def setUp(self):
+        self.request = Request('http://a.b/path')
+        self.request.scopes = ('hello', 'world')
+        self.request.client = mock.MagicMock()
+        self.request.client.client_id = 'abcdef'
+        self.request.client_id = 'abcdef'
+        self.request.code = 'auth-code-value'
+        self.request.response_type = 'code'
+        self.request.grant_type = 'authorization_code'
+        self.request.redirect_uri = 'https://a.b/cb'
+
+        self.mock_validator = mock.MagicMock()
+        self.mock_validator.is_pkce_required.return_value = False
+        self.mock_validator.get_code_challenge.return_value = None
+        self.mock_validator.authenticate_client.side_effect = self.set_client
+        self.auth = AuthorizationCodeGrant(request_validator=self.mock_validator)
+
+    def set_client(self, request):
+        request.client = mock.MagicMock()
+        request.client.client_id = request.client_id
+        return True
+
+    def s256_grant(self):
+        return AuthorizationCodeGrant(
+            request_validator=self.mock_validator,
+            pkce_policy='S256_ONLY',
+        )
+
+    def test_strict_s256_authorization_and_token_redemption(self):
+        auth = self.s256_grant()
+        self.request.code_challenge = valid_code_challenge_s256
+        self.request.code_challenge_method = 'S256'
+        auth.validate_authorization_request(self.request)
+
+        self.request.code_verifier = valid_code_verifier
+        self.mock_validator.get_code_challenge.return_value = valid_code_challenge_s256
+        self.mock_validator.get_code_challenge_method.return_value = 'S256'
+        auth.validate_token_request(self.request)
+
+    def test_strict_policy_rejects_plain_and_missing_method(self):
+        auth = self.s256_grant()
+        for method in ('plain', None):
+            self.request.code_challenge = valid_code_challenge_plain
+            self.request.code_challenge_method = method
+            with self.assertRaises(errors.UnsupportedCodeChallengeMethodError):
+                auth.validate_authorization_request(self.request)
+
+    def test_stored_plain_code_is_rejected_by_strict_policy(self):
+        auth = self.s256_grant()
+        self.request.code_verifier = valid_code_verifier
+        self.mock_validator.get_code_challenge.return_value = valid_code_challenge_plain
+        self.mock_validator.get_code_challenge_method.return_value = 'plain'
+        with self.assertRaises(errors.InvalidGrantError):
+            auth.validate_token_request(self.request)
+
+    def test_validator_can_explicitly_disable_plain(self):
+        self.mock_validator.is_pkce_plain_allowed.return_value = False
+        self.request.code_challenge = valid_code_challenge_plain
+        self.request.code_challenge_method = 'plain'
+        with self.assertRaises(errors.UnsupportedCodeChallengeMethodError):
+            self.auth.validate_authorization_request(self.request)
+
+        self.request.code_verifier = valid_code_verifier
+        self.mock_validator.get_code_challenge.return_value = valid_code_challenge_plain
+        self.mock_validator.get_code_challenge_method.return_value = 'plain'
+        with self.assertRaises(errors.InvalidGrantError):
+            self.auth.validate_token_request(self.request)
+
+    def test_validator_can_explicitly_enable_plain_for_migration(self):
+        self.mock_validator.is_pkce_plain_allowed.return_value = True
+        self.request.code_challenge = valid_code_challenge_plain
+        self.request.code_challenge_method = 'plain'
+        self.s256_grant().validate_authorization_request(self.request)
+
+    def test_validator_can_report_consumed_code(self):
+        self.mock_validator.is_authorization_code_consumed.return_value = True
+        with self.assertRaises(errors.InvalidGrantError):
+            self.auth.validate_token_request(self.request)
+
+    def test_s256_code_cannot_be_downgraded_to_plain(self):
+        # The token request claims plain and supplies the plain challenge as
+        # the verifier.  The stored S256 method must still be used.
+        self.request.code_verifier = valid_code_challenge_plain
+        self.request.code_challenge_method = 'plain'
+        self.mock_validator.get_code_challenge.return_value = (
+            'ZtNPunH49FD35FWYhT5Tv8I7vRKQJ8uxMaL0_9eHjNA')
+        self.mock_validator.get_code_challenge_method.return_value = 'S256'
+        with self.assertRaises(errors.InvalidGrantError):
+            self.auth.validate_token_request(self.request)
+
+    def test_missing_bound_method_is_invalid_grant(self):
+        self.request.code_verifier = valid_code_verifier
+        self.mock_validator.get_code_challenge.return_value = valid_code_challenge_s256
+        self.mock_validator.get_code_challenge_method.return_value = None
+        with self.assertRaises(errors.InvalidGrantError):
+            self.auth.validate_token_request(self.request)
+
+    def test_empty_and_malformed_verifiers(self):
+        self.mock_validator.get_code_challenge.return_value = valid_code_challenge_plain
+        self.mock_validator.get_code_challenge_method.return_value = 'plain'
+        for verifier in (None, ''):
+            self.request.code_verifier = verifier
+            with self.assertRaises(errors.MissingCodeVerifierError):
+                self.auth.validate_token_request(self.request)
+        for verifier in ('short', 'a' * 129, 'a' * 42 + '=', 42, b'a' * 43):
+            self.request.code_verifier = verifier
+            with self.assertRaises(errors.InvalidGrantError):
+                self.auth.validate_token_request(self.request)
+
+    def test_code_replay_is_invalid_grant(self):
+        self.mock_validator.validate_code.side_effect = [True, False]
+        bearer = BearerToken(self.mock_validator)
+        _headers, _body, status = self.auth.create_token_response(self.request, bearer)
+        self.assertEqual(status, 200)
+        _headers, body, status = self.auth.create_token_response(self.request, bearer)
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body)['error'], 'invalid_grant')
+
+    def test_code_bound_to_client_a_is_not_redeemable_by_client_b(self):
+        self.mock_validator.validate_code.side_effect = (
+            lambda client_id, code, client, request: client_id == 'client-a')
+        self.request.client_id = 'client-a'
+        self.auth.validate_token_request(self.request)
+
+        self.request.client_id = 'client-b'
+        self.assertEqual(self.set_client(self.request), True)
+        with self.assertRaises(errors.InvalidGrantError):
+            self.auth.validate_token_request(self.request)
+
+    def test_errors_do_not_echo_code_or_verifier(self):
+        code = 'TOP-SECRET-AUTHORIZATION-CODE'
+        verifier = 'TOP-SECRET-CODE-VERIFIER'
+        self.request = Request(
+            'https://a.b/token',
+            body='grant_type=authorization_code&code=%s&code_verifier=%s'
+                 % (code, verifier),
+        )
+        self.request.scopes = ('hello',)
+        self.request.client_id = 'abcdef'
+        self.request.redirect_uri = 'https://a.b/cb'
+        self.mock_validator.get_code_challenge.return_value = valid_code_challenge_plain
+        self.mock_validator.get_code_challenge_method.return_value = 'plain'
+        with self.assertRaises(errors.OAuth2Error) as caught:
+            self.auth.validate_token_request(self.request)
+        message = str(caught.exception)
+        self.assertNotIn(code, message)
+        self.assertNotIn(verifier, message)
+
+    def test_challenge_is_not_written_to_logs(self):
+        challenge = valid_code_challenge_s256
+        request = Request(
+            'https://a.b/authorize?client_id=abcdef&response_type=code'
+            '&redirect_uri=https%3A%2F%2Fa.b%2Fcb'
+            '&code_challenge=' + challenge + '&code_challenge_method=S256'
+        )
+        request.scopes = ('hello',)
+        with self.assertLogs('oauthlib', level='DEBUG') as captured:
+            self.auth.create_authorization_response(request, BearerToken(self.mock_validator))
+        self.assertNotIn(challenge, '\n'.join(captured.output))
+
+    def test_non_pkce_flow_remains_optional(self):
+        self.mock_validator.is_pkce_required.return_value = False
+        self.auth.validate_token_request(self.request)
 
 
 class CustomDefaultResponseModeTest(TestCase):

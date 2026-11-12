@@ -620,6 +620,43 @@ class RequestValidator:
         """
         return False
 
+    def is_pkce_plain_allowed(self, client_id, request):
+        """Explicitly allow or deny the PKCE ``plain`` method for a client.
+
+        ``plain`` is only enabled by an explicit policy.  Return ``True`` to
+        permit it during a migration period, ``False`` to reject it, or
+        ``None`` to use the ``AuthorizationCodeGrant`` policy.  The default
+        is ``None`` so that existing validator implementations keep working.
+
+        :param client_id: Client identifier.
+        :param request: OAuthlib request.
+        :type request: oauthlib.common.Request
+        :rtype: True, False, or None
+
+        Method is used by:
+            - Authorization Code Grant
+        """
+        return None
+
+    def is_authorization_code_consumed(self, code, request):
+        """Report whether an authorization code has already been redeemed.
+
+        This is an optional companion to ``.validate_code`` for implementations
+        that track consumption separately.  Return ``True`` for a consumed
+        code, ``False`` for a code that is still redeemable, or ``None`` to
+        leave replay detection to ``.validate_code``.  The code value is
+        passed only as validation context and must not be included in errors.
+
+        :param code: Unicode authorization code.
+        :param request: OAuthlib request.
+        :type request: oauthlib.common.Request
+        :rtype: True, False, or None
+
+        Method is used by:
+            - Authorization Code Grant
+        """
+        return None
+
     def get_code_challenge(self, code, request):
         """Is called for every "token" requests.
 
@@ -657,6 +694,10 @@ class RequestValidator:
 
         Must return ``plain`` or ``S256``. You can return a custom value if you have
         implemented your own ``AuthorizationCodeGrant`` class.
+
+        The method must be the one stored with the authorization code at
+        issuance time. It is not taken from the token request, so a token
+        request cannot change or downgrade the method bound to a code.
 
         :param code: Authorization code.
         :param request: OAuthlib request.

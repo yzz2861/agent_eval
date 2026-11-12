@@ -4,6 +4,17 @@ Changelog
 Unreleased:
 ------------------
 OAuth2.0 Provider:
+* PKCE authorization codes are now bound to the ``code_challenge`` and
+  ``code_challenge_method`` stored when the code was issued. ``S256``
+  verification hashes the original ``code_verifier`` and compares in
+  constant time. A code issued with one method cannot be redeemed under
+  another. ``plain`` remains available under the backwards compatible
+  migration policy; deployments can set
+  ``AuthorizationCodeGrant.pkce_policy = "S256_ONLY"`` (or pass
+  ``pkce_policy="S256_ONLY"``) to reject it. Missing, empty, or malformed
+  verifiers, missing bound methods, consumed codes, and replay attempts
+  produce stable OAuth2 errors without echoing authorization codes or
+  verifier values. Non-PKCE authorization code flows remain optional.
 * **Breaking**: #988: PKCE parameters are now validated against RFC 7636
   syntax. ``code_verifier`` must be 43-128 unreserved ASCII characters
   (``[A-Za-z0-9-._~]``) at the token endpoint (rejected with ``invalid_grant``)
