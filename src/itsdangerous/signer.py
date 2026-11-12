@@ -3,6 +3,7 @@ from __future__ import annotations
 import collections.abc as cabc
 import hashlib
 import hmac
+import logging
 import typing as t
 
 from .encoding import _base64_alphabet
@@ -10,6 +11,8 @@ from .encoding import base64_decode
 from .encoding import base64_encode
 from .encoding import want_bytes
 from .exc import BadSignature
+
+_log = logging.getLogger(__name__)
 
 
 class SigningAlgorithm:
@@ -67,10 +70,66 @@ class HMACAlgorithm(SigningAlgorithm):
 def _make_keys_list(
     secret_key: str | bytes | cabc.Iterable[str] | cabc.Iterable[bytes],
 ) -> list[bytes]:
-    if isinstance(secret_key, (str, bytes)):
-        return [want_bytes(secret_key)]
+    """Normalize the given key or keys into a list of ``bytes`` keys.
 
-    return [want_bytes(s) for s in secret_key]  # pyright: ignore
+    The list is de-duplicated so that each key is only derived and
+    compared once during verification. If a key occurs multiple times,
+    its last (newest) position is kept, so the newest key in the input
+    remains the key used for signing.
+
+    Empty keys, and an empty list of keys, are rejected as
+    configuration errors.
+    """
+    if isinstance(secret_key, (str, bytes)):
+        secret_key = [secret_key]
+
+    keys: list[bytes] = []
+    seen: set[bytes] = set()
+
+    for item in secret_key:  # pyright: ignore
+        key = want_bytes(item)
+
+        if not key:
+            raise ValueError("Secret keys must not be empty.")
+
+        if key in seen:
+            # Keep the newest (last) position of a repeated key.
+            keys.remove(key)
+        else:
+            seen.add(key)
+
+        keys.append(key)
+
+    if not keys:
+        raise ValueError("At least one secret key must be given.")
+
+    return keys
+
+
+def _validate_digest_method(digest_method: t.Any) -> t.Any:
+    """Check that the configured digest method is usable, raising a
+    configuration error early rather than failing at signing time.
+
+    A string is resolved to a callable constructor from :mod:`hashlib`.
+    """
+    if isinstance(digest_method, str):
+        try:
+            hashlib.new(digest_method)
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"The digest method {digest_method!r} is not a known hash."
+            ) from e
+
+        name = digest_method
+        return lambda data=b"": hashlib.new(name, data)
+
+    if not callable(digest_method):
+        raise TypeError(
+            "The digest method must be a callable or the name of a hash"
+            " in hashlib."
+        )
+
+    return digest_method
 
 
 class Signer:
@@ -98,10 +157,20 @@ class Signer:
     :param algorithm: A :class:`SigningAlgorithm` instance to use
         instead of building a default :class:`HMACAlgorithm` with the
         ``digest_method``.
+    :param min_key_length: The minimum length, in bytes, required for
+        the key used to sign. Signing with a shorter key raises a
+        :exc:`ValueError` configuration error before any signature is
+        produced. Defaults to :attr:`default_min_key_length`.
 
     .. versionchanged:: 2.0
         Added support for key rotation by passing a list to
         ``secret_key``.
+
+    .. versionchanged:: 2.3
+        The key list is de-duplicated, keeping the newest position of
+        each key. Empty keys and an empty list are rejected. All
+        candidate keys are compared during verification without exiting
+        early, so timing does not depend on which key matched.
 
     .. versionchanged:: 0.18
         ``algorithm`` was added as an argument to the class constructor.
@@ -126,6 +195,14 @@ class Signer:
     #: .. versionadded:: 0.14
     default_key_derivation: str = "django-concat"
 
+    #: The default minimum length, in bytes, required for the key used
+    #: to sign. Signing with a shorter key raises a configuration error
+    #: before any signature is produced. Verification is not affected,
+    #: so older shorter keys can remain in the list during rotation.
+    #:
+    #: .. versionadded:: 2.3
+    default_min_key_length: int = 1
+
     def __init__(
         self,
         secret_key: str | bytes | cabc.Iterable[str] | cabc.Iterable[bytes],
@@ -134,6 +211,7 @@ class Signer:
         key_derivation: str | None = None,
         digest_method: t.Any | None = None,
         algorithm: SigningAlgorithm | None = None,
+        min_key_length: int | None = None,
     ):
         #: The list of secret keys to try for verifying signatures, from
         #: oldest to newest. The newest (last) key is used for signing.
@@ -165,12 +243,19 @@ class Signer:
         if digest_method is None:
             digest_method = self.default_digest_method
 
-        self.digest_method: t.Any = digest_method
+        self.digest_method: t.Any = _validate_digest_method(digest_method)
 
         if algorithm is None:
             algorithm = HMACAlgorithm(self.digest_method)
 
         self.algorithm: SigningAlgorithm = algorithm
+
+        if min_key_length is None:
+            min_key_length = self.default_min_key_length
+
+        #: The minimum length, in bytes, required for the key used to
+        #: sign. See :attr:`default_min_key_length`.
+        self.min_key_length: int = min_key_length
 
     @property
     def secret_key(self) -> bytes:
@@ -215,7 +300,18 @@ class Signer:
     def get_signature(self, value: str | bytes) -> bytes:
         """Returns the signature for the given value."""
         value = want_bytes(value)
-        key = self.derive_key()
+        # Signing always uses the newest (last) key, made explicit here
+        # so de-duplication or reordering can never change it silently.
+        secret_key = self.secret_keys[-1]
+
+        if len(secret_key) < self.min_key_length:
+            raise ValueError(
+                f"The signing key is {len(secret_key)} bytes long, but the"
+                f" configured minimum is {self.min_key_length} bytes. Use a"
+                " longer key or lower 'min_key_length'."
+            )
+
+        key = self.derive_key(secret_key)
         sig = self.algorithm.get_signature(key, value)
         return base64_encode(sig)
 
@@ -225,27 +321,35 @@ class Signer:
         return value + self.sep + self.get_signature(value)
 
     def verify_signature(self, value: str | bytes, sig: str | bytes) -> bool:
-        """Verifies the signature for the given value."""
+        """Verifies the signature for the given value.
+
+        Every candidate key is derived and compared, without exiting
+        early when a match is found. The work done therefore does not
+        depend on which key, if any, matches, so an attacker measuring
+        response time cannot learn the position of a valid key.
+        """
         try:
             sig = base64_decode(sig)
         except Exception:
             return False
 
         value = want_bytes(value)
+        valid = False
 
         for secret_key in reversed(self.secret_keys):
             key = self.derive_key(secret_key)
 
             if self.algorithm.verify_signature(key, value, sig):
-                return True
+                valid = True
 
-        return False
+        return valid
 
     def unsign(self, signed_value: str | bytes) -> bytes:
         """Unsigns the given string."""
         signed_value = want_bytes(signed_value)
 
         if self.sep not in signed_value:
+            _log.debug("unsign failed", extra={"reason": "missing-separator"})
             raise BadSignature(f"No {self.sep!r} found in value")
 
         value, sig = signed_value.rsplit(self.sep, 1)
@@ -253,6 +357,7 @@ class Signer:
         if self.verify_signature(value, sig):
             return value
 
+        _log.debug("unsign failed", extra={"reason": "bad-signature"})
         raise BadSignature(f"Signature {sig!r} does not match", payload=value)
 
     def validate(self, signed_value: str | bytes) -> bool:

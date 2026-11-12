@@ -5,6 +5,16 @@ Unreleased
 
 -   Drop support for Python 3.8 and 3.9.
 -   Remove previously deprecated code.
+-   ``Signer`` de-duplicates the key list, keeping the newest position of
+    each key, and rejects empty keys and an empty key list as
+    configuration errors.
+-   ``Signer`` compares every candidate key during verification without
+    exiting early, so response timing does not reveal which key matched.
+-   Add ``min_key_length`` to ``Signer``. Signing with a shorter key raises
+    a ``ValueError`` configuration error before signing; verification of
+    older shorter keys still works during rotation.
+-   An invalid ``digest_method`` is reported as a configuration error when
+    creating the signer instead of failing at signing time.
 
 
 Version 2.2.0
