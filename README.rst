@@ -416,6 +416,33 @@ to give users more fine-grained control over certain operations:
   used to construct objects from the JSON stream.
   This should be a dict-like type supporting item assignment.
 
+Duplicate keys
+==============
+
+The ``items`` and ``kvitems`` functions (and their ``_coro``/``_gen``/``_async``
+variants) accept a ``duplicate_keys`` option that controls what happens when
+the same key appears more than once in one JSON object:
+
+* ``None`` (the default) keeps the historical behaviour: ``items`` assigns the
+  last value, while ``kvitems`` still yields every member.
+* ``'first'`` keeps the first value.
+* ``'last'`` keeps the last value without moving the key to a new position in
+  the resulting object.
+* ``'reject'`` raises :class:`ijson.DuplicateKeyError` with the full dotted key
+  path and the positions of the two values in the parse-event stream.
+
+For ``kvitems`` the same policies choose which member value is projected at
+the selected object, and they also apply to nested values built for each
+member. ``kvitems`` with ``duplicate_keys=None`` continues to yield every
+member (including duplicates).
+
+The policy is scoped to the object currently being built, so the same key in
+different objects (for example, objects inside an array) is independent. Keys
+are compared after JSON string decoding but without any Unicode normalization,
+so escaped spellings of the same key are duplicates while visually similar but
+different code point sequences are not. ``basic_parse`` and ``parse`` always
+emit every original event regardless of this option.
+
 
 Events
 ======

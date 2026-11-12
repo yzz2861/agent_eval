@@ -64,29 +64,35 @@ class async_iterable:
 
 
 def _make_basic_parse_async(backend):
-    def basic_parse_async(f, buf_size=64*1024, **config):
+    def basic_parse_async(f, buf_size=64*1024, duplicate_keys=None, **config):
         return async_iterable(f, buf_size,
             *common._basic_parse_pipeline(backend, config)
         )
     return basic_parse_async
 
 def _make_parse_async(backend):
-    def parse_async(f, buf_size=64*1024, **config):
+    def parse_async(f, buf_size=64*1024, duplicate_keys=None, **config):
         return async_iterable(f, buf_size,
             *common._parse_pipeline(backend, config)
         )
     return parse_async
 
 def _make_items_async(backend):
-    def items_async(f, prefix, map_type=None, buf_size=64*1024, **config):
+    def items_async(f, prefix, map_type=None, buf_size=64*1024,
+                    duplicate_keys=None, **config):
         return async_iterable(f, buf_size,
-            *common._items_pipeline(backend, prefix, map_type, config)
+            *common._items_pipeline(
+                backend, prefix, map_type, config, duplicate_keys
+            )
         )
     return items_async
 
 def _make_kvitems_async(backend):
-    def kvitems_async(f, prefix, map_type=None, buf_size=64*1024, **config):
+    def kvitems_async(f, prefix, map_type=None, buf_size=64*1024,
+                      duplicate_keys=None, **config):
         return async_iterable(f, buf_size,
-            *common._kvitems_pipeline(backend, prefix, map_type, config)
+            *common._kvitems_pipeline(
+                backend, prefix, map_type, config, duplicate_keys
+            )
         )
     return kvitems_async
