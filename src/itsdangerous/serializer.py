@@ -199,6 +199,10 @@ class Serializer(t.Generic[_TSerialized]):
             dict[str, t.Any] | tuple[type[Signer], dict[str, t.Any]] | type[Signer]
         ]
         | None = None,
+        signing_policy: t.Any | None = None,
+        verification_policy: t.Any | None = None,
+        policy: t.Any | None = None,
+        verify_only: bool = False,
     ):
         #: The list of secret keys to try for verifying signatures, from
         #: oldest to newest. The newest (last) key is used for signing.
@@ -223,7 +227,19 @@ class Serializer(t.Generic[_TSerialized]):
             signer = self.default_signer
 
         self.signer: type[Signer] = signer
-        self.signer_kwargs: dict[str, t.Any] = signer_kwargs or {}
+        self.signer_kwargs: dict[str, t.Any] = dict(signer_kwargs or {})
+
+        if signing_policy is not None:
+            self.signer_kwargs["signing_policy"] = signing_policy
+
+        if verification_policy is not None:
+            self.signer_kwargs["verification_policy"] = verification_policy
+
+        if policy is not None:
+            self.signer_kwargs["policy"] = policy
+
+        if verify_only:
+            self.signer_kwargs["verify_only"] = True
 
         if fallback_signers is None:
             fallback_signers = list(self.default_fallback_signers)
@@ -294,14 +310,29 @@ class Serializer(t.Generic[_TSerialized]):
 
         yield self.make_signer(salt)
 
+        policy_options = {
+            name: self.signer_kwargs[name]
+            for name in (
+                "signing_policy",
+                "verification_policy",
+                "policy",
+                "verify_only",
+            )
+            if name in self.signer_kwargs
+        }
+
         for fallback in self.fallback_signers:
             if isinstance(fallback, dict):
-                kwargs = fallback
+                kwargs = dict(fallback)
                 fallback = self.signer
             elif isinstance(fallback, tuple):
                 fallback, kwargs = fallback
+                kwargs = dict(kwargs)
             else:
-                kwargs = self.signer_kwargs
+                kwargs = dict(self.signer_kwargs)
+
+            for name, value in policy_options.items():
+                kwargs.setdefault(name, value)
 
             for secret_key in self.secret_keys:
                 yield fallback(secret_key, salt=salt, **kwargs)

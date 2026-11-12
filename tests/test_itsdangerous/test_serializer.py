@@ -9,12 +9,14 @@ from typing import IO
 from typing import overload
 
 import pytest
-
 from itsdangerous.exc import BadPayload
 from itsdangerous.exc import BadSignature
+from itsdangerous.exc import PolicyError
 from itsdangerous.serializer import Serializer
 from itsdangerous.signer import _lazy_sha1
 from itsdangerous.signer import Signer
+from itsdangerous.signer import SigningPolicy
+from itsdangerous.signer import VerificationPolicy
 
 
 @overload
@@ -194,3 +196,49 @@ def test_digests():
         "[42].MKCz_0nXQqv7wKpfHZcRtJRmpT2T5uvs9YQsJEhJimqxc"
         "9bCLxG31QzS5uC8OVBI1i6jyOLAFNoKaF5ckO9L5Q"
     )
+
+
+class TestSerializerPolicy:
+    key = "k" * 32
+
+    @pytest.fixture()
+    def value(self):
+        return {"id": 42}
+
+    @pytest.fixture()
+    def policies(self):
+        return (
+            SigningPolicy(
+                digest_method=hashlib.sha256,
+                min_key_bits=128,
+                key_derivation="django-concat",
+            ),
+            VerificationPolicy(
+                allowed_digests=(hashlib.sha1, hashlib.sha256),
+                min_key_bits=128,
+                key_derivations=("django-concat", "hmac"),
+            ),
+        )
+
+    def test_legacy_loads_and_current_dumps(self, policies, value):
+        signing_policy, verification_policy = policies
+        legacy = Serializer(self.key).dumps(value)
+        serializer = Serializer(
+            self.key,
+            signing_policy=signing_policy,
+            verification_policy=verification_policy,
+        )
+        assert serializer.loads(legacy) == value
+
+        current = serializer.dumps(value)
+        assert serializer.loads(current) == value
+        assert current != legacy
+
+    def test_verification_only_does_not_dump(self, policies, value):
+        _, verification_policy = policies
+        serializer = Serializer(self.key, verification_policy=verification_policy)
+        legacy = Serializer(self.key).dumps(value)
+        assert serializer.loads(legacy) == value
+
+        with pytest.raises(PolicyError):
+            serializer.dumps(value)

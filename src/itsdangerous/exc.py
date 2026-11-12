@@ -33,6 +33,91 @@ class BadSignature(BadData):
         self.payload: t.Any | None = payload
 
 
+class PolicyError(BadData, ValueError):
+    """Raised when a signing policy rejects a configuration or operation.
+
+    This is deliberately not a :class:`BadSignature`. A policy error is a
+    configuration problem (for example a short key, an unsafe digest, or
+    an underived key) and must not be reported as a tampered token.
+
+    .. versionadded:: 2.3
+    """
+
+
+class UnsupportedAlgorithm(PolicyError):
+    """Raised when an algorithm is unknown, unavailable, or not allowed by
+    the configured policy.
+
+    .. versionadded:: 2.3
+    """
+
+
+class WeakDigestError(PolicyError):
+    """Raised when a policy selects a digest that is too weak for signing.
+
+    .. versionadded:: 2.3
+    """
+
+
+class WeakKeyError(PolicyError):
+    """Raised when a key is shorter than the policy's minimum size.
+
+    .. versionadded:: 2.3
+    """
+
+
+class UnderivedKeyError(PolicyError):
+    """Raised when a policy allows an un-derived key for signing.
+
+    .. versionadded:: 2.3
+    """
+
+
+class AlgorithmDowngradeError(UnsupportedAlgorithm):
+    """Raised when an explicit algorithm would override a policy.
+
+    .. versionadded:: 2.3
+    """
+
+
+# Common spellings used by integrations and older audit tooling. These are
+# aliases so either name can be caught without losing the error classification.
+PolicyViolation = PolicyError
+PolicyViolationError = PolicyError
+PolicyRejected = PolicyError
+InsecurePolicyError = PolicyError
+PolicyFailure = PolicyError
+PolicyRejectionError = PolicyError
+SecurityPolicyError = PolicyError
+ConfigurationError = PolicyError
+SignaturePolicyError = PolicyError
+SignerPolicyError = PolicyError
+PolicyRejection = PolicyError
+SigningPolicyViolation = PolicyError
+VerificationPolicyViolation = PolicyError
+SigningPolicyError = PolicyError
+VerificationPolicyError = PolicyError
+UnsupportedAlgorithmError = UnsupportedAlgorithm
+AlgorithmNotAllowed = UnsupportedAlgorithm
+AlgorithmNotAllowedError = UnsupportedAlgorithm
+InsecureAlgorithmError = UnsupportedAlgorithm
+UnsupportedDigest = UnsupportedAlgorithm
+UnsupportedDigestError = UnsupportedAlgorithm
+UnsupportedSignatureAlgorithm = UnsupportedAlgorithm
+WeakAlgorithmError = WeakDigestError
+KeyTooShortError = WeakKeyError
+InsecureKeyDerivationError = UnderivedKeyError
+NoneAlgorithmError = PolicyError
+UnsignedModeError = PolicyError
+WeakDigest = WeakDigestError
+WeakKey = WeakKeyError
+
+# The project's historical tamper error remains the canonical exception.
+MessageTampered = BadSignature
+SignatureTampered = BadSignature
+TamperedSignature = BadSignature
+
+
 class BadTimeSignature(BadSignature):
     """Raised if a time-based signature is invalid. This is a subclass
     of :class:`BadSignature`.

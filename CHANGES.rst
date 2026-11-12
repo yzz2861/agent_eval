@@ -5,6 +5,11 @@ Unreleased
 
 -   Drop support for Python 3.8 and 3.9.
 -   Remove previously deprecated code.
+-   Add opt-in :class:`~itsdangerous.signer.SigningPolicy` and
+    :class:`~itsdangerous.signer.VerificationPolicy` objects. Policy mode
+    rejects weak signing digests, short keys, underived keys, and algorithm
+    downgrades during construction. Verification policies can explicitly read
+    legacy digests and derivations, while ``none`` is verification-only.
 
 
 Version 2.2.0
