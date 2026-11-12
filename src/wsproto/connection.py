@@ -19,7 +19,15 @@ from .events import (
     Pong,
     TextMessage,
 )
-from .frame_protocol import CloseReason, FrameProtocol, Opcode, ParseFailed
+from .frame_protocol import (
+    CloseAuditCode,
+    CloseAuditError,
+    CloseAuditEvent,
+    CloseReason,
+    FrameProtocol,
+    Opcode,
+    ParseFailed,
+)
 from .utilities import LocalProtocolError
 
 if TYPE_CHECKING:
@@ -75,6 +83,7 @@ class Connection:
         connection_type: ConnectionType,
         extensions: list[Extension] | None = None,
         trailing_data: bytes = b"",
+        close_audit: bool = False,
     ) -> None:
         """
         Constructor
@@ -85,16 +94,30 @@ class Connection:
         :param list extensions: The proposed extensions.
         :param bytes trailing_data: Data that has been received, but not yet
             processed.
+        :param bool close_audit: When true, validate outbound close codes and
+            reasons and keep a one-to-one audit trail for close-handshake
+            failures. Defaults to false so the legacy API and event ordering
+            remain unchanged.
         """
         self.client = connection_type is ConnectionType.CLIENT
         self._events: deque[Event] = deque()
-        self._proto = FrameProtocol(self.client, extensions or [])
+        self.close_audit = close_audit
+        self._proto = FrameProtocol(
+            self.client,
+            extensions or [],
+            close_audit=close_audit,
+        )
         self._state = ConnectionState.OPEN
         self.receive_data(trailing_data)
 
     @property
     def state(self) -> ConnectionState:
         return self._state
+
+    @property
+    def audit_events(self) -> tuple[CloseAuditEvent, ...]:
+        """Stable close-handshake findings, in the order they were observed."""
+        return self._proto.audit_events
 
     def send(self, event: Event) -> bytes:
         data = b""
@@ -108,7 +131,12 @@ class Connection:
             ConnectionState.OPEN,
             ConnectionState.REMOTE_CLOSING,
         }:
-            data += self._proto.close(event.code, event.reason)
+            try:
+                data += self._proto.close(event.code, event.reason)
+            except CloseAuditError as exc:
+                error = LocalProtocolError(str(exc))
+                error.audit_code = exc.reason_code  # type: ignore[attr-defined]
+                raise error from exc
             if self.state == ConnectionState.REMOTE_CLOSING:
                 self._state = ConnectionState.CLOSED
             else:
@@ -140,11 +168,20 @@ class Connection:
             # frame was received by the endpoint (such as could occur if the
             # underlying transport connection is lost), _The WebSocket
             # Connection Close Code_ is considered to be 1006."
-            self._events.append(CloseConnection(code=CloseReason.ABNORMAL_CLOSURE))
             self._state = ConnectionState.CLOSED
+            if self.close_audit and not self._proto._close_received:
+                self._proto._record_audit(
+                    CloseAuditCode.ABNORMAL_EOF,
+                    "transport EOF without a CLOSE frame",
+                    CloseReason.ABNORMAL_CLOSURE,
+                )
+            self._events.append(CloseConnection(code=CloseReason.ABNORMAL_CLOSURE))
             return
 
-        if self.state in (ConnectionState.OPEN, ConnectionState.LOCAL_CLOSING):
+        receive_states = {ConnectionState.OPEN, ConnectionState.LOCAL_CLOSING}
+        if self.close_audit:
+            receive_states.add(ConnectionState.REMOTE_CLOSING)
+        if self.state in receive_states:
             self._proto.receive_bytes(data)
         elif self.state is ConnectionState.CLOSED:
             msg = "Connection already closed."

@@ -1208,3 +1208,254 @@ def test_xor_mask_simple() -> None:
     assert masker.process(b"some very long data for masking by websocket") == (
         b"B]^Q\x11DVFH\x12_[_U\x13PPFR\x14W]A\x14\\S@_X\\T\x14SK\x13CTP@[RYV@"
     )
+
+
+def _close_frame(payload: bytes = b"") -> bytes:
+    return b"\x88" + bytearray([len(payload)]) + payload
+
+
+class TestCloseAuditSend:
+    @pytest.mark.parametrize(
+        "code",
+        [1000, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014],
+    )
+    def test_sendable_protocol_codes(self, code: int) -> None:
+        proto = fp.FrameProtocol(
+            client=False, extensions=[], close_audit=True,
+        )
+
+        data = proto.close(code=code, reason="ok")
+
+        assert data[:2] == b"\x88\x04"
+        assert struct.unpack("!H", data[2:4])[0] == code
+        assert data[4:] == b"ok"
+        assert proto.audit_events == ()
+
+    @pytest.mark.parametrize("code", [3000, 4000, 4999])
+    def test_sendable_extension_and_private_codes(self, code: int) -> None:
+        proto = fp.FrameProtocol(
+            client=False, extensions=[], close_audit=True,
+        )
+
+        data = proto.close(code=code)
+
+        assert struct.unpack("!H", data[2:4])[0] == code
+        assert proto.audit_events == ()
+
+    @pytest.mark.parametrize("code", [1005, 1006, 1015])
+    def test_local_only_codes_are_rejected(self, code: int) -> None:
+        proto = fp.FrameProtocol(
+            client=False, extensions=[], close_audit=True,
+        )
+
+        with pytest.raises(fp.CloseAuditError) as exc:
+            proto.close(code=code)
+
+        assert exc.value.reason_code is fp.CloseAuditCode.INVALID_CLOSE_CODE
+        assert exc.value.close_code == code
+        assert [event.reason_code for event in proto.audit_events] == [
+            fp.CloseAuditCode.INVALID_CLOSE_CODE,
+        ]
+        assert proto.audit_events[0].close_code == code
+
+    @pytest.mark.parametrize("code", [999, 1004, 1016, 2999, 5000])
+    def test_reserved_and_out_of_range_codes_are_rejected(self, code: int) -> None:
+        proto = fp.FrameProtocol(
+            client=False, extensions=[], close_audit=True,
+        )
+
+        with pytest.raises(fp.CloseAuditError) as exc:
+            proto.close(code=code)
+
+        assert exc.value.reason_code is fp.CloseAuditCode.INVALID_CLOSE_CODE
+        assert proto.audit_events[0].reason_code is (
+            fp.CloseAuditCode.INVALID_CLOSE_CODE
+        )
+
+    def test_chinese_reason_round_trip(self) -> None:
+        server = fp.FrameProtocol(client=False, extensions=[], close_audit=True)
+        client = fp.FrameProtocol(client=True, extensions=[], close_audit=True)
+        reason = "再见，连接正常关闭"  # noqa: RUF001
+
+        frame = server.close(code=fp.CloseReason.NORMAL_CLOSURE, reason=reason)
+        client.receive_bytes(frame)
+        received = list(client.received_frames())
+
+        assert len(received) == 1
+        assert received[0].opcode is fp.Opcode.CLOSE
+        assert received[0].payload == (fp.CloseReason.NORMAL_CLOSURE, reason)
+        assert server.audit_events == ()
+        assert client.audit_events == ()
+
+    def test_max_length_reason_is_accepted(self) -> None:
+        proto = fp.FrameProtocol(
+            client=False, extensions=[], close_audit=True,
+        )
+        reason = "中" * (fp.MAX_CLOSE_REASON_BYTES // 3)
+
+        data = proto.close(code=fp.CloseReason.NORMAL_CLOSURE, reason=reason)
+
+        assert len(data) == fp.MAX_PAYLOAD_NORMAL + 2
+        assert proto.audit_events == ()
+
+    def test_reason_longer_than_protocol_limit_is_rejected(self) -> None:
+        proto = fp.FrameProtocol(
+            client=False, extensions=[], close_audit=True,
+        )
+        reason = "x" * (fp.MAX_CLOSE_REASON_BYTES + 1)
+
+        with pytest.raises(fp.CloseAuditError) as exc:
+            proto.close(code=fp.CloseReason.NORMAL_CLOSURE, reason=reason)
+
+        assert exc.value.reason_code is fp.CloseAuditCode.CLOSE_REASON_TOO_LONG
+        assert proto.audit_events[0].reason_code is (
+            fp.CloseAuditCode.CLOSE_REASON_TOO_LONG
+        )
+
+    def test_lone_surrogate_reason_is_rejected(self) -> None:
+        proto = fp.FrameProtocol(
+            client=False, extensions=[], close_audit=True,
+        )
+        reason = "broken\ud800"
+
+        with pytest.raises(fp.CloseAuditError) as exc:
+            proto.close(code=fp.CloseReason.NORMAL_CLOSURE, reason=reason)
+
+        assert exc.value.reason_code is fp.CloseAuditCode.INVALID_CLOSE_REASON
+        assert proto.audit_events[0].reason_code is (
+            fp.CloseAuditCode.INVALID_CLOSE_REASON
+        )
+
+
+class TestCloseAuditReceive:
+    def test_duplicate_close_emits_one_frame_and_audit(self) -> None:
+        proto = fp.FrameProtocol(client=True, extensions=[], close_audit=True)
+        first = _close_frame(struct.pack("!H", fp.CloseReason.NORMAL_CLOSURE))
+        second = _close_frame(struct.pack("!H", fp.CloseReason.GOING_AWAY))
+        proto.receive_bytes(first + second)
+
+        frames = list(proto.received_frames())
+
+        assert len(frames) == 1
+        assert frames[0].payload == (fp.CloseReason.NORMAL_CLOSURE, "")
+        assert [event.reason_code for event in proto.audit_events] == [
+            fp.CloseAuditCode.DUPLICATE_CLOSE,
+        ]
+        event = proto.audit_events[0]
+        assert event.close_code is fp.CloseReason.GOING_AWAY
+        assert event.close_reason == ""
+
+    def test_data_after_close_is_audited_but_not_emitted(self) -> None:
+        proto = fp.FrameProtocol(client=True, extensions=[], close_audit=True)
+        close_frame = _close_frame(
+            struct.pack("!H", fp.CloseReason.NORMAL_CLOSURE),
+        )
+        text_frame = b"\x81\x05hello"
+        proto.receive_bytes(close_frame + text_frame)
+
+        frames = list(proto.received_frames())
+
+        assert [frame.opcode for frame in frames] == [fp.Opcode.CLOSE]
+        assert [event.reason_code for event in proto.audit_events] == [
+            fp.CloseAuditCode.DATA_AFTER_CLOSE,
+        ]
+
+    def test_duplicate_close_and_data_are_audited_in_one_drain(self) -> None:
+        proto = fp.FrameProtocol(client=True, extensions=[], close_audit=True)
+        proto.receive_bytes(
+            _close_frame(struct.pack("!H", fp.CloseReason.NORMAL_CLOSURE))
+            + _close_frame(struct.pack("!H", fp.CloseReason.GOING_AWAY))
+            + b"\x81\x05hello",
+        )
+
+        frames = list(proto.received_frames())
+
+        assert [frame.opcode for frame in frames] == [fp.Opcode.CLOSE]
+        assert [event.reason_code for event in proto.audit_events] == [
+            fp.CloseAuditCode.DUPLICATE_CLOSE,
+            fp.CloseAuditCode.DATA_AFTER_CLOSE,
+        ]
+
+    def test_invalid_duplicate_close_has_one_audit(self) -> None:
+        proto = fp.FrameProtocol(client=True, extensions=[], close_audit=True)
+        proto.receive_bytes(
+            _close_frame(struct.pack("!H", fp.CloseReason.NORMAL_CLOSURE))
+            + _close_frame(struct.pack("!H", fp.CloseReason.ABNORMAL_CLOSURE)),
+        )
+
+        frames = list(proto.received_frames())
+
+        assert len(frames) == 1
+        assert [event.reason_code for event in proto.audit_events] == [
+            fp.CloseAuditCode.INVALID_CLOSE_CODE,
+        ]
+        assert proto.audit_events[0].close_code == fp.CloseReason.ABNORMAL_CLOSURE
+
+    def test_non_utf8_reason_is_audited_with_code(self) -> None:
+        proto = fp.FrameProtocol(client=True, extensions=[], close_audit=True)
+        payload = struct.pack("!H", fp.CloseReason.NORMAL_CLOSURE) + b"\xff\xfe"
+        proto.receive_bytes(_close_frame(payload))
+
+        with pytest.raises(fp.ParseFailed) as exc:
+            list(proto.received_frames())
+
+        assert exc.value.code is fp.CloseReason.INVALID_FRAME_PAYLOAD_DATA
+        assert [event.reason_code for event in proto.audit_events] == [
+            fp.CloseAuditCode.INVALID_CLOSE_REASON,
+        ]
+        assert proto.audit_events[0].close_code == fp.CloseReason.NORMAL_CLOSURE
+
+    def test_reserved_code_is_audited(self) -> None:
+        proto = fp.FrameProtocol(client=True, extensions=[], close_audit=True)
+        proto.receive_bytes(_close_frame(struct.pack("!H", 2998)))
+
+        with pytest.raises(fp.ParseFailed):
+            list(proto.received_frames())
+
+        assert [event.reason_code for event in proto.audit_events] == [
+            fp.CloseAuditCode.INVALID_CLOSE_CODE,
+        ]
+        assert proto.audit_events[0].close_code == 2998
+
+    def test_one_byte_close_is_audited_as_malformed(self) -> None:
+        proto = fp.FrameProtocol(client=True, extensions=[], close_audit=True)
+        proto.receive_bytes(b"\x88\x01\x0e")
+
+        with pytest.raises(fp.ParseFailed):
+            list(proto.received_frames())
+
+        assert [event.reason_code for event in proto.audit_events] == [
+            fp.CloseAuditCode.MALFORMED_CLOSE_FRAME,
+        ]
+
+    def test_close_frame_over_control_limit_is_audited(self) -> None:
+        proto = fp.FrameProtocol(client=True, extensions=[], close_audit=True)
+        proto.receive_bytes(b"\x88\x7e\x00\x7e" + b"x" * 126)
+
+        with pytest.raises(fp.ParseFailed):
+            list(proto.received_frames())
+
+        assert [event.reason_code for event in proto.audit_events] == [
+            fp.CloseAuditCode.CLOSE_REASON_TOO_LONG,
+        ]
+
+
+class TestCloseAuditDefaultMode:
+    def test_default_mode_keeps_legacy_local_only_remap(self) -> None:
+        proto = fp.FrameProtocol(client=False, extensions=[])
+
+        data = proto.close(code=fp.CloseReason.ABNORMAL_CLOSURE)
+
+        assert data == b"\x88\x02\x03\xe8"
+        assert proto.audit_events == ()
+
+    def test_default_mode_truncates_overlong_reason(self) -> None:
+        proto = fp.FrameProtocol(client=False, extensions=[])
+
+        data = proto.close(
+            code=fp.CloseReason.NORMAL_CLOSURE,
+            reason="x" * 200,
+        )
+
+        assert len(data) == fp.MAX_PAYLOAD_NORMAL + 2
+        assert proto.audit_events == ()

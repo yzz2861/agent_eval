@@ -10,6 +10,7 @@ import contextlib
 import os
 import struct
 from codecs import IncrementalDecoder, getincrementaldecoder
+from collections.abc import Callable
 from enum import IntEnum
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -196,6 +197,61 @@ LOCAL_ONLY_CLOSE_REASONS = (
 )
 
 
+# RFC 6455, Section 5.5.1: a control frame payload is at most 125 bytes and
+# the first two bytes of a CLOSE payload are the status code.
+MAX_CLOSE_REASON_BYTES = MAX_PAYLOAD_NORMAL - 2
+
+# RFC 6455, Section 7.4.1 registers 1014, but does not give it a name.
+REGISTERED_CLOSE_REASON_BAD_GATEWAY = 1014
+
+
+class CloseAuditCode(IntEnum):
+    """Stable identifiers for close-handshake audit findings."""
+
+    #: A CLOSE frame was received after the CLOSE handshake had started.
+    DUPLICATE_CLOSE = 1
+    #: A data or control frame other than the first CLOSE arrived after CLOSE.
+    DATA_AFTER_CLOSE = 2
+    #: The peer or local caller used a status code that cannot be sent.
+    INVALID_CLOSE_CODE = 3
+    #: The CLOSE reason was not valid UTF-8 or was the wrong Python type.
+    INVALID_CLOSE_REASON = 4
+    #: The encoded CLOSE reason did not fit in the control frame payload.
+    CLOSE_REASON_TOO_LONG = 5
+    #: The CLOSE frame payload could not be parsed as code plus reason.
+    MALFORMED_CLOSE_FRAME = 6
+    #: The transport reached EOF without a CLOSE frame.
+    ABNORMAL_EOF = 7
+
+
+class CloseAuditEvent(NamedTuple):
+    reason_code: CloseAuditCode
+    detail: str
+    close_code: int | None = None
+    close_reason: str | None = None
+
+
+class CloseAuditError(Exception):
+    """A local close request failed close-audit validation."""
+
+    def __init__(
+        self,
+        reason_code: CloseAuditCode,
+        message: str,
+        close_code: int | None = None,
+        close_reason: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+        self.close_code = close_code
+        self.close_reason = close_reason
+
+
+CloseAuditCallback = Callable[
+    [CloseAuditCode, str, int | None, str | None], None,
+]
+
+
 # RFC 6455, Section 7.4.2 - Status Code Ranges
 MIN_CLOSE_REASON = 1000
 MIN_PROTOCOL_CLOSE_REASON = 1000
@@ -205,6 +261,14 @@ MAX_LIBRARY_CLOSE_REASON = 3999
 MIN_PRIVATE_CLOSE_REASON = 4000
 MAX_PRIVATE_CLOSE_REASON = 4999
 MAX_CLOSE_REASON = 4999
+
+# Status codes that an endpoint is allowed to send in a CLOSE frame. The
+# reserved 1004 and local-only 1005/1006/1015 codes are deliberately absent.
+SENDABLE_CLOSE_REASONS = frozenset(
+    {int(code) for code in CloseReason if code not in LOCAL_ONLY_CLOSE_REASONS}
+    | {REGISTERED_CLOSE_REASON_BAD_GATEWAY}
+    | set(range(MIN_LIBRARY_CLOSE_REASON, MAX_PRIVATE_CLOSE_REASON + 1)),
+)
 
 
 NULL_MASK = struct.pack("!I", 0)
@@ -332,10 +396,14 @@ class MessageDecoder:
 
 class FrameDecoder:
     def __init__(
-        self, client: bool, extensions: list[Extension] | None = None,
+        self,
+        client: bool,
+        extensions: list[Extension] | None = None,
+        close_audit: CloseAuditCallback | None = None,
     ) -> None:
         self.client = client
         self.extensions = extensions or []
+        self._close_audit = close_audit
 
         self.buffer = Buffer()
 
@@ -460,6 +528,13 @@ class FrameDecoder:
         self, opcode: Opcode, payload_len: int,
     ) -> int | None:
         if opcode.iscontrol() and payload_len > MAX_PAYLOAD_NORMAL:
+            if opcode is Opcode.CLOSE and self._close_audit is not None:
+                self._close_audit(
+                    CloseAuditCode.CLOSE_REASON_TOO_LONG,
+                    "CLOSE frame payload exceeds 125 bytes",
+                    None,
+                    None,
+                )
             msg = "Control frame with payload len > 125"
             raise ParseFailed(msg)
         if payload_len == PAYLOAD_LENGTH_TWO_BYTE:
@@ -509,18 +584,66 @@ class FrameDecoder:
 
 
 class FrameProtocol:
-    def __init__(self, client: bool, extensions: list[Extension]) -> None:
+    def __init__(
+        self,
+        client: bool,
+        extensions: list[Extension],
+        close_audit: bool = False,
+    ) -> None:
         self.client = client
         self.extensions = [ext for ext in extensions if ext.enabled()]
+        self.close_audit = close_audit
+        self._audit_events: list[CloseAuditEvent] = []
+        self._close_received = False
 
         # Global state
-        self._frame_decoder = FrameDecoder(self.client, self.extensions)
+        audit_callback = self._record_audit if close_audit else None
+        self._frame_decoder = FrameDecoder(
+            self.client,
+            self.extensions,
+            close_audit=audit_callback,
+        )
         self._message_decoder = MessageDecoder()
         self._parse_more = self._parse_more_gen()
 
         self._outbound_opcode: Opcode | None = None
 
-    def _process_close(self, frame: Frame) -> Frame:
+    @property
+    def audit_events(self) -> tuple[CloseAuditEvent, ...]:
+        return tuple(self._audit_events)
+
+    def _record_audit(
+        self,
+        reason_code: CloseAuditCode,
+        detail: str,
+        close_code: int | None = None,
+        close_reason: str | None = None,
+    ) -> None:
+        self._audit_events.append(
+            CloseAuditEvent(reason_code, detail, close_code, close_reason),
+        )
+
+    def _raise_close_audit(
+        self,
+        reason_code: CloseAuditCode,
+        detail: str,
+        close_code: int | None = None,
+        close_reason: str | None = None,
+    ) -> None:
+        self._record_audit(reason_code, detail, close_code, close_reason)
+        raise CloseAuditError(reason_code, detail, close_code, close_reason)
+
+    def _audit_close_failure(
+        self,
+        record_audit: bool,
+        reason_code: CloseAuditCode,
+        detail: str,
+        close_code: int | None = None,
+    ) -> None:
+        if self.close_audit and record_audit:
+            self._record_audit(reason_code, detail, close_code)
+
+    def _process_close(self, frame: Frame, record_audit: bool = True) -> Frame:
         data = frame.payload
         assert isinstance(data, (bytes, bytearray))
 
@@ -529,24 +652,53 @@ class FrameProtocol:
             # WebSocket Connection Close Code_ is considered to be 1005"
             data = (CloseReason.NO_STATUS_RCVD, "")
         elif len(data) == 1:
+            self._audit_close_failure(
+                record_audit,
+                CloseAuditCode.MALFORMED_CLOSE_FRAME,
+                "CLOSE with 1 byte payload",
+            )
             msg = "CLOSE with 1 byte payload"
             raise ParseFailed(msg)
         else:
             (code,) = struct.unpack("!H", data[:2])
             if code < MIN_CLOSE_REASON or code > MAX_CLOSE_REASON:
+                self._audit_close_failure(
+                    record_audit,
+                    CloseAuditCode.INVALID_CLOSE_CODE,
+                    "CLOSE with invalid code",
+                    code,
+                )
                 msg = "CLOSE with invalid code"
                 raise ParseFailed(msg)
             with contextlib.suppress(ValueError):
                 code = CloseReason(code)
             if code in LOCAL_ONLY_CLOSE_REASONS:
+                self._audit_close_failure(
+                    record_audit,
+                    CloseAuditCode.INVALID_CLOSE_CODE,
+                    "remote CLOSE with local-only reason",
+                    int(code),
+                )
                 msg = "remote CLOSE with local-only reason"
                 raise ParseFailed(msg)
             if not isinstance(code, CloseReason) and code <= MAX_PROTOCOL_CLOSE_REASON:
+                self._audit_close_failure(
+                    record_audit,
+                    CloseAuditCode.INVALID_CLOSE_CODE,
+                    "CLOSE with unknown reserved code",
+                    code,
+                )
                 msg = "CLOSE with unknown reserved code"
                 raise ParseFailed(msg)
             try:
                 reason = data[2:].decode("utf-8")
             except UnicodeDecodeError as exc:
+                self._audit_close_failure(
+                    record_audit,
+                    CloseAuditCode.INVALID_CLOSE_REASON,
+                    "Error decoding CLOSE reason: " + str(exc),
+                    int(code),
+                )
                 raise ParseFailed(
                     "Error decoding CLOSE reason: " + str(exc),
                     CloseReason.INVALID_FRAME_PAYLOAD_DATA,
@@ -572,9 +724,74 @@ class FrameProtocol:
                     frame = self._message_decoder.process_frame(frame)
                 elif frame.opcode == Opcode.CLOSE:
                     frame = self._process_close(frame)
+                    self._close_received = True
                     closed = True
 
             yield frame
+
+        if self.close_audit:
+            yield from self._watch_after_close()
+
+    def _watch_after_close(self) -> Generator[Frame | None, None, None]:
+        while True:
+            frame = self._frame_decoder.process_buffer()
+            if frame is None:
+                yield None
+                continue
+
+            while frame is not None:
+                if frame.opcode is Opcode.CLOSE:
+                    close_code: int | None = None
+                    close_reason: str | None = None
+                    frame_payload = frame.payload
+                    if (
+                        isinstance(frame_payload, (bytes, bytearray))
+                        and len(frame_payload) >= 2
+                    ):
+                        (close_code,) = struct.unpack("!H", frame_payload[:2])
+                    try:
+                        duplicate = self._process_close(
+                            frame, record_audit=False,
+                        )
+                        if isinstance(duplicate.payload, tuple):
+                            close_code, close_reason = duplicate.payload
+                    except ParseFailed as exc:
+                        # The malformed/invalid second frame itself is the
+                        # primary audit finding; do not add a second event for
+                        # the same bytes merely because they were also a
+                        # duplicate CLOSE.
+                        self._record_audit(
+                            self._audit_code_for_parse_failure(exc),
+                            f"invalid second CLOSE frame: {exc}",
+                            close_code,
+                            close_reason,
+                        )
+                    else:
+                        self._record_audit(
+                            CloseAuditCode.DUPLICATE_CLOSE,
+                            "received a second CLOSE frame",
+                            close_code,
+                            close_reason,
+                        )
+                else:
+                    self._record_audit(
+                        CloseAuditCode.DATA_AFTER_CLOSE,
+                        f"received {frame.opcode.name} frame after CLOSE",
+                    )
+
+                frame = self._frame_decoder.process_buffer()
+
+            # Only the first CLOSE is exposed as an event; keep waiting for
+            # further audit findings without yielding another protocol frame.
+            yield None
+
+    @staticmethod
+    def _audit_code_for_parse_failure(exc: ParseFailed) -> CloseAuditCode:
+        if "1 byte payload" in str(exc):
+            return CloseAuditCode.MALFORMED_CLOSE_FRAME
+        if exc.code is CloseReason.INVALID_FRAME_PAYLOAD_DATA:
+            return CloseAuditCode.INVALID_CLOSE_REASON
+        return CloseAuditCode.INVALID_CLOSE_CODE
 
     def receive_bytes(self, data: bytes) -> None:
         self._frame_decoder.receive_bytes(data)
@@ -587,6 +804,10 @@ class FrameProtocol:
                 yield event
 
     def close(self, code: int | None = None, reason: str | None = None) -> bytearray:
+        if self.close_audit:
+            payload = self._audit_close(code, reason)
+            return self._serialize_frame(Opcode.CLOSE, payload)
+
         payload = bytearray()
         if code is CloseReason.NO_STATUS_RCVD:
             code = None
@@ -603,6 +824,68 @@ class FrameProtocol:
                 )
 
         return self._serialize_frame(Opcode.CLOSE, payload)
+
+    def _audit_close(
+        self, code: int | None, reason: str | None,
+    ) -> bytearray:
+        if code is None:
+            if reason is not None:
+                self._raise_close_audit(
+                    CloseAuditCode.INVALID_CLOSE_REASON,
+                    "cannot specify a reason without a code",
+                    None,
+                    reason,
+                )
+            return bytearray()
+
+        numeric_code = int(code)
+        if (
+            not isinstance(code, int)
+            or isinstance(code, bool)
+            or numeric_code not in SENDABLE_CLOSE_REASONS
+        ):
+            self._raise_close_audit(
+                CloseAuditCode.INVALID_CLOSE_CODE,
+                f"CLOSE code {code!r} is not allowed on the wire",
+                numeric_code,
+                reason,
+            )
+
+        payload = bytearray(struct.pack("!H", numeric_code))
+        if reason is None:
+            return payload
+
+        if not isinstance(reason, str):
+            self._raise_close_audit(
+                CloseAuditCode.INVALID_CLOSE_REASON,
+                "CLOSE reason must be a str",
+                numeric_code,
+                None,
+            )
+        try:
+            reason_bytes = reason.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            self._raise_close_audit(
+                CloseAuditCode.INVALID_CLOSE_REASON,
+                "CLOSE reason is not valid UTF-8: " + str(exc),
+                numeric_code,
+                reason,
+            )
+
+        if len(reason_bytes) > MAX_CLOSE_REASON_BYTES:
+            self._raise_close_audit(
+                CloseAuditCode.CLOSE_REASON_TOO_LONG,
+                (
+                    "CLOSE reason is "
+                    f"{len(reason_bytes)} bytes; maximum is "
+                    f"{MAX_CLOSE_REASON_BYTES}"
+                ),
+                numeric_code,
+                reason,
+            )
+
+        payload += reason_bytes
+        return payload
 
     def ping(self, payload: bytes = b"") -> bytearray:
         return self._serialize_frame(Opcode.PING, payload)
