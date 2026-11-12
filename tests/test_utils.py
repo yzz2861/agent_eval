@@ -4,7 +4,14 @@ import pytest
 
 from contextlib import AbstractContextManager
 
-from jwt.utils import force_bytes, from_base64url_uint, is_ssh_key, to_base64url_uint
+from jwt.utils import (
+    base64url_decode_strict,
+    base64url_encode,
+    force_bytes,
+    from_base64url_uint,
+    is_ssh_key,
+    to_base64url_uint,
+)
 
 
 @pytest.mark.parametrize(
@@ -44,6 +51,49 @@ def test_from_base64url_uint(inputval: bytes, expected: int) -> None:
 def test_force_bytes_raises_error_on_invalid_object() -> None:
     with pytest.raises(TypeError):
         force_bytes({})  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "encoded,decoded",
+    [
+        (b"", b""),
+        (b"Zg", b"f"),
+        (b"Zm8", b"fo"),
+        (b"Zm9v", b"foo"),
+        (b"_w", bytes([255])),
+        (b"AQAB", bytes([1, 0, 1])),
+    ],
+)
+def test_base64url_decode_strict_accepts_canonical_unpadded(
+    encoded: bytes, decoded: bytes
+) -> None:
+    assert base64url_decode_strict(encoded) == decoded
+    # round-trips through the encoder without gaining padding
+    assert base64url_encode(decoded) == encoded
+
+
+@pytest.mark.parametrize(
+    "encoded",
+    [
+        b"Zg==",  # padding must not appear in base64url
+        b"Zm8=",
+        b"Zg=",  # malformed padding length
+        b"Zg/",  # standard base64 alias for the URL-safe '_'
+        b"Z+g",  # standard base64 alias for the URL-safe '-'
+        b"a",  # length % 4 == 1 can never be valid
+        b"Zh",  # non-canonical: trailing bits are not zero
+        b"Zh==",
+        b"Z?g",  # character outside the alphabet
+        b"Z g",  # whitespace is not part of the alphabet
+    ],
+)
+def test_base64url_decode_strict_rejects_non_canonical(encoded: bytes) -> None:
+    with pytest.raises(ValueError):
+        base64url_decode_strict(encoded)
+
+
+def test_base64url_decode_strict_accepts_str_and_force_bytes() -> None:
+    assert base64url_decode_strict("Zm9v") == b"foo"
 
 
 @pytest.mark.parametrize(

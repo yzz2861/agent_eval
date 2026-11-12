@@ -20,7 +20,10 @@ from .exceptions import (
     InvalidSignatureError,
     InvalidTokenError,
 )
-from .utils import base64url_decode, base64url_encode
+from .utils import (
+    base64url_decode_strict,
+    base64url_encode,
+)
 from .warnings import InsecureKeyLengthWarning, RemovedInPyjwt3Warning
 
 if TYPE_CHECKING:
@@ -28,9 +31,61 @@ if TYPE_CHECKING:
     from .types import SigOptions
 
 _ALGORITHM_UNSET = object()
-_BASE64URL_ALPHABET = (
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-)
+
+# Firmware-style detached payloads can be several megabytes; cap what a
+# single decode() call will hold so a compact token cannot pull an
+# unbounded external blob into memory.
+MAX_DETACHED_PAYLOAD_SIZE = 10 * 1024 * 1024
+
+
+class DetachedPayload:
+    """One-shot carrier for the payload of a ``b64=false`` JWS.
+
+    A detached JWS (RFC 7515 Appendix F) carries its payload outside the
+    compact serialization. Wrapping the raw bytes in this object makes the
+    detached calling convention explicit and guarantees the payload can
+    only be consumed once, so an application cannot accidentally verify
+    the same supplied buffer against two different tokens.
+
+    Plain :class:`bytes` remain accepted directly for backward
+    compatibility; those are not given one-shot semantics.
+    """
+
+    __slots__ = ("_data", "_consumed")
+
+    def __init__(
+        self, data: bytes, *, max_size: int = MAX_DETACHED_PAYLOAD_SIZE
+    ) -> None:
+        if isinstance(data, str) or not isinstance(
+            data, (bytes, bytearray, memoryview)
+        ):
+            raise TypeError("Detached payload must be raw bytes")
+        data = bytes(data)
+        if len(data) > max_size:
+            raise DecodeError(
+                f"Detached payload exceeds maximum allowed size of {max_size} bytes"
+            )
+        self._data = data
+        self._consumed = False
+
+    def consume(self) -> bytes:
+        """Return the payload bytes, raising if they were already consumed."""
+        if self._consumed:
+            raise DecodeError("Detached payload has already been consumed")
+        self._consumed = True
+        return self._data
+
+    @property
+    def consumed(self) -> bool:
+        return self._consumed
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __bytes__(self) -> bytes:
+        # Expose the bytes without changing consumption state so logging
+        # or size checks do not burn the one-shot allowance.
+        return self._data
 
 
 class PyJWS:
@@ -153,8 +208,21 @@ class PyJWS:
                 algorithm_ = headers["alg"]
 
             headers_b64 = headers.get("b64")
+            if "b64" in headers and not isinstance(headers_b64, bool):
+                raise InvalidTokenError(
+                    "The 'b64' header parameter must be a boolean value"
+                )
             if headers_b64 is False:
                 is_payload_detached = True
+            elif headers_b64 is True and is_payload_detached:
+                raise InvalidTokenError(
+                    "Header 'b64' is true but is_payload_detached was requested; "
+                    "the two calling conventions must not be mixed"
+                )
+
+        if not isinstance(payload, (bytes, bytearray, memoryview)):
+            raise TypeError("JWS payload must be raw bytes")
+        payload = bytes(payload)
 
         # Header
         header: dict[str, Any] = {"typ": self.header_typ, "alg": algorithm_}
@@ -225,7 +293,7 @@ class PyJWS:
         key: AllowedPublicKeys | PyJWK | str | bytes = "",
         algorithms: Sequence[str] | None = None,
         options: SigOptions | None = None,
-        detached_payload: bytes | None = None,
+        detached_payload: bytes | DetachedPayload | None = None,
         **kwargs: dict[str, Any],
     ) -> dict[str, Any]:
         if kwargs:
@@ -253,12 +321,20 @@ class PyJWS:
 
         self._validate_headers(header)
 
-        if detached_payload is not None and header.get("b64", True) is not False:
+        header_b64 = header.get("b64", True)
+        if not isinstance(header_b64, bool):
+            raise InvalidTokenError(
+                "The 'b64' header parameter must be a boolean value"
+            )
+
+        wants_detached = detached_payload is not None
+
+        if wants_detached and header_b64 is not False:
             raise DecodeError(
                 'It is only valid to pass "detached_payload" when the protected header has "b64" set to false.'
             )
 
-        if header.get("b64", True) is False:
+        if header_b64 is False:
             # RFC 7797 §3: when "b64" is present in the protected header,
             # it MUST also appear in "crit". A token that sets b64=false
             # without declaring it critical is malformed.
@@ -267,11 +343,11 @@ class PyJWS:
                 raise InvalidTokenError(
                     "The 'b64' header parameter requires 'b64' to be listed in 'crit'."
                 )
-            if detached_payload is None:
+            if not wants_detached:
                 raise DecodeError(
                     'It is required that you pass in a value for the "detached_payload" argument to decode a message having the b64 header set to false.'
                 )
-            payload = detached_payload
+            payload = self._consume_detached_payload(detached_payload)
             signing_input = b".".join([signing_input.rsplit(b".", 1)[0], payload])
 
         if verify_signature:
@@ -296,7 +372,7 @@ class PyJWS:
         key: AllowedPublicKeys | PyJWK | str | bytes = "",
         algorithms: Sequence[str] | None = None,
         options: SigOptions | None = None,
-        detached_payload: bytes | None = None,
+        detached_payload: bytes | DetachedPayload | None = None,
         **kwargs: dict[str, Any],
     ) -> Any:
         if kwargs:
@@ -338,20 +414,37 @@ class PyJWS:
         if padding and len(segment) % 4 != 0:
             raise DecodeError(f"Invalid {name} padding")
 
-        if len(stripped) % 4 == 1 or any(
-            character not in _BASE64URL_ALPHABET for character in stripped
-        ):
-            raise DecodeError(f"Invalid {name} padding")
-
         try:
-            decoded = base64url_decode(stripped)
-        except (TypeError, binascii.Error) as err:
+            # The unpadded remainder must be canonical base64url: no
+            # padding chars, no '+'/'/' aliases, no non-canonical tail.
+            decoded = base64url_decode_strict(stripped)
+        except (TypeError, ValueError, binascii.Error) as err:
             raise DecodeError(f"Invalid {name} padding") from err
 
         if base64url_encode(decoded) != stripped:
             raise DecodeError(f"Invalid {name} padding")
 
         return decoded
+
+    @staticmethod
+    def _consume_detached_payload(
+        detached_payload: bytes | DetachedPayload,
+    ) -> bytes:
+        if isinstance(detached_payload, DetachedPayload):
+            return detached_payload.consume()
+
+        if isinstance(detached_payload, str) or not isinstance(
+            detached_payload, (bytes, bytearray, memoryview)
+        ):
+            raise TypeError("Detached payload must be raw bytes")
+
+        payload = bytes(detached_payload)
+        if len(payload) > MAX_DETACHED_PAYLOAD_SIZE:
+            raise DecodeError(
+                "Detached payload exceeds maximum allowed size of "
+                f"{MAX_DETACHED_PAYLOAD_SIZE} bytes"
+            )
+        return payload
 
     def _load(self, jwt: str | bytes) -> tuple[bytes, bytes, dict[str, Any], bytes]:
         if isinstance(jwt, str):

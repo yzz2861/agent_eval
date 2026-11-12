@@ -37,6 +37,53 @@ def base64url_encode(input: bytes) -> bytes:
     return base64.urlsafe_b64encode(input).replace(b"=", b"")
 
 
+# The 64 unreserved base64url characters defined in RFC 4648 section 5.
+# Standard base64 aliases ("+", "/") and padding ("=") are deliberately
+# excluded so callers can enforce the unpadded, URL-safe serialization.
+BASE64URL_ALPHABET = frozenset(
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+)
+
+
+def base64url_decode_strict(input: Union[bytes, str]) -> bytes:
+    """Decode a canonical, unpadded base64url string.
+
+    Unlike :func:`base64url_decode`, this rejects:
+
+    * ``"="`` padding characters (base64url is always transmitted unpadded),
+    * standard-base64 alias characters ``"+"`` and ``"/"``,
+    * any other byte outside the RFC 4648 section 5 alphabet,
+    * inputs whose length cannot be a valid base64 grouping,
+    * non-canonical encodings whose trailing bits are not zero.
+
+    An empty input decodes to empty bytes: the empty payload used by the
+    detached JWS compact serialization is a valid base64url encoding of
+    the empty byte string.
+
+    :raises ValueError: if the input is not canonical unpadded base64url.
+    """
+    input_bytes = force_bytes(input)
+
+    if not input_bytes:
+        return b""
+
+    if any(character not in BASE64URL_ALPHABET for character in input_bytes):
+        raise ValueError(
+            "Invalid base64url input: only the unpadded URL-safe alphabet is allowed"
+        )
+
+    if len(input_bytes) % 4 == 1:
+        raise ValueError("Invalid base64url input: incorrect length")
+
+    padding = b"=" * (-len(input_bytes) % 4)
+    decoded = base64.urlsafe_b64decode(input_bytes + padding)
+
+    if base64url_encode(decoded) != input_bytes:
+        raise ValueError("Invalid base64url input: encoding is not canonical")
+
+    return decoded
+
+
 def to_base64url_uint(val: int, *, bit_length: Optional[int] = None) -> bytes:
     if val < 0:
         raise ValueError("Must be a positive integer")

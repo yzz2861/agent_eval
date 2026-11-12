@@ -5,7 +5,11 @@ import pytest
 
 from jwt.algorithms import NoneAlgorithm, has_crypto
 from jwt.api_jwk import PyJWK
-from jwt.api_jws import PyJWS
+from jwt.api_jws import (
+    MAX_DETACHED_PAYLOAD_SIZE,
+    DetachedPayload,
+    PyJWS,
+)
 from jwt.exceptions import (
     DecodeError,
     InvalidAlgorithmError,
@@ -1316,3 +1320,359 @@ class TestJWS:
             jwt.PyJWK.from_dict(
                 {"kty": "oct", "k": "", "kid": "active", "alg": "HS256"}
             )
+
+
+class TestDetachedJWS:
+    """Explicit detached (RFC 7515 Appendix F, b64=false) JWS behavior."""
+
+    secret = "a" * 32
+
+    def _encode_detached(self, jws: PyJWS, payload: bytes) -> str:
+        return jws.encode(
+            payload,
+            self.secret,
+            algorithm="HS256",
+            is_payload_detached=True,
+        )
+
+    def test_compact_serialization_has_empty_payload_segment(self, jws: PyJWS) -> None:
+        token = self._encode_detached(jws, b"firmware-image")
+        header, payload_segment, signature = token.split(".")
+        assert header
+        assert signature
+        assert payload_segment == ""
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            b"",
+            b" ",
+            b"   \t\n\r",
+            b"\x00",
+            b"\x00\x00\x00",
+            b"\x00\xff" * 16,
+            bytes(range(256)),
+        ],
+    )
+    def test_empty_whitespace_and_binary_payloads_round_trip(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        token = self._encode_detached(jws, payload)
+
+        decoded = jws.decode(
+            token,
+            self.secret,
+            algorithms=["HS256"],
+            detached_payload=payload,
+        )
+        assert decoded == payload
+
+    def test_empty_payload_is_legal_but_missing_payload_is_rejected(
+        self, jws: PyJWS
+    ) -> None:
+        token = self._encode_detached(jws, b"")
+
+        # b"" is a real, caller-supplied payload and must verify.
+        assert (
+            jws.decode(
+                token,
+                self.secret,
+                algorithms=["HS256"],
+                detached_payload=b"",
+            )
+            == b""
+        )
+
+        # None means "no payload was supplied" and must not be treated as
+        # the empty payload (the frontend {} -> b"" confusion).
+        with pytest.raises(DecodeError, match="detached_payload"):
+            jws.decode(token, self.secret, algorithms=["HS256"])
+
+    def test_attached_token_rejects_supplied_detached_payload(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        token = jws.encode(payload, self.secret, algorithm="HS256")
+        with pytest.raises(DecodeError, match="b64"):
+            jws.decode(
+                token,
+                self.secret,
+                algorithms=["HS256"],
+                detached_payload=payload,
+            )
+
+    def test_detached_payload_must_be_bytes(self, jws: PyJWS) -> None:
+        token = self._encode_detached(jws, b"x")
+        with pytest.raises(TypeError, match="raw bytes"):
+            jws.decode(
+                token,
+                self.secret,
+                algorithms=["HS256"],
+                detached_payload="not bytes",  # type: ignore[arg-type]
+            )
+        with pytest.raises(TypeError, match="raw bytes"):
+            DetachedPayload({})  # type: ignore[arg-type]
+
+    def test_wrong_payload_fails_signature(self, jws: PyJWS) -> None:
+        token = self._encode_detached(jws, b"real firmware")
+        with pytest.raises(InvalidSignatureError):
+            jws.decode(
+                token,
+                self.secret,
+                algorithms=["HS256"],
+                detached_payload=b"tampered firmware",
+            )
+
+    def test_truncated_tokens_are_rejected(self, jws: PyJWS) -> None:
+        token = self._encode_detached(jws, b"firmware")
+        truncated = [
+            token[:-1],
+            token.rsplit(".", 1)[0],
+            token.split(".", 1)[0],
+            token.replace(".", ""),
+            "",
+        ]
+        for bad_token in truncated:
+            with pytest.raises(DecodeError):
+                jws.decode(
+                    bad_token,
+                    self.secret,
+                    algorithms=["HS256"],
+                    detached_payload=b"firmware",
+                )
+
+    def test_detached_payload_wrapper_is_consumed_once(self, jws: PyJWS) -> None:
+        payload = b"firmware"
+        token = self._encode_detached(jws, payload)
+        detached = DetachedPayload(payload)
+
+        assert not detached.consumed
+        assert (
+            jws.decode(
+                token,
+                self.secret,
+                algorithms=["HS256"],
+                detached_payload=detached,
+            )
+            == payload
+        )
+        assert detached.consumed
+
+        with pytest.raises(DecodeError, match="already been consumed"):
+            jws.decode(
+                token,
+                self.secret,
+                algorithms=["HS256"],
+                detached_payload=detached,
+            )
+
+    def test_bytes_payload_has_no_one_shot_semantics(self, jws: PyJWS) -> None:
+        # Backward-compatible plain-bytes calling convention: the same
+        # bytes remain usable for repeated decode calls.
+        payload = b"firmware"
+        token = self._encode_detached(jws, payload)
+        for _ in range(3):
+            assert (
+                jws.decode(
+                    token,
+                    self.secret,
+                    algorithms=["HS256"],
+                    detached_payload=payload,
+                )
+                == payload
+            )
+
+    def test_detached_payload_size_boundary(self, jws: PyJWS) -> None:
+        at_limit = b"A" * MAX_DETACHED_PAYLOAD_SIZE
+        token = self._encode_detached(jws, at_limit)
+        assert (
+            len(
+                jws.decode(
+                    token,
+                    self.secret,
+                    algorithms=["HS256"],
+                    detached_payload=at_limit,
+                )
+            )
+            == MAX_DETACHED_PAYLOAD_SIZE
+        )
+
+    def test_oversized_detached_payload_is_rejected(self, jws: PyJWS) -> None:
+        token = self._encode_detached(jws, b"x")
+        oversized = b"A" * (MAX_DETACHED_PAYLOAD_SIZE + 1)
+
+        with pytest.raises(DecodeError, match="maximum allowed size"):
+            jws.decode(
+                token,
+                self.secret,
+                algorithms=["HS256"],
+                detached_payload=oversized,
+            )
+        with pytest.raises(DecodeError, match="maximum allowed size"):
+            DetachedPayload(oversized)
+
+    def test_custom_wrapper_size_limit(self) -> None:
+        with pytest.raises(DecodeError, match="maximum allowed size"):
+            DetachedPayload(b"x" * 5, max_size=4)
+        assert bytes(DetachedPayload(b"x" * 4, max_size=4)) == b"xxxx"
+
+    def test_encode_rejects_non_boolean_b64_header(self, jws: PyJWS) -> None:
+        with pytest.raises(InvalidTokenError, match="boolean"):
+            jws.encode(
+                b"x",
+                self.secret,
+                algorithm="HS256",
+                headers={"b64": "false"},
+            )
+        with pytest.raises(InvalidTokenError, match="boolean"):
+            jws.encode(
+                b"x",
+                self.secret,
+                algorithm="HS256",
+                headers={"b64": 0},
+            )
+
+    def test_encode_rejects_conflicting_b64_and_detached_flag(self, jws: PyJWS) -> None:
+        with pytest.raises(InvalidTokenError, match="must not be mixed"):
+            jws.encode(
+                b"x",
+                self.secret,
+                algorithm="HS256",
+                is_payload_detached=True,
+                headers={"b64": True},
+            )
+
+    def test_decode_rejects_non_boolean_b64_header(self, jws: PyJWS) -> None:
+        header_obj = {"typ": "JWT", "alg": "HS256", "b64": "false"}
+        header_b64 = base64url_encode(
+            json.dumps(header_obj, separators=(",", ":")).encode()
+        )
+        token = b".".join([header_b64, b"", base64url_encode(b"sig")]).decode()
+        with pytest.raises(InvalidTokenError, match="boolean"):
+            jws.decode(
+                token,
+                self.secret,
+                algorithms=["HS256"],
+                detached_payload=b"x",
+            )
+
+    def test_unknown_critical_extension_is_rejected_on_decode(self, jws: PyJWS) -> None:
+        token = jws.encode(
+            b"x",
+            self.secret,
+            algorithm="HS256",
+            headers={"crit": ["b64", "http://example.invalid/ext"], "b64": False},
+            is_payload_detached=True,
+        )
+        with pytest.raises(InvalidTokenError, match="Unsupported critical extension"):
+            jws.decode(
+                token,
+                self.secret,
+                algorithms=["HS256"],
+                detached_payload=b"x",
+            )
+
+    def test_decode_complete_returns_raw_detached_payload(self, jws: PyJWS) -> None:
+        payload = b"{}"  # the frontend's empty-object serialization
+        token = self._encode_detached(jws, payload)
+        result = jws.decode_complete(
+            token,
+            self.secret,
+            algorithms=["HS256"],
+            detached_payload=payload,
+        )
+        assert result["payload"] == b"{}"
+        assert result["header"]["b64"] is False
+        assert "b64" in result["header"]["crit"]
+
+    def test_verify_signature_false_still_requires_payload_for_detached(
+        self, jws: PyJWS
+    ) -> None:
+        token = self._encode_detached(jws, b"x")
+        with pytest.raises(DecodeError, match="detached_payload"):
+            jws.decode(
+                token,
+                options={"verify_signature": False},
+            )
+
+    def test_strict_base64url_rejects_padding_and_alias_segments(
+        self, jws: PyJWS, payload: bytes
+    ) -> None:
+        token = jws.encode(payload, self.secret, algorithm="HS256")
+        header, encoded_payload, signature = token.split(".")
+
+        # Standard base64 alias characters must not be accepted.
+        aliased = signature.replace("-", "+").replace("_", "/")
+        with pytest.raises(DecodeError, match="Invalid crypto padding"):
+            jws.decode(
+                ".".join((header, encoded_payload, aliased)),
+                self.secret,
+                algorithms=["HS256"],
+            )
+
+        # Embedded padding must not be accepted in a middle position.
+        if len(signature) > 2:
+            embedded = signature[:2] + "=" + signature[2:]
+            with pytest.raises(DecodeError, match="Invalid crypto padding"):
+                jws.decode(
+                    ".".join((header, encoded_payload, embedded)),
+                    self.secret,
+                    algorithms=["HS256"],
+                )
+
+    def test_payload_alias_characters_are_rejected(self, jws: PyJWS) -> None:
+        token = jws.encode(b"foo", self.secret, algorithm="HS256")
+        header, _, signature = token.split(".")
+        # "+" is a standard-base64 alias, not a valid base64url character.
+        malformed = ".".join((header, "Zm+9v", signature))
+        with pytest.raises(DecodeError, match="Invalid payload padding"):
+            jws.decode(
+                malformed,
+                self.secret,
+                algorithms=["HS256"],
+            )
+
+    def test_detached_payload_accepts_bytearray_and_memoryview(
+        self, jws: PyJWS
+    ) -> None:
+        payload = b"firmware"
+        token = self._encode_detached(jws, payload)
+        assert (
+            jws.decode(
+                token,
+                self.secret,
+                algorithms=["HS256"],
+                detached_payload=bytearray(payload),
+            )
+            == payload
+        )
+        assert (
+            jws.decode(
+                token,
+                self.secret,
+                algorithms=["HS256"],
+                detached_payload=memoryview(payload),
+            )
+            == payload
+        )
+        wrapper = DetachedPayload(memoryview(payload))
+        assert bytes(wrapper) == payload
+
+    def test_detached_round_trip_through_high_level_jwt_api(self) -> None:
+        import jwt
+
+        raw_payload = json.dumps(
+            {"firmware": "version"}, separators=(",", ":")
+        ).encode()
+        token = jwt.encode(
+            {"firmware": "version"},
+            self.secret,
+            algorithm="HS256",
+            headers={"b64": False},
+        )
+        decoded = jwt.decode(
+            token,
+            self.secret,
+            algorithms=["HS256"],
+            detached_payload=raw_payload,
+        )
+        assert decoded == {"firmware": "version"}

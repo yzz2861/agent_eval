@@ -1,5 +1,7 @@
 from .api_jwk import PyJWK, PyJWKSet
 from .api_jws import (
+    DetachedPayload,
+    MAX_DETACHED_PAYLOAD_SIZE,
     PyJWS,
     get_algorithm_by_name,
     get_unverified_header,
@@ -44,6 +46,8 @@ __copyright__ = "Copyright 2015-2026 José Padilla"
 
 
 __all__ = [
+    "DetachedPayload",
+    "MAX_DETACHED_PAYLOAD_SIZE",
     "PyJWS",
     "PyJWT",
     "PyJWKClient",
