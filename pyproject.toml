@@ -1,0 +1,51 @@
+[tool.coverage.run]
+branch = true
+relative_files = true
+source = ["OpenSSL", "tests/"]
+
+[tool.coverage.paths]
+source = [
+    "src/OpenSSL",
+    "*.nox/*/lib/python*/site-packages/OpenSSL",
+    "*.nox/*/lib/pypy*/site-packages/OpenSSL",
+    "*.nox/pypy/site-packages/OpenSSL",
+    "*.nox\\*\\Lib\\site-packages\\OpenSSL",
+]
+
+[tool.coverage.report]
+exclude_also = ["assert False"]
+show_missing = true
+
+[tool.mypy]
+warn_unused_configs = true
+strict = true
+strict_bytes = true
+
+[[tool.mypy.overrides]]
+module = "OpenSSL.*"
+warn_return_any = false
+
+[[tool.mypy.overrides]]
+module = "cryptography.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "cffi.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["pretend"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+addopts = "-r s --strict-markers"
+testpaths = ["tests"]
+
+[tool.ruff]
+lint.select = ['E', 'F', 'I', 'W', 'UP', 'RUF']
+line-length = 79
+# Remove if/when we move setup.py python-requires metadata to pyproject.toml
+target-version = "py37"
+
+[tool.ruff.lint.isort]
+known-first-party = ["OpenSSL", "tests"]
