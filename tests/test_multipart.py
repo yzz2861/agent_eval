@@ -4,6 +4,7 @@ import os
 import random
 import sys
 import tempfile
+import time
 import unittest
 from io import BytesIO
 from typing import TYPE_CHECKING
@@ -911,6 +912,180 @@ def test_multipart_opening_boundary_max_size() -> None:
     assert parser.write(data[max_size:]) == len(data) - max_size
     parser.finalize()
     assert events == ["begin", "end"]
+
+
+def _build_multipart_message(boundary, bodies):
+    message = b""
+    for i, body in enumerate(bodies):
+        message += b"--" + boundary + b"\r\n"
+        message += b'Content-Disposition: form-data; name="field' + str(i).encode("ascii") + b'"\r\n'
+        message += b"\r\n" + body + b"\r\n"
+    return message + b"--" + boundary + b"--\r\n"
+
+
+def _parse_multipart_chunks(boundary: bytes, chunks: list[bytes]) -> tuple[list[bytes], bool]:
+    bodies: list[bytes] = []
+    current: list[bytes] = []
+    ended = False
+
+    def on_part_data(data: bytes, start: int, end: int) -> None:
+        current.append(data[start:end])
+
+    def on_part_end() -> None:
+        bodies.append(b"".join(current))
+        current.clear()
+
+    def on_end() -> None:
+        nonlocal ended
+        ended = True
+
+    parser = MultipartParser(boundary, {"on_part_data": on_part_data, "on_part_end": on_part_end, "on_end": on_end})
+    for chunk in chunks:
+        parser.write(chunk)
+    parser.finalize()
+    return bodies, ended
+
+
+# A part body full of boundary look-alikes: long prefixes of the real
+# delimiter and full delimiters trailed by junk, none of which is an
+# actual delimiter.  Every byte of it must come back as data.
+FAKE_BOUNDARY_PAYLOAD = (
+    b"plain text\r\n"
+    b"\r\n--boundar\r\n"  # longest false prefix: delimiter minus last char
+    b"\r\n--b\r\n--bound\r\n"  # shorter false prefixes
+    b"\r\n--boundaryX\r\n"  # full delimiter followed by junk
+    b"\r\n--boundary\rX\r\n"  # delimiter + CR + junk (not a CRLF)
+    b"\r\n--boundary\n"  # delimiter + bare LF
+    b"\r\n--boundary-\r\n"  # delimiter + single hyphen
+    b"\r\n--boundary-X\r\n"  # delimiter + hyphen + junk
+    b"\r\n--\r\n"  # dashes only
+    b"\r\n\r\n\r\n"  # bare CRLFs
+    b"tail"
+)
+
+
+def test_multipart_fake_boundaries_single_chunk() -> None:
+    boundary = b"boundary"
+    message = _build_multipart_message(boundary, [FAKE_BOUNDARY_PAYLOAD])
+    bodies, ended = _parse_multipart_chunks(boundary, [message])
+    assert ended
+    assert bodies == [FAKE_BOUNDARY_PAYLOAD]
+
+
+def test_multipart_fake_boundaries_byte_by_byte() -> None:
+    boundary = b"boundary"
+    message = _build_multipart_message(boundary, [FAKE_BOUNDARY_PAYLOAD])
+    bodies, ended = _parse_multipart_chunks(boundary, [message[i : i + 1] for i in range(len(message))])
+    assert ended
+    assert bodies == [FAKE_BOUNDARY_PAYLOAD]
+
+
+def test_multipart_fake_boundaries_random_chunking() -> None:
+    boundary = b"boundary"
+    message = _build_multipart_message(boundary, [FAKE_BOUNDARY_PAYLOAD])
+    rng = random.Random(20261112)
+    for _ in range(50):
+        points = sorted(rng.sample(range(1, len(message)), rng.randint(1, 32)))
+        chunks = [message[a:b] for a, b in zip([0] + points, points + [len(message)])]
+        bodies, ended = _parse_multipart_chunks(boundary, chunks)
+        assert ended
+        assert bodies == [FAKE_BOUNDARY_PAYLOAD]
+        # No part-data byte may be lost or duplicated.
+        assert sum(len(body) for body in bodies) == len(FAKE_BOUNDARY_PAYLOAD)
+
+
+def test_multipart_real_boundary_split_across_chunks() -> None:
+    boundary = b"boundary"
+    expected = [b"first part body\r\nwith lines", b"second \r\n--boundar\r\n body", b""]
+    message = _build_multipart_message(boundary, expected)
+    # Split the message at every single byte; the delimiter (and everything
+    # else) is straddled across the two chunks at each possible offset.
+    for split in range(len(message)):
+        bodies, ended = _parse_multipart_chunks(boundary, [message[:split], message[split:]])
+        assert ended, split
+        assert bodies == expected, split
+
+
+def test_multipart_closing_boundary_split_and_epilogue() -> None:
+    boundary = b"boundary"
+    expected = [b"body"]
+    head = _build_multipart_message(boundary, expected)
+    for tail in (b"", b"\r\n", b"\r\ntrailing epilogue\r\nmore"):
+        message = head + tail
+        for split in range(len(message)):
+            bodies, ended = _parse_multipart_chunks(boundary, [message[:split], message[split:]])
+            assert ended, (tail, split)
+            assert bodies == expected, (tail, split)
+
+
+def test_multipart_empty_part() -> None:
+    boundary = b"boundary"
+    expected = [b"", b"", b"non-empty"]
+    message = _build_multipart_message(boundary, expected)
+    for chunks in ([message], [message[i : i + 1] for i in range(len(message))]):
+        bodies, ended = _parse_multipart_chunks(boundary, chunks)
+        assert ended
+        assert bodies == expected
+
+
+def test_multipart_near_max_boundary_repeated_prefixes() -> None:
+    # Boundary at the maximum allowed length; the body is made of the longest
+    # possible false prefixes of the 260-byte delimiter.
+    boundary = b"b" * 256
+    delimiter = b"\r\n--" + boundary
+    payload = delimiter[:-1] * 64 + b"end"
+    message = _build_multipart_message(boundary, [payload])
+    for nchunks in (1, 7, 200):
+        size = max(1, len(message) // nchunks)
+        chunks = [message[i : i + size] for i in range(0, len(message), size)]
+        bodies, ended = _parse_multipart_chunks(boundary, chunks)
+        assert ended
+        assert bodies == [payload]
+
+
+def test_multipart_boundary_with_crlf_rejected() -> None:
+    for boundary in (b"a\rb", b"a\nb", b"\r\n"):
+        with pytest.raises(FormParserError, match="CR or LF"):
+            MultipartParser(boundary)
+        # FormParserError is a ValueError, as the fuzz targets expect.
+        with pytest.raises(ValueError):
+            MultipartParser(boundary)
+
+
+def test_multipart_error_offsets_are_bounded() -> None:
+    # A malformed opening boundary inside a large body must raise an error
+    # whose message and offset stay bounded - the body is never embedded.
+    boundary = b"boundary"
+    message = b"--boundary" + b"z" * 65536
+    parser = MultipartParser(boundary)
+    with pytest.raises(MultipartParseError) as excinfo:
+        parser.write(message)
+    assert 0 <= excinfo.value.offset <= len(message)
+    assert len(str(excinfo.value)) < 200
+
+
+def test_multipart_repeated_prefixes_scale_near_linearly() -> None:
+    # Adversarial body: repeated near-complete delimiters plus full delimiters
+    # trailed by junk.  Quadrupling the input must not explode the parse time.
+    boundary = b"----WebKitFormBoundary" + b"a" * 100
+    delimiter = b"\r\n--" + boundary
+    unit = delimiter[:-1] + b"\r\n" + delimiter + b"X\r\n"
+
+    def parse(size: int, nchunks: int) -> float:
+        payload = (unit * (size // len(unit) + 1))[:size]
+        message = _build_multipart_message(boundary, [payload])
+        parser = MultipartParser(boundary, callbacks={"on_part_data": lambda d, s, e: None})
+        chunk = max(1, len(message) // nchunks)
+        start = time.perf_counter()
+        for i in range(0, len(message), chunk):
+            parser.write(message[i : i + chunk])
+        return time.perf_counter() - start
+
+    small = parse(64 * 1024, 200)
+    large = parse(256 * 1024, 200)
+    # Generous bound: catches quadratic blowups, immune to slow CI machines.
+    assert large < small * 16 + 0.5
+    assert large < 5.0
 
 
 @pytest.mark.parametrize(

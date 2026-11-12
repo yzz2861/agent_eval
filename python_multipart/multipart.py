@@ -1097,6 +1097,13 @@ class MultipartParser(BaseParser):
             boundary = boundary.encode("latin-1")
         if len(boundary) > MAX_BOUNDARY_LENGTH:
             raise FormParserError(f"Boundary length {len(boundary)} exceeds maximum of {MAX_BOUNDARY_LENGTH}")
+        # RFC 2046 boundaries never contain CR/LF.  The streaming delimiter
+        # scan below keeps at most one partial cross-chunk candidate and relies
+        # on CR appearing only at the very start of the delimiter
+        # ("\r\n--" + boundary); a CR or LF inside the boundary would break
+        # that invariant and silently misplace a delimiter split across chunks.
+        if b"\r" in boundary or b"\n" in boundary:
+            raise FormParserError("Boundary must not contain CR or LF characters")
         self.boundary = b"\r\n--" + boundary
 
     def write(self, data: bytes) -> int:
