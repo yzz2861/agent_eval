@@ -306,7 +306,9 @@ class TestPoolManager(HypercornDummyServerTestCase):
             assert r._pool is not None
             assert r._pool.host == self.host_alt
 
-    def test_redirect_cross_host_no_remove_headers(self) -> None:
+    def test_redirect_cross_host_cannot_disable_default_credential_removal(
+        self,
+    ) -> None:
         with PoolManager() as http:
             r = http.request(
                 "GET",
@@ -324,9 +326,9 @@ class TestPoolManager(HypercornDummyServerTestCase):
 
             data = r.json()
 
-            assert data["Authorization"] == "foo"
-            assert data["Proxy-Authorization"] == "bar"
-            assert data["Cookie"] == "foo=bar"
+            assert "Authorization" not in data
+            assert "Proxy-Authorization" not in data
+            assert "Cookie" not in data
 
     def test_redirect_cross_host_set_removed_headers(self) -> None:
         with PoolManager() as http:
@@ -348,9 +350,9 @@ class TestPoolManager(HypercornDummyServerTestCase):
             data = r.json()
 
             assert "X-API-Secret" not in data
-            assert data["Authorization"] == "bar"
-            assert data["Proxy-Authorization"] == "baz"
-            assert data["Cookie"] == "foo=bar"
+            assert "Authorization" not in data
+            assert "Proxy-Authorization" not in data
+            assert "Cookie" not in data
 
             headers = {
                 "x-api-secret": "foo",
@@ -372,9 +374,9 @@ class TestPoolManager(HypercornDummyServerTestCase):
 
             assert "x-api-secret" not in data
             assert "X-API-Secret" not in data
-            assert data["Authorization"] == "bar"
-            assert data["Proxy-Authorization"] == "baz"
-            assert data["Cookie"] == "foo=bar"
+            assert "Authorization" not in data
+            assert "Proxy-Authorization" not in data
+            assert "Cookie" not in data
 
             # Ensure the header argument itself is not modified in-place.
             assert headers == {

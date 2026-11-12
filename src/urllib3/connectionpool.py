@@ -9,6 +9,7 @@ import warnings
 import weakref
 from socket import timeout as SocketTimeout
 from types import TracebackType
+from urllib.parse import urljoin
 
 from ._base_connection import _TYPE_BODY
 from ._collections import HTTPHeaderDict
@@ -36,6 +37,7 @@ from .exceptions import (
     ProtocolError,
     ProxyError,
     ReadTimeoutError,
+    RedirectDowngradeError,
     SSLError,
     TimeoutError,
 )
@@ -46,7 +48,13 @@ from .util.request import _TYPE_BODY_POSITION, set_file_position
 from .util.retry import Retry
 from .util.ssl_match_hostname import CertificateError
 from .util.timeout import _DEFAULT_TIMEOUT, _TYPE_DEFAULT, Timeout
-from .util.url import Url, _encode_target
+from .util.url import (
+    Url,
+    _encode_target,
+    _origin_from_parts,
+    _origin_from_url,
+    _SCHEME_RE,
+)
 from .util.url import _normalize_host as normalize_host
 from .util.url import parse_url
 from .util.util import to_str
@@ -311,6 +319,9 @@ class HTTPConnectionPool(ConnectionPool, RequestMethods):
 
         If the pool is closed, then the connection will be closed and discarded.
         """
+        if conn is not None:
+            _clear_sensitive_connection_state(conn)
+
         if self.pool is not None:
             try:
                 self.pool.put(conn, block=False)
@@ -596,6 +607,7 @@ class HTTPConnectionPool(ConnectionPool, RequestMethods):
         body_pos: _TYPE_BODY_POSITION | None = None,
         preload_content: bool = True,
         decode_content: bool = True,
+        _proxy_headers_suppressed: frozenset[str] | None = None,
         **response_kw: typing.Any,
     ) -> BaseHTTPResponse:
         """
@@ -741,8 +753,11 @@ class HTTPConnectionPool(ConnectionPool, RequestMethods):
         # have to copy the headers dict so we can safely change it without those
         # changes being reflected in anyone else's copy.
         if not http_tunnel_required:
-            headers = headers.copy()  # type: ignore[attr-defined]
-            headers.update(self.proxy_headers)  # type: ignore[union-attr]
+            headers = {} if headers is None else headers.copy()
+            suppressed = _proxy_headers_suppressed or frozenset()
+            for header, value in self.proxy_headers.items():
+                if header.lower() not in suppressed:
+                    headers[header] = value
 
         # Must keep the exception bound to a separate variable or else Python 3
         # complains about UnboundLocalError.
@@ -887,12 +902,22 @@ class HTTPConnectionPool(ConnectionPool, RequestMethods):
                 body_pos=body_pos,
                 preload_content=preload_content,
                 decode_content=decode_content,
+                _proxy_headers_suppressed=_proxy_headers_suppressed,
                 **response_kw,
             )
 
         # Handle redirect?
         redirect_location = redirect and response.get_redirect_location()
         if redirect_location:
+            source_url = _url_from_pool(self, url) if url.startswith("/") else url
+
+            # Resolve a relative Location against the request URL. Root-relative
+            # references are already valid request targets for this pool.
+            if not _SCHEME_RE.search(redirect_location) or redirect_location.startswith(
+                "//"
+            ):
+                redirect_location = urljoin(source_url, redirect_location)
+
             if response.status == 303:
                 # Change the method according to RFC 9110, Section 15.4.4.
                 method = "GET"
@@ -905,20 +930,44 @@ class HTTPConnectionPool(ConnectionPool, RequestMethods):
                 body_pos = None
                 headers = HTTPHeaderDict(headers)._prepare_for_method_change()
 
+            decision = retries.evaluate_redirect(source_url, redirect_location, headers)
+
+            if decision.reject:
+                response.drain_conn()
+                if retries.raise_on_redirect:
+                    raise MaxRetryError(
+                        self,
+                        url,
+                        RedirectDowngradeError(
+                            source_url,
+                            redirect_location,
+                            removed_headers=decision.removed_headers,
+                            policy_reason=decision.reason,
+                        ),
+                    )
+                return response
+
+            suppressed_proxy_headers = _proxy_headers_suppressed or frozenset()
+            if not decision.same_origin:
+                suppressed_proxy_headers |= retries.redirect_credential_headers
+
             # Strip headers marked as unsafe to forward to the redirected location.
-            # Check remove_headers_on_redirect to avoid a potential network call within
-            # self.is_same_host() which may use socket.gethostbyname() in the future.
-            if retries.remove_headers_on_redirect and not self.is_same_host(
-                redirect_location
-            ):
-                new_headers = headers.copy()  # type: ignore[union-attr]
+            if decision.removed_headers and headers is not None:
+                new_headers = headers.copy()
                 for header in headers:
-                    if header.lower() in retries.remove_headers_on_redirect:
+                    if header.lower() in decision.removed_headers:
                         new_headers.pop(header, None)
                 headers = new_headers
 
             try:
-                retries = retries.increment(method, url, response=response, _pool=self)
+                retries = retries.increment(
+                    method,
+                    url,
+                    response=response,
+                    _pool=self,
+                    removed_headers=decision.removed_headers,
+                    policy_reason=decision.reason,
+                )
             except MaxRetryError:
                 if retries.raise_on_redirect:
                     response.drain_conn()
@@ -943,6 +992,7 @@ class HTTPConnectionPool(ConnectionPool, RequestMethods):
                 body_pos=body_pos,
                 preload_content=preload_content,
                 decode_content=decode_content,
+                _proxy_headers_suppressed=suppressed_proxy_headers,
                 **response_kw,
             )
 
@@ -975,6 +1025,7 @@ class HTTPConnectionPool(ConnectionPool, RequestMethods):
                 body_pos=body_pos,
                 preload_content=preload_content,
                 decode_content=decode_content,
+                _proxy_headers_suppressed=_proxy_headers_suppressed,
                 **response_kw,
             )
 
@@ -1193,26 +1244,40 @@ def _is_same_host(
     if url.startswith("/"):
         return True
 
+    target_origin = _origin_from_url(url)
+    if target_origin is None:
+        # A relative reference stays on this pool's origin.
+        return True
+
     # TODO: Add optional support for socket.gethostbyname checking.
-    url_scheme, _, url_host, url_port, *_ = parse_url(url)
-    url_scheme = url_scheme or "http"
-    if url_host is not None:
-        url_host = _normalize_host(url_host, scheme=url_scheme)
+    return target_origin == _origin_from_parts(scheme, host, port)
 
-    # Use explicit default port for comparison when none is given
-    if port is not None and url_port is None:
-        url_port = port_by_scheme.get(url_scheme)
-    elif port is None and url_port == port_by_scheme.get(url_scheme):
-        url_port = None
 
-    return (url_scheme, url_host, url_port) == (scheme, host, port)
+def _clear_sensitive_connection_state(conn: BaseHTTPConnection) -> None:
+    """Remove credentials retained on a connection before it is reused.
+
+    ``http.client`` keeps the proxy headers used for CONNECT in
+    ``_tunnel_headers`` and urllib3 keeps the proxy's raw response headers in
+    ``_raw_proxy_headers``. Neither is needed once the response has been
+    reclaimed and both may contain credential material.
+    """
+    for attribute in ("_tunnel_headers", "_raw_proxy_headers"):
+        if hasattr(conn, attribute):
+            try:
+                setattr(conn, attribute, None)
+            except (AttributeError, TypeError):
+                # Some connection implementations use read-only attributes.
+                pass
 
 
 def _url_from_pool(
     pool: HTTPConnectionPool | HTTPSConnectionPool, path: str | None = None
 ) -> str:
     """Returns the URL from a given connection pool. This is mainly used for testing and logging."""
-    return Url(scheme=pool.scheme, host=pool.host, port=pool.port, path=path).url
+    host = pool.host
+    if host and ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return Url(scheme=pool.scheme, host=host, port=pool.port, path=path).url
 
 
 def _close_pool_connections(pool: queue.LifoQueue[typing.Any]) -> None:

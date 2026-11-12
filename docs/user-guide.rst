@@ -247,7 +247,12 @@ the ``;`` delimited key-value pairs:
     # {"cookies": {"id": "30", "session": "f3efe9db"}}  
 
 Note that the ``Cookie`` header will be stripped if the server redirects to a
-different host.
+different origin. The same applies to ``Authorization`` and
+``Proxy-Authorization``, along with any headers listed in
+``Retry(remove_headers_on_redirect=...)``. Redirects from HTTPS to HTTP are
+refused by default; if you explicitly enable them with
+``Retry(allow_redirect_downgrade=True)``, all credential headers are still
+stripped before the downgraded request is sent.
 
 Cookies provided by the server are stored in the ``Set-Cookie`` header:
 

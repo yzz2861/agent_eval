@@ -34,10 +34,50 @@ from urllib3.util.ssl_ import (
     ssl_wrap_socket,
 )
 from urllib3.util.timeout import _DEFAULT_TIMEOUT, Timeout
-from urllib3.util.url import _PATH_CHARS, Url, _encode_invalid_chars, parse_url
+from urllib3.util.url import (
+    _PATH_CHARS,
+    Url,
+    _encode_invalid_chars,
+    _is_same_origin,
+    _origin_from_url,
+    parse_url,
+)
 from urllib3.util.util import to_bytes, to_str
 
 from . import clear_warnings
+
+
+class TestUrlOrigin:
+    @pytest.mark.parametrize(
+        ("a", "b"),
+        [
+            ("https://id.example/", "https://ID.EXAMPLE:443/next"),
+            ("http://id.example/", "http://id.example:80/next"),
+            ("https://[::1]/", "https://[::1]:443/next"),
+            ("http://[2001:DB8::1]/", "http://[2001:db8::1]:80/next"),
+            ("https://bücher.example/", "https://xn--bcher-kva.example:443/"),
+        ],
+        ids=["case-default-port", "http-default-port", "ipv6", "ipv6-case", "idna"],
+    )
+    def test_same_origin(self, a: str, b: str) -> None:
+        assert _is_same_origin(a, b)
+
+    @pytest.mark.parametrize(
+        ("a", "b"),
+        [
+            ("http://id.example/", "http://id.example:8080/"),
+            ("https://id.example/", "http://id.example:443/"),
+            ("http://id.example/", "http://cdn.example/"),
+            ("http://[::1]/", "http://[::2]/"),
+        ],
+        ids=["non-default-port", "downgrade", "different-host", "different-ipv6"],
+    )
+    def test_different_origin(self, a: str, b: str) -> None:
+        assert not _is_same_origin(a, b)
+
+    def test_relative_url_has_no_origin(self) -> None:
+        assert _origin_from_url("/relative") is None
+
 
 # This number represents a time in seconds, it doesn't mean anything in
 # isolation. Setting to a high-ish value to avoid conflicts with the smaller

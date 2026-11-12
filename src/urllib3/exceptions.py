@@ -106,6 +106,36 @@ class MaxRetryError(RequestError):
         return self.__class__, (None, self.url, self.reason)
 
 
+class RedirectDowngradeError(HTTPError):
+    """Raised when an HTTPS request would be redirected to an insecure URL.
+
+    This error is normally wrapped in :class:`MaxRetryError` by the redirect
+    machinery so callers can use the same retry controls they use for other
+    redirect failures.
+    """
+
+    def __init__(
+        self,
+        source_url: str | None,
+        target_url: str | None,
+        *,
+        removed_headers: tuple[str, ...] = (),
+        policy_reason: str | None = None,
+    ) -> None:
+        self.source_url = source_url
+        self.target_url = target_url
+        self.removed_headers = removed_headers
+        self.policy_reason = policy_reason
+        super().__init__(
+            f"Refusing redirect from {source_url!r} to {target_url!r}: "
+            "HTTPS to HTTP downgrade would expose credentials"
+        )
+
+
+#: Alias kept for clarity when callers describe the policy in terms of HTTPS.
+HTTPSDowngradeError = RedirectDowngradeError
+
+
 class HostChangedError(RequestError):
     """Raised when an existing pool gets a request for a foreign host."""
 

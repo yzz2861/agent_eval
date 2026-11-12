@@ -22,6 +22,7 @@ from ..exceptions import (
     ResponseError,
 )
 from .util import reraise
+from .url import _origin_from_url
 
 if typing.TYPE_CHECKING:
     from typing_extensions import Self
@@ -32,6 +33,12 @@ if typing.TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+#: Redirect policy reasons recorded in :attr:`Retry.history`.
+REDIRECT_REASON_SAME_ORIGIN = "same-origin"
+REDIRECT_REASON_CROSS_ORIGIN = "cross-origin"
+REDIRECT_REASON_HTTPS_DOWNGRADE = "https-to-http-downgrade"
+
+
 # Data structure for representing the metadata of requests that result in a retry.
 class RequestHistory(typing.NamedTuple):
     method: str | None
@@ -39,6 +46,32 @@ class RequestHistory(typing.NamedTuple):
     error: Exception | None
     status: int | None
     redirect_location: str | None
+    removed_headers: tuple[str, ...] = ()
+    policy_reason: str | None = None
+
+    @property
+    def removed_header_names(self) -> tuple[str, ...]:
+        """Alias for :attr:`removed_headers`."""
+        return self.removed_headers
+
+    @property
+    def redirect_reason(self) -> str | None:
+        """Alias for :attr:`policy_reason`."""
+        return self.policy_reason
+
+
+class RedirectCredentialPolicy(typing.NamedTuple):
+    """The result of evaluating a redirect against the credential policy.
+
+    ``removed_headers`` contains header *names* only. Header values are never
+    retained for audit history.
+    """
+
+    same_origin: bool
+    downgrade: bool
+    reject: bool
+    reason: str
+    removed_headers: tuple[str, ...]
 
 
 class Retry:
@@ -190,7 +223,15 @@ class Retry:
     :param Collection remove_headers_on_redirect:
         Sequence of headers to remove from the request when a response
         indicating a redirect is returned before firing off the redirected
-        request.
+        request. These headers are removed in addition to the default
+        credential headers (``Authorization``, ``Cookie``, and
+        ``Proxy-Authorization``) when a redirect crosses origins.
+
+    :param bool allow_redirect_downgrade:
+        Whether to follow redirects from HTTPS to HTTP. Defaults to ``False``
+        because a downgrade can expose credentials and request data. When
+        enabled, credential headers are still removed before the downgraded
+        request is sent.
 
     :param int retry_after_max: Number of seconds to allow as the maximum for
         Retry-After headers. Defaults to :attr:`Retry.DEFAULT_RETRY_AFTER_MAX`.
@@ -210,6 +251,11 @@ class Retry:
     #: Default headers to be used for ``remove_headers_on_redirect``
     DEFAULT_REMOVE_HEADERS_ON_REDIRECT = frozenset(
         ["Cookie", "Authorization", "Proxy-Authorization"]
+    )
+
+    #: Credential-bearing headers that must never be forwarded across origins.
+    DEFAULT_CREDENTIAL_HEADERS = frozenset(
+        ["authorization", "cookie", "proxy-authorization"]
     )
 
     #: Default maximum backoff time.
@@ -243,6 +289,7 @@ class Retry:
         ] = DEFAULT_REMOVE_HEADERS_ON_REDIRECT,
         backoff_jitter: float = 0.0,
         retry_after_max: int = DEFAULT_RETRY_AFTER_MAX,
+        allow_redirect_downgrade: bool = False,
     ) -> None:
         self.total = total
         self.connect = connect
@@ -277,6 +324,70 @@ class Retry:
             h.lower() for h in remove_headers_on_redirect
         )
         self.backoff_jitter = backoff_jitter
+        self.allow_redirect_downgrade = allow_redirect_downgrade
+
+    @property
+    def redirect_credential_headers(self) -> frozenset[str]:
+        """Header names that must be removed on a cross-origin redirect."""
+        return self.DEFAULT_CREDENTIAL_HEADERS | self.remove_headers_on_redirect
+
+    def evaluate_redirect(
+        self,
+        source_url: str,
+        target_url: str,
+        headers: typing.Mapping[str, str] | None = None,
+        *,
+        extra_remove_headers: typing.Collection[str] = (),
+    ) -> RedirectCredentialPolicy:
+        """Evaluate the redirect credential policy for a single hop.
+
+        The returned decision records removed header names and a policy
+        reason. Header values are intentionally never included.
+        """
+        source_origin = _origin_from_url(source_url)
+        target_origin = _origin_from_url(target_url)
+
+        # Relative references stay on the current origin.
+        same_origin = target_origin is None or source_origin == target_origin
+        downgrade = (
+            source_origin is not None
+            and target_origin is not None
+            and source_origin[0] == "https"
+            and target_origin[0] == "http"
+        )
+
+        if downgrade:
+            reason = REDIRECT_REASON_HTTPS_DOWNGRADE
+            same_origin = False
+        elif same_origin:
+            reason = REDIRECT_REASON_SAME_ORIGIN
+        else:
+            reason = REDIRECT_REASON_CROSS_ORIGIN
+
+        reject = downgrade and not self.allow_redirect_downgrade
+
+        removed_headers: tuple[str, ...] = ()
+        if headers is not None and (not same_origin or downgrade):
+            headers_to_remove = self.redirect_credential_headers | {
+                header.lower() for header in extra_remove_headers
+            }
+            removed_headers = tuple(
+                sorted(
+                    {
+                        header.lower()
+                        for header in headers
+                        if header.lower() in headers_to_remove
+                    }
+                )
+            )
+
+        return RedirectCredentialPolicy(
+            same_origin=same_origin,
+            downgrade=downgrade,
+            reject=reject,
+            reason=reason,
+            removed_headers=removed_headers,
+        )
 
     def new(self, **kw: typing.Any) -> Self:
         params = dict(
@@ -297,6 +408,7 @@ class Retry:
             remove_headers_on_redirect=self.remove_headers_on_redirect,
             respect_retry_after_header=self.respect_retry_after_header,
             backoff_jitter=self.backoff_jitter,
+            allow_redirect_downgrade=self.allow_redirect_downgrade,
         )
 
         params.update(kw)
@@ -478,6 +590,8 @@ class Retry:
         error: Exception | None = None,
         _pool: ConnectionPool | None = None,
         _stacktrace: TracebackType | None = None,
+        removed_headers: typing.Collection[str] = (),
+        policy_reason: str | None = None,
     ) -> Self:
         """Return a new Retry object with incremented retry counters.
 
@@ -546,7 +660,15 @@ class Retry:
                 status = response.status
 
         history = self.history + (
-            RequestHistory(method, url, error, status, redirect_location),
+            RequestHistory(
+                method,
+                url,
+                error,
+                status,
+                redirect_location,
+                tuple(sorted(header.lower() for header in removed_headers)),
+                policy_reason,
+            ),
         )
 
         new_retry = self.new(

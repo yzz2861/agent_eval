@@ -31,6 +31,7 @@ from urllib3.exceptions import (
     LocationValueError,
     MaxRetryError,
     ProtocolError,
+    RedirectDowngradeError,
     ReadTimeoutError,
     SSLError,
     TimeoutError,
@@ -39,6 +40,7 @@ from urllib3.exceptions import (
 from urllib3.response import HTTPResponse
 from urllib3.util.ssl_match_hostname import CertificateError
 from urllib3.util.timeout import _DEFAULT_TIMEOUT, Timeout
+from urllib3.util.url import parse_url
 
 from .test_response import MockChunkedEncodingResponse, MockSock
 
@@ -903,3 +905,341 @@ class TestConnectionPool:
             "http://[fe80::1%251]:8080/next?x=%23",
             "http://[fe80::1%251]:8080/next?x=%23",
         ]
+
+
+def _response_side_effect(
+    responses: list[HTTPResponse],
+) -> typing.Callable[..., HTTPResponse]:
+    """Return responses while also exposing the retry state like real requests."""
+
+    def side_effect(*args: typing.Any, **kwargs: typing.Any) -> HTTPResponse:
+        response = responses.pop(0)
+        response.retries = kwargs.get("retries")
+        return response
+
+    return side_effect
+
+
+def _sent_headers(request: Mock) -> list[dict[str, str]]:
+    return [dict(call.kwargs.get("headers") or {}) for call in request.call_args_list]
+
+
+class TestRedirectCredentialPolicy:
+    def test_cross_origin_strips_default_and_configured_credentials(self) -> None:
+        responses = [
+            HTTPResponse(status=302, headers={"location": "http://cdn.example/next"}),
+            HTTPResponse(status=200),
+        ]
+        with HTTPConnectionPool("id.example", 80) as pool:
+            with patch.object(
+                pool, "_make_request", side_effect=_response_side_effect(responses)
+            ) as request:
+                pool.urlopen(
+                    "GET",
+                    "http://id.example/start",
+                    headers={
+                        "Authorization": "secret",
+                        "Cookie": "session=secret",
+                        "Proxy-Authorization": "proxy-secret",
+                        "X-API-Secret": "caller-secret",
+                    },
+                    assert_same_host=False,
+                    retries=Retry(total=2, remove_headers_on_redirect=["X-API-Secret"]),
+                )
+
+        hops = _sent_headers(request)
+        assert hops[0] == {
+            "Authorization": "secret",
+            "Cookie": "session=secret",
+            "Proxy-Authorization": "proxy-secret",
+            "X-API-Secret": "caller-secret",
+        }
+        assert hops[1] == {}
+
+    @pytest.mark.parametrize(
+        ("pool_host", "pool_port", "target"),
+        [
+            ("id.example", 80, "http://ID.EXAMPLE:80/next"),
+            ("id.example", 443, "https://ID.EXAMPLE/next"),
+            ("[::1]", 8080, "http://[::1]:8080/next"),
+            ("bücher.example", 443, "https://xn--bcher-kva.example:443/next"),
+        ],
+        ids=["default-port-case", "https-default-port", "ipv6-literal", "idna"],
+    )
+    def test_same_origin_keeps_credentials(
+        self, pool_host: str, pool_port: int, target: str
+    ) -> None:
+        responses = [
+            HTTPResponse(status=302, headers={"location": target}),
+            HTTPResponse(status=200),
+        ]
+        pool_cls = (
+            HTTPSConnectionPool if target.startswith("https") else HTTPConnectionPool
+        )
+        with pool_cls(pool_host, pool_port) as pool:
+            with patch.object(
+                pool, "_make_request", side_effect=_response_side_effect(responses)
+            ) as request:
+                pool.urlopen(
+                    "GET",
+                    "/start",
+                    headers={"Authorization": "secret"},
+                    assert_same_host=False,
+                    retries=Retry(total=2),
+                )
+
+        hops = _sent_headers(request)
+        assert hops[0]["Authorization"] == "secret"
+        assert hops[1]["Authorization"] == "secret"
+
+    def test_non_default_port_is_cross_origin(self) -> None:
+        responses = [
+            HTTPResponse(
+                status=302, headers={"location": "http://id.example:8080/next"}
+            ),
+            HTTPResponse(status=200),
+        ]
+        with HTTPConnectionPool("id.example", 80) as pool:
+            with patch.object(
+                pool, "_make_request", side_effect=_response_side_effect(responses)
+            ) as request:
+                pool.urlopen(
+                    "GET",
+                    "/start",
+                    headers={"Authorization": "secret"},
+                    assert_same_host=False,
+                    retries=Retry(total=2),
+                )
+
+        hops = _sent_headers(request)
+        assert hops[1] == {}
+
+    def test_https_to_http_downgrade_is_rejected_by_default(self) -> None:
+        responses = [
+            HTTPResponse(status=302, headers={"location": "http://id.example/next"}),
+            HTTPResponse(status=200),
+        ]
+        with HTTPSConnectionPool("id.example", 443) as pool:
+            with patch.object(
+                pool, "_make_request", side_effect=_response_side_effect(responses)
+            ) as request:
+                with pytest.raises(MaxRetryError) as error:
+                    pool.urlopen(
+                        "GET",
+                        "/start",
+                        headers={"Authorization": "secret"},
+                        assert_same_host=False,
+                        retries=Retry(total=2),
+                    )
+
+        assert isinstance(error.value.reason, RedirectDowngradeError)
+        assert error.value.reason.policy_reason == "https-to-http-downgrade"
+        assert error.value.reason.removed_headers == ("authorization",)
+        assert request.call_count == 1
+
+    def test_allowed_downgrade_still_strips_all_credentials(self) -> None:
+        responses = [
+            HTTPResponse(status=302, headers={"location": "http://id.example/next"}),
+            HTTPResponse(status=200),
+        ]
+        with HTTPSConnectionPool("id.example", 443) as pool:
+            with patch.object(
+                pool, "_make_request", side_effect=_response_side_effect(responses)
+            ) as request:
+                pool.urlopen(
+                    "GET",
+                    "/start",
+                    headers={
+                        "Authorization": "secret",
+                        "Cookie": "cookie=secret",
+                        "X-API-Secret": "caller-secret",
+                    },
+                    assert_same_host=False,
+                    retries=Retry(
+                        total=2,
+                        allow_redirect_downgrade=True,
+                        remove_headers_on_redirect=["X-API-Secret"],
+                    ),
+                )
+
+        hops = _sent_headers(request)
+        assert hops[0] == {
+            "Authorization": "secret",
+            "Cookie": "cookie=secret",
+            "X-API-Secret": "caller-secret",
+        }
+        assert hops[1] == {}
+
+    def test_return_to_original_origin_does_not_restore_credentials(self) -> None:
+        responses = [
+            HTTPResponse(status=302, headers={"location": "https://cdn.example/next"}),
+            HTTPResponse(status=302, headers={"location": "https://id.example/final"}),
+            HTTPResponse(status=200),
+        ]
+        with HTTPSConnectionPool("id.example", 443) as pool:
+            with patch.object(
+                pool, "_make_request", side_effect=_response_side_effect(responses)
+            ) as request:
+                pool.urlopen(
+                    "GET",
+                    "/start",
+                    headers={"Authorization": "secret", "Cookie": "cookie=secret"},
+                    assert_same_host=False,
+                    retries=Retry(total=3),
+                )
+
+        hops = _sent_headers(request)
+        assert "Authorization" in hops[0]
+        assert hops[1] == {}
+        assert hops[2] == {}
+
+    def test_repeated_same_origin_redirects_keep_credentials(self) -> None:
+        responses = [
+            HTTPResponse(status=302, headers={"location": "/second"}),
+            HTTPResponse(status=302, headers={"location": "/third"}),
+            HTTPResponse(status=200),
+        ]
+        with HTTPConnectionPool("id.example", 80) as pool:
+            with patch.object(
+                pool, "_make_request", side_effect=_response_side_effect(responses)
+            ) as request:
+                pool.urlopen(
+                    "GET",
+                    "/start",
+                    headers={"Authorization": "secret"},
+                    retries=Retry(total=2),
+                )
+
+        hops = _sent_headers(request)
+        assert all(hop["Authorization"] == "secret" for hop in hops)
+
+    def test_relative_location_stays_on_same_origin(self) -> None:
+        responses = [
+            HTTPResponse(status=302, headers={"location": "next"}),
+            HTTPResponse(status=200),
+        ]
+        with HTTPConnectionPool("id.example", 80) as pool:
+            with patch.object(
+                pool, "_make_request", side_effect=_response_side_effect(responses)
+            ) as request:
+                pool.urlopen(
+                    "GET",
+                    "/start",
+                    headers={"Authorization": "secret"},
+                    retries=Retry(total=2),
+                )
+
+        hops = _sent_headers(request)
+        assert hops[1]["Authorization"] == "secret"
+
+    def test_proxy_credentials_are_not_restored_on_second_redirect(self) -> None:
+        responses = [
+            HTTPResponse(status=302, headers={"location": "http://cdn.example/next"}),
+            HTTPResponse(status=302, headers={"location": "http://id.example/final"}),
+            HTTPResponse(status=200),
+        ]
+        with HTTPConnectionPool(
+            "proxy.host",
+            8080,
+            _proxy=parse_url("http://proxy.host:8080"),
+            _proxy_headers={"Proxy-Authorization": "proxy-secret"},
+        ) as pool:
+            with patch.object(
+                pool, "_make_request", side_effect=_response_side_effect(responses)
+            ) as request:
+                pool.urlopen(
+                    "GET",
+                    "http://id.example/start",
+                    headers={"Authorization": "secret"},
+                    assert_same_host=False,
+                    retries=Retry(total=3),
+                )
+
+        hops = _sent_headers(request)
+        assert hops[0]["Authorization"] == "secret"
+        assert hops[0]["Proxy-Authorization"] == "proxy-secret"
+        assert hops[1] == {}
+        assert hops[2] == {}
+
+    def test_redirect_history_records_names_and_reasons_without_values(self) -> None:
+        responses = [
+            HTTPResponse(status=302, headers={"location": "http://cdn.example/next"}),
+            HTTPResponse(status=302, headers={"location": "http://cdn.example/final"}),
+            HTTPResponse(status=200),
+        ]
+        with HTTPConnectionPool("id.example", 80) as pool:
+            with patch.object(
+                pool, "_make_request", side_effect=_response_side_effect(responses)
+            ):
+                response = pool.urlopen(
+                    "GET",
+                    "http://id.example/start",
+                    headers={
+                        "Authorization": "top-secret",
+                        "Cookie": "cookie-secret",
+                        "X-API-Secret": "caller-secret",
+                    },
+                    assert_same_host=False,
+                    retries=Retry(total=3, remove_headers_on_redirect=["X-API-Secret"]),
+                )
+
+        assert response.retries is not None
+        history = response.retries.history
+        assert history[0].url == "http://id.example/start"
+        assert history[0].redirect_location == "http://cdn.example/next"
+        assert history[0].removed_headers == (
+            "authorization",
+            "cookie",
+            "x-api-secret",
+        )
+        assert history[0].policy_reason == "cross-origin"
+        assert history[1].url == "http://cdn.example/next"
+        assert history[1].redirect_location == "http://cdn.example/final"
+        assert history[1].removed_headers == ()
+        assert history[1].policy_reason == "same-origin"
+        assert "top-secret" not in repr(history)
+        assert "cookie-secret" not in repr(history)
+
+    @pytest.mark.parametrize("status", [307, 308])
+    def test_307_and_308_preserve_method_and_body(self, status: int) -> None:
+        responses = [
+            HTTPResponse(status=status, headers={"location": "/next"}),
+            HTTPResponse(status=200),
+        ]
+        with HTTPConnectionPool("id.example", 80) as pool:
+            with patch.object(
+                pool, "_make_request", side_effect=_response_side_effect(responses)
+            ) as request:
+                pool.urlopen(
+                    "POST",
+                    "/start",
+                    body=b"payload",
+                    headers={"Authorization": "secret"},
+                    retries=Retry(total=2),
+                )
+
+        second = request.call_args_list[1]
+        assert second.args[1] == "POST"
+        assert second.kwargs["body"] == b"payload"
+
+    def test_303_still_converts_method_and_drops_body(self) -> None:
+        responses = [
+            HTTPResponse(status=303, headers={"location": "/next"}),
+            HTTPResponse(status=200),
+        ]
+        with HTTPConnectionPool("id.example", 80) as pool:
+            with patch.object(
+                pool, "_make_request", side_effect=_response_side_effect(responses)
+            ) as request:
+                pool.urlopen(
+                    "POST",
+                    "/start",
+                    body=b"payload",
+                    headers={"Content-Length": "7"},
+                    retries=Retry(total=2),
+                )
+
+        second = request.call_args_list[1]
+        assert second.args[1] == "GET"
+        assert second.kwargs["body"] is None
+        assert "Content-Length" not in second.kwargs["headers"]

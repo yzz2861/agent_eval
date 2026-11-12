@@ -1283,7 +1283,15 @@ class TestRetry(HypercornDummyServerTestCase):
             assert resp.status == 200
             assert resp.retries is not None
             assert resp.retries.history == (
-                RequestHistory("GET", "/redirect?target=%2F", None, 303, "/"),
+                RequestHistory(
+                    "GET",
+                    "/redirect?target=%2F",
+                    None,
+                    303,
+                    "/",
+                    (),
+                    "same-origin",
+                ),
             )
 
     def test_multi_redirect_history(self) -> None:

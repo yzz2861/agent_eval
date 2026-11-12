@@ -13,14 +13,13 @@ from .connection import ProxyConfig
 from .connectionpool import (
     HTTPConnectionPool,
     HTTPSConnectionPool,
-    _is_same_host,
-    _normalize_host,
     port_by_scheme,
 )
 from .exceptions import (
     LocationValueError,
     MaxRetryError,
     ProxySchemeUnknown,
+    RedirectDowngradeError,
     URLSchemeUnknown,
 )
 from .response import BaseHTTPResponse
@@ -501,19 +500,46 @@ class PoolManager(RequestMethods):
         # the request URL and so has to be recomputed for the new location.
         # 'conn' is the proxy's pool when forwarding through an HTTP proxy, so
         # compare the request URL itself rather than asking the pool.
-        scheme = u.scheme or "http"
-        if kw["headers"] is not None and not _is_same_host(
-            redirect_location, scheme, _normalize_host(u.host, scheme=scheme), u.port
-        ):
-            headers_to_remove = retries.remove_headers_on_redirect | {"host"}
+        decision = retries.evaluate_redirect(
+            url, redirect_location, kw["headers"], extra_remove_headers={"host"}
+        )
+
+        if decision.reject:
+            response.drain_conn()
+            if retries.raise_on_redirect:
+                raise MaxRetryError(
+                    conn,
+                    url,
+                    RedirectDowngradeError(
+                        url,
+                        redirect_location,
+                        removed_headers=decision.removed_headers,
+                        policy_reason=decision.reason,
+                    ),
+                )
+            return response
+
+        suppressed_proxy_headers = kw.get("_proxy_headers_suppressed") or frozenset()
+        if not decision.same_origin:
+            suppressed_proxy_headers |= retries.redirect_credential_headers
+        kw["_proxy_headers_suppressed"] = suppressed_proxy_headers
+
+        if decision.removed_headers and kw["headers"] is not None:
             new_headers = kw["headers"].copy()
             for header in kw["headers"]:
-                if header.lower() in headers_to_remove:
+                if header.lower() in decision.removed_headers:
                     new_headers.pop(header, None)
             kw["headers"] = new_headers
 
         try:
-            retries = retries.increment(method, url, response=response, _pool=conn)
+            retries = retries.increment(
+                method,
+                url,
+                response=response,
+                _pool=conn,
+                removed_headers=decision.removed_headers,
+                policy_reason=decision.reason,
+            )
         except MaxRetryError:
             if retries.raise_on_redirect:
                 response.drain_conn()
@@ -658,7 +684,10 @@ class ProxyManager(PoolManager):
             )
 
         return super().connection_from_host(
-            self.proxy.host, self.proxy.port, self.proxy.scheme, pool_kwargs=pool_kwargs  # type: ignore[union-attr]
+            self.proxy.host,
+            self.proxy.port,
+            self.proxy.scheme,
+            pool_kwargs=pool_kwargs,  # type: ignore[union-attr]
         )
 
     def _set_proxy_headers(

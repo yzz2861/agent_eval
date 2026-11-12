@@ -263,7 +263,8 @@ class TestHTTPProxyManager(HypercornDummyProxyTestCase):
 
     def test_oldapi(self) -> None:
         with ProxyManager(
-            connection_from_url(self.proxy_url), ca_certs=DEFAULT_CA  # type: ignore[arg-type]
+            connection_from_url(self.proxy_url),
+            ca_certs=DEFAULT_CA,  # type: ignore[arg-type]
         ) as http:
             r = http.request("GET", f"{self.http_url}/")
             assert r.status == 200
@@ -387,6 +388,13 @@ class TestHTTPProxyManager(HypercornDummyProxyTestCase):
                     error=None,
                     status=303,
                     redirect_location=headers_url,
+                    removed_headers=(
+                        "authorization",
+                        "cookie",
+                        "host",
+                        "proxy-authorization",
+                    ),
+                    policy_reason="cross-origin",
                 ),
             )
             data = r.json()
@@ -423,6 +431,12 @@ class TestHTTPProxyManager(HypercornDummyProxyTestCase):
                     error=None,
                     status=303,
                     redirect_location=headers_url,
+                    removed_headers=(
+                        "authorization",
+                        "cookie",
+                        "proxy-authorization",
+                    ),
+                    policy_reason="cross-origin",
                 ),
             )
             data = r.json()

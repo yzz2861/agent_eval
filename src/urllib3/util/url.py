@@ -587,3 +587,61 @@ def parse_url(url: str) -> Url:
         query=query,
         fragment=fragment,
     )
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _normalize_host_for_origin(host: str | None, scheme: str | None) -> str | None:
+    """Normalize a host exactly the way origins are compared.
+
+    IPv6 literals are returned without brackets so hosts originating from a
+    connection pool and hosts parsed out of a URL compare equal. The case of
+    an IPv6 zone identifier is preserved because it identifies a distinct
+    network endpoint.
+    """
+    if host is None:
+        return None
+
+    normalized = _normalize_host(host, scheme=scheme)
+    if (
+        normalized is not None
+        and normalized.startswith("[")
+        and normalized.endswith("]")
+    ):
+        normalized = normalized[1:-1]
+    return normalized
+
+
+def _origin_from_parts(
+    scheme: str | None, host: str | None, port: int | None
+) -> tuple[str, str | None, int | None]:
+    """Return a normalized ``(scheme, host, port)`` origin tuple.
+
+    Default ports are made explicit so ``https://example`` and
+    ``https://example:443`` are the same origin.
+    """
+    scheme = (scheme or "http").lower()
+    host = _normalize_host_for_origin(host, scheme)
+    if port is None:
+        port = _DEFAULT_PORTS.get(scheme)
+    return scheme, host, port
+
+
+def _origin_from_url(url: str) -> tuple[str, str | None, int | None] | None:
+    """Return the normalized origin of ``url``.
+
+    Scheme-less URLs with a host are treated as HTTP, matching the rest of
+    urllib3. Returns ``None`` for path-only relative references.
+    """
+    parsed = parse_url(url)
+    if parsed.host is None:
+        return None
+    return _origin_from_parts(parsed.scheme or "http", parsed.host, parsed.port)
+
+
+def _is_same_origin(a: str, b: str) -> bool:
+    """Return whether two absolute URLs share the same normalized origin."""
+    origin_a = _origin_from_url(a)
+    origin_b = _origin_from_url(b)
+    return origin_a is not None and origin_b is not None and origin_a == origin_b
