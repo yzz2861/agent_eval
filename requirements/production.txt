@@ -1,0 +1,1 @@
+# onetimepass has no runtime dependencies (Python 3.8+ standard library only).
