@@ -60,13 +60,15 @@ class OrjsonFormatter(core.BaseJsonFormatter):
         super().__init__(*args, **kwargs)
 
         self.json_default = json_default
+        if self.safe_logging and self.json_default is not None:
+            self.json_default = core.sanitizing_json_default(self.json_default)
         self.json_indent = json_indent
         return
 
     def jsonify_log_record(self, log_data: core.LogData) -> str:
         """Returns a json string of the log data."""
         opt = orjson.OPT_NON_STR_KEYS
-        if self.json_indent:
+        if self.json_indent and not self.safe_logging:
             opt |= orjson.OPT_INDENT_2
 
         return orjson.dumps(log_data, default=self.json_default, option=opt).decode("utf8")

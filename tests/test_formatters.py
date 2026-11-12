@@ -25,7 +25,13 @@ import pytest
 ## Application
 import pythonjsonlogger
 import pythonjsonlogger.defaults
-from pythonjsonlogger.core import RESERVED_ATTRS, BaseJsonFormatter, merge_record_extra
+from pythonjsonlogger.core import (
+    RESERVED_ATTRS,
+    BaseJsonFormatter,
+    escape_control_characters,
+    merge_record_extra,
+    unescape_control_characters,
+)
 from pythonjsonlogger.json import JsonFormatter
 
 if pythonjsonlogger.ORJSON_AVAILABLE:
@@ -1161,6 +1167,105 @@ def test_stack_info_as_array_no_stack_info(
     log_json = env.load_json()
 
     assert "stack_info" not in log_json
+    return
+
+
+## Safe Logging Mode
+## -----------------------------------------------------------------------------
+SAFE_CONTROL_PAYLOAD = (
+    "alice\r\nlevel=critical\nactor=admin\rlone\x00nul\x1b[31mred\x1b[0m"
+    "\u202ertl\u0085nel\u2028line-separator"
+)
+
+
+@pytest.mark.parametrize("class_", ALL_FORMATTERS)
+def test_safe_logging_escapes_controls(env: LoggingEnvironment, class_: type[BaseJsonFormatter]):
+    env.set_formatter(class_(safe_logging=True))
+
+    env.logger.info(SAFE_CONTROL_PAYLOAD)
+    raw = env.buffer.getvalue()
+    log_json = json.loads(raw)
+
+    assert len(raw.splitlines()) == 1
+    assert log_json["message"] == escape_control_characters(SAFE_CONTROL_PAYLOAD)
+    assert unescape_control_characters(log_json["message"]) == SAFE_CONTROL_PAYLOAD
+    assert not any(char in log_json["message"] for char in "\r\n\x00\x1b\u202e\u0085\u2028")
+    return
+
+
+@pytest.mark.parametrize("class_", ALL_FORMATTERS)
+def test_safe_logging_preserves_unicode(env: LoggingEnvironment, class_: type[BaseJsonFormatter]):
+    payload = "Привет 你好 café 😀 e\u0301"
+    env.set_formatter(class_(safe_logging=True))
+
+    env.logger.info(payload)
+    log_json = json.loads(env.buffer.getvalue())
+
+    assert log_json["message"] == payload
+    return
+
+
+@pytest.mark.parametrize("class_", ALL_FORMATTERS)
+def test_safe_logging_applies_to_all_fields(
+    env: LoggingEnvironment, class_: type[BaseJsonFormatter]
+):
+    def custom_default(obj: Any) -> Any:
+        if isinstance(obj, SomeClass):
+            return {"TYPE": obj.thing, "text": "default\r\nvalue", "nested": {"nul": "\x00"}}
+        raise TypeError(f"Unexpected object: {obj!r}")
+
+    env.set_formatter(
+        class_(
+            safe_logging=True,
+            rename_fields={"message": "msg.text", "custom": "renamed.custom"},
+            static_fields={"static": "static\nvalue"},
+            json_default=custom_default,
+        )
+    )
+
+    env.logger.info(
+        "message\r\ninjection",
+        extra={
+            "custom": SomeClass(7),
+            "nested": {"text": "nested\nvalue", "bad\r\nkey": "ok"},
+        },
+    )
+    raw = env.buffer.getvalue()
+    log_json = json.loads(raw)
+
+    assert len(raw.splitlines()) == 1
+    assert log_json["msg.text"] == r"message\r\ninjection"
+    assert log_json["static"] == r"static\nvalue"
+    assert log_json["nested"]["text"] == r"nested\nvalue"
+    assert log_json["nested"][r"bad\r\nkey"] == "ok"
+    assert log_json["renamed.custom"]["text"] == r"default\r\nvalue"
+    assert log_json["renamed.custom"]["nested"]["nul"] == r"\u0000"
+    return
+
+
+@pytest.mark.parametrize("class_", ALL_FORMATTERS)
+def test_safe_logging_exception_preserves_structure(
+    env: LoggingEnvironment, class_: type[BaseJsonFormatter]
+):
+    env.set_formatter(class_(safe_logging=True))
+
+    try:
+        raise ValueError("first\nlevel=critical\r\nthird\x00\x1b[31m")
+    except ValueError:
+        env.logger.exception("user\rinjection\nline", stack_info=True)
+
+    raw = env.buffer.getvalue()
+    log_json = json.loads(raw)
+    exception_text = log_json["exc_info"]
+    stack_text = log_json["stack_info"]
+
+    assert len(raw.splitlines()) == 1
+    assert "first\nlevel=critical\r\nthird" in exception_text
+    assert "\x00" not in exception_text
+    assert "\x1b" not in exception_text
+    assert "\n" in stack_text
+    assert log_json["message"] == r"user\rinjection\nline"
+    assert "\\n" in log_json["message"]
     return
 
 

@@ -62,6 +62,13 @@ class JsonEncoder(json.JSONEncoder):
         return d.datetime_any(o)
 
 
+class _SafeJsonEncoder(JsonEncoder):
+    """Encoder used by safe mode so values produced by built-in defaults are escaped."""
+
+    def default(self, o: Any) -> Any:
+        return core.sanitize_json_value(super().default(o))
+
+
 class JsonFormatter(core.BaseJsonFormatter):
     """JSON formatter using the standard library's [`json`](https://docs.python.org/3/library/json.html) for encoding"""
 
@@ -89,12 +96,14 @@ class JsonFormatter(core.BaseJsonFormatter):
         super().__init__(*args, **kwargs)
 
         self.json_default = json_default
+        if self.safe_logging and self.json_default is not None:
+            self.json_default = core.sanitizing_json_default(self.json_default)
         self.json_encoder = json_encoder
         self.json_serializer = json_serializer
         self.json_indent = json_indent
         self.json_ensure_ascii = json_ensure_ascii
         if not self.json_encoder and not self.json_default:
-            self.json_encoder = JsonEncoder
+            self.json_encoder = _SafeJsonEncoder if self.safe_logging else JsonEncoder
         return
 
     def jsonify_log_record(self, log_data: core.LogData) -> str:
@@ -103,7 +112,7 @@ class JsonFormatter(core.BaseJsonFormatter):
             log_data,
             default=self.json_default,
             cls=self.json_encoder,
-            indent=self.json_indent,
+            indent=None if self.safe_logging else self.json_indent,
             ensure_ascii=self.json_ensure_ascii,
         )
 

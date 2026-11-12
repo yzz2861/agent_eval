@@ -56,6 +56,8 @@ class MsgspecFormatter(core.BaseJsonFormatter):
         super().__init__(*args, **kwargs)
 
         self.json_default = json_default
+        if self.safe_logging and self.json_default is not None:
+            self.json_default = core.sanitizing_json_default(self.json_default)
         self._encoder = msgspec.json.Encoder(enc_hook=self.json_default)
         return
 
