@@ -1,0 +1,21 @@
+[libdefaults]
+  default_realm = {{ domain_name | upper }}
+  # Don't try to resolve the hostnames passed in through DNS to speed up the tests
+{% if krb_provider == 'Heimdal' %}
+  name_canon_rules = as-is:realm={{ domain_name | upper }}
+{% else %}
+  rdns = false
+  dns_lookup_kdc = false
+  dns_uri_lookup = false
+  dns_canonicalize_hostname = false
+{% endif %}
+
+[realms]
+  {{ domain_name | upper }} = {
+    kdc = {{ groups['win_controller'][0] | lower }}.{{ domain_name | lower }}
+    admin_server = {{ groups['win_controller'][0] | lower }}.{{ domain_name | lower }}
+  }
+
+[domain_realm]
+  {{ domain_name | lower }} = {{ domain_name | upper }}
+  .{{ domain_name | lower }} = {{ domain_name | upper }}

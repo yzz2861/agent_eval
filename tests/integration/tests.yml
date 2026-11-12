@@ -1,0 +1,63 @@
+- name: run integration tests on Windows
+  hosts: TESTWIN
+  gather_facts: false
+  tags:
+  - windows
+
+  tasks:
+  - name: template out tests
+    ansible.windows.win_template:
+      src: test_integration.py.tmpl
+      dest: C:\temp\test_integration.py
+      block_start_string: '{!!'
+      block_end_string: '!!}'
+
+  - name: run integration tests as a normal user account
+    ansible.windows.win_command: >
+      "{{ python_venv_path }}\{{ item | win_basename }}\Scripts\python.exe"
+      -m
+      pytest
+      C:\temp\test_integration.py
+      -v
+    with_items: '{{ python_interpreters }}'
+    become: true
+    become_method: runas
+    vars:
+      ansible_become_user: '{{ domain_upn }}'
+      ansible_become_pass: '{{ domain_password }}'
+
+  - name: run integration tests as the SYSTEM account
+    ansible.windows.win_command: >
+      "{{ python_venv_path }}\{{ item | win_basename }}\Scripts\python.exe"
+      -m
+      pytest
+      C:\temp\test_integration.py
+      -v
+    with_items: '{{ python_interpreters }}'
+    become: true
+    become_method: runas
+    become_user: SYSTEM
+
+- name: run integration tests on Linux
+  hosts: linux_children
+  gather_facts: false
+  tags:
+  - linux
+
+  tasks:
+  - name: template out tests
+    ansible.builtin.template:
+      src: test_integration.py.tmpl
+      dest: ~/test_integration.py
+      block_start_string: '{!!'
+      block_end_string: '!!}'
+
+  - name: run integration tests
+    ansible.builtin.command: >
+      "{{ python_venv_path }}/{{ item | basename }}/bin/python"
+      -m
+      pytest
+      ~/test_integration.py
+      -v
+      --forked
+    with_items: '{{ python_interpreters }}'

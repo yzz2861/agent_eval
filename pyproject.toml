@@ -1,0 +1,143 @@
+[build-system]
+requires = [
+    "setuptools >= 77.0.3",  # license and license-files alignment
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyspnego"
+description = "Windows Negotiate Authentication Client and Server"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Jordan Borean", email = "jborean93@gmail.com" }
+]
+keywords = ["windows", "spnego", "negotiate", "ntlm", "kerberos", "sspi", "gssapi", "auth"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15"
+]
+dependencies = [
+    "cryptography",
+    "sspilib >= 0.5.0; sys_platform == 'win32'"  # Retrieve canonicalized principal in cred.client
+]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+kerberos = [
+    "gssapi >= 1.6.0; sys_platform != 'win32'",
+    "krb5 >= 0.3.0; sys_platform != 'win32'"
+]
+yaml = ["ruamel.yaml"]
+
+[project.scripts]
+pyspnego-parse = "spnego.__main__:main"
+
+[project.urls]
+homepage = "https://github.com/jborean93/pyspnego"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.dynamic]
+version = {attr = "spnego._version.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+spnego = ["py.typed"]
+
+[tool.ruff]
+line-length = 120
+extend-exclude = [
+    "*.md",
+    "tests/integration/collections",
+]
+
+[tool.ruff.lint]
+select = [
+    "I",  # isort
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["spnego"]
+
+[tool.mypy]
+exclude = [
+    "build/",
+    "tests/integration/collections/",
+]
+mypy_path = "$MYPY_CONFIG_FILE_DIR/src"
+show_error_codes = true
+show_column_numbers = true
+disallow_any_unimported = true
+disallow_untyped_calls = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+
+# The ignores in this file are platform dependent so the ignores will not be
+# needed on some flagging this rule. Just avoid specifically for this file
+[[tool.mypy.overrides]]
+module = "spnego.exceptions"
+warn_unused_ignores = false
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+
+# Cannot install on Windows so we cannot validate this
+[[tool.mypy.overrides]]
+module = "spnego._gss"
+disallow_any_unimported = false
+
+[[tool.mypy.overrides]]
+module = "gssapi.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "krb5.*"
+ignore_missing_imports = true
+
+# Cannot install on non-Windows so we cannot validate this
+[[tool.mypy.overrides]]
+module = "spnego._sspi"
+disallow_any_unimported = false
+
+[[tool.mypy.overrides]]
+module = "sspilib.*"
+ignore_missing_imports = true
+
+# These types are used in tests, too much effort to create stubs
+[[tool.mypy.overrides]]
+module = "argcomplete"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "ruamel"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "win32net"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "win32netcon"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = "tests"
+junit_family = "xunit2"

@@ -1,0 +1,602 @@
+- name: setup local configuration and scratch information
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+  - name: create cert output folder
+    ansible.builtin.file:
+      path: '{{ playbook_dir }}/cert_setup'
+      state: directory
+
+  - name: create generate_cert script
+    ansible.builtin.template:
+      src: generate_cert.sh.tmpl
+      dest: '{{ playbook_dir }}/cert_setup/generate_cert.sh'
+      mode: '700'
+
+  - name: generate CA and LDAPS certificates
+    ansible.builtin.shell: ./generate_cert.sh password
+    args:
+      creates: '{{ playbook_dir }}/cert_setup/complete.txt'
+      chdir: '{{ playbook_dir }}/cert_setup'
+
+- name: get network adapter for each Windows host
+  hosts: windows
+  gather_facts: false
+  tasks:
+  - name: get network connection for private adapter
+    ansible.windows.win_powershell:
+      parameters:
+        IPAddress: '{{ ansible_host }}'
+      script: |
+        param($IPAddress)
+
+        $Ansible.Changed = $false
+
+        foreach ($instance in (Get-CimInstance -ClassName Win32_NetworkAdapter -Filter "Netenabled='True'")) {
+            $config = Get-CimInstance -ClassName WIn32_NetworkAdapterConfiguration -Filter "Index = '$($instance.Index)'"
+            if ($config.IPAddress -contains $IPAddress) {
+                $instance.NetConnectionID
+            }
+        }
+    register: network_connection_name_raw
+
+  - name: fail if we didn't get a network connection name
+    ansible.builtin.fail:
+      msg: Failed to get the Windows network connection name
+    when: network_connection_name_raw.output | count != 1
+
+  - name: set fact of network connection name
+    ansible.builtin.set_fact:
+      network_connection_name: '{{ network_connection_name_raw.output[0] }}'
+
+  - name: copy CA certificate
+    ansible.windows.win_copy:
+      src: '{{ playbook_dir }}/cert_setup/ca.pem'
+      dest: C:\Windows\TEMP\ca.pem
+
+  - name: import CA certificate to trusted root CA
+    ansible.windows.win_certificate_store:
+      path: C:\Windows\TEMP\ca.pem
+      state: present
+      store_location: LocalMachine
+      store_name: Root
+
+- name: create Domain Controller
+  hosts: win_controller
+  gather_facts: false
+  tasks:
+  - name: set the DNS for the specified adapter to localhost
+    ansible.windows.win_dns_client:
+      adapter_name: '{{ network_connection_name }}'
+      ipv4_addresses: 127.0.0.1
+
+  - name: ensure domain exists and DC is promoted as a domain controller
+    microsoft.ad.domain:
+      dns_domain_name: '{{ domain_name }}'
+      safe_mode_password: '{{ domain_password }}'
+      reboot: true
+
+  - name: create domain username
+    microsoft.ad.user:
+      name: '{{ domain_username }}'
+      upn: '{{ domain_upn }}'
+      description: '{{ domain_username }} Domain Account'
+      password: '{{ domain_password }}'
+      password_never_expires: true
+      update_password: on_create
+      groups:
+        add:
+        - Domain Admins
+      state: present
+
+  - name: test out domain user that was created
+    ansible.windows.win_whoami:
+    register: become_res
+    failed_when: become_res.upn != domain_upn
+    become: true
+    become_method: runas
+    vars:
+      ansible_become_user: '{{ domain_upn }}'
+      ansible_become_pass: '{{ domain_password }}'
+
+  - name: copy LDAPS certificate
+    ansible.windows.win_copy:
+      src: '{{ playbook_dir }}/cert_setup/DC01.pfx'
+      dest: C:\Windows\TEMP\ldaps.pfx
+
+  - name: import LDAPS certificate
+    ansible.windows.win_certificate_store:
+      path: C:\Windows\TEMP\ldaps.pfx
+      password: password
+      key_exportable: false
+      key_storage: machine
+      state: present
+      store_type: service
+      store_location: NTDS
+      store_name: My
+    register: ldaps_cert_info
+
+  - name: register LDAPS certificate
+    ansible.windows.win_powershell:
+      script: |
+        $dse = [adsi]'LDAP://localhost/rootDSE'
+        [void]$dse.Properties['renewServerCertificate'].Add(1)
+        $dse.CommitChanges()
+    when: ldaps_cert_info is changed
+    vars:
+      ansible_become: true
+      ansible_become_method: runas
+      ansible_become_user: '{{ domain_upn }}'
+      ansible_become_pass: '{{ domain_password }}'
+
+  - name: create group which can access gMSA
+    microsoft.ad.group:
+      name: gMSAUsers
+      scope: global
+      state: present
+      members:
+        add:
+        - '{{ domain_username }}'
+
+  - name: Create KDS root key if not present
+    ansible.windows.win_powershell:
+      error_action: stop
+      script: |
+        $Ansible.Changed = $false
+        if (-not (Get-KdsRootKey)) {
+            Add-KdsRootKey -EffectiveTime ((Get-Date).AddHours(-10))
+            $Ansible.Changed = $true
+        }
+    become: true
+    become_method: runas
+    become_user: SYSTEM
+
+  - name: create gMSA account
+    microsoft.ad.service_account:
+      identity: '{{ gmsa_username }}'
+      dns_hostname: '{{ gmsa_username }}@{{ domain_name }}'
+      kerberos_encryption_types:
+        set:
+        - aes128
+        - aes256
+      allowed_to_retrieve_password:
+        set:
+        - gMSAUsers
+      upn: '{{ gmsa_username }}$@{{ domain_name }}'
+    become: true
+    become_method: runas
+    become_user: SYSTEM
+
+- name: create test keytabs
+  hosts: TESTWIN,linux_children
+  gather_facts: false
+  tasks:
+  - name: create AD principal for host keytabs
+    microsoft.ad.user:
+      name: '{{ inventory_hostname }}_{{ item }}'
+      description: Kerberos principal for {{ inventory_hostname }} {{ item }} keytab
+      password: '{{ domain_password }}'
+      password_never_expires: true
+      update_password: on_create
+      attributes:
+        set:
+          msDS-SupportedEncryptionTypes: 16  # AES256_CTS_HMAC_SHA1_96
+      state: present
+    become: false
+    delegate_to: DC01
+    with_items:
+    - SERV1
+    - serv2
+
+  - name: create service keytabs
+    ansible.windows.win_command: >-
+      ktpass.exe
+      -out C:\temp\{{ inventory_hostname }}-{{ item }}.keytab
+      -princ {{ item }}/{{ inventory_hostname }}.{{ domain_name }}@{{ domain_name | upper }}
+      -mapUser {{ inventory_hostname }}_{{ item }}@{{ domain_name | upper }}
+      +rndpass
+      -mapOp set
+      -crypto AES256-SHA1
+      -ptype KRB5_NT_PRINCIPAL
+    args:
+      creates: C:\temp\{{ inventory_hostname }}-{{ item }}.keytab
+    become: false
+    delegate_to: DC01
+    with_items:
+    - SERV1
+    - serv2
+
+  - name: create user keytab
+    ansible.windows.win_command: >-
+      ktpass.exe
+      -out C:\temp\{{ domain_username }}.keytab
+      -princ {{ domain_upn }}
+      -mapuser {{ domain_upn }}
+      -pass {{ domain_password }}
+      -crypto AES256-SHA1
+      -ptype KRB5_NT_PRINCIPAL
+    args:
+      creates: C:\temp\{{ domain_username }}.keytab
+    become: false
+    delegate_to: DC01
+    run_once: true
+
+  - name: fetch the service keytab
+    ansible.builtin.fetch:
+      src: C:\temp\{{ inventory_hostname }}-{{ item }}.keytab
+      dest: '{{ inventory_hostname }}-{{ item }}.keytab'
+      flat: true
+    become: false
+    delegate_to: DC01
+    with_items:
+    - SERV1
+    - serv2
+
+  - name: fetch the user keytab
+    ansible.builtin.fetch:
+      src: C:\temp\{{ domain_username }}.keytab
+      dest: '{{ domain_username }}.keytab'
+      flat: true
+    become: false
+    delegate_to: DC01
+    run_once: true
+
+- name: join Windows host to domain
+  hosts: win_children
+  gather_facts: false
+  tasks:
+  - name: set the DNS for the private adapter to point to the DC
+    ansible.windows.win_dns_client:
+      adapter_names: '{{ network_connection_name }}'
+      ipv4_addresses: '{{ hostvars[groups["win_controller"][0]]["ansible_host"] }}'
+
+  - name: join host to domain
+    microsoft.ad.membership:
+      dns_domain_name: '{{ domain_name }}'
+      domain_admin_user: '{{ domain_upn }}'
+      domain_admin_password: '{{ domain_password }}'
+      state: domain
+      reboot: true
+
+  - name: trust hosts for delegation in AD
+    microsoft.ad.computer:
+      identity: SERVER2022$ # We only want to have this host with delegation for testing
+      trusted_for_delegation: true
+    register: delegation_res
+    run_once: true
+    delegate_to: '{{ groups["win_controller"][0] }}'
+
+  - name: ensure the host can install the gMSA account
+    microsoft.ad.group:
+      identity: gMSAUsers
+      members:
+        add:
+        - '{{ inventory_hostname }}$'
+      state: present
+    register: gmsa_group_join
+    delegate_to: '{{ groups["win_controller"][0] }}'
+
+  - name: reboot after joining host to gMSA group or changing delegation settings
+    ansible.windows.win_reboot:
+    when: >-
+      gmsa_group_join is changed or
+      (delegation_res is changed and inventory_hostname == "SERVER2022")
+
+  - name: test out domain user logon
+    ansible.windows.win_whoami:
+    register: become_res
+    failed_when: become_res.upn != domain_upn
+    become: true
+    become_method: runas
+    vars:
+      ansible_become_user: '{{ domain_upn }}'
+      ansible_become_pass: '{{ domain_password }}'
+
+  - name: add gMSA to Administrators group
+    ansible.windows.win_group_membership:
+      name: Administrators
+      members:
+      - '{{ gmsa_username }}$@{{ domain_name }}'
+
+# Use the following to get a snaphot of programs installed and their product_ids
+# 'SOFTWARE', 'SOFTWARE\Wow6432Node' | ForEach-Object {
+#       $getParams = @{
+#           Path = "HKLM:\$_\Microsoft\Windows\CurrentVersion\Uninstall\*"
+#           Name = 'DisplayName'
+#           ErrorAction = 'SilentlyContinue'
+#       }
+#       Get-ItemProperty @getParams | Select-Object -Property @(
+#           @{ N = 'Name'; E = { $_.DisplayName } },
+#           @{ N = 'AppId'; E = { $_.PSChildName.Trim('{}') } }
+#       )
+#   } |
+#     Where-Object { $_.Name -like 'Python * Standard Library *' } |
+#     Sort-Object {
+#       $null = $_.Name -match 'Python (\d+\.\d+\.\d+).+Standard Library \((\d+)-bit\)'
+#       [Version]"$($matches[1]).$($matches[2])"
+#     }
+
+- name: set up Python interpreters and other test requirements on test Windows host
+  hosts: TESTWIN
+  gather_facts: false
+  tasks:
+  - name: install Python interpreters
+    ansible.windows.win_package:
+      path: https://www.python.org/ftp/python/{{ item.version }}/python-{{ item.version}}{{ item.version_suffix }}.exe
+      arguments: /quiet InstallAllUsers=1 Shortcuts=0
+      product_id: '{{ "{" ~ item.product_id ~ "}" }}'
+      state: present
+    with_items:
+    - version: 3.9.13
+      version_suffix: -amd64
+      product_id: 90A30DAB-6FD8-4CF8-BB8B-C0DB21C69F20
+
+    - version: 3.10.11
+      version_suffix: -amd64
+      product_id: 6532871D-1F76-408C-ABD0-63C732137351
+
+    - version: 3.11.9
+      version_suffix: -amd64
+      product_id: 9AFDC691-40E5-4B15-835F-9A524AC4672C
+
+    - version: 3.12.10
+      version_suffix: -amd64
+      product_id: DE12B597-D4BF-4B1B-BF5F-C5CE41AFBDFC
+
+    - version: 3.13.16
+      version_suffix: -amd64
+      product_id: 56322D83-737F-4A85-9EC1-9FAB196A6970
+
+    - version: 3.14.8
+      version_suffix: -amd64
+      product_id: E60CC960-3B61-4FB9-B4A3-9D7788B81D9C
+
+    - version: 3.15.0
+      version_suffix: rc3-amd64
+      product_id: 6E23005C-7173-4451-96AD-90D028344702
+
+  - name: ensure virtualenv package is installed for each Python install
+    ansible.windows.win_command: '"{{ item }}\python.exe" -m pip install virtualenv'
+    args:
+      creates: '{{ item }}\Scripts\virtualenv.exe'
+    with_items: '{{ python_interpreters }}'
+
+  - name: create virtualenv for each Python install
+    ansible.windows.win_command: '"{{ item }}\python.exe" -m virtualenv "{{ python_venv_path }}\{{ item | win_basename }}"'
+    args:
+      creates: '{{ python_venv_path }}\{{ item | win_basename }}'
+    with_items: '{{ python_interpreters }}'
+
+  - name: copy across wheel artifacts
+    ansible.windows.win_copy:
+      src: artifact.zip
+      dest: C:\temp\wheels.zip
+
+  - name: ensure wheel dir exists
+    ansible.windows.win_file:
+      path: C:\temp\wheels
+      state: directory
+
+  - name: extract wheel from archive
+    community.windows.win_unzip:
+      src: C:\temp\wheels.zip
+      dest: C:\temp\wheels
+
+  - name: get pyspnego artifact sdist filename
+    ansible.windows.win_find:
+      paths: C:\temp\wheels
+      patterns: 'pyspnego-*.tar.gz'
+      use_regex: false
+    register: spnego_sdist_file
+
+  - name: verify sdist was found
+    ansible.builtin.assert:
+      that:
+      - spnego_sdist_file.files | count == 1
+
+  - name: get pyspnego artifact version
+    ansible.builtin.set_fact:
+      spnego_version: >-
+        {{ spnego_sdist_file.files[0].filename | regex_replace('pyspnego-(?P<version>.*)\.tar\.gz', '\g<version>') }}
+
+  - name: install pyspnego into virtualenv
+    ansible.windows.win_command: >-
+      "{{ python_venv_path }}\{{ item | win_basename }}\Scripts\python.exe" -m pip
+      install
+      pyspnego=={{ spnego_version }}
+      pytest
+      requests
+      sansldap
+      --find-links=C:/temp/wheels
+    args:
+      creates: '{{ python_venv_path }}\{{ item | win_basename }}\Lib\site-packages\spnego'
+    with_items: '{{ python_interpreters }}'
+
+  - name: copy service keytabs to host
+    ansible.windows.win_copy:
+      src: '{{ inventory_hostname }}-{{ item }}.keytab'
+      dest: C:\temp\{{ item }}.keytab
+    with_items:
+    - SERV1
+    - serv2
+
+  - name: copy user keytab to host
+    ansible.windows.win_copy:
+      src: '{{ domain_username }}.keytab'
+      dest: C:\temp\user.keytab
+
+  - name: template out test integration file
+    ansible.windows.win_template:
+      src: test_integration.py.tmpl
+      dest: C:\temp\test_integration.py
+      block_start_string: '{!!'
+      block_end_string: '!!}'
+    tags:
+    - template
+
+- name: set up WinRM config and SMB shares on Windows hosts
+  hosts: windows
+  gather_facts: false
+  tasks:
+  - name: set WinRM Cbt value to Strict
+    ansible.windows.win_powershell:
+      script: |
+        $ErrorActionPreference = 'Stop'
+        $Ansible.Changed = $false
+
+        $val = (Get-Item -LiteralPath WSMan:\localhost\Service\Auth\CbtHardeningLevel).Value
+        if ($val -ne 'Strict') {
+            Set-Item -LiteralPath WSMan:\localhost\Service\Auth\CbtHardeningLevel -Value Strict
+            $Ansible.Changed = $true
+        }
+
+  - name: enable WSMan CredSSP Server
+    ansible.windows.win_powershell:
+      script: |
+        $ErrorActionPreference = 'Stop'
+        $Ansible.Changed = $false
+
+        $val = (Get-Item -LiteralPath WSMan:\localhost\Service\Auth\CredSSP).Value
+        if ($val -ne 'true') {
+            $null = Enable-WSManCredSSP -Role Server
+            $Ansible.Changed = $true
+        }
+
+  - name: allow SMB traffic in
+    community.windows.win_firewall_rule:
+      name: File and Printer Sharing (SMB-In)
+      state: present
+      enabled: true
+
+- name: set up Linux host
+  hosts: linux_children
+  gather_facts: false
+  become: true
+  handlers:
+  - name: restart NetworkManager.service
+    ansible.builtin.service:
+      name: NetworkManager.service
+      state: restarted
+
+  tasks:
+  - name: install base packages
+    ansible.builtin.dnf:
+      name:
+      - dnsmasq
+      - epel-release
+      - gcc
+      - python39
+      - python3-devel
+      - unzip
+      - vim
+      state: present
+
+  - name: install kerberos packages
+    ansible.builtin.dnf:
+      name: '{{ krb_packages }}'
+      state: present
+
+  - name: ensure virtualenv is installed on base Python interpreters
+    ansible.builtin.pip:
+      name:
+      - virtualenv
+      executable: /usr/bin/pip3.9
+
+  - name: setup NetworkManager to use dnsmasq
+    ansible.builtin.copy:
+      dest: /etc/NetworkManager/conf.d/dns.conf
+      content: |
+        [main]
+        dns=dnsmasq
+    notify: restart NetworkManager.service
+
+  - name: set dnsmasq to forward requests for domain to DC
+    ansible.builtin.copy:
+      dest: /etc/NetworkManager/dnsmasq.d/{{ domain_name }}
+      content: server=/{{ domain_name }}/{{ hostvars[groups['win_controller'][0]]["ansible_host"] }}
+    notify: restart NetworkManager.service
+
+  - name: template krb5.conf file
+    ansible.builtin.template:
+      src: krb5.conf.tmpl
+      dest: /etc/krb5.conf
+
+  - name: copy service keytabs to host
+    ansible.builtin.copy:
+      src: '{{ inventory_hostname }}-{{ item }}.keytab'
+      dest: /etc/{{ item }}.keytab
+    with_items:
+    - SERV1
+    - serv2
+
+  - name: copy user keytab to host
+    ansible.builtin.copy:
+      src: '{{ domain_username }}.keytab'
+      dest: ~/user.keytab
+    become: false
+
+  - name: copy across CA cert
+    ansible.builtin.copy:
+      src: cert_setup/ca.pem
+      dest: /etc/pki/ca-trust/source/anchors/pyspnego.pem
+    register: ca_cert_copy
+
+  - name: register CA cert
+    ansible.builtin.command: update-ca-trust
+    when: ca_cert_copy is changed
+
+  - name: ensure wheel dir exists
+    ansible.builtin.file:
+      path: ~/wheels
+      state: directory
+    become: false
+
+  - name: extract wheel artifacts
+    ansible.builtin.unarchive:
+      src: artifact.zip
+      dest: ~/wheels
+    become: false
+
+  - name: get pyspnego artifact sdist filename
+    ansible.builtin.find:
+      paths: ~/wheels
+      patterns: 'pyspnego-*.tar.gz'
+      recurse: false
+      file_type: file
+    become: false
+    register: spnego_sdist_file
+
+  - name: verify sdist was found
+    ansible.builtin.assert:
+      that:
+      - spnego_sdist_file.files | count == 1
+
+  - name: get pyspnego artifact version
+    ansible.builtin.set_fact:
+      spnego_version: >-
+        {{ spnego_sdist_file.files[0].path | basename | regex_replace('pyspnego-(?P<version>.*)\.tar\.gz', '\g<version>') }}
+
+  - name: create a virtualenv for each Python interpeter
+    ansible.builtin.pip:
+      name:
+      - pytest
+      - pytest-forked
+      - requests
+      - sansldap
+      - pyspnego[kerberos] == {{ spnego_version }}
+      virtualenv: '{{ python_venv_path }}/{{ item | basename }}'
+      virtualenv_python: '{{ item }}'
+      extra_args: --find-links file://{{ spnego_sdist_file.files[0].path | dirname }}
+    become: false
+    with_items: '{{ python_interpreters }}'
+
+  - name: template out test integration file
+    ansible.builtin.template:
+      src: test_integration.py.tmpl
+      dest: ~/test_integration.py
+      block_start_string: '{!!'
+      block_end_string: '!!}'
+    tags:
+    - template
+    become: false
