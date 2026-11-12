@@ -333,7 +333,9 @@ defusedxml (package)
 --------------------
 
 DefusedXmlException, DTDForbidden, EntitiesForbidden,
-ExternalReferenceForbidden, NotSupportedError
+ExternalReferenceForbidden, NotSupportedError,
+ParameterEntityForbidden, UnparsedEntityForbidden, NotationForbidden,
+ConditionalSectionForbidden, ExternalSubsetForbidden
 
 defuse_stdlib() (*experimental*)
 
@@ -549,8 +551,16 @@ network or local file access apply to processing instructions, too.
 Other DTD features
 ------------------
 
-`DTD`_ has more features like ``<!NOTATION>``. I haven't researched how
-these features may be a security threat.
+`DTD`_ has more features like ``<!NOTATION>``. defusedxml scans the
+document type declaration before the XML parser sees it.  Parameter
+entity declarations and references, ``INCLUDE`` and
+``IGNORE`` conditional sections, nested external subset declarations,
+unparsed entities and notation declarations are classified consistently
+across all backends.  In forbidden mode they raise a defused exception
+before an entity is expanded or an external resource is opened.  The
+exception exposes ``construct``, ``depth``, ``source``, ``line``,
+``column`` and ``offset`` attributes for diagnostics.  Entity values are
+not included in exception messages or representations.
 
 
 XPath

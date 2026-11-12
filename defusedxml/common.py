@@ -25,21 +25,52 @@ class DefusedXmlException(ValueError):
 class DTDForbidden(DefusedXmlException):
     """Document type definition is forbidden"""
 
-    def __init__(self, name, sysid, pubid):
+    def __init__(
+        self,
+        name,
+        sysid,
+        pubid,
+        construct=None,
+        depth=0,
+        source=None,
+        line=None,
+        column=None,
+        offset=None,
+    ):
         super().__init__()
         self.name = name
         self.sysid = sysid
         self.pubid = pubid
+        self.construct = construct or "doctype"
+        self.depth = depth
+        self.source = source
+        self.line = line
+        self.column = column
+        self.offset = offset
 
     def __str__(self):
-        tpl = "DTDForbidden(name='{}', system_id={!r}, public_id={!r})"
-        return tpl.format(self.name, self.sysid, self.pubid)
+        tpl = "{}(name='{}', system_id={!r}, public_id={!r})"
+        return tpl.format(self.__class__.__name__, self.name, self.sysid, self.pubid)
 
 
 class EntitiesForbidden(DefusedXmlException):
     """Entity definition is forbidden"""
 
-    def __init__(self, name, value, base, sysid, pubid, notation_name):
+    def __init__(
+        self,
+        name,
+        value,
+        base,
+        sysid,
+        pubid,
+        notation_name,
+        construct=None,
+        depth=0,
+        source=None,
+        line=None,
+        column=None,
+        offset=None,
+    ):
         super().__init__()
         self.name = name
         self.value = value
@@ -47,25 +78,69 @@ class EntitiesForbidden(DefusedXmlException):
         self.sysid = sysid
         self.pubid = pubid
         self.notation_name = notation_name
+        self.construct = construct or "entity-declaration"
+        self.depth = depth
+        self.source = source
+        self.line = line
+        self.column = column
+        self.offset = offset
 
     def __str__(self):
-        tpl = "EntitiesForbidden(name='{}', system_id={!r}, public_id={!r})"
-        return tpl.format(self.name, self.sysid, self.pubid)
+        tpl = "{}(name='{}', system_id={!r}, public_id={!r})"
+        return tpl.format(self.__class__.__name__, self.name, self.sysid, self.pubid)
 
 
 class ExternalReferenceForbidden(DefusedXmlException):
     """Resolving an external reference is forbidden"""
 
-    def __init__(self, context, base, sysid, pubid):
+    def __init__(
+        self,
+        context,
+        base,
+        sysid,
+        pubid,
+        construct=None,
+        depth=0,
+        source=None,
+        line=None,
+        column=None,
+        offset=None,
+    ):
         super().__init__()
         self.context = context
         self.base = base
         self.sysid = sysid
         self.pubid = pubid
+        self.construct = construct or "external-reference"
+        self.depth = depth
+        self.source = source
+        self.line = line
+        self.column = column
+        self.offset = offset
 
     def __str__(self):
-        tpl = "ExternalReferenceForbidden(system_id='{}', public_id={})"
-        return tpl.format(self.sysid, self.pubid)
+        tpl = "{}(system_id='{}', public_id={})"
+        return tpl.format(self.__class__.__name__, self.sysid, self.pubid)
+
+
+class ParameterEntityForbidden(EntitiesForbidden):
+    """A parameter entity declaration or reference is forbidden"""
+
+
+class UnparsedEntityForbidden(EntitiesForbidden):
+    """An unparsed entity declaration is forbidden"""
+
+
+class NotationForbidden(EntitiesForbidden):
+    """A notation declaration is forbidden"""
+
+
+class ConditionalSectionForbidden(EntitiesForbidden):
+    """An INCLUDE or IGNORE conditional section is forbidden"""
+
+
+class ExternalSubsetForbidden(ExternalReferenceForbidden):
+    """An external DTD subset is forbidden"""
 
 
 class NotSupportedError(DefusedXmlException):

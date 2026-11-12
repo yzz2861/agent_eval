@@ -9,12 +9,18 @@ The code has NO protection against decompression bombs.
 """
 from __future__ import print_function, absolute_import
 
+import io
 import threading
 import warnings
 
 from lxml import etree as _etree
 
-from .common import DTDForbidden, EntitiesForbidden, NotSupportedError
+from .common import (
+    DTDForbidden,
+    EntitiesForbidden,
+    NotSupportedError,
+)
+from .dtdscan import scan_document
 
 LXML3 = _etree.LXML_VERSION[0] >= 3
 
@@ -78,6 +84,8 @@ class GlobalParserTLS(threading.local):
 
     parser_config = {
         "resolve_entities": False,
+        "load_dtd": False,
+        "no_network": True,
         # 'remove_comments': True,
         # 'remove_pis': True,
     }
@@ -107,7 +115,7 @@ _parser_tls = GlobalParserTLS()
 getDefaultParser = _parser_tls.getDefaultParser
 
 
-def check_docinfo(elementtree, forbid_dtd=False, forbid_entities=True):
+def check_docinfo(elementtree, forbid_dtd=False, forbid_entities=True, forbid_external=True):
     """Check docinfo of an element tree for DTD and entity declarations
 
     The check for entity declarations needs lxml 3 or newer. lxml 2.x does
@@ -126,23 +134,79 @@ def check_docinfo(elementtree, forbid_dtd=False, forbid_entities=True):
             if dtd is None:
                 continue
             for entity in dtd.iterentities():
-                raise EntitiesForbidden(entity.name, entity.content, None, None, None, None)
+                raise EntitiesForbidden(
+                    entity.name,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    construct="internal-entity-declaration",
+                    depth=1,
+                    source="internal_subset",
+                )
 
 
-def parse(source, parser=None, base_url=None, forbid_dtd=False, forbid_entities=True):
+def _scan_source(source, forbid_dtd, forbid_entities, forbid_external):
+    if hasattr(source, "read"):
+        data = source.read()
+        scan_document(
+            data,
+            forbid_dtd=forbid_dtd,
+            forbid_entities=forbid_entities,
+            forbid_external=forbid_external,
+        )
+        try:
+            source.seek(0)
+        except (AttributeError, IOError, ValueError):
+            source = io.BytesIO(data) if isinstance(data, bytes) else io.StringIO(data)
+        return source
+    with open(source, "rb") as fp:
+        data = fp.read()
+    scan_document(
+        data,
+        forbid_dtd=forbid_dtd,
+        forbid_entities=forbid_entities,
+        forbid_external=forbid_external,
+    )
+    return source
+
+
+def parse(
+    source,
+    parser=None,
+    base_url=None,
+    forbid_dtd=False,
+    forbid_entities=True,
+    forbid_external=True,
+):
+    source = _scan_source(source, forbid_dtd, forbid_entities, forbid_external)
     if parser is None:
         parser = getDefaultParser()
     elementtree = _etree.parse(source, parser, base_url=base_url)
-    check_docinfo(elementtree, forbid_dtd, forbid_entities)
+    check_docinfo(elementtree, forbid_dtd, forbid_entities, forbid_external)
     return elementtree
 
 
-def fromstring(text, parser=None, base_url=None, forbid_dtd=False, forbid_entities=True):
+def fromstring(
+    text,
+    parser=None,
+    base_url=None,
+    forbid_dtd=False,
+    forbid_entities=True,
+    forbid_external=True,
+):
+    scan_document(
+        text,
+        forbid_dtd=forbid_dtd,
+        forbid_entities=forbid_entities,
+        forbid_external=forbid_external,
+    )
     if parser is None:
         parser = getDefaultParser()
     rootelement = _etree.fromstring(text, parser, base_url=base_url)
     elementtree = rootelement.getroottree()
-    check_docinfo(elementtree, forbid_dtd, forbid_entities)
+    check_docinfo(elementtree, forbid_dtd, forbid_entities, forbid_external)
     return rootelement
 
 

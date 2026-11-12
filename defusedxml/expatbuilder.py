@@ -10,7 +10,14 @@ from __future__ import print_function, absolute_import
 from xml.dom.expatbuilder import ExpatBuilder as _ExpatBuilder
 from xml.dom.expatbuilder import Namespaces as _Namespaces
 
-from .common import DTDForbidden, EntitiesForbidden, ExternalReferenceForbidden
+from .common import DTDForbidden
+from .dtdscan import (
+    DTDScanGuard,
+    raise_entity_decl,
+    raise_unparsed_entity_decl,
+    raise_notation_decl,
+    raise_external_reference,
+)
 
 __origin__ = "xml.dom.expatbuilder"
 
@@ -25,31 +32,158 @@ class DefusedExpatBuilder(_ExpatBuilder):
         self.forbid_dtd = forbid_dtd
         self.forbid_entities = forbid_entities
         self.forbid_external = forbid_external
+        self._dtd_depth = 0
+        self._dtd_source = "internal_subset"
+
+    def _make_guard(self):
+        return DTDScanGuard(
+            forbid_dtd=self.forbid_dtd,
+            forbid_entities=self.forbid_entities,
+            forbid_external=self.forbid_external,
+        )
+
+    def _location(self):
+        parser = self._parser
+        try:
+            return parser.CurrentLineNumber, parser.CurrentColumnNumber + 1
+        except AttributeError:
+            return None, None
+
+    def _is_own_end_handler(self, handler):
+        return getattr(handler, "__func__", None) is self.defused_end_doctype_decl.__func__
+
+    def _scan(self, data):
+        guard = self._make_guard()
+        guard.feed(data, is_final=True)
+
+    def parseString(self, string):
+        self._scan(string)
+        return _ExpatBuilder.parseString(self, string)
+
+    def parseFile(self, file):
+        data = file.read()
+        return self.parseString(data)
 
     def defused_start_doctype_decl(self, name, sysid, pubid, has_internal_subset):
-        raise DTDForbidden(name, sysid, pubid)
+        self._dtd_depth = 1
+        self._dtd_source = "internal_subset" if has_internal_subset else "external_subset"
+        if self.forbid_dtd:
+            line, column = self._location()
+            raise DTDForbidden(
+                name,
+                sysid,
+                pubid,
+                construct="doctype",
+                depth=0,
+                source="doctype",
+                line=line,
+                column=column,
+            )
+        if self._orig_start_doctype is not None:
+            result = self._orig_start_doctype(name, sysid, pubid, has_internal_subset)
+        else:
+            result = None
+        end_handler = self._parser.EndDoctypeDeclHandler
+        if end_handler is not None and not self._is_own_end_handler(end_handler):
+            self._orig_end_doctype = end_handler
+            self._parser.EndDoctypeDeclHandler = self.defused_end_doctype_decl
+        return result
+
+    def defused_end_doctype_decl(self):
+        self._dtd_depth = 0
+        if self._orig_end_doctype is not None:
+            return self._orig_end_doctype()
 
     def defused_entity_decl(
         self, name, is_parameter_entity, value, base, sysid, pubid, notation_name
     ):
-        raise EntitiesForbidden(name, value, base, sysid, pubid, notation_name)
+        line, column = self._location()
+        raise_entity_decl(
+            name,
+            is_parameter_entity,
+            value,
+            base,
+            sysid,
+            pubid,
+            notation_name,
+            forbid_entities=self.forbid_entities,
+            forbid_external=self.forbid_external,
+            depth=max(self._dtd_depth, 1),
+            source=self._dtd_source,
+            line=line,
+            column=column,
+        )
+        if self._orig_entity_decl is not None:
+            return self._orig_entity_decl(
+                name, is_parameter_entity, value, base, sysid, pubid, notation_name
+            )
 
     def defused_unparsed_entity_decl(self, name, base, sysid, pubid, notation_name):
-        # expat 1.2
-        raise EntitiesForbidden(name, None, base, sysid, pubid, notation_name)  # pragma: no cover
+        line, column = self._location()
+        raise_unparsed_entity_decl(
+            name,
+            base,
+            sysid,
+            pubid,
+            notation_name,
+            forbid_entities=self.forbid_entities,
+            forbid_external=self.forbid_external,
+            depth=max(self._dtd_depth, 1),
+            source=self._dtd_source,
+            line=line,
+            column=column,
+        )
+        if self._orig_unparsed_entity_decl is not None:
+            return self._orig_unparsed_entity_decl(
+                name, base, sysid, pubid, notation_name
+            )
+
+    def defused_notation_decl(self, name, base, sysid, pubid):
+        line, column = self._location()
+        raise_notation_decl(
+            name,
+            base,
+            sysid,
+            pubid,
+            forbid_entities=self.forbid_entities,
+            forbid_external=self.forbid_external,
+            depth=max(self._dtd_depth, 1),
+            source=self._dtd_source,
+            line=line,
+            column=column,
+        )
+        if self._orig_notation_decl is not None:
+            return self._orig_notation_decl(name, base, sysid, pubid)
 
     def defused_external_entity_ref_handler(self, context, base, sysid, pubid):
-        raise ExternalReferenceForbidden(context, base, sysid, pubid)
+        line, column = self._location()
+        raise_external_reference(
+            context,
+            base,
+            sysid,
+            pubid,
+            depth=max(self._dtd_depth, 1),
+            source=self._dtd_source,
+            line=line,
+            column=column,
+        )
 
     def install(self, parser):
         _ExpatBuilder.install(self, parser)
-
-        if self.forbid_dtd:
-            parser.StartDoctypeDeclHandler = self.defused_start_doctype_decl
-        if self.forbid_entities:
-            # if self._options.entities:
-            parser.EntityDeclHandler = self.defused_entity_decl
-            parser.UnparsedEntityDeclHandler = self.defused_unparsed_entity_decl
+        self._dtd_depth = 0
+        self._dtd_source = "internal_subset"
+        self._orig_start_doctype = parser.StartDoctypeDeclHandler
+        self._orig_end_doctype = parser.EndDoctypeDeclHandler
+        if self._is_own_end_handler(self._orig_end_doctype):
+            self._orig_end_doctype = None
+        self._orig_entity_decl = parser.EntityDeclHandler
+        self._orig_unparsed_entity_decl = parser.UnparsedEntityDeclHandler
+        self._orig_notation_decl = parser.NotationDeclHandler
+        parser.StartDoctypeDeclHandler = self.defused_start_doctype_decl
+        parser.EndDoctypeDeclHandler = self.defused_end_doctype_decl
+        parser.EntityDeclHandler = self.defused_entity_decl
+        parser.UnparsedEntityDeclHandler = self.defused_unparsed_entity_decl
+        parser.NotationDeclHandler = self.defused_notation_decl
         if self.forbid_external:
             parser.ExternalEntityRefHandler = self.defused_external_entity_ref_handler
 

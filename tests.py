@@ -16,9 +16,14 @@ from pyexpat import ExpatError
 from defusedxml import ElementTree, minidom, pulldom, sax, xmlrpc, expatreader
 from defusedxml import defuse_stdlib
 from defusedxml import (
+    DefusedXmlException,
     DTDForbidden,
     EntitiesForbidden,
     ExternalReferenceForbidden,
+    ParameterEntityForbidden,
+    UnparsedEntityForbidden,
+    NotationForbidden,
+    ConditionalSectionForbidden,
     NotSupportedError,
 )
 
@@ -78,11 +83,71 @@ class DefusedTestCase(unittest.TestCase):
     xml_dtd_element = os.path.join(HERE, "xmltestdata", "dtd_element.xml")
     xml_schema_include = os.path.join(HERE, "xmltestdata", "schema-include.xsd")
 
+    xml_parameter_entity = (
+        '<!DOCTYPE r [<!ENTITY % pe "<!ENTITY x \'TOPSECRET\'>">%pe;]>'
+        "<r>&x;</r>"
+    )
+    xml_parameter_entity_reference = "<!DOCTYPE r [%pe;]><r/>"
+    xml_parameter_entity_chain = (
+        "<!DOCTYPE r ["
+        "<!ENTITY % outer \"<!ENTITY % inner SYSTEM 'http://example.invalid/nested.dtd'>\">"
+        "%outer;"
+        "]><r/>"
+    )
+    xml_conditional_section = (
+        "<!DOCTYPE r [<![INCLUDE[<![IGNORE[<!ENTITY x 'TOPSECRET'>]]>]]>]><r/>"
+    )
+    xml_empty_conditional_section = "<!DOCTYPE r [<![INCLUDE[]]>]><r/>"
+    xml_nested_conditional_external = (
+        "<!DOCTYPE r ["
+        "<![INCLUDE["
+        "<![INCLUDE["
+        '<!ENTITY % pe SYSTEM "http://example.invalid/inner.dtd">'
+        "%pe;"
+        "]]>"
+        "]]>"
+        "]><r/>"
+    )
+    xml_external_parameter_entity = (
+        '<!DOCTYPE r SYSTEM "http://example.invalid/outer.dtd" ['
+        '<!ENTITY % pe SYSTEM "http://example.invalid/inner.dtd">'
+        "%pe;"
+        "]><r/>"
+    )
+    xml_external_subset_with_internal = (
+        '<!DOCTYPE r SYSTEM "http://example.invalid/outer.dtd" '
+        "[<!ELEMENT r EMPTY>]><r/>"
+    )
+    xml_unparsed_entity = (
+        '<!DOCTYPE r [<!ENTITY logo SYSTEM "logo.gif" NDATA gif>'
+        '<!NOTATION gif SYSTEM "image/gif">]><r/>'
+    )
+    xml_notation = (
+        '<!DOCTYPE r [<!NOTATION gif SYSTEM "image/gif">'
+        '<!ENTITY logo SYSTEM "logo.gif" NDATA gif>]><r/>'
+    )
+
     def get_content(self, xmlfile):
         mode = "rb" if self.content_binary else "r"
         with io.open(xmlfile, mode) as f:
             data = f.read()
         return data
+
+    def encode_content(self, text):
+        return text.encode("utf-8") if self.content_binary else text
+
+    def assert_advanced_error(self, text, exception_type, **kwargs):
+        with self.assertRaises(exception_type) as ctx:
+            self.parseString(self.encode_content(text), **kwargs)
+        exc = ctx.exception
+        self.assertGreaterEqual(exc.depth, 1)
+        self.assertTrue(exc.source)
+        self.assertGreaterEqual(exc.line, 1)
+        self.assertGreaterEqual(exc.column, 1)
+        self.assertGreaterEqual(exc.offset, 0)
+        self.assertLess(exc.offset, len(text))
+        self.assertIsNotNone(exc.construct)
+        return exc
 
 
 class BaseTests(DefusedTestCase):
@@ -179,6 +244,98 @@ class BaseTests(DefusedTestCase):
 
     def test_dtd_element(self):
         self.parse(self.xml_dtd_element)
+
+    def test_parameter_entity_declaration(self):
+        exc = self.assert_advanced_error(
+            self.xml_parameter_entity, ParameterEntityForbidden
+        )
+        self.assertEqual(exc.construct, "parameter-entity-declaration")
+        self.assertEqual(exc.name, "pe")
+        self.assertIsNone(exc.value)
+        self.assertNotIn("TOPSECRET", str(exc))
+        self.assertNotIn("TOPSECRET", repr(exc))
+
+    def test_parameter_entity_reference(self):
+        exc = self.assert_advanced_error(
+            self.xml_parameter_entity_reference, ParameterEntityForbidden
+        )
+        self.assertEqual(exc.construct, "parameter-entity-reference")
+        self.assertEqual(exc.name, "pe")
+
+    def test_conditional_section(self):
+        exc = self.assert_advanced_error(
+            self.xml_conditional_section, ConditionalSectionForbidden
+        )
+        self.assertEqual(exc.construct, "conditional-section")
+        self.assertEqual(exc.name, "INCLUDE")
+        self.assertGreaterEqual(exc.depth, 2)
+
+    def test_conditional_section_without_entities_allowed(self):
+        exc = self.assert_advanced_error(
+            self.xml_empty_conditional_section,
+            ConditionalSectionForbidden,
+            forbid_entities=False,
+        )
+        self.assertEqual(exc.construct, "conditional-section")
+        self.assertGreaterEqual(exc.depth, 2)
+
+    def test_nested_conditional_external_reference(self):
+        exc = self.assert_advanced_error(
+            self.xml_nested_conditional_external,
+            ExternalReferenceForbidden,
+            forbid_entities=False,
+        )
+        self.assertEqual(exc.construct, "external-entity-declaration")
+        self.assertGreaterEqual(exc.depth, 3)
+        self.assertEqual(exc.sysid, "http://example.invalid/inner.dtd")
+
+    def test_external_parameter_entity(self):
+        exc = self.assert_advanced_error(
+            self.xml_external_parameter_entity, EntitiesForbidden
+        )
+        self.assertEqual(exc.construct, "parameter-entity-declaration")
+        self.assertEqual(exc.sysid, "http://example.invalid/inner.dtd")
+
+        exc = self.assert_advanced_error(
+            self.xml_external_parameter_entity,
+            ExternalReferenceForbidden,
+            forbid_entities=False,
+        )
+        self.assertEqual(exc.construct, "external-entity-declaration")
+        self.assertEqual(exc.sysid, "http://example.invalid/inner.dtd")
+
+    def test_parameter_entity_chain(self):
+        exc = self.assert_advanced_error(
+            self.xml_parameter_entity_chain,
+            ExternalReferenceForbidden,
+            forbid_entities=False,
+        )
+        self.assertEqual(exc.construct, "external-entity-declaration")
+        self.assertGreaterEqual(exc.depth, 2)
+        self.assertEqual(exc.sysid, "http://example.invalid/nested.dtd")
+
+    def test_external_subset_with_internal_subset(self):
+        exc = self.assert_advanced_error(
+            self.xml_external_subset_with_internal, ExternalReferenceForbidden
+        )
+        self.assertEqual(exc.construct, "external-subset")
+        self.assertEqual(exc.sysid, "http://example.invalid/outer.dtd")
+
+    def test_unparsed_entity(self):
+        exc = self.assert_advanced_error(
+            self.xml_unparsed_entity, UnparsedEntityForbidden
+        )
+        self.assertEqual(exc.construct, "unparsed-entity-declaration")
+        self.assertEqual(exc.notation_name, "gif")
+
+    def test_notation(self):
+        exc = self.assert_advanced_error(self.xml_notation, NotationForbidden)
+        self.assertEqual(exc.construct, "notation-declaration")
+        self.assertEqual(exc.name, "gif")
+
+    def test_ordinary_internal_subset_compatible_mode(self):
+        self.parse(self.xml_dtd_element, forbid_entities=False)
+        self.parseString(self.get_content(self.xml_dtd_element), forbid_entities=False)
 
 
 class TestDefusedElementTree(BaseTests):
@@ -345,6 +502,93 @@ class TestDefusedSax(BaseTests):
         msg = "DTDForbidden(name='xmlbomb', system_id=None, public_id=None)"
         self.assertEqual(str(ctx.exception), msg)
         self.assertEqual(repr(ctx.exception), msg)
+
+
+class _AdvancedTarget(object):
+    def xml(self, encoding, standalone):
+        pass
+
+    def start(self, tag, attrs):
+        pass
+
+    def data(self, text):
+        pass
+
+    def end(self, tag):
+        pass
+
+
+class TestAdvancedDTDMatrix(DefusedTestCase):
+    def _backends(self):
+        def etree(text, **kwargs):
+            return ElementTree.fromstring(text, **kwargs)
+
+        def dom(text, **kwargs):
+            return minidom.parseString(text, **kwargs)
+
+        def dom_events(text, **kwargs):
+            return list(pulldom.parseString(text, **kwargs))
+
+        def sax_events(text, **kwargs):
+            with io.StringIO() as result:
+                sax.parseString(text.encode("utf-8"), XMLGenerator(result), **kwargs)
+                return result.getvalue()
+
+        def xmlrpc_events(text, **kwargs):
+            parser = xmlrpc.DefusedExpatParser(_AdvancedTarget(), **kwargs)
+            parser.feed(text.encode("utf-8"))
+            parser.close()
+            return parser
+
+        backends = [
+            ("ElementTree", etree),
+            ("minidom", dom),
+            ("pulldom", dom_events),
+            ("sax", sax_events),
+            ("xmlrpc", xmlrpc_events),
+        ]
+        if lxml is not None:
+            backends.append(("lxml", lxml.fromstring))
+        return backends
+
+    def assert_matrix(self, text, construct, **kwargs):
+        results = []
+        for name, parser in self._backends():
+            with self.assertRaises(DefusedXmlException) as ctx:
+                parser(text, **kwargs)
+            exc = ctx.exception
+            results.append(
+                (name, type(exc).__name__, exc.construct, exc.depth, exc.source)
+            )
+        signatures = {(result[1], result[2]) for result in results}
+        self.assertEqual(len(signatures), 1, results)
+        for result in results:
+            self.assertEqual(result[2], construct, result)
+            self.assertGreaterEqual(result[3], 1, result)
+            self.assertTrue(result[4], result)
+
+    def test_parameter_entity_matrix(self):
+        self.assert_matrix(self.xml_parameter_entity, "parameter-entity-declaration")
+        self.assert_matrix(
+            self.xml_parameter_entity_reference, "parameter-entity-reference"
+        )
+
+    def test_conditional_section_matrix(self):
+        self.assert_matrix(self.xml_conditional_section, "conditional-section")
+
+    def test_external_subset_matrix(self):
+        self.assert_matrix(
+            self.xml_external_parameter_entity, "parameter-entity-declaration"
+        )
+        self.assert_matrix(
+            self.xml_external_parameter_entity,
+            "external-entity-declaration",
+            forbid_entities=False,
+        )
+
+    def test_unparsed_and_notation_matrix(self):
+        self.assert_matrix(self.xml_unparsed_entity, "unparsed-entity-declaration")
+        self.assert_matrix(self.xml_notation, "notation-declaration")
 
 
 @unittest.skipUnless(lxml is not None, "test requires lxml")

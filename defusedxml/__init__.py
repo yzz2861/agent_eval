@@ -14,6 +14,11 @@ from .common import (
     DTDForbidden,
     EntitiesForbidden,
     ExternalReferenceForbidden,
+    ExternalSubsetForbidden,
+    ParameterEntityForbidden,
+    UnparsedEntityForbidden,
+    NotationForbidden,
+    ConditionalSectionForbidden,
     NotSupportedError,
     _apply_defusing,
 )
@@ -64,5 +69,10 @@ __all__ = [
     "DTDForbidden",
     "EntitiesForbidden",
     "ExternalReferenceForbidden",
+    "ExternalSubsetForbidden",
+    "ParameterEntityForbidden",
+    "UnparsedEntityForbidden",
+    "NotationForbidden",
+    "ConditionalSectionForbidden",
     "NotSupportedError",
 ]
