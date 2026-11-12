@@ -1,6 +1,8 @@
 from __future__ import print_function
 
+import hashlib
 import io
+import json
 import os
 import sys
 import unittest
@@ -21,6 +23,7 @@ from defusedxml import (
     ExternalReferenceForbidden,
     NotSupportedError,
 )
+from defusedxml import forensics
 
 from xml.etree.ElementTree import Element as ElementAfterImport
 
@@ -469,6 +472,177 @@ class TestDefusedLxml(BaseTests):
             schema.validate(doc)
 
 
+class TestDefusedForensics(DefusedTestCase):
+    content_binary = True
+
+    def analyze(self, data, **kwargs):
+        return forensics.analyze(data, **kwargs)
+
+    def test_dtd_profile(self):
+        report = self.analyze(
+            self.get_content(self.xml_dtd),
+            backends=("ElementTree", "sax"),
+            forbid_dtd=True,
+        )
+        for name in ("ElementTree", "sax"):
+            profile = report.to_dict()["backends"][name]
+            self.assertEqual(profile["status"], forensics.STATUS_BLOCKED)
+            self.assertEqual(profile["category"], forensics.CATEGORY_DTD_FORBIDDEN)
+            self.assertEqual(profile["policy_hits"], ["forbid_dtd"])
+            self.assertEqual(profile["dtd"]["name"], "html")
+            self.assertTrue(
+                profile["dtd"]["system_id"].endswith("xhtml1-transitional.dtd")
+            )
+        self.assertNotIn("www.w3.org", report.to_json())
+
+    def test_entities_profile(self):
+        report = self.analyze(self.get_content(self.xml_bomb), backends=("ElementTree",))
+        profile = report.to_dict()["backends"]["ElementTree"]
+        self.assertEqual(profile["status"], forensics.STATUS_BLOCKED)
+        self.assertEqual(profile["category"], forensics.CATEGORY_ENTITIES_FORBIDDEN)
+        self.assertEqual(profile["policy_hits"], ["forbid_entities"])
+        entity = profile["entity"]
+        self.assertEqual(entity["name"], "a")
+        self.assertEqual(entity["value_length"], len("1234567890"))
+        self.assertEqual(
+            entity["value_sha256"],
+            hashlib.sha256(b"1234567890").hexdigest(),
+        )
+        # the raw entity value must not leak into the report
+        self.assertNotIn("1234567890", report.to_json())
+
+    def test_external_ref_profile(self):
+        report = self.analyze(
+            self.get_content(self.xml_external),
+            backends=("sax",),
+            forbid_entities=False,
+        )
+        profile = report.to_dict()["backends"]["sax"]
+        self.assertEqual(profile["status"], forensics.STATUS_BLOCKED)
+        self.assertEqual(
+            profile["category"], forensics.CATEGORY_EXTERNAL_REFERENCE_FORBIDDEN
+        )
+        self.assertEqual(profile["policy_hits"], ["forbid_external"])
+        ref = profile["external_reference"]
+        self.assertEqual(ref["system_id"], "http://<redacted>/note.xml")
+        self.assertNotIn("www.w3schools.com", report.to_json())
+
+    def test_syntax_error_profile(self):
+        report = self.analyze(
+            b"<root><unclosed></root>", backends=("ElementTree", "sax", "minidom")
+        )
+        for name in ("ElementTree", "sax", "minidom"):
+            profile = report.to_dict()["backends"][name]
+            self.assertEqual(profile["status"], forensics.STATUS_SYNTAX_ERROR)
+            self.assertEqual(profile["category"], forensics.CATEGORY_SYNTAX_ERROR)
+            self.assertIsInstance(profile["line"], int)
+            self.assertIsInstance(profile["column"], int)
+            self.assertIsNone(profile["byte_offset"])
+
+    def test_cross_backend_comparison(self):
+        report = self.analyze(self.get_content(self.xml_bomb))
+        comparison = report.compare()
+        self.assertEqual(
+            set(comparison),
+            {"ElementTree", "minidom", "pulldom", "sax", "lxml"},
+        )
+        for name in ("ElementTree", "minidom", "pulldom", "sax"):
+            self.assertEqual(comparison[name]["status"], forensics.STATUS_BLOCKED)
+            self.assertEqual(
+                comparison[name]["category"], forensics.CATEGORY_ENTITIES_FORBIDDEN
+            )
+        if lxml is None:
+            # missing backend is reported as unsupported, not as a failure
+            self.assertEqual(
+                comparison["lxml"]["status"], forensics.STATUS_UNSUPPORTED
+            )
+            self.assertEqual(
+                comparison["lxml"]["category"], forensics.CATEGORY_NOT_SUPPORTED
+            )
+            self.assertTrue(report.backends_differ)
+        else:
+            self.assertEqual(comparison["lxml"]["status"], forensics.STATUS_BLOCKED)
+            self.assertFalse(report.backends_differ)
+
+    def test_unsupported_is_distinct_from_error(self):
+        def broken_backend(data, forbid_dtd, forbid_entities, forbid_external):
+            raise NotSupportedError("no such check")
+
+        with mock.patch.dict(
+            forensics._BACKENDS, {"broken": broken_backend}, clear=False
+        ):
+            profile = forensics.analyze_backend(b"<root/>", "broken")
+        self.assertEqual(profile["status"], forensics.STATUS_UNSUPPORTED)
+        self.assertEqual(profile["category"], forensics.CATEGORY_NOT_SUPPORTED)
+        self.assertNotEqual(profile["status"], forensics.STATUS_ERROR)
+
+    def test_sanitization_hides_absolute_paths(self):
+        content = self.get_content(self.xml_external_file)
+        content = content.replace(b"/PATH/TO", HERE.encode(sys.getfilesystemencoding()))
+        report = self.analyze(content, backends=("sax", "ElementTree"), forbid_entities=False)
+        payload = report.to_json()
+        self.assertNotIn(HERE, payload)
+        self.assertNotIn(HERE.encode(sys.getfilesystemencoding()).decode(), payload)
+        self.assertIn("<redacted>", payload)
+        for profile in report.to_dict()["backends"].values():
+            self.assertEqual(
+                profile["category"], forensics.CATEGORY_EXTERNAL_REFERENCE_FORBIDDEN
+            )
+            self.assertEqual(
+                profile["external_reference"]["system_id"],
+                "file://<redacted>/simple.xml",
+            )
+
+    def test_json_roundtrip(self):
+        report = self.analyze(self.get_content(self.xml_bomb))
+        payload = report.to_json()
+        # plain JSON, no custom types
+        decoded = json.loads(payload)
+        self.assertEqual(decoded["format"], forensics.FORMAT_VERSION)
+        clone = forensics.ForensicReport.from_json(payload)
+        self.assertEqual(clone, report)
+        self.assertEqual(clone.to_dict(), report.to_dict())
+        self.assertEqual(clone.cluster_key, report.cluster_key)
+
+    def test_deterministic(self):
+        data = self.get_content(self.xml_quadratic)
+        first = self.analyze(data)
+        second = self.analyze(data)
+        self.assertEqual(first.to_json(), second.to_json())
+
+    def test_clustering_of_near_duplicates(self):
+        sample_a = b'<!DOCTYPE r [<!ENTITY x "AAAA">]><r>&x;</r>'
+        sample_b = b'<!DOCTYPE r [<!ENTITY y "BBBB">]><r>&y;</r>'
+        report_a = self.analyze(sample_a)
+        report_b = self.analyze(sample_b)
+        # different samples, different content hashes
+        self.assertNotEqual(
+            report_a.to_dict()["sample"]["sha256"],
+            report_b.to_dict()["sample"]["sha256"],
+        )
+        # but the same forensic outcome, so they cluster together
+        self.assertEqual(report_a.cluster_key, report_b.cluster_key)
+
+    def test_parse_keeps_exception_and_attaches_profile(self):
+        with self.assertRaises(EntitiesForbidden) as ctx:
+            forensics.parse(self.get_content(self.xml_bomb), "ElementTree")
+        exc = ctx.exception
+        self.assertEqual(
+            exc.forensic_profile["category"], forensics.CATEGORY_ENTITIES_FORBIDDEN
+        )
+        self.assertEqual(exc.forensic_profile["backend"], "ElementTree")
+        # successful parses return a clean profile
+        profile = forensics.parse(self.get_content(self.xml_simple), "ElementTree")
+        self.assertEqual(profile["status"], forensics.STATUS_CLEAN)
+        self.assertIsNone(profile["category"])
+
+    def test_unknown_backend(self):
+        with self.assertRaises(ValueError):
+            self.analyze(b"<root/>", backends=("nope",))
+        with self.assertRaises(ValueError):
+            forensics.parse(b"<root/>", "nope")
+
+
 class XmlRpcTarget(object):
     def __init__(self):
         self._data = []
@@ -589,6 +763,7 @@ def test_main():
         TestDefusedPulldom,
         TestDefusedSax,
         TestDefusedLxml,
+        TestDefusedForensics,
         TestXmlRpc,
         TestDefusedGzip,
     ]

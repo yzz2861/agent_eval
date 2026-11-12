@@ -389,6 +389,41 @@ for entities lxml \> 3.0 is required.
 parse(), fromstring() RestrictedElement, GlobalParserTLS,
 getDefaultParser(), check_docinfo()
 
+### defusedxml.forensics
+
+The forensics module is an opt-in analysis mode for triage pipelines. It
+runs a sample through one or more defused backends and returns a
+structured, JSON serializable error profile instead of a bare exception
+string. The existing parser classes, exception types and raise locations
+are not modified.
+
+    from defusedxml import forensics
+
+    report = forensics.analyze(data)  # all default backends
+    payload = report.to_json()        # deterministic, JSON serializable
+    report.compare()                  # per-backend status/category view
+    report.cluster_key                # groups near-duplicate samples
+
+Each backend profile contains a stable error category
+(`dtd_forbidden`, `entities_forbidden`, `external_reference_forbidden`,
+`syntax_error`, `not_supported`, `unknown_error`), a status
+(`clean`, `blocked`, `syntax_error`, `unsupported`, `error`), line /
+column / byte offset (`None` when the backend does not report them), a
+sanitized DTD / entity summary, and the policy hits that fired. The
+report also carries a SHA-256 content hash of the sample. A backend that
+cannot perform a check (for example lxml not installed) is reported as
+`unsupported`, never as a parse failure.
+
+Reports never contain entity values (only their length and SHA-256),
+absolute paths or hosts (identifiers are reduced to
+`<redacted>/<basename>`), or document content. Analyzing the same input
+twice yields byte-identical JSON, and `ForensicReport.from_json()`
+round-trips a report.
+
+`forensics.parse(data, backend)` behaves like the backend's own parse
+function but attaches the profile to any raised exception as
+`exception.forensic_profile`.
+
 ## defusedexpat
 
 The [defusedexpat package](https://github.com/tiran/defusedexpat)
