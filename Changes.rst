@@ -1,3 +1,15 @@
+Changes for v2.11.0 (unreleased)
+================================
+
+- Add ``HOTP.resync()`` for bounded, deterministic resynchronization of a
+  drifted HOTP counter. It returns a ``ResyncResult`` carrying the matched
+  counter and the recommended counter to commit, while persistence stays with
+  the caller via a one-time compare-and-swap callback, so concurrent
+  presentation of the same token can only be consumed once
+  (``ResyncStatus.ALREADY_CONSUMED``). Failure statuses do not expose the
+  server-side counter; invalid tokens, negative counters, zero/negative
+  windows and 64-bit counter overflow are handled without raising
+
 Changes for v2.10.0 (2026-06-13)
 ================================
 

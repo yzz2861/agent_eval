@@ -6,6 +6,10 @@ from urllib.parse import parse_qsl, unquote, urlparse
 from . import contrib  # noqa:F401
 from .compat import random
 from .hotp import HOTP as HOTP
+from .hotp import MAX_COUNTER as MAX_COUNTER
+from .hotp import MAX_RESYNC_WINDOW as MAX_RESYNC_WINDOW
+from .hotp import ResyncResult as ResyncResult
+from .hotp import ResyncStatus as ResyncStatus
 from .otp import OTP as OTP
 from .totp import TOTP as TOTP
 

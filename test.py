@@ -5,7 +5,9 @@ import datetime
 import hashlib
 import os
 import sys
+import threading
 import unittest
+from unittest import mock
 from urllib.parse import parse_qsl, urlparse
 from warnings import warn
 
@@ -497,6 +499,263 @@ class ParseUriTest(unittest.TestCase):
         otp = pyotp.parse_uri("otpauth://totp/Big%20Corp:bob?secret=GEZDGNBV&issuer=Big%20Corp")
         self.assertEqual(otp.name, "bob")
         self.assertEqual(otp.issuer, "Big Corp")
+
+
+class CasCounterStore(object):
+    """
+    Minimal stand-in for a database row holding the committed HOTP counter.
+    The compare-and-swap only commits when the row still holds the value the
+    caller read, which is what makes concurrent reuse of one token impossible.
+    """
+
+    def __init__(self, counter):
+        self.counter = counter
+        self.consume_calls = 0
+        self._lock = threading.Lock()
+
+    def consume(self, expected_count, new_count):
+        with self._lock:
+            self.consume_calls += 1
+            if self.counter != expected_count:
+                return False
+            self.counter = new_count
+            return True
+
+
+class HOTPResyncTests(unittest.TestCase):
+    SECRET = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+
+    def setUp(self):
+        self.hotp = pyotp.HOTP(self.SECRET)
+
+    def test_resync_one_step_ahead(self):
+        store = CasCounterStore(4)
+        token = self.hotp.at(5)
+
+        result = self.hotp.resync(token, 4, 10, store.consume)
+
+        self.assertEqual(result.status, pyotp.ResyncStatus.MATCH)
+        self.assertTrue(result.success)
+        self.assertEqual(result.matched_count, 5)
+        self.assertEqual(result.next_count, 6)
+        self.assertEqual(result.candidates_checked, 2)
+        # Acceptance is judged by the committed counter, not just the status.
+        self.assertEqual(store.counter, 6)
+        self.assertEqual(store.consume_calls, 1)
+
+    def test_resync_at_committed_counter_window_zero(self):
+        store = CasCounterStore(7)
+        result = self.hotp.resync(self.hotp.at(7), 7, 0, store.consume)
+
+        self.assertEqual(result.status, pyotp.ResyncStatus.MATCH)
+        self.assertEqual(result.matched_count, 7)
+        self.assertEqual(result.next_count, 8)
+        self.assertEqual(result.candidates_checked, 1)
+        self.assertEqual(store.counter, 8)
+
+    def test_resync_max_window_step(self):
+        window = 17
+        store = CasCounterStore(0)
+        # The hardware token drifted exactly to the edge of the window.
+        result = self.hotp.resync(self.hotp.at(window), 0, window, store.consume)
+
+        self.assertEqual(result.status, pyotp.ResyncStatus.MATCH)
+        self.assertEqual(result.matched_count, window)
+        self.assertEqual(result.next_count, window + 1)
+        self.assertEqual(result.candidates_checked, window + 1)
+        self.assertEqual(store.counter, window + 1)
+
+    def test_resync_beyond_window_does_not_advance(self):
+        store = CasCounterStore(0)
+        token = self.hotp.at(18)
+
+        result = self.hotp.resync(token, 0, 17, store.consume)
+
+        self.assertEqual(result.status, pyotp.ResyncStatus.NOT_FOUND)
+        self.assertFalse(result.success)
+        self.assertIsNone(result.matched_count)
+        self.assertIsNone(result.next_count)
+        self.assertEqual(result.candidates_checked, 18)
+        # A failed scan must never move the stored counter or touch storage.
+        self.assertEqual(store.counter, 0)
+        self.assertEqual(store.consume_calls, 0)
+
+    def test_resync_window_zero_rejects_drifted_token(self):
+        store = CasCounterStore(5)
+        result = self.hotp.resync(self.hotp.at(6), 5, 0, store.consume)
+
+        self.assertEqual(result.status, pyotp.ResyncStatus.NOT_FOUND)
+        self.assertEqual(result.candidates_checked, 1)
+        self.assertEqual(store.counter, 5)
+        self.assertEqual(store.consume_calls, 0)
+
+    def test_resync_wrong_token_does_not_advance(self):
+        store = CasCounterStore(3)
+        result = self.hotp.resync("000000", 3, 10, store.consume)
+
+        self.assertEqual(result.status, pyotp.ResyncStatus.NOT_FOUND)
+        self.assertEqual(store.counter, 3)
+        self.assertEqual(store.consume_calls, 0)
+
+    def test_resync_scans_in_deterministic_order(self):
+        store = CasCounterStore(0)
+        seen = []
+        token = self.hotp.at(4)
+        original_at = self.hotp.at
+
+        def recording_at(counter):
+            seen.append(counter)
+            return original_at(counter)
+
+        with mock.patch.object(self.hotp, "at", side_effect=recording_at):
+            result = self.hotp.resync(token, 0, 10, store.consume)
+
+        self.assertEqual(result.status, pyotp.ResyncStatus.MATCH)
+        self.assertEqual(seen, [0, 1, 2, 3, 4])
+        self.assertEqual(store.counter, 5)
+
+    def test_resync_concurrent_consume_only_one_succeeds(self):
+        committed = 4
+        store = CasCounterStore(committed)
+        token = self.hotp.at(committed)
+        start = threading.Barrier(8)
+        outcomes = []
+        outcomes_lock = threading.Lock()
+
+        def worker():
+            start.wait()
+            result = self.hotp.resync(token, committed, 10, store.consume)
+            with outcomes_lock:
+                outcomes.append(result.status)
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        successes = [status for status in outcomes if status is pyotp.ResyncStatus.MATCH]
+        rejected = [status for status in outcomes if status is pyotp.ResyncStatus.ALREADY_CONSUMED]
+        self.assertEqual(len(successes), 1)
+        self.assertEqual(len(rejected), 7)
+        # The counter advanced exactly once, regardless of request count.
+        self.assertEqual(store.counter, committed + 1)
+
+    def test_resync_lost_race_exposes_no_counter(self):
+        result = self.hotp.resync(self.hotp.at(2), 2, 5, lambda expected, new: False)
+
+        self.assertEqual(result.status, pyotp.ResyncStatus.ALREADY_CONSUMED)
+        self.assertIsNone(result.matched_count)
+        self.assertIsNone(result.next_count)
+        self.assertFalse(result.success)
+
+    def test_resync_same_token_after_consumption_is_rejected(self):
+        store = CasCounterStore(4)
+        token = self.hotp.at(4)
+        first = self.hotp.resync(token, 4, 10, store.consume)
+        self.assertTrue(first.success)
+
+        # The later request still believes the counter is 4; the CAS fails.
+        second = self.hotp.resync(token, 4, 10, store.consume)
+        self.assertEqual(second.status, pyotp.ResyncStatus.ALREADY_CONSUMED)
+        self.assertEqual(store.counter, 5)
+        self.assertEqual(store.consume_calls, 2)
+
+    def test_resync_empty_and_invalid_tokens(self):
+        store = CasCounterStore(0)
+        for token in ["", "12345", "1234567", "abcdef", "12 456", "①②③④⑤⑥", None, 123456]:
+            with self.subTest(token=token):
+                result = self.hotp.resync(token, 0, 10, store.consume)
+                self.assertEqual(result.status, pyotp.ResyncStatus.INVALID_TOKEN)
+                self.assertIsNone(result.matched_count)
+                self.assertIsNone(result.next_count)
+                self.assertIsNone(result.candidates_checked)
+
+        self.assertEqual(store.counter, 0)
+        self.assertEqual(store.consume_calls, 0)
+
+    def test_resync_negative_counter_and_window(self):
+        store = CasCounterStore(0)
+        self.assertEqual(
+            self.hotp.resync(self.hotp.at(0), -1, 10, store.consume).status,
+            pyotp.ResyncStatus.INVALID_ARGUMENT,
+        )
+        self.assertEqual(
+            self.hotp.resync(self.hotp.at(0), 0, -1, store.consume).status,
+            pyotp.ResyncStatus.INVALID_ARGUMENT,
+        )
+        self.assertEqual(
+            self.hotp.resync(self.hotp.at(0), 0, 10, None).status,
+            pyotp.ResyncStatus.INVALID_ARGUMENT,
+        )
+        self.assertEqual(store.counter, 0)
+        self.assertEqual(store.consume_calls, 0)
+
+    def test_resync_window_cap_rejects_giant_scan(self):
+        store = CasCounterStore(0)
+        result = self.hotp.resync(self.hotp.at(0), 0, pyotp.MAX_RESYNC_WINDOW + 1, store.consume)
+        self.assertEqual(result.status, pyotp.ResyncStatus.INVALID_ARGUMENT)
+        self.assertEqual(store.consume_calls, 0)
+
+    def test_resync_counter_overflow_boundary(self):
+        max_counter = pyotp.MAX_COUNTER
+        store = CasCounterStore(max_counter)
+
+        # The last representable counter still generates and accepts a token.
+        result = self.hotp.resync(self.hotp.at(max_counter), max_counter, 0, store.consume)
+        self.assertEqual(result.status, pyotp.ResyncStatus.MATCH)
+        self.assertEqual(result.matched_count, max_counter)
+        self.assertEqual(result.next_count, max_counter + 1)
+        self.assertEqual(store.counter, max_counter + 1)
+
+        # A committed counter past the 64-bit space cannot generate further OTPs.
+        exhausted = CasCounterStore(max_counter + 1)
+        overflow = self.hotp.resync(self.hotp.at(max_counter), max_counter + 1, 0, exhausted.consume)
+        self.assertEqual(overflow.status, pyotp.ResyncStatus.OVERFLOW)
+        self.assertIsNone(overflow.matched_count)
+        self.assertEqual(exhausted.counter, max_counter + 1)
+        self.assertEqual(exhausted.consume_calls, 0)
+
+    def test_resync_window_clamped_at_counter_space(self):
+        near_end = pyotp.MAX_COUNTER - 1
+        store = CasCounterStore(near_end)
+        # The requested window would run past the 64-bit space; the scan is
+        # clamped and a non-matching token still reports a plain failure.
+        result = self.hotp.resync("000000", near_end, 100, store.consume)
+        self.assertEqual(result.status, pyotp.ResyncStatus.NOT_FOUND)
+        self.assertEqual(result.candidates_checked, 2)
+        self.assertEqual(store.counter, near_end)
+
+    def test_resync_respects_initial_count(self):
+        hotp = pyotp.HOTP(self.SECRET, initial_count=10)
+        store = CasCounterStore(2)
+        # HOTP.at(2) with initial_count=10 uses HMAC counter 12.
+        result = hotp.resync(hotp.at(2), 2, 0, store.consume)
+        self.assertEqual(result.status, pyotp.ResyncStatus.MATCH)
+        self.assertEqual(result.next_count, 3)
+        self.assertEqual(store.counter, 3)
+
+    def test_resync_propagates_consume_exception(self):
+        def boom(expected, new):
+            raise RuntimeError("storage unavailable")
+
+        with self.assertRaises(RuntimeError):
+            self.hotp.resync(self.hotp.at(0), 0, 5, boom)
+
+    def test_legacy_hotp_api_unchanged(self):
+        self.assertEqual(self.hotp.at(0), "755224")
+        self.assertTrue(self.hotp.verify("755224", 0))
+        self.assertFalse(self.hotp.verify("755224", 1))
+        with self.assertRaises(ValueError):
+            self.hotp.at(-1)
+
+        shifted = pyotp.HOTP(self.SECRET, initial_count=3)
+        self.assertEqual(shifted.initial_count, 3)
+        self.assertEqual(shifted.at(0), "969429")
+
+        default = pyotp.HOTP(self.SECRET)
+        self.assertEqual(default.initial_count, 0)
+        self.assertEqual(default.digits, 6)
 
 
 class Timecop(object):

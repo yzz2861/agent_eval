@@ -85,6 +85,32 @@ Counter-based OTPs
     hotp.verify('316439', 1401) # => True
     hotp.verify('316439', 1402) # => False
 
+Resynchronizing a drifted HOTP counter
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When a hardware token has been pressed ahead of the server-side counter, use
+``resync()`` to scan a bounded forward window. The library compares counters in
+order and never persists anything itself: the caller supplies an atomic
+compare-and-swap callback that commits the new counter exactly once, so two
+concurrent requests presenting the same token cannot both succeed.
+
+.. code:: python
+
+    def consume(committed_count, new_count):
+        # Run the storage-level CAS here; return False if the stored counter
+        # changed concurrently (another request already consumed the token).
+        return storage.compare_and_swap(user_id, committed_count, new_count)
+
+    result = hotp.resync(token, current_count=stored_counter, max_window=20, consume=consume)
+    if result.status is pyotp.ResyncStatus.MATCH:
+        # result.next_count is the counter the CAS just committed.
+        accept_login()
+    elif result.status is pyotp.ResyncStatus.ALREADY_CONSUMED:
+        reject_as_replayed_token()
+    else:
+        # NOT_FOUND, INVALID_TOKEN, INVALID_ARGUMENT or OVERFLOW; the stored
+        # counter is unchanged and no counter value is exposed in the status.
+        reject_login()
+
 Generating a Secret Key
 ~~~~~~~~~~~~~~~~~~~~~~~
 A helper function is provided to generate a 32-character base32 secret, compatible with Google Authenticator and other
