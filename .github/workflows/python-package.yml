@@ -1,0 +1,103 @@
+name: Python package
+
+on:
+  - push
+  - pull_request
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint and type check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Check the license copyright year is current
+        run: |
+          year="$(date -u +%Y)"
+          license_year="$(grep -m1 '^Copyright' LICENSE.md | grep -oE '[0-9]{4}' | tail -1)"
+          if [ "$license_year" != "$year" ]; then
+            echo "::error file=LICENSE.md::Copyright year $license_year is not the current year $year; update LICENSE.md" >&2
+            exit 1
+          fi
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+      - name: Install dependencies
+        run: python -m pip install --require-hashes -r .github/requirements/lint.txt
+      - name: Check code style with ruff
+        run: |
+          ruff format --check idna tests/fuzz_*.py
+          ruff check idna tests
+      - name: Check types with mypy
+        run: mypy --strict idna
+      - name: Check types with ty
+        run: ty check idna tests
+
+  tables:
+    name: Verify generated tables
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+      - name: Read pinned Unicode version
+        id: unicode
+        run: echo "version=$(sed -n 's/^PREFERRED_VERSION = "\(.*\)"$/\1/p' tools/idna-data)" >> "$GITHUB_OUTPUT"
+      - name: Cache Unicode Character Database
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/unidata
+          key: unidata-${{ steps.unicode.outputs.version }}
+      - name: Regenerate tables and conformance tests from Unicode ${{ steps.unicode.outputs.version }}
+        run: python tools/idna-data make-libdata --dir idna --test-dir tests
+      - name: Verify checked-in files match generator output
+        run: git diff --exit-code -- idna/idnadata.py idna/uts46data.py tests/test_idna_uts46.py
+
+  test:
+    name: Test on Python ${{ matrix.python-version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - '3.10'
+          - '3.11'
+          - '3.12'
+          - '3.13'
+          - '3.14'
+          - '3.15'
+          - 'pypy-3.11'
+        include:
+          # Free-threaded builds, run with the GIL disabled; the suite checks
+          # that it stays off. (PYTHON_GIL=0 is a fatal error on other builds,
+          # so it is only set here.)
+          - python-version: '3.14t'
+            gil: '0'
+          - python-version: '3.15t'
+            gil: '0'
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      with:
+        python-version: ${{ matrix.python-version }}
+        allow-prereleases: true
+    - name: Install dependencies
+      run: python -m pip install --require-hashes -r .github/requirements/test.txt
+    - name: Test with pytest
+      env:
+        PYTHON_GIL: ${{ matrix.gil }}
+      # Measured under coverage on CPython; PyPy runs the suite plain since
+      # tracing there is an order of magnitude slower.
+      run: |
+        if [[ "${{ matrix.python-version }}" == pypy* ]]; then
+          pytest
+        else
+          coverage run -m pytest
+          coverage report
+        fi

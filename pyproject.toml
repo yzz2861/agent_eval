@@ -1,0 +1,95 @@
+[build-system]
+requires = ["flit_core >=3.11,<5"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "idna"
+description = "Internationalized Domain Names in Applications (IDNA)"
+readme = "README.md"
+license = "BSD-3-Clause"
+license-files = ["LICENSE.md"]
+authors = [
+  {name = "Kim Davies", email = "kim+pypi@gumleaf.org"}
+]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Developers",
+  "Intended Audience :: System Administrators",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: 3.15",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Python :: Implementation :: PyPy",
+  "Topic :: Internet :: Name Service (DNS)",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Topic :: Utilities",
+]
+requires-python = ">=3.10"
+dynamic = ["version"]
+
+[project.urls]
+"Source" = "https://github.com/kjd/idna"
+"Changelog" = "https://github.com/kjd/idna/blob/master/HISTORY.md"
+"Issue tracker" = "https://github.com/kjd/idna/issues"
+
+[project.scripts]
+idna = "idna.cli:main"
+
+[tool.flit.sdist]
+exclude = [".gitignore", ".github/"]
+include = ["tests", "tools", "HISTORY.md"]
+
+[project.optional-dependencies]
+all = [
+    "ruff >= 0.16.0",
+    "mypy >= 1.11.2",
+    "ty >= 0.0.37",
+    "pytest >= 8.3.2",
+    "hypothesis >= 6.141.1",
+    "coverage >= 7.10.0",
+]
+
+[tool.coverage.run]
+source = ["idna"]
+[tool.coverage.report]
+show_missing = true
+fail_under = 95
+
+[tool.ruff]
+line-length = 127
+[tool.ruff.lint]
+extend-select = [
+    # pycodestyle import/statement/runtime errors; these were part of ruff's
+    # default rule set before 0.16 and are kept explicitly here.
+    "E4",
+    "E7",
+    "E9",
+    "I",            # isort
+    "B",            # flake8-bugbear
+    "SIM",          # flake8-simplify
+    "UP",           # pyupgrade
+    "PERF",         # perflint
+    "PIE",          # flake8-pie
+    "RET",          # flake8-return
+    "RUF",          # ruff-specific
+    "PTH",          # flake8-use-pathlib
+    "TC",           # flake8-type-checking
+    "FURB",         # refurb
+    "C4",           # flake8-comprehensions
+]
+ignore = [
+    # An IDN library legitimately handles confusable / ambiguous Unicode;
+    # flagging it everywhere produces tens of thousands of false positives.
+    "RUF001",       # ambiguous-unicode-character-string
+    "RUF002",       # ambiguous-unicode-character-docstring
+    "RUF003",       # ambiguous-unicode-character-comment
+    # `__all__` lists __version__ first by convention; otherwise sorted.
+    "RUF022",       # unsorted-dunder-all
+]
