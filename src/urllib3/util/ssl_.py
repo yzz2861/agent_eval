@@ -11,6 +11,7 @@ from binascii import Error as BinasciiError
 from binascii import unhexlify
 
 from ..exceptions import ProxySchemeUnsupported, SSLError
+from .ssl_match_hostname import CertificateError, normalize_hostname
 from .url import _BRACELESS_IPV6_ADDRZ_RE, _IPV4_RE
 
 SSLContext = None
@@ -433,6 +434,12 @@ def ssl_wrap_socket(
             context.load_cert_chain(certfile, keyfile, key_password)
 
     context.set_alpn_protocols(ALPN_PROTOCOLS)
+
+    if server_hostname is not None:
+        try:
+            server_hostname = normalize_hostname(server_hostname)
+        except CertificateError as e:
+            raise SSLError(str(e)) from e
 
     ssl_sock = _ssl_wrap_socket_impl(sock, context, tls_in_tls, server_hostname)
     return ssl_sock

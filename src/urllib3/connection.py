@@ -55,12 +55,15 @@ from .util.request import body_to_chunks
 from .util.ssl_ import assert_fingerprint as _assert_fingerprint
 from .util.ssl_ import (
     create_urllib3_context,
-    is_ipaddress,
     resolve_cert_reqs,
     resolve_ssl_version,
     ssl_wrap_socket,
 )
-from .util.ssl_match_hostname import CertificateError, match_hostname
+from .util.ssl_match_hostname import (
+    CertificateError,
+    match_hostname,
+    normalize_hostname,
+)
 from .util.url import Url
 
 # Not a no-op, we're adding this to the namespace so it can be imported.
@@ -851,7 +854,10 @@ class HTTPSConnection(HTTPConnection):
         try:
             sock: socket.socket | ssl.SSLSocket
             self.sock = sock = self._new_conn()
-            server_hostname: str = self.host
+            # Keep the original DNS name here (including any trailing root
+            # dot).  The shared hostname normalizer removes one trailing dot,
+            # while still detecting names that contain empty labels.
+            server_hostname: str = self._dns_host
             tls_in_tls = False
 
             # Do we need to establish a tunnel?
@@ -884,9 +890,6 @@ class HTTPSConnection(HTTPConnection):
                     SystemTimeWarning,
                 )
 
-            # Remove trailing '.' from fqdn hostnames to allow certificate validation
-            server_hostname_rm_dot = server_hostname.rstrip(".")
-
             # Forwarding proxies should use proxy SSL context for
             # wrapping since that's the connection being established,
             # whereas tunneling proxies should use the connection's SSL
@@ -913,7 +916,7 @@ class HTTPSConnection(HTTPConnection):
                     cert_file=self.cert_file,
                     key_file=self.key_file,
                     key_password=self.key_password,
-                    server_hostname=server_hostname_rm_dot,
+                    server_hostname=server_hostname,
                     ssl_context=self.ssl_context,
                     tls_in_tls=tls_in_tls,
                     assert_hostname=self.assert_hostname,
@@ -1065,21 +1068,14 @@ def _ssl_wrap_socket_and_match_hostname(
     else:
         context = ssl_context
 
-    context.verify_mode = resolve_cert_reqs(cert_reqs)
-
-    # In some cases, we want to verify hostnames ourselves
-    if (
-        # `ssl` can't verify fingerprints or alternate hostnames
-        assert_fingerprint
-        or assert_hostname
-        # assert_hostname can be set to False to disable hostname checking
-        or assert_hostname is False
-        # We still support OpenSSL 1.0.2, which prevents us from verifying
-        # hostnames easily: https://github.com/pyca/pyopenssl/pull/933
-        or ssl_.IS_PYOPENSSL
-        or not ssl_.HAS_NEVER_CHECK_COMMON_NAME
-    ):
+    # Hostname matching must use the same normalization for direct connections,
+    # redirects, and proxy TLS handshakes.  OpenSSL's built-in check performs
+    # version-dependent IDNA and trailing-dot normalization, so disable it and
+    # use our own matcher below.  Certificate chain and expiration verification
+    # still happen during the handshake via ``context.verify_mode``.
+    if context.check_hostname:
         context.check_hostname = False
+    context.verify_mode = resolve_cert_reqs(cert_reqs)
 
     # Try to load OS default certs if none are given. We need to do the hasattr() check
     # for custom pyOpenSSL SSLContext objects because they don't support
@@ -1093,15 +1089,8 @@ def _ssl_wrap_socket_and_match_hostname(
     ):
         context.load_default_certs()
 
-    # Ensure that IPv6 addresses are in the proper format and don't have a
-    # scope ID. Python's SSL module fails to recognize scoped IPv6 addresses
-    # and interprets them as DNS hostnames.
     if server_hostname is not None:
-        normalized = server_hostname.strip("[]")
-        if "%" in normalized:
-            normalized = normalized[: normalized.rfind("%")]
-        if is_ipaddress(normalized):
-            server_hostname = normalized
+        server_hostname = normalize_hostname(server_hostname)
 
     ssl_sock = ssl_wrap_socket(
         sock=sock,
@@ -1159,20 +1148,17 @@ def _match_hostname(
     asserted_hostname: str,
     hostname_checks_common_name: bool = False,
 ) -> None:
-    # Our upstream implementation of ssl.match_hostname()
-    # only applies this normalization to IP addresses so it doesn't
-    # match DNS SANs so we do the same thing!
-    stripped_hostname = asserted_hostname.strip("[]")
-    if is_ipaddress(stripped_hostname):
-        asserted_hostname = stripped_hostname
-
     try:
-        match_hostname(cert, asserted_hostname, hostname_checks_common_name)
+        match_hostname(
+            cert,
+            asserted_hostname,
+            hostname_checks_common_name,
+        )
     except CertificateError as e:
         log.warning(
-            "Certificate did not match expected hostname: %s. Certificate: %s",
+            "Certificate did not match expected hostname: %s. Reason: %s",
             asserted_hostname,
-            cert,
+            e,
         )
         # Add cert to exception and reraise so client code can inspect
         # the cert when catching the exception, if they want to

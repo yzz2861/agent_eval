@@ -9,6 +9,12 @@ import pytest
 
 from urllib3.exceptions import ProxySchemeUnsupported, SSLError
 from urllib3.util import ssl_
+from urllib3.util.ssl_match_hostname import (
+    CertificateError,
+    _dnsname_match,
+    match_hostname,
+    normalize_hostname,
+)
 
 
 class TestSSL:
@@ -271,3 +277,181 @@ class TestSSL:
     ) -> None:
         with pytest.raises(SSLError):
             ssl_.assert_fingerprint(b"certificate", fingerprint)
+
+
+class TestHostnameMatching:
+    def test_normalize_hostname_unicode_case_and_trailing_dot(self) -> None:
+        assert normalize_hostname("BÜCHER.Example.COM.") == (
+            "xn--bcher-kva.example.com"
+        )
+        assert normalize_hostname("xn--BCHER-KVA.EXAMPLE.") == ("xn--bcher-kva.example")
+        assert normalize_hostname("bu\u0308cher.example") == ("xn--bcher-kva.example")
+
+    def test_normalize_hostname_rejects_empty_labels(self) -> None:
+        for name in ("example..com", ".example.com", "example.."):
+            with pytest.raises(CertificateError, match="empty label"):
+                normalize_hostname(name)
+
+    def test_normalize_hostname_ip_literals(self) -> None:
+        assert normalize_hostname("127.0.0.1") == "127.0.0.1"
+        assert normalize_hostname("[::1]") == "::1"
+        assert normalize_hostname("[2001:db8::1%42]") == "2001:db8::1"
+
+    def test_match_hostname_unicode_domain(self) -> None:
+        cert = {"subjectAltName": (("DNS", "xn--bcher-kva.example"),)}
+        match_hostname(cert, "BÜCHER.EXAMPLE.")
+
+    def test_match_hostname_punycode_and_case(self) -> None:
+        cert = {"subjectAltName": (("DNS", "XN--BCHER-KVA.EXAMPLE"),)}
+        match_hostname(cert, "bücher.example")
+
+    def test_match_hostname_ipv4_requires_ip_san(self) -> None:
+        match_hostname(
+            {"subjectAltName": (("IP Address", "127.0.0.1"),)},
+            "127.0.0.1",
+        )
+        with pytest.raises(CertificateError, match="IP literal.*DNS SAN"):
+            match_hostname(
+                {"subjectAltName": (("DNS", "127.0.0.1"),)},
+                "127.0.0.1",
+            )
+
+    def test_match_hostname_ipv6_literal_and_zone_id(self) -> None:
+        cert = {"subjectAltName": (("IP Address", "2001:db8::1"),)}
+        match_hostname(cert, "[2001:db8::1]")
+        match_hostname(cert, "2001:db8::1%en0")
+
+    def test_match_hostname_ipv6_does_not_match_dns_san(self) -> None:
+        with pytest.raises(CertificateError, match="IP literal.*DNS SAN"):
+            match_hostname(
+                {"subjectAltName": (("DNS", "example.com"),)},
+                "[2001:db8::1]",
+            )
+
+    def test_match_hostname_ip_type_mismatch(self) -> None:
+        with pytest.raises(CertificateError, match="IP type mismatch"):
+            match_hostname(
+                {"subjectAltName": (("IP Address", "2001:db8::1"),)},
+                "127.0.0.1",
+            )
+
+    def test_match_hostname_wildcard_leftmost_only(self) -> None:
+        cert = {"subjectAltName": (("DNS", "*.example.com"),)}
+        match_hostname(cert, "a.example.com")
+        with pytest.raises(CertificateError, match="SAN mismatch"):
+            match_hostname(cert, "a.b.example.com")
+
+    def test_dnsname_match_wildcard_cannot_match_empty_label(self) -> None:
+        assert not _dnsname_match("*.example.com", ".example.com")
+        assert not _dnsname_match("example.*.com", "example.foo.com")
+
+    def test_match_hostname_multiple_sans(self) -> None:
+        cert = {
+            "subjectAltName": (
+                ("DNS", "first.example.com"),
+                ("DNS", "*.example.com"),
+                ("IP Address", "127.0.0.1"),
+            )
+        }
+        match_hostname(cert, "second.example.com")
+        match_hostname(cert, "127.0.0.1")
+
+    def test_match_hostname_common_name_fallback(self) -> None:
+        cert = {"subject": ((("commonName", "example.com"),),)}
+        with pytest.raises(CertificateError, match="SAN mismatch"):
+            match_hostname(cert, "example.com")
+        match_hostname(cert, "EXAMPLE.COM.", hostname_checks_common_name=True)
+
+    def test_match_hostname_common_name_not_used_with_san(self) -> None:
+        cert = {
+            "subject": ((("commonName", "example.com"),),),
+            "subjectAltName": (("DNS", "other.example.com"),),
+        }
+        with pytest.raises(CertificateError, match="SAN mismatch"):
+            match_hostname(cert, "example.com", hostname_checks_common_name=True)
+
+    def test_match_hostname_expired_certificate(self) -> None:
+        cert = {
+            "subjectAltName": (("DNS", "example.com"),),
+            "notAfter": "Jan  1 00:00:00 2020 GMT",
+        }
+        with pytest.raises(CertificateError, match="certificate is expired"):
+            match_hostname(cert, "example.com")
+
+    def test_match_hostname_invalid_certificate(self) -> None:
+        with pytest.raises(CertificateError, match="invalid certificate"):
+            match_hostname(None, "example.com")
+        with pytest.raises(CertificateError, match="invalid certificate"):
+            match_hostname({}, "example.com")
+        with pytest.raises(CertificateError, match="empty label"):
+            match_hostname(
+                {"subjectAltName": (("DNS", "example..com"),)},
+                "example.com",
+            )
+
+    def test_hostname_check_disabled_skips_only_hostname_verification(self) -> None:
+        from urllib3.connection import _ssl_wrap_socket_and_match_hostname
+
+        context = mock.Mock(spec=ssl.SSLContext)
+        context.check_hostname = True
+        context.verify_mode = ssl.CERT_REQUIRED
+        context.hostname_checks_common_name = False
+        ssl_sock = mock.Mock()
+        ssl_sock.getpeercert.return_value = {
+            "subjectAltName": (("DNS", "not-example.com"),)
+        }
+
+        match = mock.Mock()
+        with (
+            mock.patch("urllib3.connection.ssl_wrap_socket", return_value=ssl_sock),
+            mock.patch("urllib3.connection._match_hostname", match),
+        ):
+            result = _ssl_wrap_socket_and_match_hostname(
+                sock=mock.Mock(),
+                cert_reqs=ssl.CERT_REQUIRED,
+                ssl_version=None,
+                ssl_minimum_version=None,
+                ssl_maximum_version=None,
+                cert_file=None,
+                key_file=None,
+                key_password=None,
+                ca_certs=None,
+                ca_cert_dir=None,
+                ca_cert_data=None,
+                assert_hostname=False,
+                assert_fingerprint=None,
+                server_hostname="example.com",
+                ssl_context=context,
+            )
+
+        assert result.is_verified is True
+        assert context.check_hostname is False
+        assert context.verify_mode == ssl.CERT_REQUIRED
+        match.assert_not_called()
+        ssl_sock.getpeercert.assert_not_called()
+
+    def test_ssl_wrap_socket_normalizes_unicode_server_hostname(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        context = mock.Mock(spec=ssl.SSLContext)
+        context.load_default_certs = mock.Mock()
+        wrapped = mock.Mock()
+        monkeypatch.setattr(
+            ssl_,
+            "_ssl_wrap_socket_impl",
+            mock.Mock(return_value=wrapped),
+        )
+
+        result = ssl_.ssl_wrap_socket(
+            sock=mock.Mock(),
+            ssl_context=context,
+            server_hostname="BÜCHER.Example.",
+        )
+
+        assert result is wrapped
+        ssl_._ssl_wrap_socket_impl.assert_called_once_with(  # type: ignore[attr-defined]
+            mock.ANY,
+            context,
+            False,
+            "xn--bcher-kva.example",
+        )

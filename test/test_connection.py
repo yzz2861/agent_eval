@@ -62,9 +62,9 @@ class TestConnection:
         except CertificateError as e:
             assert "hostname 'bar' doesn't match 'foo'" in str(e)
             mock_log.assert_called_once_with(
-                "Certificate did not match expected hostname: %s. Certificate: %s",
+                "Certificate did not match expected hostname: %s. Reason: %s",
                 "bar",
-                {"subjectAltName": (("DNS", "foo"),)},
+                mock.ANY,
             )
             assert e._peer_cert == cert  # type: ignore[attr-defined]
 
@@ -77,9 +77,9 @@ class TestConnection:
         except CertificateError as e:
             assert "hostname 'bar' doesn't match ''" in str(e)
             mock_log.assert_called_once_with(
-                "Certificate did not match expected hostname: %s. Certificate: %s",
+                "Certificate did not match expected hostname: %s. Reason: %s",
                 "bar",
-                {"subjectAltName": (("DNS", ""),)},
+                mock.ANY,
             )
             assert e._peer_cert == cert  # type: ignore[attr-defined]
 
@@ -137,9 +137,9 @@ class TestConnection:
         except CertificateError as e:
             assert "hostname '1.1.1.2' doesn't match '1.1.1.1'" in str(e)
             mock_log.assert_called_once_with(
-                "Certificate did not match expected hostname: %s. Certificate: %s",
+                "Certificate did not match expected hostname: %s. Reason: %s",
                 "1.1.1.2",
-                {"subjectAltName": (("IP Address", "1.1.1.1"),)},
+                mock.ANY,
             )
             assert e._peer_cert == cert  # type: ignore[attr-defined]
 
@@ -171,9 +171,9 @@ class TestConnection:
         except CertificateError as e:
             assert "hostname '1:2::2:2' doesn't match '1:2::2:1'" in str(e)
             mock_log.assert_called_once_with(
-                "Certificate did not match expected hostname: %s. Certificate: %s",
+                "Certificate did not match expected hostname: %s. Reason: %s",
                 "1:2::2:2",
-                {"subjectAltName": (("IP Address", "1:2::2:1"),)},
+                mock.ANY,
             )
             assert e._peer_cert == cert  # type: ignore[attr-defined]
 
