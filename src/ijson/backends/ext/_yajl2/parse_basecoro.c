@@ -115,6 +115,38 @@ PyObject* parse_basecoro_send_impl(PyObject *self, PyObject *event, PyObject *va
 	Py_RETURN_NONE;
 }
 
+PyObject* parse_basecoro_current_path(PyObject *self)
+{
+	ParseBasecoro *gen = (ParseBasecoro *)self;
+	Py_ssize_t npaths = PyList_GET_SIZE(gen->path);
+	PyObject *dot = gen->module_state->dot;
+	PyObject *result = PyUnicode_FromString("");
+	N_N(result);
+	for (Py_ssize_t i = 0; i < npaths; i++) {
+		PyObject *part = PyList_GET_ITEM(gen->path, i);
+		if (part == Py_None || PyUnicode_GET_LENGTH(part) == 0) {
+			continue;
+		}
+		if (PyUnicode_GET_LENGTH(result) > 0) {
+			PyObject *joined = PyUnicode_Concat(result, dot);
+			if (!joined) {
+				Py_DECREF(result);
+				return NULL;
+			}
+			Py_DECREF(result);
+			result = joined;
+		}
+		PyObject *joined = PyUnicode_Concat(result, part);
+		if (!joined) {
+			Py_DECREF(result);
+			return NULL;
+		}
+		Py_DECREF(result);
+		result = joined;
+	}
+	return result;
+}
+
 static PyObject* parse_basecoro_send(PyObject *self, PyObject *tuple)
 {
 	PyObject *event = NULL;

@@ -4,7 +4,7 @@ Pure-python parsing backend.
 from json.decoder import scanstring
 import re
 
-from ijson import common, utils
+from ijson import common, numbers, utils
 import codecs
 
 
@@ -12,6 +12,16 @@ LEXEME_RE = re.compile(r'[a-z0-9eE\.\+-]+|\S')
 INTEGER_RE = re.compile(r'-?[0-9]+')
 UNARY_LEXEMES = set('[]{},')
 EOF = -1, None
+
+
+def _unpack_chunk(incoming):
+    """Accepts decoded text or a (text, original_byte_length) tuple produced
+    by utf8_encoder and returns both parts."""
+    if isinstance(incoming, tuple):
+        return incoming
+    if not incoming:
+        return incoming, 0
+    return incoming, len(incoming.encode('utf-8'))
 
 
 class UnexpectedSymbol(common.JSONError):
@@ -26,6 +36,7 @@ def utf8_encoder(target):
     decoder = codecs.getincrementaldecoder('utf-8')()
     decode = decoder.decode
     send = target.send
+    pending_bytes = 0
     while True:
         try:
             final = False
@@ -47,34 +58,67 @@ def utf8_encoder(target):
             except:
                 pass
             raise
+        # account for every byte read: those retained by the incremental
+        # decoder as part of an incomplete multibyte sequence stay pending
+        # and are attributed to the characters once decoding completes
+        if bdata:
+            pending_bytes += len(bdata)
         if sdata:
-            send(sdata)
+            decoded_bytes = len(sdata.encode('utf-8'))
+            pending_bytes -= decoded_bytes
+            # forward the decoded text with the byte length it represents
+            # so the Lexer reports true byte offsets across chunk splits
+            send((sdata, decoded_bytes))
         elif not bdata:
-            target.close()
-            break
+            if final:
+                # On close, drive the downstream EOF handling through the
+                # normal path so pending events are still delivered.
+                try:
+                    send(('', 0))
+                except StopIteration:
+                    pass
+                return
+            # an empty chunk on the generator path marks end-of-input
+            try:
+                target.send(('', 0))
+            except StopIteration:
+                return
+            # an empty non-final chunk carries no information
+            continue
 
 @utils.coroutine
-def Lexer(target):
+def Lexer(target, number_limits, current_path=None):
     """
     Parses lexemes out of the incoming content, and sends them to parse_value.
     A special EOF result is sent when the data source has been exhausted to
-    give parse_value the possibility of raising custom exceptions due to missing
-    content.
+    give parse_value the possibility of raising custom exceptions due to
+    missing content.
+
+    Chunks are either plain decoded text or ``(text, byte_length)`` tuples
+    produced by utf8_encoder; the byte length lets this coroutine report true
+    byte offsets even when multibyte UTF-8 characters are split across chunks.
     """
-    try:
-        data = (yield)
-    except GeneratorExit:
-        data = ''
+    incoming = (yield)
+    data, data_bytes = _unpack_chunk(incoming)
     buf = data
     pos = 0
-    discarded = 0
+    pos_bytes = 0  # byte offset of buf[pos] in the original stream
     send = target.send
+
+    def advance(new_pos):
+        nonlocal pos, pos_bytes
+        if new_pos > pos:
+            pos_bytes += len(buf[pos:new_pos].encode('utf-8'))
+            pos = new_pos
+
     while True:
         match = LEXEME_RE.search(buf, pos)
         if match:
             lexeme = match.group()
             if lexeme == '"':
-                pos = match.start()
+                string_byte_start = pos_bytes + len(
+                    buf[pos:match.start()].encode('utf-8'))
+                advance(match.start())
                 start = pos + 1
                 while True:
                     try:
@@ -87,35 +131,78 @@ def Lexer(target):
                         else:
                             break
                     except ValueError:
-                        try:
-                            data = (yield)
-                        except GeneratorExit:
-                            data = ''
+                        chunk = (yield)
+                        data, _ = _unpack_chunk(chunk)
                         if not data:
-                            raise common.IncompleteJSONError('Incomplete string lexeme')
+                            raise common.IncompleteJSONError(
+                                'Incomplete string lexeme')
                         buf += data
-                send((discarded + pos, buf[pos:end + 1]))
-                pos = end + 1
+                lexeme_text = buf[pos:end + 1]
+                advance(end + 1)
+                send((string_byte_start, lexeme_text))
             else:
+                token_start = match.start()
+                token_byte_start = pos_bytes + len(
+                    buf[pos:token_start].encode('utf-8'))
+                streaming_token = False
                 while lexeme not in UNARY_LEXEMES and match.end() == len(buf):
-                    try:
-                        data = (yield)
-                    except GeneratorExit:
-                        data = ''
+                    is_number_like = bool(lexeme) and lexeme[0] in '-0123456789'
+                    if is_number_like:
+                        numbers.check_token_length(
+                            lexeme, number_limits, offset=token_byte_start,
+                            path=current_path() if current_path else None)
+                    # Only number-like tokens are streamed linearly; other
+                    # unterminated lexemes (true/false/null fragments) use
+                    # the original regex-based accumulation below.
+                    if not is_number_like:
+                        chunk = (yield)
+                        data, data_bytes = _unpack_chunk(chunk)
+                        if not data:
+                            break
+                        pos_bytes += data_bytes
+                        buf += data
+                        match = LEXEME_RE.search(buf, pos)
+                        lexeme = match.group()
+                        continue
+
+                    chunk = (yield)
+                    data, data_bytes = _unpack_chunk(chunk)
                     if not data:
+                        # end of input: the accumulated token is complete
                         break
-                    buf += data
+                    separators = ' \t\n\r[],{}:'
+                    cut = 0
+                    while cut < len(data) and data[cut] not in separators:
+                        cut += 1
+                    if number_limits.max_token_length is not None and \
+                            len(lexeme) + cut > number_limits.max_token_length:
+                        numbers.check_token_length(
+                            lexeme + data[:cut], number_limits,
+                            offset=token_byte_start,
+                            path=current_path() if current_path else None)
+                    lexeme += data[:cut]
+                    extra = data[cut:]
+                    numbers.check_token_length(
+                        lexeme, number_limits, offset=token_byte_start,
+                        path=current_path() if current_path else None)
+                    if extra:
+                        buf = buf[:token_start] + lexeme + extra
+                        match = LEXEME_RE.search(buf, pos)
+                        lexeme = match.group()
+                        break
+                    streaming_token = True
+                if streaming_token and match.end() == len(buf):
+                    buf = buf[:token_start] + lexeme
                     match = LEXEME_RE.search(buf, pos)
-                    lexeme = match.group()
-                send((discarded + match.start(), lexeme))
-                pos = match.end()
+                number_byte_start = pos_bytes + len(
+                    buf[pos:match.start()].encode('utf-8'))
+                send((number_byte_start, lexeme))
+                advance(match.end())
         else:
             # Don't ask data from an already exhausted source
             if data:
-                try:
-                    data = (yield)
-                except GeneratorExit:
-                    data = ''
+                chunk = (yield)
+                data, data_bytes = _unpack_chunk(chunk)
             if not data:
                 # Normally should raise StopIteration, but can raise
                 # IncompleteJSONError too, which is the point of sending EOF
@@ -124,7 +211,9 @@ def Lexer(target):
                 except StopIteration:
                     pass
                 break
-            discarded += len(buf)
+            # pos_bytes already points at the end of the fully-consumed
+            # previous buffer; the new chunk starts there, so only the state
+            # is reset (the chunk's own bytes are counted as it is consumed)
             buf = data
             pos = 0
 
@@ -140,7 +229,7 @@ inf = float("inf")
 neg_inf = float("-inf")
 
 @utils.coroutine
-def parse_value(target, multivalue, use_float):
+def parse_value(target, multivalue, use_float, number_limits):
     """
     Parses results coming out of the Lexer into ijson events, which are sent to
     `target`. A stack keeps track of the type of object being parsed at the time
@@ -159,11 +248,21 @@ def parse_value(target, multivalue, use_float):
     push = state_stack.append
     send = target.send
     prev_pos, prev_symbol = None, None
-    to_number = common.integer_or_float if use_float else common.integer_or_decimal
+    # Mirrors the path stack built by common.parse_basecoro so limit
+    # failures can be reported with their JSON location even at the
+    # basic_parse level.
+    path_stack = ['']
     while True:
 
         if prev_pos is None:
-            pos, symbol = (yield)
+            try:
+                pos, symbol = (yield)
+            except numbers.NumberLimitError as exc:
+                # raised by the Lexer while it was accumulating a token; the
+                # path stack already reflects the value's container
+                if exc.path is None:
+                    exc.set_path(path_stack[-1] or '')
+                raise
             if (pos, symbol) == EOF:
                 if state_stack:
                     raise common.IncompleteJSONError('Incomplete JSON content')
@@ -198,11 +297,13 @@ def parse_value(target, multivalue, use_float):
             # Array start
             elif symbol == '[':
                 send(('start_array', None))
+                path_stack.append(path_stack[-1] + '.item' if path_stack[-1] else 'item')
                 pos, symbol = (yield)
                 if (pos, symbol) == EOF:
                     raise common.IncompleteJSONError('Incomplete JSON content')
                 if symbol == ']':
                     send(('end_array', None))
+                    path_stack.pop()
                     pop()
                 else:
                     prev_pos, prev_symbol = pos, symbol
@@ -211,17 +312,20 @@ def parse_value(target, multivalue, use_float):
             # Object start
             elif symbol == '{':
                 send(('start_map', None))
+                path_stack.append(None)
                 pos, symbol = (yield)
                 if (pos, symbol) == EOF:
                     raise common.IncompleteJSONError('Incomplete JSON content')
                 if symbol == '}':
                     send(('end_map', None))
+                    path_stack.pop()
                     pop()
                 else:
                     prev_pos, prev_symbol = pos, symbol
                     push(_PARSE_OBJECT_KEY)
             # A number
             else:
+                number_path = path_stack[-1] or ''
                 # JSON numbers can't contain leading zeros
                 if ((len(symbol) > 1 and symbol[0] == '0' and symbol[1] not in ('e', 'E', '.')) or
                     (len(symbol) > 2 and symbol[0:2] == '-0' and symbol[2] not in ('e', 'E', '.'))):
@@ -234,9 +338,18 @@ def parse_value(target, multivalue, use_float):
                 if dot != -1 and not (symbol[dot - 1:dot].isdigit() and symbol[dot + 1:dot + 2].isdigit()):
                     raise common.JSONError('Invalid JSON number: %s' % (symbol,))
                 try:
-                    number = to_number(symbol)
+                    number = numbers.convert_number(
+                        symbol, use_float=use_float, limits=number_limits,
+                        offset=pos, path=number_path
+                    )
                     if number == inf or number == neg_inf:
                         raise common.JSONError("float overflow: %s" % (symbol,))
+                except numbers.NumberLimitError:
+                    raise
+                except common.JSONError:
+                    # e.g. an explicit float overflow produced by the shared
+                    # conversion code; don't turn it into an UnexpectedSymbol
+                    raise
                 except:
                     if 'true'.startswith(symbol) or 'false'.startswith(symbol) or 'null'.startswith(symbol):
                         raise common.IncompleteJSONError('Incomplete JSON content')
@@ -253,7 +366,10 @@ def parse_value(target, multivalue, use_float):
         elif state == _PARSE_OBJECT_KEY:
             if symbol[0] != '"':
                 raise UnexpectedSymbol(symbol, pos)
-            send(('map_key', parse_string(symbol)))
+            key = parse_string(symbol)
+            send(('map_key', key))
+            base = path_stack[-2]
+            path_stack[-1] = base + '.' + key if base else key
             pos, symbol = (yield)
             if (pos, symbol) == EOF:
                 raise common.IncompleteJSONError('Incomplete JSON content')
@@ -269,6 +385,7 @@ def parse_value(target, multivalue, use_float):
                 raise UnexpectedSymbol(symbol, pos)
             else:
                 send(('end_map', None))
+                path_stack.pop()
                 pop()
                 pop()
 
@@ -280,6 +397,7 @@ def parse_value(target, multivalue, use_float):
                 raise UnexpectedSymbol(symbol, pos)
             else:
                 send(('end_array', None))
+                path_stack.pop()
                 pop()
                 pop()
 
@@ -289,7 +407,7 @@ def parse_string(symbol):
 
 
 def basic_parse_basecoro(target, multiple_values=False, allow_comments=False,
-                         use_float=False):
+                         use_float=False, number_limits=None):
     '''
     Iterator yielding unprefixed events.
 
@@ -299,7 +417,18 @@ def basic_parse_basecoro(target, multiple_values=False, allow_comments=False,
     '''
     if allow_comments:
         raise ValueError("Comments are not supported by the python backend")
-    return utf8_encoder(Lexer(parse_value(target, multiple_values, use_float)))
+    limits = numbers.resolve_number_limits(number_limits)
+    value_coro = parse_value(target, multiple_values, use_float, limits)
+    def current_path():
+        # parse_value keeps the same path stack convention as the public
+        # parse_basecoro; read it directly so failures raised while the Lexer
+        # accumulates a token still carry their JSON location.
+        frame = value_coro.gi_frame
+        if frame is None:
+            return ''
+        stack = frame.f_locals.get('path_stack') or ['']
+        return '.'.join(part for part in stack if part)
+    return utf8_encoder(Lexer(value_coro, limits, current_path))
 
 
 common.enrich_backend(globals(), c_comments=False)

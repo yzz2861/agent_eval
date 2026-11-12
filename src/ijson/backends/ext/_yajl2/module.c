@@ -184,6 +184,14 @@ static int _yajl2_mod_exec(PyObject *m)
 	Py_DECREF(decimal_module);
 	M1_N(state->Decimal);
 
+	PyObject *numbers_module = PyImport_ImportModule("ijson.numbers");
+	M1_N(numbers_module);
+	state->convert_number = PyObject_GetAttrString(numbers_module, "convert_number");
+	state->NumberLimitError = PyObject_GetAttrString(numbers_module, "NumberLimitError");
+	Py_DECREF(numbers_module);
+	M1_N(state->convert_number);
+	M1_N(state->NumberLimitError);
+
 	return 0;
 }
 
@@ -197,6 +205,8 @@ void _yajl2_mod_free(void *self)
 		return;
 	}
 	Py_XDECREF(state->Decimal);
+	Py_XDECREF(state->NumberLimitError);
+	Py_XDECREF(state->convert_number);
 	Py_XDECREF(state->IncompleteJSONError);
 	Py_XDECREF(state->JSONError);
 	Py_XDECREF(state->dotitem);

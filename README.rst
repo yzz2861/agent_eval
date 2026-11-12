@@ -407,6 +407,21 @@ to give users more fine-grained control over certain operations:
   controls whether C-style comments (e.g., ``/* a comment */``),
   which are not supported by the JSON standard,
   are allowed in the content or not.
+- The ``number_limits`` option (enabled by default) bounds the resources
+  ijson will spend on a single JSON number.  A hostile document containing,
+  for example, a 100k-digit integer or a token like ``1e999999999`` would
+  otherwise make the parser allocate gigabytes (or more) while constructing
+  an ``int`` or expanding a ``Decimal`` exponent.  Pass a configured
+  ``ijson.numbers.NumberLimits`` instance to control the maximum number of
+  integer digits, fractional digits, significant digits, the absolute value
+  of an exponent and the overall token length; each bound can also be set to
+  ``None`` to disable it.  By default an out-of-bounds number raises
+  ``ijson.numbers.NumberLimitError`` (a ``JSONError``, never an
+  ``IncompleteJSONError``) *before* its ``number`` event is produced, and the
+  exception carries the JSON path and the byte offset of the offending token.
+  Set ``on_exceed=ijson.numbers.OnExceed.raw`` to keep the original token as a
+  string instead of converting it, while the token-length bound always
+  applies so an unbounded token can never exhaust memory.
 - For functions taking a file-like object,
   an additional ``buf_size`` option (defaults to ``65536`` or 64KB)
   specifies the amount of bytes the library

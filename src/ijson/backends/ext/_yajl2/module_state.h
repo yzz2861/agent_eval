@@ -29,6 +29,8 @@ typedef struct _yajl2_state {
 	PyObject *JSONError;
 	PyObject *IncompleteJSONError;
 	PyObject *Decimal;
+	PyObject *convert_number;
+	PyObject *NumberLimitError;
 } yajl2_state;
 
 /**

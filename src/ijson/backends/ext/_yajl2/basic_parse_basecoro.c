@@ -20,6 +20,77 @@ static inline enames_t get_enames(void *ctx)
 }
 
 /*
+ * Annotates a NumberLimitError raised while converting a number token with
+ * its byte offset (best-effort: yajl does not expose the token position, so
+ * the amount of bytes fed to the parser is used) and its JSON path when the
+ * downstream target tracks one.
+ */
+static int annotate_number_limit_error(void *ctx)
+{
+	yajl_parse_context *parse_ctx = (yajl_parse_context *)ctx;
+	PyObject *exc_type, *exc_value, *exc_tb;
+	PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
+	if (!exc_value ||
+	            !PyErr_GivenExceptionMatches(exc_value, parse_ctx->module_state->NumberLimitError)) {
+		PyErr_Restore(exc_type, exc_value, exc_tb);
+		return 0;
+	}
+	Py_XDECREF(exc_type);
+	Py_XDECREF(exc_tb);
+
+	/* yajl does not expose the token's position, so the offset reported is
+	 * the amount of data already handed over to it: a best-effort value that
+	 * never points before the offending token */
+	PyObject *offset = PyLong_FromSsize_t(parse_ctx->bytes_consumed);
+	if (!offset) {
+		Py_DECREF(exc_value);
+		return -1;
+	}
+	int rc = PyObject_SetAttrString(exc_value, "offset", offset);
+	Py_DECREF(offset);
+	if (rc == -1) {
+		Py_DECREF(exc_value);
+		return -1;
+	}
+	if (ParseBasecoro_Check(parse_ctx->target_send)) {
+		PyObject *path = parse_basecoro_current_path(parse_ctx->target_send);
+		if (!path) {
+			Py_DECREF(exc_value);
+			return -1;
+		}
+		rc = PyObject_SetAttrString(exc_value, "path", path);
+		Py_DECREF(path);
+		if (rc == -1) {
+			Py_DECREF(exc_value);
+			return -1;
+		}
+	}
+	/* refresh the exception message through the helper on NumberLimitError */
+	PyObject *set_path = PyObject_GetAttrString(exc_value, "set_path");
+	if (!set_path) {
+		Py_DECREF(exc_value);
+		return -1;
+	}
+	PyObject *current_path = PyObject_GetAttrString(exc_value, "path");
+	if (!current_path) {
+		Py_DECREF(set_path);
+		Py_DECREF(exc_value);
+		return -1;
+	}
+	PyObject *updated = PyObject_CallOneArg(set_path, current_path);
+	Py_DECREF(current_path);
+	Py_DECREF(set_path);
+	if (!updated) {
+		Py_DECREF(exc_value);
+		return -1;
+	}
+	Py_DECREF(updated);
+
+	PyErr_Restore((PyObject *)Py_TYPE(exc_value), exc_value, NULL);
+	return 0;
+}
+
+/*
  * The YAJL callbacks, they add (evt,value) to a list
  */
 static inline
@@ -51,53 +122,30 @@ static int boolean(void * ctx, int val) {
 	return add_event_and_value(ctx, get_enames(ctx).boolean_ename, bval);
 }
 
-static int yajl_integer(void *ctx, long long val)
-{
-	PyObject *ival;
-	Z_N(ival = PyLong_FromLongLong(val))
-	return add_event_and_value(ctx, get_enames(ctx).number_ename, ival);
-}
-
-static int yajl_double(void *ctx, double val)
-{
-	PyObject *dval;
-	Z_N(dval = PyFloat_FromDouble(val))
-	return add_event_and_value(ctx, get_enames(ctx).number_ename, dval);
-}
+/* integer/double callbacks are intentionally not registered: all numbers
+ * go through number() below so the original token is converted by the same
+ * shared Python code used by the other backends */
 
 static int number(void * ctx, const char *numberVal, size_t numberLen) {
 
-	// If original string has a dot or an "e/E" we return a Decimal
-	// just like in the common module
-	int is_decimal = 0;
-	const char *iter = numberVal;
-	size_t i;
-	for(i=0; i!=numberLen; i++) {
-		char c = *iter++;
-		if( c == '.' || c == 'e' || c == 'E' ) {
-			is_decimal = 1;
-			break;
+	yajl_parse_context *parse_ctx = (yajl_parse_context *)ctx;
+	PyObject *token = PyUnicode_FromStringAndSize(numberVal, (Py_ssize_t)numberLen);
+	Z_N(token);
+	PyObject *use_float = parse_ctx->use_float ? Py_True : Py_False;
+	PyObject *val = PyObject_CallFunctionObjArgs(
+		parse_ctx->module_state->convert_number, token, use_float,
+		parse_ctx->number_limits, NULL);
+	Py_DECREF(token);
+	if (!val) {
+		if (annotate_number_limit_error(ctx) == -1) {
+			return 0;
 		}
+		return 0;
 	}
 
-	PyObject *val;
-	if( !is_decimal ) {
-		char *nval = (char *)malloc(numberLen + 1);
-		memcpy(nval, numberVal, numberLen);
-		nval[numberLen] = 0;
-		char *endptr;
-		val = PyLong_FromString(nval, &endptr, 10);
-		free(nval);
-		// can fail even for valid input, e.g., when exceeding
-		// sys.get_int_max_str_digits()
-		Z_N(val);
-		assert(("string provided by yajl is not an integer", endptr != nval));
-	}
-	else {
-		Z_N(val = PyObject_CallFunction(((yajl_parse_context *)ctx)->module_state->Decimal, "s#", numberVal, numberLen));
-	}
-
-	return add_event_and_value(ctx, get_enames(ctx).number_ename, val);
+	int result = add_event_and_value(ctx, get_enames(ctx).number_ename, val);
+	Py_DECREF(val);
+	return result;
 }
 
 static int string_cb(void * ctx, const unsigned char *stringVal, size_t stringLen) {
@@ -138,7 +186,7 @@ static yajl_callbacks decimal_callbacks = {
 };
 
 static yajl_callbacks float_callbacks = {
-	null, boolean, yajl_integer, yajl_double, NULL, string_cb,
+	null, boolean, NULL, NULL, number, string_cb,
 	start_map, map_key, end_map, start_array, end_array
 };
 
@@ -186,20 +234,46 @@ static int basic_parse_basecoro_init(BasicParseBasecoro *self, PyObject *args, P
 	PyObject *allow_comments = Py_False;
 	PyObject *multiple_values = Py_False;
 	PyObject *use_float = Py_False;
+	PyObject *number_limits = NULL;
 	PyObject *target_send = NULL;
 
 	self->h = NULL;
 
 	char *kwlist[] = {"target_send", "allow_comments", "multiple_values",
-	                  "use_float", NULL};
-	if( !PyArg_ParseTupleAndKeywords(args, kwargs, "O|OOO", kwlist,
+	                  "use_float", "number_limits", NULL};
+	if( !PyArg_ParseTupleAndKeywords(args, kwargs, "O|OOOO", kwlist,
 	                                 &target_send, &allow_comments,
-	                                 &multiple_values, &use_float) ) {
+	                                 &multiple_values, &use_float,
+	                                 &number_limits) ) {
 		return -1;
 	}
 	self->ctx.target_send = target_send;
 	Py_INCREF(self->ctx.target_send);
 	M1_N(self->ctx.module_state = get_state_from_imported_module());
+	self->ctx.use_float = PyObject_IsTrue(use_float);
+	if (self->ctx.use_float == -1) {
+		return -1;
+	}
+	self->ctx.bytes_consumed = 0;
+	if (number_limits == NULL) {
+		PyObject *numbers_module = PyImport_ImportModule("ijson.numbers");
+		M1_N(numbers_module);
+		number_limits = PyObject_GetAttrString(numbers_module, "DEFAULT_NUMBER_LIMITS");
+		Py_DECREF(numbers_module);
+		M1_N(number_limits);
+		self->ctx.number_limits = number_limits;
+	}
+	else {
+		PyObject *numbers_module = PyImport_ImportModule("ijson.numbers");
+		M1_N(numbers_module);
+		PyObject *resolve = PyObject_GetAttrString(numbers_module, "resolve_number_limits");
+		Py_DECREF(numbers_module);
+		M1_N(resolve);
+		PyObject *resolved = PyObject_CallOneArg(resolve, number_limits);
+		Py_DECREF(resolve);
+		M1_N(resolved);
+		self->ctx.number_limits = resolved;
+	}
 
 	/*
 	 * Prepare yajl handle and configure it
@@ -234,6 +308,7 @@ static void basic_parse_basecoro_dealloc(BasicParseBasecoro *self)
 		yajl_free(self->h);
 	}
 	Py_XDECREF(self->ctx.target_send);
+	Py_XDECREF(self->ctx.number_limits);
 	Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
@@ -246,6 +321,9 @@ static PyObject* basic_parse_basecoro_send(PyObject *self, PyObject *arg)
 	N_M1(PyObject_GetBuffer(arg, &bufview, PyBUF_SIMPLE));
 	BasicParseBasecoro *gen = (BasicParseBasecoro *)self;
 	PyObject *ret = ijson_yajl_parse(gen, bufview.buf, bufview.len);
+	if (ret != NULL) {
+		gen->ctx.bytes_consumed += bufview.len;
+	}
 	if (ret != NULL && bufview.len == 0) {
 		// This was the last one, let's end now
 		PyErr_SetNone(PyExc_StopIteration);

@@ -47,4 +47,10 @@ extern PyTypeObject ParseBasecoro_Type;
  */
 PyObject* parse_basecoro_send_impl(PyObject *self, PyObject *event, PyObject *value);
 
+/**
+ * Returns the current JSON path (new reference) of a parse_basecoro
+ * coroutine, joining path components with dots and ignoring NULL entries.
+ */
+PyObject* parse_basecoro_current_path(PyObject *self);
+
 #endif // PARSE_BASECORO_H

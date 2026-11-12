@@ -5,7 +5,7 @@ Wrapper for YAJL C library version 1.x.
 import ctypes
 from ctypes import Structure, c_uint, byref
 
-from ijson import common, utils
+from ijson import common, numbers, utils
 from ijson.backends import _yajl2_ctypes_common
 
 
@@ -20,7 +20,7 @@ class Config(Structure):
 
 @utils.coroutine
 def basic_parse_basecoro(target, allow_comments=False, multiple_values=False,
-                         use_float=False):
+                         use_float=False, number_limits=None):
     '''
     Iterator yielding unprefixed events.
 
@@ -33,7 +33,9 @@ def basic_parse_basecoro(target, allow_comments=False, multiple_values=False,
     '''
     if multiple_values:
         raise ValueError("yajl backend doesn't support multiple_values")
-    callbacks, _keepalive, pending = _yajl2_ctypes_common.make_callbaks(target.send, use_float, 1)
+    limits = numbers.resolve_number_limits(number_limits)
+    callbacks, _keepalive, pending, state = _yajl2_ctypes_common.make_callbaks(
+        target.send, use_float, 1, limits)
     config = Config(allow_comments, True)
     handle = yajl.yajl_alloc(byref(callbacks), byref(config), None, None)
     try:
@@ -46,7 +48,9 @@ def basic_parse_basecoro(target, allow_comments=False, multiple_values=False,
                 result = yajl.yajl_parse(handle, buffer, len(buffer))
             else:
                 result = yajl.yajl_parse_complete(handle)
-            pending.raise_if_set()
+            if result == _yajl2_ctypes_common.YAJL_OK and buffer:
+                state.bytes_consumed += len(buffer)
+            pending.raise_annotated(state)
             if result == _yajl2_ctypes_common.YAJL_ERROR:
                 error = _yajl2_ctypes_common.yajl_get_error(yajl, handle, buffer)
                 raise common.JSONError(error)
@@ -63,5 +67,7 @@ common.enrich_backend(
     multiple_values=False,
     invalid_leading_zeros_detection=False,
     incomplete_json_tokens_detection=False,
-    int64=ctypes.sizeof(ctypes.c_long) == 0,
+    # numbers are always converted from their original token in Python now,
+    # so 64-bit integers are supported regardless of the platform's long size
+    int64=True,
 )

@@ -2,6 +2,24 @@
 
 ## Development
 
+* Added configurable number resource limits shared by all backends
+  (`ijson.numbers.NumberLimits`, passed through the `number_limits` option).
+  Number tokens are now validated before conversion, bounding integer digits,
+  fractional digits, significant digits, exponent magnitude and the overall
+  token length so pathological inputs (e.g. a 100k-digit integer or
+  `1e999999999`) can no longer exhaust memory. Limit failures raise
+  `ijson.numbers.NumberLimitError` (a `JSONError`, never an EOF error) before
+  the `number` event is emitted, and carry the JSON path and byte offset; an
+  `on_exceed=raw` strategy keeps offending tokens as strings instead. The
+  pure-Python lexer also stops growing an over-long token while it is being
+  accumulated across chunks.
+* All backends now convert numbers from their original textual token through
+  the shared `ijson.numbers.convert_number` code, so integer/Decimal/float
+  results and boundary behaviour are identical across backends; the yajl
+  backends no longer rely on the C library's own integer/double callbacks
+  (which produced slightly different rounding) and the yajl v1 backend
+  therefore supports 64-bit integers.
+
 * Fixed handling of integers longer than `sys.get_int_max_str_digits()`:
   the `yajl2_c` backend no longer crashes on them, and all backends
   now raise the `ValueError` produced by `int()` (#188).

@@ -23,6 +23,24 @@ class IncompleteJSONError(JSONError):
     pass
 
 
+from ijson import numbers  # noqa: E402  (imported after JSONError is defined)
+# Number limit failures are parsing failures, but must never be confused
+# with an unexpected end of input (IncompleteJSONError stays separate).
+_BaseNumberLimitError = numbers.NumberLimitError
+
+
+class NumberLimitError(JSONError, numbers.NumberLimitError):
+    '''A :class:`~ijson.numbers.NumberLimitError` that is also a
+    :class:`JSONError`, while remaining distinct from
+    :class:`IncompleteJSONError`.'''
+    __module__ = numbers.NumberLimitError.__module__
+
+    def __init__(self, *args, **kwargs):
+        _BaseNumberLimitError.__init__(self, *args, **kwargs)
+
+numbers.NumberLimitError = NumberLimitError
+
+
 @utils.coroutine
 def parse_basecoro(target):
     '''
@@ -70,7 +88,16 @@ def parse_basecoro(target):
     '''
     path = []
     while True:
-        event, value = yield
+        try:
+            event, value = yield
+        except numbers.NumberLimitError as exc:
+            # The pure-Python Lexer can raise while accumulating a token,
+            # before the corresponding event reaches this coroutine; in that
+            # case its path is still missing and is filled in here using the
+            # path state built from all the events already processed.
+            exc.set_path(exc.path if exc.path is not None
+                         else '.'.join(part for part in path if part))
+            raise
         if event == 'map_key':
             prefix = '.'.join(path[:-1])
             path[-1] = value

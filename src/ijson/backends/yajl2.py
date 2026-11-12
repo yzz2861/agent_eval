@@ -4,7 +4,7 @@ Wrapper for YAJL C library version 2.x.
 
 from ctypes import byref
 
-from ijson import common, utils
+from ijson import common, numbers, utils
 from ijson.backends import _yajl2_ctypes_common
 
 
@@ -17,7 +17,7 @@ YAJL_MULTIPLE_VALUES = 8
 
 @utils.coroutine
 def basic_parse_basecoro(target, allow_comments=False, multiple_values=False,
-                         use_float=False):
+                         use_float=False, number_limits=None):
     '''
     Iterator yielding unprefixed events.
 
@@ -28,7 +28,9 @@ def basic_parse_basecoro(target, allow_comments=False, multiple_values=False,
     - buf_size: a size of an input buffer
     - multiple_values: allows the parser to parse multiple JSON objects
     '''
-    callbacks, _keepalive, pending = _yajl2_ctypes_common.make_callbaks(target.send, use_float, 2)
+    limits = numbers.resolve_number_limits(number_limits)
+    callbacks, _keepalive, pending, state = _yajl2_ctypes_common.make_callbaks(
+        target.send, use_float, 2, limits)
     handle = yajl.yajl_alloc(byref(callbacks), None, None)
     if allow_comments:
         yajl.yajl_config(handle, YAJL_ALLOW_COMMENTS, 1)
@@ -44,7 +46,9 @@ def basic_parse_basecoro(target, allow_comments=False, multiple_values=False,
                 result = yajl.yajl_parse(handle, buffer, len(buffer))
             else:
                 result = yajl.yajl_complete_parse(handle)
-            pending.raise_if_set()
+            if result == _yajl2_ctypes_common.YAJL_OK and buffer:
+                state.bytes_consumed += len(buffer)
+            pending.raise_annotated(state)
             if result != _yajl2_ctypes_common.YAJL_OK:
                 error = _yajl2_ctypes_common.yajl_get_error(yajl, handle, buffer)
                 exception = common.IncompleteJSONError if result == _yajl2_ctypes_common.YAJL_INSUFFICIENT_DATA else common.JSONError

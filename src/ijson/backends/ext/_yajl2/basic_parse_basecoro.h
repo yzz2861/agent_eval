@@ -21,6 +21,9 @@
 typedef struct _yajl_parse_context {
 	yajl2_state *module_state;
 	PyObject *target_send;
+	PyObject *number_limits;
+	int use_float;
+	Py_ssize_t bytes_consumed;
 } yajl_parse_context;
 
 

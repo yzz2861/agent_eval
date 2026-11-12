@@ -56,6 +56,7 @@ def coros2gen(source, *coro_pipeline):
             except Exception as ex:
                 for event in events:
                     yield event
+                del events[:]
                 if isinstance(ex, StopIteration):
                     return
                 raise

@@ -5,7 +5,7 @@ CFFI-Wrapper for YAJL C library version 2.x.
 from cffi import FFI
 import functools
 
-from ijson import common, backends, utils
+from ijson import common, backends, numbers, utils
 
 
 ffi = FFI()
@@ -101,22 +101,21 @@ def boolean(val):
     return bool(val)
 
 
-@ffi.callback('int(void *ctx, long long integerVal)')
-@append_event_to_ctx('number')
-def integer(val):
-    return int(val)
-
-
-@ffi.callback('int(void * ctx, double doubleVal)')
-@append_event_to_ctx('number')
-def double(val):
-    return val
-
-
-@ffi.callback('int(void *ctx, const char *numberVal, size_t numberLen)')
-@append_event_to_ctx('number')
-def number(val, length):
-    return common.integer_or_decimal(ffi.string(val, maxlen=length).decode("utf-8"))
+def _make_number_callback(use_float):
+    @ffi.callback('int(void *ctx, const char *numberVal, size_t numberLen)')
+    def number(ctx, val, length):
+        scope = ffi.from_handle(ctx)
+        try:
+            token = ffi.string(val, maxlen=length).decode("utf-8")
+            value = numbers.convert_number(
+                token, use_float=scope.use_float, limits=scope.number_limits
+            )
+            scope.send(('number', value))
+        except BaseException as e:
+            scope.exception = e
+            return 0
+        return 1
+    return number
 
 
 @ffi.callback('int(void *ctx, const unsigned char *stringVal, size_t stringLen)')
@@ -156,25 +155,24 @@ def end_array():
     return None
 
 
-_decimal_callback_data = (
-    null, boolean, ffi.NULL, ffi.NULL, number, string,
-    start_map, map_key, end_map, start_array, end_array
-)
-
-_float_callback_data = (
-    null, boolean, integer, double, ffi.NULL, string,
-    start_map, map_key, end_map, start_array, end_array
-)
-
-
-def yajl_init(scope, send, allow_comments=False, multiple_values=False, use_float=False):
+def yajl_init(scope, send, allow_comments=False, multiple_values=False,
+              use_float=False, number_limits=None):
     scope.send = send
     scope.exception = None
+    scope.bytes_consumed = 0
+    scope.use_float = use_float
+    scope.number_limits = numbers.resolve_number_limits(number_limits)
     scope.ctx = ffi.new_handle(scope)
-    if use_float:
-        scope.callbacks = ffi.new('yajl_callbacks*', _float_callback_data)
-    else:
-        scope.callbacks = ffi.new('yajl_callbacks*', _decimal_callback_data)
+    # The string-based number callback is always used: it keeps conversion
+    # (and rounding) identical across backends and applies the number limits
+    # before any value is built.  The integer/double callbacks stay NULL.
+    number_cb = _make_number_callback(use_float)
+    scope._number_cb = number_cb  # keep the callback alive
+    callback_data = (
+        null, boolean, ffi.NULL, ffi.NULL, number_cb, string,
+        start_map, map_key, end_map, start_array, end_array
+    )
+    scope.callbacks = ffi.new('yajl_callbacks*', callback_data)
     handle = yajl.yajl_alloc(scope.callbacks, ffi.NULL, scope.ctx)
 
     if allow_comments:
@@ -190,10 +188,16 @@ def yajl_parse(scope, handle, buffer):
         result = yajl.yajl_parse(handle, buffer, len(buffer))
     else:
         result = yajl.yajl_complete_parse(handle)
+    if result == YAJL_OK and buffer:
+        scope.bytes_consumed += len(buffer)
 
     if result != YAJL_OK:
         if scope.exception is not None:
             exception, scope.exception = scope.exception, None
+            if isinstance(exception, numbers.NumberLimitError):
+                if exception.offset is None:
+                    exception.offset = scope.bytes_consumed
+                exception.set_path(exception.path)
             raise exception
         perror = yajl.yajl_get_error(handle, 1, buffer, len(buffer))
         error = ffi.string(perror)
