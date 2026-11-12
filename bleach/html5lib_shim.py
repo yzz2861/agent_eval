@@ -633,6 +633,157 @@ def convert_entities(text):
     return "".join(new_text)
 
 
+def _decode_numeric_entity(text, position):
+    """Decode a numeric character reference at ``position``
+
+    :arg text: the text to decode
+    :arg int position: index of the ``&`` that starts the reference
+
+    :returns: ``(decoded, next_position)`` or ``None`` if this isn't a valid
+        numeric character reference
+
+    """
+    index = position + 2
+    hexadecimal = False
+
+    if index < len(text) and text[index] in ("x", "X"):
+        hexadecimal = True
+        index += 1
+
+    digits_start = index
+    allowed = string.hexdigits if hexadecimal else string.digits
+
+    while index < len(text) and text[index] in allowed:
+        index += 1
+
+    if index == digits_start:
+        return None
+
+    code_point = int(text[digits_start:index], 16 if hexadecimal else 10)
+
+    if index < len(text) and text[index] == ";":
+        index += 1
+
+    # Numeric character references are decoded whether or not they end
+    # with a semicolon.
+    if code_point in constants.replacementCharacters:
+        character = constants.replacementCharacters[code_point]
+
+    elif code_point == 0 or 0xD800 <= code_point <= 0xDFFF or code_point > 0x10FFFF:
+        character = "\ufffd"
+
+    else:
+        character = chr(code_point)
+
+    return character, index
+
+
+def _decode_named_entity(text, position):
+    """Decode a named character reference at ``position``
+
+    This mirrors html5lib's tokenizer behavior, including legacy named
+    character references that don't require a semicolon in attribute values.
+
+    :arg text: the text to decode
+    :arg int position: index of the ``&`` that starts the reference
+
+    :returns: ``(decoded, next_position)`` or ``None`` if this isn't a valid
+        named character reference
+
+    """
+    start = position + 1
+    index = start
+    characters = []
+
+    while index < len(text):
+        characters.append(text[index])
+        index += 1
+
+        if not ENTITIES_TRIE.has_keys_with_prefix("".join(characters)):
+            break
+
+    if index < len(text):
+        # The last character we collected is what made the prefix fail, so
+        # it isn't part of the candidate entity name.
+        candidate = "".join(characters[:-1])
+    else:
+        candidate = "".join(characters)
+
+    if not candidate:
+        return None
+
+    try:
+        entity = ENTITIES_TRIE.longest_prefix(candidate)
+    except KeyError:
+        return None
+
+    next_position = start + len(entity)
+
+    if not entity.endswith(";"):
+        # Legacy named character references are not decoded in attribute
+        # values if they're followed by an alphanumeric character or "=".
+        if next_position < len(text):
+            following = text[next_position]
+            if following in string.ascii_letters or following in string.digits:
+                return None
+            if following == "=":
+                return None
+
+    return ENTITIES[entity], next_position
+
+
+def unescape_attribute_value(text):
+    """Decode character references as the HTML parser does in attribute values
+
+    Unlike :func:`convert_entities`, this follows the HTML parsing rules for
+    attribute values:
+
+    * numeric character references are decoded with or without a semicolon
+    * named character references with semicolons are decoded
+    * legacy named character references without semicolons are decoded unless
+      followed by an alphanumeric character or ``=``
+
+    :arg text: the attribute value to decode
+
+    :returns: decoded attribute value
+
+    """
+    if "&" not in text:
+        return text
+
+    decoded = []
+    position = 0
+    text_length = len(text)
+
+    while position < text_length:
+        ampersand = text.find("&", position)
+
+        if ampersand == -1:
+            decoded.append(text[position:])
+            break
+
+        decoded.append(text[position:ampersand])
+
+        if ampersand + 1 >= text_length:
+            decoded.append("&")
+            position = ampersand + 1
+            continue
+
+        if text[ampersand + 1] == "#":
+            reference = _decode_numeric_entity(text, ampersand)
+        else:
+            reference = _decode_named_entity(text, ampersand)
+
+        if reference is None:
+            decoded.append("&")
+            position = ampersand + 1
+        else:
+            character, position = reference
+            decoded.append(character)
+
+    return "".join(decoded)
+
+
 def match_entity(stream):
     """Returns first entity in stream or None if no entity exists
 

@@ -661,6 +661,176 @@ def test_uri_value_allowed_protocols(data, kwargs, expected):
     assert clean(data, **kwargs) == expected
 
 
+@pytest.mark.parametrize(
+    "data",
+    [
+        # Schemes whose payload looks like a port must still be treated as
+        # absolute URLs.
+        '<a href="javascript:1337">alert</a>',
+        '<a href="JaVaScRiPt:1337">alert</a>',
+        '<a href="data:1337">alert</a>',
+        '<a href="vbscript:56">alert</a>',
+        '<a href="javascript:1337/path">alert</a>',
+        # Character references are decoded using attribute value semantics,
+        # including numeric references without a semicolon.
+        '<a href="javascript&#58alert(1)">alert</a>',
+        '<a href="jav&#x09;ascript&#x3A;alert(1)">alert</a>',
+        '<a href="java&#115;cript:1337">alert</a>',
+        # Controls and whitespace, including non-ASCII whitespace, can't
+        # split the scheme.
+        '<a href="jav\tascript:1337">alert</a>',
+        '<a href="javascript\u3000:1337">alert</a>',
+        '<a href="javascript\u00a0:1337">alert</a>',
+        # Unicode characters can't disguise an ASCII scheme.
+        '<a href="jav\u00e1script:1337">alert</a>',
+        '<a href="jav\u0430script:1337">alert</a>',
+    ],
+)
+def test_uri_value_dangerous_schemes_normalized(data):
+    assert clean(data) == "<a>alert</a>"
+
+
+@pytest.mark.parametrize(
+    "data, expected",
+    [
+        (
+            '<a href="HTTPS://bücher.example/straße?q=值&amp;x=1#frag">link</a>',
+            '<a href="HTTPS://bücher.example/straße?q=值&amp;x=1#frag">link</a>',
+        ),
+        (
+            '<a href="mailto:user@example.com?subject=Hi&amp;body=there">mail</a>',
+            '<a href="mailto:user@example.com?subject=Hi&amp;body=there">mail</a>',
+        ),
+        (
+            '<a href="/relative/path?q=1&amp;x=2#frag">link</a>',
+            '<a href="/relative/path?q=1&amp;x=2#frag">link</a>',
+        ),
+        (
+            '<a href="example.com:8000/path?q=1#frag">link</a>',
+            '<a href="example.com:8000/path?q=1#frag">link</a>',
+        ),
+        (
+            '<a href="192.168.100.100:8000/path?q=1#frag">link</a>',
+            '<a href="192.168.100.100:8000/path?q=1#frag">link</a>',
+        ),
+    ],
+)
+def test_uri_value_preserves_safe_original_value(data, expected):
+    assert clean(data) == expected
+
+
+def test_uri_value_data_protocol_allowed():
+    assert (
+        clean(
+            '<a href="data:text/plain,hello%20world">data</a>',
+            protocols=("data",),
+        )
+        == '<a href="data:text/plain,hello%20world">data</a>'
+    )
+
+
+def test_uri_value_allowed_protocols_case_insensitive():
+    assert (
+        clean(
+            '<a href="HTTPS://example.com/path?q=1">link</a>',
+            protocols=("HTTP", "HTTPS", "MAILTO"),
+        )
+        == '<a href="HTTPS://example.com/path?q=1">link</a>'
+    )
+
+
+@pytest.mark.parametrize(
+    "text, tags, attributes, expected",
+    [
+        (
+            '<img src="javascript:1337">',
+            {"img"},
+            {"img": ["src"]},
+            "<img>",
+        ),
+        (
+            '<form action="javascript:1337"></form>',
+            {"form"},
+            {"form": ["action"]},
+            "<form></form>",
+        ),
+        (
+            '<button formaction="javascript:1337">x</button>',
+            {"button"},
+            {"button": ["formaction"]},
+            "<button>x</button>",
+        ),
+        (
+            '<video poster="javascript:1337"></video>',
+            {"video"},
+            {"video": ["poster"]},
+            "<video></video>",
+        ),
+    ],
+)
+def test_uri_value_normalizes_uri_attributes(text, tags, attributes, expected):
+    assert clean(text, tags=tags, attributes=attributes) == expected
+
+
+def test_uri_value_normalization_with_callable_attributes():
+    def allowed_attributes(tag, name, value):
+        return name in ("href", "data-id")
+
+    assert (
+        clean(
+            '<a href="jav&#x09;ascript&#58;1337" data-id="javascript:1337">x</a>',
+            attributes=allowed_attributes,
+        )
+        == '<a data-id="javascript:1337">x</a>'
+    )
+
+
+def test_uri_value_normalization_with_data_attribute_filter():
+    attributes = {
+        "a": ["href", "data-target"],
+    }
+
+    assert (
+        clean(
+            '<a href="javascript:1337" data-target="javascript:1337">x</a>',
+            attributes=attributes,
+        )
+        == '<a data-target="javascript:1337">x</a>'
+    )
+
+
+@pytest.mark.parametrize("strip", [True, False])
+def test_uri_value_removal_respects_strip(strip):
+    # The link tag is allowed, so only the unsafe attribute is dropped.
+    assert (
+        clean(
+            '<a href="javascript:1337">x</a>',
+            tags={"a"},
+            strip=strip,
+        )
+        == "<a>x</a>"
+    )
+
+    # The link tag is disallowed, so the existing strip/escape policy applies.
+    expected = "x" if strip else '&lt;a href="javascript:1337"&gt;x&lt;/a&gt;'
+    assert clean('<a href="javascript:1337">x</a>', tags=set(), strip=strip) == expected
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        '<a href="javascript:1337">alert</a>',
+        '<a href="javascript&#58alert(1)">alert</a>',
+        '<a href="HTTPS://bücher.example/straße?q=值&amp;x=1#frag">link</a>',
+        '<a href="mailto:user@example.com?subject=Hi&amp;body=there">mail</a>',
+        '<a href="/relative/path?q=1&amp;x=2#frag">link</a>',
+    ],
+)
+def test_uri_value_clean_is_idempotent(data):
+    cleaned = clean(data)
+    assert clean(cleaned) == cleaned
+
+
 def test_svg_attr_val_allows_ref():
     """Unescape values in svg attrs that allow url references"""
     # Local IRI, so keep it

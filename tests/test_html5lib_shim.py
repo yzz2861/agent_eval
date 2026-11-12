@@ -36,6 +36,35 @@ def test_convert_entities(data, expected):
 @pytest.mark.parametrize(
     "data, expected",
     [
+        # Numeric character references are decoded with or without a semicolon
+        ("&#58;", ":"),
+        ("&#58alert(1)", ":alert(1)"),
+        ("&#0058alert", ":alert"),
+        ("&#x3a;", ":"),
+        ("&#x03azalert", ":zalert"),
+        # Named character references with semicolons are decoded
+        ("&colon;", ":"),
+        ("&Tab;", "\t"),
+        ("&NewLine;", "\n"),
+        # Legacy named character references without semicolons are decoded
+        # unless followed by an alphanumeric character or "="
+        ("&amp x", "& x"),
+        ("&ampx", "&ampx"),
+        ("&amp=1", "&amp=1"),
+        ("&notit;", "&notit;"),
+        ("&notin;", "\u2209"),
+        # Invalid numeric references are replaced with the unicode replacement
+        # character, as the html5lib tokenizer does
+        ("&#x110000;", "\ufffd"),
+    ],
+)
+def test_unescape_attribute_value(data, expected):
+    assert html5lib_shim.unescape_attribute_value(data) == expected
+
+
+@pytest.mark.parametrize(
+    "data, expected",
+    [
         ("", ""),
         ("text", "text"),
         # & in Characters is escaped

@@ -50,6 +50,79 @@ INVISIBLE_CHARACTERS_RE = re.compile("[" + INVISIBLE_CHARACTERS + "]", re.UNICOD
 INVISIBLE_REPLACEMENT_CHAR = "?"
 
 
+#: Regexp for a URI scheme at the beginning of a normalized URL
+URI_SCHEME_RE = re.compile(r"\A([A-Za-z][A-Za-z0-9+.-]*):", re.ASCII)
+
+#: Regexp for URLs that look like a host and port, but have no scheme
+HOST_PORT_RE = re.compile(
+    r"\A([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+|localhost):[0-9]+(?:[/?#]|\Z)",
+    re.ASCII | re.IGNORECASE,
+)
+
+
+def normalize_uri(value):
+    """Normalize a URI attribute value for protocol checking
+
+    This decodes character references using the HTML parser's attribute value
+    rules, strips characters that can't be part of a scheme, and lowercases the
+    result so it can be checked consistently.
+
+    The normalized value is only used for the allowlist comparison. Callers
+    should return the original value so path, query, fragment, and entity
+    information isn't lost.
+
+    :arg str value: the URI attribute value
+
+    :returns: normalized URI string
+
+    """
+    # Decode character references the way the HTML parser would decode them
+    # in an attribute value.
+    normalized_uri = html5lib_shim.unescape_attribute_value(value)
+
+    # Strip backticks, whitespace, control characters, and other invisible
+    # characters that browsers ignore or that obfuscate scheme names.
+    normalized_uri = re.sub(r"[`\000-\040\177-\240\s]+", "", normalized_uri)
+
+    # Strip non-ASCII characters so Unicode invisible characters and IDNA
+    # characters can't split or disguise a scheme. This is only used for the
+    # protocol check--the original value is kept when it's allowed.
+    normalized_uri = re.sub(r"[^\x00-\x7f]", "", normalized_uri)
+
+    return normalized_uri.lower()
+
+
+def uri_scheme(normalized_uri):
+    """Extract a URI scheme from a normalized URI
+
+    :arg str normalized_uri: URI normalized with :func:`normalize_uri`
+
+    :returns: lowercased scheme or ``None`` if the URI has no explicit scheme
+
+    """
+    match = URI_SCHEME_RE.match(normalized_uri)
+    if match is None:
+        return None
+
+    return match.group(1).lower()
+
+
+def looks_like_host_port(normalized_uri):
+    """Determine whether a normalized URI is really a host and port
+
+    A bare ``example.com:8000`` parses as a relative URL with a host and port
+    in some contexts, but as a URI with an ``example.com`` scheme in others.
+    Treat it as a scheme-less URL so relative URL handling and protocol
+    allowlists agree with Bleach's historical behavior.
+
+    :arg str normalized_uri: URI normalized with :func:`normalize_uri`
+
+    :returns: True if the URI looks like a host and port
+
+    """
+    return HOST_PORT_RE.match(normalized_uri) is not None
+
+
 class NoCssSanitizerWarning(UserWarning):
     pass
 
@@ -307,7 +380,9 @@ class BleachSanitizerFilter(html5lib_shim.SanitizerFilter):
         html5lib_shim.Filter.__init__(self, source)
 
         self.allowed_tags = frozenset(allowed_tags)
-        self.allowed_protocols = frozenset(allowed_protocols)
+        self.allowed_protocols = frozenset(
+            protocol.lower() for protocol in allowed_protocols
+        )
 
         self.attr_filter = attribute_filter_factory(attributes)
         self.strip_disallowed_tags = strip_disallowed_tags
@@ -484,50 +559,44 @@ class BleachSanitizerFilter(html5lib_shim.SanitizerFilter):
         # NOTE(willkg): This transforms the value into a normalized one that's
         # easier to match and verify, but shouldn't get returned since it's
         # vastly different than the original value.
+        normalized_uri = normalize_uri(value)
+        scheme = uri_scheme(normalized_uri)
 
-        # Convert all character entities in the value
-        normalized_uri = html5lib_shim.convert_entities(value)
+        if scheme is not None:
+            if scheme in allowed_protocols:
+                try:
+                    # Make sure the URI is parseable before keeping it. For
+                    # example, an invalid IPv6 host is not a valid URL.
+                    parse_shim.urlparse(normalized_uri)
+                except ValueError:
+                    return None
 
-        # Strip backtick, whitespace, and control characters
-        normalized_uri = re.sub(r"[`\000-\040\177-\240\s]+", "", normalized_uri)
-
-        # Strip non-ASCII characters so that urlparse can parse the url into
-        # components correctly. This drops invisible and whitespace unicode
-        # characters among other things.
-        normalized_uri = re.sub(r"[^\x00-\x7f]", "", normalized_uri)
-
-        # Lowercase value to make matching easier
-        normalized_uri = normalized_uri.lower()
-
-        try:
-            # Drop attributes with uri values that have protocols that aren't
-            # allowed
-            parsed = parse_shim.urlparse(normalized_uri)
-        except ValueError:
-            # URI is impossible to parse, therefore it's not allowed
-            return None
-
-        if parsed.scheme:
-            # If urlparse found a scheme, check that
-            if parsed.scheme in allowed_protocols:
                 return value
 
-        else:
-            # Allow uris that are just an anchor
-            if normalized_uri.startswith("#"):
-                return value
-
-            # Handle protocols that urlparse doesn't recognize like "myprotocol"
-            if (
-                ":" in normalized_uri
-                and normalized_uri.split(":")[0] in allowed_protocols
+            # A bare host and port is a relative URL, not a protocol. Don't
+            # treat it as an unknown absolute scheme.
+            if looks_like_host_port(normalized_uri) and (
+                "http" in allowed_protocols or "https" in allowed_protocols
             ):
                 return value
 
-            # If there's no protocol/scheme specified, then assume it's "http" or
-            # "https" and see if that's allowed
-            if "http" in allowed_protocols or "https" in allowed_protocols:
+            return None
+
+        try:
+            # Drop attributes with URI values that are impossible to parse.
+            parsed = parse_shim.urlparse(normalized_uri)
+        except ValueError:
+            return None
+
+        # Allow URIs that are just an anchor
+        if not parsed.scheme and not parsed.path:
+            if parsed.fragment or normalized_uri == "#":
                 return value
+
+        # If there's no protocol/scheme specified, then assume it's "http" or
+        # "https" and see if that's allowed
+        if "http" in allowed_protocols or "https" in allowed_protocols:
+            return value
 
         return None
 
