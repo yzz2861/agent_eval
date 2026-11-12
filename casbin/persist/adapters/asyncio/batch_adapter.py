@@ -1,7 +1,9 @@
 from abc import ABCMeta, abstractmethod
 
+from .adapter import AsyncAdapter
 
-class AsyncBatchAdapter(metaclass=ABCMeta):
+
+class AsyncBatchAdapter(AsyncAdapter):
     """AsyncBatchAdapter is the interface for async Casbin adapters with multiple add and remove policy functions."""
 
     @abstractmethod

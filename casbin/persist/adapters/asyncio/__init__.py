@@ -2,6 +2,7 @@ from .adapter import AsyncAdapter
 from .adapter_filtered import AsyncFilteredAdapter
 from .batch_adapter import AsyncBatchAdapter
 from .file_adapter import AsyncFileAdapter
+from .transaction_adapter import AsyncTransaction, AsyncTransactionAdapter
 from .update_adapter import AsyncUpdateAdapter
 
 __all__ = [
@@ -9,5 +10,7 @@ __all__ = [
     "AsyncFilteredAdapter",
     "AsyncBatchAdapter",
     "AsyncFileAdapter",
+    "AsyncTransaction",
+    "AsyncTransactionAdapter",
     "AsyncUpdateAdapter",
 ]

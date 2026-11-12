@@ -15,6 +15,7 @@
 import copy
 import logging
 import re
+import threading
 from functools import lru_cache
 
 from casbin.effect import (
@@ -24,8 +25,16 @@ from casbin.effect import (
     get_effector,
 )
 from casbin.model import Model, FunctionMap
+from casbin.model.policy_op import PolicyOp
 from casbin.persist import Adapter
 from casbin.persist.adapters import FileAdapter
+from casbin.persist.errors import (
+    ON_DUPLICATE_FAIL,
+    ON_DUPLICATE_IGNORE,
+    PolicyRollbackError,
+    PolicyValidationError,
+    _ON_DUPLICATE_MODES,
+)
 from casbin.policy_index import PolicyIndex, policy_matches_bucket
 from casbin.rbac import default_role_manager
 from casbin.util import generate_g_function, SimpleEval, util, generate_conditional_g_function, key_match
@@ -70,6 +79,9 @@ class CoreEnforcer:
         self.logger = logging.getLogger("casbin.enforcer")
         self._policy_indexes = {}
         self._policy_deny_cache = {}
+        # serializes every transactional batch change, so two concurrent batches cannot
+        # interleave their adapter writes or observe each other's half-applied model state.
+        self._batch_lock = threading.RLock()
         if isinstance(model, str):
             if isinstance(adapter, str):
                 self.init_with_file(model, adapter)
@@ -86,6 +98,202 @@ class CoreEnforcer:
             configure_logging(logging_config)
         else:
             disabled_logging()
+
+    # ------------------------------------------------------------------
+    # explicit, transactional batch changes
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_rules(rules):
+        """turns the caller's rules into a list of string lists and rejects malformed
+        input. Empty rules and non-string fields are reported as validation errors rather
+        than leaking into the adapter or corrupting the model."""
+        if rules is None:
+            raise PolicyValidationError("rules must be a non-empty list of policy rules")
+
+        try:
+            normalized = list(rules)
+        except TypeError:
+            raise PolicyValidationError("rules must be a non-empty list of policy rules")
+
+        if len(normalized) == 0:
+            raise PolicyValidationError("rules must be a non-empty list of policy rules")
+
+        result = []
+        for index, rule in enumerate(normalized):
+            if not isinstance(rule, (list, tuple)):
+                raise PolicyValidationError(f"rule at index {index} must be a list of string fields")
+            if len(rule) == 0:
+                raise PolicyValidationError(f"rule at index {index} is empty")
+
+            fields = []
+            for field in rule:
+                if not isinstance(field, str):
+                    raise PolicyValidationError(
+                        f"rule at index {index} contains a non-string field: {field!r}"
+                    )
+                if field == "":
+                    raise PolicyValidationError(f"rule at index {index} contains an empty field")
+                fields.append(field)
+            result.append(fields)
+        return result
+
+    def _validate_batch_request(self, sec, ptype, rules, on_duplicate):
+        """runs every check that can fail before any write happens: section/ptype
+        existence, rule width, intra-batch duplicates and, in ``fail`` mode, conflicts
+        with rules already stored in the model.
+
+        Returns the rules that actually have to be written, in stable input order.
+        """
+        if sec not in self.model.keys():
+            raise PolicyValidationError(f"unknown policy section {sec!r}")
+        if ptype not in self.model[sec]:
+            raise PolicyValidationError(f"unknown policy type {ptype!r} in section {sec!r}")
+        if on_duplicate not in _ON_DUPLICATE_MODES:
+            raise PolicyValidationError(
+                f"on_duplicate must be one of {_ON_DUPLICATE_MODES}, got {on_duplicate!r}"
+            )
+
+        normalized = self._normalize_rules(rules)
+        expected_width = len(self.model[sec][ptype].tokens)
+        for index, rule in enumerate(normalized):
+            if len(rule) != expected_width:
+                raise PolicyValidationError(
+                    f"rule at index {index} has {len(rule)} fields, "
+                    f"but {ptype!r} expects {expected_width}"
+                )
+
+        seen = set()
+        for index, rule in enumerate(normalized):
+            key = tuple(rule)
+            if key in seen:
+                raise PolicyValidationError(
+                    f"rule at index {index} is duplicated inside the batch: {rule}"
+                )
+            seen.add(key)
+
+        effective = []
+        for rule in normalized:
+            already_stored = self.model.has_policy(sec, ptype, rule)
+            if already_stored and on_duplicate == ON_DUPLICATE_FAIL:
+                raise PolicyValidationError(f"rule already exists: {rule}")
+            if not already_stored:
+                effective.append(rule)
+        return normalized, effective
+
+    def _validate_remove_request(self, sec, ptype, rules, on_missing):
+        """remove-side counterpart of :meth:`_validate_batch_request`. Every rule has to
+        exist in ``fail`` mode; in ``ignore`` mode absent rules are skipped."""
+        if sec not in self.model.keys():
+            raise PolicyValidationError(f"unknown policy section {sec!r}")
+        if ptype not in self.model[sec]:
+            raise PolicyValidationError(f"unknown policy type {ptype!r} in section {sec!r}")
+        if on_missing not in _ON_DUPLICATE_MODES:
+            raise PolicyValidationError(
+                f"on_missing must be one of {_ON_DUPLICATE_MODES}, got {on_missing!r}"
+            )
+
+        normalized = self._normalize_rules(rules)
+        expected_width = len(self.model[sec][ptype].tokens)
+        for index, rule in enumerate(normalized):
+            if len(rule) != expected_width:
+                raise PolicyValidationError(
+                    f"rule at index {index} has {len(rule)} fields, "
+                    f"but {ptype!r} expects {expected_width}"
+                )
+
+        seen = set()
+        for index, rule in enumerate(normalized):
+            key = tuple(rule)
+            if key in seen:
+                raise PolicyValidationError(
+                    f"rule at index {index} is duplicated inside the batch: {rule}"
+                )
+            seen.add(key)
+
+        effective = []
+        for rule in normalized:
+            exists = self.model.has_policy(sec, ptype, rule)
+            if not exists and on_missing == ON_DUPLICATE_FAIL:
+                raise PolicyValidationError(f"rule does not exist: {rule}")
+            if exists:
+                effective.append(rule)
+        return normalized, effective
+
+    def _snapshot_assertion(self, sec, ptype):
+        """captures everything a batch can mutate inside one assertion: the ordered rule
+        list plus the bookkeeping indexes that go stale alongside it."""
+        assertion = self.model[sec][ptype]
+        return {
+            "policy": [rule[:] for rule in assertion.policy],
+            "policy_map": copy.deepcopy(assertion.policy_map),
+            "policy_version": assertion.policy_version,
+        }
+
+    def _restore_assertion(self, sec, ptype, snapshot):
+        assertion = self.model[sec][ptype]
+        assertion.policy = [rule[:] for rule in snapshot["policy"]]
+        assertion.policy_map = copy.deepcopy(snapshot["policy_map"])
+        assertion.policy_version = snapshot["policy_version"]
+
+    def _snapshot_role_links(self):
+        """deep-copies every role manager so role links can be rebuilt byte-for-byte on
+        rollback. Role managers are the only batch-mutable state that lives outside the
+        model assertions."""
+        return copy.deepcopy(self.rm_map), copy.deepcopy(self.cond_rm_map)
+
+    def _restore_role_links(self, snapshot):
+        rm_map, cond_rm_map = snapshot
+        self.rm_map = rm_map
+        self.cond_rm_map = cond_rm_map
+        if "g" in self.model.keys():
+            for ptype, assertion in self.model["g"].items():
+                if ptype in rm_map:
+                    assertion.rm = rm_map[ptype]
+                if ptype in cond_rm_map:
+                    assertion.cond_rm = cond_rm_map[ptype]
+
+    def _apply_role_links(self, sec, ptype, rules, op):
+        if sec != "g" or not self.auto_build_role_links:
+            return
+        self.model.build_incremental_role_links(self.rm_map[ptype], op, sec, ptype, rules)
+        if ptype in self.cond_rm_map:
+            self.model.build_incremental_conditional_role_links(
+                self.cond_rm_map[ptype], op, sec, ptype, rules
+            )
+
+    def _notify_batch(self, op, sec, ptype, rules):
+        if not (self.watcher and self.auto_notify_watcher):
+            return
+        method_name = {
+            PolicyOp.Policy_add: "update_for_add_policies",
+            PolicyOp.Policy_remove: "update_for_remove_policies",
+        }[op]
+        method = getattr(self.watcher, method_name, None)
+        if callable(method):
+            method(sec, ptype, rules)
+        else:
+            self.watcher.update()
+
+    def _rollback_batch(self, sec, ptype, policy_snapshot, role_snapshot, error):
+        """restores the in-memory state after an adapter or model failure.
+
+        With a transactional adapter the storage has already rolled itself back; with the
+        single-rule fallback the adapter compensation has already run before this method
+        is reached. The memory restoration is independent, so a failure here still leaves
+        the caller with the real cause chained inside :class:`PolicyRollbackError`.
+        """
+        try:
+            self._restore_assertion(sec, ptype, policy_snapshot)
+            self._restore_role_links(role_snapshot)
+            self._reset_policy_caches()
+        except Exception as restore_error:
+            raise PolicyRollbackError(
+                "failed to restore in-memory policy after an adapter failure",
+                cause=error,
+            ) from error
+        raise error
+
 
     def init_with_file(self, model_path, policy_path):
         """initializes an enforcer with a model file and a policy file."""

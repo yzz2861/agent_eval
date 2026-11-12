@@ -16,13 +16,142 @@ import inspect
 
 from casbin.core_enforcer import CoreEnforcer
 from casbin.model import Model, FunctionMap
+from casbin.model.policy_op import PolicyOp
 from casbin.persist.adapters.asyncio import AsyncFileAdapter, AsyncAdapter
+from casbin.persist.adapters.asyncio.transaction_adapter import AsyncTransactionAdapter
+from casbin.persist.errors import (
+    ON_DUPLICATE_FAIL,
+    PolicyRollbackError,
+)
 
 
 class AsyncInternalEnforcer(CoreEnforcer):
     """
     AsyncInternalEnforcer = CoreEnforcer + Async Internal API.
     """
+
+    # the validation/snapshot/restore helpers are synchronous and shared with the sync
+    # enforcer implementation, so only the adapter interaction needs async variants.
+
+    async def _add_policies_transaction(self, sec, ptype, rules, on_duplicate=ON_DUPLICATE_FAIL):
+        """async counterpart of InternalEnforcer._add_policies_transaction."""
+        with self._batch_lock:
+            _, effective = self._validate_batch_request(sec, ptype, rules, on_duplicate)
+            if not effective:
+                return []
+
+            policy_snapshot = self._snapshot_assertion(sec, ptype)
+            role_snapshot = self._snapshot_role_links()
+            try:
+                await self._persist_add_batch(sec, ptype, effective)
+                self.model.add_policies(sec, ptype, effective)
+                self._apply_role_links(sec, ptype, effective, PolicyOp.Policy_add)
+            except Exception as error:
+                self._rollback_batch(sec, ptype, policy_snapshot, role_snapshot, error)
+                raise  # _rollback_batch always raises; this keeps the control flow explicit
+
+            await self._notify_batch(PolicyOp.Policy_add, sec, ptype, effective)
+            return [rule[:] for rule in effective]
+
+    async def _remove_policies_transaction(self, sec, ptype, rules, on_missing=ON_DUPLICATE_FAIL):
+        """async counterpart of InternalEnforcer._remove_policies_transaction."""
+        with self._batch_lock:
+            _, effective = self._validate_remove_request(sec, ptype, rules, on_missing)
+            if not effective:
+                return []
+
+            policy_snapshot = self._snapshot_assertion(sec, ptype)
+            role_snapshot = self._snapshot_role_links()
+            try:
+                await self._persist_remove_batch(sec, ptype, effective)
+                self.model.remove_policies(sec, ptype, effective)
+                self._apply_role_links(sec, ptype, effective, PolicyOp.Policy_remove)
+            except Exception as error:
+                self._rollback_batch(sec, ptype, policy_snapshot, role_snapshot, error)
+                raise  # _rollback_batch always raises; this keeps the control flow explicit
+
+            await self._notify_batch(PolicyOp.Policy_remove, sec, ptype, effective)
+            return [rule[:] for rule in effective]
+
+    async def _persist_add_batch(self, sec, ptype, rules):
+        if not (self.adapter and self.auto_save):
+            return
+
+        if isinstance(self.adapter, AsyncTransactionAdapter):
+            tx = await self.adapter.begin_transaction()
+            try:
+                await tx.add_policies(sec, ptype, rules)
+                await tx.commit()
+            except Exception:
+                await tx.rollback()
+                raise
+            return
+
+        written = []
+        try:
+            for rule in rules:
+                if await self.adapter.add_policy(sec, ptype, rule) is False:
+                    raise RuntimeError(f"adapter refused to add rule {rule}")
+                written.append(rule)
+        except Exception as error:
+            await self._compensate(self.adapter.remove_policy, written, sec, ptype, error, "add")
+
+    async def _persist_remove_batch(self, sec, ptype, rules):
+        if not (self.adapter and self.auto_save):
+            return
+
+        if isinstance(self.adapter, AsyncTransactionAdapter):
+            tx = await self.adapter.begin_transaction()
+            try:
+                await tx.remove_policies(sec, ptype, rules)
+                await tx.commit()
+            except Exception:
+                await tx.rollback()
+                raise
+            return
+
+        removed = []
+        try:
+            for rule in rules:
+                if await self.adapter.remove_policy(sec, ptype, rule) is False:
+                    raise RuntimeError(f"adapter refused to remove rule {rule}")
+                removed.append(rule)
+        except Exception as error:
+            await self._compensate(self.adapter.add_policy, removed, sec, ptype, error, "remove")
+
+    async def _compensate(self, undo_call, done_rules, sec, ptype, original_error, operation):
+        compensation_failures = []
+        for rule in done_rules:
+            try:
+                await undo_call(sec, ptype, rule)
+            except Exception:
+                compensation_failures.append(rule)
+        if compensation_failures:
+            raise PolicyRollbackError(
+                f"adapter failed during batch {operation} and compensation failed for "
+                f"{len(compensation_failures)} rule(s)",
+                failed_rules=compensation_failures,
+                cause=original_error,
+            ) from original_error
+        raise original_error
+
+    async def _notify_batch(self, op, sec, ptype, rules):
+        if not (self.watcher and self.auto_notify_watcher):
+            return
+        method_name = {
+            PolicyOp.Policy_add: "update_for_add_policies",
+            PolicyOp.Policy_remove: "update_for_remove_policies",
+        }[op]
+        method = getattr(self.watcher, method_name, None)
+        if callable(method):
+            if inspect.iscoroutinefunction(method):
+                await method(sec, ptype, rules)
+            else:
+                method(sec, ptype, rules)
+        elif inspect.iscoroutinefunction(self.watcher.update):
+            await self.watcher.update()
+        else:
+            self.watcher.update()
 
     def init_with_file(self, model_path, policy_path):
         """initializes an enforcer with a model file and a policy file."""

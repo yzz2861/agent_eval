@@ -16,6 +16,7 @@ import threading
 import time
 
 from casbin.enforcer import Enforcer
+from casbin.persist.errors import ON_DUPLICATE_FAIL
 from casbin.util.rwlock import RWLockWrite
 
 
@@ -749,6 +750,24 @@ class SyncedEnforcer:
         with self._wl:
             return self._e.add_named_policies(ptype, rules)
 
+    def add_policies_transaction(self, rules, on_duplicate=None):
+        """transactional batch addition; the whole batch runs under one write lock so
+        concurrent batches cannot interleave."""
+        with self._wl:
+            return self._e.add_policies_transaction(rules, on_duplicate or ON_DUPLICATE_FAIL)
+
+    def add_named_policies_transaction(self, ptype, rules, on_duplicate=None):
+        with self._wl:
+            return self._e.add_named_policies_transaction(ptype, rules, on_duplicate or ON_DUPLICATE_FAIL)
+
+    def remove_policies_transaction(self, rules, on_missing=None):
+        with self._wl:
+            return self._e.remove_policies_transaction(rules, on_missing or ON_DUPLICATE_FAIL)
+
+    def remove_named_policies_transaction(self, ptype, rules, on_missing=None):
+        with self._wl:
+            return self._e.remove_named_policies_transaction(ptype, rules, on_missing or ON_DUPLICATE_FAIL)
+
     def remove_policies(self, rules):
         """removes authorization rules from the current policy."""
         with self._wl:
@@ -803,6 +822,26 @@ class SyncedEnforcer:
         """removes role inheritance rules from the current named policy."""
         with self._wl:
             return self._e.remove_named_grouping_policies(ptype, rules)
+
+    def add_grouping_policies_transaction(self, rules, on_duplicate=None):
+        with self._wl:
+            return self._e.add_grouping_policies_transaction(rules, on_duplicate or ON_DUPLICATE_FAIL)
+
+    def add_named_grouping_policies_transaction(self, ptype, rules, on_duplicate=None):
+        with self._wl:
+            return self._e.add_named_grouping_policies_transaction(
+                ptype, rules, on_duplicate or ON_DUPLICATE_FAIL
+            )
+
+    def remove_grouping_policies_transaction(self, rules, on_missing=None):
+        with self._wl:
+            return self._e.remove_grouping_policies_transaction(rules, on_missing or ON_DUPLICATE_FAIL)
+
+    def remove_named_grouping_policies_transaction(self, ptype, rules, on_missing=None):
+        with self._wl:
+            return self._e.remove_named_grouping_policies_transaction(
+                ptype, rules, on_missing or ON_DUPLICATE_FAIL
+            )
 
     def build_incremental_role_links(self, op, ptype, rules):
         self.get_model().build_incremental_role_links(self.get_role_manager(), op, "g", ptype, rules)

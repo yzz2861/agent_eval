@@ -13,12 +13,136 @@
 # limitations under the License.
 
 from casbin.core_enforcer import CoreEnforcer
+from casbin.model.policy_op import PolicyOp
+from casbin.persist.errors import (
+    ON_DUPLICATE_FAIL,
+    PolicyRollbackError,
+)
+from casbin.persist.transaction_adapter import TransactionAdapter
 
 
 class InternalEnforcer(CoreEnforcer):
     """
     InternalEnforcer = CoreEnforcer + Internal API.
     """
+
+    def _add_policies_transaction(self, sec, ptype, rules, on_duplicate=ON_DUPLICATE_FAIL):
+        """applies a batch of additions atomically and returns the rules actually added.
+
+        Either every effective rule lands in both the adapter and the in-memory model, or
+        the enforcer (policy, role links, decision cache) is left exactly as it was before
+        the call. Validation happens first, so a rejected request never reaches storage.
+        """
+        with self._batch_lock:
+            _, effective = self._validate_batch_request(sec, ptype, rules, on_duplicate)
+            if not effective:
+                return []
+
+            policy_snapshot = self._snapshot_assertion(sec, ptype)
+            role_snapshot = self._snapshot_role_links()
+            try:
+                self._persist_add_batch(sec, ptype, effective)
+                self.model.add_policies(sec, ptype, effective)
+                self._apply_role_links(sec, ptype, effective, PolicyOp.Policy_add)
+            except Exception as error:
+                self._rollback_batch(sec, ptype, policy_snapshot, role_snapshot, error)
+                raise  # _rollback_batch always raises; this keeps the control flow explicit
+
+            self._notify_batch(PolicyOp.Policy_add, sec, ptype, effective)
+            return [rule[:] for rule in effective]
+
+    def _remove_policies_transaction(self, sec, ptype, rules, on_missing=ON_DUPLICATE_FAIL):
+        """applies a batch of removals atomically and returns the rules actually removed.
+        See :meth:`_add_policies_transaction` for the guarantees."""
+        with self._batch_lock:
+            _, effective = self._validate_remove_request(sec, ptype, rules, on_missing)
+            if not effective:
+                return []
+
+            policy_snapshot = self._snapshot_assertion(sec, ptype)
+            role_snapshot = self._snapshot_role_links()
+            try:
+                self._persist_remove_batch(sec, ptype, effective)
+                self.model.remove_policies(sec, ptype, effective)
+                self._apply_role_links(sec, ptype, effective, PolicyOp.Policy_remove)
+            except Exception as error:
+                self._rollback_batch(sec, ptype, policy_snapshot, role_snapshot, error)
+                raise  # _rollback_batch always raises; this keeps the control flow explicit
+
+            self._notify_batch(PolicyOp.Policy_remove, sec, ptype, effective)
+            return [rule[:] for rule in effective]
+
+    def _persist_add_batch(self, sec, ptype, rules):
+        """writes one add batch through the adapter, preferring a real storage
+        transaction and falling back to single-rule writes that can be compensated."""
+        if not (self.adapter and self.auto_save):
+            return
+
+        if isinstance(self.adapter, TransactionAdapter):
+            tx = self.adapter.begin_transaction()
+            try:
+                tx.add_policies(sec, ptype, rules)
+                tx.commit()
+            except Exception:
+                tx.rollback()
+                raise
+            return
+
+        written = []
+        try:
+            for rule in rules:
+                if self.adapter.add_policy(sec, ptype, rule) is False:
+                    raise RuntimeError(f"adapter refused to add rule {rule}")
+                written.append(rule)
+        except Exception as error:
+            self._compensate(
+                self.adapter.remove_policy, written, sec, ptype, error, "add"
+            )
+
+    def _persist_remove_batch(self, sec, ptype, rules):
+        if not (self.adapter and self.auto_save):
+            return
+
+        if isinstance(self.adapter, TransactionAdapter):
+            tx = self.adapter.begin_transaction()
+            try:
+                tx.remove_policies(sec, ptype, rules)
+                tx.commit()
+            except Exception:
+                tx.rollback()
+                raise
+            return
+
+        removed = []
+        try:
+            for rule in rules:
+                if self.adapter.remove_policy(sec, ptype, rule) is False:
+                    raise RuntimeError(f"adapter refused to remove rule {rule}")
+                removed.append(rule)
+        except Exception as error:
+            self._compensate(
+                self.adapter.add_policy, removed, sec, ptype, error, "remove"
+            )
+
+    @staticmethod
+    def _compensate(undo_call, done_rules, sec, ptype, original_error, operation):
+        """replays the inverse write for every rule already sent to a non-transactional
+        adapter. If any inverse write fails, the storage is known to be inconsistent, so
+        the original error is wrapped instead of being hidden."""
+        compensation_failures = []
+        for rule in done_rules:
+            try:
+                undo_call(sec, ptype, rule)
+            except Exception:
+                compensation_failures.append(rule)
+        if compensation_failures:
+            raise PolicyRollbackError(
+                f"adapter failed during batch {operation} and compensation failed for "
+                f"{len(compensation_failures)} rule(s)",
+                failed_rules=compensation_failures,
+                cause=original_error,
+            ) from original_error
+        raise original_error
 
     def _add_policy(self, sec, ptype, rule):
         """adds a rule to the current policy."""

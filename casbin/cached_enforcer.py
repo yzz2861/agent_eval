@@ -14,6 +14,7 @@
 
 from casbin.cache import DefaultCache
 from casbin.enforcer import Enforcer
+from casbin.persist.errors import ON_DUPLICATE_FAIL
 
 # distinguishes "key absent" from a cached None/False without an exception on the hot path.
 _MISSING = object()
@@ -297,6 +298,18 @@ class CachedEnforcer(CacheSupport, Enforcer):
     def _add_policies_ex(self, sec, ptype, rules):
         try:
             return super()._add_policies_ex(sec, ptype, rules)
+        finally:
+            self.invalidate_cache()
+
+    def _add_policies_transaction(self, sec, ptype, rules, on_duplicate=ON_DUPLICATE_FAIL):
+        try:
+            return super()._add_policies_transaction(sec, ptype, rules, on_duplicate)
+        finally:
+            self.invalidate_cache()
+
+    def _remove_policies_transaction(self, sec, ptype, rules, on_missing=ON_DUPLICATE_FAIL):
+        try:
+            return super()._remove_policies_transaction(sec, ptype, rules, on_missing)
         finally:
             self.invalidate_cache()
 

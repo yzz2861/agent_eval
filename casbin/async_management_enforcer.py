@@ -14,6 +14,7 @@
 from casbin.async_internal_enforcer import AsyncInternalEnforcer
 from casbin.model.policy_op import PolicyOp
 from casbin.constant.constants import ACTION_INDEX, SUBJECT_INDEX, OBJECT_INDEX
+from casbin.persist.errors import ON_DUPLICATE_FAIL
 
 
 class AsyncManagementEnforcer(AsyncInternalEnforcer):
@@ -138,6 +139,22 @@ class AsyncManagementEnforcer(AsyncInternalEnforcer):
         Otherwise, the function returns true for the corresponding by adding the new rule.
         """
         return await self._add_policies("p", ptype, rules)
+
+    async def add_policies_transaction(self, rules, on_duplicate=ON_DUPLICATE_FAIL):
+        """async transactional counterpart of add_policies(); returns the rules added."""
+        return await self.add_named_policies_transaction("p", rules, on_duplicate)
+
+    async def add_named_policies_transaction(self, ptype, rules, on_duplicate=ON_DUPLICATE_FAIL):
+        """adds named authorization rules in one all-or-nothing batch."""
+        return await self._add_policies_transaction("p", ptype, rules, on_duplicate)
+
+    async def remove_policies_transaction(self, rules, on_missing=ON_DUPLICATE_FAIL):
+        """async transactional counterpart of remove_policies(); returns the rules removed."""
+        return await self.remove_named_policies_transaction("p", rules, on_missing)
+
+    async def remove_named_policies_transaction(self, ptype, rules, on_missing=ON_DUPLICATE_FAIL):
+        """removes named authorization rules in one all-or-nothing batch."""
+        return await self._remove_policies_transaction("p", ptype, rules, on_missing)
 
     async def update_policy(self, old_rule, new_rule):
         """async updates an authorization rule from the current policy."""
@@ -292,6 +309,22 @@ class AsyncManagementEnforcer(AsyncInternalEnforcer):
             self.model.build_incremental_role_links(self.rm_map[ptype], PolicyOp.Policy_remove, "g", ptype, rules)
 
         return rules_removed
+
+    async def add_grouping_policies_transaction(self, rules, on_duplicate=ON_DUPLICATE_FAIL):
+        """adds role inheritance rules transactionally and returns the rules actually added."""
+        return await self.add_named_grouping_policies_transaction("g", rules, on_duplicate)
+
+    async def add_named_grouping_policies_transaction(self, ptype, rules, on_duplicate=ON_DUPLICATE_FAIL):
+        """adds named role inheritance rules in one all-or-nothing batch."""
+        return await self._add_policies_transaction("g", ptype, rules, on_duplicate)
+
+    async def remove_grouping_policies_transaction(self, rules, on_missing=ON_DUPLICATE_FAIL):
+        """removes role inheritance rules transactionally and returns the rules actually removed."""
+        return await self.remove_named_grouping_policies_transaction("g", rules, on_missing)
+
+    async def remove_named_grouping_policies_transaction(self, ptype, rules, on_missing=ON_DUPLICATE_FAIL):
+        """removes named role inheritance rules in one all-or-nothing batch."""
+        return await self._remove_policies_transaction("g", ptype, rules, on_missing)
 
     async def remove_filtered_named_grouping_policy(self, ptype, field_index, *field_values):
         """async removes a role inheritance rule from the current named policy, field filters can be specified."""

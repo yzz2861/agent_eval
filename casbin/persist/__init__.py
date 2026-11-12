@@ -16,3 +16,5 @@ from .adapter import *
 from .adapter_filtered import *
 from .adapters import *
 from .batch_adapter import *
+from .errors import *
+from .transaction_adapter import *

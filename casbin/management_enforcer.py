@@ -15,6 +15,7 @@
 from casbin.internal_enforcer import InternalEnforcer
 from casbin.model.policy_op import PolicyOp
 from casbin.constant.constants import ACTION_INDEX, SUBJECT_INDEX, OBJECT_INDEX
+from casbin.persist.errors import ON_DUPLICATE_FAIL
 
 
 class ManagementEnforcer(InternalEnforcer):
@@ -155,6 +156,42 @@ class ManagementEnforcer(InternalEnforcer):
         """
         return self._add_policies_ex("p", ptype, rules)
 
+    # ------------------------------------------------------------------
+    # explicit transactional batch API
+    #
+    # unlike add_policies()/remove_policies(), these methods give an all-or-nothing
+    # guarantee: they validate the whole batch first, write it inside one adapter
+    # transaction when the adapter supports one (or use compensating single-rule writes
+    # otherwise), and leave the in-memory policy, role links and decision cache
+    # untouched on any failure. They return the rules that actually changed, in stable
+    # input order.
+    # ------------------------------------------------------------------
+
+    def add_policies_transaction(self, rules, on_duplicate=ON_DUPLICATE_FAIL):
+        """adds authorization rules transactionally and returns the rules actually added."""
+        return self.add_named_policies_transaction("p", rules, on_duplicate)
+
+    def add_named_policies_transaction(self, ptype, rules, on_duplicate=ON_DUPLICATE_FAIL):
+        """adds named authorization rules transactionally.
+
+        ``on_duplicate`` controls rules already present: ``ON_DUPLICATE_FAIL`` (default)
+        fails the whole batch, ``ON_DUPLICATE_IGNORE`` skips them. The whole batch still
+        has a single outcome -- no rule is partially applied.
+        """
+        return self._add_policies_transaction("p", ptype, rules, on_duplicate)
+
+    def remove_policies_transaction(self, rules, on_missing=ON_DUPLICATE_FAIL):
+        """removes authorization rules transactionally and returns the rules actually removed."""
+        return self.remove_named_policies_transaction("p", rules, on_missing)
+
+    def remove_named_policies_transaction(self, ptype, rules, on_missing=ON_DUPLICATE_FAIL):
+        """removes named authorization rules transactionally.
+
+        ``on_missing`` controls absent rules: ``ON_DUPLICATE_FAIL`` (default) fails the
+        whole batch, ``ON_DUPLICATE_IGNORE`` skips them.
+        """
+        return self._remove_policies_transaction("p", ptype, rules, on_missing)
+
     def update_policy(self, old_rule, new_rule):
         """updates an authorization rule from the current policy."""
         return self.update_named_policy("p", old_rule, new_rule)
@@ -294,6 +331,28 @@ class ManagementEnforcer(InternalEnforcer):
             self.model.build_incremental_role_links(self.rm_map[ptype], PolicyOp.Policy_add, "g", ptype, rules)
 
         return rules_added
+
+    def add_grouping_policies_transaction(self, rules, on_duplicate=ON_DUPLICATE_FAIL):
+        """adds role inheritance rules transactionally and returns the rules actually added.
+
+        Role links are updated inside the same unit of work and rebuilt from a snapshot on
+        rollback, so a failed batch cannot leave a user half-promoted.
+        """
+        return self.add_named_grouping_policies_transaction("g", rules, on_duplicate)
+
+    def add_named_grouping_policies_transaction(self, ptype, rules, on_duplicate=ON_DUPLICATE_FAIL):
+        """adds named role inheritance rules transactionally, see
+        :meth:`add_named_policies_transaction` for the duplicate handling."""
+        return self._add_policies_transaction("g", ptype, rules, on_duplicate)
+
+    def remove_grouping_policies_transaction(self, rules, on_missing=ON_DUPLICATE_FAIL):
+        """removes role inheritance rules transactionally and returns the rules actually
+        removed."""
+        return self.remove_named_grouping_policies_transaction("g", rules, on_missing)
+
+    def remove_named_grouping_policies_transaction(self, ptype, rules, on_missing=ON_DUPLICATE_FAIL):
+        """removes named role inheritance rules transactionally."""
+        return self._remove_policies_transaction("g", ptype, rules, on_missing)
 
     def remove_grouping_policy(self, *params):
         """removes a role inheritance rule from the current policy."""

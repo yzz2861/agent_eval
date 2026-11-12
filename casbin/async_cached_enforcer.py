@@ -14,6 +14,7 @@
 
 from casbin.async_enforcer import AsyncEnforcer
 from casbin.cached_enforcer import CacheSupport
+from casbin.persist.errors import ON_DUPLICATE_FAIL
 
 
 class AsyncCachedEnforcer(CacheSupport, AsyncEnforcer):
@@ -55,6 +56,18 @@ class AsyncCachedEnforcer(CacheSupport, AsyncEnforcer):
     async def _add_policies(self, sec, ptype, rules):
         try:
             return await super()._add_policies(sec, ptype, rules)
+        finally:
+            self.invalidate_cache()
+
+    async def _add_policies_transaction(self, sec, ptype, rules, on_duplicate=ON_DUPLICATE_FAIL):
+        try:
+            return await super()._add_policies_transaction(sec, ptype, rules, on_duplicate)
+        finally:
+            self.invalidate_cache()
+
+    async def _remove_policies_transaction(self, sec, ptype, rules, on_missing=ON_DUPLICATE_FAIL):
+        try:
+            return await super()._remove_policies_transaction(sec, ptype, rules, on_missing)
         finally:
             self.invalidate_cache()
 
