@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import logging
 import os
 import random
 import sys
 import tempfile
 import unittest
 from io import BytesIO
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
@@ -1792,6 +1796,262 @@ class TestHelperFunctions(unittest.TestCase):
                 lambda _: None,
                 lambda _: None,
             )
+
+
+def _file_part(boundary: bytes, field_name: bytes, file_name: bytes, data: bytes) -> bytes:
+    return (
+        b"--"
+        + boundary
+        + b'\r\nContent-Disposition: form-data; name="'
+        + field_name
+        + b'"; filename="'
+        + file_name
+        + b'"\r\n\r\n'
+        + data
+        + b"\r\n"
+    )
+
+
+def _multipart_body(boundary: bytes, *parts: bytes) -> bytes:
+    return b"".join(parts) + b"--" + boundary + b"--\r\n"
+
+
+def test_parser_close_does_not_close_a_transferred_file(tmp_path: Path) -> None:
+    files: list[File] = []
+    data = b"transferred content"
+    parser = FormParser(
+        "multipart/form-data",
+        None,
+        files.append,
+        boundary=b"b",
+        config={"UPLOAD_TMP_DIR": str(tmp_path), "UPLOAD_DELETE_TMP": False, "MAX_MEMORY_FILE_SIZE": 1},
+    )
+
+    parser.write(_multipart_body(b"b", _file_part(b"b", b"upload", b"sample.bin", data)))
+    parser.finalize()
+
+    assert len(files) == 1
+    uploaded = files[0]
+    assert uploaded.owner == "caller"
+    assert uploaded.finalized
+    assert uploaded.size == len(data)
+    assert uploaded.digest == hashlib.sha256(data).hexdigest()
+
+    parser.close()
+    parser.close()
+    assert not uploaded.file_object.closed
+
+    uploaded.close()
+    uploaded.close()
+
+
+def test_callback_exception_is_preserved_and_file_is_cleaned(tmp_path: Path) -> None:
+    class CallbackError(Exception):
+        pass
+
+    sentinel = CallbackError("virus scan failed")
+    files: list[File] = []
+
+    def on_file(file: File) -> None:
+        files.append(file)
+        raise sentinel
+
+    parser = FormParser(
+        "multipart/form-data",
+        None,
+        on_file,
+        boundary=b"b",
+        config={"UPLOAD_TMP_DIR": str(tmp_path), "UPLOAD_DELETE_TMP": False, "MAX_MEMORY_FILE_SIZE": 1},
+    )
+    body = _multipart_body(b"b", _file_part(b"b", b"upload", b"sample.bin", b"scan me"))
+
+    with pytest.raises(CallbackError) as exc_info:
+        parser.write(body)
+
+    assert exc_info.value is sentinel
+    assert len(files) == 1
+    assert files[0].file_object.closed
+    assert list(tmp_path.iterdir()) == []
+
+    parser.close()
+    parser.close()
+
+
+def test_parse_error_cleans_up_pending_file(tmp_path: Path) -> None:
+    parser = FormParser(
+        "multipart/form-data",
+        None,
+        Mock(),
+        boundary=b"b",
+        config={"UPLOAD_TMP_DIR": str(tmp_path), "UPLOAD_DELETE_TMP": False, "MAX_MEMORY_FILE_SIZE": 1},
+    )
+    body = _file_part(b"b", b"upload", b"sample.bin", b"data") + b"--b x"
+
+    with pytest.raises(MultipartParseError):
+        parser.write(body)
+
+    assert list(tmp_path.iterdir()) == []
+    parser.close()
+
+
+def test_unwritable_temp_dir_fails_without_residue(tmp_path: Path) -> None:
+    missing_dir = tmp_path / "missing-tmp-dir"
+    parser = FormParser(
+        "multipart/form-data",
+        None,
+        Mock(),
+        boundary=b"b",
+        config={"UPLOAD_TMP_DIR": str(missing_dir), "MAX_MEMORY_FILE_SIZE": 1},
+    )
+    body = _multipart_body(b"b", _file_part(b"b", b"upload", b"sample.bin", b"data"))
+
+    with pytest.raises(FileError, match="temporary file"):
+        parser.write(body)
+
+    assert not missing_dir.exists()
+    parser.close()
+    parser.close()
+
+
+def test_multiple_file_parts_are_independently_owned(tmp_path: Path) -> None:
+    first_data = b"first payload"
+    second_data = b"second payload"
+    files: list[File] = []
+    parser = FormParser(
+        "multipart/form-data",
+        None,
+        files.append,
+        boundary=b"b",
+        config={"UPLOAD_TMP_DIR": str(tmp_path), "MAX_MEMORY_FILE_SIZE": 1},
+    )
+    body = _multipart_body(
+        b"b",
+        _file_part(b"b", b"first", b"first.bin", first_data),
+        _file_part(b"b", b"second", b"second.bin", second_data),
+    )
+
+    parser.write(body)
+    parser.finalize()
+
+    assert [file.size for file in files] == [len(first_data), len(second_data)]
+    assert [file.digest for file in files] == [
+        hashlib.sha256(first_data).hexdigest(),
+        hashlib.sha256(second_data).hexdigest(),
+    ]
+    parser.close()
+    assert all(file.owner == "caller" for file in files)
+    assert not any(file.file_object.closed for file in files)
+
+    for file in files:
+        file.close()
+
+
+def test_total_disk_quota_exhaustion_keeps_transferred_files(tmp_path: Path) -> None:
+    files: list[File] = []
+    parser = FormParser(
+        "multipart/form-data",
+        None,
+        files.append,
+        boundary=b"b",
+        config={
+            "UPLOAD_TMP_DIR": str(tmp_path),
+            "UPLOAD_DELETE_TMP": False,
+            "MAX_MEMORY_FILE_SIZE": 1,
+            "MAX_TOTAL_FILE_SIZE": 4,
+        },
+    )
+    body = _multipart_body(
+        b"b", _file_part(b"b", b"first", b"first.bin", b"aaa"), _file_part(b"b", b"second", b"second.bin", b"bbb")
+    )
+
+    with pytest.raises(FileError, match="Total disk quota"):
+        parser.write(body)
+
+    assert len(files) == 1
+    first = files[0]
+    assert first.size == 3
+    assert not first.file_object.closed
+    assert len(list(tmp_path.iterdir())) == 1
+
+    parser.close()
+    assert not first.file_object.closed
+    first.close()
+
+
+def test_cancelled_callback_cleans_up_file(tmp_path: Path) -> None:
+    sentinel = asyncio.CancelledError("client disconnected")
+    files: list[File] = []
+
+    def on_file(file: File) -> None:
+        files.append(file)
+        raise sentinel
+
+    parser = FormParser(
+        "multipart/form-data",
+        None,
+        on_file,
+        boundary=b"b",
+        config={"UPLOAD_TMP_DIR": str(tmp_path), "UPLOAD_DELETE_TMP": False, "MAX_MEMORY_FILE_SIZE": 1},
+    )
+
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        parser.write(_multipart_body(b"b", _file_part(b"b", b"upload", b"sample.bin", b"cancel me")))
+
+    assert exc_info.value is sentinel
+    assert files[0].file_object.closed
+    assert list(tmp_path.iterdir()) == []
+    parser.close()
+
+
+def test_cancel_cleans_partial_file_and_is_idempotent(tmp_path: Path) -> None:
+    parser = FormParser(
+        "multipart/form-data",
+        None,
+        Mock(),
+        boundary=b"b",
+        config={"UPLOAD_TMP_DIR": str(tmp_path), "UPLOAD_DELETE_TMP": False, "MAX_MEMORY_FILE_SIZE": 1},
+    )
+    parser.write(b'--b\r\nContent-Disposition: form-data; name="upload"; filename="partial.bin"\r\n\r\npartial')
+
+    assert len(parser._pending_files) == 1
+    pending = parser._pending_files[0]
+    assert not pending.finalized
+    assert pending.actual_file_name is not None
+    path = Path(pending.actual_file_name.decode())
+    assert path.exists()
+
+    parser.cancel()
+    parser.cancel()
+
+    assert pending.file_object.closed
+    assert not path.exists()
+
+
+def test_logs_redact_filename_and_directory(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    sensitive_dir = tmp_path / "sensitive-tenant-dir"
+    sensitive_dir.mkdir()
+    sensitive_name = b"patient-secret.csv"
+    data = b"private body"
+    files: list[File] = []
+    caplog.set_level(logging.INFO, logger="python_multipart.multipart")
+
+    parser = FormParser(
+        "multipart/form-data",
+        None,
+        files.append,
+        boundary=b"b",
+        config={"UPLOAD_TMP_DIR": str(sensitive_dir), "UPLOAD_DELETE_TMP": False, "MAX_MEMORY_FILE_SIZE": 1},
+    )
+    parser.write(_multipart_body(b"b", _file_part(b"b", b"upload", sensitive_name, data)))
+    parser.finalize()
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert sensitive_name.decode() not in messages
+    assert "sensitive-tenant-dir" not in messages
+    assert files[0].digest in messages
+
+    parser.close()
+    files[0].close()
 
 
 def suite() -> unittest.TestSuite:

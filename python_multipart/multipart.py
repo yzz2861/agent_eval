@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import shutil
@@ -45,10 +46,28 @@ if TYPE_CHECKING:
 
     class FileConfig(TypedDict, total=False):
         UPLOAD_DIR: str | bytes | None
+        UPLOAD_TMP_DIR: str | bytes | None
+        UPLOAD_TEMP_DIR: str | bytes | None
+        TEMP_DIR: str | bytes | None
+        TMP_DIR: str | bytes | None
         UPLOAD_DELETE_TMP: bool
         UPLOAD_KEEP_FILENAME: bool
         UPLOAD_KEEP_EXTENSIONS: bool
+        UPLOAD_REDACT_FILENAMES: bool | str
+        UPLOAD_REDACT_FILENAME: bool | str
+        UPLOAD_FILENAME_REDACTION: bool | str
+        UPLOAD_LOG_FILENAME_POLICY: bool | str
+        UPLOAD_FILENAME_POLICY: bool | str
         MAX_MEMORY_FILE_SIZE: int
+        MAX_FILE_SIZE: int | float
+        MAX_FILE_BYTES: int | float
+        MAX_UPLOAD_FILE_SIZE: int | float
+        MAX_TOTAL_FILE_SIZE: int | float
+        MAX_TOTAL_UPLOAD_SIZE: int | float
+        MAX_DISK_BUDGET: int | float
+        MAX_DISK_SIZE: int | float
+        MAX_DISK_QUOTA: int | float
+        MAX_TOTAL_DISK_SIZE: int | float
 
     class FormParserConfig(FileConfig):
         UPLOAD_ERROR_ON_BAD_CTE: bool
@@ -78,6 +97,72 @@ if TYPE_CHECKING:
 
 # Unique missing object.
 _missing = object()
+
+
+def _config_limit(config: dict[Any, Any], *names: str, default: int | float = float("inf")) -> int | float:
+    """Return the first configured byte limit, validating it as non-negative."""
+    for name in names:
+        value = config.get(name)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, Number) or value < 0:
+            raise ValueError(f"{name} must be a non-negative number")
+        return value
+    return default
+
+
+class _DiskBudget:
+    """A shared, logical byte budget for files written to disk by one parser."""
+
+    def __init__(self, limit: int | float = float("inf")) -> None:
+        if isinstance(limit, bool) or not isinstance(limit, Number) or limit < 0:
+            raise ValueError("disk budget must be a non-negative number")
+        self.limit = limit
+        self.used: int | float = 0
+
+    def reserve(self, amount: int) -> None:
+        if amount <= 0:
+            return
+        if self.used + amount > self.limit:
+            raise FileError(f"Total disk quota of {self.limit} bytes exceeded")
+        self.used += amount
+
+    def release(self, amount: int) -> None:
+        if amount <= 0:
+            return
+        self.used = max(0, self.used - amount)
+
+
+def _filename_redaction_policy(config: dict[Any, Any]) -> str:
+    """Resolve the configured log-facing filename policy.
+
+    Redaction is enabled by default so upload names and path segments cannot
+    accidentally end up in logs. Callers may explicitly opt into ``none`` or
+    choose a hashed/masked representation.
+    """
+    value: Any = config.get("UPLOAD_FILENAME_REDACTION")
+    if value is None:
+        value = config.get("UPLOAD_REDACT_FILENAMES")
+    if value is None:
+        value = config.get("UPLOAD_REDACT_FILENAME")
+    if value is None:
+        value = config.get("UPLOAD_LOG_FILENAME_POLICY")
+    if value is None:
+        value = config.get("UPLOAD_FILENAME_POLICY")
+    if value is None:
+        value = True
+
+    if value is False:
+        return "none"
+    if isinstance(value, str):
+        normalized = value.lower()
+        if normalized in {"none", "off", "false", "full"}:
+            return "none"
+        if normalized in {"hash", "sha256", "hashed"}:
+            return "hash"
+        if normalized in {"mask", "masked"}:
+            return "mask"
+    return "redact"
 
 
 def _noop_event() -> None:
@@ -400,10 +485,14 @@ class File:
     | Name                  | Type  | Default | Description |
     |-----------------------|-------|---------|-------------|
     | UPLOAD_DIR            | `str` | None    | The directory to store uploaded files in. If this is None, a temporary file will be created in the system's standard location. |
+    | UPLOAD_TMP_DIR        | `str` | None    | The directory to create automatically named temporary files in. Falls back to `UPLOAD_DIR`, then the system temporary directory. |
     | UPLOAD_DELETE_TMP     | `bool`| True    | Delete automatically created TMP file |
     | UPLOAD_KEEP_FILENAME  | `bool`| False   | Whether or not to keep the filename of the uploaded file. If True, then the filename is reduced to its basename (directory components are stripped) and the file is saved with that name. Otherwise, a temporary name will be used. |
     | UPLOAD_KEEP_EXTENSIONS| `bool`| False   | Whether or not to keep the uploaded file's extension. If False, the file will be saved with the default temporary extension (usually ".tmp"). Otherwise, the file's extension will be maintained. Note that this will properly combine with the UPLOAD_KEEP_FILENAME setting. |
     | MAX_MEMORY_FILE_SIZE  | `int` | 1 MiB   | The maximum number of bytes of a File to keep in memory. By default, the contents of a File are kept into memory until a certain limit is reached, after which the contents of the File are written to a temporary file. This behavior can be disabled by setting this value to an appropriately large value (or, for example, infinity, such as `float('inf')`. |
+    | MAX_FILE_SIZE         | `int` | infinity| The maximum size of this file. The write is rejected before data beyond the limit is stored. |
+    | MAX_TOTAL_FILE_SIZE   | `int` | infinity| The maximum number of bytes all files from one parser may use (whether in memory or on disk). Shared across file parts. |
+    | UPLOAD_FILENAME_REDACTION | `str` | `"redact"` | Log-facing filename policy: `redact`, `hash`, `mask`, or `none`. Logs never include upload paths. |
 
     Args:
         file_name: The name of the file that this [`File`][python_multipart.File] represents.
@@ -420,13 +509,39 @@ class File:
         config: FileConfig = {},
         *,
         content_type: str | None = None,
+        _disk_budget: _DiskBudget | None = None,
+        _parser_owned: bool = False,
     ) -> None:
         # Save configuration, set other variables default.
         self.logger = logging.getLogger(__name__)
         self._config = config
+        self._owner = "parser" if _parser_owned else "caller"
+        self._closed = False
+        self._finalized = False
         self._in_memory = True
         self._bytes_written = 0
         self._fileobj: BytesIO | BufferedRandom = BytesIO()
+        self._hasher = hashlib.sha256()
+
+        # Disk accounting is shared by every file created by a FormParser.
+        total_limit = _config_limit(
+            config,
+            "MAX_TOTAL_FILE_SIZE",
+            "MAX_TOTAL_UPLOAD_SIZE",
+            "MAX_DISK_BUDGET",
+            "MAX_DISK_SIZE",
+            "MAX_DISK_QUOTA",
+            "MAX_TOTAL_DISK_SIZE",
+        )
+        self._disk_budget = _disk_budget if _disk_budget is not None else _DiskBudget(total_limit)
+        self._budget_reserved = 0
+        _config_limit(config, "MAX_FILE_SIZE", "MAX_FILE_BYTES", "MAX_UPLOAD_FILE_SIZE")
+
+        # Temporary file bookkeeping. `_temp_path` is the real path used by the
+        # OS, while `_actual_file_name` preserves the public naming behavior.
+        self._temp_path: bytes | None = None
+        self._delete_tmp = bool(config.get("UPLOAD_DELETE_TMP", True))
+        self._temp_is_auto_named = False
 
         # Save the provided field/file name and content type.
         self._field_name = field_name
@@ -446,6 +561,53 @@ class File:
             base, ext = os.path.splitext(basename)
             self._file_base = base
             self._ext = ext
+
+    @classmethod
+    def _for_parser(
+        cls,
+        file_name: bytes | None,
+        field_name: bytes | None,
+        config: FileConfig,
+        *,
+        content_type: str | None,
+        disk_budget: _DiskBudget,
+    ) -> File:
+        """Create a file owned by the parser until an explicit hand-off."""
+        return cls(
+            file_name,
+            field_name,
+            config=config,
+            content_type=content_type,
+            _disk_budget=disk_budget,
+            _parser_owned=True,
+        )
+
+    @property
+    def owner(self) -> str:
+        """Who is responsible for closing this file: ``parser`` or ``caller``."""
+        return self._owner
+
+    @property
+    def owned_by_parser(self) -> bool:
+        return self._owner == "parser"
+
+    @property
+    def finalized(self) -> bool:
+        return self._finalized
+
+    @property
+    def ownership(self) -> str:
+        return self._owner
+
+    @property
+    def is_parser_owned(self) -> bool:
+        return self.owned_by_parser
+
+    def transfer_ownership(self) -> File:
+        """Explicitly hand a parser-owned file over to the caller."""
+        if self._owner == "parser":
+            self._owner = "caller"
+        return self
 
     @property
     def field_name(self) -> bytes | None:
@@ -482,6 +644,55 @@ class File:
         return self._bytes_written
 
     @property
+    def digest(self) -> str:
+        """SHA-256 hex digest of the file content written so far."""
+        return self._hasher.hexdigest()
+
+    @property
+    def hexdigest(self) -> str:
+        return self.digest
+
+    @property
+    def digest_bytes(self) -> bytes:
+        return self._hasher.digest()
+
+    @property
+    def sha256_digest(self) -> bytes:
+        return self.digest_bytes
+
+    @property
+    def content_digest(self) -> str:
+        return self.digest
+
+    @property
+    def sha256_hexdigest(self) -> str:
+        return self.digest
+
+    @property
+    def content_sha256(self) -> str:
+        return self.digest
+
+    @property
+    def sha256(self) -> str:
+        return self.digest
+
+    def get_digest(self) -> str:
+        return self.digest
+
+    def _display_file_name(self) -> str:
+        if self._file_name is None:
+            return "<unnamed>"
+        policy = _filename_redaction_policy(self._config)
+        if policy == "none":
+            return os.fsdecode(os.path.basename(self._file_name))
+        if policy == "hash":
+            return "sha256:" + hashlib.sha256(self._file_name).hexdigest()[:8]
+        if policy == "mask":
+            extension = self._ext.decode("latin-1")
+            return "***" + extension if extension else "***"
+        return "<redacted>"
+
+    @property
     def in_memory(self) -> bool:
         """A boolean representing whether or not this file object is currently
         stored in-memory or on-disk.
@@ -505,54 +716,71 @@ class File:
             self.logger.warning("Trying to flush to disk when we're not in memory")
             return
 
-        # Go back to the start of our file.
-        self._fileobj.seek(0)
+        # Reserve any bytes that are not already accounted for before opening
+        # the file, so quota failures happen before more data reaches disk.
+        needed = max(0, self._bytes_written - self._budget_reserved)
+        if needed:
+            self._disk_budget.reserve(needed)
+            self._budget_reserved += needed
 
-        # Open a new file.
-        new_file = self._get_disk_file()
-
-        # Copy the file objects.
-        shutil.copyfileobj(self._fileobj, new_file)
-
-        # Seek to the new position in our new file.
-        new_file.seek(self._bytes_written)
-
-        # Reassign the fileobject.
         old_fileobj = self._fileobj
+        new_file: BufferedRandom | None = None
+        try:
+            old_fileobj.seek(0)
+            new_file = self._get_disk_file()
+            shutil.copyfileobj(old_fileobj, new_file)
+            new_file.seek(self._bytes_written)
+        except BaseException:
+            if new_file is not None:
+                try:
+                    new_file.close()
+                finally:
+                    self._remove_tmp_file()
+                    self._actual_file_name = None
+            self._release_reserved_budget()
+            raise
+
         self._fileobj = new_file
-
-        # We're no longer in memory.
         self._in_memory = False
-
-        # Close the old file object.
+        self._budget_reserved = max(self._budget_reserved, self._bytes_written)
         old_fileobj.close()
 
     def _get_disk_file(self) -> BufferedRandom:
         """This function is responsible for getting a file object on-disk for us."""
-        self.logger.info("Opening a file on disk")
+        self.logger.info("Opening a disk-backed upload file")
 
-        file_dir = self._config.get("UPLOAD_DIR")
+        upload_dir = self._config.get("UPLOAD_DIR")
+        file_dir = self._config.get("UPLOAD_TMP_DIR")
+        if file_dir is None:
+            file_dir = self._config.get("UPLOAD_TEMP_DIR")
+        if file_dir is None:
+            file_dir = self._config.get("TEMP_DIR")
+        if file_dir is None:
+            file_dir = self._config.get("TMP_DIR")
+        if file_dir is None:
+            file_dir = upload_dir
         keep_filename = self._config.get("UPLOAD_KEEP_FILENAME", False)
         keep_extensions = self._config.get("UPLOAD_KEEP_EXTENSIONS", False)
         delete_tmp = self._config.get("UPLOAD_DELETE_TMP", True)
         tmp_file: None | BufferedRandom = None
+        fname: bytes | None = None
+        temp_path: bytes | None = None
 
         # If we have a directory and a filename to keep...
         if file_dir is not None and keep_filename and self._file_base is not None:
-            self.logger.info("Saving with filename in: %r", file_dir)
+            self.logger.info("Saving an upload with its original filename")
 
             # Build our filename.
             fname = self._file_base + self._ext if keep_extensions else self._file_base
 
-            path = os.path.join(os.fsencode(file_dir), fname)
+            target_dir = upload_dir if upload_dir is not None else file_dir
+            path = os.path.join(os.fsencode(target_dir), fname)
+            temp_path = os.path.abspath(path)
             try:
-                self.logger.info("Opening file: %r", path)
                 tmp_file = open(path, "w+b")
-            except OSError:
-                tmp_file = None
-
-                self.logger.exception("Error opening temporary file")
-                raise FileError("Error opening temporary file: %r" % path)
+            except OSError as exc:
+                self.logger.warning("Error opening temporary upload file (%s)", type(exc).__name__)
+                raise FileError("Error opening temporary file")
         else:
             # Build options array.
             # Note that on Python 3, tempfile doesn't support byte names.  We
@@ -560,20 +788,20 @@ class File:
             suffix = self._ext.decode(sys.getfilesystemencoding()) if keep_extensions else None
 
             if file_dir is None:
-                dir = None
-            elif isinstance(file_dir, bytes):
-                dir = file_dir.decode(sys.getfilesystemencoding())
+                directory = None
             else:
-                dir = file_dir  # pragma: no cover
+                directory = os.fsdecode(file_dir)
 
             # Create a temporary (named) file with the appropriate settings.
             self.logger.info(
-                "Creating a temporary file with options: %r", {"suffix": suffix, "delete": delete_tmp, "dir": dir}
+                "Creating a temporary upload file (keep_extensions=%s, delete=%s)", keep_extensions, delete_tmp
             )
             try:
-                tmp_file = cast(BufferedRandom, tempfile.NamedTemporaryFile(suffix=suffix, delete=delete_tmp, dir=dir))
-            except OSError:
-                self.logger.exception("Error creating named temporary file")
+                tmp_file = cast(
+                    BufferedRandom, tempfile.NamedTemporaryFile(suffix=suffix, delete=delete_tmp, dir=directory)
+                )
+            except OSError as exc:
+                self.logger.warning("Error creating temporary upload file (%s)", type(exc).__name__)
                 raise FileError("Error creating named temporary file")
 
             assert tmp_file is not None
@@ -582,9 +810,57 @@ class File:
                 fname = tmp_file.name.encode(sys.getfilesystemencoding())
             else:
                 fname = cast(bytes, tmp_file.name)  # pragma: no cover
+            temp_path = os.path.abspath(fname)
+            self._temp_is_auto_named = True
 
+        assert tmp_file is not None
+        assert fname is not None
+        assert temp_path is not None
         self._actual_file_name = fname
+        self._temp_path = temp_path
+        self._delete_tmp = bool(delete_tmp)
         return tmp_file
+
+    def _remove_tmp_file(self) -> None:
+        """Best-effort removal of the OS temporary path, without logging it."""
+        path = self._temp_path
+        if path is None:
+            return
+        self._temp_path = None
+        try:
+            os.unlink(os.fsdecode(path))
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            self.logger.warning("Unable to remove temporary upload file (%s)", type(exc).__name__)
+
+    def _release_reserved_budget(self) -> None:
+        reserved = self._budget_reserved
+        self._budget_reserved = 0
+        self._disk_budget.release(reserved)
+
+    def _dispose(self, *, force_delete: bool) -> None:
+        """Close and release this file exactly once, optionally deleting it."""
+        close_error: BaseException | None = None
+        if not self._closed:
+            self._closed = True
+            try:
+                self._fileobj.close()
+            except BaseException as exc:
+                close_error = exc
+
+        if force_delete or (self._delete_tmp and self._temp_is_auto_named):
+            self._remove_tmp_file()
+        self._release_reserved_budget()
+
+        if close_error is not None:
+            raise close_error
+
+    def _discard(self) -> None:
+        """Parser-owned cleanup path. Transferred files are never touched."""
+        if self._owner != "parser":
+            return
+        self._dispose(force_delete=True)
 
     def write(self, data: bytes) -> int:
         """Write some data to the File.
@@ -603,18 +879,40 @@ class File:
         Returns:
             The number of bytes written.
         """
-        bwritten = self._fileobj.write(data)
+        incoming = len(data)
+        max_file_size = _config_limit(self._config, "MAX_FILE_SIZE", "MAX_FILE_BYTES", "MAX_UPLOAD_FILE_SIZE")
+        if self._bytes_written + incoming > max_file_size:
+            raise FileError(f"File exceeds maximum size of {max_file_size} bytes")
+
+        max_memory_file_size = self._config.get("MAX_MEMORY_FILE_SIZE")
+        reserved_now = 0
+        needed = max(0, self._bytes_written + incoming - self._budget_reserved)
+        if needed:
+            self._disk_budget.reserve(needed)
+            self._budget_reserved += needed
+            reserved_now = needed
+
+        try:
+            bwritten = self._fileobj.write(data)
+        except BaseException:
+            if reserved_now:
+                self._disk_budget.release(reserved_now)
+                self._budget_reserved -= reserved_now
+            raise
 
         # If the bytes written isn't the same as the length, just return.
         if bwritten != len(data):
+            if reserved_now:
+                self._disk_budget.release(reserved_now)
+                self._budget_reserved -= reserved_now
             self.logger.warning("bwritten != len(data) (%d != %d)", bwritten, len(data))
             return bwritten
 
         # Keep track of how many bytes we've written.
         self._bytes_written += bwritten
+        self._hasher.update(data[:bwritten])
 
         # If we're in-memory and are over our limit, we create a file.
-        max_memory_file_size = self._config.get("MAX_MEMORY_FILE_SIZE")
         if self._in_memory and max_memory_file_size is not None and (self._bytes_written > max_memory_file_size):
             self.logger.info("Flushing to disk")
             self.flush_to_disk()
@@ -632,16 +930,23 @@ class File:
         but simply signal that we are finished writing to the File.
         """
         self.on_end()
+        self._finalized = True
+        self.logger.info(
+            "File part finalized: name=%s size=%d sha256=%s", self._display_file_name(), self.size, self.digest
+        )
 
     def close(self) -> None:
-        """Close the File object.  This will actually close the underlying
-        file object (whether it's a :class:`io.BytesIO` or an actual file
-        object).
+        """Close the File object exactly once.
+
+        For automatically named temporary files, the behavior is controlled by
+        ``UPLOAD_DELETE_TMP``. Parser-driven cleanup uses a separate path that
+        also removes files created by the parser even when ``UPLOAD_DELETE_TMP``
+        was disabled.
         """
-        self._fileobj.close()
+        self._dispose(force_delete=False)
 
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}(file_name={self.file_name!r}, field_name={self.field_name!r})"
+        return f"{self.__class__.__name__}(file_name={self._display_file_name()!r}, field_name={self.field_name!r})"
 
 
 class BaseParser:
@@ -1682,6 +1987,22 @@ class FormParser:
         self.config: FormParserConfig = self.DEFAULT_CONFIG.copy()
         self.config.update(config)  # type: ignore[typeddict-item]
 
+        # Files created by this parser are owned by the parser until a callback
+        # completes and the hand-off is recorded explicitly.
+        self._pending_files: list[File] = []
+        self._disk_budget = _DiskBudget(
+            _config_limit(
+                self.config,
+                "MAX_TOTAL_FILE_SIZE",
+                "MAX_TOTAL_UPLOAD_SIZE",
+                "MAX_DISK_BUDGET",
+                "MAX_DISK_SIZE",
+                "MAX_DISK_QUOTA",
+                "MAX_TOTAL_DISK_SIZE",
+            )
+        )
+        self._closed = False
+
         parser: OctetStreamParser | MultipartParser | QuerystringParser | None = None
 
         # Depending on the Content-Type, we instantiate the correct parser.
@@ -1690,7 +2011,7 @@ class FormParser:
 
             def on_start() -> None:
                 nonlocal file
-                file = File(file_name, None, config=self.config)
+                file = self._new_file(file_name, None, content_type=None)
 
             def on_data(data: bytes, start: int, end: int) -> None:
                 nonlocal file
@@ -1699,13 +2020,14 @@ class FormParser:
 
             def _on_end() -> None:
                 nonlocal file
-                assert file is not None
+                if file is None:
+                    file = self._new_file(file_name, None, content_type=None)
                 # Finalize the file itself.
                 file.finalize()
 
-                # Call our callback.
-                if on_file:
-                    on_file(file)
+                # Only transfer ownership after the callback returns normally.
+                self._handoff_file(file)
+                file = None
 
                 # Call the on-end callback.
                 if self.on_end is not None:
@@ -1809,17 +2131,19 @@ class FormParser:
                 # TODO: check for error here.
 
             def on_part_end() -> None:
+                nonlocal f_multi, writer
                 assert f_multi is not None
                 assert writer is not None
                 writer.finalize()
                 if is_file:
-                    if on_file:
-                        assert isinstance(f_multi, File)
-                        on_file(f_multi)
+                    assert isinstance(f_multi, File)
+                    self._handoff_file(f_multi)
                 else:
                     if on_field:
                         assert isinstance(f_multi, Field)
                         on_field(f_multi)
+                f_multi = None
+                writer = None
 
             def on_header_field(data: bytes, start: int, end: int) -> None:
                 header_name.append(data[start:end])
@@ -1854,7 +2178,7 @@ class FormParser:
                 if file_name is None:
                     f_multi = Field(field_name, content_type=content_type)
                 else:
-                    f_multi = File(file_name, field_name, config=self.config, content_type=content_type)
+                    f_multi = self._new_file(file_name, field_name, content_type=content_type)
                     is_file = True
 
                 # Parse the given Content-Transfer-Encoding to determine what
@@ -1910,6 +2234,41 @@ class FormParser:
 
         self.parser = parser
 
+    def _new_file(self, file_name: bytes | None, field_name: bytes | None, *, content_type: str | None) -> File:
+        file = File._for_parser(
+            file_name, field_name, self.config, content_type=content_type, disk_budget=self._disk_budget
+        )
+        self._pending_files.append(file)
+        return file
+
+    def _forget_file(self, file: File) -> None:
+        try:
+            self._pending_files.remove(file)
+        except ValueError:
+            pass
+
+    def _handoff_file(self, file: File) -> None:
+        """Run the success callback, then explicitly transfer ownership."""
+        if self.on_file is None:
+            try:
+                file._discard()
+            finally:
+                self._forget_file(file)
+            return
+
+        self.on_file(file)
+        file.transfer_ownership()
+        self._forget_file(file)
+
+    def _cleanup_files(self) -> None:
+        files = self._pending_files
+        self._pending_files = []
+        for file in files:
+            try:
+                file._discard()
+            except BaseException as exc:  # cleanup must never replace the original error
+                self.logger.warning("Error cleaning up parser-owned file (%s)", type(exc).__name__)
+
     def write(self, data: bytes) -> int:
         """Write some data.  The parser will forward this to the appropriate
         underlying parser.
@@ -1923,17 +2282,51 @@ class FormParser:
         self.bytes_received += len(data)
         # TODO: check the parser's return value for errors?
         assert self.parser is not None
-        return self.parser.write(data)
+        try:
+            return self.parser.write(data)
+        except BaseException:
+            self._cleanup_files()
+            raise
 
     def finalize(self) -> None:
         """Finalize the parser."""
         if self.parser is not None and hasattr(self.parser, "finalize"):
-            self.parser.finalize()
+            try:
+                self.parser.finalize()
+            except BaseException:
+                self._cleanup_files()
+                raise
+        # A truncated body can leave a file that was never handed off.
+        self._cleanup_files()
 
     def close(self) -> None:
-        """Close the parser."""
+        """Close the parser and discard every file that was not handed off.
+
+        This method is idempotent. Files already transferred to the caller are
+        deliberately left open.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        self._cleanup_files()
         if self.parser is not None and hasattr(self.parser, "close"):
             self.parser.close()
+
+    def cancel(self) -> None:
+        """Cancel parsing and release all parser-owned resources."""
+        self.close()
+
+    def __enter__(self) -> FormParser:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        try:
+            self._cleanup_files()
+        except BaseException:
+            pass
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(content_type={self.content_type!r}, parser={self.parser!r})"
@@ -2014,19 +2407,22 @@ def parse_form(
         content_length = float("inf")
     bytes_read = 0
 
-    while True:
-        # Read only up to the Content-Length given.
-        max_readable = int(min(content_length - bytes_read, chunk_size))
-        buff = input_stream.read(max_readable)
+    try:
+        while True:
+            # Read only up to the Content-Length given.
+            max_readable = int(min(content_length - bytes_read, chunk_size))
+            buff = input_stream.read(max_readable)
 
-        # Write to the parser and update our length.
-        parser.write(buff)
-        bytes_read += len(buff)
+            # Write to the parser and update our length.
+            parser.write(buff)
+            bytes_read += len(buff)
 
-        # If we get a buffer that's smaller than the size requested, or if we
-        # have read up to our content length, we're done.
-        if len(buff) != max_readable or bytes_read == content_length:
-            break
+            # If we get a buffer that's smaller than the size requested, or if we
+            # have read up to our content length, we're done.
+            if len(buff) != max_readable or bytes_read == content_length:
+                break
 
-    # Tell our parser that we're done writing data.
-    parser.finalize()
+        # Tell our parser that we're done writing data.
+        parser.finalize()
+    finally:
+        parser.close()

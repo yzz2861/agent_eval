@@ -1,5 +1,9 @@
+import hashlib
 from pathlib import Path
 
+import pytest
+
+from python_multipart.exceptions import FileError
 from python_multipart.multipart import File
 
 
@@ -71,3 +75,41 @@ def test_keep_filename_without_filename(tmp_path: Path) -> None:
     assert file.actual_file_name is not None
     assert Path(file.actual_file_name.decode()).parent == tmp_path
     assert Path(file.actual_file_name.decode()).read_bytes() == b"123456789012"
+
+
+def test_file_size_and_digest_are_observable(tmp_path: Path) -> None:
+    data = b"content that crosses the memory threshold"
+    file = File(
+        b"sample.bin", config={"UPLOAD_TMP_DIR": str(tmp_path), "MAX_MEMORY_FILE_SIZE": 1, "UPLOAD_DELETE_TMP": False}
+    )
+    file.write(data)
+
+    assert file.size == len(data)
+    assert file.digest == hashlib.sha256(data).hexdigest()
+    assert file.digest_bytes == hashlib.sha256(data).digest()
+
+    file.close()
+
+
+def test_close_is_idempotent() -> None:
+    file = File(b"sample.bin")
+    file.write(b"data")
+
+    file.close()
+    file.close()
+
+    assert file.file_object.closed
+
+
+def test_max_file_size_fails_before_writing_more(tmp_path: Path) -> None:
+    file = File(b"sample.bin", config={"UPLOAD_TMP_DIR": str(tmp_path), "MAX_MEMORY_FILE_SIZE": 1, "MAX_FILE_SIZE": 4})
+    file.write(b"1234")
+    assert file.size == 4
+
+    with pytest.raises(FileError, match="File exceeds maximum size"):
+        file.write(b"5")
+
+    assert file.size == 4
+    file.file_object.seek(0)
+    assert file.file_object.read() == b"1234"
+    file.close()
