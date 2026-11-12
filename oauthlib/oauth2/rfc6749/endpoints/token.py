@@ -9,6 +9,8 @@ import logging
 
 from oauthlib.common import Request
 from oauthlib.oauth2.rfc6749 import utils
+from oauthlib.oauth2.rfc6749.errors import InvalidRequestError
+from oauthlib.oauth2.rfc6749.parameters import normalize_request_parameters
 
 from .base import BaseEndpoint, catch_errors_and_unavailability
 
@@ -90,6 +92,16 @@ class TokenEndpoint(BaseEndpoint):
         request = Request(
             uri, http_method=http_method, body=body, headers=headers)
         self.validate_token_request(request)
+        try:
+            normalize_request_parameters(
+                query=request.uri_query,
+                body=request.body,
+                headers=request.headers,
+            )
+        except InvalidRequestError as e:
+            log.debug('Ambiguous parameters in token request %r: %s',
+                      request, e)
+            return {}, e.json, e.status_code
         # 'scope' is an allowed Token Request param in both the "Resource Owner Password Credentials Grant"
         # and "Client Credentials Grant" flows
         # https://tools.ietf.org/html/rfc6749#section-4.3.2

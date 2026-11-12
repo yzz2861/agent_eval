@@ -4,6 +4,21 @@ Changelog
 Unreleased:
 ------------------
 OAuth2.0 Provider:
+* Parameter pollution hardening: added
+  ``oauthlib.oauth2.rfc6749.parameters.normalize_request_parameters`` and
+  wired it into ``TokenEndpoint``. Repeated security-critical parameters
+  (``grant_type``, ``client_id``, ``scope``, ``code_verifier``, ...) with
+  conflicting values are now rejected with a stable ``invalid_request``
+  instead of silently keeping the first or last value; identical values
+  collapse to one. Percent-encoding and ``+`` are decoded exactly once
+  before comparison, parameter names stay case-sensitive, and empty values
+  normalize to ``""``. The same client credential sent in the
+  ``Authorization`` header, body and query resolves by the fixed priority
+  header > body > query. Strict mode (``strict=True`` or the
+  ``OAUTHLIB_STRICT_PARAMETERS`` environment variable) additionally rejects
+  any repeated parameter, credentials in multiple locations and malformed
+  encodings. Error responses name the offending parameter without echoing
+  submitted values, so client secrets are never reflected.
 * **Breaking**: #988: PKCE parameters are now validated against RFC 7636
   syntax. ``code_verifier`` must be 43-128 unreserved ASCII characters
   (``[A-Za-z0-9-._~]``) at the token endpoint (rejected with ``invalid_grant``)

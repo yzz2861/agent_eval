@@ -6,20 +6,235 @@ This module contains methods related to `Section 4`_ of the OAuth 2 RFC.
 
 .. _`Section 4`: https://tools.ietf.org/html/rfc6749#section-4
 """
+import base64
 import json
 import os
 import time
 import urllib.parse as urlparse
 
-from oauthlib.common import add_params_to_qs, add_params_to_uri
+from oauthlib.common import (
+    add_params_to_qs, add_params_to_uri, extract_params, urldecode,
+)
 from oauthlib.signals import scope_changed
 
 from .errors import (
-    InsecureTransportError, MismatchingStateError, MissingCodeError,
-    MissingTokenError, MissingTokenTypeError, raise_from_error,
+    InsecureTransportError, InvalidRequestError, MismatchingStateError,
+    MissingCodeError, MissingTokenError, MissingTokenTypeError,
+    raise_from_error,
 )
 from .tokens import OAuth2Token
 from .utils import is_secure_transport, list_to_scope, scope_to_list
+
+
+#: Parameters whose values directly influence authentication, authorization
+#: or token issuance.  Repeating any of these with conflicting values is
+#: always rejected, in both lenient and strict mode, because silently
+#: picking the first or last value lets upstream proxies choose which
+#: credential or scope the authorization server acts on.
+SECURITY_CRITICAL_PARAMETERS = frozenset({
+    'access_token',
+    'assertion',
+    'client_id',
+    'client_secret',
+    'code',
+    'code_challenge',
+    'code_challenge_method',
+    'code_verifier',
+    'device_code',
+    'grant_type',
+    'password',
+    'redirect_uri',
+    'refresh_token',
+    'response_type',
+    'scope',
+    'state',
+    'token',
+    'token_type_hint',
+    'username',
+})
+
+#: Parameters that carry client credentials.  When the same credential is
+#: supplied in more than one location, a single deterministic priority
+#: applies (see CREDENTIAL_SOURCE_PRIORITY) instead of whichever value the
+#: parameter parser happened to keep.
+CREDENTIAL_PARAMETERS = frozenset({'client_id', 'client_secret'})
+
+#: Priority of the locations a client credential may appear in, highest
+#: first: the Authorization header wins over the request body, which wins
+#: over the URL query.
+CREDENTIAL_SOURCE_PRIORITY = ('header', 'body', 'query')
+
+
+def _strict_parameters_default():
+    """Whether strict parameter normalization is enabled by default."""
+    return bool(os.environ.get('OAUTHLIB_STRICT_PARAMETERS'))
+
+
+def _normalize_form_params(raw, source, strict):
+    """Decode one parameter source into a list of (name, value) tuples.
+
+    Percent-encoding (hex digits compared case-insensitively) and `+` are
+    decoded exactly once, blank values are kept as empty strings, and a
+    parameter without `=` is indistinguishable from one with an empty
+    value.  A source that is not valid x-www-form-urlencoded data yields no
+    parameters in lenient mode (matching the historical behaviour of
+    `oauthlib.common.Request`) and raises `InvalidRequestError` in
+    strict mode.
+    """
+    if not raw:
+        return []
+    params = extract_params(raw)
+    if params is None:
+        if strict:
+            raise InvalidRequestError(
+                description='Malformed %s parameters.' % source)
+        return []
+    return list(params)
+
+
+def _parse_basic_credentials(authorization, strict):
+    """Extract (client_id, client_secret) from an Authorization header value.
+
+    Only the Basic scheme carries client credentials; any other scheme
+    returns None.  Per `Section 2.3.1`_ the client_id and client_secret
+    are x-www-form-urlencoded before being joined with a colon and
+    base64-encoded, so each side is decoded once after splitting on the
+    first colon.  The decoded values are used verbatim; they are never
+    re-encoded, stripped or otherwise rewritten.
+
+    .. _`Section 2.3.1`: https://tools.ietf.org/html/rfc6749#section-2.3.1
+    """
+    scheme, _, credentials = authorization.partition(' ')
+    if scheme.lower() != 'basic':
+        return None
+    credentials = credentials.strip()
+    decoded = None
+    if credentials:
+        try:
+            decoded = base64.b64decode(credentials, validate=True).decode('utf-8')
+        except (ValueError, UnicodeDecodeError):
+            decoded = None
+    if not decoded or ':' not in decoded:
+        if strict:
+            raise InvalidRequestError(
+                description='Malformed Authorization header.')
+        return None
+    client_id, _, client_secret = decoded.partition(':')
+    return (urlparse.unquote_plus(client_id),
+            urlparse.unquote_plus(client_secret))
+
+
+def normalize_request_parameters(query='', body='', headers=None, strict=None):
+    """Normalize the parameters of an OAuth 2 request into a single dict.
+
+    This gives a fixed, documented answer to parameter pollution and
+    encoding ambiguity instead of silently keeping the first or last
+    occurrence of a repeated parameter:
+
+    * Percent-encoding and `+` are decoded exactly once before any
+      comparison, so `%2F` and `%2f` (or `+` and `%20`) are the
+      same value, while `%2B` stays a literal plus sign.  Parameter
+      names are decoded the same way but remain case-sensitive:
+      `Scope` and `scope` are different parameters.
+    * A parameter sent with no value (`scope`) and one sent with an
+      empty value (`scope=`) both normalize to the empty string.
+    * A parameter repeated with the same normalized value collapses to
+      that single value, regardless of the order or location of the
+      occurrences.
+    * A security-critical parameter (see SECURITY_CRITICAL_PARAMETERS)
+      repeated with conflicting values is always rejected with
+      `invalid_request`; it is never resolved by taking the first or
+      last value.  In particular duplicate `scope` values are never
+      merged, since merging would change the meaning of the requested
+      scope.
+    * The same client credential (`client_id`/`client_secret`) sent in
+      more than one location (Authorization header, body, query) is
+      resolved by the fixed priority in CREDENTIAL_SOURCE_PRIORITY in
+      lenient mode and rejected in strict mode.
+    * In strict mode any other parameter repeated with conflicting
+      values, malformed percent-encoding and malformed Basic
+      credentials are rejected as well.  In lenient mode a repeated
+      non-critical parameter keeps the last occurrence, matching the
+      historical behaviour, so the result for requests that were
+      previously valid is unchanged.
+
+    Values are never rewritten: the returned values are the decoded
+    request bytes exactly as sent (a client secret keeps its raw
+    decoded form), and error descriptions name the offending parameter
+    without echoing any value, so secrets are never reflected in an
+    error response.
+
+    The function is deterministic: the same input always produces the
+    same output, and permuting the order of repeated parameters cannot
+    change the outcome.
+
+    :param query: The URL query component, as a urlencoded string.
+    :param body: The request body, as a urlencoded string, a dict or a
+                 list of 2-tuples.
+    :param headers: Mapping of request headers, inspected for a Basic
+                    `Authorization` header.
+    :param strict: `True` to reject every ambiguity with
+                   `InvalidRequestError`, `False` to apply the lenient
+                   fallbacks described above.  Defaults to the
+                   `OAUTHLIB_STRICT_PARAMETERS` environment variable.
+    :raises InvalidRequestError: on ambiguous or malformed input as
+                                 described above.
+    :return: A dict of normalized parameter names to single values.
+    """
+    if strict is None:
+        strict = _strict_parameters_default()
+
+    occurrences = []
+    for name, value in _normalize_form_params(query, 'query', strict):
+        occurrences.append((name, value, 'query'))
+    for name, value in _normalize_form_params(body, 'body', strict):
+        occurrences.append((name, value, 'body'))
+
+    authorization = None
+    if headers:
+        items = headers.items() if hasattr(headers, 'items') else []
+        for key, value in items:
+            if str(key).lower() == 'authorization':
+                authorization = value
+                break
+    if authorization:
+        credentials = _parse_basic_credentials(authorization, strict)
+        if credentials is not None:
+            occurrences.append(('client_id', credentials[0], 'header'))
+            occurrences.append(('client_secret', credentials[1], 'header'))
+
+    # Resolve credentials appearing in more than one location to a single
+    # source, so the same credential can never be read from two places.
+    for credential in CREDENTIAL_PARAMETERS:
+        sources = {source for name, _value, source in occurrences
+                   if name == credential}
+        if len(sources) > 1:
+            if strict:
+                raise InvalidRequestError(
+                    description='Client credential sent in multiple locations.')
+            winner = next(source for source in CREDENTIAL_SOURCE_PRIORITY
+                          if source in sources)
+            occurrences = [(name, value, source)
+                           for name, value, source in occurrences
+                           if name != credential or source == winner]
+
+    values_by_name = {}
+    for name, value, _source in occurrences:
+        values_by_name.setdefault(name, []).append(value)
+
+    normalized = {}
+    for name, values in values_by_name.items():
+        first = values[0]
+        if all(value == first for value in values):
+            normalized[name] = first
+        elif name in SECURITY_CRITICAL_PARAMETERS or strict:
+            # Name the parameter only; never echo submitted values (which
+            # may be secrets) in the error response.
+            raise InvalidRequestError(
+                description='Duplicate %s parameter.' % (name,))
+        else:
+            normalized[name] = values[-1]
+    return normalized
 
 
 def prepare_grant_uri(uri, client_id, response_type, redirect_uri=None,

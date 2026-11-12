@@ -210,6 +210,45 @@ class TokenEndpointTest(TestCase):
         token = {'error': 'unsupported_grant_type'}
         self.assertEqual(json.loads(body), token)
 
+    def test_conflicting_duplicate_grant_type(self):
+        # Parameter pollution: the same security-critical parameter twice
+        # with different values must be a stable invalid_request, whatever
+        # the order of the occurrences.
+        bodies = ('grant_type=client_credentials&grant_type=password',
+                  'grant_type=password&grant_type=client_credentials')
+        responses = []
+        for body in bodies:
+            _, body, status = self.endpoint.create_token_response('', body=body)
+            self.assertEqual(status, 400)
+            responses.append(body)
+            self.assertEqual(json.loads(body)['error'], 'invalid_request')
+        self.assertEqual(responses[0], responses[1])
+
+    def test_conflicting_duplicate_scope(self):
+        # scope=read&scope=admin must not be resolved by picking the first
+        # or last value, nor merged into a wider scope.
+        body = 'grant_type=client_credentials&scope=read&scope=admin'
+        _, body, status = self.endpoint.create_token_response('', body=body)
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body)['error'], 'invalid_request')
+
+    def test_conflicting_duplicate_secret_not_echoed(self):
+        body = ('grant_type=client_credentials'
+                '&client_secret=sup3rs3cr3t&client_secret=0th3rvalu3')
+        _, body, status = self.endpoint.create_token_response('', body=body)
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body)['error'], 'invalid_request')
+        self.assertNotIn('sup3rs3cr3t', body)
+        self.assertNotIn('0th3rvalu3', body)
+
+    def test_conflicting_duplicate_query_body_client_id(self):
+        # The same credential in query and body with different values is
+        # ambiguous; POSTing query parameters is rejected first.
+        self.assertRaises(errors.InvalidRequestError,
+                          self.endpoint.create_token_response,
+                          'https://i.b/token?client_id=foo',
+                          body='grant_type=client_credentials&client_id=bar')
+
 
 class SignedTokenEndpointTest(TestCase):
 
