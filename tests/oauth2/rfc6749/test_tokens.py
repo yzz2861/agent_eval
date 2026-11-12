@@ -1,8 +1,11 @@
 from unittest import mock
 
 from oauthlib.common import Request
+from oauthlib.oauth2.rfc6749.errors import InvalidTokenError
 from oauthlib.oauth2.rfc6749.tokens import (
-    BearerToken, prepare_bearer_body, prepare_bearer_headers,
+    MAX_BEARER_CHALLENGE_LENGTH, BearerToken, parse_bearer_challenge,
+    prepare_bearer_body, prepare_bearer_challenge,
+    prepare_bearer_challenge_headers, prepare_bearer_headers,
     prepare_bearer_uri, prepare_mac_header,
 )
 
@@ -149,6 +152,130 @@ class TokenTest(TestCase):
         self.assertEqual(prepare_bearer_headers(self.token), self.bearer_headers)
         self.assertEqual(prepare_bearer_body(self.token), self.bearer_body)
         self.assertEqual(prepare_bearer_uri(self.token, uri=self.uri), self.bearer_uri)
+
+    def test_bearer_challenge_round_trip(self):
+        challenge = prepare_bearer_challenge(
+            realm='photos "shared" \\ archive',
+            error='invalid_token',
+            error_description='The token "expired" \\ revoked.',
+            scope={'write', 'read'},
+            error_uri='https://example.com/errors/invalid_token',
+            strict=True,
+        )
+
+        self.assertNotIn('\r', challenge)
+        self.assertNotIn('\n', challenge)
+        self.assertIn('realm="photos \\"shared\\" \\\\ archive"', challenge)
+        self.assertIn('scope="read write"', challenge)
+        self.assertEqual(parse_bearer_challenge(challenge), {
+            'realm': 'photos "shared" \\ archive',
+            'error': 'invalid_token',
+            'error_description': 'The token "expired" \\ revoked.',
+            'scope': 'read write',
+            'error_uri': 'https://example.com/errors/invalid_token',
+        })
+        self.assertEqual(
+            prepare_bearer_challenge_headers(error='invalid_token'),
+            {'WWW-Authenticate': 'Bearer error="invalid_token"'},
+        )
+
+    def test_bearer_challenge_scope_is_deterministic(self):
+        first = prepare_bearer_challenge(
+            realm='api', scope={'write', 'read', 'read'}, strict=True)
+        second = prepare_bearer_challenge(
+            realm='api', scope=['read', 'write'], strict=True)
+
+        self.assertEqual(first, second)
+        self.assertIn('scope="read write"', first)
+        self.assertEqual(
+            parse_bearer_challenge(
+                'Bearer realm="api", scope="write read write"')['scope'],
+            'read write',
+        )
+
+    def test_bearer_challenge_builder_rejects_unsafe_values(self):
+        for field, value in (
+            ('realm', 'legit\r\nX-Injected: evil'),
+            ('realm', 'legit\nX-Injected: evil'),
+            ('realm', 'legit\0value'),
+            ('realm', 'l\u00e9git'),
+            ('error_description', 'bad\r\nSet-Cookie: pwned=1'),
+            ('error_description', 'bad\0value'),
+            ('error_description', 'caf\u00e9'),
+            ('scope', 'read\r\nwrite'),
+            ('scope', 'read"write'),
+            ('scope', 'read\\write'),
+            ('error_uri', 'https://exa mple.com/error'),
+            ('error_uri', 'https://example.com/"error'),
+            ('error_uri', ''),
+        ):
+            with self.subTest(field=field, value=repr(value)), \
+                    self.assertRaises(ValueError):
+                kwargs = {'strict': True}
+                if field != 'realm':
+                    kwargs['realm'] = 'api'
+                kwargs[field] = value
+                prepare_bearer_challenge(**kwargs)
+
+    def test_bearer_challenge_strict_rejects_empty_realm_and_long_scope(self):
+        with self.assertRaises(ValueError):
+            prepare_bearer_challenge(realm='', strict=True)
+
+        with self.assertRaises(ValueError):
+            prepare_bearer_challenge(
+                realm='api',
+                scope=' '.join('scope%d' % index for index in range(2000)),
+                strict=True,
+            )
+
+    def test_parse_bearer_challenge_rejects_invalid_challenges(self):
+        for challenge in (
+            'Bearer error="invalid_token"',
+            'Basic realm="api"',
+            'Digest realm="api"',
+            'Bearer realm=""',
+            'Bearer realm="a", realm="b"',
+            'Bearer Realm="a", realm="b"',
+            'Bearer realm="a',
+            'Bearer realm="a",',
+        ):
+            with self.subTest(challenge=repr(challenge)), \
+                    self.assertRaises(ValueError):
+                parse_bearer_challenge(challenge)
+
+        with self.assertRaises(ValueError):
+            parse_bearer_challenge('Bearer realm="a"', max_length=10)
+
+        with self.assertRaises(ValueError):
+            parse_bearer_challenge('Bearer realm="a\r\nX: b"')
+
+        with self.assertRaises(ValueError):
+            parse_bearer_challenge(
+                'Bearer realm="' + 'a' * MAX_BEARER_CHALLENGE_LENGTH + '"')
+
+    def test_parse_bearer_challenge_accepts_case_insensitive_headers(self):
+        parsed = parse_bearer_challenge({
+            'www-authenticate':
+                'bEaReR   REALM="api", SCOPE="write read", ERROR="invalid_token"',
+        })
+
+        self.assertEqual(parsed, {
+            'realm': 'api',
+            'error': 'invalid_token',
+            'scope': 'read write',
+        })
+
+    def test_oauth2_error_header_escapes_user_values(self):
+        error = InvalidTokenError(
+            description='The realm "api" \\ path was not found.')
+        header = error.headers['WWW-Authenticate']
+
+        self.assertIn('error_description="The realm \\"api\\" \\\\ path', header)
+        self.assertNotIn('\n', header)
+        self.assertNotIn('\r', header)
+
+        with self.assertRaises(ValueError):
+            InvalidTokenError(description='legit\r\nX-Injected: evil').headers
 
     def test_valid_bearer_is_validated(self):
         request_validator = mock.MagicMock()

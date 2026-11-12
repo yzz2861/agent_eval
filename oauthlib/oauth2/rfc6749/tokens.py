@@ -9,14 +9,373 @@ This module contains methods for adding two types of access tokens to requests.
 """
 import hashlib
 import hmac
+import re
 import warnings
 from binascii import b2a_base64
+from collections.abc import Mapping
 from urllib.parse import urlparse
 
 from oauthlib import common
 from oauthlib.common import add_params_to_qs, add_params_to_uri
+from oauthlib.uri_validate import is_uri_reference
 
 from . import utils
+
+
+MAX_BEARER_CHALLENGE_LENGTH = 8192
+MAX_CHALLENGE_LENGTH = MAX_BEARER_CHALLENGE_LENGTH
+
+_AUTH_TOKEN_RE = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+_CHALLENGE_PARAM_NAMES = (
+    'realm', 'error', 'error_description', 'scope', 'error_uri',
+)
+
+
+def _check_challenge_text(name, value):
+    """Reject values that cannot safely appear in an HTTP field value."""
+    if not isinstance(value, str):
+        raise ValueError('%s must be a string' % name)
+    for char in value:
+        codepoint = ord(char)
+        if char in '\r\n':
+            raise ValueError('%s must not contain CR or LF characters' % name)
+        if codepoint < 0x20 or codepoint == 0x7f:
+            raise ValueError('%s must not contain control characters' % name)
+        if codepoint > 0x7e:
+            raise ValueError('%s must contain ASCII characters only' % name)
+    return value
+
+
+def _quote_challenge_value(name, value):
+    _check_challenge_text(name, value)
+    return '"{}"'.format(
+        value.replace('\\', '\\\\').replace('"', '\\"'))
+
+
+def _is_scope_token(token):
+    return bool(token) and all(
+        ord(char) == 0x21 or 0x23 <= ord(char) <= 0x5b or 0x5d <= ord(char) <= 0x7e
+        for char in token
+    )
+
+
+def _normalize_scope(scope):
+    """Return a deterministic, space-delimited scope set."""
+    if scope is None:
+        return None
+    if isinstance(scope, str):
+        _check_challenge_text('scope', scope)
+        raw_tokens = scope.split(' ')
+    elif isinstance(scope, (set, frozenset, list, tuple)):
+        raw_tokens = []
+        for item in scope:
+            if not isinstance(item, str):
+                raise ValueError('scope entries must be strings')
+            _check_challenge_text('scope', item)
+            raw_tokens.extend(item.split(' '))
+    else:
+        raise ValueError('scope must be a string, set, tuple, or list')
+
+    tokens = {token for token in raw_tokens if token}
+    for token in tokens:
+        if not _is_scope_token(token):
+            raise ValueError('scope contains an invalid scope token')
+    return ' '.join(sorted(tokens)) if tokens else ''
+
+
+def _check_error_uri(uri):
+    _check_challenge_text('error_uri', uri)
+    if not uri or not is_uri_reference(uri):
+        raise ValueError('error_uri must be a valid URI reference')
+
+
+def _format_bearer_challenge(realm=None, error=None, error_description=None,
+                             scope=None, error_uri=None, *, strict=False,
+                             max_length=MAX_BEARER_CHALLENGE_LENGTH,
+                             description=None, uri=None):
+    """Build a canonical RFC 6750 ``Bearer`` challenge value.
+
+    Values are emitted as quoted strings and escaped according to the HTTP
+    quoted-string rules.  ``scope`` accepts a string or a set-like collection;
+    duplicate scope tokens are removed and the remaining tokens are sorted.
+
+    :param realm: Protection space.  An explicitly empty realm is rejected.
+    :param error: OAuth error code.
+    :param error_description: Human-readable error description.
+    :param scope: Required scope, as a string or collection of strings.
+    :param error_uri: URI reference with human-readable error information.
+    :param strict: Enable strict validation.
+    :param max_length: Maximum generated challenge length.
+    :param description: Alias for ``error_description``.
+    :param uri: Alias for ``error_uri``.
+    :raises ValueError: if a value cannot safely be represented in a header.
+    """
+    if description is not None:
+        if error_description is not None and error_description != description:
+            raise ValueError('description and error_description disagree')
+        error_description = description
+    if uri is not None:
+        if error_uri is not None and error_uri != uri:
+            raise ValueError('uri and error_uri disagree')
+        error_uri = uri
+
+    if realm is not None:
+        _check_challenge_text('realm', realm)
+        if not realm:
+            raise ValueError('realm must not be empty')
+    if error is not None:
+        _check_challenge_text('error', error)
+        if not error:
+            raise ValueError('error must not be empty')
+    if error_description is not None:
+        _check_challenge_text('error_description', error_description)
+    if error_uri is not None:
+        _check_error_uri(error_uri)
+
+    normalized_scope = _normalize_scope(scope)
+    if strict and scope is not None and not normalized_scope:
+        raise ValueError('scope must not be empty')
+
+    authvalues = []
+    if realm is not None:
+        authvalues.append('realm={}'.format(_quote_challenge_value('realm', realm)))
+    if error is not None:
+        authvalues.append('error={}'.format(_quote_challenge_value('error', error)))
+    if error_description is not None:
+        authvalues.append('error_description={}'.format(
+            _quote_challenge_value('error_description', error_description)))
+    if normalized_scope:
+        authvalues.append('scope={}'.format(
+            _quote_challenge_value('scope', normalized_scope)))
+    if error_uri is not None:
+        authvalues.append('error_uri={}'.format(_quote_challenge_value('error_uri', error_uri)))
+
+    challenge = 'Bearer'
+    if authvalues:
+        challenge += ' ' + ', '.join(authvalues)
+    elif strict:
+        raise ValueError('Bearer challenge requires at least one auth-param')
+
+    if max_length is not None and len(challenge) > max_length:
+        raise ValueError('Bearer challenge exceeds the maximum length')
+    return challenge
+
+
+class BearerChallengeHeaders(dict):
+    """Headers mapping for a Bearer challenge.
+
+    The mapping contains the canonical ``WWW-Authenticate`` entry.  String
+    operations and comparisons are delegated to that value so callers that
+    consume the challenge value directly remain compatible.
+    """
+
+    def __init__(self, challenge):
+        super().__init__({'WWW-Authenticate': challenge})
+
+    @property
+    def value(self):
+        return self['WWW-Authenticate']
+
+    def __str__(self):
+        return self.value
+
+    def __repr__(self):
+        return repr(self.value)
+
+    def __eq__(self, other):
+        if isinstance(other, str):
+            return self.value == other
+        return super().__eq__(other)
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    def __hash__(self):
+        return hash(self.value)
+
+    def __contains__(self, item):
+        return (dict.__contains__(self, item) or
+                (isinstance(item, str) and item in self.value))
+
+    def __getitem__(self, key):
+        if isinstance(key, (int, slice)):
+            return self.value[key]
+        return dict.__getitem__(self, key)
+
+    def __getattr__(self, name):
+        return getattr(self.value, name)
+
+
+def prepare_bearer_challenge(*args, **kwargs):
+    """Build a canonical RFC 6750 ``Bearer`` challenge.
+
+    The returned mapping contains the ``WWW-Authenticate`` header value and
+    also supports direct string comparison and string methods.
+    """
+    return BearerChallengeHeaders(_format_bearer_challenge(*args, **kwargs))
+
+
+def prepare_bearer_challenge_headers(*args, **kwargs):
+    """Return a ``WWW-Authenticate`` headers mapping for a Bearer challenge."""
+    return {'WWW-Authenticate': _format_bearer_challenge(*args, **kwargs)}
+
+
+build_bearer_challenge = prepare_bearer_challenge
+format_bearer_challenge = _format_bearer_challenge
+create_bearer_challenge = prepare_bearer_challenge
+prepare_www_authenticate = prepare_bearer_challenge
+
+
+def _consume_token(text, position):
+    match = _AUTH_TOKEN_RE.match(text, position)
+    if match is None:
+        return '', position
+    return match.group(0), match.end()
+
+
+def _consume_quoted_string(text, position):
+    value = []
+    while position < len(text):
+        char = text[position]
+        if char == '"':
+            return ''.join(value), position + 1
+        if char == '\\':
+            position += 1
+            if position >= len(text):
+                raise ValueError('unterminated quoted-string escape')
+            char = text[position]
+        value.append(char)
+        position += 1
+    raise ValueError('unterminated quoted-string')
+
+
+def _parse_bearer_params(text, position):
+    params = {}
+    while position < len(text):
+        name, position = _consume_token(text, position)
+        if not name:
+            raise ValueError('invalid auth-param name')
+        name = name.lower()
+        if name in params:
+            raise ValueError('duplicate auth-param %s' % name)
+
+        while position < len(text) and text[position] == ' ':
+            position += 1
+        if position >= len(text) or text[position] != '=':
+            raise ValueError('auth-param is missing a value')
+        position += 1
+        while position < len(text) and text[position] == ' ':
+            position += 1
+        if position >= len(text):
+            raise ValueError('auth-param is missing a value')
+
+        if text[position] == '"':
+            value, position = _consume_quoted_string(text, position + 1)
+        else:
+            value, position = _consume_token(text, position)
+            if not value:
+                raise ValueError('auth-param is missing a value')
+        params[name] = value
+
+        while position < len(text) and text[position] == ' ':
+            position += 1
+        if position < len(text):
+            if text[position] != ',':
+                raise ValueError('invalid data after auth-param value')
+            position += 1
+            while position < len(text) and text[position] == ' ':
+                position += 1
+            if position >= len(text):
+                raise ValueError('trailing comma in challenge')
+    return params
+
+
+def _validate_parsed_params(params, strict):
+    if 'realm' in params and not params['realm']:
+        raise ValueError('realm must not be empty')
+    if strict and 'realm' not in params:
+        raise ValueError('Bearer challenge is missing realm')
+
+    if 'scope' in params:
+        params['scope'] = _normalize_scope(params['scope'])
+    if 'error_uri' in params:
+        _check_error_uri(params['error_uri'])
+    if 'error' in params and not params['error']:
+        raise ValueError('error must not be empty')
+
+
+def _canonicalize_params(params):
+    result = {}
+    for name in _CHALLENGE_PARAM_NAMES:
+        if name in params:
+            result[name] = params[name]
+    for name in sorted(params):
+        if name not in result:
+            result[name] = params[name]
+    return result
+
+
+def parse_bearer_challenge(challenge=None, *, strict=True,
+                           max_length=MAX_BEARER_CHALLENGE_LENGTH,
+                           header=None, headers=None):
+    """Parse a ``WWW-Authenticate`` Bearer challenge.
+
+    The parser accepts either a header value or a mapping containing a
+    ``WWW-Authenticate`` entry.  Auth-scheme and parameter names are matched
+    case-insensitively and returned with canonical lowercase names.
+
+    :param challenge: Challenge string or headers mapping.
+    :param strict: Require a non-empty ``realm`` parameter and validate it.
+    :param max_length: Maximum accepted challenge length.
+    :return: Parsed challenge parameters.
+    :raises ValueError: if the challenge is malformed or not a Bearer challenge.
+    """
+    if headers is not None:
+        if challenge is not None:
+            raise ValueError('challenge and headers cannot both be provided')
+        challenge = headers
+    if header is not None:
+        if challenge is not None:
+            raise ValueError('challenge and header cannot both be provided')
+        challenge = header
+    if challenge is None:
+        raise ValueError('challenge must not be empty')
+
+    if isinstance(challenge, Mapping):
+        for name, value in challenge.items():
+            if str(name).lower() == 'www-authenticate':
+                challenge = value
+                break
+        else:
+            raise ValueError('WWW-Authenticate header is missing')
+
+    if not isinstance(challenge, str):
+        raise ValueError('challenge must be a string')
+    if max_length is not None and len(challenge) > max_length:
+        raise ValueError('Bearer challenge exceeds the maximum length')
+    _check_challenge_text('challenge', challenge)
+
+    text = challenge.strip(' ')
+    if not text:
+        raise ValueError('challenge must not be empty')
+
+    scheme, position = _consume_token(text, 0)
+    if not scheme or scheme.lower() != 'bearer':
+        raise ValueError('unsupported authentication scheme')
+    if position >= len(text) or text[position] != ' ':
+        raise ValueError('Bearer challenge is missing auth-param values')
+    while position < len(text) and text[position] == ' ':
+        position += 1
+
+    params = _parse_bearer_params(text, position)
+    _validate_parsed_params(params, strict)
+    return _canonicalize_params(params)
+
+
+parse_www_authenticate = parse_bearer_challenge
+parse_bearer_challenge_header = parse_bearer_challenge
+parse_www_authenticate_header = parse_bearer_challenge
+parse_bearer_www_authenticate = parse_bearer_challenge
 
 
 class OAuth2Token(dict):

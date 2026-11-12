@@ -16,9 +16,10 @@ class OAuth2Error(Exception):
     error = None
     status_code = 400
     description = ''
+    strict = False
 
     def __init__(self, description=None, uri=None, state=None,
-                 status_code=None, request=None):
+                 status_code=None, request=None, strict=False):
         """
         :param description: A human-readable ASCII [USASCII] text providing
                             additional information, used to assist the client
@@ -51,6 +52,7 @@ class OAuth2Error(Exception):
 
         self.uri = uri
         self.state = state
+        self.strict = strict
 
         if status_code:
             self.status_code = status_code
@@ -105,12 +107,14 @@ class OAuth2Error(Exception):
             value "Bearer".  This scheme MUST be followed by one or more
             auth-param values.
             """
-            authvalues = ['error="{}"'.format(self.error)]
-            if self.description:
-                authvalues.append('error_description="{}"'.format(self.description))
-            if self.uri:
-                authvalues.append('error_uri="{}"'.format(self.uri))
-            return {"WWW-Authenticate": "Bearer " + ", ".join(authvalues)}
+            from .tokens import prepare_bearer_challenge_headers  # noqa: PLC0415
+
+            return prepare_bearer_challenge_headers(
+                error=self.error,
+                error_description=self.description or None,
+                error_uri=self.uri or None,
+                strict=self.strict,
+            )
         return {}
 
 
