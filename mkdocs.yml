@@ -12,6 +12,7 @@ watch:
 nav:
   - "Home": index.md
   - quickstart.md
+  - audit.md
   - time.md
   - cookbook.md
   - benchmarking.md
@@ -114,4 +115,3 @@ plugins:
       nav_file: SUMMARY.txt
   - mike:
       canonical_version: latest
-

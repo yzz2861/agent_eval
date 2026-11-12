@@ -22,6 +22,7 @@ This library assumes that you are famliar with the `logging` standard library pa
 - **Supports Multiple JSON Encoders:** In addition to the standard libary's `json` module, also supports the [`orjson`][pythonjsonlogger.orjson], [`msgspec`][pythonjsonlogger.msgspec] JSON encoders.
 - **Fully Customizable Output Fields:** Control required, excluded, and static fields including automatically picking up custom attributes on `LogRecord` objects. Fields can be renamed before they are output.
 - **Encode Any Type:** Encoders are customized to ensure that something sane is logged for any input including those that aren't supported by default. For example formatting UUID objects into their string representation and bytes objects into a base 64 encoded string.
+- **Optional Tamper-Evident Audit Chains:** Canonical, HMAC-signed JSON lines with sequence numbers, key rotation, ordered writes, and independent replay verification.
 
 ## Getting Started
 
@@ -48,6 +49,7 @@ logger.info("Logging using python-json-logger!", extra={"more_data": True})
 ## Where to Go Next
 
 *   **[Quickstart Guide](quickstart.md):** For installation and basic setup.
+*   **[Audit Logs](audit.md):** For tamper-evident exports and independent chain verification.
 *   **[Cookbook](cookbook.md):** For more advanced usage patterns and recipes.
 *   **API Reference:** Dive into the details of specific formatters, functions, and classes (see navigation menu).
 *   **[Contributing Guidelines](contributing.md):** If you'd like to contribute to the project.
