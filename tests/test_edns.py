@@ -21,8 +21,27 @@ import struct
 import unittest
 from io import BytesIO
 
+import dns.exception
 import dns.edns
 import dns.wire
+
+
+def _option_wire(otype, data):
+    """Build the wire bytes of one EDNS option."""
+    return struct.pack("!HH", int(otype), len(data)) + data
+
+
+def _parse_options(rdata):
+    """Parse an OPT option list through the shared OPT entry point."""
+    parser = dns.wire.Parser(rdata)
+    with parser.restrict_to(len(rdata)):
+        return dns.edns.options_from_wire_parser(parser)
+
+
+# A well-formed 8-byte client cookie; tests never assert on this value in an
+# error path, and error messages must not echo it.
+_CLIENT_COOKIE = b"01234567"
+_COOKIE_RDATA = _option_wire(dns.edns.COOKIE, _CLIENT_COOKIE)
 
 
 class OptionTestCase(unittest.TestCase):
@@ -443,6 +462,233 @@ class OptionTestCase(unittest.TestCase):
 
         generic = dns.edns.GenericOption(12345, "foo")
         assert generic.to_generic() is generic
+
+
+class WireValidationTestCase(unittest.TestCase):
+    def assertEDNSError(self, rdata, option_code, offset, category):
+        with self.assertRaises(dns.edns.EDNSError) as cm:
+            _parse_options(rdata)
+        error = cm.exception
+        self.assertIsInstance(error, dns.exception.FormError)
+        self.assertIsInstance(error, ValueError)
+        self.assertEqual(error.option_code, option_code)
+        self.assertEqual(error.offset, offset)
+        self.assertEqual(error.length_category, category)
+        return error
+
+    def test_duplicate_cookie_rejected_with_metadata(self):
+        rdata = _COOKIE_RDATA + _option_wire(dns.edns.COOKIE, _CLIENT_COOKIE)
+        error = self.assertEDNSError(
+            rdata,
+            dns.edns.COOKIE,
+            len(_COOKIE_RDATA),
+            dns.edns.LENGTH_CATEGORY_OPTION,
+        )
+        # The cookie value must never appear in the error text.
+        self.assertNotIn(_CLIENT_COOKIE.hex(), str(error))
+        self.assertNotIn(_CLIENT_COOKIE, str(error).encode())
+
+    def test_duplicate_ecs_rejected(self):
+        ecs = dns.edns.ECSOption("1.2.3.0", 24).to_wire()
+        rdata = _option_wire(dns.edns.ECS, ecs) * 2
+        self.assertEDNSError(
+            rdata,
+            dns.edns.ECS,
+            4 + len(ecs),
+            dns.edns.LENGTH_CATEGORY_OPTION,
+        )
+
+    def test_non_singleton_duplicates_are_kept(self):
+        # EDE may occur multiple times; all occurrences are retained.
+        ede1 = _option_wire(dns.edns.EDE, b"\x00\x03")
+        ede2 = _option_wire(dns.edns.EDE, b"\x00\x10extra")
+        options = _parse_options(ede1 + ede2)
+        self.assertEqual(len(options), 2)
+        self.assertEqual([o.otype for o in options], [dns.edns.EDE, dns.edns.EDE])
+
+    def test_cookie_short_client(self):
+        rdata = _option_wire(dns.edns.COOKIE, b"short")
+        self.assertEDNSError(
+            rdata,
+            dns.edns.COOKIE,
+            0,
+            dns.edns.LENGTH_CATEGORY_ADDRESS,
+        )
+
+    def test_cookie_bad_server_length(self):
+        # One trailing byte is neither an empty nor an 8..32 byte server
+        # cookie.
+        rdata = _option_wire(dns.edns.COOKIE, _CLIENT_COOKIE + b"x")
+        self.assertEDNSError(
+            rdata,
+            dns.edns.COOKIE,
+            0,
+            dns.edns.LENGTH_CATEGORY_ADDRESS,
+        )
+
+    def test_cookie_valid_server_round_trips(self):
+        server = b"abcdefgh"
+        rdata = _option_wire(dns.edns.COOKIE, _CLIENT_COOKIE + server)
+        options = _parse_options(rdata)
+        self.assertEqual(options[0].client, _CLIENT_COOKIE)
+        self.assertEqual(options[0].server, server)
+        self.assertEqual(options[0].to_wire(), _CLIENT_COOKIE + server)
+
+    def test_ecs_unknown_family_checked_before_address_read(self):
+        # Family 9 with a declared 4-byte address; an unknown family must be
+        # reported rather than reading a fixed-width address.
+        rdata = _option_wire(dns.edns.ECS, b"\x00\x09\x18\x00\x01\x02\x03\x04")
+        self.assertEDNSError(
+            rdata,
+            dns.edns.ECS,
+            0,
+            dns.edns.LENGTH_CATEGORY_OPTION,
+        )
+
+    def test_ecs_short_option(self):
+        # The 24-bit prefix needs 3 address bytes but only two are present;
+        # the option's own length disagrees with its prefix length.
+        rdata = _option_wire(dns.edns.ECS, b"\x00\x01\x18\x00\x01\x02")
+        self.assertEDNSError(
+            rdata,
+            dns.edns.ECS,
+            0,
+            dns.edns.LENGTH_CATEGORY_ADDRESS,
+        )
+
+    def test_ecs_long_option(self):
+        # Trailing bytes beyond the prefix length are a length mismatch.
+        rdata = _option_wire(dns.edns.ECS, b"\x00\x01\x18\x00\x01\x02\x03\x04")
+        self.assertEDNSError(
+            rdata,
+            dns.edns.ECS,
+            0,
+            dns.edns.LENGTH_CATEGORY_ADDRESS,
+        )
+
+    def test_ecs_fixed_header_truncated(self):
+        rdata = _option_wire(dns.edns.ECS, b"\x00\x01\x18")
+        self.assertEDNSError(
+            rdata,
+            dns.edns.ECS,
+            0,
+            dns.edns.LENGTH_CATEGORY_ADDRESS,
+        )
+
+    def test_padding_valid(self):
+        rdata = _option_wire(dns.edns.PADDING, b"\x00" * 16)
+        options = _parse_options(rdata)
+        self.assertIsInstance(options[0], dns.edns.PaddingOption)
+        self.assertEqual(options[0].padding, 16)
+        self.assertEqual(options[0].to_wire(), b"\x00" * 16)
+        # Empty padding, as emitted by the renderer, is valid.
+        self.assertEqual(
+            _parse_options(_option_wire(dns.edns.PADDING, b""))[0].padding, 0
+        )
+
+    def test_padding_non_zero_rejected_without_echo(self):
+        payload = b"\x00\x00\x07\x00"
+        rdata = _option_wire(dns.edns.PADDING, payload)
+        error = self.assertEDNSError(
+            rdata,
+            dns.edns.PADDING,
+            0,
+            dns.edns.LENGTH_CATEGORY_ADDRESS,
+        )
+        self.assertNotIn(repr(payload), str(error))
+
+    def test_unknown_option_preserves_raw_bytes(self):
+        payload = b"\xde\xad\xbe\xef\x00\x01"
+        rdata = _option_wire(65000, payload)
+        options = _parse_options(rdata)
+        self.assertEqual(len(options), 1)
+        self.assertIsInstance(options[0], dns.edns.GenericOption)
+        self.assertEqual(int(options[0].otype), 65000)
+        # Round-trip at the full option-list level reproduces the bytes.
+        rebuilt = b"".join(_option_wire(o.otype, o.to_wire()) for o in options)
+        self.assertEqual(rebuilt, rdata)
+
+    def test_unknown_option_between_known_options(self):
+        rdata = (
+            _option_wire(dns.edns.NSID, b"ab")
+            + _option_wire(65001, b"raw")
+            + _option_wire(dns.edns.EDE, b"\x00\x03")
+        )
+        options = _parse_options(rdata)
+        self.assertEqual(
+            [int(o.otype) for o in options],
+            [dns.edns.NSID, 65001, dns.edns.EDE],
+        )
+        rebuilt = b"".join(_option_wire(o.otype, o.to_wire()) for o in options)
+        self.assertEqual(rebuilt, rdata)
+
+    def test_truncated_option_header(self):
+        # Only three bytes remain where a four-byte option header is needed.
+        rdata = b"\x00\x0a\x00"
+        error = self.assertEDNSError(rdata, None, 0, dns.edns.LENGTH_CATEGORY_OPTION)
+        self.assertNotIn(_CLIENT_COOKIE.hex(), str(error))
+
+    def test_declared_length_runs_past_rdata(self):
+        # Header claims 10 bytes but only 4 follow; the second option's offset
+        # is reported relative to the start of the rdata.
+        first = _option_wire(dns.edns.NSID, b"ab")
+        second = struct.pack("!HH", dns.edns.COOKIE, 10) + _CLIENT_COOKIE
+        self.assertEDNSError(
+            first + second,
+            dns.edns.COOKIE,
+            len(first),
+            dns.edns.LENGTH_CATEGORY_OPTION,
+        )
+
+    def test_trailing_partial_header_after_valid_option(self):
+        rdata = _option_wire(dns.edns.NSID, b"ab") + b"\x00\x0a"
+        self.assertEDNSError(
+            rdata, None, len(rdata) - 2, dns.edns.LENGTH_CATEGORY_OPTION
+        )
+
+    def test_too_many_options(self):
+        rdata = b"".join(
+            _option_wire(dns.edns.EDE, b"\x00\x00")
+            for _ in range(dns.edns.MAX_OPTIONS + 1)
+        )
+        self.assertEDNSError(
+            rdata,
+            dns.edns.EDE,
+            dns.edns.MAX_OPTIONS * 6,
+            dns.edns.LENGTH_CATEGORY_TOTAL,
+        )
+
+    def test_max_options_accepted(self):
+        rdata = b"".join(
+            _option_wire(dns.edns.EDE, b"\x00\x00") for _ in range(dns.edns.MAX_OPTIONS)
+        )
+        self.assertEqual(len(_parse_options(rdata)), dns.edns.MAX_OPTIONS)
+
+    def test_rdata_length_cap(self):
+        parser = dns.wire.Parser(b"\x00" * (dns.edns.MAX_OPT_RDATA_LENGTH + 1))
+        with self.assertRaises(dns.edns.EDNSError) as cm:
+            dns.edns.options_from_wire_parser(parser)
+        self.assertEqual(cm.exception.length_category, dns.edns.LENGTH_CATEGORY_TOTAL)
+
+    def test_full_option_list_round_trip(self):
+        rdata = (
+            _option_wire(dns.edns.NSID, b"node-1")
+            + _option_wire(dns.edns.COOKIE, _CLIENT_COOKIE)
+            + _option_wire(dns.edns.ECS, dns.edns.ECSOption("1.2.3.0", 24).to_wire())
+            + _option_wire(65002, b"\x01\x02\x03")
+        )
+        options = _parse_options(rdata)
+        rebuilt = b"".join(_option_wire(o.otype, o.to_wire()) for o in options)
+        self.assertEqual(rebuilt, rdata)
+
+    def test_error_details_helper_has_no_payload(self):
+        rdata = _option_wire(dns.edns.COOKIE, b"short")
+        with self.assertRaises(dns.edns.EDNSError) as cm:
+            _parse_options(rdata)
+        details = cm.exception.details()
+        self.assertIn("option_code=10", details)
+        self.assertIn("offset=0", details)
+        self.assertIn("length_category=address", details)
 
 
 if __name__ == "__main__":

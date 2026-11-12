@@ -16,6 +16,12 @@ dns.dnssec Exceptions
 .. autoexception:: dns.dnssec.ValidationFailure
 
       
+dns.edns Exceptions
+-------------------
+
+.. autoexception:: dns.edns.EDNSError
+
+
 dns.message Exceptions
 ----------------------
 

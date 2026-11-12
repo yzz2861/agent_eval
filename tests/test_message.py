@@ -18,6 +18,7 @@
 
 import binascii
 import pathlib
+import struct
 import unittest
 
 import dns.edns
@@ -1120,6 +1121,101 @@ www.dnspython.org. 300 IN A 1.2.3.4
         r = dns.message.make_query("example", "A", use_edns=0, options=options)
         r.flags |= dns.flags.QR
         self.assertEqual(r.extended_errors(), options)
+
+    def _opt_query_wire(self, option_rdata):
+        q = dns.message.make_query("example", "A")
+        # OPT RR: root name, type OPT, rdclass=payload, TTL=0, rdlength.
+        rr = (
+            b"\x00"
+            + struct.pack("!HHIH", 41, 1232, 0, len(option_rdata))
+            + option_rdata
+        )
+        wire = q.to_wire()
+        # The query has no additional records; the appended OPT is the first.
+        return wire[:10] + b"\x00\x01" + wire[12:] + rr
+
+    def _option_bytes(self, otype, data):
+        return struct.pack("!HH", int(otype), len(data)) + data
+
+    def test_opt_rdata_and_message_parsers_agree_on_unknown_option(self):
+        option_rdata = self._option_bytes(65000, b"\xde\xad\xbe\xef")
+        wire = self._opt_query_wire(option_rdata)
+        message = dns.message.from_wire(wire)
+        self.assertEqual(len(message.options), 1)
+        self.assertIsInstance(message.options[0], dns.edns.GenericOption)
+
+        # The direct OPT rdata entry point yields the same option bytes.
+        rdata = dns.rdata.from_wire(
+            dns.rdataclass.IN,
+            dns.rdatatype.OPT,
+            option_rdata,
+            0,
+            len(option_rdata),
+        )
+        self.assertEqual(rdata.options[0], message.options[0])
+        rebuilt = b"".join(
+            self._option_bytes(o.otype, o.to_wire()) for o in rdata.options
+        )
+        self.assertEqual(rebuilt, option_rdata)
+
+    def test_bad_option_does_not_misalign_later_records(self):
+        # A valid A record in additional, followed by an OPT whose COOKIE
+        # option declares more bytes than the rdata contains.
+        a_rr = (
+            dns.name.from_text("ns.example.").to_wire()
+            + struct.pack("!HHIH", dns.rdatatype.A, dns.rdataclass.IN, 300, 4)
+            + bytes((10, 0, 0, 1))
+        )
+        bad_option = struct.pack("!HH", dns.edns.COOKIE, 40) + b"01234567"
+        opt_rr = (
+            b"\x00" + struct.pack("!HHIH", 41, 1232, 0, len(bad_option)) + bad_option
+        )
+        q = dns.message.make_query("example", "A")
+        wire = q.to_wire()
+        # One additional A record plus one additional OPT record.
+        wire = wire[:10] + b"\x00\x02" + wire[12:] + a_rr + opt_rr
+
+        with self.assertRaises(dns.edns.EDNSError) as cm:
+            dns.message.from_wire(wire)
+        error = cm.exception
+        self.assertEqual(error.option_code, dns.edns.COOKIE)
+        self.assertEqual(error.length_category, dns.edns.LENGTH_CATEGORY_OPTION)
+
+        # In continue-on-error mode the bad OPT is recorded as an error but
+        # the well-formed A record is still parsed, proving the parser did not
+        # lose its place in the message.
+        message = dns.message.from_wire(wire, continue_on_error=True)
+        self.assertEqual(len(message.errors), 1)
+        self.assertEqual(message.sections[3][0].rdtype, dns.rdatatype.A)
+        self.assertEqual(message.sections[3][0][0].address, "10.0.0.1")
+
+    def test_duplicate_cookie_in_message_rejected(self):
+        cookie = self._option_bytes(dns.edns.COOKIE, b"01234567")
+        wire = self._opt_query_wire(cookie + cookie)
+        with self.assertRaises(dns.edns.EDNSError) as cm:
+            dns.message.from_wire(wire)
+        self.assertEqual(cm.exception.option_code, dns.edns.COOKIE)
+        self.assertEqual(cm.exception.offset, len(cookie))
+        self.assertNotIn("3031323334353637", str(cm.exception))
+
+    def test_mixed_known_and_unknown_options_round_trip(self):
+        option_rdata = (
+            self._option_bytes(dns.edns.NSID, b"nsid-data")
+            + self._option_bytes(65001, b"\x01\x02\x03\x04")
+            + self._option_bytes(dns.edns.EDE, b"\x00\x03")
+            + self._option_bytes(dns.edns.PADDING, b"\x00" * 8)
+        )
+        wire = self._opt_query_wire(option_rdata)
+        message = dns.message.from_wire(wire)
+        self.assertEqual(
+            [int(o.otype) for o in message.options],
+            [dns.edns.NSID, 65001, dns.edns.EDE, dns.edns.PADDING],
+        )
+        # Re-serializing the whole message reproduces the original option
+        # bytes exactly.
+        opt_rdata = message.opt[0].to_wire()
+        self.assertEqual(opt_rdata, option_rdata)
+        self.assertEqual(dns.message.from_wire(message.to_wire()), message)
 
 
 if __name__ == "__main__":

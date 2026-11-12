@@ -23,6 +23,7 @@ import socket
 import struct
 from typing import Any, Self
 
+import dns.exception
 import dns.enum
 import dns.inet
 import dns.ipv4
@@ -71,6 +72,96 @@ class OptionType(dns.enum.IntEnum):
     @classmethod
     def _maximum(cls):
         return 65535
+
+
+#: The maximum number of EDNS options accepted in a single OPT record.  This
+#: bounds the work done on a malicious message and, together with
+#: :data:`MAX_OPT_RDATA_LENGTH`, bounds the nesting/depth of option parsing.
+MAX_OPTIONS = 256
+
+#: The maximum total length, in bytes, of the option portion of an OPT record's
+#: rdata.  A 16-bit rdlength can never encode anything larger, but the check is
+#: explicit so that callers building parsers over larger buffers are protected.
+MAX_OPT_RDATA_LENGTH = 65535
+
+#: Length category reported by :class:`EDNSError` when an option's own length
+#: field is invalid (truncated header, declared length exceeds the enclosing
+#: OPT rdata, or a duplicate of an option that may only appear once).
+LENGTH_CATEGORY_OPTION = "option"
+
+#: Length category reported by :class:`EDNSError` when the bytes inside an
+#: option do not match what its declared length promises (e.g. an ECS address
+#: that is shorter or longer than the prefix length requires).
+LENGTH_CATEGORY_ADDRESS = "address"
+
+#: Length category reported by :class:`EDNSError` when the enclosing OPT rdata
+#: as a whole is invalid (too many options, or rdata larger than allowed).
+LENGTH_CATEGORY_TOTAL = "total"
+
+
+class EDNSError(dns.exception.FormError, ValueError):
+    """An EDNS option or OPT record is malformed.
+
+    The exception carries structured information about the offending option
+    but never includes option payload bytes, so secret material such as a
+    COOKIE value is not echoed back in error messages or logs.
+
+    :param option_code: The EDNS option code, or ``None`` if the code could
+        not be read.
+    :type option_code: int or None
+    :param offset: The offset of the option relative to the start of the OPT
+        rdata, or ``None`` if no option could be located.
+    :type offset: int or None
+    :param length_category: One of the ``LENGTH_CATEGORY`` constants,
+        describing which length relationship was violated.
+    :type length_category: str
+    """
+
+    def __init__(
+        self,
+        message: str,
+        option_code: int | None,
+        offset: int | None,
+        length_category: str,
+    ):
+        super().__init__(message)
+        self.option_code = option_code
+        self.offset = offset
+        self.length_category = length_category
+
+    def details(self) -> str:
+        """Return the structured location information without payload data."""
+        return (
+            f"option_code={self.option_code} offset={self.offset} "
+            f"length_category={self.length_category}"
+        )
+
+
+def _edns_error(
+    message: str,
+    option_code: int | None,
+    offset: int | None,
+    length_category: str,
+) -> EDNSError:
+    return EDNSError(message, option_code, offset, length_category)
+
+
+# Option codes that RFCs define as singletons within an OPT record.  A second
+# occurrence is a protocol error rather than something that should silently
+# overwrite the first option.
+_SINGLETON_OPTIONS = frozenset(
+    (
+        OptionType.NSID,
+        OptionType.DAU,
+        OptionType.DHU,
+        OptionType.N3U,
+        OptionType.ECS,
+        OptionType.COOKIE,
+        OptionType.KEEPALIVE,
+        OptionType.PADDING,
+        OptionType.CHAIN,
+    )
+)
 
 
 def _escapify_text(text: str) -> str:
@@ -347,19 +438,50 @@ class ECSOption(Option):  # lgtm[py/missing-equals]
     def from_wire_parser(
         cls, otype: OptionType | str, parser: "dns.wire.Parser"
     ) -> Option:
+        # The fixed ECS header is family (2), source prefix length (1) and
+        # scope prefix length (1).  Validate it before consuming any address
+        # bytes so an unknown family cannot cause reads of a fixed-size address
+        # past the end of the option.
+        if parser.remaining() < 4:
+            raise _edns_error(
+                "ECS option is shorter than its 4-byte fixed header",
+                OptionType.ECS,
+                0,
+                LENGTH_CATEGORY_ADDRESS,
+            )
         family, src, scope = parser.get_struct("!HBB")
         if family == 1:
             bits = 32
         elif family == 2:
             bits = 128
         else:
-            raise ValueError("unsupported family")
+            raise _edns_error(
+                "ECS option has an unsupported address family",
+                OptionType.ECS,
+                0,
+                LENGTH_CATEGORY_OPTION,
+            )
         # RFC 7871 Section 6: the source and scope prefix lengths are the
         # significant bits of ADDRESS and cannot exceed the width of the
         # address family.
         if src > bits or scope > bits:
-            raise ValueError("invalid ECS prefix length")
+            raise _edns_error(
+                "ECS prefix length exceeds the address family width",
+                OptionType.ECS,
+                0,
+                LENGTH_CATEGORY_ADDRESS,
+            )
         addrlen = int(math.ceil(src / 8.0))
+        # Cross-check the option's own length field against the address bytes
+        # the prefix length requires, instead of letting get_bytes() raise a
+        # generic error after a partial read.
+        if parser.remaining() != addrlen:
+            raise _edns_error(
+                "ECS option length does not match its source prefix length",
+                OptionType.ECS,
+                0,
+                LENGTH_CATEGORY_ADDRESS,
+            )
         prefix = parser.get_bytes(addrlen)
         # RFC 7871 Sections 6 and 7.4: bits of ADDRESS beyond the source
         # prefix length are padding and must be zero.  Reject a non-zero pad
@@ -367,7 +489,12 @@ class ECSOption(Option):  # lgtm[py/missing-equals]
         # would make from_wire and to_wire disagree on the same option.
         rest = src % 8
         if rest != 0 and prefix[-1] & (0xFF >> rest):
-            raise ValueError("non-zero ECS address padding bits")
+            raise _edns_error(
+                "ECS option has non-zero address padding bits",
+                OptionType.ECS,
+                0,
+                LENGTH_CATEGORY_ADDRESS,
+            )
         if family == 1:
             addr = dns.ipv4.inet_ntoa(prefix + b"\x00" * (4 - addrlen))
         else:
@@ -466,6 +593,13 @@ class EDEOption(Option):  # lgtm[py/missing-equals]
     def from_wire_parser(
         cls, otype: OptionType | str, parser: "dns.wire.Parser"
     ) -> Option:
+        if parser.remaining() < 2:
+            raise _edns_error(
+                "EDE option is shorter than its 2-byte info code",
+                OptionType.EDE,
+                0,
+                LENGTH_CATEGORY_ADDRESS,
+            )
         code = EDECode.make(parser.get_uint16())
         text = parser.get_remaining()
 
@@ -537,7 +671,75 @@ class CookieOption(Option):
     def from_wire_parser(
         cls, otype: OptionType | str, parser: dns.wire.Parser
     ) -> Option:
-        return cls(parser.get_bytes(8), parser.get_remaining())
+        olen = parser.remaining()
+        if olen < 8:
+            # Do not include the (truncated) cookie bytes in the message.
+            raise _edns_error(
+                "COOKIE option is shorter than the 8-byte client cookie",
+                OptionType.COOKIE,
+                0,
+                LENGTH_CATEGORY_ADDRESS,
+            )
+        client = parser.get_bytes(8)
+        server = parser.get_remaining()
+        try:
+            return cls(client, server)
+        except ValueError:
+            raise _edns_error(
+                "COOKIE option server cookie has an invalid length",
+                OptionType.COOKIE,
+                0,
+                LENGTH_CATEGORY_ADDRESS,
+            ) from None
+
+
+class PaddingOption(Option):
+    """EDNS PADDING option (RFC 7830).
+
+    The padding data is a sequence of zero bytes; the option's length alone
+    carries the useful information.
+    """
+
+    def __init__(self, padding: int = 0):
+        """Initialize a PaddingOption.
+
+        :param padding: The number of padding bytes.
+        :type padding: int
+        """
+        super().__init__(OptionType.PADDING)
+        if padding < 0:
+            raise ValueError("padding must be non-negative")
+        self.padding = padding
+
+    def to_wire(self, file: Any = None) -> bytes | None:
+        data = b"\x00" * self.padding
+        if file:
+            file.write(data)
+            return None
+        else:
+            return data
+
+    def to_text(self) -> str:
+        return f"PADDING {self.padding}"
+
+    def to_generic(self) -> "GenericOption":
+        return GenericOption(self.otype, self.to_wire())
+
+    @classmethod
+    def from_wire_parser(
+        cls, otype: OptionType | str, parser: dns.wire.Parser
+    ) -> Option:
+        data = parser.get_remaining()
+        # RFC 7830 section 2: the bytes of a PADDING option MUST be zero.
+        # Report the length only, never the payload contents.
+        if data.count(0) != len(data):
+            raise _edns_error(
+                "PADDING option contains non-zero bytes",
+                OptionType.PADDING,
+                0,
+                LENGTH_CATEGORY_ADDRESS,
+            )
+        return cls(len(data))
 
 
 class ReportChannelOption(Option):
@@ -688,6 +890,7 @@ _type_to_class: dict[OptionType, Any] = {
     OptionType.EDE: EDEOption,
     OptionType.NSID: NSIDOption,
     OptionType.COOKIE: CookieOption,
+    OptionType.PADDING: PaddingOption,
     OptionType.REPORTCHANNEL: ReportChannelOption,
     OptionType.EDE_EXTRA_TEXT_LANGUAGE: EDEExtraTextLanguageOption,
     OptionType.FILTERING_CONTACT: FilteringContactOption,
@@ -723,6 +926,109 @@ def option_from_wire_parser(
     otype = OptionType.make(otype)
     cls = get_option_class(otype)
     return cls.from_wire_parser(otype, parser)
+
+
+def options_from_wire_parser(parser: "dns.wire.Parser") -> tuple[Option, ...]:
+    """Parse the complete option list of an OPT record.
+
+    The parser is assumed to be restricted to the OPT rdata (i.e. its
+    remaining bytes are exactly the option list).  Every option's declared
+    length is checked against the enclosing rdata before the option is
+    parsed; options of unknown type are kept as :class:`GenericOption` with
+    their original bytes so they round-trip verbatim; and duplicates of the
+    singleton option codes are rejected instead of silently dropping an
+    earlier option.
+
+    Errors are :class:`EDNSError` instances carrying the option code, the
+    option's offset relative to the start of the OPT rdata, and a length
+    category.  Payload bytes (in particular COOKIE values) are never included
+    in error messages.
+
+    :param parser: A parser restricted to the OPT rdata.
+    :type parser: :py:class:`dns.wire.Parser`
+    :rtype: tuple of :py:class:`dns.edns.Option`
+    """
+
+    rdata_start = parser.current
+    rdata_length = parser.remaining()
+    if rdata_length > MAX_OPT_RDATA_LENGTH:
+        raise _edns_error(
+            "OPT rdata exceeds the maximum option list length",
+            None,
+            0,
+            LENGTH_CATEGORY_TOTAL,
+        )
+
+    options: list[Option] = []
+    seen: set[OptionType] = set()
+
+    while parser.remaining() > 0:
+        relative_offset = parser.current - rdata_start
+        # An option header is four bytes: a 16-bit code and a 16-bit length.
+        if parser.remaining() < 4:
+            raise _edns_error(
+                "truncated EDNS option header",
+                None,
+                relative_offset,
+                LENGTH_CATEGORY_OPTION,
+            )
+        ocode, olen = parser.get_struct("!HH")
+        otype = OptionType.make(ocode)
+        if olen > parser.remaining():
+            # A declared length that runs past the OPT rdata must not be
+            # followed by further parsing at a bogus offset.
+            raise _edns_error(
+                "EDNS option length exceeds the enclosing OPT rdata",
+                ocode,
+                relative_offset,
+                LENGTH_CATEGORY_OPTION,
+            )
+        if otype in _SINGLETON_OPTIONS and otype in seen:
+            raise _edns_error(
+                "duplicate EDNS option of a type that may only appear once",
+                ocode,
+                relative_offset,
+                LENGTH_CATEGORY_OPTION,
+            )
+        if len(options) >= MAX_OPTIONS:
+            raise _edns_error(
+                "OPT record contains too many EDNS options",
+                ocode,
+                relative_offset,
+                LENGTH_CATEGORY_TOTAL,
+            )
+
+        try:
+            with parser.restrict_to(olen):
+                option = option_from_wire_parser(otype, parser)
+        except EDNSError as e:
+            # Option classes report an offset relative to their own data;
+            # rewrite it as the option's offset within the OPT rdata.
+            e.offset = relative_offset
+            if e.option_code is None:
+                e.option_code = ocode
+            raise
+        except dns.exception.FormError as e:
+            raise _edns_error(
+                f"malformed EDNS option: {e}",
+                ocode,
+                relative_offset,
+                LENGTH_CATEGORY_ADDRESS,
+            ) from None
+        except ValueError as e:
+            # Custom registered option classes may raise plain ValueErrors;
+            # normalize them so every entry point reports the same shape.
+            raise _edns_error(
+                f"malformed EDNS option: {e}",
+                ocode,
+                relative_offset,
+                LENGTH_CATEGORY_ADDRESS,
+            ) from None
+
+        seen.add(otype)
+        options.append(option)
+
+    return tuple(options)
 
 
 def option_from_wire(

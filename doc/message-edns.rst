@@ -8,6 +8,22 @@ mechanism for the protocol.  EDNS *options* are typed data, and are
 treated much like Rdata.  For example, if dnspython encounters the EDNS
 ``ECS`` option code when parsing a DNS wire format message, it
 will create a :py:class:`dns.edns.ECSOption` object to represent it.
+Option codes without a specific implementation are retained as
+:py:class:`dns.edns.GenericOption` objects with their original bytes, so
+unknown options survive a wire-format round trip.  Malformed option lists
+raise :py:class:`dns.edns.EDNSError`, which reports the offending option
+code, its offset relative to the start of the OPT rdata, and a length
+category; option payloads such as COOKIE values are never included in the
+error text.
+
+.. autoexception:: dns.edns.EDNSError
+   :members:
+
+.. autodata:: dns.edns.MAX_OPTIONS
+.. autodata:: dns.edns.MAX_OPT_RDATA_LENGTH
+.. autodata:: dns.edns.LENGTH_CATEGORY_OPTION
+.. autodata:: dns.edns.LENGTH_CATEGORY_ADDRESS
+.. autodata:: dns.edns.LENGTH_CATEGORY_TOTAL
 
 .. autoclass:: dns.edns.OptionType
 
@@ -40,6 +56,9 @@ will create a :py:class:`dns.edns.ECSOption` object to represent it.
    :members:
 
 .. autoclass:: dns.edns.CookieOption
+   :members:
+
+.. autoclass:: dns.edns.PaddingOption
    :members:
 
 .. autoclass:: dns.edns.ReportChannelOption
