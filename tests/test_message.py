@@ -252,6 +252,137 @@ class MessageTestCase(unittest.TestCase):
         with self.assertRaises(dns.exception.FormError):
             dns.message.from_wire(badwire)
 
+    def test_compression_state_is_per_message_and_cross_section(self):
+        # Legal compression reused across the question, answer and
+        # additional sections parses identically to the uncompressed form.
+        message = dns.message.from_text(
+            "id 1\nflags QR RD\n;QUESTION\nwww.example. IN A\n"
+            ";ANSWER\nwww.example. 300 IN CNAME host.example.\n"
+            "host.example. 300 IN A 1.2.3.4\n"
+            ";ADDITIONAL\nhost.example. 300 IN A 5.6.7.8\n"
+        )
+        wire = message.to_wire()
+        parsed = dns.message.from_wire(wire)
+        self.assertEqual(parsed, message)
+        reader = dns.message._WireReader(wire, lambda unused: None)
+        reader.read()
+        state = reader.parser.decompression_state
+        self.assertFalse(state.poisoned)
+        # Every name is shared through one context, so the pointer hops are
+        # counted together and successful names land in the offset table.
+        self.assertGreater(state.total_hops, 0)
+        self.assertTrue(state.offsets)
+        # A second message gets its own, independent context.
+        other = dns.message._WireReader(wire, lambda unused: None)
+        self.assertIsNot(
+            other.parser.decompression_state,
+            reader.parser.decompression_state,
+        )
+
+    def test_compression_self_loop_owner_is_structured_error(self):
+        badwire = (
+            bytes.fromhex("123481800001000200000000")
+            + b"\x01a\x00\x00\x01\x00\x01"
+            + b"\xc0\x0c"
+            + bytes.fromhex("000100010000012c000401020304")
+        )
+        loop_offset = len(badwire)
+        badwire += bytes([0xC0, loop_offset])
+        badwire += bytes.fromhex("000100010000012c00040a0b0c0d")
+        with self.assertRaises(dns.name.PointerLoop) as cm:
+            dns.message.from_wire(badwire)
+        error = cm.exception
+        self.assertEqual(error.category, dns.name.CompressionFailure.LOOP)
+        self.assertEqual(error.name_offset, loop_offset)
+        self.assertEqual(error.pointer_offset, loop_offset)
+
+    def test_compression_mixed_bad_record_continue_on_error(self):
+        # A good answer RR followed by an owner-name self loop.  The good
+        # record survives, the bad one is reported once, and the offset
+        # table is never left holding a bogus entry.
+        good = (
+            bytes.fromhex("123481800001000200000000")
+            + b"\x01a\x00\x00\x01\x00\x01"
+            + b"\xc0\x0c"
+            + bytes.fromhex("000100010000012c000401020304")
+        )
+        loop_offset = len(good)
+        badwire = good + bytes([0xC0, loop_offset])
+        badwire += bytes.fromhex("000100010000012c00040a0b0c0d")
+        parsed = dns.message.from_wire(badwire, continue_on_error=True)
+        self.assertEqual(len(parsed.errors), 1)
+        error = parsed.errors[0].exception
+        self.assertIsInstance(error, dns.name.PointerLoop)
+        self.assertEqual(error.category, dns.name.CompressionFailure.LOOP)
+        self.assertEqual(len(parsed.answer), 1)
+        self.assertEqual(parsed.answer[0].to_text(), "a. 300 IN A 1.2.3.4")
+
+    def test_compression_message_total_pointer_budget(self):
+        # More single-hop names than the whole-message budget, each pointing
+        # at offset 0.  Parsing must stop with a structured error after a
+        # bounded number of hops.
+        wire = bytearray(b"\x01z\x00")
+        starts = []
+        while len(wire) <= 1024:
+            starts.append(len(wire))
+            wire += b"\xc0\x00"
+        wire = bytes(wire)
+        reader = dns.message._WireReader(wire, lambda unused: None)
+        state = reader.parser.decompression_state
+        for offset in starts:
+            reader.parser.seek(offset)
+            try:
+                reader.parser.get_name(decompress=True)
+            except dns.name.PointerChainTooLong as error:
+                self.assertEqual(
+                    error.category,
+                    dns.name.CompressionFailure.MESSAGE_LIMIT_EXCEEDED,
+                )
+                break
+        else:  # pragma: no cover
+            self.fail("message pointer budget was never enforced")
+        self.assertEqual(state.total_hops, dns.name.MAX_TOTAL_COMPRESSION_POINTERS)
+        self.assertTrue(state.poisoned)
+        # Only names decoded before the failure are cached.
+        self.assertEqual(len(state.offsets), dns.name.MAX_TOTAL_COMPRESSION_POINTERS)
+
+    def test_compression_rdata_and_owner_share_context(self):
+        # A compressed name reached through an rdata entry point (NS target)
+        # uses the same per-message context as the owner names.
+        message = dns.message.from_text(
+            "id 1\nflags QR\n;QUESTION\nexample. IN NS\n"
+            ";ANSWER\nexample. 300 IN NS ns.example.\n"
+        )
+        wire = message.to_wire()
+        parsed = dns.message.from_wire(wire)
+        self.assertEqual(parsed, message)
+
+    def test_compression_forward_pointer_across_records(self):
+        # The first answer owner points forward to a name beginning in a
+        # later record.  The shared per-message context rejects it with a
+        # structured forward-pointer error rather than chasing it.
+        header = bytes.fromhex("123481800001000200000000")
+        question = b"\x01a\x00\x00\x01\x00\x01"
+        rr_suffix = bytes.fromhex("000100010000012c000401020304")
+        wire = bytearray(header + question)
+        first_owner = len(wire)
+        target = first_owner + 2 + len(rr_suffix)
+        wire += bytes([0xC0, target])
+        wire += rr_suffix
+        wire += b"\x01b\x00"
+        wire += rr_suffix
+        with self.assertRaises(dns.name.BadPointer) as cm:
+            dns.message.from_wire(bytes(wire))
+        error = cm.exception
+        self.assertEqual(error.category, dns.name.CompressionFailure.FORWARD_POINTER)
+        self.assertEqual(error.name_offset, first_owner)
+        self.assertEqual(error.pointer_offset, target)
+        # continue_on_error records the failure once and keeps the message
+        # free of a bogus offset-table entry.
+        parsed = dns.message.from_wire(bytes(wire), continue_on_error=True)
+        self.assertEqual(len(parsed.errors), 1)
+        self.assertIsInstance(parsed.errors[0].exception, dns.name.BadPointer)
+
     def test_ShortHeader(self):
         def bad():
             badwire = b"\x00" * 11

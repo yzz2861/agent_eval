@@ -20,6 +20,7 @@
 import copy
 import dataclasses
 import encodings.idna  # pyright: ignore
+import enum
 import functools
 import struct
 from collections.abc import Callable, Iterable
@@ -94,9 +95,25 @@ class BadEscape(dns.exception.SyntaxError):
 class BadPointer(dns.exception.FormError):
     """A DNS compression pointer points forward instead of backward."""
 
+    #: Machine-readable failure category (set when raised by the wire
+    #: parser); ``None`` for exceptions constructed directly by callers.
+    category: "CompressionFailure | None" = None
+    #: Wire offset of the start of the name that failed to decode.
+    name_offset: int | None = None
+    #: Wire offset targeted by the offending pointer, when applicable.
+    pointer_offset: int | None = None
+
 
 class PointerChainTooLong(dns.exception.FormError):
     """A DNS compression pointer chain was too long."""
+
+    category: "CompressionFailure | None" = None
+    name_offset: int | None = None
+    pointer_offset: int | None = None
+
+
+class PointerLoop(BadPointer):
+    """A DNS compression pointer chain loops back to an earlier offset."""
 
 
 class BadLabelType(dns.exception.FormError):
@@ -105,6 +122,41 @@ class BadLabelType(dns.exception.FormError):
 
 class DecompressionForbidden(dns.exception.FormError):
     """A name has a compression pointer but decompression is forbidden."""
+
+    category: "CompressionFailure | None" = None
+    name_offset: int | None = None
+    pointer_offset: int | None = None
+
+
+class CompressionFailure(enum.Enum):
+    """The reason a DNS compression pointer could not be followed.
+
+    The values are deliberately short and stable so that callers can branch
+    on them programmatically; they are never expanded into a dump of the
+    whole pointer chain.
+    """
+
+    #: The compression pointer points forward or to its own offset.
+    FORWARD_POINTER = "forward-pointer"
+    #: The compression pointer chain revisits an offset already consumed by
+    #: this name, forming a loop.
+    LOOP = "loop"
+    #: The compression target interval overlaps bytes already consumed by
+    #: this name.
+    OVERLAPPING_TARGET = "overlapping-target"
+    #: Following the compression pointer ran past the start of this name or
+    #: past the end of the wire.
+    TARGET_OUT_OF_RANGE = "target-out-of-range"
+    #: A single name followed more than the permitted number of pointers.
+    NAME_DEPTH_EXCEEDED = "name-depth-exceeded"
+    #: The whole message followed more than the permitted number of
+    #: pointers across all of its names.
+    MESSAGE_LIMIT_EXCEEDED = "message-limit-exceeded"
+    #: A compression pointer appeared where decompression was not allowed.
+    FORBIDDEN = "forbidden"
+    #: A decompression state bound to another wire buffer was reused, or a
+    #: name was parsed after a fatal compression error poisoned the state.
+    STALE_STATE = "stale-state"
 
 
 class NeedAbsoluteNameOrOrigin(dns.exception.DNSException):
@@ -1157,6 +1209,136 @@ def from_text(
 
 MAX_COMPRESSION_POINTER_CHAIN = 16
 
+#: Maximum number of compression pointers that may be followed while
+#: parsing a whole message.  This bounds the work an attacker can force by
+#: chaining many short names across sections, even when every individual
+#: name stays within :data:`MAX_COMPRESSION_POINTER_CHAIN`.
+MAX_TOTAL_COMPRESSION_POINTERS = 128
+
+
+class DecompressionState:
+    """Per-message state used while decompressing names.
+
+    A single instance is created for each wire message being parsed and is
+    shared by every name encountered in the message, including names parsed
+    through the rdata entry points.  It owns the offset-to-name table (the
+    "compression table" used while reading), the hop counters, and a poison
+    flag.  Instances are never shared between messages.
+    """
+
+    def __init__(self, wire: bytes):
+        # The identity and value of *wire* both bind this state to a single
+        # message; see check_wire().
+        self._wire = wire
+        #: Offset of the start of the name currently being parsed.
+        self.name_start = 0
+        #: Number of compression pointers followed for the current name.
+        self.name_hops = 0
+        #: Total number of compression pointers followed for the message.
+        self.total_hops = 0
+        #: Target offset of the most recently followed pointer, if any.
+        self.last_pointer: int | None = None
+        #: Offsets visited by the pointer chain of the current name.
+        self.visited: set[int] = set()
+        #: Mapping of name start offset to the fully decoded name.  Entries
+        #: are only added after a name has been parsed successfully.
+        self.offsets: dict[int, Name] = {}
+        #: Set to True once a fatal compression error has occurred; no
+        #: further names may be decoded and no offset-table entry may be
+        #: written.
+        self.poisoned = False
+
+    def check_wire(self, wire: bytes) -> None:
+        """Make sure *wire* is the message this state was created for."""
+        if wire is not self._wire:
+            raise _compression_error(
+                BadPointer,
+                CompressionFailure.STALE_STATE,
+                self.name_start,
+            )
+
+    def begin_name(self, start: int) -> Name | None:
+        """Reset per-name state and return a cached name if available."""
+        if self.poisoned:
+            raise _compression_error(BadPointer, CompressionFailure.STALE_STATE, start)
+        self.name_start = start
+        self.name_hops = 0
+        self.last_pointer = None
+        self.visited = set()
+        return self.offsets.get(start)
+
+    def follow_pointer(self, target: int, biggest_pointer: int) -> None:
+        """Validate and record a compression pointer hop.
+
+        The pointer must strictly point backward, must not revisit an
+        already visited offset (a loop), the target interval must not
+        overlap bytes already consumed by this name, and both the per-name
+        and whole-message hop budgets must have room left.
+        """
+        failure: type[BadPointer] | None = None
+        category: CompressionFailure
+        if target == self.name_start or target in self.visited:
+            # Revisiting an offset already followed, or returning to the
+            # start of this name, closes a pointer loop.
+            failure = PointerLoop
+            category = CompressionFailure.LOOP
+        elif target >= self.name_start:
+            # A pointer must strictly point behind the beginning of the
+            # name being decoded.  A target at the name start or later is
+            # either a forward/self pointer or lands inside bytes already
+            # consumed by this name; in both cases following it would make
+            # the target interval overlap the current name.
+            failure = BadPointer
+            category = (
+                CompressionFailure.OVERLAPPING_TARGET
+                if target < biggest_pointer
+                else CompressionFailure.FORWARD_POINTER
+            )
+        elif self.name_hops >= MAX_COMPRESSION_POINTER_CHAIN:
+            failure = PointerChainTooLong
+            category = CompressionFailure.NAME_DEPTH_EXCEEDED
+        elif self.total_hops >= MAX_TOTAL_COMPRESSION_POINTERS:
+            failure = PointerChainTooLong
+            category = CompressionFailure.MESSAGE_LIMIT_EXCEEDED
+        if failure is not None:
+            self.poison()
+            raise _compression_error(failure, category, self.name_start, target)
+        self.visited.add(target)
+        self.last_pointer = target
+        self.name_hops += 1
+        self.total_hops += 1
+
+    def remember_name(self, start: int, name: "Name") -> None:
+        """Record a successfully decoded name in the offset table."""
+        if not self.poisoned:
+            self.offsets[start] = name
+
+    def poison(self) -> None:
+        """Mark the state as unusable after a fatal compression error."""
+        self.poisoned = True
+
+
+def _compression_error(
+    exception_class: type[dns.exception.FormError],
+    category: CompressionFailure,
+    name_offset: int,
+    pointer_offset: int | None = None,
+) -> dns.exception.FormError:
+    """Build a compression error carrying structured diagnostic fields.
+
+    The message is deliberately terse and never renders the pointer chain,
+    so a crafted loop cannot make exception text grow without bound.
+    """
+    error = exception_class(
+        f"{category.value} in compressed name at offset {name_offset}"
+        + (f" (pointer target {pointer_offset})" if pointer_offset is not None else "")
+    )
+    error.category = category
+    error.name_offset = name_offset
+    error.pointer_offset = pointer_offset
+    return error
+
+
 # A Note on Decompressability
 #
 # Dnspython used to be generous about decompression, being willing to decompress
@@ -1189,43 +1371,92 @@ def from_wire_parser(parser: dns.wirebase.Parser, decompress: bool = True) -> Na
     :type decompress: bool
     :raises dns.name.BadPointer: if a compression pointer did not
         point backwards in the message.
+    :raises dns.name.PointerLoop: if a compression pointer chain revisits an
+        offset already consumed by the name.
     :raises dns.name.BadLabelType: if an invalid label type was encountered.
     :raises dns.name.DecompressionForbidden: if a name needs decompression but it is
         not allowed.
     :rtype: :py:class:`dns.name.Name`
     """
 
+    state = getattr(parser, "decompression_state", None)
+    if state is None:
+        # A name parsed outside of a message (e.g. via dns.name.from_wire()
+        # or a one-shot rdata parser) gets its own private state, so offset
+        # tables and counters can never leak between independent calls.
+        state = DecompressionState(parser.wire)
+        ephemeral = True
+    else:
+        state.check_wire(parser.wire)
+        ephemeral = False
+
     labels = []
-    biggest_pointer = parser.current
-    hops = 0
     with parser.restore_furthest():
         start = parser.current
-        count = parser.get_uint8()
-        while count != 0:
-            if count < 64:
-                labels.append(parser.get_bytes(count))
-            elif count >= 192:
-                # Are compressed names allowed at all?
-                if not decompress:
-                    raise DecompressionForbidden
-                # For sanity, compression pointers must point backwards.
-                current = (count & 0x3F) * 256 + parser.get_uint8()
-                if current >= biggest_pointer:
-                    raise BadPointer
-                biggest_pointer = current
-                hops += 1
-                if hops > MAX_COMPRESSION_POINTER_CHAIN:
-                    raise PointerChainTooLong
-                # For sanity, the entire compression target must not overlap
-                # with any part of this name.
-                parser.restrict_end(start)
-                parser.seek(current)
-                start = current
-            else:
-                raise BadLabelType
+        cached = state.begin_name(start)
+        if cached is not None:
+            return cached
+        biggest_pointer = start
+        try:
             count = parser.get_uint8()
-        labels.append(b"")
-    return Name(labels)
+            while count != 0:
+                if count < 64:
+                    labels.append(parser.get_bytes(count))
+                elif count >= 192:
+                    # Are compressed names allowed at all?
+                    if not decompress:
+                        state.poison()
+                        raise _compression_error(
+                            DecompressionForbidden,
+                            CompressionFailure.FORBIDDEN,
+                            start,
+                        )
+                    # For sanity, compression pointers must point backwards.
+                    current = (count & 0x3F) * 256 + parser.get_uint8()
+                    state.follow_pointer(current, biggest_pointer)
+                    biggest_pointer = current
+                    # For sanity, the entire compression target must not
+                    # overlap with any part of this name.
+                    parser.restrict_end(start)
+                    parser.seek(current)
+                else:
+                    state.poison()
+                    raise BadLabelType
+                count = parser.get_uint8()
+            labels.append(b"")
+            name = Name(labels)
+        except dns.exception.FormError as e:
+            structured = isinstance(
+                e,
+                BadPointer
+                | PointerChainTooLong
+                | DecompressionForbidden
+                | BadLabelType,
+            )
+            state.poison()
+            if structured or state.last_pointer is None:
+                # Either an already-structured compression error, or an
+                # unrelated malformation (e.g. a truncated name); re-raise
+                # the original exception unchanged.
+                raise
+            if parser.end <= start:
+                # The parser was restricted to the bytes of this name, so
+                # hitting the boundary while following a pointer means the
+                # target interval overlapped bytes already consumed.
+                category = CompressionFailure.OVERLAPPING_TARGET
+            else:
+                category = CompressionFailure.TARGET_OUT_OF_RANGE
+            raise _compression_error(
+                BadPointer,
+                category,
+                start,
+                state.last_pointer,
+            ) from e
+        if not ephemeral:
+            # Only fully decoded names are published, so a failure mid-name
+            # can never leave a bogus offset-table entry behind.
+            state.remember_name(start, name)
+    return name
 
 
 def from_wire(message: bytes, current: int) -> tuple[Name, int]:

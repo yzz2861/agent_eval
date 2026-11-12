@@ -1176,6 +1176,10 @@ class _WireReader:
         continue_on_error=False,
     ):
         self.parser = dns.wire.Parser(wire)
+        # All names in this message share one decompression context, so hop
+        # budgets, the offset table and the poison flag cover every section
+        # and the rdata parsing entry points as well.
+        self.parser.bind_decompression_state(dns.name.DecompressionState(wire))
         self.message = None
         self.initialize_message = initialize_message
         self.question_only = question_only

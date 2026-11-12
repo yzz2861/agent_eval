@@ -5,8 +5,12 @@
 import contextlib
 import struct
 from collections.abc import Generator
+from typing import TYPE_CHECKING
 
 import dns.exception
+
+if TYPE_CHECKING:
+    import dns.name
 
 
 class Parser:
@@ -26,6 +30,19 @@ class Parser:
         if current:
             self.seek(current)
         self.furthest = current
+        # Optional dns.name.DecompressionState shared by every name parsed
+        # from a single message.  It is intentionally absent for one-shot
+        # parsers; dns.name.from_wire_parser() creates a private state then.
+        self.decompression_state = None
+
+    def bind_decompression_state(self, state: "dns.name.DecompressionState") -> None:
+        """Bind a per-message decompression state to this parser.
+
+        The state is bound to the parser's wire buffer and may not be reused
+        for a different message.
+        """
+        state.check_wire(self.wire)
+        self.decompression_state = state
 
     def remaining(self) -> int:
         return self.end - self.current

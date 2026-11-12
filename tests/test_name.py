@@ -27,6 +27,7 @@ import dns.e164
 import dns.exception
 import dns.name
 import dns.reversename
+import dns.wire
 
 # pylint: disable=line-too-long,unsupported-assignment-operation
 
@@ -794,6 +795,153 @@ class NameTestCase(unittest.TestCase):
 
         self.assertEqual(dns.name.from_wire(w, 32)[0], dns.name.from_text("."))
         self.assertRaises(dns.name.PointerChainTooLong, bad)
+
+    def _assertCompressionFailure(
+        self, wire, current, exception_class, category, name_offset
+    ):
+        with self.assertRaises(exception_class) as cm:
+            dns.name.from_wire(wire, current)
+        error = cm.exception
+        self.assertEqual(error.category, category)
+        self.assertEqual(error.name_offset, name_offset)
+        # The message is bounded and never renders the whole pointer chain.
+        message = str(error)
+        self.assertIn(category.value, message)
+        self.assertIn(f"offset {name_offset}", message)
+        self.assertLess(len(message), 120)
+        return error
+
+    def testCompressionSelfLoop(self):
+        # The pointer at offset 4 targets its own offset; it does not point
+        # strictly backwards, so it is rejected as a forward pointer.
+        wire = b"\x03foo\xc0\x04"
+        self._assertCompressionFailure(
+            wire,
+            0,
+            dns.name.BadPointer,
+            dns.name.CompressionFailure.FORWARD_POINTER,
+            0,
+        )
+
+    def testCompressionPointerBackToNameStart(self):
+        # A pointer that returns to the very first offset of the name closes
+        # a loop even though the target technically points "backwards".
+        wire = b"\xc0\x00"
+        self._assertCompressionFailure(
+            wire,
+            0,
+            dns.name.PointerLoop,
+            dns.name.CompressionFailure.LOOP,
+            0,
+        )
+
+    def testCompressionTwoNodeLoop(self):
+        # Name starts at offset 5 and jumps to 1, which jumps back to 5.
+        wire = b"\x00\xc0\x05\xc0\x01\xc0\x01"
+        error = self._assertCompressionFailure(
+            wire,
+            5,
+            dns.name.PointerLoop,
+            dns.name.CompressionFailure.LOOP,
+            5,
+        )
+        self.assertEqual(error.pointer_offset, 5)
+
+    def testCompressionForwardPointer(self):
+        wire = b"\x03foo\xc0\x05"
+        error = self._assertCompressionFailure(
+            wire,
+            0,
+            dns.name.BadPointer,
+            dns.name.CompressionFailure.FORWARD_POINTER,
+            0,
+        )
+        self.assertEqual(error.pointer_offset, 5)
+
+    def testCompressionOverlappingTarget(self):
+        # The pointer target lands inside the bytes already consumed by
+        # this name.
+        wire = b"\x07abc" + b"\x04www\x00" + b"\xc0\x00"
+        error = self._assertCompressionFailure(
+            wire,
+            4,
+            dns.name.BadPointer,
+            dns.name.CompressionFailure.OVERLAPPING_TARGET,
+            4,
+        )
+        self.assertEqual(error.pointer_offset, 0)
+
+    def testCompressionChainDepthExceeded(self):
+        w = b"\x00\x00\xc0\x00\xc0\x02\xc0\x04\xc0\x06\xc0\x08\xc0\x0a\xc0\x0c\xc0\x0e\xc0\x10\xc0\x12\xc0\x14\xc0\x16\xc0\x18\xc0\x1a\xc0\x1c\xc0\x1e"
+        w1 = w + b"\xc0\x20"
+        self._assertCompressionFailure(
+            w1,
+            34,
+            dns.name.PointerChainTooLong,
+            dns.name.CompressionFailure.NAME_DEPTH_EXCEEDED,
+            34,
+        )
+
+    def testCompressionBoundedStepsNoHang(self):
+        # Every pathological wire must terminate after a small, bounded
+        # number of pointer hops rather than spin in a loop.
+        cases = [
+            (b"\x03foo\xc0\x04", 0),  # self loop
+            (b"\x00\xc0\x05\xc0\x01\xc0\x01", 5),  # two-node loop
+            (b"\x03foo\xc0\x05", 0),  # forward
+        ]
+        for wire, current in cases:
+            state = dns.name.DecompressionState(wire)
+            parser = dns.wire.Parser(wire, current)
+            parser.bind_decompression_state(state)
+            with self.assertRaises(dns.exception.FormError):
+                parser.get_name(decompress=True)
+            self.assertTrue(state.poisoned)
+            self.assertLessEqual(
+                state.total_hops, dns.name.MAX_COMPRESSION_POINTER_CHAIN
+            )
+            # A failure never leaves a partial entry in the offset table.
+            self.assertEqual(state.offsets, {})
+
+    def testCompressionStateRejectedAcrossMessages(self):
+        first = b"\x03foo\x00\xc0\x00"
+        second = b"\x03bar\x00"
+        state = dns.name.DecompressionState(first)
+        parser = dns.wire.Parser(first)
+        parser.bind_decompression_state(state)
+        self.assertEqual(parser.get_name(decompress=True), dns.name.from_text("foo."))
+        foreign = dns.wire.Parser(second)
+        with self.assertRaises(dns.name.BadPointer) as cm:
+            foreign.bind_decompression_state(state)
+        self.assertEqual(cm.exception.category, dns.name.CompressionFailure.STALE_STATE)
+
+    def testCompressionPoisonedStateRejectsFurtherNames(self):
+        wire = b"\x03foo\xc0\x04"
+        state = dns.name.DecompressionState(wire)
+        parser = dns.wire.Parser(wire)
+        parser.bind_decompression_state(state)
+        with self.assertRaises(dns.exception.FormError):
+            parser.get_name(decompress=True)
+        self.assertTrue(state.poisoned)
+        # Even a fresh parser over the same wire cannot reuse the state.
+        retry = dns.wire.Parser(wire)
+        retry.bind_decompression_state(state)
+        with self.assertRaises(dns.name.BadPointer) as cm:
+            retry.get_name(decompress=True)
+        self.assertEqual(cm.exception.category, dns.name.CompressionFailure.STALE_STATE)
+
+    def testCompressionStateCachesSuccessfulNames(self):
+        wire = b"\x03foo\x00\xc0\x00"
+        state = dns.name.DecompressionState(wire)
+        parser = dns.wire.Parser(wire)
+        parser.bind_decompression_state(state)
+        first = parser.get_name(decompress=True)
+        second_parser = dns.wire.Parser(wire, 5)
+        second_parser.bind_decompression_state(state)
+        second = second_parser.get_name(decompress=True)
+        self.assertEqual(first, second)
+        self.assertEqual(state.total_hops, 1)
+        self.assertEqual(sorted(state.offsets), [0, 5])
 
     def testParent1(self):
         n = dns.name.from_text("foo.bar.")
