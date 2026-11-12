@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 ## Standard Library
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 from dataclasses import dataclass
 import datetime
 import enum
@@ -26,6 +29,13 @@ import pytest
 import pythonjsonlogger
 import pythonjsonlogger.defaults
 from pythonjsonlogger.core import RESERVED_ATTRS, BaseJsonFormatter, merge_record_extra
+from pythonjsonlogger.core import (
+    bind_log_context,
+    clear_log_context,
+    log_context,
+    sanitize_context,
+    set_log_context,
+)
 from pythonjsonlogger.json import JsonFormatter
 
 if pythonjsonlogger.ORJSON_AVAILABLE:
@@ -85,6 +95,10 @@ def get_traceback_from_exception_followed_by_log_call(env_: LoggingEnvironment) 
         if str_traceback.endswith("\n"):
             str_traceback = str_traceback[:-1]
     return str_traceback
+
+
+def load_json_lines(env_: LoggingEnvironment) -> list[Any]:
+    return [json.loads(line) for line in env_.buffer.getvalue().splitlines() if line]
 
 
 class SomeClass:
@@ -1161,6 +1175,373 @@ def test_stack_info_as_array_no_stack_info(
     log_json = env.load_json()
 
     assert "stack_info" not in log_json
+    return
+
+
+## Context / Correlation Tests
+## -----------------------------------------------------------------------------
+@pytest.mark.parametrize("class_", ALL_FORMATTERS)
+def test_context_fields_are_isolated_between_asyncio_tasks(
+    env: LoggingEnvironment, class_: type[BaseJsonFormatter]
+) -> None:
+    """Interleaved coroutines must never observe another task's context."""
+    clear_log_context()
+    env.set_formatter(class_(context_fields=["trace_id", "request_id"]))
+
+    async def worker(index: int) -> None:
+        token = set_log_context({"trace_id": f"trace-{index}", "request_id": f"request-{index}"})
+        try:
+            for step in range(3):
+                env.logger.info(f"{index}:{step}")
+                await asyncio.sleep(0)
+        finally:
+            log_context.reset(token)
+
+    async def main() -> None:
+        await asyncio.gather(*(worker(index) for index in range(8)))
+
+    asyncio.run(main())
+
+    lines = load_json_lines(env)
+    assert len(lines) == 24
+    for line in lines:
+        index = line["message"].split(":", 1)[0]
+        assert line["trace_id"] == f"trace-{index}"
+        assert line["request_id"] == f"request-{index}"
+    return
+
+
+@pytest.mark.parametrize("class_", ALL_FORMATTERS)
+def test_context_fields_are_isolated_between_threads(
+    env: LoggingEnvironment, class_: type[BaseJsonFormatter]
+) -> None:
+    clear_log_context()
+    env.set_formatter(class_(context_fields=["trace_id"]))
+
+    def worker(index: int) -> None:
+        token = set_log_context({"trace_id": f"thread-{index}"})
+        try:
+            for step in range(10):
+                env.logger.info(f"{index}:{step}")
+        finally:
+            log_context.reset(token)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(worker, range(8)))
+
+    lines = load_json_lines(env)
+    assert len(lines) == 80
+    for line in lines:
+        index = line["message"].split(":", 1)[0]
+        assert line["trace_id"] == f"thread-{index}"
+    return
+
+
+@pytest.mark.parametrize("class_", ALL_FORMATTERS)
+def test_context_field_precedence(env: LoggingEnvironment, class_: type[BaseJsonFormatter]) -> None:
+    clear_log_context()
+    env.set_formatter(
+        class_(
+            context_fields=["trace_id", "span_id"],
+            defaults={"trace_id": "default"},
+            static_fields={"trace_id": "static", "service": "billing"},
+        )
+    )
+    token = set_log_context({"trace_id": "context", "span_id": "context-span"})
+    try:
+        env.logger.info("context beats defaults")
+        env.logger.info("extra wins", extra={"trace_id": "extra"})
+        env.logger.info({"message": "dict message wins", "trace_id": "message"})
+    finally:
+        log_context.reset(token)
+
+    first, second, third = load_json_lines(env)
+    assert first["trace_id"] == "static"
+    assert first["span_id"] == "context-span"
+    assert second["trace_id"] == "extra"
+    assert third["trace_id"] == "message"
+    for line in (first, second, third):
+        assert line["service"] == "billing"
+    return
+
+
+@pytest.mark.parametrize("class_", ALL_FORMATTERS)
+def test_context_overrides_defaults(
+    env: LoggingEnvironment, class_: type[BaseJsonFormatter]
+) -> None:
+    clear_log_context()
+    env.set_formatter(class_(context_fields=["trace_id"], defaults={"trace_id": "default"}))
+    token = set_log_context({"trace_id": "context"})
+    try:
+        env.logger.info("hello")
+    finally:
+        log_context.reset(token)
+
+    assert env.load_json()["trace_id"] == "context"
+    return
+
+
+@pytest.mark.parametrize("class_", ALL_FORMATTERS)
+def test_context_not_configured_output_is_unchanged(
+    env: LoggingEnvironment, class_: type[BaseJsonFormatter]
+) -> None:
+    clear_log_context()
+    env.set_formatter(class_())
+    env.logger.info("hello")
+    baseline_output = env.buffer.getvalue()
+
+    # A configured formatter with no bound context must add no fields.
+    clear_log_context()
+    env.set_formatter(class_(context_fields=["trace_id"]))
+    env.logger.info("hello")
+    unbound_output = env.buffer.getvalue().splitlines()[-1] + "\n"
+
+    # A context value must not leak into a formatter that was not configured to use it.
+    token = set_log_context({"trace_id": "not-configured"})
+    try:
+        env.set_formatter(class_())
+        env.logger.info("hello")
+        unconfigured_output = env.buffer.getvalue().splitlines()[-1] + "\n"
+    finally:
+        log_context.reset(token)
+
+    assert baseline_output == unbound_output == unconfigured_output
+    assert "trace_id" not in json.loads(unbound_output)
+    return
+
+
+@pytest.mark.parametrize("class_", ALL_FORMATTERS)
+def test_context_snapshot_is_taken_before_message_formatting(
+    env: LoggingEnvironment, class_: type[BaseJsonFormatter]
+) -> None:
+    clear_log_context()
+    env.set_formatter(class_(context_fields=["trace_id"]))
+
+    class ChangesContext:
+        def __format__(self, format_spec: str) -> str:
+            set_log_context({"trace_id": "late"})
+            return "message"
+
+    set_log_context({"trace_id": "snapshot"})
+    try:
+        env.logger.info("%s", ChangesContext())
+    finally:
+        clear_log_context()
+
+    assert env.load_json()["trace_id"] == "snapshot"
+    return
+
+
+@pytest.mark.parametrize("class_", ALL_FORMATTERS)
+def test_context_nested_and_unsafe_values(
+    env: LoggingEnvironment, class_: type[BaseJsonFormatter]
+) -> None:
+    clear_log_context()
+    circular: dict[str, Any] = {}
+    circular["self"] = circular
+    unsafe = {
+        "trace_id": "trace",
+        "request": {"method": "GET", "nested": {"ok": True}},
+        "too_deep": {"one": {"two": {"three": 3}}},
+        "circular": circular,
+        "object": object(),
+        "items": list(range(50)),
+    }
+    token = set_log_context(unsafe)
+    try:
+        env.set_formatter(
+            class_(
+                context_fields=True,
+                context_max_depth=2,
+                context_max_items=6,
+                context_on_error="replace",
+            )
+        )
+        env.logger.info("hello")
+    finally:
+        log_context.reset(token)
+
+    log_json = env.load_json()
+    assert log_json["trace_id"] == "trace"
+    assert log_json["request"] == {"method": "GET", "nested": {"ok": True}}
+    assert log_json["too_deep"] == {"one": {"two": "<max-depth:dict>"}}
+    assert log_json["circular"]["self"].startswith("<circular-reference:")
+    assert log_json["object"] == "<unserializable:object>"
+    assert log_json["items"] == [0, 1, 2, 3, 4, 5]
+    return
+
+
+@pytest.mark.parametrize("class_", ALL_FORMATTERS)
+def test_context_drop_policy_and_bad_mapping(
+    env: LoggingEnvironment, class_: type[BaseJsonFormatter]
+) -> None:
+    clear_log_context()
+    circular: dict[str, Any] = {}
+    circular["self"] = circular
+    token = set_log_context(
+        {
+            "trace_id": "trace",
+            "circular": circular,
+            "object": object(),
+            "bad_key": {},
+        }
+    )
+    try:
+        env.set_formatter(class_(context_fields=True))
+        env.logger.info("hello")
+    finally:
+        log_context.reset(token)
+
+    log_json = env.load_json()
+    assert log_json["bad_key"] == {}
+    assert log_json["trace_id"] == "trace"
+    assert "circular" not in log_json
+    assert "object" not in log_json
+
+    assert sanitize_context({"self": circular}) == {}
+    return
+
+
+@pytest.mark.parametrize("class_", ALL_FORMATTERS)
+def test_context_explicit_context_var_and_per_field_var(
+    env: LoggingEnvironment, class_: type[BaseJsonFormatter]
+) -> None:
+    clear_log_context()
+    request_var: ContextVar[dict[str, Any] | None] = ContextVar(
+        "test_request_context", default=None
+    )
+    span_var: ContextVar[str | None] = ContextVar("test_span_context", default=None)
+    env.set_formatter(
+        class_(
+            context_var=request_var,
+            context_fields={"trace_id": "trace_id", "span_id": span_var},
+        )
+    )
+    request_token = request_var.set({"trace_id": "custom-trace"})
+    span_token = span_var.set("custom-span")
+    try:
+        env.logger.info("hello")
+    finally:
+        request_var.reset(request_token)
+        span_var.reset(span_token)
+
+    log_json = env.load_json()
+    assert log_json["trace_id"] == "custom-trace"
+    assert log_json["span_id"] == "custom-span"
+    return
+
+
+@pytest.mark.parametrize("class_", ALL_FORMATTERS)
+def test_context_alias_parameters_and_instance_api(
+    env: LoggingEnvironment, class_: type[BaseJsonFormatter]
+) -> None:
+    clear_log_context()
+    request_var: ContextVar[dict[str, Any] | None] = ContextVar(
+        "test_alias_request_context", default=None
+    )
+    env.set_formatter(class_(context_key="trace_id", context_var=request_var))
+    token = env.handler.formatter.set_context(trace_id="alias-trace")
+    try:
+        env.logger.info("hello")
+    finally:
+        env.handler.formatter.reset_context(token)
+
+    assert env.load_json()["trace_id"] == "alias-trace"
+
+    span_var: ContextVar[str | None] = ContextVar("test_alias_span_context", default=None)
+    env.set_formatter(class_(context_vars={"span_id": span_var}))
+    span_token = span_var.set("alias-span")
+    try:
+        env.logger.info("hello")
+    finally:
+        span_var.reset(span_token)
+
+    assert load_json_lines(env)[-1]["span_id"] == "alias-span"
+    return
+
+
+@pytest.mark.parametrize("class_", ALL_FORMATTERS)
+def test_context_on_exception(env: LoggingEnvironment, class_: type[BaseJsonFormatter]) -> None:
+    clear_log_context()
+    env.set_formatter(class_(context_fields=["trace_id"]))
+    token = set_log_context({"trace_id": "exception-trace"})
+    try:
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            env.logger.exception("failed")
+    finally:
+        log_context.reset(token)
+
+    log_json = env.load_json()
+    assert log_json["trace_id"] == "exception-trace"
+    assert "ValueError: boom" in log_json["exc_info"]
+    return
+
+
+@pytest.mark.parametrize("class_", ALL_FORMATTERS)
+def test_context_on_cancellation(env: LoggingEnvironment, class_: type[BaseJsonFormatter]) -> None:
+    clear_log_context()
+    env.set_formatter(class_(context_fields=["trace_id"]))
+
+    async def worker(name: str, wait: bool) -> None:
+        with bind_log_context(trace_id=name):
+            try:
+                if wait:
+                    await asyncio.sleep(60)
+                else:
+                    await asyncio.sleep(0)
+                    env.logger.info(f"{name}:after-await")
+            except asyncio.CancelledError:
+                env.logger.info(f"{name}:cancelled")
+                raise
+            finally:
+                env.logger.info(f"{name}:finally")
+
+    async def main() -> None:
+        cancelled = asyncio.create_task(worker("cancelled-task", wait=True))
+        await asyncio.sleep(0)
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+        await worker("next-task", wait=False)
+
+    asyncio.run(main())
+
+    lines = load_json_lines(env)
+    assert {line["message"] for line in lines} == {
+        "cancelled-task:cancelled",
+        "cancelled-task:finally",
+        "next-task:after-await",
+        "next-task:finally",
+    }
+    for line in lines:
+        assert line["trace_id"] == line["message"].split(":", 1)[0]
+    return
+
+
+@pytest.mark.parametrize("class_", ALL_FORMATTERS)
+def test_formatter_does_not_store_request_context(
+    env: LoggingEnvironment, class_: type[BaseJsonFormatter]
+) -> None:
+    clear_log_context()
+    formatter = class_(context_fields=["trace_id"])
+    env.set_formatter(formatter)
+    for index in range(3):
+        token = set_log_context({"trace_id": f"trace-{index}"})
+        try:
+            env.logger.info(f"message-{index}")
+        finally:
+            log_context.reset(token)
+
+    for line in load_json_lines(env):
+        index = line["message"].split("-", 1)[1]
+        assert line["trace_id"] == f"trace-{index}"
+
+    assert "trace_id" not in vars(formatter)
+    assert not any(
+        isinstance(value, str) and value.startswith("trace-") for value in vars(formatter).values()
+    )
     return
 
 

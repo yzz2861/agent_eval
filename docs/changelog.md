@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI: Use trusted publishing to create PyPI and GitHub releases.
 - Documentation: Quickstart examples are tested to ensure the sample output matches reality.
 - Add support for Python 3.15, PyPy 3.12
+- Add explicit `contextvars`-based correlation fields via `context_fields`, with
+  per-record snapshots, async/thread isolation, deterministic precedence, and
+  bounded JSON-safe context sanitization.
 
 ### Removed
 - `STYLE_STRING_FORMAT_REGEX`, which is no longer used to find `{` style fields. [#75](https://github.com/nhairs/python-json-logger/pull/75)

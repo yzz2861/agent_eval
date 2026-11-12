@@ -139,17 +139,48 @@ Output:
 
 Despite the name, static fields can be overridden by message fields and `extra` fields, as described below.
 
+#### Request Context
+
+Request-scoped correlation fields can be read from a
+[`ContextVar`](https://docs.python.org/3/library/contextvars.html). Configure the
+formatter once, then bind context inside the task handling the request. The formatter
+does not store request values, so the same formatter can safely be shared by threads
+and asyncio tasks.
+
+```python
+from pythonjsonlogger.core import bind_log_context
+
+formatter = JsonFormatter(context_fields=["trace_id", "request_id"])
+logHandler.setFormatter(formatter)
+
+with bind_log_context(trace_id="trace-123", request_id="req-456"):
+    logger.info("processing request")
+```
+
+Output:
+
+```json
+{"message": "processing request", "trace_id": "trace-123", "request_id": "req-456"}
+```
+
+`context_fields` may also map output names to context keys, use per-field
+`ContextVar` objects, or be set to `True` to include every context key. Context values
+are copied once when formatting starts and are limited to JSON-safe primitives and
+small mappings. Unsafe values are dropped by default; use `context_policy="replace"`
+to emit a safe marker instead.
+
 #### Field Precedence
 
 These field sources are added in the following order. A later source replaces an earlier value for the same output key:
 
 1. `defaults`
 2. Fields selected by `fmt`
-3. `static_fields`
-4. Fields from a dictionary message
-5. Non-reserved `LogRecord` attributes, including those supplied through `extra`
+3. Context fields
+4. `static_fields`
+5. Fields from a dictionary message
+6. Non-reserved `LogRecord` attributes, including those supplied through `extra`
 
-Fields selected by `fmt` are handled in step 2 and are not merged again in step 5. This is why `static_fields` can override a field selected by `fmt`, even when that field was supplied through `extra`. All five sources are subject to `rename_fields`.
+Fields selected by `fmt` are handled in step 2 and are not merged again in step 6. This is why `static_fields` can override a field selected by `fmt`, even when that field was supplied through `extra`. Explicit `extra` values always win, so a context default can never replace a caller-supplied `trace_id`. All six sources are subject to `rename_fields`.
 
 The following example shows a static value overriding both a default and the record's `levelname`, while dictionary messages and `extra` can override the static `environment`:
 
