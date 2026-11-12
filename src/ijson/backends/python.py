@@ -1,7 +1,7 @@
 '''
 Pure-python parsing backend.
 '''
-from json.decoder import scanstring
+from json.decoder import scanstring, JSONDecodeError
 import re
 
 from ijson import common, utils
@@ -13,6 +13,17 @@ INTEGER_RE = re.compile(r'-?[0-9]+')
 UNARY_LEXEMES = set('[]{},')
 EOF = -1, None
 
+# The Unicode byte order mark, which is what a UTF-8 BOM (b'\xef\xbb\xbf')
+# decodes into
+BOM = '\ufeff'
+
+# BOM handling policies: 'compat' skips a BOM found at the very beginning of
+# the input and leaves any other BOM to the regular parsing machinery (which
+# will reject it as an unexpected symbol), while 'strict' allows a single BOM
+# at the very beginning of the input and rejects any other BOM as an illegal
+# character
+BOM_POLICIES = ('compat', 'strict')
+
 
 class UnexpectedSymbol(common.JSONError):
     def __init__(self, symbol, pos):
@@ -23,9 +34,17 @@ class UnexpectedSymbol(common.JSONError):
 
 @utils.coroutine
 def utf8_encoder(target):
+    """
+    Incrementally decodes incoming UTF-8 bytes, allowing multi-byte characters
+    to be split across chunks, and sends the resulting text to the target.
+    Invalid byte sequences are reported immediately with their absolute byte
+    offset in the input; the message deliberately does not echo any of the
+    decoded text.
+    """
     decoder = codecs.getincrementaldecoder('utf-8')()
     decode = decoder.decode
     send = target.send
+    nbytes = 0
     while True:
         try:
             final = False
@@ -33,6 +52,11 @@ def utf8_encoder(target):
         except GeneratorExit:
             final = True
             bdata = b''
+        if not bdata:
+            # An empty chunk signals the end of the input; any bytes still
+            # buffered by the decoder are an incomplete (hence invalid)
+            # multi-byte sequence
+            final = True
         try:
             sdata = decode(bdata, final)
         except UnicodeDecodeError as e:
@@ -40,13 +64,20 @@ def utf8_encoder(target):
                 target.close()
             except:
                 pass
-            raise common.IncompleteJSONError(e)
+            # e.object holds the bytes being decoded when the error happened,
+            # including any bytes buffered from previous chunks
+            pos = nbytes - (len(e.object) - len(bdata)) + e.start
+            msg = 'Invalid UTF-8 byte sequence at byte offset %d' % (pos,)
+            if e.reason == 'unexpected end of data':
+                raise common.IncompleteJSONError(msg)
+            raise common.JSONError(msg)
         except:
             try:
                 target.close()
             except:
                 pass
             raise
+        nbytes += len(bdata)
         if sdata:
             send(sdata)
         elif not bdata:
@@ -54,12 +85,16 @@ def utf8_encoder(target):
             break
 
 @utils.coroutine
-def Lexer(target):
+def Lexer(target, bom_policy='compat'):
     """
     Parses lexemes out of the incoming content, and sends them to parse_value.
     A special EOF result is sent when the data source has been exhausted to
     give parse_value the possibility of raising custom exceptions due to missing
     content.
+
+    A BOM is skipped when found as the very first character of the input. With
+    the 'strict' bom_policy, a BOM found anywhere else (outside of string
+    literals, where it is simply data) is rejected as an illegal character.
     """
     try:
         data = (yield)
@@ -73,6 +108,17 @@ def Lexer(target):
         match = LEXEME_RE.search(buf, pos)
         if match:
             lexeme = match.group()
+            if lexeme == BOM:
+                bom_pos = discarded + match.start()
+                if bom_pos == 0:
+                    # A BOM at the very start of the input is always skipped
+                    pos = match.end()
+                    continue
+                if bom_policy == 'strict':
+                    raise common.JSONError(
+                        'BOM (byte order mark) is only allowed at the start of '
+                        'the input, but found one at %d' % (bom_pos,)
+                    )
             if lexeme == '"':
                 pos = match.start()
                 start = pos + 1
@@ -193,7 +239,7 @@ def parse_value(target, multivalue, use_float):
                 send(('boolean', False))
                 pop()
             elif symbol[0] == '"':
-                send(('string', parse_string(symbol)))
+                send(('string', parse_string(symbol, pos)))
                 pop()
             # Array start
             elif symbol == '[':
@@ -253,7 +299,7 @@ def parse_value(target, multivalue, use_float):
         elif state == _PARSE_OBJECT_KEY:
             if symbol[0] != '"':
                 raise UnexpectedSymbol(symbol, pos)
-            send(('map_key', parse_string(symbol)))
+            send(('map_key', parse_string(symbol, pos)))
             pos, symbol = (yield)
             if (pos, symbol) == EOF:
                 raise common.IncompleteJSONError('Incomplete JSON content')
@@ -284,22 +330,89 @@ def parse_value(target, multivalue, use_float):
                 pop()
 
 
-def parse_string(symbol):
-    return scanstring(symbol, 1)[0]
+def _check_surrogate_escapes(symbol, pos):
+    """
+    Scans the \\uXXXX escapes of a raw string lexeme (which includes the
+    surrounding quotes, and starts at absolute position pos) and makes sure
+    that UTF-16 surrogates only appear as valid high+low pairs. Lone
+    surrogates are rejected with their absolute position; the string content
+    itself is never echoed back in the error message.
+    """
+    i = 1
+    end = len(symbol) - 1
+    while i < end:
+        if symbol[i] == '\\':
+            if symbol[i + 1:i + 2] == 'u':
+                try:
+                    code = int(symbol[i + 2:i + 6], 16)
+                except ValueError:
+                    # Not a valid escape; scanstring will reject it later
+                    i += 2
+                    continue
+                if 0xD800 <= code <= 0xDBFF:
+                    # A high surrogate must be immediately followed by a
+                    # low surrogate escape
+                    try:
+                        follows = (
+                            symbol[i + 6:i + 8] == '\\u' and
+                            0xDC00 <= int(symbol[i + 8:i + 12], 16) <= 0xDFFF
+                        )
+                    except ValueError:
+                        follows = False
+                    if not follows:
+                        raise common.JSONError(
+                            'Lone high surrogate in string at %d' % (pos + i,)
+                        )
+                    i += 12
+                    continue
+                if 0xDC00 <= code <= 0xDFFF:
+                    raise common.JSONError(
+                        'Lone low surrogate in string at %d' % (pos + i,)
+                    )
+                i += 6
+            else:
+                i += 2
+        else:
+            i += 1
+
+
+def parse_string(symbol, pos):
+    """
+    Decodes a raw string lexeme (including the surrounding quotes) found at
+    absolute position pos, validating its escapes (including UTF-16 surrogate
+    pairing) and rejecting unescaped control characters. Errors carry the
+    absolute position of the offending construct and never echo the string
+    content.
+    """
+    if '\\u' in symbol:
+        _check_surrogate_escapes(symbol, pos)
+    try:
+        return scanstring(symbol, 1)[0]
+    except JSONDecodeError as e:
+        # Some of the json module's messages end in " at" already
+        msg = e.msg[:-3] if e.msg.endswith(' at') else e.msg
+        raise common.JSONError('%s at %d' % (msg, pos + e.pos))
 
 
 def basic_parse_basecoro(target, multiple_values=False, allow_comments=False,
-                         use_float=False):
+                         use_float=False, bom_policy='compat'):
     '''
     Iterator yielding unprefixed events.
 
     Parameters:
 
     - file: a readable file-like object with JSON input
+    - bom_policy: how to handle byte order marks; 'compat' (the default)
+      skips a BOM at the very start of the input, while 'strict' only allows
+      a single BOM there and rejects any other as an illegal character
     '''
     if allow_comments:
         raise ValueError("Comments are not supported by the python backend")
-    return utf8_encoder(Lexer(parse_value(target, multiple_values, use_float)))
+    if bom_policy not in BOM_POLICIES:
+        raise ValueError(
+            "bom_policy must be one of %r, got %r" % (BOM_POLICIES, bom_policy)
+        )
+    return utf8_encoder(Lexer(parse_value(target, multiple_values, use_float), bom_policy))
 
 
 common.enrich_backend(globals(), c_comments=False)

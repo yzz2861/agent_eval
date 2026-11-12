@@ -61,6 +61,11 @@ class async_iterable:
                 if self.events:
                     return self.events.popleft()
                 raise StopAsyncIteration
+            except BaseException:
+                # The pipeline has failed; make sure we never read from the
+                # source again if iteration is retried
+                self.coro_finished = True
+                raise
 
 
 def _make_basic_parse_async(backend):

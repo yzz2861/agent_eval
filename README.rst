@@ -407,6 +407,15 @@ to give users more fine-grained control over certain operations:
   controls whether C-style comments (e.g., ``/* a comment */``),
   which are not supported by the JSON standard,
   are allowed in the content or not.
+- The ``bom_policy`` option (defaults to ``'compat'``)
+  controls how byte order marks (BOMs) are handled.
+  With ``'compat'`` a BOM at the very start of the input is skipped,
+  and a BOM anywhere else results in a generic parse error.
+  With ``'strict'`` a single BOM is only allowed at the very start
+  of the input; a BOM found anywhere else is rejected
+  as an illegal character with its character offset.
+  A BOM inside a string literal is always treated as content.
+  This option is currently only supported by the ``python`` backend.
 - For functions taking a file-like object,
   an additional ``buf_size`` option (defaults to ``65536`` or 64KB)
   specifies the amount of bytes the library

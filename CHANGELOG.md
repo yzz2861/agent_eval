@@ -2,6 +2,19 @@
 
 ## Development
 
+* The `python` backend now validates text more strictly and consistently:
+  invalid UTF-8 byte sequences are reported immediately with their absolute
+  byte offset, `\\uXXXX` escapes forming lone UTF-16 surrogates are rejected,
+  and unescaped control characters in strings raise `ijson.JSONError`
+  (instead of `json.JSONDecodeError`). Error messages carry character/byte
+  offsets but never echo the offending content.
+* New `bom_policy` option for the `python` backend: with the default
+  `compat` policy a BOM at the very start of the input is skipped (matching
+  the `yajl` backends); with `strict` a single BOM is only allowed at the
+  very start of the input and any other BOM is rejected as an illegal
+  character with its character offset.
+* The async iterable interface no longer reads from the source again
+  after the parsing pipeline has failed.
 * Fixed handling of integers longer than `sys.get_int_max_str_digits()`:
   the `yajl2_c` backend no longer crashes on them, and all backends
   now raise the `ValueError` produced by `int()` (#188).
