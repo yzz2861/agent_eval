@@ -52,6 +52,8 @@ if TYPE_CHECKING:
 
     class FormParserConfig(FileConfig):
         UPLOAD_ERROR_ON_BAD_CTE: bool
+        UPLOAD_STRICT_CONTENT_TRANSFER_ENCODING: bool
+        UPLOAD_ALLOW_NO_BASE64_PADDING: bool
         MAX_BODY_SIZE: float
         MAX_FIELDS: int | float
         MAX_FIELD_SIZE: int | float
@@ -1653,6 +1655,10 @@ class FormParser:
         "UPLOAD_KEEP_EXTENSIONS": False,
         # Error on invalid Content-Transfer-Encoding?
         "UPLOAD_ERROR_ON_BAD_CTE": False,
+        # Validate known Content-Transfer-Encoding payloads strictly.  This is
+        # opt-in so existing callers retain the historical permissive behaviour.
+        "UPLOAD_STRICT_CONTENT_TRANSFER_ENCODING": False,
+        "UPLOAD_ALLOW_NO_BASE64_PADDING": False,
     }
 
     def __init__(
@@ -1806,7 +1812,6 @@ class FormParser:
                 nonlocal writer
                 assert writer is not None
                 writer.write(data[start:end])
-                # TODO: check for error here.
 
             def on_part_end() -> None:
                 assert f_multi is not None
@@ -1864,14 +1869,20 @@ class FormParser:
                 # https://www.rfc-editor.org/rfc/rfc2045#section-6.1
                 transfer_encoding = headers.get(b"content-transfer-encoding", b"7bit").lower()
 
+                strict_transfer_encoding = bool(
+                    self.config.get("UPLOAD_STRICT_CONTENT_TRANSFER_ENCODING")
+                    or self.config.get("UPLOAD_ERROR_ON_BAD_CTE")
+                )
+                allow_no_padding = bool(self.config.get("UPLOAD_ALLOW_NO_BASE64_PADDING"))
+
                 if transfer_encoding in (b"binary", b"8bit", b"7bit"):
                     writer = f_multi
 
                 elif transfer_encoding == b"base64":
-                    writer = Base64Decoder(f_multi)
+                    writer = Base64Decoder(f_multi, strict=strict_transfer_encoding, allow_no_padding=allow_no_padding)
 
                 elif transfer_encoding == b"quoted-printable":
-                    writer = QuotedPrintableDecoder(f_multi)
+                    writer = QuotedPrintableDecoder(f_multi, strict=strict_transfer_encoding)
 
                 else:
                     self.logger.warning("Unknown Content-Transfer-Encoding: %r", transfer_encoding)

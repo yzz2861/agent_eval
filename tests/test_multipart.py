@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import os
 import random
 import sys
@@ -794,6 +795,225 @@ class TestQuotedPrintableDecoder(unittest.TestCase):
 
         self.d.write(b"q=3AX")
         self.assert_data(b"q:X")
+
+
+def _write_in_chunks(decoder: Any, data: bytes, chunk_size: int) -> None:
+    for start in range(0, len(data), chunk_size):
+        decoder.write(data[start : start + chunk_size])
+
+
+def _decode_base64(data: bytes, chunk_size: int, **kwargs: Any) -> bytes:
+    output = BytesIO()
+    decoder = Base64Decoder(output, strict=True, **kwargs)
+    _write_in_chunks(decoder, data, chunk_size)
+    decoder.finalize()
+    return output.getvalue()
+
+
+def _decode_quoted_printable(data: bytes, chunk_size: int) -> bytes:
+    output = BytesIO()
+    decoder = QuotedPrintableDecoder(output, strict=True)
+    _write_in_chunks(decoder, data, chunk_size)
+    decoder.finalize()
+    return output.getvalue()
+
+
+@pytest.mark.parametrize(
+    "payload", [b"", b"f", b"fo", b"foo", b"foobar", bytes(range(256)), b"browser upload \x00\xff"]
+)
+def test_strict_base64_chunking_is_invariant(payload: bytes) -> None:
+    encoded = base64.b64encode(payload)
+    for chunk_size in range(1, len(encoded) + 1):
+        assert _decode_base64(encoded, chunk_size) == payload
+
+
+def test_strict_base64_byte_by_byte() -> None:
+    assert _decode_base64(b"Zm9vYmFy", 1) == b"foobar"
+
+
+def test_strict_base64_cross_chunk_quartet() -> None:
+    output = BytesIO()
+    decoder = Base64Decoder(output, strict=True)
+    decoder.write(b"Zm9")
+    decoder.write(b"v")
+    decoder.write(b"Ym")
+    decoder.write(b"Fy")
+    decoder.finalize()
+    assert output.getvalue() == b"foobar"
+
+
+@pytest.mark.parametrize("encoded", [b"Zg=", b"Z===", b"=AAA", b"AA=A", b"Zm8=A", b"AA==AAAA", b"Zg==Zg=="])
+def test_strict_base64_rejects_bad_padding(encoded: bytes) -> None:
+    with pytest.raises(DecodeError) as exc_info:
+        _decode_base64(encoded, 1)
+    assert exc_info.value.encoding == "base64"
+
+
+@pytest.mark.parametrize("encoded", [b"Zh==", b"Zm9=", b"Zh"])
+def test_strict_base64_rejects_non_zero_trailing_bits(encoded: bytes) -> None:
+    kwargs = {"allow_no_padding": True} if len(encoded) % 4 else {}
+    with pytest.raises(DecodeError, match="non-zero trailing bits"):
+        _decode_base64(encoded, 1, **kwargs)
+
+
+@pytest.mark.parametrize("encoded, expected", [(b"Zg", b"f"), (b"Zm8", b"fo")])
+def test_strict_base64_optional_unpadded_quantum(encoded: bytes, expected: bytes) -> None:
+    assert _decode_base64(encoded, 1, allow_no_padding=True) == expected
+
+    with pytest.raises(DecodeError, match="missing Base64 padding"):
+        _decode_base64(encoded, 1)
+
+
+def test_strict_base64_unpadded_option_rejects_partial_padding() -> None:
+    with pytest.raises(DecodeError, match="incomplete Base64 padding"):
+        _decode_base64(b"AA=", 1, allow_no_padding=True)
+
+
+def test_strict_base64_rejects_invalid_character() -> None:
+    output = BytesIO()
+    decoder = Base64Decoder(output, strict=True)
+    with pytest.raises(DecodeError) as exc_info:
+        decoder.write(b"Zm9v!mFy")
+    assert exc_info.value.offset == 4
+    assert exc_info.value.encoding == "base64"
+    assert b"Zm9v" not in str(exc_info.value).encode()
+
+
+def test_strict_base64_empty_and_finalize_twice() -> None:
+    output = BytesIO()
+    decoder = Base64Decoder(output, strict=True)
+    decoder.write(b"")
+    decoder.finalize()
+    decoder.finalize()
+    assert output.getvalue() == b""
+
+    output = BytesIO()
+    decoder = Base64Decoder(output, strict=True)
+    decoder.write(b"VGVzdCAxMjM=")
+    decoder.finalize()
+    decoder.finalize()
+    assert output.getvalue() == b"Test 123"
+
+
+@pytest.mark.parametrize(
+    "payload", [b"", b"foo=3Dbar", b"foo=\r\nbar", b"name=3DJohn=20Doe", b"=41=\r\n=42", b"\x00\x01abc\x7f"]
+)
+def test_strict_quoted_printable_chunking_is_invariant(payload: bytes) -> None:
+    expected = {
+        b"": b"",
+        b"foo=3Dbar": b"foo=bar",
+        b"foo=\r\nbar": b"foobar",
+        b"name=3DJohn=20Doe": b"name=John Doe",
+        b"=41=\r\n=42": b"AB",
+        b"\x00\x01abc\x7f": b"\x00\x01abc\x7f",
+    }[payload]
+    for chunk_size in range(1, len(payload) + 1):
+        assert _decode_quoted_printable(payload, chunk_size) == expected
+
+
+def test_strict_quoted_printable_byte_by_byte() -> None:
+    assert _decode_quoted_printable(b"foo=3D=\r\nbar", 1) == b"foo=bar"
+
+
+def test_strict_quoted_printable_soft_line_break_across_chunks() -> None:
+    output = BytesIO()
+    decoder = QuotedPrintableDecoder(output, strict=True)
+    decoder.write(b"foo=\r")
+    decoder.write(b"\nbar")
+    decoder.finalize()
+    assert output.getvalue() == b"foobar"
+
+
+@pytest.mark.parametrize("encoded", [b"foo=GZbar", b"=4G", b"foo=\nbar", b"foo=\rbar"])
+def test_strict_quoted_printable_rejects_bad_escapes(encoded: bytes) -> None:
+    with pytest.raises(DecodeError) as exc_info:
+        _decode_quoted_printable(encoded, 1)
+    assert exc_info.value.encoding == "quoted-printable"
+    assert b"foo" not in str(exc_info.value).encode()
+
+
+def test_strict_quoted_printable_invalid_escape_chunk_offset() -> None:
+    output = BytesIO()
+    decoder = QuotedPrintableDecoder(output, strict=True)
+    decoder.write(b"foo=")
+    with pytest.raises(DecodeError) as exc_info:
+        decoder.write(b"GZ")
+    assert exc_info.value.offset == 0
+    assert exc_info.value.encoding == "quoted-printable"
+
+
+@pytest.mark.parametrize("encoded", [b"foo=", b"foo=3", b"foo=\r"])
+def test_strict_quoted_printable_rejects_residual_at_finalize(encoded: bytes) -> None:
+    output = BytesIO()
+    decoder = QuotedPrintableDecoder(output, strict=True)
+    decoder.write(encoded)
+    with pytest.raises(DecodeError):
+        decoder.finalize()
+
+
+def test_strict_quoted_printable_empty_and_finalize_twice() -> None:
+    output = BytesIO()
+    decoder = QuotedPrintableDecoder(output, strict=True)
+    decoder.write(b"")
+    decoder.finalize()
+    decoder.finalize()
+    assert output.getvalue() == b""
+
+    output = BytesIO()
+    decoder = QuotedPrintableDecoder(output, strict=True)
+    decoder.write(b"foo=3Dbar")
+    decoder.finalize()
+    decoder.finalize()
+    assert output.getvalue() == b"foo=bar"
+
+
+def test_form_parser_propagates_strict_base64_error() -> None:
+    data = (
+        b'--b\r\nContent-Disposition: form-data; name="f"\r\nContent-Transfer-Encoding: base64\r\n\r\nZh==\r\n--b--\r\n'
+    )
+    parser = FormParser(
+        "multipart/form-data", None, None, boundary=b"b", config={"UPLOAD_STRICT_CONTENT_TRANSFER_ENCODING": True}
+    )
+    with pytest.raises(DecodeError) as exc_info:
+        parser.write(data)
+        parser.finalize()
+    assert exc_info.value.encoding == "base64"
+
+
+def test_form_parser_propagates_strict_quoted_printable_error() -> None:
+    data = (
+        b'--b\r\nContent-Disposition: form-data; name="f"\r\n'
+        b"Content-Transfer-Encoding: quoted-printable\r\n\r\nfoo=GZbar\r\n--b--\r\n"
+    )
+    parser = FormParser(
+        "multipart/form-data", None, None, boundary=b"b", config={"UPLOAD_STRICT_CONTENT_TRANSFER_ENCODING": True}
+    )
+    with pytest.raises(DecodeError) as exc_info:
+        parser.write(data)
+        parser.finalize()
+    assert exc_info.value.encoding == "quoted-printable"
+
+
+@pytest.mark.parametrize(
+    "transfer_encoding, body, expected",
+    [(b"base64", b"Zm9vYmFy", b"foobar"), (b"quoted-printable", b"foo=3D=\r\nbar", b"foo=bar")],
+)
+def test_form_parser_decode_chunking_invariance(transfer_encoding: bytes, body: bytes, expected: bytes) -> None:
+    data = (
+        b'--b\r\nContent-Disposition: form-data; name="f"; filename="f.txt"\r\n'
+        b"Content-Transfer-Encoding: " + transfer_encoding + b"\r\n\r\n" + body + b"\r\n--b--\r\n"
+    )
+    config = {"UPLOAD_STRICT_CONTENT_TRANSFER_ENCODING": True}
+
+    for chunk_size in range(1, len(data) + 1):
+        files: list[File] = []
+        parser = FormParser("multipart/form-data", None, files.append, boundary=b"b", config=config)
+        _write_in_chunks(parser, data, chunk_size)
+        parser.finalize()
+
+        file = files[0]
+        file.file_object.seek(0)
+        assert file.file_object.read() == expected
 
 
 # Load our list of HTTP test cases.

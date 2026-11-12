@@ -29,6 +29,22 @@ class DecodeError(ParseError):
     with the Base64Decoder or QuotedPrintableDecoder.
     """
 
+    def __init__(self, message: str, *, offset: int = -1, encoding: str | None = None) -> None:
+        super().__init__(message, offset=offset)
+        self.encoding = encoding
+
+    @property
+    def chunk_offset(self) -> int:
+        """The offset, relative to the chunk passed to ``write()``, at which
+        decoding failed.  This is identical to :attr:`offset`.
+        """
+        return self.offset
+
+    @property
+    def encoding_type(self) -> str | None:
+        """An alias for :attr:`encoding`."""
+        return self.encoding
+
 
 class FileError(FormParserError, OSError):
     """Exception class for problems with the File class."""
