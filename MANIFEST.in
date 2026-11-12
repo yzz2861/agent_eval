@@ -1,0 +1,17 @@
+graft src/hpack
+graft docs
+graft tests
+
+prune bench
+prune docs/build
+prune utils
+
+exclude tasks.py
+exclude tests/test_fixtures/*/*.json
+exclude tests/test_hpack_integration.py
+
+include README.rst LICENSE CHANGELOG.rst CONTRIBUTORS.rst pyproject.toml
+
+global-exclude *.pyc *.pyo *.swo *.swp *.map *.yml *.DS_Store
+exclude .readthedocs.yaml
+exclude uv.lock
