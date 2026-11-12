@@ -1,0 +1,540 @@
+.. _classic_cipher_modes:
+
+Classic modes of operation for symmetric block ciphers
+======================================================
+
+A block cipher uses a symmetric key to encrypt data of fixed and very short length
+(the *block size*), such as 16 bytes for AES.
+In order to cope with data of arbitrary length, the cipher must be
+combined with a *mode of operation*.
+
+You create a cipher object with the :func:`new` function
+in the relevant module under ``Crypto.Cipher``:
+
+1. the first parameter is always the cryptographic key (a byte string)
+2. the second parameter is always the constant that selects the desired
+   mode of operation
+
+Constants for each mode of operation are defined at the module level for each algorithm.
+Their name starts with ``MODE_``, for instance :const:`Crypto.Cipher.AES.MODE_CBC`.
+Note that not all ciphers support all modes.
+
+The class of the object returned by :func:`new` depends on the mode,
+and its full API is at the end of the section of each mode
+(for instance, :class:`~Crypto.Cipher._mode_cbc.CbcMode` for CBC).
+
+For instance::
+
+    >>> from Crypto.Cipher import AES
+    >>> from Crypto.Random import get_random_bytes
+    >>>
+    >>> key = get_random_bytes(16)
+    >>> cipher = AES.new(key, AES.MODE_CBC)
+    >>>
+    >>> # You can now use use cipher to encrypt or decrypt...
+
+The state machine for a cipher configured with a classic mode is:    
+    
+.. figure:: simple_mode.png
+    :align: center
+    :figwidth: 50%
+
+    Generic state diagram for a cipher object
+
+What follows is a list of classic modes of operation: they all provide confidentiality
+but not data integrity (unlike modern AEAD modes, which are described in :doc:`another section <modern>`).
+
+.. _ecb_mode:
+
+ECB mode
+--------
+`Electronic CodeBook <https://en.wikipedia.org/wiki/Block_cipher_mode_of_operation#Electronic_Codebook_.28ECB.29>`_.
+The most basic but also the weakest mode of operation.
+Each block of plaintext is encrypted independently of any other block.
+
+.. warning::
+ The ECB mode should not be used because it is `semantically insecure <https://en.wikipedia.org/wiki/Semantic_security>`_.
+ For one, it exposes correlation between blocks.
+
+The :func:`new` function at the module level under ``Crypto.Cipher`` instantiates
+a new ECB cipher object for the relevant base algorithm.
+In the following definition, ``<algorithm>`` could be ``AES``:
+
+.. function:: Crypto.Cipher.<algorithm>.new(key, mode)
+
+  Create a new ECB object, using <algorithm> as the base block cipher.
+  
+  :param bytes key: the cryptographic key
+  :param mode: the constant ``Crypto.Cipher.<algorithm>.MODE_ECB``
+  :return: an ECB cipher object (:class:`~Crypto.Cipher._mode_ecb.EcbMode`)
+
+The method :meth:`~Crypto.Cipher._mode_ecb.EcbMode.encrypt` (and likewise :meth:`~Crypto.Cipher._mode_ecb.EcbMode.decrypt`) of an ECB cipher object
+expects data to have length multiple of the block size (e.g. 16 bytes for AES).
+You might need to use :mod:`Crypto.Util.Padding` to align the plaintext to the right boundary.
+
+ECB cipher object
+~~~~~~~~~~~~~~~~~
+
+.. autoclass:: Crypto.Cipher._mode_ecb.EcbMode
+   :members:
+   :member-order: bysource
+
+.. _cbc_mode:
+
+CBC mode
+--------
+`Ciphertext Block Chaining <https://en.wikipedia.org/wiki/Block_cipher_mode_of_operation#Cipher_Block_Chaining_.28CBC.29>`_,
+defined in `NIST SP 800-38A, section 6.2 <http://csrc.nist.gov/publications/nistpubs/800-38a/sp800-38a.pdf>`_.
+It is a mode of operation where each plaintext block
+gets XOR-ed with the previous ciphertext block prior to encryption.
+
+The :func:`new` function at the module level under ``Crypto.Cipher`` instantiates
+a new CBC cipher object for the relevant base algorithm.
+In the following definition, ``<algorithm>`` could be ``AES``:
+
+.. function:: Crypto.Cipher.<algorithm>.new(key, mode, *, iv=None)
+
+  Create a new CBC object, using <algorithm> as the base block cipher.
+  
+  :param bytes key: the cryptographic key
+  :param mode: the constant ``Crypto.Cipher.<algorithm>.MODE_CBC``
+  :param bytes iv: the *Initialization Vector*. A piece of data unpredictable to adversaries.
+         It is as long as the block size (e.g. 16 bytes for AES).
+         If not present, the library creates a random IV value.
+  :return: a CBC cipher object (:class:`~Crypto.Cipher._mode_cbc.CbcMode`)
+
+The method :meth:`~Crypto.Cipher._mode_cbc.CbcMode.encrypt` (and likewise :meth:`~Crypto.Cipher._mode_cbc.CbcMode.decrypt`) of a CBC cipher object
+expects data to have length multiple of the block size (e.g. 16 bytes for AES).
+You might need to use :mod:`Crypto.Util.Padding` to align the plaintext to the right boundary.
+
+A CBC cipher object has a read-only attribute :attr:`~Crypto.Cipher._mode_cbc.CbcMode.iv`, holding the
+*Initialization Vector* (*bytes*).
+
+Example (encryption)::
+
+    >>> import json
+    >>> from base64 import b64encode
+    >>> from Crypto.Cipher import AES
+    >>> from Crypto.Util.Padding import pad
+    >>> from Crypto.Random import get_random_bytes
+    >>>
+    >>> data = b"secret"
+    >>> key = get_random_bytes(16)
+    >>> cipher = AES.new(key, AES.MODE_CBC)
+    >>> ct_bytes = cipher.encrypt(pad(data, AES.block_size))
+    >>> iv = b64encode(cipher.iv).decode('utf-8')
+    >>> ct = b64encode(ct_bytes).decode('utf-8')
+    >>> result = json.dumps({'iv':iv, 'ciphertext':ct})
+    >>> print(result)
+    '{"iv": "bWRHdzkzVDFJbWNBY0EwSmQ1UXFuQT09", "ciphertext": "VDdxQVo3TFFCbXIzcGpYa1lJbFFZQT09"}'
+
+Example (decryption)::
+
+    >>> import json
+    >>> from base64 import b64decode
+    >>> from Crypto.Cipher import AES
+    >>> from Crypto.Util.Padding import unpad
+    >>>
+    >>> # We assume that the key was securely shared beforehand
+    >>> try:
+    ...     b64 = json.loads(json_input)
+    ...     iv = b64decode(b64['iv'])
+    ...     ct = b64decode(b64['ciphertext'])
+    ...     cipher = AES.new(key, AES.MODE_CBC, iv)
+    ...     pt = unpad(cipher.decrypt(ct), AES.block_size)
+    ...     print("The message was: ", pt)
+    ... except (ValueError, KeyError):
+    ...     print("Incorrect decryption")
+
+CBC cipher object
+~~~~~~~~~~~~~~~~~
+
+.. autoclass:: Crypto.Cipher._mode_cbc.CbcMode
+   :members:
+   :member-order: bysource
+
+.. _ctr_mode:
+
+CTR mode
+--------
+`CounTeR mode <https://en.wikipedia.org/wiki/Block_cipher_mode_of_operation#Counter_.28CTR.29>`_,
+defined in `NIST SP 800-38A, section 6.5 and Appendix B <http://csrc.nist.gov/publications/nistpubs/800-38a/sp800-38a.pdf>`_.
+This mode turns the block cipher into a stream cipher.
+Each byte of plaintext is XOR-ed with a byte taken from a *keystream*: the result is the ciphertext.
+The *keystream* is generated by encrypting a sequence of *counter blocks* with ECB.
+
+.. figure:: ctr_mode.png
+    :align: center
+
+A *counter block* is exactly as long as the cipher block size (e.g. 16 bytes for AES).
+It consists of the concatenation of two pieces:
+
+1. a fixed **nonce**, set at initialization.
+2. a variable **counter**, which gets increased by 1 for any subsequent counter block.
+   The counter is big endian encoded.
+
+The :func:`new` function at the module level under ``Crypto.Cipher`` instantiates
+a new CTR cipher object for the relevant base algorithm.
+In the following definition, ``<algorithm>`` could be ``AES``:
+
+.. function:: Crypto.Cipher.<algorithm>.new(key, mode, *, nonce=None, initial_value=None, counter=None, threads=1)
+
+  Create a new CTR object, using <algorithm> as the base block cipher.
+  
+  :param bytes key: the cryptographic key
+  :param mode: the constant ``Crypto.Cipher.<algorithm>.MODE_CTR``
+  :param bytes nonce: the value of the fixed nonce.
+    It must be unique for the combination message/key.
+    Its length varies from 0 to the block size minus 1.
+    If not present, the library creates a random nonce of length equal to block size/2.
+  :param initial_value: the value of the counter for the first counter block.
+    It can be either an integer or *bytes* (which is the same integer, just big endian encoded).
+    If not specified, the counter starts at 0.
+  :type initial_value: integer or bytes
+  :param counter: a custom counter object created with :func:`Crypto.Util.Counter.new`.
+    This allows the definition of a more complex counter block.
+  :param int threads: the maximum number of threads used to
+    encrypt or decrypt long data (default: 1, no extra threads).
+    Use 0 for as many threads as the CPU cores available to the process.
+  :return: a CTR cipher object (:class:`~Crypto.Cipher._mode_ctr.CtrMode`)
+
+The methods :meth:`~Crypto.Cipher._mode_ctr.CtrMode.encrypt` and :meth:`~Crypto.Cipher._mode_ctr.CtrMode.decrypt` of a CTR cipher object
+accept data of any length (i.e. padding is not needed).
+Both raise :class:`Crypto.MessageTooLongError` (which is also an ``OverflowError``)
+as soon as the counter wraps around to repeat the original value.
+
+The CTR cipher object has a read-only attribute :attr:`~Crypto.Cipher._mode_ctr.CtrMode.nonce` (*bytes*):
+the fixed part at the beginning of the counter block.
+
+If you create the cipher with a custom counter (that is, you pass the result of
+:func:`Crypto.Util.Counter.new` as the ``counter`` parameter of :func:`new`),
+the attribute only holds the ``prefix`` you gave to that function (``b''`` if you gave none).
+If you also gave a ``suffix``, reading the attribute raises ``AttributeError``,
+because no value of the ``nonce`` parameter could produce that counter block,
+and the prefix alone would not be enough to decrypt.
+The cipher object cannot tell which of those values must be delivered to the recipient,
+so you must keep them yourself. It does not reveal the current value of the counter either:
+see :ref:`ctr_next_counter`.
+
+A counter block must never be used twice with the same key, because
+a repeated *keystream* breaks the confidentiality of both messages.
+If the nonce is random, the risk grows with the number of messages encrypted under the same key.
+The nonce that the library creates by default is 8 bytes long, which is not enough for a very large
+number of messages. A 12-byte nonce makes a collision far less likely, but it leaves only 32 bits for
+the counter, so a single message cannot be longer than 64 GiB:
+
+.. list-table::
+    :header-rows: 1
+
+    * - Random nonce
+      - Longest message
+      - Probability of a repeated nonce after 2\ :sup:`16` messages
+      - After 2\ :sup:`24` messages
+      - After 2\ :sup:`32` messages
+    * - 8 bytes (default)
+      - 2\ :sup:`68` bytes
+      - 1.2 · 10\ :sup:`-10`
+      - 7.6 · 10\ :sup:`-6`
+      - 39%
+    * - 12 bytes
+      - 64 GiB
+      - below 10\ :sup:`-19`
+      - 1.8 · 10\ :sup:`-15`
+      - 1.2 · 10\ :sup:`-10`
+
+Each block of the *keystream* only depends on its counter block,
+so the CTR mode can use several CPU cores.
+This is disabled by default; enable it with the ``threads`` parameter::
+
+    >>> cipher = AES.new(key, AES.MODE_CTR, nonce=nonce, threads=4)
+    >>> ciphertext = cipher.encrypt(very_long_message)
+
+With ``threads=0``, it uses as many threads as the CPU cores available to the process.
+The output does not depend on the number of threads.
+Threads only help with long data passed in large chunks:
+each thread processes at least 1 MiB of a single :meth:`~Crypto.Cipher._mode_ctr.CtrMode.encrypt` or :meth:`~Crypto.Cipher._mode_ctr.CtrMode.decrypt` call.
+
+Example (encryption)::
+
+    >>> import json
+    >>> from base64 import b64encode
+    >>> from Crypto.Cipher import AES
+    >>> from Crypto.Random import get_random_bytes
+    >>>
+    >>> data = b"secret"
+    >>> key = get_random_bytes(16)
+    >>> cipher = AES.new(key, AES.MODE_CTR)
+    >>> ct_bytes = cipher.encrypt(data)
+    >>> nonce = b64encode(cipher.nonce).decode('utf-8')
+    >>> ct = b64encode(ct_bytes).decode('utf-8')
+    >>> result = json.dumps({'nonce':nonce, 'ciphertext':ct})
+    >>> print(result)
+    {"nonce": "XqP8WbylRt0=", "ciphertext": "Mie5lqje"}
+
+Example (decryption)::
+
+    >>> import json
+    >>> from base64 import b64decode
+    >>> from Crypto.Cipher import AES
+    >>>
+    >>> # We assume that the key was securely shared beforehand
+    >>> try:
+    ...     b64 = json.loads(json_input)
+    ...     nonce = b64decode(b64['nonce'])
+    ...     ct = b64decode(b64['ciphertext'])
+    ...     cipher = AES.new(key, AES.MODE_CTR, nonce=nonce)
+    ...     pt = cipher.decrypt(ct)
+    ...     print("The message was: ", pt)
+    ... except (ValueError, KeyError):
+    ...     print("Incorrect decryption")
+
+CTR cipher object
+~~~~~~~~~~~~~~~~~
+
+.. autoclass:: Crypto.Cipher._mode_ctr.CtrMode
+   :members:
+   :member-order: bysource
+
+.. _cfb_mode:
+
+CFB mode
+--------
+`Cipher FeedBack <https://en.wikipedia.org/wiki/Block_cipher_mode_of_operation#Electronic_Codebook_.28ECB.29>`_,
+defined in `NIST SP 800-38A, section 6.3 <http://csrc.nist.gov/publications/nistpubs/800-38a/sp800-38a.pdf>`_.
+It is a mode of operation which turns the block cipher into a stream cipher.
+Each byte of plaintext is XOR-ed with a byte taken from a *keystream*: the result is the ciphertext.
+
+The *keystream* is obtained on a per-segment basis: the plaintext is broken up in
+segments (from 1 byte up to the size of a block). Then, for each segment,
+the keystream is obtained by encrypting with the block cipher the last piece of
+ciphertext produced so far - possibly backfilled with the *Initialization Vector*,
+if not enough ciphertext is available yet.
+
+The :func:`new` function at the module level under ``Crypto.Cipher`` instantiates
+a new CFB cipher object for the relevant base algorithm.
+In the following definition, ``<algorithm>`` could be ``AES``:
+
+.. function:: Crypto.Cipher.<algorithm>.new(key, mode, *, iv=None, segment_size=8)
+
+  Create a new CFB object, using <algorithm> as the base block cipher.
+  
+  :param bytes key: the cryptographic key
+  :param mode: the constant ``Crypto.Cipher.<algorithm>.MODE_CFB``
+  :param bytes iv: the *Initialization Vector*.
+         It must be unique for the combination message/key.
+         It is as long as the block size (e.g. 16 bytes for AES).
+         If not present, the library creates a random IV.
+  :param integer segment_size: the number of **bits** (not bytes!) the plaintext and the
+    ciphertext are segmented in (default if not specified: 8 bits = 1 byte).
+  :return: a CFB cipher object (:class:`~Crypto.Cipher._mode_cfb.CfbMode`)
+
+The methods :meth:`~Crypto.Cipher._mode_cfb.CfbMode.encrypt` and :meth:`~Crypto.Cipher._mode_cfb.CfbMode.decrypt` of a CFB cipher object
+accept data of any length (i.e. padding is not needed).
+
+The CFB cipher object has a read-only attribute :attr:`~Crypto.Cipher._mode_cfb.CfbMode.iv` (*bytes*), holding
+the Initialization Vector.
+
+Example (encryption)::
+
+    >>> import json
+    >>> from base64 import b64encode
+    >>> from Crypto.Cipher import AES
+    >>> from Crypto.Random import get_random_bytes
+    >>>
+    >>> data = b"secret"
+    >>> key = get_random_bytes(16)
+    >>> cipher = AES.new(key, AES.MODE_CFB)
+    >>> ct_bytes = cipher.encrypt(data)
+    >>> iv = b64encode(cipher.iv).decode('utf-8')
+    >>> ct = b64encode(ct_bytes).decode('utf-8')
+    >>> result = json.dumps({'iv':iv, 'ciphertext':ct})
+    >>> print(result)
+    {"iv": "VoamO23kFSOZcK1O2WiCDQ==", "ciphertext": "f8jciJ8/"}
+
+Example (decryption)::
+
+    >>> import json
+    >>> from base64 import b64decode
+    >>> from Crypto.Cipher import AES
+    >>>
+    >>> # We assume that the key was securely shared beforehand
+    >>> try:
+    ...     b64 = json.loads(json_input)
+    ...     iv = b64decode(b64['iv'])
+    ...     ct = b64decode(b64['ciphertext'])
+    ...     cipher = AES.new(key, AES.MODE_CFB, iv=iv)
+    ...     pt = cipher.decrypt(ct)
+    ...     print("The message was: ", pt)
+    ... except (ValueError, KeyError):
+    ...     print("Incorrect decryption")
+
+CFB cipher object
+~~~~~~~~~~~~~~~~~
+
+.. autoclass:: Crypto.Cipher._mode_cfb.CfbMode
+   :members:
+   :member-order: bysource
+
+.. _ofb_mode:
+
+OFB mode
+--------
+`Output FeedBack <https://en.wikipedia.org/wiki/Block_cipher_mode_of_operation#Output_Feedback_.28OFB.29>`_,
+defined in `NIST SP 800-38A, section 6.4 <http://csrc.nist.gov/publications/nistpubs/800-38a/sp800-38a.pdf>`_.
+It is another mode that leads to a stream cipher.
+Each byte of plaintext is XOR-ed with a byte taken from a *keystream*: the result is the ciphertext.
+The *keystream* is obtained by recursively encrypting the *Initialization Vector*.
+
+The :func:`new` function at the module level under ``Crypto.Cipher`` instantiates
+a new OFB cipher object for the relevant base algorithm.
+In the following definition, ``<algorithm>`` could be ``AES``:
+
+.. function:: Crypto.Cipher.<algorithm>.new(key, mode, *, iv=None)
+
+  Create a new OFB object, using <algorithm> as the base block cipher.
+  
+  :param bytes key: the cryptographic key
+  :param mode: the constant ``Crypto.Cipher.<algorithm>.MODE_OFB``
+  :param bytes iv: the *Initialization Vector*.
+         It must be unique for the combination message/key.
+         It is as long as the block size (e.g. 16 bytes for AES).
+         If not present, the library creates a random IV.
+  :return: an OFB cipher object (:class:`~Crypto.Cipher._mode_ofb.OfbMode`)
+
+The methods :meth:`~Crypto.Cipher._mode_ofb.OfbMode.encrypt` and :meth:`~Crypto.Cipher._mode_ofb.OfbMode.decrypt` of an OFB cipher object
+accept data of any length (i.e. padding is not needed).
+
+The OFB cipher object has a read-only attribute :attr:`~Crypto.Cipher._mode_ofb.OfbMode.iv` (*bytes*), holding
+the Initialization Vector.
+
+Example (encryption)::
+
+    >>> import json
+    >>> from base64 import b64encode
+    >>> from Crypto.Cipher import AES
+    >>> from Crypto.Random import get_random_bytes
+    >>>
+    >>> data = b"secret"
+    >>> key = get_random_bytes(16)
+    >>> cipher = AES.new(key, AES.MODE_OFB)
+    >>> ct_bytes = cipher.encrypt(data)
+    >>> iv = b64encode(cipher.iv).decode('utf-8')
+    >>> ct = b64encode(ct_bytes).decode('utf-8')
+    >>> result = json.dumps({'iv':iv, 'ciphertext':ct})
+    >>> print(result)
+    {"iv": "NUuRJbL0UMp8+UMCk2/vQA==", "ciphertext": "XGVGc1Gw"}
+
+Example (decryption)::
+
+    >>> import json
+    >>> from base64 import b64decode
+    >>> from Crypto.Cipher import AES
+    >>>
+    >>> # We assume that the key was securely shared beforehand
+    >>> try:
+    ...     b64 = json.loads(json_input)
+    ...     iv = b64decode(b64['iv'])
+    ...     ct = b64decode(b64['ciphertext'])
+    ...     cipher = AES.new(key, AES.MODE_OFB, iv=iv)
+    ...     pt = cipher.decrypt(ct)
+    ...     print("The message was: ", pt)
+    ... except (ValueError, KeyError):
+    ...     print("Incorrect decryption")
+
+OFB cipher object
+~~~~~~~~~~~~~~~~~
+
+.. autoclass:: Crypto.Cipher._mode_ofb.OfbMode
+   :members:
+   :member-order: bysource
+
+.. _openpgp_mode:
+
+OpenPGP mode
+------------
+Constant: ``Crypto.Cipher.<cipher>.MODE_OPENPGP``.
+
+OpenPGP (defined in `RFC4880 <https://tools.ietf.org/html/rfc4880>`_).
+A variant of CFB, with two differences:
+
+1.  The first invocation to the :meth:`~Crypto.Cipher._mode_openpgp.OpenPgpMode.encrypt` method
+    returns the encrypted IV concatenated to the first chunk
+    of ciphertext (as opposed to the ciphertext only).
+    The encrypted IV is as long as the block size plus 2 more bytes.
+
+2.  When the cipher object is intended for decryption,
+    the parameter ``iv`` to :func:`new` is the encrypted IV
+    (and not the IV, which is still the case for encryption).
+
+Like for CTR, an OpenPGP cipher object has a read-only attribute :attr:`~Crypto.Cipher._mode_openpgp.OpenPgpMode.iv`.
+
+OpenPGP cipher object
+~~~~~~~~~~~~~~~~~~~~~
+
+.. autoclass:: Crypto.Cipher._mode_openpgp.OpenPgpMode
+   :members:
+   :member-order: bysource
+
+.. _xts_mode:
+
+XTS mode
+--------
+*XEX-based Tweaked-codebook mode with ciphertext Stealing*,
+defined in `IEEE 1619 <https://standards.ieee.org/ieee/1619/7168/>`_
+and `NIST SP 800-38E <https://csrc.nist.gov/pubs/sp/800/38/e/final>`_.
+It is meant for encrypting storage, such as a disk,
+where each *data unit* (such as a sector) is stored in place, and the ciphertext cannot
+be longer than the plaintext. It is only available for AES.
+
+.. warning::
+
+    XTS does not authenticate the data, and it has no room for a nonce or a tag.
+    An attacker who can modify the ciphertext can turn it into random-looking plaintext
+    (one block for each block changed), can restore an old version of a data unit,
+    and can see if a block in a data unit has gone back to a previous value.
+
+    Unless you are constrained by the storage format, use an :doc:`authenticated mode <modern>` instead.
+
+Each cipher object processes one data unit::
+
+    Crypto.Cipher.AES.new(key, AES.MODE_XTS, tweak=tweak)
+
+The arguments are:
+
+* ``key``: 32 bytes (two AES-128 keys) or 64 bytes (two AES-256 keys), concatenated.
+  The two keys must be different, and independent of each other: generate the whole value at random.
+* ``tweak``: 16 bytes that identify the data unit, and that must be different for each data unit
+  encrypted with the same key.
+  It is mandatory: it must come from the position of the data, so it is not generated for you,
+  and it is not stored with the ciphertext.
+  The standard way is the number of the sector, as a little-endian value: ``number.to_bytes(16, "little")``.
+
+The methods :meth:`~Crypto.Cipher._mode_xts.XtsMode.encrypt` and :meth:`~Crypto.Cipher._mode_xts.XtsMode.decrypt`
+return data of the same length as their input.
+A data unit must be at least 16 bytes long, and it cannot be longer than 16 MiB (2\ :sup:`20` blocks).
+There is no padding, as its length does not need to be a multiple of the block size.
+
+A data unit can be processed in several pieces. Each one must have a length that is a multiple
+of 16 bytes, except for the last one, which can have any length above 16 bytes.
+
+Example of encryption and decryption of a disk sector:
+
+.. code-block:: pycon
+
+    >>> from Crypto.Cipher import AES
+    >>> from Crypto.Random import get_random_bytes
+    >>>
+    >>> key = get_random_bytes(64)
+    >>> sector_number = 1234
+    >>> tweak = sector_number.to_bytes(16, "little")
+    >>> sector = b"A" * 512
+    >>>
+    >>> ciphertext = AES.new(key, AES.MODE_XTS, tweak=tweak).encrypt(sector)
+    >>> assert AES.new(key, AES.MODE_XTS, tweak=tweak).decrypt(ciphertext) == sector
+
+XTS cipher object
+~~~~~~~~~~~~~~~~~
+
+.. autoclass:: Crypto.Cipher._mode_xts.XtsMode
+   :members:
+   :member-order: bysource

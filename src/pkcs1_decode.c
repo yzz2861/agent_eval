@@ -1,0 +1,439 @@
+/*
+ * SPDX-FileCopyrightText: 2021 Helder Eijs <helderijs@gmail.com>
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+#include "common.h"
+#include "nat_ct.h"
+
+FAKE_INIT(pkcs1_decode)
+
+#define SIZE_T_MAX ((size_t)-1)
+#define SIZE_T_LEN (sizeof(size_t))
+
+STATIC uint8_t rol8(uint8_t x)
+{
+    return (uint8_t)((x << 1) | (x >> 7));
+}
+
+/*
+ * Return 0 if x is 0, otherwise SIZE_T_MAX (all bits set to 1)
+ */
+STATIC size_t propagate_ones(uint8_t x)
+{
+    unsigned i;
+    uint8_t result8;
+    size_t result;
+
+    result8 = x;
+    for (i=0; i<8; i++) {
+        x = rol8(x);
+        result8 |= x;
+    }
+    result = 0;
+    for (i=0; i<sizeof(result); i++) {
+        result |= ((size_t)result8) << (i*8);
+    }
+
+    return result;
+}
+
+/*
+ * Set all bits to 1 in the flag if term1 == term2
+ * or leave the flag untouched otherwise.
+ */
+STATIC void set_if_match(uint8_t *flag, size_t term1, size_t term2)
+{
+    unsigned i;
+    uint8_t x;
+
+    x = 0;
+    for (i=0; i<sizeof(size_t); i++) {
+        x |= (uint8_t)((term1 ^ term2) >> (i*8));
+    }
+    *flag |= (uint8_t)~propagate_ones(x);
+}
+
+/*
+ * Set all bits to 1 in the flag if term1 != term2
+ * or leave the flag untouched otherwise.
+ */
+STATIC void set_if_no_match(uint8_t *flag, size_t term1, size_t term2)
+{
+    size_t i;
+    uint8_t x;
+
+    x = 0;
+    for (i=0; i<sizeof(size_t); i++) {
+        x |= (uint8_t)((term1 ^ term2) >> (i*8));
+    }
+    *flag |= (uint8_t)propagate_ones(x);
+}
+
+/*
+ * Copy in1[] into out[] if choice is 0, otherwise copy in2[]
+ */
+STATIC void safe_select(const uint8_t *in1, const uint8_t *in2, uint8_t *out, uint8_t choice, size_t len)
+{
+    size_t i;
+    uint8_t mask1, mask2;
+
+    mask1 = (uint8_t)propagate_ones(choice);
+    mask2 = (uint8_t)~mask1;
+    for (i=0; i<len; i++) {
+        out[i] = (in1[i] & mask2) | (in2[i] & mask1);
+        /* yes, these rol8s are redundant, but we try to avoid compiler optimizations */
+        mask1 = rol8(mask1);
+        mask2 = rol8(mask2);
+    }
+}
+
+/*
+ * Return in1 if choice is 0, in2 otherwise.
+ */
+STATIC size_t safe_select_idx(size_t in1, size_t in2, uint8_t choice)
+{
+    size_t mask;
+
+    mask = propagate_ones(choice);
+    return (in1 & ~mask) | (in2 & mask);
+}
+
+/*
+ * Return 0 if all these conditions hold:
+ *  - in1[] is equal to in2[]     where eq_mask[] is 0xFF,
+ *  - in1[] is NOT equal to in2[] where neq_mask[] is 0xFF.
+ * Return non-zero otherwise.
+ */
+STATIC uint8_t safe_cmp_masks(const uint8_t *in1, const uint8_t *in2,
+                 const uint8_t *eq_mask, const uint8_t *neq_mask,
+                 size_t len)
+{
+    size_t i;
+    uint8_t c, result;
+
+    result = 0;
+    for (i=0; i<len; i++) {
+        c = (uint8_t)propagate_ones(*in1++ ^ *in2++);
+        result |= (uint8_t)(c & *eq_mask++);    /* Set all bits to 1 if *in1 and *in2 differed
+                                                and eq_mask was 0xff */
+        result |= (uint8_t)(~c & *neq_mask++);  /* Set all bits to 1 if *in1 and *in2 matched
+                                                and neq_mask was 0xff */
+    }
+
+    return result;
+}
+
+/*
+ * Put into *pos the index of the first byte with value c,
+ * or the length of in1[] when c is not present.
+ *
+ * Return 0 on success. Return -1, without setting *pos, if in1 or pos
+ * is NULL, if len is 0, or if memory cannot be allocated.
+ * The status is returned separately from the (secret) position,
+ * so that the caller never needs to compare the position with an error value.
+ */
+STATIC int safe_search(const uint8_t *in1, uint8_t c, size_t len, size_t *pos)
+{
+    size_t result, mask1, mask2, i;
+    uint8_t *in1_c;
+
+    if (NULL == in1 || 0 == len || NULL == pos) {
+        return -1;
+    }
+
+    /*
+     * Create a second byte string and put c at the end,
+     * so that at least we will find it there.
+     */
+    in1_c = (uint8_t*) malloc(len + 1);
+    if (NULL == in1_c) {
+        return -1;
+    }
+    memcpy(in1_c, in1, len);
+    in1_c[len] = c;
+
+    result = 0;
+    mask2 = 0;
+    for (i=0; i<(len+1); i++) {
+        mask1 = ~mask2 & ~propagate_ones(in1_c[i] ^ c); /* Set mask1 to 0xff if there is a match
+                                                           and it is the first one. */
+        result |= i & mask1;
+        mask2 |= mask1;
+    }
+
+    free(in1_c);
+    *pos = result;
+    return 0;
+}
+
+#define PKCS1_PREFIX_LEN 10
+
+/*
+ * Decode and verify the PKCS#1 padding, then put either the plaintext
+ * or the sentinel value into the output buffer, all in constant time.
+ *
+ * The output is a buffer of equal length as the encoded message (em).
+ *
+ * The sentinel is put into the buffer when decryption fails.
+ *
+ * The caller may already know the expected length of the plaintext M,
+ * which they should put into expected_pt_len.
+ * Otherwise, expected_pt_len must be set to 0.
+ *
+ * Either the plaintext or the sentinel will be put into the buffer
+ * with padding on the left.
+ *
+ * The function returns the number of bytes to ignore at the beginning
+ * of the output buffer, or -1 in case of problems.
+ */
+EXPORT_SYM int pkcs1_decode(const uint8_t *em, size_t len_em_output,
+                            const uint8_t *sentinel, size_t len_sentinel,
+                            size_t expected_pt_len,
+                            uint8_t *output)
+{
+    size_t pos;
+    uint8_t match, selector;
+    uint8_t *padded_sentinel;
+    int result;
+
+    result = -1;
+
+    if (NULL == em || NULL == output || NULL == sentinel) {
+        return -1;
+    }
+    if (len_em_output < (PKCS1_PREFIX_LEN + 2)) {
+        return -1;
+    }
+    if (len_sentinel > len_em_output) {
+        return -1;
+    }
+    if (expected_pt_len > 0 && expected_pt_len > (len_em_output - PKCS1_PREFIX_LEN - 1)) {
+        return -1;
+    }
+
+    /** Pad sentinel (on the left) so that it matches em in length **/
+    padded_sentinel = (uint8_t*) calloc(1, len_em_output);
+    if (NULL == padded_sentinel) {
+        return -1;
+    }
+    memcpy(padded_sentinel + (len_em_output - len_sentinel), sentinel, len_sentinel);
+
+    /** The first 10 bytes must follow the pattern **/
+    match = safe_cmp_masks(em,
+                     (const uint8_t*)"\x00\x02" "\x00\x00\x00\x00\x00\x00\x00\x00",
+                     (const uint8_t*)"\xFF\xFF" "\x00\x00\x00\x00\x00\x00\x00\x00",
+                     (const uint8_t*)"\x00\x00" "\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF",
+                     10);
+
+    /*
+     * pos is the index of the first 0 byte. It is followed by the plaintext M.
+     * It can be (len_em_output-1) when the 0 is at the end (empty M).
+     * It can be len_em_output when the 0 is not present.
+     */
+    if (safe_search(em + 10, 0, len_em_output - 10, &pos)) {
+        result = -1;
+        goto end;
+    }
+    pos += 10;
+
+    /*
+     * selector is 0 if:
+     * - there is a match for the first 10 bytes AND
+     * - a 0 byte is found in the remainder of em, AND
+     * - the length of the plaintext matches the expectation (if there is one)
+     */
+    selector = match;
+    set_if_match(&selector, pos, len_em_output);
+    if (expected_pt_len > 0) {
+        size_t pt_len;
+
+        pt_len = len_em_output - pos - 1;
+        set_if_no_match(&selector, pt_len, expected_pt_len);
+    }
+
+    /** Select the correct data to output **/
+    safe_select(em, padded_sentinel, output, selector, len_em_output);
+
+    /** Select the number of bytes that the caller will skip in output **/
+    result = (int)safe_select_idx(pos + 1, len_em_output - len_sentinel, selector);
+
+end:
+    free(padded_sentinel);
+    return result;
+}
+
+/* Implicit rejection: 128 candidate lengths, 2 bytes each (big endian) */
+#define IR_NUM_LENGTHS 128
+
+/*
+ * Return the length of the alternative message for implicit rejection
+ * (step 3.3 in section 7.2 of draft-irtf-cfrg-rsa-guidance),
+ * without branches or memory accesses that depend on the secret
+ * candidate lengths.
+ *
+ * cl[] contains the 128 candidate lengths, each 2 bytes long (big endian).
+ * max_len is the maximum length of a message (k - 11), smaller than 2^16.
+ */
+STATIC size_t select_alt_length(const uint8_t cl[IR_NUM_LENGTHS][2], size_t max_len)
+{
+    size_t mask_bits, i, result;
+
+    /* Mask with the same bit length as max_len (public) */
+    mask_bits = 0;
+    while (mask_bits < max_len) {
+        mask_bits = (mask_bits << 1) | 1;
+    }
+
+    /* Pick the last candidate that is not larger than max_len, or 0 */
+    result = 0;
+    for (i=0; i<IR_NUM_LENGTHS; i++) {
+        size_t candidate, mask;
+
+        candidate = (((size_t)cl[i][0] << 8) | cl[i][1]) & mask_bits;
+        /* All bits set to 1 if candidate <= max_len, 0 otherwise */
+        mask = (size_t)ct_mask(1 ^ ct_lt(max_len, candidate));
+        result = (result & ~mask) | (candidate & mask);
+    }
+
+    return result;
+}
+
+/*
+ * Decode and verify the PKCS#1 padding with implicit rejection
+ * (section 7.2 of draft-irtf-cfrg-rsa-guidance), all in constant time.
+ *
+ * em is the encoded message, len_em_output bytes long (k).
+ * am is the alternative message, also len_em_output bytes long:
+ *      AM = IRPRF(KDK, "message", k)
+ * cl contains the 128 candidate lengths (2 bytes each, big endian):
+ *      CL = IRPRF(KDK, "length", 256)
+ *
+ * The output is a buffer of equal length as the encoded message (em).
+ *
+ * When the padding is correct, the plaintext M is put into the buffer,
+ * otherwise the last AL bytes of am (AL is selected from cl).
+ *
+ * If expected_pt_len is not 0, the padding is also considered wrong when
+ * M has a different length, and AL is expected_pt_len.
+ *
+ * The function returns the number of bytes to ignore at the beginning
+ * of the output buffer, or -1 in case of problems.
+ */
+EXPORT_SYM int pkcs1_decode_implicit(const uint8_t *em, size_t len_em_output,
+                                     const uint8_t *am,
+                                     const uint8_t cl[IR_NUM_LENGTHS][2],
+                                     size_t expected_pt_len,
+                                     uint8_t *output)
+{
+    size_t max_len, alt_len, mask;
+    int result;
+    uint8_t failed;
+
+    if (NULL == em || NULL == am || NULL == cl || NULL == output) {
+        return -1;
+    }
+    if (len_em_output < (PKCS1_PREFIX_LEN + 2) || len_em_output > 0xFFFF) {
+        return -1;
+    }
+    max_len = len_em_output - PKCS1_PREFIX_LEN - 1;
+    if (expected_pt_len > max_len) {
+        return -1;
+    }
+
+    if (expected_pt_len > 0) {
+        alt_len = expected_pt_len;
+    } else {
+        alt_len = select_alt_length(cl, max_len);
+    }
+
+    /*
+     * With the whole am as sentinel, the number of bytes to skip is 0
+     * only when the padding is wrong (it is at least 11 otherwise).
+     * With the parameters checked above, pkcs1_decode() can only fail
+     * (-1) when out of memory.
+     */
+    result = pkcs1_decode(em, len_em_output, am, len_em_output, expected_pt_len, output);
+
+    /*
+     * No branch on result, which depends on the padding: replace 0
+     * with len_em_output - alt_len, and keep any other value (also -1)
+     */
+    failed = 0;
+    set_if_match(&failed, (size_t)result, 0);
+    mask = propagate_ones(failed);
+    return result + (int)((len_em_output - alt_len) & mask);
+}
+
+/*
+ * Decode and verify the OAEP padding in constant time.
+ *
+ * The function returns the number of bytes to ignore at the beginning
+ * of db (the rest is the plaintext), 0 if the padding is not correct,
+ * or -1 in case of other problems (invalid parameters, no memory).
+ */
+
+EXPORT_SYM int oaep_decode(const uint8_t *em,
+                           size_t em_len,
+                           const uint8_t *lHash,
+                           size_t hLen,
+                           const uint8_t *db,
+                           size_t db_len)   /* em_len - 1 - hLen */
+{
+    int result;
+    size_t one_pos, search_len, i;
+    uint8_t wrong_padding;
+    uint8_t *eq_mask = NULL;
+    uint8_t *neq_mask = NULL;
+    uint8_t *target_db = NULL;
+
+    if (NULL == em || NULL == lHash || NULL == db) {
+        return -1;
+    }
+
+    if (em_len < 2*hLen+2 || db_len != em_len-1-hLen) {
+        return -1;
+    }
+
+    /* Allocate */
+    eq_mask = (uint8_t*) calloc(1, db_len);
+    neq_mask = (uint8_t*) calloc(1, db_len);
+    target_db = (uint8_t*) calloc(1, db_len);
+    if (NULL == eq_mask || NULL == neq_mask || NULL == target_db) {
+        result = -1;
+        goto cleanup;
+    }
+
+    /* Step 3g */
+    search_len = db_len - hLen;
+
+    if (safe_search(db + hLen, 0x01, search_len, &one_pos)) {
+        result = -1;
+        goto cleanup;
+    }
+
+    memcpy(target_db, lHash, hLen);
+    memset(eq_mask, 0xFF, hLen);
+
+    /*
+     * The barrier on i stops gcc from rewriting the loop counter as
+     * i - one_pos (found with test_pkcs1_ct)
+     */
+    for (i=0; i<search_len; i++) {
+        eq_mask[hLen + i] = (uint8_t)ct_mask(ct_lt(ct_barrier(i), one_pos));
+    }
+
+    wrong_padding = em[0];
+    wrong_padding |= safe_cmp_masks(db, target_db, eq_mask, neq_mask, db_len);
+    set_if_match(&wrong_padding, one_pos, search_len);
+
+    /* hLen + 1 + one_pos is at least 1, so 0 is never a valid result */
+    result = (int)safe_select_idx(hLen + 1 + one_pos, 0, wrong_padding);
+
+cleanup:
+    free(eq_mask);
+    free(neq_mask);
+    free(target_db);
+
+    return result;
+}

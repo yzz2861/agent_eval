@@ -1,0 +1,1562 @@
+Changelog
+=========
+
+4.5.0 (Under development)
++++++++++++++++++++++++++++
+
+New features
+------------
+* Added the mode ``MODE_GCM_SIV`` to ``Crypto.Cipher.AES`` (AES-GCM-SIV, RFC 8452),
+  for authenticated encryption that is resistant to the reuse of a nonce.
+* Added the mode ``MODE_XTS`` to ``Crypto.Cipher.AES`` (IEEE 1619, NIST SP 800-38E),
+  for the encryption of storage.
+* CTR mode is about 35% faster on short ``bytes`` messages.
+
+4.4.0 (7 November 2026)
++++++++++++++++++++++++++++
+
+New features
+------------
+* Added the elliptic curve secp256k1 to ``Crypto.PublicKey.ECC``: key generation,
+  import and export, ECDSA with ``Crypto.Signature.DSS``, and ECDH with
+  ``Crypto.Protocol.DH``.
+* Added the mode ``'sec1'`` to ``Crypto.Signature.DSS.new``, for randomized ECDSA on all Weierstrass
+  curves. Mode ``'fips-186-3'`` does not accept secp256k1, which is not a curve of that standard.
+* GH#759: Added the parameter ``low_s`` to ``Crypto.Signature.DSS.new``, for ECDSA signatures
+  in the low-S form (for all curves): signing normalizes ``s``, and verifying rejects a high ``s``.
+* ECDSA signatures in DER encoding are about 5-8x faster.
+
+Resolved issues
+---------------
+* ``ECC.import_key`` raised ``TypeError`` instead of ``ValueError`` for an OpenSSH public key
+  with an unsupported curve or key type, or with a malformed body.
+* ``ECC.import_key`` accepted an OpenSSH key (public or private) whose curve did not match its key type.
+* GH#960: In HPKE, a message rejected by ``unseal()`` consumed a sequence number, so all later
+  messages of that context failed too. The sequence number now only advances when ``unseal()``
+  succeeds (RFC 9180, Section 5.2). Thanks to Zulfareen Shaikh.
+* In HPKE, a ``seal()`` that raised an exception also consumed a sequence number,
+  so the receiver could not unseal the messages that followed.
+
+4.3.0 (2 November 2026)
+++++++++++++++++++++++++++
+
+New features
+------------
+* CTR mode is 2.5-3.5x faster on large data (and GCM about 2x),
+  on all platforms.
+* On 64-bit ARM CPUs (Linux, macOS and Windows), AES and GHASH use the instructions
+  of the ARMv8 Cryptography Extensions (AES and PMULL), when available.
+  On a Graviton3, AES-ECB is about 35x faster, GCM 7x, OCB 10-12x,
+  and CTR, CBC, CFB and OFB 3-6x.
+* ``Integer.random_range()`` is about 2x faster when the bounds are public,
+  with the same output: ECDSA signatures are about 13% faster (P-256),
+  DSA signatures about 4%, and ECC key generation about 35%.
+  The RSA modulus and the DSA subgroup order are now public ``Integer`` objects.
+* Faster RSA: on x86-64, signatures and decryption are 35-40% faster
+  (RSA-2048 to RSA-4096), verification and encryption 2-2.7x.
+  Modular exponentiation with a public exponent (like the RSA public exponent)
+  no longer uses the slower constant-time algorithm, which is only needed for
+  secret exponents, and the Montgomery context of a modulus is kept with it.
+  The RSA blinding factor is squared between uses (a new one every 32 uses,
+  and after a fork).
+* The Montgomery multiplication for x86-64 CPUs with BMI2 and ADX is about 20%
+  faster: DSA signatures and verification are about 25% faster.
+* ECDSA signatures are 3-6% faster for P-256 and P-384: the field inversion
+  uses the faster power for public exponents (the exponent p - 2 is public).
+* On 64-bit ARM CPUs, SHA-224 and SHA-256 use the SHA-256 instructions
+  of the ARMv8 Cryptography Extensions, and SHA-384 and SHA-512 the SHA-512
+  instructions of ARMv8.2, when available.
+  On a Graviton3, SHA-256 is about 3.8x faster, and SHA-512 2x.
+* On 64-bit ARM CPUs, KangarooTwelve, ML-KEM and ML-DSA compute 4 Keccak states at once
+  (2 with scalar code and 2 with NEON).
+  On a Graviton3, KangarooTwelve is 1.9x faster, ML-DSA 7-20% and ML-KEM 7-8%.
+* PKCS#1 v1.5 decryption (``Crypto.Cipher.PKCS1_v1_5``) performs implicit rejection,
+  as defined in section 7.2 of ``draft-irtf-cfrg-rsa-guidance``,
+  when ``decrypt()`` is called without a ``sentinel`` (which is now optional):
+  when the padding of a ciphertext is not correct, it returns a pseudo-random
+  message, which only depends on the private key and on the ciphertext.
+  With a ``sentinel``, ``decrypt()`` behaves as before.
+
+Other changes
+-------------
+* Updated the Wycheproof test vectors (new Ed25519 tests and the new ``chacha20_counter_test.json``).
+  XChaCha20 keeps the construction of draft-irtf-cfrg-xchacha (HChaCha20 and the ChaCha20
+  of RFC 8439), with a 32-bit block counter: the key stream ends after 256 GiB,
+  whereas libsodium and Wycheproof use a 64-bit counter.
+
+Resolved issues
+---------------
+* GH#481: PKCS#1 v1.5 decryption could be used as a Bleichenbacher oracle,
+  through the ``sentinel`` returned for ciphertexts with incorrect padding.
+  Calling ``decrypt()`` without ``sentinel`` (implicit rejection) is now
+  recommended. Thanks to tomato42 and eslerm.
+* PKCS#1 v1.5 ``decrypt()`` never returned a ``sentinel`` that is not a byte string
+  (such as ``None``), and it returned an empty byte string instead.
+* GH#954: ``Crypto.Util.asn1.DerObjectId`` accepted an ASN.1 OBJECT IDENTIFIER where an arc
+  is encoded with the initial octet 0x80 (invalid, as that would violate the minimal
+  encoding rule for BER) or where the last octet encoding the last arc has bit 7 set
+  (invalid, and that arc would also be dropped). In those cases, decoding now fails.
+  Thanks to Zulfareen Shaikh.
+
+4.2.0 (24 October 2026)
+++++++++++++++++++++++++++
+
+New features
+------------
+* New module ``Crypto.PublicKey.MLKEM``, for ML-KEM keys (FIPS 203).
+  It is based on the portable C code of
+  `mlkem-native <https://github.com/pq-code-package/mlkem-native>`_ (v2.0.0),
+  with the Keccak code of PyCryptodome, also compiled for AVX2 and BMI2 (with 4-way SHA-3).
+  The keys can be exported and imported as PKCS#8 DER or PEM files.
+* New module ``Crypto.PublicKey.Hybrid``, to model hybrid keys (post-quantum + traditional).
+  It supports the hybrid KEM MLKEM768-X25519 (X-Wing), which combines ML-KEM-768 and X25519.
+  For now, hybrid keys can only be generated and used with HPKE: they cannot be exported or imported.
+* ``Crypto.Protocol.HPKE`` accepts ML-KEM keys and X-Wing keys,
+  for post-quantum HPKE (draft-ietf-hpke-pq), in the Base and PSK modes.
+
+4.1.0 (19 October 2026)
+++++++++++++++++++++++++++
+
+New features
+------------
+* New module ``Crypto.PublicKey.MLDSA``, for ML-DSA keys (FIPS 204).
+  It is based on the portable C code of `mldsa-native <https://github.com/pq-code-package/mldsa-native>`_
+  (v2.0.0), with the Keccak code of PyCryptodome. On CPUs with AVX2 and BMI2, a version
+  compiled for them and with 4-way SHA-3 is used: compared to the portable version,
+  key generation and verification are 30-45% faster, signing 15-30%.
+* New module ``Crypto.Signature.mldsa``, for ML-DSA and HashML-DSA signatures (FIPS 204),
+  hedged (default) or deterministic, with an optional context.
+  The new ``MLDSAMuHash`` computes the message representative mu (external mu),
+  to sign or verify a large message in pieces.
+* New function ``digest()`` in the modules of the SHA-2 and SHA-3 hashes,
+  to hash a whole message with a single call,
+  like ``Crypto.Hash.KangarooTwelve.digest()``. For messages up to 1 KiB,
+  it is 1.5x to 3.4x faster than ``new()`` followed by ``digest()``.
+* ``Crypto.IO.PKCS8.wrap()`` has a new parameter ``public_key``, to create a ``OneAsymmetricKey``
+  version 2 (RFC 5958) with the field ``publicKey``.
+  ``Crypto.IO.PKCS8.unwrap()`` returns an ``UnwrappedKey``: still a tuple ``(oid, private_key, params)``,
+  with the same items as attributes, plus ``public_key`` (the field ``publicKey``, if present).
+* The scalar Keccak permutation (used by SHA-3, SHAKE, cSHAKE, KMAC, TupleHash, TurboSHAKE
+  and KangarooTwelve) processes the state one plane at a time, two rounds per iteration,
+  which needs fewer registers: SHA-3 and SHAKE are 5-10% faster.
+
+Resolved issues
+---------------
+* ``Crypto.PublicKey.ECC.import_key()`` checks that the field ``publicKey`` of a PKCS#8
+  ``OneAsymmetricKey`` version 2 (RFC 5958), if present, matches the private key.
+  Before, it was ignored.
+
+4.0.1 (17 October 2026)
+++++++++++++++++++++++++++
+
+New features
+------------
+* The Windows wheels for x86-64 are built with ``clang-cl`` (compatible with MSVC), so the
+  code for CPUs with AVX2, BMI2 and ADX is also used on Windows: SHA-3 and the other
+  Keccak-based functions, KangarooTwelve, ChaCha20, Salsa20, and the big integers of RSA,
+  DSA and the NIST curves. To build from source with ``clang-cl``, set the environment
+  variable ``PYCRYPTODOME_CLANG_CL`` (see the installation instructions).
+
+4.0.0 (14 October 2026)
+++++++++++++++++++++++++++
+
+Breaking changes
+----------------
+* Remove support for Python 2.7 and 3.8. The minimum supported version is now Python 3.9.
+* The ``pycryptodomex`` package (``Cryptodome`` namespace) is no longer released
+  (except for important security patches, but still on the 3.x branch).
+  The library is only available as ``pycryptodome``, under the ``Crypto`` namespace.
+* The self-tests are now run by ``pytest``, which must be installed for
+  ``python -m Crypto.SelfTest`` to work. The ``test`` command of ``setup.py`` is removed:
+  install the package (e.g. with ``pip install -e .``) and run ``python -m Crypto.SelfTest`` instead.
+* In ``Crypto.Protocol.KDF.SP800_108_Counter()``, the ``label`` can no longer
+  contain zero bytes, while the ``context`` now can (for instance, a binary nonce).
+  The zero byte between them still separates the two unambiguously,
+  as required by NIST SP 800-108r1 (GH#896).
+* The coordinates of ``EccPoint`` and ``EccXPoint`` (``x``, ``y`` and ``xy``),
+  ``EccKey.d`` and the components of ElGamal keys (``p``, ``g``, ``y`` and ``x``)
+  are now Python ``int`` objects, not ``Crypto.Math.Numbers.Integer``.
+  The ElGamal components can no longer be assigned.
+* The GMP library is no longer used, and the environment variable
+  ``PYCRYPTODOME_DISABLE_GMP`` has no effect. Big integers are handled by the
+  new constant-time code (see below). ``Crypto.Math.Numbers.Integer``
+  (an internal class) no longer supports negative values.
+* Elliptic curve points are decoded more strictly. Importing a NIST curve public key
+  (SEC1, DER, PEM or OpenSSH) fails if a coordinate of the point is equal to or
+  larger than the modulus ``p``, as required by SEC1 (such coordinates were reduced
+  modulo ``p`` before; ``EccPoint`` and ``ECC.construct()`` still reduce them).
+  Ed25519 and Ed448 points (public keys, and ``R`` in signatures) are decoded
+  as in RFC 8032: an encoding with x = 0 and the sign bit of x set,
+  or (for Ed448) with any of the 7 low bits of the last byte set, is now rejected.
+* RSA keys are limited to a modulus of 16384 bits: ``RSA.generate()``,
+  ``RSA.construct()`` and ``RSA.import_key()`` raise ``ValueError`` for
+  larger ones. The constant-time arithmetic is slower than GMP, and a large
+  public key from an untrusted source could take minutes to import or use.
+* ``Crypto.Protocol.KDF.bcrypt_check()`` rejects (with ``Crypto.KdfIterationLimitError``,
+  a ``ValueError``) a bcrypt hash whose cost
+  is above 20, which takes about one minute: a hash from an untrusted source, which states
+  its own cost, could otherwise tie up the CPU for a day. Use the new parameter ``max_cost``
+  to accept costs up to 31, as before (0 for no limit).
+* ChaCha20-Poly1305 with an 8-byte nonce follows RFC 8439 (the nonce is prefixed
+  by 4 zero bytes, and the block counter has 32 bits): a single message longer than
+  about 256 GiB is now rejected with ``MessageTooLongError``. Before, the counter
+  overflowed into the 4 zero bytes, which no specification defines. The ciphertext
+  and the tag of shorter messages are unchanged.
+* Exporting a private key with a passphrase uses PKCS#8 with
+  ``'PBKDF2WithHMAC-SHA256AndAES256-CBC'`` and 600 000 iterations by default,
+  instead of weak schemes. With RSA keys, ``export_key(passphrase=...)`` returned
+  a PKCS#1 key with the obsolete PEM encryption (one round of MD5 and 3DES, easy to brute force),
+  and now returns an ``ENCRYPTED PRIVATE KEY``: the parameter ``pkcs`` of ``RsaKey.export_key()``
+  is now ``None`` by default (PKCS#1 for a key in the clear, as before, PKCS#8 with a passphrase).
+  Without ``protection``, ``export_key()`` of RSA and DSA keys and ``Crypto.IO.PKCS8.wrap()``
+  used ``'PBKDF2WithHMAC-SHA1AndDES-EDE3-CBC'``, and ECC keys raised ``ValueError``.
+  When ``prot_params`` does not specify them, the iteration count of PBKDF2 is now 600 000 (it was 1000)
+  and the cost N of scrypt 131 072 (it was 16 384), which meet the OWASP recommendations.
+  The obsolete PEM encryption is only used with an explicit ``pkcs=1`` (RSA), ``pkcs8=False`` (DSA)
+  or ``use_pkcs8=False`` (ECC); with RSA and DSA, ``protection`` and ``prot_params``
+  are then rejected, instead of being silently ignored.
+  Also, ``protection`` or ``prot_params`` without a passphrase raise ``ValueError``,
+  for RSA, DSA and ECC keys: before, the key was exported in the clear.
+* Removed ``Crypto.Util.number.long2str()`` and ``str2long()``, aliases of
+  ``long_to_bytes()`` and ``bytes_to_long()`` deprecated since PyCrypto.
+
+Deprecations
+------------
+* ``Crypto.Hash.HMAC.new()`` without ``digestmod`` (which then uses MD5) emits a
+  ``DeprecationWarning``. The default will be removed: always pass the hash
+  (for instance, ``digestmod=SHA256``), as with Python's ``hmac`` module.
+* ``Crypto.Protocol.KDF.PBKDF2()`` without ``count`` (which then uses 1000 iterations)
+  or without ``hmac_hash_module`` and ``prf`` (which then uses HMAC-SHA1) emits a
+  ``DeprecationWarning``. These weak defaults will be removed: always pass them
+  (for instance, ``count=600000, hmac_hash_module=SHA256``).
+
+Resolved issues
+---------------
+* ``Crypto.Util.number.long_to_bytes()`` took quadratic time on large integers:
+  now it uses ``int.to_bytes()``, and ``bytes_to_long()`` uses ``int.from_bytes()``.
+* The ``verify()`` methods of MACs and AEAD modes, and ``bcrypt_check()``, compare
+  the tags with ``hmac.compare_digest()``, instead of two BLAKE2s MACs with a random key.
+* Updated the references to superseded RFCs (PKCS#1 to RFC 8017, PKCS#5 to RFC 8018,
+  PKCS#8 to RFC 5958), and fixed typos in error messages.
+* Exporting a private key with an empty passphrase of type ``bytes`` returned the key
+  in the clear, instead of raising ``ValueError``: for ECC keys in all formats,
+  and for RSA (``pkcs=1``) and DSA (``pkcs8=False``) keys in DER format.
+* ``RsaKey.export_key()`` with ``format='PEM'``, ``pkcs=8``, a ``protection`` but no passphrase
+  labeled the key in the clear as ``ENCRYPTED PRIVATE KEY`` (now it raises ``ValueError``).
+* Importing a private key in clear PKCS#8 format failed if a passphrase was
+  also given; now the passphrase is ignored, as for the other formats.
+* ``Crypto.Math.Primality``: the trial division by small primes in ``test_probable_prime()``
+  never ran (only the Miller-Rabin and Lucas tests did), which made the generation
+  of RSA, DSA and ElGamal keys slower; and the primality tests reported 1 as a probable prime.
+* Key comparison: ElGamal key objects could not be compared for equality, two DSA keys
+  always compared as equal if both were public or both private, and comparing an RSA,
+  DSA or ElGamal key with an object of a different type raised ``AttributeError``
+  instead of returning ``False``.
+* EdDSA signatures with ``S`` equal to the order of the curve are now rejected, as required by RFC 8032.
+* A few valid Ed25519 points (those where one side of the curve equation is very small,
+  for instance with y = 3) were rejected as not on the curve.
+* Ed25519 and X25519: the final reduction modulo the prime (when
+  converting a point to bytes, including the X25519 shared secret) could
+  branch on secret data, depending on the compiler and the target
+  (for instance, gcc -O3 on 32-bit x86, and the code without SSE2 built with clang).
+  It is now constant time, checked with Valgrind like the rest of the elliptic curves.
+* The legacy ``can_decrypt()`` method of PKCS#1 ciphers raised ``AttributeError``
+  and not a boolean.
+* The ``update()`` method for SIV encryption objects now returns the cipher object,
+  like for other AEAD modes.
+* Fixed the method ``new()`` of KMAC256 and TupleHash256 objects:
+  it created a KMAC128 or TupleHash128 object instead (for KMAC, also accepting
+  keys shorter than the 32 bytes required for KMAC256).
+* Added the missing documentation for ``Crypto.Hash.MD4``.
+* Salsa20 never returned when encrypting or decrypting 4 GiB or more in a single call.
+* The package metadata declares the license as an SPDX expression
+  (``BSD-2-Clause AND Unlicense``, PEP 639), which tools can process.
+* ``Crypto.Protocol.HPKE.new()`` raised ``TypeError`` with Python 3.9 to 3.11
+  when ``aead_id`` was a plain integer, and not an ``HPKE.AEAD`` member.
+* GH#937: Importing a malformed PEM key could take quadratic time. Thanks to Brian Willows.
+* Importing an encrypted OpenSSH private key (with ``RSA.import_key()`` or
+  ``ECC.import_key()``) had no limit on the number of rounds of bcrypt_pbkdf,
+  which the key states: a malicious key could tie up the CPU for months.
+  Now ``max_iteration_count`` limits it (by default, 16,384 rounds, about one minute),
+  and a key with less than one round is rejected.
+* PKCS#8 keys: ``Crypto.PublicKey.RSA.import_key()`` accepted a PKCS#8 key whose private key
+  was not an ``RSAPrivateKey`` (PKCS#1), including another, possibly encrypted, PKCS#8 key:
+  now such a key is rejected. An encrypted PKCS#8 key with an iteration count lower than 1,
+  or with invalid scrypt parameters (*N* not a power of 2 larger than 1, *r* or *p* not
+  positive), raised other exceptions than ``ValueError`` (like ``ZeroDivisionError``):
+  now it is rejected with ``ValueError``, before any key derivation.
+* Encrypted PKCS#8 keys protected with PBKDF2 (PBES2) were exported and imported
+  with the slow Python implementation of PBKDF2-HMAC, and not with the C one:
+  now they are about 50x-150x faster (SHA-1 and SHA-2).
+* GH#794, GH#795: the C tests failed to link on Debian armel (where the gcc
+  sanitizers need ``libatomic``) and mips64el (where gcc has no sanitizers);
+  now ``libatomic`` is linked when needed, and the tests run without the
+  sanitizers if they cannot be linked at all.
+
+New features
+------------
+* GH#320: importing an encrypted private key (PEM, PKCS#8 or OpenSSH) without
+  a passphrase raises ``Crypto.PassphraseRequiredError``, and with
+  an incorrect passphrase ``Crypto.IncorrectPassphraseError``.
+  Both are subclasses of ``ValueError``, like before; the messages are also clearer.
+  This applies to ``import_key()`` of RSA, DSA and ECC, to ``Crypto.IO.PKCS8.unwrap()``
+  and to ``Crypto.IO.PEM.decode()``.
+  A new page of the documentation lists the dedicated exceptions of the library.
+* New exception ``Crypto.MessageTooLongError``, raised when a cipher would process
+  more data than allowed with the same key and nonce: CCM (it replaces
+  ``CCMMessageTooLongError``, still available as an alias), GCM, CTR, ChaCha20,
+  ChaCha20-Poly1305, Salsa20, KW and KWP. It is a subclass of both ``ValueError``
+  and ``OverflowError``, which those ciphers used to raise. GCM now checks the
+  limits before processing the data, also when decrypting; and its limit on the
+  associated data is now 2\ :sup:`64` - 1 bits (it was bytes).
+* All the big integer arithmetic for RSA, DSA, ElGamal and ECC runs in a new
+  C library (``Crypto.Math._nat``), in constant time: the time and the memory
+  accesses do not depend on the values of the numbers, only on their (public)
+  size. This includes modular exponentiation and inversion, GCD, Jacobi symbol,
+  and the Miller-Rabin and Lucas tests used to generate primes.
+  It replaces GMP, the previous C code for modular exponentiation
+  (``IntegerCustom``) and Python integers, which leak timing information;
+  Python integers remain only as a fallback, if the C extensions are not available.
+  The C extensions no longer depend on GMP at runtime.
+  For now, RSA and DSA private key operations and key generation are slower
+  than with GMP. On x86-64 CPUs with BMI2 and ADX (gcc and clang only),
+  a build that uses those instructions is about 15-25% faster.
+* The NIST curves (P-192, P-224, P-256, P-384 and P-521) run on the same
+  constant-time library (new module ``Crypto.PublicKey._ec_nat``). Every scalar
+  multiplication processes the full (blinded) scalar length, scans its tables in full
+  and randomizes the coordinates, and its result is checked to be on the curve.
+  This fixes timing leaks of the previous code, including one on the length
+  of ECDSA nonces. It is also faster: the multiplication of the generator
+  (signing, key generation) is up to 10x faster for P-192 and P-224, which now
+  have precomputed tables too, and ECDH is about 1.5x-2x faster on P-192,
+  P-224, P-256 and P-384. Multiplying the generator by a scalar of any length
+  no longer fails.
+* Ed448 and X448 (Curve448) run on the same library and module, with the same
+  countermeasures: for Ed448, a blinded scalar (by a multiple of the order of
+  the whole group, so that it also works for points with a small-order component),
+  signed windows with full table scans, randomized coordinates and a check of the
+  result; for X448, the Montgomery ladder with randomized coordinates.
+  Ed448 key generation and signing are about 10x faster (precomputed tables),
+  verification about 2.5x, and X448 about 1.3x.
+* Ed25519 scalar multiplications are blinded (by a random 32-bit multiple of
+  the order of the whole group) and randomize the coordinates. Signing is about
+  10% slower.
+* Faster signature verification. ECDSA and EdDSA verification no longer applies the
+  side-channel countermeasures, which are useless for its public values:
+  about 22-28% faster for P-256, P-384, P-521 and Ed448 (for the NIST curves,
+  it also uses faster, not constant-time, formulas). Ed25519 and Ed448 points are
+  decoded in C (RFC 8032), and copying a point no longer goes through its affine
+  coordinates: EdDSA verification is about 2x faster for Ed25519 and 1.8x for Ed448,
+  importing an Ed25519 public key 7x-11x faster (Ed448 2.5x-3x), and ECDSA
+  verification on P-256 1.4x faster.
+* The field arithmetic of the elliptic curves has unrolled code for each curve size:
+  scalar multiplications are 1.4x-1.7x faster for P-192, P-224 and P-256, and
+  1.1x-1.5x for the larger curves (more with clang than with gcc).
+* New function ``Crypto.Hash.KangarooTwelve.digest()``, to hash a whole message
+  with a single call. For messages up to 8 KiB, it is 1.3x to 3x faster than
+  ``new()`` followed by ``read()``.
+* Faster hashes on x86 CPUs. With AVX2 and BMI2 (x86-64, gcc and clang only),
+  the Keccak-based hashes use a build that takes advantage of those instructions:
+  SHA-3, SHAKE, cSHAKE, KMAC, TupleHash and TurboSHAKE are about 1.25x-1.4x faster
+  on long messages, and KangarooTwelve hashes 4 leaves in parallel
+  (2x to 2.3x faster for messages of 1 MiB or more). With the SHA extensions (SHA-NI),
+  SHA-224 and SHA-256 hash long messages about 4x faster.
+* New parameter ``threads``, to run on several CPU cores (``threads=0`` for all of them);
+  the output does not depend on the number of threads. It is accepted by the CTR mode
+  (all block ciphers), the GCM and OCB modes and ChaCha20 (also XChaCha20),
+  to encrypt and decrypt long data;
+  by ``Crypto.Protocol.KDF.scrypt()``, to compute the ``p`` independent flows
+  (each thread uses its own ``128 * r * N`` bytes of memory at the same time);
+  and by ``Crypto.IO.PKCS8.wrap()`` and ``unwrap()``, ``import_key()`` of RSA, DSA and
+  ECC keys and ``export_key()`` of RSA and ECC keys, for a private key protected with
+  scrypt (PBES2) and a parallelization parameter larger than 1.
+* GCM mode is about 1.5x faster on long messages, as it does not copy the data
+  before authenticating it. The portable GHASH (for CPUs without PCLMULQDQ) no longer
+  uses key-dependent tables: it is now constant-time, with the technique described
+  by Thomas Pornin for BearSSL, and about 2.8x faster on 64-bit and 3.2x on 32-bit systems.
+* On CPython, the ``encrypt()`` and ``decrypt()`` methods of most ciphers
+  (block cipher modes ECB, CBC, CFB, OFB, CTR, GCM and OCB, plus ChaCha20, Salsa20
+  and ARC4) write their result directly into the returned ``bytes`` object,
+  without copying it (for 64 KiB or more). For long data, this is 1.3x to 1.8x faster,
+  and up to 3x with threads. The same applies to the ``read()`` method of SHAKE128,
+  SHAKE256, cSHAKE, TurboSHAKE and KangarooTwelve, to
+  ``Crypto.Hash.KangarooTwelve.digest()``, and to ``Crypto.Util.strxor.strxor()``
+  and ``strxor_c()`` (up to 3.6x faster).
+* The Salsa20 and ChaCha20 (also XChaCha20) stream ciphers are faster on long messages:
+  about 4.8x and 4.7x on x86-64 CPUs with AVX2 and BMI2 (gcc and clang only;
+  8 blocks of key stream at a time), 2.6x and 2.3x with SSE2 (4 blocks at a time),
+  and 1.3x and 1.1x otherwise. ChaCha20-Poly1305 is about 2x faster.
+* New parameter ``prot_params`` for ``DsaKey.export_key()``, as for RSA and ECC keys.
+* GH#911: New method ``export()`` for HPKE contexts, to derive secrets
+  (RFC 9180, Section 5.3). With the new ``HPKE.AEAD.EXPORT_ONLY``,
+  a context can only export secrets. Thanks to sebastian.
+* GH#906: New module ``Crypto.Cipher.oaep`` for RSA-OAEP encryption.
+  It replaces ``Crypto.Cipher.PKCS1_OAEP``. The hash function (``hashmod``)
+  must always be specified, and all parameters after the key are keyword-only.
+* Faster key derivation functions. ``Crypto.Protocol.KDF.PBKDF2()`` is about 1.25x-1.35x
+  faster with HMAC based on SHA-1, SHA-224, SHA-256, SHA-384 and SHA-512 (about 3.5x with
+  HMAC-SHA256 on CPUs with SHA-NI), and about 25x-35x faster with HMAC based on SHA-3,
+  as it now runs its inner loop in C. ``PBKDF1()`` with MD5 and SHA-1 (also used to import
+  keys protected with the legacy PBES1 algorithms) runs its inner loop in C too:
+  it is about 15x faster. ``scrypt()`` is about 1.15x-1.3x faster for ``p=1``,
+  and up to 1.7x faster for small ``N`` and large ``p``; on Linux, its memory is
+  backed by transparent huge pages where available. Encrypted OpenSSH private keys
+  are imported about 1.9x faster: the two bcrypt hashes of each round of
+  bcrypt_pbkdf run interleaved, in C.
+* Limits when decrypting PKCS#8 private keys (see the new page "Limits when decrypting
+  private keys" in the documentation). New parameter ``max_iteration_count`` for
+  ``import_key()`` of RSA, DSA and ECC keys, like the one of ``Crypto.IO.PKCS8.unwrap()``:
+  the maximum iteration count accepted for an encrypted PKCS#8 key.
+  When a key is above the limit, ``import_key()`` and ``PKCS8.unwrap()`` now raise
+  ``Crypto.KdfIterationLimitError`` (a ``ValueError``), whose message
+  says which value is too high and how to accept it, instead of a generic error
+  about the key format. For scrypt, ``max_iteration_count`` now limits *N·r·p/8*
+  (that is, *N* for the usual *r=8* and *p=1*), and not only *N*: before, a key with
+  a large *r* or *p* could require any amount of time and memory. By default, the
+  limit is 2\ :sup:`25`. Since scrypt also does some work in proportion to *r·p* only,
+  *N* counts as at least 1024 in the cost. New parameter ``max_memory`` for
+  ``PKCS8.unwrap()`` and for ``import_key()`` of RSA, DSA and ECC keys: the maximum
+  memory for the scrypt key derivation, as a total for all threads together, not for
+  each thread (and including the memory for the input and the output of all the flows).
+  The default is 256 MiB. Fewer threads are used if needed; if even one thread
+  does not fit, ``Crypto.KdfMemoryLimitError`` is raised.
+  Both are subclasses of ``Crypto.KdfLimitError``; ``bcrypt_check()`` also raises
+  ``Crypto.KdfIterationLimitError`` when the cost of the hash is above ``max_cost``.
+* Set the environment variable ``PYCRYPTODOME_NO_SELFTEST`` when building
+  from source to leave out the self-tests (``Crypto.SelfTest``), whose test keys
+  and certificates may be reported by security scanners.
+* DES and Triple DES are reimplemented from scratch, in constant time
+  (no table lookups at secret addresses), and no longer use LibTomCrypt.
+  They are about 3.5x slower than before.
+* GH#908: New method ``seek()`` for Salsa20 cipher objects, to move to any
+  position in the key stream (for instance, to start from a given block counter).
+* Salsa20 raises ``OverflowError`` instead of silently reusing the key stream,
+  when the data goes beyond its end (2\ :sup:`70` bytes per nonce).
+
+3.24.2 (5 November 2026)
+++++++++++++++++++++++++++
+
+This release is only for ``pycryptodomex``.
+
+Resolved issues
+---------------
+* GH#958: on Windows with PyPy, native modules built with setuptools 84.2 or newer
+  could not be loaded because they were named ``.pyd``.
+
+Other changes
+-------------
+* Build wheels for PyPy 8.0 (Python 3.11), in addition to PyPy 7.3.
+
+3.24.1 (11 October 2026)
+++++++++++++++++++++++++++
+
+Resolved issues
+---------------
+* Security: the time to create an ECDSA, EdDSA or DSA signature depended
+  on the secret nonce, enough to recover the private key with a lattice attack.
+  DSA signing is now about 40% slower with GMP. Thanks to Daniel Bleichenbacher.
+
+3.24.0 (4 October 2026)
+++++++++++++++++++++++++++
+
+New features
+---------------
+* Speed up KangarooTwelve by 50% for long messages (1MB or more).
+* New parameter ``threads`` for ``Crypto.Hash.KangarooTwelve.new()``,
+  to hash long messages on several CPU cores (``threads=0`` for all of them).
+  The output does not depend on the number of threads.
+
+Resolved issues
+---------------
+* GH#875: Fixed the Object Identifiers (OID) for BLAKE2.
+* Fixed a potential DOS attack when decrypting a password-encrypted PKCS#8 key,
+  when the iteration count is enourmous. Decryption will now fail if it exceeds
+  50M iterations; the limit can be changed or removed  via
+  the new ``max_iteration_count`` option. Thanks to afldl for reporting.
+* Fixed the maximum number of bytes that GCM should encrypt. Thanks to Loganaden Velvindron.
+* Fixed ECC operations on 32-bit Windows (x86) wheels: due to a compiler bug in
+  Visual Studio 2022, the modular inversion skipped half of the exponent bits,
+  producing wrong results.
+* Fixed a bug in KangarooTwelve in the scenario where customization string is very
+  long (8190 bytes or longer) and the message to hash is empty.
+* GH#922: Fixed incorrect verification of an otherwise valid ECDSA signature,
+  when the raw x-coordinate of the computed point is not reduced.
+  Thanks to afldl for reporting and Ville Vesilehto for the fix.
+
+Other changes
+-------------
+* Build Windows wheel with Visual Studio 2022, from Visual Studio 2019.
+* Remove support for Python 3.7.
+
+3.23.0 (17 May 2025)
+++++++++++++++++++++++++++
+
+New features
+---------------
+* Added cipher modes Key Wrap (KW, RFC3394) and Key Wrap with Padding (KWP, RFC5649).
+  Both are defined also in NIST SP 800-38F.
+* Wheels for Windows ARM.
+
+Resolved issues
+---------------
+* GH#862: For HashEdDSA and Ed448, sign() and verify() modified the state of the XOF.
+
+3.22.0 (16 March 2025)
+++++++++++++++++++++++++++
+
+New features
+---------------
+* Added support for HPKE (RFC 9180).
+
+Resolved issues
+---------------
+* GH#812: CCM ciphers will now fail before encrypting (or decrypting)
+  data beyond the limit imposed by the nonce length.
+* GH#846: fix infinite loop with RC4 for data larger than 4GB.
+* GH#852: handle correctly invalid PEM files with less than 3 lines.
+
+Other changes
+-------------
+* Remove support for Python 3.6.
+
+3.21.0 (30 September 2024)
+++++++++++++++++++++++++++
+
+New features
+---------------
+* By setting the PYCRYPTODOME_DISABLE_GMP environment variable,
+  the GMP library will not be used even if detected.
+* Add support for Curve25519 / X25519.
+* Add support for Curve448 / X448.
+* Add attribute ``curve`` to EccPoint and EccXPoint classes,
+  with the canonical name of the curve.
+* GH#781: the label for the SP800_108_Counter KDF may now
+  contain zero bytes. Thanks to Julien Rische.
+* GH#814: RSA keys for PSS can be imported.
+
+Resolved issues
+---------------
+* GH#810: fixed negation of Ed25519 points.
+* GH#819: accept an RFC5916 ECPrivateKey even if it doesn't
+  contain any of the optional elements
+  (parameters [0] and publicKey[1]).
+
+Other changes
+-------------
+* Remove support for Python 3.5.
+
+3.20.0 (9 January 2024)
+++++++++++++++++++++++++++
+
+New features
+---------------
+* Added support for TurboSHAKE128 and TurboSHAKE256.
+* Added method ``Crypto.Hash.new()`` to generate a hash
+  object given a hash name.
+* Added support for AES-GCM encryption of PBES2 and PKCS#8
+  containers.
+* Added support for SHA-2 and SHA-3 algorithms in PBKDF2
+  when creating PBES2 and PKCS#8 containers.
+* Export of RSA keys accepts the ``prot_params`` dictionary
+  as parameter to control the number of iterations for PBKDF2
+  and scrypt.
+* C unit tests also run on non-x86 architectures.
+
+Resolved issues
+---------------
+* GH#787: Fixed autodetect logic for GCC 14 in combination with LTO.
+
+3.19.1 (28 December 2023)
+++++++++++++++++++++++++++
+
+Resolved issues
+---------------
+* Fixed a side-channel leakage with OAEP decryption that could be
+  exploited to carry out a Manger attack (CVE-2023-52323). Thanks to Hubert Kario.
+
+3.19.0 (16 September 2023)
+++++++++++++++++++++++++++
+
+New features
+---------------
+* The ``update()`` methods of TupleHash128 and TupleHash256 objects
+  can now hash multiple items (byte strings) at once.
+  Thanks to Sylvain Pelissier.
+* Added support for ECDH, with ``Crypto.Protocol.DH``.
+
+Resolved issues
+---------------
+* GH#754: due to a bug in ``cffi``, do not use it on Windows with Python 3.12+.
+
+3.18.0 (18 May 2023)
+++++++++++++++++++++++++++
+
+New features
+---------------
+* Added support for DER BOOLEAN encodings.
+* The library now compiles on Windows ARM64. Thanks to Niyas Sait.
+
+Resolved issues
+---------------
+* GH#722: ``nonce`` attribute was not correctly set for XChaCha20_Poly1305 ciphers. Thanks to Liam Haber.
+* GH#728: Workaround for a possible x86 emulator bug in Windows for ARM64.
+* GH#739: OID encoding for arc 2 didn't accept children larger than 39. Thanks to James.
+* Correctly check that the scalar matches the point when importing an ECC private key.
+
+3.17.0 (29 January 2023)
+++++++++++++++++++++++++++
+
+New features
+---------------
+* Added support for the Counter Mode KDF defined in SP 800-108 Rev 1.
+* Reduce the minimum tag length for the EAX cipher to 2 bytes.
+* An RSA object has 4 new properties for the CRT coefficients:
+  ``dp``, ``dq``, ``invq`` and ``invq`` (``invp`` is the same value
+  as the existing ``u``).
+
+Resolved issues
+---------------
+* GH#526: improved typing for ``RSA.construct``.
+* GH#534: reduced memory consumption when using a large number
+  of cipher objects.
+* GH#598: fixed missing error handling for ``Util.number.inverse``.
+* GH#629: improved typing for ``AES.new`` and the various
+  mode-specific types it returns. Thanks to Greg Werbin.
+* GH#653: added workaround for an alleged GCC compiler bug
+  that affected Ed25519 code compiled for AVX2.
+* GH#658: attribute ``curve`` of an ECC key was not always
+  the preferred curve name, as it used to be in v3.15.0
+  (independently of the curve name specified when generating
+  the key).
+* GH#637: fixed typing for legacy modules ``PKCS1_v1_5`` and ``PKCS1_PSS``,
+  as their ``verify()`` returned a boolean.
+* GH#664: with OCB mode, nonces of maximum length (15 bytes)
+  were actually used as 14 bytes nonces.
+  After this fix, data that was encrypted in past using the
+  (default) nonce length of 15 bytes can still be decrypted
+  by reducing the nonce to its first 14 bytes.
+* GH#705: improved typing for ``nonce``, ``iv``, and ``IV`` parameters
+  of cipher objects.
+
+Other changes
+-------------
+* Build PyPy wheels only for versions 3.8 and 3.9, and not for 3.7 anymore.
+
+3.16.0 (26 November 2022)
+++++++++++++++++++++++++++
+
+New features
+------------
+* Build wheels for musl Linux. Thanks to Ben Raz.
+
+Resolved issues
+---------------
+* GH#639: ARC4 now also works with 'keys' as short as 8 bits.
+* GH#669: fix segfaults when running in a manylinux2010 i686 image.
+
+3.15.0 (22 June 2022)
+++++++++++++++++++++++++++
+
+New features
+------------
+* Add support for curves Ed25519 and Ed448, including export and import of keys.
+* Add support for EdDSA signatures.
+* Add support for Asymmetric Key Packages (RFC5958) to import private keys.
+
+Resolved issues
+---------------
+* GH#620: for ``Crypto.Util.number.getPrime`` , do not sequentially
+  scan numbers searching for a prime.
+
+3.14.1 (5 February 2022)
+++++++++++++++++++++++++++
+
+Resolved issues
+---------------
+* GH#595: Fixed memory leak for GMP integers.
+  Thanks to Witalij Siebert and Pablo Quílez.
+
+3.14.0 (30 January 2022)
+++++++++++++++++++++++++++
+
+New features
+------------
+* Add support for curve NIST P-192.
+
+3.13.0 (23 January 2022)
+++++++++++++++++++++++++++
+
+New features
+------------
+* Add support for curve NIST P-224.
+
+Resolved issues
+---------------
+* GH#590: Fixed typing info for ``Crypto.PublicKey.ECC``.
+
+Other changes
+-------------
+* Relaxed ECDSA requirements for FIPS 186 signatures and accept any SHA-2 or SHA-3 hash.
+  ``sign()`` and ``verify()`` will be performed even if the hash is stronger than the ECC key.
+
+3.12.0 (4 December 2021)
+++++++++++++++++++++++++++
+
+New features
+------------
+* ECC keys in the SEC1 format can be exported and imported.
+* Add support for KMAC128, KMAC256, TupleHash128, and TupleHash256 (NIST SP-800 185).
+* Add support for KangarooTwelve.
+
+Resolved issues
+---------------
+* GH#563: An asymmetric key could not be imported as a ``memoryview``.
+* GH#566: cSHAKE128/256 generated a wrong output for customization strings
+  longer than 255 bytes.
+* GH#582: CBC decryption generated the wrong plaintext when the input and the output were the same buffer.
+  Thanks to Michael K. Ashburn.
+
+3.11.0 (8 October 2021)
+++++++++++++++++++++++++++
+
+Resolved issues
+---------------
+* GH#512: Especially for very small bit sizes, ``Crypto.Util.number.getPrime()`` was
+  occasionally generating primes larger than given the bit size. Thanks to Koki Takahashi.
+* GH#552: Correct typing annotations for ``PKCS115_Cipher.decrypt()``.
+* GH#555: ``decrypt()`` method of a PKCS#1v1.5 cipher returned a ``bytearray`` instead of ``bytes``.
+* GH#557: External DSA domain parameters were accepted even when the modulus (``p``) was not prime.
+  This affected ``Crypto.PublicKey.DSA.generate()`` and ``Crypto.PublicKey.DSA.construct()``.
+  Thanks to Koki Takahashi.
+
+New features
+------------
+* Added cSHAKE128 and cSHAKE256 (of SHA-3 family). Thanks to Michael Schaffner.
+* GH#558: The flag RTLD_DEEPBIND passed to ``dlopen()`` is not well supported by
+  `address sanitizers <https://github.com/google/sanitizers/issues/611>`_.
+  It is now possible to set the environment variable ``PYCRYPTDOME_DISABLE_DEEPBIND``
+  to drop that flag and allow security testing.
+
+3.10.4 (25 September 2021)
+++++++++++++++++++++++++++
+
+Resolved issues
+---------------
+* Output of ``Crypto.Util.number.long_to_bytes()`` was not always a multiple of ``blocksize``.
+
+3.10.3 (22 September 2021)
+++++++++++++++++++++++++++
+
+Resolved issues
+---------------
+* GH#376: Fixed symbol conflict between different versions of ``libgmp``.
+* GH#481: Improved robustness of PKCS#1v1.5 decryption against timing attacks.
+* GH#506 and GH#509: Fixed segmentation faults on Apple M1 and other Aarch64 SoCs,
+  when the GMP library was accessed via ``ctypes``. Do not use GMP's own sscanf
+  and snprintf routines: instead, use simpler conversion routines.
+* GH#510: Workaround for ``cffi`` calling ``ctypes.util.find_library()``, which
+  invokes ``gcc`` and ``ld`` on Linux, considerably slowing down all imports.
+  On certain configurations, that may also leave temporary files behind.
+* GH#517: Fix RSAES-OAEP, as it didn't always fail when zero padding was incorrect.
+
+New features
+------------
+* Added support for SHA-3 hash functions to HMAC.
+
+Other changes
+-------------
+* The Windows wheels of Python 2.7 now require the VS2015 runtime to be installed in the system,
+  because Microsoft stopped distributing the VS2008 compiler in April 2021.
+  VS2008 was used to compile the Python 2.7 extensions.
+
+3.10.1 (9 February 2021)
+++++++++++++++++++++++++
+
+Other changes
+-------------
+* Python 3 wheels use ``abi3`` ABI tag.
+* Remove Appveyor CI.
+
+3.10.0 (6 February 2021)
+++++++++++++++++++++++++
+
+Resolved issues
+---------------
+* Fixed a potential memory leak when initializing block ciphers.
+* GH#466: ``Crypto.Math.miller_rabin_test()`` was still using the system random
+  source and not the one provided as parameter.
+* GH#469: RSA objects have the method ``public_key()`` like ECC objects.
+  The old method ``publickey()`` is still available for backward compatibility.
+* GH#476: ``Crypto.Util.Padding.unpad()`` was raising an incorrect exception
+  in case of zero-length inputs. Thanks to Captainowie.
+* GH#491: better exception message when ``Counter.new()`` is called with an integer
+  ``initial_value`` than doesn't fit into ``nbits`` bits.
+* GH#496: added missing ``block_size`` member for ECB cipher objects. Thanks to willem.
+* GH#500: ``nonce`` member of an XChaCha20 cipher object was not matching the original nonce.
+  Thanks to Charles Machalow.
+
+Other changes
+-------------
+* The bulk of the test vectors have been moved to the separate
+  package ``pycryptodome-test-vectors``. As result, packages ``pycryptodome`` and
+  ``pycryptodomex`` become significantly smaller (from 14MB to 3MB).
+* Moved CI tests and build service from Travis CI to GitHub Actions.
+
+Breaks in compatibility
+-----------------------
+* Drop support for Python 2.6 and 3.4.
+
+3.9.9 (2 November 2020)
++++++++++++++++++++++++
+
+Resolved issues
+---------------
+* GH#435: Fixed ``Crypto.Util.number.size`` for negative numbers.
+
+New features
+------------
+* Build Python 3.9 wheels on Windows.
+
+3.9.8 (23 June 2020)
+++++++++++++++++++++
+
+Resolved issues
+---------------
+* GH#426: The Shamir's secret sharing implementation is not actually compatible with ``ssss``.
+  Added an optional parameter to enable interoperability.
+* GH#427: Skip altogether loading of ``gmp.dll`` on Windows.
+* GH#420: Fix incorrect CFB decryption when the input and the output are the same buffer.
+
+New features
+------------
+* Speed up Shamir's secret sharing routines. Thanks to ncarve.
+
+3.9.7 (20 February 2020)
+++++++++++++++++++++++++
+
+Resolved issues
+---------------
+* GH#381: Make notarization possible again on OS X when using wheels.
+  Thanks to Colin Atkinson.
+
+3.9.6 (2 February 2020)
+++++++++++++++++++++++++
+
+Resolved issues
+---------------
+* Fix building of wheels for OS X by explicitly setting `sysroot` location.
+
+3.9.5 (1 February 2020)
+++++++++++++++++++++++++
+
+Resolved issues
+---------------
+* RSA OAEP decryption was not verifying that all ``PS`` bytes are zero.
+* GH#372: fixed memory leak for operations that use memoryviews when `cffi` is not installed.
+* Fixed wrong ASN.1 OID for HMAC-SHA512 in PBE2.
+
+New features
+------------
+* Updated Wycheproof test vectors to version 0.8r12.
+
+3.9.4 (18 November 2019)
+++++++++++++++++++++++++
+
+Resolved issues
+---------------
+* GH#341: Prevent ``key_to_english`` from creating invalid data when fed with
+  keys of length not multiple of 8. Thanks to vstoykovbg.
+* GH#347: Fix blocking RSA signing/decryption when key has very small factor.
+  Thanks to Martijn Pieters.
+
+3.9.3 (12 November 2019)
+++++++++++++++++++++++++
+
+Resolved issues
+---------------
+* GH#308: Align stack of functions using SSE2 intrinsics to avoid crashes,
+  when compiled with gcc on 32-bit x86 platforms.
+
+3.9.2 (10 November 2019)
+++++++++++++++++++++++++
+
+New features
+------------
+* Add Python 3.8 wheels for Mac.
+
+Resolved issues
+---------------
+* GH#308: Avoid allocating arrays of ``__m128i`` on the stack, to cope with buggy compilers.
+* GH#322: Remove blanket ``-O3`` optimization for gcc and clang, to cope with buggy compilers.
+* GH#337: Fix typing stubs for signatures.
+* GH#338: Deal with gcc installations that don't have ``x86intrin.h``.
+
+3.9.1 (1 November 2019)
+++++++++++++++++++++++++
+
+New features
+------------
+* Add Python 3.8 wheels for Linux and Windows.
+
+Resolved issues
+---------------
+
+* GH#328: minor speed-up when importing RSA.
+
+3.9.0 (27 August 2019)
++++++++++++++++++++++++
+
+New features
+------------
+
+* Add support for loading PEM files encrypted with AES256-CBC.
+* Add support for XChaCha20 and XChaCha20-Poly1305 ciphers.
+* Add support for bcrypt key derivation function (``Crypto.Protocol.KDF.bcrypt``).
+* Add support for left multiplication of an EC point by a scalar.
+* Add support for importing ECC and RSA keys in the new OpenSSH format.
+
+Resolved issues
+---------------
+
+* GH#312: it was not possible to invert an EC point anymore.
+* GH#316: fix printing of DSA keys.
+* GH#317: ``DSA.generate()`` was not always using the ``randfunc`` input.
+* GH#285: the MD2 hash had block size of 64 bytes instead of 16; as result the HMAC construction gave incorrect results.
+
+3.8.2 (30 May 2019)
++++++++++++++++++++++++
+
+Resolved issues
+---------------
+
+* GH#291: fix strict aliasing problem, emerged with GCC 9.1.
+
+3.8.1 (4 April 2019)
++++++++++++++++++++++++
+
+New features
+------------
+
+* Add support for loading PEM files encrypted with AES192-CBC and AES256-GCM.
+* When importing ECC keys in PEM format, ignore the redundant EC PARAMS section that was included by certain openssl commands.
+
+Resolved issues
+---------------
+
+* ``repr()`` did not work for ``ECC.EccKey`` objects.
+* Fix installation in development mode (``setup install develop`` or ``pip install -e .``).
+* Minimal length for Blowfish cipher is 32 bits, not 40 bits.
+* Various updates to docs.
+
+3.8.0 (23 March 2019)
++++++++++++++++++++++++
+
+New features
+------------
+
+* Speed-up ECC performance. ECDSA is 33 times faster on the NIST P-256 curve.
+* Added support for NIST P-384 and P-521 curves.
+* ``EccKey`` has new methods ``size_in_bits()`` and ``size_in_bytes()``.
+* Support HMAC-SHA224, HMAC-SHA256, HMAC-SHA384, and HMAC-SHA512 in PBE2/PBKDF2.
+
+Resolved issues
+---------------
+
+* DER objects were not rejected if their length field had a leading zero.
+* Allow legacy RC2 ciphers to have 40-bit keys.
+* ASN.1 Object IDs did not allow the value 0 in the path.
+
+Breaks in compatibility
+-----------------------
+
+* ``point_at_infinity()`` becomes an instance method for ``Crypto.PublicKey.ECC.EccKey``, from a static one.
+
+3.7.3 (19 January 2019)
++++++++++++++++++++++++
+
+Resolved issues
+---------------
+
+* GH#258: False positive on PSS signatures when externally provided salt is too long.
+* Include type stub files for ``Crypto.IO`` and ``Crypto.Util``.
+
+3.7.2 (26 November 2018)
+++++++++++++++++++++++++
+
+Resolved issues
+---------------
+
+* GH#242: Fixed compilation problem on ARM platforms.
+
+3.7.1 (25 November 2018)
+++++++++++++++++++++++++
+
+New features
+------------
+
+* Added type stubs to enable static type checking with mypy. Thanks to Michael Nix.
+* New ``update_after_digest`` flag for CMAC.
+
+Resolved issues
+---------------
+
+* GH#232: Fixed problem with gcc 4.x when compiling ``ghash_clmul.c``.
+* GH#238: Incorrect digest value produced by CMAC after cloning the object.
+* Method ``update()`` of an EAX cipher object was returning the underlying CMAC object,
+  instead of the EAX object itself.
+* Method ``update()`` of a CMAC object was not throwing an exception after the digest
+  was computed (with ``digest()`` or ``verify()``).
+
+3.7.0 (27 October 2018)
++++++++++++++++++++++++
+
+New features
+------------
+
+* Added support for Poly1305 MAC (with AES and ChaCha20 ciphers for key derivation).
+* Added support for ChaCha20-Poly1305 AEAD cipher.
+* New parameter ``output`` for ``Crypto.Util.strxor.strxor``, ``Crypto.Util.strxor.strxor_c``,
+  ``encrypt`` and ``decrypt`` methods in symmetric ciphers (``Crypto.Cipher`` package).
+  ``output`` is a pre-allocated buffer (a ``bytearray`` or a writeable ``memoryview``)
+  where the result must be stored.
+  This requires less memory for very large payloads; it is also more efficient when
+  encrypting (or decrypting) several small payloads.
+
+Resolved issues
+---------------
+
+* GH#266: AES-GCM hangs when processing more than 4GB at a time on x86 with PCLMULQDQ instruction.
+
+Breaks in compatibility
+-----------------------
+
+* Drop support for Python 3.3.
+* Remove ``Crypto.Util.py3compat.unhexlify`` and ``Crypto.Util.py3compat.hexlify``.
+* With the old Python 2.6, use only ``ctypes`` (and not ``cffi``) to interface to native code.
+
+3.6.6 (17 August 2018)
+++++++++++++++++++++++
+
+Resolved issues
+---------------
+
+* GH#198: Fix vulnerability on AESNI ECB with payloads smaller than 16 bytes (CVE-2018-15560).
+
+3.6.5 (12 August 2018)
+++++++++++++++++++++++
+
+Resolved issues
+---------------
+
+* GH#187: Fixed incorrect AES encryption/decryption with AES acceleration on x86
+  due to gcc's optimization and strict aliasing rules.
+* GH#188: More prime number candidates than necessary where discarded as composite
+  due to the limited way D values were searched in the Lucas test.
+* Fixed ResouceWarnings and DeprecationWarnings.
+* Workaround for Python 3.7.0 bug on Windows (https://bugs.python.org/issue34108).
+
+3.6.4 (10 July 2018)
++++++++++++++++++++++
+
+New features
+------------
+
+* Build Python 3.7 wheels on Linux, Windows and Mac.
+
+Resolved issues
+---------------
+
+* GH#178: Rename ``_cpuid`` module to make upgrades more robust.
+* More meaningful exceptions in case of mismatch in IV length (CBC/OFB/CFB modes).
+* Fix compilation issues on Solaris 10/11.
+
+3.6.3 (21 June 2018)
++++++++++++++++++++++
+
+Resolved issues
+---------------
+
+* GH#175: Fixed incorrect results for CTR encryption/decryption with more than 8 blocks.
+
+3.6.2 (19 June 2018)
++++++++++++++++++++++
+
+New features
+------------
+* ChaCha20 accepts 96 bit nonces (in addition to 64 bit nonces)
+  as defined in RFC7539.
+* Accelerate AES-GCM on x86 using PCLMULQDQ instruction.
+* Accelerate AES-ECB and AES-CTR on x86 by pipelining AESNI instructions.
+* As result of the two improvements above, on x86 (Broadwell):
+
+  - AES-ECB and AES-CTR are 3x faster
+  - AES-GCM is 9x faster
+
+Resolved issues
+---------------
+
+* On Windows, MPIR library was stilled pulled in if renamed to ``gmp.dll``.
+
+Breaks in compatibility
+-----------------------
+
+* In ``Crypto.Util.number``, functions ``floor_div`` and ``exact_div``
+  have been removed. Also, ``ceil_div`` is limited to non-negative terms only.
+
+3.6.1 (15 April 2018)
++++++++++++++++++++++
+
+New features
+------------
+* Added Google Wycheproof tests (https://github.com/google/wycheproof)
+  for RSA, DSA, ECDSA, GCM, SIV, EAX, CMAC.
+* New parameter ``mac_len`` (length of MAC tag) for CMAC.
+
+Resolved issues
+---------------
+
+* In certain circumstances (at counter wrapping, which happens on average after
+  32 GB) AES GCM produced wrong ciphertexts.
+* Method ``encrypt()`` of AES SIV cipher could be still called,
+  whereas only ``encrypt_and_digest()`` is allowed.
+
+3.6.0 (8 April 2018)
+++++++++++++++++++++
+
+New features
+------------
+* Introduced ``export_key`` and deprecated ``exportKey`` for DSA and RSA key
+  objects.
+* Ciphers and hash functions accept ``memoryview`` objects in input.
+* Added support for SHA-512/224 and SHA-512/256.
+
+Resolved issues
+---------------
+
+* Reintroduced ``Crypto.__version__`` variable as in PyCrypto.
+* Fixed compilation problem with MinGW.
+
+3.5.1 (8 March 2018)
+++++++++++++++++++++
+
+Resolved issues
+---------------
+
+* GH#142. Fix mismatch with declaration and definition of addmul128.
+
+3.5.0 (7 March 2018)
+++++++++++++++++++++
+
+New features
+------------
+* Import and export of ECC curves in compressed form.
+* The initial counter for a cipher in CTR mode can be a byte string
+  (in addition to an integer).
+* Faster PBKDF2 for HMAC-based PRFs (at least 20x for short passwords,
+  more for longer passwords). Thanks to Christian Heimes for pointing
+  out the implementation was under-optimized.
+* The salt for PBKDF2 can be either a string or bytes (GH#67).
+* Ciphers and hash functions accept data as `bytearray`, not just
+  binary strings.
+* The old SHA-1 and MD5 hash functions are available even when Python's
+  own `hashlib` does not include them.
+
+Resolved issues
+---------------
+
+* Without libgmp, modular exponentiation (since v3.4.8) crashed
+  on 32-bit big-endian systems.
+
+Breaks in compatibility
+-----------------------
+
+* Removed support for Python < 2.6.
+
+3.4.12 (5 February 2018)
+++++++++++++++++++++++++
+
+Resolved issues
+---------------
+
+* GH#129. pycryptodomex could only be installed via wheels.
+
+3.4.11 (5 February 2018)
+++++++++++++++++++++++++
+
+Resolved issues
+---------------
+
+* GH#121. the record list was still not correct due to PEP3147
+  and __pycache__ directories. Thanks again to John O'Brien.
+
+3.4.10 (2 February 2018)
+++++++++++++++++++++++++
+
+Resolved issues
+---------------
+
+* When creating ElGamal keys, the generator wasn't a square residue:
+  ElGamal encryption done with those keys cannot be secure under
+  the DDH assumption. Thanks to Weikeng Chen.
+
+3.4.9 (1 February 2018)
++++++++++++++++++++++++
+
+New features
+------------
+* More meaningful error messages while importing an ECC key.
+
+Resolved issues
+---------------
+
+* GH#123 and #125. The SSE2 command line switch was not always passed on 32-bit x86 platforms.
+* GH#121. The record list (--record) was not always correctly filled for the
+  pycryptodomex package. Thanks to John W. O'Brien.
+
+3.4.8 (27 January 2018)
++++++++++++++++++++++++
+
+New features
+------------
+
+* Added a native extension in pure C for modular exponentiation, optimized for SSE2 on x86.
+  In the process, we drop support for the arbitrary arithmetic library MPIR
+  on Windows, which is painful to compile and deploy.
+  The custom  modular exponentiation is 130% (160%) slower on an Intel CPU in 32-bit (64-bit) mode,
+  compared to MPIR. Still, that is much faster that CPython's own `pow()` function which
+  is 900% (855%) slower than MPIR. Support for the GMP library on Unix remains.
+* Added support for *manylinux* wheels.
+* Support for Python 3.7.
+
+Resolved issues
+---------------
+
+* The DSA parameter 'p' prime was created with 255 bits cleared
+  (but still with the correct strength).
+* GH#106. Not all docs were included in the tar ball.
+  Thanks to Christopher Hoskin.
+* GH#109. ECDSA verification failed for DER encoded signatures.
+  Thanks to Alastair Houghton.
+* Human-friendly messages for padding errors with ECB and CBC.
+
+3.4.7 (26 August 2017)
+++++++++++++++++++++++
+
+New features
+------------
+
+* API documentation is made with sphinx instead of epydoc.
+* Start using ``importlib`` instead of ``imp`` where available.
+
+Resolved issues
+---------------
+
+* GH#82. Fixed PEM header for RSA/DSA public keys.
+
+3.4.6 (18 May 2017)
++++++++++++++++++++++++
+
+Resolved issues
+---------------
+
+* GH#65. Keccak, SHA3, SHAKE and the seek functionality for ChaCha20 were
+  not working on big endian machines. Fixed. Thanks to Mike Gilbert.
+* A few fixes in the documentation.
+
+3.4.5 (6 February 2017)
++++++++++++++++++++++++
+
+Resolved issues
+---------------
+
+* The library can also be compiled using MinGW.
+
+3.4.4 (1 February 2017)
++++++++++++++++++++++++
+
+Resolved issues
+---------------
+
+* Removed use of ``alloca()``.
+* [Security] Removed implementation of deprecated "quick check" feature of PGP block cipher mode.
+* Improved the performance of ``scrypt`` by converting some Python to C.
+
+3.4.3 (17 October 2016)
++++++++++++++++++++++++
+
+Resolved issues
+---------------
+
+* Undefined warning was raised with libgmp version < 5
+* Forgot inclusion of ``alloca.h``
+* Fixed a warning about type mismatch raised by recent versions of cffi
+
+3.4.2 (8 March 2016)
+++++++++++++++++++++
+
+
+Resolved issues
+---------------
+
+* Fix renaming of package for ``install`` command.
+
+
+3.4.1 (21 February 2016)
+++++++++++++++++++++++++
+
+New features
+------------
+
+* Added option to install the library under the ``Cryptodome`` package
+  (instead of ``Crypto``).
+
+3.4 (7 February 2016)
++++++++++++++++++++++
+
+New features
+------------
+
+* Added ``Crypto.PublicKey.ECC`` module (NIST P-256 curve only), including export/import of ECC keys.
+* Added support for ECDSA (FIPS 186-3 and RFC6979).
+* For CBC/CFB/OFB/CTR cipher objects, ``encrypt()`` and ``decrypt()`` cannot be intermixed.
+* CBC/CFB/OFB, the cipher objects have both ``IV`` and ``iv`` attributes.
+  ``new()`` accepts ``IV`` as well as ``iv`` as parameter.
+* For CFB/OPENPGP cipher object, ``encrypt()`` and ``decrypt()`` do not require the plaintext
+  or ciphertext pieces to have length multiple of the CFB segment size.
+* Added dedicated tests for all cipher modes, including NIST test vectors
+* CTR/CCM/EAX/GCM/SIV/Salsa20/ChaCha20 objects expose the ``nonce`` attribute.
+* For performance reasons, CCM cipher optionally accepted a pre-declaration of
+  the length of the associated data, but never checked if the actual data passed
+  to the cipher really matched that length. Such check is now enforced.
+* CTR cipher objects accept parameter ``nonce`` and possibly ``initial_value`` in
+  alternative to ``counter`` (which is deprecated).
+* All ``iv``/``IV`` and ``nonce`` parameters are optional. If not provided,
+  they will be randomly generated (exception: ``nonce`` for CTR mode in case
+  of block sizes smaller than 16 bytes).
+* Refactored ARC2 cipher.
+* Added ``Crypto.Cipher.DES3.adjust_key_parity()`` function.
+* Added ``RSA.import_key`` as an alias to the deprecated ``RSA.importKey``
+  (same for the ``DSA`` module).
+* Added ``size_in_bits()`` and ``size_in_bytes()`` methods to ``RsaKey``.
+
+Resolved issues
+---------------
+
+* RSA key size is now returned correctly in ``RsaKey.__repr__()`` method (kudos to *hannesv*).
+* CTR mode does not modify anymore ``counter`` parameter passed to ``new()`` method.
+* CTR raises ``OverflowError`` instead of ``ValueError`` when the counter wraps around.
+* PEM files with Windows newlines could not be imported.
+* ``Crypto.IO.PEM`` and ``Crypto.IO.PKCS8`` used to accept empty passphrases.
+* GH#6: NotImplementedError now raised for unsupported methods ``sign``, ``verify``,
+  ``encrypt``, ``decrypt``, ``blind``, ``unblind`` and ``size`` in objects ``RsaKey``, ``DsaKey``,
+  ``ElGamalKey``.
+
+Breaks in compatibility
+-----------------------
+
+* Parameter ``segment_size`` cannot be 0 for the CFB mode.
+* For OCB ciphers, a final call without parameters to ``encrypt`` must end a sequence
+  of calls to ``encrypt`` with data (similarly for ``decrypt``).
+* Key size for ``ARC2``, ``ARC4`` and ``Blowfish`` must be at least 40 bits long (still very weak).
+* DES3 (Triple DES module) does not allow keys that degenerate to Single DES.
+* Removed method ``getRandomNumber`` in ``Crypto.Util.number``.
+* Removed module ``Crypto.pct_warnings``.
+* Removed attribute ``Crypto.PublicKey.RSA.algorithmIdentifier``.
+
+3.3.1 (1 November 2015)
++++++++++++++++++++++++
+
+New features
+------------
+
+* Opt-in for ``update()`` after ``digest()`` for SHA-3, keccak, BLAKE2 hashes
+
+Resolved issues
+---------------
+
+* Removed unused SHA-3 and keccak test vectors, therefore significantly reducing
+  the package from 13MB to 3MB.
+
+Breaks in compatibility
+-----------------------
+
+* Removed method ``copy()`` from BLAKE2 hashes
+* Removed ability to ``update()`` a BLAKE2 hash after the first call to ``(hex)digest()``
+
+3.3 (29 October 2015)
++++++++++++++++++++++
+
+New features
+------------
+
+* Windows wheels bundle the MPIR library
+* Detection of faults occurring during secret RSA operations
+* Detection of non-prime (weak) q value in DSA domain parameters
+* Added original Keccak hash family (b=1600 only).
+  In the process, simplified the C code base for SHA-3.
+* Added SHAKE128 and SHAKE256 (of SHA-3 family)
+
+Resolved issues
+---------------
+
+* GH#3: gcc 4.4.7 unhappy about double typedef
+
+Breaks in compatibility
+-----------------------
+
+* Removed method ``copy()`` from all SHA-3 hashes
+* Removed ability to ``update()`` a SHA-3 hash after the first call to ``(hex)digest()``
+
+3.2.1 (9 September 2015)
+++++++++++++++++++++++++
+
+New features
+------------
+
+* Windows wheels are automatically built on Appveyor
+
+3.2 (6 September 2015)
+++++++++++++++++++++++
+
+New features
+------------
+
+* Added hash functions BLAKE2b and BLAKE2s.
+* Added stream cipher ChaCha20.
+* Added OCB cipher mode.
+* CMAC raises an exception whenever the message length is found to be
+  too large and the chance of collisions not negligeable.
+* New attribute ``oid`` for Hash objects with ASN.1 Object ID
+* Added ``Crypto.Signature.pss`` and ``Crypto.Signature.pkcs1_15``
+* Added NIST test vectors (roughly 1200) for PKCS#1 v1.5 and PSS signatures.
+
+Resolved issues
+---------------
+
+* tomcrypt_macros.h asm error #1
+
+Breaks in compatibility
+-----------------------
+
+* Removed keyword ``verify_x509_cert`` from module method ``importKey`` (RSA and DSA).
+* Reverted to original PyCrypto behavior of method ``verify`` in ``PKCS1_v1_5``
+  and ``PKCS1_PSS``.
+
+3.1 (15 March 2015)
++++++++++++++++++++
+
+New features
+------------
+
+* Speed up execution of Public Key algorithms on PyPy, when backed
+  by the Gnu Multiprecision (GMP) library.
+* GMP headers and static libraries are not required anymore at the time
+  PyCryptodome is built. Instead, the code will automatically use the
+  GMP dynamic library (.so/.DLL) if found in the system at runtime.
+* Reduced the amount of C code by almost 40% (4700 lines).
+  Modularized and simplified all code (C and Python) related to block ciphers.
+  Pycryptodome is now free of CPython extensions.
+* Add support for CI in Windows via Appveyor.
+* RSA and DSA key generation more closely follows FIPS 186-4 (though it is
+  not 100% compliant).
+
+Resolved issues
+---------------
+
+* None
+
+Breaks in compatibility
+-----------------------
+
+* New dependency on ctypes with Python 2.4.
+* The ``counter`` parameter of a CTR mode cipher must be generated via
+  ``Crypto.Util.Counter``. It cannot be a generic callable anymore.
+* Removed the ``Crypto.Random.Fortuna`` package (due to lack of test vectors).
+* Removed the ``Crypto.Hash.new`` function.
+* The ``allow_wraparound`` parameter of ``Crypto.Util.Counter`` is ignored.
+  An exception is always generated if the counter is reused.
+* ``DSA.generate``, ``RSA.generate`` and ``ElGamal.generate`` do not
+  accept the ``progress_func`` parameter anymore.
+* Removed ``Crypto.PublicKey.RSA.RSAImplementation``.
+* Removed ``Crypto.PublicKey.DSA.DSAImplementation``.
+* Removed ambiguous method ``size()`` from RSA, DSA and ElGamal keys.
+
+3.0 (24 June 2014)
+++++++++++++++++++
+
+New features
+------------
+
+* Initial support for PyPy.
+* SHA-3 hash family based on the April 2014 draft of FIPS 202.
+  See modules ``Crypto.Hash.SHA3_224/256/384/512``.
+  Initial Keccak patch by Fabrizio Tarizzo.
+* Salsa20 stream cipher. See module ``Crypto.Cipher.Salsa20``.
+  Patch by Fabrizio Tarizzo.
+* Colin Percival's ``scrypt`` key derivation function (``Crypto.Protocol.KDF.scrypt``).
+* Proper interface to FIPS 186-3 DSA. See module ``Crypto.Signature.DSS``.
+* Deterministic DSA (RFC6979). Again, see ``Crypto.Signature.DSS``.
+* HMAC-based Extract-and-Expand key derivation function
+  (``Crypto.Protocol.KDF.HKDF``, RFC5869).
+* Shamir's Secret Sharing protocol, compatible with *ssss* (128 bits only).
+  See module ``Crypto.Protocol.SecretSharing``.
+* Ability to generate a DSA key given the domain parameters.
+* Ability to test installation with a simple ``python -m Crypto.SelfTest``.
+
+Resolved issues
+---------------
+
+* LP#1193521: ``mpz_powm_sec()`` (and Python) crashed when modulus was odd.
+* Benchmarks work again (they broke when ECB stopped working if
+  an IV was passed. Patch by Richard Mitchell.
+* LP#1178485: removed some catch-all exception handlers.
+  Patch by Richard Mitchell.
+* LP#1209399: Removal of Python wrappers caused HMAC to silently
+  produce the wrong data with SHA-2 algorithms.
+* LP#1279231: remove dead code that does nothing in SHA-2 hashes.
+  Patch by Richard Mitchell.
+* LP#1327081: AESNI code accesses memory beyond buffer end.
+* Stricter checks on ciphertext and plaintext size for textbook RSA
+  (kudos to sharego).
+
+Breaks in compatibility
+-----------------------
+
+* Removed support for Python < 2.4.
+* Removed the following methods from all 3 public key object types (RSA, DSA, ElGamal):
+
+  - ``sign``
+  - ``verify``
+  - ``encrypt``
+  - ``decrypt``
+  - ``blind``
+  - ``unblind``
+
+  Code that uses such methods is doomed anyway. It should be fixed ASAP to
+  use the algorithms available in ``Crypto.Signature`` and ``Crypto.Cipher``.
+* The 3 public key object types (RSA, DSA, ElGamal) are now unpickable.
+* Symmetric ciphers do not have a default mode anymore (used to be ECB).
+  An expression like ``AES.new(key)`` will now fail. If ECB is the desired mode,
+  one has to explicitly use ``AES.new(key, AES.MODE_ECB)``.
+* Unsuccessful verification of a signature will now raise an exception [reverted in 3.2].
+* Removed the ``Crypto.Random.OSRNG`` package.
+* Removed the ``Crypto.Util.winrandom`` module.
+* Removed the ``Crypto.Random.randpool`` module.
+* Removed the ``Crypto.Cipher.XOR`` module.
+* Removed the ``Crypto.Protocol.AllOrNothing`` module.
+* Removed the ``Crypto.Protocol.Chaffing`` module.
+* Removed the parameters ``disabled_shortcut`` and ``overflow`` from ``Crypto.Util.Counter.new``.
+
+Other changes
+-------------
+
+* ``Crypto.Random`` stops being a userspace CSPRNG. It is now a pure wrapper over ``os.urandom``.
+* Added certain resistance against side-channel attacks for GHASH (GCM) and DSA.
+* More test vectors for ``HMAC-RIPEMD-160``.
+* Update ``libtomcrypt`` headers and code to v1.17 (kudos to Richard Mitchell).
+* RSA and DSA keys are checked for consistency as they are imported.
+* Simplified build process by removing autoconf.
+* Speed optimization to PBKDF2.
+* Add support for MSVC.
+* Replaced HMAC code with a BSD implementation. Clarified that starting from the fork,
+  all contributions are released under the BSD license.

@@ -1,0 +1,503 @@
+/*
+ * SPDX-FileCopyrightText: 2018 Helder Eijs <helderijs@gmail.com>
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+#include <stdio.h>
+#include "common.h"
+#include "endianess.h"
+
+/**
+ * SHA-2 as defined in FIPS 180-4 http://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.180-4.pdf
+ *
+ * This file is included by SHA224.c, SHA256.c, SHA384.c and SHA512.c
+ * (themselves included by their CPU-specific variants, like SHA256_armv8.c),
+ * after they define MODULE_NAME, WORD_SIZE and DIGEST_SIZE.
+ *
+ * The extension module is named after SHA2_MODULE (default: MODULE_NAME),
+ * while the exported functions are always prefixed by MODULE_NAME.
+ *
+ * The compression function sha_compress_words() is in a separate file:
+ *
+ * - hash_SHA2_compress_shani.c, if SHA2_SHA_NI is defined (SHA-224 and
+ *   SHA-256 only): it uses the Intel SHA extensions, so the module can only
+ *   be loaded on a CPU that supports them (see SHA256_shani.c).
+ *
+ * - hash_SHA2_compress_armv8.c, if SHA2_ARMV8 is defined: it uses the
+ *   instructions of the ARMv8 Cryptography Extensions (see SHA256_armv8.c).
+ *   On other targets (such as the x86-64 half of a macOS universal2 build),
+ *   the portable compression function is used instead: the Python code
+ *   only loads the module after checking that the CPU has the instructions.
+ *
+ * - hash_SHA2_compress_portable.c, otherwise.
+ */
+#ifndef SHA2_MODULE
+#define SHA2_MODULE MODULE_NAME
+#endif
+
+FAKE_INIT(SHA2_MODULE)
+
+#define FUNC_NAME(pf) PASTE2(MODULE_NAME, pf)
+
+#if WORD_SIZE==4
+
+/** SHA-224, SHA-256 **/
+
+typedef uint32_t sha2_word_t;
+
+#define SCHEDULE_SIZE 64
+#define BLOCK_SIZE 64
+
+static const sha2_word_t K[SCHEDULE_SIZE] = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b,
+    0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01,
+    0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7,
+    0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152,
+    0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+    0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+    0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819,
+    0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08,
+    0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f,
+    0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+};
+
+#define LOAD_WORD_BIG(p)        LOAD_U32_BIG(p)
+#define STORE_WORD_BIG(p, w)    STORE_U32_BIG(p, w)
+
+#elif WORD_SIZE==8
+
+/** SHA-384, SHA-512 **/
+
+typedef uint64_t sha2_word_t;
+
+#define SCHEDULE_SIZE 80
+#define BLOCK_SIZE 128
+
+static const sha2_word_t K[SCHEDULE_SIZE] = {
+    0x428a2f98d728ae22ULL, 0x7137449123ef65cdULL, 0xb5c0fbcfec4d3b2fULL, 0xe9b5dba58189dbbcULL,
+    0x3956c25bf348b538ULL, 0x59f111f1b605d019ULL, 0x923f82a4af194f9bULL, 0xab1c5ed5da6d8118ULL,
+    0xd807aa98a3030242ULL, 0x12835b0145706fbeULL, 0x243185be4ee4b28cULL, 0x550c7dc3d5ffb4e2ULL,
+    0x72be5d74f27b896fULL, 0x80deb1fe3b1696b1ULL, 0x9bdc06a725c71235ULL, 0xc19bf174cf692694ULL,
+    0xe49b69c19ef14ad2ULL, 0xefbe4786384f25e3ULL, 0x0fc19dc68b8cd5b5ULL, 0x240ca1cc77ac9c65ULL,
+    0x2de92c6f592b0275ULL, 0x4a7484aa6ea6e483ULL, 0x5cb0a9dcbd41fbd4ULL, 0x76f988da831153b5ULL,
+    0x983e5152ee66dfabULL, 0xa831c66d2db43210ULL, 0xb00327c898fb213fULL, 0xbf597fc7beef0ee4ULL,
+    0xc6e00bf33da88fc2ULL, 0xd5a79147930aa725ULL, 0x06ca6351e003826fULL, 0x142929670a0e6e70ULL,
+    0x27b70a8546d22ffcULL, 0x2e1b21385c26c926ULL, 0x4d2c6dfc5ac42aedULL, 0x53380d139d95b3dfULL,
+    0x650a73548baf63deULL, 0x766a0abb3c77b2a8ULL, 0x81c2c92e47edaee6ULL, 0x92722c851482353bULL,
+    0xa2bfe8a14cf10364ULL, 0xa81a664bbc423001ULL, 0xc24b8b70d0f89791ULL, 0xc76c51a30654be30ULL,
+    0xd192e819d6ef5218ULL, 0xd69906245565a910ULL, 0xf40e35855771202aULL, 0x106aa07032bbd1b8ULL,
+    0x19a4c116b8d2d0c8ULL, 0x1e376c085141ab53ULL, 0x2748774cdf8eeb99ULL, 0x34b0bcb5e19b48a8ULL,
+    0x391c0cb3c5c95a63ULL, 0x4ed8aa4ae3418acbULL, 0x5b9cca4f7763e373ULL, 0x682e6ff3d6b2b8a3ULL,
+    0x748f82ee5defb2fcULL, 0x78a5636f43172f60ULL, 0x84c87814a1f0ab72ULL, 0x8cc702081a6439ecULL,
+    0x90befffa23631e28ULL, 0xa4506cebde82bde9ULL, 0xbef9a3f7b2c67915ULL, 0xc67178f2e372532bULL,
+    0xca273eceea26619cULL, 0xd186b8c721c0c207ULL, 0xeada7dd6cde0eb1eULL, 0xf57d4f7fee6ed178ULL,
+    0x06f067aa72176fbaULL, 0x0a637dc5a2c898a6ULL, 0x113f9804bef90daeULL, 0x1b710b35131c471bULL,
+    0x28db77f523047d84ULL, 0x32caab7b40c72493ULL, 0x3c9ebe0a15c9bebcULL, 0x431d67c49c100d4cULL,
+    0x4cc5d4becb3e42b6ULL, 0x597f299cfc657e2aULL, 0x5fcb6fab3ad6faecULL, 0x6c44198c4a475817ULL
+};
+
+#define LOAD_WORD_BIG(p)        LOAD_U64_BIG(p)
+#define STORE_WORD_BIG(p, w)    STORE_U64_BIG(p, w)
+
+#else
+#error Invalid WORD_SIZE
+#endif
+
+static inline void put_be(sha2_word_t number, uint8_t *p)
+{
+    int i;
+
+    for (i=0; i<WORD_SIZE; i++) {
+        p[WORD_SIZE-1-i] = (uint8_t)(number >> (i*8));
+    }
+}
+
+typedef struct t_hash_state {
+    sha2_word_t h[8];
+    uint8_t buf[BLOCK_SIZE];    /** 16 words **/
+    unsigned curlen;            /** Useful message bytes in buf[] (leftmost) **/
+    sha2_word_t totbits[2];     /** Total message length in bits **/
+    size_t digest_size;         /** Actual digest size in bytes **/
+} hash_state;
+
+static int add_bits(hash_state *hs, sha2_word_t bits)
+{
+    hs->totbits[0] += bits;
+    if (hs->totbits[0] >= bits) {
+        return 0;
+    }
+
+    /** Overflow **/
+    hs->totbits[1] += 1;
+    if (hs->totbits[1] > 0) {
+        return 0;
+    }
+
+    return ERR_MAX_DATA;
+}
+
+/** The compression function sha_compress_words() **/
+#if defined(SHA2_ARMV8) && !(defined(__aarch64__) || defined(_M_ARM64))
+#undef SHA2_ARMV8
+#endif
+
+#if defined(SHA2_SHA_NI)
+#include "hash_SHA2_compress_shani.c"
+#elif defined(SHA2_ARMV8)
+#include "hash_SHA2_compress_armv8.c"
+#else
+#include "hash_SHA2_compress_portable.c"
+#endif
+
+/** Compress one block of BLOCK_SIZE bytes **/
+static void sha_compress_block(hash_state *hs, const uint8_t *block)
+{
+    sha2_word_t M[16];
+    int i;
+
+    /** Words flow in in big-endian mode **/
+    for (i=0; i<16; i++) {
+        M[i] = LOAD_WORD_BIG(&block[i*WORD_SIZE]);
+    }
+
+    sha_compress_words(hs->h, hs->h, M);
+}
+
+static void sha_compress(hash_state * hs)
+{
+    sha_compress_block(hs, hs->buf);
+}
+
+/** Set the initial state, for a digest of digest_size bytes **/
+static void sha_init_state(hash_state *hs, size_t digest_size)
+{
+    int i;
+#if DIGEST_SIZE == (512/8)
+    size_t variant;
+#endif
+
+    hs->curlen = 0;
+    hs->totbits[0] = hs->totbits[1] = 0;
+
+    /** Digest size and initial intermediate hash value **/
+    hs->digest_size = digest_size;
+#if DIGEST_SIZE == (512/8)
+    switch (digest_size) {
+        case 28: variant = 1;   /** SHA-512/224 **/
+                 break;
+        case 32: variant = 2;   /** SHA-512/256 **/
+                 break;
+        default: variant = 0;   /** Vanilla SHA-512 **/
+    }
+
+    for (i=0; i<8; i++) {
+        hs->h[i] = H_SHA_512[variant][i];
+    }
+#else
+    for (i=0; i<8; i++) {
+        hs->h[i] = H[i];
+    }
+#endif
+}
+
+EXPORT_SYM int FUNC_NAME(_init)(hash_state **shaState
+#if DIGEST_SIZE == (512/8)
+        , size_t digest_size
+#endif
+        )
+{
+    hash_state *hs;
+
+    if (NULL == shaState) {
+        return ERR_NULL;
+    }
+
+    *shaState = hs = (hash_state*) calloc(1, sizeof(hash_state));
+    if (NULL == hs)
+        return ERR_MEMORY;
+
+#if DIGEST_SIZE == (512/8)
+    sha_init_state(hs, digest_size);
+#else
+    sha_init_state(hs, DIGEST_SIZE);
+#endif
+
+    return 0;
+}
+
+EXPORT_SYM int FUNC_NAME(_destroy)(hash_state *shaState)
+{
+    free(shaState);
+    return 0;
+}
+
+EXPORT_SYM int FUNC_NAME(_update)(hash_state *hs, const uint8_t *buf, size_t len)
+{
+    unsigned curlen;
+
+    if (NULL == hs || NULL == buf) {
+        return ERR_NULL;
+    }
+
+    /*
+     * Read the position in buf[] only once, and check it: if several
+     * threads used the object at once (not supported), the state could
+     * be inconsistent, but buf[] must never overflow.
+     */
+    curlen = hs->curlen;
+    if (curlen >= BLOCK_SIZE) {
+        return ERR_STATE;
+    }
+
+    while (len>0) {
+        unsigned btc, left;
+
+        /** Whole blocks are compressed directly from the input **/
+        if (curlen == 0 && len >= BLOCK_SIZE) {
+            sha_compress_block(hs, buf);
+            buf += BLOCK_SIZE;
+            len -= BLOCK_SIZE;
+            if (add_bits(hs, BLOCK_SIZE*8)) {
+                hs->curlen = 0;
+                return ERR_MAX_DATA;
+            }
+            continue;
+        }
+
+        left = BLOCK_SIZE - curlen;
+        btc = (unsigned)MIN(left, len);
+        memcpy(&hs->buf[curlen], buf, btc);
+        buf += btc;
+        curlen += btc;
+        len -= btc;
+
+        if (curlen == BLOCK_SIZE) {
+            sha_compress(hs);
+            curlen = 0;
+            if (add_bits(hs, BLOCK_SIZE*8)) {
+                hs->curlen = 0;
+                return ERR_MAX_DATA;
+            }
+        }
+    }
+
+    hs->curlen = curlen;
+    return 0;
+}
+
+static int sha_finalize(hash_state *hs, uint8_t *hash, size_t digest_size)
+{
+    unsigned left, i;
+    uint8_t hash_tmp[WORD_SIZE*8];
+
+    if (digest_size != hs->digest_size) {
+        return ERR_DIGEST_SIZE;
+    }
+
+    /* hs is a private copy, but it may come from an inconsistent state */
+    if (hs->curlen >= BLOCK_SIZE) {
+        return ERR_STATE;
+    }
+
+    /* remaining length of the message */
+    if (add_bits(hs, hs->curlen*8)) {
+        return ERR_MAX_DATA;
+    }
+
+    /* append the '1' bit */
+    /* buf[] is guaranteed to have at least 1 byte free */
+    hs->buf[hs->curlen++] = 0x80;
+
+    /** if there are less then 64/128 bits left, just pad with zeroes and compress **/
+    left = BLOCK_SIZE - hs->curlen;
+    if (left < WORD_SIZE*2) {
+        memset(&hs->buf[hs->curlen], 0, left);
+        sha_compress(hs);
+        hs->curlen = 0;
+    }
+
+    /**
+     * pad with zeroes and close the block with the bit length
+     * encoded as 64-bit integer big endian.
+     **/
+    left = BLOCK_SIZE - hs->curlen;
+    memset(&hs->buf[hs->curlen], 0, left);
+    STORE_WORD_BIG(&hs->buf[BLOCK_SIZE-(2*WORD_SIZE)], hs->totbits[1]);
+    STORE_WORD_BIG(&hs->buf[BLOCK_SIZE-(  WORD_SIZE)], hs->totbits[0]);
+
+    /** compress one last time **/
+    sha_compress(hs);
+
+    /** create final hash **/
+    for (i=0; i<8; i++) {
+        put_be(hs->h[i], &hash_tmp[i*WORD_SIZE]);
+    }
+    memcpy(hash, hash_tmp, hs->digest_size);
+
+    return 0;
+}
+
+EXPORT_SYM int FUNC_NAME(_digest)(const hash_state *shaState, uint8_t *digest, size_t digest_size)
+{
+    hash_state temp;
+
+    if (NULL == shaState) {
+        return ERR_NULL;
+    }
+
+    if (digest_size != shaState->digest_size) {
+        return ERR_DIGEST_SIZE;
+    }
+
+    temp = *shaState;
+    return sha_finalize(&temp, digest, digest_size);
+}
+
+/**
+ * Hash a whole message in one call, without allocating a state.
+ * For SHA-512, digest_size selects the variant (28, 32 or 64 bytes);
+ * for the other hashes, it must be the size of their digest.
+ */
+EXPORT_SYM int FUNC_NAME(_oneshot)(const uint8_t *in, size_t len, uint8_t *digest, size_t digest_size)
+{
+    hash_state hs;
+    int result;
+
+    if ((NULL == in && len > 0) || NULL == digest) {
+        return ERR_NULL;
+    }
+
+#if DIGEST_SIZE == (512/8)
+    if (digest_size != 28 && digest_size != 32 && digest_size != 64) {
+        return ERR_DIGEST_SIZE;
+    }
+#else
+    if (digest_size != DIGEST_SIZE) {
+        return ERR_DIGEST_SIZE;
+    }
+#endif
+
+    sha_init_state(&hs, digest_size);
+    if (len > 0) {
+        result = FUNC_NAME(_update)(&hs, in, len);
+        if (result) {
+            return result;
+        }
+    }
+    return sha_finalize(&hs, digest, digest_size);
+}
+
+EXPORT_SYM int FUNC_NAME(_copy)(const hash_state *src, hash_state *dst)
+{
+    if (NULL == src || NULL == dst) {
+        return ERR_NULL;
+    }
+
+    *dst = *src;
+    return 0;
+}
+
+/**
+ * This is a specialized function to efficiently perform the inner loop of PBKDF2-HMAC.
+ *
+ * - inner, the hash after the inner padded secret has been absorbed
+ * - outer, the hash after the outer padded secret has been absorbed
+ * - first_hmac, the output of the first HMAC iteration (with salt and counter)
+ * - result, the XOR of the HMACs from all iterations
+ * - iterations, the total number of PBKDF2 iterations (>0)
+ *
+ * This function does not change the state of either hash.
+ */
+EXPORT_SYM int FUNC_NAME(_pbkdf2_hmac_assist)(const hash_state *inner, const hash_state *outer,
+                                             const uint8_t *first_hmac,
+                                             uint8_t *result,
+                                             size_t iterations,
+                                             size_t digest_size)
+{
+    sha2_word_t M[16], h[8], acc[8];
+    sha2_word_t mask, pad;
+    uint8_t tmp[WORD_SIZE*8];
+    size_t i;
+    unsigned j, full, rem, nwords;
+
+    if (NULL == inner || NULL == outer || NULL == first_hmac || NULL == result) {
+        return ERR_NULL;
+    }
+
+    if (iterations == 0) {
+        return ERR_NR_ROUNDS;
+    }
+
+    if (digest_size != inner->digest_size || digest_size != outer->digest_size) {
+        return ERR_DIGEST_SIZE;
+    }
+
+    /** Both hashes must have absorbed exactly one block (the padded HMAC key) **/
+    if (inner->curlen != 0 || outer->curlen != 0 ||
+        inner->totbits[0] != BLOCK_SIZE*8 || inner->totbits[1] != 0 ||
+        outer->totbits[0] != BLOCK_SIZE*8 || outer->totbits[1] != 0) {
+        return ERR_STATE;
+    }
+
+    /**
+     * The digest may not fill the last word it touches (e.g. SHA-512/224):
+     * that word is shared with the 0x80 padding byte.
+     **/
+    full = (unsigned)(digest_size / WORD_SIZE);
+    rem = (unsigned)(digest_size % WORD_SIZE);
+    nwords = full + (rem > 0);
+    mask = rem ? ~(((sha2_word_t)1 << ((WORD_SIZE-rem)*8)) - 1) : 0;
+    pad = (sha2_word_t)0x80 << ((WORD_SIZE-rem-1)*8);
+
+    memset(tmp, 0, sizeof tmp);
+    memcpy(tmp, first_hmac, digest_size);
+    for (j=0; j<8; j++) {
+        acc[j] = LOAD_WORD_BIG(&tmp[j*WORD_SIZE]);
+    }
+
+    /**
+     * Each hash in the loop processes a single, already padded block,
+     * so we skip the buffering logic and call the compression function directly.
+     **/
+    memset(M, 0, sizeof M);
+    for (j=0; j<nwords; j++) {
+        M[j] = acc[j];
+    }
+    M[full] |= pad;
+    M[15] = (sha2_word_t)((BLOCK_SIZE + digest_size)*8);
+
+    for (i=1; i<iterations; i++) {
+
+        /** Inner hash **/
+        sha_compress_words(inner->h, h, M);
+        for (j=0; j<full; j++) {
+            M[j] = h[j];
+        }
+        if (rem) {
+            M[full] = (h[full] & mask) | pad;
+        }
+
+        /** Outer hash **/
+        sha_compress_words(outer->h, h, M);
+        for (j=0; j<full; j++) {
+            M[j] = h[j];
+        }
+        if (rem) {
+            M[full] = (h[full] & mask) | pad;
+        }
+
+        for (j=0; j<nwords; j++) {
+            acc[j] ^= h[j];
+        }
+    }
+
+    for (j=0; j<8; j++) {
+        put_be(acc[j], &tmp[j*WORD_SIZE]);
+    }
+    memcpy(result, tmp, digest_size);
+
+    return 0;
+}

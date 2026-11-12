@@ -1,0 +1,14 @@
+include MANIFEST.in
+include *.rst
+include setup.py pct-speedtest.py compiler_opt.py
+include pyproject.toml
+include requirements-test.txt
+graft Doc
+prune Doc/_build
+include .github/workflows/*.yml
+recursive-include src *.h *.c *.inc
+include src/mldsa-native/LICENSE src/mldsa-native/README.md
+include src/mlkem-native/LICENSE src/mlkem-native/README.md
+graft src/test
+recursive-exclude src *.pyc *.swp
+prune src/test/build

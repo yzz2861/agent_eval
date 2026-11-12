@@ -1,0 +1,119 @@
+[build-system]
+# 77: license as an SPDX expression (PEP 639)
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pycryptodome"
+dynamic = ["version"]
+description = "Cryptographic library for Python"
+readme = "README.rst"
+authors = [{name = "Helder Eijs", email = "helderijs@gmail.com"}]
+# See LICENSE.rst: the code from PyCrypto is in the public domain (Unlicense),
+# mldsa-native and mlkem-native are under Apache-2.0 OR ISC OR MIT,
+# the rest is under the BSD 2-Clause license
+license = "BSD-2-Clause AND Unlicense AND MIT"
+license-files = ["LICENSE.rst", "src/mldsa-native/LICENSE", "src/mlkem-native/LICENSE"]
+requires-python = ">=3.9"
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Operating System :: Unix",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS :: MacOS X",
+    "Topic :: Security :: Cryptography",
+    "Typing :: Typed",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "pycryptodome-test-vectors"]
+
+[project.urls]
+Homepage = "https://www.pycryptodome.org"
+Source = "https://github.com/Legrandin/pycryptodome/"
+Changelog = "https://www.pycryptodome.org/src/changelog"
+
+[tool.setuptools.dynamic]
+version = {attr = "Crypto.__version__"}
+
+[tool.setuptools.package-data]
+Crypto = ["py.typed"]
+
+[[tool.mypy.overrides]]
+module = ["pycryptodome_test_vectors.*"]
+follow_untyped_imports = true
+
+[[tool.mypy.overrides]]
+module = ["cffi"]
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 110
+target-version = "py39"
+extend-exclude = ["Doc/sphinx_rtd_theme", "build", "ve3"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "C4", "SIM", "PIE", "RUF"]
+ignore = [
+    "E501",     # line length is left to the formatter
+    "UP007",    # keep typing.Union, valid for Python 3.9
+    "UP045",    # keep typing.Optional, valid for Python 3.9
+    "UP031",    # keep printf-style string formatting
+    "RUF012",   # mutable class attributes are not annotated with ClassVar
+    "RUF022",   # keep the order of __all__ as written
+    "E731",     # lambda assignments are fine
+    "SIM108",   # ternary operators are not always more readable
+    "B904",     # exception chaining would change the tracebacks users see
+    "B028",     # explicit stacklevel would change where warnings are reported
+    "RUF005",   # list concatenation is fine
+    "RUF015",   # indexing the first element is fine
+    "SIM105",   # try-except-pass is fine
+    "SIM115",   # files may be closed explicitly
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Test helpers take (never modified) dictionaries as default arguments
+"lib/Crypto/SelfTest/**" = ["B006"]
+# Modules that re-export names imported from other modules
+"lib/Crypto/Hash/RIPEMD.py" = ["F401"]
+"lib/Crypto/Hash/SHA.py" = ["F401"]
+"lib/Crypto/Util/_raw_api.py" = ["F401"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["Crypto"]
+
+[tool.pytest.ini_options]
+# Plain "pytest" runs the self-tests of the installed package
+# (the sources in lib/ lack the compiled extensions)
+addopts = ["-p", "Crypto.SelfTest.plugin", "--pyargs"]
+testpaths = ["Crypto.SelfTest"]
+
+[tool.cibuildwheel.windows]
+# delvewheel should find no DLL to vendor: it is kept as a check.
+# vcruntime140.dll is excluded, as delvewheel 1.13 does not know that PyPy 8.0 provides it.
+repair-wheel-command = "delvewheel repair --exclude vcruntime140.dll -w {dest_dir} -v {wheel}"
+
+[tool.cibuildwheel.linux]
+# The CPython wheels are built for glibc 2.17 and newer (manylinux2014)
+manylinux-x86_64-image = "manylinux2014"
+manylinux-i686-image = "manylinux2014"
+manylinux-aarch64-image = "manylinux2014"
+
+[[tool.cibuildwheel.overrides]]
+# PyPy 8.0 (PyPy 3.11 since cibuildwheel 4.3.0) requires glibc 2.28: it cannot be
+# installed in the manylinux2014 image. cibuildwheel 4.3 builds PyPy in the image of
+# CPython (the manylinux-pypy_*-image options have no effect), hence this override.
+# These options must not be set with CIBW_* environment variables, which would take
+# precedence over it.
+select = "pp*"
+manylinux-x86_64-image = "manylinux_2_28"
+manylinux-i686-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"

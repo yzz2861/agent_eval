@@ -1,0 +1,762 @@
+.. _modern_cipher_modes:
+
+Modern modes of operation for symmetric block ciphers
+=====================================================
+
+Classic modes of operation such as CBC only provide guarantees over
+the *confidentiality* of the message but not over its *integrity*.
+In other words, they don't allow the receiver to establish if the 
+ciphertext was modified in transit or if it really originates
+from a certain source.
+
+For that reason, classic modes of operation have been often paired with
+a MAC primitive (such as :mod:`Crypto.Hash.HMAC`), but the
+combination is not always straightforward, efficient or secure.
+
+Recently, new modes of operations (AEAD, for `Authenticated Encryption
+with Associated Data <https://en.wikipedia.org/wiki/Authenticated_encryption>`_)
+have been designed to combine *encryption* and *authentication* into a single,
+efficient primitive. Optionally, some part of the message can also be left in the
+clear (non-confidential *associated data*, such as headers),
+while the whole message remains fully authenticated.
+
+In addition to the **ciphertext** and a **nonce** (or **IV** - Initialization
+Vector), AEAD modes require the additional delivery of a **MAC tag**.
+
+This is the state machine for a cipher object:
+
+.. figure:: aead.png
+    :align: center
+    :figwidth: 80%
+
+    Generic state diagram for a AEAD cipher mode
+
+Besides :meth:`encrypt` and :meth:`decrypt`, which are also available
+in classic modes of operation, a cipher object for an AEAD mode has these methods:
+
+.. list-table::
+    :header-rows: 1
+    :widths: 35 65
+
+    * - Method
+      - Purpose
+    * - ``update(data)``
+      - Authenticate data that is delivered as it is, without encryption
+        (*associated data*, like a header).
+        Call it before :meth:`encrypt` or :meth:`decrypt`.
+        Data passed to :meth:`encrypt` and :meth:`decrypt` is authenticated automatically.
+    * - ``digest()``, ``hexdigest()``
+      - At the end of encryption, return the MAC tag to deliver with the ciphertext
+        (as ``bytes`` or as a hexadecimal string).
+    * - ``verify(tag)``, ``hexverify(hex_tag)``
+      - At the end of decryption, check the MAC tag received with the ciphertext.
+        They raise ``ValueError`` if the tag is not valid:
+        then the key is wrong or the message was modified,
+        and you must discard the plaintext.
+    * - ``encrypt_and_digest(plaintext)``
+      - :meth:`encrypt` and ``digest()`` in one call:
+        returns the tuple ``(ciphertext, tag)``.
+    * - ``decrypt_and_verify(ciphertext, tag)``
+      - :meth:`decrypt` and ``verify()`` in one call:
+        returns the plaintext, or raises ``ValueError`` if the tag is not valid.
+
+The full API of each mode is at the end of its section below
+(for instance, :class:`~Crypto.Cipher._mode_gcm.GcmMode` for GCM).
+
+.. _ccm_mode:
+
+CCM mode
+--------
+`Counter with CBC-MAC <https://en.wikipedia.org/wiki/CCM_mode>`_, defined in
+`RFC3610 <https://tools.ietf.org/html/rfc3610>`_ or
+`NIST SP 800-38C <http://csrc.nist.gov/publications/nistpubs/800-38C/SP800-38C.pdf>`_.
+It only works with ciphers having block size 128 bits (like AES).
+ 
+The :func:`new` function at the module level under ``Crypto.Cipher`` instantiates
+a new CCM cipher object for the relevant base algorithm.
+In the following definition, ``<algorithm>`` can only be ``AES`` today:
+
+.. function:: Crypto.Cipher.<algorithm>.new(key, mode, *, nonce=None, mac_len=None, msg_len=None, assoc_len=None)
+
+  Create a new CCM object, using <algorithm> as the base block cipher.
+  
+  :param bytes key: the cryptographic key
+  :param mode: the constant ``Crypto.Cipher.<algorithm>.MODE_CCM``
+  :param bytes nonce: the value of the fixed nonce.
+    It must be unique for the combination message/key.
+    For AES, its length varies from 7 to 13 bytes.
+    The longer the nonce, the smaller the allowed message size
+    (with a nonce of 13 bytes, the message cannot exceed 64KB).
+    If not present, the library creates a 11 bytes random nonce (the maximum
+    message size is 4GB).
+  :param integer mac_len: the desired length of the 
+    MAC tag (default if not present: 16 bytes).
+  :param integer msg_len: pre-declaration of the length of the
+    message to encipher. If not specified, :meth:`~Crypto.Cipher._mode_ccm.CcmMode.encrypt` and :meth:`~Crypto.Cipher._mode_ccm.CcmMode.decrypt`
+    can only be called once.
+  :param integer assoc_len: pre-declaration of the length of the
+    associated data. If not specified, some extra buffering will take place
+    internally.
+  :return: a CCM cipher object (:class:`~Crypto.Cipher._mode_ccm.CcmMode`)
+      
+The cipher object has a read-only attribute :attr:`~Crypto.Cipher._mode_ccm.CcmMode.nonce`.
+
+Example (encryption)::
+
+    >>> import json
+    >>> from base64 import b64encode
+    >>> from Crypto.Cipher import AES
+    >>> from Crypto.Random import get_random_bytes
+    >>>
+    >>> header = b"header"
+    >>> data = b"secret"
+    >>> key = get_random_bytes(16)
+    >>> cipher = AES.new(key, AES.MODE_CCM)
+    >>> cipher.update(header)
+    >>> ciphertext, tag = cipher.encrypt_and_digest(data)
+    >>>
+    >>> json_k = [ 'nonce', 'header', 'ciphertext', 'tag' ]
+    >>> json_v = [ b64encode(x).decode('utf-8') for x in (cipher.nonce, header, ciphertext, tag) ]
+    >>> result = json.dumps(dict(zip(json_k, json_v)))
+    >>> print(result)
+    {"nonce": "p6ffzcKw+6xopVQ=", "header": "aGVhZGVy", "ciphertext": "860kZo/G", "tag": "Ck5YpVCM6fdWnFkFxw8K6A=="}
+
+Example (decryption)::
+
+    >>> import json
+    >>> from base64 import b64decode
+    >>> from Crypto.Cipher import AES
+    >>>
+    >>> # We assume that the key was securely shared beforehand
+    >>> try:
+    ...     b64 = json.loads(json_input)
+    ...     json_k = [ 'nonce', 'header', 'ciphertext', 'tag' ]
+    ...     jv = {k:b64decode(b64[k]) for k in json_k}    
+    ...     
+    ...     cipher = AES.new(key, AES.MODE_CCM, nonce=jv['nonce'])
+    ...     cipher.update(jv['header'])
+    ...     plaintext = cipher.decrypt_and_verify(jv['ciphertext'], jv['tag'])
+    ...     print("The message was: " + plaintext.decode('utf-8'))
+    ... except (ValueError, KeyError):
+    ...     print("Incorrect decryption")
+
+CCM cipher object
+~~~~~~~~~~~~~~~~~
+
+.. autoclass:: Crypto.Cipher._mode_ccm.CcmMode
+   :members:
+   :member-order: bysource
+
+.. _eax_mode:
+
+EAX mode
+--------
+An AEAD mode designed for NIST by
+`Bellare, Rogaway, and Wagner in 2003 <http://csrc.nist.gov/groups/ST/toolkit/BCM/documents/proposedmodes/eax/eax-spec.pdf>`_.
+
+The :func:`new` function at the module level under ``Crypto.Cipher`` instantiates
+a new EAX cipher object for the relevant base algorithm.
+
+.. function:: Crypto.Cipher.<algorithm>.new(key, mode, *, nonce=None, mac_len=None)
+
+  Create a new EAX object, using <algorithm> as the base block cipher.
+
+  :param bytes key: the cryptographic key
+  :param mode: the constant ``Crypto.Cipher.<algorithm>.MODE_EAX``
+  :param bytes nonce: the value of the fixed nonce.
+    It must be unique for the combination message/key.
+    If not present, the library creates a random nonce (16 bytes long for AES).
+  :param integer mac_len: the length of the MAC tag, in bytes.
+    At least 2, and not larger than the cipher's block size (default),
+    which is 16 bytes for AES.
+  :return: an EAX cipher object (:class:`~Crypto.Cipher._mode_eax.EaxMode`)
+
+The cipher object has a read-only attribute :attr:`~Crypto.Cipher._mode_eax.EaxMode.nonce`.
+
+Example (encryption)::
+
+    >>> import json
+    >>> from base64 import b64encode
+    >>> from Crypto.Cipher import AES
+    >>> from Crypto.Random import get_random_bytes
+    >>>
+    >>> header = b"header"
+    >>> data = b"secret"
+    >>> key = get_random_bytes(16)
+    >>> cipher = AES.new(key, AES.MODE_EAX)
+    >>> cipher.update(header)
+    >>> ciphertext, tag = cipher.encrypt_and_digest(data)
+    >>>
+    >>> json_k = [ 'nonce', 'header', 'ciphertext', 'tag' ]
+    >>> json_v = [ b64encode(x).decode('utf-8') for x in (cipher.nonce, header, ciphertext, tag) ]
+    >>> result = json.dumps(dict(zip(json_k, json_v)))
+    >>> print(result)
+    {"nonce": "CSIJ+e8KP7HJo+hC4RXIyQ==", "header": "aGVhZGVy", "ciphertext": "9YYjuAn6", "tag": "kXHrs9ZwYmjDkmfEJx7Clg=="}
+
+Example (decryption)::
+
+    >>> import json
+    >>> from base64 import b64decode
+    >>> from Crypto.Cipher import AES
+    >>>
+    >>> # We assume that the key was securely shared beforehand
+    >>> try:
+    ...     b64 = json.loads(json_input)
+    ...     json_k = [ 'nonce', 'header', 'ciphertext', 'tag' ]
+    ...     jv = {k:b64decode(b64[k]) for k in json_k}    
+    ...     
+    ...     cipher = AES.new(key, AES.MODE_EAX, nonce=jv['nonce'])
+    ...     cipher.update(jv['header'])
+    ...     plaintext = cipher.decrypt_and_verify(jv['ciphertext'], jv['tag'])
+    ...     print("The message was: " + plaintext.decode('utf-8'))
+    ... except (ValueError, KeyError):
+    ...     print("Incorrect decryption")
+
+EAX cipher object
+~~~~~~~~~~~~~~~~~
+
+.. autoclass:: Crypto.Cipher._mode_eax.EaxMode
+   :members:
+   :member-order: bysource
+
+.. _gcm_mode:
+
+GCM mode
+--------
+`Galois/Counter Mode <https://en.wikipedia.org/wiki/Galois/Counter_Mode>`_,
+defined in `NIST SP 800-38D <http://csrc.nist.gov/publications/nistpubs/800-38D/SP-800-38D.pdf>`_.
+It only works in combination with a 128 bits cipher like AES.
+
+The :func:`new` function at the module level under ``Crypto.Cipher`` instantiates
+a new GCM cipher object for the relevant base algorithm.
+
+.. function:: Crypto.Cipher.<algorithm>.new(key, mode, *, nonce=None, mac_len=None, threads=1)
+
+  Create a new GCM object, using <algorithm> as the base block cipher.
+  
+  :param bytes key: the cryptographic key
+  :param mode: the constant ``Crypto.Cipher.<algorithm>.MODE_GCM``
+  :param bytes nonce: the value of the fixed nonce.
+    It must be unique for the combination message/key.
+    If not present, the library creates a random nonce (16 bytes long for AES).
+  :param integer mac_len: the desired length of the 
+    MAC tag, from 4 to 16 bytes (default: 16).
+  :param int threads: (only for AES) the maximum number of threads used to
+    encrypt or decrypt long data (default: 1, no extra threads).
+    Use 0 for as many threads as the CPU cores available to the process.
+    See the same parameter for the :ref:`ctr_mode`.
+  :return: a GCM cipher object (:class:`~Crypto.Cipher._mode_gcm.GcmMode`)
+      
+The cipher object has a read-only attribute :attr:`~Crypto.Cipher._mode_gcm.GcmMode.nonce`.
+
+With the ``threads`` parameter, both the encryption (CTR mode) and
+the authentication (GHASH) of long data run on several CPU cores.
+
+Example (encryption)::
+
+    >>> import json
+    >>> from base64 import b64encode
+    >>> from Crypto.Cipher import AES
+    >>> from Crypto.Random import get_random_bytes
+    >>>
+    >>> header = b"header"
+    >>> data = b"secret"
+    >>> key = get_random_bytes(16)
+    >>> cipher = AES.new(key, AES.MODE_GCM)
+    >>> cipher.update(header)
+    >>> ciphertext, tag = cipher.encrypt_and_digest(data)
+    >>>
+    >>> json_k = [ 'nonce', 'header', 'ciphertext', 'tag' ]
+    >>> json_v = [ b64encode(x).decode('utf-8') for x in (cipher.nonce, header, ciphertext, tag) ]
+    >>> result = json.dumps(dict(zip(json_k, json_v)))
+    >>> print(result)
+    {"nonce": "DpOK8NIOuSOQlTq+BphKWw==", "header": "aGVhZGVy", "ciphertext": "CZVqyacc", "tag": "B2tBgICbyw+Wji9KpLVa8w=="}
+
+Example (decryption)::
+
+    >>> import json
+    >>> from base64 import b64decode
+    >>> from Crypto.Cipher import AES
+    >>>
+    >>> # We assume that the key was securely shared beforehand
+    >>> try:
+    ...     b64 = json.loads(json_input)
+    ...     json_k = [ 'nonce', 'header', 'ciphertext', 'tag' ]
+    ...     jv = {k:b64decode(b64[k]) for k in json_k}
+    >>>
+    ...     cipher = AES.new(key, AES.MODE_GCM, nonce=jv['nonce'])
+    ...     cipher.update(jv['header'])
+    ...     plaintext = cipher.decrypt_and_verify(jv['ciphertext'], jv['tag'])
+    ...     print("The message was: " + plaintext.decode('utf-8'))
+    ... except (ValueError, KeyError):
+    ...     print("Incorrect decryption")
+
+.. note::
+  GCM is most commonly used with 96-bit (12-byte) nonces, which is also the length recommended by NIST SP 800-38D.
+
+  If interoperability is important, one should take into account that the library default
+  of a 128-bit random nonce may not be (easily) supported by other implementations.
+  A 96-bit nonce can be explicitly generated for a new encryption cipher::
+
+    >>> key = get_random_bytes(16)
+    >>> nonce = get_random_bytes(12)
+    >>> cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+
+GCM cipher object
+~~~~~~~~~~~~~~~~~
+
+.. autoclass:: Crypto.Cipher._mode_gcm.GcmMode
+   :members:
+   :member-order: bysource
+
+.. _siv_mode:
+
+SIV mode
+--------
+Synthetic Initialization Vector (SIV), defined in `RFC5297 <https://tools.ietf.org/html/rfc5297>`_.
+It only works with ciphers with a block size of 128 bits (like AES).
+
+Although less efficient than other modes, SIV is *nonce misuse-resistant*:
+accidental reuse of the nonce does not jeopardize the security as it happens with CCM or GCM.
+As a matter of fact, operating **without** a nonce is not an error per se: the cipher
+simply becomes **deterministic**. In other words, a message gets always encrypted into
+the same ciphertext.
+
+The :func:`new` function at the module level under ``Crypto.Cipher`` instantiates
+a new SIV cipher object for the relevant base algorithm.
+
+.. function:: Crypto.Cipher.<algorithm>.new(key, mode, *, nonce=None)
+
+  Create a new SIV object, using <algorithm> as the base block cipher.
+  
+  :param bytes key: the cryptographic key; it must be twice the size of the key 
+                    required by the underlying cipher (e.g. 32 bytes for
+                    AES-128).
+  :param mode: the constant ``Crypto.Cipher.<algorithm>.MODE_SIV``
+  :param bytes nonce: the value of the fixed nonce.
+    It must be unique for the combination message/key.
+    If not present, the encryption will be deterministic.
+  :return: a SIV cipher object (:class:`~Crypto.Cipher._mode_siv.SivMode`)
+
+If the `nonce` parameter was provided to :func:`new`, the resulting cipher object has a read-only attribute :attr:`~Crypto.Cipher._mode_siv.SivMode.nonce`.
+
+Example (encryption)::
+
+    >>> import json
+    >>> from base64 import b64encode
+    >>> from Crypto.Cipher import AES
+    >>> from Crypto.Random import get_random_bytes
+    >>>
+    >>> header = b"header"
+    >>> data = b"secret"
+    >>> key = get_random_bytes(16 * 2)
+    >>> nonce = get_random_bytes(16)
+    >>> cipher = AES.new(key, AES.MODE_SIV, nonce=nonce)    # Without nonce, the encryption
+    ...                                                     # becomes deterministic
+    >>> cipher.update(header)
+    >>> ciphertext, tag = cipher.encrypt_and_digest(data)
+    >>>
+    >>> json_k = [ 'nonce', 'header', 'ciphertext', 'tag' ]
+    >>> json_v = [ b64encode(x).decode('utf-8') for x in (nonce, header, ciphertext, tag) ]
+    >>> result = json.dumps(dict(zip(json_k, json_v)))
+    >>> print(result)
+    {"nonce": "zMiifAVvDpMS8hnGK/z+iw==", "header": "aGVhZGVy", "ciphertext": "Q7lReEAF", "tag": "KgdnBVbCee6B/wGmMf/wQA=="}
+
+Example (decryption)::
+
+    >>> import json
+    >>> from base64 import b64decode
+    >>> from Crypto.Cipher import AES
+    >>>
+    >>> # We assume that the key was securely shared beforehand
+    >>> try:
+    ...     b64 = json.loads(json_input)
+    ...     json_k = [ 'nonce', 'header', 'ciphertext', 'tag' ]
+    ...     jv = {k:b64decode(b64[k]) for k in json_k}    
+    ...     
+    ...     cipher = AES.new(key, AES.MODE_SIV, nonce=jv['nonce'])
+    ...     cipher.update(jv['header'])
+    ...     plaintext = cipher.decrypt_and_verify(jv['ciphertext'], jv['tag'])
+    ...     print("The message was: " + plaintext.decode('utf-8'))
+    ... except (ValueError, KeyError):
+    ...     print("Incorrect decryption")
+
+One side-effect is that encryption (or decryption) must take place in one go
+with the method ``encrypt_and_digest()`` (or ``decrypt_and_verify()``).
+You cannot use ``encrypt()`` or ``decrypt()``. The state diagram is therefore:
+
+.. figure:: siv.png
+    :align: center
+    :figwidth: 60%
+    
+    State diagram for the SIV cipher mode
+
+The length of the key passed to ``new()`` must be twice
+as required by the underlying block cipher (e.g. 32 bytes for AES-128).
+
+Each call to the method ``update()`` consumes an full piece of associated data.
+That is, the sequence::
+
+    >>> siv_cipher.update(b"builtin")
+    >>> siv_cipher.update(b"securely")
+
+is **not** equivalent to::
+
+    >>> siv_cipher.update(b"built")
+    >>> siv_cipher.update(b"insecurely")
+
+SIV cipher object
+~~~~~~~~~~~~~~~~~
+
+.. autoclass:: Crypto.Cipher._mode_siv.SivMode
+   :members:
+   :exclude-members: encrypt, decrypt
+   :member-order: bysource
+
+.. _gcm_siv_mode:
+
+GCM-SIV mode
+------------
+AES-GCM-SIV, defined in `RFC8452 <https://www.rfc-editor.org/rfc/rfc8452>`_.
+It only works with AES, with a key of 128 or 256 bits.
+
+Like :ref:`SIV <siv_mode>`, GCM-SIV is *nonce misuse-resistant*: if a nonce is repeated,
+the only loss is that encrypting the same message
+(with the same key, nonce and associated data) gives the same ciphertext.
+It is much faster than SIV and about as fast as GCM on long messages,
+and each nonce gets its own keys, so that one key can protect more data.
+Still, you should not reuse nonces on purpose: RFC 8452 recommends random ones.
+
+Encryption and decryption take place in one step, because the
+whole plaintext is needed to compute the tag, and the tag is the start of the key stream.
+There is no :meth:`encrypt` or :meth:`decrypt`: call
+:meth:`encrypt_and_digest` and :meth:`decrypt_and_verify`, once, with the complete message.
+It cannot be longer than 2\ :sup:`36` bytes, and neither can the associated data.
+
+.. function:: Crypto.Cipher.AES.new(key, mode, *, nonce=None, threads=1)
+  :no-index:
+
+  Create a new GCM-SIV object.
+
+  :param bytes key: the cryptographic key, either 16 or 32 bytes long
+                    (24 bytes is not allowed).
+  :param mode: the constant ``Crypto.Cipher.AES.MODE_GCM_SIV``
+  :param bytes nonce: the value of the nonce, which must be 12 bytes long.
+    If not present, a random nonce is generated.
+  :param int threads: the maximum number of threads used to process long data
+    (default: 1, no extra threads; 0 for all CPU cores).
+  :return: a GCM-SIV cipher object (:class:`~Crypto.Cipher._mode_gcm_siv.GcmSivMode`)
+
+The cipher object has a read-only attribute :attr:`~Crypto.Cipher._mode_gcm_siv.GcmSivMode.nonce`.
+
+Example (encryption)::
+
+    >>> import json
+    >>> from base64 import b64encode
+    >>> from Crypto.Cipher import AES
+    >>> from Crypto.Random import get_random_bytes
+    >>>
+    >>> header = b"header"
+    >>> data = b"secret"
+    >>> key = get_random_bytes(32)
+    >>> cipher = AES.new(key, AES.MODE_GCM_SIV)
+    >>> cipher.update(header)
+    >>> ciphertext, tag = cipher.encrypt_and_digest(data)
+    >>>
+    >>> json_k = [ 'nonce', 'header', 'ciphertext', 'tag' ]
+    >>> json_v = [ b64encode(x).decode() for x in (cipher.nonce, header, ciphertext, tag) ]
+    >>> result = json.dumps(dict(zip(json_k, json_v)))
+
+Example (decryption)::
+
+    >>> import json
+    >>> from base64 import b64decode
+    >>> from Crypto.Cipher import AES
+    >>>
+    >>> # We assume that the key was securely shared beforehand
+    >>> try:
+    >>>     b64 = json.loads(json_input)
+    >>>     jv = {k: b64decode(b64[k]) for k in ('nonce', 'header', 'ciphertext', 'tag')}
+    >>>     cipher = AES.new(key, AES.MODE_GCM_SIV, nonce=jv['nonce'])
+    >>>     cipher.update(jv['header'])
+    >>>     plaintext = cipher.decrypt_and_verify(jv['ciphertext'], jv['tag'])
+    >>>     print("The message was: " + plaintext.decode())
+    >>> except (ValueError, KeyError):
+    >>>     print("Incorrect decryption")
+
+GCM-SIV cipher object
+~~~~~~~~~~~~~~~~~~~~~
+
+.. autoclass:: Crypto.Cipher._mode_gcm_siv.GcmSivMode
+   :members:
+   :exclude-members: encrypt, decrypt
+   :member-order: bysource
+
+.. _ocb_mode:
+
+OCB mode
+--------
+`Offset CodeBook mode <https://en.wikipedia.org/wiki/OCB_mode>`_,
+a cipher designed by Rogaway and specified in `RFC7253 <http://www.rfc-editor.org/info/rfc7253>`_
+(more specifically, this module implements the last variant, OCB3).
+It only works in combination with a 128 bits cipher like AES.
+
+OCB was patented in USA but the author eventually `abandoned the patents <https://mailarchive.ietf.org/arch/msg/cfrg/qLTveWOdTJcLn4HP3ev-vrj05Vg/>`_.
+
+The :func:`new` function at the module level under ``Crypto.Cipher`` instantiates
+a new OCB cipher object for the relevant base algorithm.
+
+.. note::
+
+    The OCB state machine is slightly different compared to other modes:
+    if you encrypt (or decrypt) multiple chunks,
+    at the end you MUST call the method ``encrypt`` (or ``decrypt``) with no parameters.
+    This last call will return any piece of internally cached ciphertext (or plaintext).
+
+.. figure:: ocb_mode.png
+    :align: center
+    :figwidth: 80%
+    
+    State diagram for the OCB mode
+
+
+.. function:: Crypto.Cipher.<algorithm>.new(key, mode, *, nonce=None, mac_len=None, threads=1)
+
+  Create a new OCB object, using <algorithm> as the base block cipher.
+
+  :param bytes key: the cryptographic key
+  :param mode: the constant ``Crypto.Cipher.<algorithm>.MODE_OCB``
+  :param bytes nonce: the value of the fixed nonce,
+    with length between 1 and 15 bytes.
+    It must be unique for the combination message/key.
+    If not present, the library creates a 15 bytes random nonce.
+  :param integer mac_len: the desired length of the
+    MAC tag (default if not present: 16 bytes).
+  :param int threads: (only for AES) the maximum number of threads used to
+    encrypt or decrypt long data (default: 1, no extra threads).
+    Use 0 for as many threads as the CPU cores available to the process.
+    See the same parameter for the :ref:`ctr_mode`.
+  :return: an OCB cipher object (:class:`~Crypto.Cipher._mode_ocb.OcbMode`)
+
+The cipher object has two read-only attributes: :attr:`~Crypto.Cipher._mode_ocb.OcbMode.nonce` and :attr:`~Crypto.Cipher._mode_ocb.OcbMode.block_size`.
+
+With the ``threads`` parameter, the encryption and the decryption of long data
+run on several CPU cores (each block is processed independently of the others).
+The associated data is always processed by the calling thread.
+
+Example (encryption as a once-off operation)::
+
+    >>> import json
+    >>> from base64 import b64encode
+    >>> from Crypto.Cipher import AES
+    >>> from Crypto.Random import get_random_bytes
+    >>>
+    >>> header = b"header"
+    >>> data = b"secret"
+    >>> key = get_random_bytes(16)
+    >>> cipher = AES.new(key, AES.MODE_OCB)
+    >>> cipher.update(header)
+    >>> ciphertext, tag = cipher.encrypt_and_digest(data)
+    >>>
+    >>> json_k = [ 'nonce', 'header', 'ciphertext', 'tag' ]
+    >>> json_v = [ b64encode(x).decode('utf-8') for x in (cipher.nonce, header, ciphertext, tag) ]
+    >>> result = json.dumps(dict(zip(json_k, json_v)))
+    >>> print(result)
+    {"nonce": "I7E6PKxHNYo2i9sz8W98", "header": "aGVhZGVy", "ciphertext": "nYJnJ8jC", "tag": "0UbFcmO9lqGknCIDWRLALA=="}
+
+Example (decryption as a once-off operation)::
+
+    >>> import json
+    >>> from base64 import b64decode
+    >>> from Crypto.Cipher import AES
+    >>>
+    >>> # We assume that the key was securely shared beforehand
+    >>> try:
+    ...     b64 = json.loads(json_input)
+    ...     json_k = [ 'nonce', 'header', 'ciphertext', 'tag' ]
+    ...     jv = {k:b64decode(b64[k]) for k in json_k}
+    >>>
+    ...     cipher = AES.new(key, AES.MODE_OCB, nonce=jv['nonce'])
+    ...     cipher.update(jv['header'])
+    ...     plaintext = cipher.decrypt_and_verify(jv['ciphertext'], jv['tag'])
+    ...     print("The message was: " + plaintext.decode('utf-8'))
+    ... except (ValueError, KeyError):
+    ...     print("Incorrect decryption")
+
+Example (encryption with multiple chunks)::
+
+    >>> import json
+    >>> from base64 import b64encode
+    >>> from Crypto.Cipher import AES
+    >>> from Crypto.Random import get_random_bytes
+    >>>
+    >>> header = b'header'
+    >>> data = [b'chunk1', b'chunk2', b'chunk3']
+    >>> key = get_random_bytes(16)
+    >>> cipher = AES.new(key, AES.MODE_OCB)
+    >>> cipher.update(header)
+    >>> ciphertext = b''
+    >>> for chunk in data:
+    ...     ciphertext += cipher.encrypt(chunk)
+    >>> ciphertext += cipher.encrypt()
+    >>> tag = cipher.digest()
+    >>>
+    >>> json_k = [ 'nonce', 'header', 'ciphertext', 'tag' ]
+    >>> json_v = [ b64encode(x).decode('utf-8') for x in (cipher.nonce, header, ciphertext, tag) ]
+    >>> result = json.dumps(dict(zip(json_k, json_v)))
+    >>> print(result)
+    {"nonce": "IABQ/ww8vGsu7F4sbHXK", "header": "aGVhZGVy", "ciphertext": "7Amm2DoiMHVkYC8dY7NEX86M", "tag": "qOPnjAxF63MOAx6xjwRvJQ=="}
+
+Example (decryption with multiple chunks)::
+
+    >>> import json
+    >>> from base64 import b64decode
+    >>> from Crypto.Cipher import AES
+    >>>
+    >>> # We assume that the key was securely shared beforehand
+    >>> try:
+    ...     b64 = json.loads(json_input)
+    ...     json_k = [ 'nonce', 'header', 'ciphertext', 'tag' ]
+    ...     jv = {k:b64decode(b64[k]) for k in json_k}
+    >>>
+    ...     cipher = AES.new(key, AES.MODE_OCB, nonce=jv['nonce'])
+    ...     cipher.update(jv['header'])
+    ...     ciphertext = jv['ciphertext']
+    >>>
+    ...     # Split into small chunks, just for demo purposes
+    ...     chunks = [ ciphertext[i:i+2] for i in range(0, len(ciphertext), 2) ]
+    >>>
+    ...     plaintext = b''
+    ...     for chunk in chunks:
+    ...         plaintext += cipher.decrypt(chunk)
+    ...     plaintext += cipher.decrypt()
+    ...     cipher.verify(jv['tag'])
+    >>>
+    ...     print("The message was: " + plaintext.decode('utf-8'))
+    ... except (ValueError, KeyError):
+    ...     print("Incorrect decryption")
+
+OCB cipher object
+~~~~~~~~~~~~~~~~~
+
+.. autoclass:: Crypto.Cipher._mode_ocb.OcbMode
+   :members:
+   :member-order: bysource
+
+.. _kw_mode:
+
+KW mode
+--------
+`Key Wrapping <https://datatracker.ietf.org/doc/html/rfc3394>`_ 
+(or `NIST SP 800-38F <https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-38F.pdf>`_)
+is an ad-hoc authenticated cipher mode designed to wrap cryptographic keys,
+and not other types of data.
+It is deterministic (it doesn't use nonces or IVs) and
+only works with ciphers with a block size of 128 bits (like AES).
+
+The cryptographic key to wrap must have a length multiple of 8.
+
+There is no reason to prefer this ad-hoc  mode to one like SIV.
+
+The :func:`new` function at the module level under ``Crypto.Cipher`` instantiates
+a new KW cipher object for the relevant base algorithm.
+In the following definition, ``<algorithm>`` can only be ``AES`` today:
+
+.. function:: Crypto.Cipher.<algorithm>.new(key, <algorithm>.MODE_KW)
+
+  Create a new Key Wrapping (KW) cipher object,
+  using <algorithm> as the base block cipher.
+
+  :param bytes key: the cryptographic key
+  :return: a KW cipher object (:class:`~Crypto.Cipher._mode_kw.KWMode`)
+
+The cipher object has one read-only attribute :attr:`~Crypto.Cipher._mode_kw.KWMode.block_size`,
+and two methods (:meth:`~Crypto.Cipher._mode_kw.KWMode.seal` and :meth:`~Crypto.Cipher._mode_kw.KWMode.unseal`).
+
+Example of encryption::
+
+    >>> from Crypto.Cipher import AES
+    >>> from Crypto.Random import get_random_bytes
+    >>>
+    >>> key_to_wrap = b"1234567890123456"
+    >>> wrapping_key = get_random_bytes(16)
+    >>> cipher = AES.new(wrapping_key, AES.MODE_KW)
+    >>> ciphertext = cipher.seal(key_to_wrap)
+
+Example of decryption::
+
+    >>> from Crypto.Cipher import AES
+    >>> from Crypto.Random import get_random_bytes
+    >>>
+    >>> wrapping_key = get_random_bytes(16)
+    >>> cipher = AES.new(wrapping_key, AES.MODE_KW)
+    >>> try:
+    ...     unwrapped_key = cipher.unseal(ciphertext)
+    ... except ValueError:
+    ...     print("Invalid decryption")
+
+KW cipher object
+~~~~~~~~~~~~~~~~
+
+.. autoclass:: Crypto.Cipher._mode_kw.KWMode
+   :members:
+   :member-order: bysource
+
+.. _kwp_mode:
+
+KWP mode
+--------
+`Key Wrapping with Padding <https://datatracker.ietf.org/doc/html/rfc5649>`_ 
+(or `NIST SP 800-38F <https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-38F.pdf>`_)
+is an ad-hoc authenticated cipher mode designed to wrap cryptographic keys,
+and not other types of data.
+It is deterministic (it doesn't use nonces or IVs) and
+only works with ciphers with a block size of 128 bits (like AES).
+
+The cryptographic key to wrap can have any length.
+
+There is no reason to prefer this ad-hoc  mode to one like SIV.
+
+The :func:`new` function at the module level under ``Crypto.Cipher`` instantiates
+a new KWP cipher object for the relevant base algorithm.
+In the following definition, ``<algorithm>`` can only be ``AES`` today:
+
+.. function:: Crypto.Cipher.<algorithm>.new(key, <algorithm>.MODE_KWP)
+
+  Create a new Key Wrapping with Padding (KWP) cipher object,
+  using <algorithm> as the base block cipher.
+
+  :param bytes key: the cryptographic key
+  :return: a KWP cipher object (:class:`~Crypto.Cipher._mode_kwp.KWPMode`)
+
+The cipher object has one read-only attribute :attr:`~Crypto.Cipher._mode_kwp.KWPMode.block_size`,
+and two methods (:meth:`~Crypto.Cipher._mode_kwp.KWPMode.seal` and :meth:`~Crypto.Cipher._mode_kwp.KWPMode.unseal`).
+
+Example of encryption::
+
+    >>> from Crypto.Cipher import AES
+    >>> from Crypto.Random import get_random_bytes
+    >>>
+    >>> key_to_wrap = b"1234567890123456"
+    >>> wrapping_key = get_random_bytes(16)
+    >>> cipher = AES.new(wrapping_key, AES.MODE_KWP)
+    >>> ciphertext = cipher.seal(key_to_wrap)
+
+Example of decryption::
+
+    >>> from Crypto.Cipher import AES
+    >>> from Crypto.Random import get_random_bytes
+    >>>
+    >>> wrapping_key = get_random_bytes(16)
+    >>> cipher = AES.new(wrapping_key, AES.MODE_KWP)
+    >>> try:
+    ...     unwrapped_key = cipher.unseal(ciphertext)
+    ... except ValueError:
+    ...     print("Invalid decryption")
+
+KWP cipher object
+~~~~~~~~~~~~~~~~~
+
+.. autoclass:: Crypto.Cipher._mode_kwp.KWPMode
+   :members:
+   :member-order: bysource

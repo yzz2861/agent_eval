@@ -1,0 +1,313 @@
+/* ===================================================================
+ *
+ * Copyright (c) 2014, Legrandin <helderijs@gmail.com>
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in
+ *    the documentation and/or other materials provided with the
+ *    distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+ * COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+ * ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ * ===================================================================
+ */
+
+#include "common.h"
+
+FAKE_INIT(cpuid_c)
+
+#if defined HAVE_CPUID_H
+#include <cpuid.h>
+#include <immintrin.h>
+#elif defined HAVE_INTRIN_H
+#include <intrin.h>
+#endif
+
+#if defined(__aarch64__) && defined(__linux__)
+#include <sys/auxv.h>
+#elif defined(__aarch64__) && defined(__APPLE__)
+#include <sys/sysctl.h>
+#elif defined(_M_ARM64)
+#include <windows.h>
+/*
+ * Older Windows SDKs do not define these (the values are those of the
+ * documentation of IsProcessorFeaturePresent). On a Windows version that
+ * does not know them, IsProcessorFeaturePresent() simply returns FALSE.
+ */
+#ifndef PF_ARM_SHA3_INSTRUCTIONS_AVAILABLE
+#define PF_ARM_SHA3_INSTRUCTIONS_AVAILABLE 64
+#endif
+#ifndef PF_ARM_SHA512_INSTRUCTIONS_AVAILABLE
+#define PF_ARM_SHA512_INSTRUCTIONS_AVAILABLE 65
+#endif
+#endif
+
+/** Call X86 CPUID for Leaf 1: return CX **/
+static uint32_t leaf1_ecx(void)
+{
+    uint32_t info[4];
+
+    memset(info, 0, sizeof info);
+ #if defined(HAVE_CPUID_H)
+    __get_cpuid(1, info, info+1, info+2, info+3);
+#elif defined(HAVE_INTRIN_H)
+    __cpuidex(info, 1, 0);
+#endif
+
+    return info[2];
+}
+
+
+/** Return 1 if the CPU supports the AESNI extension **/
+EXPORT_SYM int have_aes_ni(void)
+{
+    uint32_t ecx;
+
+    ecx = leaf1_ecx();
+    return (ecx & (1UL<<25)) ? 1 : 0;
+}
+
+/** Return non-zero if the CPU supports the PCLMULQDQ instruction (carry-less
+ * multiplication). **/
+EXPORT_SYM int have_clmul(void)
+{
+    uint32_t ecx;
+
+    ecx = leaf1_ecx();
+    return (ecx >> 1) & 1;
+}
+
+/** Call X86 CPUID for Leaf 7, Subleaf 0: return BX (0 if the leaf is not available) **/
+static uint32_t leaf7_ebx(void)
+{
+#if defined(HAVE_CPUID_H)
+    uint32_t eax, ebx, ecx, edx;
+
+    if (__get_cpuid_max(0, NULL) < 7)
+        return 0;
+    __cpuid_count(7, 0, eax, ebx, ecx, edx);
+    return ebx;
+#elif defined(HAVE_INTRIN_H)
+    int info[4];
+
+    /* Leaf 0: highest supported leaf in EAX */
+    __cpuid(info, 0);
+    if (info[0] < 7)
+        return 0;
+    __cpuidex(info, 7, 0);
+    return (uint32_t)info[1];
+#else
+    return 0;
+#endif
+}
+
+/** Return non-zero if the CPU supports the SHA extensions (SHA-NI),
+ * together with SSSE3 and SSE4.1 which the SHA-256 code also uses.
+ * They only use the XMM registers, so no OS support needs to be checked. **/
+EXPORT_SYM int have_sha_ni(void)
+{
+    uint32_t ecx;
+
+    /* Leaf 1: SSSE3 (bit 9) and SSE4.1 (bit 19) */
+    ecx = leaf1_ecx();
+    if ((ecx & (1UL<<9)) == 0 || (ecx & (1UL<<19)) == 0)
+        return 0;
+
+    /* Leaf 7: SHA (EBX bit 29) */
+    return (leaf7_ebx() & (1UL<<29)) ? 1 : 0;
+}
+
+#if defined(HAVE_CPUID_H)
+
+/** Read the XCR0 register, which tells which registers the OS saves on
+ * a context switch. The XGETBV instruction is only valid if CPUID reports
+ * OSXSAVE. **/
+__attribute__((target("xsave")))
+static uint64_t read_xcr0(void)
+{
+    return (uint64_t)_xgetbv(0);
+}
+
+/** Return non-zero if the CPU supports AVX2 and the OS saves the 256-bit
+ * YMM registers. **/
+EXPORT_SYM int have_avx2(void)
+{
+    uint32_t ecx;
+    const uint32_t xcr0_sse_avx = (1U<<1) | (1U<<2);
+
+    /* Leaf 1: OSXSAVE (bit 27) and AVX (bit 28) */
+    ecx = leaf1_ecx();
+    if ((ecx & (1UL<<27)) == 0 || (ecx & (1UL<<28)) == 0)
+        return 0;
+
+    /* The OS must save both the XMM and the YMM registers */
+    if ((read_xcr0() & xcr0_sse_avx) != xcr0_sse_avx)
+        return 0;
+
+    /* Leaf 7: AVX2 (EBX bit 5) */
+    return (leaf7_ebx() & (1UL<<5)) ? 1 : 0;
+}
+
+/** Return non-zero if the CPU supports BMI1 (ANDN and other bit
+ * manipulation instructions). **/
+EXPORT_SYM int have_bmi1(void)
+{
+    return (leaf7_ebx() & (1UL<<3)) ? 1 : 0;
+}
+
+/** Return non-zero if the CPU supports BMI2 (RORX and other bit
+ * manipulation instructions). **/
+EXPORT_SYM int have_bmi2(void)
+{
+    return (leaf7_ebx() & (1UL<<8)) ? 1 : 0;
+}
+
+/** Return non-zero if the CPU supports ADX (ADCX and ADOX: additions with
+ * two independent carry flags). **/
+EXPORT_SYM int have_adx(void)
+{
+    return (leaf7_ebx() & (1UL<<19)) ? 1 : 0;
+}
+
+#else
+
+/** AVX2, BMI1, BMI2 and ADX are only detected with gcc and clang for now **/
+
+EXPORT_SYM int have_avx2(void)
+{
+    return 0;
+}
+
+EXPORT_SYM int have_bmi1(void)
+{
+    return 0;
+}
+
+EXPORT_SYM int have_bmi2(void)
+{
+    return 0;
+}
+
+EXPORT_SYM int have_adx(void)
+{
+    return 0;
+}
+
+#endif
+
+/** Return non-zero if the CPU supports the AES instructions of the ARMv8
+ * Cryptography Extensions (AESE, AESD, AESMC and AESIMC), in AArch64 state. **/
+EXPORT_SYM int have_aes_armv8(void)
+{
+#if defined(__aarch64__) && defined(__linux__)
+    /* HWCAP_AES in asm/hwcap.h */
+    return (getauxval(AT_HWCAP) & (1UL<<3)) ? 1 : 0;
+#elif defined(__aarch64__) && defined(__APPLE__)
+    /* All Apple CPUs for arm64 have them */
+    return 1;
+#elif defined(_M_ARM64)
+    return IsProcessorFeaturePresent(PF_ARM_V8_CRYPTO_INSTRUCTIONS_AVAILABLE) ? 1 : 0;
+#else
+    return 0;
+#endif
+}
+
+/** Return non-zero if the CPU supports the 64-bit carry-less multiplication
+ * of the ARMv8 Cryptography Extensions (PMULL and PMULL2), in AArch64 state. **/
+EXPORT_SYM int have_pmull(void)
+{
+#if defined(__aarch64__) && defined(__linux__)
+    /* HWCAP_PMULL in asm/hwcap.h */
+    return (getauxval(AT_HWCAP) & (1UL<<4)) ? 1 : 0;
+#elif defined(__aarch64__) && defined(__APPLE__)
+    return 1;
+#elif defined(_M_ARM64)
+    /* Windows reports AES and PMULL together */
+    return IsProcessorFeaturePresent(PF_ARM_V8_CRYPTO_INSTRUCTIONS_AVAILABLE) ? 1 : 0;
+#else
+    return 0;
+#endif
+}
+
+#if defined(__aarch64__) && defined(__APPLE__)
+/** Return non-zero if the sysctl name (or, on older macOS, legacy_name) is 1 **/
+static int apple_feature(const char *name, const char *legacy_name)
+{
+    int value = 0;
+    size_t len = sizeof value;
+
+    if (sysctlbyname(name, &value, &len, NULL, 0) != 0) {
+        value = 0;
+        len = sizeof value;
+        if (sysctlbyname(legacy_name, &value, &len, NULL, 0) != 0)
+            return 0;
+    }
+    return value == 1;
+}
+#endif
+
+/** Return non-zero if the CPU supports the SHA-256 instructions of the ARMv8
+ * Cryptography Extensions (SHA256H, SHA256H2, SHA256SU0 and SHA256SU1), in AArch64 state. **/
+EXPORT_SYM int have_sha256_armv8(void)
+{
+#if defined(__aarch64__) && defined(__linux__)
+    /* HWCAP_SHA2 in asm/hwcap.h */
+    return (getauxval(AT_HWCAP) & (1UL<<6)) ? 1 : 0;
+#elif defined(__aarch64__) && defined(__APPLE__)
+    return 1;
+#elif defined(_M_ARM64)
+    /* Windows reports AES, PMULL, SHA-1 and SHA-256 together */
+    return IsProcessorFeaturePresent(PF_ARM_V8_CRYPTO_INSTRUCTIONS_AVAILABLE) ? 1 : 0;
+#else
+    return 0;
+#endif
+}
+
+/** Return non-zero if the CPU supports the SHA-512 instructions of ARMv8.2
+ * (SHA512H, SHA512H2, SHA512SU0 and SHA512SU1), in AArch64 state. **/
+EXPORT_SYM int have_sha512_armv8(void)
+{
+#if defined(__aarch64__) && defined(__linux__)
+    /* HWCAP_SHA512 in asm/hwcap.h */
+    return (getauxval(AT_HWCAP) & (1UL<<21)) ? 1 : 0;
+#elif defined(__aarch64__) && defined(__APPLE__)
+    return apple_feature("hw.optional.arm.FEAT_SHA512", "hw.optional.armv8_2_sha512");
+#elif defined(_M_ARM64)
+    return IsProcessorFeaturePresent(PF_ARM_SHA512_INSTRUCTIONS_AVAILABLE) ? 1 : 0;
+#else
+    return 0;
+#endif
+}
+
+/** Return non-zero if the CPU supports the SHA-3 instructions of ARMv8.2
+ * (EOR3, RAX1, XAR and BCAX), in AArch64 state. **/
+EXPORT_SYM int have_sha3_armv8(void)
+{
+#if defined(__aarch64__) && defined(__linux__)
+    /* HWCAP_SHA3 in asm/hwcap.h */
+    return (getauxval(AT_HWCAP) & (1UL<<17)) ? 1 : 0;
+#elif defined(__aarch64__) && defined(__APPLE__)
+    return apple_feature("hw.optional.arm.FEAT_SHA3", "hw.optional.armv8_2_sha3");
+#elif defined(_M_ARM64)
+    return IsProcessorFeaturePresent(PF_ARM_SHA3_INSTRUCTIONS_AVAILABLE) ? 1 : 0;
+#else
+    return 0;
+#endif
+}

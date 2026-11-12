@@ -1,0 +1,82 @@
+name: Wheels
+
+on:
+  push:
+    tags:
+    - '*'
+
+jobs:
+  build_source:
+    name: Build source package
+    runs-on: [ ubuntu-24.04 ]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        name: Install Python
+        with:
+          python-version: '3.x'
+
+      - name: Build source package (.tar.gz)
+        run: |
+          python -m pip install build
+          python -m build --sdist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: source-${{ github.ref_name }}
+          path: ./dist/*.tar.gz
+
+  build_python3_wheels:
+    name: Build Python 3 wheels on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, windows-2025, macos-15, ubuntu-24.04-arm, windows-11-arm]
+
+    if: github.actor == 'Legrandin'
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Select architecture for MacOS
+        run: |
+          echo 'CIBW_ARCHS=x86_64 universal2' >> $GITHUB_ENV
+        if: runner.os == 'macOS'
+
+      - uses: pypa/cibuildwheel@v4.3.4
+        name: Build wheels
+        env:
+          # cibuildwheel will build wheel once and test it for each CPython version
+          # and for PyPy >= 3.10
+          CIBW_BUILD: "cp39-* cp314-* cp315-* cp315t-* pp310-* pp311-* pp312*"
+          # The manylinux images are set in pyproject.toml ([tool.cibuildwheel])
+          CIBW_ENABLE: "pypy pypy-eol"
+
+          CIBW_TEST_REQUIRES: "pytest"
+          CIBW_TEST_COMMAND: "python -m Crypto.SelfTest --skip-slow-tests"
+
+          # The Windows x86_64 (AMD64) runners support SHA-NI: fail if it is not used.
+          # The tests only enforce it for 64-bit Python, not for the win32 wheels.
+          PYCRYPTODOME_REQUIRE_SHA_NI: ${{ matrix.os == 'windows-2025' && '1' || '' }}
+
+          # Build the Windows x86_64 (AMD64) wheels with clang-cl, which compiles the
+          # code for AVX2, BMI2 and ADX (MSVC cannot), and fail if it is not used.
+          # Neither applies to the win32 wheels.
+          PYCRYPTODOME_CLANG_CL: ${{ matrix.os == 'windows-2025' && '1' || '' }}
+          PYCRYPTODOME_REQUIRE_AVX2_BMI2: ${{ matrix.os == 'windows-2025' && '1' || '' }}
+
+          # The Windows ARM64 runners support the SHA-512 instructions of ARMv8.2:
+          # fail if they are not used (module not built, or CPU feature not detected)
+          PYCRYPTODOME_REQUIRE_SHA512_ARMV8: ${{ matrix.os == 'windows-11-arm' && '1' || '' }}
+
+      - name: Delete manylinux1 wheels
+        if: runner.os == 'Linux'
+        run: |
+          rm -f wheelhouse/*-manylinux1_*.whl
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-python3-${{ matrix.os }}-${{ github.ref_name }}
+          overwrite: true
+          path: ./wheelhouse/*.whl
