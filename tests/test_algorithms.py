@@ -5,7 +5,7 @@ from typing import Callable, Union, cast
 import pytest
 
 from jwt.algorithms import HMACAlgorithm, NoneAlgorithm, has_crypto
-from jwt.exceptions import InvalidKeyError
+from jwt.exceptions import InvalidAlgorithmError, InvalidKeyError
 from jwt.utils import base64url_decode
 
 from .keys import load_ec_pub_key_p_521, load_hmac_key, load_rsa_pub_key
@@ -1475,7 +1475,7 @@ class TestECCurveValidation:
         with open(key_path("jwk_ec_key_P-384.json")) as keyfile:
             p384_key = ECAlgorithm.from_jwk(keyfile.read())
 
-        with pytest.raises(InvalidKeyError) as excinfo:
+        with pytest.raises(InvalidAlgorithmError) as excinfo:
             algo.prepare_key(p384_key)
         assert "secp384r1" in str(excinfo.value)
         assert "secp256r1" in str(excinfo.value)
@@ -1490,7 +1490,7 @@ class TestECCurveValidation:
         with open(key_path("jwk_ec_key_P-256.json")) as keyfile:
             p256_key = ECAlgorithm.from_jwk(keyfile.read())
 
-        with pytest.raises(InvalidKeyError) as excinfo:
+        with pytest.raises(InvalidAlgorithmError) as excinfo:
             algo.prepare_key(p256_key)
         assert "secp256r1" in str(excinfo.value)
         assert "secp384r1" in str(excinfo.value)
@@ -1505,7 +1505,7 @@ class TestECCurveValidation:
         with open(key_path("jwk_ec_key_P-256.json")) as keyfile:
             p256_key = ECAlgorithm.from_jwk(keyfile.read())
 
-        with pytest.raises(InvalidKeyError) as excinfo:
+        with pytest.raises(InvalidAlgorithmError) as excinfo:
             algo.prepare_key(p256_key)
         assert "secp256r1" in str(excinfo.value)
         assert "secp521r1" in str(excinfo.value)
@@ -1520,7 +1520,7 @@ class TestECCurveValidation:
         with open(key_path("jwk_ec_key_P-256.json")) as keyfile:
             p256_key = ECAlgorithm.from_jwk(keyfile.read())
 
-        with pytest.raises(InvalidKeyError) as excinfo:
+        with pytest.raises(InvalidAlgorithmError) as excinfo:
             algo.prepare_key(p256_key)
         assert "secp256r1" in str(excinfo.value)
         assert "secp256k1" in str(excinfo.value)
@@ -1576,7 +1576,7 @@ class TestECCurveValidation:
         algo = ECAlgorithm(ECAlgorithm.SHA256, SECP256R1)
 
         with open(key_path("testkey_ec_secp192r1.priv")) as keyfile:
-            with pytest.raises(InvalidKeyError) as excinfo:
+            with pytest.raises(InvalidAlgorithmError) as excinfo:
                 algo.prepare_key(keyfile.read())
             assert "secp192r1" in str(excinfo.value)
             assert "secp256r1" in str(excinfo.value)
@@ -1650,7 +1650,7 @@ class TestECCurveValidation:
 
         # P-192 PEM key should be rejected
         with open(key_path("testkey_ec_secp192r1.priv")) as keyfile:
-            with pytest.raises(InvalidKeyError):
+            with pytest.raises(InvalidAlgorithmError):
                 algo.prepare_key(keyfile.read())
 
     def test_jwt_encode_decode_rejects_wrong_curve(self) -> None:
@@ -1664,7 +1664,7 @@ class TestECCurveValidation:
         assert isinstance(p384_key, EllipticCurvePrivateKey)
 
         # Encoding should fail
-        with pytest.raises(InvalidKeyError):
+        with pytest.raises(InvalidAlgorithmError):
             jwt.encode({"hello": "world"}, p384_key, algorithm="ES256")
 
         # Create a valid token with P-256 key
@@ -1681,7 +1681,7 @@ class TestECCurveValidation:
 
         assert isinstance(p384_pub_key, EllipticCurvePublicKey)
 
-        with pytest.raises(InvalidKeyError):
+        with pytest.raises(InvalidAlgorithmError):
             jwt.decode(token, p384_pub_key, algorithms=["ES256"])
 
         # Decoding with correct curve key should succeed
@@ -1827,7 +1827,7 @@ class TestKeyLengthValidation:
         import jwt
 
         jws = jwt.PyJWS(options={"enforce_minimum_key_length": True})
-        with pytest.raises(InvalidKeyError, match="below"):
+        with pytest.raises(InvalidAlgorithmError, match="below"):
             jws.encode(b'{"test":"payload"}', b"short", algorithm="HS256")
 
     def test_pyjws_encode_no_warning_adequate_key(self) -> None:
@@ -1852,7 +1852,7 @@ class TestKeyLengthValidation:
         import jwt
 
         pyjwt = jwt.PyJWT(options={"enforce_minimum_key_length": True})
-        with pytest.raises(InvalidKeyError, match="below"):
+        with pytest.raises(InvalidAlgorithmError, match="below"):
             pyjwt.encode({"hello": "world"}, "short", algorithm="HS256")
 
     def test_pyjwt_decode_enforces_short_hmac_key(self) -> None:
@@ -1868,7 +1868,7 @@ class TestKeyLengthValidation:
 
         # Decoding with short key should raise
         pyjwt_enforce = jwt.PyJWT(options={"enforce_minimum_key_length": True})
-        with pytest.raises(InvalidKeyError):
+        with pytest.raises(InvalidAlgorithmError):
             pyjwt_enforce.decode(token, "short", algorithms=["HS256"])
 
     def test_pyjwt_decode_honors_per_call_enforce_minimum_key_length(self) -> None:
@@ -1882,7 +1882,7 @@ class TestKeyLengthValidation:
         token = jwt.encode({"hello": "world"}, adequate_key, algorithm="HS256")
 
         # Module-level singleton path with per-call enforcement.
-        with pytest.raises(InvalidKeyError, match="below"):
+        with pytest.raises(InvalidAlgorithmError, match="below"):
             jwt.decode(
                 token,
                 "short",
@@ -1892,7 +1892,7 @@ class TestKeyLengthValidation:
 
         # PyJWT() instance path (instance default off, per-call on).
         pyjwt = jwt.PyJWT()
-        with pytest.raises(InvalidKeyError, match="below"):
+        with pytest.raises(InvalidAlgorithmError, match="below"):
             pyjwt.decode(
                 token,
                 "short",
@@ -1918,3 +1918,177 @@ class TestKeyLengthValidation:
         token = jwt.encode({"hello": "world"}, "a" * 32, algorithm="HS256")
         decoded = jwt.decode(token, "a" * 32, algorithms=["HS256"])
         assert decoded == {"hello": "world"}
+
+
+@crypto_required
+class TestAlgorithmKeyValidation:
+    """Explicit algorithm/key-material matching must happen before verifying.
+
+    All mismatches are classified as InvalidAlgorithmError (not signature
+    failures) and messages must never leak key material.
+    """
+
+    def _load_ec(self, name: str):
+        with open(key_path(name)) as keyfile:
+            return ECAlgorithm.from_jwk(keyfile.read())
+
+    def test_ec_rejects_rsa_family_key(self) -> None:
+        from cryptography.hazmat.primitives.asymmetric.ec import SECP256R1
+
+        rsa_key = load_rsa_pub_key()
+        algo = ECAlgorithm(ECAlgorithm.SHA256, SECP256R1)
+        with pytest.raises(InvalidAlgorithmError):
+            algo.validate_algorithm_key(rsa_key)
+
+    def test_rsa_rejects_ec_family_key(self) -> None:
+        ec_key = self._load_ec("jwk_ec_pub_P-256.json")
+        algo = RSAAlgorithm(RSAAlgorithm.SHA256)
+        with pytest.raises(InvalidAlgorithmError):
+            algo.validate_algorithm_key(ec_key)
+
+    def test_ec_rejects_cross_curve_keys(self) -> None:
+        from cryptography.hazmat.primitives.asymmetric.ec import (
+            SECP256R1,
+            SECP384R1,
+            SECP521R1,
+        )
+
+        p256 = self._load_ec("jwk_ec_pub_P-256.json")
+        p384 = self._load_ec("jwk_ec_pub_P-384.json")
+        p521 = self._load_ec("jwk_ec_pub_P-521.json")
+
+        with pytest.raises(InvalidAlgorithmError):
+            ECAlgorithm(ECAlgorithm.SHA256, SECP256R1).validate_algorithm_key(p384)
+        with pytest.raises(InvalidAlgorithmError):
+            ECAlgorithm(ECAlgorithm.SHA384, SECP384R1).validate_algorithm_key(p256)
+        with pytest.raises(InvalidAlgorithmError):
+            ECAlgorithm(ECAlgorithm.SHA512, SECP521R1).validate_algorithm_key(p256)
+        with pytest.raises(InvalidAlgorithmError):
+            ECAlgorithm(ECAlgorithm.SHA256, SECP256R1).validate_algorithm_key(p521)
+
+    def test_ec_accepts_correct_curve_public_and_private(self) -> None:
+        from cryptography.hazmat.primitives.asymmetric.ec import SECP256R1
+
+        pub = self._load_ec("jwk_ec_pub_P-256.json")
+        priv = self._load_ec("jwk_ec_key_P-256.json")
+        algo = ECAlgorithm(ECAlgorithm.SHA256, SECP256R1)
+        algo.validate_algorithm_key(pub)
+        algo.validate_algorithm_key(priv)
+
+    def test_ec_compressed_point_roundtrips(self) -> None:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ec import (
+            EllipticCurvePublicKey,
+            SECP256R1,
+        )
+
+        pub = self._load_ec("jwk_ec_pub_P-256.json")
+        compressed = pub.public_bytes(
+            serialization.Encoding.X962,
+            serialization.PublicFormat.CompressedPoint,
+        )
+        decoded = EllipticCurvePublicKey.from_encoded_point(SECP256R1(), compressed)
+        ECAlgorithm(ECAlgorithm.SHA256, SECP256R1).validate_algorithm_key(decoded)
+
+    def test_ec_point_at_infinity_encoding_is_rejected(self) -> None:
+        from cryptography.hazmat.primitives.asymmetric.ec import (
+            EllipticCurvePublicKey,
+            SECP256R1,
+        )
+
+        for encoding in (b"\x00", b"\x00" + b"\x00" * 64):
+            with pytest.raises(ValueError):
+                EllipticCurvePublicKey.from_encoded_point(SECP256R1(), encoding)
+
+    def test_ec_off_curve_jwk_is_invalid_key_not_raw_value_error(self) -> None:
+        import base64 as b64
+
+        coord = b64.urlsafe_b64encode((1).to_bytes(32, "big")).rstrip(b"=").decode()
+        bad_jwk = json.dumps({"kty": "EC", "crv": "P-256", "x": coord, "y": coord})
+        with pytest.raises(InvalidKeyError):
+            ECAlgorithm.from_jwk(bad_jwk)
+
+    def test_ec_unknown_curve_jwk_is_rejected(self) -> None:
+        import base64 as b64
+
+        coord = b64.urlsafe_b64encode((1).to_bytes(32, "big")).rstrip(b"=").decode()
+        bad_jwk = json.dumps({"kty": "EC", "crv": "P-999", "x": coord, "y": coord})
+        with pytest.raises(InvalidKeyError):
+            ECAlgorithm.from_jwk(bad_jwk)
+
+    def test_hmac_rejects_asymmetric_key_objects(self) -> None:
+        rsa_key = load_rsa_pub_key()
+        algo = HMACAlgorithm(HMACAlgorithm.SHA256)
+        with pytest.raises(InvalidAlgorithmError):
+            algo.prepare_key(rsa_key)
+
+    def test_hmac_keeps_type_error_for_plain_objects(self) -> None:
+        algo = HMACAlgorithm(HMACAlgorithm.SHA256)
+        with pytest.raises(TypeError, match="Expected a string or bytes value"):
+            algo.prepare_key(object())
+
+    def test_error_messages_do_not_contain_key_material(self) -> None:
+        import jwt
+
+        from cryptography.hazmat.primitives.asymmetric.ec import SECP256R1
+
+        secret = "TOPSECRET-MATERIAL-DO-NOT-LEAK"
+        token = jwt.encode({"x": 1}, "a" * 32, algorithm="HS256")
+        try:
+            jwt.decode(
+                token,
+                secret,
+                algorithms=["HS256"],
+                options={"enforce_minimum_key_length": True},
+            )
+        except InvalidAlgorithmError as err:
+            assert "TOPSECRET" not in str(err)
+        else:  # pragma: no cover - defensive
+            pytest.fail("expected InvalidAlgorithmError")
+
+        p384 = self._load_ec("jwk_ec_pub_P-384.json")
+        try:
+            ECAlgorithm(ECAlgorithm.SHA256, SECP256R1).validate_algorithm_key(p384)
+        except InvalidAlgorithmError as err:
+            assert str(p384.public_numbers().x) not in str(err)
+            assert str(p384.public_numbers().y) not in str(err)
+        else:  # pragma: no cover - defensive
+            pytest.fail("expected InvalidAlgorithmError")
+
+    def test_decode_cross_family_and_cross_curve_raise_algorithm_error(self) -> None:
+        import jwt
+
+        p256_priv = self._load_ec("jwk_ec_key_P-256.json")
+        p384_pub = self._load_ec("jwk_ec_pub_P-384.json")
+        rsa_pub = load_rsa_pub_key()
+
+        es_token = jwt.encode({"hello": "world"}, p256_priv, algorithm="ES256")
+        with pytest.raises(InvalidAlgorithmError):
+            jwt.decode(es_token, p384_pub, algorithms=["ES256"])
+
+        hs_token = jwt.encode({"hello": "world"}, "a" * 32, algorithm="HS256")
+        with pytest.raises(InvalidAlgorithmError):
+            jwt.decode(hs_token, rsa_pub, algorithms=["HS256"])
+
+    def test_decode_whitelist_still_selects_header_algorithm(self) -> None:
+        import jwt
+
+        priv = self._load_ec("jwk_ec_key_P-256.json")
+        pub = self._load_ec("jwk_ec_pub_P-256.json")
+        token = jwt.encode({"hello": "world"}, priv, algorithm="ES256")
+        decoded = jwt.decode(
+            token, pub, algorithms=["ES256", "ES384", "RS256", "HS256"]
+        )
+        assert decoded == {"hello": "world"}
+
+    def test_hmac_boundary_lengths_under_enforcement(self) -> None:
+        import jwt
+
+        short = b"a" * 31
+        exact = b"a" * 32
+        token_short = jwt.encode({"x": 1}, short, algorithm="HS256")
+        token_exact = jwt.encode({"x": 1}, exact, algorithm="HS256")
+        options = {"enforce_minimum_key_length": True}
+        with pytest.raises(InvalidAlgorithmError):
+            jwt.decode(token_short, short, algorithms=["HS256"], options=options)
+        jwt.decode(token_exact, exact, algorithms=["HS256"], options=options)

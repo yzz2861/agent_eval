@@ -18,7 +18,7 @@ from typing import (
     overload,
 )
 
-from .exceptions import InvalidKeyError
+from .exceptions import InvalidAlgorithmError, InvalidKeyError
 from .types import HashlibHash, JWKDict
 from .utils import (
     base64url_decode,
@@ -44,6 +44,7 @@ try:
         SECP256R1,
         SECP384R1,
         SECP521R1,
+        EllipticCurveOID,
         EllipticCurve,
         EllipticCurvePrivateKey,
         EllipticCurvePrivateNumbers,
@@ -138,6 +139,17 @@ requires_cryptography = {
     "EdDSA",
 }
 
+if has_crypto:
+    #: Maps the named curves supported by the EC algorithms to their OIDs.
+    #: Used to validate that a key's curve OID matches the algorithm header
+    #: without relying on string names that an unknown/custom curve could fake.
+    _EC_CURVE_OIDS: dict[type[EllipticCurve], EllipticCurveOID] = {
+        SECP256R1: EllipticCurveOID.SECP256R1,
+        SECP384R1: EllipticCurveOID.SECP384R1,
+        SECP521R1: EllipticCurveOID.SECP521R1,
+        SECP256K1: EllipticCurveOID.SECP256K1,
+    }
+
 
 def get_default_algorithms() -> dict[str, Algorithm]:
     """
@@ -225,6 +237,26 @@ class Algorithm(ABC):
             raise InvalidKeyError(
                 f"Expected one of {valid_classes}, got: {actual_class}. Invalid Key type for {self_class}"
             )
+
+    def validate_algorithm_key(self, key: Any) -> None:
+        """Explicitly validate that prepared key material matches this algorithm.
+
+        This runs *before* any signature operation so that an attacker cannot
+        push mismatched or malformed key material (cross-family keys, wrong EC
+        curves, off-curve points, weak HMAC/RSA keys) down into the underlying
+        cryptographic backend, where some inputs trigger expensive work before
+        being rejected.
+
+        Failures are classified as :class:`InvalidAlgorithmError` because the
+        key material is incompatible with the algorithm advertised in the token
+        header — not as a failed signature. Error messages must never contain
+        key material.
+
+        :param key: A key as returned by :meth:`prepare_key`.
+        :raises InvalidAlgorithmError: if the key material does not match this algorithm.
+        """
+
+        return None
 
     @abstractmethod
     def prepare_key(self, key: Any) -> Any:
@@ -324,6 +356,22 @@ class HMACAlgorithm(Algorithm):
     def __init__(self, hash_alg: HashlibHash) -> None:
         self.hash_alg = hash_alg
 
+    def validate_algorithm_key(self, key: Any) -> None:
+        """Validate HMAC key material type before the MAC is computed.
+
+        Strength (length) requirements remain advisory by default via
+        :meth:`check_key_length` and become a hard
+        :class:`InvalidAlgorithmError` only when callers opt in through the
+        ``enforce_minimum_key_length`` option, preserving the historical
+        warning-only behaviour for short secrets.
+        """
+        if not isinstance(key, bytes):
+            raise InvalidAlgorithmError(
+                f"The {self.__class__.__name__} algorithm requires a byte "
+                "string secret, but the provided key material is of type "
+                f"{type(key).__name__}."
+            )
+
     @staticmethod
     def _is_der_key(key_bytes: bytes) -> bool:
         if not has_crypto:
@@ -344,6 +392,24 @@ class HMACAlgorithm(Algorithm):
             return True
 
     def prepare_key(self, key: str | bytes) -> bytes:
+        if has_crypto and isinstance(
+            key,
+            (
+                RSAPublicKey,
+                RSAPrivateKey,
+                EllipticCurvePublicKey,
+                EllipticCurvePrivateKey,
+                Ed25519PublicKey,
+                Ed25519PrivateKey,
+                Ed448PublicKey,
+                Ed448PrivateKey,
+            ),
+        ):
+            raise InvalidAlgorithmError(
+                "An asymmetric key cannot be used as an HMAC secret. The "
+                "algorithm declared in the token header requires a symmetric "
+                "byte-string key."
+            )
         key_bytes = force_bytes(key)
 
         if len(key_bytes) == 0:
@@ -517,6 +583,21 @@ if has_crypto:
 
         def __init__(self, hash_alg: type[hashes.HashAlgorithm]) -> None:
             self.hash_alg = hash_alg
+
+        def validate_algorithm_key(self, key: Any) -> None:
+            """Validate the RSA key family before any crypto operation.
+
+            Minimum key size stays advisory by default via
+            :meth:`check_key_length` and is enforced (as
+            :class:`InvalidAlgorithmError`) only when the caller enables
+            ``enforce_minimum_key_length``.
+            """
+            if not isinstance(key, self._crypto_key_types):
+                expected = ", ".join(cls.__name__ for cls in self._crypto_key_types)
+                raise InvalidAlgorithmError(
+                    f"The {self.__class__.__name__} algorithm requires an RSA "
+                    f"key ({expected}), but got {type(key).__name__}."
+                )
 
         def check_key_length(self, key: AllowedRSAKeys) -> str | None:
             if key.key_size < self._MIN_KEY_SIZE:
@@ -719,10 +800,109 @@ if has_crypto:
                 return
 
             if not isinstance(key.curve, self.expected_curve):
-                raise InvalidKeyError(
+                raise InvalidAlgorithmError(
                     f"The key's curve '{key.curve.name}' does not match the expected "
                     f"curve '{self.expected_curve.name}' for this algorithm"
                 )
+
+        def _validate_public_point(self, key: EllipticCurvePublicKey) -> None:
+            """Validate the EC public point before any signature operation.
+
+            Checks the point encoding (rejecting the point at infinity and
+            unknown prefixes), that the coordinates decode consistently for
+            both compressed and uncompressed SEC1 encodings, and that the
+            point actually lies on the declared curve. All failures are
+            classified as algorithm/key-mismatch errors rather than being
+            handed to the backend for an expensive, exception-driven failure.
+            """
+            try:
+                encoded = key.public_bytes(
+                    Encoding.X962, PublicFormat.UncompressedPoint
+                )
+            except (ValueError, UnsupportedAlgorithm) as err:
+                raise InvalidAlgorithmError(
+                    "The EC key does not expose a valid public point for "
+                    "this algorithm."
+                ) from err
+
+            # The point at infinity is encoded as the single octet 0x00; a
+            # valid uncompressed finite point starts with 0x04 followed by
+            # exactly two coordinate-sized integers.
+            coordinate_size = (key.curve.key_size + 7) // 8
+            expected_size = 1 + 2 * coordinate_size
+            if len(encoded) != expected_size or encoded[0] != 0x04:
+                raise InvalidAlgorithmError(
+                    "The EC public key encodes the point at infinity or an "
+                    "invalid point, which cannot be used for verification."
+                )
+
+            # Re-decoding through the backend forces on-curve and range
+            # validation. Round-tripping also rejects compressed/uncompressed
+            # encodings whose coordinates do not agree.
+            try:
+                decoded = EllipticCurvePublicKey.from_encoded_point(key.curve, encoded)
+            except (ValueError, UnsupportedAlgorithm) as err:
+                raise InvalidAlgorithmError(
+                    "The EC public point is malformed or is not on the declared curve."
+                ) from err
+
+            if decoded.public_numbers() != key.public_numbers():
+                raise InvalidAlgorithmError(
+                    "The EC public point encoding is inconsistent with the "
+                    "declared key coordinates."
+                )
+
+        def validate_algorithm_key(self, key: Any) -> None:
+            """Validate EC family, curve OID and public point before signing/verifying."""
+            if not isinstance(key, self._crypto_key_types):
+                expected = ", ".join(cls.__name__ for cls in self._crypto_key_types)
+                raise InvalidAlgorithmError(
+                    f"The {self.__class__.__name__} algorithm requires an "
+                    f"elliptic curve key ({expected}), but got "
+                    f"{type(key).__name__}."
+                )
+
+            ec_key = cast(AllowedECKeys, key)
+
+            if self.expected_curve is not None:
+                if not isinstance(ec_key.curve, self.expected_curve):
+                    raise InvalidAlgorithmError(
+                        f"The key's curve '{ec_key.curve.name}' does not match "
+                        f"the curve '{self.expected_curve.name}' required by "
+                        "this algorithm."
+                    )
+
+                # Defence in depth: confirm the curve is one of the named
+                # curves PyJWT supports and whose OID is pinned below. An
+                # unknown/custom curve can never match an expected named
+                # curve, but this makes the OID comparison explicit rather
+                # than trusting the human-readable curve name.
+                if not any(
+                    isinstance(ec_key.curve, named_curve)
+                    for named_curve in _EC_CURVE_OIDS
+                ):
+                    raise InvalidAlgorithmError(
+                        f"The key uses an unsupported or unknown curve "
+                        f"'{ec_key.curve.name}' for this algorithm."
+                    )
+                expected_oid = _EC_CURVE_OIDS[self.expected_curve]
+                actual_oid = next(
+                    oid
+                    for curve_cls, oid in _EC_CURVE_OIDS.items()
+                    if isinstance(ec_key.curve, curve_cls)
+                )
+                if actual_oid != expected_oid:
+                    raise InvalidAlgorithmError(
+                        "The EC key's curve OID does not match the curve "
+                        "required by this algorithm."
+                    )
+
+            public_key = (
+                ec_key.public_key()
+                if isinstance(ec_key, EllipticCurvePrivateKey)
+                else ec_key
+            )
+            self._validate_public_point(public_key)
 
         def prepare_key(self, key: AllowedECKeys | str | bytes) -> AllowedECKeys:
             if isinstance(key, self._crypto_key_types):
@@ -751,11 +931,16 @@ if has_crypto:
                 self._validate_curve(ec_public_key)
                 return ec_public_key
             except ValueError:
-                private_key = load_pem_private_key(key_bytes, password=None)
-                self.check_crypto_key_type(private_key)
-                ec_private_key = cast(EllipticCurvePrivateKey, private_key)
-                self._validate_curve(ec_private_key)
-                return ec_private_key
+                try:
+                    private_key = load_pem_private_key(key_bytes, password=None)
+                    self.check_crypto_key_type(private_key)
+                    ec_private_key = cast(EllipticCurvePrivateKey, private_key)
+                    self._validate_curve(ec_private_key)
+                    return ec_private_key
+                except (ValueError, UnsupportedAlgorithm):
+                    raise InvalidKeyError(
+                        "Could not parse the provided EC key."
+                    ) from None
 
         def sign(self, msg: bytes, key: EllipticCurvePrivateKey) -> bytes:
             der_sig = key.sign(msg, ECDSA(self.hash_alg()))
@@ -893,7 +1078,13 @@ if has_crypto:
             )
 
             if "d" not in obj:
-                return public_numbers.public_key()
+                try:
+                    return public_numbers.public_key()
+                except (ValueError, UnsupportedAlgorithm) as err:
+                    raise InvalidKeyError(
+                        "Invalid EC JWK: the public point is malformed or not "
+                        "on the declared curve."
+                    ) from err
 
             d = base64url_decode(obj.get("d"))
             if len(d) != len(x):
@@ -901,9 +1092,15 @@ if has_crypto:
                     "D should be {} bytes for curve {}", len(x), curve
                 )
 
-            return EllipticCurvePrivateNumbers(
-                int.from_bytes(d, byteorder="big"), public_numbers
-            ).private_key()
+            try:
+                return EllipticCurvePrivateNumbers(
+                    int.from_bytes(d, byteorder="big"), public_numbers
+                ).private_key()
+            except (ValueError, UnsupportedAlgorithm) as err:
+                raise InvalidKeyError(
+                    "Invalid EC JWK: the key coordinates are malformed or not "
+                    "on the declared curve."
+                ) from err
 
     class RSAPSSAlgorithm(RSAAlgorithm):
         """
@@ -957,6 +1154,16 @@ if has_crypto:
 
         def __init__(self, **kwargs: Any) -> None:
             pass
+
+        def validate_algorithm_key(self, key: Any) -> None:
+            """Validate that the key is an Ed25519/Ed448 (OKP) key before use."""
+            if not isinstance(key, self._crypto_key_types):
+                expected = ", ".join(cls.__name__ for cls in self._crypto_key_types)
+                raise InvalidAlgorithmError(
+                    f"The {self.__class__.__name__} algorithm requires an "
+                    f"OKP (Ed25519/Ed448) key ({expected}), but got "
+                    f"{type(key).__name__}."
+                )
 
         def prepare_key(self, key: AllowedOKPKeys | str | bytes) -> AllowedOKPKeys:
             if not isinstance(key, (str, bytes)):

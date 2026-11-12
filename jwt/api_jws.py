@@ -16,7 +16,6 @@ from .api_jwk import PyJWK
 from .exceptions import (
     DecodeError,
     InvalidAlgorithmError,
-    InvalidKeyError,
     InvalidSignatureError,
     InvalidTokenError,
 )
@@ -200,11 +199,12 @@ class PyJWS:
         if isinstance(key, PyJWK):
             key = key.key
         key = alg_obj.prepare_key(key)
+        alg_obj.validate_algorithm_key(key)
 
         key_length_msg = alg_obj.check_key_length(key)
         if key_length_msg:
             if self.options.get("enforce_minimum_key_length", False):
-                raise InvalidKeyError(key_length_msg)
+                raise InvalidAlgorithmError(key_length_msg)
             else:
                 warnings.warn(key_length_msg, InsecureKeyLengthWarning, stacklevel=2)
 
@@ -427,18 +427,30 @@ class PyJWS:
                     f"algorithm {key.algorithm_name!r}"
                 )
             alg_obj = key.Algorithm
-            prepared_key = alg_obj.prepare_key(key.key)
         else:
             try:
                 alg_obj = self.get_algorithm_by_name(alg)
             except NotImplementedError as e:
                 raise InvalidAlgorithmError("Algorithm not supported") from e
-            prepared_key = alg_obj.prepare_key(key)
+
+        # prepare_key() normalises the key material (PEM/SSH/JWK -> backend
+        # objects). Structural "not a key" problems remain InvalidKeyError,
+        # while algorithm/key compatibility is checked explicitly below,
+        # before any cryptographic operation is attempted.
+        prepared_key = alg_obj.prepare_key(key.key if isinstance(key, PyJWK) else key)
+
+        # Explicit, pre-verification matching between the algorithm selected
+        # from the (whitelisted) header and the supplied key material. This
+        # rejects cross-family keys, wrong/unknown EC curves, malformed or
+        # off-curve points and point-at-infinity encodings with a
+        # distinguishable InvalidAlgorithmError instead of letting them reach
+        # the backend's verification routine (a potential CPU amplifier).
+        alg_obj.validate_algorithm_key(prepared_key)
 
         key_length_msg = alg_obj.check_key_length(prepared_key)
         if key_length_msg:
             if effective_options.get("enforce_minimum_key_length", False):
-                raise InvalidKeyError(key_length_msg)
+                raise InvalidAlgorithmError(key_length_msg)
             else:
                 warnings.warn(key_length_msg, InsecureKeyLengthWarning, stacklevel=4)
 
