@@ -1,7 +1,50 @@
+import datetime
+import math
 import unicodedata
 from hmac import compare_digest
 from typing import Dict, Optional, Union
 from urllib.parse import quote, urlencode, urlparse
+
+# Epoch-second range that datetime.datetime can represent. Numeric inputs
+# outside it are almost always millisecond/nanosecond timestamps passed where
+# seconds were expected; rejecting them prevents silently jumping to a timecode
+# far in the future or past.
+MIN_EPOCH_SECONDS = int(datetime.datetime.min.replace(tzinfo=datetime.timezone.utc).timestamp())
+MAX_EPOCH_SECONDS = int(datetime.datetime.max.replace(tzinfo=datetime.timezone.utc).timestamp())
+
+
+def normalize_timestamp(for_time: Union[int, float]) -> int:
+    """
+    Normalize a numeric Unix timestamp to whole epoch seconds.
+
+    Integers are treated as timestamps in seconds and returned unchanged.
+    Floats are truncated toward zero (matching the historical ``int(for_time)``
+    behavior); the fractional second is dropped rather than rounded. Callers
+    needing different rounding must round the value themselves before passing
+    it in.
+
+    Millisecond or nanosecond timestamps are not scaled: they fall outside the
+    range representable by :class:`datetime.datetime` and raise ``ValueError``
+    so that they cannot silently produce a wrong timecode. Booleans and
+    non-numeric values raise ``TypeError``.
+
+    :param for_time: Unix timestamp in seconds
+    :returns: whole epoch seconds
+    """
+    if isinstance(for_time, bool) or not isinstance(for_time, (int, float)):
+        raise TypeError(
+            "for_time must be a datetime.datetime, an integer epoch-second timestamp, or a float epoch-second timestamp"
+        )
+    if isinstance(for_time, float):
+        if math.isnan(for_time) or math.isinf(for_time):
+            raise ValueError("for_time timestamp must be a finite number of seconds since the epoch")
+        for_time = int(for_time)
+    if for_time < MIN_EPOCH_SECONDS or for_time > MAX_EPOCH_SECONDS:
+        raise ValueError(
+            "for_time timestamp is outside the representable datetime range; timestamps must be given in seconds "
+            "since the epoch (millisecond or nanosecond inputs must be scaled down before use)"
+        )
+    return for_time
 
 
 def build_uri(

@@ -8,6 +8,7 @@ from .compat import random
 from .hotp import HOTP as HOTP
 from .otp import OTP as OTP
 from .totp import TOTP as TOTP
+from .totp import TimePolicy as TimePolicy
 
 
 def random_base32(length: int = 32, chars: Sequence[str] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567") -> str:

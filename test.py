@@ -4,13 +4,27 @@ import base64
 import datetime
 import hashlib
 import os
+import subprocess
 import sys
+import time
 import unittest
 from urllib.parse import parse_qsl, urlparse
 from warnings import warn
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 import pyotp  # noqa
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover - Python < 3.9
+    ZoneInfo = None
+
+ZONEINFO_AVAILABLE = ZoneInfo is not None
+TZSET_AVAILABLE = hasattr(time, "tzset")
+
+UTC = datetime.timezone.utc
+FIXED_TS = 1710055800  # 2024-03-10T07:30:00Z, a Sunday just after the US spring-forward
+SECRET = "ABCDEFGH"
 
 
 class HOTPExampleValuesFromTheRFC(unittest.TestCase):
@@ -497,6 +511,247 @@ class ParseUriTest(unittest.TestCase):
         otp = pyotp.parse_uri("otpauth://totp/Big%20Corp:bob?secret=GEZDGNBV&issuer=Big%20Corp")
         self.assertEqual(otp.name, "bob")
         self.assertEqual(otp.issuer, "Big Corp")
+
+
+@unittest.skipUnless(ZONEINFO_AVAILABLE, "zoneinfo is required for timezone policy tests")
+class TimePolicyTest(unittest.TestCase):
+    def setUp(self):
+        self.local = pyotp.TOTP(SECRET)
+        self.strict = pyotp.TOTP(SECRET, time_policy=pyotp.TimePolicy.UTC)
+        self.utc_dt = datetime.datetime.fromtimestamp(FIXED_TS, UTC)
+
+    def test_time_policy_enum_coercion(self):
+        self.assertEqual(pyotp.TimePolicy.coerce("utc"), pyotp.TimePolicy.UTC)
+        self.assertEqual(pyotp.TimePolicy.coerce("local"), pyotp.TimePolicy.LOCAL)
+        self.assertIs(pyotp.TimePolicy.coerce(pyotp.TimePolicy.UTC), pyotp.TimePolicy.UTC)
+        with self.assertRaises(ValueError):
+            pyotp.TimePolicy.coerce("europe/paris")
+        with self.assertRaises(ValueError):
+            pyotp.TOTP(SECRET, time_policy="bogus")
+        with self.assertRaises(TypeError):
+            pyotp.TOTP(SECRET, default_tz="UTC")
+
+    def test_fixed_utc_instant_same_code_in_every_timezone_representation(self):
+        reference = self.strict.at(FIXED_TS)
+        for zone_name in ("UTC", "Asia/Shanghai", "America/New_York"):
+            zone = ZoneInfo(zone_name)
+            aware = datetime.datetime.fromtimestamp(FIXED_TS, zone)
+            self.assertEqual(aware.astimezone(UTC).replace(tzinfo=None), self.utc_dt.replace(tzinfo=None))
+            self.assertEqual(self.strict.at(aware), reference, zone_name)
+            self.assertEqual(self.strict.timecode(aware), self.strict.timecode(FIXED_TS), zone_name)
+
+    def test_aware_datetimes_always_converted_to_utc(self):
+        reference = self.strict.at(FIXED_TS)
+        shanghai = ZoneInfo("Asia/Shanghai")
+        new_york = ZoneInfo("America/New_York")
+        self.assertEqual(
+            self.strict.at(datetime.datetime.fromtimestamp(FIXED_TS, shanghai)),
+            reference,
+        )
+        self.assertEqual(
+            self.strict.at(datetime.datetime.fromtimestamp(FIXED_TS, new_york)),
+            reference,
+        )
+        # aware datetimes are converted to UTC even in the legacy local policy
+        self.assertEqual(self.local.at(datetime.datetime.fromtimestamp(FIXED_TS, new_york)), reference)
+
+    def test_naive_datetime_rejected_in_strict_mode_without_declared_tz(self):
+        naive = self.utc_dt.replace(tzinfo=None)
+        with self.assertRaises(ValueError) as cm:
+            self.strict.at(naive)
+        self._assert_safe_error(str(cm.exception))
+        with self.assertRaises(ValueError):
+            self.strict.verify("123456", naive)
+        with self.assertRaises(ValueError):
+            self.strict.timecode(naive)
+
+    def test_naive_datetime_accepted_with_default_tz(self):
+        new_york = ZoneInfo("America/New_York")
+        strict_ny = pyotp.TOTP(SECRET, time_policy="utc", default_tz=new_york)
+        naive_ny = datetime.datetime.fromtimestamp(FIXED_TS, new_york).replace(tzinfo=None)
+        self.assertEqual(strict_ny.at(naive_ny), self.strict.at(FIXED_TS))
+        self.assertEqual(strict_ny.timecode(naive_ny), self.strict.timecode(FIXED_TS))
+
+    def test_naive_datetime_accepted_with_per_call_tzinfo(self):
+        shanghai = ZoneInfo("Asia/Shanghai")
+        naive_sh = datetime.datetime.fromtimestamp(FIXED_TS, shanghai).replace(tzinfo=None)
+        self.assertEqual(self.strict.at(naive_sh, tzinfo=shanghai), self.strict.at(FIXED_TS))
+        self.assertEqual(self.strict.timecode(naive_sh, tzinfo=shanghai), self.strict.timecode(FIXED_TS))
+        # per-call tzinfo wins over default_tz
+        strict_ny = pyotp.TOTP(SECRET, time_policy=pyotp.TimePolicy.UTC, default_tz=ZoneInfo("America/New_York"))
+        self.assertEqual(strict_ny.at(naive_sh, tzinfo=shanghai), self.strict.at(FIXED_TS))
+        with self.assertRaises(TypeError):
+            self.strict.at(naive_sh, tzinfo="Asia/Shanghai")
+
+    def test_numeric_timestamps_are_utc_seconds_in_strict_mode(self):
+        self.assertEqual(self.strict.at(FIXED_TS), self.strict.at(self.utc_dt))
+        self.assertEqual(self.strict.at(float(FIXED_TS)), self.strict.at(FIXED_TS))
+
+    def test_float_timestamps_truncated_toward_zero(self):
+        base_timecode = self.strict.timecode(FIXED_TS)
+        self.assertEqual(self.strict.at(FIXED_TS + 29.9), self.strict.at(FIXED_TS))
+        self.assertEqual(self.strict.timecode(FIXED_TS + 29.9), base_timecode)
+        self.assertEqual(self.strict.at(FIXED_TS + 30.0), self.strict.at(FIXED_TS + 30))
+        self.assertNotEqual(self.strict.at(FIXED_TS + 30.0), self.strict.at(FIXED_TS))
+        # negative fractional seconds truncate toward zero: -1 and -29.5 both land on timecode 0
+        self.assertEqual(self.strict.at(-1), self.strict.at(0))
+        self.assertEqual(self.strict.at(-29.5), self.strict.at(0))
+
+    def test_millisecond_and_nanosecond_timestamps_rejected(self):
+        for bad_value in (FIXED_TS * 1000, FIXED_TS * 1_000_000_000, FIXED_TS * 1000.0):
+            with self.assertRaises(ValueError) as cm:
+                self.strict.at(bad_value)
+            self._assert_safe_error(str(cm.exception))
+            with self.assertRaises(ValueError):
+                self.local.at(bad_value)
+
+    def test_non_finite_and_wrong_type_inputs(self):
+        for bad_value in (float("nan"), float("inf"), float("-inf")):
+            with self.assertRaises(ValueError):
+                self.strict.at(bad_value)
+        for bad_value in (True, False):
+            with self.assertRaises(TypeError):
+                self.strict.at(bad_value)
+        with self.assertRaises(TypeError):
+            self.strict.at("1710055800")
+        with self.assertRaises(TypeError):
+            pyotp.utils.normalize_timestamp("1710055800")
+
+    def test_negative_time_before_epoch(self):
+        epoch_code = self.strict.at(0)
+        self.assertEqual(self.strict.at(-1), epoch_code)
+        self.assertEqual(self.strict.at(-29.5), epoch_code)
+        with self.assertRaises(ValueError):
+            self.strict.at(-30)
+        # legacy policy keeps the same externally visible behavior
+        self.assertEqual(self.local.at(-1), self.local.at(0))
+        self.assertEqual(self.local.at(-29.5), self.local.at(0))
+        with self.assertRaises(ValueError):
+            self.local.at(-30)
+
+    def test_dst_gap_and_repeated_time_are_stable(self):
+        new_york = ZoneInfo("America/New_York")
+        # nonexistent wall-clock time 02:30 during the 2024 spring-forward gap
+        gap = datetime.datetime(2024, 3, 10, 2, 30, tzinfo=new_york)
+        gap_before = gap.replace(fold=0)
+        gap_after = gap.replace(fold=1)
+        self.assertEqual(self.strict.timecode(gap_before), self.strict.timecode(gap_before))
+        self.assertEqual(self.strict.timecode(gap_after), self.strict.timecode(gap_after))
+        self.assertNotEqual(
+            self.strict.timecode(gap_before),
+            self.strict.timecode(gap_after),
+        )
+        # repeated wall-clock time 01:30 during the 2024 fall-back
+        repeated = datetime.datetime(2024, 11, 3, 1, 30, tzinfo=new_york)
+        first_pass = repeated.replace(fold=0)
+        second_pass = repeated.replace(fold=1)
+        self.assertEqual(first_pass.astimezone(UTC), datetime.datetime(2024, 11, 3, 5, 30, tzinfo=UTC))
+        self.assertEqual(second_pass.astimezone(UTC), datetime.datetime(2024, 11, 3, 6, 30, tzinfo=UTC))
+        self.assertEqual(
+            self.strict.timecode(first_pass),
+            self.strict.timecode(datetime.datetime(2024, 11, 3, 5, 30, tzinfo=UTC)),
+        )
+        self.assertEqual(
+            self.strict.timecode(second_pass),
+            self.strict.timecode(datetime.datetime(2024, 11, 3, 6, 30, tzinfo=UTC)),
+        )
+        self.assertNotEqual(self.strict.timecode(first_pass), self.strict.timecode(second_pass))
+
+    def test_default_policy_preserves_legacy_local_behavior(self):
+        self.assertEqual(self.local.time_policy, pyotp.TimePolicy.LOCAL)
+        # numeric timestamps keep producing the legacy result
+        self.assertEqual(self.local.at(FIXED_TS), self.local.at(datetime.datetime.fromtimestamp(FIXED_TS)))
+        self.assertEqual(self.local.at(FIXED_TS + 29.9), self.local.at(FIXED_TS))
+        # naive datetimes are accepted and interpreted as local time
+        naive = datetime.datetime.fromtimestamp(FIXED_TS).replace(tzinfo=None)
+        self.assertEqual(self.local.timecode(naive), self.local.timecode(FIXED_TS))
+
+    def _assert_safe_error(self, message):
+        self.assertNotIn(SECRET, message)
+        for otp_value in (self.strict.at(FIXED_TS), self.local.at(FIXED_TS)):
+            self.assertNotIn(otp_value, message)
+
+
+@unittest.skipUnless(ZONEINFO_AVAILABLE, "zoneinfo is required for window boundary tests")
+class ValidWindowPolicyTest(unittest.TestCase):
+    def setUp(self):
+        self.strict = pyotp.TOTP(SECRET, time_policy=pyotp.TimePolicy.UTC)
+        # last whole second of a 30-second interval
+        self.boundary = (FIXED_TS // 30) * 30 + 29
+
+    def test_window_uses_one_base_timecode_on_boundary(self):
+        current = self.strict.at(self.boundary)
+        previous = self.strict.at(self.boundary - 30)
+        nxt = self.strict.at(self.boundary + 30)
+        outside = self.strict.at(self.boundary - 60)
+        self.assertTrue(self.strict.verify(current, self.boundary, valid_window=1))
+        self.assertTrue(self.strict.verify(previous, self.boundary, valid_window=1))
+        self.assertTrue(self.strict.verify(nxt, self.boundary, valid_window=1))
+        self.assertFalse(self.strict.verify(outside, self.boundary, valid_window=1))
+
+    def test_window_symmetric_with_naive_declared_datetime(self):
+        shanghai = ZoneInfo("Asia/Shanghai")
+        bound_dt = datetime.datetime.fromtimestamp(self.boundary, shanghai).replace(tzinfo=None)
+        previous = self.strict.at(self.boundary - 30)
+        nxt = self.strict.at(self.boundary + 30)
+        self.assertTrue(self.strict.verify(previous, bound_dt, valid_window=1, tzinfo=shanghai))
+        self.assertTrue(self.strict.verify(nxt, bound_dt, valid_window=1, tzinfo=shanghai))
+        self.assertFalse(
+            self.strict.verify(self.strict.at(self.boundary - 60), bound_dt, valid_window=1, tzinfo=shanghai)
+        )
+
+    def test_verify_and_get_timecode_matches_generation_path(self):
+        for offset, expected_code in (
+            (-1, self.strict.at(self.boundary - 30)),
+            (0, self.strict.at(self.boundary)),
+            (1, self.strict.at(self.boundary + 30)),
+        ):
+            timecode = self.strict.verify_and_get_timecode(expected_code, self.boundary, valid_window=1)
+            self.assertEqual(timecode, self.strict.timecode(self.boundary) + offset)
+        self.assertFalse(
+            self.strict.verify_and_get_timecode(self.strict.at(self.boundary - 60), self.boundary, valid_window=1)
+        )
+
+    def test_negative_valid_window_rejected(self):
+        with self.assertRaises(ValueError):
+            self.strict.verify("123456", self.boundary, valid_window=-1)
+        with self.assertRaises(ValueError):
+            self.strict.verify_and_get_timecode("123456", self.boundary, valid_window=-1)
+
+    def test_error_messages_do_not_leak_otp_or_secret(self):
+        with self.assertRaises(ValueError) as cm:
+            self.strict.verify("123456", FIXED_TS * 1000)
+        message = str(cm.exception)
+        self.assertNotIn(SECRET, message)
+        self.assertNotIn(self.strict.at(FIXED_TS), message)
+
+
+@unittest.skipUnless(ZONEINFO_AVAILABLE and TZSET_AVAILABLE, "tzset/zoneinfo required for process TZ tests")
+class ProcessTimezoneTest(unittest.TestCase):
+    def test_same_utc_instant_matches_across_tz_processes(self):
+        script = (
+            "import datetime, sys; sys.path.insert(0, 'src'); import pyotp; "
+            "totp = pyotp.TOTP('" + SECRET + "', time_policy=pyotp.TimePolicy.UTC); "
+            "print(totp.at(" + str(FIXED_TS) + ")); "
+            "print(totp.at(datetime.datetime.fromtimestamp(" + str(FIXED_TS) + ", datetime.timezone.utc)))"
+        )
+        env = dict(os.environ)
+        codes = set()
+        for zone in ("UTC", "Asia/Shanghai", "America/New_York"):
+            env["TZ"] = zone
+            output = subprocess.run(
+                [sys.executable, "-c", script],
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            lines = output.stdout.split()
+            self.assertEqual(len(lines), 2)
+            self.assertEqual(lines[0], lines[1])
+            codes.add(lines[0])
+        self.assertEqual(len(codes), 1)
 
 
 class Timecop(object):

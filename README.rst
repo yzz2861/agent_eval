@@ -70,6 +70,45 @@ Time-based OTPs
     time.sleep(30)
     totp.verify('492039') # => False
 
+Time interpretation
+~~~~~~~~~~~~~~~~~~~
+``TOTP.at()``, ``TOTP.verify()`` and ``TOTP.timecode()`` accept either a datetime or a numeric Unix timestamp. The
+rules are explicit:
+
+* Integer timestamps are interpreted as whole seconds since the epoch. Float timestamps are truncated toward zero
+  (the fractional second is dropped, not rounded). Millisecond or nanosecond timestamps must be scaled down by the
+  caller; values outside the range that ``datetime`` can represent raise ``ValueError`` instead of silently producing
+  a wrong timecode.
+* Timezone-aware datetimes are always converted to UTC.
+* Naive datetimes and numeric timestamps follow the instance ``time_policy``:
+
+  - ``pyotp.TimePolicy.LOCAL`` (the default, backwards compatible): naive datetimes are interpreted in the process
+    local timezone (via ``time.mktime()``), and numeric timestamps map through ``datetime.fromtimestamp()``. Results
+    can depend on the machine timezone.
+  - ``pyotp.TimePolicy.UTC`` (strict): naive datetimes are rejected with ``ValueError`` unless their timezone is
+    declared through the ``default_tz`` constructor argument or the per-call ``tzinfo`` argument. Numeric timestamps
+    are treated directly as UTC epoch seconds, with no local-time conversion. Daylight-saving-time gaps and repeated
+    local times resolve deterministically through the standard library timezone database; the datetime ``fold`` flag
+    selects which side of an ambiguous time is used.
+
+.. code:: python
+
+    import datetime
+    from zoneinfo import ZoneInfo
+    import pyotp
+
+    strict = pyotp.TOTP('base32secret3232', time_policy=pyotp.TimePolicy.UTC)
+    shanghai = ZoneInfo('Asia/Shanghai')
+
+    strict.at(1710055800)                                     # integer seconds
+    strict.at(1710055800.9)                                   # float, truncated to 1710055800
+    strict.at(datetime.datetime(2024, 3, 10, tzinfo=shanghai))  # aware -> UTC
+
+    with_default = pyotp.TOTP('base32secret3232', time_policy=pyotp.TimePolicy.UTC, default_tz=shanghai)
+    with_default.at(datetime.datetime(2024, 3, 10, 9, 30))  # naive datetime assumed to be Shanghai time
+
+    strict.at(datetime.datetime(2024, 3, 10, 9, 30), tzinfo=shanghai)  # per-call timezone declaration
+
 Counter-based OTPs
 ~~~~~~~~~~~~~~~~~~
 .. code:: python

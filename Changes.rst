@@ -1,3 +1,28 @@
+Changes for next release
+========================
+
+- Add explicit time interpretation policy to ``TOTP``: ``TimePolicy.LOCAL``
+  (default, unchanged legacy behavior) and strict ``TimePolicy.UTC``. In UTC
+  mode naive datetimes are rejected unless their timezone is declared via
+  ``default_tz`` or a per-call ``tzinfo``; aware datetimes are converted to
+  UTC and numeric timestamps are treated as UTC epoch seconds without
+  local-time conversion. DST gaps and repeated times resolve deterministically
+  with the standard library timezone database and the ``fold`` flag.
+
+- Numeric timestamps: integers are whole epoch seconds; floats are truncated
+  toward zero (fractional seconds dropped). Millisecond/nanosecond and other
+  out-of-range inputs now raise ``ValueError`` instead of silently changing
+  the timecode; booleans and non-numeric, non-datetime inputs raise
+  ``TypeError``.
+
+- ``verify()`` and ``verify_and_get_timecode()`` compute a single base
+  timecode and share the exact generation path of ``at()``, so
+  ``valid_window`` windows are symmetric regardless of local timezone offset.
+  Negative ``valid_window`` now raises ``ValueError``.
+
+- ``TOTP.now()`` reads the current time as aware UTC and is independent of the
+  process timezone.
+
 Changes for v2.10.0 (2026-06-13)
 ================================
 
