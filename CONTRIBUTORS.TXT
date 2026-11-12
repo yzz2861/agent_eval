@@ -1,0 +1,25 @@
+Many thanks to the following contributors who submitted patches, bug reports, and great ideas:
+
+  - @3ev0: implemented Python3 support
+  - @hiddenillusion: provided example scripts
+  - @reidrac: submitted Debian packaging support
+  - @jallmantalbot: submitting a patch for better detection and handling of malformed Unicode
+  - @jallmantalbot: submitting a patch for a more correct Unicode code page for key/value names
+  - Joel Schneider: suggesting that "Windows-1252" is the correct Unicode code page for NKRecord and VKRecord fields.
+  - @woanware:
+    - submitting a patch for hive detection
+    - researching and submitting a patch for value types on Vista+ and RegDateTime support
+  - @tonycpsu:
+    - Add BCD hive type
+  - @NiKiZe:
+    - REGFBlock Checksum and validation
+    - RegTester updates
+  - @BridgeyTheGeek
+    - identify issue in data size parsing
+  - @sbv-csis
+    - identify path cycle issue and suggest fix
+  - @msuhanov
+    - transaction log files (new format) support
+    - various improvements to the primary files parser
+  - John Ormonde and Tim Heaney
+    - identifing and providing a fix for regf file type detection
