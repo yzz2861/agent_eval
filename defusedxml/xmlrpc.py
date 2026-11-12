@@ -12,6 +12,8 @@ from __future__ import print_function, absolute_import
 import io
 
 from .common import DTDForbidden, EntitiesForbidden, ExternalReferenceForbidden
+from ._expat_policy import ExpatPolicyHandler
+from .policy import BACKEND_XMLRPC, XMLSecurityPolicy
 
 __origin__ = "xmlrpc.client"
 from xmlrpc.client import ExpatParser
@@ -98,19 +100,57 @@ class DefusedGzipDecodedResponse(gzip.GzipFile if gzip else object):
 
 
 class DefusedExpatParser(ExpatParser):
-    def __init__(self, target, forbid_dtd=False, forbid_entities=True, forbid_external=True):
+    def __init__(
+        self,
+        target,
+        forbid_dtd=False,
+        forbid_entities=True,
+        forbid_external=True,
+        policy=None,
+    ):
         super().__init__(target)
+        if policy is not None and not isinstance(policy, XMLSecurityPolicy):
+            raise TypeError(
+                "policy must be an XMLSecurityPolicy instance, got {!r}".format(
+                    type(policy).__name__
+                )
+            )
+        self._policy = policy
+        self._backend = BACKEND_XMLRPC
         self.forbid_dtd = forbid_dtd
         self.forbid_entities = forbid_entities
         self.forbid_external = forbid_external
         parser = self._parser
-        if self.forbid_dtd:
-            parser.StartDoctypeDeclHandler = self.defused_start_doctype_decl
-        if self.forbid_entities:
-            parser.EntityDeclHandler = self.defused_entity_decl
-            parser.UnparsedEntityDeclHandler = self.defused_unparsed_entity_decl
-        if self.forbid_external:
-            parser.ExternalEntityRefHandler = self.defused_external_entity_ref_handler
+        if policy is not None:
+            self.install_policy(parser)
+        else:
+            if self.forbid_dtd:
+                parser.StartDoctypeDeclHandler = self.defused_start_doctype_decl
+            if self.forbid_entities:
+                parser.EntityDeclHandler = self.defused_entity_decl
+                parser.UnparsedEntityDeclHandler = (
+                    self.defused_unparsed_entity_decl
+                )
+            if self.forbid_external:
+                parser.ExternalEntityRefHandler = (
+                    self.defused_external_entity_ref_handler
+                )
+
+    # Shared XMLSecurityPolicy implementation.
+    _position = ExpatPolicyHandler._position
+    policy_start_doctype_decl = ExpatPolicyHandler.policy_start_doctype_decl
+    policy_entity_decl = ExpatPolicyHandler.policy_entity_decl
+    policy_unparsed_entity_decl = ExpatPolicyHandler.policy_unparsed_entity_decl
+    policy_external_entity_ref_handler = (
+        ExpatPolicyHandler.policy_external_entity_ref_handler
+    )
+    install_policy = ExpatPolicyHandler.install_policy
+
+    def _raise(self, exc, policy_item):
+        exc.backend = self._backend
+        exc.policy_item = policy_item
+        exc.position = self._position()
+        raise exc
 
     def defused_start_doctype_decl(self, name, sysid, pubid, has_internal_subset):
         raise DTDForbidden(name, sysid, pubid)
@@ -142,3 +182,50 @@ def unmonkey_patch():
     xmlrpc_client.gzip_decode = _orig_gzip_decode
     if xmlrpc_server:
         xmlrpc_server.gzip_decode = _orig_gzip_decode
+
+
+class _PolicyTarget:
+    """Minimal xmlrpc parser target used by the unified policy entry."""
+
+    def __init__(self):
+        self._data = []
+
+    def xml(self, encoding, standalone):
+        pass
+
+    def start(self, tag, attrs):
+        self._data.append("<%s>" % tag)
+
+    def data(self, text):
+        self._data.append(text)
+
+    def end(self, tag):
+        self._data.append("</%s>" % tag)
+
+    def __str__(self):
+        return "".join(self._data)
+
+
+def _as_bytes(text):
+    if isinstance(text, str):
+        return text.encode("utf-8")
+    return text
+
+
+def fromstring(text, policy=None, **legacy_kwargs):
+    """Parse an in-memory document under an :class:`XMLSecurityPolicy`."""
+    target = _PolicyTarget()
+    parser = DefusedExpatParser(target, policy=policy, **legacy_kwargs)
+    parser.feed(_as_bytes(text))
+    parser.close()
+    return target
+
+
+def parse(source, policy=None, **legacy_kwargs):
+    """Parse a filename or file object under an :class:`XMLSecurityPolicy`."""
+    if hasattr(source, "read"):
+        data = source.read()
+    else:
+        with open(source, "rb") as fp:
+            data = fp.read()
+    return fromstring(data, policy=policy, **legacy_kwargs)

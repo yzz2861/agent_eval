@@ -15,7 +15,13 @@ __origin__ = "xml.dom.minidom"
 
 
 def parse(
-    file, parser=None, bufsize=None, forbid_dtd=False, forbid_entities=True, forbid_external=True
+    file,
+    parser=None,
+    bufsize=None,
+    forbid_dtd=False,
+    forbid_entities=True,
+    forbid_external=True,
+    policy=None,
 ):
     """Parse a file into a DOM by filename or file object."""
     if parser is None and not bufsize:
@@ -24,6 +30,7 @@ def parse(
             forbid_dtd=forbid_dtd,
             forbid_entities=forbid_entities,
             forbid_external=forbid_external,
+            policy=policy,
         )
     else:
         return _do_pulldom_parse(
@@ -35,12 +42,18 @@ def parse(
                 "forbid_dtd": forbid_dtd,
                 "forbid_entities": forbid_entities,
                 "forbid_external": forbid_external,
+                "policy": policy,
             },
         )
 
 
 def parseString(
-    string, parser=None, forbid_dtd=False, forbid_entities=True, forbid_external=True
+    string,
+    parser=None,
+    forbid_dtd=False,
+    forbid_entities=True,
+    forbid_external=True,
+    policy=None,
 ):
     """Parse a file into a DOM from a string."""
     if parser is None:
@@ -49,6 +62,7 @@ def parseString(
             forbid_dtd=forbid_dtd,
             forbid_entities=forbid_entities,
             forbid_external=forbid_external,
+            policy=policy,
         )
     else:
         return _do_pulldom_parse(
@@ -59,5 +73,6 @@ def parseString(
                 "forbid_dtd": forbid_dtd,
                 "forbid_entities": forbid_entities,
                 "forbid_external": forbid_external,
+                "policy": policy,
             },
         )

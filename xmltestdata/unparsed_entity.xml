@@ -1,0 +1,5 @@
+<!DOCTYPE root [
+<!NOTATION gif SYSTEM "image/gif">
+<!ENTITY picture SYSTEM "file:///PATH/TO/xmltestdata/simple.xml" NDATA gif>
+]>
+<root/>

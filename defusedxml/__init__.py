@@ -10,12 +10,27 @@ from __future__ import print_function, absolute_import
 import warnings
 
 from .common import (
+    BackendUnavailable,
     DefusedXmlException,
     DTDForbidden,
     EntitiesForbidden,
+    ExternalDTDForbidden,
     ExternalReferenceForbidden,
     NotSupportedError,
+    ParameterEntityForbidden,
+    UnparsedEntityForbidden,
+    XMLPosition,
     _apply_defusing,
+)
+from .policy import (
+    ALL_BACKENDS,
+    DEFAULT_POLICY,
+    PERMISSIVE_POLICY,
+    STRICT_POLICY,
+    XMLSecurityPolicy,
+    available_backends,
+    fromstring,
+    parse,
 )
 
 
@@ -60,9 +75,22 @@ def defuse_stdlib():
 __version__ = "0.8.0rc2"
 
 __all__ = [
+    "ALL_BACKENDS",
+    "BackendUnavailable",
+    "DEFAULT_POLICY",
     "DefusedXmlException",
     "DTDForbidden",
     "EntitiesForbidden",
+    "ExternalDTDForbidden",
     "ExternalReferenceForbidden",
     "NotSupportedError",
+    "PERMISSIVE_POLICY",
+    "ParameterEntityForbidden",
+    "STRICT_POLICY",
+    "UnparsedEntityForbidden",
+    "XMLPosition",
+    "XMLSecurityPolicy",
+    "available_backends",
+    "fromstring",
+    "parse",
 ]

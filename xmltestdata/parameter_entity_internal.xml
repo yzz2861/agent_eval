@@ -1,0 +1,5 @@
+<!DOCTYPE root [
+<!ENTITY % inner "<!ELEMENT root (#PCDATA)>">
+%inner;
+]>
+<root>text</root>

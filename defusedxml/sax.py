@@ -22,13 +22,15 @@ def parse(
     forbid_dtd=False,
     forbid_entities=True,
     forbid_external=True,
+    policy=None,
 ):
-    parser = make_parser()
+    parser = make_parser(policy=policy)
     parser.setContentHandler(handler)
     parser.setErrorHandler(errorHandler)
-    parser.forbid_dtd = forbid_dtd
-    parser.forbid_entities = forbid_entities
-    parser.forbid_external = forbid_external
+    if policy is None:
+        parser.forbid_dtd = forbid_dtd
+        parser.forbid_entities = forbid_entities
+        parser.forbid_external = forbid_external
     parser.parse(source)
 
 
@@ -39,22 +41,27 @@ def parseString(
     forbid_dtd=False,
     forbid_entities=True,
     forbid_external=True,
+    policy=None,
 ):
     from io import BytesIO
 
     if errorHandler is None:
         errorHandler = _ErrorHandler()
-    parser = make_parser()
+    parser = make_parser(policy=policy)
     parser.setContentHandler(handler)
     parser.setErrorHandler(errorHandler)
-    parser.forbid_dtd = forbid_dtd
-    parser.forbid_entities = forbid_entities
-    parser.forbid_external = forbid_external
+    if policy is None:
+        parser.forbid_dtd = forbid_dtd
+        parser.forbid_entities = forbid_entities
+        parser.forbid_external = forbid_external
 
     inpsrc = _InputSource()
     inpsrc.setByteStream(BytesIO(string))
     parser.parse(inpsrc)
 
 
-def make_parser(parser_list=[]):
-    return expatreader.create_parser()
+def make_parser(parser_list=[], policy=None, backend=None):
+    parser = expatreader.create_parser(policy=policy)
+    if backend is not None:
+        parser._backend = backend
+    return parser

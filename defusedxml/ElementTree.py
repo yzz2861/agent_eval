@@ -18,6 +18,11 @@ import importlib
 
 
 from .common import DTDForbidden, EntitiesForbidden, ExternalReferenceForbidden
+from ._expat_policy import ExpatPolicyHandler
+from .policy import (
+    BACKEND_ETREE,
+    XMLSecurityPolicy,
+)
 
 __origin__ = "xml.etree.ElementTree"
 
@@ -72,6 +77,7 @@ class DefusedXMLParser(_XMLParser):
         forbid_dtd=False,
         forbid_entities=True,
         forbid_external=True,
+        policy=None,
     ):
         super().__init__(target=target, encoding=encoding)
         if html is not _sentinel:
@@ -86,17 +92,54 @@ class DefusedXMLParser(_XMLParser):
                     category=DeprecationWarning,
                 )
 
+        if policy is not None:
+            if not isinstance(policy, XMLSecurityPolicy):
+                raise TypeError(
+                    "policy must be an XMLSecurityPolicy instance, got {!r}".format(
+                        type(policy).__name__
+                    )
+                )
+            # Legacy booleans are ignored when an explicit policy is given.
+            forbid_dtd = False
+            forbid_entities = False
+            forbid_external = False
+
+        self._policy = policy
+        self._backend = BACKEND_ETREE
         self.forbid_dtd = forbid_dtd
         self.forbid_entities = forbid_entities
         self.forbid_external = forbid_external
         parser = self.parser
-        if self.forbid_dtd:
-            parser.StartDoctypeDeclHandler = self.defused_start_doctype_decl
-        if self.forbid_entities:
-            parser.EntityDeclHandler = self.defused_entity_decl
-            parser.UnparsedEntityDeclHandler = self.defused_unparsed_entity_decl
-        if self.forbid_external:
-            parser.ExternalEntityRefHandler = self.defused_external_entity_ref_handler
+        if policy is not None:
+            self.install_policy(parser)
+        else:
+            if self.forbid_dtd:
+                parser.StartDoctypeDeclHandler = self.defused_start_doctype_decl
+            if self.forbid_entities:
+                parser.EntityDeclHandler = self.defused_entity_decl
+                parser.UnparsedEntityDeclHandler = self.defused_unparsed_entity_decl
+            if self.forbid_external:
+                parser.ExternalEntityRefHandler = (
+                    self.defused_external_entity_ref_handler
+                )
+
+    # Shared XMLSecurityPolicy implementation.
+    def _position(self):
+        return ExpatPolicyHandler._position(self)
+
+    policy_start_doctype_decl = ExpatPolicyHandler.policy_start_doctype_decl
+    policy_entity_decl = ExpatPolicyHandler.policy_entity_decl
+    policy_unparsed_entity_decl = ExpatPolicyHandler.policy_unparsed_entity_decl
+    policy_external_entity_ref_handler = (
+        ExpatPolicyHandler.policy_external_entity_ref_handler
+    )
+    install_policy = ExpatPolicyHandler.install_policy
+
+    def _raise(self, exc, policy_item):
+        exc.backend = self._backend
+        exc.policy_item = policy_item
+        exc.position = self._position()
+        raise exc
 
     def defused_start_doctype_decl(self, name, sysid, pubid, has_internal_subset):
         raise DTDForbidden(name, sysid, pubid)
@@ -119,13 +162,21 @@ class DefusedXMLParser(_XMLParser):
 XMLTreeBuilder = XMLParse = XMLParser = DefusedXMLParser
 
 
-def parse(source, parser=None, forbid_dtd=False, forbid_entities=True, forbid_external=True):
+def parse(
+    source,
+    parser=None,
+    forbid_dtd=False,
+    forbid_entities=True,
+    forbid_external=True,
+    policy=None,
+):
     if parser is None:
         parser = DefusedXMLParser(
             target=_TreeBuilder(),
             forbid_dtd=forbid_dtd,
             forbid_entities=forbid_entities,
             forbid_external=forbid_external,
+            policy=policy,
         )
     return _parse(source, parser)
 
@@ -137,6 +188,7 @@ def iterparse(
     forbid_dtd=False,
     forbid_entities=True,
     forbid_external=True,
+    policy=None,
 ):
     if parser is None:
         parser = DefusedXMLParser(
@@ -144,16 +196,24 @@ def iterparse(
             forbid_dtd=forbid_dtd,
             forbid_entities=forbid_entities,
             forbid_external=forbid_external,
+            policy=policy,
         )
     return _iterparse(source, events, parser)
 
 
-def fromstring(text, forbid_dtd=False, forbid_entities=True, forbid_external=True):
+def fromstring(
+    text,
+    forbid_dtd=False,
+    forbid_entities=True,
+    forbid_external=True,
+    policy=None,
+):
     parser = DefusedXMLParser(
         target=_TreeBuilder(),
         forbid_dtd=forbid_dtd,
         forbid_entities=forbid_entities,
         forbid_external=forbid_external,
+        policy=policy,
     )
     parser.feed(text)
     return parser.close()
@@ -162,12 +222,19 @@ def fromstring(text, forbid_dtd=False, forbid_entities=True, forbid_external=Tru
 XML = fromstring
 
 
-def fromstringlist(sequence, forbid_dtd=False, forbid_entities=True, forbid_external=True):
+def fromstringlist(
+    sequence,
+    forbid_dtd=False,
+    forbid_entities=True,
+    forbid_external=True,
+    policy=None,
+):
     parser = DefusedXMLParser(
         target=_TreeBuilder(),
         forbid_dtd=forbid_dtd,
         forbid_entities=forbid_entities,
         forbid_external=forbid_external,
+        policy=policy,
     )
     for text in sequence:
         parser.feed(text)

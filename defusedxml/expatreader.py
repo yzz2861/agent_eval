@@ -10,6 +10,8 @@ from __future__ import print_function, absolute_import
 from xml.sax.expatreader import ExpatParser as _ExpatParser
 
 from .common import DTDForbidden, EntitiesForbidden, ExternalReferenceForbidden
+from ._expat_policy import ExpatPolicyHandler
+from .policy import BACKEND_SAX, XMLSecurityPolicy
 
 __origin__ = "xml.sax.expatreader"
 
@@ -24,11 +26,37 @@ class DefusedExpatParser(_ExpatParser):
         forbid_dtd=False,
         forbid_entities=True,
         forbid_external=True,
+        policy=None,
     ):
         super().__init__(namespaceHandling, bufsize)
+        if policy is not None and not isinstance(policy, XMLSecurityPolicy):
+            raise TypeError(
+                "policy must be an XMLSecurityPolicy instance, got {!r}".format(
+                    type(policy).__name__
+                )
+            )
+        self._policy = policy
+        self._backend = BACKEND_SAX
         self.forbid_dtd = forbid_dtd
         self.forbid_entities = forbid_entities
         self.forbid_external = forbid_external
+
+    # Shared XMLSecurityPolicy implementation.  The mixin reads
+    # ``self._parser`` which the SAX base class creates in reset().
+    _position = ExpatPolicyHandler._position
+    policy_start_doctype_decl = ExpatPolicyHandler.policy_start_doctype_decl
+    policy_entity_decl = ExpatPolicyHandler.policy_entity_decl
+    policy_unparsed_entity_decl = ExpatPolicyHandler.policy_unparsed_entity_decl
+    policy_external_entity_ref_handler = (
+        ExpatPolicyHandler.policy_external_entity_ref_handler
+    )
+    install_policy = ExpatPolicyHandler.install_policy
+
+    def _raise(self, exc, policy_item):
+        exc.backend = self._backend
+        exc.policy_item = policy_item
+        exc.position = self._position()
+        raise exc
 
     def defused_start_doctype_decl(self, name, sysid, pubid, has_internal_subset):
         raise DTDForbidden(name, sysid, pubid)
@@ -48,6 +76,9 @@ class DefusedExpatParser(_ExpatParser):
     def reset(self):
         super().reset()
         parser = self._parser
+        if self._policy is not None:
+            self.install_policy(parser)
+            return
         if self.forbid_dtd:
             parser.StartDoctypeDeclHandler = self.defused_start_doctype_decl
         if self.forbid_entities:
