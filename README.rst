@@ -98,6 +98,47 @@ Some applications want the secret key to be formatted as a hex-encoded string:
 .. code:: python
     pyotp.random_hex()  # returns a 40-character hex-encoded secret
 
+Enrollment policy for new accounts
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The OTP constructors and ``verify()`` deliberately accept any base32 secret so that existing accounts
+keep working. For new registrations, PyOTP ships an explicitly enabled :class:`pyotp.EnrollmentPolicy`
+that audits a secret and its OTP parameters before anything is provisioned. Call it yourself at the
+point you generate a secret, construct a TOTP/HOTP object, or emit a provisioning URI:
+
+.. code:: python
+
+    import pyotp
+
+    policy = pyotp.EnrollmentPolicy()
+
+    # Generate (or import) and audit a secret.
+    result = policy.generate_secret()
+
+    # Reuse the same audited result for both TOTP and HOTP flows.
+    totp = policy.totp(result, name="alice@example.com", issuer="Secure App")
+    hotp = policy.hotp(result, name="alice@example.com", issuer="Secure App", initial_count=0)
+
+    # Non-fatal compatibility concerns are returned instead of being raised.
+    print(result.warnings)
+
+The policy normalizes the base32 secret (uppercase, unpadded), checks the decoded length and estimated
+entropy, and restricts ``digest``, ``digits``, TOTP ``interval`` and HOTP ``counter`` to the ranges
+accepted by common authenticator apps. It rejects whitespace, mixed case, characters outside the
+base32 alphabet and illegal padding, as well as ambiguous parameter combinations such as
+``digits=11`` or a one-second period.
+
+Failures are split into distinct error types so callers can react differently:
+
+* :class:`pyotp.SecretTooShortError` / :class:`pyotp.SecretEncodingError` - the secret is too weak
+  or not valid base32.
+* :class:`pyotp.UnsupportedParameterError` - the requested parameters are not supported by the policy.
+* :class:`pyotp.EnrollmentResult` - acceptance, with optional ``warnings`` for non-fatal issues.
+
+Exception messages never contain the inspected secret, so they are safe to log. The policy is opt-in:
+legacy constructors and ``verify()`` never consult it, so accounts provisioned with weaker historical
+secrets can still authenticate.
+
 Google Authenticator Compatible
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

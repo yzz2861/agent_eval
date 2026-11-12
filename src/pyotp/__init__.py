@@ -7,6 +7,13 @@ from . import contrib  # noqa:F401
 from .compat import random
 from .hotp import HOTP as HOTP
 from .otp import OTP as OTP
+from .policy import EnrollmentPolicy as EnrollmentPolicy
+from .policy import EnrollmentPolicyError as EnrollmentPolicyError
+from .policy import EnrollmentResult as EnrollmentResult
+from .policy import SecretEncodingError as SecretEncodingError
+from .policy import SecretError as SecretError
+from .policy import SecretTooShortError as SecretTooShortError
+from .policy import UnsupportedParameterError as UnsupportedParameterError
 from .totp import TOTP as TOTP
 
 

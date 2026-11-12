@@ -12,6 +12,9 @@ API documentation
 .. automodule:: pyotp.hotp
    :members:
 
+.. automodule:: pyotp.policy
+   :members:
+
 .. automodule:: pyotp.utils
    :members:
 

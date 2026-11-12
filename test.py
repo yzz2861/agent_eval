@@ -365,6 +365,188 @@ class DigestFunctionTest(unittest.TestCase):
         )
 
 
+class EnrollmentPolicyTest(unittest.TestCase):
+    def setUp(self):
+        self.policy = pyotp.EnrollmentPolicy()
+        # 32 base32 chars -> 20 bytes -> 160 bits of entropy.
+        self.strong_secret = pyotp.random_base32()
+        # Eight base32 chars -> 5 bytes -> 40 bits: short enough to model the
+        # timestamp-truncation secrets described in the incident report while
+        # still being decodable base32.
+        self.weak_secret = "GEZDGNBV"
+
+    def test_weak_secret_rejected(self):
+        with self.assertRaises(pyotp.SecretTooShortError):
+            self.policy.validate_secret(self.weak_secret)
+        with self.assertRaises(pyotp.SecretError):
+            self.policy.validate(self.weak_secret, "totp")
+
+    def test_custom_entropy_floor(self):
+        strict = pyotp.EnrollmentPolicy(min_entropy_bits=200)
+        with self.assertRaises(pyotp.SecretTooShortError):
+            strict.validate_secret(self.strong_secret)
+        relaxed = pyotp.EnrollmentPolicy(min_entropy_bits=20)
+        result = relaxed.validate_secret(self.weak_secret)
+        self.assertEqual(result.entropy_bits, 40)
+
+    def test_valid_long_secret_accepted(self):
+        result = self.policy.validate_secret(self.strong_secret)
+        self.assertEqual(result.normalized_secret, self.strong_secret)
+        self.assertEqual(result.entropy_bits, 160)
+        self.assertEqual(len(result.secret_bytes), 20)
+        self.assertEqual(result.warnings, [])
+
+    def test_lowercase_normalized_with_warning(self):
+        result = self.policy.validate_secret(self.strong_secret.lower())
+        self.assertEqual(result.normalized_secret, self.strong_secret)
+        self.assertTrue(any("uppercase" in warning for warning in result.warnings))
+
+    def test_mixed_case_rejected(self):
+        mixed = self.strong_secret[:4].lower() + self.strong_secret[4:]
+        with self.assertRaises(pyotp.SecretEncodingError):
+            self.policy.validate_secret(mixed)
+
+    def test_whitespace_rejected(self):
+        for contaminated in (
+            self.strong_secret[:8] + " " + self.strong_secret[8:],
+            "\t" + self.strong_secret,
+            self.strong_secret + "\n",
+        ):
+            with self.assertRaises(pyotp.SecretEncodingError):
+                self.policy.validate_secret(contaminated)
+
+    def test_illegal_padding_and_alphabet_rejected(self):
+        for bad in (
+            "AA=AAAAA",  # padding embedded in the middle
+            "AAAAAA==",  # wrong number of padding chars for the body length
+            "AAAAAAA==",  # padded total length is not a multiple of 8
+            "ABCDEFGH" + "====",  # body length is a multiple of 8 but padding was added
+            "AB!CDEF",  # character outside the base32 alphabet
+            "ABCDEF",  # unpadded length cannot encode whole bytes
+        ):
+            with self.assertRaises(pyotp.SecretEncodingError):
+                self.policy.validate_secret(bad)
+
+    def test_legal_padding_accepted_and_stripped(self):
+        body = "A" * 34  # six padding chars complete a 40-char (5-quantum) block
+        padded = body + "======"
+        result = self.policy.validate_secret(padded)
+        self.assertEqual(result.normalized_secret, body)
+        self.assertTrue(any("padding" in warning for warning in result.warnings))
+
+    def test_non_multiple_of_eight_warns_but_passes(self):
+        secret = pyotp.random_base32(length=34)  # mod 8 == 2, decodes to bytes
+        result = self.policy.validate_secret(secret)
+        self.assertEqual(result.normalized_secret, secret)
+        self.assertTrue(any("multiple of 8" in warning for warning in result.warnings))
+
+    def test_empty_and_non_string_rejected(self):
+        for bad in ("", None, 12345):
+            with self.assertRaises(pyotp.SecretEncodingError):
+                self.policy.validate_secret(bad)
+
+    def test_digits_boundaries(self):
+        for digits in (6, 7, 8):
+            result = self.policy.validate(self.strong_secret, "totp", digits=digits)
+            self.assertEqual(result.entropy_bits, 160)
+        for digits in (5, 9, 11):
+            with self.assertRaises(pyotp.UnsupportedParameterError):
+                self.policy.validate(self.strong_secret, "totp", digits=digits)
+
+    def test_interval_boundaries(self):
+        for interval in (15, 30, 300):
+            self.policy.validate(self.strong_secret, "totp", interval=interval)
+        for interval in (1, 14, 301):
+            with self.assertRaises(pyotp.UnsupportedParameterError):
+                self.policy.validate(self.strong_secret, "totp", interval=interval)
+        # Non-default but valid periods produce a compatibility warning.
+        result = self.policy.validate(self.strong_secret, "totp", interval=60)
+        self.assertTrue(any("interval" in warning for warning in result.warnings))
+
+    def test_digest_restrictions(self):
+        for digest in (hashlib.sha1, hashlib.sha256, hashlib.sha512, "sha256"):
+            self.policy.validate(self.strong_secret, "totp", digest=digest)
+        with self.assertRaises(pyotp.UnsupportedParameterError):
+            self.policy.validate(self.strong_secret, "totp", digest=hashlib.md5)
+        with self.assertRaises(pyotp.UnsupportedParameterError):
+            self.policy.validate(self.strong_secret, "totp", digest="aes")
+        result = self.policy.validate(self.strong_secret, "totp", digest=hashlib.sha256)
+        self.assertTrue(any("SHA1" in warning for warning in result.warnings))
+
+    def test_counter_restrictions(self):
+        self.policy.validate(self.strong_secret, "hotp", initial_count=0)
+        self.policy.validate(self.strong_secret, "hotp", initial_count=2**31 - 1)
+        for counter in (-1, 2**31):
+            with self.assertRaises(pyotp.UnsupportedParameterError):
+                self.policy.validate(self.strong_secret, "hotp", initial_count=counter)
+
+    def test_totp_hotp_share_one_result(self):
+        result = self.policy.validate_secret(self.strong_secret)
+        totp = self.policy.totp(result, name="alice", issuer="Acme", interval=30)
+        hotp = self.policy.hotp(result, name="alice", issuer="Acme", initial_count=0)
+        self.assertIsInstance(totp, pyotp.TOTP)
+        self.assertIsInstance(hotp, pyotp.HOTP)
+        self.assertEqual(totp.secret, hotp.secret)
+        self.assertEqual(totp.secret, self.strong_secret)
+        self.assertEqual(totp.now(), pyotp.TOTP(self.strong_secret).now())
+
+    def test_factories_reject_bad_enrollments(self):
+        with self.assertRaises(pyotp.SecretTooShortError):
+            self.policy.totp(self.weak_secret)
+        with self.assertRaises(pyotp.UnsupportedParameterError):
+            self.policy.totp(self.strong_secret, digits=11)
+        with self.assertRaises(pyotp.UnsupportedParameterError):
+            self.policy.totp(self.strong_secret, interval=1)
+
+    def test_provisioning_uri_roundtrip(self):
+        totp = self.policy.totp(self.strong_secret, name="alice", issuer="Acme")
+        uri = totp.provisioning_uri()
+        parsed = pyotp.parse_uri(uri)
+        self.assertIsInstance(parsed, pyotp.TOTP)
+        self.assertEqual(parsed.secret, self.strong_secret)
+
+        hotp = self.policy.hotp(self.strong_secret, name="alice", issuer="Acme", initial_count=7)
+        parsed = pyotp.parse_uri(hotp.provisioning_uri())
+        self.assertIsInstance(parsed, pyotp.HOTP)
+        self.assertEqual(parsed.initial_count, 7)
+
+    def test_generate_secret(self):
+        result = self.policy.generate_secret()
+        self.assertGreaterEqual(result.entropy_bits, 160)
+        self.assertEqual(result.normalized_secret, result.normalized_secret.upper())
+
+    def test_error_hierarchy_and_secret_not_leaked(self):
+        self.assertTrue(issubclass(pyotp.SecretTooShortError, pyotp.SecretError))
+        self.assertTrue(issubclass(pyotp.SecretEncodingError, pyotp.SecretError))
+        self.assertTrue(issubclass(pyotp.SecretError, pyotp.EnrollmentPolicyError))
+        self.assertTrue(issubclass(pyotp.UnsupportedParameterError, pyotp.EnrollmentPolicyError))
+
+        contaminated = self.strong_secret[:8] + " " + self.strong_secret[8:]
+        try:
+            self.policy.validate_secret(contaminated)
+        except pyotp.EnrollmentPolicyError as exc:
+            self.assertNotIn(contaminated, str(exc))
+            self.assertNotIn(self.strong_secret, str(exc))
+
+        result = self.policy.validate_secret(self.strong_secret)
+        self.assertNotIn(self.strong_secret, str(result))
+
+    def test_legacy_construction_and_verify_unchanged(self):
+        # Existing accounts with weak or oddly formatted secrets must still
+        # verify; the policy is never consulted by the legacy constructors.
+        legacy_totp = pyotp.TOTP(self.weak_secret.lower())
+        self.assertEqual(len(legacy_totp.now()), 6)
+        self.assertTrue(legacy_totp.verify(legacy_totp.now()))
+
+        legacy_hotp = pyotp.HOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+        self.assertEqual(legacy_hotp.at(0), "755224")
+
+        # digits > 10 still raises the original constructor error, not a
+        # policy error.
+        with self.assertRaises(ValueError):
+            pyotp.TOTP(self.strong_secret, digits=11)
+
+
 class ParseUriTest(unittest.TestCase):
     def test_invalids(self):
         with self.assertRaises(ValueError) as cm:
