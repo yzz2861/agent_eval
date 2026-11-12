@@ -7,6 +7,7 @@ from .exc import BadPayload as BadPayload
 from .exc import BadSignature as BadSignature
 from .exc import BadTimeSignature as BadTimeSignature
 from .exc import SignatureExpired as SignatureExpired
+from .serializer import DecompressionBudget as DecompressionBudget
 from .serializer import Serializer as Serializer
 from .signer import HMACAlgorithm as HMACAlgorithm
 from .signer import NoneAlgorithm as NoneAlgorithm

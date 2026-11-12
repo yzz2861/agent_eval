@@ -5,6 +5,15 @@ Unreleased
 
 -   Drop support for Python 3.8 and 3.9.
 -   Remove previously deprecated code.
+-   Add a :class:`~itsdangerous.serializer.DecompressionBudget` that bounds
+    compressed payload decoding. ``URLSafeSerializer`` and
+    ``URLSafeTimedSerializer`` now enforce limits on the compact payload size,
+    compressed size, decompressed size, decompression ratio and JSON nesting
+    depth, streaming the zlib decompressor so a "zip bomb" is aborted before it
+    is fully expanded. Signature verification still happens first, budgets are
+    per-instance and cannot be set to unlimited, and truncated streams,
+    trailing garbage, non-canonical base64 and nested compression now fail
+    cleanly without leaking decompressed content.
 
 
 Version 2.2.0

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import collections.abc as cabc
+import dataclasses
 import json
 import typing as t
 
+from ._json import _CompactJSON
 from .encoding import want_bytes
 from .exc import BadPayload
 from .exc import BadSignature
@@ -19,6 +21,105 @@ if t.TYPE_CHECKING:
 else:
     # Still available at runtime on Python < 3.13, but without the default.
     _TSerialized = t.TypeVar("_TSerialized", bound=str | bytes)
+
+
+def _require_positive_int(value: t.Any, name: str) -> int:
+    """Validate that a budget value is a finite positive integer.
+
+    Booleans are rejected even though they are technically integers, and any
+    non-integer (including floats such as infinity) is rejected too, so a
+    budget can never be configured to mean "unlimited".
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name!r} must be an integer, not {type(value).__name__}")
+
+    if value <= 0:
+        raise ValueError(f"{name!r} must be a positive integer, not {value}")
+
+    return value
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class DecompressionBudget:
+    """Hard limits applied while decoding compressed payloads.
+
+    Every limit is a finite, positive integer. There is intentionally no
+    way to disable a limit, callers can only make the defaults more
+    restrictive (or relax them up to another finite value). A new budget
+    is created for each :class:`Serializer` instance, so counters are
+    never shared between instances.
+
+    :param max_compact_bytes: Maximum size in bytes of the compact,
+        URL-safe payload (the base64 text, including the leading ``.``
+        compression marker) before any decoding happens.
+    :param max_compressed_bytes: Maximum size in bytes of the base64
+        decoded, still-compressed data.
+    :param max_decompressed_bytes: Maximum size in bytes that may be
+        produced while streaming the zlib decompressor. Decompression is
+        aborted as soon as this would be exceeded, before the full output
+        is materialized.
+    :param max_decompression_ratio: Maximum allowed ratio of decompressed
+        bytes to compressed bytes. A highly compressible "zip bomb" is
+        rejected while the ratio is still being computed.
+    :param max_json_depth: Maximum nesting depth of JSON objects and
+        arrays in the decoded payload.
+
+    .. versionadded:: 2.3.0
+    """
+
+    max_compact_bytes: int = 4096
+    max_compressed_bytes: int = 8192
+    max_decompressed_bytes: int = 1_048_576
+    max_decompression_ratio: int = 1000
+    max_json_depth: int = 100
+
+    def __post_init__(self) -> None:
+        # Every field is a finite, positive integer. The int-only type check
+        # rejects floats (including ``math.inf``) and booleans, and the value
+        # check rejects zero and negatives, so a limit can never mean
+        # "unlimited".
+        for field in dataclasses.fields(self):
+            _require_positive_int(getattr(self, field.name), field.name)
+
+
+#: The budget used when a serializer is constructed without one. Each
+#: serializer copies this into its own instance, it is never mutated.
+DEFAULT_DECOMPRESSION_BUDGET = DecompressionBudget()
+
+
+def check_json_depth(payload: bytes, max_depth: int) -> None:
+    """Scan JSON text and reject payloads that nest containers too deeply.
+
+    The scan is a single linear pass over the raw bytes, so it runs before
+    the JSON parser gets a chance to build a deeply recursive object graph.
+    Bytes inside JSON strings (including escaped quotes and braces) are
+    ignored. Only ``{``, ``}``, ``[`` and ``]`` outside of strings affect
+    the depth.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+
+    for char in payload:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == 0x5C:  # backslash
+                escaped = True
+            elif char == 0x22:  # double quote
+                in_string = False
+
+            continue
+
+        if char == 0x22:
+            in_string = True
+        elif char == 0x5B or char == 0x7B:  # [ or {
+            depth += 1
+
+            if depth > max_depth:
+                raise BadPayload("The payload exceeds the maximum allowed depth")
+        elif char == 0x5D or char == 0x7D:  # ] or }
+            depth -= 1
 
 
 class _PDataSerializer(t.Protocol[_TSerialized]):
@@ -70,6 +171,10 @@ class Serializer(t.Generic[_TSerialized]):
         of ``signer_kwargs``, a ``Signer`` class, or a tuple of
         ``(signer, signer_kwargs)``. Defaults to
         :attr:`default_fallback_signers`.
+    :param decompression_budget: A :class:`DecompressionBudget` with the
+        limits used when decoding a compressed payload. Defaults to a copy
+        of :data:`DEFAULT_DECOMPRESSION_BUDGET`. The value must always be
+        a finite, positive budget; it cannot disable the limits.
 
     .. versionchanged:: 2.0
         Added support for key rotation by passing a list to
@@ -117,6 +222,7 @@ class Serializer(t.Generic[_TSerialized]):
             dict[str, t.Any] | tuple[type[Signer], dict[str, t.Any]] | type[Signer]
         ]
         | None = None,
+        decompression_budget: DecompressionBudget | None = None,
     ): ...
 
     # Serializer[bytes] with a bytes data serializer positional argument.
@@ -133,6 +239,7 @@ class Serializer(t.Generic[_TSerialized]):
             dict[str, t.Any] | tuple[type[Signer], dict[str, t.Any]] | type[Signer]
         ]
         | None = None,
+        decompression_budget: DecompressionBudget | None = None,
     ): ...
 
     # Serializer[bytes] with a bytes data serializer keyword argument.
@@ -150,6 +257,7 @@ class Serializer(t.Generic[_TSerialized]):
             dict[str, t.Any] | tuple[type[Signer], dict[str, t.Any]] | type[Signer]
         ]
         | None = None,
+        decompression_budget: DecompressionBudget | None = None,
     ): ...
 
     # Fall back with a positional argument. If the strict signature of
@@ -168,6 +276,7 @@ class Serializer(t.Generic[_TSerialized]):
             dict[str, t.Any] | tuple[type[Signer], dict[str, t.Any]] | type[Signer]
         ]
         | None = None,
+        decompression_budget: DecompressionBudget | None = None,
     ): ...
 
     # Fall back with a keyword argument.
@@ -185,6 +294,7 @@ class Serializer(t.Generic[_TSerialized]):
             dict[str, t.Any] | tuple[type[Signer], dict[str, t.Any]] | type[Signer]
         ]
         | None = None,
+        decompression_budget: DecompressionBudget | None = None,
     ): ...
 
     def __init__(
@@ -199,6 +309,7 @@ class Serializer(t.Generic[_TSerialized]):
             dict[str, t.Any] | tuple[type[Signer], dict[str, t.Any]] | type[Signer]
         ]
         | None = None,
+        decompression_budget: DecompressionBudget | None = None,
     ):
         #: The list of secret keys to try for verifying signatures, from
         #: oldest to newest. The newest (last) key is used for signing.
@@ -233,6 +344,13 @@ class Serializer(t.Generic[_TSerialized]):
         ] = fallback_signers
         self.serializer_kwargs: dict[str, t.Any] = serializer_kwargs or {}
 
+        if decompression_budget is None:
+            # Copy the defaults into a per-instance budget; the budget is
+            # frozen so nothing can be shared or mutated across instances.
+            decompression_budget = dataclasses.replace(DEFAULT_DECOMPRESSION_BUDGET)
+
+        self.decompression_budget: DecompressionBudget = decompression_budget
+
     @property
     def secret_key(self) -> bytes:
         """The newest (last) entry in the :attr:`secret_keys` list. This
@@ -256,11 +374,21 @@ class Serializer(t.Generic[_TSerialized]):
             use_serializer = serializer
             is_text = is_text_serializer(serializer)
 
+        if use_serializer is json or use_serializer is _CompactJSON:
+            # Enforce the nesting limit on raw JSON before the parser builds
+            # a recursive object graph. Non-JSON serializers such as pickle
+            # keep their own (uncompressed) failure modes.
+            check_json_depth(payload, self.decompression_budget.max_json_depth)
+
         try:
             if is_text:
                 return use_serializer.loads(payload.decode("utf-8"))  # type: ignore[arg-type]
 
             return use_serializer.loads(payload)  # type: ignore[arg-type]
+        except BadPayload:
+            # Preserve the dedicated depth/limit message instead of masking
+            # it behind the generic unserializing-error wrapper.
+            raise
         except Exception as e:
             raise BadPayload(
                 "Could not load the payload because an exception"
