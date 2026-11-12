@@ -1,0 +1,29 @@
+# Back-up files
+*.bak
+*.swp
+*~
+
+# Editors / IDEs
+.idea/*
+.vscode/*
+
+# Python compiled files
+*.pyc
+/__pycache__
+
+# Virtual environments
+.venv/
+venv/
+
+# Project specific and miscellaneous
+/.tox
+/build
+/dist
+/pefile.egg-info
+/pefile-tests/
+.DS_Store
+.coverage
+.ipynb_checkpoints/*
+pefile.code-workspace
+pefile.ipynb
+tests/test_files/*
