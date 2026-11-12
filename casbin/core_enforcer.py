@@ -15,6 +15,7 @@
 import copy
 import logging
 import re
+from contextlib import contextmanager
 from functools import lru_cache
 
 from casbin.effect import (
@@ -29,6 +30,16 @@ from casbin.persist.adapters import FileAdapter
 from casbin.policy_index import PolicyIndex, policy_matches_bucket
 from casbin.rbac import default_role_manager
 from casbin.util import generate_g_function, SimpleEval, util, generate_conditional_g_function, key_match
+from casbin.util.expression import (
+    BudgetState,
+    MatcherBudget,
+    MatcherError,
+    MatcherFunctionError,
+    REASON_RECURSIVE_ENFORCER,
+    bounded_re_search,
+    current_budget,
+    enforce_depth,
+)
 from casbin.util.log import configure_logging, disabled_logging
 
 
@@ -70,6 +81,11 @@ class CoreEnforcer:
         self.logger = logging.getLogger("casbin.enforcer")
         self._policy_indexes = {}
         self._policy_deny_cache = {}
+        # Survives model reloads, which replace the FunctionMap entirely.
+        self._function_whitelist = frozenset()
+        # Default budget: every limit is None, so enforcement stays unbounded
+        # and behaves exactly like previous releases until a budget is set.
+        self._matcher_budget = MatcherBudget()
         if isinstance(model, str):
             if isinstance(adapter, str):
                 self.init_with_file(model, adapter)
@@ -110,6 +126,7 @@ class CoreEnforcer:
         self.model = m
         self.model.print_model()
         self.fm = FunctionMap.load_function_map()
+        self.fm.set_function_whitelist(self._function_whitelist)
 
         self._initialize()
 
@@ -152,6 +169,7 @@ class CoreEnforcer:
         self.model.load_model(self.model_path)
         self.model.print_model()
         self.fm = FunctionMap.load_function_map()
+        self.fm.set_function_whitelist(self._function_whitelist)
         self._reset_policy_caches()
 
     def get_model(self):
@@ -164,6 +182,7 @@ class CoreEnforcer:
 
         self.model = m
         self.fm = FunctionMap.load_function_map()
+        self.fm.set_function_whitelist(self._function_whitelist)
         self._reset_policy_caches()
 
     def get_adapter(self):
@@ -416,6 +435,77 @@ class CoreEnforcer:
 
         self.enabled = enabled
 
+    def set_matcher_budget(self, budget):
+        """installs a :class:`MatcherBudget` bounding every subsequent enforce call.
+
+        Pass ``None`` or a default :class:`MatcherBudget` to remove all limits and
+        restore the historical unbounded behaviour. Over-limit requests are denied
+        with a distinguishable :class:`MatcherError` (see ``error.reason``) rather
+        than being allowed to hang the worker.
+        """
+        if budget is None:
+            budget = MatcherBudget()
+        if not isinstance(budget, MatcherBudget):
+            raise TypeError("budget must be a casbin.util.MatcherBudget instance")
+        self._matcher_budget = budget
+
+    def get_matcher_budget(self):
+        """returns the matcher execution budget currently in force."""
+        return self._matcher_budget
+
+    def set_function_whitelist(self, names):
+        """restricts add_function() to the given explicit set of custom names.
+
+        Built-in matchers (keyMatch, ipMatch, regexMatch, ...) remain available
+        without being listed. Pass an empty/falsey value to remove the restriction.
+        """
+        self._function_whitelist = frozenset(names) if names else frozenset()
+        self.fm.set_function_whitelist(self._function_whitelist)
+
+    def get_function_whitelist(self):
+        return frozenset(self._function_whitelist)
+
+    @contextmanager
+    def _budget_context(self):
+        budget = self._matcher_budget
+        if not budget.enabled():
+            yield None
+            return
+
+        if enforce_depth.get() > 0:
+            raise MatcherFunctionError(
+                REASON_RECURSIVE_ENFORCER,
+                "a matcher function recursively invoked the enforcer while a budget is active",
+            )
+
+        state = BudgetState(budget)
+        budget_token = current_budget.set(state)
+        depth_token = enforce_depth.set(enforce_depth.get() + 1)
+        try:
+            yield state
+        finally:
+            enforce_depth.reset(depth_token)
+            current_budget.reset(budget_token)
+
+    def _build_enforce_functions(self):
+        """returns the function map for one enforce call.
+
+        A per-call copy keeps concurrent requests isolated. When a budget is
+        active, regexMatch is routed through the bounded engine so pattern-length
+        and execution-time limits apply without changing its boolean results.
+        """
+        functions = dict(self.fm.get_functions())
+        if self._matcher_budget.enabled():
+            def bounded_regex_match_func(*args):
+                name1, name2 = args[0], args[1]
+                # bounded_re_search raises MatcherError on limit breach;
+                # otherwise its truthiness matches re.search exactly.
+                match = bounded_re_search(name2, name1)
+                return bool(match)
+
+            functions["regexMatch"] = bounded_regex_match_func
+        return functions
+
     def enable_auto_save(self, auto_save):
         """controls whether to save a policy rule automatically to the adapter when it is added or removed."""
         self.auto_save = auto_save
@@ -504,6 +594,28 @@ class CoreEnforcer:
         result, _ = self.enforce_ex(*rvals)
         return result
 
+    def enforce_safe(self, *rvals):
+        """enforce() variant that turns matcher failures into explicit denials.
+
+        Returns ``(allowed, explain_rule, reason)``:
+
+        - a normal decision returns ``(bool, rule, None)`` exactly like enforce_ex;
+        - a budget breach or an unsafe custom function returns
+          ``(False, [], reason)`` where ``reason`` is a stable code such as
+          ``"enforce_wall_time_exceeded"`` or ``"unknown_function"``, so callers
+          can distinguish a policy denial from a resource-protection denial.
+
+        The request is fully evaluated on the calling thread inside the matcher
+        budget, so a pathological model is rejected in bounded time instead of
+        being abandoned to a process-level timeout.
+        """
+        try:
+            result, explain = self.enforce_ex(*rvals)
+            return result, explain, None
+        except MatcherError as exc:
+            self.logger.warning("enforce denied by matcher protection: %s", exc.reason)
+            return False, [], exc.reason
+
     def enforce_ex(self, *rvals):
         """decides whether a "subject" can access a "object" with the operation "action",
         input parameters are usually: (sub, obj, act).
@@ -518,7 +630,11 @@ class CoreEnforcer:
         if not self.enabled:
             return [True, []]
 
-        functions = self.fm.get_functions()
+        with self._budget_context() as budget_state:
+            return self._enforce_internal(rvals, rtype, ptype, etype, mtype, budget_state)
+
+    def _enforce_internal(self, rvals, rtype, ptype, etype, mtype, budget_state):
+        functions = self._build_enforce_functions()
 
         if "g" in self.model.keys():
             for key, ast in self.model["g"].items():
@@ -550,7 +666,11 @@ class CoreEnforcer:
 
         exp_string = self.model["m"][mtype].value
         exp_has_eval = util.has_eval(exp_string)
-        expression = self._get_expression("" if exp_has_eval else exp_string, functions)
+        expression = self._get_expression(
+            "" if exp_has_eval else exp_string,
+            functions,
+            self.fm.get_custom_functions(),
+        )
         if exp_has_eval:
             rule_names = util.get_eval_value(exp_string)
 
@@ -590,6 +710,8 @@ class CoreEnforcer:
                     rules = tuple(p_parameters[rule_name] for rule_name in rule_names)
                     expression.set_expr(self._get_eval_expression(exp_string, rules))
 
+                if budget_state is not None:
+                    budget_state.count_policy_evaluation()
                 result = expression.eval(parameters)
 
                 if isinstance(result, bool):
@@ -635,6 +757,8 @@ class CoreEnforcer:
             for token in self.model["p"][ptype].tokens:
                 parameters[token] = ""
 
+            if budget_state is not None:
+                budget_state.count_policy_evaluation()
             result = expression.eval(parameters)
 
             if result:
@@ -681,8 +805,12 @@ class CoreEnforcer:
         configure_logging(logging_config)
 
     @staticmethod
-    def _get_expression(expr, functions=None):
-        return SimpleEval(CoreEnforcer._normalize_expression(expr), functions)
+    def _get_expression(expr, functions=None, custom_functions=None):
+        return SimpleEval(
+            CoreEnforcer._normalize_expression(expr),
+            functions,
+            custom_functions=custom_functions,
+        )
 
     @staticmethod
     @lru_cache(maxsize=8192)

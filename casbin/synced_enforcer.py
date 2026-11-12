@@ -281,6 +281,31 @@ class SyncedEnforcer:
         with self._rl:
             return self._e.enforce_ex(*rvals)
 
+    def enforce_safe(self, *rvals):
+        """bounded variant of enforce_ex returning (allowed, rule, reason)."""
+        with self._rl:
+            return self._e.enforce_safe(*rvals)
+
+    def set_matcher_budget(self, budget):
+        """installs a matcher execution budget on the wrapped enforcer."""
+        with self._wl:
+            return self._e.set_matcher_budget(budget)
+
+    def get_matcher_budget(self):
+        """returns the matcher execution budget of the wrapped enforcer."""
+        with self._rl:
+            return self._e.get_matcher_budget()
+
+    def set_function_whitelist(self, names):
+        """restricts the custom function names the wrapped enforcer accepts."""
+        with self._wl:
+            return self._e.set_function_whitelist(names)
+
+    def get_function_whitelist(self):
+        """returns the custom function whitelist of the wrapped enforcer."""
+        with self._rl:
+            return self._e.get_function_whitelist()
+
     def batch_enforce(self, rvals):
         """batch_enforce enforce in batches,
         input parameters are usually: [(sub, obj, act), (sub, obj, act), ...].

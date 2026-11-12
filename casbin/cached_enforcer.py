@@ -138,9 +138,35 @@ class CacheSupport:
             # caller mutating it would corrupt both the cache and the model.
             return result, list(explain)
 
+        # MatcherError (budget breach, unknown/recursive function, ...) propagates
+        # out of this call: the line below is never reached, so a protection denial
+        # or a half-evaluated request can never be written into the allow cache.
         result, explain = super().enforce_ex(*rvals)
         self._cache.set(key, (result, tuple(explain)), self._expire_time)
         return result, explain
+
+    def enforce_safe(self, *rvals):
+        """same contract as CoreEnforcer.enforce_safe, with the same cache guarantees.
+
+        Only fully evaluated decisions are cached; a protection denial returns
+        ``(False, [], reason)`` and leaves the cache untouched.
+        """
+        if not self._enable_cache or self._cache_would_be_stale():
+            return super().enforce_safe(*rvals)
+
+        key = self.get_cache_key(*rvals)
+        if key is None:
+            return super().enforce_safe(*rvals)
+
+        cached = self._cache.get(key, _MISSING)
+        if cached is not _MISSING:
+            result, explain = cached
+            return result, list(explain), None
+
+        result, explain, reason = super().enforce_safe(*rvals)
+        if reason is None:
+            self._cache.set(key, (result, tuple(explain)), self._expire_time)
+        return result, explain, reason
 
     # Everything below invalidates the cache after letting the enforcer do its work.
     #
