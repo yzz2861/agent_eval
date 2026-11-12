@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import struct
+
 import pytest
 
 from wsproto.connection import CLIENT, SERVER, Connection, ConnectionState
@@ -13,6 +15,18 @@ from wsproto.events import (
 )
 from wsproto.frame_protocol import CloseReason
 from wsproto.utilities import LocalProtocolError
+
+
+def _frame(opcode: int, payload: bytes, fin: bool = True) -> bytes:
+    first = (0x80 if fin else 0) | opcode
+    length = len(payload)
+    if length <= 125:
+        header = bytes([first, length])
+    elif length <= 2**16 - 1:
+        header = bytes([first, 126]) + struct.pack("!H", length)
+    else:
+        header = bytes([first, 127]) + struct.pack("!Q", length)
+    return header + payload
 
 
 @pytest.mark.parametrize("client_sends", [True, False])
@@ -30,10 +44,15 @@ def test_send_message(client_sends: bool, final: bool) -> None:
 
     data = b"x" * 23
     remote.receive_data(local.send(BytesMessage(data=data, message_finished=final)))
+    if not final:
+        assert list(remote.events()) == []
+        remote.receive_data(
+            local.send(BytesMessage(data=b"y", message_finished=True)),
+        )
     event = next(remote.events())
     assert isinstance(event, BytesMessage)
-    assert event.data == data
-    assert event.message_finished is final
+    assert event.data == (data if final else data + b"y")
+    assert event.message_finished is True
 
 
 @pytest.mark.parametrize("client_sends", [True, False])
@@ -141,9 +160,13 @@ def test_data(split_message: bool) -> None:
     server.receive_data(
         client.send(TextMessage(data=data, message_finished=not split_message)),
     )
+    if split_message:
+        assert list(server.events()) == []
+        server.receive_data(client.send(TextMessage(data="", message_finished=True)))
     event = next(server.events())
     assert isinstance(event, TextMessage)
-    assert event.message_finished is not split_message
+    assert event.data == data
+    assert event.message_finished is True
 
 
 def test_frame_protocol_gets_fed_garbage() -> None:
@@ -169,3 +192,97 @@ def test_receive_data_when_closed() -> None:
     client._state = ConnectionState.CLOSED
     with pytest.raises(LocalProtocolError):
         client.receive_data(b"something")
+
+
+def test_text_codepoint_split_across_frames_with_ping() -> None:
+    client = Connection(CLIENT)
+    text = "日志😀"
+    payload = text.encode("utf-8")
+    split = payload.index(b"\xf0\x9f\x98") + 2
+
+    client.receive_data(
+        _frame(0x1, payload[:split], fin=False)
+        + _frame(0x9, b"ping")
+        + _frame(0x0, payload[split:], fin=True),
+    )
+    events = list(client.events())
+    assert [type(event) for event in events] == [Ping, TextMessage]
+    assert events[1].data == text
+    assert events[1].message_finished is True
+
+
+def test_invalid_utf8_closes_without_data_event() -> None:
+    client = Connection(CLIENT)
+    client.receive_data(
+        _frame(0x1, b"prefix", fin=False) + _frame(0x0, b"\xff", fin=True),
+    )
+    events = list(client.events())
+    assert len(events) == 1
+    assert isinstance(events[0], CloseConnection)
+    assert events[0].code is CloseReason.INVALID_FRAME_PAYLOAD_DATA
+
+
+def test_binary_message_skips_utf8_validation() -> None:
+    client = Connection(CLIENT)
+    client.receive_data(_frame(0x2, b"\xff", fin=True))
+    events = list(client.events())
+    assert len(events) == 1
+    assert isinstance(events[0], BytesMessage)
+    assert events[0].data == b"\xff"
+
+
+def test_close_before_final_fragment_discards_message() -> None:
+    client = Connection(CLIENT)
+    client.receive_data(
+        _frame(0x1, b"partial", fin=False)
+        + _frame(0x8, struct.pack("!H", CloseReason.NORMAL_CLOSURE)),
+    )
+    events = list(client.events())
+    assert len(events) == 1
+    assert isinstance(events[0], CloseConnection)
+    assert client.state is ConnectionState.REMOTE_CLOSING
+
+
+def test_new_text_frame_during_fragmented_message() -> None:
+    client = Connection(CLIENT)
+    client.receive_data(
+        _frame(0x1, b"part", fin=False) + _frame(0x1, b"rest", fin=True),
+    )
+    events = list(client.events())
+    assert len(events) == 1
+    assert isinstance(events[0], CloseConnection)
+    assert events[0].code is CloseReason.PROTOCOL_ERROR
+
+
+def test_empty_starting_continuation_is_a_protocol_error() -> None:
+    client = Connection(CLIENT)
+    client.receive_data(_frame(0x0, b"", fin=True))
+    events = list(client.events())
+    assert len(events) == 1
+    assert isinstance(events[0], CloseConnection)
+    assert events[0].code is CloseReason.PROTOCOL_ERROR
+
+
+def test_unknown_opcode_is_a_protocol_error() -> None:
+    client = Connection(CLIENT)
+    client.receive_data(_frame(0xB, b"x", fin=True))
+    events = list(client.events())
+    assert len(events) == 1
+    assert isinstance(events[0], CloseConnection)
+    assert events[0].code is CloseReason.PROTOCOL_ERROR
+
+
+def test_control_frames_do_not_change_message_length() -> None:
+    client = Connection(CLIENT)
+    first = b"x" * 125
+    second = b"y" * 126
+    client.receive_data(
+        _frame(0x1, first, fin=False)
+        + _frame(0x9, b"z" * 125)
+        + _frame(0x0, second, fin=True),
+    )
+    events = list(client.events())
+    assert len(events) == 2
+    assert isinstance(events[0], Ping)
+    assert isinstance(events[1], TextMessage)
+    assert events[1].data == (first + second).decode("utf-8")

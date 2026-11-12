@@ -140,6 +140,12 @@ class Connection:
             # frame was received by the endpoint (such as could occur if the
             # underlying transport connection is lost), _The WebSocket
             # Connection Close Code_ is considered to be 1006."
+            if self._state in (
+                ConnectionState.REMOTE_CLOSING,
+                ConnectionState.CLOSED,
+            ):
+                self._state = ConnectionState.CLOSED
+                return
             self._events.append(CloseConnection(code=CloseReason.ABNORMAL_CLOSURE))
             self._state = ConnectionState.CLOSED
             return
@@ -166,7 +172,16 @@ class Connection:
         :returns: generator of :class:`Event <wsproto.events.Event>` subclasses
         """
         while self._events:
-            yield self._events.popleft()
+            event = self._events.popleft()
+            if isinstance(event, CloseConnection):
+                # Once a close has been surfaced there can be no subsequent
+                # data event, even if more decoded frames were already queued.
+                yield event
+                return
+            yield event
+
+        if self._state in (ConnectionState.CLOSED, ConnectionState.REMOTE_CLOSING):
+            return
 
         try:
             for frame in self._proto.received_frames():
@@ -190,6 +205,7 @@ class Connection:
                     else:
                         self._state = ConnectionState.REMOTE_CLOSING
                     yield CloseConnection(code=code, reason=reason)
+                    return
 
                 elif frame.opcode is Opcode.TEXT:
                     assert isinstance(frame.payload, str)

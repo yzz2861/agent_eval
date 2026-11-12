@@ -146,6 +146,9 @@ class CloseReason(IntEnum):
     #: data within a text message).
     INVALID_FRAME_PAYLOAD_DATA = 1007
 
+    #: Alias for :attr:`INVALID_FRAME_PAYLOAD_DATA`.
+    INVALID_DATA = 1007
+
     #: indicates that an endpoint is terminating the connection
     #: because it has received a message that violates its policy.  This
     #: is a generic status code that can be returned when there is no
@@ -295,6 +298,10 @@ class MessageDecoder:
         self.opcode: Opcode | None = None
         self.decoder: IncrementalDecoder | None = None
 
+    def reset(self) -> None:
+        self.opcode = None
+        self.decoder = None
+
     def process_frame(self, frame: Frame) -> Frame:
         assert not frame.opcode.iscontrol()
 
@@ -319,13 +326,13 @@ class MessageDecoder:
             try:
                 data = self.decoder.decode(frame.payload, finished)
             except UnicodeDecodeError as exc:
+                self.reset()
                 raise ParseFailed(str(exc), CloseReason.INVALID_FRAME_PAYLOAD_DATA)
 
         frame = Frame(self.opcode, data, frame.frame_finished, finished)
 
         if finished:
-            self.opcode = None
-            self.decoder = None
+            self.reset()
 
         return frame
 
@@ -377,7 +384,10 @@ class FrameDecoder:
                 raise ParseFailed(msg, payload_)
             payload = bytearray(payload_)
 
-        if finished:
+        # Extension completion hooks describe a data message.  Invoking them
+        # for an interleaved control frame would reset per-message state (for
+        # example the permessage-deflate stream), ending the message early.
+        if finished and not self.effective_opcode.iscontrol():
             final = bytearray()
             for extension in self.extensions:
                 result = extension.frame_inbound_complete(self, self.header.fin)
@@ -518,7 +528,48 @@ class FrameProtocol:
         self._message_decoder = MessageDecoder()
         self._parse_more = self._parse_more_gen()
 
+        # Data messages are assembled here so that callers never observe a
+        # partial message.  Control frames may be emitted while a message is
+        # being assembled, but they do not affect this state.
+        self._message_opcode: Opcode | None = None
+        self._message_payloads: list[str | bytes | bytearray] = []
+
         self._outbound_opcode: Opcode | None = None
+
+    def _reset_message(self) -> None:
+        self._message_opcode = None
+        self._message_payloads = []
+        self._message_decoder.reset()
+
+    def _process_data_frame(self, frame: Frame) -> Frame | None:
+        if self._message_opcode is None:
+            self._message_opcode = frame.opcode
+        elif frame.opcode is not self._message_opcode:
+            # MessageDecoder checks this as well; keep the invariant local to
+            # the assembly state in case it is ever fed frames independently.
+            msg = f"expected CONTINUATION, got {frame.opcode!r}"
+            raise ParseFailed(msg)
+
+        self._message_payloads.append(frame.payload)
+
+        if not frame.message_finished:
+            return None
+
+        if self._message_opcode is Opcode.TEXT:
+            payload = "".join(
+                part for part in self._message_payloads if isinstance(part, str)
+            )
+        else:
+            payload = b"".join(bytes(part) for part in self._message_payloads)
+
+        completed = Frame(
+            self._message_opcode,
+            payload,
+            frame.frame_finished,
+            True,
+        )
+        self._reset_message()
+        return completed
 
     def _process_close(self, frame: Frame) -> Frame:
         data = frame.payload
@@ -565,14 +616,32 @@ class FrameProtocol:
         closed = False
 
         while not closed:
-            frame = self._frame_decoder.process_buffer()
+            try:
+                frame = self._frame_decoder.process_buffer()
+            except ParseFailed:
+                self._reset_message()
+                raise
+            if frame is None:
+                yield None
+                continue
 
-            if frame is not None:
-                if not frame.opcode.iscontrol():
+            if not frame.opcode.iscontrol():
+                try:
                     frame = self._message_decoder.process_frame(frame)
-                elif frame.opcode == Opcode.CLOSE:
-                    frame = self._process_close(frame)
-                    closed = True
+                    completed = self._process_data_frame(frame)
+                except ParseFailed:
+                    self._reset_message()
+                    raise
+                if completed is None:
+                    continue
+                frame = completed
+            elif frame.opcode == Opcode.CLOSE:
+                # A close before the final data frame terminates the
+                # message.  Nothing from the abandoned message may be
+                # surfaced after the close event.
+                self._reset_message()
+                frame = self._process_close(frame)
+                closed = True
 
             yield frame
 
