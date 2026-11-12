@@ -33,6 +33,47 @@ To serialize to a format that is safe to use in URLs, see
 :doc:`/url_safe`.
 
 
+Authenticated Scope
+-------------------
+
+A serializer can bind a token to the action that may consume it, the
+tenant it belongs to, and optionally an object version. The scope is
+part of the signed message, not an unsigned cookie attribute or URL
+parameter, so a token copied to another action or tenant fails to load.
+
+.. code-block:: python
+
+    s = URLSafeSerializer("secret-key")
+    token = s.dumps(
+        {"amount": 10},
+        action="refund.preview",
+        tenant="tenant-1",
+        version=3,
+    )
+
+    s.loads(token, action="refund.preview", tenant="tenant-1", version=3)
+    # {"amount": 10}
+
+    s.loads(token, action="refund.submit", tenant="tenant-1", version=3)
+    # raises ScopeMismatch
+
+``purpose`` is accepted as an alias for ``action``. ``tenant_id``,
+``revision``, and ``object_version`` are aliases for ``tenant`` and
+``version``. A :class:`~itsdangerous.serializer.Scope` may also be passed
+as ``scope=``.
+
+Scope verification happens after the signature is checked but before the
+payload is deserialized. A scoped token loaded without declaring its
+scope is rejected. If a scope is declared for a token issued without one,
+:class:`~itsdangerous.exc.ScopeMigrationRequired` is raised so the token
+can be reissued rather than silently accepted. When a version is
+declared, it must equal the token's version; a token from an older version
+is rejected as a replay.
+
+Calls without scope arguments produce the same value as before, so
+existing unscoped tokens continue to work.
+
+
 Responding to Failure
 ---------------------
 

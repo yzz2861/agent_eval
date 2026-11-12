@@ -5,6 +5,11 @@ Unreleased
 
 -   Drop support for Python 3.8 and 3.9.
 -   Remove previously deprecated code.
+-   Add authenticated scope binding to serializers. ``dumps`` can bind an
+    action, tenant, and optional object version inside the signed message;
+    ``loads`` verifies them before deserialization. Unscoped tokens keep
+    their existing behavior, and scoped loads of legacy tokens raise
+    :class:`~itsdangerous.exc.ScopeMigrationRequired`.
 
 
 Version 2.2.0

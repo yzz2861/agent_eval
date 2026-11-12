@@ -104,3 +104,58 @@ class BadPayload(BadData):
         #: If available, the error that indicates why the payload was
         #: not valid. This might be ``None``.
         self.original_error: Exception | None = original_error
+
+
+class BadScope(BadSignature, BadPayload):
+    """Raised when an authenticated payload's scope (action, tenant, or
+    object version) is missing, malformed, or does not match the scope
+    declared by the caller.
+
+    This is a subclass of :class:`BadSignature` because the scope is part
+    of the signed value: a token from another scope is not valid for the
+    current one.
+
+    .. versionadded:: 2.3
+    """
+
+
+class ScopeMismatch(BadScope):
+    """Raised when a token is scoped, but the action, tenant, or version
+    declared by the caller does not match the token.
+
+    .. versionadded:: 2.3
+    """
+
+
+class ScopeMigrationRequired(ScopeMismatch):
+    """Raised when scope verification is requested for a token that was
+    issued without an authenticated scope. Such tokens must be reissued
+    rather than silently treated as unscoped.
+
+    .. versionadded:: 2.3
+    """
+
+    #: Machine-readable marker for callers that need to schedule a
+    #: reissue rather than treat this as a normal signature failure.
+    migration_required = True
+
+
+class InvalidScope(BadScope, ValueError):
+    """Raised when scope data is empty, contains invalid UTF-8, is too
+    long, or is otherwise malformed.
+
+    .. versionadded:: 2.3
+    """
+
+
+#: Aliases for callers that use "purpose" terminology for the action.
+BadPurpose = BadScope
+BadScopeSignature = BadScope
+ScopeError = BadScope
+PurposeMismatch = ScopeMismatch
+ScopeMismatchError = ScopeMismatch
+MigrationRequired = ScopeMigrationRequired
+MigrationRequiredError = ScopeMigrationRequired
+ScopeMigrationError = ScopeMigrationRequired
+InvalidPurpose = InvalidScope
+InvalidScopeError = InvalidScope

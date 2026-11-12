@@ -15,7 +15,12 @@ from .exc import BadSignature
 from .exc import BadTimeSignature
 from .exc import SignatureExpired
 from .serializer import _TSerialized
+from .serializer import _check_scope
+from .serializer import _extract_scoped_payload
+from .serializer import _make_scope
+from .serializer import _strip_scope_from_exception
 from .serializer import Serializer
+from .serializer import Scope
 from .signer import Signer
 
 
@@ -188,6 +193,16 @@ class TimedSerializer(Serializer[_TSerialized]):
         max_age: int | None = None,
         return_timestamp: bool = False,
         salt: str | bytes | None = None,
+        *,
+        action: str | bytes | None = None,
+        purpose: str | bytes | None = None,
+        tenant: str | bytes | None = None,
+        tenant_id: str | bytes | None = None,
+        version: int | None = None,
+        revision: int | None = None,
+        object_version: int | None = None,
+        scope: Scope | cabc.Mapping[str, t.Any] | tuple[t.Any, ...] | None = None,
+        **kwargs: t.Any,
     ) -> t.Any:
         """Reverse of :meth:`dumps`, raises :exc:`.BadSignature` if the
         signature validation fails. If a ``max_age`` is provided it will
@@ -196,6 +211,17 @@ class TimedSerializer(Serializer[_TSerialized]):
         raised. All arguments are forwarded to the signer's
         :meth:`~TimestampSigner.unsign` method.
         """
+        expected_scope = _make_scope(
+            action=action,
+            purpose=purpose,
+            tenant=tenant,
+            tenant_id=tenant_id,
+            version=version,
+            revision=revision,
+            object_version=object_version,
+            scope=scope,
+            extra=kwargs,
+        )
         s = want_bytes(s)
         last_exception = None
 
@@ -204,18 +230,24 @@ class TimedSerializer(Serializer[_TSerialized]):
                 base64d, timestamp = signer.unsign(
                     s, max_age=max_age, return_timestamp=True
                 )
-                payload = self.load_payload(base64d)
-
-                if return_timestamp:
-                    return payload, timestamp
-
-                return payload
-            except SignatureExpired:
+            except SignatureExpired as err:
                 # The signature was unsigned successfully but was
                 # expired. Do not try the next signer.
+                _strip_scope_from_exception(err)
                 raise
             except BadSignature as err:
+                _strip_scope_from_exception(err)
                 last_exception = err
+                continue
+
+            token_scope, base64d = _extract_scoped_payload(base64d)
+            _check_scope(token_scope, expected_scope)
+            payload = self.load_payload(base64d)
+
+            if return_timestamp:
+                return payload, timestamp
+
+            return payload
 
         raise t.cast(BadSignature, last_exception)
 
@@ -224,5 +256,10 @@ class TimedSerializer(Serializer[_TSerialized]):
         s: str | bytes,
         max_age: int | None = None,
         salt: str | bytes | None = None,
+        **kwargs: t.Any,
     ) -> tuple[bool, t.Any]:
-        return self._loads_unsafe_impl(s, salt, load_kwargs={"max_age": max_age})
+        return self._loads_unsafe_impl(
+            s,
+            salt,
+            load_kwargs={"max_age": max_age, **kwargs},
+        )

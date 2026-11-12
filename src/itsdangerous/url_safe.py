@@ -27,6 +27,10 @@ class URLSafeSerializerMixin(Serializer[str]):
         serializer: t.Any | None = None,
         **kwargs: t.Any,
     ) -> t.Any:
+        # Authenticated scope headers are removed before this method is
+        # called. They are URL-safe base64 and stay outside the optional
+        # leading "." that marks a compressed payload, so scoped and
+        # unscoped compressed values continue to follow the same path.
         decompress = False
 
         if payload.startswith(b"."):
