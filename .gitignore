@@ -1,0 +1,10 @@
+*.pyc
+.coverage
+.tox
+*.egg-info
+.pytest_cache
+.cache/
+build/
+doc/_build/
+dist/
+t.py

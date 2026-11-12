@@ -1,0 +1,8 @@
+[report]
+exclude_lines =
+    .* # Python \d.*
+    .* # nocov: Python \d.*
+    .* # pragma: no cover.*
+    ^\s*(?:el)?if t\.TYPE_CHECKING:$
+    ^ +\.\.\.$
+fail_under = 100
