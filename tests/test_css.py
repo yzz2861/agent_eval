@@ -239,9 +239,9 @@ def test_style_hang():
         (
             "<p style=\"content: '&nbsp;';\">text</p>",
             ["content"],
-            # This seems wrong, but it's right. Character entities aren't a
-            # thing in CSS, so this is treated as text.
-            "<p style='content: \"&amp;nbsp;\";'>text</p>",
+            # Character entities aren't a thing in CSS, so this is treated as
+            # text and the entity is preserved as-is.
+            "<p style='content: \"&nbsp;\";'>text</p>",
         ),
     ],
 )

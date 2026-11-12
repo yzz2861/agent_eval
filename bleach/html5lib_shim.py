@@ -595,7 +595,13 @@ def convert_entity(value):
         else:
             return None
 
-    return ENTITIES.get(value, None)
+    # ENTITIES has keys both with and without a trailing semicolon (legacy
+    # entities like "amp" have no-semicolon variants), so try both
+    converted = ENTITIES.get(value, None)
+    if converted is None:
+        converted = ENTITIES.get(value + ";", None)
+
+    return converted
 
 
 def convert_entities(text):
@@ -696,6 +702,11 @@ def match_entity(stream):
 AMP_SPLIT_RE = re.compile("(&)")
 
 
+#: Matches the start of a serialized start/empty tag ("<" followed by an
+#: ASCII letter)
+TAG_START_RE = re.compile("<[a-zA-Z]")
+
+
 def next_possible_entity(text):
     """Takes a text and generates a list of possible entities
 
@@ -765,24 +776,43 @@ class BleachHTMLSerializer(HTMLSerializer):
         """
         in_tag = False
         after_equals = False
+        quote_char = None
 
         for stoken in super().serialize(treewalker, encoding):
             if in_tag:
+                if quote_char is not None:
+                    # We're inside a quoted attribute value; stoken is either
+                    # the attribute value or the closing quote.
+                    if stoken == quote_char:
+                        quote_char = None
+                        yield stoken
+                    else:
+                        yield from self.escape_base_amp(stoken)
+                    continue
+
                 if stoken == ">":
                     in_tag = False
 
                 elif after_equals:
-                    if stoken != '"':
+                    after_equals = False
+                    if stoken in ("'", '"'):
+                        # The serializer picks the quote character based on
+                        # the attribute value, so handle both
+                        quote_char = stoken
+                        yield stoken
+                    else:
+                        # Unquoted attribute value
                         yield from self.escape_base_amp(stoken)
-
-                        after_equals = False
-                        continue
+                    continue
 
                 elif stoken == "=":
                     after_equals = True
 
                 yield stoken
             else:
-                if stoken.startswith("<"):
+                # Only "<" followed by an ASCII letter starts a tag; comments
+                # ("<!--"), doctypes ("<!DOCTYPE") and end tags ("</") are
+                # single tokens and must not put us in tag state
+                if TAG_START_RE.match(stoken):
                     in_tag = True
                 yield stoken

@@ -1,6 +1,32 @@
 Bleach changes
 ==============
 
+Version 6.4.1 (in development)
+------------------------------
+
+**Security fixes**
+
+* Make ``clean`` a fixpoint: cleaning cleaned output no longer changes it.
+
+  Previously, some inputs produced cleaned output that reparsed to a
+  different--and potentially unsafe--token stream when fed back through
+  ``clean`` (e.g. when a CMS re-sanitizes already-sanitized content for an
+  edit preview):
+
+  * foreign content (svg/math) breakout and table foster-parenting could
+    produce serialized nesting that doesn't survive reparsing
+  * single-quoted attribute values didn't get entity normalization, so
+    escaped text was re-escaped on every pass
+  * comments kept with ``strip_comments=False`` were entity-escaped on
+    every pass
+  * namespaced attributes (e.g. ``xlink:href``) colliding with a plain
+    attribute of the same local name serialized as duplicate attributes
+  * character entities like ``&Tab;`` weren't converted when checking uri
+    protocols, so ``&Tab;javascript:`` slipped through the protocol check
+
+  ``clean`` now re-cleans foreign-content/table output until it's stable
+  and falls back to escaping output that can't be serialized stably.
+
 Version 6.4.0 (June 5th, 2026)
 ------------------------------
 

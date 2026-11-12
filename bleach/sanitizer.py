@@ -50,6 +50,47 @@ INVISIBLE_CHARACTERS_RE = re.compile("[" + INVISIBLE_CHARACTERS + "]", re.UNICOD
 INVISIBLE_REPLACEMENT_CHAR = "?"
 
 
+def sanitize_comment_data(data):
+    """Sanitizes comment data so it serializes to the same comment
+
+    Comment data is emitted verbatim between ``<!--`` and ``-->``. If the
+    data could close the comment early, the serialized output would reparse
+    into a different--and potentially unsafe--token stream. This rewrites the
+    data deterministically so that:
+
+    * the data can't close the comment early (``-->`` and ``--!>``)
+    * the data can't abruptly close an empty comment (leading ``>`` or ``->``)
+    * the data can't close an enclosing rawtext element (``<xmp>`` and
+      friends) if a browser reparses the output and ejects the comment out
+      of foreign content--so ``<`` and ``>`` are entity-escaped
+    * applying it to already-sanitized data is a no-op, so cleaning the
+      serialized output yields the identical output; this is why ``&`` is
+      deliberately not escaped--comments don't consume character entities,
+      so escaping ``&`` would expand on every re-clean
+
+    :arg data: the comment data
+
+    :returns: sanitized comment data
+
+    """
+    if data.startswith(">") or data.startswith("->"):
+        data = " " + data
+
+    # Break up sequences that would end the comment early; the replacements
+    # contain neither sequence, so this is stable under re-application
+    data = data.replace("--!>", "- !>")
+    data = data.replace("-->", "- >")
+
+    # Escape < and > so the comment data can't form tags if a browser
+    # reparses it as rawtext (refs: bug 1689399 / GHSA-vv2x-vrpj-qqpq). Note
+    # that & is intentionally not escaped: it isn't required for safety and
+    # escaping it would break idempotency since comment data is reparsed
+    # verbatim.
+    data = data.replace("<", "&lt;").replace(">", "&gt;")
+
+    return data
+
+
 class NoCssSanitizerWarning(UserWarning):
     pass
 
@@ -188,6 +229,52 @@ class Cleaner:
         if not text:
             return ""
 
+        cleaned = self._clean_once(text)
+
+        # If the output contains foreign content (svg/math) or table
+        # elements, then reparsing it can produce a different tree: certain
+        # HTML elements "break out" of foreign content and the parser
+        # foster-parents stray table content, so the serialized nesting
+        # doesn't survive a reparse. Keep cleaning the output until it's
+        # stable so that cleaning is a fixpoint--the output reparses to
+        # itself and no new nodes appear on a subsequent clean.
+        #
+        # Only those elements can cause this, so skip the extra passes when
+        # none of them made it into the output. Disallowed tags are escaped
+        # or stripped and attribute values and comments can't contain a
+        # literal "<", so a literal "<svg"/"<math"/"<table" in the output is
+        # always a real element.
+        if (
+            "<svg" in cleaned
+            or "<math" in cleaned
+            or "<table" in cleaned
+        ):
+            unstable = cleaned
+            for _ in range(4):
+                recleaned = self._clean_once(unstable)
+                if recleaned == unstable:
+                    cleaned = recleaned
+                    break
+                unstable = recleaned
+            else:
+                # Didn't converge--this happens with pathological
+                # configurations (e.g. "table" allowed without its structure
+                # tags and strip=False) where every reparse regenerates
+                # unstable content. Such input can't be safely serialized as
+                # markup, so fall back to escaping it all as text; escaped
+                # text reparses to itself, so this is a stable fixpoint.
+                cleaned = html5lib_shim.escape(cleaned)
+
+        return cleaned
+
+    def _clean_once(self, text):
+        """Performs a single parse/sanitize/serialize pass on the text
+
+        :arg str text: text to be cleaned
+
+        :returns: sanitized text as unicode
+
+        """
         dom = self.parser.parseFragment(text)
         filtered = BleachSanitizerFilter(
             source=self.walker(dom),
@@ -397,10 +484,10 @@ class BleachSanitizerFilter(html5lib_shim.SanitizerFilter):
 
         elif token_type == "Comment":
             if not self.strip_html_comments:
-                # call lxml.sax.saxutils to escape &, <, and > in addition to " and '
-                token["data"] = html5lib_shim.escape(
-                    token["data"], entities={'"': "&quot;", "'": "&#x27;"}
-                )
+                # Make sure the comment data can't close the comment (or an
+                # enclosing rawtext element) early and that it reparses to
+                # the same comment.
+                token["data"] = sanitize_comment_data(token["data"])
                 return token
             else:
                 return None
@@ -595,6 +682,21 @@ class BleachSanitizerFilter(html5lib_shim.SanitizerFilter):
 
                 # At this point, we want to keep the attribute, so add it in
                 attrs[namespaced_name] = val
+
+            # The serializer drops attribute namespaces and emits only the
+            # local name, so two kept attributes with different namespaces
+            # but the same local name (e.g. xlink:href and href) would
+            # serialize as a duplicate attribute that html5lib then drops
+            # all but the first of when reparsing. Drop all but the first
+            # here--mirroring what a reparse would do--so the serialized
+            # output is stable.
+            seen_attr_names = set()
+            for namespaced_name in list(attrs):
+                namespace, name = namespaced_name
+                if name in seen_attr_names:
+                    del attrs[namespaced_name]
+                else:
+                    seen_attr_names.add(name)
 
             token["data"] = attrs
 

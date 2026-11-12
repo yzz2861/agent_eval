@@ -1,5 +1,7 @@
 import os
 
+import random
+
 import pytest
 
 from bleach import clean
@@ -862,28 +864,28 @@ def test_namespace_rc_data_element_strip_false(
             "p",
             "style",
             "<math></p><style><!--</style><img src/onerror=alert(1)>",
-            "<math><p></p><style><!--&lt;/style&gt;&lt;img src/onerror=alert(1)&gt;--></style></math>",
+            "<math></math><p></p><style>&lt;!--&lt;/style&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</style>",
         ),
         (
             "math",
             "br",
             "style",
             "<math></br><style><!--</style><img src/onerror=alert(1)>",
-            "<math><br><style><!--&lt;/style&gt;&lt;img src/onerror=alert(1)&gt;--></style></math>",
+            "<math></math><br><style>&lt;!--&lt;/style&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</style>",
         ),
         (
             "svg",
             "p",
             "style",
             "<svg></p><style><!--</style><img src/onerror=alert(1)>",
-            "<svg><p></p><style><!--&lt;/style&gt;&lt;img src/onerror=alert(1)&gt;--></style></svg>",
+            "<svg></svg><p></p><style>&lt;!--&lt;/style&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</style>",
         ),
         (
             "svg",
             "br",
             "style",
             "<svg></br><style><!--</style><img src/onerror=alert(1)>",
-            "<svg><br><style><!--&lt;/style&gt;&lt;img src/onerror=alert(1)&gt;--></style></svg>",
+            "<svg></svg><br><style>&lt;!--&lt;/style&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</style>",
         ),
         # eject with title
         (
@@ -891,28 +893,28 @@ def test_namespace_rc_data_element_strip_false(
             "p",
             "title",
             "<math></p><title><!--</title><img src/onerror=alert(1)>",
-            "<math><p></p><title><!--&lt;/title&gt;&lt;img src/onerror=alert(1)&gt;--></title></math>",
+            "<math></math><p></p><title>&lt;!--&lt;/title&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</title>",
         ),
         (
             "math",
             "br",
             "title",
             "<math></br><title><!--</title><img src/onerror=alert(1)>",
-            "<math><br><title><!--&lt;/title&gt;&lt;img src/onerror=alert(1)&gt;--></title></math>",
+            "<math></math><br><title>&lt;!--&lt;/title&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</title>",
         ),
         (
             "svg",
             "p",
             "title",
             "<svg></p><title><!--</title><img src/onerror=alert(1)>",
-            "<svg><p></p><title><!--&lt;/title&gt;&lt;img src/onerror=alert(1)&gt;--></title></svg>",
+            "<svg></svg><p></p><title>&lt;!--&lt;/title&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</title>",
         ),
         (
             "svg",
             "br",
             "title",
             "<svg></br><title><!--</title><img src/onerror=alert(1)>",
-            "<svg><br><title><!--&lt;/title&gt;&lt;img src/onerror=alert(1)&gt;--></title></svg>",
+            "<svg></svg><br><title>&lt;!--&lt;/title&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</title>",
         ),
         # eject with noscript
         (
@@ -920,28 +922,28 @@ def test_namespace_rc_data_element_strip_false(
             "p",
             "noscript",
             "<math></p><noscript><!--</noscript><img src/onerror=alert(1)>",
-            "<math><p></p><noscript><!--&lt;/noscript&gt;&lt;img src/onerror=alert(1)&gt;--></noscript></math>",
+            "<math></math><p></p><noscript>&lt;!--&lt;/noscript&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</noscript>",
         ),
         (
             "math",
             "br",
             "noscript",
             "<math></br><noscript><!--</noscript><img src/onerror=alert(1)>",
-            "<math><br><noscript><!--&lt;/noscript&gt;&lt;img src/onerror=alert(1)&gt;--></noscript></math>",
+            "<math></math><br><noscript>&lt;!--&lt;/noscript&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</noscript>",
         ),
         (
             "svg",
             "p",
             "noscript",
             "<svg></p><noscript><!--</noscript><img src/onerror=alert(1)>",
-            "<svg><p></p><noscript><!--&lt;/noscript&gt;&lt;img src/onerror=alert(1)&gt;--></noscript></svg>",
+            "<svg></svg><p></p><noscript>&lt;!--&lt;/noscript&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</noscript>",
         ),
         (
             "svg",
             "br",
             "noscript",
             "<svg></br><noscript><!--</noscript><img src/onerror=alert(1)>",
-            "<svg><br><noscript><!--&lt;/noscript&gt;&lt;img src/onerror=alert(1)&gt;--></noscript></svg>",
+            "<svg></svg><br><noscript>&lt;!--&lt;/noscript&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</noscript>",
         ),
         # eject with script
         (
@@ -949,28 +951,28 @@ def test_namespace_rc_data_element_strip_false(
             "p",
             "script",
             "<math></p><script><!--</script><img src/onerror=alert(1)>",
-            "<math><p></p><script><!--&lt;/script&gt;&lt;img src/onerror=alert(1)&gt;--></script></math>",
+            "<math></math><p></p><script>&lt;!--&lt;/script&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</script>",
         ),
         (
             "math",
             "br",
             "script",
             "<math></br><script><!--</script><img src/onerror=alert(1)>",
-            "<math><br><script><!--&lt;/script&gt;&lt;img src/onerror=alert(1)&gt;--></script></math>",
+            "<math></math><br><script>&lt;!--&lt;/script&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</script>",
         ),
         (
             "svg",
             "p",
             "script",
             "<svg></p><script><!--</script><img src/onerror=alert(1)>",
-            "<svg><p></p><script><!--&lt;/script&gt;&lt;img src/onerror=alert(1)&gt;--></script></svg>",
+            "<svg></svg><p></p><script>&lt;!--&lt;/script&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</script>",
         ),
         (
             "svg",
             "br",
             "script",
             "<svg></br><script><!--</script><img src/onerror=alert(1)>",
-            "<svg><br><script><!--&lt;/script&gt;&lt;img src/onerror=alert(1)&gt;--></script></svg>",
+            "<svg></svg><br><script>&lt;!--&lt;/script&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</script>",
         ),
         # eject with noembed
         (
@@ -978,28 +980,28 @@ def test_namespace_rc_data_element_strip_false(
             "p",
             "noembed",
             "<math></p><noembed><!--</noembed><img src/onerror=alert(1)>",
-            "<math><p></p><noembed><!--&lt;/noembed&gt;&lt;img src/onerror=alert(1)&gt;--></noembed></math>",
+            "<math></math><p></p><noembed>&lt;!--&lt;/noembed&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</noembed>",
         ),
         (
             "math",
             "br",
             "noembed",
             "<math></br><noembed><!--</noembed><img src/onerror=alert(1)>",
-            "<math><br><noembed><!--&lt;/noembed&gt;&lt;img src/onerror=alert(1)&gt;--></noembed></math>",
+            "<math></math><br><noembed>&lt;!--&lt;/noembed&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</noembed>",
         ),
         (
             "svg",
             "p",
             "noembed",
             "<svg></p><noembed><!--</noembed><img src/onerror=alert(1)>",
-            "<svg><p></p><noembed><!--&lt;/noembed&gt;&lt;img src/onerror=alert(1)&gt;--></noembed></svg>",
+            "<svg></svg><p></p><noembed>&lt;!--&lt;/noembed&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</noembed>",
         ),
         (
             "svg",
             "br",
             "noembed",
             "<svg></br><noembed><!--</noembed><img src/onerror=alert(1)>",
-            "<svg><br><noembed><!--&lt;/noembed&gt;&lt;img src/onerror=alert(1)&gt;--></noembed></svg>",
+            "<svg></svg><br><noembed>&lt;!--&lt;/noembed&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</noembed>",
         ),
         # eject with textarea
         (
@@ -1007,28 +1009,28 @@ def test_namespace_rc_data_element_strip_false(
             "p",
             "textarea",
             "<math></p><textarea><!--</textarea><img src/onerror=alert(1)>",
-            "<math><p></p><textarea><!--&lt;/textarea&gt;&lt;img src/onerror=alert(1)&gt;--></textarea></math>",
+            "<math></math><p></p><textarea>&lt;!--&lt;/textarea&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</textarea>",
         ),
         (
             "math",
             "br",
             "textarea",
             "<math></br><textarea><!--</textarea><img src/onerror=alert(1)>",
-            "<math><br><textarea><!--&lt;/textarea&gt;&lt;img src/onerror=alert(1)&gt;--></textarea></math>",
+            "<math></math><br><textarea>&lt;!--&lt;/textarea&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</textarea>",
         ),
         (
             "svg",
             "p",
             "textarea",
             "<svg></p><textarea><!--</textarea><img src/onerror=alert(1)>",
-            "<svg><p></p><textarea><!--&lt;/textarea&gt;&lt;img src/onerror=alert(1)&gt;--></textarea></svg>",
+            "<svg></svg><p></p><textarea>&lt;!--&lt;/textarea&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</textarea>",
         ),
         (
             "svg",
             "br",
             "textarea",
             "<svg></br><textarea><!--</textarea><img src/onerror=alert(1)>",
-            "<svg><br><textarea><!--&lt;/textarea&gt;&lt;img src/onerror=alert(1)&gt;--></textarea></svg>",
+            "<svg></svg><br><textarea>&lt;!--&lt;/textarea&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</textarea>",
         ),
         # eject with noframes
         (
@@ -1036,28 +1038,28 @@ def test_namespace_rc_data_element_strip_false(
             "p",
             "noframes",
             "<math></p><noframes><!--</noframes><img src/onerror=alert(1)>",
-            "<math><p></p><noframes><!--&lt;/noframes&gt;&lt;img src/onerror=alert(1)&gt;--></noframes></math>",
+            "<math></math><p></p><noframes>&lt;!--&lt;/noframes&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</noframes>",
         ),
         (
             "math",
             "br",
             "noframes",
             "<math></br><noframes><!--</noframes><img src/onerror=alert(1)>",
-            "<math><br><noframes><!--&lt;/noframes&gt;&lt;img src/onerror=alert(1)&gt;--></noframes></math>",
+            "<math></math><br><noframes>&lt;!--&lt;/noframes&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</noframes>",
         ),
         (
             "svg",
             "p",
             "noframes",
             "<svg></p><noframes><!--</noframes><img src/onerror=alert(1)>",
-            "<svg><p></p><noframes><!--&lt;/noframes&gt;&lt;img src/onerror=alert(1)&gt;--></noframes></svg>",
+            "<svg></svg><p></p><noframes>&lt;!--&lt;/noframes&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</noframes>",
         ),
         (
             "svg",
             "br",
             "noframes",
             "<svg></br><noframes><!--</noframes><img src/onerror=alert(1)>",
-            "<svg><br><noframes><!--&lt;/noframes&gt;&lt;img src/onerror=alert(1)&gt;--></noframes></svg>",
+            "<svg></svg><br><noframes>&lt;!--&lt;/noframes&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</noframes>",
         ),
         # eject with iframe
         (
@@ -1065,28 +1067,28 @@ def test_namespace_rc_data_element_strip_false(
             "p",
             "iframe",
             "<math></p><iframe><!--</iframe><img src/onerror=alert(1)>",
-            "<math><p></p><iframe><!--&lt;/iframe&gt;&lt;img src/onerror=alert(1)&gt;--></iframe></math>",
+            "<math></math><p></p><iframe>&lt;!--&lt;/iframe&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</iframe>",
         ),
         (
             "math",
             "br",
             "iframe",
             "<math></br><iframe><!--</iframe><img src/onerror=alert(1)>",
-            "<math><br><iframe><!--&lt;/iframe&gt;&lt;img src/onerror=alert(1)&gt;--></iframe></math>",
+            "<math></math><br><iframe>&lt;!--&lt;/iframe&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</iframe>",
         ),
         (
             "svg",
             "p",
             "iframe",
             "<svg></p><iframe><!--</iframe><img src/onerror=alert(1)>",
-            "<svg><p></p><iframe><!--&lt;/iframe&gt;&lt;img src/onerror=alert(1)&gt;--></iframe></svg>",
+            "<svg></svg><p></p><iframe>&lt;!--&lt;/iframe&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</iframe>",
         ),
         (
             "svg",
             "br",
             "iframe",
             "<svg></br><iframe><!--</iframe><img src/onerror=alert(1)>",
-            "<svg><br><iframe><!--&lt;/iframe&gt;&lt;img src/onerror=alert(1)&gt;--></iframe></svg>",
+            "<svg></svg><br><iframe>&lt;!--&lt;/iframe&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</iframe>",
         ),
         # eject with xmp
         (
@@ -1094,28 +1096,28 @@ def test_namespace_rc_data_element_strip_false(
             "p",
             "xmp",
             "<math></p><xmp><!--</xmp><img src/onerror=alert(1)>",
-            "<math><p></p><xmp><!--&lt;/xmp&gt;&lt;img src/onerror=alert(1)&gt;--></xmp></math>",
+            "<math></math><p></p><xmp>&lt;!--&lt;/xmp&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</xmp>",
         ),
         (
             "math",
             "br",
             "xmp",
             "<math></br><xmp><!--</xmp><img src/onerror=alert(1)>",
-            "<math><br><xmp><!--&lt;/xmp&gt;&lt;img src/onerror=alert(1)&gt;--></xmp></math>",
+            "<math></math><br><xmp>&lt;!--&lt;/xmp&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</xmp>",
         ),
         (
             "svg",
             "p",
             "xmp",
             "<svg></p><xmp><!--</xmp><img src/onerror=alert(1)>",
-            "<svg><p></p><xmp><!--&lt;/xmp&gt;&lt;img src/onerror=alert(1)&gt;--></xmp></svg>",
+            "<svg></svg><p></p><xmp>&lt;!--&lt;/xmp&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</xmp>",
         ),
         (
             "svg",
             "br",
             "xmp",
             "<svg></br><xmp><!--</xmp><img src/onerror=alert(1)>",
-            "<svg><br><xmp><!--&lt;/xmp&gt;&lt;img src/onerror=alert(1)&gt;--></xmp></svg>",
+            "<svg></svg><br><xmp>&lt;!--&lt;/xmp&gt;&lt;img src/onerror=alert(1)&gt;--&gt;</xmp>",
         ),
     ],
 )
@@ -1132,6 +1134,10 @@ def test_html_comments_escaped(namespace_tag, end_tag, eject_tag, data, expected
     # * the breaking tag ejects trailing elements (e.g. <svg><img><style></style></svg> == <svg></svg><img><style></style>)
     #
     # the ejected elements can trigger XSS
+    #
+    # clean() re-cleans foreign-content output until it's stable, so the
+    # breakout has already happened in the expected output and the payload is
+    # inert text inside the rawtext element
     assert (
         clean(data, tags={namespace_tag, end_tag, eject_tag}, strip_comments=False)
         == expected
@@ -1266,3 +1272,239 @@ class TestCleaner:
 
         dirty = 'this is cute! <img src="http://example.com/puppy.jpg" rel="nofollow">'
         assert cleaner.clean(dirty) == 'this is cute! <img src="moo" rel="moo">'
+
+
+def assert_clean_fixpoint(cleaner, text):
+    """Assert that cleaning is a fixpoint: clean(clean(x)) == clean(x)
+
+    The cleaned output must reparse to the same output--neither introducing
+    new nodes nor changing serialization--on a second and third pass.
+
+    """
+    once = cleaner.clean(text)
+    twice = cleaner.clean(once)
+    thrice = cleaner.clean(twice)
+    assert once == twice == thrice
+    return once
+
+
+#: Cleaner configurations that the fixpoint guarantee must hold for
+FIXPOINT_CLEANERS = [
+    Cleaner(),
+    Cleaner(strip=True),
+    Cleaner(strip_comments=False),
+    Cleaner(strip=True, strip_comments=False),
+    Cleaner(
+        tags={"svg", "math", "mi", "mo", "annotation-xml", "desc", "a", "b",
+              "foreignObject", "p", "title"},
+        attributes={"*": ["xlink:href", "href", "title"]},
+        strip_comments=False,
+    ),
+    Cleaner(
+        tags={"a", "b", "i", "p", "img", "title", "textarea", "style", "div"},
+        attributes={"*": ["title", "href", "src"], "a": ["href", "title"]},
+        strip=True,
+    ),
+]
+
+
+@pytest.mark.parametrize("cleaner", FIXPOINT_CLEANERS, ids=repr)
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Misnested and overlapping tags
+        "<b><i></b></i>",
+        "<em><strong></em></strong>",
+        "<a href='http://x'><b></a><i>",
+        "<ul><li><ul><li></ul></li></ul>",
+        "<b><blockquote></b></blockquote>",
+        "<p><b><p></b>",
+        # Entities--named, numeric, hex, unknown, unterminated, nested
+        "&lt;script&gt;",
+        "&amp;lt;script&amp;gt;",
+        "&#106;avascript:alert(1)",
+        "&#x6a;avascript:alert(1)",
+        "&Tab;",
+        "&unknown; &amp &notit; &not;",
+        "fish &amp; chips &#169; &#xA9;",
+        "<a href='&#106;avascript:alert(1)'>x</a>",
+        "<a href='&Tab;javascript:alert(1)'>x</a>",
+        "<a href='http://e.com/?a=1&amp;b=2'>x</a>",
+        # Comments
+        "<!-- comment -->text",
+        "text<!-- a -- b -->",
+        "<!--&amp;-->",
+        "<!--&lt;/xmp&gt;-->",
+        "<!--<img src=x onerror=alert(1)>-->",
+        "<!--->",
+        "<!---->",
+        # Duplicate attributes
+        "<a href='http://x' href='javascript:alert(1)'>y</a>",
+        "<a title='1' title='2'>t</a>",
+        # CDATA-ish text
+        "<![CDATA[<script>alert(1)</script>]]>",
+        "a ]]> b",
+        # Foreign content
+        "<svg><script>alert(1)</script></svg>",
+        "<svg><a xlink:href='javascript:alert(1)'>x</a></svg>",
+        "<math><mi xlink:href='#local'>x</mi></math>",
+        "<math xlink:href='#l' href='http://y'>x</math>",
+        "<svg></p><xmp><!--</xmp><img src/onerror=alert(1)>",
+        "<svg><foreignObject><p>hi</p></foreignObject></svg>",
+        # Attribute values with markup-y contents and both quote styles
+        "<a title='\"><img src=x onerror=alert(1)>'>t</a>",
+        "<a title=\"'\"><img src=x onerror=alert(1)>t</a>",
+        "<a title='&lt;/xmp&gt;'>t</a>",
+        # Legit documents that must come through intact
+        "<p>hello <a href='http://example.com'>link</a></p>",
+        "<ul><li>one</li><li>two</li></ul>",
+        "<ol><li>first</li></ol><blockquote>quote</blockquote>",
+        "中文文本 <b>加粗</b> テスト 🎉",
+        "<abbr title='World Health Organization'>WHO</abbr>",
+    ],
+)
+def test_clean_fixpoint(cleaner, text):
+    """Cleaning cleaned output must not change it"""
+    assert_clean_fixpoint(cleaner, text)
+
+
+def test_clean_fixpoint_fuzz():
+    """Fuzz small random fragments and verify the fixpoint property"""
+    tags = ["a", "b", "i", "p", "ul", "li", "img", "svg", "math", "title",
+            "textarea", "script", "xmp", "table", "td", "font", "b "]
+    attrs = [
+        ("href", "http://e.com"), ("href", "javascript:alert(1)"),
+        ("href", "&Tab;javascript:alert(1)"), ("href", "&#106;avascript:1"),
+        ("title", "'\"><img src=x onerror=alert(1)>"), ("title", "&lt;"),
+        ("onerror", "alert(1)"), ("src", "x"), ("xlink:href", "#l"),
+        ("style", "color:red"),
+    ]
+    texts = ["hi", "中文", "&lt;", "&amp;", "&#106;", "&Tab;", "-->", "--!>",
+             "<!--", "]]>", "<![CDATA[x]]>", "<", "&", "</title>", "</xmp>"]
+
+    def gen(rng, depth=0):
+        r = rng.random()
+        if depth > 2 or r < 0.4:
+            return rng.choice(texts)
+        if r < 0.5:
+            return "<!--" + rng.choice(texts) + "-->"
+        tag = rng.choice(tags)
+        attr_text = ""
+        for _ in range(rng.randrange(0, 3)):
+            key, val = rng.choice(attrs)
+            quote = rng.choice(["'", '"'])
+            attr_text += f" {key}={quote}{val}{quote}"
+            if rng.random() < 0.2:
+                attr_text += f" {key}={quote}{val}{quote}"
+        inner = "".join(gen(rng, depth + 1) for _ in range(rng.randrange(0, 3)))
+        if rng.random() < 0.15:
+            other = rng.choice(tags)
+            return f"<{tag}{attr_text}><{other}>{inner}</{tag}></{other}>"
+        return f"<{tag}{attr_text}>{inner}</{tag}>"
+
+    rng = random.Random(20261113)
+    for cleaner in FIXPOINT_CLEANERS:
+        for _ in range(200):
+            assert_clean_fixpoint(cleaner, gen(rng))
+
+
+def test_clean_output_has_no_new_dangerous_nodes():
+    """Cleaned output reparsed by the same parser yields no dangerous nodes"""
+    cleaner = Cleaner(strip_comments=False)
+    cases = [
+        "<a href='&Tab;javascript:alert(1)'>x</a>",
+        "<svg></p><xmp><!--</xmp><img src/onerror=alert(1)>",
+        "<a title='\"><img src=x onerror=alert(1)>'>t</a>",
+        "<math xlink:href='#l' href='javascript:alert(1)'>x</math>",
+    ]
+    for text in cases:
+        once = cleaner.clean(text)
+        dom = cleaner.parser.parseFragment(once)
+        for token in cleaner.walker(dom):
+            if token["type"] in ("StartTag", "EmptyTag"):
+                assert token["name"] in cleaner.tags
+                for (_ns, name), val in token["data"].items():
+                    assert not name.startswith("on")
+                    if name == "href":
+                        assert "javascript:" not in val.replace("&Tab;", "").lower()
+
+
+def test_clean_fixpoint_entity_protocol_dropped():
+    """Entities that decode into a script protocol must not survive to output"""
+    cleaner = Cleaner()
+    for text in [
+        "<a href='&Tab;javascript:alert(1)'>x</a>",
+        "<a href='&NewLine;javascript:alert(1)'>x</a>",
+        "<a href='&#106;avascript:alert(1)'>x</a>",
+        "<a href='&#x6a;avascript:alert(1)'>x</a>",
+    ]:
+        assert cleaner.clean(text) == "<a>x</a>"
+
+
+def test_clean_fixpoint_single_quoted_attr_entities():
+    """Single-quoted attribute values get the same entity handling as
+    double-quoted ones and don't get double-escaped on re-clean"""
+    cleaner = Cleaner()
+    once = cleaner.clean("<a title='\"><img src=x onerror=alert(1)>'>t</a>")
+    assert once == "<a title='\">&lt;img src=x onerror=alert(1)>'>t</a>"
+    assert cleaner.clean(once) == once
+
+
+def test_clean_fixpoint_comment_entities_stable():
+    """Entities in comments must not get re-escaped on every clean pass"""
+    cleaner = Cleaner(strip_comments=False)
+    assert cleaner.clean("<!--&amp;-->") == "<!--&amp;-->"
+    assert cleaner.clean("<!--&lt;tag&gt;-->") == "<!--&lt;tag&gt;-->"
+    # < and > in comment data are escaped so the comment can't break out of
+    # rawtext elements when a browser reparses it
+    assert cleaner.clean("<!--</xmp><img src=x>-->") == (
+        "<!--&lt;/xmp&gt;&lt;img src=x&gt;-->"
+    )
+
+
+def test_clean_fixpoint_namespaced_attr_collision():
+    """A namespaced attribute and a plain attribute with the same local name
+    must not serialize as a duplicate attribute"""
+    cleaner = Cleaner(
+        tags={"math", "svg"},
+        attributes={"*": ["xlink:href", "href"]},
+    )
+    once = cleaner.clean("<math xlink:href='#l' href='http://y'>x</math>")
+    assert once == "<math href=\"#l\">x</math>"
+    assert cleaner.clean(once) == once
+
+
+def test_clean_fixpoint_foreign_content_breakout():
+    """Foreign content breakout: the serialized nesting must survive reparsing"""
+    cleaner = Cleaner(
+        tags={"svg", "p", "xmp"},
+        strip_comments=False,
+    )
+    once = cleaner.clean("<svg></p><xmp><!--</xmp><img src/onerror=alert(1)>")
+    # The p breaks out of the svg on reparse, so the stable output has it
+    # outside and the payload is inert text
+    assert once == (
+        "<svg></svg><p></p><xmp>"
+        "&lt;!--&lt;/xmp&gt;&lt;img src/onerror=alert(1)&gt;--&gt;"
+        "</xmp>"
+    )
+    assert cleaner.clean(once) == once
+
+
+def test_clean_fixpoint_table_foster_parenting():
+    """Table content that can't serialize stably is escaped to a stable form"""
+    # table without its structure tags and strip=False can't be serialized
+    # such that it reparses to itself, so clean falls back to escaping
+    cleaner = Cleaner(tags={"table", "td"}, strip=False)
+    once = cleaner.clean("<table><td>x</td></table>")
+    assert "<table" not in once
+    assert_clean_fixpoint(cleaner, "<table><td>x</td></table>")
+
+    # with the structure tags allowed (or stripped), output is stable markup
+    cleaner = Cleaner(tags={"table", "tbody", "tr", "td"}, strip=False)
+    assert (
+        cleaner.clean("<table><tr><td>x</td></tr></table>")
+        == "<table><tbody><tr><td>x</td></tr></tbody></table>"
+    )
+    cleaner = Cleaner(tags={"table", "td"}, strip=True)
+    assert cleaner.clean("<table><td>x</td></table>") == "<table><td>x</td></table>"
