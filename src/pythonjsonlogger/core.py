@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 ## Standard Library
+import dataclasses
 from datetime import datetime, timezone
 import logging
 import re
@@ -17,6 +18,7 @@ from collections.abc import Container, Sequence
 ## Installed
 
 ## Application
+from .exception import ProjectionViolationError
 
 
 ### CONSTANTS
@@ -75,6 +77,12 @@ LogData: TypeAlias = dict[str, Any]
 *Changed in 4.0*: renamed from `LogRecord` to `LogData`
 """
 
+TRUNCATED_VALUE_MARKER = "__truncated__"
+"""Marker appended to (or used as) values truncated by a projection policy."""
+
+DEFAULT_CIRCULAR_MARKER = "__circular_reference__"
+"""Default marker used to replace circular references in projected values."""
+
 
 ### FUNCTIONS
 ### ============================================================================
@@ -105,8 +113,179 @@ def merge_record_extra(
     return target
 
 
+def projection_placeholder(reason: str) -> str:
+    """Return a JSON-safe placeholder value explaining why data was removed.
+
+    Args:
+        reason: short machine readable reason, e.g. 'max_depth_exceeded'
+    """
+    return f"{TRUNCATED_VALUE_MARKER}:{reason}"
+
+
+def sanitize_projection_value(
+    value: Any,
+    policy: FieldProjectionPolicy,
+    _depth: int = 0,
+    _seen: set[int] | None = None,
+) -> Any:
+    """Bound a value so it is safe to serialize under a projection policy.
+
+    Enforces maximum nesting depth, maximum value size (in bytes), maximum
+    collection/mapping size, and replaces circular references with a stable
+    marker. Values of types not handled here are returned unchanged so that
+    custom json_default functions and encoders still apply.
+
+    Args:
+        value: the value to sanitize
+        policy: the projection policy to enforce
+
+    Raises:
+        ProjectionViolationError: if policy.on_violation is 'reject' and
+            the value exceeds a configured bound.
+    """
+    if _seen is None:
+        _seen = set()
+
+    if isinstance(value, str):
+        encoded = value.encode("utf-8")
+        if len(encoded) <= policy.max_value_bytes:
+            return value
+        if policy.on_violation == "reject":
+            raise ProjectionViolationError(
+                f"string value exceeds max_value_bytes ({policy.max_value_bytes})"
+            )
+        keep = max(policy.max_value_bytes - len(TRUNCATED_VALUE_MARKER), 0)
+        return encoded[:keep].decode("utf-8", errors="ignore") + TRUNCATED_VALUE_MARKER
+
+    if isinstance(value, (bytes, bytearray)):
+        if len(value) <= policy.max_value_bytes:
+            return value
+        if policy.on_violation == "reject":
+            raise ProjectionViolationError(
+                f"bytes value exceeds max_value_bytes ({policy.max_value_bytes})"
+            )
+        return value[: policy.max_value_bytes]
+
+    if isinstance(value, dict):
+        if _depth >= policy.max_depth:
+            return _container_violation(policy, "max_depth_exceeded")
+        marker = _circular_marker_if_seen(value, policy, _seen)
+        if marker is not None:
+            return marker
+        try:
+            result: dict[Any, Any] = {}
+            truncated = False
+            for index, (key, item) in enumerate(value.items()):
+                if index >= policy.max_items:
+                    truncated = True
+                    break
+                result[key] = sanitize_projection_value(item, policy, _depth + 1, _seen)
+            if truncated and TRUNCATED_VALUE_MARKER not in result:
+                result[TRUNCATED_VALUE_MARKER] = projection_placeholder("max_items_exceeded")
+            return result
+        finally:
+            _seen.discard(id(value))
+
+    if isinstance(value, (list, tuple, set, frozenset)):
+        if _depth >= policy.max_depth:
+            return _container_violation(policy, "max_depth_exceeded")
+        marker = _circular_marker_if_seen(value, policy, _seen)
+        if marker is not None:
+            return marker
+        try:
+            items = [
+                sanitize_projection_value(item, policy, _depth + 1, _seen)
+                for item in list(value)[: policy.max_items]
+            ]
+            if len(value) > policy.max_items:
+                items.append(projection_placeholder("max_items_exceeded"))
+            return items
+        finally:
+            _seen.discard(id(value))
+
+    return value
+
+
+def _container_violation(policy: FieldProjectionPolicy, reason: str) -> Any:
+    if policy.on_violation == "reject":
+        raise ProjectionViolationError(f"value violates projection policy: {reason}")
+    return projection_placeholder(reason)
+
+
+def _circular_marker_if_seen(
+    value: Any, policy: FieldProjectionPolicy, seen: set[int]
+) -> str | None:
+    if id(value) in seen:
+        return policy.circular_marker
+    seen.add(id(value))
+    return None
+
+
 ### CLASSES
 ### ============================================================================
+@dataclasses.dataclass(frozen=True)
+class FieldProjectionPolicy:
+    """Explicit policy controlling which fields may appear in JSON output.
+
+    When a policy is attached to a formatter, the output key set becomes a
+    security boundary: only required fields (from `fmt`) and explicitly
+    allowed extras, message-dict keys, static fields, and defaults are
+    emitted. `rename_fields` is applied *after* projection, so a forbidden
+    field cannot re-enter the output by being renamed to an allowed name.
+
+    Values are bounded so the serialized record stays parseable and small:
+    nesting depth, per-value size, per-record size, and collection size are
+    all limited, and circular references are replaced with a stable marker.
+    """
+
+    allowed_extra_fields: Container[str] = frozenset()
+    """Record extra attributes (from `logger.info(..., extra=...)`) allowed in the output."""
+
+    allowed_message_keys: Container[str] = frozenset()
+    """Keys allowed from a dict logged as the message (including `exc_info` / `stack_info`)."""
+
+    allowed_static_fields: Container[str] = frozenset()
+    """`static_fields` entries allowed in the output."""
+
+    allowed_default_fields: Container[str] = frozenset()
+    """`defaults` entries allowed in the output."""
+
+    max_depth: int = 16
+    """Maximum nesting depth for container values."""
+
+    max_value_bytes: int = 64 * 1024
+    """Maximum size in bytes of a single string or bytes value."""
+
+    max_record_bytes: int = 1024 * 1024
+    """Maximum size in bytes of the serialized record."""
+
+    max_items: int = 256
+    """Maximum number of elements kept in a single collection or mapping."""
+
+    circular_marker: str = DEFAULT_CIRCULAR_MARKER
+    """Stable marker used to replace circular references."""
+
+    on_violation: str = "placeholder"
+    """How to handle bound violations: 'placeholder' replaces the offending
+    value with a reason placeholder, 'reject' raises `ProjectionViolationError`."""
+
+    def __post_init__(self) -> None:
+        if self.on_violation not in ("placeholder", "reject"):
+            raise ValueError("on_violation must be 'placeholder' or 'reject'")
+        for name in (
+            "allowed_extra_fields",
+            "allowed_message_keys",
+            "allowed_static_fields",
+            "allowed_default_fields",
+        ):
+            if isinstance(getattr(self, name), str):
+                raise TypeError(f"{name} must be a container of field names, not a string")
+        for name in ("max_depth", "max_value_bytes", "max_record_bytes", "max_items"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must be non-negative")
+        return
+
+
 class BaseJsonFormatter(logging.Formatter):
     """Base class for all formatters
 
@@ -136,6 +315,7 @@ class BaseJsonFormatter(logging.Formatter):
         defaults: dict[str, Any] | None = None,
         exc_info_as_array: bool = False,
         stack_info_as_array: bool = False,
+        field_projection: FieldProjectionPolicy | None = None,
     ) -> None:
         """
         Args:
@@ -162,6 +342,10 @@ class BaseJsonFormatter(logging.Formatter):
             exc_info_as_array: break the exc_info into a list of lines based on line breaks,
                 including cached exception text in records received over a transport.
             stack_info_as_array: break the stack_info into a list of lines based on line breaks.
+            field_projection: an optional `FieldProjectionPolicy` that explicitly controls
+                which fields may appear in the output and bounds serialized values.
+                Defaults to `None` which preserves the legacy behaviour of merging
+                all record extras.
 
         *Changed in 3.1*:
 
@@ -239,6 +423,7 @@ class BaseJsonFormatter(logging.Formatter):
         self._skip_fields.update(self.reserved_attrs)
         self.exc_info_as_array = exc_info_as_array
         self.stack_info_as_array = stack_info_as_array
+        self.field_projection = field_projection
         return
 
     def usesTime(self) -> bool:
@@ -369,6 +554,10 @@ class BaseJsonFormatter(logging.Formatter):
 
         *Changed in 4.0*: `log_record` renamed to `log_data`
         """
+        if self.field_projection is not None:
+            self._add_fields_projected(log_data, record, message_dict, self.field_projection)
+            return
+
         for field in self.defaults:
             log_data[self._get_rename(field)] = self.defaults[field]
 
@@ -396,6 +585,82 @@ class BaseJsonFormatter(logging.Formatter):
             for field in self.rename_fields.values():
                 if field not in log_data:
                     log_data[field] = None
+        return
+
+    def _add_fields_projected(
+        self,
+        log_data: dict[str, Any],
+        record: logging.LogRecord,
+        message_dict: dict[str, Any],
+        policy: FieldProjectionPolicy,
+    ) -> None:
+        """Extract fields from a LogRecord under an explicit projection policy.
+
+        Only fields allowed by the policy are emitted, and `rename_fields` is
+        applied after projection so forbidden fields cannot be renamed back
+        into the output. Category priority is deterministic (highest first):
+        required fields, static fields, message dict, record extras, defaults.
+        A lower-priority field never overwrites a key already emitted by a
+        higher-priority category.
+        """
+        allowed_keys = (
+            set(self._required_fields)
+            | set(policy.allowed_extra_fields)
+            | set(policy.allowed_message_keys)
+            | set(policy.allowed_static_fields)
+            | set(policy.allowed_default_fields)
+        )
+
+        for field in self._required_fields:
+            log_data[self._get_rename(field)] = sanitize_projection_value(
+                record.__dict__.get(field), policy
+            )
+
+        for key, value in self.static_fields.items():
+            if key in policy.allowed_static_fields:
+                self._set_projected_field(log_data, key, value, policy)
+
+        for key, value in message_dict.items():
+            if key in policy.allowed_message_keys:
+                self._set_projected_field(log_data, key, value, policy)
+
+        for key, value in record.__dict__.items():
+            if key in self._skip_fields:
+                continue
+            if hasattr(key, "startswith") and key.startswith("_"):
+                continue
+            if key not in policy.allowed_extra_fields:
+                continue
+            self._set_projected_field(log_data, key, value, policy)
+
+        for key, value in self.defaults.items():
+            if key in policy.allowed_default_fields:
+                self._set_projected_field(log_data, key, value, policy)
+
+        if self.timestamp:
+            key = self.timestamp if isinstance(self.timestamp, str) else "timestamp"
+            output_key = self._get_rename(key)
+            if output_key not in log_data:
+                log_data[output_key] = datetime.fromtimestamp(record.created, tz=timezone.utc)
+
+        if self.rename_fields_keep_missing:
+            for key, target in self.rename_fields.items():
+                if key in allowed_keys and target not in log_data:
+                    log_data[target] = None
+        return
+
+    def _set_projected_field(
+        self,
+        log_data: dict[str, Any],
+        key: str,
+        value: Any,
+        policy: FieldProjectionPolicy,
+    ) -> None:
+        output_key = self._get_rename(key)
+        if output_key in log_data:
+            # A higher-priority category already emitted this key.
+            return
+        log_data[output_key] = sanitize_projection_value(value, policy)
         return
 
     def _get_rename(self, key: str) -> str:

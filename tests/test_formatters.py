@@ -25,7 +25,13 @@ import pytest
 ## Application
 import pythonjsonlogger
 import pythonjsonlogger.defaults
-from pythonjsonlogger.core import RESERVED_ATTRS, BaseJsonFormatter, merge_record_extra
+from pythonjsonlogger.core import (
+    RESERVED_ATTRS,
+    BaseJsonFormatter,
+    FieldProjectionPolicy,
+    merge_record_extra,
+)
+from pythonjsonlogger.exception import ProjectionViolationError
 from pythonjsonlogger.json import JsonFormatter
 
 if pythonjsonlogger.ORJSON_AVAILABLE:
@@ -1183,4 +1189,421 @@ def test_json_ensure_ascii_false(env: LoggingEnvironment):
     # Note: we don't use env.load_json as we want to know the raw output
     msg = env.buffer.getvalue().split('"message": "', 1)[1].split('"', 1)[0]
     assert msg == "Привет"
+    return
+
+
+## Field Projection Policy
+## -----------------------------------------------------------------------------
+def make_projection_record(**extras: Any) -> logging.LogRecord:
+    record = logging.LogRecord("test", logging.INFO, __file__, 10, "hello", (), None)
+    for key, value in extras.items():
+        setattr(record, key, value)
+    return record
+
+
+def test_projection_policy_validation():
+    with pytest.raises(ValueError, match="on_violation"):
+        FieldProjectionPolicy(on_violation="explode")
+
+    with pytest.raises(TypeError, match="allowed_extra_fields"):
+        FieldProjectionPolicy(allowed_extra_fields="request_id")  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="max_depth"):
+        FieldProjectionPolicy(max_depth=-1)
+    return
+
+
+@pytest.mark.parametrize("class_", ALL_FORMATTERS)
+def test_projection_default_fields_still_available(
+    env: LoggingEnvironment, class_: type[BaseJsonFormatter]
+):
+    env.set_formatter(
+        class_("%(message)s %(levelname)s %(asctime)s", field_projection=FieldProjectionPolicy())
+    )
+
+    env.logger.info("hello")
+    log_json = env.load_json()
+
+    assert log_json["message"] == "hello"
+    assert log_json["levelname"] == "INFO"
+    assert "asctime" in log_json
+    return
+
+
+@pytest.mark.parametrize("class_", ALL_FORMATTERS)
+def test_projection_extra_allowlist(env: LoggingEnvironment, class_: type[BaseJsonFormatter]):
+    policy = FieldProjectionPolicy(allowed_extra_fields={"request_id"})
+    env.set_formatter(class_("%(message)s", field_projection=policy))
+
+    env.logger.info(
+        "hello",
+        extra={
+            "request_id": "req-1",
+            "authorization": "Bearer secret-token",
+            "user_email": "user@example.com",
+        },
+    )
+    log_json = env.load_json()
+
+    assert log_json["message"] == "hello"
+    assert log_json["request_id"] == "req-1"
+    assert "authorization" not in log_json
+    assert "user_email" not in log_json
+    return
+
+
+@pytest.mark.parametrize("class_", ALL_FORMATTERS)
+def test_projection_extras_denied_by_default(env: LoggingEnvironment, class_: type[BaseJsonFormatter]):
+    env.set_formatter(class_("%(message)s", field_projection=FieldProjectionPolicy()))
+
+    env.logger.info("hello", extra={"request_id": "req-1"})
+    log_json = env.load_json()
+
+    assert log_json["message"] == "hello"
+    assert "request_id" not in log_json
+    return
+
+
+@pytest.mark.parametrize("class_", ALL_FORMATTERS)
+def test_projection_rename_forbidden_extra_cannot_reenter(
+    env: LoggingEnvironment, class_: type[BaseJsonFormatter]
+):
+    policy = FieldProjectionPolicy(allowed_extra_fields={"request_id"})
+    env.set_formatter(
+        class_(
+            "%(message)s",
+            field_projection=policy,
+            rename_fields={"secret": "message"},
+        )
+    )
+
+    env.logger.info("original", extra={"secret": "classified"})
+    log_json = env.load_json()
+
+    assert log_json["message"] == "original"
+    assert "secret" not in log_json
+    assert "classified" not in log_json.values()
+    return
+
+
+@pytest.mark.parametrize("class_", ALL_FORMATTERS)
+def test_projection_rename_allowed_extra_to_reserved_collision(
+    env: LoggingEnvironment, class_: type[BaseJsonFormatter]
+):
+    policy = FieldProjectionPolicy(allowed_extra_fields={"request_id"})
+    env.set_formatter(
+        class_(
+            "%(message)s %(levelname)s",
+            field_projection=policy,
+            rename_fields={"request_id": "levelname"},
+        )
+    )
+
+    env.logger.info("hello", extra={"request_id": "req-1"})
+    log_json = env.load_json()
+
+    # The reserved LogRecord field deterministically wins over the renamed extra
+    assert log_json["levelname"] == "INFO"
+    assert "req-1" not in log_json.values()
+    return
+
+
+@pytest.mark.parametrize("class_", ALL_FORMATTERS)
+def test_projection_static_and_defaults_same_name(
+    env: LoggingEnvironment, class_: type[BaseJsonFormatter]
+):
+    policy = FieldProjectionPolicy(
+        allowed_static_fields={"env"},
+        allowed_default_fields={"env", "region"},
+    )
+    env.set_formatter(
+        class_(
+            "%(message)s",
+            field_projection=policy,
+            static_fields={"env": "prod", "secret_static": "not-allowed"},
+            defaults={"env": "fallback", "region": "us-east"},
+        )
+    )
+
+    env.logger.info("hello")
+    log_json = env.load_json()
+
+    # static fields deterministically win over defaults with the same name
+    assert log_json["env"] == "prod"
+    assert log_json["region"] == "us-east"
+    assert "secret_static" not in log_json
+    return
+
+
+@pytest.mark.parametrize("class_", ALL_FORMATTERS)
+def test_projection_dict_message(env: LoggingEnvironment, class_: type[BaseJsonFormatter]):
+    policy = FieldProjectionPolicy(allowed_message_keys={"event"})
+    env.set_formatter(class_("%(message)s", field_projection=policy))
+
+    env.logger.info({"event": "login", "password": "hunter2", "exc_info": "smuggled"})
+    log_json = env.load_json()
+
+    assert log_json["event"] == "login"
+    assert "password" not in log_json
+    assert "exc_info" not in log_json
+    return
+
+
+@pytest.mark.parametrize("class_", ALL_FORMATTERS)
+def test_projection_exc_info_not_allowed(env: LoggingEnvironment, class_: type[BaseJsonFormatter]):
+    env.set_formatter(class_("%(message)s", field_projection=FieldProjectionPolicy()))
+
+    get_traceback_from_exception_followed_by_log_call(env)
+    log_json = env.load_json()
+
+    assert "exc_info" not in log_json
+    return
+
+
+@pytest.mark.parametrize("class_", ALL_FORMATTERS)
+def test_projection_exc_info_allowed(env: LoggingEnvironment, class_: type[BaseJsonFormatter]):
+    policy = FieldProjectionPolicy(allowed_message_keys={"exc_info"})
+    env.set_formatter(class_("%(message)s", field_projection=policy))
+
+    expected_value = get_traceback_from_exception_followed_by_log_call(env)
+    log_json = env.load_json()
+
+    assert log_json["exc_info"] == expected_value
+    return
+
+
+def test_projection_timestamp(env: LoggingEnvironment):
+    env.set_formatter(
+        JsonFormatter("%(message)s", timestamp=True, field_projection=FieldProjectionPolicy())
+    )
+
+    env.logger.info("hello")
+    log_json = env.load_json()
+
+    assert "timestamp" in log_json
+    return
+
+
+def test_projection_rename_keep_missing_only_for_allowed(env: LoggingEnvironment):
+    policy = FieldProjectionPolicy(allowed_extra_fields={"request_id"})
+    env.set_formatter(
+        JsonFormatter(
+            "%(message)s",
+            field_projection=policy,
+            rename_fields={"request_id": "rid", "secret": "not_secret"},
+            rename_fields_keep_missing=True,
+        )
+    )
+
+    env.logger.info("hello")
+    log_json = env.load_json()
+
+    assert log_json["rid"] is None
+    assert "not_secret" not in log_json
+    return
+
+
+def test_projection_nested_depth_truncation(env: LoggingEnvironment):
+    policy = FieldProjectionPolicy(allowed_extra_fields={"nested"}, max_depth=2)
+    env.set_formatter(JsonFormatter("%(message)s", field_projection=policy))
+
+    env.logger.info("hello", extra={"nested": {"l1": {"l2": {"l3": "too deep"}}}})
+    log_json = env.load_json()
+
+    assert log_json["nested"] == {"l1": {"l2": "__truncated__:max_depth_exceeded"}}
+    return
+
+
+def test_projection_circular_reference(env: LoggingEnvironment):
+    circular: dict[str, Any] = {}
+    circular["self"] = circular
+    policy = FieldProjectionPolicy(allowed_extra_fields={"circular"})
+    env.set_formatter(JsonFormatter("%(message)s", field_projection=policy))
+
+    env.logger.info("hello", extra={"circular": circular})
+    log_json = env.load_json()
+
+    assert log_json["circular"] == {"self": "__circular_reference__"}
+    return
+
+
+def test_projection_circular_marker_customizable():
+    circular: dict[str, Any] = {}
+    circular["self"] = circular
+    formatter = JsonFormatter(
+        "%(message)s",
+        field_projection=FieldProjectionPolicy(
+            allowed_extra_fields={"c"}, circular_marker="<<circular>>"
+        ),
+    )
+
+    log_json = json.loads(formatter.format(make_projection_record(c=circular)))
+
+    assert log_json["c"] == {"self": "<<circular>>"}
+    return
+
+
+def test_projection_oversized_string(env: LoggingEnvironment):
+    policy = FieldProjectionPolicy(allowed_extra_fields={"big"}, max_value_bytes=32)
+    env.set_formatter(JsonFormatter("%(message)s", field_projection=policy))
+
+    env.logger.info("hello", extra={"big": "x" * 1000})
+    log_json = env.load_json()
+
+    assert len(log_json["big"].encode("utf-8")) <= 32
+    assert log_json["big"].endswith("__truncated__")
+    return
+
+
+def test_projection_oversized_string_multibyte(env: LoggingEnvironment):
+    policy = FieldProjectionPolicy(allowed_extra_fields={"big"}, max_value_bytes=30)
+    env.set_formatter(JsonFormatter("%(message)s", field_projection=policy))
+
+    env.logger.info("hello", extra={"big": "界" * 100})
+    log_json = env.load_json()
+
+    assert isinstance(log_json["big"], str)
+    assert len(log_json["big"].encode("utf-8")) <= 30
+    assert log_json["big"].endswith("__truncated__")
+    return
+
+
+def test_projection_max_items(env: LoggingEnvironment):
+    policy = FieldProjectionPolicy(allowed_extra_fields={"items", "mapping"}, max_items=3)
+    env.set_formatter(JsonFormatter("%(message)s", field_projection=policy))
+
+    env.logger.info(
+        "hello",
+        extra={"items": list(range(10)), "mapping": {str(i): i for i in range(10)}},
+    )
+    log_json = env.load_json()
+
+    assert log_json["items"] == [0, 1, 2, "__truncated__:max_items_exceeded"]
+    assert log_json["mapping"]["0"] == 0
+    assert "3" not in log_json["mapping"]
+    assert log_json["mapping"]["__truncated__"] == "__truncated__:max_items_exceeded"
+    return
+
+
+def test_projection_reject_mode_oversized_value():
+    formatter = JsonFormatter(
+        "%(message)s",
+        field_projection=FieldProjectionPolicy(
+            allowed_extra_fields={"big"}, max_value_bytes=16, on_violation="reject"
+        ),
+    )
+
+    with pytest.raises(ProjectionViolationError, match="max_value_bytes"):
+        formatter.format(make_projection_record(big="x" * 1000))
+    return
+
+
+def test_projection_reject_mode_oversized_record():
+    formatter = JsonFormatter(
+        "%(message)s",
+        field_projection=FieldProjectionPolicy(
+            allowed_extra_fields={"blob"}, max_record_bytes=128, on_violation="reject"
+        ),
+    )
+
+    with pytest.raises(ProjectionViolationError, match="max_record_bytes"):
+        formatter.format(make_projection_record(blob="x" * 1000))
+    return
+
+
+def test_projection_max_record_bytes_placeholder():
+    formatter = JsonFormatter(
+        "%(message)s",
+        field_projection=FieldProjectionPolicy(
+            allowed_extra_fields={"blob"}, max_record_bytes=256
+        ),
+    )
+
+    result = formatter.format(make_projection_record(blob="x" * 10000))
+    log_json = json.loads(result)
+
+    assert len(result.encode("utf-8")) <= 256
+    assert log_json["message"] == "hello"
+    assert log_json["blob"] == "__truncated__:max_record_bytes_exceeded"
+    return
+
+
+def test_projection_invalid_serializer_return_type():
+    formatter = JsonFormatter(
+        "%(message)s",
+        json_serializer=lambda *args, **kwargs: 42,  # type: ignore[return-value]
+        field_projection=FieldProjectionPolicy(),
+    )
+
+    with pytest.raises(TypeError, match="json_serializer must return a str"):
+        formatter.format(make_projection_record())
+    return
+
+
+def test_projection_broken_serializer():
+    def broken_serializer(*args: Any, **kwargs: Any) -> str:
+        raise RuntimeError("boom")
+
+    formatter = JsonFormatter(
+        "%(message)s",
+        json_serializer=broken_serializer,
+        field_projection=FieldProjectionPolicy(),
+    )
+
+    with pytest.raises(ProjectionViolationError, match="could not be serialized"):
+        formatter.format(make_projection_record())
+    return
+
+
+def test_projection_unserializable_value_placeholder():
+    class Unserializable:
+        pass
+
+    def json_default(obj: Any) -> Any:
+        raise TypeError("cannot serialize")
+
+    formatter = JsonFormatter(
+        "%(message)s",
+        json_default=json_default,
+        field_projection=FieldProjectionPolicy(allowed_extra_fields={"obj"}),
+    )
+
+    log_json = json.loads(formatter.format(make_projection_record(obj=Unserializable())))
+
+    assert log_json["message"] == "hello"
+    assert log_json["obj"] == "__truncated__:unserializable_value"
+    return
+
+
+def test_projection_custom_json_default_not_bypassed():
+    class Custom:
+        pass
+
+    formatter = JsonFormatter(
+        "%(message)s",
+        json_default=lambda obj: "CUSTOM",
+        field_projection=FieldProjectionPolicy(allowed_extra_fields={"obj"}),
+    )
+
+    log_json = json.loads(formatter.format(make_projection_record(obj=Custom())))
+
+    assert log_json["obj"] == "CUSTOM"
+    return
+
+
+def test_projection_process_log_record_not_bypassed(env: LoggingEnvironment):
+    class CustomJsonFormatter(JsonFormatter):
+
+        def process_log_record(self, log_data):
+            log_data["custom"] = "value"
+            return super().process_log_record(log_data)
+
+    env.set_formatter(
+        CustomJsonFormatter("%(message)s", field_projection=FieldProjectionPolicy())
+    )
+
+    env.logger.info("hello")
+    log_json = env.load_json()
+
+    assert log_json["custom"] == "value"
     return

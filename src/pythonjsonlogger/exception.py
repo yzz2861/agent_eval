@@ -25,3 +25,7 @@ class MissingPackageError(ImportError, PythonJsonLoggerError):
             msg += f" It can be installed using 'python-json-logger[{extras_name}]'."
         super().__init__(msg)
         return
+
+
+class ProjectionViolationError(PythonJsonLoggerError):
+    "A log record violated the configured field projection policy and was rejected"

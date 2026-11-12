@@ -19,6 +19,7 @@ import warnings
 ## Application
 from . import core
 from . import defaults as d
+from .exception import ProjectionViolationError
 
 
 ### CLASSES
@@ -99,6 +100,11 @@ class JsonFormatter(core.BaseJsonFormatter):
 
     def jsonify_log_record(self, log_data: core.LogData) -> str:
         """Returns a json string of the log data."""
+        if self.field_projection is not None:
+            return self._jsonify_projected_log_record(log_data, self.field_projection)
+        return self._serialize(log_data)
+
+    def _serialize(self, log_data: core.LogData) -> str:
         return self.json_serializer(
             log_data,
             default=self.json_default,
@@ -106,6 +112,87 @@ class JsonFormatter(core.BaseJsonFormatter):
             indent=self.json_indent,
             ensure_ascii=self.json_ensure_ascii,
         )
+
+    def _jsonify_projected_log_record(
+        self, log_data: core.LogData, policy: core.FieldProjectionPolicy
+    ) -> str:
+        """Serialize projected log data, enforcing record level bounds.
+
+        The output is always valid JSON or a `ProjectionViolationError` is
+        raised; unserializable values are never silently dropped into the
+        output and the record never exceeds `policy.max_record_bytes`.
+        """
+        try:
+            result = self._serialize(log_data)
+        except ProjectionViolationError:
+            raise
+        except Exception as exc:
+            if policy.on_violation == "reject":
+                raise ProjectionViolationError(
+                    f"log record could not be serialized: {exc}"
+                ) from exc
+            log_data = self._replace_unserializable_values(log_data)
+            try:
+                result = self._serialize(log_data)
+            except Exception as repair_exc:
+                raise ProjectionViolationError(
+                    f"log record could not be serialized: {repair_exc}"
+                ) from repair_exc
+
+        if not isinstance(result, str):
+            raise TypeError(
+                "json_serializer must return a str when a field projection policy "
+                f"is used, got {type(result).__name__}"
+            )
+
+        return self._enforce_max_record_bytes(log_data, policy, result)
+
+    def _replace_unserializable_values(self, log_data: core.LogData) -> core.LogData:
+        repaired: core.LogData = {}
+        for key, value in log_data.items():
+            try:
+                self._serialize({key: value})
+            except Exception:  # pylint: disable=broad-exception-caught
+                repaired[key] = core.projection_placeholder("unserializable_value")
+            else:
+                repaired[key] = value
+        return repaired
+
+    def _enforce_max_record_bytes(
+        self, log_data: core.LogData, policy: core.FieldProjectionPolicy, result: str
+    ) -> str:
+        limit = policy.max_record_bytes
+        if len(result.encode("utf-8")) <= limit:
+            return result
+        if policy.on_violation == "reject":
+            raise ProjectionViolationError(
+                f"log record exceeds max_record_bytes ({limit})"
+            )
+
+        required_keys = {self._get_rename(field) for field in self._required_fields}
+        log_data = dict(log_data)
+        while len(result.encode("utf-8")) > limit:
+            string_keys = [
+                key
+                for key, value in log_data.items()
+                if isinstance(value, str) and len(value) > 32
+            ]
+            if string_keys:
+                key = max(string_keys, key=lambda k: len(log_data[k]))
+                if key in required_keys:
+                    log_data[key] = log_data[key][: len(log_data[key]) // 2]
+                else:
+                    log_data[key] = core.projection_placeholder("max_record_bytes_exceeded")
+            else:
+                candidates = [key for key in log_data if key not in required_keys]
+                if not candidates:
+                    raise ProjectionViolationError(
+                        f"log record exceeds max_record_bytes ({limit})"
+                    )
+                key = max(candidates, key=lambda k: len(repr(log_data[k])))
+                del log_data[key]
+            result = self._serialize(log_data)
+        return result
 
 
 ### DEPRECATED COMPATIBILITY
