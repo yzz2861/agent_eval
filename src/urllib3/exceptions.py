@@ -70,6 +70,40 @@ class DecodeError(HTTPError):
     """Raised when automatic decoding based on Content-Type fails."""
 
 
+class DecodeBudgetExceeded(DecodeError):
+    """
+    Raised when decompressed response content exceeds a configured budget.
+
+    This is a subclass of :class:`DecodeError` so existing callers that handle
+    decoding errors keep working, while new callers can distinguish a policy
+    limit from malformed compressed content.
+    """
+
+    def __init__(
+        self, limit: int, decoded_bytes: int, content_encoding: str | None = None
+    ) -> None:
+        self.limit = limit
+        self.max_decoded_bytes = limit
+        self.max_decoded_size = limit
+        self.decoded_bytes = decoded_bytes
+        self.content_encoding = content_encoding
+        encoding = (
+            f" for content-encoding: {content_encoding}" if content_encoding else ""
+        )
+        super().__init__(
+            "Decompressed response content exceeded the configured budget of "
+            f"{limit} bytes{encoding} ({decoded_bytes} decoded bytes)"
+        )
+
+
+# Descriptive aliases for the same condition.  The exception above remains the
+# canonical class and all aliases are subclasses of DecodeError.
+DecodedContentTooLarge = DecodeBudgetExceeded
+ContentTooLarge = DecodeBudgetExceeded
+ResponseTooLarge = DecodeBudgetExceeded
+DecompressionBombError = DecodeBudgetExceeded
+
+
 class ProtocolError(HTTPError):
     """Raised when something unexpected happens mid-request/response."""
 

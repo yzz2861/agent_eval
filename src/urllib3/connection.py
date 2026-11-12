@@ -632,6 +632,7 @@ class HTTPConnection(_HTTPConnection):
 
     def getresponse(  # type: ignore[override]
         self,
+        **response_kw: typing.Any,
     ) -> HTTPResponse:
         """
         Get the response from the server.
@@ -690,6 +691,7 @@ class HTTPConnection(_HTTPConnection):
             request_method=resp_options.request_method,
             request_url=resp_options.request_url,
             sock_shutdown=_shutdown,
+            **response_kw,
         )
         return response
 

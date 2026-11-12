@@ -32,6 +32,7 @@ from ._collections import HTTPHeaderDict
 from .connection import BaseSSLError, HTTPConnection, HTTPException
 from .exceptions import (
     BodyNotHttplibCompatible,
+    DecodeBudgetExceeded,
     DecodeError,
     DependencyWarning,
     HTTPError,
@@ -531,6 +532,13 @@ class BaseHTTPResponse(io.IOBase):
         self._decoder_initialized = False
         self.length_remaining: int | None
 
+        # Decompression output budgeting. Subclasses may override the limit
+        # through the corresponding HTTPResponse constructor arguments.
+        self._max_decoded_bytes: int | None = None
+        self._decoded_bytes_total = 0
+        self._decoded_bytes_this_read = 0
+        self._decode_budget_exceeded = False
+
     def get_redirect_location(self) -> str | None | typing.Literal[False]:
         """
         Should we redirect and where to?
@@ -672,7 +680,12 @@ class BaseHTTPResponse(io.IOBase):
                 )
             return data
 
-        if max_length is None or flush_decoder:
+        budgeted_decode = (
+            self._decoder is not None and self._max_decoded_bytes is not None
+        )
+        if budgeted_decode:
+            max_length = self._budgeted_max_length(max_length)
+        elif max_length is None or flush_decoder:
             max_length = -1
 
         try:
@@ -686,19 +699,112 @@ class BaseHTTPResponse(io.IOBase):
                 "failed to decode it." % content_encoding,
                 e,
             ) from e
+        if self._decoder is not None:
+            self._consume_decoded_bytes(data)
         if flush_decoder:
-            data += self._flush_decoder()
+            if budgeted_decode:
+                remaining = self._remaining_decode_budget()
+                flushed = self._flush_decoder(
+                    max_length=max(remaining + 1, 1),
+                )
+                if self._decoder is not None:
+                    self._consume_decoded_bytes(flushed)
+                data += flushed
+            else:
+                flushed = self._flush_decoder()
+                if self._decoder is not None:
+                    self._consume_decoded_bytes(flushed)
+                data += flushed
 
         return data
 
-    def _flush_decoder(self) -> bytes:
+    def _flush_decoder(self, max_length: int | None = None) -> bytes:
         """
         Flushes the decoder. Should only be called if the decoder is actually
         being used.
         """
         if self._decoder:
-            return self._decoder.decompress(b"") + self._decoder.flush()
+            if max_length is None:
+                return self._decoder.decompress(b"") + self._decoder.flush()
+
+            # ``flush()`` on zlib-based decompressors can emit all remaining
+            # output at once. Drain through ``decompress()`` first and only
+            # flush when no compressed input is left pending.
+            data = self._decoder.decompress(b"", max_length=max_length)
+            if self._decoder.has_unconsumed_tail:
+                return data
+            return data + self._decoder.flush()
         return b""
+
+    def _remaining_decode_budget(self) -> int:
+        assert self._max_decoded_bytes is not None
+        return self._max_decoded_bytes - self._decoded_bytes_total
+
+    def _budgeted_max_length(self, max_length: int | None) -> int:
+        requested = -1 if max_length is None else max_length
+        remaining = self._remaining_decode_budget()
+        if remaining <= 0:
+            # Ask for a single byte so that pending output is observable
+            # without allowing an oversized block to be materialized.
+            return 0 if requested == 0 else 1
+        if requested < 0:
+            return remaining + 1
+        return min(requested, remaining + 1)
+
+    def _consume_decoded_bytes(self, data: bytes) -> None:
+        if not data:
+            return
+        decoded_bytes = self._decoded_bytes_total + len(data)
+        if (
+            self._max_decoded_bytes is not None
+            and decoded_bytes > self._max_decoded_bytes
+        ):
+            self._decoded_bytes_total = decoded_bytes
+            self._abort_decode_budget()
+        self._decoded_bytes_total = decoded_bytes
+        self._decoded_bytes_this_read += len(data)
+
+    def _abort_decode_budget(self) -> typing.NoReturn:
+        self._decode_budget_exceeded = True
+        self._decoded_buffer = BytesQueueBuffer()
+        self._decoder = None
+        self._invalidate_connection()
+        raise DecodeBudgetExceeded(
+            self._max_decoded_bytes,  # type: ignore[arg-type]
+            self._decoded_bytes_total,
+            content_encoding=self.headers.get("content-encoding", "").lower() or None,
+        )
+
+    def _invalidate_connection(self) -> None:
+        """
+        Prevent a partially consumed compressed stream from being reused.
+        """
+        self._connection_reusable = False
+        for obj in (
+            getattr(self, "_original_response", None),
+            getattr(self, "_fp", None),
+        ):
+            if obj is not None:
+                try:
+                    obj.close()
+                except Exception:
+                    pass
+        connection = getattr(self, "_connection", None)
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
+
+    def _raise_if_decode_budget_exceeded(self) -> None:
+        if self._decode_budget_exceeded:
+            raise DecodeBudgetExceeded(
+                self._max_decoded_bytes,  # type: ignore[arg-type]
+                self._decoded_bytes_total,
+                content_encoding=(
+                    self.headers.get("content-encoding", "").lower() or None
+                ),
+            )
 
     # Compatibility methods for `io` module
     def readinto(self, b: bytearray | memoryview[int]) -> int:
@@ -755,6 +861,13 @@ class HTTPResponse(BaseHTTPResponse):
     :param enforce_content_length:
         Enforce content length checking. Body returned by server must match
         value of Content-Length header, if present. Otherwise, raise error.
+
+    :param max_decoded_bytes:
+        Maximum number of decompressed bytes this response may produce. The
+        budget is cumulative across the whole response and all decoders in a
+        ``Content-Encoding`` chain. Defaults to ``None`` (disabled). When the
+        limit is exceeded, :class:`~urllib3.exceptions.DecodeBudgetExceeded`
+        is raised and the underlying connection is not reused.
     """
 
     def __init__(
@@ -777,7 +890,42 @@ class HTTPResponse(BaseHTTPResponse):
         request_url: str | None = None,
         auto_close: bool = True,
         sock_shutdown: typing.Callable[[int], None] | None = None,
+        max_decoded_bytes: int | None = None,
+        max_decoded_size: int | None = None,
+        max_decompressed_size: int | None = None,
+        max_decompressed_bytes: int | None = None,
+        max_decode_bytes: int | None = None,
+        max_decode_size: int | None = None,
+        decode_budget: int | None = None,
     ) -> None:
+        budget_values = {
+            "max_decoded_bytes": max_decoded_bytes,
+            "max_decoded_size": max_decoded_size,
+            "max_decompressed_size": max_decompressed_size,
+            "max_decompressed_bytes": max_decompressed_bytes,
+            "max_decode_bytes": max_decode_bytes,
+            "max_decode_size": max_decode_size,
+            "decode_budget": decode_budget,
+        }
+        configured_budgets = {
+            name: value for name, value in budget_values.items() if value is not None
+        }
+        if len(set(configured_budgets.values())) > 1:
+            raise ValueError(
+                "Conflicting decompression output budgets were provided: "
+                + ", ".join(
+                    f"{name}={value}" for name, value in configured_budgets.items()
+                )
+            )
+        if configured_budgets:
+            budget = next(iter(configured_budgets.values()))
+            if isinstance(budget, bool) or not isinstance(budget, int):
+                raise TypeError("The decompression output budget must be an integer")
+            if budget < 0:
+                raise ValueError("The decompression output budget cannot be negative")
+        else:
+            budget = None
+
         super().__init__(
             headers=headers,
             status=status,
@@ -804,10 +952,20 @@ class HTTPResponse(BaseHTTPResponse):
 
         self._pool = pool
         self._connection = connection
+        self._connection_reusable = True
 
         if hasattr(body, "read"):
             self._fp = body  # type: ignore[assignment]
         self._sock_shutdown = sock_shutdown
+
+        # Decompressed output budget. Disabled by default to preserve the
+        # historical behavior. The counter belongs to this response (and is
+        # therefore also independent from every other response and decoder
+        # chain).
+        self._max_decoded_bytes = budget
+        self._decoded_bytes_total = 0
+        self._decoded_bytes_this_read = 0
+        self._decode_budget_exceeded = False
 
         # Are we using the chunked-style of transfer encoding?
         self.chunk_left: int | None = None
@@ -826,6 +984,14 @@ class HTTPResponse(BaseHTTPResponse):
         if not self._pool or not self._connection:
             return None
 
+        if not self._connection_reusable:
+            connection = self._connection
+            self._connection = None
+            connection.close()
+            # Return the pool slot without the contaminated connection.
+            self._pool._put_conn(None)
+            return None
+
         self._pool._put_conn(self._connection)
         self._connection = None
 
@@ -835,6 +1001,9 @@ class HTTPResponse(BaseHTTPResponse):
 
         Unread data in the HTTPResponse connection blocks the connection from being released back to the pool.
         """
+        if self._decode_budget_exceeded:
+            self._invalidate_connection()
+            return
         try:
             while self._raw_read(_READ_CHUNK_SIZE):
                 pass
@@ -871,6 +1040,39 @@ class HTTPResponse(BaseHTTPResponse):
         if bytes are encoded on the wire (e.g, compressed).
         """
         return self._fp_bytes_read
+
+    @property
+    def decoded_bytes(self) -> int:
+        """Number of decompressed bytes produced for this response so far."""
+        return self._decoded_bytes_total
+
+    @property
+    def decoded_bytes_this_read(self) -> int:
+        """Number of decompressed bytes produced during the latest read."""
+        return self._decoded_bytes_this_read
+
+    @property
+    def max_decoded_bytes(self) -> int | None:
+        """The decompression output budget, or ``None`` when disabled."""
+        return self._max_decoded_bytes
+
+    @max_decoded_bytes.setter
+    def max_decoded_bytes(self, value: int | None) -> None:
+        if value is not None:
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError("The decompression output budget must be an integer")
+            if value < 0:
+                raise ValueError("The decompression output budget cannot be negative")
+        self._max_decoded_bytes = value
+
+    @property
+    def max_decoded_size(self) -> int | None:
+        """Alias for :attr:`max_decoded_bytes`."""
+        return self._max_decoded_bytes
+
+    @max_decoded_size.setter
+    def max_decoded_size(self, value: int | None) -> None:
+        self.max_decoded_bytes = value
 
     def _init_length(self, request_method: str | None) -> int | None:
         """
@@ -1128,6 +1330,8 @@ class HTTPResponse(BaseHTTPResponse):
         self._init_decoder()
         if decode_content is None:
             decode_content = self.decode_content
+        self._raise_if_decode_budget_exceeded()
+        self._decoded_bytes_this_read = 0
 
         if amt and amt < 0:
             # Negative numbers and `None` should be treated the same.
@@ -1149,6 +1353,14 @@ class HTTPResponse(BaseHTTPResponse):
                 self._decoded_buffer.put(decoded_data)
             if len(self._decoded_buffer) >= amt:
                 return self._decoded_buffer.get(amt)
+
+        if (
+            amt is None
+            and decode_content
+            and self._decoder is not None
+            and self._max_decoded_bytes is not None
+        ):
+            return self._read_all_with_budget(decode_content, cache_content)
 
         data = self._raw_read(amt)
         if not cache_content:
@@ -1207,6 +1419,43 @@ class HTTPResponse(BaseHTTPResponse):
 
         return data
 
+    def _read_all_with_budget(
+        self, decode_content: bool | None, cache_content: bool
+    ) -> bytes:
+        """
+        Read the whole body while decoding it in bounded chunks.
+
+        This avoids pulling an unbounded compressed stream off the wire before
+        discovering that its decoded representation exceeds the budget.
+        """
+        if not cache_content:
+            self._uncached_read_occurred = True
+
+        saw_data = False
+        while True:
+            data = self._raw_read(_READ_CHUNK_SIZE)
+            if not data:
+                if (
+                    not saw_data
+                    and not self._decoded_buffer
+                    and not (self._decoder and self._decoder.has_unconsumed_tail)
+                ):
+                    break
+                decoded_data = self._decode(b"", decode_content, flush_decoder=True)
+                if decoded_data:
+                    self._decoded_buffer.put(decoded_data)
+                break
+
+            saw_data = True
+            decoded_data = self._decode(data, decode_content, flush_decoder=False)
+            if decoded_data:
+                self._decoded_buffer.put(decoded_data)
+
+        result = self._decoded_buffer.get_all()
+        if cache_content and not self._uncached_read_occurred:
+            self._body = result
+        return result
+
     def read1(
         self,
         amt: int | None = None,
@@ -1226,6 +1475,8 @@ class HTTPResponse(BaseHTTPResponse):
         """
         if decode_content is None:
             decode_content = self.decode_content
+        self._raise_if_decode_budget_exceeded()
+        self._decoded_bytes_this_read = 0
         if amt and amt < 0:
             # Negative numbers and `None` should be treated the same.
             amt = None
@@ -1333,6 +1584,9 @@ class HTTPResponse(BaseHTTPResponse):
 
         if self._connection:
             self._connection.close()
+            # A connection closed by the caller must never be returned to the
+            # pool, even if release_conn() is called later.
+            self._connection_reusable = False
 
         if not self.auto_close:
             io.IOBase.close(self)
@@ -1443,6 +1697,8 @@ class HTTPResponse(BaseHTTPResponse):
             'content-encoding' header.
         """
         self._init_decoder()
+        self._raise_if_decode_budget_exceeded()
+        self._decoded_bytes_this_read = 0
         # FIXME: Rewrite this method and make it a class with a better structured logic.
         if not self.chunked:
             raise ResponseNotChunked(
@@ -1496,7 +1752,17 @@ class HTTPResponse(BaseHTTPResponse):
                 # On CPython and PyPy, we should never need to flush the
                 # decoder. However, on Jython we *might* need to, so
                 # lets defensively do it anyway.
-                decoded = self._flush_decoder()
+                budgeted_decode = (
+                    self._decoder is not None and self._max_decoded_bytes is not None
+                )
+                if budgeted_decode:
+                    remaining = self._remaining_decode_budget()
+                    decoded = self._flush_decoder(
+                        max_length=max(remaining + 1, 1),
+                    )
+                    self._consume_decoded_bytes(decoded)
+                else:
+                    decoded = self._flush_decoder()
                 if decoded:  # Platform-specific: Jython.
                     yield decoded
 

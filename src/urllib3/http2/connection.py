@@ -226,6 +226,7 @@ class HTTP2Connection(HTTPSConnection):
 
     def getresponse(  # type: ignore[override]
         self,
+        **_response_kw: typing.Any,
     ) -> HTTP2Response:
         status = None
         data = bytearray()

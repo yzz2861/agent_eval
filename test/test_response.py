@@ -18,6 +18,7 @@ import pytest
 
 from urllib3.exceptions import (
     BodyNotHttplibCompatible,
+    DecodeBudgetExceeded,
     DecodeError,
     IncompleteRead,
     InvalidChunkLength,
@@ -2203,6 +2204,270 @@ class TestResponse:
             resp = HTTPResponse(fp, status=204)
             resp.read(16)
         assert "Response may not contain content" in str(excinfo.value)
+
+
+class TestDecodeOutputBudget:
+    @staticmethod
+    def _gzip_response(
+        data: bytes, budget: int | None, **kwargs: typing.Any
+    ) -> HTTPResponse:
+        return HTTPResponse(
+            BytesIO(gzip.compress(data)),
+            headers={"content-encoding": "gzip"},
+            preload_content=False,
+            max_decoded_bytes=budget,
+            **kwargs,
+        )
+
+    def test_default_is_disabled(self) -> None:
+        original = b"x" * 1_000_000
+        fp = BytesIO(gzip.compress(original))
+        r = HTTPResponse(
+            fp, headers={"content-encoding": "gzip"}, preload_content=False
+        )
+        assert r.max_decoded_bytes is None
+        assert r.read() == original
+        assert r.decoded_bytes == len(original)
+
+    def test_small_compressed_body_large_decoded_output(self) -> None:
+        original = b"x" * 1_000_000
+        r = self._gzip_response(original, 1000)
+
+        with pytest.raises(DecodeBudgetExceeded) as ctx:
+            r.read()
+
+        assert ctx.value.limit == 1000
+        assert ctx.value.decoded_bytes == 1001
+        assert r.decoded_bytes == 1001
+        assert len(r._decoded_buffer) == 0
+        assert r.closed
+
+    def test_bounded_read_stops_before_further_upstream_reads(self) -> None:
+        class CountingBytesIO(BytesIO):
+            def __init__(self, data: bytes) -> None:
+                super().__init__(data)
+                self.read_calls = 0
+
+            def read(self, size: int = -1) -> bytes:
+                self.read_calls += 1
+                return super().read(size)
+
+        # Compressed data is much larger than one 64 KiB read, but its decoded
+        # output is already over the budget during the first upstream read.
+        original = b"0123456789abcdef" * 20_000
+        fp = CountingBytesIO(gzip.compress(original))
+        r = HTTPResponse(
+            fp,
+            headers={"content-encoding": "gzip"},
+            preload_content=False,
+            max_decoded_bytes=1000,
+        )
+
+        with pytest.raises(DecodeBudgetExceeded):
+            r.read()
+
+        assert fp.read_calls == 1
+        assert r.decoded_bytes == 1001
+
+    def test_chunked_reads_are_cumulatively_bounded(self) -> None:
+        original = b"x" * 100_000
+        r = self._gzip_response(original, 5000)
+
+        chunks = []
+        with pytest.raises(DecodeBudgetExceeded):
+            while True:
+                chunks.append(r.read(4096))
+
+        assert chunks and all(len(chunk) <= 4096 for chunk in chunks)
+        assert sum(map(len, chunks)) == 4096
+        assert r.decoded_bytes <= 5001
+        assert r.closed
+
+    def test_multi_encoding_chain_uses_one_cumulative_budget(self) -> None:
+        original = b"abc" * 40_000
+        data = gzip.compress(zlib.compress(original))
+        headers = {"content-encoding": "deflate, gzip"}
+
+        r = HTTPResponse(
+            BytesIO(data),
+            headers=headers,
+            preload_content=False,
+            max_decoded_bytes=1000,
+        )
+        with pytest.raises(DecodeBudgetExceeded):
+            r.read()
+        assert r.decoded_bytes == 1001
+
+        exact = HTTPResponse(
+            BytesIO(data),
+            headers=headers,
+            preload_content=False,
+            max_decoded_bytes=len(original),
+        )
+        assert exact.read() == original
+        assert exact.read() == b""
+
+    def test_multi_encoding_budgets_are_response_local(self) -> None:
+        first = b"a" * 100
+        second = b"b" * 100
+        headers = {"content-encoding": "deflate, gzip"}
+        r1 = HTTPResponse(
+            BytesIO(gzip.compress(zlib.compress(first))),
+            headers=headers,
+            preload_content=False,
+            max_decoded_bytes=100,
+        )
+        r2 = HTTPResponse(
+            BytesIO(gzip.compress(zlib.compress(second))),
+            headers=headers,
+            preload_content=False,
+            max_decoded_bytes=100,
+        )
+
+        assert r1.read() == first
+        assert r2.read() == second
+        assert r1.decoded_bytes == r2.decoded_bytes == 100
+
+    @pytest.mark.parametrize("read_method", ("read", "read1", "stream"))
+    def test_exact_budget_boundary_succeeds(self, read_method: str) -> None:
+        original = b"x" * 1000
+        r = self._gzip_response(original, 1000)
+
+        if read_method == "read":
+            result = r.read()
+        elif read_method == "read1":
+            result = r.read1()
+        else:
+            result = b"".join(r.stream())
+
+        assert result == original
+        assert r.decoded_bytes == 1000
+        assert r.read() == b""
+
+    @pytest.mark.parametrize("read_method", ("read", "read1", "stream"))
+    def test_one_byte_over_budget_raises(self, read_method: str) -> None:
+        original = b"x" * 1000
+        r = self._gzip_response(original, 999)
+
+        with pytest.raises(DecodeBudgetExceeded):
+            if read_method == "read":
+                r.read()
+            elif read_method == "read1":
+                r.read1()
+            else:
+                list(r.stream())
+
+        assert r.decoded_bytes == 1000
+        assert r.closed
+
+    def test_decoder_flush_counts_towards_budget(self) -> None:
+        class FlushOnlyDecoder:
+            def decompress(self, data: bytes, max_length: int = -1) -> bytes:
+                return b""
+
+            @property
+            def has_unconsumed_tail(self) -> bool:
+                return False
+
+            def flush(self) -> bytes:
+                return b"x" * 100
+
+        decoder = FlushOnlyDecoder()
+        with mock.patch("urllib3.response._get_decoder", return_value=decoder):
+            r = HTTPResponse(
+                BytesIO(b"compressed"),
+                headers={"content-encoding": "gzip"},
+                preload_content=False,
+                max_decoded_bytes=10,
+            )
+            with pytest.raises(DecodeBudgetExceeded):
+                r.read()
+
+        assert r.decoded_bytes == 100
+        assert r.closed
+
+    def test_normal_read_returns_connection_to_pool(self) -> None:
+        class DummyPool:
+            def __init__(self) -> None:
+                self.conns: list[DummyConnection] = []
+
+            def _put_conn(self, conn: DummyConnection) -> None:
+                self.conns.append(conn)
+
+        class DummyConnection:
+            def __init__(self) -> None:
+                self.closed = False
+                self.close_calls = 0
+
+            def close(self) -> None:
+                self.closed = True
+                self.close_calls += 1
+
+        pool = DummyPool()
+        conn = DummyConnection()
+        r = self._gzip_response(b"hello", 100, pool=pool, connection=conn)
+
+        assert r.read() == b"hello"
+        r.release_conn()
+
+        assert pool.conns == [conn]
+        assert not conn.closed
+        assert r.connection is None
+
+    def test_over_budget_connection_is_not_reused(self) -> None:
+        class DummyPool:
+            def __init__(self) -> None:
+                self.conns: list[DummyConnection] = []
+
+            def _put_conn(self, conn: DummyConnection) -> None:
+                self.conns.append(conn)
+
+        class DummyConnection:
+            def __init__(self) -> None:
+                self.closed = False
+                self.close_calls = 0
+
+            def close(self) -> None:
+                self.closed = True
+                self.close_calls += 1
+
+        pool = DummyPool()
+        conn = DummyConnection()
+        r = self._gzip_response(b"x" * 10_000, 1000, pool=pool, connection=conn)
+
+        with pytest.raises(DecodeBudgetExceeded):
+            r.read()
+
+        assert conn.closed
+        r.release_conn()
+        assert pool.conns == [None]
+        assert r.connection is None
+
+    def test_early_close_does_not_return_connection_to_pool(self) -> None:
+        class DummyPool:
+            def __init__(self) -> None:
+                self.conns: list[DummyConnection] = []
+
+            def _put_conn(self, conn: DummyConnection) -> None:
+                self.conns.append(conn)
+
+        class DummyConnection:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        pool = DummyPool()
+        conn = DummyConnection()
+        r = self._gzip_response(b"x" * 10_000, 1000, pool=pool, connection=conn)
+
+        assert len(r.read(10)) == 10
+        r.close()
+        r.release_conn()
+
+        assert conn.closed
+        assert pool.conns == [None]
 
 
 class MockChunkedEncodingResponse:

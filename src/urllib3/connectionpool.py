@@ -394,6 +394,7 @@ class HTTPConnectionPool(ConnectionPool, RequestMethods):
         preload_content: bool = True,
         decode_content: bool = True,
         enforce_content_length: bool = True,
+        **response_kw: typing.Any,
     ) -> BaseHTTPResponse:
         """
         Perform a request on a given urllib connection object taken from our
@@ -537,7 +538,7 @@ class HTTPConnectionPool(ConnectionPool, RequestMethods):
 
         # Receive the response from the server
         try:
-            response = conn.getresponse()
+            response = conn.getresponse(**response_kw)
         except (BaseSSLError, OSError) as e:
             self._raise_timeout(err=e, url=url, timeout_value=read_timeout)
             raise

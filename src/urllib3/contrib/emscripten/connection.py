@@ -126,7 +126,7 @@ class EmscriptenHTTPConnection:
         except _RequestError as e:
             raise HTTPException(e.message) from e
 
-    def getresponse(self) -> BaseHTTPResponse:
+    def getresponse(self, **_response_kw: typing.Any) -> BaseHTTPResponse:
         if self._response is not None:
             return EmscriptenHttpResponseWrapper(
                 internal_response=self._response,
