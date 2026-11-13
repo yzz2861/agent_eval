@@ -15,6 +15,14 @@ You can find out backwards-compatibility policy [here](https://github.com/pyca/s
 
 ## [Unreleased](https://github.com/pyca/service-identity/compare/26.1.0...HEAD)
 
+### Added
+
+- The *cryptography* backend now supports an explicit, auditable policy for falling back to the subject's `commonName` when a certificate carries no `subjectAltName` extension at all:
+  `service_identity.cryptography.CommonNameFallback`, `verify_certificate_hostname_with_policy()`, and `extract_common_name_pattern()`.
+  The default keeps refusing the fallback; when enabled, the `commonName` is only consulted if no `subjectAltName` extension (of any kind, including URI or IP) is present, and it is strictly validated (duplicate, empty, wildcard-like, multi-valued-RDN, and non-IDNA `commonName`\ s are rejected).
+  New error classifications `service_identity.SubjectAltNameMissingError` (no SANs, fallback disabled) and `service_identity.InvalidSubjectCommonNameError` (structurally invalid `commonName`) -- both `CertificateError` subclasses -- distinguish those cases from a `VerificationError` (SANs present, but none matched).
+
+
 ### Removed
 
 - Support for Python 3.8 and 3.9.

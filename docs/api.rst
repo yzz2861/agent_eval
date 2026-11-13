@@ -16,7 +16,11 @@ PyCA cryptography
 
 .. autofunction:: verify_certificate_hostname
 .. autofunction:: verify_certificate_ip_address
+.. autofunction:: verify_certificate_hostname_with_policy
 .. autofunction:: extract_patterns
+.. autofunction:: extract_common_name_pattern
+.. autoclass:: CommonNameFallback
+   :members:
 
 
 pyOpenSSL
@@ -75,4 +79,6 @@ Universal Errors and Warnings
 
 .. autoexception:: VerificationError
 .. autoexception:: CertificateError
+.. autoexception:: SubjectAltNameMissingError
+.. autoexception:: InvalidSubjectCommonNameError
 .. autoexception:: SubjectAltNameWarning

@@ -79,3 +79,32 @@ class CertificateError(Exception):
     This includes the case where s certificate contains no
     ``subjectAltName``\ s.
     """
+
+
+class SubjectAltNameMissingError(CertificateError):
+    r"""
+    Certificate contains no ``subjectAltName``\ s and the commonName
+    fallback policy does not allow falling back to the subject's
+    ``commonName``.
+
+    This is a more specific :class:`CertificateError` so callers can
+    distinguish "no usable identity at all" from other certificate
+    problems.
+
+    .. versionadded:: 26.2.0
+    """
+
+
+class InvalidSubjectCommonNameError(CertificateError):
+    r"""
+    The subject's ``commonName`` of a certificate is structurally
+    invalid and therefore must not be used for identity verification.
+
+    This includes duplicate ``commonName``\ s, ``commonName``\ s
+    within multi-valued RDNs, empty ``commonName``\ s,
+    ``commonName``\ s that look like wildcard patterns, and
+    ``commonName``\ s that are not valid DNS names (including invalid
+    IDNA encoding).
+
+    .. versionadded:: 26.2.0
+    """

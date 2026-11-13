@@ -18,6 +18,7 @@ from .exceptions import (
     IPAddressMismatch,
     Mismatch,
     SRVMismatch,
+    SubjectAltNameMissingError,
     URIMismatch,
     VerificationError,
 )
@@ -50,10 +51,16 @@ def verify_service_identity(
 
     *obligatory_ids* must be both present and match.  *optional_ids* must match
     if a pattern of the respective type is present.
+
+    .. versionchanged:: 26.2.0
+       Raises the more specific
+       :class:`service_identity.exceptions.SubjectAltNameMissingError` (a
+       subclass of :class:`service_identity.CertificateError`) if
+       *cert_patterns* is empty.
     """
     if not cert_patterns:
         msg = "Certificate does not contain any `subjectAltName`s."
-        raise CertificateError(msg)
+        raise SubjectAltNameMissingError(msg)
 
     errors = []
     matches = _find_matches(cert_patterns, obligatory_ids) + _find_matches(
