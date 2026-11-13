@@ -35,8 +35,16 @@ from .util import (
     sigdecode_string,
     sigdecode_der,
     sigdecode_strings,
+    number_to_string,
 )
-from .curves import NIST256p, Curve, BRAINPOOLP160r1, Ed25519, Ed448
+from .curves import (
+    NIST256p,
+    Curve,
+    BRAINPOOLP160r1,
+    SECP256k1,
+    Ed25519,
+    Ed448,
+)
 from .ellipticcurve import Point, PointJacobi, CurveFp, INFINITY
 from .ecdsa import generator_brainpoolp160r1
 
@@ -130,6 +138,198 @@ class TestVerifyingKeyFromString(unittest.TestCase):
     def test_ed25519_VerifyingKey_from_string_imported(self):
         with self.assertRaises(MalformedPointError):
             VerifyingKey.from_string(b"AAA", Ed25519)
+
+
+class TestPublicKeyValidation(unittest.TestCase):
+    @staticmethod
+    def _assert_reason(testcase, reason, func, *args, **kwargs):
+        with testcase.assertRaises(MalformedPointError) as exc:
+            func(*args, **kwargs)
+        testcase.assertEqual(exc.exception.reason, reason)
+        return exc.exception
+
+    def test_valid_roundtrips_weierstrass(self):
+        for curve in (NIST256p, SECP256k1):
+            key = SigningKey.from_secret_exponent(1, curve)
+            vk = key.verifying_key
+            for encoding in ("raw", "uncompressed", "compressed", "hybrid"):
+                encoded = vk.to_string(encoding)
+                decoded = VerifyingKey.from_string(encoded, curve)
+                self.assertEqual(decoded, vk)
+                self.assertEqual(decoded.to_string(encoding), encoded)
+
+    def test_valid_roundtrip_ed25519(self):
+        key = SigningKey.from_string(b"\x01" * 32, Ed25519)
+        vk = key.verifying_key
+        encoded = vk.to_string()
+        decoded = VerifyingKey.from_string(encoded, Ed25519, strict=True)
+        self.assertEqual(decoded, vk)
+        self.assertEqual(decoded.to_string(), encoded)
+
+    def test_off_curve_uncompressed_and_raw(self):
+        vk = SigningKey.generate(NIST256p).verifying_key
+        p = NIST256p.curve.p()
+        x = vk.pubkey.point.x()
+        y = (vk.pubkey.point.y() + 1) % p
+        raw = number_to_string(x, p) + number_to_string(y, p)
+        for encoded in (raw, b"\x04" + raw):
+            error = self._assert_reason(
+                self,
+                "point_not_on_curve",
+                VerifyingKey.from_string,
+                encoded,
+                NIST256p,
+            )
+            self.assertNotIn(encoded, str(error).encode())
+
+    def test_infinity_encoding(self):
+        self._assert_reason(
+            self,
+            "point_at_infinity",
+            VerifyingKey.from_string,
+            b"\x00",
+            NIST256p,
+        )
+        self._assert_reason(
+            self,
+            "point_at_infinity",
+            VerifyingKey.from_public_point,
+            INFINITY,
+            NIST256p,
+        )
+
+    def test_ed25519_identity_is_rejected(self):
+        identity = b"\x01" + b"\x00" * 31
+        self._assert_reason(
+            self,
+            "point_at_infinity",
+            VerifyingKey.from_string,
+            identity,
+            Ed25519,
+        )
+
+    def test_ed25519_small_order_subgroup_is_opt_in(self):
+        small_order = b"\x00" * 32
+        VerifyingKey.from_string(small_order, Ed25519)
+        self._assert_reason(
+            self,
+            "subgroup_mismatch",
+            VerifyingKey.from_string,
+            small_order,
+            Ed25519,
+            strict=True,
+        )
+
+    def test_invalid_prefixes(self):
+        vk = SigningKey.generate(NIST256p).verifying_key
+        compressed = vk.to_string("compressed")
+        uncompressed = vk.to_string("uncompressed")
+        for encoded in (
+            b"\x04" + compressed[1:],
+            b"\x05" + compressed[1:],
+            b"\x02" + uncompressed[1:],
+        ):
+            self._assert_reason(
+                self,
+                "encoding_format",
+                VerifyingKey.from_string,
+                encoded,
+                NIST256p,
+            )
+
+    def test_compressed_no_y_and_ambiguous_parity(self):
+        c_23 = CurveFp(23, 1, 1, 1)
+        # x=2 has no square root in this curve's group.
+        self._assert_reason(
+            self,
+            "point_not_on_curve",
+            PointJacobi.from_bytes,
+            c_23,
+            b"\x02\x02",
+            valid_encodings=["compressed"],
+        )
+        # x=4 gives y=0; there is no odd y for the 0x03 prefix.
+        self._assert_reason(
+            self,
+            "point_not_on_curve",
+            PointJacobi.from_bytes,
+            c_23,
+            b"\x03\x04",
+            valid_encodings=["compressed"],
+        )
+        self.assertEqual(
+            PointJacobi.from_bytes(
+                c_23, b"\x02\x04", valid_encodings=["compressed"]
+            ).y(),
+            0,
+        )
+
+    def test_hybrid_inconsistency_always_rejected(self):
+        vk = SigningKey.generate(NIST256p).verifying_key
+        hybrid = vk.to_string("hybrid")
+        flipped = (b"\x07" if hybrid[:1] == b"\x06" else b"\x06") + hybrid[1:]
+        self._assert_reason(
+            self,
+            "encoding_format",
+            VerifyingKey.from_string,
+            flipped,
+            NIST256p,
+            validate_point=False,
+        )
+
+    def test_subgroup_validation_is_opt_in(self):
+        c_23 = CurveFp(23, 1, 1, 1)
+        generator = Point(c_23, 13, 7, 7)
+        toy_curve = Curve("toy", c_23, generator, None)
+        # (3, 10) has order 28, while the generator has order 7.
+        raw = b"\x03\x0a"
+        VerifyingKey.from_string(raw, toy_curve, valid_encodings=["raw"])
+        for kwargs in ({"strict": True}, {"validate_subgroup": True}):
+            for encoded, encodings in (
+                (raw, ["raw"]),
+                (b"\x02\x03", ["compressed"]),
+                (b"\x04\x03\x0a", ["uncompressed"]),
+                (b"\x06\x03\x0a", ["hybrid"]),
+            ):
+                self._assert_reason(
+                    self,
+                    "subgroup_mismatch",
+                    VerifyingKey.from_string,
+                    encoded,
+                    toy_curve,
+                    valid_encodings=encodings,
+                    **kwargs
+                )
+        self.assertIsNotNone(
+            VerifyingKey.from_string(
+                b"\x05\x04",
+                toy_curve,
+                valid_encodings=["raw"],
+                strict=True,
+            )
+        )
+
+    def test_curve_mismatch(self):
+        vk = SigningKey.from_secret_exponent(1, SECP256k1).verifying_key
+        for encoding in ("uncompressed", "compressed"):
+            self._assert_reason(
+                self,
+                "curve_mismatch",
+                VerifyingKey.from_string,
+                vk.to_string(encoding),
+                NIST256p,
+            )
+
+    def test_point_object_curve_mismatch(self):
+        c_23 = CurveFp(23, 1, 1, 1)
+        point = Point(c_23, 13, 7, 7)
+        self._assert_reason(
+            self,
+            "curve_mismatch",
+            VerifyingKey.from_public_point,
+            point,
+            NIST256p,
+        )
 
 
 class TestVerifyingKeyFromDer(unittest.TestCase):

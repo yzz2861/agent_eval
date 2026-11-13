@@ -50,8 +50,66 @@ except ImportError:  # pragma: no branch
 from six import python_2_unicode_compatible
 from . import numbertheory
 from ._compat import normalise_bytes, int_to_bytes, bit_length, bytes_to_int
-from .errors import MalformedPointError
+from .errors import (
+    CurveMismatchError,
+    MalformedPointError,
+    PointAtInfinityError,
+    PointEncodingError,
+    PointNotOnCurveError,
+    SubgroupMismatchError,
+)
 from .util import orderlen, string_to_number, number_to_string
+
+# Stable error reasons. They are also exposed on the exception instance so
+# callers can reliably distinguish failures even when wording changes.
+POINT_ERROR_ENCODING = "encoding_format"
+POINT_ERROR_CURVE_MISMATCH = "curve_mismatch"
+POINT_ERROR_NOT_ON_CURVE = "point_not_on_curve"
+POINT_ERROR_SUBGROUP = "subgroup_mismatch"
+POINT_ERROR_INFINITY = "point_at_infinity"
+
+_POINT_ERROR_CLASSES = {
+    POINT_ERROR_ENCODING: PointEncodingError,
+    POINT_ERROR_CURVE_MISMATCH: CurveMismatchError,
+    POINT_ERROR_NOT_ON_CURVE: PointNotOnCurveError,
+    POINT_ERROR_SUBGROUP: SubgroupMismatchError,
+    POINT_ERROR_INFINITY: PointAtInfinityError,
+}
+
+
+def malformed_point_error(reason, message, cause=None, **details):
+    """
+    Build a reason-tagged :class:`MalformedPointError`.
+
+    The error must never contain the full encoded public key. Callers may
+    attach decoded coordinates for diagnostics, but messages stay generic.
+    """
+    error = _POINT_ERROR_CLASSES[reason](message)
+    error.reason = reason
+    error.category = reason
+    error.code = reason
+    error.cause = cause
+    for name, value in details.items():
+        setattr(error, name, value)
+    return error
+
+
+def _point_at_infinity(message="Point at infinity is not a valid public key"):
+    return malformed_point_error(POINT_ERROR_INFINITY, message)
+
+
+def _point_not_on_curve(
+    message="Point does not lay on the curve", cause=None, **details
+):
+    return malformed_point_error(
+        POINT_ERROR_NOT_ON_CURVE, message, cause, **details
+    )
+
+
+def _encoding_error(message):
+    return malformed_point_error(
+        POINT_ERROR_ENCODING, "Invalid point encoding: {0}".format(message)
+    )
 
 
 @python_2_unicode_compatible
@@ -267,22 +325,72 @@ class AbstractPoint(object):
     def _from_compressed(data, curve):
         """Decode public point from compressed encoding."""
         if data[:1] not in (b"\x02", b"\x03"):
-            raise MalformedPointError("Malformed compressed point encoding")
+            raise _encoding_error("Malformed compressed point encoding")
 
-        is_even = data[:1] == b"\x02"
+        prefix = data[:1]
+        is_even = prefix == b"\x02"
         x = string_to_number(data[1:])
+        coordinate_length = len(data[1:])
         p = curve.p()
+        if not 0 <= x < p:
+            raise _point_not_on_curve(
+                "Point coordinates are not in the finite field "
+                "(out of range)",
+                x=x,
+                y=None,
+                encoding_prefix=prefix,
+                coordinate_length=coordinate_length,
+            )
         alpha = (pow(x, 3, p) + (curve.a() * x) + curve.b()) % p
         try:
             beta = numbertheory.square_root_mod_prime(alpha, p)
         except numbertheory.Error as e:
-            raise MalformedPointError(
-                "Encoding does not correspond to a point on curve", e
+            raise _point_not_on_curve(
+                "Point does not lay on the curve",
+                e,
+                x=x,
+                y=None,
+                encoding_prefix=prefix,
+                coordinate_length=coordinate_length,
             )
-        if is_even == bool(beta & 1):
-            y = p - beta
-        else:
-            y = beta
+        # For an odd prime, a non-zero square root has two roots with
+        # opposite parity. Select the one requested by the prefix. A zero
+        # root has no odd representative, and a non-prime modulus may produce
+        # more than one candidate; both cases are rejected rather than
+        # silently guessing a coordinate.
+        candidates = set((beta % p, (-beta) % p))
+        wanted_odd = not is_even
+        candidates = [
+            candidate
+            for candidate in candidates
+            if bool(candidate & 1) == wanted_odd
+        ]
+        if not candidates:
+            raise _point_not_on_curve(
+                "Compressed point encoding has no y coordinate with the "
+                "requested parity",
+                x=x,
+                y=None,
+                encoding_prefix=prefix,
+                coordinate_length=coordinate_length,
+            )
+        if len(candidates) != 1:
+            raise _point_not_on_curve(
+                "Compressed point encoding has an ambiguous y coordinate",
+                x=x,
+                y=None,
+                encoding_prefix=prefix,
+                coordinate_length=coordinate_length,
+            )
+        y = candidates[0]
+        if not 0 <= y < p or not curve.contains_point(x, y):
+            raise _point_not_on_curve(
+                "Point does not lay on the curve",
+                x=x,
+                y=y,
+                encoding_prefix=prefix,
+                coordinate_length=coordinate_length,
+            )
         return x, y
 
     @classmethod
@@ -294,26 +402,35 @@ class AbstractPoint(object):
         # primarily use the uncompressed as it's easiest to handle
         x, y = cls._from_raw_encoding(data[1:], raw_encoding_length)
 
-        # but validate if it's self-consistent if we're asked to do that
-        if validate_encoding and (
+        # Hybrid encoding is self-describing, so an inconsistent parity bit
+        # is always an encoding error. Keeping the argument for API
+        # compatibility must not turn this check off.
+        if (
             y & 1
             and data[:1] != b"\x07"
             or (not y & 1)
             and data[:1] != b"\x06"
         ):
-            raise MalformedPointError("Inconsistent hybrid point encoding")
+            raise _encoding_error("Inconsistent hybrid point encoding")
 
         return x, y
 
     @classmethod
-    def _from_edwards(cls, curve, data):
+    def _from_edwards(
+        cls,
+        curve,
+        data,
+        validate_point=True,
+        order=None,
+        validate_subgroup=False,
+    ):
         """Decode a point on an Edwards curve."""
         data = bytearray(data)
         p = curve.p()
         # add 1 for the sign bit and then round up
         exp_len = (bit_length(p) + 1 + 7) // 8
         if len(data) != exp_len:
-            raise MalformedPointError("Point length doesn't match the curve.")
+            raise _encoding_error("Point length doesn't match the curve.")
         x_0 = (data[-1] & 0x80) >> 7
 
         data[-1] &= 0x80 - 1
@@ -321,6 +438,13 @@ class AbstractPoint(object):
         y = bytes_to_int(data, "little")
         if GMPY:
             y = mpz(y)
+        if not 0 <= y < p:
+            raise _point_not_on_curve(
+                "Point coordinates are not in the finite field "
+                "(out of range)",
+                x=None,
+                y=y,
+            )
 
         x2 = (
             (y * y - 1)
@@ -331,18 +455,84 @@ class AbstractPoint(object):
         try:
             x = numbertheory.square_root_mod_prime(x2, p)
         except numbertheory.Error as e:
-            raise MalformedPointError(
-                "Encoding does not correspond to a point on curve", e
+            raise _point_not_on_curve(
+                "Point does not lay on the curve", e, x=None, y=y
             )
 
         if x % 2 != x_0:
             x = -x % p
 
+        if validate_point and not curve.contains_point(x, y):
+            raise _point_not_on_curve(
+                "Point does not lay on the curve", x=x, y=y
+            )
+        if x == 0 and y == 1:
+            raise _point_at_infinity()
+        if validate_subgroup and order:
+            if not cls._edwards_is_in_subgroup(curve, x, y, order):
+                raise malformed_point_error(
+                    POINT_ERROR_SUBGROUP,
+                    "Point is not in the expected subgroup (order mismatch)",
+                    x=x,
+                    y=y,
+                )
+
         return x, y
+
+    @staticmethod
+    def _edwards_is_in_subgroup(curve, x, y, order):
+        """
+        Check ``order * (x, y) == infinity`` on an Edwards curve.
+
+        PointEdwards' coordinate formulas assume points from the prime-order
+        subgroup and shortcut points with ``x*y == 0`` to infinity. That hides
+        exactly the small-order points we need to reject, so perform the
+        check with the affine Edwards addition formula instead.
+        """
+        p, a, d = curve.p(), curve.a(), curve.d()
+
+        def add(left, right):
+            if left is None:
+                return right
+            if right is None:
+                return left
+            x1, y1 = left
+            x2, y2 = right
+            factor = d * x1 * x2 * y1 * y2 % p
+            den_x = (1 + factor) % p
+            den_y = (1 - factor) % p
+            if not den_x or not den_y:
+                return None
+            x3 = (
+                (x1 * y2 + y1 * x2)
+                * numbertheory.inverse_mod(den_x, p)
+            ) % p
+            y3 = (
+                (y1 * y2 - a * x1 * x2)
+                * numbertheory.inverse_mod(den_y, p)
+            ) % p
+            return x3, y3
+
+        result = None
+        base = (x, y)
+        for bit in bin(order)[2:]:
+            result = add(result, result)
+            if bit == "1":
+                result = add(result, base)
+        return result is None or result == (0, 1)
 
     @classmethod
     def from_bytes(
-        cls, curve, data, validate_encoding=True, valid_encodings=None
+        cls,
+        curve,
+        data,
+        validate_encoding=True,
+        valid_encodings=None,
+        validate_point=True,
+        order=None,
+        strict=False,
+        validate_subgroup=None,
+        subgroup_order=None,
     ):
         """
         Initialise the object from byte encoding of a point.
@@ -367,6 +557,17 @@ class AbstractPoint(object):
             :term:`hybrid`, and :term:`raw encoding` (specified with ``raw``
             name). All formats by default (specified with ``None``).
         :type valid_encodings: :term:`set-like object`
+        :param bool validate_point: verify that coordinates are in the finite
+            field and that the point satisfies the curve equation.
+        :param int order: the order of the point; used for subgroup validation
+            when no separate ``subgroup_order`` is provided.
+        :param bool strict: enable full public-key validation. This implies
+            ``validate_point`` and, unless explicitly disabled, subgroup
+            validation.
+        :param bool validate_subgroup: explicitly enable or disable the
+            subgroup (``order * point == infinity``) check.
+        :param int subgroup_order: order of the expected subgroup. When not
+            provided, ``order`` is used.
 
         :raises `~ecdsa.errors.MalformedPointError`: if the public point does
             not lay on the curve or the encoding is invalid
@@ -388,15 +589,43 @@ class AbstractPoint(object):
             )
         data = normalise_bytes(data)
 
+        if validate_subgroup is None:
+            validate_subgroup = bool(strict)
+        if strict or validate_subgroup:
+            validate_point = True
+
         if isinstance(curve, CurveEdTw):
-            return cls._from_edwards(curve, data)
+            return cls._from_edwards(
+                curve,
+                data,
+                validate_point=validate_point,
+                order=subgroup_order or order,
+                validate_subgroup=validate_subgroup,
+            )
 
         key_len = len(data)
+        if data == b"\x00":
+            raise _point_at_infinity()
         raw_encoding_length = 2 * orderlen(curve.p())
         if key_len == raw_encoding_length and "raw" in valid_encodings:
             coord_x, coord_y = cls._from_raw_encoding(
                 data, raw_encoding_length
             )
+            # On very small curves the raw and compressed encodings have the
+            # same length. If the raw interpretation is not a point, honour
+            # the SEC1 prefix instead of silently treating it as raw bytes.
+            if (
+                validate_point
+                and data[:1] in (b"\x02", b"\x03")
+                and "compressed" in valid_encodings
+                and not curve.contains_point(coord_x, coord_y)
+            ):
+                try:
+                    compressed_coords = cls._from_compressed(data, curve)
+                except MalformedPointError:
+                    pass
+                else:
+                    coord_x, coord_y = compressed_coords
         elif key_len == raw_encoding_length + 1 and (
             "hybrid" in valid_encodings or "uncompressed" in valid_encodings
         ):
@@ -409,7 +638,7 @@ class AbstractPoint(object):
                     data[1:], raw_encoding_length
                 )
             else:
-                raise MalformedPointError(
+                raise _encoding_error(
                     "Invalid X9.62 encoding of the public point"
                 )
         elif (
@@ -418,11 +647,43 @@ class AbstractPoint(object):
         ):
             coord_x, coord_y = cls._from_compressed(data, curve)
         else:
-            raise MalformedPointError(
+            raise _encoding_error(
                 "Length of string does not match lengths of "
                 "any of the enabled ({0}) encodings of the "
                 "curve.".format(", ".join(valid_encodings))
             )
+        if coord_x is None or coord_y is None:
+            raise _point_at_infinity()
+        p = curve.p()
+        coordinate_length = orderlen(p)
+        if not 0 <= coord_x < p or not 0 <= coord_y < p:
+            raise _point_not_on_curve(
+                "Point coordinates are not in the finite field "
+                "(out of range)",
+                x=coord_x,
+                y=coord_y,
+                coordinate_length=coordinate_length,
+            )
+        if validate_point and not curve.contains_point(coord_x, coord_y):
+            raise _point_not_on_curve(
+                "Point does not lay on the curve",
+                x=coord_x,
+                y=coord_y,
+                coordinate_length=coordinate_length,
+            )
+        if validate_subgroup:
+            subgroup_order = subgroup_order or order
+            if subgroup_order is not None:
+                point = Point(curve, coord_x, coord_y)
+                if point * subgroup_order != INFINITY:
+                    raise malformed_point_error(
+                        POINT_ERROR_SUBGROUP,
+                        "Point is not in the expected subgroup "
+                        "(order mismatch)",
+                        x=coord_x,
+                        y=coord_y,
+                        subgroup_order=subgroup_order,
+                    )
         return coord_x, coord_y
 
     def _raw_encode(self):
@@ -551,6 +812,10 @@ class PointJacobi(AbstractPoint):
         valid_encodings=None,
         order=None,
         generator=False,
+        validate_point=True,
+        strict=False,
+        validate_subgroup=None,
+        subgroup_order=None,
     ):
         """
         Initialise the object from byte encoding of a point.
@@ -577,6 +842,12 @@ class PointJacobi(AbstractPoint):
         :param bool generator: the point provided is a curve generator, as
             such, it will be commonly used with scalar multiplication. This
             will cause to precompute multiplication table generation for it
+        :param bool validate_point: verify that the point lies on the curve.
+        :param bool strict: enable full public-key validation, including the
+            subgroup check.
+        :param bool validate_subgroup: explicitly enable or disable the
+            subgroup check.
+        :param int subgroup_order: order of the expected subgroup.
 
         :raises `~ecdsa.errors.MalformedPointError`: if the public point does
             not lay on the curve or the encoding is invalid
@@ -585,7 +856,15 @@ class PointJacobi(AbstractPoint):
         :rtype: PointJacobi
         """
         coord_x, coord_y = super(PointJacobi, cls).from_bytes(
-            curve, data, validate_encoding, valid_encodings
+            curve,
+            data,
+            validate_encoding=validate_encoding,
+            valid_encodings=valid_encodings,
+            validate_point=validate_point,
+            order=order,
+            strict=strict,
+            validate_subgroup=validate_subgroup,
+            subgroup_order=subgroup_order,
         )
         return PointJacobi(curve, coord_x, coord_y, 1, order, generator)
 
@@ -1116,6 +1395,10 @@ class Point(AbstractPoint):
         validate_encoding=True,
         valid_encodings=None,
         order=None,
+        validate_point=True,
+        strict=False,
+        validate_subgroup=None,
+        subgroup_order=None,
     ):
         """
         Initialise the object from byte encoding of a point.
@@ -1139,6 +1422,12 @@ class Point(AbstractPoint):
         :type valid_encodings: :term:`set-like object`
         :param int order: the point order, must be non zero when using
             generator=True
+        :param bool validate_point: verify that the point lies on the curve.
+        :param bool strict: enable full public-key validation, including the
+            subgroup check.
+        :param bool validate_subgroup: explicitly enable or disable the
+            subgroup check.
+        :param int subgroup_order: order of the expected subgroup.
 
         :raises `~ecdsa.errors.MalformedPointError`: if the public point does
             not lay on the curve or the encoding is invalid
@@ -1147,7 +1436,15 @@ class Point(AbstractPoint):
         :rtype: Point
         """
         coord_x, coord_y = super(Point, cls).from_bytes(
-            curve, data, validate_encoding, valid_encodings
+            curve,
+            data,
+            validate_encoding=validate_encoding,
+            valid_encodings=valid_encodings,
+            validate_point=validate_point,
+            order=order,
+            strict=strict,
+            validate_subgroup=validate_subgroup,
+            subgroup_order=subgroup_order,
         )
         return Point(curve, coord_x, coord_y, order)
 
@@ -1310,6 +1607,10 @@ class PointEdwards(AbstractPoint):
         valid_encodings=None,
         order=None,
         generator=False,
+        validate_point=True,
+        strict=False,
+        validate_subgroup=None,
+        subgroup_order=None,
     ):
         """
         Initialise the object from byte encoding of a point.
@@ -1330,6 +1631,13 @@ class PointEdwards(AbstractPoint):
         :param bool generator: Flag to mark the point as a curve generator,
             this will cause the library to pre-compute some values to
             make repeated usages of the point much faster
+        :param bool validate_point: verify that the decoded point satisfies
+            the curve equation.
+        :param bool strict: enable full public-key validation, including the
+            subgroup check.
+        :param bool validate_subgroup: explicitly enable or disable the
+            subgroup check.
+        :param int subgroup_order: order of the expected subgroup.
 
         :raises `~ecdsa.errors.MalformedPointError`: if the public point does
             not lay on the curve or the encoding is invalid
@@ -1338,7 +1646,15 @@ class PointEdwards(AbstractPoint):
         :rtype: PointEdwards
         """
         coord_x, coord_y = super(PointEdwards, cls).from_bytes(
-            curve, data, validate_encoding, valid_encodings
+            curve,
+            data,
+            validate_encoding=validate_encoding,
+            valid_encodings=valid_encodings,
+            validate_point=validate_point,
+            order=order,
+            strict=strict,
+            validate_subgroup=validate_subgroup,
+            subgroup_order=subgroup_order,
         )
         return PointEdwards(
             curve, coord_x, coord_y, 1, coord_x * coord_y, order, generator

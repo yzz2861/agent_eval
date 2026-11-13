@@ -22,9 +22,25 @@ from .util import (
     MalformedSignature,
 )
 from ._compat import normalise_bytes
-from .errors import MalformedPointError
-from .ellipticcurve import PointJacobi, CurveEdTw
-
+from .errors import (
+    CurveMismatchError,
+    MalformedPointError,
+    PointAtInfinityError,
+    PointEncodingError,
+    PointNotOnCurveError,
+    SubgroupMismatchError,
+)
+from .ellipticcurve import (
+    CurveEdTw,
+    PointEdwards,
+    PointJacobi,
+    POINT_ERROR_CURVE_MISMATCH,
+    POINT_ERROR_ENCODING,
+    POINT_ERROR_INFINITY,
+    POINT_ERROR_NOT_ON_CURVE,
+    POINT_ERROR_SUBGROUP,
+    malformed_point_error,
+)
 
 __all__ = [
     "BadSignatureError",
@@ -32,6 +48,11 @@ __all__ = [
     "VerifyingKey",
     "SigningKey",
     "MalformedPointError",
+    "PointEncodingError",
+    "CurveMismatchError",
+    "PointNotOnCurveError",
+    "SubgroupMismatchError",
+    "PointAtInfinityError",
 ]
 
 
@@ -88,6 +109,85 @@ def _truncate_and_convert_digest(digest, curve, allow_truncate):
     return number
 
 
+def _find_curve_for_encoded_point(
+    x, y, prefix, expected_curve, coordinate_length
+):
+    """
+    Return a known curve that contains the decoded point, if any.
+
+    This is only used on the error path to distinguish a genuinely invalid
+    point from a key encoded for a different, supported curve. It deliberately
+    works with coordinates and the SEC1 prefix, never with the raw key bytes.
+    """
+    from .curves import curves as known_curves
+    from .numbertheory import Error as NumberTheoryError
+    from .numbertheory import square_root_mod_prime
+
+    for candidate in known_curves:
+        if isinstance(candidate.curve, CurveEdTw):
+            continue
+        if candidate.curve == expected_curve:
+            continue
+        p = candidate.curve.p()
+        if (
+            coordinate_length is not None
+            and ellipticcurve.orderlen(p) != coordinate_length
+        ):
+            continue
+        if not 0 <= x < p:
+            continue
+        if y is not None:
+            if prefix == b"\x02" and y & 1:
+                continue
+            if prefix == b"\x03" and not y & 1:
+                continue
+            if candidate.curve.contains_point(x, y):
+                return candidate
+            continue
+        if prefix not in (b"\x02", b"\x03"):
+            continue
+        alpha = (
+            pow(x, 3, p) + (candidate.curve.a() * x) + candidate.curve.b()
+        ) % p
+        try:
+            beta = square_root_mod_prime(alpha, p)
+        except NumberTheoryError:
+            continue
+        wanted_odd = prefix == b"\x03"
+        roots = set((beta % p, (-beta) % p))
+        roots = [root for root in roots if bool(root & 1) == wanted_odd]
+        if len(roots) != 1:
+            continue
+        if candidate.curve.contains_point(x, roots[0]):
+            return candidate
+    return None
+
+
+def _raise_point_import_error(error, curve):
+    """Re-raise a point error, refining curve mismatch when detectable."""
+    if getattr(error, "reason", None) != POINT_ERROR_NOT_ON_CURVE:
+        raise error
+    x = getattr(error, "x", None)
+    y = getattr(error, "y", None)
+    prefix = getattr(error, "encoding_prefix", None)
+    coordinate_length = getattr(error, "coordinate_length", None)
+    if x is not None:
+        other_curve = _find_curve_for_encoded_point(
+            x, y, prefix, curve.curve, coordinate_length
+        )
+        if other_curve is not None:
+            raise malformed_point_error(
+                POINT_ERROR_CURVE_MISMATCH,
+                "Curve mismatch: public point does not belong to curve "
+                "'{0}' (it matches curve '{1}')".format(
+                    curve.name, other_curve.name
+                ),
+                x=x,
+                y=y,
+            )
+    raise error
+
+
 class VerifyingKey(object):
     """
     Class for handling keys that can verify signatures (public keys).
@@ -133,7 +233,13 @@ class VerifyingKey(object):
 
     @classmethod
     def from_public_point(
-        cls, point, curve=NIST192p, hashfunc=sha1, validate_point=True
+        cls,
+        point,
+        curve=NIST192p,
+        hashfunc=sha1,
+        validate_point=True,
+        strict=False,
+        validate_subgroup=None,
     ):
         """
         Initialise the object from a Point object.
@@ -152,9 +258,14 @@ class VerifyingKey(object):
         :type bool validate_point: whether to check if the point lays on curve
             should always be used if the public point is not a result
             of our own calculation
+        :param bool strict: enable full public-key validation, including the
+            subgroup order check.
+        :param bool validate_subgroup: explicitly enable or disable the
+            subgroup order check. ``strict`` enables it by default.
 
-        :raises MalformedPointError: if the public point does not lay on the
-            curve
+        :raises MalformedPointError: if the public point is at infinity, is on
+            a different curve, does not lay on the curve, or is outside the
+            expected subgroup
 
         :return: Initialised VerifyingKey object
         :rtype: VerifyingKey
@@ -162,6 +273,44 @@ class VerifyingKey(object):
         self = cls(_error__please_use_generate=True)
         if isinstance(curve.curve, CurveEdTw):
             raise ValueError("Method incompatible with Edwards curves")
+        if validate_subgroup is None:
+            validate_subgroup = bool(strict)
+        if strict or validate_subgroup:
+            validate_point = True
+        try:
+            point_curve = point.curve()
+            point_x = point.x()
+            point_y = point.y()
+        except (AttributeError, TypeError):
+            raise malformed_point_error(
+                POINT_ERROR_ENCODING,
+                "Object is not an elliptic curve point",
+            )
+        if point_curve is None or point_x is None or point_y is None:
+            raise malformed_point_error(
+                POINT_ERROR_INFINITY,
+                "Point at infinity is not a valid public key",
+            )
+        if point_curve != curve.curve:
+            raise malformed_point_error(
+                POINT_ERROR_CURVE_MISMATCH,
+                "Curve mismatch: public point belongs to curve '{0}', "
+                "expected '{1}'".format(
+                    str(point_curve),
+                    curve.name,
+                ),
+                x=point_x,
+                y=point_y,
+            )
+        p = curve.curve.p()
+        if not 0 <= point_x < p or not 0 <= point_y < p:
+            raise malformed_point_error(
+                POINT_ERROR_NOT_ON_CURVE,
+                "Point coordinates are not in the finite field "
+                "(out of range)",
+                x=point_x,
+                y=point_y,
+            )
         if not isinstance(point, ellipticcurve.PointJacobi):
             point = ellipticcurve.PointJacobi.from_affine(point)
         self.curve = curve
@@ -170,8 +319,32 @@ class VerifyingKey(object):
             self.pubkey = ecdsa.Public_key(
                 curve.generator, point, validate_point
             )
-        except ecdsa.InvalidPointError:
-            raise MalformedPointError("Point does not lay on the curve")
+        except ecdsa.InvalidPointError as e:
+            message = str(e)
+            if "order" in message:
+                raise malformed_point_error(
+                    POINT_ERROR_SUBGROUP,
+                    "Point is not in the expected subgroup "
+                    "(order mismatch)",
+                )
+            raise malformed_point_error(
+                POINT_ERROR_NOT_ON_CURVE,
+                "Point does not lay on the curve",
+                e,
+                x=point_x,
+                y=point_y,
+            )
+        if validate_subgroup:
+            # Check even for cofactor-one curves when explicitly requested.
+            subgroup_point = ellipticcurve.Point(curve.curve, point_x, point_y)
+            if subgroup_point * curve.order != ellipticcurve.INFINITY:
+                raise malformed_point_error(
+                    POINT_ERROR_SUBGROUP,
+                    "Point is not in the expected subgroup "
+                    "(order mismatch)",
+                    x=point_x,
+                    y=point_y,
+                )
         self.pubkey.order = curve.order
         return self
 
@@ -223,6 +396,8 @@ class VerifyingKey(object):
         hashfunc=sha1,
         validate_point=True,
         valid_encodings=None,
+        strict=False,
+        validate_subgroup=None,
     ):
         """
         Initialise the object from byte encoding of public key.
@@ -255,9 +430,16 @@ class VerifyingKey(object):
             name). All formats by default (specified with ``None``).
             Ignored for EdDSA.
         :type valid_encodings: :term:`set-like object`
+        :param bool strict: enable full public-key validation, including the
+            subgroup order check. Disabled by default to retain the historical
+            compatibility behaviour.
+        :param bool validate_subgroup: explicitly enable or disable the
+            subgroup order check. When ``None`` it follows ``strict``.
 
-        :raises MalformedPointError: if the public point does not lay on the
-            curve or the encoding is invalid
+        :raises MalformedPointError: if the encoding is invalid, the point is
+            at infinity, is on a different curve, does not lay on the curve,
+            or (in strict mode) is outside the expected subgroup. The error
+            exposes a ``reason`` attribute and never includes the whole key.
 
         :return: Initialised VerifyingKey object
         :rtype: VerifyingKey
@@ -266,19 +448,46 @@ class VerifyingKey(object):
             self = cls(_error__please_use_generate=True)
             self.curve = curve
             self.default_hashfunc = None  # ignored for EdDSA
+            string = normalise_bytes(string)
             try:
-                self.pubkey = eddsa.PublicKey(curve.generator, string)
+                point = PointEdwards.from_bytes(
+                    curve.curve,
+                    string,
+                    validate_point=validate_point,
+                    order=curve.order,
+                    strict=strict,
+                    validate_subgroup=validate_subgroup,
+                    subgroup_order=curve.order,
+                )
+                self.pubkey = eddsa.PublicKey(curve.generator, string, point)
             except ValueError:
-                raise MalformedPointError("Malformed point for the curve")
+                raise malformed_point_error(
+                    POINT_ERROR_ENCODING,
+                    "Malformed point for the curve",
+                )
             return self
 
-        point = PointJacobi.from_bytes(
-            curve.curve,
-            string,
-            validate_encoding=validate_point,
-            valid_encodings=valid_encodings,
+        try:
+            point = PointJacobi.from_bytes(
+                curve.curve,
+                string,
+                validate_encoding=True,
+                valid_encodings=valid_encodings,
+                validate_point=validate_point,
+                strict=strict,
+                validate_subgroup=validate_subgroup,
+                subgroup_order=curve.order,
+            )
+        except MalformedPointError as e:
+            _raise_point_import_error(e, curve)
+        return cls.from_public_point(
+            point,
+            curve,
+            hashfunc,
+            validate_point,
+            strict=strict,
+            validate_subgroup=validate_subgroup,
         )
-        return cls.from_public_point(point, curve, hashfunc, validate_point)
 
     @classmethod
     def from_pem(
@@ -287,6 +496,8 @@ class VerifyingKey(object):
         hashfunc=sha1,
         valid_encodings=None,
         valid_curve_encodings=None,
+        strict=False,
+        validate_subgroup=None,
     ):
         """
         Initialise from public key stored in :term:`PEM` format.
@@ -320,6 +531,8 @@ class VerifyingKey(object):
             hashfunc=hashfunc,
             valid_encodings=valid_encodings,
             valid_curve_encodings=valid_curve_encodings,
+            strict=strict,
+            validate_subgroup=validate_subgroup,
         )
 
     @classmethod
@@ -329,6 +542,8 @@ class VerifyingKey(object):
         hashfunc=sha1,
         valid_encodings=None,
         valid_curve_encodings=None,
+        strict=False,
+        validate_subgroup=None,
     ):
         """
         Initialise the key stored in :term:`DER` format.
@@ -388,7 +603,13 @@ class VerifyingKey(object):
             point_str, empty = der.remove_bitstring(point_str_bitstring, 0)
             if empty:
                 raise der.UnexpectedDER("trailing junk after public key")
-            return cls.from_string(point_str, curve, None)
+            return cls.from_string(
+                point_str,
+                curve,
+                None,
+                strict=strict,
+                validate_subgroup=validate_subgroup,
+            )
         if not oid_pk == oid_ecPublicKey:
             raise der.UnexpectedDER(
                 "Unexpected object identifier in DER "
@@ -409,6 +630,8 @@ class VerifyingKey(object):
             curve,
             hashfunc=hashfunc,
             valid_encodings=valid_encodings,
+            strict=strict,
+            validate_subgroup=validate_subgroup,
         )
 
     @classmethod
