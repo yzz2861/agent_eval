@@ -42,12 +42,12 @@ from ..operation.search import search_request_to_dict, parse_filter, ROOT, AND, 
     MATCH_GREATER_OR_EQUAL, MATCH_LESS_OR_EQUAL, MATCH_EXTENSIBLE, MATCH_PRESENT,\
     MATCH_SUBSTRING, MATCH_EQUAL
 from ..utils.conv import json_hook, to_unicode, to_raw
-from ..core.exceptions import LDAPDefinitionError, LDAPPasswordIsMandatoryError, LDAPInvalidValueError, LDAPSocketOpenError
+from ..core.exceptions import LDAPDefinitionError, LDAPPasswordIsMandatoryError, LDAPInvalidValueError, LDAPSocketOpenError, LDAPInvalidDnError
 from ..core.results import RESULT_SUCCESS, RESULT_OPERATIONS_ERROR, RESULT_UNAVAILABLE_CRITICAL_EXTENSION, \
     RESULT_INVALID_CREDENTIALS, RESULT_NO_SUCH_OBJECT, RESULT_ENTRY_ALREADY_EXISTS, RESULT_COMPARE_TRUE, \
     RESULT_COMPARE_FALSE, RESULT_NO_SUCH_ATTRIBUTE, RESULT_UNWILLING_TO_PERFORM, RESULT_PROTOCOL_ERROR, RESULT_CONSTRAINT_VIOLATION, RESULT_NOT_ALLOWED_ON_RDN
 from ..utils.ciDict import CaseInsensitiveDict
-from ..utils.dn import to_dn, safe_dn, safe_rdn
+from ..utils.dn import to_dn, safe_dn, safe_rdn, DN, dn_equals, is_descendant_dn
 from ..protocol.sasl.sasl import validate_simple_password
 from ..protocol.formatters.standard import find_attribute_validator, format_attribute_values
 from ..protocol.rfc2696 import paged_search_control
@@ -662,6 +662,33 @@ class MockBaseStrategy(object):
         else:
             return self._execute_search(request)
 
+    @staticmethod
+    def _try_parse_dn(dn):
+        """Parse a DN for structural comparison or return None for non-DN bases (GUID/SID/UPN)."""
+        try:
+            return DN(dn)
+        except (LDAPInvalidDnError, TypeError):
+            return None
+
+    def _match_base(self, entry, base, base_dn, direct_child_only):
+        entry_dn = self._try_parse_dn(entry)
+        if base_dn is not None and entry_dn is not None:
+            if direct_child_only:
+                return is_descendant_dn(entry_dn, base_dn) and len(entry_dn.rdns()) == len(base_dn.rdns()) + 1
+            return dn_equals(entry_dn, base_dn) or is_descendant_dn(entry_dn, base_dn)
+        # fallback for pseudo-DN values that cannot be parsed as RFC 4514 DNs
+        if not entry.lower().endswith(base.lower()):
+            return False
+        if direct_child_only and ',' in entry[:-len(base) - 1]:  # only leafs without commas in the remaining dn
+            return False
+        return True
+
+    def _is_direct_child(self, entry, base, base_dn):
+        return self._match_base(entry, base, base_dn, True)
+
+    def _is_within_subtree(self, entry, base, base_dn):
+        return self._match_base(entry, base, base_dn, False)
+
     def _execute_search(self, request):
         responses = []
         if request['base']:
@@ -678,16 +705,17 @@ class MockBaseStrategy(object):
 
         filter_root = parse_filter(request['filter'], self.connection.server.schema, auto_escape=True, auto_encode=False, validator=self.connection.server.custom_validator, check_names=self.connection.check_names)
         candidates = []
+        base_dn = self._try_parse_dn(base) if base else None
         if scope == 0:  # base object
             if base in self.connection.server.dit or base.lower() == 'cn=schema':
                 candidates.append(base)
         elif scope == 1:  # single level
             for entry in self.connection.server.dit:
-                if entry.lower().endswith(base.lower()) and ',' not in entry[:-len(base) - 1]:  # only leafs without commas in the remaining dn
+                if self._is_direct_child(entry, base, base_dn):  # only leafs directly under the base
                     candidates.append(entry)
         elif scope == 2:  # whole subtree
             for entry in self.connection.server.dit:
-                if entry.lower().endswith(base.lower()):
+                if self._is_within_subtree(entry, base, base_dn):
                     candidates.append(entry)
 
         if not candidates:  # incorrect base

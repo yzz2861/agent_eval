@@ -33,6 +33,339 @@ STATE_ANY = 0
 STATE_ESCAPE = 1
 STATE_ESCAPE_HEX = 2
 
+# characters that RFC 4514 mandates to be escaped in an AttributeValue
+_ESCAPE_ANYWHERE = set('\\"+,;<=>\x00')
+_SPECIAL_AT_START = set('# ')
+
+
+class DN(object):
+    """A distinguished name with three explicit representations.
+
+    - ``raw`` keeps the string exactly as provided by the caller.
+    - ``escaped`` is a valid RFC 4514 string suitable for display and for
+      being sent on the wire, with every value properly escaped.
+    - ``canonical`` is the normalized string used for comparison and group
+      authorization decisions: attribute types are lowercased, redundant
+      whitespace and trailing commas are removed, escaped hex pairs and
+      UTF-8 sequences are decoded and special characters are re-escaped
+      uniformly.
+
+    Ambiguous input (unescaped commas, empty RDNs, repeated attribute types
+    inside one RDN or an invalid ``#hex`` value) raises
+    :class:`ldap3.core.exceptions.LDAPInvalidDnError` instead of being
+    guessed.
+    """
+
+    def __init__(self, dn):
+        if isinstance(dn, DN):
+            self.raw = dn.raw
+            self.escaped = dn.escaped
+            self.canonical = dn.canonical
+            # each rdn is a tuple of (type, original_type, value) tuples,
+            # value is either a decoded str or a bytes object (BER #hex)
+            self._rdns = tuple(tuple(ava) for ava in dn._rdns)
+            return
+        if not isinstance(dn, str):
+            raise TypeError('DN must be created from a string or another DN object, got ' + type(dn).__name__)
+
+        self.raw = dn
+        self._rdns = _parse_dn_strict(dn)
+        self.escaped = _render_dn(self._rdns, canonical=False)
+        self.canonical = _render_dn(self._rdns, canonical=True)
+
+    def rdns(self):
+        """Return the parsed structure: a tuple of RDNs, each RDN a tuple of
+        ``(attribute_type, attribute_value)`` pairs.  Values are decoded
+        ``str`` objects or ``bytes`` for binary ``#hex`` values."""
+        return tuple(tuple((ava[0], ava[2]) for ava in rdn) for rdn in self._rdns)
+
+    def _key(self):
+        return tuple(tuple(sorted((ava[0], ava[2]) for ava in rdn)) for rdn in self._rdns)
+
+    def __eq__(self, other):
+        if not isinstance(other, DN):
+            return NotImplemented
+        return self._key() == other._key()
+
+    def __ne__(self, other):
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+    def __hash__(self):
+        return hash(self._key())
+
+    def __str__(self):
+        return self.escaped
+
+    def __repr__(self):
+        return 'DN(' + self.raw + ')'
+
+    def is_equal(self, other):
+        """True when the two DN objects name the exact same object."""
+        return dn_equals(self, other)
+
+    def is_descendant_of(self, other):
+        """True when this DN is strictly below ``other`` in the DIT."""
+        return is_descendant_dn(self, other)
+
+    def is_ancestor_of(self, other):
+        """True when this DN is strictly above ``other`` in the DIT."""
+        return is_ancestor_dn(self, other)
+
+
+def _require_dn(value, name):
+    if not isinstance(value, DN):
+        raise TypeError(name + ' must be a DN object, not a bare string of type ' + type(value).__name__)
+
+
+def dn_equals(first, second):
+    """Compare two :class:`DN` objects structurally.
+
+    Only :class:`DN` instances are accepted; bare strings are rejected so
+    callers cannot accidentally rely on textual prefix/suffix matching.
+    """
+    _require_dn(first, 'first')
+    _require_dn(second, 'second')
+    return first == second
+
+
+def is_descendant_dn(descendant, ancestor):
+    """True when ``descendant`` is strictly below ``ancestor`` in the DIT.
+
+    The check compares the parsed RDN sequence, never string prefixes, so
+    ``cn=admin,dc=example,dc=com`` cannot be confused with a different DN
+    that merely happens to share a textual suffix.
+    """
+    _require_dn(descendant, 'descendant')
+    _require_dn(ancestor, 'ancestor')
+    ancestor_key = ancestor._key()
+    descendant_key = descendant._key()
+    if len(descendant_key) <= len(ancestor_key):
+        return False
+    return descendant_key[-len(ancestor_key):] == ancestor_key
+
+
+def is_ancestor_dn(ancestor, descendant):
+    """True when ``ancestor`` is strictly above ``descendant`` in the DIT."""
+    _require_dn(ancestor, 'ancestor')
+    _require_dn(descendant, 'descendant')
+    return is_descendant_dn(descendant, ancestor)
+
+
+def _split_top_level(value):
+    """Split a DN string on unescaped COMMA and PLUS characters."""
+    parts = []
+    current = ''
+    index = 0
+    length = len(value)
+    while index < length:
+        char = value[index]
+        if char == '\\':
+            if index + 1 >= length:
+                raise LDAPInvalidDnError('dangling escape in dn ' + value)
+            current += char + value[index + 1]
+            index += 2
+            continue
+        if char in (',', '+'):
+            parts.append((current, char))
+            current = ''
+            index += 1
+            continue
+        current += char
+        index += 1
+    parts.append((current, ''))
+    return parts
+
+
+def _validate_strict_attribute_type(attribute_type):
+    if not attribute_type:
+        raise LDAPInvalidDnError('attribute type not present')
+    if attribute_type[0] in digits:
+        # numeric OID, dotted-decimal as per RFC 4512
+        for char in attribute_type:
+            if char not in digits and char != '.':
+                raise LDAPInvalidDnError("character '" + char + "' not allowed in numeric OID attribute type")
+        if '..' in attribute_type or attribute_type.endswith('.'):
+            raise LDAPInvalidDnError("invalid numeric OID attribute type '" + attribute_type + "'")
+        return True
+    for char in attribute_type:
+        if not (char in ascii_letters or char in digits or char == '-'):
+            raise LDAPInvalidDnError("character '" + char + "' not allowed in attribute type")
+    if attribute_type[0] == '-':
+        raise LDAPInvalidDnError("character '" + attribute_type[0] + "' not allowed as first character of attribute type")
+    return True
+
+
+def _decode_attribute_value(raw_value):
+    """Decode an RFC 4514 attribute value into a str or bytes (for #hex)."""
+    if not raw_value:
+        raise LDAPInvalidDnError('empty attribute value')
+
+    raw_value = _strip_unespaced_spaces(raw_value)
+    if raw_value[0] == '#':
+        hex_part = raw_value[1:]
+        if not hex_part or len(hex_part) % 2 != 0:
+            raise LDAPInvalidDnError('hex representation must be in the form of <HEX><HEX> pairs')
+        for char in hex_part:
+            if char not in hexdigits:
+                raise LDAPInvalidDnError('character ' + char + ' not allowed in hex representation of attribute value')
+        binary = bytes(bytearray(int(hex_part[pos:pos + 2], 16) for pos in range(0, len(hex_part), 2)))
+        try:
+            return binary.decode('utf-8')
+        except UnicodeDecodeError:
+            return binary
+
+    decoded = ''
+    byte_buffer = bytearray()
+    index = 0
+    length = len(raw_value)
+    while index < length:
+        char = raw_value[index]
+        if char == '\\':
+            if index + 1 >= length:
+                raise LDAPInvalidDnError('dangling escape in attribute value ' + raw_value)
+            escaped = raw_value[index + 1]
+            if escaped in ' "#+,;<=>\\':
+                if byte_buffer:
+                    try:
+                        decoded += byte_buffer.decode('utf-8')
+                    except UnicodeDecodeError:
+                        raise LDAPInvalidDnError('invalid UTF-8 sequence in attribute value ' + raw_value)
+                    byte_buffer = bytearray()
+                decoded += escaped
+                index += 2
+            elif escaped in hexdigits:
+                if index + 2 >= length or raw_value[index + 2] not in hexdigits:
+                    raise LDAPInvalidDnError('invalid hex escape in attribute value ' + raw_value)
+                byte_buffer.append(int(raw_value[index + 1:index + 3], 16))
+                index += 3
+            else:
+                raise LDAPInvalidDnError('invalid escaped character ' + escaped)
+        elif char in '"+,;<>=':
+            # unescaped special characters make the boundary ambiguous
+            raise LDAPInvalidDnError('special character ' + char + ' must be escaped in attribute value ' + raw_value)
+        else:
+            if byte_buffer:
+                try:
+                    decoded += byte_buffer.decode('utf-8')
+                except UnicodeDecodeError:
+                    raise LDAPInvalidDnError('invalid UTF-8 sequence in attribute value ' + raw_value)
+                byte_buffer = bytearray()
+            decoded += char
+            index += 1
+
+    if byte_buffer:
+        try:
+            decoded += byte_buffer.decode('utf-8')
+        except UnicodeDecodeError:
+            # keep binary values (for example a BER-encoded #hex equivalent) as bytes
+            return bytes(byte_buffer)
+    return decoded
+
+
+def _strip_unespaced_spaces(value):
+    """Remove leading/trailing SPACE characters that are not escaped.
+
+    RFC 4514 only allows a SPACE at the start or end of a value when it is
+    escaped, so an unescaped one is redundant formatting while an escaped one
+    carries meaning and must be preserved.
+    """
+    start = 0
+    length = len(value)
+    while start < length and value[start] == ' ':
+        start += 1
+    end = length
+    while end > start and value[end - 1] == ' ':
+        # a trailing space preceded by an unescaped backslash is significant
+        backslashes = 0
+        index = end - 2
+        while index >= 0 and value[index] == '\\':
+            backslashes += 1
+            index -= 1
+        if backslashes % 2 == 1:
+            break
+        end -= 1
+    return value[start:end]
+
+
+def _encode_attribute_value(value):
+    """Render a decoded value as an unambiguous RFC 4514 string."""
+    if isinstance(value, bytes):
+        return '#' + ''.join('{:02X}'.format(byte) for byte in bytearray(value))
+
+    encoded = ''
+    for char in value:
+        if char in _ESCAPE_ANYWHERE:
+            encoded += '\\' + char
+        elif ord(char) < 0x20 or ord(char) == 0x7f:
+            encoded += '\\{:02X}'.format(ord(char))
+        else:
+            encoded += char
+    if encoded and encoded[0] in _SPECIAL_AT_START:
+        encoded = '\\' + encoded
+    if len(encoded) > 1 and encoded[-1] == ' ' and encoded[-2] != '\\':
+        encoded = encoded[:-1] + '\\ '
+    return encoded
+
+
+def _parse_dn_strict(dn):
+    """Strict RFC 4514-ish parser returning a tuple of RDN structures."""
+    if not isinstance(dn, str) or not dn.strip():
+        raise LDAPInvalidDnError('empty dn')
+
+    text = dn.strip()
+    # accept exactly one trailing (unquoted) comma, multiple leave an empty RDN
+    if text.endswith(',') and not text.endswith('\\,'):
+        text = text[:-1].rstrip()
+    if not text or text.endswith(','):
+        raise LDAPInvalidDnError('empty RDN in dn ' + dn)
+
+    parts = _split_top_level(text)
+    rdns = []
+    current_rdn = []
+    seen_types = set()
+    for raw_ava, separator in parts:
+        if not raw_ava.strip() or '=' not in raw_ava:
+            raise LDAPInvalidDnError('empty or malformed RDN in dn ' + dn)
+
+        equal = _find_first_unescaped(raw_ava, '=', 0)
+        if equal <= 0:
+            raise LDAPInvalidDnError('attribute type not present in ' + raw_ava)
+        attribute_type = raw_ava[:equal].strip()
+        raw_value = raw_ava[equal + 1:]
+        _validate_strict_attribute_type(attribute_type)
+        value = _decode_attribute_value(raw_value)
+
+        lowered_type = attribute_type.lower()
+        if lowered_type in seen_types:
+            raise LDAPInvalidDnError("duplicate attribute type '" + attribute_type + "' in RDN")
+        seen_types.add(lowered_type)
+        current_rdn.append((lowered_type, attribute_type, value))
+
+        if separator != '+':
+            rdns.append(tuple(current_rdn))
+            current_rdn = []
+            seen_types = set()
+
+    if current_rdn:
+        rdns.append(tuple(current_rdn))
+    if not rdns:
+        raise LDAPInvalidDnError('empty dn')
+    return tuple(rdns)
+
+
+def _render_dn(rdns, canonical):
+    rendered_rdns = []
+    for rdn in rdns:
+        rendered_avas = []
+        for lowered_type, original_type, value in rdn:
+            attribute_type = lowered_type if canonical else original_type
+            rendered_avas.append(attribute_type + '=' + _encode_attribute_value(value))
+        rendered_rdns.append('+'.join(rendered_avas))
+    return ','.join(rendered_rdns)
+
 
 def _add_ava(ava, decompose, remove_space, space_around_equal):
     if not ava:
