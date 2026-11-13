@@ -420,6 +420,56 @@ then the entire session (as well as the remember token if it exists) is
 deleted.
 
 
+Session Fingerprint Strategy
+============================
+By default the session identifier is a plain hash of the client IP address
+and user agent (the ``legacy`` strategy). Applications can opt in to a keyed,
+versioned session fingerprint instead::
+
+    app.config["SESSION_FINGERPRINT_STRATEGY"] = "hmac"
+
+With the ``hmac`` strategy, the identifier stored in the session is an HMAC
+(fixed-length hex) derived from three inputs: the trusted-proxy-processed
+client boundary (``request.remote_addr`` after any proxy middleware such as
+ProxyFix — raw forwarding headers are never used), normalized user-agent
+features, and a fingerprint version tag. Only the resulting
+``v<version>.<hmac>`` token is stored in the session; raw IP addresses, user
+agents, or reversible encodings of them are never persisted.
+
+The following configuration keys tune the strategy:
+
+====================================== =================================================
+`SESSION_FINGERPRINT_KEY`              HMAC key for the fingerprint. Defaults to the
+                                       app's `SECRET_KEY`.
+`SESSION_FINGERPRINT_PREVIOUS_KEY`     The immediately previous key, accepted during a
+                                       rotation window. Older keys are never accepted.
+`SESSION_FINGERPRINT_VERSION`          Fingerprint version tag. Only the current and
+                                       the immediately previous version verify.
+                                       **Default:** `1`
+`SESSION_FINGERPRINT_IP_MODE`          ``network`` (default) pins the session to the
+                                       normalized client network, ``strict`` uses the
+                                       full address, ``ignore`` excludes the client
+                                       address entirely (useful on mobile networks
+                                       with frequently changing egress).
+`SESSION_FINGERPRINT_IPV4_PREFIX`      Network prefix for IPv4 boundaries in
+                                       ``network`` mode. **Default:** `32`
+`SESSION_FINGERPRINT_IPV6_PREFIX`      Network prefix for IPv6 boundaries in
+                                       ``network`` mode. **Default:** `64`, which
+                                       absorbs natural drift from privacy addresses.
+`SESSION_FINGERPRINT_UA_MAX_LENGTH`    Maximum length of the normalized user-agent
+                                       features mixed into the fingerprint.
+                                       **Default:** `128`
+====================================== =================================================
+
+Missing user agents or client addresses map to explicit markers rather than
+empty strings, so they never silently become a shared "stable" identity. When
+a fingerprint check fails in `basic` mode (or on a permanent session), the
+session is marked non-fresh once and the stored fingerprint is re-anchored,
+so a single proxy or network jitter does not lock the session out of fresh
+state on every subsequent request. Sessions verified through a rotated key
+or version are transparently re-anchored to the current generation.
+
+
 Disabling Session Cookie for APIs
 =================================
 When authenticating to APIs, you might want to disable setting the Flask

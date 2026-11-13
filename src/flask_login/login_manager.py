@@ -30,7 +30,10 @@ from .signals import user_loaded_from_request
 from .signals import user_needs_refresh
 from .signals import user_unauthorized
 from .utils import _create_identifier
+from .utils import _create_session_fingerprint
+from .utils import _fingerprint_strategy
 from .utils import _user_context_processor
+from .utils import _verify_session_fingerprint
 from .utils import decode_cookie
 from .utils import encode_cookie
 from .utils import expand_login_view
@@ -171,7 +174,7 @@ class LoginManager:
         config = current_app.config
         if config.get("USE_SESSION_FOR_NEXT", USE_SESSION_FOR_NEXT):
             login_url = expand_login_view(login_view)
-            session["_id"] = self._session_identifier_generator()
+            session["_id"] = self._generate_session_identifier()
             session["next"] = make_next_param(login_url, request.url)
             redirect_url = make_login_url(login_view)
         else:
@@ -282,7 +285,7 @@ class LoginManager:
         config = current_app.config
         if config.get("USE_SESSION_FOR_NEXT", USE_SESSION_FOR_NEXT):
             login_url = expand_login_view(self.refresh_view)
-            session["_id"] = self._session_identifier_generator()
+            session["_id"] = self._generate_session_identifier()
             session["next"] = make_next_param(login_url, request.url)
             redirect_url = make_login_url(self.refresh_view)
         else:
@@ -337,7 +340,6 @@ class LoginManager:
 
     def _session_protection_failed(self):
         sess = session._get_current_object()
-        ident = self._session_identifier_generator()
 
         app = current_app._get_current_object()
         mode = app.config.get("SESSION_PROTECTION", self.session_protection)
@@ -347,27 +349,65 @@ class LoginManager:
 
         # if the sess is empty, it's an anonymous user or just logged out
         # so we can skip this
-        if sess and ident != sess.get("_id", None):
-            if mode == "basic" or sess.permanent:
-                if sess.get("_fresh") is not False:
-                    sess["_fresh"] = False
-                session_protected.send(app)
-                return False
-            elif mode == "strong":
-                for k in SESSION_KEYS:
-                    sess.pop(k, None)
+        if not sess:
+            return False
 
-                sess["_remember"] = "clear"
-                session_protected.send(app)
-                return True
+        if self._session_identifier_matches(sess):
+            return False
+
+        if mode == "basic" or sess.permanent:
+            if sess.get("_fresh") is not False:
+                sess["_fresh"] = False
+            # Re-anchor the identifier so a single proxy or network jitter
+            # downgrades the session once instead of failing the comparison
+            # on every following request.
+            sess["_id"] = self._generate_session_identifier()
+            session_protected.send(app)
+            return False
+        elif mode == "strong":
+            for k in SESSION_KEYS:
+                sess.pop(k, None)
+
+            sess["_remember"] = "clear"
+            session_protected.send(app)
+            return True
 
         return False
+
+    def _generate_session_identifier(self):
+        """Generate the session identifier for the current request.
+
+        With the opt-in ``hmac`` fingerprint strategy this derives a keyed,
+        versioned fingerprint; otherwise it falls back to the configured
+        (legacy) identifier generator.
+        """
+        if _fingerprint_strategy() == "hmac":
+            return _create_session_fingerprint()
+        return self._session_identifier_generator()
+
+    def _session_identifier_matches(self, sess):
+        """Check whether the session's stored identifier matches this request."""
+        stored = sess.get("_id")
+
+        if _fingerprint_strategy() == "hmac":
+            if not _verify_session_fingerprint(stored):
+                return False
+            # Re-anchor fingerprints verified via a rotated key or version
+            # so the stored token migrates forward within the rotation
+            # window instead of relying on the old generation forever.
+            current = _create_session_fingerprint()
+            if stored != current:
+                sess["_id"] = current
+            return True
+
+        return stored == self._session_identifier_generator()
 
     def _load_user_from_remember_cookie(self, cookie):
         user_id = decode_cookie(cookie)
         if user_id is not None:
             session["_user_id"] = user_id
             session["_fresh"] = False
+            session["_id"] = self._generate_session_identifier()
             user = None
             if self._user_callback:
                 user = self._user_callback(user_id)

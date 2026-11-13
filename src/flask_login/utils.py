@@ -1,5 +1,7 @@
 import hmac
+import ipaddress
 from functools import wraps
+from hashlib import sha256
 from hashlib import sha512
 from urllib.parse import parse_qs
 from urllib.parse import urlencode
@@ -181,7 +183,7 @@ def login_user(user, remember=False, duration=None, force=False, fresh=True):
     user_id = getattr(user, current_app.login_manager.id_attribute)()
     session["_user_id"] = user_id
     session["_fresh"] = fresh
-    session["_id"] = current_app.login_manager._session_identifier_generator()
+    session["_id"] = current_app.login_manager._generate_session_identifier()
 
     if remember:
         session["_remember"] = "set"
@@ -236,7 +238,7 @@ def confirm_login():
     are reloaded from a cookie.
     """
     session["_fresh"] = True
-    session["_id"] = current_app.login_manager._session_identifier_generator()
+    session["_id"] = current_app.login_manager._generate_session_identifier()
     user_login_confirmed.send(current_app._get_current_object())
 
 
@@ -377,6 +379,158 @@ def _create_identifier():
     h = sha512()
     h.update(f"{request.remote_addr}|{request.user_agent.string}".encode())
     return h.hexdigest()
+
+
+#: Default version tag embedded in HMAC session fingerprints.
+FINGERPRINT_DEFAULT_VERSION = 1
+
+#: Strategies accepted by the ``SESSION_FINGERPRINT_STRATEGY`` config key.
+#: ``legacy`` reproduces the historical sha512 identifier, ``hmac`` derives
+#: a keyed, versioned session fingerprint.
+FINGERPRINT_STRATEGIES = ("legacy", "hmac")
+
+
+def _fingerprint_strategy():
+    return current_app.config.get("SESSION_FINGERPRINT_STRATEGY", "legacy")
+
+
+def _fingerprint_version():
+    try:
+        return int(
+            current_app.config.get("SESSION_FINGERPRINT_VERSION", FINGERPRINT_DEFAULT_VERSION)
+        )
+    except (TypeError, ValueError):
+        return FINGERPRINT_DEFAULT_VERSION
+
+
+def _fingerprint_keys():
+    """Return the accepted fingerprint keys, current generation first.
+
+    ``SESSION_FINGERPRINT_PREVIOUS_KEY`` optionally holds the immediately
+    previous generation so it keeps verifying inside the rotation window.
+    Arbitrary older keys are never accepted.
+    """
+    keys = [_secret_key(current_app.config.get("SESSION_FINGERPRINT_KEY"))]
+    previous = current_app.config.get("SESSION_FINGERPRINT_PREVIOUS_KEY")
+    if previous:
+        keys.append(_secret_key(previous))
+    return keys
+
+
+def _normalize_client_edge(remote_addr=None):
+    """Reduce the trusted-proxy-processed client address to a boundary token.
+
+    Only ``request.remote_addr`` is consulted (which already reflects any
+    trusted-proxy middleware such as ProxyFix); raw forwarding headers are
+    never used as identity. The result feeds the HMAC and is never stored.
+    """
+    mode = current_app.config.get("SESSION_FINGERPRINT_IP_MODE", "network")
+    if mode == "ignore":
+        return "ip:ignored"
+
+    if remote_addr is None:
+        remote_addr = request.remote_addr
+    if not remote_addr:
+        # Auditable rule: a missing client address maps to an explicit
+        # marker, never to an empty string treated as a stable identity.
+        return "ip:none"
+
+    try:
+        addr = ipaddress.ip_address(str(remote_addr).strip())
+    except ValueError:
+        return "ip:unparseable"
+
+    if mode == "strict":
+        return f"ip:{addr}"
+
+    if addr.version == 4:
+        prefix = current_app.config.get("SESSION_FINGERPRINT_IPV4_PREFIX", 32)
+    else:
+        # Default /64 absorbs natural IPv6 drift (privacy addresses) while
+        # still pinning the session to the client's network boundary.
+        prefix = current_app.config.get("SESSION_FINGERPRINT_IPV6_PREFIX", 64)
+    network = ipaddress.ip_network(f"{addr}/{prefix}", strict=False)
+    return f"ip:{network.network_address}/{network.prefixlen}"
+
+
+def _normalize_user_agent(user_agent=None):
+    """Reduce the User-Agent header to a normalized feature token.
+
+    The result feeds the HMAC and is never stored. A missing UA maps to an
+    explicit ``ua:none`` marker rather than an empty string.
+    """
+    if user_agent is None:
+        user_agent = request.user_agent.string
+    if not user_agent or not user_agent.strip():
+        return "ua:none"
+
+    max_length = current_app.config.get("SESSION_FINGERPRINT_UA_MAX_LENGTH", 128)
+    normalized = " ".join(str(user_agent).split()).lower()
+    return f"ua:{normalized[:max_length]}"
+
+
+def _create_session_fingerprint(version=None, key=None):
+    """Derive a keyed, fixed-length session fingerprint for this request.
+
+    The fingerprint is an HMAC over the fingerprint version, the normalized
+    client boundary, and the normalized UA features. Only the resulting
+    ``v<version>.<hex>`` token is stored in the session; raw IP/UA values
+    never leave the request context.
+    """
+    if version is None:
+        version = _fingerprint_version()
+    if key is None:
+        key = _fingerprint_keys()[0]
+    else:
+        key = _secret_key(key)
+
+    material = "|".join(
+        [
+            f"v{version}",
+            _normalize_client_edge(),
+            _normalize_user_agent(),
+        ]
+    )
+    digest = hmac.new(key, material.encode("utf-8"), sha256).hexdigest()
+    return f"v{version}.{digest}"
+
+
+def _parse_session_fingerprint(stored):
+    if not isinstance(stored, str):
+        return None
+    version_tag, sep, digest = stored.partition(".")
+    if not sep or not version_tag.startswith("v"):
+        return None
+    try:
+        version = int(version_tag[1:])
+    except ValueError:
+        return None
+    if len(digest) != sha256().digest_size * 2:
+        return None
+    return version, digest
+
+
+def _verify_session_fingerprint(stored):
+    """Verify a stored session fingerprint against the current request.
+
+    Accepts only the current and the immediately previous generation
+    (key and/or version) so key rotation does not log users out, while
+    arbitrary old versions remain invalid.
+    """
+    parsed = _parse_session_fingerprint(stored)
+    if parsed is None:
+        return False
+    version, _ = parsed
+
+    current_version = _fingerprint_version()
+    if version not in (current_version, current_version - 1):
+        return False
+
+    for key in _fingerprint_keys():
+        expected = _create_session_fingerprint(version=version, key=key)
+        if hmac.compare_digest(expected, stored):
+            return True
+    return False
 
 
 def _user_context_processor():

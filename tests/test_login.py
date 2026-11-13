@@ -11,6 +11,7 @@ from unittest.mock import patch
 from flask import Blueprint
 from flask import Flask
 from flask import get_flashed_messages
+from flask import request
 from flask import Response
 from flask import session
 from flask.views import MethodView
@@ -41,6 +42,7 @@ from flask_login import user_login_confirmed
 from flask_login import user_needs_refresh
 from flask_login import user_unauthorized
 from flask_login import UserMixin
+from flask_login.utils import _create_session_fingerprint
 from flask_login.utils import _secret_key
 from flask_login.utils import _user_context_processor
 
@@ -1127,6 +1129,289 @@ class LoginTestCase(unittest.TestCase):
         with self.app.test_request_context():
             _ucp = self.app.context_processor(_user_context_processor)
             self.assertIsInstance(_ucp()["current_user"], AnonymousUserMixin)
+
+
+class SessionFingerprintIdentifierTestCase(unittest.TestCase):
+    """Tests for the opt-in HMAC session fingerprint strategy."""
+
+    def setUp(self):
+        self.app = Flask(__name__)
+        self.app.config["SECRET_KEY"] = "deterministic"
+        self.app.config["SESSION_PROTECTION"] = "basic"
+        self.app.config["SESSION_FINGERPRINT_STRATEGY"] = "hmac"
+        self.app.config["SESSION_FINGERPRINT_KEY"] = "fingerprint-key-v1"
+        self.login_manager = LoginManager()
+        self.login_manager.init_app(self.app)
+
+        @self.login_manager.user_loader
+        def load_user(user_id):
+            return USERS[int(user_id)]
+
+        @self.app.route("/login-notch-remember")
+        def login_notch_remember():
+            return str(login_user(notch, remember=True))
+
+        @self.app.route("/username")
+        def username():
+            if current_user.is_authenticated:
+                return current_user.name
+            return "Anonymous"
+
+        @self.app.route("/is-fresh")
+        def is_fresh():
+            return str(login_fresh())
+
+        @self.app.route("/confirm-login")
+        def _confirm_login():
+            confirm_login()
+            return ""
+
+        @self.app.route("/forge-fingerprint")
+        def forge_fingerprint():
+            # mints a fingerprint for the current request environment, so
+            # tests can craft tokens with specific keys/versions
+            version = request.args.get("version", type=int)
+            key = request.args.get("key")
+            return _create_session_fingerprint(version=version, key=key)
+
+        @self.app.errorhandler(404)
+        def handle_404(e):
+            raise e
+
+    def _delete_session(self, c):
+        with c.session_transaction() as sess:
+            sess.clear()
+
+    def _session_id(self, c):
+        with c.session_transaction() as sess:
+            return sess.get("_id")
+
+    def test_stable_requests_keep_session_fresh(self):
+        with self.app.test_client() as c:
+            c.get("/login-notch-remember")
+            self.assertEqual("Notch", c.get("/username").data.decode("utf-8"))
+            self.assertEqual("True", c.get("/is-fresh").data.decode("utf-8"))
+            self.assertTrue(self._session_id(c).startswith("v1."))
+
+    def test_legacy_strategy_remains_default(self):
+        self.app.config.pop("SESSION_FINGERPRINT_STRATEGY")
+        with self.app.test_client() as c:
+            c.get("/login-notch-remember")
+            self.assertEqual("Notch", c.get("/username").data.decode("utf-8"))
+            self.assertEqual("True", c.get("/is-fresh").data.decode("utf-8"))
+            # legacy sha512 hex digest, not a versioned fingerprint token
+            self.assertEqual(128, len(self._session_id(c)))
+
+    def test_user_agent_change_marks_unfresh_once_and_reanchors(self):
+        with self.app.test_client() as c:
+            c.get("/login-notch-remember")
+            with listen_to(session_protected) as listener:
+                result = c.get("/username", headers=[("User-Agent", "different")])
+                self.assertEqual("Notch", result.data.decode("utf-8"))
+                listener.assert_heard_one(self.app)
+            self.assertEqual("False", c.get("/is-fresh").data.decode("utf-8"))
+
+            # the session re-anchored: the same new UA must not trigger
+            # protection again (no permanent lockout after one jitter)
+            with listen_to(session_protected) as listener:
+                result = c.get("/username", headers=[("User-Agent", "different")])
+                self.assertEqual("Notch", result.data.decode("utf-8"))
+                listener.assert_heard_none(self.app)
+
+    def test_user_agent_normalization_tolerates_case_and_whitespace(self):
+        with self.app.test_client() as c:
+            c.get("/login-notch-remember", headers=[("User-Agent", "Mozilla/5.0  Safari")])
+            with listen_to(session_protected) as listener:
+                c.get("/username", headers=[("User-Agent", "mozilla/5.0 safari")])
+                listener.assert_heard_none(self.app)
+            self.assertEqual("True", c.get("/is-fresh").data.decode("utf-8"))
+
+    def test_ip_change_downgrades_once_not_permanently(self):
+        with self.app.test_client() as c:
+            c.get("/login-notch-remember", environ_overrides={"REMOTE_ADDR": "10.0.0.1"})
+            with listen_to(session_protected) as listener:
+                result = c.get("/username", environ_overrides={"REMOTE_ADDR": "10.0.0.2"})
+                self.assertEqual("Notch", result.data.decode("utf-8"))
+                listener.assert_heard_one(self.app)
+            self.assertEqual("False", c.get("/is-fresh").data.decode("utf-8"))
+
+            # same new address must be accepted from now on
+            with listen_to(session_protected) as listener:
+                c.get("/username", environ_overrides={"REMOTE_ADDR": "10.0.0.2"})
+                listener.assert_heard_none(self.app)
+
+    def test_ipv4_ipv6_switch_handled_by_rule(self):
+        with self.app.test_client() as c:
+            c.get("/login-notch-remember", environ_overrides={"REMOTE_ADDR": "10.0.0.1"})
+            with listen_to(session_protected) as listener:
+                result = c.get("/username", environ_overrides={"REMOTE_ADDR": "2001:db8::1"})
+                self.assertEqual("Notch", result.data.decode("utf-8"))
+                listener.assert_heard_one(self.app)
+
+            # re-anchored on the IPv6 boundary
+            with listen_to(session_protected) as listener:
+                c.get("/username", environ_overrides={"REMOTE_ADDR": "2001:db8::1"})
+                listener.assert_heard_none(self.app)
+
+    def test_ipv6_natural_drift_within_prefix_stays_fresh(self):
+        with self.app.test_client() as c:
+            c.get(
+                "/login-notch-remember",
+                environ_overrides={"REMOTE_ADDR": "2001:db8:abcd:1234::1"},
+            )
+            with listen_to(session_protected) as listener:
+                c.get(
+                    "/username",
+                    environ_overrides={"REMOTE_ADDR": "2001:db8:abcd:1234:ffff:eeee:dddd:cccc"},
+                )
+                listener.assert_heard_none(self.app)
+            self.assertEqual("True", c.get("/is-fresh").data.decode("utf-8"))
+
+            # a different /64 is a different boundary
+            with listen_to(session_protected) as listener:
+                c.get(
+                    "/username",
+                    environ_overrides={"REMOTE_ADDR": "2001:db8:abcd:9999::1"},
+                )
+                listener.assert_heard_one(self.app)
+
+    def test_missing_user_agent_uses_explicit_marker(self):
+        with self.app.test_client() as c:
+            # the werkzeug test client sends no UA by default
+            c.get("/login-notch-remember")
+            with listen_to(session_protected) as listener:
+                c.get("/username")
+                listener.assert_heard_none(self.app)
+            self.assertEqual("True", c.get("/is-fresh").data.decode("utf-8"))
+
+            # a UA appearing later is a different identity, not an empty one
+            with listen_to(session_protected) as listener:
+                c.get("/username", headers=[("User-Agent", "agent")])
+                listener.assert_heard_one(self.app)
+
+    def test_key_rotation_accepts_previous_generation(self):
+        with self.app.test_client() as c:
+            c.get("/login-notch-remember")
+            old_id = self._session_id(c)
+
+            self.app.config["SESSION_FINGERPRINT_KEY"] = "fingerprint-key-v2"
+            self.app.config["SESSION_FINGERPRINT_PREVIOUS_KEY"] = "fingerprint-key-v1"
+
+            with listen_to(session_protected) as listener:
+                self.assertEqual("Notch", c.get("/username").data.decode("utf-8"))
+                listener.assert_heard_none(self.app)
+            self.assertEqual("True", c.get("/is-fresh").data.decode("utf-8"))
+
+            # the stored fingerprint migrated to the current generation
+            new_id = self._session_id(c)
+            self.assertNotEqual(old_id, new_id)
+
+            # dropping the previous key keeps the migrated session valid
+            self.app.config.pop("SESSION_FINGERPRINT_PREVIOUS_KEY")
+            with listen_to(session_protected) as listener:
+                c.get("/username")
+                listener.assert_heard_none(self.app)
+
+    def test_arbitrary_old_keys_rejected(self):
+        with self.app.test_client() as c:
+            c.get("/login-notch-remember")
+
+            self.app.config["SESSION_FINGERPRINT_KEY"] = "fingerprint-key-v3"
+            self.app.config["SESSION_FINGERPRINT_PREVIOUS_KEY"] = "fingerprint-key-v2"
+
+            # a token minted with the v1 key is two generations old now
+            stale = c.get("/forge-fingerprint?key=fingerprint-key-v1").data.decode("utf-8")
+            with c.session_transaction() as sess:
+                sess["_id"] = stale
+
+            with listen_to(session_protected) as listener:
+                c.get("/username")
+                listener.assert_heard_one(self.app)
+            self.assertEqual("False", c.get("/is-fresh").data.decode("utf-8"))
+
+    def test_arbitrary_old_versions_rejected(self):
+        self.app.config["SESSION_FINGERPRINT_VERSION"] = 3
+        with self.app.test_client() as c:
+            c.get("/login-notch-remember")
+            self.assertTrue(self._session_id(c).startswith("v3."))
+
+            # one generation back is inside the rotation window
+            previous = c.get("/forge-fingerprint?version=2").data.decode("utf-8")
+            with c.session_transaction() as sess:
+                sess["_id"] = previous
+            with listen_to(session_protected) as listener:
+                c.get("/username")
+                listener.assert_heard_none(self.app)
+
+            # two generations back is rejected even with the current key
+            stale = c.get("/forge-fingerprint?version=1").data.decode("utf-8")
+            with c.session_transaction() as sess:
+                sess["_id"] = stale
+            with listen_to(session_protected) as listener:
+                c.get("/username")
+                listener.assert_heard_one(self.app)
+
+    def test_strong_mode_clears_session_on_mismatch(self):
+        self.app.config["SESSION_PROTECTION"] = "strong"
+        with self.app.test_client() as c:
+            c.get("/login-notch-remember")
+            result = c.get("/username", headers=[("User-Agent", "different")])
+            self.assertEqual("Anonymous", result.data.decode("utf-8"))
+            with c.session_transaction() as sess:
+                self.assertNotIn("_user_id", sess)
+
+    def test_anonymous_session_not_tracked(self):
+        with self.app.test_client() as c:
+            with listen_to(session_protected) as listener:
+                result = c.get("/username")
+                self.assertEqual("Anonymous", result.data.decode("utf-8"))
+                listener.assert_heard_none(self.app)
+            self.assertFalse(session)
+
+    def test_serialized_session_has_no_raw_device_fields(self):
+        ua = "SuperSecretDevice/9.9 (UniqueToken abc123)"
+        with self.app.test_client() as c:
+            c.get(
+                "/login-notch-remember",
+                headers=[("User-Agent", ua)],
+                environ_overrides={"REMOTE_ADDR": "10.11.12.13"},
+            )
+            with c.session_transaction() as sess:
+                data = dict(sess)
+
+        serializer = self.app.session_interface.get_signing_serializer(self.app)
+        blob = serializer.dumps(data)
+        self.assertNotIn(ua, blob)
+        self.assertNotIn("abc123", blob)
+        self.assertNotIn("10.11.12.13", blob)
+        self.assertRegex(data["_id"], r"^v1\.[0-9a-f]{64}$")
+
+    def test_remember_restore_regenerates_consistent_fingerprint(self):
+        with self.app.test_client() as c:
+            c.get("/login-notch-remember")
+            self._delete_session(c)
+
+            # restored from the remember cookie with a fresh fingerprint
+            self.assertEqual("Notch", c.get("/username").data.decode("utf-8"))
+            self.assertTrue(self._session_id(c).startswith("v1."))
+
+            # the next request must not be punished for the restore
+            with listen_to(session_protected) as listener:
+                c.get("/username")
+                listener.assert_heard_none(self.app)
+
+    def test_confirm_login_regenerates_fingerprint(self):
+        with self.app.test_client() as c:
+            c.get("/login-notch-remember")
+            # drift unfresh, then reconfirm under the new environment
+            c.get("/username", headers=[("User-Agent", "different")])
+            self.assertEqual("False", c.get("/is-fresh").data.decode("utf-8"))
+            c.get("/confirm-login", headers=[("User-Agent", "different")])
+            self.assertEqual("True", c.get("/is-fresh").data.decode("utf-8"))
+
+            with listen_to(session_protected) as listener:
+                c.get("/username", headers=[("User-Agent", "different")])
+                listener.assert_heard_none(self.app)
 
 
 class LoginViaRequestTestCase(unittest.TestCase):
