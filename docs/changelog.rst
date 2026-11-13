@@ -54,6 +54,7 @@ Release 0.14 (in development)
 .. rubric:: New features
 
 * ``bottle.HTTPError`` raised on invalid JSON now include the underlying exception in the ``exception`` field.
+* Signed cookies gained an optional keyring mode. :class:`bottle.CookieKeyring` manages named key generations and signs every token with an unforgeable key generation id, issuance timestamp and purpose domain. Verification rejects unknown, revoked or expired generations, future-dated tokens, clock skew beyond the configured tolerance and cross-purpose/cross-name reuse. During a rotation window both the current and the previous generation are accepted while new tokens use the current generation only; ``CookieKeyring.finish_rotation()`` invalidates all old generations at once. The legacy single-``secret`` format, HMAC comparison and 4KB limit are unchanged, and keyring cookies always carry string payloads rather than pickle. A companion ``tools/cookie_key_rotation.py`` script drives the annual ``init``/``rotate``/``finish`` workflow.
 
 
 Release 0.13
@@ -272,4 +273,3 @@ This is an incomplete list of new features and improved functionality.
 * New :func:`get`, :func:`post`, :func:`put` and :func:`delete` decorators.
 * The :class:`SimpleTemplate` engine got full unicode support.
 * Lots of non-critical bugfixes.
-

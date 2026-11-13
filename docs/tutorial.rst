@@ -475,6 +475,55 @@ In addition, Bottle automatically pickles and unpickles any data stored to signe
 
 .. warning:: Signed cookies are not encrypted (the client can still see the content) and not copy-protected (the client can restore an old cookie). The main intention is to make pickling and unpickling safe and prevent manipulation, not to store secret information at client side.
 
+.. rubric:: Keyring Cookies and Key Rotation
+
+A single static ``secret`` is hard to rotate: replacing it invalidates every
+cookie signed with the old value at once, and there is no way to tell which
+generation of key a cookie was signed with. The optional
+:class:`CookieKeyring` solves this by managing several named key
+*generations*. Every token carries the signing generation, an issuance
+timestamp and a configurable *purpose domain*, and all three are covered by
+the HMAC signature. Keyring tokens are always plain strings; they never use
+pickle.
+
+Pass a keyring instead of a ``secret``::
+
+    from bottle import CookieKeyring
+
+    keyring = CookieKeyring(
+        keys={'2026': 'current-secret', '2025': 'previous-secret'},
+        current_generation='2026',
+        allowed_generations={'2026', '2025'},  # rotation window
+        purpose='session',
+        max_age=30 * 24 * 3600,
+    )
+
+    response.set_cookie('account', username, keyring=keyring)
+    username = request.get_cookie('account', keyring=keyring)
+
+New cookies are always signed with ``current_generation``, while
+``get_cookie`` accepts any generation listed in ``allowed_generations``.
+Once every client has re-authenticated, close the rotation window and the
+old generation stops being accepted in one shot::
+
+    keyring.finish_rotation()  # revokes every generation but the current
+
+Verification failures (unknown or revoked generation, expired or future
+timestamps, mismatched purpose or signature) normally return the default
+value just like a bad legacy signature. Pass ``strict=True`` to raise the
+specific :class:`CookieVerificationError` subclass instead, which makes a
+failed rotation attributable to its exact cause::
+
+    try:
+        username = request.get_cookie('account', keyring=keyring, strict=True)
+    except CookieVerificationError:
+        # Re-issue the cookie or force a fresh login.
+        ...
+
+The companion script ``tools/cookie_key_rotation.py`` stores the keyring in
+a small JSON state file and implements the ``init``, ``rotate`` and
+``finish`` steps of an annual rotation, including random secret generation.
+
 
 
 
@@ -803,4 +852,3 @@ Glossary
    source directory
       The directory which, including its subdirectories, contains all
       source files for one Sphinx project.
-

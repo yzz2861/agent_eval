@@ -209,6 +209,25 @@ HTTP utilities
 
 .. autofunction:: cookie_is_encoded
 
+.. autoclass:: CookieKeyring
+   :members:
+
+.. autoexception:: CookieVerificationError
+
+.. autoexception:: CookieFormatError
+
+.. autoexception:: UnknownKeyGenerationError
+
+.. autoexception:: RevokedKeyGenerationError
+
+.. autoexception:: CookieSignatureError
+
+.. autoexception:: CookieExpiredError
+
+.. autoexception:: CookieFutureError
+
+.. autoexception:: CookiePurposeError
+
 .. autofunction:: path_shift
 
 .. autodata:: HTTP_CODES

@@ -1169,12 +1169,31 @@ class BaseRequest:
         cookies = SimpleCookie(cookie_header).values()
         return FormsDict((c.key, c.value) for c in cookies)
 
-    def get_cookie(self, key, default=None, secret=None, digestmod=hashlib.sha256):
+    def get_cookie(self, key, default=None, secret=None, digestmod=hashlib.sha256,
+                   keyring=None, strict=False):
         """ Return the content of a cookie. To read a `Signed Cookie`, the
             `secret` must match the one used to create the cookie (see
             :meth:`Response.set_cookie <BaseResponse.set_cookie>`). If anything goes wrong (missing
-            cookie or wrong signature), return a default value. """
+            cookie or wrong signature), return a default value.
+
+            Pass a :class:`CookieKeyring` as `keyring` to verify versioned
+            keyring cookies carrying a key generation, issuance time and
+            purpose domain. By default any verification failure still
+            returns `default`; set `strict=True` to raise the matching
+            :class:`CookieVerificationError` instead, which makes failed
+            rotations attributable to an exact cause. """
         value = self.cookies.get(key)
+        if keyring is not None:
+            if secret is not None:
+                raise ValueError("Pass either 'secret' or 'keyring', not both.")
+            if not value:
+                return default
+            try:
+                return keyring.verify(key, value)
+            except CookieVerificationError:
+                if strict:
+                    raise
+                return default
         if secret:
             # See BaseResponse.set_cookie for details on signed cookies.
             if value and value.startswith('!') and '?' in value:
@@ -1758,13 +1777,19 @@ class BaseResponse:
             return self.content_type.split('charset=')[-1].split(';')[0].strip()
         return default
 
-    def set_cookie(self, name, value, secret=None, digestmod=hashlib.sha256, **options):
+    def set_cookie(self, name, value, secret=None, digestmod=hashlib.sha256,
+                   keyring=None, **options):
         """ Create a new cookie or replace an old one. If the `secret` parameter is
             set, create a `Signed Cookie` (described below).
 
             :param name: the name of the cookie.
             :param value: the value of the cookie.
             :param secret: a signature key required for signed cookies.
+            :param keyring: optional :class:`CookieKeyring` for versioned,
+              rotatable signed cookies. Keyring cookies are always strings
+              and never pickled; the token carries the signing key
+              generation, an issuance timestamp and the keyring's purpose
+              domain, all covered by the HMAC.
 
             Additionally, this method accepts all RFC 2109 attributes that are
             supported by :class:`cookie.Morsel`, including:
@@ -1806,7 +1831,13 @@ class BaseResponse:
         if py < (3, 8, 0):
             Morsel._reserved.setdefault('samesite', 'SameSite')
 
-        if secret:
+        if keyring is not None:
+            if secret is not None:
+                raise ValueError("Pass either 'secret' or 'keyring', not both.")
+            if not isinstance(value, (str, bytes)):
+                raise TypeError('Keyring cookies only accept string values.')
+            value = keyring.sign(name, value)
+        elif secret:
             if not isinstance(value, str):
                 depr(0, 13, "Pickling of arbitrary objects into cookies is "
                             "deprecated.", "Only store strings in cookies. "
@@ -2986,6 +3017,300 @@ def cookie_is_encoded(data):
     depr(0, 13, "cookie_is_encoded() will be removed soon.",
                 "Do not use this API directly.")
     return bool(data.startswith(b'!') and b'?' in data)
+
+
+###############################################################################
+# Keyring signed cookies #######################################################
+###############################################################################
+
+#: Format marker for keyring tokens. The legacy ``!sig?msg`` format only ever
+#: starts with a single ``!`` followed by base64, so a doubled ``!`` reliably
+#: distinguishes the two formats while staying within the legal cookie alphabet.
+COOKIE_KEYRING_PREFIX = '!!'
+COOKIE_KEYRING_VERSION = 1
+
+_KEYRING_GEN_RE = re.compile(r'[A-Za-z0-9_.-]{1,64}')
+_KEYRING_PURPOSE_RE = re.compile(r'[A-Za-z0-9_.-]{0,128}')
+
+
+class CookieVerificationError(BottleException, ValueError):
+    """ Base class for all keyring cookie verification failures. """
+
+
+class CookieFormatError(CookieVerificationError):
+    """ The token is malformed or not a keyring cookie. """
+
+
+class UnknownKeyGenerationError(CookieVerificationError):
+    """ The token claims a key generation the keyring does not know. """
+
+
+class RevokedKeyGenerationError(CookieVerificationError):
+    """ The token's key generation was revoked or left the rotation window. """
+
+
+class CookieSignatureError(CookieVerificationError):
+    """ The HMAC signature does not match the token payload. """
+
+
+class CookieExpiredError(CookieVerificationError):
+    """ The token is older than its signed maximum age. """
+
+
+class CookieFutureError(CookieVerificationError):
+    """ The token was issued in the future beyond the allowed clock skew. """
+
+
+class CookiePurposeError(CookieVerificationError):
+    """ The token was minted for a different name or purpose domain. """
+
+
+class CookieKeyring:
+    """ A versioned set of HMAC keys for :meth:`BaseResponse.set_cookie`
+        and :meth:`BaseRequest.get_cookie`.
+
+        Unlike a plain ``secret`` string, a keyring keeps several named key
+        *generations* at the same time. Every signed token carries the
+        generation id, an issuance timestamp and a purpose domain, all of
+        which are covered by the HMAC signature and therefore cannot be
+        forged without the matching key.
+
+        New tokens are always signed with :attr:`current_generation`. During
+        a rotation window the previous generation may be listed in
+        ``allowed_generations`` so old sessions keep working; once the
+        migration is done, remove it (or call :meth:`revoke`) and every token
+        of that generation fails verification in one shot.
+
+        :param keys: mapping of generation id (str/int) to secret key
+            (str/bytes). At least one key is required.
+        :param current_generation: generation used for new tokens. Defaults
+            to the numerically highest generation id.
+        :param allowed_generations: generations accepted for verification.
+            Defaults to every key in ``keys``. Revoked generations are
+            always rejected even if listed here.
+        :param revoked_generations: generations explicitly marked as
+            compromised or retired.
+        :param purpose: optional purpose domain (e.g. ``"session"``) that
+            is signed into every token and checked on verification, so a
+            token minted for one purpose cannot be replayed for another.
+        :param max_age: default lifetime in seconds signed into every
+            token. ``None`` disables the keyring-level expiry check, in
+            which case only the browser cookie attributes limit reuse.
+        :param clock_skew: tolerance in seconds for future-dated and
+            expired tokens.
+        :param digestmod: hash module passed to :func:`hmac.new`.
+    """
+
+    __slots__ = ('_keys', 'current_generation', 'allowed_generations',
+                 'revoked_generations', 'purpose', 'max_age',
+                 'clock_skew', 'digestmod')
+
+    def __init__(self, keys, current_generation=None,
+                 allowed_generations=None, revoked_generations=None,
+                 purpose='', max_age=None, clock_skew=60,
+                 digestmod=hashlib.sha256):
+        if not keys:
+            raise ValueError('CookieKeyring requires at least one key.')
+        self._keys = {self._validate_generation(gen): tob(secret)
+                      for gen, secret in keys.items()}
+        if current_generation is None:
+            self.current_generation = self._highest_generation(self._keys)
+        else:
+            self.current_generation = self._validate_generation(current_generation)
+        if self.current_generation not in self._keys:
+            raise ValueError('Current generation %r has no key.'
+                             % self.current_generation)
+        if allowed_generations is None:
+            self.allowed_generations = set(self._keys)
+        else:
+            self.allowed_generations = {
+                self._validate_generation(gen) for gen in allowed_generations}
+        self.revoked_generations = {
+            self._validate_generation(gen) for gen in (revoked_generations or ())}
+        self.purpose = self._validate_purpose(purpose)
+        if max_age is not None and (not isinstance(max_age, (int, float))
+                                    or max_age <= 0):
+            raise ValueError('max_age must be a positive number of seconds '
+                             'or None.')
+        self.max_age = max_age
+        if not isinstance(clock_skew, (int, float)) or clock_skew < 0:
+            raise ValueError('clock_skew must be a non-negative number.')
+        self.clock_skew = clock_skew
+        self.digestmod = digestmod
+
+    @property
+    def keys(self):
+        """ Mapping of generation id to secret key (bytes). """
+        return dict(self._keys)
+
+    @property
+    def generations(self):
+        """ Sorted tuple of all known generation ids. """
+        return tuple(sorted(self._keys))
+
+    @staticmethod
+    def _validate_generation(gen):
+        gen = str(gen)
+        if not _KEYRING_GEN_RE.fullmatch(gen):
+            raise ValueError('Invalid key generation id %r. Allowed '
+                             'characters: letters, digits, "_", "." and "-".'
+                             % gen)
+        return gen
+
+    @staticmethod
+    def _validate_purpose(purpose):
+        purpose = '' if purpose is None else str(purpose)
+        if not _KEYRING_PURPOSE_RE.fullmatch(purpose):
+            raise ValueError('Invalid purpose domain %r. Allowed '
+                             'characters: letters, digits, "_", "." and "-".'
+                             % purpose)
+        return purpose
+
+    @staticmethod
+    def _highest_generation(keys):
+        numeric = [gen for gen in keys if gen.isdigit()]
+        if numeric:
+            return max(numeric, key=int)
+        return sorted(keys)[-1]
+
+    def _message(self, version, gen, purpose, name, iat, max_age, payload):
+        return '|'.join((str(version), gen, purpose, name,
+                         str(int(iat)), str(max_age if max_age is not None else ''),
+                         payload))
+
+    def sign(self, name, value, now=None):
+        """ Sign a string cookie value and return the token string.
+
+            Only strings (and bytes) are accepted; keyring tokens never
+            contain pickle data.
+        """
+        if not isinstance(value, (str, bytes)):
+            raise TypeError('CookieKeyring cookies only accept string '
+                            'values, not %s.' % type(value).__name__)
+        name = str(name)
+        if not isinstance(value, str):
+            value = touni(value)
+        iat = int(time.time() if now is None else now)
+        payload = touni(base64.b64encode(tob(value)))
+        gen = self.current_generation
+        max_age = self.max_age
+        message = tob(self._message(COOKIE_KEYRING_VERSION, gen, self.purpose,
+                                    name, iat, max_age, payload))
+        signature = base64.b64encode(
+            hmac.new(self._keys[gen], message,
+                     digestmod=self.digestmod).digest())
+        token = base64.b64encode(message)
+        return COOKIE_KEYRING_PREFIX + touni(token) + '.' + touni(signature)
+
+    def verify(self, name, token, now=None):
+        """ Verify a token produced by :meth:`sign` and return its value.
+
+            Raises a :class:`CookieVerificationError` subclass describing
+            exactly why verification failed.
+        """
+        if not token or not token.startswith(COOKIE_KEYRING_PREFIX):
+            raise CookieFormatError('Not a keyring signed cookie.')
+        try:
+            raw = base64.b64decode(tob(token[len(COOKIE_KEYRING_PREFIX):
+                                            token.rfind('.')]),
+                                   validate=True)
+            sig_b64 = token[token.rfind('.') + 1:]
+            fields = touni(raw).split('|')
+            version, gen, purpose, token_name, iat_s, max_age_s, payload = fields
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise CookieFormatError('Malformed keyring cookie token.') from exc
+
+        if version != str(COOKIE_KEYRING_VERSION):
+            raise CookieFormatError('Unsupported token version %r.' % version)
+        gen = self._validate_generation(gen)
+        if gen not in self._keys:
+            raise UnknownKeyGenerationError(
+                'Unknown key generation %r.' % gen)
+        if gen in self.revoked_generations:
+            raise RevokedKeyGenerationError(
+                'Key generation %r has been revoked.' % gen)
+        if gen not in self.allowed_generations:
+            raise RevokedKeyGenerationError(
+                'Key generation %r is outside the allowed rotation window.'
+                % gen)
+        try:
+            iat = int(iat_s)
+            max_age = None if max_age_s == '' else int(max_age_s)
+        except ValueError as exc:
+            raise CookieFormatError('Malformed token timestamps.') from exc
+        if max_age is not None and max_age <= 0:
+            raise CookieFormatError('Malformed token max age.')
+        if purpose != self.purpose:
+            raise CookiePurposeError(
+                'Purpose domain %r does not match %r.'
+                % (purpose, self.purpose))
+
+        message = tob(self._message(version, gen, purpose, token_name,
+                                    iat, max_age, payload))
+        expected = base64.b64encode(
+            hmac.new(self._keys[gen], message,
+                     digestmod=self.digestmod).digest())
+        if not _lscmp(tob(sig_b64), expected):
+            raise CookieSignatureError('Cookie signature mismatch.')
+
+        # Only trust the cookie name once the signature holds.
+        if token_name != str(name):
+            raise CookiePurposeError(
+                'Token was minted for cookie %r, not %r.'
+                % (token_name, name))
+
+        current = time.time() if now is None else now
+        if iat - self.clock_skew > current:
+            raise CookieFutureError(
+                'Cookie issued in the future (iat=%s, now=%s).' % (iat, current))
+        if max_age is not None and iat + max_age + self.clock_skew < current:
+            raise CookieExpiredError(
+                'Cookie expired (iat=%s, max_age=%s, now=%s).'
+                % (iat, max_age, current))
+
+        try:
+            return touni(base64.b64decode(payload, validate=True))
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise CookieFormatError('Malformed cookie payload.') from exc
+
+    def rotate(self, new_generation, new_secret, accept_previous=True):
+        """ Add a new generation and make it the current one.
+
+            With ``accept_previous`` (default) the old current generation
+            stays in :attr:`allowed_generations`, opening the rotation
+            window. Call :meth:`finish_rotation` once every client has
+            re-authenticated to close it.
+        """
+        new_generation = self._validate_generation(new_generation)
+        previous = self.current_generation
+        self._keys[new_generation] = tob(new_secret)
+        self.current_generation = new_generation
+        self.allowed_generations.add(new_generation)
+        if not accept_previous:
+            self.revoke(previous)
+        return previous
+        return previous
+
+    def revoke(self, generation):
+        """ Revoke a generation: its tokens are rejected immediately. """
+        generation = self._validate_generation(generation)
+        if generation not in self._keys:
+            raise UnknownKeyGenerationError(
+                'Cannot revoke unknown generation %r.' % generation)
+        self.revoked_generations.add(generation)
+        self.allowed_generations.discard(generation)
+
+    def finish_rotation(self):
+        """ Close the rotation window by invalidating every generation
+            except the current one. All retired generations are added to
+            :attr:`revoked_generations`, so their tokens fail verification
+            in one shot even if they are still inside their validity window.
+        """
+        keep = self.current_generation
+        retired = set(self._keys) - {keep}
+        self.revoked_generations.update(retired)
+        self.allowed_generations = {keep}
+        return retired
 
 
 def html_escape(string):
