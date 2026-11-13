@@ -1,6 +1,9 @@
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
+from inspect import signature
+from secrets import token_urlsafe
+from threading import RLock
 
 from flask import abort
 from flask import current_app
@@ -36,6 +39,10 @@ from .utils import encode_cookie
 from .utils import expand_login_view
 from .utils import login_url as make_login_url
 from .utils import make_next_param
+
+
+class SessionRekeyError(RuntimeError):
+    """Raised by applications that require a backend capable of rekeying."""
 
 
 class LoginManager:
@@ -99,6 +106,26 @@ class LoginManager:
         self._request_callback = None
 
         self._session_identifier_generator = _create_identifier
+
+        #: Opt-in strict session rekeying. When enabled, identity changes get
+        #: a new server-recognised session id before any user data is written.
+        self.strict_session_rekey = False
+        self.session_rekey_mode = None
+        self.require_session_rekey = False
+
+        #: Require a real session backend rekey hook. Without one, strict
+        #: mode fails instead of using the process-local fallback.
+        self.session_rekey_require_backend = False
+
+        #: Optional callback implementing a session backend rekey. It may
+        #: accept ``(session, new_id)`` or just ``(session)``.
+        self._session_rekey_handler = None
+
+        self._session_rekey_lock = RLock()
+        self._session_rekey_store = {}
+        self._remember_rekey_store = {}
+        self._rekey_fallback_warned = False
+        self.last_session_rekey_degraded = False
 
         if app is not None:
             self.init_app(app, add_context_processor)
@@ -298,6 +325,357 @@ class LoginManager:
             user = self.anonymous_user()
 
         g._login_user = user
+        g._login_user_object = user
+        g._login_user_session_key = self._session_cache_key()
+
+    def session_rekey_handler(self, callback):
+        """Set the callback used to rekey the current session backend."""
+
+        self._session_rekey_handler = callback
+        return callback
+
+    def session_rekey(self, user_id=None, new_session_id=None):
+        """Explicitly replace the current session identity.
+
+        The backend hook is preferred. If it is unavailable, the built-in
+        process-local identity store is used unless strict mode requires a
+        backend. Returns ``True`` only when the old identity can no longer
+        authorise requests.
+        """
+
+        return self._rekey_session(user_id=user_id, new_session_id=new_session_id)
+
+    def _strict_rekey_enabled(self, override=None):
+        if override is True:
+            return True
+
+        app = current_app._get_current_object()
+        config = app.config
+        strict = bool(getattr(self, "strict_session_rekey", False))
+        strict = strict or bool(getattr(self, "require_session_rekey", False))
+
+        manager_mode = getattr(self, "session_rekey_mode", None)
+        if isinstance(manager_mode, str) and manager_mode.lower() in {
+            "strict",
+            "strong",
+            "true",
+            "1",
+            "require",
+            "required",
+        }:
+            strict = True
+
+        for key in (
+            "SESSION_REKEY_STRICT",
+            "SESSION_REKEY_ENABLED",
+            "LOGIN_SESSION_REKEY_STRICT",
+            "LOGIN_STRICT_SESSION_REKEY",
+            "STRICT_SESSION_REKEY",
+        ):
+            if config.get(key):
+                strict = True
+
+        mode = config.get("SESSION_REKEY_MODE")
+        if mode is None:
+            mode = config.get("SESSION_REKEY")
+
+        if isinstance(mode, bool):
+            strict = strict or mode
+        elif isinstance(mode, str) and mode.lower() in {
+            "strict",
+            "strong",
+            "true",
+            "1",
+            "require",
+            "required",
+        }:
+            strict = True
+
+        return strict
+
+    def _session_cache_key(self):
+        return (
+            session.get("_user_id"),
+            session.get("_id"),
+            session.get("_fresh"),
+            session.get("_strict_rekey"),
+        )
+
+    def _request_user_cache_stale(self):
+        cached_user = getattr(g, "_login_user_object", None)
+        if cached_user is not None and g._login_user is not cached_user:
+            return True
+
+        cached = getattr(g, "_login_user_session_key", None)
+        if cached is None:
+            return False
+
+        if cached != self._session_cache_key():
+            return True
+
+        user_id = session.get("_user_id")
+        if user_id is None:
+            return False
+
+        user = getattr(g, "_login_user", None)
+        if user is not None and getattr(user, "is_authenticated", False):
+            if str(user.get_id()) != str(user_id):
+                return True
+
+        rekeyed = bool(session.get("_strict_rekey"))
+        strict = self._strict_rekey_enabled()
+        if not rekeyed and not strict:
+            return False
+
+        return not self._session_identity_is_current(user_id)
+
+    def _session_identity_is_current(self, user_id=None):
+        if not session.get("_strict_rekey"):
+            return False
+
+        session_id = session.get("_id")
+        if session_id is None:
+            return False
+
+        with self._session_rekey_lock:
+            registered_user = self._session_rekey_store.get(session_id)
+
+        if registered_user is None:
+            return False
+
+        return user_id is None or str(registered_user) == str(user_id)
+
+    def _revoke_session_identity(self, session_id):
+        if session_id is None:
+            return
+
+        with self._session_rekey_lock:
+            self._session_rekey_store.pop(session_id, None)
+
+    def _clear_session_authentication(self):
+        old_id = session.pop("_id", None)
+        self._revoke_session_identity(old_id)
+        session.pop("_fresh", None)
+        session.pop("_user_id", None)
+        session.pop("_fingerprint", None)
+        session.pop("_strict_rekey", None)
+        session.pop("_remember_nonce", None)
+
+    def _requires_backend_rekey(self):
+        app = current_app._get_current_object()
+        config = app.config
+        required = bool(getattr(self, "session_rekey_require_backend", False))
+        required = required or bool(config.get("SESSION_REKEY_REQUIRE_BACKEND"))
+        required = required or bool(config.get("SESSION_REKEY_BACKEND_REQUIRED"))
+
+        fallback = config.get("SESSION_REKEY_FALLBACK")
+        if isinstance(fallback, str) and fallback.lower() in {
+            "reject",
+            "fail",
+            "error",
+            "required",
+        }:
+            required = True
+
+        return required
+
+    def _session_rekey_failed(self, message):
+        failure_mode = current_app.config.get("SESSION_REKEY_FAILURE", "return")
+        if isinstance(failure_mode, str) and failure_mode.lower() == "raise":
+            raise SessionRekeyError(message)
+
+        return False
+
+    def _invoke_rekey_hook(self, hook, session_obj, new_id, old_id):
+        try:
+            parameters = signature(hook).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+
+        names = list(parameters)
+        has_varargs = any(
+            p.kind == p.VAR_POSITIONAL for p in parameters.values()
+        )
+
+        if has_varargs:
+            args = (session_obj, new_id)
+        elif len(parameters) >= 3:
+            app = current_app._get_current_object()
+            if names and names[0] in {"app", "application"}:
+                args = (app, session_obj, new_id)
+            else:
+                args = (session_obj, old_id, new_id)
+        elif len(parameters) >= 2:
+            second = names[1].lower() if len(names) > 1 else ""
+            if "old" in second:
+                args = (session_obj, old_id)
+            else:
+                args = (session_obj, new_id)
+        elif len(parameters) == 1:
+            args = (session_obj,)
+        else:
+            args = ()
+
+        return hook(*args)
+
+    def _backend_rekey(self, session_obj, new_id, old_id):
+        app = current_app._get_current_object()
+        hooks = []
+
+        if self._session_rekey_handler is not None:
+            hooks.append(("session_rekey_handler", self._session_rekey_handler))
+
+        for key in (
+            "SESSION_REKEY_HANDLER",
+            "SESSION_REKEY_CALLBACK",
+            "SESSION_REKEY_BACKEND",
+        ):
+            hook = app.config.get(key)
+            if callable(hook):
+                hooks.append((key, hook))
+
+        session_interface = app.session_interface
+        for name in (
+            "rekey_session",
+            "regenerate_session",
+            "regenerate",
+            "rotate_session",
+            "rekey",
+        ):
+            hook = getattr(session_interface, name, None)
+            if callable(hook):
+                hooks.append((f"session_interface.{name}", hook))
+
+        supported = False
+        for name, hook in hooks:
+            try:
+                result = self._invoke_rekey_hook(
+                    hook, session_obj, new_id, old_id
+                )
+            except NotImplementedError:
+                continue
+            except Exception:
+                current_app.logger.exception("Session rekey hook %s failed", name)
+                return True, False, None
+
+            if result is False:
+                current_app.logger.error("Session rekey hook %s rejected the rekey", name)
+                return True, False, None
+
+            supported = True
+            if isinstance(result, str):
+                new_id = result
+            break
+
+        return supported, supported, new_id
+
+    def _rekey_session(self, user_id=None, new_session_id=None):
+        session_obj = session._get_current_object()
+        old_id = session_obj.get("_id")
+        new_id = new_session_id or token_urlsafe(32)
+        self.last_session_rekey_degraded = False
+
+        supported, success, backend_id = self._backend_rekey(
+            session_obj, new_id, old_id
+        )
+
+        if not success:
+            if supported or self._requires_backend_rekey():
+                if supported:
+                    return self._session_rekey_failed(
+                        "Session rekey hook failed or rejected the rekey"
+                    )
+
+                current_app.logger.error(
+                    "Session rekey failed: the session backend does not "
+                    "implement a rekey hook"
+                )
+                return self._session_rekey_failed(
+                    "Session backend does not implement a rekey hook"
+                )
+
+            if not self._rekey_fallback_warned:
+                current_app.logger.warning(
+                    "Session backend cannot rekey; using process-local identity "
+                    "revocation. Configure a server-side session backend for "
+                    "multi-process deployments."
+                )
+                self._rekey_fallback_warned = True
+
+            backend_id = new_id
+            self.last_session_rekey_degraded = True
+
+        session_obj["_id"] = backend_id
+        session_obj["_fingerprint"] = self._session_identifier_generator()
+        session_obj["_strict_rekey"] = True
+
+        with self._session_rekey_lock:
+            if old_id is not None:
+                self._session_rekey_store.pop(old_id, None)
+            if user_id is not None:
+                self._session_rekey_store[backend_id] = str(user_id)
+            else:
+                self._session_rekey_store.pop(backend_id, None)
+
+        return True
+
+    def _new_remember_nonce(self, user_id):
+        nonce = f"rk_{token_urlsafe(24)}"
+        with self._session_rekey_lock:
+            self._remember_rekey_store[nonce] = str(user_id)
+        return nonce
+
+    def _revoke_remember_nonce(self, nonce):
+        if nonce is None:
+            return
+
+        with self._session_rekey_lock:
+            self._remember_rekey_store.pop(nonce, None)
+
+    def _remember_nonce_is_current(self, nonce, user_id):
+        if nonce is None:
+            return False
+
+        with self._session_rekey_lock:
+            registered_user = self._remember_rekey_store.get(nonce)
+
+        return registered_user is not None and str(registered_user) == str(user_id)
+
+    def _consume_remember_nonce(self, nonce, user_id):
+        if nonce is None:
+            return False
+
+        with self._session_rekey_lock:
+            registered_user = self._remember_rekey_store.pop(nonce, None)
+
+        return registered_user is not None and str(registered_user) == str(user_id)
+
+    @staticmethod
+    def _parse_remember_payload(payload):
+        if payload is None:
+            return None, None
+
+        if "|rk_" in payload:
+            user_id, nonce = payload.rsplit("|", 1)
+            return user_id, nonce
+
+        return payload, None
+
+    def _remember_cookie_is_current(self, cookie):
+        user_id = session.get("_user_id")
+        pending = getattr(g, "_flask_login_remember_nonce", None)
+        if pending is not None and self._remember_nonce_is_current(pending, user_id):
+            return True
+
+        payload = decode_cookie(cookie)
+        user_id, nonce = self._parse_remember_payload(payload)
+        if user_id is None:
+            return False
+
+        if nonce is None:
+            return not self._strict_rekey_enabled()
+
+        return self._remember_nonce_is_current(nonce, user_id)
 
     def _load_user(self):
         """Loads user from session or remember_me cookie as applicable"""
@@ -315,12 +693,42 @@ class LoginManager:
         if self._session_protection_failed():
             return self._update_request_context_with_user()
 
+        strict = self._strict_rekey_enabled()
+        rekeyed = bool(session.get("_strict_rekey"))
+        enforce_identity = strict or rekeyed
         user = None
 
         # Load user from Flask Session
         user_id = session.get("_user_id")
-        if user_id is not None and self._user_callback is not None:
-            user = self._user_callback(user_id)
+        if user_id is not None:
+            if enforce_identity and not self._session_identity_is_current(user_id):
+                self._clear_session_authentication()
+                if request.cookies.get(
+                    current_app.config.get("REMEMBER_COOKIE_NAME", COOKIE_NAME)
+                ):
+                    session["_remember"] = "clear"
+                return self._update_request_context_with_user()
+
+            if self._user_callback is not None:
+                user = self._user_callback(user_id)
+                if enforce_identity and user is not None and not user.is_active:
+                    user = None
+
+            if enforce_identity and self._user_callback is None:
+                self._clear_session_authentication()
+                if request.cookies.get(
+                    current_app.config.get("REMEMBER_COOKIE_NAME", COOKIE_NAME)
+                ):
+                    session["_remember"] = "clear"
+                return self._update_request_context_with_user()
+
+            if self._user_callback is not None and user is None:
+                self._clear_session_authentication()
+                if request.cookies.get(
+                    current_app.config.get("REMEMBER_COOKIE_NAME", COOKIE_NAME)
+                ):
+                    session["_remember"] = "clear"
+                return self._update_request_context_with_user()
 
         # Load user from Remember Me Cookie or Request Loader
         if user is None:
@@ -332,6 +740,8 @@ class LoginManager:
                 user = self._load_user_from_remember_cookie(cookie)
             elif self._request_callback:
                 user = self._load_user_from_request(request)
+                if enforce_identity and user is not None and not user.is_active:
+                    user = None
 
         return self._update_request_context_with_user(user)
 
@@ -347,15 +757,24 @@ class LoginManager:
 
         # if the sess is empty, it's an anonymous user or just logged out
         # so we can skip this
-        if sess and ident != sess.get("_id", None):
+        if sess.get("_strict_rekey"):
+            stored_ident = sess.get("_fingerprint")
+        else:
+            stored_ident = sess.get("_id")
+
+        if sess and ident != stored_ident:
             if mode == "basic" or sess.permanent:
                 if sess.get("_fresh") is not False:
                     sess["_fresh"] = False
                 session_protected.send(app)
                 return False
             elif mode == "strong":
+                self._revoke_session_identity(sess.get("_id"))
                 for k in SESSION_KEYS:
                     sess.pop(k, None)
+                sess.pop("_fingerprint", None)
+                sess.pop("_strict_rekey", None)
+                sess.pop("_remember_nonce", None)
 
                 sess["_remember"] = "clear"
                 session_protected.send(app)
@@ -364,17 +783,44 @@ class LoginManager:
         return False
 
     def _load_user_from_remember_cookie(self, cookie):
-        user_id = decode_cookie(cookie)
+        payload = decode_cookie(cookie)
+        user_id, nonce = self._parse_remember_payload(payload)
+        strict = self._strict_rekey_enabled()
+
+        if strict and nonce is None:
+            return None
+
+        if strict and not self._consume_remember_nonce(nonce, user_id):
+            return None
+
         if user_id is not None:
-            session["_user_id"] = user_id
-            session["_fresh"] = False
             user = None
             if self._user_callback:
                 user = self._user_callback(user_id)
             if user is not None:
+                if strict and not user.is_active:
+                    self._revoke_remember_nonce(nonce)
+                    session["_remember"] = "clear"
+                    return None
+
+                if strict:
+                    if not self._rekey_session(user_id=user_id):
+                        return None
+
+                    new_nonce = self._new_remember_nonce(user_id)
+                    g._flask_login_remember_nonce = new_nonce
+
+                session["_user_id"] = user_id
+                session["_fresh"] = False
+                if strict:
+                    session["_remember"] = "set"
+
                 app = current_app._get_current_object()
                 user_loaded_from_cookie.send(app, user=user)
                 return user
+
+            if strict:
+                session["_remember"] = "clear"
         return None
 
     def _load_user_from_request(self, request):
@@ -393,6 +839,16 @@ class LoginManager:
         refresh = current_app.config.get("REMEMBER_COOKIE_REFRESH_EACH_REQUEST") and has_cookie
 
         operation = session.pop("_remember", None)
+
+        if (
+            operation != "set"
+            and has_cookie
+            and self._strict_rekey_enabled()
+            and not self._remember_cookie_is_current(request.cookies[cookie_name])
+        ):
+            operation = "clear"
+            refresh = False
+
         if not operation and not refresh:
             return response
 
@@ -400,11 +856,11 @@ class LoginManager:
             self._clear_cookie(response)
 
         if operation == "set" or refresh:
-            self._set_cookie(response)
+            self._set_cookie(response, rotate=operation == "set")
 
         return response
 
-    def _set_cookie(self, response):
+    def _set_cookie(self, response, rotate=False):
         if "_user_id" not in session:
             return
 
@@ -424,7 +880,34 @@ class LoginManager:
             duration = config.get("REMEMBER_COOKIE_DURATION", COOKIE_DURATION)
 
         # prepare data
-        data = encode_cookie(str(session["_user_id"]))
+        user_id = str(session["_user_id"])
+        strict = self._strict_rekey_enabled()
+        nonce = None
+
+        if strict:
+            nonce = getattr(g, "_flask_login_remember_nonce", None)
+            old_cookie = request.cookies.get(cookie_name)
+            if rotate and old_cookie is not None:
+                old_payload = decode_cookie(old_cookie)
+                _old_user_id, old_nonce = self._parse_remember_payload(old_payload)
+                self._revoke_remember_nonce(old_nonce)
+
+            if nonce is None:
+                current_payload = decode_cookie(old_cookie) if old_cookie else None
+                current_user_id, current_nonce = self._parse_remember_payload(
+                    current_payload
+                )
+                if not rotate and self._remember_nonce_is_current(
+                    current_nonce, user_id
+                ):
+                    nonce = current_nonce
+
+            if nonce is None or not self._remember_nonce_is_current(nonce, user_id):
+                nonce = self._new_remember_nonce(user_id)
+
+            data = encode_cookie(f"{user_id}|{nonce}")
+        else:
+            data = encode_cookie(user_id)
 
         if isinstance(duration, int):
             duration = timedelta(seconds=duration)
@@ -453,4 +936,9 @@ class LoginManager:
         cookie_name = config.get("REMEMBER_COOKIE_NAME", COOKIE_NAME)
         domain = config.get("REMEMBER_COOKIE_DOMAIN")
         path = config.get("REMEMBER_COOKIE_PATH", "/")
+        cookie = request.cookies.get(cookie_name)
+        if cookie is not None:
+            payload = decode_cookie(cookie)
+            _user_id, nonce = self._parse_remember_payload(payload)
+            self._revoke_remember_nonce(nonce)
         response.delete_cookie(cookie_name, domain=domain, path=path)

@@ -146,12 +146,16 @@ def login_remembered():
     has_cookie = cookie_name in request.cookies and session.get("_remember") != "clear"
     if has_cookie:
         cookie = request.cookies[cookie_name]
+        login_manager = current_app.login_manager
+        if login_manager._strict_rekey_enabled() or session.get("_strict_rekey"):
+            return login_manager._remember_cookie_is_current(cookie)
+
         user_id = decode_cookie(cookie)
         return user_id is not None
     return False
 
 
-def login_user(user, remember=False, duration=None, force=False, fresh=True):
+def login_user(user, remember=False, duration=None, force=False, fresh=True, rekey=None):
     """
     Logs a user in. You should pass the actual user object to this. If the
     user's `is_active` property is ``False``, they will not be logged in
@@ -174,14 +178,31 @@ def login_user(user, remember=False, duration=None, force=False, fresh=True):
     :param fresh: setting this to ``False`` will log in the user with a session
         marked as not "fresh". Defaults to ``True``.
     :type fresh: bool
+    :param rekey: Force a session rekey even when strict mode is disabled.
+        In strict mode a rekey is always required.
+    :type rekey: bool
     """
     if not force and not user.is_active:
         return False
 
     user_id = getattr(user, current_app.login_manager.id_attribute)()
+    login_manager = current_app.login_manager
+    rekey_required = login_manager._strict_rekey_enabled() or rekey is True
+
+    if rekey_required:
+        if not login_manager._rekey_session(user_id=user_id):
+            return False
+    else:
+        if session.get("_strict_rekey"):
+            login_manager._revoke_session_identity(session.get("_id"))
+            session.pop("_strict_rekey", None)
+            session.pop("_fingerprint", None)
+            session.pop("_remember_nonce", None)
+
+        session["_id"] = login_manager._session_identifier_generator()
+
     session["_user_id"] = user_id
     session["_fresh"] = fresh
-    session["_id"] = current_app.login_manager._session_identifier_generator()
 
     if remember:
         session["_remember"] = "set"
@@ -195,28 +216,41 @@ def login_user(user, remember=False, duration=None, force=False, fresh=True):
                 raise Exception(
                     f"duration must be a datetime.timedelta, instead got: {duration}"
                 ) from e
+    elif rekey_required:
+        cookie_name = current_app.config.get("REMEMBER_COOKIE_NAME", COOKIE_NAME)
+        if cookie_name in request.cookies:
+            session["_remember"] = "clear"
 
-    current_app.login_manager._update_request_context_with_user(user)
+    login_manager._update_request_context_with_user(user)
     user_logged_in.send(current_app._get_current_object(), user=_get_user())
     return True
 
 
-def logout_user():
+def logout_user(rekey=None):
     """
     Logs a user out. (You do not need to pass the actual user.) This will
     also clean up the remember me cookie if it exists.
+
+    In strict mode the server-recognised session id is revoked before the
+    request context is refreshed. ``False`` is returned if that revocation
+    could not be completed.
     """
 
     user = _get_user()
+    login_manager = current_app.login_manager
+    strict = login_manager._strict_rekey_enabled() or rekey is True
+    result = True
 
-    if "_user_id" in session:
-        session.pop("_user_id")
+    if strict and (session.get("_id") is not None or "_user_id" in session):
+        result = login_manager._rekey_session(user_id=None)
 
-    if "_fresh" in session:
-        session.pop("_fresh")
-
-    if "_id" in session:
-        session.pop("_id")
+    old_session_id = session.pop("_id", None)
+    login_manager._revoke_session_identity(old_session_id)
+    session.pop("_user_id", None)
+    session.pop("_fresh", None)
+    session.pop("_fingerprint", None)
+    session.pop("_strict_rekey", None)
+    session.pop("_remember_nonce", None)
 
     cookie_name = current_app.config.get("REMEMBER_COOKIE_NAME", COOKIE_NAME)
     if cookie_name in request.cookies:
@@ -226,8 +260,8 @@ def logout_user():
 
     user_logged_out.send(current_app._get_current_object(), user=user)
 
-    current_app.login_manager._update_request_context_with_user()
-    return True
+    login_manager._update_request_context_with_user()
+    return result
 
 
 def confirm_login():
@@ -235,8 +269,14 @@ def confirm_login():
     This sets the current session as fresh. Sessions become stale when they
     are reloaded from a cookie.
     """
+    login_manager = current_app.login_manager
+    if login_manager._strict_rekey_enabled() or session.get("_strict_rekey"):
+        if not login_manager._rekey_session(user_id=session.get("_user_id")):
+            return
+    else:
+        session["_id"] = login_manager._session_identifier_generator()
+
     session["_fresh"] = True
-    session["_id"] = current_app.login_manager._session_identifier_generator()
     user_login_confirmed.send(current_app._get_current_object())
 
 
@@ -360,6 +400,8 @@ def set_login_view(login_view, blueprint=None):
 def _get_user():
     if has_request_context():
         if "_login_user" not in g:
+            current_app.login_manager._load_user()
+        elif current_app.login_manager._request_user_cache_stale():
             current_app.login_manager._load_user()
 
         return g._login_user

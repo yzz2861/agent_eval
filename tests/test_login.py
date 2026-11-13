@@ -10,9 +10,11 @@ from unittest.mock import patch
 
 from flask import Blueprint
 from flask import Flask
+from flask import g
 from flask import get_flashed_messages
 from flask import Response
 from flask import session
+from flask.sessions import SecureCookieSessionInterface
 from flask.views import MethodView
 
 from flask_login import AnonymousUserMixin
@@ -1623,3 +1625,170 @@ class CustomTestClientTestCase(unittest.TestCase):
             self.assertEqual("Anonymous", username.data.decode("utf-8"))
             is_fresh = c.get("/is-fresh")
             self.assertEqual("False", is_fresh.data.decode("utf-8"))
+
+
+class StrictSessionRekeyTestCase(unittest.TestCase):
+    def setUp(self):
+        self.app = Flask(__name__)
+        self.app.config["SECRET_KEY"] = "deterministic"
+        self.app.config["SESSION_PROTECTION"] = None
+        self.app.config["SESSION_REKEY_STRICT"] = True
+        self.app.config["REMEMBER_COOKIE_NAME"] = "remember"
+        self.login_manager = LoginManager()
+        self.login_manager.init_app(self.app)
+        self.user_for_loader = None
+        self.return_none_from_loader = False
+
+        @self.login_manager.user_loader
+        def load_user(user_id):
+            if self.return_none_from_loader:
+                return None
+            if self.user_for_loader is not None:
+                return self.user_for_loader
+            return USERS.get(int(user_id))
+
+        @self.app.route("/login/<int:user_id>")
+        def login(user_id):
+            return str(login_user(USERS[user_id]))
+
+        @self.app.route("/login-remember/<int:user_id>")
+        def login_remember(user_id):
+            return str(login_user(USERS[user_id], remember=True))
+
+        @self.app.route("/login-force-remember/<int:user_id>")
+        def login_force_remember(user_id):
+            return str(login_user(USERS[user_id], remember=True, force=True))
+
+        @self.app.route("/logout")
+        def logout():
+            return str(logout_user())
+
+        @self.app.route("/username")
+        def username():
+            if current_user.is_authenticated:
+                return current_user.name
+            return "Anonymous"
+
+        @self.app.route("/session-id")
+        def session_id():
+            return session.get("_id", "")
+
+        @self.app.route("/is-fresh")
+        def is_fresh():
+            return str(login_fresh())
+
+    def _session_cookie(self, client):
+        return client.get_cookie("session")
+
+    def _remember_cookie(self, client):
+        return client.get_cookie("remember")
+
+    def test_anonymous_login_rekeys_and_old_session_is_rejected(self):
+        with self.app.test_client() as client:
+            client.get("/")
+            with client.session_transaction() as sess:
+                sess["anonymous_data"] = "keep"
+            old_cookie = self._session_cookie(client)
+            old_id = client.get("/session-id").data.decode("utf-8")
+
+            self.assertEqual("True", client.get("/login/1").data.decode("utf-8"))
+            new_id = client.get("/session-id").data.decode("utf-8")
+            self.assertNotEqual(old_id, new_id)
+            self.assertEqual("Notch", client.get("/username").data.decode("utf-8"))
+
+            client.set_cookie("session", old_cookie.value)
+            self.assertEqual("Anonymous", client.get("/username").data.decode("utf-8"))
+
+    def test_repeat_login_revokes_previous_identity(self):
+        with self.app.test_client() as client:
+            client.get("/login/1")
+            previous_cookie = self._session_cookie(client)
+
+            client.get("/login/2")
+            self.assertEqual("Steve", client.get("/username").data.decode("utf-8"))
+
+            client.set_cookie("session", previous_cookie.value)
+            self.assertEqual("Anonymous", client.get("/username").data.decode("utf-8"))
+
+    def test_logout_revokes_previous_identity(self):
+        with self.app.test_client() as client:
+            client.get("/login/1")
+            previous_cookie = self._session_cookie(client)
+            self.assertEqual("True", client.get("/logout").data.decode("utf-8"))
+
+            client.set_cookie("session", previous_cookie.value)
+            self.assertEqual("Anonymous", client.get("/username").data.decode("utf-8"))
+
+    def test_remember_restore_rotates_cookie_and_token(self):
+        with self.app.test_client() as client:
+            client.get("/login-remember/1")
+            old_remember = self._remember_cookie(client)
+            client.delete_cookie("session")
+
+            self.assertEqual("Notch", client.get("/username").data.decode("utf-8"))
+            new_remember = self._remember_cookie(client)
+            self.assertNotEqual(old_remember.value, new_remember.value)
+
+            client.delete_cookie("session")
+            client.set_cookie("remember", old_remember.value)
+            self.assertEqual("Anonymous", client.get("/username").data.decode("utf-8"))
+
+    def test_user_loader_none_does_not_fall_back_to_remember(self):
+        with self.app.test_client() as client:
+            client.get("/login-remember/1")
+            self.return_none_from_loader = True
+            client.delete_cookie("session")
+            self.assertEqual("Anonymous", client.get("/username").data.decode("utf-8"))
+
+    def test_inactive_remember_user_is_rejected(self):
+        self.user_for_loader = creeper
+        with self.app.test_client() as client:
+            client.get("/login-force-remember/3")
+            client.delete_cookie("session")
+            self.assertEqual("Anonymous", client.get("/username").data.decode("utf-8"))
+
+    def test_unsupported_backend_can_require_failure(self):
+        self.app.config["SESSION_REKEY_REQUIRE_BACKEND"] = True
+        with self.app.test_client() as client:
+            self.assertEqual("False", client.get("/login/1").data.decode("utf-8"))
+            self.assertEqual("Anonymous", client.get("/username").data.decode("utf-8"))
+
+    def test_rekey_handler_is_used(self):
+        calls = []
+
+        @self.login_manager.session_rekey_handler
+        def rekey(session_obj, new_id):
+            calls.append((session_obj, new_id))
+            return True
+
+        with self.app.test_client() as client:
+            self.assertEqual("True", client.get("/login/1").data.decode("utf-8"))
+            self.assertEqual("Notch", client.get("/username").data.decode("utf-8"))
+            self.assertEqual(1, len(calls))
+
+    def test_session_backend_regenerate_is_used(self):
+        calls = []
+
+        class RekeyingSessionInterface(SecureCookieSessionInterface):
+            def regenerate(self, session_obj):
+                calls.append(session_obj)
+
+        self.app.session_interface = RekeyingSessionInterface()
+        with self.app.test_client() as client:
+            self.assertEqual("True", client.get("/login/1").data.decode("utf-8"))
+            self.assertEqual("Notch", client.get("/username").data.decode("utf-8"))
+            self.assertEqual(1, len(calls))
+
+    def test_session_protection_uses_fingerprint_after_rekey(self):
+        self.app.config["SESSION_PROTECTION"] = "basic"
+        with self.app.test_client() as client:
+            client.get("/login/1")
+            self.assertEqual("Notch", client.get("/username").data.decode("utf-8"))
+            self.assertEqual("True", client.get("/is-fresh").data.decode("utf-8"))
+
+    def test_stale_request_user_cache_is_refreshed(self):
+        with self.app.test_request_context():
+            login_user(notch)
+            login_user(steve)
+            g._login_user = notch
+            self.assertEqual("Steve", current_user.name)
