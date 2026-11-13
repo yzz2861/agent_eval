@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Iterable, MutableMapping
 from typing import Protocol, TypeAlias, cast
 
+from ..headers._validation import validate_header_name, validate_wire_header
 from ..secure import MULTI_OK, Secure
 
 # ---------------------------------------------------------------------------
@@ -111,7 +112,10 @@ class SecureASGIMiddleware:
         provided = MULTI_OK if multi_ok is None else multi_ok
         # Normalize once during init; comparisons during request handling are bytes-based.
         self._multi_ok: frozenset[bytes] = frozenset(
-            _normalize_header_name_bytes(_encode_header_name(_normalize_header_name(name))) for name in provided
+            _normalize_header_name_bytes(
+                _encode_header_name(_normalize_header_name(validate_header_name(name, what="multi_ok header name")))
+            )
+            for name in provided
         )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -134,9 +138,12 @@ class SecureASGIMiddleware:
 
                 # Apply Secure headers.
                 for name_str, value_str in self.secure.headers.items():
-                    name_b = _encode_header_name(name_str)
+                    # Shared wire validation: identical accept/reject outcome as
+                    # the WSGI middleware for the same logical header list.
+                    checked_name, checked_value = validate_wire_header(name_str, value_str)
+                    name_b = _encode_header_name(checked_name)
                     norm_name_b = _normalize_header_name_bytes(name_b)
-                    value_b = _encode_header_value(value_str)
+                    value_b = _encode_header_value(checked_value)
 
                     if norm_name_b in self._multi_ok:
                         headers.append((name_b, value_b))

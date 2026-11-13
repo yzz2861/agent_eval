@@ -3,6 +3,8 @@ from __future__ import annotations
 import inspect
 from typing import TYPE_CHECKING, cast
 
+from ..headers._validation import RULE_HEADER_SET, validate_header_name, validate_header_value
+
 if TYPE_CHECKING:
     from collections.abc import Callable, MutableMapping
 
@@ -11,6 +13,21 @@ if TYPE_CHECKING:
 
 class HeaderSetError(RuntimeError):
     """Raised when applying a header to a response fails."""
+
+
+def _validate_item(name: str, value: str) -> None:
+    """
+    Validate one header pair before it is applied to a response.
+
+    Raises:
+        HeaderSetError: If the name or value is invalid. The message contains
+            only the header name and a rule id, never the value.
+    """
+    try:
+        checked_name = validate_header_name(name)
+        validate_header_value(value, header_name=checked_name)
+    except ValueError as error:
+        raise HeaderSetError(str(error)) from error
 
 
 def set_headers_sync(response: ResponseProtocol, items: HeaderItems) -> None:
@@ -89,25 +106,27 @@ def _apply_sync_setter(
 
     typed_setter = cast("Callable[[str, str], object]", setter)
 
-    try:
-        for name, value in items:
+    for name, value in items:
+        _validate_item(name, value)
+        try:
             result = typed_setter(name, value)
-            if inspect.isawaitable(result):
-                raise RuntimeError(awaitable_error)
-    except (TypeError, ValueError, AttributeError) as error:
-        raise HeaderSetError(f"Failed to set headers: {error}") from error
+        except (TypeError, ValueError, AttributeError) as error:
+            raise HeaderSetError(f"Failed to set header {name!r} (rule {RULE_HEADER_SET})") from error
+        if inspect.isawaitable(result):
+            raise RuntimeError(awaitable_error)
 
 
 async def _apply_async_setter(setter: object, items: HeaderItems) -> None:
     typed_setter = cast("Callable[[str, str], object]", setter)
 
-    try:
-        for name, value in items:
+    for name, value in items:
+        _validate_item(name, value)
+        try:
             result = typed_setter(name, value)
             if inspect.isawaitable(result):
                 await result
-    except (TypeError, ValueError, AttributeError) as error:
-        raise HeaderSetError(f"Failed to set headers: {error}") from error
+        except (TypeError, ValueError, AttributeError) as error:
+            raise HeaderSetError(f"Failed to set header {name!r} (rule {RULE_HEADER_SET})") from error
 
 
 def _set_headers_mapping_sync(headers: object, items: HeaderItems) -> None:
@@ -120,12 +139,13 @@ def _set_headers_mapping_sync(headers: object, items: HeaderItems) -> None:
     if inspect.iscoroutinefunction(setitem):
         raise RuntimeError("Async headers mapping detected in sync context. Use 'await set_headers_async(response)'.")
 
-    try:
-        headers_map = cast("MutableMapping[str, str]", headers)
-        for name, value in items:
+    headers_map = cast("MutableMapping[str, str]", headers)
+    for name, value in items:
+        _validate_item(name, value)
+        try:
             headers_map[name] = value
-    except (TypeError, ValueError, AttributeError) as error:
-        raise HeaderSetError(f"Failed to set headers: {error}") from error
+        except (TypeError, ValueError, AttributeError) as error:
+            raise HeaderSetError(f"Failed to set header {name!r} (rule {RULE_HEADER_SET})") from error
 
 
 async def _set_headers_mapping_async(headers: object, items: HeaderItems) -> None:

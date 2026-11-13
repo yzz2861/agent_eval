@@ -2,7 +2,7 @@ from __future__ import annotations  # type: ignore
 
 from dataclasses import dataclass, field
 
-from secure.headers._validation import normalize_header_value
+from secure.headers._validation import normalize_header_value, validate_header_name
 from secure.headers.base_header import BaseHeader
 
 
@@ -14,8 +14,9 @@ class CustomHeader(BaseHeader):
     Default header value: provided by the caller at initialization.
 
     Notes:
-        * Header names and values are normalized via ``normalize_header_value`` to
-          prevent header injection.
+        * Header names are validated as RFC 9110 tokens via ``validate_header_name``
+          and values are normalized via ``normalize_header_value`` to prevent
+          header injection.
         * This class keeps parity with other builders via ``value``, ``set``, and
           escape-hatch helpers so it plugs into the fluent API.
 
@@ -34,7 +35,7 @@ class CustomHeader(BaseHeader):
             header: The header name (for example, ``"X-Custom-Header"``).
             value: The header value to emit.
         """
-        self.header_name = normalize_header_value(header, what="custom header name")
+        self.header_name = validate_header_name(header, what="custom header name")
         self._value = value
 
     @property

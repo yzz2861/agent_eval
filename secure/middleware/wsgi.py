@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from types import TracebackType
 from typing import Any, TypeAlias
 
+from ..headers._validation import validate_header_name, validate_wire_header
 from ..secure import MULTI_OK, Secure
 
 # ---------------------------------------------------------------------------
@@ -91,7 +92,9 @@ class SecureWSGIMiddleware:
         self.secure = secure or Secure.with_default_headers()
 
         provided = MULTI_OK if multi_ok is None else multi_ok
-        self._multi_ok: frozenset[str] = frozenset(_normalize_header_name(h) for h in provided)
+        self._multi_ok: frozenset[str] = frozenset(
+            _normalize_header_name(validate_header_name(h, what="multi_ok header name")) for h in provided
+        )
 
     def __call__(self, environ: WSGIEnvironment, start_response: StartResponse) -> Iterable[bytes]:
         """
@@ -124,10 +127,13 @@ class SecureWSGIMiddleware:
 
             # Apply Secure headers.
             for k, v in self.secure.headers.items():
-                nk = _normalize_header_name(k)
+                # Shared wire validation: identical accept/reject outcome as
+                # the ASGI middleware for the same logical header list.
+                name, value = validate_wire_header(k, v)
+                nk = _normalize_header_name(name)
 
                 if nk in self._multi_ok:
-                    out.append((k, v))
+                    out.append((name, value))
                     continue
 
                 if nk in positions:
@@ -135,7 +141,7 @@ class SecureWSGIMiddleware:
                         out.pop(idx)
                     positions.pop(nk, None)
 
-                out.append((k, v))
+                out.append((name, value))
                 positions[nk] = [len(out) - 1]
 
             return start_response(status, out, exc_info)
