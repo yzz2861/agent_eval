@@ -3,11 +3,12 @@ import datetime as dt
 import urllib.parse
 
 import pytest
-
 from werkzeug import datastructures
 from werkzeug import http
 from werkzeug.datastructures import Accept
 from werkzeug.datastructures import Authorization
+from werkzeug.datastructures import AuthorizationParseError
+from werkzeug.datastructures import AuthorizationParseErrorReason
 from werkzeug.datastructures import ContentRange
 from werkzeug.datastructures import ContentSecurityPolicy
 from werkzeug.datastructures import HeaderSet
@@ -248,6 +249,288 @@ class TestHTTPUtility:
         assert bearer1 == bearer2
         assert basic1 != bearer1
         assert basic1 != object()
+
+    @pytest.mark.parametrize(
+        ("value", "reason"),
+        [
+            (None, "empty"),
+            ("", "empty"),
+            ("   ", "empty"),
+            ("Basic", "missing_credentials"),
+            ("Bearer   ", "missing_credentials"),
+            ("Bad/Scheme abc", "scheme"),
+            ("Bad:Scheme abc", "scheme"),
+            ("Bearer abc\r\n def", "obs_fold"),
+            ("Bearer abc\r\n", "obs_fold"),
+            ("Bearer abc\n", "obs_fold"),
+            ("Bearer abc\x00", "nul"),
+            ("Bearer abc\x01", "control_char"),
+            ("Bearer abc\x7f", "control_char"),
+            ("Bearer " + "a" * 5000, "length"),
+        ],
+    )
+    def test_authorization_strict_structure(self, value, reason):
+        with pytest.raises(AuthorizationParseError) as exc_info:
+            Authorization.from_header_strict(value)
+
+        assert exc_info.value.reason is AuthorizationParseErrorReason(reason)
+        # The exception message contains only the stable reason code.
+        assert str(exc_info.value) == reason
+
+    def test_authorization_strict_error_has_no_credentials(self):
+        token = base64.b64encode(b"username:password").decode()
+
+        with pytest.raises(AuthorizationParseError) as exc_info:
+            Authorization.from_header_strict(f"Basic {token}extra")
+
+        assert token not in str(exc_info.value)
+        assert "username" not in str(exc_info.value)
+
+    def test_authorization_strict_basic(self):
+        token = base64.b64encode(b"Aladdin:open sesame").decode()
+        auth = Authorization.from_header_strict(f"Basic {token}")
+        assert auth.type == "basic"
+        assert auth.username == "Aladdin"
+        assert auth.password == "open sesame"
+
+    def test_authorization_strict_basic_multiple_colons(self):
+        # Upstream/downstream must not split on different colons.
+        token = base64.b64encode(b"a:b:c").decode()
+
+        with pytest.raises(AuthorizationParseError) as exc_info:
+            Authorization.from_header_strict(f"Basic {token}")
+
+        assert exc_info.value.reason is AuthorizationParseErrorReason.BASIC_COLON
+
+        # The lenient parser keeps its historical behavior.
+        loose = Authorization.from_header(f"Basic {token}")
+        assert loose.username == "a"
+        assert loose.password == "b:c"
+
+    @pytest.mark.parametrize(
+        "credentials",
+        [b"a:b:c", b"no-colon", b":password", b"username:", b":"],
+    )
+    def test_authorization_strict_basic_colon_rules(self, credentials):
+        token = base64.b64encode(credentials).decode()
+
+        with pytest.raises(AuthorizationParseError):
+            Authorization.from_header_strict(f"Basic {token}")
+
+    def test_authorization_strict_basic_unicode(self):
+        token = base64.b64encode("普通话:中文".encode()).decode()
+        auth = Authorization.from_header_strict(f"Basic {token}")
+        assert auth.username == "普通话"
+        assert auth.password == "中文"
+
+        # UTF-8 round trip preserves the semantics.
+        again = Authorization.from_header_strict(auth.to_header())
+        assert again == auth
+
+    @pytest.mark.parametrize(
+        ("value", "reason"),
+        [
+            ("Basic foo", "basic_base64"),
+            ("Basic !QWE=", "basic_base64"),
+            ("Basic QWxh", "basic_colon"),
+        ],
+    )
+    def test_authorization_strict_basic_bad_base64(self, value, reason):
+        with pytest.raises(AuthorizationParseError) as exc_info:
+            Authorization.from_header_strict(value)
+
+        assert exc_info.value.reason is AuthorizationParseErrorReason(reason)
+
+    def test_authorization_strict_basic_bad_encoding(self):
+        token = base64.b64encode(b"\xffser:pass").decode()
+
+        with pytest.raises(AuthorizationParseError) as exc_info:
+            Authorization.from_header_strict(f"Basic {token}")
+
+        assert exc_info.value.reason is AuthorizationParseErrorReason.BASIC_ENCODING
+
+    def test_authorization_strict_basic_whitespace_is_verbatim(self):
+        token = base64.b64encode(b" user :p wd ").decode()
+        auth = Authorization.from_header_strict(f"Basic {token}")
+        assert auth.username == " user "
+        assert auth.password == "p wd "
+
+    def test_authorization_strict_basic_control_char(self):
+        token = base64.b64encode(b"user:pa\x01ss").decode()
+
+        with pytest.raises(AuthorizationParseError) as exc_info:
+            Authorization.from_header_strict(f"Basic {token}")
+
+        assert exc_info.value.reason is AuthorizationParseErrorReason.CONTROL_CHAR
+
+    def test_authorization_strict_digest(self):
+        auth = Authorization.from_header_strict(
+            'Digest username="Mufasa",'
+            ' realm="testrealm@host.invalid",'
+            ' nonce="dcd98b7102dd2f0e8b11d0f600bfb0c093",'
+            ' uri="/dir/index.html",'
+            " qop=auth, nc=00000001,"
+            ' cnonce="0a4f113b",'
+            ' response="6629fae49393a05397450978507c4ef1",'
+            ' opaque="5ccc069c403ebaf9f0171e9517f40e41"'
+        )
+        assert auth.type == "digest"
+        assert auth.parameters["username"] == "Mufasa"
+        assert auth.parameters["qop"] == "auth"
+        assert auth.token is None
+
+    def test_authorization_strict_digest_duplicate_parameter(self):
+        with pytest.raises(AuthorizationParseError) as exc_info:
+            Authorization.from_header_strict(
+                'Digest username="first", username="second",'
+                ' realm="r", nonce="n", uri="/", response="x"'
+            )
+
+        assert (
+            exc_info.value.reason is AuthorizationParseErrorReason.DUPLICATE_PARAMETER
+        )
+
+    def test_authorization_strict_digest_parameter_name_case(self):
+        # Names are case-insensitive and stored lowercased.
+        auth = Authorization.from_header_strict(
+            'Digest USERNAME="Mufasa", Realm="r", NONCE="n", uri="/", response="x"'
+        )
+        assert auth.parameters["username"] == "Mufasa"
+        assert auth.parameters["realm"] == "r"
+
+        with pytest.raises(AuthorizationParseError) as exc_info:
+            Authorization.from_header_strict(
+                'Digest UserName="a", username="b", realm="r",'
+                ' nonce="n", uri="/", response="x"'
+            )
+
+        assert (
+            exc_info.value.reason is AuthorizationParseErrorReason.DUPLICATE_PARAMETER
+        )
+
+    @pytest.mark.parametrize(
+        ("value", "reason"),
+        [
+            ('Digest username=""', "empty_parameter"),
+            ("Digest username=", "empty_parameter"),
+            ("Digest foo", "bare_parameter"),
+            ('Digest username="abc', "quoted_string"),
+            ('Digest username="ab\\', "quoted_string"),
+            ("Digest user/name=a", "parameter_key"),
+            ('Digest username=a"b', "token"),
+            ('Digest username="a",', "parameter_key"),
+            ('Digest username="a",, realm="r"', "parameter_key"),
+        ],
+    )
+    def test_authorization_strict_digest_invalid(self, value, reason):
+        with pytest.raises(AuthorizationParseError) as exc_info:
+            Authorization.from_header_strict(value)
+
+        assert exc_info.value.reason is AuthorizationParseErrorReason(reason)
+
+    def test_authorization_strict_digest_quoted_escapes(self):
+        auth = Authorization.from_header_strict(
+            'Digest username="a\\"b", realm="r\\\\x", nonce="n", uri="/", response="x"'
+        )
+        assert auth.parameters["username"] == 'a"b'
+        assert auth.parameters["realm"] == r"r\x"
+
+        again = Authorization.from_header_strict(auth.to_header())
+        assert again == auth
+
+    def test_authorization_strict_digest_second_scheme(self):
+        with pytest.raises(AuthorizationParseError) as exc_info:
+            Authorization.from_header_strict(
+                'Digest username="a", realm="r", nonce="n",'
+                ' uri="/", response="x", Basic YTpi'
+            )
+
+        assert exc_info.value.reason is AuthorizationParseErrorReason.MULTIPLE_SCHEMES
+
+    def test_authorization_strict_bearer(self):
+        auth = Authorization.from_header_strict("Bearer abc.def-ghi_JKL~")
+        assert auth.type == "bearer"
+        assert auth.token == "abc.def-ghi_JKL~"
+        assert not auth.parameters
+
+    @pytest.mark.parametrize(
+        ("value", "reason"),
+        [
+            ("Bearer abc def", "multiple_schemes"),
+            ("Bearer abc\tdef", "multiple_schemes"),
+            ('Bearer abc, foo="bar"', "multiple_schemes"),
+            ("Bearer ,abc", "token"),
+        ],
+    )
+    def test_authorization_strict_bearer_invalid(self, value, reason):
+        with pytest.raises(AuthorizationParseError) as exc_info:
+            Authorization.from_header_strict(value)
+
+        assert exc_info.value.reason is AuthorizationParseErrorReason(reason)
+
+    def test_authorization_strict_other_schemes(self):
+        auth = Authorization.from_header_strict("Token abc123")
+        assert auth.type == "token"
+        assert auth.token == "abc123"
+
+        auth = Authorization.from_header_strict('HOBA a="b", c=d')
+        assert auth.parameters == {"a": "b", "c": "d"}
+
+    def test_authorization_strict_length_overrides(self):
+        with pytest.raises(AuthorizationParseError) as exc_info:
+            Authorization.from_header_strict("Bearer " + "a" * 100, max_length=50)
+
+        assert exc_info.value.reason is AuthorizationParseErrorReason.LENGTH
+
+        token = base64.b64encode(b"a:b").decode()
+
+        with pytest.raises(AuthorizationParseError) as exc_info:
+            Authorization.from_header_strict(f"Basic {token}", max_param_length=2)
+
+        assert exc_info.value.reason is AuthorizationParseErrorReason.PARAMETER_LENGTH
+
+    @pytest.mark.parametrize(
+        "header",
+        [
+            "Basic " + base64.b64encode(b"Aladdin:open sesame").decode(),
+            "Basic " + base64.b64encode("普通话:中文".encode()).decode(),
+            "Bearer abc.def-ghi_JKL~",
+            "Token abc123",
+            'Digest username="Mufasa", realm="r", nonce="n",'
+            ' uri="/", response="6629fae", opaque="opq"',
+            r'Digest username="mu,fasa", realm="r\"x\\y",'
+            ' nonce="n", uri="/", response="x"',
+            'HOBA a="b", c=d',
+        ],
+    )
+    def test_authorization_strict_round_trip(self, header):
+        auth = Authorization.from_header_strict(header)
+        again = Authorization.from_header_strict(auth.to_header())
+        assert again == auth
+
+    def test_authorization_strict_single_interpretation(self):
+        # A parsed object never carries two contradictory credential sets.
+        basic = Authorization.from_header_strict(
+            "Basic " + base64.b64encode(b"a:b").decode()
+        )
+        assert basic.token is None
+        assert basic.parameters == {"username": "a", "password": "b"}
+
+        bearer = Authorization.from_header_strict("Bearer abc")
+        assert bearer.token == "abc"
+        assert bearer.parameters == {}
+
+    def test_authorization_strict_is_value_error(self):
+        assert issubclass(AuthorizationParseError, ValueError)
+
+    def test_parse_strict_dict_header(self):
+        assert http.parse_strict_dict_header('a="b", c=d') == {"a": "b", "c": "d"}
+        scheme, rest = http.parse_strict_header_scheme("Basic QWE=")
+        assert scheme == "basic"
+        assert rest == "QWE="
+        assert http.is_valid_token("abc~-._+")
+        assert not http.is_valid_token("")
+        assert not http.is_valid_token("a b")
 
     def test_www_authenticate_header(self):
         wa = WWWAuthenticate.from_header('Basic realm="WallyWorld"')

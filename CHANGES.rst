@@ -11,6 +11,18 @@ Version 3.2.0
 
 -   Minimum required version of MarkupSafe is 3.0.3.
 -   Minimum supported version of Watchdog is 7.0.
+-   Add an opt-in strict profile for parsing ``Authorization`` headers:
+    :meth:`Authorization.from_header_strict`, along with
+    :func:`http.parse_strict_dict_header`,
+    :func:`http.parse_strict_header_scheme` and :func:`http.is_valid_token`.
+    It validates the scheme token and total length first, then applies
+    scheme-specific rules. Basic credentials must decode to UTF-8 text with
+    exactly one ``:``; Digest rejects duplicate, empty or malformed
+    parameters; Bearer accepts only a single token; and obsolete folding,
+    NUL characters, bare control characters, overlong values and mixed
+    auth schemes are rejected with a stable reason code via
+    :class:`AuthorizationParseError` instead of being truncated. The
+    lenient :meth:`Authorization.from_header` behavior is unchanged.
 -   The CSP ``prefetch_src``, ``navigate_to``, and ``plugin_types`` properties
     are deprecated. Their corresponding directives have been deprecated or
     removed from the spec. :pr:`3114`

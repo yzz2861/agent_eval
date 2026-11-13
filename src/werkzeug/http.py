@@ -21,6 +21,12 @@ from ._internal import _plain_int
 _token_chars = frozenset(
     "!#$%&'*+-.0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ^_`abcdefghijklmnopqrstuvwxyz|~"
 )
+# https://httpwg.org/specs/rfc9110.html#tokens
+_token_re = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+", flags=re.ASCII)
+# Default maximum accepted length of a complete structured header value.
+DEFAULT_MAX_HEADER_LENGTH = 4096
+# Default maximum length of a single parameter value.
+DEFAULT_MAX_PARAM_LENGTH = 1024
 _HTTP_STATUS_CODES = {
     100: "Continue",
     101: "Switching Protocols",
@@ -493,6 +499,337 @@ def parse_dict_header(value: str) -> dict[str, str | None]:
         result[key] = unquote_header_value(value)
 
     return result
+
+
+class HeaderParseErrorReason(Enum):
+    """Stable reason codes for strict header parsing failures.
+
+    A reason identifies *why* a header was rejected without containing any
+    portion of the header value itself, so credentials and tokens are never
+    written to logs or exception messages.
+
+    .. versionadded:: 3.2
+    """
+
+    EMPTY = "empty"
+    """The header value was empty or only whitespace."""
+
+    LENGTH = "length"
+    """The header value exceeded the configured maximum length."""
+
+    OBS_FOLD = "obs_fold"
+    """The header contained an obsolete line fold (CRLF/LF followed by
+    whitespace), which is not allowed in HTTP/1.1 field values."""
+
+    NUL = "nul"
+    """The header contained a NUL character."""
+
+    CONTROL_CHAR = "control_char"
+    """The header contained a bare ASCII control character."""
+
+    SCHEME = "scheme"
+    """The first token was not a valid HTTP token."""
+
+    MISSING_CREDENTIALS = "missing_credentials"
+    """The scheme token was not followed by any credentials."""
+
+    MULTIPLE_SCHEMES = "multiple_schemes"
+    """A second auth scheme token was mixed into the header."""
+
+    PARAMETER_KEY = "parameter_key"
+    """A parameter name was not a valid HTTP token."""
+
+    DUPLICATE_PARAMETER = "duplicate_parameter"
+    """A parameter name appeared more than once."""
+
+    EMPTY_PARAMETER = "empty_parameter"
+    """A parameter had an empty value."""
+
+    BARE_PARAMETER = "bare_parameter"
+    """A parameter was a bare key without an ``=value`` part."""
+
+    QUOTED_STRING = "quoted_string"
+    """A quoted string was unclosed or contained an invalid escape."""
+
+    PARAMETER_LENGTH = "parameter_length"
+    """A parameter value exceeded the configured maximum length."""
+
+    TOKEN = "token"
+    """A token value was malformed or contained invalid characters."""
+
+
+class HeaderParseError(ValueError):
+    """Raised by the strict header parsers when a value is rejected.
+
+    The :attr:`reason` attribute holds a stable
+    :class:`HeaderParseErrorReason` member. The exception message never
+    contains any part of the parsed header value.
+
+    .. versionadded:: 3.2
+    """
+
+    def __init__(self, reason: HeaderParseErrorReason) -> None:
+        super().__init__(reason.value)
+        self.reason = reason
+
+
+def _check_header_chars(
+    value: str,
+    max_length: int,
+) -> None:
+    """Validate the structural character rules shared by strict parsers.
+
+    Checks overall length, obsolete folding, NUL characters and bare control
+    characters before any scheme-specific parsing happens.
+    """
+    if len(value) > max_length:
+        raise HeaderParseError(HeaderParseErrorReason.LENGTH)
+
+    # Obsolete line folding: a line break (possibly followed by whitespace).
+    # Rejecting it prevents a single header value from being interpreted as
+    # multiple log lines or multiple header events.
+    if "\n" in value or "\r" in value:
+        raise HeaderParseError(HeaderParseErrorReason.OBS_FOLD)
+
+    if "\x00" in value:
+        raise HeaderParseError(HeaderParseErrorReason.NUL)
+
+    if any((ord(char) < 0x20 and char != "\t") or ord(char) == 0x7F for char in value):
+        raise HeaderParseError(HeaderParseErrorReason.CONTROL_CHAR)
+
+
+def _strip_optional_whitespace(value: str) -> str:
+    """Strip the single optional SP/HTAB allowed around field components."""
+    return value.strip(" \t")
+
+
+def parse_strict_dict_header(
+    value: str,
+    *,
+    max_length: int = DEFAULT_MAX_HEADER_LENGTH,
+    max_param_length: int = DEFAULT_MAX_PARAM_LENGTH,
+) -> dict[str, str]:
+    """Strictly parse a comma-separated ``key=value`` header.
+
+    Unlike :func:`parse_dict_header`, this parser is designed for credential
+    headers such as ``Digest`` and has no lenient fallbacks:
+
+    -   Parameter names are HTTP tokens and are matched case-insensitively.
+        Repeated names are rejected rather than overwriting a previous value.
+    -   Every parameter must have a non-empty ``=value`` part. Bare keys and
+        empty values are rejected.
+    -   Double-quoted values must be closed, and backslashes may only escape
+        quoted-pair characters (``\\`` followed by one character).
+    -   Bare control characters, NUL and line folding are rejected by the
+        shared :func:`_check_header_chars` validation.
+    -   Values longer than ``max_param_length`` are rejected.
+
+    A bare item containing whitespace is treated as a second auth scheme
+    mixed into the header and rejected with
+    :attr:`HeaderParseErrorReason.MULTIPLE_SCHEMES`.
+
+    :param value: The header value to parse.
+    :param max_length: Maximum accepted length of the complete value.
+    :param max_param_length: Maximum accepted length of a single value.
+
+    .. versionadded:: 3.2
+    """
+    _check_header_chars(value, max_length)
+
+    result: dict[str, str] = {}
+    index = 0
+    length = len(value)
+
+    if not _strip_optional_whitespace(value):
+        raise HeaderParseError(HeaderParseErrorReason.EMPTY)
+
+    while index < length:
+        index = _skip_ows(value, index)
+
+        if index >= length:
+            raise HeaderParseError(HeaderParseErrorReason.PARAMETER_KEY)
+
+        key_start = index
+
+        while index < length and value[index] not in "=,":
+            index += 1
+
+        raw_key = _strip_optional_whitespace(value[key_start:index])
+
+        if not raw_key:
+            # An empty element (leading, trailing or doubled comma) is not a
+            # valid parameter and must not be silently ignored.
+            raise HeaderParseError(HeaderParseErrorReason.PARAMETER_KEY)
+
+        if index >= length or value[index] == ",":
+            # A bare item with no value. Whitespace inside means a separate
+            # token, i.e. a second auth scheme was mixed in.
+            if any(char in " \t" for char in raw_key):
+                raise HeaderParseError(HeaderParseErrorReason.MULTIPLE_SCHEMES)
+
+            raise HeaderParseError(HeaderParseErrorReason.BARE_PARAMETER)
+
+        # value[index] == "="
+        index += 1
+
+        if _token_re.fullmatch(raw_key) is None:
+            raise HeaderParseError(HeaderParseErrorReason.PARAMETER_KEY)
+
+        key = raw_key.lower()
+
+        if key in result:
+            raise HeaderParseError(HeaderParseErrorReason.DUPLICATE_PARAMETER)
+
+        index, raw_item_value = _parse_strict_parameter_value(value, index)
+
+        if len(raw_item_value) > max_param_length:
+            raise HeaderParseError(HeaderParseErrorReason.PARAMETER_LENGTH)
+
+        if raw_item_value.startswith('"'):
+            item_value = _unquote_strict(raw_item_value)
+        else:
+            item_value = _strip_optional_whitespace(raw_item_value)
+
+            if not item_value:
+                raise HeaderParseError(HeaderParseErrorReason.EMPTY_PARAMETER)
+
+            if _token_re.fullmatch(item_value) is None:
+                raise HeaderParseError(HeaderParseErrorReason.TOKEN)
+
+        if not item_value:
+            raise HeaderParseError(HeaderParseErrorReason.EMPTY_PARAMETER)
+
+        result[key] = item_value
+
+        index = _skip_ows(value, index)
+
+        if index < length:
+            if value[index] != ",":
+                raise HeaderParseError(HeaderParseErrorReason.TOKEN)
+
+            index += 1
+            index = _skip_ows(value, index)
+
+            if index >= length:
+                raise HeaderParseError(HeaderParseErrorReason.PARAMETER_KEY)
+
+    if not result:
+        raise HeaderParseError(HeaderParseErrorReason.EMPTY)
+
+    return result
+
+
+def _skip_ows(value: str, index: int) -> int:
+    while index < len(value) and value[index] in " \t":
+        index += 1
+
+    return index
+
+
+def parse_strict_header_scheme(
+    value: str,
+    *,
+    max_length: int = DEFAULT_MAX_HEADER_LENGTH,
+) -> tuple[str, str]:
+    """Validate the shared structure of a credential header and split it.
+
+    Performs the checks that apply regardless of scheme -- emptiness, total
+    length, obsolete folding, NUL and bare control characters -- then splits
+    the value into the lowercased auth scheme token and the remaining
+    credentials string.
+
+    :raises HeaderParseError: With a stable :attr:`HeaderParseError.reason`.
+
+    .. versionadded:: 3.2
+    """
+    if not value or not value.strip(" \t"):
+        raise HeaderParseError(HeaderParseErrorReason.EMPTY)
+
+    _check_header_chars(value, max_length)
+
+    separator = 0
+
+    while separator < len(value) and value[separator] not in " \t":
+        separator += 1
+
+    scheme = value[:separator].lower()
+
+    if _token_re.fullmatch(scheme) is None:
+        raise HeaderParseError(HeaderParseErrorReason.SCHEME)
+
+    rest = _strip_optional_whitespace(value[separator:])
+
+    if not rest:
+        raise HeaderParseError(HeaderParseErrorReason.MISSING_CREDENTIALS)
+
+    return scheme, rest
+
+
+def is_valid_token(value: str) -> bool:
+    """Return whether ``value`` is a valid HTTP ``token`` per RFC 9110.
+
+    .. versionadded:: 3.2
+    """
+    return bool(value) and _token_re.fullmatch(value) is not None
+
+
+def _parse_strict_parameter_value(value: str, index: int) -> tuple[int, str]:
+    """Parse one parameter value starting at ``index``.
+
+    Returns the index just past the value and the raw value, including quote
+    characters when it was quoted. OWS between the ``=`` and the value is
+    consumed.
+    """
+    length = len(value)
+    index = _skip_ows(value, index)
+    start = index
+
+    if index < length and value[index] == '"':
+        index += 1
+
+        while index < length:
+            char = value[index]
+
+            if char == "\\":
+                # A quoted-pair escape must be followed by one character.
+                if index + 1 >= length:
+                    raise HeaderParseError(HeaderParseErrorReason.QUOTED_STRING)
+
+                index += 2
+                continue
+
+            if char == '"':
+                index += 1
+                return index, value[start:index]
+
+            index += 1
+
+        raise HeaderParseError(HeaderParseErrorReason.QUOTED_STRING)
+
+    while index < length and value[index] != ",":
+        index += 1
+
+    return index, value[start:index]
+
+
+def _unquote_strict(value: str) -> str:
+    """Remove quotes and quoted-pair escapes from a complete quoted string."""
+    chars: list[str] = []
+    index = 1
+    end = len(value) - 1
+
+    while index < end:
+        char = value[index]
+
+        if char == "\\":
+            index += 1
+            chars.append(value[index])
+        else:
+            chars.append(char)
+
+        index += 1
+
+    return "".join(chars)
 
 
 # https://httpwg.org/specs/rfc9110.html#parameter

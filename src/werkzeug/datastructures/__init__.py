@@ -6,6 +6,8 @@ from .accept import Accept as Accept
 from .accept import LanguageAccept as LanguageAccept
 from .accept import MIMEAccept as MIMEAccept
 from .auth import Authorization as Authorization
+from .auth import AuthorizationParseError as AuthorizationParseError
+from .auth import AuthorizationParseErrorReason as AuthorizationParseErrorReason
 from .auth import WWWAuthenticate as WWWAuthenticate
 from .cache_control import RequestCacheControl as RequestCacheControl
 from .cache_control import ResponseCacheControl as ResponseCacheControl

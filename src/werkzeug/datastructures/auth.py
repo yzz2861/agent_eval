@@ -4,11 +4,133 @@ import base64
 import binascii
 import collections.abc as cabc
 import typing as t
+from enum import Enum
 
+from ..http import DEFAULT_MAX_HEADER_LENGTH
+from ..http import DEFAULT_MAX_PARAM_LENGTH
 from ..http import dump_header
+from ..http import HeaderParseError
+from ..http import HeaderParseErrorReason
+from ..http import is_valid_token
 from ..http import parse_dict_header
+from ..http import parse_strict_dict_header
+from ..http import parse_strict_header_scheme
 from ..http import quote_header_value
 from .structures import CallbackDict
+
+
+class AuthorizationParseErrorReason(Enum):
+    """Stable reason codes returned when an ``Authorization`` header is
+    rejected by the strict parser.
+
+    Only the reason is exposed; no base64 content, token or parameter value is
+    ever included in the exception.
+
+    .. versionadded:: 3.2
+    """
+
+    EMPTY = HeaderParseErrorReason.EMPTY.value
+    LENGTH = HeaderParseErrorReason.LENGTH.value
+    OBS_FOLD = HeaderParseErrorReason.OBS_FOLD.value
+    NUL = HeaderParseErrorReason.NUL.value
+    CONTROL_CHAR = HeaderParseErrorReason.CONTROL_CHAR.value
+    SCHEME = HeaderParseErrorReason.SCHEME.value
+    MISSING_CREDENTIALS = HeaderParseErrorReason.MISSING_CREDENTIALS.value
+    MULTIPLE_SCHEMES = HeaderParseErrorReason.MULTIPLE_SCHEMES.value
+    PARAMETER_KEY = HeaderParseErrorReason.PARAMETER_KEY.value
+    DUPLICATE_PARAMETER = HeaderParseErrorReason.DUPLICATE_PARAMETER.value
+    EMPTY_PARAMETER = HeaderParseErrorReason.EMPTY_PARAMETER.value
+    BARE_PARAMETER = HeaderParseErrorReason.BARE_PARAMETER.value
+    QUOTED_STRING = HeaderParseErrorReason.QUOTED_STRING.value
+    PARAMETER_LENGTH = HeaderParseErrorReason.PARAMETER_LENGTH.value
+    TOKEN = HeaderParseErrorReason.TOKEN.value
+    BASIC_BASE64 = "basic_base64"
+    """The Basic credentials were not valid canonical base64."""
+
+    BASIC_ENCODING = "basic_encoding"
+    """The decoded Basic credentials were not valid UTF-8."""
+
+    BASIC_COLON = "basic_colon"
+    """The decoded Basic credentials did not contain exactly one ``:``."""
+
+
+class AuthorizationParseError(ValueError):
+    """Raised by :meth:`Authorization.from_header_strict` when the header is
+    rejected.
+
+    The :attr:`reason` attribute is a stable
+    :class:`AuthorizationParseErrorReason` member suitable for metrics and
+    logging. The message contains only that reason string, never the header
+    value or any credential material.
+
+    .. versionadded:: 3.2
+    """
+
+    def __init__(self, reason: AuthorizationParseErrorReason) -> None:
+        super().__init__(reason.value)
+        self.reason = reason
+
+
+def _strict_reason(error: HeaderParseError) -> AuthorizationParseErrorReason:
+    """Map an HTTP-level parse error to an auth-level reason with the same
+    stable code."""
+    return AuthorizationParseErrorReason(error.reason.value)
+
+
+def _parse_strict_basic(token: str, max_param_length: int) -> dict[str, str]:
+    """Decode and validate the credentials portion of a Basic header.
+
+    The token must be canonical base64 of UTF-8 text containing exactly one
+    ``:``. Username and password are returned verbatim with no whitespace
+    stripping or other normalization.
+    """
+    if len(token) > max_param_length:
+        raise AuthorizationParseError(AuthorizationParseErrorReason.PARAMETER_LENGTH)
+
+    try:
+        raw = base64.b64decode(token, validate=True)
+    except (binascii.Error, ValueError):
+        raise AuthorizationParseError(
+            AuthorizationParseErrorReason.BASIC_BASE64
+        ) from None
+
+    # Re-encoding canonical base64 must reproduce the token; this rejects
+    # non-canonical encodings such as missing padding or extra line bits.
+    if base64.b64encode(raw).decode("ascii") != token:
+        raise AuthorizationParseError(AuthorizationParseErrorReason.BASIC_BASE64)
+
+    try:
+        credentials = raw.decode("utf-8", errors="strict")
+    except UnicodeError:
+        raise AuthorizationParseError(
+            AuthorizationParseErrorReason.BASIC_ENCODING
+        ) from None
+
+    # The base64 wrapper can hide characters rejected on the raw header, so
+    # apply the same character rules to the decoded credentials.
+    if "\n" in credentials or "\r" in credentials:
+        raise AuthorizationParseError(AuthorizationParseErrorReason.OBS_FOLD)
+
+    if "\x00" in credentials:
+        raise AuthorizationParseError(AuthorizationParseErrorReason.NUL)
+
+    if any(
+        (ord(char) < 0x20 and char != "\t") or ord(char) == 0x7F for char in credentials
+    ):
+        raise AuthorizationParseError(AuthorizationParseErrorReason.CONTROL_CHAR)
+
+    separator = credentials.find(":")
+
+    if separator == -1 or credentials.find(":", separator + 1) != -1:
+        raise AuthorizationParseError(AuthorizationParseErrorReason.BASIC_COLON)
+
+    username = credentials[:separator]
+    password = credentials[separator + 1 :]
+
+    if not username or not password:
+        raise AuthorizationParseError(AuthorizationParseErrorReason.EMPTY_PARAMETER)
+
+    return {"username": username, "password": password}
 
 
 class Authorization:
@@ -162,6 +284,96 @@ class Authorization:
             return cls(scheme, parse_dict_header(rest), None)
 
         # No = or only trailing =, this is a token.
+        return cls(scheme, None, rest)
+
+    @classmethod
+    def from_header_strict(
+        cls,
+        value: str | None,
+        *,
+        max_length: int = DEFAULT_MAX_HEADER_LENGTH,
+        max_param_length: int = DEFAULT_MAX_PARAM_LENGTH,
+    ) -> t.Self:
+        """Parse an ``Authorization`` header value using the strict profile.
+
+        The lenient :meth:`from_header` keeps historical compatibility; this
+        method is opt-in and applies deterministic rules so that every layer
+        of the application arrives at the same interpretation of the
+        credentials.
+
+        The auth scheme token and the overall length are validated before any
+        scheme-specific parsing. Failures raise
+        :class:`AuthorizationParseError` carrying a stable
+        :class:`AuthorizationParseErrorReason`; the header value itself is
+        never included in the exception.
+
+        ``Basic``
+            The credentials must be canonical, correctly padded base64 of
+            UTF-8 text containing exactly one ``:`` separator. The username
+            and password are kept verbatim, including any internal
+            whitespace; no whitespace is stripped and no surrogate or control
+            character is accepted.
+
+        ``Digest``
+            Parameter names are matched case-insensitively and lowercased.
+            Duplicate parameter names, bare keys, empty values and unclosed
+            or badly escaped quoted strings are rejected.
+
+        ``Bearer``
+            Exactly one RFC 9110 ``token`` must follow the scheme; any
+            parameter, space or extra scheme is rejected.
+
+        Any other scheme follows the same token or strict parameter rules.
+        Obsolete line folding, NUL characters, bare control characters,
+        overlong values and a second auth scheme mixed into the header always
+        cause an error instead of being silently truncated.
+
+        :param value: The header value to parse.
+        :param max_length: Maximum accepted length of the complete header.
+        :param max_param_length: Maximum accepted length of one parameter.
+
+        .. versionadded:: 3.2
+        """
+        if not value:
+            raise AuthorizationParseError(AuthorizationParseErrorReason.EMPTY)
+
+        try:
+            scheme, rest = parse_strict_header_scheme(value, max_length=max_length)
+        except HeaderParseError as error:
+            raise AuthorizationParseError(_strict_reason(error)) from None
+
+        if scheme == "basic":
+            return cls(
+                scheme,
+                _parse_strict_basic(rest, max_param_length),
+            )
+
+        if scheme == "bearer":
+            if any(char in " \t" for char in rest):
+                raise AuthorizationParseError(
+                    AuthorizationParseErrorReason.MULTIPLE_SCHEMES
+                )
+
+            if not is_valid_token(rest):
+                raise AuthorizationParseError(AuthorizationParseErrorReason.TOKEN)
+
+            return cls(scheme, None, rest)
+
+        if scheme == "digest" or "=" in rest:
+            try:
+                parameters = parse_strict_dict_header(
+                    rest,
+                    max_length=max_length,
+                    max_param_length=max_param_length,
+                )
+            except HeaderParseError as error:
+                raise AuthorizationParseError(_strict_reason(error)) from None
+
+            return cls(scheme, parameters)
+
+        if not is_valid_token(rest):
+            raise AuthorizationParseError(AuthorizationParseErrorReason.TOKEN)
+
         return cls(scheme, None, rest)
 
     def to_header(self) -> str:

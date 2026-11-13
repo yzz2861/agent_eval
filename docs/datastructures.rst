@@ -61,6 +61,12 @@ empty instances.
 .. autoclass:: Authorization
     :members:
 
+.. autoclass:: AuthorizationParseError
+    :members:
+
+.. autoclass:: AuthorizationParseErrorReason
+    :members:
+
 .. autoclass:: WWWAuthenticate
     :members:
 
