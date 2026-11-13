@@ -68,6 +68,92 @@ list or is returned by ``get_request_object_signing_algorithms()``. Unsigned
 request objects remain supported when signatures are optional and the algorithm
 configuration permits ``none``.
 
+The signature is always verified with the key returned by
+``resolve_client_public_key()``: keys carried by the request itself are never
+trusted. Symmetric ``HS256``/``HS384``/``HS512`` signatures are rejected by
+default because a client public JWK must not be used as an HMAC secret. Clients
+that registered a shared secret can be allowed with
+``allow_symmetric_signing_algorithm()``.
+
+Request object validation pipeline
+-----------------------------------
+
+Signature verification alone does not prevent a signed request object from
+being replayed at another tenant or endpoint. ``JWTAuthenticationRequest``
+accepts strict policy flags that turn the extension into a complete validation
+pipeline::
+
+    JWTAuthenticationRequest(
+        require_iss=True,
+        require_aud=True,
+        require_exp=True,
+        require_jti=True,
+    )
+
+* ``require_iss``: the ``iss`` claim must be present and identify the sending
+  client, per RFC 9101 §5.4. ``get_expected_request_object_issuer()`` returns
+  the expected value (the ``client_id`` by default) and
+  ``issuer_matches_client()`` can additionally bind it to a tenant.
+* ``require_aud``: the ``aud`` claim must be present and contain one of the
+  values returned by ``get_audiences()`` (the server ``issuer`` by default).
+  Without the flag, an ``aud`` claim is still checked when present.
+* ``require_exp``: the ``exp`` claim is mandatory. When present, ``exp``,
+  ``nbf`` and ``iat`` are always evaluated against a single clock reading from
+  ``get_current_time()``, with the ``get_clock_leeway()`` tolerance.
+* ``require_jti``: the ``jti`` claim is mandatory and consumed atomically.
+
+Replay protection with ``jti``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``consume_request_object_jti(client, jti)`` must atomically mark the
+identifier as consumed for the client and return ``True``, or return ``False``
+when it was already consumed. The default keeps identifiers in memory for
+single-process deployments. Production deployments should use an atomic
+database unique constraint or a cache ``SET NX`` operation, with a retention
+window covering the request object lifetime::
+
+    def consume_request_object_jti(self, client, jti):
+        try:
+            db.session.add(
+                ConsumedJTI(client_id=client.get_client_id(), jti=jti)
+            )
+            db.session.commit()
+        except IntegrityError:
+            db.session.rollback()
+            return False
+        return True
+
+The identifier is only consumed after every other validation, including
+parameter conflict checks, succeeds. A rejected request object never writes
+replay state. Because the authorization view parses the request object again
+when the consent page is submitted, deployments using ``request_uri`` should
+retain the first request object in the authorization session (see
+`Request objects during consent`_) or scope consumption to the authorization
+session itself.
+
+Conflicting request parameters
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The request object remains the source of the authorization parameters, but
+security parameters cannot be silently overridden. When one of
+``client_id``, ``redirect_uri``, ``response_type``, ``scope``, ``state``,
+``code_challenge``, ``code_challenge_method``, ``response_mode`` or ``nonce``
+is present in both the outer request and the request object with a different
+value, the request is rejected with ``invalid_request_object``. Identical
+duplicated values remain accepted.
+
+Encrypted and nested request objects
+------------------------------------
+
+JWE request objects and signed request objects nested inside a JWE are
+disabled by default. Enable them explicitly with
+``allow_encrypted_request_object`` and ``allow_nested_request_object``, and
+provide the decryption key through ``resolve_client_private_key()`` and the
+accepted algorithms through
+``get_request_object_encryption_algorithms()``. Encryption never replaces the
+signature requirement: when nested JWTs are disabled, the decrypted content
+must not be accepted as an unsigned request object.
+
 Retrieving request objects
 --------------------------
 

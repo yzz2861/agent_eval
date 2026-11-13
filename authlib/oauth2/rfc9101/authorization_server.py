@@ -1,3 +1,7 @@
+import threading
+import time
+
+from joserfc import jwe
 from joserfc import jwt
 from joserfc.errors import DecodeError
 from joserfc.errors import JoseError
@@ -13,8 +17,10 @@ from ..rfc6749 import InvalidClientError
 from ..rfc6749 import InvalidRequestError
 from ..rfc6749.requests import BasicOAuth2Payload
 from ..rfc6749.requests import OAuth2Request
+from .errors import DuplicateRequestParameterError
 from .errors import InvalidRequestObjectError
 from .errors import InvalidRequestUriError
+from .errors import JTIReplayError
 from .errors import RequestNotSupportedError
 from .errors import RequestUriNotSupportedError
 
@@ -23,12 +29,41 @@ class _RequestObjectPayload(BasicOAuth2Payload):
     """The authorization request parameters of a request object."""
 
 
+#: Authorization parameters whose value can never be silently overridden by
+#: the request object when they are also sent in the query string or form.
+PROTECTED_REQUEST_PARAMETERS = frozenset(
+    {
+        "client_id",
+        "redirect_uri",
+        "response_type",
+        "scope",
+        "state",
+        "code_challenge",
+        "code_challenge_method",
+        "response_mode",
+        "nonce",
+    }
+)
+
+#: The JWS ``alg`` values that use a shared secret. Public JWK material must
+#: never be used as an HMAC secret, so symmetric signatures are rejected
+#: unless an integration explicitly allows them for the client.
+SYMMETRIC_SIGNING_ALGORITHMS = frozenset({"HS256", "HS384", "HS512"})
+
+
 class JWTAuthenticationRequest:
     """Authorization server extension implementing the support
     for JWT secured authentication request, as defined in :rfc:`RFC9101 <9101>`.
 
     :param support_request: Whether to enable support for the ``request`` parameter.
     :param support_request_uri: Whether to enable support for the ``request_uri`` parameter.
+    :param require_iss: Require and validate the ``iss`` claim against the client.
+    :param require_aud: Require the ``aud`` claim to identify this server.
+    :param require_exp: Require the ``exp`` claim.
+    :param require_jti: Require the ``jti`` claim and consume it atomically.
+    :param allow_encrypted_request_object: Accept JWE request objects (disabled by default).
+    :param allow_nested_request_object: Accept a signed request object nested in a JWE
+        (disabled by default).
 
     This extension is intended to be inherited and registered into the authorization server::
 
@@ -54,16 +89,38 @@ class JWTAuthenticationRequest:
                 return client.require_signed_request_object
 
 
-        authorization_server.register_extension(JWTAuthenticationRequest())
+        authorization_server.register_extension(
+            JWTAuthenticationRequest(require_jti=True, require_aud=True)
+        )
     """
 
+    #: Backwards compatible default registry; the actual options are built in
+    #: :meth:`_build_claims_registry` from the strict policy flags.
     claims_validator = jwt.JWTClaimsRegistry(
         client_id={"essential": True},
     )
 
-    def __init__(self, support_request: bool = True, support_request_uri: bool = True):
+    def __init__(
+        self,
+        support_request: bool = True,
+        support_request_uri: bool = True,
+        require_iss: bool = False,
+        require_aud: bool = False,
+        require_exp: bool = False,
+        require_jti: bool = False,
+        allow_encrypted_request_object: bool = False,
+        allow_nested_request_object: bool = False,
+    ):
         self.support_request = support_request
         self.support_request_uri = support_request_uri
+        self.require_iss = require_iss
+        self.require_aud = require_aud
+        self.require_exp = require_exp
+        self.require_jti = require_jti
+        self.allow_encrypted_request_object = allow_encrypted_request_object
+        self.allow_nested_request_object = allow_nested_request_object
+        self._jti_lock = threading.Lock()
+        self._consumed_jtis: set[tuple[str, str]] = set()
 
     def __call__(self, authorization_server: AuthorizationServer):
         authorization_server.register_authorization_parameters(
@@ -124,11 +181,13 @@ class JWTAuthenticationRequest:
         request_object = self._decode_request_object(
             request, client, raw_request_object
         )
+        self._validate_parameter_conflicts(request, request_object.claims)
         _validate_parameter_types(
             request_object.claims,
             authorization_server.authorization_parameters,
             request.payload.state,
         )
+        self._validate_request_object_claims(request, client, request_object)
         request.payload = _RequestObjectPayload(request_object.claims)
 
     def validate_grant_parameter_types(self, authorization_server, grant):
@@ -206,10 +265,68 @@ class JWTAuthenticationRequest:
     def _decode_request_object(
         self, request, client: ClientMixin, raw_request_object: str
     ):
+        metadata = self.get_server_metadata() or {}
+        segment_count = (
+            raw_request_object.count(".") if isinstance(raw_request_object, str) else -1
+        )
+        if segment_count == 4:
+            if not self.allow_encrypted_request_object:
+                raise InvalidRequestObjectError(
+                    description=(
+                        "Encrypted request objects are not supported by this server."
+                    ),
+                    state=request.payload.state,
+                )
+            nested_raw = self._decrypt_request_object(
+                request, client, raw_request_object
+            )
+            if not self.allow_nested_request_object:
+                raise InvalidRequestObjectError(
+                    description=(
+                        "Nested request objects are not supported by this server."
+                    ),
+                    state=request.payload.state,
+                )
+            raw_request_object = nested_raw
+        elif segment_count != 2:
+            raise InvalidRequestObjectError(state=request.payload.state)
+
+        return self._decode_signed_request_object(
+            request, client, raw_request_object, metadata
+        )
+
+    def _decrypt_request_object(
+        self, request, client: ClientMixin, raw_jwe: str
+    ) -> str:
+        key = import_any_key(self.resolve_client_private_key(client))
+        algorithms = self.get_request_object_encryption_algorithms(client)
+        try:
+            if not algorithms:
+                raise UnsupportedAlgorithmError()
+            encrypted = jwe.decrypt_compact(raw_jwe, key, algorithms=algorithms)
+            plaintext = encrypted.plaintext
+        except UnsupportedAlgorithmError as error:
+            raise InvalidRequestError(
+                "Authorization requests must be encrypted with supported algorithms.",
+                state=request.payload.state,
+            ) from error
+        except JoseError as error:
+            raise InvalidRequestObjectError(
+                description=error.description or InvalidRequestObjectError.description,
+                state=request.payload.state,
+            ) from error
+
+        try:
+            return plaintext.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise InvalidRequestObjectError(state=request.payload.state) from error
+
+    def _decode_signed_request_object(
+        self, request, client: ClientMixin, raw_request_object: str, metadata: dict
+    ):
         jwks = self.resolve_client_public_key(client)
         key = import_any_key(jwks)
         algorithms = self.get_request_object_signing_algorithms(client)
-        metadata = self.get_server_metadata() or {}
         if self.get_client_require_signed_request_object(client) or metadata.get(
             "require_signed_request_object", False
         ):
@@ -220,7 +337,9 @@ class JWTAuthenticationRequest:
             if not algorithms:
                 raise UnsupportedAlgorithmError()
             request_object = jwt.decode(raw_request_object, key, algorithms=algorithms)
-            self.claims_validator.validate(request_object.claims)
+            self._check_algorithm_family(request_object.header, client)
+            registry = self._build_claims_registry()
+            registry.validate(request_object.claims)
         except UnsupportedAlgorithmError as error:
             raise InvalidRequestError(
                 "Authorization requests must be signed with supported algorithms.",
@@ -234,36 +353,125 @@ class JWTAuthenticationRequest:
                 state=request.payload.state,
             ) from error
 
+        return request_object
+
+    def _check_algorithm_family(self, header: dict, client: ClientMixin):
+        """Reject symmetric signatures unless the integration allows them.
+
+        The client public JWK must not be used as an HMAC secret. An
+        integration that registers shared secrets may explicitly allow the
+        ``HS*`` family for a client.
+        """
+        algorithm = header.get("alg")
+        if (
+            algorithm in SYMMETRIC_SIGNING_ALGORITHMS
+            and not self.allow_symmetric_signing_algorithm(client)
+        ):
+            raise UnsupportedAlgorithmError()
+
+    def _build_claims_registry(self) -> jwt.JWTClaimsRegistry:
+        options = {
+            "client_id": {"essential": True},
+            "exp": {"essential": self.require_exp},
+            "nbf": {"essential": False},
+            "iat": {"essential": False},
+            "jti": {"essential": self.require_jti},
+        }
+        return jwt.JWTClaimsRegistry(
+            self.get_current_time,
+            self.get_clock_leeway(),
+            **options,
+        )
+
+    def _validate_request_object_claims(self, request, client: ClientMixin, token):
+        claims = token.claims
+        state = request.payload.state
+
         # The client ID values in the client_id request parameter and in
         # the Request Object client_id claim MUST be identical.
-        if request_object.claims["client_id"] != request.payload.client_id:
+        if claims["client_id"] != request.payload.client_id:
             raise InvalidRequestError(
                 "The 'client_id' claim from the request parameters "
                 "and the request object claims don't match.",
+                state=state,
+            )
+
+        self._validate_issuer(request, client, claims)
+        self._validate_audience(request, claims)
+
+        # The Request Object MAY be sent by value, as described in Section 5.1,
+        # or by reference, as described in Section 5.2. request and
+        # request_uri parameters MUST NOT be included in Request Objects.
+        if "request" in claims or "request_uri" in claims:
+            raise InvalidRequestError(
+                "The 'request' and 'request_uri' parameters must not be included in the request object.",
+                state=state,
+            )
+
+        # jti consumption is the last step: when a previous check fails, the
+        # identifier must remain available and no state must be written.
+        if self.require_jti:
+            self._consume_jti(client, claims, state)
+
+    def _validate_issuer(self, request, client: ClientMixin, claims):
+        """Bind the request object to its client (and tenant).
+
+        RFC 9101 §5.4: the ``iss`` claim, when present, MUST contain the
+        client_id of the OAuth client that sent the request object. With the
+        strict policy, a missing ``iss`` claim is rejected.
+        """
+        if not self.require_iss:
+            return
+
+        expected_issuer = self.get_expected_request_object_issuer(client)
+        issuer = claims.get("iss")
+        if not isinstance(issuer, str) or not self.issuer_matches_client(
+            issuer, client, expected_issuer
+        ):
+            raise InvalidRequestObjectError(
+                description="The 'iss' claim does not identify the client.",
                 state=request.payload.state,
             )
 
-        # Per RFC 7519 §4.1.3, if the principal processing the claim does not
-        # identify itself with a value in the "aud" claim when this claim is
-        # present, then the JWT MUST be rejected.
-        if "aud" in request_object.claims and not audience_matches(
-            request_object.claims["aud"], self.get_audiences()
-        ):
+    def _validate_audience(self, request, claims):
+        if not self.require_aud and "aud" not in claims:
+            return
+
+        audiences = self.get_audiences()
+        if not audiences or not audience_matches(claims.get("aud"), audiences):
             raise InvalidRequestObjectError(
                 description="The 'aud' claim does not identify this server.",
                 state=request.payload.state,
             )
 
-        # The Request Object MAY be sent by value, as described in Section 5.1,
-        # or by reference, as described in Section 5.2. request and
-        # request_uri parameters MUST NOT be included in Request Objects.
-        if "request" in request_object.claims or "request_uri" in request_object.claims:
-            raise InvalidRequestError(
-                "The 'request' and 'request_uri' parameters must not be included in the request object.",
-                state=request.payload.state,
-            )
+    def _validate_parameter_conflicts(self, request, claims):
+        """Reject security parameters present both outside and inside the
+        request object with different values, instead of letting the request
+        object silently override them.
+        """
+        outer = request.payload.data
+        for name in PROTECTED_REQUEST_PARAMETERS:
+            # client_id has its own mandatory equality check and error code.
+            if name == "client_id":
+                continue
+            if name in outer and name in claims and outer[name] != claims[name]:
+                raise DuplicateRequestParameterError(
+                    description=(
+                        f"The '{name}' parameter conflicts with the request object."
+                    ),
+                    state=request.payload.state,
+                )
 
-        return request_object
+    def _consume_jti(self, client: ClientMixin, claims, state):
+        jti = claims.get("jti")
+        if not isinstance(jti, str) or not jti:
+            raise InvalidRequestObjectError(
+                description="The 'jti' claim must be a non-empty string.",
+                state=state,
+            )
+        with self._jti_lock:
+            if not self.consume_request_object_jti(client, jti):
+                raise JTIReplayError(state=state)
 
     def validate_request_uri(self, request_uri: str, client: ClientMixin) -> bool:
         """Return whether ``request_uri`` may be retrieved for this client.
@@ -298,7 +506,7 @@ class JWTAuthenticationRequest:
         HTTP transport or network policy must also block private destinations
         and prevent DNS rebinding::
 
-            def get_request_object(self, request_uri: str):
+            def get_request_object(self, request_uri):
                 try:
                     with requests.get(
                         request_uri,
@@ -344,8 +552,104 @@ class JWTAuthenticationRequest:
                         return KeySet.import_key_set(data)
 
                     return KeySet.import_key_set(client.jwks)
+
+        The key is the only signature key source: request objects are never
+        verified with keys supplied in the request itself or fetched from an
+        unapproved location, which prevents key-confusion attacks.
         """
         raise NotImplementedError()
+
+    def resolve_client_private_key(self, client: ClientMixin):
+        """Resolve the server-side private key for decrypting a JWE request object.
+
+        Only called when :attr:`allow_encrypted_request_object` is enabled.
+        Implementations must return key material registered for this client,
+        never a key derived from the request itself. The default reuses
+        :meth:`resolve_client_public_key` for clients that register a shared
+        symmetric key.
+        """
+        return self.resolve_client_public_key(client)
+
+    def get_request_object_encryption_algorithms(self, client: ClientMixin):
+        """Return the accepted JWE ``alg``/``enc`` values for request objects.
+
+        Override this to restrict key management and content encryption
+        algorithms when :attr:`allow_encrypted_request_object` is enabled.
+        An empty list rejects every encrypted request object.
+        """
+        metadata = self.get_server_metadata() or {}
+        return metadata.get("request_object_encryption_alg_values_supported", [])
+
+    def allow_symmetric_signing_algorithm(self, client: ClientMixin) -> bool:
+        """Whether the client may sign request objects with an ``HS*`` algorithm.
+
+        Return :data:`True` only when the client registered a shared secret
+        intended for request object signatures. Asymmetric clients must keep
+        rejecting symmetric algorithms so their public JWK cannot be used as
+        an HMAC secret.
+        """
+        return False
+
+    def get_current_time(self) -> int:
+        """Return the current Unix timestamp used for every time claim check.
+
+        ``exp``, ``nbf`` and ``iat`` are all evaluated against this single
+        value, so one request object never mixes two clock readings.
+        """
+        return int(time.time())
+
+    def get_clock_leeway(self) -> int:
+        """Return the clock skew tolerance, in seconds, for time claims."""
+        return 0
+
+    def get_expected_request_object_issuer(self, client: ClientMixin) -> str:
+        """Return the expected ``iss`` value of the client's request objects.
+
+        Per RFC 9101 §5.4, this is the ``client_id`` of the client that sends
+        the request object. Override it to bind the issuer to a tenant-specific
+        identifier, and implement :meth:`issuer_matches_client` accordingly.
+        """
+        return client.get_client_id()
+
+    def issuer_matches_client(
+        self, issuer: str, client: ClientMixin, expected_issuer: str
+    ) -> bool:
+        """Return whether the request object ``iss`` belongs to the client.
+
+        Multi-tenant deployments can override this to additionally verify that
+        the issuer is scoped to the tenant that owns ``client``.
+        """
+        return issuer == expected_issuer
+
+    def consume_request_object_jti(self, client: ClientMixin, jti: str) -> bool:
+        """Atomically mark ``jti`` as consumed for the client.
+
+        Return :data:`True` when the identifier was free and is now consumed,
+        and :data:`False` when it was already consumed. The call runs inside a
+        lock and only after every other validation succeeded, so a rejected
+        request object never writes state.
+
+        The default keeps identifiers in memory, which fits single-process
+        deployments and tests. Production deployments should override it with
+        an atomic database insert or a ``SET NX`` cache operation scoped to the
+        client, with a retention window covering the request object lifetime::
+
+            def consume_request_object_jti(self, client, jti):
+                try:
+                    db.session.add(
+                        ConsumedJTI(client_id=client.get_client_id(), jti=jti)
+                    )
+                    db.session.commit()
+            except IntegrityError:
+                db.session.rollback()
+                return False
+            return True
+        """
+        key = (client.get_client_id(), jti)
+        if key in self._consumed_jtis:
+            return False
+        self._consumed_jtis.add(key)
+        return True
 
     def get_server_metadata(self) -> dict:
         """Return server metadata which includes supported grant types,
@@ -372,11 +676,11 @@ class JWTAuthenticationRequest:
         """Return the accepted values of the request object ``aud`` claim.
 
         A request object with an ``aud`` claim is rejected when ``aud`` does not
-        contain one of these values. A request object without ``aud`` is
-        accepted. By default, it returns the ``issuer`` of
-        :meth:`get_server_metadata`, or an empty list when there is none.
-        Developers MAY re-implement it in subclass, for example to also accept
-        the authorization endpoint URL::
+        contain one of these values. When the strict audience policy is enabled,
+        a request object without ``aud`` is also rejected. By default, it returns
+        the ``issuer`` of :meth:`get_server_metadata`, or an empty list when there
+        is none. Developers MAY re-implement it in subclass, for example to also
+        accept the authorization endpoint URL::
 
             def get_audiences(self):
                 metadata = self.get_server_metadata()
