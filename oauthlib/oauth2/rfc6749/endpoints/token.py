@@ -8,6 +8,10 @@ for consuming and providing OAuth 2.0 RFC6749.
 import logging
 
 from oauthlib.common import Request
+from oauthlib.oauth2.rfc6749 import errors as oauth2_errors
+from oauthlib.oauth2.rfc6749.client_assertion import (
+    JWTClientAssertionValidator,
+)
 from oauthlib.oauth2.rfc6749 import utils
 
 from .base import BaseEndpoint, catch_errors_and_unavailability
@@ -60,11 +64,13 @@ class TokenEndpoint(BaseEndpoint):
 
     valid_request_methods = ('POST',)
 
-    def __init__(self, default_grant_type, default_token_type, grant_types):
+    def __init__(self, default_grant_type, default_token_type, grant_types,
+                 client_assertion_validator=None):
         BaseEndpoint.__init__(self)
         self._grant_types = grant_types
         self._default_token_type = default_token_type
         self._default_grant_type = default_grant_type
+        self._client_assertion_validator = client_assertion_validator
 
     @property
     def grant_types(self):
@@ -82,6 +88,24 @@ class TokenEndpoint(BaseEndpoint):
     def default_token_type(self):
         return self._default_token_type
 
+    @property
+    def client_assertion_validator(self):
+        """Lazily build the RFC 7523 assertion lifecycle from a grant.
+
+        Constructed on first use so that deployments which only rely on
+        ``client_secret_basic``/``client_secret_post`` pay no setup cost and
+        keep their existing behaviour unchanged.
+        """
+        if self._client_assertion_validator is None:
+            grant_handler = next(iter(self.grant_types.values()))
+            self._client_assertion_validator = JWTClientAssertionValidator(
+                grant_handler.request_validator)
+        return self._client_assertion_validator
+
+    @client_assertion_validator.setter
+    def client_assertion_validator(self, validator):
+        self._client_assertion_validator = validator
+
     @catch_errors_and_unavailability
     def create_token_response(self, uri, http_method='POST', body=None,
                               headers=None, credentials=None, grant_type_for_scope=None,
@@ -90,6 +114,17 @@ class TokenEndpoint(BaseEndpoint):
         request = Request(
             uri, http_method=http_method, body=body, headers=headers)
         self.validate_token_request(request)
+
+        try:
+            reservation = self._validate_client_assertion(request)
+        except oauth2_errors.OAuth2Error as error:
+            headers_out = {'Content-Type': 'application/json',
+                           'Cache-Control': 'no-store',
+                           'Pragma': 'no-cache'}
+            headers_out.update(error.headers)
+            return headers_out, error.json, error.status_code
+        if reservation is not None:
+            request.client_assertion_authenticated = True
         # 'scope' is an allowed Token Request param in both the "Resource Owner Password Credentials Grant"
         # and "Client Credentials Grant" flows
         # https://tools.ietf.org/html/rfc6749#section-4.3.2
@@ -111,8 +146,63 @@ class TokenEndpoint(BaseEndpoint):
                                                   self.default_grant_type_handler)
         log.debug('Dispatching grant_type %s request to %r.',
                   request.grant_type, grant_type_handler)
-        return grant_type_handler.create_token_response(
-            request, self.default_token_type)
+
+        if reservation is None:
+            return grant_type_handler.create_token_response(
+                request, self.default_token_type)
+
+        # The jti is only reserved at this point. Commit it once the token
+        # has actually been issued; roll it back on any failure so a rejected
+        # exchange cannot leave the assertion in a consumed state.
+        client_id, jti = reservation
+        try:
+            headers_out, body_out, status = grant_type_handler.create_token_response(
+                request, self.default_token_type)
+        except oauth2_errors.OAuth2Error:
+            self.client_assertion_validator.release_reservation(
+                client_id, jti, request)
+            raise
+        except Exception:
+            self.client_assertion_validator.release_reservation(
+                client_id, jti, request)
+            raise
+        if status == 200:
+            self.client_assertion_validator.commit_reservation(
+                client_id, jti, request)
+        else:
+            self.client_assertion_validator.release_reservation(
+                client_id, jti, request)
+        return headers_out, body_out, status
+
+    def _validate_client_assertion(self, request):
+        """Run the private_key_jwt lifecycle when an assertion is present.
+
+        Requests without ``client_assertion`` follow the unchanged
+        ``client_secret_basic``/``client_secret_post`` path.
+        """
+        assertion_type = getattr(request, 'client_assertion_type', None)
+        assertion = getattr(request, 'client_assertion', None)
+        if assertion_type is None and assertion is None:
+            return None
+
+        if 'client_assertion' in request.duplicate_params or \
+                'client_assertion_type' in request.duplicate_params:
+            raise oauth2_errors.InvalidRequestError(
+                description='Duplicate client assertion parameter.',
+                request=request)
+        if assertion_type != (
+                'urn:ietf:params:oauth:client-assertion-type:jwt-bearer'):
+            raise oauth2_errors.InvalidRequestError(
+                description='Unsupported client assertion type.',
+                request=request)
+        if not assertion:
+            raise oauth2_errors.InvalidRequestError(
+                description='Missing client assertion parameter.',
+                request=request)
+
+        # The lifecycle raises distinct, generic OAuth2Error subclasses whose
+        # messages never contain the assertion text or key material.
+        return self.client_assertion_validator.validate(assertion, request)
 
     def validate_token_request(self, request):
         self._raise_on_bad_method(request)

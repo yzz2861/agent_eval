@@ -4,6 +4,17 @@ Changelog
 Unreleased:
 ------------------
 OAuth2.0 Provider:
+* #1010: Added a pluggable RFC 7523 ``private_key_jwt`` client assertion
+  lifecycle. ``JWTClientAssertionValidator`` verifies the signature chain,
+  binds ``iss``/``sub`` to the client, requires an exact ``aud`` match,
+  validates the ``exp``/``nbf``/``iat`` windows and atomically reserves the
+  one-time ``jti`` (rolled back if token issuance fails). Two deployments are
+  supported: host-managed signature/clock/jti hooks on ``RequestValidator``
+  (with legacy positional-signature compatibility) and a built-in thread-safe
+  ``InMemoryJtiStore`` for tests. Replay, concurrent exchange, clock rollback,
+  bad audience, unknown ``kid`` and expired assertion each return a distinct
+  error, never echoing the assertion text or key material. Existing
+  ``client_secret_basic``/``client_secret_post`` flows are unchanged.
 * **Breaking**: #988: PKCE parameters are now validated against RFC 7636
   syntax. ``code_verifier`` must be 43-128 unreserved ASCII characters
   (``[A-Za-z0-9-._~]``) at the token endpoint (rejected with ``invalid_grant``)

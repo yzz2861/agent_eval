@@ -214,6 +214,16 @@ class GrantTypeBase:
         # client MUST authenticate with the authorization server as described
         # in Section 3.2.1.
         # https://tools.ietf.org/html/rfc6749#section-3.2.1
+        if getattr(request, 'client_assertion_authenticated', False):
+            # The private_key_jwt lifecycle already authenticated the client
+            # at the TokenEndpoint, including its one-time jti reservation.
+            if request.client is None or \
+                not hasattr(request.client, 'client_id'):
+                raise NotImplementedError(
+                    'authenticate_client_assertion must set the '
+                    'request.client attribute to a client object with a '
+                    'client_id attribute.')
+            return
         log.debug('Authenticating confidential client, %r.', request)
         if not self.request_validator.authenticate_client(request):
             log.debug('Client authentication failed, %r.', request)
@@ -252,6 +262,9 @@ class GrantTypeBase:
 
     def validate_client_authentication(self, request):
         """Raise on failed client authentication."""
+        if getattr(request, 'client_assertion_authenticated', False):
+            self.validate_client_confidential(request)
+            return
         # Handles confidential clients
         if self.request_validator.client_authentication_required(request):
             self.validate_client_confidential(request)

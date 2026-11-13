@@ -2,12 +2,21 @@
 oauthlib.oauth2.rfc6749.request_validator
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 """
+import inspect
 import logging
 
 log = logging.getLogger(__name__)
 
 
 class RequestValidator:
+
+    # Return values for the one-time ``jti`` hooks. They make the difference
+    # between a replayed assertion and two concurrent exchanges explicit,
+    # without requiring host applications to raise library-specific errors.
+    JTI_ACCEPTED = 'accepted'
+    JTI_REPLAYED = 'replayed'
+    JTI_CONCURRENT = 'concurrent'
+    JTI_CLOCK_ROLLBACK = 'clock_rollback'
 
     def client_authentication_required(self, request, *args, **kwargs):
         """Determine if client authentication is required for current request.
@@ -694,3 +703,181 @@ class RequestValidator:
 
         """
         return False
+
+    # ------------------------------------------------------------------
+    # private_key_jwt client assertion lifecycle (RFC 7523)
+    #
+    # These hooks are intentionally optional. Two deployment shapes are
+    # supported:
+    #
+    # * A host application provides the signature verification key(s), the
+    #   clock and an atomic, durable jti store by overriding the hooks below
+    #   (for example reserving a row behind a unique index and committing or
+    #   releasing it around token issuance).
+    # * Tests and single-process deployments use the built-in in-memory
+    #   implementation in oauthlib.oauth2.rfc6749.client_assertion instead.
+    # ------------------------------------------------------------------
+
+    def get_client_assertion_signing_key(self, client_id, kid, headers,
+                                         request, *args, **kwargs):
+        """Return the public key registered for an assertion's ``kid``.
+
+        Hosts that verify signatures themselves may leave this unimplemented
+        and override :meth:`verify_client_assertion_signature` instead.
+
+        :param client_id: Unicode client identifier bound to the assertion.
+        :param kid: The ``kid`` header of the received assertion, or None.
+        :param headers: The parsed JOSE header of the assertion.
+        :param request: OAuthlib request.
+        :type request: oauthlib.common.Request
+        :rtype: A public key object or PEM string accepted by PyJWT.
+        """
+        raise NotImplementedError(
+            'Subclasses must implement this method or override '
+            'verify_client_assertion_signature.')
+
+    def verify_client_assertion_signature(self, client_id, assertion,
+                                          headers, request,
+                                          signing_key=None, *args, **kwargs):
+        """Verify the assertion signature chain and return its claims.
+
+        The default implementation resolves the key through
+        :meth:`get_client_assertion_signing_key` and verifies the signature
+        with PyJWT, without applying any audience or time-window checks: the
+        assertion lifecycle performs those separately so that every failure
+        produces a distinct, non-leaking error.
+
+        Host applications that delegate signature verification to an external
+        IdP can override this method and return the verified claims dict
+        directly.
+
+        :param client_id: Unicode client identifier.
+        :param assertion: The raw client assertion string.
+        :param headers: The parsed JOSE header.
+        :param request: OAuthlib request.
+        :type request: oauthlib.common.Request
+        :param signing_key: Optional key pre-resolved by the lifecycle.
+        :rtype: Dict of verified JWT claims.
+        """
+        import jwt  # noqa: PLC0415
+
+        key = signing_key
+        if key is None:
+            key = self.get_client_assertion_signing_key(
+                client_id, headers.get('kid'), headers, request)
+        options = {
+            'verify_signature': True,
+            'verify_exp': False,
+            'verify_nbf': False,
+            'verify_iat': False,
+            'verify_aud': False,
+            'verify_iss': False,
+            'verify_sub': False,
+            'require': [],
+        }
+        return jwt.decode(
+            assertion,
+            key=key,
+            algorithms=[headers.get('alg')],
+            options=options,
+        )
+
+    def get_client_assertion_time(self, request, *args, **kwargs):
+        """Return the authoritative current time as a UNIX timestamp.
+
+        Override this when the host application owns the clock (for example a
+        monotonic time service shared across workers).
+        """
+        import time  # noqa: PLC0415
+
+        return time.time()
+
+    def reserve_client_assertion_jti(self, client_id, jti, expires_at,
+                                     request, *args, **kwargs):
+        """Atomically reserve a one-time assertion ``jti``.
+
+        The reservation MUST be atomic: only one concurrent request may
+        receive :attr:`JTI_ACCEPTED` for the same ``(client_id, jti)`` pair.
+        It is committed by :meth:`commit_client_assertion_jti` once the token
+        has been issued, or released by
+        :meth:`release_client_assertion_jti` if any later step fails, so a
+        failed exchange never leaves the assertion in a consumed state.
+
+        :rtype: One of :attr:`JTI_ACCEPTED`, :attr:`JTI_REPLAYED`,
+                :attr:`JTI_CONCURRENT` or :attr:`JTI_CLOCK_ROLLBACK`.
+        """
+        raise NotImplementedError(
+            'Subclasses must provide an atomic jti store or use the built-in '
+            'InMemoryJtiStore.')
+
+    def commit_client_assertion_jti(self, client_id, jti, request,
+                                    *args, **kwargs):
+        """Mark a previously reserved ``jti`` as permanently consumed."""
+        return None
+
+    def release_client_assertion_jti(self, client_id, jti, request,
+                                     *args, **kwargs):
+        """Release a reservation so the assertion can be retried.
+
+        This is called whenever validation or token issuance fails after a
+        reservation was made. Overriding methods must never raise: cleanup
+        problems must not replace the original error.
+        """
+        return None
+
+    def consume_client_assertion_jti(self, client_id, jti, expires_at,
+                                     request, *args, **kwargs):
+        """Atomically consume a ``jti`` in a single operation.
+
+        Hosts whose storage only supports an atomic insert (e.g. a unique
+        index without explicit reservations) may override this method. The
+        default implementation composes reserve + commit, which is what the
+        built-in in-memory store uses.
+
+        :rtype: One of the ``JTI_*`` status constants.
+        """
+        status = self.reserve_client_assertion_jti(
+            client_id, jti, expires_at, request)
+        if status == self.JTI_ACCEPTED:
+            self.commit_client_assertion_jti(client_id, jti, request)
+        return status
+
+    def authenticate_client_assertion(self, client_id, request,
+                                      claims=None, *args, **kwargs):
+        """Bind an authenticated assertion to the request.
+
+        Called only after the signature, claims and jti reservation have all
+        succeeded. The default implementation sets ``request.client_id`` and
+        a lightweight client object; host applications normally override it
+        to load the registered client. Returning False rejects the request
+        without consuming the reserved jti.
+        """
+        request.client_id = client_id
+        if getattr(request, 'client', None) is None:
+            request.client = type('AssertionClient', (), {
+                'client_id': client_id,
+            })()
+        return True
+
+
+def call_validator_hook(validator, method_name, kwargs):
+    """Invoke a client-assertion validator hook with legacy signature support.
+
+    Custom validators predate these hooks and may define methods with an
+    older positional signature (for example ``(client_id, jti, request)``).
+    Keyword arguments that the method cannot accept are dropped, and
+    variadic methods always receive everything. This keeps every new hook
+    callable from the lifecycle without breaking existing subclasses.
+    """
+    method = getattr(validator, method_name)
+    signature = inspect.signature(method)
+    parameters = signature.parameters.values()
+    accepts_var_kwargs = any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters)
+    if accepts_var_kwargs:
+        return method(**kwargs)
+    accepted = {
+        name: value for name, value in kwargs.items()
+        if name in signature.parameters
+    }
+    return method(**accepted)

@@ -52,6 +52,7 @@ class Server(
         :param kwargs: Extra parameters to pass to authorization-,
                        token-, resource-, and revocation-endpoint constructors.
         """
+        client_assertion_validator = kwargs.pop('client_assertion_validator', None)
         self.auth_grant = AuthorizationCodeGrant(request_validator)
         self.implicit_grant = ImplicitGrant(request_validator)
         self.password_grant = ResourceOwnerPasswordCredentialsGrant(request_validator)
@@ -85,6 +86,7 @@ class Server(
                 "urn:ietf:params:oauth:grant-type:device_code": self.device_code_grant,
             },
             default_token_type=self.bearer,
+            client_assertion_validator=client_assertion_validator,
         )
         ResourceEndpoint.__init__(
             self, default_token="Bearer", token_types={"Bearer": self.bearer}
@@ -119,6 +121,7 @@ class WebApplicationServer(
         :param kwargs: Extra parameters to pass to authorization-,
                        token-, resource-, and revocation-endpoint constructors.
         """
+        client_assertion_validator = kwargs.pop('client_assertion_validator', None)
         self.auth_grant = AuthorizationCodeGrant(request_validator)
         self.refresh_grant = RefreshTokenGrant(request_validator)
         self.bearer = BearerToken(
@@ -138,6 +141,7 @@ class WebApplicationServer(
                 "refresh_token": self.refresh_grant,
             },
             default_token_type=self.bearer,
+            client_assertion_validator=client_assertion_validator,
         )
         ResourceEndpoint.__init__(
             self, default_token="Bearer", token_types={"Bearer": self.bearer}
@@ -219,6 +223,7 @@ class LegacyApplicationServer(
         :param kwargs: Extra parameters to pass to authorization-,
                        token-, resource-, and revocation-endpoint constructors.
         """
+        client_assertion_validator = kwargs.pop('client_assertion_validator', None)
         self.password_grant = ResourceOwnerPasswordCredentialsGrant(request_validator)
         self.refresh_grant = RefreshTokenGrant(request_validator)
         self.bearer = BearerToken(
@@ -232,6 +237,7 @@ class LegacyApplicationServer(
                 "refresh_token": self.refresh_grant,
             },
             default_token_type=self.bearer,
+            client_assertion_validator=client_assertion_validator,
         )
         ResourceEndpoint.__init__(
             self, default_token="Bearer", token_types={"Bearer": self.bearer}
@@ -266,6 +272,7 @@ class BackendApplicationServer(
         :param kwargs: Extra parameters to pass to authorization-,
                        token-, resource-, and revocation-endpoint constructors.
         """
+        client_assertion_validator = kwargs.pop('client_assertion_validator', None)
         self.credentials_grant = ClientCredentialsGrant(request_validator)
         self.bearer = BearerToken(
             request_validator, token_generator, token_expires_in, refresh_token_generator
@@ -275,6 +282,7 @@ class BackendApplicationServer(
             default_grant_type="client_credentials",
             grant_types={"client_credentials": self.credentials_grant},
             default_token_type=self.bearer,
+            client_assertion_validator=client_assertion_validator,
         )
         ResourceEndpoint.__init__(
             self, default_token="Bearer", token_types={"Bearer": self.bearer}

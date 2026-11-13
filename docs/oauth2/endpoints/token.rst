@@ -81,3 +81,37 @@ tokens which unless you are certain you need them, are a bad idea.
 
 .. autoclass:: oauthlib.oauth2.TokenEndpoint
     :members:
+
+private_key_jwt client assertions
+---------------------------------
+
+Token requests may authenticate with a RFC 7523 JWT client assertion using
+``client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer``.
+Wire a :class:`~oauthlib.oauth2.rfc6749.client_assertion.JWTClientAssertionValidator`
+into the token endpoint (or pass it as ``client_assertion_validator`` to a
+pre-configured server). It verifies the signature chain, requires ``iss`` and
+``sub`` to equal the client id, matches ``aud`` exactly against the token
+endpoint URI (host, port and path), validates the ``exp``/``nbf``/``iat``
+windows, and atomically reserves the one-time ``jti``. The reservation is only
+committed after token issuance succeeds; any failure rolls it back, so a
+rejected assertion is never marked consumed.
+
+Two deployments are supported:
+
+* **Host-managed**: implement the ``*_client_assertion_*`` hooks on
+  :class:`~oauthlib.oauth2.RequestValidator` to supply signing keys (or verify
+  signatures yourself), the authoritative clock and a durable atomic jti
+  store. Legacy positional hook signatures remain supported.
+* **In-memory**: pass an
+  :class:`~oauthlib.oauth2.rfc6749.client_assertion.InMemoryJtiStore` and a
+  ``{kid: public_key}`` registry, mainly for tests and single-process use.
+
+Replays, concurrent exchanges, clock rollback, audience mismatches, unknown
+``kid`` values and expired assertions produce distinct error codes whose
+descriptions never include the assertion text or public key material.
+
+.. autoclass:: oauthlib.oauth2.rfc6749.client_assertion.JWTClientAssertionValidator
+    :members:
+
+.. autoclass:: oauthlib.oauth2.rfc6749.client_assertion.InMemoryJtiStore
+    :members:

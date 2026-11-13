@@ -302,6 +302,54 @@ class InvalidClientError(FatalClientError):
     status_code = 401
 
 
+class InvalidClientAssertionError(InvalidClientError):
+    """Base class for ``private_key_jwt`` client assertion failures.
+
+    All client assertion errors are reported as client authentication
+    failures (HTTP 401). Descriptions are deliberately generic so that
+    neither the assertion itself nor any public key material can leak to
+    the caller through an error response.
+    """
+    error = 'invalid_client'
+    description = 'Client assertion is invalid.'
+
+
+class ReplayedClientAssertionError(InvalidClientAssertionError):
+    """The assertion was already consumed in a previous request."""
+    error = 'replayed_client_assertion'
+    description = 'The client assertion has already been used.'
+
+
+class ConcurrentClientAssertionError(InvalidClientAssertionError):
+    """The same assertion is being exchanged by concurrent requests."""
+    error = 'concurrent_client_assertion'
+    description = 'The client assertion is being processed concurrently.'
+
+
+class ClockRollbackClientAssertionError(InvalidClientAssertionError):
+    """The server clock moved backwards, so the assertion cannot be checked."""
+    error = 'clock_rollback'
+    description = 'Server clock anomaly; retry the request later.'
+
+
+class InvalidClientAssertionAudienceError(InvalidClientAssertionError):
+    """The assertion audience does not exactly match the token endpoint."""
+    error = 'invalid_client_assertion_audience'
+    description = 'The client assertion audience is invalid.'
+
+
+class UnknownClientAssertionKeyError(InvalidClientAssertionError):
+    """The ``kid`` used to sign the assertion is not registered."""
+    error = 'unknown_client_assertion_key'
+    description = 'The client assertion key is not recognized.'
+
+
+class ExpiredClientAssertionError(InvalidClientAssertionError):
+    """The assertion ``exp`` time has passed."""
+    error = 'expired_client_assertion'
+    description = 'The client assertion has expired.'
+
+
 class InvalidGrantError(OAuth2Error):
     """
     The provided authorization grant (e.g. authorization code, resource
