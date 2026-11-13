@@ -6,6 +6,12 @@ from secure.secure import (
     Secure,
 )
 
+from ._internal.cache_policy import (
+    CachePolicy,
+    CacheSensitivity,
+    SensitiveCachePolicy,
+    SensitiveResponsePolicy,
+)
 from .headers.cache_control import CacheControl
 from .headers.content_security_policy import ContentSecurityPolicy
 from .headers.cross_origin_embedder_policy import CrossOriginEmbedderPolicy
@@ -16,6 +22,7 @@ from .headers.permissions_policy import PermissionsPolicy
 from .headers.referrer_policy import ReferrerPolicy
 from .headers.server import Server
 from .headers.strict_transport_security import StrictTransportSecurity
+from .headers.vary import Vary
 from .headers.x_content_type_options import XContentTypeOptions
 from .headers.x_dns_prefetch_control import XDnsPrefetchControl
 from .headers.x_frame_options import XFrameOptions
@@ -26,6 +33,8 @@ __all__ = [
     "DEFAULT_ALLOWED_HEADERS",
     "MULTI_OK",
     "CacheControl",
+    "CachePolicy",
+    "CacheSensitivity",
     "ContentSecurityPolicy",
     "CrossOriginEmbedderPolicy",
     "CrossOriginOpenerPolicy",
@@ -35,8 +44,11 @@ __all__ = [
     "Preset",
     "ReferrerPolicy",
     "Secure",
+    "SensitiveCachePolicy",
+    "SensitiveResponsePolicy",
     "Server",
     "StrictTransportSecurity",
+    "Vary",
     "XContentTypeOptions",
     "XDnsPrefetchControl",
     "XFrameOptions",

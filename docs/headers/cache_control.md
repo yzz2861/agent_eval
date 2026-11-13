@@ -141,6 +141,55 @@ Reset to the default (no directives configured; default value will be returned).
 - Repeating a parameterized directive overwrites the previous value (e.g., calling `.max_age(60)` then `.max_age(0)` results in `max-age=0`).
 - The builder rejects obvious header-splitting primitives (CR/LF) in `.value(...)` and `.custom(...)`.
 
+## Merging response values
+
+Middleware often needs to add secure directives to a `Cache-Control` value that an application or framework already wrote. Use `merge()` (or `merge_header()` / `merge_existing()`) instead of replacing the whole header:
+
+```python
+cc = CacheControl().sensitive()
+cc.merge("private, max-age=600, no-cache")
+print(cc.header_value)
+# no-store, no-cache, private, max-age=0
+```
+
+Merge rules:
+
+- Existing `private`, `no-cache`, `must-revalidate`, and other stricter directives are preserved.
+- `max-age` / `s-maxage` keep the smaller value, so a sensitive response never increases a lifetime.
+- `no-store` or `private` removes conflicting `public` / `immutable`.
+- Duplicate directive names are de-duplicated and emitted in canonical order.
+
+`.sensitive()` applies the closing baseline:
+
+```python
+CacheControl().sensitive().header_value
+# no-store, private, max-age=0
+```
+
+## Middleware cache policy
+
+`SecureASGIMiddleware` and `SecureWSGIMiddleware` classify responses and merge cache headers before the response starts:
+
+```python
+from secure import CachePolicy, Secure
+from secure.middleware import SecureASGIMiddleware
+
+policy = CachePolicy(
+    sensitive_statuses={200, 201},
+    sensitive_when_authenticated=True,
+    sensitive_content_types={"text/html", "application/json"},
+    sensitive_routes={"/orders/*"},
+)
+
+app = SecureASGIMiddleware(
+    app,
+    secure=Secure.with_default_headers(),
+    cache_policy=policy,
+)
+```
+
+Sensitive responses get `no-store, private, max-age=0` merged with their existing directives. Public static assets such as JavaScript, CSS, images, and fonts keep their original `Cache-Control` value. Route annotations (`scope["sensitive"] = True`, a `sensitive` / `no_store` route attribute, or a `"sensitive"` route tag) can override the content-type rules.
+
 ## Attribution
 
 This library implements security recommendations and behavior described by:

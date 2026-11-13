@@ -10,7 +10,7 @@ MULTI_OK: frozenset[str] = frozenset(
 )
 
 # Headers where RFC7230-style comma merging is safe/expected.
-COMMA_JOIN_OK: frozenset[str] = frozenset({"cache-control"})
+COMMA_JOIN_OK: frozenset[str] = frozenset({"cache-control", "vary"})
 
 # A default allowlist of secure headers.
 DEFAULT_ALLOWED_HEADERS: frozenset[str] = frozenset(
@@ -26,6 +26,7 @@ DEFAULT_ALLOWED_HEADERS: frozenset[str] = frozenset(
         "referrer-policy",
         "server",
         "strict-transport-security",
+        "vary",
         "x-content-type-options",
         "x-dns-prefetch-control",
         "x-download-options",

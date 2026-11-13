@@ -7,7 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Placeholder for upcoming changes.
+- Added explicit `Vary` builder with merge/de-duplication support.
+- Added `CachePolicy` / `SensitiveCachePolicy` response classification for status codes, authentication, content types, and route annotations.
+- Middleware now merges sensitive `Cache-Control` directives instead of replacing application values, preserving `private` and other stricter directives.
+- Middleware keeps existing cache headers for public static assets and merges `Vary` rather than overwriting it.
 
 ## [2.0.1] - 2026-04-21
 

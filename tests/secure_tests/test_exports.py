@@ -12,6 +12,8 @@ class TestExportSurface(unittest.TestCase):
             "DEFAULT_ALLOWED_HEADERS",
             "MULTI_OK",
             "CacheControl",
+            "CachePolicy",
+            "CacheSensitivity",
             "ContentSecurityPolicy",
             "CrossOriginEmbedderPolicy",
             "CrossOriginOpenerPolicy",
@@ -23,6 +25,9 @@ class TestExportSurface(unittest.TestCase):
             "Secure",
             "Server",
             "StrictTransportSecurity",
+            "SensitiveCachePolicy",
+            "SensitiveResponsePolicy",
+            "Vary",
             "XDnsPrefetchControl",
             "XContentTypeOptions",
             "XFrameOptions",
@@ -47,6 +52,7 @@ class TestExportSurface(unittest.TestCase):
             "ReferrerPolicy",
             "Server",
             "StrictTransportSecurity",
+            "Vary",
             "XContentTypeOptions",
             "XDnsPrefetchControl",
             "XFrameOptions",
@@ -59,7 +65,14 @@ class TestExportSurface(unittest.TestCase):
                 self.assertTrue(hasattr(secure.headers, name))
 
     def test_middleware_package_exports(self) -> None:
-        expected = {"SecureASGIMiddleware", "SecureWSGIMiddleware"}
+        expected = {
+            "CachePolicy",
+            "CacheSensitivity",
+            "SecureASGIMiddleware",
+            "SecureWSGIMiddleware",
+            "SensitiveCachePolicy",
+            "SensitiveResponsePolicy",
+        }
 
         self.assertEqual(set(secure.middleware.__all__), expected)
         for name in expected:

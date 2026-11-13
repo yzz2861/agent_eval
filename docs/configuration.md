@@ -92,6 +92,21 @@ The ASGI and WSGI middleware classes use the same `Secure` instance you would us
 - Existing header values are overwritten by default for configured header names.
 - Pass `multi_ok` when a header name should be preserved and appended instead.
 - `SecureASGIMiddleware` only changes HTTP responses. WebSocket scopes pass through unchanged.
+- `Cache-Control` and `Vary` are merged rather than replaced. Sensitive responses keep application directives such as `private` and `no-cache`.
+- Public static responses (JavaScript, CSS, images, fonts, and similar assets) keep their existing cache headers.
+- Pass `cache_policy=CachePolicy(...)`, or any of its keyword options such as `sensitive_statuses`, `sensitive_content_types`, or `sensitive_routes`, to control classification.
+
+```python
+from secure import CachePolicy, Secure, Vary
+from secure.middleware import SecureASGIMiddleware
+
+policy = CachePolicy(sensitive_routes={"/orders/*", "/account"})
+secure_headers = Secure(
+    vary=Vary().accept_encoding().authorization().cookie(),
+)
+
+app = SecureASGIMiddleware(app, secure=secure_headers, cache_policy=policy)
+```
 
 ## Validation and normalization
 

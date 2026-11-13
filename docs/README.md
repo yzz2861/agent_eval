@@ -28,6 +28,7 @@ The recommended default throughout the docs is `Secure.with_default_headers()`, 
 - [Referrer-Policy](./headers/referrer_policy.md)
 - [Server](./headers/server.md)
 - [Strict-Transport-Security](./headers/strict_transport_security.md)
+- [Vary](./headers/vary.md)
 - [X-Content-Type-Options](./headers/x_content_type_options.md)
 - [X-DNS-Prefetch-Control](./headers/dns_prefetch_control.md)
 - [X-Frame-Options](./headers/x_frame_options.md)

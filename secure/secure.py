@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
+    from ._internal.cache_policy import CachePolicy
     from ._internal.types import DeduplicateAction, HeaderItems, OnInvalidPolicy, OnUnexpectedPolicy, ResponseProtocol
     from .headers import (
         BaseHeader,
@@ -19,6 +20,7 @@ if TYPE_CHECKING:
         ReferrerPolicy,
         Server,
         StrictTransportSecurity,
+        Vary,
         XContentTypeOptions,
         XDnsPrefetchControl,
         XFrameOptions,
@@ -71,6 +73,7 @@ class Secure:
         self,
         *,
         cache: CacheControl | None = None,
+        cache_policy: CachePolicy | None = None,
         coep: CrossOriginEmbedderPolicy | None = None,
         coop: CrossOriginOpenerPolicy | None = None,
         corp: CrossOriginResourcePolicy | None = None,
@@ -84,6 +87,7 @@ class Secure:
         server: Server | None = None,
         xcto: XContentTypeOptions | None = None,
         xfo: XFrameOptions | None = None,
+        vary: Vary | None = None,
     ) -> None:
         """
         Initialize a :class:`Secure` instance with the specified security headers.
@@ -92,6 +96,8 @@ class Secure:
         ----------
         cache :
             Cache-Control header configuration.
+        cache_policy :
+            Optional shared-cache sensitivity rules used by the middleware.
         coep :
             Cross-Origin-Embedder-Policy header configuration.
         coop :
@@ -118,9 +124,12 @@ class Secure:
             X-Content-Type-Options header configuration.
         xfo :
             X-Frame-Options header configuration.
+        vary :
+            Vary header configuration.
         """
         params: tuple[BaseHeader | None, ...] = (
             cache,
+            vary,
             coep,
             coop,
             corp,
@@ -140,6 +149,7 @@ class Secure:
             configured_headers.extend(custom)
 
         self._headers = ConfiguredHeaders(configured_headers, on_change=self._discard_normalized_headers)
+        self.cache_policy = cache_policy
         self._normalized_headers: Mapping[str, str] | None = None
         self._normalized_source_items: HeaderItems | None = None
 

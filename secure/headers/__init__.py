@@ -9,6 +9,7 @@ from .permissions_policy import PermissionsPolicy
 from .referrer_policy import ReferrerPolicy
 from .server import Server
 from .strict_transport_security import StrictTransportSecurity
+from .vary import Vary
 from .x_content_type_options import XContentTypeOptions
 from .x_dns_prefetch_control import XDnsPrefetchControl
 from .x_frame_options import XFrameOptions
@@ -26,6 +27,7 @@ __all__ = [
     "ReferrerPolicy",
     "Server",
     "StrictTransportSecurity",
+    "Vary",
     "XContentTypeOptions",
     "XDnsPrefetchControl",
     "XFrameOptions",

@@ -17,6 +17,7 @@ class HeaderName(Enum):
 
     # Caching
     CACHE_CONTROL = "Cache-Control"
+    VARY = "Vary"
 
     # Content policy
     CONTENT_SECURITY_POLICY = "Content-Security-Policy"
@@ -68,6 +69,9 @@ class HeaderDefaultValue(Enum):
 
     # Cache-Control to prevent caching of sensitive data
     CACHE_CONTROL = "no-store, max-age=0"
+
+    # Vary on the negotiated content encoding by default.
+    VARY = "Accept-Encoding"
 
     # Basic Content Security Policy to allow resources only from the same origin
     CONTENT_SECURITY_POLICY = (

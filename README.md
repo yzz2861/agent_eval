@@ -120,6 +120,8 @@ Start with BALANCED, review the generated headers, and move stricter only when n
 
 - Overwrites headers by default
 - Allows controlled duplication via `multi_ok`
+- Merges `Cache-Control` and `Vary` for sensitive responses without dropping application directives
+- Leaves public static asset cache headers unchanged
 - Only modifies HTTP responses in ASGI apps
 
 ### ASGI
@@ -191,6 +193,20 @@ app = SecureASGIMiddleware(App(), secure=secure_headers)
 ```
 
 Interactive apps often need CSP configuration for their script, style, and asset loading patterns.
+
+### Sensitive response caching
+
+Middleware classifies responses by status code, authentication, content type, and route annotations. Sensitive responses get `no-store`, `private`, and `max-age=0` merged into their existing `Cache-Control`; public static assets keep their original caching policy. `Vary` values are merged instead of overwritten.
+
+```python
+from secure import CachePolicy, Secure
+from secure.middleware import SecureASGIMiddleware
+
+policy = CachePolicy(sensitive_routes={"/orders/*"})
+secure_headers = Secure.with_default_headers()
+
+app = SecureASGIMiddleware(app, secure=secure_headers, cache_policy=policy)
+```
 
 ---
 

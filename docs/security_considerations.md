@@ -99,6 +99,16 @@ The `Cache-Control` header controls how responses are cached. For security-sensi
 
 ---
 
+### **Vary**
+
+`Vary` identifies request headers that select a response variant for caching. It helps shared caches avoid serving a response selected for one request to a different request.
+
+- [MDN Docs - Vary](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Vary)
+- **Best Practice**: Merge new fields into the existing `Vary` value. For authenticated or personalized HTML, include the headers that select user-specific content alongside `no-store` / `private` in `Cache-Control`.
+- **Pitfall**: `Vary` does not prevent storage and cannot compensate for a broadly cacheable response that contains another user's data. Keep the privacy directive on the response itself.
+
+---
+
 ### **Server**
 
 The `Server` header can disclose software details, but changing or clearing it should be treated as passive information reduction, not as a primary defense.

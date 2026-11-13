@@ -18,6 +18,45 @@ from secure.headers.base_header import BaseHeader, HeaderDefaultValue, HeaderNam
 _TOKEN_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 
 
+def _split_cache_control_value(value: str) -> list[str]:
+    """Split a Cache-Control value on commas that are not inside quoted strings."""
+    parts: list[str] = []
+    current: list[str] = []
+    in_quotes = False
+    escaped = False
+
+    for char in value:
+        if escaped:
+            current.append(char)
+            escaped = False
+        elif char == "\\" and in_quotes:
+            current.append(char)
+            escaped = True
+        elif char == '"':
+            in_quotes = not in_quotes
+            current.append(char)
+        elif char == "," and not in_quotes:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+
+    parts.append("".join(current))
+    return [part.strip() for part in parts if part.strip()]
+
+
+def _stricter_seconds(current: str | None, incoming: str | None) -> str | None:
+    """Return the more restrictive of two numeric directive values."""
+    if current is None:
+        return incoming
+    if incoming is None:
+        return None
+    try:
+        return str(min(int(current), int(incoming)))
+    except ValueError:
+        return current
+
+
 @dataclass
 class CacheControl(BaseHeader):
     """
@@ -113,6 +152,7 @@ class CacheControl(BaseHeader):
             if not extra_name or extra_name in present_names:
                 continue
             parts.append(token)
+            present_names.add(extra_name)
 
         return ", ".join(parts)
 
@@ -150,6 +190,150 @@ class CacheControl(BaseHeader):
         self._directives.clear()
         self._extras.clear()
         return self
+
+    # -------------------------------------------------------------------------
+    # Parsing and safe merging
+    # -------------------------------------------------------------------------
+
+    @classmethod
+    def parse(cls, value: str) -> CacheControl:
+        """
+        Create a builder from an existing ``Cache-Control`` header value.
+
+        Unknown directives are preserved so that an application's stricter
+        directives survive a merge. Malformed directive names are ignored.
+        """
+        builder = cls()
+        cleaned = normalize_header_value(value, what="Cache-Control value")
+        if not cleaned:
+            return builder
+
+        for token in _split_cache_control_value(cleaned):
+            if "=" in token:
+                raw_name, raw_value = token.split("=", 1)
+                name = raw_name.strip().lower()
+                directive_value = raw_value.strip()
+            else:
+                name = token.strip().lower()
+                directive_value = None
+
+            if not name or not _TOKEN_RE.match(name):
+                continue
+
+            builder._directives[name] = directive_value
+            builder._raw_value = None
+
+        return builder
+
+    @classmethod
+    def from_value(cls, value: str) -> CacheControl:
+        """Alias for :meth:`parse`."""
+        return cls.parse(value)
+
+    @classmethod
+    def from_header(cls, value: str) -> CacheControl:
+        """Alias for :meth:`parse`."""
+        return cls.parse(value)
+
+    def merge(self, value: str | CacheControl | None) -> CacheControl:
+        """
+        Safely merge directives from an existing value or another builder.
+
+        Merging never relaxes a directive that is already present:
+
+        * Boolean directives are additive.
+        * Age directives keep the smaller value (``0`` is stricter than a
+          positive lifetime).
+        * ``no-store`` or ``private`` removes conflicting ``public`` / ``immutable``.
+        * Unknown directives already present are preserved as-is.
+
+        This is useful when middleware must add a secure baseline to a header
+        that was already written by the application or a framework.
+        """
+        if value is None:
+            return self
+        if isinstance(value, str) and not value.strip():
+            return self
+
+        other = value if isinstance(value, CacheControl) else self.parse(value)
+        other_value = other.header_value
+
+        if other._raw_value is not None:
+            other = self.parse(other_value)
+
+        if not self._directives and not self._extras:
+            self._directives = dict(other._directives)
+            self._extras = list(other._extras)
+        else:
+            self._merge_directives(other)
+
+        self._discard_conflicting_relaxations()
+        self._raw_value = None
+        return self
+
+    def merge_header(self, value: str | None) -> CacheControl:
+        """Alias for :meth:`merge`."""
+        return self.merge(value)
+
+    def merge_existing(self, value: str | CacheControl | None) -> CacheControl:
+        """Alias for :meth:`merge`, useful when adding an existing response value."""
+        return self.merge(value)
+
+    def merge_value(self, value: str | CacheControl | None) -> CacheControl:
+        """Alias for :meth:`merge`."""
+        return self.merge(value)
+
+    def update(self, value: str | CacheControl | None) -> CacheControl:
+        """Alias for :meth:`merge`."""
+        return self.merge(value)
+
+    @classmethod
+    def from_existing(cls, value: str) -> CacheControl:
+        """Alias for :meth:`parse`."""
+        return cls.parse(value)
+
+    def sensitive(self) -> CacheControl:
+        """
+        Apply the sensitive-response baseline.
+
+        This adds ``no-store``, ``private`` and ``max-age=0`` while preserving
+        stricter directives that were already configured. A positive
+        ``s-maxage`` is reduced to ``0`` when it is already present.
+        """
+        self._ensure_directive_mode()
+        self._directives["no-store"] = None
+        self._directives["private"] = None
+        self._directives["max-age"] = "0"
+        if "s-maxage" in self._directives:
+            self._directives["s-maxage"] = "0"
+        self._discard_conflicting_relaxations()
+        return self
+
+    def _merge_directives(self, other: CacheControl) -> None:
+        for name, other_value in other._directives.items():
+            if name in ("max-age", "s-maxage"):
+                self._directives[name] = _stricter_seconds(self._directives.get(name), other_value)
+            elif name in self._directives:
+                current = self._directives[name]
+                if current is None or other_value is None:
+                    self._directives[name] = None
+            else:
+                self._directives[name] = other_value
+
+        existing_extra_names = {token.split("=", 1)[0].strip().lower() for token in self._extras}
+        for token in other._extras:
+            name = token.split("=", 1)[0].strip().lower()
+            if name and name not in existing_extra_names:
+                self._extras.append(token)
+                existing_extra_names.add(name)
+
+    def _discard_conflicting_relaxations(self) -> None:
+        if "no-store" not in self._directives and "private" not in self._directives:
+            return
+        self._directives.pop("public", None)
+        self._directives.pop("immutable", None)
+        if "s-maxage" in self._directives:
+            self._directives["s-maxage"] = "0"
 
     def custom(self, directive: str) -> CacheControl:
         """
