@@ -30,6 +30,7 @@ from typing import Dict, List, Set, Sequence, Tuple, Iterable  # noqa: F401
 from typing import Callable, Optional, Union, Any  # noqa: F401
 
 from ssh_audit.utils import Utils
+from ssh_audit.result_encoder import ResultEncoder
 
 
 class OutputBuffer:
@@ -50,6 +51,7 @@ class OutputBuffer:
         self.debug = False
         self.use_colors = True
         self.json = False
+        self.escape_control_chars = True
         self.__level = 0
         self.__is_color_supported = ('colorama' in sys.modules) or (os.name == 'posix')
         self.line_ended = True
@@ -60,6 +62,10 @@ class OutputBuffer:
         # If we're logging only 'warn' or above, and this is an 'info', ignore message, unless always_print is True (useful for printing informational lines regardless of the level setting).
         if (always_print is False) and (self.get_level(level) < self.__level):
             return
+
+        # Render control characters, unpaired surrogates, and Unicode bidi/format characters as visible escape sequences so that untrusted data (e.g.: banners) cannot corrupt the terminal or be misread.  Skipped for machine-readable (JSON) output, and truncated overlong lines are marked.
+        if self.escape_control_chars and not self.json and len(s) > 0:
+            s = ResultEncoder.escape_terminal(ResultEncoder.truncate(s))
 
         if self.use_colors and self.colors_supported and len(s) > 0 and level != 'info':
             s = "\033[0;%dm%s\033[0m" % (self.COLORS[level], s)

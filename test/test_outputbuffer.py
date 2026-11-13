@@ -181,3 +181,73 @@ class TestOutputBuffer:
         out.fail('fail color')
         out.write()
         assert len(output_spy.flush()) == 4
+
+    def test_outputbuffer_escapes_control_characters(self, output_spy):
+        out = self.OutputBuffer()
+        out.use_colors = False
+
+        # Control characters and bidi/format characters are rendered as visible escapes.
+        output_spy.begin()
+        out.info('banner: SSH-2.0-OpenSSH_7.3\x1b[2J‮')
+        out.write()
+        assert output_spy.flush() == ['banner: SSH-2.0-OpenSSH_7.3\\x1b[2J\\u202e']
+
+        # Newlines keep the line structure; tab and carriage return become visible escapes.
+        output_spy.begin()
+        out.info('col1\tcol2\r\nnext')
+        out.write()
+        assert output_spy.flush() == ['col1\\tcol2\\r', 'next']
+
+        # Printable text passes through untouched.
+        output_spy.begin()
+        out.info('SSH-2.0-OpenSSH_7.3 some comments')
+        out.write()
+        assert output_spy.flush() == ['SSH-2.0-OpenSSH_7.3 some comments']
+
+    def test_outputbuffer_escapes_before_colorizing(self, output_spy):
+        out = self.OutputBuffer()
+        if not out.colors_supported:
+            return
+        out.use_colors = True
+
+        # The injected ESC character is escaped, while the wrapper's own color codes remain intact.
+        output_spy.begin()
+        out.warn('a\x1bb')
+        out.write()
+        lines = output_spy.flush()
+        assert len(lines) == 1
+        assert 'a\\x1bb' in lines[0]
+        assert lines[0].startswith('\x1b[')
+
+    def test_outputbuffer_no_escaping_in_json_mode(self, output_spy):
+        out = self.OutputBuffer()
+        out.use_colors = False
+        out.json = True
+
+        # Machine-readable output must pass through unescaped.
+        output_spy.begin()
+        out.info('{"software": "OpenSSH‮"}')
+        out.write()
+        assert output_spy.flush() == ['{"software": "OpenSSH‮"}']
+
+    def test_outputbuffer_escaping_can_be_disabled(self, output_spy):
+        out = self.OutputBuffer()
+        out.use_colors = False
+        out.escape_control_chars = False
+
+        output_spy.begin()
+        out.info('a\x1bb')
+        out.write()
+        assert output_spy.flush() == ['a\x1bb']
+
+    def test_outputbuffer_truncates_overlong_lines(self, output_spy):
+        out = self.OutputBuffer()
+        out.use_colors = False
+
+        output_spy.begin()
+        out.info('A' * 5000)
+        out.write()
+        lines = output_spy.flush()
+        assert len(lines) == 1
+        assert lines[0].endswith('...[truncated]')
+        assert len(lines[0]) < 5000

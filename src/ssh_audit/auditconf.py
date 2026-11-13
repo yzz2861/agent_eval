@@ -40,6 +40,7 @@ class AuditConf:
         self.colors = True
         self.json = False
         self.json_print_indent = False
+        self.csv = False
         self.verbose = False
         self.level = 'info'
         self.ip_version_preference: List[int] = []  # Holds only 5 possible values: [] (no preference), [4] (use IPv4 only), [6] (use IPv6 only), [46] (use both IPv4 and IPv6, but prioritize v4), and [64] (use both IPv4 and IPv6, but prioritize v6).
@@ -72,7 +73,7 @@ class AuditConf:
 
     def __setattr__(self, name: str, value: Union[str, int, float, bool, Sequence[int]]) -> None:
         valid = False
-        if name in ['batch', 'client_audit', 'colors', 'json', 'json_print_indent', 'list_policies', 'manual', 'make_policy', 'timeout_set', 'verbose', 'debug', 'skip_rate_test']:
+        if name in ['batch', 'client_audit', 'colors', 'json', 'json_print_indent', 'csv', 'list_policies', 'manual', 'make_policy', 'timeout_set', 'verbose', 'debug', 'skip_rate_test']:
             valid, value = True, bool(value)
         elif name in ['ipv4', 'ipv6']:
             valid, value = True, bool(value)

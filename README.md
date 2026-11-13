@@ -42,7 +42,7 @@
 ```
 usage: ssh-audit.py [-h] [-4] [-6] [-b] [-c] [-d]
                     [-g <min1:pref1:max1[,min2:pref2:max2,...]> / <x-y[:step]>]
-                    [-j] [-l {info,warn,fail}] [-L] [-M custom_policy.txt]
+                    [-j] [--csv] [-l {info,warn,fail}] [-L] [-M custom_policy.txt]
                     [-m] [-n] [-P "Built-In Policy Name" / custom_policy.txt]
                     [-p N] [-T targets.txt] [-t N] [-v]
                     [--conn-rate-test N[:max_rate]] [--dheat N[:kex[:e_len]]]
@@ -72,6 +72,8 @@ optional arguments:
                         incremental step amount
   -j, --json            enable JSON output (use -jj to enable indentation for
                         better readability)
+  --csv                 enable CSV output (RFC 4180 quoting, with spreadsheet
+                        formula-injection protection)
   -l {info,warn,fail}, --level {info,warn,fail}
                         minimum output level (default: info)
   -L, --list-policies   list all the official, built-in policies. Combine with

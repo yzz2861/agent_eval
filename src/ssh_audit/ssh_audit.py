@@ -26,7 +26,6 @@
 import argparse
 import concurrent.futures
 import copy
-import json
 import multiprocessing
 import os
 import re
@@ -53,6 +52,7 @@ from ssh_audit.gextest import GEXTest
 from ssh_audit.hostkeytest import HostKeyTest
 from ssh_audit.outputbuffer import OutputBuffer
 from ssh_audit.policy import Policy
+from ssh_audit.result_encoder import ResultEncoder
 from ssh_audit.hardening_guides import Hardening_Guides
 from ssh_audit.product import Product
 from ssh_audit.protocol import Protocol
@@ -508,6 +508,7 @@ def output(out: OutputBuffer, aconf: AuditConf, banner: Optional[Banner], header
     program_retval = exitcodes.GOOD
     client_audit = client_host is not None  # If set, this is a client audit.
     algs = Algorithms(kex)
+    json_or_csv_output = aconf.json or aconf.csv  # Machine-readable output modes suppress the human-readable text sections.
 
     # Perform post-processing on the findings to make final adjustments before outputting the results.
     algorithm_recommendation_suppress_list, additional_notes = post_process_findings(banner, algs, client_audit, dh_rate_test_notes)
@@ -555,12 +556,12 @@ def output(out: OutputBuffer, aconf: AuditConf, banner: Optional[Banner], header
             else:
                 cmptxt = 'disabled'
             out.good('(gen) compression: {}'.format(cmptxt))
-    if not out.is_section_empty() and not aconf.json:  # Print output when it exists and JSON output isn't requested.
+    if not out.is_section_empty() and not json_or_csv_output:  # Print output when it exists and JSON/CSV output isn't requested.
         out.head('# general')
         out.flush_section()
         out.sep()
     maxlen = algs.maxlen + 1
-    output_security(out, banner, maxlen, aconf.json)
+    output_security(out, banner, maxlen, json_or_csv_output)
     # Filled in by output_algorithms() with unidentified algs.
     unknown_algorithms: List[str] = []
 
@@ -568,22 +569,28 @@ def output(out: OutputBuffer, aconf: AuditConf, banner: Optional[Banner], header
     if kex is not None:
         adb = SSH2_KexDB.get_db()
         title, atype = 'key exchange algorithms', 'kex'
-        program_retval = output_algorithms(out, title, adb, atype, kex.kex_algorithms, unknown_algorithms, aconf.json, program_retval, maxlen, dh_modulus_sizes=kex.dh_modulus_sizes())
+        program_retval = output_algorithms(out, title, adb, atype, kex.kex_algorithms, unknown_algorithms, json_or_csv_output, program_retval, maxlen, dh_modulus_sizes=kex.dh_modulus_sizes())
         title, atype = 'host-key algorithms', 'key'
-        program_retval = output_algorithms(out, title, adb, atype, kex.key_algorithms, unknown_algorithms, aconf.json, program_retval, maxlen, host_keys=kex.host_keys())
+        program_retval = output_algorithms(out, title, adb, atype, kex.key_algorithms, unknown_algorithms, json_or_csv_output, program_retval, maxlen, host_keys=kex.host_keys())
         title, atype = 'encryption algorithms (ciphers)', 'enc'
-        program_retval = output_algorithms(out, title, adb, atype, kex.server.encryption, unknown_algorithms, aconf.json, program_retval, maxlen)
+        program_retval = output_algorithms(out, title, adb, atype, kex.server.encryption, unknown_algorithms, json_or_csv_output, program_retval, maxlen)
         title, atype = 'message authentication code algorithms', 'mac'
-        program_retval = output_algorithms(out, title, adb, atype, kex.server.mac, unknown_algorithms, aconf.json, program_retval, maxlen)
+        program_retval = output_algorithms(out, title, adb, atype, kex.server.mac, unknown_algorithms, json_or_csv_output, program_retval, maxlen)
 
-    output_fingerprints(out, algs, aconf.json)
-    perfect_config = output_recommendations(out, algs, algorithm_recommendation_suppress_list, software, aconf.json, maxlen)
-    output_info(out, software, client_audit, not perfect_config, aconf.json, additional_notes)
+    output_fingerprints(out, algs, json_or_csv_output)
+    perfect_config = output_recommendations(out, algs, algorithm_recommendation_suppress_list, software, json_or_csv_output, maxlen)
+    output_info(out, software, client_audit, not perfect_config, json_or_csv_output, additional_notes)
 
-    if aconf.json:
+    if json_or_csv_output:
         out.reset()
-        # Build & write the JSON struct.
-        out.info(json.dumps(build_struct(aconf.host + ":" + str(aconf.port), banner, kex=kex, client_host=client_host, software=software, algorithms=algs, algorithm_recommendation_suppress_list=algorithm_recommendation_suppress_list, additional_notes=additional_notes), indent=4 if aconf.json_print_indent else None, sort_keys=True))
+        # All machine-readable formats are encoded from the same structured result.
+        res = build_struct(aconf.host + ":" + str(aconf.port), banner, kex=kex, client_host=client_host, software=software, algorithms=algs, algorithm_recommendation_suppress_list=algorithm_recommendation_suppress_list, additional_notes=additional_notes)
+        if aconf.json:
+            # Build & write the JSON struct.
+            out.info(ResultEncoder.to_json(res, indent=4 if aconf.json_print_indent else None))
+        else:
+            # Build & write the CSV document.
+            out.info(ResultEncoder.to_csv(res))
     elif len(unknown_algorithms) > 0:  # If we encountered any unknown algorithms, ask the user to report them.
         out.warn("\n\n!!! WARNING: unknown algorithm(s) found!: %s.  If this is the latest version of ssh-audit (see <https://github.com/jtesta/ssh-audit/releases>), please create a new Github issue at <https://github.com/jtesta/ssh-audit/issues> with the full output above.\n" % ','.join(unknown_algorithms))
 
@@ -603,7 +610,7 @@ def evaluate_policy(out: OutputBuffer, aconf: AuditConf, banner: Optional['Banne
 
         json_struct = {'host': aconf.host, 'port': aconf.port, 'policy': aconf.policy.get_name_and_version(), 'passed': passed, 'errors': error_struct, 'warnings': warnings}
 
-        out.info(json.dumps(json_struct, indent=4 if aconf.json_print_indent else None, sort_keys=True))
+        out.info(ResultEncoder.to_json(json_struct, indent=4 if aconf.json_print_indent else None))
     else:
         spacing = ''
         if aconf.client_audit:
@@ -776,6 +783,7 @@ def process_commandline(out: OutputBuffer, args: List[str]) -> 'AuditConf':  # p
     parser.add_argument("-d", "--debug", action="store_true", dest="debug", default=False, help="enable debugging output")
     parser.add_argument("-g", "--gex-test", action="store", dest="gex_test", metavar="<min1:pref1:max1[,min2:pref2:max2,...]> / <x-y[:step]>", type=str, default=None, help="conducts a very customized Diffie-Hellman GEX modulus size test. Tests an array of minimum, preferred, and maximum values, or a range of values with an optional incremental step amount")
     parser.add_argument("-j", "--json", action="count", dest="json", default=0, help="enable JSON output (use -jj to enable indentation for better readability)")
+    parser.add_argument("--csv", action="store_true", dest="csv", default=False, help="enable CSV output (RFC 4180 quoting, with spreadsheet formula-injection protection)")
     parser.add_argument("-l", "--level", action="store", dest="level", type=str, choices=["info", "warn", "fail"], default="info", help="minimum output level (default: %(default)s)")
     parser.add_argument("-L", "--list-policies", action="store_true", dest="list_policies", default=False, help="list all the official, built-in policies. Combine with -v to view policy change logs")
     parser.add_argument("-M", "--make-policy", action="store", dest="make_policy", metavar="custom_policy.txt", type=str, default=None, help="creates a policy based on the target server (i.e.: the target server has the ideal configuration that other servers should adhere to), and stores it in the file path specified")
@@ -839,6 +847,10 @@ def process_commandline(out: OutputBuffer, args: List[str]) -> 'AuditConf':  # p
         aconf.json = argument.json > 0
         if argument.json > 1:
             aconf.json_print_indent = True
+
+        # Enable CSV output if requested.
+        if argument.csv is True:
+            aconf.csv = True
 
         if argument.conn_rate_test is not None:
             aconf.conn_rate_test = argument.conn_rate_test
@@ -1159,6 +1171,10 @@ def audit(out: OutputBuffer, aconf: AuditConf, print_target: bool = False) -> in
     out.debug = aconf.debug
     out.level = aconf.level
     out.use_colors = aconf.colors
+    # Machine-readable output modes must not have their content escaped or truncated by the terminal encoder.
+    if aconf.json or aconf.csv:
+        out.json = aconf.json
+        out.escape_control_chars = False
     s = SSH_Socket(out, aconf.host, aconf.port, aconf.ip_version_preference, aconf.timeout, aconf.timeout_set, aconf.socks5_proxy)
 
     if aconf.client_audit:
@@ -1371,7 +1387,10 @@ def builtin_manual(out: OutputBuffer) -> int:
     if not out.use_colors:
         builtin_man_page = re.sub(r'\x1b\[\d+?m', '', builtin_man_page)
 
+    # The man page is trusted content that intentionally contains ANSI color codes; don't escape it.
+    out.escape_control_chars = False
     out.info(builtin_man_page)
+    out.escape_control_chars = True
     return exitcodes.GOOD
 
 
@@ -1436,7 +1455,7 @@ def run_gex_granular_modulus_size_test(out: OutputBuffer, s: 'SSH_Socket', kex: 
     if mod_dict:
         if aconf.json:
             json_struct = {'dh-gex-modulus-size': mod_dict}
-            out.info(json.dumps(json_struct, indent=4 if aconf.json_print_indent else None, sort_keys=True))
+            out.info(ResultEncoder.to_json(json_struct, indent=4 if aconf.json_print_indent else None))
         else:
             out.head('# diffie-hellman group exchange modulus size')
             max_key_len = len(max(mod_dict, key=len))
