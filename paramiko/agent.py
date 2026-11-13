@@ -28,19 +28,34 @@ import sys
 import tempfile
 import threading
 import time
+from hashlib import sha256
 from logging import DEBUG
 from select import select
 
 from paramiko.common import byte_chr, io_sleep
 from paramiko.message import Message
 from paramiko.pkey import PKey, UnknownKeyType
-from paramiko.ssh_exception import AuthenticationException, SSHException
+from paramiko.ssh_exception import (
+    AgentKeyNotAuthorized,
+    AgentProtocolError,
+    AgentSessionClosed,
+    AuthenticationException,
+    LocalAgentUnavailable,
+    SSHException,
+)
 from paramiko.util import asbytes, get_logger
 
 cSSH2_AGENTC_REQUEST_IDENTITIES = byte_chr(11)
 SSH2_AGENT_IDENTITIES_ANSWER = 12
 cSSH2_AGENTC_SIGN_REQUEST = byte_chr(13)
 SSH2_AGENT_SIGN_RESPONSE = 14
+SSH_AGENT_FAILURE = 5
+
+#: Maximum size, in bytes, of a single SSH agent message (including its 4 byte
+#: length prefix) that we are willing to parse or emit. The real protocol has
+#: no hard limit, but unbounded remote-controlled lengths make trivial memory
+#: exhaustion and length-smuggling attacks possible.
+MAX_AGENT_MESSAGE_SIZE = 256 * 1024
 
 SSH_AGENT_RSA_SHA2_256 = 2
 SSH_AGENT_RSA_SHA2_512 = 4
@@ -204,17 +219,344 @@ class AgentLocalProxy(AgentProxyThread):
             raise
 
 
-class AgentRemoteProxy(AgentProxyThread):
+def _read_agent_message(conn):
     """
-    Class to be used when wanting to ask a remote SSH Agent
+    Read one length-prefixed SSH agent message from ``conn``.
+
+    Lengths are validated against `MAX_AGENT_MESSAGE_SIZE` instead of being
+    trusted blindly, so a hostile peer cannot make us allocate arbitrary
+    amounts of memory or wait forever for a claimed huge payload.
+    """
+    header = conn.recv(4)
+    if not header:
+        return b""
+    while len(header) < 4:
+        extra = conn.recv(4 - len(header))
+        if not extra:
+            raise AgentProtocolError(
+                "truncated SSH agent message length prefix"
+            )
+        header += extra
+    (length,) = struct.unpack(">I", header)
+    if length == 0 or length > MAX_AGENT_MESSAGE_SIZE:
+        raise AgentProtocolError(
+            "invalid SSH agent message length: {}".format(length)
+        )
+    payload = conn.recv(length)
+    if not payload:
+        raise AgentProtocolError("truncated SSH agent message body")
+    while len(payload) < length:
+        extra = conn.recv(length - len(payload))
+        if not extra:
+            raise AgentProtocolError("truncated SSH agent message body")
+        payload += extra
+    return payload
+
+
+def _frame_message(payload):
+    """Serialize an agent message payload with a checked length prefix."""
+    payload = asbytes(payload)
+    if len(payload) > MAX_AGENT_MESSAGE_SIZE:
+        raise AgentProtocolError(
+            "outbound SSH agent message exceeds size limit"
+        )
+    return struct.pack(">I", len(payload)) + payload
+
+
+def _strict_string(message):
+    """
+    Read an SSH string, rejecting truncated or oversized payloads.
+
+    `Message.get_string` silently zero-pads short data, which would let a
+    malformed remote message be turned into a well-formed request to the local
+    agent. We parse lengths ourselves so bad input stays a protocol error.
+    """
+    stream = message.packet
+    header = stream.read(4)
+    if len(header) != 4:
+        raise AgentProtocolError("truncated SSH agent string length")
+    (length,) = struct.unpack(">I", header)
+    if length > MAX_AGENT_MESSAGE_SIZE:
+        raise AgentProtocolError(
+            "invalid SSH agent string length: {}".format(length)
+        )
+    data = stream.read(length)
+    if len(data) != length:
+        raise AgentProtocolError(
+            "truncated SSH agent string: expected {} bytes, got {}".format(
+                length, len(data)
+            )
+        )
+    return data
+
+
+class ForwardedAgentSession:
+    """
+    Session-scoped, policy-enforcing entry point for one forwarded agent.
+
+    Each incoming ``auth-agent@openssh.com`` channel gets its own instance.
+    The session opens a dedicated connection to the *local* agent, snapshots
+    the identities that local agent exposes, and only forwards requests that
+    refer to those allow-listed public key blobs. Remote bytes are never
+    spliced into the local agent protocol: every request is parsed and
+    re-serialized from validated fields, and every answer is parsed before
+    being re-framed for the remote channel.
+
+    Closing the session (including when the remote channel closes) immediately
+    revokes it: subsequent requests raise `.AgentSessionClosed` and never reach
+    the local agent. Concurrent sessions hold independent local connections,
+    key allow-lists and closed flags.
+
+    :param channel:
+        the remote-side channel (or channel-like object) carrying SSH agent
+        protocol bytes.
+    :param agent_connection:
+        optional pre-connected local agent connection; mainly useful for
+        testing. When omitted, `get_agent_connection` is used.
+
+    :raises `.LocalAgentUnavailable`:
+        if no local SSH agent can be contacted.
+    :raises `.AgentProtocolError`:
+        if the local agent answers the initial identity request incorrectly.
     """
 
-    def __init__(self, agent, chan):
-        AgentProxyThread.__init__(self, agent)
-        self.__chan = chan
+    def __init__(self, channel, agent_connection=None):
+        self._channel = channel
+        self._lock = threading.Lock()
+        self._closed = False
+        self._conn = agent_connection
+        if self._conn is None:
+            self._conn = get_agent_connection()
+        if self._conn is None:
+            raise LocalAgentUnavailable(
+                "unable to connect to a local SSH agent for forwarding"
+            )
+        self._keys = ()
+        try:
+            self._load_identities()
+        except BaseException:
+            # A half-initialised session must not hold an open agent socket.
+            self.close()
+            raise
 
-    def get_connection(self):
-        return self.__chan, None
+    @property
+    def closed(self):
+        return self._closed
+
+    @property
+    def allowed_key_blobs(self):
+        """Tuple of public key blobs this session is allowed to sign with."""
+        return tuple(self._key_blobs)
+
+    @property
+    def allowed_key_fingerprints(self):
+        """Tuple of SHA256 fingerprints of the allow-listed key blobs."""
+        return tuple(self._fingerprints)
+
+    def is_key_authorized(self, key_blob):
+        """Return whether ``key_blob`` matches one of this session's keys."""
+        return sha256(asbytes(key_blob)).digest() in self._fingerprint_set
+
+    def serve(self):
+        """
+        Drive the forwarding loop until the remote channel closes.
+
+        Framing errors on the remote side are surfaced as
+        `.AgentProtocolError`; policy violations raised by `handle_message`
+        propagate to the caller. The session is always closed on exit.
+        """
+        try:
+            while True:
+                try:
+                    payload = _read_agent_message(self._channel)
+                except OSError:
+                    # The channel was closed underneath us (locally or by
+                    # the remote end); that is normal session teardown, not
+                    # a malformed protocol message.
+                    break
+                if not payload:
+                    break
+                response = self.handle_message(payload)
+                if response is not None:
+                    self._channel.send(_frame_message(response))
+        finally:
+            self.close()
+
+    def handle_message(self, payload):
+        """
+        Validate and service one remote agent message payload.
+
+        Only identity listing and signing requests are part of the agent
+        forwarding surface. Returns the raw payload to send back to the remote
+        channel (without length prefix), or ``None`` for messages that warrant
+        no answer.
+
+        :raises `.AgentSessionClosed`:
+            if the session has already been revoked.
+        :raises `.AgentKeyNotAuthorized`:
+            if a sign request names a key outside this session's allow-list.
+        :raises `.AgentProtocolError`:
+            if the message or a local agent answer is malformed.
+        """
+        with self._lock:
+            if self._closed:
+                raise AgentSessionClosed(
+                    "agent forwarding session has been closed"
+                )
+            if not payload:
+                raise AgentProtocolError("empty SSH agent message")
+            request_type = ord(payload[:1])
+            if request_type == ord(cSSH2_AGENTC_REQUEST_IDENTITIES):
+                return self._identity_answer()
+            if request_type == ord(cSSH2_AGENTC_SIGN_REQUEST):
+                return self._handle_sign_request(Message(payload[1:]))
+            # Unknown/unsupported agent message types get a protocol failure,
+            # never a blind relay to the local agent.
+            raise AgentProtocolError(
+                "unsupported SSH agent message type: {}".format(request_type)
+            )
+
+    def close(self):
+        """Revoke the session and close its local agent connection."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            conn = self._conn
+            self._conn = None
+        if conn is not None:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    def _load_identities(self):
+        request = Message()
+        request.add_byte(cSSH2_AGENTC_REQUEST_IDENTITIES)
+        ptype, result = self._roundtrip(request)
+        if ptype != SSH2_AGENT_IDENTITIES_ANSWER:
+            raise AgentProtocolError(
+                "local agent returned unexpected message {} while listing "
+                "identities".format(ptype)
+            )
+        count = result.get_int()
+        keys = []
+        blobs = []
+        comments = []
+        for _ in range(count):
+            blob = _strict_string(result)
+            # Comments are strings too; validate rather than trust leftovers.
+            comment = _strict_string(result)
+            keys.append(AgentKey(agent=self, blob=blob))
+            blobs.append(blob)
+            comments.append(comment)
+        if result.get_remainder():
+            raise AgentProtocolError(
+                "trailing bytes in agent identities answer"
+            )
+        self._keys = tuple(keys)
+        self._key_blobs = tuple(blobs)
+        self._key_comments = tuple(comments)
+        self._fingerprints = tuple(
+            sha256(blob).digest() for blob in blobs
+        )
+        self._fingerprint_set = set(self._fingerprints)
+
+    def _identity_answer(self):
+        answer = Message()
+        answer.add_byte(byte_chr(SSH2_AGENT_IDENTITIES_ANSWER))
+        answer.add_int(len(self._key_blobs))
+        for blob, comment in zip(self._key_blobs, self._key_comments):
+            answer.add_string(blob)
+            answer.add_string(comment)
+        return answer.asbytes()
+
+    def _handle_sign_request(self, message):
+        key_blob = _strict_string(message)
+        data = _strict_string(message)
+        flag_bytes = message.get_bytes(4)
+        if len(flag_bytes) != 4:
+            raise AgentProtocolError("truncated SSH agent sign request flags")
+        if message.get_remainder():
+            raise AgentProtocolError("trailing bytes in agent sign request")
+        (flags,) = struct.unpack(">I", flag_bytes)
+        # Match the exact allow-listed blob (fingerprint set backed) before
+        # trusting the request enough to touch the local agent.
+        if not self.is_key_authorized(key_blob):
+            raise AgentKeyNotAuthorized(
+                "signature requested for a key not granted to this "
+                "forwarding session (sha256 fingerprint: {})".format(
+                    sha256(key_blob).hexdigest()
+                )
+            )
+        request = Message()
+        request.add_byte(cSSH2_AGENTC_SIGN_REQUEST)
+        request.add_string(key_blob)
+        request.add_string(data)
+        request.add_int(flags)
+        ptype, result = self._roundtrip(request)
+        if ptype != SSH2_AGENT_SIGN_RESPONSE:
+            raise AgentProtocolError(
+                "local agent returned unexpected message {} for sign "
+                "request".format(ptype)
+            )
+        signature = _strict_string(result)
+        if result.get_remainder():
+            raise AgentProtocolError(
+                "trailing bytes in agent sign response"
+            )
+        response = Message()
+        response.add_byte(byte_chr(SSH2_AGENT_SIGN_RESPONSE))
+        response.add_string(signature)
+        return response.asbytes()
+
+    def _roundtrip(self, message):
+        """Send a validated message to the local agent; parse its answer."""
+        if self._closed or self._conn is None:
+            raise AgentSessionClosed(
+                "agent forwarding session has been closed"
+            )
+        conn = self._conn
+        conn.send(_frame_message(message.asbytes()))
+        try:
+            payload = _read_agent_message(conn)
+        except OSError as error:
+            raise AgentProtocolError(
+                "lost connection to local SSH agent: {}".format(error)
+            )
+        if not payload:
+            raise AgentProtocolError("local SSH agent closed the connection")
+        answer = Message(payload)
+        return ord(answer.get_byte()), answer
+
+
+class ForwardedAgentThread(threading.Thread):
+    """
+    Background driver owning one `.ForwardedAgentSession`.
+
+    A remote-side policy failure (closed session replay, unauthorized key,
+    malformed message) terminates the thread and revokes the session instead
+    of silently relaying data. The exception is retained on ``error`` for
+    callers/tests that want to inspect why forwarding stopped.
+    """
+
+    def __init__(self, channel, agent_connection=None):
+        super().__init__(target=self.run)
+        self.channel = channel
+        self._agent_connection = agent_connection
+        self.session = None
+        self.error = None
+
+    def run(self):
+        try:
+            self.session = ForwardedAgentSession(
+                self.channel, agent_connection=self._agent_connection
+            )
+            self.session.serve()
+        except Exception as error:
+            self.error = error
+            if self.session is not None:
+                self.session.close()
 
 
 def get_agent_connection():
@@ -247,45 +589,39 @@ def get_agent_connection():
 
 class AgentClientProxy:
     """
-    Class proxying request as a client:
+    Client-side handle for one remote request to our forwarded agent.
 
-    #. client ask for a request_forward_agent()
-    #. server creates a proxy and a fake SSH Agent
-    #. server ask for establishing a connection when needed,
-       calling the forward_agent_handler at client side.
-    #. the forward_agent_handler launch a thread for connecting
-       the remote fake agent and the local agent
-    #. Communication occurs ...
+    Each instance owns a dedicated `.ForwardedAgentSession` (run via
+    `.ForwardedAgentThread`) bound to the channel the server opened back to
+    us. The session, not a stateless byte pump, decides which identities and
+    signature requests may reach the local SSH agent, and it is revoked as
+    soon as the channel or this proxy is closed.
     """
 
-    def __init__(self, chanRemote):
-        self._conn = None
-        self.__chanR = chanRemote
-        self.thread = AgentRemoteProxy(self, chanRemote)
+    def __init__(self, chanRemote, agent_connection=None):
+        self.thread = ForwardedAgentThread(
+            chanRemote, agent_connection=agent_connection
+        )
         self.thread.start()
 
     def __del__(self):
         self.close()
 
-    def connect(self):
-        """
-        Method automatically called by ``AgentProxyThread.run``.
-        """
-        conn = get_agent_connection()
-        if not conn:
-            return
-        self._conn = conn
+    @property
+    def session(self):
+        """The `.ForwardedAgentSession` once the worker has created it."""
+        return self.thread.session
 
     def close(self):
         """
-        Close the current connection and terminate the agent
-        Should be called manually
+        Revoke the forwarding session and terminate its worker thread.
         """
-        if hasattr(self, "thread"):
-            self.thread._exit = True
-            self.thread.join(1000)
-        if self._conn is not None:
-            self._conn.close()
+        thread = getattr(self, "thread", None)
+        if thread is None:
+            return
+        if thread.session is not None:
+            thread.session.close()
+        thread.join(1000)
 
 
 class AgentServerProxy(AgentSSH):

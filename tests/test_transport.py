@@ -53,6 +53,7 @@ from paramiko.common import (
     MIN_PACKET_SIZE,
     MIN_WINDOW_SIZE,
     MSG_CHANNEL_OPEN,
+    MSG_CHANNEL_OPEN_FAILURE,
     MSG_DEBUG,
     MSG_IGNORE,
     MSG_KEXINIT,
@@ -1428,3 +1429,27 @@ class TestStrictKex:
                 transport_factory=RolloverTransport,
             ):
                 pass  # kexinit happens at connect...
+
+
+class AgentForwardingChannelPolicyTest(unittest.TestCase):
+    def test_auth_agent_open_rejected_when_forwarding_not_enabled(self):
+        # A client-side transport that never requested agent forwarding must
+        # keep rejecting incoming auth-agent channels instead of silently
+        # exposing an agent.
+        transport = Transport(sock=LoopSocket())
+        assert transport._forward_agent_handler is None
+        transport._send_message = Mock()
+        m = Message()
+        m.add_string("auth-agent@openssh.com")
+        m.add_int(4242)  # sender channel id
+        m.add_int(DEFAULT_WINDOW_SIZE)
+        m.add_int(DEFAULT_MAX_PACKET_SIZE)
+        m.rewind()
+        transport._parse_channel_open(m)
+        transport.close()
+        assert transport._send_message.call_count == 1
+        reply = transport._send_message.call_args[0][0]
+        reply.rewind()
+        assert ord(reply.get_byte()) == MSG_CHANNEL_OPEN_FAILURE
+        assert reply.get_int() == 4242
+        assert reply.get_int() == OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED

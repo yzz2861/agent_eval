@@ -252,3 +252,49 @@ class MessageOrderError(SSHException):
     """
 
     pass
+
+
+class AgentForwardingError(SSHException):
+    """
+    Base class for errors encountered while forwarding an SSH agent.
+
+    .. versionadded:: 5.1
+    """
+
+
+class LocalAgentUnavailable(AgentForwardingError):
+    """
+    No local SSH agent could be contacted for a forwarding session.
+
+    .. versionadded:: 5.1
+    """
+
+
+class AgentKeyNotAuthorized(AgentForwardingError):
+    """
+    A remote forwarding session asked to use a key it was not granted.
+
+    Raised when a signature request names a public key whose blob/fingerprint
+    is not part of the forwarding session's allow-listed identity set.
+
+    .. versionadded:: 5.1
+    """
+
+
+class AgentSessionClosed(AgentForwardingError):
+    """
+    A remote forwarding session was used after its channel was closed.
+
+    .. versionadded:: 5.1
+    """
+
+
+class AgentProtocolError(AgentForwardingError):
+    """
+    An SSH agent message was malformed or otherwise unprocessable.
+
+    This covers truncated or oversized messages, bad length fields, and
+    malformed answers returned by the local agent.
+
+    .. versionadded:: 5.1
+    """
