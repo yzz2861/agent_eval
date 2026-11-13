@@ -322,6 +322,8 @@ class ReusableStrategy(BaseStrategy):
                                          authentication=self.master_connection.authentication,
                                          client_strategy=RESTARTABLE,
                                          auto_referrals=self.master_connection.auto_referrals,
+                                         max_referral_depth=self.master_connection.max_referral_depth,
+                                         max_referral_time=self.master_connection.max_referral_time,
                                          auto_range=self.master_connection.auto_range,
                                          sasl_mechanism=self.master_connection.sasl_mechanism,
                                          sasl_credentials=self.master_connection.sasl_credentials,

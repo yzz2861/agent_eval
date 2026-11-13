@@ -11,13 +11,17 @@ The Server object specifies the DSA (Directory Server Agent) LDAP server that wi
 
 * use_ssl: specifies if the connection is on a secure port (defaults to False). When True the secure port is usually set to 636.
 
-* allowed_referral_hosts: specifies which servers are considered reliable as referrals (defaults to None)
+* allowed_referral_hosts: specifies which servers are considered reliable as referrals (defaults to None, meaning that no
+  external referral target is trusted and only referrals to the same origin - scheme, host and port - of this server are followed)
 
     * Format is a list of tuples; [(server, allow_auth), (server, allow_auth), ...]
 
-    * server is an IP address or DNS name. Specify an asterisk (*) to accept any server.
+    * server is an IP address or DNS name. Specify an asterisk (*) to accept any server. The server can optionally
+      include a port ('server2:636') or a full origin ('ldaps://server2:636') to restrict the match to a specific
+      port or scheme. Host names are compared as DNS names only and are never resolved to IP addresses.
 
     * allow_auth is a boolean to indicate if authentication to that server is allowed; if False only anonymous bind will be used.
+      Credentials are never forwarded when the referral downgrades the connection security (from ldaps or StartTLS to plain ldap).
 
 * get_info: specifies if the server schema and server specific info must be read (defaults to SCHEMA). Possible values are:
 

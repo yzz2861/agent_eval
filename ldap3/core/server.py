@@ -56,7 +56,9 @@ class Server(object):
 
     Allowed_referral_hosts can be None (default), or a list of tuples of
     allowed servers ip address or names to contact while redirecting
-    search to referrals.
+    search to referrals. When None no external referral target is
+    trusted: only referrals pointing to the same origin (scheme, host
+    and port) of this server are followed.
 
     The second element of the tuple is a boolean to indicate if
     authentication to that server is allowed; if False only anonymous
@@ -155,8 +157,8 @@ class Server(object):
                 raise LDAPInvalidPortError(port_err)
             self.port = port
 
-        if allowed_referral_hosts is None:  # defaults to any server with authentication
-            allowed_referral_hosts = [('*', True)]
+        if allowed_referral_hosts is None:  # defaults to no external referral host trusted
+            allowed_referral_hosts = []
 
         if isinstance(allowed_referral_hosts, SEQUENCE_TYPES):
             self.allowed_referral_hosts = []
@@ -677,6 +679,5 @@ class Server(object):
 
     def has_feature(self, feature):
         return self._check_info_property('feature', feature)
-
 
 

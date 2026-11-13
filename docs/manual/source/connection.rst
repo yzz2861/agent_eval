@@ -68,6 +68,10 @@ Connection parameters are:
 
 * auto_referrals: specify if the Connection must follows referrals automatically (defaults to True). Allowed referral servers are specified in the Server object.
 
+* max_referral_depth: maximum number of referral hops followed for a single operation (defaults to 5).
+
+* max_referral_time: maximum total time in seconds spent following a referral chain for a single operation (defaults to 60, None for no limit).
+
 * sasl_mechanism: specify the SASL mechanism to use for SASL authentication. Available mechanism are EXTERNAL, DIGEST-MD5 (**deprecated** by RFCs because insecure) and GSSAPI.
 
 * sasl_credential: an object specific to the SASL mechanism chosen. Refer to the documentation for each SASL mechanism supported.

@@ -73,6 +73,7 @@ from ..utils.conv import escape_bytes, prepare_for_stream, check_json_dict, form
 from ..utils.log import log, log_enabled, ERROR, BASIC, PROTOCOL, EXTENDED, get_library_log_hide_sensitive_data
 from ..utils.dn import safe_dn
 from ..utils.port_validators import check_port_and_port_list
+from ..utils.referral import DEFAULT_MAX_REFERRAL_DEPTH, DEFAULT_MAX_REFERRAL_TIME
 
 
 SASL_AVAILABLE_MECHANISMS = [EXTERNAL,
@@ -176,6 +177,10 @@ class Connection(object):
     :type cred_store: dict
     :param use_referral_cache: keep referral connections open and reuse them
     :type use_referral_cache: bool
+    :param max_referral_depth: maximum number of referral hops followed for a single operation
+    :type max_referral_depth: int
+    :param max_referral_time: maximum total time in seconds spent following a referral chain, None for no limit
+    :type max_referral_time: float
     :param auto_escape: automatic escaping of filter values
     :type auto_escape: bool
     :param auto_encode: automatic encoding of attribute values
@@ -214,6 +219,8 @@ class Connection(object):
                  receive_timeout=None,
                  return_empty_attributes=True,
                  use_referral_cache=False,
+                 max_referral_depth=DEFAULT_MAX_REFERRAL_DEPTH,
+                 max_referral_time=DEFAULT_MAX_REFERRAL_TIME,
                  auto_escape=True,
                  auto_encode=True,
                  pool_keepalive=None,
@@ -290,6 +297,8 @@ class Connection(object):
             self.receive_timeout = receive_timeout
             self.empty_attributes = return_empty_attributes
             self.use_referral_cache = use_referral_cache
+            self.max_referral_depth = max_referral_depth
+            self.max_referral_time = max_referral_time
             self.auto_escape = auto_escape
             self.auto_encode = auto_encode
             self._digest_md5_kic = None
@@ -486,6 +495,8 @@ class Connection(object):
         r += '' if self.auto_encode is None else (', auto_encode=' + ('True' if self.auto_encode else 'False'))
         r += '' if self.auto_escape is None else (', auto_escape=' + ('True' if self.auto_escape else 'False'))
         r += '' if self.use_referral_cache is None else (', use_referral_cache=' + ('True' if self.use_referral_cache else 'False'))
+        r += '' if self.max_referral_depth is None else ', max_referral_depth={0.max_referral_depth!r}'.format(self)
+        r += '' if self.max_referral_time is None else ', max_referral_time={0.max_referral_time!r}'.format(self)
         r += ')'
 
         return r
@@ -526,6 +537,8 @@ class Connection(object):
         r += '' if self.auto_encode is None else (', auto_encode=' + ('True' if self.auto_encode else 'False'))
         r += '' if self.auto_escape is None else (', auto_escape=' + ('True' if self.auto_escape else 'False'))
         r += '' if self.use_referral_cache is None else (', use_referral_cache=' + ('True' if self.use_referral_cache else 'False'))
+        r += '' if self.max_referral_depth is None else ', max_referral_depth={0.max_referral_depth!r}'.format(self)
+        r += '' if self.max_referral_time is None else ', max_referral_time={0.max_referral_time!r}'.format(self)
         r += ')'
 
         return r

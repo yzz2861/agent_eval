@@ -1,3 +1,11 @@
+# 2.10.2rc5 . 2026.11.14
+    - referral following now enforces a trust scope: only same-origin targets or explicitly whitelisted hosts are followed
+    - connection credentials are no longer forwarded to untrusted or downgraded (ldaps/StartTLS -> ldap) referral targets
+    - added max_referral_depth and max_referral_time Connection parameters to bound referral chains
+    - added referral loop, repeated target, empty and malformed LDAP URL detection
+    - referral failures now leave the originating connection in a clean state and discard tainted referral sessions
+    - changed the default of Server allowed_referral_hosts from [('*', True)] to no external trusted host
+
 # 2.10.2rc4 . 2026.04.18
     - fixed IndexError in auto_range search when response has no ranged attributes
     - fixed TypeError in format_ad_timedelta with malformed AD timestamps
