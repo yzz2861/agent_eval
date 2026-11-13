@@ -26,7 +26,7 @@ from .constants import (
     DW_VIS,
 )
 from .die import DIE
-from .dwarf_expr import DW_OP_name2opcode, DWARFExprParser
+from .dwarf_expr import DW_OP_name2opcode, DWARFExprParser, ExprBudget
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -154,20 +154,33 @@ def describe_CFI_CFA_rule(rule: CFARule) -> str:
         return f'{describe_reg_name(rule.reg)}{int(rule.offset):+}'
 
 
-def describe_DWARF_expr(expr: Any, structs: DWARFStructs, cu_offset: int | None = None) -> str:
+# Sentinel distinguishing "no budget passed" from an explicit None.
+_EXPR_BUDGET_UNSET: Any = object()
+
+
+def describe_DWARF_expr(
+    expr: Any,
+    structs: DWARFStructs,
+    cu_offset: int | None = None,
+    budget: ExprBudget | None | object = _EXPR_BUDGET_UNSET,
+) -> str:
     """ Textual description of a DWARF expression encoded in 'expr'.
         structs should come from the entity encompassing the expression - it's
         needed to be able to parse it correctly.
+        budget, when provided, enables resource-limit enforcement for the
+        parse instead of the default (budget-disabled) behavior.
     """
     # Since this function can be called a lot, initializing a fresh new
     # ExprDumper per call is expensive. So a rudimentary caching scheme is in
     # place to create only one such dumper per instance of structs.
-    cache_key = id(structs)
+    effective_budget = None if budget is _EXPR_BUDGET_UNSET else budget
+    cache_key = (id(structs), id(effective_budget))
     if cache_key not in _DWARF_EXPR_DUMPER_CACHE:
         _DWARF_EXPR_DUMPER_CACHE[cache_key] = \
-            ExprDumper(structs)
+            ExprDumper(structs, budget=effective_budget)
     dwarf_expr_dumper = _DWARF_EXPR_DUMPER_CACHE[cache_key]
-    return '(' + dwarf_expr_dumper.dump_expr(expr, cu_offset) + ')'
+    return '(' + dwarf_expr_dumper.dump_expr(
+        expr, cu_offset, budget=effective_budget) + ')'
 
 
 @overload
@@ -676,12 +689,21 @@ class ExprDumper:
 
         Usage: after creation, call dump_expr repeatedly - it's stateless.
     """
-    def __init__(self, structs: DWARFStructs) -> None:
+    def __init__(
+        self,
+        structs: DWARFStructs,
+        budget: ExprBudget | None = None,
+    ) -> None:
         self.structs = structs
-        self.expr_parser = DWARFExprParser(self.structs)
+        self.expr_parser = DWARFExprParser(self.structs, budget=budget)
         self._init_lookups()
 
-    def dump_expr(self, expr: bytes | Iterable[int], cu_offset: int | None = None) -> str:
+    def dump_expr(
+        self,
+        expr: bytes | Iterable[int],
+        cu_offset: int | None = None,
+        budget: ExprBudget | None | object = _EXPR_BUDGET_UNSET,
+    ) -> str:
         """ Parse and dump a DWARF expression.
             expr should be bytes or a list of (integer) byte values.
             cu_offset is the cu_offset
@@ -689,10 +711,16 @@ class ExprDumper:
             Only affects a handful of GNU opcodes, if None is provided,
             that's not a crash condition, only the expression dump will
             not be consistent of that of readelf.
+            budget, when provided, enables resource-limit enforcement for
+            this parse; otherwise the dumper's own budget (if any) applies.
 
             Returns a string representing the expression.
         """
-        parsed = self.expr_parser.parse_expr(bytes(expr))
+        if budget is _EXPR_BUDGET_UNSET:
+            # Fall back to the budget (if any) given at dumper construction.
+            parsed = self.expr_parser.parse_expr(bytes(expr))
+        else:
+            parsed = self.expr_parser.parse_expr(bytes(expr), budget=budget)
         return '; '.join(
             self._dump_to_string(deo.op, deo.op_name, deo.args, cu_offset)
             for deo in parsed
