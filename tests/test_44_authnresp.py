@@ -69,9 +69,17 @@ class TestAuthnResponse:
             self.conf.only_use_keys_in_metadata = False
             self.ar = authn_response(self.conf, "http://lingon.catalogix.se:8087/")
 
+    def _reset_response(self):
+        self.ar.replay_cache.clear()
+        self.ar._consumed = False
+        self.ar.verification_instant = None
+        self.ar.return_addrs = ["http://lingon.catalogix.se:8087/"]
+        self.ar.entity_id = "urn:mace:example.com:saml:roland:sp"
+
     def test_verify_1(self):
         xml_response = f"{self._resp_}"
         print(xml_response)
+        self._reset_response()
         self.ar.outstanding_queries = {"id12": "http://localhost:8088/sso"}
         self.ar.timeslack = 10000
         self.ar.loads(xml_response, decode=False)
@@ -88,6 +96,7 @@ class TestAuthnResponse:
         xml_response = self._sign_resp_
         print(xml_response)
 
+        self._reset_response()
         self.ar.outstanding_queries = {"id12": "http://localhost:8088/sso"}
         self.ar.timeslack = 10000
         self.ar.loads(xml_response, decode=False)
@@ -104,11 +113,12 @@ class TestAuthnResponse:
         with open(XML_RESPONSE_FILE) as fp:
             xml_response = fp.read()
         ID = "bahigehogffohiphlfmplepdpcohkhhmheppcdie"
+        self._reset_response()
         self.ar.outstanding_queries = {ID: "http://localhost:8088/foo"}
-        self.ar.return_addr = "http://xenosmilus.umdc.umu.se:8087/login"
+        self.ar.return_addrs = ["http://xenosmilus.umdc.umu.se:8087/login"]
         self.ar.entity_id = "xenosmilus.umdc.umu.se"
         # roughly a year, should create the response on the fly
-        self.ar.timeslack = 315360000  # indecent long time
+        self.ar.timeslack = 60 * 60  # clock skew is capped at one hour
         self.ar.loads(xml_response, decode=False)
         self.ar.verify()
 
@@ -119,8 +129,9 @@ class TestAuthnResponse:
 
     def test_verify_w_authn(self):
         xml_response = f"{self._resp_authn}"
+        self._reset_response()
         self.ar.outstanding_queries = {"id12": "http://localhost:8088/sso"}
-        self.ar.return_addr = "http://lingon.catalogix.se:8087/"
+        self.ar.return_addrs = ["http://lingon.catalogix.se:8087/"]
         self.ar.entity_id = "urn:mace:example.com:saml:roland:sp"
         self.ar.timeslack = 10000
         self.ar.loads(xml_response, decode=False)

@@ -36,6 +36,7 @@ from saml2.response import AuthnQueryResponse
 from saml2.response import AuthnResponse
 from saml2.response import AuthzResponse
 from saml2.response import NameIDMappingResponse
+from saml2.response import ReplayError
 from saml2.response import StatusError
 from saml2.s_utils import UnravelError
 from saml2.s_utils import do_attributes
@@ -793,6 +794,9 @@ class Base(Entity):
             resp = self._parse_response(xmlstr, AuthnResponse, "assertion_consumer_service", binding, **kwargs)
         except StatusError as err:
             logger.error("SAML status error: %s", str(err))
+            raise
+        except ReplayError as err:
+            logger.error("Rejected replayed SAML response: %s", str(err))
             raise
         except UnravelError:
             return None

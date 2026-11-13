@@ -40,6 +40,27 @@ class ToEarly(Exception):
     pass
 
 
+#: Maximum accepted clock skew (seconds). A larger configured value is
+#: clamped down to this limit to avoid effectively disabling time based
+#: checks such as assertion lifetime or subject confirmation validity.
+MAX_ACCEPTED_TIME_DIFF = 60 * 60
+
+
+def effective_time_slack(slack):
+    """Return the clock skew that will actually be used.
+
+    Negative values are treated as zero and anything above
+    :data:`MAX_ACCEPTED_TIME_DIFF` is clamped to the upper bound.
+    """
+    try:
+        slack = int(slack)
+    except (TypeError, ValueError):
+        return 0
+    if slack < 0:
+        return 0
+    return min(slack, MAX_ACCEPTED_TIME_DIFF)
+
+
 # --------------------- validators -------------------------------------
 #
 
@@ -91,9 +112,10 @@ def valid_url(url):
     return True
 
 
-def validate_on_or_after(not_on_or_after, slack):
+def validate_on_or_after(not_on_or_after, slack, now=None):
     if not_on_or_after:
-        now = time_util.utc_now()
+        if now is None:
+            now = time_util.utc_now()
         nooa = calendar.timegm(time_util.str_to_time(not_on_or_after))
         if now > nooa + slack:
             now_str = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
@@ -106,9 +128,10 @@ def validate_on_or_after(not_on_or_after, slack):
         return False
 
 
-def validate_before(not_before, slack):
+def validate_before(not_before, slack, now=None):
     if not_before:
-        now = time_util.utc_now()
+        if now is None:
+            now = time_util.utc_now()
         nbefore = calendar.timegm(time_util.str_to_time(not_before))
         if nbefore > now + slack:
             now_str = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))

@@ -2,6 +2,7 @@
 #
 import calendar
 import logging
+import threading
 
 from saml2 import SAMLError
 from saml2 import class_name
@@ -48,7 +49,9 @@ from saml2.sigver import signed
 from saml2.time_util import later_than
 from saml2.time_util import str_to_time
 from saml2.validate import NotValid
+from saml2.validate import effective_time_slack
 from saml2.validate import valid_address
+from saml2.validate import valid_id
 from saml2.validate import valid_instance
 from saml2.validate import validate_before
 from saml2.validate import validate_on_or_after
@@ -82,6 +85,70 @@ class StatusError(SAMLError):
 
 class UnsolicitedResponse(SAMLError):
     pass
+
+
+class ReplayError(SAMLError):
+    """Raised when a SAML response that was already consumed is presented
+    again."""
+
+
+class ReplayCache:
+    """Tracks SAML responses that have already been consumed.
+
+    The cache only stores the tuple that uniquely identifies a consumed
+    response together with the AuthnRequest it answered: the response ID and
+    the InResponseTo value. Entries are kept until the assertion they belong
+    to expires, after which they are pruned lazily.
+
+    All mutations happen while holding an internal lock so a failed
+    verification never leaves a partially registered response behind.
+    """
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._consumed = {}
+
+    @staticmethod
+    def _key(response_id, in_response_to):
+        return response_id, in_response_to
+
+    def has_seen(self, response_id, in_response_to, now=None):
+        """Return True if the response/request combination was consumed."""
+        if now is None:
+            now = time_util.utc_now()
+        with self._lock:
+            self._prune(now)
+            return self._key(response_id, in_response_to) in self._consumed
+
+    def register(self, response_id, in_response_to, expires_at=0, now=None):
+        """Atomically mark a response/request combination as consumed.
+
+        :raises ReplayError: if the combination is already registered.
+        """
+        if now is None:
+            now = time_util.utc_now()
+        key = self._key(response_id, in_response_to)
+        with self._lock:
+            self._prune(now)
+            if key in self._consumed:
+                raise ReplayError(
+                    f"SAML response '{response_id}' for request "
+                    f"'{in_response_to}' has already been consumed"
+                )
+            self._consumed[key] = expires_at
+
+    def _prune(self, now):
+        stale = [key for key, expires_at in self._consumed.items() if expires_at and expires_at <= now]
+        for key in stale:
+            del self._consumed[key]
+
+    def __len__(self):
+        with self._lock:
+            return len(self._consumed)
+
+    def clear(self):
+        with self._lock:
+            self._consumed.clear()
 
 
 class StatusVersionMismatch(StatusError):
@@ -205,7 +272,12 @@ def _dummy(_):
 
 
 def for_me(conditions, myself):
-    """Am I among the intended audiences"""
+    """Am I among the intended audiences.
+
+    Every AudienceRestriction that actually contains audiences must list the
+    local entity ID exactly. A restriction without audiences does not narrow
+    the set of allowed audiences and is ignored, matching the SAML spec.
+    """
 
     if not conditions.audience_restriction:  # No audience restriction
         return True
@@ -213,13 +285,17 @@ def for_me(conditions, myself):
     for restriction in conditions.audience_restriction:
         if not restriction.audience:
             continue
+        matched = False
         for audience in restriction.audience:
-            if audience.text and audience.text.strip() == myself:
-                return True
-            else:
-                logger.debug(f"AudienceRestriction - One condition not satisfied: {audience.text} != {myself}")
-    logger.debug("AudienceRestrictions not satisfied!")
-    return False
+            audience_text = (audience.text or "").strip()
+            if audience_text == myself:
+                matched = True
+                break
+            logger.debug("AudienceRestriction - condition not satisfied: '%s' != '%s'", audience_text, myself)
+        if not matched:
+            logger.debug("AudienceRestrictions not satisfied for entity '%s'", myself)
+            return False
+    return True
 
 
 def authn_response(
@@ -281,7 +357,7 @@ class StatusResponse:
         self.sec = sec_context
         self.return_addrs = return_addrs or []
 
-        self.timeslack = timeslack
+        self._timeslack = effective_time_slack(timeslack)
         self.request_id = request_id
 
         self.xmlstr = ""
@@ -299,20 +375,41 @@ class StatusResponse:
         self.do_not_verify = False
         self.conv_info = conv_info or {}
 
+    @property
+    def timeslack(self):
+        return self._timeslack
+
+    @timeslack.setter
+    def timeslack(self, value):
+        self._timeslack = effective_time_slack(value)
+
     def _clear(self):
         self.xmlstr = ""
         self.name_id = None
         self.response = None
         self.not_on_or_after = 0
 
+    def _log_summary(self):
+        """Return a non-sensitive description for logging.
+
+        Full SAML responses contain assertions with user attributes and must
+        never be written to the logs, so only message metadata is returned.
+        """
+        response = getattr(self, "response", None)
+        if response is None:
+            return "unparsed SAML response"
+        return (
+            f"{class_name(response)} id={getattr(response, 'id', None)!r} "
+            f"in_response_to={getattr(response, 'in_response_to', None)!r}"
+        )
+
     def _postamble(self):
         if not self.response:
             logger.warning("Response was not correctly signed")
-            if self.xmlstr:
-                logger.debug("Response: %s", self.xmlstr)
+            logger.debug("Unsigned or invalid %s", self._log_summary())
             raise IncorrectlySigned()
 
-        logger.debug("response: %s", self.response)
+        logger.debug("Parsed %s", self._log_summary())
 
         try:
             valid_instance(self.response)
@@ -345,7 +442,7 @@ class StatusResponse:
             self.xmlstr = xmldata[:].decode("utf-8")
         else:
             self.xmlstr = xmldata[:]
-        logger.debug("xmlstr: %s", self.xmlstr)
+        logger.debug("Loading SAML response (%d bytes)", len(self.xmlstr))
         if origxml:
             self.origxml = origxml
         else:
@@ -402,7 +499,9 @@ class StatusResponse:
     def _verify(self):
         if self.request_id and self.in_response_to and self.in_response_to != self.request_id:
             logger.error("Not the id I expected: %s != %s", self.in_response_to, self.request_id)
-            return None
+            raise UnsolicitedResponse(
+                f"InResponseTo '{self.in_response_to}' does not match expected request ID '{self.request_id}'"
+            )
 
         if self.response.version != "2.0":
             _ver = float(self.response.version)
@@ -416,7 +515,10 @@ class StatusResponse:
                 logger.error(
                     "destination '%s' not in return addresses '%s'", self.response.destination, self.return_addrs
                 )
-                return None
+                raise VerificationError(
+                    f"Response Destination '{self.response.destination}' is not an allowed "
+                    "assertion consumer endpoint"
+                )
 
         valid = self.issue_instant_ok() and self.status_ok()
         return valid
@@ -489,6 +591,7 @@ class AuthnResponse(StatusResponse):
         want_assertions_signed=False,
         want_assertions_or_response_signed=False,
         want_response_signed=False,
+        replay_cache=None,
         conv_info=None,
         **kwargs,
     ):
@@ -512,6 +615,17 @@ class AuthnResponse(StatusResponse):
         self.require_response_signature = want_response_signed
         self.test = test
         self.allow_unknown_attributes = allow_unknown_attributes
+        # Enforce an upper bound on the accepted clock skew so a misconfigured
+        # (or maliciously large) time slack cannot disable lifetime checks.
+        # StatusResponse.__init__ already applied the clamp, keep the value in
+        # sync in case a subclass receives an adjusted value.
+        self.timeslack = effective_time_slack(self.timeslack)
+        self.replay_cache = replay_cache if replay_cache is not None else ReplayCache()
+        # Wall clock time used for every time based check of this response.
+        # It is captured once so NotBefore/NotOnOrAfter/SubjectConfirmation
+        # are all evaluated against the exact same instant.
+        self.verification_instant = None
+        self._consumed = False
         #
         try:
             self.extension_schema = kwargs["extension_schema"]
@@ -530,21 +644,55 @@ class AuthnResponse(StatusResponse):
         self._loads(xmldata, decode, origxml)
 
         if self.asynchop:
-            if self.in_response_to in self.outstanding_queries:
-                self.came_from = self.outstanding_queries[self.in_response_to]
-                # del self.outstanding_queries[self.in_response_to]
-                try:
-                    if not self.check_subject_confirmation_in_response_to(self.in_response_to):
-                        raise UnsolicitedResponse(f"Unsolicited response: {self.in_response_to}")
-                except AttributeError:
-                    pass
-            elif self.allow_unsolicited:
-                # Should check that I haven't seen this before
-                pass
-            else:
-                raise UnsolicitedResponse(f"Unsolicited response: {self.in_response_to}")
+            self._validate_request_binding()
 
         return self
+
+    def _validate_request_binding(self):
+        """Bind the Response to the original AuthnRequest (if any).
+
+        A missing or unknown InResponseTo is only accepted when unsolicited
+        responses have been explicitly enabled. This runs after the response
+        signature has been checked, but before any business callback.
+        """
+        in_response_to = self.in_response_to
+
+        if not in_response_to:
+            if self.allow_unsolicited:
+                return self
+            raise UnsolicitedResponse("Unsolicited response: missing InResponseTo")
+
+        if in_response_to not in self.outstanding_queries:
+            if self.allow_unsolicited:
+                return self
+            raise UnsolicitedResponse(f"Unsolicited response: {in_response_to}")
+
+        self.came_from = self.outstanding_queries[in_response_to]
+
+        try:
+            if not self.check_subject_confirmation_in_response_to(in_response_to):
+                raise UnsolicitedResponse(
+                    f"SubjectConfirmationData InResponseTo does not match request: {in_response_to}"
+                )
+        except AttributeError:
+            pass
+
+        return self
+
+    def _validate_response_destination(self):
+        if not self.asynchop:
+            return
+        destination = self.response.destination
+        if destination and destination not in self.return_addrs:
+            raise VerificationError(
+                f"Response Destination '{destination}' is not an allowed assertion consumer endpoint"
+            )
+
+    def _validate_response_id(self):
+        response_id = getattr(self.response, "id", None)
+        if not response_id:
+            raise VerificationError("Response is missing an ID attribute")
+        valid_id(response_id)
 
     def clear(self):
         self._clear()
@@ -563,7 +711,9 @@ class AuthnResponse(StatusResponse):
 
         authn_statement = self.assertion.authn_statement[0]
         if authn_statement.session_not_on_or_after:
-            if validate_on_or_after(authn_statement.session_not_on_or_after, self.timeslack):
+            if validate_on_or_after(
+                authn_statement.session_not_on_or_after, self.timeslack, now=self.verification_instant
+            ):
                 self.session_not_on_or_after = calendar.timegm(
                     time_util.str_to_time(authn_statement.session_not_on_or_after)
                 )
@@ -583,7 +733,7 @@ class AuthnResponse(StatusResponse):
 
         conditions = self.assertion.conditions
 
-        logger.debug("conditions: %s", conditions)
+        logger.debug("Evaluating assertion conditions")
 
         # if no sub-elements or elements are supplied, then the
         # assertion is considered to be valid.
@@ -597,9 +747,11 @@ class AuthnResponse(StatusResponse):
 
         try:
             if conditions.not_on_or_after:
-                self.not_on_or_after = validate_on_or_after(conditions.not_on_or_after, self.timeslack)
+                self.not_on_or_after = validate_on_or_after(
+                    conditions.not_on_or_after, self.timeslack, now=self.verification_instant
+                )
             if conditions.not_before:
-                validate_before(conditions.not_before, self.timeslack)
+                validate_before(conditions.not_before, self.timeslack, now=self.verification_instant)
         except Exception as excp:
             logger.error("Exception on conditions: %s", str(excp))
             if not lax:
@@ -647,7 +799,7 @@ class AuthnResponse(StatusResponse):
                 attribute_statement.attribute.extend(attrlist)
 
     def read_attribute_statement(self, attr_statem):
-        logger.debug("Attribute Statement: %s", attr_statem)
+        logger.debug("Processing attribute statement with %d attributes", len(attr_statem.attribute))
         # for aconv in self.attribute_converters:
         #    logger.debug("Converts name format: %s", aconv.name_format)
 
@@ -672,7 +824,6 @@ class AuthnResponse(StatusResponse):
             if _assertion.attribute_statement:
                 logger.debug("Assertion contains %s attribute statement(s)", (len(self.assertion.attribute_statement)))
                 for _attr_statem in _assertion.attribute_statement:
-                    logger.debug(f"Attribute Statement: {_attr_statem}")
                     ava.update(self.read_attribute_statement(_attr_statem))
             if not ava:
                 logger.debug("Assertion contains no attribute statements")
@@ -687,28 +838,26 @@ class AuthnResponse(StatusResponse):
                 return False
                 # verify that I got it from the correct sender
 
-        # These two will raise exception if untrue
-        validate_on_or_after(data.not_on_or_after, self.timeslack)
-        validate_before(data.not_before, self.timeslack)
+        # These two will raise exception if untrue. They use the same
+        # verification instant as the assertion Conditions.
+        validate_on_or_after(data.not_on_or_after, self.timeslack, now=self.verification_instant)
+        validate_before(data.not_before, self.timeslack, now=self.verification_instant)
 
         # not_before must be < not_on_or_after
         if not later_than(data.not_on_or_after, data.not_before):
             return False
 
-        if self.asynchop and self.came_from is None:
-            if data.in_response_to:
-                if data.in_response_to in self.outstanding_queries:
-                    self.came_from = self.outstanding_queries[data.in_response_to]
-                    # del self.outstanding_queries[data.in_response_to]
-                elif self.allow_unsolicited:
-                    pass
-                else:
-                    # This is where I don't allow unsolicited reponses
-                    # Either in_response_to == None or has a value I don't
-                    # recognize
-                    logger.debug("in response to: '%s'", data.in_response_to)
-                    logger.info("outstanding queries: %s", self.outstanding_queries.keys())
-                    raise Exception("Combination of session id and requestURI I don't " "recall")
+        if self.asynchop:
+            # The bearer subject confirmation must be bound to the same
+            # AuthnRequest as the enclosing response (or be explicitly
+            # accepted as unsolicited).
+            if data.in_response_to and data.in_response_to != self.in_response_to:
+                raise VerificationError(
+                    f"SubjectConfirmationData InResponseTo '{data.in_response_to}' does not match "
+                    f"response InResponseTo '{self.in_response_to}'"
+                )
+            if self.came_from is None and not self.allow_unsolicited:
+                raise VerificationError("Bearer assertion is not bound to an outstanding AuthnRequest")
         return True
 
     def _holder_of_key_confirmed(self, data):
@@ -751,8 +900,13 @@ class AuthnResponse(StatusResponse):
                 raise ValueError(f"Unknown subject confirmation method: {subject_confirmation.method}")
 
             _recip = _data.recipient
-            if not _recip or not self.verify_recipient(_recip):
-                raise VerificationError("No valid recipient")
+            if self.asynchop:
+                # Web Browser SSO: the bearer assertion must be addressed to
+                # one of this SP's assertion consumer endpoints. Recipient is
+                # optional in SOAP profiles (AuthnQuery, AttributeQuery, ...)
+                # where the connection itself establishes the receiver.
+                if not _recip or not self.verify_recipient(_recip):
+                    raise VerificationError("No valid recipient")
 
             subjconf.append(subject_confirmation)
 
@@ -771,7 +925,7 @@ class AuthnResponse(StatusResponse):
             _name_id = saml.name_id_from_string(_name_id_str)
             self.name_id = _name_id
 
-        logger.info("Subject NameID: %s", self.name_id)
+        logger.info("Subject NameID present: %s", self.name_id is not None)
         return self.name_id
 
     def _assertion(self, assertion, verified=False):
@@ -1001,7 +1155,7 @@ class AuthnResponse(StatusResponse):
 
         if self.context == "AuthnReq" or self.context == "AttrQuery":
             self.ava = self.get_identity()
-            logger.debug(f"--- AVA: {self.ava}")
+            logger.debug("Resolved %d attribute(s) from the assertion", len(self.ava))
 
         return True
 
@@ -1012,6 +1166,11 @@ class AuthnResponse(StatusResponse):
         :param keys: If not the default key file should be used then use one
         of these.
         """
+        # Every time based check for this response uses one and the same
+        # wall-clock instant, captured only after the signature has been
+        # verified during loads().
+        if self.verification_instant is None:
+            self.verification_instant = time_util.utc_now()
 
         try:
             res = self._verify()
@@ -1026,10 +1185,46 @@ class AuthnResponse(StatusResponse):
             return self
 
         if self.parse_assertion(keys):
+            self._consume()
             return self
         else:
             logger.error("Could not parse the assertion")
-            return None
+            raise VerificationError("Could not parse the assertion")
+
+    def _consume(self):
+        """Atomically mark the response/request combination as consumed.
+
+        All verification has already succeeded at this point, so this is the
+        only place where mutable state (the replay cache and the outstanding
+        query dictionary) is touched. If anything raised before this call,
+        nothing was registered and the same response can be retried cleanly.
+        """
+        self._validate_response_id()
+        self._validate_response_destination()
+
+        response_id = self.response.id
+        in_response_to = self.in_response_to
+        now = self.verification_instant or time_util.utc_now()
+
+        if self.replay_cache.has_seen(response_id, in_response_to, now=now):
+            logger.warning("Rejected replayed SAML response")
+            raise ReplayError(
+                f"SAML response '{response_id}' for request '{in_response_to}' has already been consumed"
+            )
+        # Keep the entry at least until the assertion lifetime so a replay
+        # is rejected while the assertion could still be used.
+        expires_at = self.not_on_or_after or 0
+        self.replay_cache.register(response_id, in_response_to, expires_at=expires_at, now=now)
+        if self.asynchop and in_response_to:
+            self.outstanding_queries.pop(in_response_to, None)
+
+        # Note: this object level flag is informational only. Replay
+        # protection relies on the shared replay cache, which also covers the
+        # case where a freshly constructed response object replays an old
+        # response. Keeping the flag allows callers to inspect the state
+        # without weakening the cache based decision above.
+        self._consumed = True
+        logger.info("SAML response consumed (response ID and InResponseTo validated)")
 
     def session_id(self):
         """Returns the SessionID of the response"""
@@ -1110,9 +1305,6 @@ class AuthnResponse(StatusResponse):
             attesting entity can present the assertion.
         :return: True/False
         """
-        if not self.conv_info:
-            return True
-
         _info = self.conv_info
 
         try:
@@ -1124,8 +1316,12 @@ class AuthnResponse(StatusResponse):
         try:
             if recipient in self.return_addrs:
                 return True
-        except KeyError:
+        except TypeError:
             pass
+
+        # return_addrs may be a single endpoint string in some call paths
+        if isinstance(self.return_addrs, str) and recipient == self.return_addrs:
+            return True
 
         return False
 
@@ -1374,7 +1570,7 @@ class AssertionIDResponse:
     def loads(self, xmldata, decode=True, origxml=None):
         # own copy
         self.xmlstr = xmldata[:]
-        logger.debug("xmlstr: %s", self.xmlstr)
+        logger.debug("Loading SAML assertion ID response (%d bytes)", len(self.xmlstr))
         self.origxml = origxml
 
         try:
@@ -1403,10 +1599,9 @@ class AssertionIDResponse:
     def _postamble(self):
         if not self.response:
             logger.warning("Response was not correctly signed")
-            if self.xmlstr:
-                logger.debug("Response: %s", self.xmlstr)
+            logger.debug("Unsigned or invalid SAML assertion ID response")
             raise IncorrectlySigned()
 
-        logger.debug("response: %s", self.response)
+        logger.debug("Parsed SAML assertion ID response")
 
         return self

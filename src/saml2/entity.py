@@ -34,6 +34,7 @@ from saml2.profile import ecp
 from saml2.profile import paos
 from saml2.profile import samlec
 from saml2.response import LogoutResponse
+from saml2.response import ReplayCache
 from saml2.response import UnsolicitedResponse
 from saml2.s_utils import UnravelError
 from saml2.s_utils import UnsupportedBinding
@@ -194,6 +195,10 @@ class Entity(HTTPBase):
             self.sourceid = self.metadata.construct_source_id()
         else:
             self.sourceid = {}
+
+        # Keeps track of SAML responses that have already been consumed so
+        # the same response/request combination can not authenticate twice.
+        self.replay_cache = ReplayCache()
 
         self.msg_cb = msg_cb
 
@@ -1197,8 +1202,6 @@ class Entity(HTTPBase):
             **rinfo,
         )
 
-        logger.debug("Response: %s", response)
-
         return response
 
     # XXX DONE ent create > _message
@@ -1269,8 +1272,6 @@ class Entity(HTTPBase):
 
         msg = element_to_extension_element(self.artifact[artifact])
         response.extension_elements = [msg]
-
-        logger.debug("Response: %s", response)
 
         return response
 
@@ -1370,8 +1371,6 @@ class Entity(HTTPBase):
             **rinfo,
         )
 
-        logger.debug("Response: %s", response)
-
         return response
 
     def parse_manage_name_id_request_response(self, string, binding=BINDING_SOAP):
@@ -1429,6 +1428,11 @@ class Entity(HTTPBase):
                 # expected return address
                 kwargs["return_addrs"] = self.config.endpoint(service, binding=binding, context=self.entity_type)
 
+        # Only authentication responses are bound one-to-one to an
+        # AuthnRequest and therefore need replay protection.
+        if response_cls.msgtype == "authn_response" and "replay_cache" not in kwargs:
+            kwargs["replay_cache"] = self.replay_cache
+
         try:
             response = response_cls(self.sec, **kwargs)
         except Exception as exc:
@@ -1471,7 +1475,7 @@ class Entity(HTTPBase):
         finally:
             response.require_response_signature = require_response_signature
 
-        logger.debug("XMLSTR: %s", xmlstr)
+        logger.debug("Unpacked SAML response (%d bytes)", len(xmlstr) if xmlstr else 0)
 
         if not response:
             return response

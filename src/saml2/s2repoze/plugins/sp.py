@@ -154,7 +154,9 @@ class SAML2Plugin:
 
         post = parse.parse_qs(body)  # parse the POST fields into a dict
 
-        logger.debug("identify post: %s", post)
+        # Never log the POST itself: the SAMLResponse field contains the
+        # full assertion with user attributes.
+        logger.debug("identify post fields: %s", sorted(post.keys()))
 
         return post
 
@@ -388,7 +390,7 @@ class SAML2Plugin:
             "repoze.who.userid": cni,
             "user": session_info["ava"],
         }
-        logger.debug("Identity: %s", identity)
+        logger.debug("Identity constructed for subject '%s'", identity.get("repoze.who.userid"))
 
         return identity
 

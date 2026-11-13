@@ -164,6 +164,7 @@ class TestResponse:
         assert isinstance(resp, StatusResponse)
         assert isinstance(resp, AuthnResponse)
         resp.sec.only_use_keys_in_metadata = False
+        resp.allow_unsolicited = True
         resp.parse_assertion()
         si = resp.session_info()
         assert si

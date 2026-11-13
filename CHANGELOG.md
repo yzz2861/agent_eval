@@ -1,6 +1,18 @@
 # Changelog
 
 
+## Unreleased
+
+- Bind each SAML Response one-to-one to its AuthnRequest: the response ID,
+  InResponseTo, Destination, Recipient, Audience, NotBefore/NotOnOrAfter and
+  Bearer SubjectConfirmationData are now verified together against a single
+  captured time instant, inside a one-time consumption object with an
+  in-memory replay cache. Missing or unknown InResponseTo is only accepted in
+  explicit unsolicited mode, Audience must match the local SP entityID
+  exactly, and the accepted clock skew (`accepted_time_diff`) is capped at one
+  hour. Failed verification leaves no retryable half-state and full
+  assertions/responses are no longer written to the logs.
+
 ## v7.5.5 (2026-09-17)
 
 - Resolve CVE-2026-26007 by migrating to the from pyOpenSSL to the cryptography APIs

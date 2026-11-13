@@ -538,6 +538,10 @@ difference in seconds you are prepared to accept.
 .. note:: This will indiscriminately affect all time comparisons.
     Hence your server may accept a statement that in fact is too old.
 
+The effective clock skew is capped at one hour (3600 seconds); larger
+configured values are clamped to that limit so a misconfiguration can not
+disable the assertion lifetime and subject confirmation checks.
+
 allow_unknown_attributes
 ^^^^^^^^^^^^^^^^^^^^^^^^
 

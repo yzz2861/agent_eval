@@ -1693,6 +1693,10 @@ class TestClient:
             return b64encode(str(self.server.create_authn_response(**kwargs)).encode())
 
         def parse_authn_response(response):
+            # A successful consumption removes the AuthnRequest from the
+            # outstanding queries one-time, so restore it before each attempt.
+            outstanding["id1"] = "http://foo.example.com/service"
+            self.client.replay_cache.clear()
             self.client.parse_authn_request_response(response, BINDING_HTTP_POST, outstanding)
 
         def set_client_want(response, assertion, either):
