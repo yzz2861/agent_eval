@@ -1,3 +1,4 @@
+import time
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -29,13 +30,30 @@ from .signals import user_loaded_from_cookie
 from .signals import user_loaded_from_request
 from .signals import user_needs_refresh
 from .signals import user_unauthorized
+from .utils import AUTH_TIME_SESSION_KEY
 from .utils import _create_identifier
+from .utils import _coerce_max_age
 from .utils import _user_context_processor
+from .utils import current_user
+from .utils import decode_auth_time
 from .utils import decode_cookie
 from .utils import encode_cookie
 from .utils import expand_login_view
+from .utils import login_remembered
 from .utils import login_url as make_login_url
 from .utils import make_next_param
+from .utils import STEPUP_REASON_CLOCK_ROLLED_BACK
+from .utils import STEPUP_REASON_EXPIRED
+from .utils import STEPUP_REASON_FORGED_CLAIM
+from .utils import STEPUP_REASON_FRESH
+from .utils import STEPUP_REASON_INVALID_MAX_AGE
+from .utils import STEPUP_REASON_MISSING_CLAIM
+from .utils import STEPUP_REASON_MISSING_MAX_AGE
+from .utils import STEPUP_REASON_MISSING_SECRET_KEY
+from .utils import STEPUP_REASON_REMEMBERED
+from .utils import STEPUP_REASON_UNAUTHENTICATED
+from .utils import StepUpResult
+from .utils import StepUpStatus
 
 
 class LoginManager:
@@ -92,6 +110,8 @@ class LoginManager:
 
         self.needs_refresh_callback = None
 
+        self._step_up_config_error_callback = None
+
         self.id_attribute = ID_ATTRIBUTE
 
         self._user_callback = None
@@ -99,6 +119,16 @@ class LoginManager:
         self._request_callback = None
 
         self._session_identifier_generator = _create_identifier
+
+        #: Default maximum age of an interactive authentication for step-up
+        #: checks. May be a :class:`datetime.timedelta` or seconds. ``None``
+        #: means the ``STEPUP_MAX_AGE`` app config must provide the value.
+        self.step_up_max_age = None
+
+        #: Injectable time source. It must return the current time as epoch
+        #: seconds (an ``int`` or ``float``). Tests can replace it with a
+        #: fixed or scripted clock to exercise window boundaries deterministically.
+        self.clock = time.time
 
         if app is not None:
             self.init_app(app, add_context_processor)
@@ -239,6 +269,139 @@ class LoginManager:
         self.needs_refresh_callback = callback
         return callback
 
+    def step_up_config_error_handler(self, callback):
+        """
+        This sets the callback invoked when a step-up protected view is
+        misconfigured (for example, no maximum age is configured). The
+        callback receives the :class:`~flask_login.utils.StepUpResult`
+        describing the error and should return a response. If no callback is
+        registered, :meth:`step_up_config_error` aborts with HTTP 500.
+
+        :param callback: The callback for configuration errors.
+        :type callback: callable
+        """
+        self._step_up_config_error_callback = callback
+        return callback
+
+    def step_up_config_error(self, result):
+        """
+        Invoked from :func:`~flask_login.utils.step_up_required` when the
+        step-up policy cannot be evaluated due to a configuration error. If a
+        :meth:`step_up_config_error_handler` is registered it is called with
+        the :class:`~flask_login.utils.StepUpResult`; otherwise HTTP 500 is
+        raised. The error reason is always available on the result, so
+        callers never need to parse exception text.
+        """
+        if self._step_up_config_error_callback is not None:
+            return self._step_up_config_error_callback(result)
+        abort(500, description=f"Step-up configuration error: {result.reason}")
+
+    def _resolve_step_up_max_age(self, max_age):
+        """Resolve and validate the effective step-up maximum age."""
+        if max_age is None:
+            max_age = current_app.config.get("STEPUP_MAX_AGE", self.step_up_max_age)
+
+        if max_age is None:
+            return None, STEPUP_REASON_MISSING_MAX_AGE
+
+        seconds = _coerce_max_age(max_age)
+
+        if seconds is None or seconds <= 0:
+            return None, STEPUP_REASON_INVALID_MAX_AGE
+
+        return seconds, None
+
+    def step_up_check(self, max_age=None):
+        """
+        Evaluate the step-up policy for the current request and return a
+        structured :class:`~flask_login.utils.StepUpResult` without raising
+        or redirecting. The window boundary is inclusive: an authentication
+        exactly ``max_age`` seconds old is still allowed, while anything
+        older requires reauthentication.
+
+        Reauthentication is required when:
+
+            - the user is not authenticated,
+            - the session was restored from a "remember me" cookie and has
+              no fresh authentication claim,
+            - the signed claim is missing or cannot be verified,
+            - the claim timestamp is in the future (a forged value or a
+              clock that rolled backwards), or
+            - the verified authentication time is older than ``max_age``.
+
+        This method never mutates the session: a failed check leaves the
+        ordinary login state untouched.
+
+        :param max_age: A :class:`datetime.timedelta`, seconds, or ``None``
+            to fall back to ``STEPUP_MAX_AGE`` /
+            :attr:`step_up_max_age`.
+        """
+        seconds, error_reason = self._resolve_step_up_max_age(max_age)
+
+        if error_reason is not None:
+            return StepUpResult(
+                StepUpStatus.CONFIG_ERROR, error_reason, None, None, None
+            )
+
+        if not current_app.config.get("SECRET_KEY"):
+            return StepUpResult(
+                StepUpStatus.CONFIG_ERROR,
+                STEPUP_REASON_MISSING_SECRET_KEY,
+                seconds,
+                None,
+                None,
+            )
+
+        if not current_user.is_authenticated:
+            return StepUpResult(
+                StepUpStatus.REAUTH_REQUIRED,
+                STEPUP_REASON_UNAUTHENTICATED,
+                seconds,
+                None,
+                None,
+            )
+
+        user_id = session.get("_user_id")
+        claim = session.get(AUTH_TIME_SESSION_KEY)
+        auth_time = decode_auth_time(claim, user_id)
+        now = self.clock()
+
+        if auth_time is None:
+            if claim is not None:
+                reason = STEPUP_REASON_FORGED_CLAIM
+            elif login_remembered():
+                reason = STEPUP_REASON_REMEMBERED
+            else:
+                reason = STEPUP_REASON_MISSING_CLAIM
+            return StepUpResult(
+                StepUpStatus.REAUTH_REQUIRED, reason, seconds, None, None
+            )
+
+        age = now - auth_time
+
+        if age < 0:
+            # The claim signature is valid, so a timestamp ahead of the
+            # injected clock means the clock moved backwards (or the claim
+            # was minted on a host with a skewed clock).
+            reason = STEPUP_REASON_CLOCK_ROLLED_BACK
+            return StepUpResult(
+                StepUpStatus.REAUTH_REQUIRED, reason, seconds, auth_time, age
+            )
+
+        # Inclusive boundary: age == max_age is still within the window.
+        if age > seconds:
+            return StepUpResult(
+                StepUpStatus.REAUTH_REQUIRED,
+                STEPUP_REASON_EXPIRED,
+                seconds,
+                auth_time,
+                age,
+            )
+
+        return StepUpResult(
+            StepUpStatus.ALLOWED, STEPUP_REASON_FRESH, seconds, auth_time, age
+        )
+
     def needs_refresh(self):
         """
         This is called when the user is logged in, but they need to be
@@ -351,6 +514,9 @@ class LoginManager:
             if mode == "basic" or sess.permanent:
                 if sess.get("_fresh") is not False:
                     sess["_fresh"] = False
+                # A downgraded session cannot retain a step-up claim even if
+                # an older signed one is still present.
+                sess.pop(AUTH_TIME_SESSION_KEY, None)
                 session_protected.send(app)
                 return False
             elif mode == "strong":
@@ -368,6 +534,10 @@ class LoginManager:
         if user_id is not None:
             session["_user_id"] = user_id
             session["_fresh"] = False
+            # Restoring from a remember cookie is not an interactive
+            # authentication: any carried-over claim must be discarded so a
+            # step-up check forces reauthentication.
+            session.pop(AUTH_TIME_SESSION_KEY, None)
             user = None
             if self._user_callback:
                 user = self._user_callback(user_id)

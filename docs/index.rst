@@ -349,6 +349,61 @@ Or by providing your own callback to handle refreshing::
 To mark a session as fresh again, call the `confirm_login` function.
 
 
+Step-Up Authentication
+======================
+The "fresh" flag is only a boolean, so it cannot express *how recently* the
+user authenticated. For especially sensitive operations, such as changing a
+payout bank account, Flask-Login provides an explicit step-up policy that
+enforces a maximum age on the most recent interactive authentication.
+
+On every fresh login and on every `confirm_login`, the current time is
+written into the session as a signed claim. It is HMAC-signed with the
+application's secret key and bound to the user id, so a client cannot forge
+one or edit an old timestamp to look newer. No plain, tamper-able timestamp
+is ever stored in the session.
+
+Protect a view with `step_up_required`, passing the maximum accepted age::
+
+    from datetime import timedelta
+
+    from flask_login import step_up_required
+
+    @app.route("/payout-account", methods=["POST"])
+    @step_up_required(max_age=timedelta(minutes=10))
+    def change_payout_account():
+        ...
+
+The boundary is inclusive: an authentication exactly ten minutes old is
+still accepted, while an older one redirects to `LoginManager.refresh_view`
+through the usual `needs_refresh` flow. Reauthentication is also required
+when the signed claim is missing or invalid, when its timestamp lies in the
+future (for example after a clock rollback), or when the session was
+restored from a "remember me" cookie without a fresh confirmation.
+
+Alternatively the maximum age can be configured once via the
+``STEPUP_MAX_AGE`` app config (a `datetime.timedelta` or seconds) or the
+`LoginManager.step_up_max_age` attribute, in which case the decorator can be
+applied without arguments::
+
+    login_manager.step_up_max_age = timedelta(minutes=10)
+
+    @app.route("/payout-account", methods=["POST"])
+    @step_up_required
+    def change_payout_account():
+        ...
+
+To make a decision without redirecting, call `step_up_status`. It always
+returns a `StepUpResult` whose ``status`` is one of ``allowed``,
+``reauth_required`` or ``config_error``, together with a stable machine
+readable ``reason``; callers never need to parse exception text. A failed
+check never mutates the session, so an unsuccessful reauthentication cannot
+rotate or destroy the ordinary login state.
+
+The time source is injectable through `LoginManager.clock`, which must
+return the current time as epoch seconds. Replacing it with a fixed clock
+makes window-boundary tests deterministic.
+
+
 Cookie Settings
 ===============
 The details of the cookie can be customized in the application settings.

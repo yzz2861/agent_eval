@@ -32,6 +32,9 @@ from flask_login import logout_user
 from flask_login import make_next_param
 from flask_login import session_protected
 from flask_login import set_login_view
+from flask_login import StepUpStatus
+from flask_login import step_up_required
+from flask_login import step_up_status
 from flask_login import user_accessed
 from flask_login import user_loaded_from_cookie
 from flask_login import user_loaded_from_request
@@ -41,6 +44,8 @@ from flask_login import user_login_confirmed
 from flask_login import user_needs_refresh
 from flask_login import user_unauthorized
 from flask_login import UserMixin
+from flask_login.utils import AUTH_TIME_SESSION_KEY
+from flask_login.utils import encode_auth_time
 from flask_login.utils import _secret_key
 from flask_login.utils import _user_context_processor
 
@@ -1623,3 +1628,445 @@ class CustomTestClientTestCase(unittest.TestCase):
             self.assertEqual("Anonymous", username.data.decode("utf-8"))
             is_fresh = c.get("/is-fresh")
             self.assertEqual("False", is_fresh.data.decode("utf-8"))
+
+
+class FakeClock:
+    """A scriptable, injectable time source returning epoch seconds."""
+
+    def __init__(self, value):
+        self.value = float(value)
+
+    def __call__(self):
+        return self.value
+
+
+class StepUpAuthTestCase(unittest.TestCase):
+    """Tests for the explicit step-up (recent reauthentication) policy."""
+
+    TEN_MINUTES = 600
+
+    def setUp(self):
+        self.app = Flask(__name__)
+        self.app.config["SECRET_KEY"] = "deterministic"
+        self.app.config["SESSION_PROTECTION"] = None
+        self.remember_cookie_name = "remember"
+        self.app.config["REMEMBER_COOKIE_NAME"] = self.remember_cookie_name
+        self.login_manager = LoginManager()
+        self.login_manager.init_app(self.app)
+        self.login_manager.refresh_view = "/refresh-view"
+
+        @self.app.route("/login-notch")
+        def login_notch():
+            return str(login_user(notch))
+
+        @self.app.route("/login-notch-remember")
+        def login_notch_remember():
+            return str(login_user(notch, remember=True))
+
+        @self.app.route("/confirm-login")
+        def _confirm_login():
+            confirm_login()
+            return ""
+
+        @self.app.route("/logout")
+        def logout():
+            return str(logout_user())
+
+        @self.app.route("/refresh-view")
+        def refresh_view():
+            return "refresh"
+
+        @self.app.route("/step-up-check")
+        def step_up_check_view():
+            result = step_up_status(timedelta(seconds=self.TEN_MINUTES))
+            return f"{result.status.value}|{result.reason}"
+
+        @self.app.route("/sensitive")
+        @step_up_required(max_age=timedelta(seconds=self.TEN_MINUTES))
+        def sensitive():
+            return "Access Granted"
+
+        @self.app.route("/sensitive-default")
+        @step_up_required
+        def sensitive_default():
+            return "Access Granted"
+
+        @self.app.route("/sensitive-options", methods=["GET", "OPTIONS"])
+        @step_up_required(max_age=timedelta(seconds=self.TEN_MINUTES))
+        def sensitive_options():
+            return "ok"
+
+        @self.login_manager.user_loader
+        def load_user(user_id):
+            return USERS[int(user_id)]
+
+        @self.app.errorhandler(404)
+        def handle_404(e):
+            raise e
+
+        unittest.TestCase.setUp(self)
+
+    def _delete_session(self, c):
+        with c.session_transaction() as sess:
+            sess.clear()
+
+    def _login_and_advance(self, clock, elapsed):
+        with self.app.test_request_context():
+            self.login_manager.clock = clock
+            login_user(notch)
+            clock.value += elapsed
+            return step_up_status(self.TEN_MINUTES)
+
+    #
+    # Window semantics
+    #
+    def test_step_up_allowed_inside_window(self):
+        result = self._login_and_advance(FakeClock(1000.0), 599)
+        self.assertTrue(result.allowed)
+        self.assertIs(result.status, StepUpStatus.ALLOWED)
+        self.assertEqual(result.reason, "fresh")
+        self.assertEqual(result.max_age, float(self.TEN_MINUTES))
+        self.assertEqual(result.age, 599.0)
+
+    def test_step_up_boundary_second_is_inclusive(self):
+        boundary = self._login_and_advance(FakeClock(1000.0), self.TEN_MINUTES)
+        self.assertTrue(boundary.allowed)
+        self.assertEqual(boundary.age, float(self.TEN_MINUTES))
+
+        expired = self._login_and_advance(FakeClock(1000.0), self.TEN_MINUTES + 1)
+        self.assertTrue(expired.reauth_required)
+        self.assertEqual(expired.reason, "expired")
+        self.assertEqual(expired.age, float(self.TEN_MINUTES + 1))
+
+    def test_step_up_accepts_timedelta_and_seconds(self):
+        clock = FakeClock(2000.0)
+        with self.app.test_request_context():
+            self.login_manager.clock = clock
+            login_user(notch)
+            clock.value += 30
+            self.assertTrue(step_up_status(timedelta(minutes=10)).allowed)
+            self.assertTrue(step_up_status(600).allowed)
+            clock.value += 600
+            self.assertTrue(step_up_status(599.0).reauth_required)
+
+    def test_step_up_uses_configured_default_max_age(self):
+        self.login_manager.step_up_max_age = timedelta(seconds=self.TEN_MINUTES)
+        clock = FakeClock(3000.0)
+        with self.app.test_request_context():
+            self.login_manager.clock = clock
+            login_user(notch)
+            clock.value += self.TEN_MINUTES + 1
+            self.assertEqual(step_up_status().reason, "expired")
+
+        self.app.config["STEPUP_MAX_AGE"] = 10
+        with self.app.test_request_context():
+            self.login_manager.clock = clock
+            login_user(notch)
+            clock.value += 11
+            self.assertEqual(step_up_status().reason, "expired")
+
+    #
+    # Remember / confirm / logout flows
+    #
+    def test_step_up_remembered_session_requires_refresh(self):
+        with self.app.test_client() as c:
+            c.get("/login-notch-remember")
+            self._delete_session(c)
+            result = c.get("/step-up-check")
+            self.assertEqual(
+                "reauth_required|remembered", result.data.decode("utf-8")
+            )
+
+    def test_step_up_confirm_login_refreshes_auth_time(self):
+        clock = FakeClock(4000.0)
+        with self.app.test_client() as c:
+            self.login_manager.clock = clock
+            c.get("/login-notch-remember")
+            self._delete_session(c)
+            self.assertEqual(
+                "reauth_required|remembered",
+                c.get("/step-up-check").data.decode("utf-8"),
+            )
+            clock.value += 3600
+            c.get("/confirm-login")
+            self.assertEqual("allowed|fresh", c.get("/step-up-check").data.decode())
+
+    def test_step_up_failed_reauth_keeps_login_state(self):
+        with self.app.test_client() as c:
+            c.get("/login-notch-remember")
+            self._delete_session(c)
+            # Prime the remember-cookie restoration so the ordinary login
+            # state exists before the sensitive request is attempted.
+            c.get("/step-up-check")
+
+            with c.session_transaction() as before:
+                before_snapshot = dict(before)
+
+            blocked = c.get("/sensitive")
+            self.assertEqual(blocked.status_code, 302)
+            self.assertIn("/refresh-view", blocked.location)
+
+            with c.session_transaction() as after:
+                self.assertEqual(
+                    before_snapshot["_user_id"], after["_user_id"]
+                )
+                self.assertEqual(before_snapshot["_fresh"], after["_fresh"])
+                self.assertNotIn(AUTH_TIME_SESSION_KEY, after)
+            # The blocked request did not rotate the ordinary session id.
+            with c.session_transaction() as after:
+                self.assertEqual(after["_user_id"], str(notch.get_id()))
+                self.assertIs(after["_fresh"], False)
+
+            c.get("/confirm-login")
+            self.assertEqual(
+                "Access Granted", c.get("/sensitive").data.decode("utf-8")
+            )
+
+    def test_step_up_logout_clears_claim(self):
+        with self.app.test_request_context():
+            login_user(notch)
+            self.assertIn(AUTH_TIME_SESSION_KEY, session)
+            logout_user()
+            self.assertNotIn(AUTH_TIME_SESSION_KEY, session)
+
+    def test_step_up_non_fresh_login_has_no_claim(self):
+        with self.app.test_request_context():
+            login_user(notch, fresh=False)
+            self.assertNotIn(AUTH_TIME_SESSION_KEY, session)
+            result = step_up_status(self.TEN_MINUTES)
+            self.assertTrue(result.reauth_required)
+            self.assertEqual(result.reason, "missing_claim")
+
+    def test_step_up_check_does_not_modify_session(self):
+        with self.app.test_client() as c:
+            c.get("/login-notch-remember")
+            self._delete_session(c)
+            # The first request restores the login from the remember cookie.
+            c.get("/step-up-check")
+            with c.session_transaction() as before:
+                snapshot = dict(before)
+            c.get("/step-up-check")
+            with c.session_transaction() as after:
+                self.assertEqual(snapshot, dict(after))
+
+    #
+    # Missing / forged / future claims and clock rollback
+    #
+    def test_step_up_missing_claim_requires_refresh(self):
+        with self.app.test_request_context():
+            login_user(notch)
+            session.pop(AUTH_TIME_SESSION_KEY)
+            result = step_up_status(self.TEN_MINUTES)
+            self.assertEqual(result.reason, "missing_claim")
+            self.assertTrue(result.reauth_required)
+
+    def test_step_up_forged_claim_is_rejected(self):
+        with self.app.test_request_context():
+            login_user(notch)
+            # A raw, client-supplied timestamp cannot be trusted.
+            session[AUTH_TIME_SESSION_KEY] = "9999999999.0|deadbeef"
+            forged = step_up_status(self.TEN_MINUTES)
+            self.assertEqual(forged.reason, "forged_claim")
+
+            # A correctly signed claim for another user cannot be replayed.
+            session[AUTH_TIME_SESSION_KEY] = encode_auth_time(
+                self.login_manager.clock(), steve.get_id()
+            )
+            foreign = step_up_status(self.TEN_MINUTES)
+            self.assertEqual(foreign.reason, "forged_claim")
+
+    def test_step_up_malformed_claim_is_rejected(self):
+        from flask_login.utils import decode_auth_time
+
+        with self.app.test_request_context():
+            login_user(notch)
+            key = self.app.config["SECRET_KEY"]
+            # Signed but structurally malformed payloads.
+            session[AUTH_TIME_SESSION_KEY] = encode_cookie(
+                "stepup|1", key=key
+            )
+            self.assertIsNone(
+                decode_auth_time(session[AUTH_TIME_SESSION_KEY], notch.get_id())
+            )
+            session[AUTH_TIME_SESSION_KEY] = encode_cookie(
+                "stepup|1|not-a-number", key=key
+            )
+            self.assertIsNone(
+                decode_auth_time(session[AUTH_TIME_SESSION_KEY], notch.get_id())
+            )
+            # Non-string claims (e.g. a client-crafted integer) are safe.
+            session[AUTH_TIME_SESSION_KEY] = 12345
+            self.assertIsNone(
+                decode_auth_time(session[AUTH_TIME_SESSION_KEY], notch.get_id())
+            )
+            result = step_up_status(self.TEN_MINUTES)
+            self.assertEqual(result.reason, "forged_claim")
+
+    def test_step_up_cannot_store_plain_tamperable_timestamp(self):
+        with self.app.test_request_context():
+            login_user(notch)
+            claim = session[AUTH_TIME_SESSION_KEY]
+            self.assertNotIn(str(self.login_manager.clock()), claim)
+            self.assertIn("|", claim)
+
+    def test_step_up_future_timestamp_requires_refresh(self):
+        clock = FakeClock(5000.0)
+        with self.app.test_request_context():
+            self.login_manager.clock = clock
+            login_user(notch)
+            clock.value -= 100
+            result = step_up_status(self.TEN_MINUTES)
+            self.assertTrue(result.reauth_required)
+            self.assertEqual(result.reason, "clock_rolled_back")
+            self.assertEqual(result.age, -100.0)
+
+    def test_step_up_session_protection_downgrade_drops_claim(self):
+        self.app.config["SESSION_PROTECTION"] = "basic"
+        with self.app.test_client() as c:
+            c.get("/login-notch")
+            c.get("/step-up-check", headers=[("User-Agent", "different")])
+            with c.session_transaction() as sess:
+                self.assertNotIn(AUTH_TIME_SESSION_KEY, sess)
+            result = c.get("/step-up-check")
+            self.assertEqual(
+                "reauth_required|missing_claim", result.data.decode("utf-8")
+            )
+
+    #
+    # Configuration errors
+    #
+    def test_step_up_missing_max_age_is_config_error(self):
+        with self.app.test_request_context():
+            login_user(notch)
+            result = step_up_status()
+            self.assertTrue(result.config_error)
+            self.assertEqual(result.reason, "missing_max_age")
+            self.assertIsNone(result.max_age)
+
+    def test_step_up_invalid_max_age_is_config_error(self):
+        with self.app.test_request_context():
+            login_user(notch)
+            for bad in (0, -10, "600", True):
+                result = step_up_status(bad)
+                self.assertTrue(result.config_error, bad)
+                self.assertEqual(result.reason, "invalid_max_age", bad)
+
+    def test_step_up_missing_secret_key_is_config_error(self):
+        with self.app.test_request_context():
+            login_user(notch)
+            with patch.dict(self.app.config, {"SECRET_KEY": None}):
+                result = self.login_manager.step_up_check(self.TEN_MINUTES)
+            self.assertTrue(result.config_error)
+            self.assertEqual(result.reason, "missing_secret_key")
+
+    def test_step_up_decorator_reports_config_error(self):
+        @self.login_manager.step_up_config_error_handler
+        def on_error(result):
+            self.assertTrue(result.config_error)
+            return f"config-error:{result.reason}", 500
+
+        with self.app.test_client() as c:
+            c.get("/login-notch")
+            response = c.get("/sensitive-default")
+            self.assertEqual(response.status_code, 500)
+            self.assertEqual(
+                "config-error:missing_max_age", response.data.decode("utf-8")
+            )
+
+    def test_step_up_config_error_defaults_to_500(self):
+        with self.app.test_client() as c:
+            c.get("/login-notch")
+            response = c.get("/sensitive-default")
+            self.assertEqual(response.status_code, 500)
+
+    #
+    # Decorator behavior and regression of the ordinary decorators
+    #
+    def test_step_up_decorator_allows_and_blocks(self):
+        clock = FakeClock(6000.0)
+        with self.app.test_client() as c:
+            self.login_manager.clock = clock
+            c.get("/login-notch")
+            self.assertEqual(
+                "Access Granted", c.get("/sensitive").data.decode("utf-8")
+            )
+            clock.value += self.TEN_MINUTES + 1
+            blocked = c.get("/sensitive")
+            self.assertEqual(blocked.status_code, 302)
+            self.assertIn("/refresh-view", blocked.location)
+
+    def test_step_up_decorator_unauthenticated_uses_unauthorized(self):
+        with self.app.test_client() as c:
+            response = c.get("/sensitive")
+            self.assertEqual(response.status_code, 401)
+
+    def test_step_up_decorator_options_exempt(self):
+        with self.app.test_client() as c:
+            response = c.open("/sensitive-options", method="OPTIONS")
+            self.assertEqual(response.status_code, 200)
+
+    def test_ordinary_decorators_ignore_step_up_policy(self):
+        # The old boolean freshness semantics must be unchanged even though
+        # sessions now also carry a signed claim.
+        @self.app.route("/ordinary-fresh")
+        @fresh_login_required
+        def ordinary_fresh():
+            return "fresh-ok"
+
+        with self.app.test_client() as c:
+            c.get("/login-notch")
+            self.assertEqual("fresh-ok", c.get("/ordinary-fresh").data.decode())
+            self._delete_session(c)
+            self.assertEqual(401, c.get("/ordinary-fresh").status_code)
+            # A deleted browser session must log in again; emulate the
+            # remember-cookie restoration followed by confirm from the
+            # existing regression test.
+            c.get("/login-notch")
+            c.get("/confirm-login")
+            self.assertEqual("fresh-ok", c.get("/ordinary-fresh").data.decode())
+
+    def test_login_fresh_semantics_unchanged(self):
+        with self.app.test_request_context():
+            self.assertIs(login_fresh(), False)
+            login_user(notch)
+            self.assertIs(login_fresh(), True)
+        with self.app.test_request_context():
+            login_user(notch, fresh=False)
+            self.assertIs(login_fresh(), False)
+
+    def test_step_up_session_lifecycle_is_explainable(self):
+        # One session, every allow/block decision carries a stable reason.
+        clock = FakeClock(7000.0)
+        with self.app.test_client() as c:
+            self.login_manager.clock = clock
+
+            c.get("/login-notch-remember")
+            self._delete_session(c)
+
+            blocked_remembered = c.get("/step-up-check")
+            self.assertEqual(
+                "reauth_required|remembered",
+                blocked_remembered.data.decode("utf-8"),
+            )
+
+            c.get("/confirm-login")
+            self.assertEqual(
+                "allowed|fresh", c.get("/step-up-check").data.decode("utf-8")
+            )
+
+            clock.value += self.TEN_MINUTES
+            self.assertEqual(
+                "allowed|fresh", c.get("/step-up-check").data.decode("utf-8")
+            )
+
+            clock.value += 1
+            self.assertEqual(
+                "reauth_required|expired",
+                c.get("/step-up-check").data.decode("utf-8"),
+            )
+
+            # A second confirmation restores access without a new login.
+            c.get("/confirm-login")
+            self.assertEqual(
+                "allowed|fresh", c.get("/step-up-check").data.decode("utf-8")
+            )

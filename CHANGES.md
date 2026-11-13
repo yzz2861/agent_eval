@@ -18,6 +18,17 @@ Unreleased
 - Never look at the `X-Forwarded-For` header, always use `request.remote_addr`,
   requiring the developer to configure `ProxyFix` appropriately. #700
 - Remove `LOGIN_DISABLED` config. #697
+- Add an explicit step-up authentication policy. Fresh logins and
+  `confirm_login` now store a signed, user-bound authentication-time claim
+  (`_auth_time`) that cannot be forged or extended by the client. The new
+  `step_up_required` decorator and `step_up_status` helper enforce a
+  configurable maximum authentication age (with an inclusive boundary) and
+  return a structured `StepUpResult`/`StepUpStatus` (`allowed`,
+  `reauth_required`, `config_error`) instead of raising. Remember-cookie
+  restoration, missing/forged/future claims and clock rollback all force
+  reauthentication. The clock is injectable via `LoginManager.clock`.
+  Existing `login_required`, `fresh_login_required` and `login_fresh`
+  behavior is unchanged when the policy is not used.
 
 
 Version 0.6.3

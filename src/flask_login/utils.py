@@ -1,3 +1,6 @@
+from collections import namedtuple
+from datetime import timedelta
+from enum import Enum
 import hmac
 from functools import wraps
 from hashlib import sha512
@@ -23,6 +26,74 @@ from .signals import user_login_confirmed
 #: A proxy for the current user. If no user is logged in, this will be an
 #: anonymous user
 current_user = LocalProxy(lambda: _get_user())
+
+#: The session key holding the signed, tamper-evident timestamp of the most
+#: recent interactive authentication (a plain login or ``confirm_login``).
+AUTH_TIME_SESSION_KEY = "_auth_time"
+
+#: Marker embedded in the signed claim payload so a remember-me cookie value
+#: (which has the same ``payload|digest`` shape) can never be replayed as an
+#: authentication-time claim.
+_AUTH_TIME_PREFIX = "stepup"
+
+
+class StepUpStatus(str, Enum):
+    """Outcome of a step-up authentication check."""
+
+    #: The most recent interactive authentication is fresh enough.
+    ALLOWED = "allowed"
+    #: The user is authenticated, but must reauthenticate first.
+    REAUTH_REQUIRED = "reauth_required"
+    #: The step-up policy itself is misconfigured, so no decision is possible.
+    CONFIG_ERROR = "config_error"
+
+
+class StepUpResult(
+    namedtuple("StepUpResult", ["status", "reason", "max_age", "auth_time", "age"])
+):
+    """
+    The structured result of :func:`step_up_status` /
+    :meth:`LoginManager.step_up_check`.
+
+    :param status: A :class:`StepUpStatus` describing what the caller should do.
+    :param reason: A stable, machine-readable code explaining the decision.
+    :param max_age: The configured maximum age in seconds, or ``None`` on a
+        configuration error.
+    :param auth_time: The verified authentication time (epoch seconds), or
+        ``None`` when no valid claim was available.
+    :param age: The age of the verified authentication time in seconds, or
+        ``None`` when no valid claim was available.
+    """
+
+    __slots__ = ()
+
+    @property
+    def allowed(self):
+        """``True`` when the sensitive operation may proceed."""
+        return self.status is StepUpStatus.ALLOWED
+
+    @property
+    def reauth_required(self):
+        """``True`` when the user must reauthenticate before proceeding."""
+        return self.status is StepUpStatus.REAUTH_REQUIRED
+
+    @property
+    def config_error(self):
+        """``True`` when the step-up policy is misconfigured."""
+        return self.status is StepUpStatus.CONFIG_ERROR
+
+
+#: Stable reason codes returned on :class:`StepUpResult`.
+STEPUP_REASON_FRESH = "fresh"
+STEPUP_REASON_UNAUTHENTICATED = "unauthenticated"
+STEPUP_REASON_REMEMBERED = "remembered"
+STEPUP_REASON_MISSING_CLAIM = "missing_claim"
+STEPUP_REASON_FORGED_CLAIM = "forged_claim"
+STEPUP_REASON_CLOCK_ROLLED_BACK = "clock_rolled_back"
+STEPUP_REASON_EXPIRED = "expired"
+STEPUP_REASON_MISSING_MAX_AGE = "missing_max_age"
+STEPUP_REASON_INVALID_MAX_AGE = "invalid_max_age"
+STEPUP_REASON_MISSING_SECRET_KEY = "missing_secret_key"
 
 
 def encode_cookie(payload, key=None):
@@ -61,6 +132,59 @@ def decode_cookie(cookie, key=None):
 
     if hmac.compare_digest(_cookie_digest(payload, key=key), digest):
         return payload
+
+
+def encode_auth_time(auth_time, user_id, key=None):
+    """
+    Build a tamper-evident claim of an authentication time. The claim binds
+    the timestamp to the user id and is signed with the app's secret key, so a
+    client cannot forge one or make an old timestamp look newer.
+
+    :param auth_time: The authentication time as epoch seconds.
+    :type auth_time: int or float
+    :param user_id: The id of the user that authenticated.
+    :type user_id: str
+    :param key: The key to sign with. Defaults to the app ``SECRET_KEY``.
+    :type key: str
+    """
+    payload = f"{_AUTH_TIME_PREFIX}|{user_id}|{repr(float(auth_time))}"
+    return encode_cookie(payload, key=key)
+
+
+def decode_auth_time(claim, user_id, key=None):
+    """
+    Verify an authentication-time claim produced by
+    :func:`encode_auth_time`. Returns the authentication time as epoch
+    seconds, or ``None`` if the claim is missing, malformed, signed with a
+    different key, or belongs to another user.
+
+    :param claim: The signed claim stored in the session.
+    :type claim: str
+    :param user_id: The id of the current user.
+    :type user_id: str
+    :param key: The key to verify with. Defaults to the app ``SECRET_KEY``.
+    :type key: str
+    """
+    if not isinstance(claim, str):
+        return None
+
+    payload = decode_cookie(claim, key=key)
+
+    if payload is None:
+        return None
+
+    try:
+        prefix, claim_user_id, timestamp = payload.split("|", 2)
+    except ValueError:
+        return None
+
+    if prefix != _AUTH_TIME_PREFIX or claim_user_id != str(user_id):
+        return None
+
+    try:
+        return float(timestamp)
+    except ValueError:
+        return None
 
 
 def make_next_param(login_url, current_url):
@@ -183,6 +307,13 @@ def login_user(user, remember=False, duration=None, force=False, fresh=True):
     session["_fresh"] = fresh
     session["_id"] = current_app.login_manager._session_identifier_generator()
 
+    # Only an interactive (fresh) login establishes a recent authentication
+    # time. Non-fresh logins must not be able to pass a step-up check.
+    if fresh:
+        _set_auth_time(user_id)
+    else:
+        _clear_auth_time()
+
     if remember:
         session["_remember"] = "set"
         if duration is not None:
@@ -218,6 +349,8 @@ def logout_user():
     if "_id" in session:
         session.pop("_id")
 
+    _clear_auth_time()
+
     cookie_name = current_app.config.get("REMEMBER_COOKIE_NAME", COOKIE_NAME)
     if cookie_name in request.cookies:
         session["_remember"] = "clear"
@@ -237,7 +370,60 @@ def confirm_login():
     """
     session["_fresh"] = True
     session["_id"] = current_app.login_manager._session_identifier_generator()
+
+    # The reauthentication itself is a fresh proof of identity, so the
+    # authentication-time claim must be (re)issued, not merely toggled.
+    user_id = session.get("_user_id")
+    if user_id is not None:
+        _set_auth_time(user_id)
+
     user_login_confirmed.send(current_app._get_current_object())
+
+
+def _set_auth_time(user_id):
+    """Store a signed claim of the current authentication time."""
+    manager = current_app.login_manager
+    session[AUTH_TIME_SESSION_KEY] = encode_auth_time(
+        manager.clock(), user_id
+    )
+
+
+def _clear_auth_time():
+    """Remove any authentication-time claim from the session."""
+    if AUTH_TIME_SESSION_KEY in session:
+        session.pop(AUTH_TIME_SESSION_KEY)
+
+
+def _coerce_max_age(max_age):
+    """Normalize a step-up ``max_age`` argument to seconds."""
+    if isinstance(max_age, timedelta):
+        return max_age.total_seconds()
+    if isinstance(max_age, bool) or not isinstance(max_age, (int, float)):
+        return None
+    return float(max_age)
+
+
+def step_up_status(max_age=None):
+    """
+    Evaluate the explicit step-up authentication policy for the current
+    request without raising or redirecting. The decision is always returned
+    as a structured :class:`StepUpResult`; callers branch on
+    :attr:`StepUpResult.status` (or its ``allowed`` / ``reauth_required`` /
+    ``config_error`` properties) rather than parsing exception text.
+
+    A reauthentication is required when the most recent interactive
+    authentication is older than ``max_age``, its signed claim is missing or
+    forged, the timestamp lies in the future (for example after a clock
+    rollback), or the session was restored from a "remember me" cookie
+    without a fresh confirmation.
+
+    :param max_age: Maximum accepted age of the authentication. Accepts a
+        :class:`datetime.timedelta` or a number of seconds. When ``None``,
+        the ``STEPUP_MAX_AGE`` app config or the
+        :attr:`LoginManager.step_up_max_age` attribute is used.
+    :type max_age: datetime.timedelta or int or float or None
+    """
+    return current_app.login_manager.step_up_check(max_age)
 
 
 def login_required(func):
@@ -326,6 +512,65 @@ def fresh_login_required(func):
             return func(*args, **kwargs)
 
     return decorated_view
+
+
+def step_up_required(func=None, max_age=None):
+    """
+    Protect a view with an explicit step-up authentication policy. Unlike
+    :func:`fresh_login_required`, which only checks a boolean flag, this
+    enforces a maximum age on the most recent interactive authentication,
+    backed by a signed timestamp that a client cannot forge or extend.
+
+    It can be applied bare (``@step_up_required``, using the configured
+    default maximum age) or parameterized::
+
+        @app.route("/payment-account")
+        @step_up_required(max_age=timedelta(minutes=10))
+        def change_payout_account():
+            ...
+
+    Unauthenticated users are handled by
+    :meth:`LoginManager.unauthorized`; authenticated users with a stale,
+    missing, forged or remembered authentication are handled by
+    :meth:`LoginManager.needs_refresh`. A policy misconfiguration (no
+    maximum age configured, an invalid age, or no secret key) is reported
+    separately through :meth:`LoginManager.step_up_config_error` instead of
+    being mistaken for a missing login.
+
+    HTTP ``OPTIONS`` requests are exempt, matching the other decorators.
+
+    :param func: The view function to decorate.
+    :type func: function
+    :param max_age: Maximum accepted age of the authentication, as a
+        :class:`datetime.timedelta` or a number of seconds. When ``None``,
+        the ``STEPUP_MAX_AGE`` app config or
+        :attr:`LoginManager.step_up_max_age` is used.
+    :type max_age: datetime.timedelta or int or float or None
+    """
+
+    def decorator(view_func):
+        @wraps(view_func)
+        def decorated_view(*args, **kwargs):
+            if request.method in EXEMPT_METHODS:
+                pass
+            elif not current_user.is_authenticated:
+                return current_app.login_manager.unauthorized()
+            else:
+                result = step_up_status(max_age)
+                if result.config_error:
+                    return current_app.login_manager.step_up_config_error(result)
+                if result.reauth_required:
+                    return current_app.login_manager.needs_refresh()
+
+            if callable(getattr(current_app, "ensure_sync", None)):
+                return current_app.ensure_sync(view_func)(*args, **kwargs)
+            return view_func(*args, **kwargs)
+
+        return decorated_view
+
+    if func is not None:
+        return decorator(func)
+    return decorator
 
 
 def set_login_view(login_view, blueprint=None):

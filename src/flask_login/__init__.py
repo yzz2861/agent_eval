@@ -33,6 +33,10 @@ from .utils import login_user
 from .utils import logout_user
 from .utils import make_next_param
 from .utils import set_login_view
+from .utils import StepUpResult
+from .utils import StepUpStatus
+from .utils import step_up_required
+from .utils import step_up_status
 
 __all__ = [
     "COOKIE_DURATION",
@@ -70,6 +74,10 @@ __all__ = [
     "logout_user",
     "make_next_param",
     "set_login_view",
+    "StepUpResult",
+    "StepUpStatus",
+    "step_up_required",
+    "step_up_status",
 ]
 
 
