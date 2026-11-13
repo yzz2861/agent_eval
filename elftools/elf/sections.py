@@ -329,12 +329,29 @@ class SUNWSyminfoTableSection(Section):
 class NoteSection(Section):
     """ ELF NOTE section. Knows how to parse notes.
     """
-    def iter_notes(self) -> Iterator[Container]:
+    def iter_notes(
+        self,
+        *,
+        duplicate_policy: str = 'all',
+        on_error: str = 'raise',
+    ) -> Iterator[Container]:
         """ Yield all the notes in the section.  Each result is a dictionary-
             like object with "n_name", "n_type", and "n_desc" fields, amongst
-            others.
+            others. Notes are bounded by this section; use ``duplicate_policy``
+            to keep/mark duplicate owner/type pairs or reject them, and
+            ``on_error`` to raise or return a corrupt-note record.
         """
-        return iter_notes(self.elffile, self['sh_offset'], self['sh_size'])
+        return iter_notes(
+            self.elffile,
+            self['sh_offset'],
+            self['sh_size'],
+            source=self,
+            source_type='section',
+            source_name=self.name,
+            vaddr=self.header.get('sh_addr'),
+            duplicate_policy=duplicate_policy,
+            on_error=on_error,
+        )
 
 
 class StabSection(Section):

@@ -135,9 +135,27 @@ class NoteSegment(Segment):
         super().__init__(header, stream)
         self.elffile = elffile
 
-    def iter_notes(self) -> Iterator[Container]:
+    def iter_notes(
+        self,
+        *,
+        duplicate_policy: str = 'all',
+        on_error: str = 'raise',
+    ) -> Iterator[Container]:
         """ Yield all the notes in the segment.  Each result is a dictionary-
             like object with "n_name", "n_type", and "n_desc" fields, amongst
-            others.
+            others. Notes are bounded by this segment; use
+            ``duplicate_policy`` to keep/mark duplicate owner/type pairs or
+            reject them, and ``on_error`` to raise or return a corrupt-note
+            record.
         """
-        return iter_notes(self.elffile, self['p_offset'], self['p_filesz'])
+        return iter_notes(
+            self.elffile,
+            self['p_offset'],
+            self['p_filesz'],
+            source=self,
+            source_type='segment',
+            source_name=None,
+            vaddr=self.header.get('p_vaddr'),
+            duplicate_policy=duplicate_policy,
+            on_error=on_error,
+        )
