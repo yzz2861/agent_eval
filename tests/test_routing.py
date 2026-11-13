@@ -7,9 +7,10 @@ import typing as t
 import uuid
 
 import pytest
-
 from werkzeug import routing as r
+from werkzeug.datastructures import Headers
 from werkzeug.datastructures import MultiDict
+from werkzeug.exceptions import BadHost
 from werkzeug.exceptions import MethodNotAllowed
 from werkzeug.exceptions import NotFound
 from werkzeug.exceptions import SecurityError
@@ -1506,6 +1507,198 @@ class TestHostMatching(_Routing):
             self._build("page", base_url="app.test", domain="personal.test")
             == "http://app.personal.test/page/"
         )
+
+
+@pytest.mark.parametrize(
+    ("host", "scheme", "expected"),
+    [
+        ("admin.example.com.", "http", "admin.example.com"),
+        ("admin.example.com:80", "http", "admin.example.com"),
+        ("admin.example.com:443", "https", "admin.example.com"),
+        ("admin\u3002example\uff0ecom", "http", "admin.example.com"),
+        ("admin\uff61example.com", "http", "admin.example.com"),
+        ("ADMIN.EXAMPLE.COM", "http", "admin.example.com"),
+        ("münchen.example.com", "http", "xn--mnchen-3ya.example.com"),
+        ("MÜNCHEN.EXAMPLE.COM.", "http", "xn--mnchen-3ya.example.com"),
+        ("xn--mnchen-3ya.example.com", "http", "xn--mnchen-3ya.example.com"),
+        ("127.0.0.1", "http", "127.0.0.1"),
+        ("127.0.0.1:80", "http", "127.0.0.1"),
+        ("[::1]", "http", "[::1]"),
+        ("[0:0:0:0:0:0:0:1]:443", "https", "[::1]"),
+    ],
+)
+def test_strict_vhost_normalization(host, scheme, expected):
+    assert r.normalize_vhost(host, scheme=scheme) == expected
+    assert r.normalize_virtual_host(host, scheme=scheme) == expected
+
+
+@pytest.mark.parametrize(
+    ("host", "scheme", "reason"),
+    [
+        ("", None, "empty-host"),
+        (":443", "https", "empty-host"),
+        ("admin.example.com:8443", "https", "non-default-port"),
+        ("admin.example.com:443", "http", "non-default-port"),
+        ("admin.example.com:0", "http", "invalid-port"),
+        ("admin.example.com:65536", "http", "invalid-port"),
+        ("admin.example.com:http", "http", "invalid-port"),
+        ("admin.example.com:80", None, "port-requires-scheme"),
+        ("admin.example.com:443:443", "https", "multiple-host-separators"),
+        ("::1", "http", "multiple-host-separators"),
+        ("%41dmin.example.com", None, "percent-encoded-host"),
+        ("admin.example.com..", None, "multiple-trailing-dots"),
+        ("admin..example.com", None, "empty-label"),
+        ("a" * 64 + ".example.com", None, "label-too-long"),
+        (
+            "a" * 63 + "." + "b" * 63 + "." + "c" * 63 + "." + "d" * 63,
+            None,
+            "host-too-long",
+        ),
+        ("[::1", None, "invalid-ipv6"),
+        ("[not-an-ip]", None, "invalid-ipv6"),
+    ],
+)
+def test_strict_vhost_rejection_reasons(host, scheme, reason):
+    with pytest.raises(r.InvalidVirtualHost) as exc_info:
+        r.normalize_vhost(host, scheme=scheme)
+
+    assert exc_info.value.reason == reason
+
+
+def test_strict_vhost_bind_rejection_reasons():
+    url_map = r.Map(
+        [r.Rule("/", host="admin.example.com", endpoint="admin")],
+        host_matching=True,
+        strict_vhost=True,
+    )
+
+    with pytest.raises(BadHost) as exc_info:
+        url_map.bind_to_request(
+            Request.from_values(
+                "/",
+                base_url="https://example.test",
+                headers={"Host": "admin.example.com:8443"},
+            )
+        )
+
+    assert exc_info.value.reason == "non-default-port"
+
+    with pytest.raises(BadHost) as exc_info:
+        url_map.bind_to_request(
+            Request.from_values(
+                "/",
+                base_url="http://example.test",
+                headers=Headers(
+                    [("Host", "admin.example.com"), ("Host", "other.test")]
+                ),
+            )
+        )
+
+    assert exc_info.value.reason == "multiple-host-headers"
+
+
+def test_strict_vhost_multitenant_host_routing():
+    url_map = r.Map(
+        [
+            r.Rule("/admin", host="admin.example.com.", endpoint="tenant-admin"),
+            r.Rule("/api", host="admin.example.com", endpoint="internal-api"),
+            r.Rule("/acme", host="acme.example.com", endpoint="tenant-acme"),
+            r.Rule("/ip", host="127.0.0.1", endpoint="ipv4"),
+            r.Rule("/ipv6", host="[::1]", endpoint="ipv6"),
+            r.Rule("/idna", host="münchen.example.com", endpoint="idna"),
+        ],
+        host_matching=True,
+        strict_vhost=True,
+    )
+
+    cases = [
+        ("admin.example.com.", "/admin", "http", "tenant-admin"),
+        ("admin.example.com:443", "/admin", "https", "tenant-admin"),
+        ("admin\uff0eexample\uff0ecom", "/admin", "http", "tenant-admin"),
+        ("ADMIN.EXAMPLE.COM", "/api", "http", "internal-api"),
+        ("acme.example.com", "/acme", "http", "tenant-acme"),
+        ("127.0.0.1", "/ip", "http", "ipv4"),
+        ("[::1]:443", "/ipv6", "https", "ipv6"),
+        ("münchen.example.com", "/idna", "http", "idna"),
+        ("xn--mnchen-3ya.example.com", "/idna", "http", "idna"),
+    ]
+
+    for host, path, scheme, endpoint in cases:
+        adapter = url_map.bind_to_request(
+            Request.from_values(
+                path, base_url=f"{scheme}://example.test", headers={"Host": host}
+            )
+        )
+        assert adapter.match(path) == (endpoint, {})
+
+
+def test_strict_vhost_build_and_match_share_idna_key():
+    url_map = r.Map(
+        [r.Rule("/tenant/<slug>", host="<tenant>.example.com", endpoint="tenant")],
+        host_matching=True,
+        strict_vhost=True,
+    )
+    adapter = url_map.bind("admin.example.com")
+
+    url = adapter.build("tenant", {"tenant": "münchen", "slug": "one"})
+    assert url == "http://xn--mnchen-3ya.example.com/tenant/one"
+
+    inbound = url_map.bind("xn--mnchen-3ya.example.com")
+    assert inbound.match("/tenant/one") == (
+        "tenant",
+        {"tenant": "xn--mnchen-3ya", "slug": "one"},
+    )
+
+
+def test_strict_vhost_partial_dynamic_idna_label_is_rejected():
+    url_map = r.Map(
+        [r.Rule("/x", host="tenant-<tenant>.example.com", endpoint="tenant")],
+        host_matching=True,
+        strict_vhost=True,
+    )
+    adapter = url_map.bind("example.com")
+
+    assert adapter.build("tenant", {"tenant": "acme"}) == (
+        "http://tenant-acme.example.com/x"
+    )
+
+    with pytest.raises(r.InvalidVirtualHost) as exc_info:
+        adapter.build("tenant", {"tenant": "münchen"})
+
+    assert exc_info.value.reason == "partial-dynamic-label"
+
+
+def test_strict_vhost_disabled_by_default():
+    url_map = r.Map(
+        [r.Rule("/", host="admin.example.com", endpoint="admin")],
+        host_matching=True,
+    )
+    adapter = url_map.bind("ADMIN.EXAMPLE.COM.")
+
+    assert adapter.server_name == "admin.example.com."
+
+    with pytest.raises(NotFound):
+        adapter.match("/")
+
+
+def test_strict_vhost_subdomain_mismatch_does_not_fall_back():
+    url_map = r.Map(
+        [
+            r.Rule("/", endpoint="default"),
+            r.Rule("/", subdomain="tenant", endpoint="tenant"),
+        ],
+        strict_vhost=True,
+    )
+
+    with pytest.raises(BadHost) as exc_info:
+        url_map.bind_to_request(
+            Request.from_values(
+                "/", base_url="http://other.test", headers={"Host": "other.test"}
+            ),
+            server_name="example.com",
+        )
+
+    assert exc_info.value.reason == "subdomain-mismatch"
 
 
 class TestNoDomainMatching(_Routing):

@@ -17,6 +17,7 @@ from ..exceptions import HTTPException
 from ..exceptions import MethodNotAllowed
 from ..exceptions import NotFound
 from ..sansio.request import Request as SansIORequest
+from ..sansio.utils import host_is_trusted
 from ..urls import _urlencode
 from ..wrappers.request import Request
 from . import converters
@@ -29,10 +30,18 @@ from .exceptions import RequestRedirect
 from .exceptions import WebsocketMismatch
 from .matcher import StateMachineMatcher
 from .rules import _simple_rule_re
+from .rules import InvalidVirtualHost
+from .rules import parse_virtual_host
 from .rules import Rule
 
 if t.TYPE_CHECKING:
     from .rules import RuleFactory
+
+
+def _bad_host(error: InvalidVirtualHost) -> BadHost:
+    exc = BadHost(description=f"Invalid Host: {error.reason}")
+    exc.reason = error.reason  # type: ignore[attr-defined]
+    return exc
 
 
 class Map:
@@ -68,9 +77,14 @@ class Map:
         of each :class:`Rule`, which defaults to ``default_subdomain``, which
         defaults to empty. Enabled by default, but always disabled if
         ``host_matching`` is enabled.
+    :param strict_vhost: Enable strict virtual host canonicalization. Incoming
+        hosts and rule hosts are lowercased, Unicode dots are mapped, one
+        trailing dot is removed, and IDNA encoding is applied after removing
+        IPv6 brackets and a default port. Non-default ports and ambiguous hosts
+        are rejected. Disabled by default.
 
     .. versionchanged:: 3.2
-        The ``subdomain_matching`` parameter was added.
+        The ``subdomain_matching`` and ``strict_vhost`` parameters were added.
 
     .. versionchanged:: 3.0
         The ``charset`` and ``encoding_errors`` parameters were removed.
@@ -121,8 +135,13 @@ class Map:
         host_matching: bool = False,
         *,
         subdomain_matching: bool = True,
+        strict_vhost: bool = False,
+        strict_virtual_host: bool | None = None,
     ) -> None:
-        self._matcher = StateMachineMatcher(merge_slashes)
+        if strict_virtual_host is not None:
+            strict_vhost = strict_vhost or strict_virtual_host
+
+        self._matcher = StateMachineMatcher(merge_slashes, strict_vhost=strict_vhost)
         self._rules_by_endpoint: dict[t.Any, list[Rule]] = {}
         self._remap = True
         self._remap_lock = self.lock_class()
@@ -132,6 +151,7 @@ class Map:
         self.redirect_defaults = redirect_defaults
         self.subdomain_matching = subdomain_matching and not host_matching
         self.host_matching = host_matching
+        self.strict_vhost = strict_vhost
 
         self.converters = dict(self.default_converters)
 
@@ -260,18 +280,27 @@ class Map:
         if path_info is None:
             path_info = "/"
 
-        # Port isn't part of IDNA, and might push a name over the 63 octet limit.
-        server_name, port_sep, port = server_name.lower().partition(":")
+        if self.strict_vhost:
+            try:
+                server_name = parse_virtual_host(server_name, scheme=url_scheme).name
+            except InvalidVirtualHost as e:
+                raise _bad_host(e) from e
+        else:
+            # Port isn't part of IDNA, and might push a name over the 63 octet
+            # limit.
+            server_name, port_sep, port = server_name.lower().partition(":")
 
-        try:
-            server_name = server_name.encode("idna").decode("ascii")
-        except UnicodeError as e:
-            raise BadHost() from e
+            try:
+                server_name = server_name.encode("idna").decode("ascii")
+            except UnicodeError as e:
+                raise BadHost() from e
+
+            server_name = f"{server_name}{port_sep}{port}"
 
         return MapAdapter(
             map=self,
             url_scheme=url_scheme,
-            server_name=f"{server_name}{port_sep}{port}",
+            server_name=server_name,
             subdomain=subdomain,
             default_method=default_method,
             script_name=script_name,
@@ -388,7 +417,6 @@ class Map:
 
         .. versionadded:: 3.2
         """
-        wsgi_server_name = request.host.lower()
         scheme = request.scheme
 
         if "upgrade" in HeaderSet.from_header(
@@ -396,8 +424,39 @@ class Map:
         ) and "websocket" in HeaderSet.from_header(request.headers.get("Upgrade")):
             scheme = "wss" if scheme == "https" else "ws"
 
+        if self.strict_vhost:
+            host_values = request.headers.getlist("Host")
+
+            if len(host_values) > 1 or (host_values and "," in host_values[0]):
+                raise _bad_host(
+                    InvalidVirtualHost(",".join(host_values), "multiple-host-headers")
+                )
+
+            raw_host = host_values[0] if host_values else request.host
+
+            try:
+                virtual_host = parse_virtual_host(raw_host, scheme=scheme)
+            except InvalidVirtualHost as e:
+                raise _bad_host(e) from e
+
+            if request.trusted_hosts and not host_is_trusted(
+                virtual_host.name, request.trusted_hosts
+            ):
+                from ..exceptions import SecurityError
+
+                raise SecurityError(f"Host {virtual_host.name!r} is not trusted.")
+
+            wsgi_server_name = virtual_host.name
+        else:
+            wsgi_server_name = request.host.lower()
+
         if server_name is None or self.host_matching:
             server_name = wsgi_server_name
+        elif self.strict_vhost:
+            try:
+                server_name = parse_virtual_host(server_name, scheme=scheme).name
+            except InvalidVirtualHost as e:
+                raise _bad_host(e) from e
         else:
             server_name = server_name.lower()
 
@@ -416,6 +475,11 @@ class Map:
                 # Host does not have server_name as a suffix. This can happen if
                 # the server was accessed by IP, or other names point to it in
                 # DNS. bind will use default_subdomain.
+                if self.strict_vhost:
+                    raise _bad_host(
+                        InvalidVirtualHost(wsgi_server_name, "subdomain-mismatch")
+                    )
+
                 warnings.warn(
                     "Couldn't determine current subdomain, but subdomain"
                     " matching is enabled. Using configured default"
@@ -786,19 +850,27 @@ class MapAdapter:
         """
         if self.map.host_matching:
             if domain_part is None:
-                return self.server_name
-
-            return domain_part
-
-        if domain_part is None:
-            subdomain = self.subdomain
+                host = self.server_name
+            else:
+                host = domain_part
         else:
-            subdomain = domain_part
+            if domain_part is None:
+                subdomain = self.subdomain
+            else:
+                subdomain = domain_part
 
-        if subdomain:
-            return f"{subdomain}.{self.server_name}"
-        else:
-            return self.server_name
+            if subdomain:
+                host = f"{subdomain}.{self.server_name}"
+            else:
+                host = self.server_name
+
+        if self.map.strict_vhost:
+            try:
+                return parse_virtual_host(host, scheme=self.url_scheme).name
+            except InvalidVirtualHost as e:
+                raise _bad_host(e) from e
+
+        return host
 
     def get_default_redirect(
         self,
@@ -902,7 +974,17 @@ class MapAdapter:
                 if build_rv is not None:
                     rv = (build_rv[0], build_rv[1], rule.websocket)
                     if self.map.host_matching:
-                        if rv[0] == self.server_name:
+                        domain = rv[0]
+
+                        if self.map.strict_vhost:
+                            try:
+                                domain = parse_virtual_host(
+                                    domain, scheme=self.url_scheme
+                                ).name
+                            except InvalidVirtualHost as e:
+                                raise _bad_host(e) from e
+
+                        if domain == self.server_name:
                             return rv
                         elif first_match is None:
                             first_match = rv

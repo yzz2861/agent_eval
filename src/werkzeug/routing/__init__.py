@@ -125,10 +125,15 @@ from .map import Map as Map
 from .map import MapAdapter as MapAdapter
 from .matcher import StateMachineMatcher as StateMachineMatcher
 from .rules import EndpointPrefix as EndpointPrefix
+from .rules import InvalidVirtualHost as InvalidVirtualHost
+from .rules import normalize_vhost as normalize_vhost
+from .rules import normalize_virtual_host as normalize_virtual_host
 from .rules import parse_converter_args as parse_converter_args
+from .rules import parse_virtual_host as parse_virtual_host
 from .rules import Rule as Rule
 from .rules import RuleFactory as RuleFactory
 from .rules import RuleTemplate as RuleTemplate
 from .rules import RuleTemplateFactory as RuleTemplateFactory
 from .rules import Subdomain as Subdomain
 from .rules import Submount as Submount
+from .rules import VirtualHost as VirtualHost

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import ast
+import ipaddress
 import re
 import typing as t
+import unicodedata
 from dataclasses import dataclass
 from string import Template
 from types import CodeType
 from urllib.parse import quote
+from urllib.parse import unquote
 
 from ..datastructures.structures import iter_multi_items
 from ..urls import _urlencode
@@ -82,6 +85,362 @@ _converter_args_re = re.compile(
 )
 
 _PYTHON_CONSTANTS = {"None": None, "True": True, "False": False}
+
+
+_VIRTUAL_HOST_MAX_LENGTH = 253
+_VIRTUAL_HOST_LABEL_MAX_LENGTH = 63
+_VIRTUAL_HOST_DEFAULT_PORTS = {
+    "http": 80,
+    "ws": 80,
+    "https": 443,
+    "wss": 443,
+}
+_VIRTUAL_HOST_DOT_TABLE = str.maketrans(
+    {
+        "\u3002": ".",  # ideographic full stop
+        "\uff0e": ".",  # fullwidth full stop
+        "\uff61": ".",  # halfwidth ideographic full stop
+    }
+)
+_VIRTUAL_HOST_LABEL_RE = re.compile(r"[a-z0-9_](?:[a-z0-9_-]*[a-z0-9_])?\Z")
+_VIRTUAL_HOST_FRAGMENT_RE = re.compile(r"[a-z0-9_-]*\Z")
+_VIRTUAL_HOST_IPV4_RE = re.compile(r"[0-9]+(?:\.[0-9]+){3}\Z")
+
+
+class InvalidVirtualHost(ValueError):
+    """Raised when a strict virtual host value can't be canonicalized.
+
+    The :attr:`reason` attribute is a stable identifier that can be used to
+    distinguish invalid input without parsing the exception message.
+
+    .. versionadded:: 3.2
+    """
+
+    def __init__(self, host: str, reason: str) -> None:
+        self.host = host
+        self.reason = reason
+        super().__init__(f"Invalid virtual host {host!r}: {reason}")
+
+
+@dataclass(frozen=True)
+class VirtualHost:
+    """A canonical virtual host key.
+
+    :attr:`name` is lowercase ASCII, has no port or trailing dot, and uses
+    brackets for IPv6 literals. It is the key used by routing rules and
+    incoming requests.
+
+    .. versionadded:: 3.2
+    """
+
+    name: str
+    port: int | None = None
+    scheme: str | None = None
+    bracketed: bool = False
+
+    @property
+    def key(self) -> str:
+        return self.name
+
+    def __str__(self) -> str:
+        return self.name
+
+
+def _invalid_vhost(host: str, reason: str) -> InvalidVirtualHost:
+    return InvalidVirtualHost(host, reason)
+
+
+def _parse_port(host: str, value: str, scheme: str | None) -> int:
+    if not value or not value.isascii() or not value.isdigit():
+        raise _invalid_vhost(host, "invalid-port")
+
+    if len(value) > 1 and value[0] == "0":
+        raise _invalid_vhost(host, "invalid-port")
+
+    port = int(value)
+
+    if not 1 <= port <= 65535:
+        raise _invalid_vhost(host, "invalid-port")
+
+    if scheme is None:
+        raise _invalid_vhost(host, "port-requires-scheme")
+
+    default_port = _VIRTUAL_HOST_DEFAULT_PORTS.get(scheme.lower())
+
+    if default_port is None:
+        raise _invalid_vhost(host, "invalid-scheme")
+
+    if port != default_port:
+        raise _invalid_vhost(host, "non-default-port")
+
+    return port
+
+
+def _encode_vhost_label(host: str, label: str) -> str:
+    if not label:
+        raise _invalid_vhost(host, "empty-label")
+
+    if len(label) > _VIRTUAL_HOST_LABEL_MAX_LENGTH:
+        raise _invalid_vhost(host, "label-too-long")
+
+    try:
+        encoded = label.encode("idna").decode("ascii")
+    except UnicodeError as e:
+        reason = "label-too-long" if len(label) > 16 else "idna-error"
+        raise _invalid_vhost(host, reason) from e
+
+    if len(encoded) > _VIRTUAL_HOST_LABEL_MAX_LENGTH:
+        raise _invalid_vhost(host, "label-too-long")
+
+    if _VIRTUAL_HOST_LABEL_RE.fullmatch(encoded) is None:
+        raise _invalid_vhost(host, "invalid-host")
+
+    return encoded
+
+
+def parse_virtual_host(
+    host: str, *, scheme: str | None = None, strict: bool = True
+) -> VirtualHost:
+    """Parse a host into a canonical :class:`VirtualHost`.
+
+    Strict mode removes one trailing dot, maps Unicode dot variants, lowercases
+    the name, and performs IDNA encoding after removing the port and IPv6
+    brackets. The resulting key is the same for Unicode and ASCII spellings of
+    a host.
+
+    Explicit ports are only accepted when *scheme* is given and the port is the
+    scheme's default port, in which case it is removed from the key. This
+    prevents a routing key from being ambiguous. IPv4 and IPv6 literals are
+    supported, IPv6 must be bracketed.
+
+    :param host: The host value to normalize.
+    :param scheme: The URL scheme, used to determine the default port.
+    :param strict: Enable strict virtual host validation.
+    :raise InvalidVirtualHost: If the host is invalid. Its ``reason`` explains
+        the rejection.
+
+    .. versionadded:: 3.2
+    """
+    if not strict:
+        # Only used internally as a fast path when strict mode is disabled.
+        name, _, _ = host.lower().partition(":")
+        return VirtualHost(name=name.encode("idna").decode("ascii"))
+
+    if not isinstance(host, str) or not host:
+        raise _invalid_vhost(str(host), "empty-host")
+
+    if any(character.isspace() or ord(character) < 32 for character in host):
+        raise _invalid_vhost(host, "invalid-host")
+
+    if "%" in host:
+        raise _invalid_vhost(host, "percent-encoded-host")
+
+    host = unicodedata.normalize("NFC", host.translate(_VIRTUAL_HOST_DOT_TABLE))
+
+    if not host:
+        raise _invalid_vhost(host, "empty-host")
+
+    port_str: str | None = None
+    bracketed = False
+
+    if host.startswith("["):
+        close = host.find("]")
+
+        if close == -1 or "]" in host[close + 1 :]:
+            raise _invalid_vhost(host, "invalid-ipv6")
+
+        literal = host[1:close]
+        remainder = host[close + 1 :]
+
+        if remainder:
+            if not remainder.startswith(":"):
+                raise _invalid_vhost(host, "invalid-ipv6")
+
+            if remainder.count(":") != 1:
+                raise _invalid_vhost(host, "multiple-host-separators")
+
+            port_str = remainder[1:]
+
+        if not literal:
+            raise _invalid_vhost(host, "empty-host")
+
+        try:
+            address = ipaddress.IPv6Address(literal)
+        except ValueError as e:
+            raise _invalid_vhost(host, "invalid-ipv6") from e
+
+        name = f"[{address.compressed}]"
+        bracketed = True
+    else:
+        separators = host.count(":")
+
+        if separators > 1:
+            raise _invalid_vhost(host, "multiple-host-separators")
+
+        if separators == 1:
+            name, _, port_str = host.partition(":")
+        else:
+            name = host
+
+        if not name:
+            raise _invalid_vhost(host, "empty-host")
+
+        if name.endswith("."):
+            name = name[:-1]
+
+            if name.endswith("."):
+                raise _invalid_vhost(host, "multiple-trailing-dots")
+
+        if not name:
+            raise _invalid_vhost(host, "empty-host")
+
+        name = name.lower()
+
+        if _VIRTUAL_HOST_IPV4_RE.fullmatch(name) is not None:
+            try:
+                name = str(ipaddress.IPv4Address(name))
+            except ValueError as e:
+                raise _invalid_vhost(host, "invalid-ipv4") from e
+        else:
+            if len(name) > _VIRTUAL_HOST_MAX_LENGTH:
+                raise _invalid_vhost(host, "host-too-long")
+
+            labels = name.split(".")
+
+            if any(not label for label in labels):
+                raise _invalid_vhost(host, "empty-label")
+
+            name = ".".join(_encode_vhost_label(host, label) for label in labels)
+
+    if len(name) > _VIRTUAL_HOST_MAX_LENGTH:
+        raise _invalid_vhost(host, "host-too-long")
+
+    port = None
+
+    if port_str is not None:
+        port = _parse_port(host, port_str, scheme)
+
+    return VirtualHost(
+        name=name,
+        port=port,
+        scheme=scheme.lower() if scheme is not None else None,
+        bracketed=bracketed,
+    )
+
+
+def normalize_virtual_host(
+    host: str, *, scheme: str | None = None, strict: bool = True
+) -> str:
+    """Return the canonical routing key for *host*.
+
+    This is a convenience wrapper around :func:`parse_virtual_host`.
+
+    .. versionadded:: 3.2
+    """
+    return parse_virtual_host(host, scheme=scheme, strict=strict).name
+
+
+# Compatibility alias for callers that use the shorter host spelling.
+normalize_vhost = normalize_virtual_host
+
+
+def _normalize_vhost_pattern(pattern: str) -> str:
+    """Normalize the static parts of a host rule pattern.
+
+    Placeholders are left intact. Literal labels use the same normalizer as
+    incoming hosts, so rule compilation and matching produce the same key.
+    """
+    if not pattern:
+        raise _invalid_vhost(pattern, "empty-host")
+
+    if "<" not in pattern:
+        return normalize_virtual_host(pattern)
+
+    pattern = unicodedata.normalize("NFC", pattern.translate(_VIRTUAL_HOST_DOT_TABLE))
+
+    if "%" in pattern:
+        raise _invalid_vhost(pattern, "percent-encoded-host")
+
+    if pattern.endswith("."):
+        pattern = pattern[:-1]
+
+        if pattern.endswith("."):
+            raise _invalid_vhost(pattern, "multiple-trailing-dots")
+
+    labels: list[str] = []
+    current = ""
+    in_placeholder = False
+
+    for character in pattern:
+        if character == "<" and not in_placeholder:
+            in_placeholder = True
+            current += character
+        elif character == ">" and in_placeholder:
+            in_placeholder = False
+            current += character
+        elif character == "." and not in_placeholder:
+            labels.append(current)
+            current = ""
+        else:
+            current += character
+
+    if in_placeholder:
+        raise _invalid_vhost(pattern, "invalid-host-rule")
+
+    labels.append(current)
+
+    normalized: list[str] = []
+
+    for label in labels:
+        if not label:
+            raise _invalid_vhost(pattern, "empty-label")
+
+        if "<" not in label:
+            normalized.append(normalize_virtual_host(label))
+            continue
+
+        static = re.sub(r"<[^>]+>", "", label)
+
+        if not static.isascii():
+            # IDNA applies to a complete label. A non-ASCII static fragment
+            # can't be encoded independently of the dynamic value.
+            raise _invalid_vhost(pattern, "dynamic-idna-label")
+
+        if _VIRTUAL_HOST_FRAGMENT_RE.fullmatch(static) is None:
+            raise _invalid_vhost(pattern, "invalid-host")
+
+        normalized.append(label)
+
+    result = ".".join(normalized)
+
+    if len(result) > _VIRTUAL_HOST_MAX_LENGTH:
+        raise _invalid_vhost(pattern, "host-too-long")
+
+    return result
+
+
+def _has_partial_dynamic_vhost_label(pattern: str) -> bool:
+    """Whether a host pattern mixes placeholders with static label text."""
+    in_placeholder = False
+    has_placeholder = False
+    has_static = False
+
+    for character in pattern:
+        if character == "<" and not in_placeholder:
+            in_placeholder = True
+            has_placeholder = True
+        elif character == ">" and in_placeholder:
+            in_placeholder = False
+        elif character == "." and not in_placeholder:
+            if has_placeholder and has_static:
+                return True
+
+            has_placeholder = False
+            has_static = False
+        elif not in_placeholder:
+            has_static = True
+
+    return has_placeholder and has_static
 
 
 def _find(value: str, target: str, pos: int) -> int:
@@ -513,6 +872,7 @@ class Rule(RuleFactory):
         self._converters: dict[str, BaseConverter] = {}
         self._trace: list[tuple[bool, str]] = []
         self._parts: list[RulePart] = []
+        self._has_partial_dynamic_host = False
 
     def empty(self) -> Rule:
         """
@@ -703,6 +1063,19 @@ class Rule(RuleFactory):
             domain_rule = self.subdomain
         else:
             domain_rule = self.host
+
+        if (
+            self.map.strict_vhost
+            and (self.map.host_matching or self.map.subdomain_matching)
+            and domain_rule
+        ):
+            domain_rule = _normalize_vhost_pattern(domain_rule)
+            self._has_partial_dynamic_host = _has_partial_dynamic_vhost_label(
+                domain_rule
+            )
+        else:
+            self._has_partial_dynamic_host = False
+
         self._parts = []
         self._trace = []
         self._converters = {}
@@ -846,11 +1219,26 @@ class Rule(RuleFactory):
         """
         try:
             if append_unknown:
-                return self._build_unknown(**values)
+                result = self._build_unknown(**values)
             else:
-                return self._build(**values)
+                result = self._build(**values)
         except ValidationError:
             return None
+
+        if (
+            self.map.strict_vhost
+            and (self.map.host_matching or self.map.subdomain_matching)
+            and result[0]
+        ):
+            domain, path = result
+            domain = unquote(domain)
+
+            if self._has_partial_dynamic_host and not domain.isascii():
+                raise _invalid_vhost(domain, "partial-dynamic-label")
+
+            return normalize_virtual_host(domain), path
+
+        return result
 
     def provides_defaults_for(self, rule: Rule) -> bool:
         """Check if this rule has defaults for a given rule.

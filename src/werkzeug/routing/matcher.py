@@ -10,6 +10,7 @@ from .exceptions import DuplicateRuleError
 from .exceptions import NoMatch
 from .exceptions import RequestAliasRedirect
 from .exceptions import RequestPath
+from .rules import normalize_virtual_host
 from .rules import Rule
 from .rules import RulePart
 
@@ -32,9 +33,10 @@ class State:
 
 
 class StateMachineMatcher:
-    def __init__(self, merge_slashes: bool) -> None:
+    def __init__(self, merge_slashes: bool, *, strict_vhost: bool = False) -> None:
         self._root = State()
         self.merge_slashes = merge_slashes
+        self.strict_vhost = strict_vhost
 
     def add(self, rule: Rule) -> None:
         state = self._root
@@ -75,6 +77,9 @@ class StateMachineMatcher:
     def match(
         self, domain: str, path: str, method: str, websocket: bool
     ) -> tuple[Rule, t.MutableMapping[str, t.Any]]:
+        if self.strict_vhost and domain:
+            domain = normalize_virtual_host(domain)
+
         # To match to a rule we need to start at the root state and
         # try to follow the transitions until we find a match, or find
         # there is no transition to follow.
