@@ -266,6 +266,8 @@ class Connection(object):
             self._usage = ConnectionUsage() if collect_usage else None
             self.socket = None
             self.tls_started = False
+            self.verified_tls_host = None
+            self.verified_tls_server = None
             self.sasl_in_progress = False
             self.read_only = read_only
             self._context_state = []

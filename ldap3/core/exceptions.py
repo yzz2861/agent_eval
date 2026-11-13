@@ -442,6 +442,28 @@ class LDAPCertificateError(LDAPExceptionError):
     pass
 
 
+class LDAPCertificateChainError(LDAPCertificateError):
+    """The certificate chain cannot be validated (unknown/untrusted CA,
+    invalid signature, malformed certificate, ...)."""
+    pass
+
+
+class LDAPCertificateExpiredError(LDAPCertificateError):
+    """The certificate is not within its validity period."""
+    pass
+
+
+class LDAPCertificateHostnameError(LDAPCertificateError):
+    """The certificate does not match the verified host name or address."""
+    pass
+
+
+class LDAPVerifiedHostChangedError(LDAPCertificateError):
+    """A connection whose TLS identity was verified is being redirected to a
+    different host without a new verification."""
+    pass
+
+
 class LDAPUserNameNotAllowedError(LDAPExceptionError):
     pass
 

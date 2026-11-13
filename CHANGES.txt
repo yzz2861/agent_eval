@@ -1,3 +1,13 @@
+# unreleased
+    - secure by default TLS server identity verification for StartTLS and LDAPS when a certificate is validated
+    - certificate identity checks now cover DNS SAN and IP SAN with IPv4/IPv6, IDNA and IPv6 zone identifier handling
+    - SNI uses the normalized host name; IP literals no longer send a DNS-style SNI
+    - commonName fallback for certificates without SAN is opt-in via Tls(allow_common_name_fallback=True) and disabled by default
+    - strict wildcard matching: wildcards only apply to the left-most label and never span multiple labels
+    - Tls(server_name=...) pins the verified identity for proxy/connection-pool deployments (legacy sni= stays supported)
+    - chain, expiration and hostname verification failures raise distinct LDAPCertificateError subclasses
+    - redirecting an already verified connection to another host raises LDAPVerifiedHostChangedError
+
 # 2.10.2rc4 . 2026.04.18
     - fixed IndexError in auto_range search when response has no ranged attributes
     - fixed TypeError in format_ad_timedelta with malformed AD timestamps

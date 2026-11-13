@@ -88,6 +88,7 @@ class RestartableStrategy(SyncStrategy):
                     if self.connection.server_pool:
                         new_server = self.connection.server_pool.get_server(self.connection)  # get a server from the server_pool if available
                         if self.connection.server != new_server:
+                            self._guard_verified_identity(new_server)
                             self.connection.server = new_server
                             if self.connection.usage:
                                 self.connection._usage.servers_from_pool += 1

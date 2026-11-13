@@ -32,6 +32,50 @@ Tls object uses the ssl module of the Python standard library with additional ch
 
 The needed constants are defined in the ssl package.
 
+Server identity verification
+============================
+
+When ``validate`` is set to ``ssl.CERT_REQUIRED`` or ``ssl.CERT_OPTIONAL`` the Tls object now verifies the
+server identity by default. The checks are implemented in ldap3 itself so the same, modern rules apply on every
+interpreter instead of relying on the ssl module default policy:
+
+* the host name is normalized before being used: DNS names are lowercased and IDNA encoded (A-label), IPv4 and
+  IPv6 literals are parsed with the ipaddress module and IPv6 zone identifiers (for example ``fe80::1%eth0``)
+  never become part of the certificate match
+* DNS names only match ``dNSName`` SAN entries, IP literals only match ``iPAddress`` SAN entries; an IP address
+  is never compared with a DNS-style name
+* wildcard certificates are accepted only when the wildcard is in the left-most label and matches a single
+  label, so ``*.example.com`` matches ``www.example.com`` but never ``a.b.example.com``
+* the subject commonName is used only when the certificate has no subjectAltName at all and the Tls object is
+  explicitly created with ``allow_common_name_fallback=True``; the default is to reject certificates without SAN
+* SNI uses the normalized DNS name. IP literals and hosts whose only identifier is an IP address do not send a
+  DNS-style SNI
+
+The relevant Tls parameters are:
+
+* ``check_hostname``: enables the identity verification; defaults to True for ``CERT_REQUIRED``/``CERT_OPTIONAL``
+  and False for ``CERT_NONE`` (the historical, non-verifying behavior). Setting it to True with ``CERT_NONE``
+  raises a configuration error
+* ``allow_common_name_fallback``: when True, permits matching the subject commonName for certificates without a
+  subjectAltName. Defaults to False
+* ``server_name``: the identity to verify and to use for SNI. Use it when the connected endpoint differs from
+  the certified host, for example an IP address or a proxy in front of the real LDAP service. The legacy
+  ``sni`` parameter keeps working and is treated as an alias
+* ``valid_names``: additional accepted identities, kept for backward compatibility
+
+Identity, certificate chain and validity period problems are reported with distinct exceptions so callers can
+react differently:
+
+* ``LDAPCertificateChainError``: untrusted/unknown CA, bad signature or other chain problems while performing
+  the TLS handshake
+* ``LDAPCertificateExpiredError``: the certificate is expired or not yet valid
+* ``LDAPCertificateHostnameError``: the chain is valid but none of the certificate identities matches the
+  verified host or address
+
+The identity verified during a successful handshake is pinned on the connection (``connection.verified_tls_host``).
+Redirecting an already verified connection to a different host through a proxy or a server pool raises
+``LDAPVerifiedHostChangedError``; open a new connection (or re-run StartTLS) to verify the new endpoint.
+
 IF you don't use a specific Tls object and set use_ssl=True in the Server definition, a default Tls object will be used, it has no certificate
 files, uses the ssl.PROTOCOL_SSLv23 (if available in your Python interpreter) and performs no validation of the server certificate.
 It's recommended to set validate=ssl.CERT_REQUIRED to verify the certificate server. Example::

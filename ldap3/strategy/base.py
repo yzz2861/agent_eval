@@ -38,7 +38,8 @@ from .. import SYNC, ANONYMOUS, get_config_parameter, BASE, ALL_ATTRIBUTES, ALL_
 from ..core.results import DO_NOT_RAISE_EXCEPTIONS, RESULT_REFERRAL
 from ..core.exceptions import LDAPOperationResult, LDAPSASLBindInProgressError, LDAPSocketOpenError, LDAPSessionTerminatedByServerError,\
     LDAPUnknownResponseError, LDAPUnknownRequestError, LDAPReferralError, communication_exception_factory, LDAPStartTLSError, \
-    LDAPSocketSendError, LDAPExceptionError, LDAPControlError, LDAPResponseTimeoutError, LDAPTransactionError
+    LDAPSocketSendError, LDAPExceptionError, LDAPControlError, LDAPResponseTimeoutError, LDAPTransactionError, \
+    LDAPVerifiedHostChangedError
 from ..utils.uri import parse_uri
 from ..protocol.rfc4511 import LDAPMessage, ProtocolOp, MessageID, SearchResultEntry
 from ..operation.add import add_response_to_dict, add_request_to_dict
@@ -122,9 +123,13 @@ class BaseStrategy(object):
             if self.connection.server_pool:
                 new_server = self.connection.server_pool.get_server(self.connection)  # get a server from the server_pool if available
                 if self.connection.server != new_server:
+                    self._guard_verified_identity(new_server)
                     self.connection.server = new_server
                     if self.connection.usage:
                         self.connection._usage.servers_from_pool += 1
+
+            # direct reassignment by the caller (proxy / custom pool code)
+            self._guard_verified_identity(self.connection.server)
 
             exception_history = []
             if not self.no_real_dsa:  # tries to connect to a real server
@@ -158,6 +163,30 @@ class BaseStrategy(object):
             self._start_listen()
             if log_enabled(NETWORK):
                 log(NETWORK, 'connection open for <%s>', self.connection)
+
+    def _guard_verified_identity(self, new_server):
+        """Prevent redirecting an already verified TLS connection to another
+        host without re-running the certificate identity check."""
+        verified_server = getattr(self.connection, 'verified_tls_server', None)
+        verified_host = getattr(self.connection, 'verified_tls_host', None)
+        if verified_server is None or verified_host is None:
+            return
+        if new_server is verified_server:
+            return
+        new_host = getattr(new_server, 'host', None)
+        if new_host is None:
+            return
+        from ..utils.host import normalize_host
+        try:
+            if normalize_host(new_host).match_value == verified_host:
+                return
+        except ValueError:
+            pass
+        self.connection.last_error = \
+            'refusing to redirect TLS connection verified for host <%s> to server <%s>' % (verified_host, new_host)
+        if log_enabled(ERROR):
+            log(ERROR, self.connection.last_error)
+        raise LDAPVerifiedHostChangedError(self.connection.last_error)
 
     def close(self):
         """
@@ -290,6 +319,9 @@ class BaseStrategy(object):
                 if log_enabled(ERROR):
                     log(ERROR, '<%s> for <%s>', self.connection.last_error, self.connection)
                 _cleanup_socket()
+                from ..core.exceptions import LDAPCertificateError
+                if isinstance(e, LDAPCertificateError):
+                    raise
                 raise communication_exception_factory(LDAPSocketOpenError, type(e)(str(e)))(self.connection.last_error)
         if self.connection.usage:
             self.connection._usage.open_sockets += 1
