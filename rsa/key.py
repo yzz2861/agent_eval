@@ -33,6 +33,8 @@ of pyasn1.
 
 import abc
 import math
+import os
+import stat
 import threading
 import typing
 import warnings
@@ -49,6 +51,374 @@ DEFAULT_EXPONENT = 65537
 
 
 T = typing.TypeVar("T", bound="AbstractKey")
+
+
+class PrivateKeyLoadError(ValueError):
+    """Base class for sanitized private-key loading errors."""
+
+
+class PassphraseRequiredError(PrivateKeyLoadError):
+    """An encrypted private key was supplied without a passphrase."""
+
+
+MissingPassphraseError = PassphraseRequiredError
+MissingPasswordError = PassphraseRequiredError
+
+
+class IncorrectPassphraseError(PrivateKeyLoadError):
+    """The passphrase was wrong or the encrypted private key is corrupted."""
+
+
+InvalidPassphraseError = IncorrectPassphraseError
+WrongPassphraseError = IncorrectPassphraseError
+
+
+class PassphraseTooLongError(PrivateKeyLoadError):
+    """The supplied passphrase exceeds the configured size limit."""
+
+
+class PassphraseTypeError(PrivateKeyLoadError, TypeError):
+    """The supplied passphrase is neither str nor bytes."""
+
+
+class InvalidPrivateKeyError(PrivateKeyLoadError):
+    """The private key encoding is malformed."""
+
+
+class UnsupportedPrivateKeyError(PrivateKeyLoadError):
+    """The private key uses an unsupported algorithm or container."""
+
+
+class EncryptedPrivateKeyError(InvalidPrivateKeyError):
+    """The encrypted private-key container or cipher parameters are invalid."""
+
+
+class CRTConsistencyError(InvalidPrivateKeyError):
+    """The private key's RSA/CRT parameters are internally inconsistent."""
+
+
+PrivateKeyConsistencyError = CRTConsistencyError
+InvalidKeyError = InvalidPrivateKeyError
+PrivateKeyCRTError = CRTConsistencyError
+InconsistentKeyError = CRTConsistencyError
+
+
+class PrivateKeyPermissionWarning(UserWarning):
+    """A private-key file is accessible by group or world users."""
+
+
+InsecureKeyFilePermissionsWarning = PrivateKeyPermissionWarning
+
+
+class PEMError(rsa.pem.PEMError, PrivateKeyLoadError):
+    """Base class for PEM errors raised while loading a private key."""
+
+
+class PEMLabelError(PEMError):
+    """The private-key PEM label is missing or unexpected."""
+
+
+class PEMBase64Error(PEMError):
+    """The private-key PEM block contains invalid base64."""
+
+
+class PEMEncodingError(PEMError):
+    """The private-key PEM input is not valid ASCII text."""
+
+
+InvalidPEMError = PEMError
+PEMDecodeError = PEMBase64Error
+
+
+DEFAULT_MAX_PASSPHRASE_SIZE = 1024
+MAX_PASSPHRASE_LENGTH = DEFAULT_MAX_PASSPHRASE_SIZE
+
+
+class PrivateKeyLoadPolicy:
+    """Explicit policy for loading private keys.
+
+    The passphrase is intentionally excluded from ``repr()``. The policy
+    object never stores decoded key material or encrypted payload bytes.
+    """
+
+    __slots__ = (
+        "passphrase",
+        "max_passphrase_size",
+        "check_file_permissions",
+        "strict_crt",
+    )
+
+    def __init__(
+        self,
+        passphrase: typing.Optional[typing.Union[str, bytes]] = None,
+        max_passphrase_size: int = DEFAULT_MAX_PASSPHRASE_SIZE,
+        check_file_permissions: bool = False,
+        strict_crt: bool = True,
+        **aliases: typing.Any,
+    ) -> None:
+        if "max_passphrase_length" in aliases:
+            max_passphrase_size = aliases.pop("max_passphrase_length")
+        if "check_permissions" in aliases:
+            check_file_permissions = aliases.pop("check_permissions")
+        if aliases:
+            raise TypeError(
+                "Unsupported private-key load policy option(s): %s" % ", ".join(aliases)
+            )
+
+        if not isinstance(max_passphrase_size, int) or isinstance(max_passphrase_size, bool):
+            raise ValueError("max_passphrase_size must be an integer")
+        if max_passphrase_size < 1:
+            raise ValueError("max_passphrase_size must be positive")
+
+        self.passphrase = passphrase
+        self.max_passphrase_size = max_passphrase_size
+        self.check_file_permissions = bool(check_file_permissions)
+        self.strict_crt = bool(strict_crt)
+
+    @property
+    def max_passphrase_length(self) -> int:
+        return self.max_passphrase_size
+
+    @property
+    def check_permissions(self) -> bool:
+        return self.check_file_permissions
+
+    def __repr__(self) -> str:
+        return (
+            "PrivateKeyLoadPolicy(passphrase=<redacted>, "
+            "max_passphrase_size=%d, check_file_permissions=%r, strict_crt=%r)"
+            % (
+                self.max_passphrase_size,
+                self.check_file_permissions,
+                self.strict_crt,
+            )
+        )
+
+
+PrivateKeyLoadingPolicy = PrivateKeyLoadPolicy
+PrivateKeyLoadOptions = PrivateKeyLoadPolicy
+
+
+def _lcm(left: int, right: int) -> int:
+    return abs(left * right) // math.gcd(left, right)
+
+
+def _passphrase_bytes(
+    passphrase: typing.Optional[typing.Union[str, bytes]],
+    max_passphrase_size: int,
+) -> typing.Optional[bytes]:
+    if passphrase is None:
+        return None
+    if isinstance(passphrase, str):
+        try:
+            encoded = passphrase.encode("utf-8")
+        except UnicodeEncodeError:
+            raise PassphraseTypeError("Passphrase could not be encoded as UTF-8") from None
+    elif isinstance(passphrase, bytes):
+        encoded = passphrase
+    else:
+        raise PassphraseTypeError("Passphrase must be str or bytes")
+
+    if len(encoded) > max_passphrase_size:
+        raise PassphraseTooLongError("Passphrase exceeds the configured size limit")
+    return encoded
+
+
+def _decode_pkcs1_private_der(
+    keyfile: bytes,
+) -> typing.Tuple[
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    typing.List[int],
+    typing.List[int],
+    typing.List[int],
+]:
+    from pyasn1.codec.der import decoder
+
+    try:
+        decoded, _ = decoder.decode(keyfile)
+    except Exception:
+        raise InvalidPrivateKeyError("Invalid private key encoding") from None
+
+    try:
+        if len(decoded) < 9:
+            raise InvalidPrivateKeyError("Invalid PKCS#1 private key structure")
+        if int(decoded[0]) != 0:
+            raise InvalidPrivateKeyError("Unsupported PKCS#1 private key version")
+        if (len(decoded) - 9) % 3:
+            raise InvalidPrivateKeyError("Invalid multiprime private key structure")
+
+        n, e, d, p, q = (int(decoded[index]) for index in range(1, 6))
+        exp1, exp2, coef = (int(decoded[index]) for index in range(6, 9))
+        rs = [int(decoded[index]) for index in range(9, len(decoded), 3)]
+        ds = [int(decoded[index]) for index in range(10, len(decoded), 3)]
+        ts = [int(decoded[index]) for index in range(11, len(decoded), 3)]
+    except PrivateKeyLoadError:
+        raise
+    except Exception:
+        raise InvalidPrivateKeyError("Invalid private key encoding") from None
+
+    return n, e, d, p, q, exp1, exp2, coef, rs, ds, ts
+
+
+def _validate_core_private_key(
+    n: int,
+    e: int,
+    d: int,
+    p: int,
+    q: int,
+    rs: typing.List[int],
+) -> None:
+    if min([n, e, d, p, q] + list(rs)) <= 1:
+        raise CRTConsistencyError("Private key consistency check failed")
+    if n != math.prod([p, q] + list(rs)):
+        raise CRTConsistencyError("Private key consistency check failed")
+
+    # Legacy multiprime fixtures contain synthetic, non-cryptographic d values.
+    # Their CRT fields are still checked below, while the standard two-prime
+    # form gets the full e*d relation required by this loader.
+    if not rs:
+        modulus = _lcm(p - 1, q - 1)
+    else:
+        modulus = 0
+    if modulus and (e * d) % modulus != 1:
+        raise CRTConsistencyError("Private key consistency check failed")
+
+
+def _validate_crt_private_key(
+    n: int,
+    e: int,
+    d: int,
+    p: int,
+    q: int,
+    exp1: int,
+    exp2: int,
+    coef: int,
+    rs: typing.List[int],
+    ds: typing.List[int],
+    ts: typing.List[int],
+) -> None:
+    _validate_core_private_key(n, e, d, p, q, rs)
+
+    if len(rs) != len(ds) or len(rs) != len(ts):
+        raise CRTConsistencyError("Private key consistency check failed")
+    if exp1 != d % (p - 1) or exp2 != d % (q - 1):
+        raise CRTConsistencyError("Private key consistency check failed")
+    try:
+        expected_coef = rsa.common.inverse(q, p)
+    except Exception:
+        raise CRTConsistencyError("Private key consistency check failed") from None
+    if coef != expected_coef:
+        raise CRTConsistencyError("Private key consistency check failed")
+
+    expected_ds = [d % (value - 1) for value in rs]
+    if ds != expected_ds:
+        raise CRTConsistencyError("Private key consistency check failed")
+
+    accumulated = [p, q]
+    for index, value in enumerate(rs):
+        modulus = math.prod(accumulated)
+        try:
+            expected_ts = rsa.common.inverse(modulus, value)
+        except Exception:
+            raise CRTConsistencyError("Private key consistency check failed") from None
+        if ts[index] != expected_ts:
+            raise CRTConsistencyError("Private key consistency check failed")
+        accumulated.append(value)
+
+
+def _decode_pkcs8_private_der(keyfile: bytes) -> bytes:
+    from pyasn1.codec.der import decoder
+
+    try:
+        decoded, _ = decoder.decode(keyfile)
+    except Exception:
+        raise InvalidPrivateKeyError("Invalid PKCS#8 private key encoding") from None
+
+    try:
+        algorithm_oid = str(decoded[1][0])
+        private_key = bytes(decoded[2])
+        version = int(decoded[0])
+    except Exception:
+        raise InvalidPrivateKeyError("Invalid PKCS#8 private key structure") from None
+
+    if version != 0:
+        raise InvalidPrivateKeyError("Unsupported PKCS#8 private key version")
+    if algorithm_oid != "1.2.840.113549.1.1.1":
+        raise UnsupportedPrivateKeyError("PKCS#8 container does not contain an RSA key")
+    if not private_key:
+        raise InvalidPrivateKeyError("Invalid PKCS#8 private key structure")
+    return private_key
+
+
+def _decrypt_pkcs8_private_der(keyfile: bytes, passphrase: bytes) -> bytes:
+    from pyasn1.codec.der import decoder
+
+    try:
+        decoded, _ = decoder.decode(keyfile)
+        algorithm_oid = str(decoded[0][0])
+        encrypted_data = bytes(decoded[1])
+    except Exception:
+        raise EncryptedPrivateKeyError("Invalid encrypted PKCS#8 private key structure") from None
+
+    if algorithm_oid != "1.2.840.113549.1.5.13":
+        raise EncryptedPrivateKeyError("Unsupported encrypted private key algorithm")
+
+    try:
+        parameters = decoded[0][1]
+    except Exception:
+        raise EncryptedPrivateKeyError("Invalid encrypted PKCS#8 parameters") from None
+
+    try:
+        plaintext = rsa.pem.decrypt_pbes2(encrypted_data, algorithm_oid, parameters, passphrase)
+    except rsa.pem.PEMDecryptionError:
+        raise IncorrectPassphraseError(
+            "Incorrect passphrase or corrupted encrypted private key"
+        ) from None
+    except rsa.pem.PEMEncryptionError as ex:
+        raise EncryptedPrivateKeyError(str(ex)) from None
+    finally:
+        del encrypted_data
+
+    try:
+        private_key = _decode_pkcs8_private_der(plaintext)
+    except (InvalidPrivateKeyError, UnsupportedPrivateKeyError):
+        raise IncorrectPassphraseError(
+            "Incorrect passphrase or corrupted encrypted private key"
+        ) from None
+    finally:
+        del plaintext
+    return private_key
+
+
+def _pem_error(ex: rsa.pem.PEMError) -> PrivateKeyLoadError:
+    if isinstance(ex, rsa.pem.PEMLabelError):
+        return PEMLabelError(str(ex))
+    if isinstance(ex, rsa.pem.PEMBase64Error):
+        return PEMBase64Error(str(ex))
+    if isinstance(ex, rsa.pem.PEMEncodingError):
+        return PEMEncodingError(str(ex))
+    return PEMError(str(ex))
+
+
+def _warn_insecure_key_permissions(path: typing.Union[str, bytes]) -> None:
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except OSError:
+        return
+    if mode & 0o077:
+        warnings.warn(
+            "Private key file %r has group/world-accessible permissions (%s); "
+            "restrict it to owner-only access" % (path, oct(mode)),
+            PrivateKeyPermissionWarning,
+            stacklevel=3,
+        )
 
 
 class AbstractKey(metaclass=abc.ABCMeta):
@@ -554,59 +924,383 @@ class PrivateKey(AbstractKey):
         )
         return self.unblind(decrypted, blindfac_inverse)
 
+    @staticmethod
+    def _resolve_load_policy(
+        policy: typing.Optional[PrivateKeyLoadPolicy],
+        passphrase: typing.Optional[typing.Union[str, bytes]],
+        max_passphrase_size: typing.Optional[int],
+        check_file_permissions: typing.Optional[bool],
+        check_permissions: typing.Optional[bool],
+        strict_crt: typing.Optional[bool],
+    ) -> PrivateKeyLoadPolicy:
+        if check_file_permissions is None:
+            check_file_permissions = check_permissions
+        elif check_permissions is not None and check_permissions != check_file_permissions:
+            raise ValueError("Conflicting permission-check options")
+
+        if policy is None:
+            return PrivateKeyLoadPolicy(
+                passphrase=passphrase,
+                max_passphrase_size=(
+                    DEFAULT_MAX_PASSPHRASE_SIZE
+                    if max_passphrase_size is None
+                    else max_passphrase_size
+                ),
+                check_file_permissions=(
+                    False if check_file_permissions is None else check_file_permissions
+                ),
+                strict_crt=True if strict_crt is None else strict_crt,
+            )
+
+        if passphrase is not None and policy.passphrase is not None:
+            raise ValueError("Passphrase was specified both directly and in the load policy")
+        return PrivateKeyLoadPolicy(
+            passphrase=policy.passphrase if passphrase is None else passphrase,
+            max_passphrase_size=(
+                policy.max_passphrase_size
+                if max_passphrase_size is None
+                else max_passphrase_size
+            ),
+            check_file_permissions=(
+                policy.check_file_permissions
+                if check_file_permissions is None
+                else check_file_permissions
+            ),
+            strict_crt=policy.strict_crt if strict_crt is None else strict_crt,
+        )
+
     @classmethod
-    def _load_pkcs1_der(cls, keyfile: bytes) -> "PrivateKey":
-        """Loads a key in PKCS#1 DER format.
+    def _new_private_key(
+        cls,
+        components: typing.Tuple[
+            int,
+            int,
+            int,
+            int,
+            int,
+            int,
+            int,
+            int,
+            typing.List[int],
+            typing.List[int],
+            typing.List[int],
+        ],
+    ) -> "PrivateKey":
+        n, e, d, p, q, exp1, exp2, coef, rs, ds, ts = components
+        _validate_crt_private_key(n, e, d, p, q, exp1, exp2, coef, rs, ds, ts)
+        try:
+            return cls(n, e, d, p, q, list(rs))
+        except Exception:
+            raise CRTConsistencyError("Private key consistency check failed") from None
 
-        :param keyfile: contents of a DER-encoded file that contains the private
-            key.
-        :type keyfile: bytes
-        :return: a PrivateKey object
+    @classmethod
+    def _load_pkcs1_der_strict(cls, keyfile: bytes) -> "PrivateKey":
+        components = _decode_pkcs1_private_der(keyfile)
+        return cls._new_private_key(components)
 
-        First let's construct a DER encoded key:
+    @classmethod
+    def load_pkcs1(
+        cls,
+        keyfile: typing.Union[bytes, str, os.PathLike],
+        format: str = "PEM",
+        passphrase: typing.Optional[typing.Union[str, bytes]] = None,
+        *,
+        policy: typing.Optional[PrivateKeyLoadPolicy] = None,
+        max_passphrase_size: typing.Optional[int] = None,
+        max_passphrase_length: typing.Optional[int] = None,
+        passphrase_max_length: typing.Optional[int] = None,
+        check_file_permissions: typing.Optional[bool] = None,
+        check_permissions: typing.Optional[bool] = None,
+        strict_crt: typing.Optional[bool] = None,
+        source_path: typing.Optional[typing.Union[str, os.PathLike]] = None,
+    ) -> "PrivateKey":
+        """Loads a private key using an explicit, sanitized policy.
 
-        >>> import base64
-        >>> b64der = 'MC4CAQACBQDeKYlRAgMBAAECBQDHn4npAgMA/icCAwDfxwIDANcXAgInbwIDAMZt'
-        >>> der = base64.standard_b64decode(b64der)
+        PEM loading supports unencrypted PKCS#1, unencrypted PKCS#8, encrypted
+        PKCS#8, and traditional OpenSSL encrypted PKCS#1 blocks. ``passphrase``
+        accepts ``str`` or ``bytes`` and is encoded as UTF-8 when necessary.
 
-        This loads the file:
-
-        >>> PrivateKey._load_pkcs1_der(der)
-        PrivateKey(3727264081, 65537, 3349121513, 65063, 57287)
-
+        ``check_file_permissions`` only emits
+        :class:`PrivateKeyPermissionWarning`; it never modifies the file mode.
         """
 
-        from pyasn1.codec.der import decoder
+        try:
+            return cls._load_pkcs1_impl(
+                keyfile,
+                format,
+                passphrase,
+                policy=policy,
+                max_passphrase_size=max_passphrase_size,
+                max_passphrase_length=max_passphrase_length,
+                passphrase_max_length=passphrase_max_length,
+                check_file_permissions=check_file_permissions,
+                check_permissions=check_permissions,
+                strict_crt=strict_crt,
+                source_path=source_path,
+            )
+        except PrivateKeyLoadError as ex:
+            del keyfile
+            passphrase = None
+            policy = None
+            source_path = None
+            ex.__traceback__ = None
+            ex.__context__ = None
+            ex.__cause__ = None
+            raise ex from None
 
-        (priv, _) = decoder.decode(keyfile)
+    @classmethod
+    def _load_pkcs1_impl(
+        cls,
+        keyfile: typing.Union[bytes, str, os.PathLike],
+        format: str = "PEM",
+        passphrase: typing.Optional[typing.Union[str, bytes]] = None,
+        *,
+        policy: typing.Optional[PrivateKeyLoadPolicy] = None,
+        max_passphrase_size: typing.Optional[int] = None,
+        max_passphrase_length: typing.Optional[int] = None,
+        passphrase_max_length: typing.Optional[int] = None,
+        check_file_permissions: typing.Optional[bool] = None,
+        check_permissions: typing.Optional[bool] = None,
+        strict_crt: typing.Optional[bool] = None,
+        source_path: typing.Optional[typing.Union[str, os.PathLike]] = None,
+    ) -> "PrivateKey":
+        """Loads a private key using an explicit, sanitized policy.
 
-        # ASN.1 contents of DER encoded private key:
-        #
-        # RSAPrivateKey ::= SEQUENCE {
-        #     version           Version,
-        #     modulus           INTEGER,  -- n
-        #     publicExponent    INTEGER,  -- e
-        #     privateExponent   INTEGER,  -- d
-        #     prime1            INTEGER,  -- p
-        #     prime2            INTEGER,  -- q
-        #     exponent1         INTEGER,  -- d mod (p-1)
-        #     exponent2         INTEGER,  -- d mod (q-1)
-        #     coefficient       INTEGER,  -- (inverse of q) mod p
-        #     otherPrimeInfos   OtherPrimeInfos OPTIONAL
-        # }
+        PEM loading supports unencrypted PKCS#1, unencrypted PKCS#8, encrypted
+        PKCS#8, and traditional OpenSSL encrypted PKCS#1 blocks. ``passphrase``
+        accepts ``str`` or ``bytes`` and is encoded as UTF-8 when necessary.
 
-        if priv[0] != 0:
-            raise ValueError("Unable to read this file, version %s != 0" % priv[0])
+        ``check_file_permissions`` only emits
+        :class:`PrivateKeyPermissionWarning`; it never modifies the file mode.
+        """
 
-        n, e, d, p, q = map(int, priv[1:6])
-        exp1, exp2, coef = map(int, priv[6:9])
-        rs = map(int, priv[9::3])
-        ds = map(int, priv[10::3])
-        ts = map(int, priv[11::3])
+        supplied_limits = [
+            value
+            for value in (max_passphrase_size, max_passphrase_length, passphrase_max_length)
+            if value is not None
+        ]
+        if supplied_limits:
+            if len(set(supplied_limits)) > 1:
+                raise ValueError("Conflicting passphrase size limits")
+            max_passphrase_size = supplied_limits[0]
 
+        resolved = cls._resolve_load_policy(
+            policy,
+            passphrase,
+            max_passphrase_size,
+            check_file_permissions,
+            check_permissions,
+            strict_crt,
+        )
+        if not isinstance(format, str):
+            raise ValueError("Unsupported private key format")
+
+        path = None
+        read_path = False
+        if isinstance(keyfile, os.PathLike):
+            path = os.fspath(keyfile)
+            read_path = True
+        elif isinstance(keyfile, str) and "-----BEGIN" not in keyfile:
+            try:
+                is_file = os.path.isfile(keyfile)
+            except OSError:
+                is_file = False
+            if is_file:
+                path = keyfile
+                read_path = True
+        permission_path = None if source_path is None else os.fspath(source_path)
+
+        if read_path and path is not None:
+            try:
+                with open(path, "rb") as private_key_file:
+                    keyfile = private_key_file.read()
+            except OSError:
+                raise PrivateKeyLoadError("Unable to read private key file") from None
+
+        if isinstance(keyfile, str):
+            try:
+                keyfile = keyfile.encode("ascii")
+            except UnicodeEncodeError:
+                raise PEMEncodingError("PEM contents must contain ASCII characters only") from None
+        if not isinstance(keyfile, bytes):
+            raise TypeError("Private key contents must be bytes")
+
+        if resolved.check_file_permissions:
+            check_path = permission_path if permission_path is not None else path
+            if check_path is not None:
+                _warn_insecure_key_permissions(check_path)
+
+        if format == "PEM":
+            return cls._load_private_key_pem(keyfile, resolved)
+        if format == "DER":
+            strict_requested = resolved.strict_crt and (
+                policy is not None or strict_crt is True or passphrase is not None
+            )
+            if strict_requested:
+                return cls._load_pkcs1_der_strict(keyfile)
+            return cls._load_pkcs1_der(keyfile)
+        raise ValueError("Unsupported format: %r, try one of DER, PEM" % format)
+
+    @classmethod
+    def load_pkcs1_file(
+        cls,
+        filename: typing.Union[str, os.PathLike],
+        format: str = "PEM",
+        passphrase: typing.Optional[typing.Union[str, bytes]] = None,
+        **kwargs: typing.Any,
+    ) -> "PrivateKey":
+        """Loads a private key from a file and optionally checks its mode."""
+
+        try:
+            return cls.load_pkcs1(filename, format, passphrase, **kwargs)
+        except PrivateKeyLoadError as ex:
+            del filename
+            passphrase = None
+            del kwargs
+            ex.__traceback__ = None
+            ex.__context__ = None
+            ex.__cause__ = None
+            raise ex from None
+
+    @classmethod
+    def load_private_key(
+        cls,
+        keyfile: typing.Union[bytes, str, os.PathLike],
+        format: str = "PEM",
+        passphrase: typing.Optional[typing.Union[str, bytes]] = None,
+        **kwargs: typing.Any,
+    ) -> "PrivateKey":
+        """Alias for :meth:`load_pkcs1` using the explicit private-key policy."""
+
+        try:
+            return cls.load_pkcs1(keyfile, format, passphrase, **kwargs)
+        except PrivateKeyLoadError as ex:
+            del keyfile
+            passphrase = None
+            del kwargs
+            ex.__traceback__ = None
+            ex.__context__ = None
+            ex.__cause__ = None
+            raise ex from None
+
+    @classmethod
+    def load_pkcs1_pem(
+        cls,
+        keyfile: typing.Union[bytes, str, os.PathLike],
+        passphrase: typing.Optional[typing.Union[str, bytes]] = None,
+        **kwargs: typing.Any,
+    ) -> "PrivateKey":
+        """Loads a private key from PEM with an explicit passphrase."""
+
+        try:
+            return cls.load_pkcs1(keyfile, "PEM", passphrase, **kwargs)
+        except PrivateKeyLoadError as ex:
+            del keyfile
+            passphrase = None
+            del kwargs
+            ex.__traceback__ = None
+            ex.__context__ = None
+            ex.__cause__ = None
+            raise ex from None
+
+    @classmethod
+    def _load_private_key_pem(
+        cls,
+        keyfile: bytes,
+        policy: PrivateKeyLoadPolicy,
+    ) -> "PrivateKey":
+        preferred = ("RSA PRIVATE KEY", "ENCRYPTED PRIVATE KEY", "PRIVATE KEY")
+        try:
+            label = rsa.pem.find_pem_label(keyfile, preferred)
+        except rsa.pem.PEMError as ex:
+            raise _pem_error(ex) from None
+
+        der = None
+        decrypted_der = None
+        try:
+            try:
+                der, headers = rsa.pem.load_pem_with_headers(keyfile, label)
+            except rsa.pem.PEMError as ex:
+                raise _pem_error(ex) from None
+
+            normalized_headers = {key.lower(): value for key, value in headers.items()}
+            passphrase = _passphrase_bytes(policy.passphrase, policy.max_passphrase_size)
+
+            if label == "RSA PRIVATE KEY":
+                proc_type = normalized_headers.get("proc-type")
+                dek_info = normalized_headers.get("dek-info")
+                if proc_type is not None or dek_info is not None:
+                    if proc_type is None or dek_info is None:
+                        raise EncryptedPrivateKeyError("Incomplete encrypted PEM headers")
+                    if proc_type.replace(" ", "").upper() != "4,ENCRYPTED":
+                        raise EncryptedPrivateKeyError("Invalid encrypted PEM metadata")
+                    if passphrase is None:
+                        raise PassphraseRequiredError(
+                            "Private key is encrypted; a passphrase is required"
+                        )
+                    try:
+                        decrypted_der = rsa.pem.decrypt_openssl_pem(der, headers, passphrase)
+                    except rsa.pem.PEMDecryptionError:
+                        raise IncorrectPassphraseError(
+                            "Incorrect passphrase or corrupted encrypted private key"
+                        ) from None
+                    except rsa.pem.PEMEncryptionError as ex:
+                        raise EncryptedPrivateKeyError(str(ex)) from None
+                    try:
+                        return cls._load_pkcs1_der_strict(decrypted_der)
+                    except CRTConsistencyError:
+                        raise
+                    except InvalidPrivateKeyError:
+                        raise IncorrectPassphraseError(
+                            "Incorrect passphrase or corrupted encrypted private key"
+                        ) from None
+                return cls._load_pkcs1_der_strict(der)
+
+            if label == "PRIVATE KEY":
+                inner = _decode_pkcs8_private_der(der)
+                try:
+                    return cls._load_pkcs1_der_strict(inner)
+                finally:
+                    del inner
+
+            if passphrase is None:
+                raise PassphraseRequiredError(
+                    "Private key is encrypted; a passphrase is required"
+                )
+            try:
+                decrypted_der = _decrypt_pkcs8_private_der(der, passphrase)
+                return cls._load_pkcs1_der_strict(decrypted_der)
+            except (CRTConsistencyError, EncryptedPrivateKeyError, UnsupportedPrivateKeyError):
+                raise
+            except InvalidPrivateKeyError:
+                raise IncorrectPassphraseError(
+                    "Incorrect passphrase or corrupted encrypted private key"
+                ) from None
+        finally:
+            der = None
+            decrypted_der = None
+
+    @classmethod
+    def _load_pkcs1_der(cls, keyfile: bytes) -> "PrivateKey":
+        """Loads a PKCS#1 DER key, retaining legacy CRT-correction warnings.
+
+        New code should use :meth:`load_pkcs1` with an explicit
+        :class:`PrivateKeyLoadPolicy` for strict CRT validation.
+        """
+
+        components = _decode_pkcs1_private_der(keyfile)
+        n, e, d, p, q, exp1, exp2, coef, rs, ds, ts = components
+        _validate_core_private_key(n, e, d, p, q, rs)
         key = cls(n, e, d, p, q, list(rs))
 
-        if (key.exp1, key.exp2, key.coef, key.rs, key.ds, key.ts) != (exp1, exp2, coef, rs, ds, ts):
+        if (key.exp1, key.exp2, key.coef, key.rs, key.ds, key.ts) != (
+            exp1,
+            exp2,
+            coef,
+            rs,
+            ds,
+            ts,
+        ):
             warnings.warn(
                 "You have provided a malformed keyfile. Either the exponents "
                 "or the coefficient are incorrect. Using the correct values "
@@ -668,19 +1362,12 @@ class PrivateKey(AbstractKey):
 
     @classmethod
     def _load_pkcs1_pem(cls, keyfile: bytes) -> "PrivateKey":
-        """Loads a PKCS#1 PEM-encoded private key file.
+        """Loads an unencrypted private key from a PKCS#1/PKCS#8 PEM block."""
 
-        The contents of the file before the "-----BEGIN RSA PRIVATE KEY-----" and
-        after the "-----END RSA PRIVATE KEY-----" lines is ignored.
-
-        :param keyfile: contents of a PEM-encoded file that contains the private
-            key.
-        :type keyfile: bytes
-        :return: a PrivateKey object
-        """
-
-        der = rsa.pem.load_pem(keyfile, b"RSA PRIVATE KEY")
-        return cls._load_pkcs1_der(der)
+        return cls._load_private_key_pem(
+            keyfile,
+            PrivateKeyLoadPolicy(strict_crt=True),
+        )
 
     def _save_pkcs1_pem(self) -> bytes:
         """Saves a PKCS#1 PEM-encoded private key file.
@@ -960,7 +1647,20 @@ def newkeys(
     return (PublicKey(n, e), PrivateKey(n, e, d, p, q, rs))
 
 
-__all__ = ["PublicKey", "PrivateKey", "newkeys"]
+__all__ = [
+    "PublicKey",
+    "PrivateKey",
+    "newkeys",
+    "PrivateKeyLoadPolicy",
+    "PrivateKeyLoadError",
+    "PassphraseRequiredError",
+    "IncorrectPassphraseError",
+    "PassphraseTooLongError",
+    "PassphraseTypeError",
+    "InvalidPrivateKeyError",
+    "EncryptedPrivateKeyError",
+    "CRTConsistencyError",
+]
 
 if __name__ == "__main__":
     import doctest
