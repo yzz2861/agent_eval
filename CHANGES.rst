@@ -303,6 +303,13 @@ Version 3.2.0
     previously only on ``TestResponse``. :pr:`3341`
 -   The test client always writes form data to ``BytesIO`` instead of a
     temporary file.
+-   Add an opt-in ``strict_pin`` mode to the debugger. The strict PIN trust
+   cookie is signed and bound to the normalized request host, PIN derivation
+   version and issue time, rejects future and expired timestamps, unknown
+   versions and bad signatures with distinct reasons, uses constant-time
+   comparison, and isolates failed attempts per host. PIN rotation
+   invalidates all previously issued cookies. Default PIN behavior is
+   unchanged unless the mode is enabled explicitly.
 
 
 Version 3.1.9

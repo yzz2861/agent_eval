@@ -87,6 +87,33 @@ value ``off`` to disable the PIN check entirely.
 If an incorrect PIN is entered too many times the server needs to be
 restarted.
 
+Strict PIN Trust
+~~~~~~~~~~~~~~~~
+
+By default, the PIN trust cookie keeps its historical layout and behavior so
+that existing setups are unaffected. Pass ``strict_pin=True`` to
+:class:`DebuggedApplication` to opt into a stricter cookie format that closes
+several gaps when one reverse proxy serves multiple internal domains:
+
+- The cookie is signed and bound to the normalized request host, so a cookie
+  issued on one domain is rejected on any other domain or port.
+- The cookie carries a format version and the PIN derivation version. It never
+  contains the PIN itself, and rotating the PIN invalidates every previously
+  issued cookie immediately.
+- The issue time is signed and checked against an injectable clock. Expired
+  cookies and cookies with a future timestamp are rejected with distinct
+  reasons.
+- Unknown cookie versions, malformed cookies and invalid signatures are
+  rejected separately, and all comparisons use constant-time functions.
+- Failed attempts are counted per normalized host instead of in a single
+  global counter. After the limit is reached, both the standalone console and
+  the frame execution endpoint stay locked for that host.
+
+The classified result is available through
+:meth:`DebuggedApplication.check_pin_trust_detail`. Its reason strings are
+generic classifications and never contain the PIN or cookie data, which is
+also never written to the page or the logs.
+
 **This feature is not meant to entirely secure the debugger. It is
 intended to make it harder for an attacker to exploit the debugger.
 Never enable the debugger in production.**

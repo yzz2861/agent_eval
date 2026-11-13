@@ -3,6 +3,7 @@ from __future__ import annotations
 import collections.abc as cabc
 import getpass
 import hashlib
+import hmac
 import json
 import os
 import pkgutil
@@ -10,6 +11,7 @@ import re
 import secrets
 import subprocess
 import sys
+import threading
 import time
 import typing as t
 import uuid
@@ -39,11 +41,115 @@ from .tbtools import render_console_html
 # A week
 PIN_TIME = 60 * 60 * 24 * 7
 
+# Strict PIN trust cookie format version. This only identifies the cookie
+# layout, it never contains the PIN itself.
+_STRICT_PIN_COOKIE_VERSION = "1"
+
+# How many failed PIN attempts are allowed per verification boundary before
+# the debugger locks it out.
+_PIN_MAX_ATTEMPTS = 10
+
+# Reasons returned by :meth:`DebuggedApplication.check_pin_trust_detail`. The
+# values are intentionally generic and never include the PIN or cookie data.
+PIN_TRUST_OK = "ok"
+PIN_TRUST_DISABLED = "pin-disabled"
+PIN_TRUST_LOCKED = "too-many-failures"
+PIN_TRUST_NO_COOKIE = "missing-cookie"
+PIN_TRUST_MALFORMED = "malformed-cookie"
+PIN_TRUST_UNKNOWN_VERSION = "unknown-cookie-version"
+PIN_TRUST_VERSION_MISMATCH = "pin-version-mismatch"
+PIN_TRUST_HOST_MISMATCH = "host-mismatch"
+PIN_TRUST_FUTURE = "future-timestamp"
+PIN_TRUST_EXPIRED = "expired"
+PIN_TRUST_INVALID_SIGNATURE = "invalid-signature"
+
 
 def hash_pin(pin: str) -> str:
     return hashlib.sha3_256(f"{pin} added salt".encode("utf-8", "replace")).hexdigest()[
         :12
     ]
+
+
+def _pin_version(pin: str) -> str:
+    """Derive a stable version identifier for a PIN.
+
+    Rotating the PIN changes this value, which invalidates every trust cookie
+    issued for the previous PIN. The output is a digest, not the PIN.
+    """
+    return hashlib.sha3_256(f"pin-version:{pin}".encode("utf-8", "replace")).hexdigest()
+
+
+def _normalize_host(host: str | None) -> str:
+    """Return a canonical, case-insensitive host without a port.
+
+    The reverse proxy may expose the same app on several internal domains, so
+    the normalized host is the verification boundary a trust cookie is bound
+    to. An absent or malformed host normalizes to the empty string instead of
+    raising, which keeps cookie parsing free of data-dependent failures.
+    """
+    if not host:
+        return ""
+
+    host = host.strip().lower()
+
+    if host.startswith("["):
+        # IPv6 literal, optionally followed by a port: ``[::1]:5000``.
+        end = host.find("]")
+        if end == -1:
+            return ""
+        return host[1:end]
+
+    # Strip a single trailing ``:port``. Bare IPv6 literals without brackets
+    # are treated as opaque names rather than guessed at.
+    if host.count(":") == 1:
+        host = host.partition(":")[0]
+
+    return host
+
+
+def _strict_pin_key(pin: str, cookie_name: str) -> bytes:
+    """Derive the HMAC key used to sign and verify strict trust cookies."""
+    return hmac.new(
+        cookie_name.encode("utf-8"),
+        f"strict-pin:{pin}".encode("utf-8", "replace"),
+        hashlib.sha256,
+    ).digest()
+
+
+def _sign_strict_pin_cookie(
+    key: bytes, pin_version: str, host: str, timestamp: int
+) -> str:
+    """Build a versioned trust cookie value.
+
+    The value carries the cookie layout version, PIN derivation version,
+    normalized host and issue time, plus an HMAC over those fields. The PIN is
+    never written into the cookie.
+    """
+    message = f"{_STRICT_PIN_COOKIE_VERSION}|{pin_version}|{host}|{int(timestamp)}"
+    digest = hmac.new(key, message.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{message}|{digest}"
+
+
+class PinTrustResult:
+    """Outcome of a PIN trust check.
+
+    ``trusted`` mirrors the legacy tri-state: ``True`` when the request is
+    trusted, ``False`` when it is not, and ``None`` when a cookie was present
+    but could not be associated with the current PIN and should be discarded.
+    ``reason`` is a generic, non-sensitive classification of the outcome.
+    """
+
+    __slots__ = ("trusted", "reason")
+
+    def __init__(self, trusted: bool | None, reason: str) -> None:
+        self.trusted = trusted
+        self.reason = reason
+
+    def __bool__(self) -> bool:
+        return bool(self.trusted)
+
+    def __repr__(self) -> str:
+        return f"PinTrustResult(trusted={self.trusted!r}, reason={self.reason!r})"
 
 
 _machine_id: str | bytes | None = None
@@ -250,6 +356,11 @@ class DebuggedApplication:
                                to `True`.
     :param pin_security: can be used to disable the pin based security system.
     :param pin_logging: enables the logging of the pin system.
+    :param strict_pin: enable strict PIN trust cookies. Cookies are bound to
+                       the normalized request host, PIN derivation version and
+                       issue time, fail closed on unknown versions and clock
+                       skew, and track failures per host. Defaults to
+                       ``False`` to preserve the legacy cookie behavior.
 
     .. versionchanged:: 3.2
         The ``reqeust_key`` parameter was removed.
@@ -270,6 +381,7 @@ class DebuggedApplication:
         show_hidden_frames: bool = False,
         pin_security: bool = True,
         pin_logging: bool = True,
+        strict_pin: bool = False,
     ) -> None:
         if not console_init_func:
             console_init_func = None
@@ -282,6 +394,13 @@ class DebuggedApplication:
         self.show_hidden_frames = show_hidden_frames
         self.secret = secrets.token_urlsafe(20)
         self._failed_pin_auth = Value("B")
+        self.strict_pin = strict_pin
+        # Strict mode isolates failed attempts per normalized host, which is
+        # the verification boundary the cookie is bound to.
+        self._strict_failures: dict[str, int] = {}
+        self._strict_failures_lock = threading.Lock()
+        # Injectable time source; defaults to the wall clock.
+        self.time_func: t.Callable[[], float] = time.time
 
         self.pin_logging = pin_logging
         if pin_security:
@@ -317,6 +436,10 @@ class DebuggedApplication:
             self._pin = None
         else:
             self._pin = value
+        # Rotating the PIN must invalidate cached derived material so that any
+        # cookie issued for the old PIN fails the version check immediately.
+        self.__dict__.pop("_pin_version", None)
+        self.__dict__.pop("_pin_key", None)
 
     @property
     def pin_cookie_name(self) -> str:
@@ -325,6 +448,27 @@ class DebuggedApplication:
             pin_cookie = get_pin_and_cookie_name(self.app)
             self._pin, self._pin_cookie = pin_cookie  # type: ignore[assignment]
         return self._pin_cookie
+
+    @property
+    def pin_version(self) -> str | None:
+        """Stable identifier derived from the current PIN.
+
+        Rotating the PIN changes this value, which makes strict cookies issued
+        previously fail verification immediately.
+        """
+        if self.pin is None:
+            return None
+
+        if "_pin_version" not in self.__dict__:
+            self._pin_version = _pin_version(self.pin)
+
+        return self._pin_version
+
+    def _get_pin_key(self) -> bytes:
+        if "_pin_key" not in self.__dict__:
+            self._pin_key = _strict_pin_key(t.cast(str, self.pin), self.pin_cookie_name)
+
+        return self._pin_key
 
     def debug_application(
         self, environ: wt.WSGIEnvironment, start_response: wt.StartResponse
@@ -428,48 +572,217 @@ class DebuggedApplication:
                 BytesIO(data), request.environ, download_name=filename, etag=etag
             )
 
-    def check_pin_trust(self, environ: wt.WSGIEnvironment) -> bool | None:
-        """Checks if the request passed the pin test.  This returns `True` if the
-        request is trusted on a pin/cookie basis and returns `False` if not.
-        Additionally if the cookie's stored pin hash is wrong it will return
-        `None` so that appropriate action can be taken.
+    def _pin_boundary(self, environ: wt.WSGIEnvironment) -> str:
+        """The verification boundary used to isolate failures in strict mode."""
+        return _normalize_host(environ.get("HTTP_HOST"))
+
+    def _strict_failure_count(self, boundary: str) -> int:
+        with self._strict_failures_lock:
+            return self._strict_failures.get(boundary, 0)
+
+    def _strict_set_failure_count(self, boundary: str, value: int) -> None:
+        with self._strict_failures_lock:
+            self._strict_failures[boundary] = value
+
+    def _is_locked_out(self, environ: wt.WSGIEnvironment) -> bool:
+        if self.strict_pin:
+            return self._strict_failure_count(self._pin_boundary(environ)) >= (
+                _PIN_MAX_ATTEMPTS
+            )
+
+        return self._failed_pin_auth.value >= _PIN_MAX_ATTEMPTS
+
+    def check_pin_trust_detail(self, environ: wt.WSGIEnvironment) -> PinTrustResult:
+        """Check whether the request passed PIN authentication.
+
+        Unlike :meth:`check_pin_trust`, this always returns a
+        :class:`PinTrustResult` whose ``reason`` classifies the outcome. In
+        strict mode every distinct failure (unknown cookie version, cross-host
+        reuse, clock skew, bad signature, ...) gets its own reason. The reason
+        never contains the PIN or any cookie material.
         """
         if self.pin is None:
-            return True
+            return PinTrustResult(True, PIN_TRUST_DISABLED)
 
         # If we failed too many times, then we're locked out.
-        if self._failed_pin_auth.value >= 10:
-            return False
+        if self._is_locked_out(environ):
+            return PinTrustResult(False, PIN_TRUST_LOCKED)
 
         val = parse_cookie(environ.get("HTTP_COOKIE")).get(self.pin_cookie_name)
-        if not val or "|" not in val:
-            return False
+
+        if not val:
+            return PinTrustResult(False, PIN_TRUST_NO_COOKIE)
+
+        if self.strict_pin:
+            return self._check_strict_cookie(environ, val)
+
+        if "|" not in val:
+            return PinTrustResult(False, PIN_TRUST_MALFORMED)
+
         ts_str, _, pin_hash = val.partition("|")
 
         try:
             ts = _plain_int(ts_str)
         except ValueError:
-            return False
+            return PinTrustResult(False, PIN_TRUST_MALFORMED)
 
-        if pin_hash != hash_pin(self.pin):
-            return None
-        return (time.time() - PIN_TIME) < ts
+        if not hmac.compare_digest(pin_hash, hash_pin(self.pin)):
+            return PinTrustResult(None, PIN_TRUST_VERSION_MISMATCH)
+
+        if (time.time() - PIN_TIME) < ts:
+            return PinTrustResult(True, PIN_TRUST_OK)
+
+        return PinTrustResult(False, PIN_TRUST_EXPIRED)
+
+    def _check_strict_cookie(
+        self, environ: wt.WSGIEnvironment, val: str
+    ) -> PinTrustResult:
+        parts = val.split("|")
+
+        if len(parts) != 5 or not all(parts):
+            return PinTrustResult(False, PIN_TRUST_MALFORMED)
+
+        cookie_version, cookie_pin_version, cookie_host, ts_str, _mac = parts
+
+        if not hmac.compare_digest(cookie_version, _STRICT_PIN_COOKIE_VERSION):
+            return PinTrustResult(None, PIN_TRUST_UNKNOWN_VERSION)
+
+        try:
+            ts = _plain_int(ts_str)
+        except ValueError:
+            return PinTrustResult(False, PIN_TRUST_MALFORMED)
+
+        expected_host = self._pin_boundary(environ)
+
+        if not hmac.compare_digest(cookie_host, expected_host):
+            return PinTrustResult(False, PIN_TRUST_HOST_MISMATCH)
+
+        if not hmac.compare_digest(cookie_pin_version, t.cast(str, self.pin_version)):
+            return PinTrustResult(None, PIN_TRUST_VERSION_MISMATCH)
+
+        now = self.time_func()
+
+        if ts > now:
+            return PinTrustResult(False, PIN_TRUST_FUTURE)
+
+        if ts < now - PIN_TIME:
+            return PinTrustResult(False, PIN_TRUST_EXPIRED)
+
+        expected = _sign_strict_pin_cookie(
+            self._get_pin_key(),
+            t.cast(str, self.pin_version),
+            expected_host,
+            ts,
+        )
+
+        if not hmac.compare_digest(val, expected):
+            return PinTrustResult(None, PIN_TRUST_INVALID_SIGNATURE)
+
+        return PinTrustResult(True, PIN_TRUST_OK)
+
+    def check_pin_trust(self, environ: wt.WSGIEnvironment) -> bool | None:
+        """Checks if the request passed the pin test. This returns `True` if
+        the request is trusted on a pin/cookie basis and returns `False` if
+        not. Additionally if the cookie cannot be associated with the current
+        PIN it will return `None` so that the cookie is discarded.
+
+        Use :meth:`check_pin_trust_detail` for the classified failure reason.
+        The legacy behavior is unchanged unless ``strict_pin`` is enabled.
+        """
+        return self.check_pin_trust_detail(environ).trusted
 
     def check_host_trust(self, environ: wt.WSGIEnvironment) -> bool:
         return host_is_trusted(environ.get("HTTP_HOST"), self.trusted_hosts)
 
-    def _fail_pin_auth(self) -> None:
+    def _fail_pin_auth(self, environ: wt.WSGIEnvironment | None = None) -> None:
+        if self.strict_pin and environ is not None:
+            boundary = self._pin_boundary(environ)
+
+            with self._strict_failures_lock:
+                count = self._strict_failures.get(boundary, 0) + 1
+                self._strict_failures[boundary] = count
+
+            time.sleep(5.0 if count > 5 else 0.5)
+            return
+
         with self._failed_pin_auth.get_lock():
             count = self._failed_pin_auth.value
             self._failed_pin_auth.value = count + 1
 
         time.sleep(5.0 if count > 5 else 0.5)
 
+    def _issue_strict_cookie(self, request: Request) -> str:
+        return _sign_strict_pin_cookie(
+            self._get_pin_key(),
+            t.cast(str, self.pin_version),
+            self._pin_boundary(request.environ),
+            int(self.time_func()),
+        )
+
     def pin_auth(self, request: Request) -> Response:
         """Authenticates with the pin."""
         if not self.check_host_trust(request.environ):
             return SecurityError()  # type: ignore[return-value]
 
+        if self.strict_pin:
+            return self._pin_auth_strict(request)
+
+        return self._pin_auth_legacy(request)
+
+    def _pin_auth_strict(self, request: Request) -> Response:
+        """Strict PIN authentication with host-bound, versioned cookies."""
+        exhausted = False
+        auth = False
+        result = self.check_pin_trust_detail(request.environ)
+        pin = t.cast(str, self.pin)
+
+        # A cookie that cannot be associated with the current PIN counts as a
+        # bad auth and is unset, so guessing the cookie name is not easier
+        # than guessing the PIN. The generic reason is logged without any
+        # cookie or PIN material.
+        bad_cookie = result.trusted is None
+        if bad_cookie:
+            self._fail_pin_auth(request.environ)
+            if self.pin_logging:
+                _log(
+                    "warning",
+                    " * Debugger PIN trust rejected, reason: %s",
+                    result.reason,
+                )
+        elif result.trusted:
+            auth = True
+        elif self._is_locked_out(request.environ):
+            exhausted = True
+        else:
+            entered_pin = request.args["pin"]
+
+            if hmac.compare_digest(
+                entered_pin.strip().replace("-", ""), pin.replace("-", "")
+            ):
+                self._strict_set_failure_count(self._pin_boundary(request.environ), 0)
+                auth = True
+            else:
+                self._fail_pin_auth(request.environ)
+                exhausted = self._is_locked_out(request.environ)
+
+        rv = Response(
+            json.dumps({"auth": auth, "exhausted": exhausted}),
+            mimetype="application/json",
+        )
+        if auth:
+            rv.set_cookie(
+                self.pin_cookie_name,
+                self._issue_strict_cookie(request),
+                httponly=True,
+                samesite="Strict",
+                secure=request.is_secure,
+            )
+        elif bad_cookie:
+            rv.delete_cookie(self.pin_cookie_name)
+        return rv
+
+    def _pin_auth_legacy(self, request: Request) -> Response:
+        """Legacy PIN authentication, kept byte-for-byte in behavior."""
         exhausted = False
         auth = False
         trust = self.check_pin_trust(request.environ)
@@ -490,7 +803,7 @@ class DebuggedApplication:
             auth = True
 
         # If we failed too many times, then we're locked out.
-        elif self._failed_pin_auth.value >= 10:
+        elif self._failed_pin_auth.value >= _PIN_MAX_ATTEMPTS:
             exhausted = True
 
         # Otherwise go through pin based authentication
