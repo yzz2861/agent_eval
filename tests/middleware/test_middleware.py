@@ -1,7 +1,11 @@
 import asyncio
+from collections.abc import Iterator
+import logging
 from typing import Any, Literal, TypedDict, cast
 
-from secure import CustomHeader, Secure
+import pytest
+
+from secure import ContentSecurityPolicy, CustomHeader, Secure
 from secure.middleware import SecureASGIMiddleware, SecureWSGIMiddleware
 
 
@@ -110,7 +114,7 @@ class _HTTPResponseStart(TypedDict):
     headers: list[tuple[bytes, bytes]]
 
 
-async def _run_asgi(scope: dict[str, Any], app) -> list[dict[str, Any]]:
+async def _run_asgi(scope: dict[str, Any], app, *, catch: bool = False) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
 
     async def send(message: dict[str, Any]):
@@ -119,7 +123,11 @@ async def _run_asgi(scope: dict[str, Any], app) -> list[dict[str, Any]]:
     async def receive() -> dict[str, Any]:
         return {"type": "http.request", "body": b"", "more_body": False}
 
-    await app(scope, receive, send)
+    try:
+        await app(scope, receive, send)
+    except Exception:
+        if not catch:
+            raise
     return messages
 
 
@@ -187,3 +195,209 @@ def test_asgi_multi_ok_custom_header():
 
     extra_values = _headers_by_name_bytes(headers, b"x-extra")
     assert extra_values == [b"existing", b"new"]
+
+
+STATUSES = (200, 302, 404, 500)
+
+
+@pytest.mark.parametrize("status", STATUSES)
+def test_wsgi_applies_headers_to_all_statuses_and_preserves_business_headers(status: int):
+    secure_headers = Secure.with_default_headers()
+    app_headers = [
+        ("Content-Type", "text/html; charset=utf-8"),
+        ("Location", "https://example.test/login"),
+        ("Set-Cookie", "a=1; Path=/"),
+        ("Set-Cookie", "b=2; Path=/"),
+    ]
+
+    def app(environ, start_response):
+        start_response(f"{status} Response", app_headers)
+        return [b""]
+
+    middleware = SecureWSGIMiddleware(app, secure=secure_headers)
+    captured = _run_wsgi_with_middleware(middleware)
+
+    for name, value in secure_headers.headers.items():
+        assert _find_header_values(captured["headers"], name) == [value]
+    assert _find_header_values(captured["headers"], "Content-Type") == ["text/html; charset=utf-8"]
+    assert _find_header_values(captured["headers"], "Location") == ["https://example.test/login"]
+    assert _find_header_values(captured["headers"], "Set-Cookie") == ["a=1; Path=/", "b=2; Path=/"]
+
+
+def test_wsgi_streams_body_and_closes_upstream_once():
+    close_calls = 0
+
+    class Stream:
+        def __iter__(self) -> Iterator[bytes]:
+            yield b"first"
+            yield b"second"
+
+        def close(self):
+            nonlocal close_calls
+            close_calls += 1
+
+    def app(environ, start_response):
+        start_response("200 OK", [("Content-Type", "text/plain")])
+        return Stream()
+
+    middleware = SecureWSGIMiddleware(app)
+    response = middleware({}, lambda status, headers: lambda body: None)
+    assert list(response) == [b"first", b"second"]
+    assert close_calls == 1
+
+    response.close()
+    assert close_calls == 1
+
+
+def test_wsgi_closes_upstream_when_iteration_fails():
+    close_calls = 0
+
+    class BrokenStream:
+        def __iter__(self) -> Iterator[bytes]:
+            yield b"first"
+            raise ConnectionError("client disconnected")
+
+        def close(self):
+            nonlocal close_calls
+            close_calls += 1
+
+    def app(environ, start_response):
+        start_response("200 OK", [])
+        return BrokenStream()
+
+    middleware = SecureWSGIMiddleware(app)
+    response = middleware({}, lambda status, headers: lambda body: None)
+
+    with pytest.raises(ConnectionError):
+        list(response)
+
+    assert close_calls == 1
+
+
+def test_wsgi_closes_upstream_when_response_is_closed_early():
+    close_calls = 0
+
+    class Stream:
+        def __iter__(self) -> Iterator[bytes]:
+            yield b"first"
+            yield b"second"
+
+        def close(self):
+            nonlocal close_calls
+            close_calls += 1
+
+    def app(environ, start_response):
+        start_response("200 OK", [])
+        return Stream()
+
+    middleware = SecureWSGIMiddleware(app)
+    response = middleware({}, lambda status, headers: lambda body: None)
+    assert next(response) == b"first"
+    response.close()
+
+    assert close_calls == 1
+
+
+def test_wsgi_honors_configured_custom_csp():
+    secure_headers = Secure(
+        csp=ContentSecurityPolicy().value("default-src 'none'"),
+        hsts=None,
+    )
+
+    def app(environ, start_response):
+        start_response("302 Found", [("Location", "/login")])
+        return [b""]
+
+    middleware = SecureWSGIMiddleware(app, secure=secure_headers)
+    captured = _run_wsgi_with_middleware(middleware)
+
+    assert _find_header_values(captured["headers"], "Content-Security-Policy") == ["default-src 'none'"]
+    assert _find_header_values(captured["headers"], "Location") == ["/login"]
+
+
+@pytest.mark.parametrize("status", STATUSES)
+def test_asgi_applies_headers_to_all_statuses_and_preserves_business_headers(status: int):
+    secure_headers = Secure.with_default_headers()
+    app_headers = [
+        (b"content-type", b"text/html; charset=utf-8"),
+        (b"location", b"https://example.test/login"),
+        (b"set-cookie", b"a=1; Path=/"),
+        (b"set-cookie", b"b=2; Path=/"),
+    ]
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": status, "headers": app_headers})
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+    middleware = SecureASGIMiddleware(app, secure=secure_headers)
+    messages = asyncio.run(_run_asgi({"type": "http"}, middleware))
+    start = cast("_HTTPResponseStart", messages[0])
+    headers = start["headers"]
+
+    for name, value in secure_headers.headers.items():
+        assert _headers_by_name_bytes(headers, name.encode("ascii")) == [value.encode("latin-1")]
+    assert _headers_by_name_bytes(headers, b"content-type") == [b"text/html; charset=utf-8"]
+    assert _headers_by_name_bytes(headers, b"location") == [b"https://example.test/login"]
+    assert _headers_by_name_bytes(headers, b"set-cookie") == [b"a=1; Path=/", b"b=2; Path=/"]
+
+
+def test_asgi_streams_body_after_start():
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"first", "more_body": True})
+        await send({"type": "http.response.body", "body": b"second", "more_body": False})
+
+    middleware = SecureASGIMiddleware(app)
+    messages = asyncio.run(_run_asgi({"type": "http"}, middleware))
+
+    assert [m["body"] for m in messages if m["type"] == "http.response.body"] == [b"first", b"second"]
+
+
+def test_asgi_duplicate_start_is_ignored():
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.start", "status": 500, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok", "more_body": False})
+
+    middleware = SecureASGIMiddleware(app)
+    messages = asyncio.run(_run_asgi({"type": "http"}, middleware))
+
+    starts = [m for m in messages if m["type"] == "http.response.start"]
+    assert len(starts) == 1
+    assert starts[0]["status"] == 200
+    assert messages[-1]["body"] == b"ok"
+
+
+def test_asgi_exception_before_start_gets_secure_500():
+    async def app(scope, receive, send):
+        raise RuntimeError("boom")
+
+    middleware = SecureASGIMiddleware(app)
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(_run_asgi({"type": "http"}, middleware))
+
+    messages = asyncio.run(_run_asgi({"type": "http"}, middleware, catch=True))
+    start = cast("_HTTPResponseStart", messages[0])
+    assert start["status"] == 500
+    assert _headers_by_name_bytes(start["headers"], b"strict-transport-security")
+    assert _headers_by_name_bytes(start["headers"], b"content-security-policy")
+
+
+def test_asgi_error_log_does_not_include_request_token(caplog):
+    request_header_value = "super-secret-token"
+
+    async def app(scope, receive, send):
+        raise RuntimeError(f"request failed for {request_header_value}")
+
+    middleware = SecureASGIMiddleware(app)
+
+    with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError):
+        asyncio.run(
+            _run_asgi(
+                {"type": "http", "headers": [(b"authorization", request_header_value.encode("ascii"))]},
+                middleware,
+            )
+        )
+
+    assert request_header_value not in caplog.text

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+import logging
 from types import TracebackType
 from typing import Any, TypeAlias
 
 from ..secure import MULTI_OK, Secure
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # WSGI typing aliases
@@ -39,6 +42,100 @@ WSGIApp: TypeAlias = WSGIApplication
 def _normalize_header_name(name: str) -> str:
     """Normalize a header field-name for case-insensitive comparison."""
     return name.strip().lower()
+
+
+def _configured_header_items(secure: Secure) -> tuple[tuple[str, str], ...]:
+    """
+    Return configured header items, including intentionally repeated headers.
+
+    ``Secure.headers`` is a single-valued mapping and raises for repeated
+    configured names. In that case, fall back to the ordered item stream so
+    ``multi_ok`` behavior remains available.
+    """
+    try:
+        return tuple(secure.headers.items())
+    except ValueError:
+        return secure.header_items()
+
+
+def _inject_headers(
+    headers: Iterable[tuple[str, str]],
+    configured_items: Iterable[tuple[str, str]],
+    multi_ok: frozenset[str],
+) -> HeaderList:
+    """
+    Merge configured security headers into an existing header list.
+
+    Single-valued headers replace all existing occurrences. Headers listed in
+    ``multi_ok`` are preserved and the configured value is appended.
+    """
+    out: HeaderList = list(headers)
+
+    positions: dict[str, list[int]] = {}
+    for i, (k, _v) in enumerate(out):
+        positions.setdefault(_normalize_header_name(k), []).append(i)
+
+    for k, v in configured_items:
+        nk = _normalize_header_name(k)
+
+        if nk in multi_ok:
+            out.append((k, v))
+            continue
+
+        if nk in positions:
+            for idx in reversed(positions[nk]):
+                out.pop(idx)
+            positions.pop(nk, None)
+
+        out.append((k, v))
+        positions[nk] = [len(out) - 1]
+
+    return out
+
+
+class _ResponseIterable(Iterator[bytes]):
+    """
+    Close the wrapped WSGI iterable exactly once.
+
+    WSGI servers call ``close()`` after use. This wrapper also closes on
+    exhaustion or iteration failure so a client disconnect cannot strand
+    upstream resources.
+    """
+
+    def __init__(self, iterable: Iterable[bytes]) -> None:
+        self._iterable = iterable
+        self._iterator: Iterator[bytes] | None = None
+        self._closed = False
+
+    def __iter__(self) -> _ResponseIterable:
+        return self
+
+    def __next__(self) -> bytes:
+        try:
+            if self._iterator is None:
+                self._iterator = iter(self._iterable)
+            return next(self._iterator)
+        except StopIteration:
+            self.close()
+            raise
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+
+        close = getattr(self._iterable, "close", None)
+        if callable(close):
+            close()
+            return
+
+        if self._iterator is not None:
+            close = getattr(self._iterator, "close", None)
+            if callable(close):
+                close()
 
 
 # ---------------------------------------------------------------------------
@@ -115,29 +212,16 @@ class SecureWSGIMiddleware:
             headers: HeaderList,
             exc_info: ExcInfo = None,
         ) -> WriteCallable:
-            out: HeaderList = list(headers)
+            out = _inject_headers(headers, _configured_header_items(self.secure), self._multi_ok)
 
-            # Track existing occurrences by normalized key.
-            positions: dict[str, list[int]] = {}
-            for i, (k, _v) in enumerate(out):
-                positions.setdefault(_normalize_header_name(k), []).append(i)
-
-            # Apply Secure headers.
-            for k, v in self.secure.headers.items():
-                nk = _normalize_header_name(k)
-
-                if nk in self._multi_ok:
-                    out.append((k, v))
-                    continue
-
-                if nk in positions:
-                    for idx in reversed(positions[nk]):
-                        out.pop(idx)
-                    positions.pop(nk, None)
-
-                out.append((k, v))
-                positions[nk] = [len(out) - 1]
-
+            if exc_info is None:
+                return start_response(status, out)
             return start_response(status, out, exc_info)
 
-        return self.app(environ, custom_start_response)
+        try:
+            app_iterable = self.app(environ, custom_start_response)
+        except Exception as exc:
+            logger.log(logging.ERROR, "WSGI application raised %s", type(exc).__name__)
+            raise
+
+        return _ResponseIterable(app_iterable)

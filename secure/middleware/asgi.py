@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Iterable, MutableMapping
+import logging
 from typing import Protocol, TypeAlias, cast
 
 from ..secure import MULTI_OK, Secure
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # ASGI typing aliases
@@ -57,6 +60,57 @@ def _encode_header_value(value: str) -> bytes:
     accidental Unicode transformations.
     """
     return value.encode("latin-1")
+
+
+def _configured_header_items(secure: Secure) -> tuple[tuple[str, str], ...]:
+    """
+    Return configured header items, including intentionally repeated headers.
+
+    ``Secure.headers`` is a single-valued mapping and raises for repeated
+    configured names. In that case, fall back to the ordered item stream so
+    ``multi_ok`` behavior remains available.
+    """
+    try:
+        return tuple(secure.headers.items())
+    except ValueError:
+        return secure.header_items()
+
+
+def _inject_headers(
+    headers: Iterable[tuple[bytes, bytes]],
+    configured_items: Iterable[tuple[str, str]],
+    multi_ok: frozenset[bytes],
+) -> HeaderList:
+    """
+    Merge configured security headers into an existing ASGI header list.
+
+    Single-valued headers replace all existing occurrences. Headers listed in
+    ``multi_ok`` are preserved and the configured value is appended.
+    """
+    out: HeaderList = list(headers)
+
+    positions: dict[bytes, list[int]] = {}
+    for i, (k, _v) in enumerate(out):
+        positions.setdefault(_normalize_header_name_bytes(k), []).append(i)
+
+    for name_str, value_str in configured_items:
+        name_b = _encode_header_name(name_str)
+        norm_name_b = _normalize_header_name_bytes(name_b)
+        value_b = _encode_header_value(value_str)
+
+        if norm_name_b in multi_ok:
+            out.append((name_b, value_b))
+            continue
+
+        if norm_name_b in positions:
+            for idx in reversed(positions[norm_name_b]):
+                out.pop(idx)
+            positions.pop(norm_name_b, None)
+
+        out.append((name_b, value_b))
+        positions[norm_name_b] = [len(out) - 1]
+
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -120,39 +174,51 @@ class SecureASGIMiddleware:
             await self.app(scope, receive, send)
             return
 
+        response_started = False
+
         async def send_wrapper(message: Message) -> None:
+            nonlocal response_started
             msg = cast("MutableMapping[str, object]", message)
 
             if msg.get("type") == "http.response.start":
-                raw_headers = msg.get("headers", [])
-                headers: HeaderList = list(cast("Iterable[tuple[bytes, bytes]]", raw_headers))
+                if response_started:
+                    logger.warning("Ignoring duplicate http.response.start")
+                    return
 
-                # Track existing occurrences by normalized key.
-                positions: dict[bytes, list[int]] = {}
-                for i, (k, _v) in enumerate(headers):
-                    positions.setdefault(_normalize_header_name_bytes(k), []).append(i)
+                raw_headers = msg.get("headers") or []
+                msg["headers"] = _inject_headers(
+                    cast("Iterable[tuple[bytes, bytes]]", raw_headers),
+                    _configured_header_items(self.secure),
+                    self._multi_ok,
+                )
 
-                # Apply Secure headers.
-                for name_str, value_str in self.secure.headers.items():
-                    name_b = _encode_header_name(name_str)
-                    norm_name_b = _normalize_header_name_bytes(name_b)
-                    value_b = _encode_header_value(value_str)
-
-                    if norm_name_b in self._multi_ok:
-                        headers.append((name_b, value_b))
-                        continue
-
-                    # Remove all existing values for this header (if present).
-                    if norm_name_b in positions:
-                        for idx in reversed(positions[norm_name_b]):
-                            headers.pop(idx)
-                        positions.pop(norm_name_b, None)
-
-                    headers.append((name_b, value_b))
-                    positions[norm_name_b] = [len(headers) - 1]
-
-                msg["headers"] = headers
+                response_started = True
 
             await send(message)
 
-        await self.app(scope, receive, send_wrapper)
+        try:
+            await self.app(scope, receive, send_wrapper)
+        except Exception as exc:
+            if response_started:
+                raise
+
+            logger.log(logging.ERROR, "ASGI application raised %s before http.response.start", type(exc).__name__)
+            try:
+                await send_wrapper(
+                    {
+                        "type": "http.response.start",
+                        "status": 500,
+                        "headers": [(b"content-type", b"text/plain; charset=utf-8")],
+                    }
+                )
+                await send_wrapper(
+                    {
+                        "type": "http.response.body",
+                        "body": b"",
+                        "more_body": False,
+                    }
+                )
+            except Exception as fallback_error:
+                raise exc from fallback_error
+
+            raise
