@@ -45,6 +45,7 @@ import dns.rdatatype
 import dns.rdtypes.ANY.PTR
 import dns.reversename
 import dns.tsig
+import dns._trust
 
 if sys.platform == "win32":  # pragma: no cover
     import dns.win32util
@@ -258,6 +259,17 @@ class Answer:
 
     Note that CNAMEs or DNAMEs in the response may mean that answer
     RRset's name might not be the query name.
+
+    The ``response`` attribute is the unmodified upstream message, exactly as
+    received (and thus may contain out-of-bailiwick RRSets).  The
+    ``trusted_response`` attribute is the cacheable view produced by the
+    resolver's trust policy, containing only RRSets anchored to the query
+    name, the validated CNAME/DNAME chain, the applicable bailiwick, and
+    valid sections; this is the view used for chaining and for the data
+    returned by ``rrset``.  ``raw_response`` is an alias of ``response``.
+    ``trust_rejects`` holds the coarse audit trail (name category,
+    class/type category, and rejection reason) for RRSets that the trust
+    policy kept out of the cache.
     """
 
     def __init__(
@@ -268,14 +280,27 @@ class Answer:
         response: dns.message.QueryMessage,
         nameserver: str | None = None,
         port: int | None = None,
+        trust_result: dns._trust.TrustResult | None = None,
     ) -> None:
         self.qname = qname
         self.rdtype = rdtype
         self.rdclass = rdclass
-        self.response = response
+        if trust_result is None:
+            # Direct construction (e.g. tests and non-resolver callers):
+            # there is no upstream message to distinguish from, so the raw
+            # and trusted views are the same and there is no audit trail.
+            self.response = response
+            self.raw_response = response
+            self.trusted_response = response
+            self.trust_rejects: list[dns._trust.TrustReject] = []
+        else:
+            self.raw_response = trust_result.raw_response
+            self.response = trust_result.raw_response
+            self.trusted_response = trust_result.trusted_response
+            self.trust_rejects = list(trust_result.rejects)
         self.nameserver = nameserver
         self.port = port
-        self.chaining_result = response.resolve_chaining()
+        self.chaining_result = self.trusted_response.resolve_chaining()
         # Copy some attributes out of chaining_result for backwards
         # compatibility and convenience.
         self.canonical_name = self.chaining_result.canonical_name
@@ -819,13 +844,15 @@ class _Resolution:
         rcode = response.rcode()
         if rcode == dns.rcode.NOERROR:
             try:
+                trust_result = self._apply_trust_policy(response)
                 answer = Answer(
                     self.qname,
                     self.rdtype,
                     self.rdclass,
-                    response,
+                    trust_result.trusted_response,
                     self.nameserver.answer_nameserver(),
                     self.nameserver.answer_port(),
+                    trust_result=trust_result,
                 )
             except Exception as e:
                 self.errors.append(
@@ -849,8 +876,13 @@ class _Resolution:
             # Further validate the response by making an Answer, even
             # if we aren't going to cache it.
             try:
+                trust_result = self._apply_trust_policy(response)
                 answer = Answer(
-                    self.qname, dns.rdatatype.ANY, dns.rdataclass.IN, response
+                    self.qname,
+                    dns.rdatatype.ANY,
+                    dns.rdataclass.IN,
+                    trust_result.trusted_response,
+                    trust_result=trust_result,
                 )
             except Exception as e:
                 self.errors.append(
@@ -903,6 +935,26 @@ class _Resolution:
             )
             return (None, False)
 
+    def _apply_trust_policy(
+        self, response: dns.message.QueryMessage
+    ) -> dns._trust.TrustResult:
+        """Apply the resolver trust policy before anything is cached.
+
+        The trust policy lives in the shared, backend-independent resolver
+        layer so that both the synchronous and asynchronous backends get
+        identical validation.  The transport backends in ``dns.query`` never
+        validate responses themselves.
+        """
+
+        policy = self.resolver.trust_policy
+        if not policy:
+            # Filtering disabled: the raw response is also the trusted view.
+            return dns._trust.TrustResult(
+                trusted_response=response, raw_response=response, rejects=[]
+            )
+        # A fresh policy per response keeps per-request state thread-local.
+        return dns._trust.TrustPolicy().apply(response)
+
 
 class BaseResolver:
     """DNS stub resolver."""
@@ -930,6 +982,7 @@ class BaseResolver:
     retry_servfail: bool
     rotate: bool
     ndots: int | None
+    trust_policy: bool
     _nameservers: Sequence[str | dns.nameserver.Nameserver]
 
     def __init__(
@@ -982,6 +1035,11 @@ class BaseResolver:
         self.retry_servfail = False
         self.rotate = False
         self.ndots = None
+        # Whether to apply the response trust policy before caching.  A
+        # fresh, stateless TrustPolicy is built per response so concurrent
+        # resolutions never share per-request state; set this to False to
+        # disable filtering.
+        self.trust_policy = True
 
     def read_resolv_conf(self, f: str | os.PathLike | TextIO) -> None:
         """Process *f* as a file in the /etc/resolv.conf format.  If *f* is

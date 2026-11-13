@@ -61,6 +61,19 @@ The dns.resolver.Resolver and dns.resolver.Answer Classes
       :py:class:`dns.resolver.Cache` or a :py:class:`dns.resolver.LRUCache`.  The default
       is ``None``, in which case there is no local caching.
 
+   .. attribute:: trust_policy
+
+      A ``bool`` controlling whether every upstream response is validated by
+      a :py:class:`dns.message.TrustPolicy` before it is cached.  The default
+      is ``True``; set it to ``False`` to disable filtering.  A fresh,
+      stateless policy is used for each response, and validation lives in
+      the resolver layer shared by the synchronous and asynchronous
+      backends, so the transport backends in :doc:`query` never validate
+      responses themselves.  A CNAME loop or an over-long chain is a hard
+      error, while out-of-bailiwick, duplicate-owner, unknown class/type,
+      and misplaced records are dropped from the cacheable view but retained
+      in the raw response and recorded as audit entries.
+
    .. attribute:: retry_servfail
 
       A ``bool``.  Should we retry a nameserver if it says ``SERVFAIL``?
@@ -129,7 +142,28 @@ The dns.resolver.Resolver and dns.resolver.Answer Classes
 
    .. attribute:: response
 
-      A :py:class:`dns.message.QueryMessage`, the response message.
+      A :py:class:`dns.message.QueryMessage`, the raw response message as
+      received from the nameserver.  It may contain RRSets that the trust
+      policy refused to cache; inspect :attr:`trusted_response` for the
+      cacheable view.
+
+   .. attribute:: raw_response
+
+      An alias of :attr:`response`, the unmodified upstream message.
+
+   .. attribute:: trusted_response
+
+      A :py:class:`dns.message.QueryMessage` containing only the RRSets
+      admitted by the resolver's trust policy (the query-name anchored
+      CNAME/DNAME chain, the terminal answer, in-bailiwick authority data,
+      and DNSSEC metadata).  This is the view used for chaining and caching.
+
+   .. attribute:: trust_rejects
+
+      A list of :py:class:`dns.message.TrustReject` audit entries, one per
+      RRset kept out of the cacheable view.  Entries hold only coarse
+      classifications (section, name category, RR class/type, and rejection
+      reason), never names or rdata.
 
    .. attribute:: rrset
 

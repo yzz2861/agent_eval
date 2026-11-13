@@ -26,6 +26,22 @@ import dns.rdataclass
 import dns.rdataset
 import dns.rdatatype
 
+#: RR types defined by DNSSEC (RFC 4034 and related RFCs).  Records of these
+#: types are security metadata and must never be dropped by response
+#: filtering, otherwise a validated response could be made unvalidatable.
+DNSSEC_RDTYPES = frozenset(
+    {
+        dns.rdatatype.RdataType.DNSKEY,
+        dns.rdatatype.RdataType.CDS,
+        dns.rdatatype.RdataType.CDNSKEY,
+        dns.rdatatype.RdataType.DS,
+        dns.rdatatype.RdataType.NSEC,
+        dns.rdatatype.RdataType.NSEC3,
+        dns.rdatatype.RdataType.NSEC3PARAM,
+        dns.rdatatype.RdataType.RRSIG,
+    }
+)
+
 
 class RRset(dns.rdataset.Rdataset):
     """A DNS RRset (named rdataset).
@@ -125,6 +141,46 @@ class RRset(dns.rdataset.Rdataset):
             return False
         if self.name != name or self.deleting != deleting:
             return False
+        return True
+
+    def is_dnssec(self) -> bool:
+        """Is this RRset DNSSEC security metadata?
+
+        DNSSEC RRsets (RRSIG, DNSKEY, DS, NSEC, NSEC3, and friends) must be
+        preserved by trust filtering so that signed responses remain
+        verifiable.
+
+        :rtype: bool
+        """
+
+        return self.rdtype in DNSSEC_RDTYPES
+
+    def has_known_rdclass(self) -> bool:
+        """Does this RRset use a registered (non-generic) rdata class?
+
+        Classes parsed from the wire that have no registered mnemonic are
+        represented with generic ``CLASSnnnn`` names; this method returns
+        ``False`` for them.
+
+        :rtype: bool
+        """
+
+        return not str(self.rdclass.name).startswith("CLASS")
+
+    def has_known_rdtype(self) -> bool:
+        """Does this RRset use a registered (non-generic) rdata type?
+
+        Types parsed from the wire that have no registered implementation are
+        represented with generic ``TYPEnnnn`` names and generic rdata; this
+        method returns ``False`` for them.
+
+        :rtype: bool
+        """
+
+        if str(self.rdtype.name).startswith("TYPE"):
+            return False
+        if len(self) > 0:
+            return not isinstance(self[0], dns.rdata.GenericRdata)
         return True
 
     # pylint: disable=arguments-differ

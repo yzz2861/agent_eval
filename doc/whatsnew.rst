@@ -6,6 +6,23 @@ What's New in dnspython
 2.10.0 (in development)
 -----------------------
 
+* The stub resolver now applies an explicit response trust policy before
+  caching an upstream response.  A new internal ``dns._trust`` module (whose
+  public vocabulary is also re-exported through :doc:`message-query`)
+  validates the CNAME/DNAME chain anchored at the question name and admits to
+  the cacheable view only chain links, the terminal answer, in-bailiwick
+  authority SOA/NS data, and DNSSEC metadata.  Out-of-bailiwick records,
+  duplicate owner names, unknown classes/types, and records smuggled into the
+  authority or additional sections stay in the raw response but never enter
+  the cache.  CNAME loops raise ``dns.message.CNAMELoop`` and chains longer
+  than ``dns.message.MAX_CHAIN`` raise a trust ``ChainTooLong``; other
+  rejections are recorded on the answer's ``trust_rejects`` audit list, which
+  contains only coarse name/class/type categories and reasons, never full
+  upstream response contents.  ``dns.resolver.Answer`` now exposes the raw
+  message as ``response``/``raw_response`` and the cacheable view as
+  ``trusted_response``.  The policy can be disabled by setting the
+  resolver's ``trust_policy`` attribute to ``False``.
+
 * The text form of an IPSECKEY record may now omit the public key, which RFC
   4025 section 3.1 makes optional, e.g. ``10 1 0 192.0.2.38`` with algorithm
   0, which means that no key is present.  Such a record could not be read from

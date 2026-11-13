@@ -135,6 +135,27 @@ MAX_CHAIN = 16
 #: answer whose authority section has no SOA record.
 NEGATIVE_TTL_WITHOUT_SOA = 300
 
+# Trust policy vocabulary re-exported through dns.message.  The lookup is
+# lazy (PEP 562) to avoid a circular import with dns._trust.
+_TRUST_EXPORTS = {
+    "CNAMELoop",
+    "NameCategory",
+    "TrustError",
+    "TrustPolicy",
+    "TrustReject",
+    "TrustRejectReason",
+    "TrustResult",
+}
+
+
+def __getattr__(name: str) -> Any:
+    if name in _TRUST_EXPORTS:
+        import dns._trust
+
+        return getattr(dns._trust, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 IndexKeyType = tuple[
     int,
     dns.name.Name,
@@ -1126,6 +1147,28 @@ class QueryMessage(Message):
         :raises dns.exception.FormError: If the question count is not 1.
         """
         return self.resolve_chaining().canonical_name
+
+    def apply_trust_policy(self) -> "dns._trust.TrustResult":
+        """Apply the resolver response trust policy to this message.
+
+        The raw message is left untouched; the returned trust result holds a
+        separate cacheable message containing only RRSets anchored to the
+        question name, the validated CNAME/DNAME chain, the applicable
+        bailiwick, and valid sections, together with a coarse audit trail of
+        every RRset that was refused entry to the cacheable view.
+
+        :raises dns._trust.CNAMELoop: If the answer section contains a CNAME
+            loop.
+        :raises dns._trust.ChainTooLong: If the CNAME/DNAME chain exceeds
+            :data:`dns.message.MAX_CHAIN` links.
+        :raises dns.exception.FormError: If the question count is not 1.
+        :rtype: dns._trust.TrustResult
+        """
+
+        import dns._trust
+
+        policy = dns._trust.TrustPolicy()
+        return policy.apply(self)
 
 
 def _maybe_import_update():
