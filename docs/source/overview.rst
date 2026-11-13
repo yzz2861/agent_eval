@@ -346,6 +346,22 @@ past or future, it will update
 time steps that the two sides are out of sync. For subsequent tokens, we'll
 slide the window of acceptable tokens by this number.
 
+.. setting:: OTP_TOTP_STRICT_CLOCK
+
+**OTP_TOTP_STRICT_CLOCK**
+
+Default: ``True``
+
+When true, TOTP devices bound how far drift may move in a single successful
+verification. A token from a clock that has jumped far into the future is not
+used to persist a new drift value, and a clock rollback cannot make an already
+consumed time step valid again. The legacy unbounded drift behaviour can be
+restored by setting this to ``False``.
+
+The bounds can be tuned with ``OTP_TOTP_MAX_DRIFT_STEP``,
+``OTP_TOTP_MAX_FUTURE_DRIFT`` and ``OTP_TOTP_MAX_PAST_DRIFT`` (all default to
+8 steps).
+
 
 .. setting:: OTP_TOTP_THROTTLE_FACTOR
 

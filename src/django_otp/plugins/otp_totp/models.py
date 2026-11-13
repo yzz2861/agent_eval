@@ -7,7 +7,15 @@ from django.conf import settings
 from django.db import models
 
 from django_otp.models import Device, ThrottlingMixin, TimestampMixin
-from django_otp.oath import TOTP
+from django_otp.oath import (
+    DEFAULT_MAX_DRIFT_STEP,
+    DEFAULT_MAX_FUTURE_DRIFT,
+    DEFAULT_MAX_PAST_DRIFT,
+    TOTP,
+    TOTPConfigurationError,
+    TOTPError,
+    TOTPOutOfWindowError,
+)
 from django_otp.util import hex_validator, random_hex
 
 
@@ -99,6 +107,15 @@ class TOTPDevice(TimestampMixin, ThrottlingMixin, Device):
     class Meta(Device.Meta):
         verbose_name = "TOTP device"
 
+    # The device opts into the strict clock policy by default.  This prevents
+    # a manually changed prover clock from persisting an arbitrarily large
+    # drift.  It can be disabled explicitly for callers that need the legacy
+    # unbounded behaviour.
+    strict_clock = True
+    max_drift_step = DEFAULT_MAX_DRIFT_STEP
+    max_future_drift = DEFAULT_MAX_FUTURE_DRIFT
+    max_past_drift = DEFAULT_MAX_PAST_DRIFT
+
     @property
     def bin_key(self):
         """
@@ -108,6 +125,7 @@ class TOTPDevice(TimestampMixin, ThrottlingMixin, Device):
 
     def verify_token(self, token):
         OTP_TOTP_SYNC = getattr(settings, 'OTP_TOTP_SYNC', True)
+        self.last_verify_error = None
 
         verify_allowed, _ = self.verify_is_allowed()
         if not verify_allowed:
@@ -117,13 +135,89 @@ class TOTPDevice(TimestampMixin, ThrottlingMixin, Device):
             token = int(token)
         except Exception:
             verified = False
+            self.last_verify_error = TOTPOutOfWindowError()
         else:
-            key = self.bin_key
+            strict = self._clock_option(
+                ('OTP_TOTP_STRICT_CLOCK', 'OTP_TOTP_STRICT'),
+                ('strict_clock', 'clock_strict', 'enforce_clock'),
+                True,
+            )
+            max_drift_step = self._clock_option(
+                (
+                    'OTP_TOTP_MAX_DRIFT_STEP',
+                    'OTP_TOTP_MAX_DRIFT_PER_STEP',
+                ),
+                (
+                    'max_drift_step',
+                    'max_drift_per_step',
+                    'max_step_adjustment',
+                ),
+                DEFAULT_MAX_DRIFT_STEP,
+            )
+            max_future_drift = self._clock_option(
+                (
+                    'OTP_TOTP_MAX_FUTURE_DRIFT',
+                    'OTP_TOTP_FUTURE_DRIFT_LIMIT',
+                ),
+                (
+                    'max_future_drift',
+                    'future_drift_limit',
+                    'max_future_steps',
+                ),
+                DEFAULT_MAX_FUTURE_DRIFT,
+            )
+            max_past_drift = self._clock_option(
+                (
+                    'OTP_TOTP_MAX_PAST_DRIFT',
+                    'OTP_TOTP_PAST_DRIFT_LIMIT',
+                ),
+                (
+                    'max_past_drift',
+                    'past_drift_limit',
+                    'max_past_steps',
+                ),
+                DEFAULT_MAX_PAST_DRIFT,
+            )
 
-            totp = TOTP(key, self.step, self.t0, self.digits, self.drift)
-            totp.time = time.time()
+            # On the last successful verification, last_t was the absolute
+            # (drift-adjusted) step and drift was the offset used to reach it.
+            # Their difference is therefore the server-side base step at that
+            # moment.  Keeping it as a floor lets us recognize a rollback
+            # without adding another persisted field.
+            min_base_t = None
+            if self.last_t >= 0:
+                min_base_t = self.last_t - self.drift
 
-            verified = totp.verify(token, self.tolerance, self.last_t + 1)
+            totp = None
+            try:
+                totp = TOTP(
+                    self.bin_key,
+                    self.step,
+                    self.t0,
+                    self.digits,
+                    self.drift,
+                    strict=strict,
+                    max_drift_step=max_drift_step,
+                    max_future_drift=max_future_drift,
+                    max_past_drift=max_past_drift,
+                )
+                totp.time = time.time()
+
+                verified = totp.verify(
+                    token,
+                    self.tolerance,
+                    self.last_t + 1,
+                    min_base_t=min_base_t,
+                )
+            except TOTPError as error:
+                verified = False
+                self.last_verify_error = error
+            except Exception:
+                # Configuration and decoding failures are reported as a safe
+                # category; neither the key nor the token is included.
+                verified = False
+                self.last_verify_error = TOTPConfigurationError()
+
             if verified:
                 self.last_t = totp.t()
                 if OTP_TOTP_SYNC:
@@ -131,14 +225,37 @@ class TOTPDevice(TimestampMixin, ThrottlingMixin, Device):
                 self.throttle_reset(commit=False)
                 self.set_last_used_timestamp(commit=False)
                 self.save()
+            else:
+                self.last_verify_error = self.last_verify_error or getattr(
+                    totp, 'last_error', None
+                )
 
         if not verified:
             self.throttle_increment(commit=True)
 
         return verified
 
+    def _clock_option(self, setting_names, attribute_names, default):
+        for name in setting_names:
+            if hasattr(settings, name):
+                return getattr(settings, name)
+        for name in attribute_names:
+            if hasattr(self, name):
+                return getattr(self, name)
+        return default
+
     def get_throttle_factor(self):
         return getattr(settings, 'OTP_TOTP_THROTTLE_FACTOR', 1)
+
+    @property
+    def last_verify_error_code(self):
+        """
+        The safe category of the most recent failed verification, if any.
+
+        Possible values are ``out_of_window``, ``rollback``,
+        ``configuration_error`` and ``consumed``.
+        """
+        return getattr(getattr(self, 'last_verify_error', None), 'code', None)
 
     @property
     def config_url(self):
