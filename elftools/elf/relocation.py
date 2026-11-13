@@ -9,10 +9,10 @@
 from __future__ import annotations
 
 from functools import cached_property
-from typing import IO, TYPE_CHECKING, Any, NamedTuple, Protocol
+from typing import IO, TYPE_CHECKING, Any, NamedTuple, Protocol, TypedDict
 
 from ..common.construct_utils import ULEB128
-from ..common.exceptions import ELFRelocationError
+from ..common.exceptions import ELFError, ELFRelocationError
 from ..common.utils import elf_assert, struct_parse
 from ..construct import Container
 from .enums import (
@@ -32,7 +32,62 @@ from .sections import Section, SymbolTableSection
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
 
+    from .gnuversions import (
+        ELFDiagnostic,
+        SymbolVersion,
+        VersionRecord,
+    )
     from .elffile import ELFFile
+
+
+class RelocationTrace(TypedDict):
+    """A relocation and the objects/sources involved in resolving its symbol."""
+    relocation_section: RelocationSection | None
+    relocation_section_index: int | None
+    relocation_index: int
+    entry_offset: int | None
+    target_section: Section | None
+    target_section_index: int | None
+    target_file_offset: int | None
+    target_offset: int
+    relocation_type: int
+    recipe_bytesize: int | None
+    addend: int | None
+    original_value: int | None
+    relocated_value: int | None
+    symbol_table: SymbolTableSection | None
+    symbol_table_index: int | None
+    symbol_index: int
+    symbol: Any
+    symbol_name: str | None
+    symbol_value: int | None
+    version: SymbolVersion | None
+    version_source: VersionRecord | None
+    version_sources: list[VersionRecord]
+    diagnostics: list[ELFDiagnostic]
+
+
+def _short_text(text: str | None, limit: int = 80) -> str | None:
+    if text is None:
+        return None
+    return text if len(text) <= limit else text[:limit] + '...'
+
+
+def _reloc_diagnostic(
+    code: str,
+    message: str,
+    severity: str = 'warning',
+    **fields: Any,
+) -> ELFDiagnostic:
+    diagnostic: dict[str, Any] = {
+        'code': code,
+        'message': _short_text(message, 240),
+        'severity': severity,
+    }
+    for key, value in fields.items():
+        if value is not None:
+            diagnostic[key] = _short_text(value, 80) if isinstance(value, str) else value
+    return diagnostic  # type: ignore[return-value]
 
 
 class Relocation:
@@ -41,9 +96,16 @@ class Relocation:
 
         Can be either a REL or RELA relocation.
     """
-    def __init__(self, entry: Container, elffile: ELFFile) -> None:
+    def __init__(
+        self,
+        entry: Container,
+        elffile: ELFFile,
+        *,
+        entry_offset: int | None = None,
+    ) -> None:
         self.entry = entry
         self.elffile = elffile
+        self.entry_offset = entry_offset
 
     def is_RELA(self) -> bool:
         """ Is this a RELA relocation? If not, it's REL.
@@ -107,7 +169,7 @@ class RelocationTable:
             self.entry_struct,
             self._stream,
             stream_pos=entry_offset)
-        return Relocation(entry, self._elffile)
+        return Relocation(entry, self._elffile, entry_offset=entry_offset)
 
     def iter_relocations(self) -> Iterator[Relocation]:
         """ Yield all the relocations in the section
@@ -283,6 +345,21 @@ class RelocationHandler:
     """
     def __init__(self, elffile: ELFFile) -> None:
         self.elffile = elffile
+        self.diagnostics: list[ELFDiagnostic] = []
+        self.traces: list[RelocationTrace] = []
+
+    def clear_diagnostics(self) -> None:
+        """Discard traces and diagnostics from previous applications."""
+        self.diagnostics.clear()
+        self.traces.clear()
+
+    @property
+    def relocation_diagnostics(self) -> list[ELFDiagnostic]:
+        return self.diagnostics
+
+    @property
+    def relocation_traces(self) -> list[RelocationTrace]:
+        return self.traces
 
     def find_relocations_for_section(self, section: Section) -> RelocationSection | None:
         """ Given a section, find the relocation section for it in the ELF
@@ -302,6 +379,9 @@ class RelocationHandler:
         self,
         stream: IO[bytes],
         reloc_section: RelocationSection,
+        *,
+        strict: bool = True,
+        diagnose: bool = True,
     ) -> None:
         """ Apply reloc_section's relocations in place to a stream containing
             the target section's data, starting at stream offset 0. The stream
@@ -312,18 +392,48 @@ class RelocationHandler:
             The target section's offset within the ELF file is not added.
             Virtual addresses in executable/shared-object dynamic relocations
             are not translated to stream offsets by this API.
+
+            When diagnose is true (the default), each symbol/version lookup is
+            checked before the value is applied, and relocation traces and
+            structured diagnostics are collected in the handler. With
+            strict=False, malformed symbol references and out-of-range target
+            offsets are skipped instead of raising.
         """
+        self.clear_diagnostics()
         # The symbol table associated with this relocation section
         symtab = self.elffile.get_section(reloc_section['sh_link'])
         assert isinstance(symtab, SymbolTableSection)
-        for reloc in reloc_section.iter_relocations():
-            self._do_apply_relocation(stream, reloc, symtab)
+        target_index = int(reloc_section['sh_info'])
+        target_section = (
+            self.elffile.get_section(target_index) if target_index != 0 else None)
+        reloc_section_index = next(
+            (i for i, section in enumerate(self.elffile.iter_sections())
+             if section == reloc_section),
+            None)
+        for index, reloc in enumerate(reloc_section.iter_relocations()):
+            self._do_apply_relocation(
+                stream, reloc, symtab,
+                target_section=target_section,
+                relocation_section=reloc_section,
+                relocation_section_index=reloc_section_index,
+                symbol_table_index=int(reloc_section['sh_link']),
+                relocation_index=index,
+                diagnose=diagnose,
+                strict=strict)
 
     def _do_apply_relocation(
         self,
         stream: IO[bytes],
         reloc: Relocation,
         symtab: SymbolTableSection,
+        *,
+        target_section: Section | None = None,
+        relocation_section: RelocationSection | None = None,
+        relocation_section_index: int | None = None,
+        symbol_table_index: int | None = None,
+        relocation_index: int = 0,
+        diagnose: bool = False,
+        strict: bool = True,
     ) -> None:
         arch = self.elffile.get_machine_arch()
         reloc_type = reloc['r_info_type']
@@ -337,14 +447,83 @@ class RelocationHandler:
         if reloc_type in self._RELOCATION_NONE_TYPES.get(arch, ()) and not is_mips_composed:
             return
 
+        target_offset = int(reloc['r_offset'])
+        target_file_offset = (
+            int(target_section['sh_offset']) + target_offset
+            if target_section is not None else None)
+        if diagnose and symbol_table_index is None:
+            symbol_table_index = self._find_section_index(symtab)
+        trace = RelocationTrace(
+            relocation_section=relocation_section,
+            relocation_section_index=relocation_section_index,
+            relocation_index=relocation_index,
+            entry_offset=reloc.entry_offset,
+            target_section=target_section,
+            target_section_index=(
+                int(relocation_section['sh_info'])
+                if relocation_section is not None else None),
+            target_file_offset=target_file_offset,
+            target_offset=target_offset,
+            relocation_type=int(reloc_type),
+            recipe_bytesize=None,
+            addend=None,
+            original_value=None,
+            relocated_value=None,
+            symbol_table=symtab,
+            symbol_table_index=symbol_table_index,
+            symbol_index=int(reloc['r_info_sym']),
+            symbol=None,
+            symbol_name=None,
+            symbol_value=None,
+            version=None,
+            version_source=None,
+            version_sources=[],
+            diagnostics=[],
+        )
+        self.traces.append(trace)
+
+        def add_diagnostic(diagnostic: ELFDiagnostic) -> None:
+            if diagnostic not in self.diagnostics:
+                self.diagnostics.append(diagnostic)
+            if diagnostic not in trace['diagnostics']:
+                trace['diagnostics'].append(diagnostic)
+
         # Preparations for performing the relocation: obtain the value of
         # the symbol mentioned in the relocation, as well as the relocation
         # recipe which tells us how to actually perform it.
         # All peppered with some sanity checking.
-        if reloc['r_info_sym'] >= symtab.num_symbols():
-            raise ELFRelocationError(
-                'Invalid symbol reference in relocation: index {}'.format(reloc['r_info_sym']))
-        sym_value = symtab.get_symbol(reloc['r_info_sym'])['st_value']
+        symbol_index = int(reloc['r_info_sym'])
+        if not 0 <= symbol_index < symtab.num_symbols():
+            symbol_table_name = getattr(symtab, 'name', None)
+            diagnostic = _reloc_diagnostic(
+                'relocation-symbol-not-in-table',
+                f'relocation symbol index {symbol_index} is outside '
+                f'{symbol_table_name} ({symtab.num_symbols()} symbols)',
+                severity='error',
+                section=relocation_section.name if relocation_section else None,
+                offset=reloc.entry_offset,
+                symbol_table=symbol_table_name,
+                symbol_index=symbol_index,
+                reason='relocation symbol index outside symbol table')
+            add_diagnostic(diagnostic)
+            if strict:
+                raise ELFRelocationError(
+                    'Invalid symbol reference in relocation: index {} '
+                    '(symbol table {}, offset {})'.format(
+                        symbol_index, symbol_table_name,
+                        f'{reloc.entry_offset:#x}' if reloc.entry_offset is not None else 'unknown'))
+            return
+
+        symbol = symtab.get_symbol(symbol_index)
+        sym_value = symbol['st_value']
+        trace['symbol'] = symbol
+        trace['symbol_name'] = getattr(symbol, 'name', None)
+        trace['symbol_value'] = sym_value
+
+        if diagnose:
+            self._collect_version_info(
+                symtab, symbol_table_index, symbol_index, symbol, trace,
+                add_diagnostic)
 
         recipe = None
 
@@ -406,11 +585,44 @@ class RelocationHandler:
             raise ELFRelocationError(
                     f'Unsupported relocation type: {detail} for {arch}')
 
+        trace['recipe_bytesize'] = recipe.bytesize
+        addend = reloc['r_addend'] if recipe.has_addend else 0
+        trace['addend'] = addend
+
+        if (diagnose and target_section is not None
+                and self.elffile.header['e_type'] == 'ET_REL'):
+            data_size = target_section.data_size
+            if recipe.bytesize == _ULEB128_BYTESIZE:
+                invalid_offset = target_offset < 0 or target_offset >= data_size
+            else:
+                invalid_offset = (
+                    target_offset < 0
+                    or target_offset + recipe.bytesize > data_size)
+            if invalid_offset:
+                diagnostic = _reloc_diagnostic(
+                    'relocation-offset-out-of-range',
+                    f'relocation offset {target_offset:#x} with size '
+                    f'{recipe.bytesize} is outside target section '
+                    f'{target_section.name} (size {data_size:#x})',
+                    severity='error',
+                    section=relocation_section.name if relocation_section else None,
+                    offset=reloc.entry_offset,
+                    symbol_table=symtab.name,
+                    symbol_index=symbol_index,
+                    reason='relocation target outside target section')
+                add_diagnostic(diagnostic)
+                if strict:
+                    raise ELFRelocationError(
+                        f'Relocation offset {target_offset:#x} is outside '
+                        f'target section {target_section.name}')
+                return
+
         # So now we have everything we need to actually perform the relocation.
         # Let's get to it:
 
         if recipe.bytesize == _ULEB128_BYTESIZE:
-            self._do_apply_uleb128_relocation(stream, reloc, recipe, sym_value)
+            self._do_apply_uleb128_relocation(
+                stream, reloc, recipe, sym_value, trace)
             return
 
         # 0. Find out which struct we're going to be using to read this value
@@ -431,6 +643,7 @@ class RelocationHandler:
             value_struct,
             stream,
             stream_pos=reloc['r_offset'])
+        trace['original_value'] = int(original_value)
         # 2. Apply the relocation to the value, acting according to the recipe
         relocated_value = recipe.calc_func(
             value=original_value,
@@ -444,7 +657,145 @@ class RelocationHandler:
         # looks like a problem, but it seems to be the way this is done in
         # binutils too.
         relocated_value = relocated_value % (2 ** (recipe.bytesize * 8))
+        trace['relocated_value'] = relocated_value
         value_struct.build_stream(relocated_value, stream)
+
+    @staticmethod
+    def _safe_int(value: Any) -> int | None:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @cached_property
+    def _section_snapshot(self) -> list[Section]:
+        return list(self.elffile.iter_sections())
+
+    def _find_section_index(self, section: Section) -> int | None:
+        return next(
+            (index for index, candidate in enumerate(self._section_snapshot)
+             if candidate == section),
+            None)
+
+    @staticmethod
+    def _symbols_differ(left: Any, right: Any) -> bool:
+        try:
+            return (
+                getattr(left, 'name', None) != getattr(right, 'name', None)
+                or left['st_value'] != right['st_value']
+                or left['st_size'] != right['st_size']
+                or left['st_shndx'] != right['st_shndx']
+                or left['st_info']['bind'] != right['st_info']['bind']
+                or left['st_info']['type'] != right['st_info']['type']
+            )
+        except (AttributeError, KeyError, TypeError):
+            return True
+
+    def _check_symbol_table_mismatch(
+        self,
+        symtab: SymbolTableSection,
+        symtab_index: int | None,
+        symbol_index: int,
+        symbol: Any,
+        add_diagnostic: Any,
+    ) -> None:
+        from .gnuversions import GNUVerSymSection
+
+        for section in self._section_snapshot:
+            if not isinstance(section, GNUVerSymSection):
+                continue
+            section_symtab_index = self._safe_int(section['sh_link'])
+            if section_symtab_index == symtab_index:
+                continue
+            other_table = self._safe_int(section_symtab_index)
+            if other_table is None:
+                continue
+            try:
+                other_symtab = self.elffile.get_section(other_table)
+            except (ELFError, TypeError, ValueError):
+                continue
+            if not isinstance(other_symtab, SymbolTableSection):
+                continue
+            if not 0 <= symbol_index < other_symtab.num_symbols():
+                continue
+            other_symbol = other_symtab.get_symbol(symbol_index)
+            if not self._symbols_differ(symbol, other_symbol):
+                continue
+
+            other_info = section.get_symbol_version_info(symbol_index)
+            other_version = other_info['version'] if other_info else None
+            add_diagnostic(_reloc_diagnostic(
+                'relocation-symbol-table-mismatch',
+                f'relocation symbol {symbol_index} resolves to '
+                f'{_short_text(getattr(symbol, "name", None))!r} in '
+                f'{symtab.name} but to '
+                f'{_short_text(other_symbol.name)!r} in {other_symtab.name}',
+                severity='warning',
+                section=section.name,
+                symbol_table=symtab.name,
+                symbol_index=symbol_index,
+                name=getattr(symbol, 'name', None),
+                other_name=other_symbol.name,
+                version_index=(
+                    other_version['index'] if other_version is not None else None),
+                filename=(
+                    other_version['filename'] if other_version is not None else None),
+                reason='same symbol index resolves differently in symbol tables'))
+
+    def _collect_version_info(
+        self,
+        symtab: SymbolTableSection,
+        symtab_index: int | None,
+        symbol_index: int,
+        symbol: Any,
+        trace: RelocationTrace,
+        add_diagnostic: Any,
+    ) -> None:
+        from .gnuversions import GNUVerSymSection
+
+        version_sections = [
+            section for section in self._section_snapshot
+            if isinstance(section, GNUVerSymSection)]
+        matching = next(
+            (section for section in version_sections
+             if self._safe_int(section['sh_link']) == symtab_index),
+            None)
+
+        if matching is None:
+            if version_sections:
+                add_diagnostic(_reloc_diagnostic(
+                    'relocation-symbol-not-in-version-table',
+                    f'relocation uses {symtab.name}, but no versym table is '
+                    f'linked to it',
+                    severity='warning',
+                    symbol_table=symtab.name,
+                    symbol_index=symbol_index,
+                    name=getattr(symbol, 'name', None),
+                    reason='no versym table linked to relocation symbol table'))
+            self._check_symbol_table_mismatch(
+                symtab, symtab_index, symbol_index, symbol, add_diagnostic)
+            return
+
+        info = matching.get_symbol_version_info(symbol_index)
+        if info is None:
+            add_diagnostic(_reloc_diagnostic(
+                'relocation-symbol-not-in-version-table',
+                f'symbol index {symbol_index} is outside {matching.name}',
+                severity='error',
+                section=matching.name,
+                symbol_table=symtab.name,
+                symbol_index=symbol_index,
+                name=getattr(symbol, 'name', None),
+                reason='relocation symbol outside versym table'))
+        else:
+            trace['version'] = info['version']
+            trace['version_source'] = info['source']
+            trace['version_sources'] = info['sources']
+            for diagnostic in info['diagnostics']:
+                add_diagnostic(diagnostic)
+
+        self._check_symbol_table_mismatch(
+            symtab, symtab_index, symbol_index, symbol, add_diagnostic)
 
     def _do_apply_uleb128_relocation(
         self,
@@ -452,18 +803,23 @@ class RelocationHandler:
         reloc: Relocation,
         recipe: _RELOCATION_RECIPE_TYPE,
         sym_value: int,
+        trace: RelocationTrace | None = None,
     ) -> None:
         # The relocated value is written back in the same number of bytes as
         # the original encoding, as ld does, so the data that follows it does
         # not move.
         original_value = struct_parse(ULEB128(''), stream, stream_pos=reloc['r_offset'])
         length = stream.tell() - reloc['r_offset']
+        if trace is not None:
+            trace['original_value'] = original_value
         relocated_value = recipe.calc_func(
             value=original_value,
             sym_value=sym_value,
             offset=reloc['r_offset'],
             addend=reloc['r_addend'] if recipe.has_addend else 0)
         relocated_value %= 2 ** (7 * length)
+        if trace is not None:
+            trace['relocated_value'] = relocated_value
         encoded = bytearray()
         for i in range(length):
             byte = relocated_value & 0x7f
@@ -691,4 +1047,3 @@ class RelocationHandler:
         ENUM_RELOC_TYPE_S390X['R_390_64']: _RELOCATION_RECIPE_TYPE(
             bytesize=8, has_addend=True, calc_func=_reloc_calc_sym_plus_addend),
     }
-

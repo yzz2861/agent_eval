@@ -198,5 +198,133 @@ class TestRelocation(unittest.TestCase):
                     relos = sect.get_relocation_tables()
                     self.assertEqual(set(relos), {'JMPREL', 'REL'})
 
+    def test_rel_and_rela_traces(self):
+        cases = (
+            ('gmtime_r.o.elf', '.rel.debug_line'),
+            ('tls_relocs_x64_gcc.o', '.rela.debug_line'),
+        )
+        test_dir = os.path.join('test', 'testfiles_for_unittests')
+        for filename, section_name in cases:
+            with (self.subTest(filename=filename, section=section_name),
+                  open(os.path.join(test_dir, filename), 'rb') as f):
+                elf = ELFFile(f)
+                reloc_section = elf.get_section_by_name(section_name)
+                target = elf.get_section(reloc_section['sh_info'])
+                first = reloc_section.get_relocation(0)
+                handler = RelocationHandler(elf)
+                stream = BytesIO(target.data())
+                handler.apply_section_relocations(stream, reloc_section)
+
+                self.assertEqual(handler.diagnostics, [])
+                trace = handler.traces[0]
+                self.assertEqual(trace['target_section'], target)
+                self.assertEqual(trace['target_section_index'],
+                                 reloc_section['sh_info'])
+                self.assertEqual(trace['target_offset'], first['r_offset'])
+                self.assertEqual(
+                    trace['target_file_offset'],
+                    target['sh_offset'] + first['r_offset'])
+                self.assertEqual(trace['entry_offset'],
+                                 reloc_section['sh_offset'])
+                self.assertEqual(
+                    trace['relocation_section_index'],
+                    elf.get_section_index(section_name))
+                self.assertEqual(trace['symbol_table_index'],
+                                 reloc_section['sh_link'])
+
+    def test_relocation_version_provenance(self):
+        path = os.path.join('test', 'testfiles_for_unittests',
+                            'lib_versioned64.so.elf')
+        with open(path, 'rb') as f:
+            elf = ELFFile(f)
+            dynsym = elf.get_section_by_name('.dynsym')
+            handler = RelocationHandler(elf)
+            reloc = Relocation(
+                Container(r_info_type=1, r_info_sym=3,
+                          r_offset=0, r_addend=0), elf)
+            handler._do_apply_relocation(
+                BytesIO(b'\0' * 8), reloc, dynsym,
+                symbol_table_index=elf.get_section_index('.dynsym'),
+                diagnose=True)
+
+        trace = handler.traces[-1]
+        self.assertEqual(trace['symbol_name'], 'puts')
+        self.assertEqual(trace['version']['name'], 'GLIBC_2.2.5')
+        self.assertEqual(trace['version']['filename'], 'libc.so.6')
+        self.assertEqual(trace['version_source']['kind'], 'verneed')
+        self.assertEqual(trace['version_source']['filename'], 'libc.so.6')
+        self.assertEqual(trace['version_source']['hash'], 157882997)
+        self.assertEqual(handler.diagnostics, [])
+
+    def test_relocation_symbol_table_mismatch(self):
+        path = os.path.join('test', 'testfiles_for_unittests',
+                            'lib_versioned64.so.elf')
+        with open(path, 'rb') as f:
+            elf = ELFFile(f)
+            symtab = elf.get_section_by_name('.symtab')
+            handler = RelocationHandler(elf)
+            reloc = Relocation(
+                Container(r_info_type=1, r_info_sym=3,
+                          r_offset=0, r_addend=0), elf)
+            handler._do_apply_relocation(
+                BytesIO(b'\0' * 8), reloc, symtab,
+                symbol_table_index=elf.get_section_index('.symtab'),
+                diagnose=True)
+
+        trace = handler.traces[-1]
+        # The same relocation index means 'puts' in .dynsym but a different
+        # object in .symtab. Version provenance must not silently come from
+        # the unrelated .gnu.version table.
+        self.assertIsNone(trace['version'])
+        codes = {diagnostic['code'] for diagnostic in handler.diagnostics}
+        self.assertIn('relocation-symbol-not-in-version-table', codes)
+        self.assertIn('relocation-symbol-table-mismatch', codes)
+
+    def test_invalid_relocation_symbol_can_be_skipped(self):
+        handler, symtab = self._make_handler('x64')
+        reloc = Relocation(
+            Container(r_info_type=10, r_info_sym=2,
+                      r_offset=0, r_addend=0), handler.elffile)
+        stream = BytesIO(b'\xaa' * 8)
+        handler._do_apply_relocation(
+            stream, reloc, symtab, strict=False)
+
+        self.assertEqual(stream.getvalue(), b'\xaa' * 8)
+        self.assertEqual(handler.diagnostics[0]['code'],
+                         'relocation-symbol-not-in-table')
+        self.assertEqual(handler.diagnostics[0]['symbol_index'], 2)
+        self.assertEqual(handler.traces[0]['symbol_index'], 2)
+        self.assertIsNone(handler.traces[0]['symbol'])
+
+    def test_out_of_range_target_offset_is_diagnosed(self):
+        path = os.path.join('test', 'testfiles_for_unittests',
+                            'gmtime_r.o.elf')
+        with open(path, 'rb') as f:
+            elf = ELFFile(f)
+            reloc_section = elf.get_section_by_name('.rel.debug_line')
+            target = elf.get_section(reloc_section['sh_info'])
+            target_data = target.data()
+            symtab = elf.get_section(reloc_section['sh_link'])
+            original = reloc_section.get_relocation(0)
+            reloc = Relocation(
+                Container(r_info_type=original['r_info_type'],
+                          r_info_sym=original['r_info_sym'],
+                          r_offset=target.data_size), elf)
+            handler = RelocationHandler(elf)
+            stream = BytesIO(target_data)
+            handler._do_apply_relocation(
+                stream, reloc, symtab,
+                target_section=target,
+                relocation_section=reloc_section,
+                symbol_table_index=reloc_section['sh_link'],
+                diagnose=True, strict=False)
+
+        self.assertEqual(stream.getvalue(), target_data)
+        diagnostic = handler.diagnostics[0]
+        self.assertEqual(diagnostic['code'],
+                         'relocation-offset-out-of-range')
+        self.assertEqual(diagnostic['reason'],
+                         'relocation target outside target section')
+
 if __name__ == '__main__':
     unittest.main()

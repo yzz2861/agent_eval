@@ -10,6 +10,8 @@ import unittest
 from io import BytesIO
 from typing import ClassVar
 
+from elftools.common.exceptions import ELFError
+from elftools.common.utils import struct_parse
 from elftools.elf.constants import VER_FLAGS
 from elftools.elf.elffile import ELFFile
 from elftools.elf.gnuversions import (
@@ -124,6 +126,141 @@ class TestSymbolVersioning(unittest.TestCase):
             self.assertEqual(versym.get_symbol_version(15), {
                 'index': 2, 'name': 'SYSVABI_1.3',
                 'filename': 'libc.so.1', 'hidden': False})
+
+    def _versioned_bytes(self) -> bytearray:
+        path = os.path.join('test', 'testfiles_for_unittests',
+                            'lib_versioned64.so.elf')
+        with open(path, 'rb') as f:
+            return bytearray(f.read())
+
+    def _load_versioned(self, data: bytearray | None = None) -> ELFFile:
+        return ELFFile(BytesIO(self._versioned_bytes() if data is None else data))
+
+    def test_legal_sample_has_no_diagnostics(self):
+        elf = self._load_versioned()
+        for section in elf.iter_sections():
+            if isinstance(section, (GNUVerDefSection, GNUVerNeedSection,
+                                    GNUVerSymSection)):
+                with self.subTest(section=section.name):
+                    self.assertEqual(section.diagnostics, [])
+
+    def test_out_of_range_versym_index(self):
+        data = self._versioned_bytes()
+        elf = ELFFile(BytesIO(data))
+        versym = elf.get_section_by_name('.gnu.version')
+        offset = versym['sh_offset'] + 17 * versym['sh_entsize']
+        struct.pack_into('<H', data, offset, 42)
+
+        elf = ELFFile(BytesIO(data))
+        versym = elf.get_section_by_name('.gnu.version')
+        info = versym.get_symbol_version_info(17)
+        self.assertEqual(info['symbol_name'], 'function1')
+        self.assertEqual(info['index'], 42)
+        self.assertIsNone(info['version'])
+        self.assertEqual(info['diagnostics'][0]['code'],
+                         'versym-index-out-of-range')
+        self.assertEqual(info['diagnostics'][0]['offset'], offset)
+        self.assertEqual(info['diagnostics'][0]['symbol_index'], 17)
+        with self.assertRaises(ELFError):
+            versym.get_symbol_version(17)
+
+    def test_hidden_bit_conflicts_with_requirement(self):
+        data = self._versioned_bytes()
+        elf = ELFFile(BytesIO(data))
+        versym = elf.get_section_by_name('.gnu.version')
+        # puts is undefined and gets its version from libc.so.6; silently
+        # hiding that requirement changes the visible symbol contract.
+        offset = versym['sh_offset'] + 3 * versym['sh_entsize']
+        struct.pack_into('<H', data, offset, 5 | 0x8000)
+
+        elf = ELFFile(BytesIO(data))
+        versym = elf.get_section_by_name('.gnu.version')
+        info = versym.get_symbol_version_info(3)
+        self.assertEqual(info['symbol_name'], 'puts')
+        self.assertTrue(info['hidden'])
+        self.assertEqual(info['version']['name'], 'GLIBC_2.2.5')
+        codes = {diagnostic['code'] for diagnostic in info['diagnostics']}
+        self.assertIn('versym-hidden-undefined-symbol', codes)
+        self.assertIn('versym-hidden-requirement', codes)
+
+    def test_duplicate_version_name(self):
+        data = self._versioned_bytes()
+        elf = ELFFile(BytesIO(data))
+        verdef = elf.get_section_by_name('.gnu.version_d')
+        records = verdef.version_records
+        definition_2 = next(record for record in records
+                            if record['index'] == 2)
+        definition_4 = next(record for record in records
+                            if record['index'] == 4)
+        name_2 = struct_parse(
+            elf.structs.Elf_Verdaux, verdef.stream,
+            stream_pos=definition_2['auxiliary_offset'])['vda_name']
+        struct.pack_into('<I', data, definition_4['auxiliary_offset'], name_2)
+
+        elf = ELFFile(BytesIO(data))
+        verdef = elf.get_section_by_name('.gnu.version_d')
+        diagnostics = verdef.diagnostics
+        self.assertEqual(
+            [diagnostic['code'] for diagnostic in diagnostics
+             if diagnostic['code'] == 'duplicate-version-name'],
+            ['duplicate-version-name'])
+        duplicate = diagnostics[0]
+        self.assertEqual(duplicate['version_index'], 4)
+        self.assertEqual(duplicate['name'], 'VER_1.0')
+        self.assertEqual(duplicate['offset'], definition_4['offset'])
+
+    def test_verdef_verneed_conflict(self):
+        data = self._versioned_bytes()
+        elf = ELFFile(BytesIO(data))
+        verneed = elf.get_section_by_name('.gnu.version_r')
+        record_5 = next(record for record in verneed.version_records
+                        if record['index'] == 5)
+        # vna_other follows vna_hash(4), vna_flags(2).
+        struct.pack_into('<H', data, record_5['auxiliary_offset'] + 6, 2)
+        versym = elf.get_section_by_name('.gnu.version')
+        struct.pack_into('<H', data,
+                         versym['sh_offset'] + 3 * versym['sh_entsize'], 2)
+
+        elf = ELFFile(BytesIO(data))
+        versym = elf.get_section_by_name('.gnu.version')
+        info = versym.get_symbol_version_info(3)
+        self.assertEqual(info['symbol_name'], 'puts')
+        self.assertEqual({source['kind'] for source in info['sources']},
+                         {'verdef', 'verneed'})
+        codes = {diagnostic['code'] for diagnostic in info['diagnostics']}
+        self.assertIn('verdef-verneed-index-conflict', codes)
+        self.assertIn('verdef-verneed-name-conflict', codes)
+
+    def test_version_records_expose_hash_and_chain(self):
+        elf = self._load_versioned()
+        verdef = elf.get_section_by_name('.gnu.version_d')
+        record = next(record for record in verdef.version_records
+                      if record['index'] == 3)
+        self.assertEqual(record['name'], 'VER_1.1')
+        self.assertEqual(record['hash'], 0xaa82441)
+        self.assertEqual(record['dependency_names'], ['VER_1.1', 'VER_1.0'])
+        self.assertGreater(record['auxiliary_offset'], record['offset'])
+
+    def test_corrupt_auxiliary_chain_is_skipped_with_reason(self):
+        data = self._versioned_bytes()
+        elf = ELFFile(BytesIO(data))
+        verdef = elf.get_section_by_name('.gnu.version_d')
+        record = next(record for record in verdef.version_records
+                      if record['index'] == 3)
+        # vda_name(4) is followed by vda_next(4). Declared count is 2, so a
+        # zero link truncates the chain but must not abort the whole table.
+        struct.pack_into('<I', data, record['auxiliary_offset'] + 4, 0)
+
+        elf = ELFFile(BytesIO(data))
+        verdef = elf.get_section_by_name('.gnu.version_d')
+        diagnostics = verdef.diagnostics
+        truncated = next(
+            diagnostic for diagnostic in diagnostics
+            if diagnostic['code'] == 'truncated-version-auxiliary-chain')
+        self.assertEqual(truncated['offset'], record['auxiliary_offset'])
+        self.assertIn('reason', truncated)
+        self.assertEqual(verdef.version_records_by_index[3][0]['name'],
+                         'VER_1.1')
 
     verneed_reference_data: ClassVar = [
         {'name': 'libz.so.1', 'vn_version': 1, 'vn_cnt': 1,
