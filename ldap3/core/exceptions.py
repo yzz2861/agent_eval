@@ -458,6 +458,24 @@ class LDAPInvalidFilterError(LDAPExceptionError):
     pass
 
 
+class LDAPFilterEscapeError(LDAPInvalidFilterError):
+    """Raised in strict mode when a filter value contains an ambiguous or
+    malformed LDAP escape sequence. Error messages never include the value."""
+    pass
+
+
+class LDAPInvalidFilterStructureError(LDAPInvalidFilterError):
+    """Raised in strict mode when filter nesting, boolean operators or
+    parentheses are malformed. Error messages never include the filter."""
+    pass
+
+
+class LDAPTruncatedFilterError(LDAPInvalidFilterError):
+    """Raised in strict mode when a filter or an escape sequence is
+    truncated. Error messages never include the filter."""
+    pass
+
+
 class LDAPInvalidScopeError(LDAPExceptionError, ValueError):
     pass
 

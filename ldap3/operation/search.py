@@ -28,7 +28,7 @@ from os import linesep
 
 from .. import DEREF_NEVER, BASE, LEVEL, SUBTREE, DEREF_SEARCH, DEREF_BASE, DEREF_ALWAYS, NO_ATTRIBUTES, SEQUENCE_TYPES, get_config_parameter, STRING_TYPES
 
-from ..core.exceptions import LDAPInvalidFilterError, LDAPAttributeError, LDAPInvalidScopeError, LDAPInvalidDereferenceAliasesError
+from ..core.exceptions import LDAPInvalidFilterError, LDAPAttributeError, LDAPInvalidScopeError, LDAPInvalidDereferenceAliasesError, LDAPInvalidFilterStructureError, LDAPFilterEscapeError, LDAPTruncatedFilterError
 from ..utils.ciDict import CaseInsensitiveDict
 from ..protocol.rfc4511 import SearchRequest, LDAPDN, Scope, DerefAliases, Integer0ToMax, TypesOnly, \
     AttributeSelection, Selector, EqualityMatch, AttributeDescription, AssertionValue, Filter, \
@@ -37,7 +37,7 @@ from ..protocol.rfc4511 import SearchRequest, LDAPDN, Scope, DerefAliases, Integ
 from ..operation.bind import referrals_to_list
 from ..protocol.convert import ava_to_dict, attributes_to_list, search_refs_to_list, validate_assertion_value, prepare_filter_for_sending, search_refs_to_list_fast
 from ..protocol.formatters.standard import format_attribute_values
-from ..utils.conv import to_unicode, to_raw
+from ..utils.conv import to_unicode, to_raw, escape_filter_chars
 
 ROOT = 0
 AND = 1
@@ -55,6 +55,111 @@ SEARCH_OPEN = 20
 SEARCH_OPEN_OR_CLOSE = 21
 SEARCH_MATCH_OR_CLOSE = 22
 SEARCH_MATCH_OR_CONTROL = 23
+
+MAX_FILTER_DEPTH = 100
+_FILTER_OPERATORS = frozenset(('=', '~=', '>=', '<=', ':=', 'present', 'sub'))
+_BOOLEAN_OPERATORS = frozenset(('&', '|', '!'))
+_INVALID_ATTRIBUTE_CHARS = frozenset('()*\\\x00')
+
+
+def _escape_structured_value(value, encoding):
+    if isinstance(value, (bytes, bytearray)):
+        return escape_filter_chars(bytes(value), encoding=encoding, strict=True)
+    return escape_filter_chars(to_unicode(value, encoding), encoding=encoding, strict=True)
+
+
+def _check_attribute_name(attribute):
+    if not isinstance(attribute, STRING_TYPES) or not attribute or any(char in _INVALID_ATTRIBUTE_CHARS for char in attribute):
+        raise LDAPInvalidFilterStructureError('invalid attribute description in structured filter')
+    return attribute
+
+
+def _is_primitive(value):
+    return isinstance(value, STRING_TYPES) or isinstance(value, (bytes, bytearray, int, float, bool))
+
+
+def _build_leaf_filter(node, encoding):
+    if isinstance(node, dict):
+        try:
+            attribute = node['attr']
+            operator = node.get('operator', '=')
+            value = node.get('value')
+        except (KeyError, TypeError):
+            raise LDAPInvalidFilterStructureError('invalid leaf node in structured filter')
+    elif isinstance(node, tuple):
+        if node and node[0] in ('&', '|', '!', '?'):
+            raise LDAPInvalidFilterStructureError('invalid boolean operator in structured filter')
+        if len(node) == 2:
+            attribute, value = node
+            operator = '='
+        elif len(node) == 3:
+            attribute, operator, value = node
+        else:
+            raise LDAPInvalidFilterStructureError('invalid leaf node in structured filter')
+    else:
+        raise LDAPInvalidFilterStructureError('invalid node in structured filter')
+
+    attribute = _check_attribute_name(attribute)
+    if operator not in _FILTER_OPERATORS:
+        raise LDAPInvalidFilterStructureError('invalid filter operator in structured filter')
+
+    if operator == 'present':
+        if value is not None:
+            raise LDAPInvalidFilterStructureError('present filter does not accept a value')
+        return '(' + attribute + '=*)'
+
+    if operator == 'sub':
+        if not isinstance(value, SEQUENCE_TYPES) or isinstance(value, STRING_TYPES) or not value:
+            raise LDAPInvalidFilterStructureError('substring filter requires a non empty sequence of values')
+        parts = [_escape_structured_value(part, encoding) for part in value]
+        return '(' + attribute + '=' + '*'.join(parts) + ')'
+
+    if value is None:
+        raise LDAPInvalidFilterStructureError('missing value in structured filter')
+    escaped_value = _escape_structured_value(value, encoding)
+    if operator == ':=':
+        return '(' + attribute + ':=' + escaped_value + ')'
+    return '(' + attribute + operator + escaped_value + ')'
+
+
+def build_filter(node, encoding=None):
+    """Build an RFC 4515 search filter from structured conditions.
+
+    Leaf conditions are ``(attribute, value)`` tuples for equality matches,
+    ``(attribute, operator, value)`` tuples or dictionaries with ``attr``,
+    ``operator`` and ``value`` keys. Supported operators are ``=``, ``~=``,
+    ``>=``, ``<=``, ``:=``, ``present`` (value must be ``None``) and ``sub``
+    (a sequence of literal fragments joined with ``*``; use empty fragments to
+    place leading, trailing or consecutive wildcards).
+
+    Boolean conditions are ``('&', [node, ...])``, ``('|', [node, ...])`` and
+    ``('!', node)``. Every literal value is escaped with the strict boundary
+    API, so callers never concatenate user input into filter templates and a
+    value such as ``*)(uid=*`` cannot alter the filter structure.
+    """
+    if encoding is None:
+        encoding = get_config_parameter('DEFAULT_ENCODING')
+
+    def _build(current_node, depth):
+        if depth > MAX_FILTER_DEPTH:
+            raise LDAPInvalidFilterStructureError('filter nesting too deep')
+        if isinstance(current_node, tuple) and len(current_node) >= 2 and current_node[0] in _BOOLEAN_OPERATORS:
+            boolean_operator = current_node[0]
+            if boolean_operator == '!':
+                if len(current_node) != 2:
+                    raise LDAPInvalidFilterStructureError('NOT filter requires exactly one child')
+                if _is_primitive(current_node[1]):
+                    raise LDAPInvalidFilterStructureError('NOT filter child must be a structured filter node')
+                return '(!' + _build(current_node[1], depth + 1) + ')'
+            if len(current_node) != 2 or _is_primitive(current_node[1]) or not isinstance(current_node[1], SEQUENCE_TYPES):
+                raise LDAPInvalidFilterStructureError('boolean filter requires a sequence of children')
+            if not current_node[1]:
+                raise LDAPInvalidFilterStructureError('boolean filter requires at least one child')
+            children = ''.join(_build(child, depth + 1) for child in current_node[1])
+            return '(' + boolean_operator + children + ')'
+        return _build_leaf_filter(current_node, encoding)
+
+    return _build(node, 1)
 
 
 class FilterNode(object):
@@ -167,56 +272,98 @@ def evaluate_match(match, schema, auto_escape, auto_encode, validator, check_nam
     return FilterNode(tag, assertion)
 
 
-def parse_filter(search_filter, schema, auto_escape, auto_encode, validator, check_names):
+def _check_filter_syntax(search_filter):
+    """Strict syntax validation used when parse_filter runs in strict mode.
+
+    Only static, value free messages are raised so a full DN, password or any
+    other assertion value is never echoed back in an error."""
+    if not isinstance(search_filter, STRING_TYPES) or not search_filter.strip():
+        raise LDAPInvalidFilterStructureError('empty or non textual search filter')
+    if '\x00' in search_filter:
+        raise LDAPInvalidFilterError('NUL character is not allowed in search filter')
+
+    depth = 0
+    index = 0
+    length = len(search_filter)
+    while index < length:
+        char = search_filter[index]
+        if char == '\\':
+            if index + 2 >= length:
+                raise LDAPTruncatedFilterError('truncated escape sequence in search filter')
+            if search_filter[index + 1] not in '0123456789abcdefABCDEF' or search_filter[index + 2] not in '0123456789abcdefABCDEF':
+                raise LDAPFilterEscapeError('malformed escape sequence in search filter')
+            index += 3
+            continue
+        if char == '(':
+            depth += 1
+            if depth > MAX_FILTER_DEPTH:
+                raise LDAPInvalidFilterStructureError('filter nesting too deep')
+        elif char == ')':
+            depth -= 1
+            if depth < 0:
+                raise LDAPInvalidFilterStructureError('unbalanced parentheses in search filter')
+        index += 1
+
+    if depth != 0:
+        raise LDAPTruncatedFilterError('truncated search filter: unbalanced parentheses')
+
+
+def parse_filter(search_filter, schema, auto_escape, auto_encode, validator, check_names, strict=False):
     if str is not bytes and isinstance(search_filter, bytes):  # python 3 with byte filter
         search_filter = to_unicode(search_filter)
-    search_filter = search_filter.strip()
-    if search_filter and search_filter.count('(') == search_filter.count(')') and search_filter.startswith('(') and search_filter.endswith(')'):
-        state = SEARCH_OPEN_OR_CLOSE
-        root = FilterNode(ROOT)
-        current_node = root
-        start_pos = None
-        skip_white_space = True
-        just_closed = False
-        for pos, c in enumerate(search_filter):
-            if skip_white_space and c in whitespace:
-                continue
-            elif (state == SEARCH_OPEN or state == SEARCH_OPEN_OR_CLOSE) and c == '(':
-                state = SEARCH_MATCH_OR_CONTROL
-                just_closed = False
-            elif state == SEARCH_MATCH_OR_CONTROL and c in '&!|':
-                if c == '&':
-                    current_node = current_node.append(FilterNode(AND))
-                elif c == '|':
-                    current_node = current_node.append(FilterNode(OR))
-                elif c == '!':
-                    current_node = current_node.append(FilterNode(NOT))
-                state = SEARCH_OPEN
-            elif (state == SEARCH_MATCH_OR_CLOSE or state == SEARCH_OPEN_OR_CLOSE) and c == ')':
-                if just_closed:
-                    current_node = current_node.parent
+    if strict:
+        _check_filter_syntax(search_filter)
+    try:
+        search_filter = search_filter.strip()
+        if search_filter and search_filter.count('(') == search_filter.count(')') and search_filter.startswith('(') and search_filter.endswith(')'):
+            state = SEARCH_OPEN_OR_CLOSE
+            root = FilterNode(ROOT)
+            current_node = root
+            start_pos = None
+            skip_white_space = True
+            just_closed = False
+            for pos, c in enumerate(search_filter):
+                if skip_white_space and c in whitespace:
+                    continue
+                elif (state == SEARCH_OPEN or state == SEARCH_OPEN_OR_CLOSE) and c == '(':
+                    state = SEARCH_MATCH_OR_CONTROL
+                    just_closed = False
+                elif state == SEARCH_MATCH_OR_CONTROL and c in '&!|':
+                    if c == '&':
+                        current_node = current_node.append(FilterNode(AND))
+                    elif c == '|':
+                        current_node = current_node.append(FilterNode(OR))
+                    elif c == '!':
+                        current_node = current_node.append(FilterNode(NOT))
+                    state = SEARCH_OPEN
+                elif (state == SEARCH_MATCH_OR_CLOSE or state == SEARCH_OPEN_OR_CLOSE) and c == ')':
+                    if just_closed:
+                        current_node = current_node.parent
+                    else:
+                        just_closed = True
+                        skip_white_space = True
+                        end_pos = pos
+                        if start_pos:
+                            if current_node.tag == NOT and len(current_node.elements) > 0:
+                                raise LDAPInvalidFilterError('NOT (!) clause in filter cannot be multiple')
+                            current_node.append(evaluate_match(search_filter[start_pos:end_pos], schema, auto_escape, auto_encode, validator, check_names))
+                    start_pos = None
+                    state = SEARCH_OPEN_OR_CLOSE
+                elif (state == SEARCH_MATCH_OR_CLOSE or state == SEARCH_MATCH_OR_CONTROL) and c not in '()':
+                    skip_white_space = False
+                    if not start_pos:
+                        start_pos = pos
+                    state = SEARCH_MATCH_OR_CLOSE
                 else:
-                    just_closed = True
-                    skip_white_space = True
-                    end_pos = pos
-                    if start_pos:
-                        if current_node.tag == NOT and len(current_node.elements) > 0:
-                            raise LDAPInvalidFilterError('NOT (!) clause in filter cannot be multiple')
-                        current_node.append(evaluate_match(search_filter[start_pos:end_pos], schema, auto_escape, auto_encode, validator, check_names))
-                start_pos = None
-                state = SEARCH_OPEN_OR_CLOSE
-            elif (state == SEARCH_MATCH_OR_CLOSE or state == SEARCH_MATCH_OR_CONTROL) and c not in '()':
-                skip_white_space = False
-                if not start_pos:
-                    start_pos = pos
-                state = SEARCH_MATCH_OR_CLOSE
-            else:
-                raise LDAPInvalidFilterError('malformed filter')
-        if len(root.elements) != 1:
-            raise LDAPInvalidFilterError('missing boolean operator in filter')
-        return root
-    else:
+                    raise LDAPInvalidFilterError('malformed filter')
+            if len(root.elements) != 1:
+                raise LDAPInvalidFilterError('missing boolean operator in filter')
+            return root
         raise LDAPInvalidFilterError('invalid filter')
+    except LDAPInvalidFilterError as error:
+        if strict and type(error) is LDAPInvalidFilterError:
+            raise LDAPInvalidFilterStructureError('malformed search filter')
+        raise
 
 
 def compile_filter(filter_node):

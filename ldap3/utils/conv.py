@@ -29,7 +29,42 @@ import re
 
 from .. import SEQUENCE_TYPES, STRING_TYPES, NUMERIC_TYPES, get_config_parameter
 from ..utils.ciDict import CaseInsensitiveDict
-from ..core.exceptions import LDAPDefinitionError
+from ..core.exceptions import LDAPDefinitionError, LDAPFilterEscapeError
+
+
+_ESCAPED_PAIR_PATTERN = re.compile(r'\\[0-9a-fA-F]{2}')
+_MALFORMED_ESCAPE_PATTERN = re.compile(r'\\(?:[^0-9a-fA-F]|$|[0-9a-fA-F](?:[^0-9a-fA-F]|$))')
+_FILTER_SPECIAL_CHARS = {
+    '\\': '\\5c',
+    '*': '\\2a',
+    '(': '\\28',
+    ')': '\\29',
+    '\x00': '\\00',
+}
+
+
+def _contains_valid_escape(text):
+    """Return True if text already contains a RFC 4515 escaped pair."""
+    return _ESCAPED_PAIR_PATTERN.search(text) is not None
+
+
+def _contains_malformed_escape(text):
+    """Return True if a backslash does not start a valid escaped pair."""
+    return _MALFORMED_ESCAPE_PATTERN.search(text) is not None
+
+
+def _escape_filter_value(text, encoding):
+    """Escape an unescaped filter value following RFC 4515."""
+    escaped = []
+    for char in text:
+        if char in _FILTER_SPECIAL_CHARS:
+            escaped.append(_FILTER_SPECIAL_CHARS[char])
+        elif ord(char) > 0x7f:
+            for octet in to_raw(char, encoding):
+                escaped.append('\\%02x' % octet)
+        else:
+            escaped.append(char)
+    return ''.join(escaped)
 
 
 def to_unicode(obj, encoding=None, from_server=False):
@@ -88,18 +123,56 @@ def to_raw(obj, encoding='utf-8'):
     return obj
 
 
-def escape_filter_chars(text, encoding=None):
-    """ Escape chars mentioned in RFC4515. """
+def escape_filter_chars(text, encoding=None, strict=False, already_escaped='reject'):
+    """Escape the filter special characters mentioned in RFC 4515.
+
+    With the default arguments the historical behaviour is preserved: the
+    value is escaped in place and calling the function twice doubles the
+    backslashes.
+
+    With ``strict=True`` the function is an idempotent boundary API:
+
+    * NUL, ``(``, ``)``, ``*``, backslash and every non ASCII octet are
+      escaped as backslash + two hexadecimal digits (UTF-8 by default);
+    * an already escaped value (one containing a valid ``\\HH`` pair) is
+      returned untouched with ``already_escaped='preserve'`` or rejected with
+      :class:`LDAPFilterEscapeError` with ``already_escaped='reject'``;
+    * a malformed escape, for example a trailing backslash, is always
+      rejected in strict mode.
+
+    Semantics therefore depend on the explicit ``strict`` flag and never on
+    the order in which callers escape the same value.
+    """
     if encoding is None:
         encoding = get_config_parameter('DEFAULT_ENCODING')
 
+    if strict:
+        if already_escaped not in ('reject', 'preserve'):
+            raise LDAPFilterEscapeError("already_escaped must be 'reject' or 'preserve'")
+        if isinstance(text, (bytes, bytearray)):
+            raw = bytes(text)
+            malformed_pattern = rb'\\(?:[^0-9a-fA-F]|$|[0-9a-fA-F](?:[^0-9a-fA-F]|$))'
+            escaped_pair_pattern = rb'\\[0-9a-fA-F]{2}'
+            if re.search(malformed_pattern, raw):
+                raise LDAPFilterEscapeError('malformed LDAP filter escape sequence')
+            if re.search(escaped_pair_pattern, raw):
+                if already_escaped == 'reject':
+                    raise LDAPFilterEscapeError('filter value is already escaped')
+                return to_unicode(raw, encoding)
+            return ''.join('\\%02x' % octet for octet in raw)
+
+        text = to_unicode(text, encoding)
+        if _contains_malformed_escape(text):
+            raise LDAPFilterEscapeError('malformed LDAP filter escape sequence')
+        if _contains_valid_escape(text):
+            if already_escaped == 'reject':
+                raise LDAPFilterEscapeError('filter value is already escaped')
+            return text
+        return _escape_filter_value(text, encoding)
+
     try:
         text = to_unicode(text, encoding)
-        escaped = text.replace('\\', '\\5c')
-        escaped = escaped.replace('*', '\\2a')
-        escaped = escaped.replace('(', '\\28')
-        escaped = escaped.replace(')', '\\29')
-        escaped = escaped.replace('\x00', '\\00')
+        escaped = _escape_filter_value(text, encoding)
     except Exception:  # probably raw bytes values, return escaped bytes value
         escaped = to_unicode(escape_bytes(text))
         # escape all octets greater than 0x7F that are not part of a valid UTF-8
