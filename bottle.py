@@ -110,6 +110,96 @@ def _wsgi_recode(src):
     return src.encode('latin1').decode('utf8', 'surrogateescape')
 
 
+def _path_digest(path):
+    """ Return a stable digest for a raw request path without storing it. """
+    if isinstance(path, bytes):
+        data = path
+    elif path is None:
+        data = b''
+    elif not isinstance(path, str):
+        data = repr(path).encode('utf8', 'surrogateescape')
+    else:
+        data = path.encode('utf8', 'surrogateescape')
+    return hashlib.sha256(data).hexdigest()
+
+
+def _strict_path_text(path):
+    """ Convert a WSGI path to text without decoding percent escapes. """
+    if isinstance(path, bytes):
+        path = path.decode('latin1')
+    if not isinstance(path, str):
+        raise ValueError('Path must be a string.')
+    if path.isascii():
+        return path
+    try:
+        return path.encode('latin1').decode('utf8')
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return path
+
+
+def _normalize_strict_path(path, max_length=8192):
+    """ Decode a raw path exactly once and reject ambiguous path syntax.
+
+        This is intentionally stricter than :func:`urllib.parse.unquote`. It
+        rejects malformed escapes, encoded separators and inputs that would
+        require another decoding pass before they can be routed safely.
+    """
+    try:
+        path = _strict_path_text(path)
+    except ValueError:
+        raise HTTPError(400, "Bad request path.")
+
+    if not path:
+        return '/'
+    if len(path) > max_length:
+        raise HTTPError(400, "Bad request path.")
+    if not path.startswith('/'):
+        raise HTTPError(400, "Bad request path.")
+
+    decoded = bytearray()
+    hexdigits = '0123456789abcdefABCDEF'
+    i, length = 0, len(path)
+    while i < length:
+        char = path[i]
+        if char == '%':
+            if i + 2 >= length or path[i + 1] not in hexdigits \
+               or path[i + 2] not in hexdigits:
+                raise HTTPError(400, "Bad request path.")
+            value = int(path[i + 1:i + 3], 16)
+            if value in (0x2f, 0x5c):
+                raise HTTPError(400, "Bad request path.")
+            decoded.append(value)
+            i += 3
+            continue
+        if char == '\\':
+            raise HTTPError(400, "Bad request path.")
+        try:
+            decoded.extend(char.encode('utf8'))
+        except UnicodeEncodeError:
+            raise HTTPError(400, "Bad request path.")
+        i += 1
+
+    try:
+        path = decoded.decode('utf8')
+    except UnicodeDecodeError:
+        raise HTTPError(400, "Bad request path.")
+
+    if len(path.encode('utf8')) > max_length:
+        raise HTTPError(400, "Bad request path.")
+    if '//' in path or '\\' in path:
+        raise HTTPError(400, "Bad request path.")
+    if any(char in path for char in ('\x00', '\r', '\n')):
+        raise HTTPError(400, "Bad request path.")
+    if any(segment in ('.', '..') for segment in path.split('/')):
+        raise HTTPError(400, "Bad request path.")
+
+    # A remaining %xx sequence means another decoder could interpret the
+    # result differently. Refuse it instead of choosing one interpretation.
+    if re.search(r'%[0-9a-fA-F]{2}', path):
+        raise HTTPError(400, "Bad request path.")
+    return path
+
+
 def _raise(*a):
     raise a[0](a[1]).with_traceback(a[2])
 
@@ -277,7 +367,11 @@ class Router:
     #: than 99 matching groups per regular expression.
     _MAX_GROUPS_PER_PATTERN = 99
 
-    def __init__(self, strict=False):
+    #: Maximum accepted raw (and decoded) path length in strict mode.
+    MAX_PATH_LENGTH = 8192
+
+    def __init__(self, strict=False, strict_paths=None, strict_path=None,
+                 strict_routing=None, max_path_length=None, maxlen=None):
         self.rules = []  # All rules in order
         self._groups = {}  # index of regexes to find them in dyna_routes
         self.builder = {}  # Data structure for the url builder
@@ -286,6 +380,14 @@ class Router:
         self.dyna_regexes = {}  # Search structure for dynamic routes
         #: If true, static routes are no longer checked first.
         self.strict_order = strict
+        if strict_paths is None:
+            strict_paths = next((value for value in
+                                 (strict_path, strict_routing)
+                                 if value is not None), strict)
+        #: If true, paths are normalized from ``bottle.raw_path`` before use.
+        self.strict_paths = bool(strict_paths)
+        self.max_path_length = (max_path_length or maxlen
+                                or self.MAX_PATH_LENGTH)
         self.filters = {
             're': lambda conf: (_re_flatten(conf or self.default_pattern),
                                 None, None),
@@ -430,7 +532,20 @@ class Router:
     def match(self, environ):
         """ Return a (target, url_args) tuple or raise HTTPError(400/404/405). """
         verb = environ['REQUEST_METHOD'].upper()
-        path = environ['PATH_INFO'] or '/'
+        if self.strict_paths or environ.get('bottle.strict_routing'):
+            environ['bottle.strict_routing'] = True
+            path = environ.get('bottle.path')
+            if path is None:
+                raw_path = environ.get('bottle.raw_path',
+                                       environ.get('PATH_INFO', ''))
+                environ.setdefault('bottle.raw_path', raw_path)
+                path = _normalize_strict_path(raw_path, self.max_path_length)
+                environ['PATH_INFO'] = path
+                environ['bottle.path'] = path
+            else:
+                environ['PATH_INFO'] = path
+        else:
+            path = environ['PATH_INFO'] or '/'
 
         methods = ('PROXY', 'HEAD', 'GET', 'ANY') if verb == 'HEAD' else ('PROXY', verb, 'ANY')
 
@@ -593,6 +708,10 @@ class Bottle:
         cfg = ConfigDict()
         cfg._define('catchall', default=True, filter=bool,
             help="Catch all unhandled exceptions and display an error page.")
+        cfg._define('strict_routing', default=False, filter=bool,
+            help="Normalize raw request paths and enable strict path routing.")
+        cfg._define('strict_path_max', default=Router.MAX_PATH_LENGTH,
+            help="Maximum path length accepted in strict routing mode.")
         return cfg
 
     def __init__(self, **kwargs):
@@ -611,6 +730,16 @@ class Bottle:
                  "The 'autojson' setting is now part of the app "
                  "configuration. Fix: `app.config['json.enable'] = False`")
             self.config['json.enable'] = False
+        strict_routing = kwargs.get(
+            'strict_routing',
+            kwargs.get('strict_paths',
+                       kwargs.get('strict_path', kwargs.get('strict', False))))
+        self.config['strict_routing'] = bool(strict_routing)
+        strict_path_max = kwargs.get(
+            'strict_path_max',
+            kwargs.get('max_path_length', kwargs.get('maxlen')))
+        if strict_path_max is not None:
+            self.config['strict_path_max'] = int(strict_path_max)
 
         self._mounts = []
 
@@ -618,7 +747,10 @@ class Bottle:
         self.resources = ResourceManager()
 
         self.routes = []  # List of installed :class:`Route` instances.
-        self.router = Router()  # Maps requests to :class:`Route` instances.
+        self.router = Router(
+            strict_paths=self.config['strict_routing'],
+            max_path_length=self.config['strict_path_max'],
+        )  # Maps requests to :class:`Route` instances.
         self.error_handler = {}
 
         # Core plugins
@@ -628,6 +760,8 @@ class Bottle:
 
     #: If true, most exceptions are caught and returned as :exc:`HTTPError`
     catchall = DictProperty('config', 'catchall')
+    #: If true, all routing consumes one normalized path.
+    strict_routing = DictProperty('config', 'strict_routing')
 
     __hook_names = 'before_request', 'after_request', 'app_reset', 'config'
     __hook_reversed = {'after_request'}
@@ -825,6 +959,9 @@ class Bottle:
         """ Search for a matching route and return a (:class:`Route`, urlargs)
             tuple. The second value is a dictionary with parameters extracted
             from the URL. Raise :exc:`HTTPError` (404/405) on a non-match."""
+        if self.config['strict_routing'] or self.config.get('strict_paths') \
+           or self.config.get('strict_path') or self.router.strict_paths:
+            environ['bottle.strict_routing'] = True
         return self.router.match(environ)
 
     def get_url(self, routename, **kargs):
@@ -937,8 +1074,16 @@ class Bottle:
         return tob(template(ERROR_PAGE_TEMPLATE, e=res, template_settings=dict(name='__ERROR_PAGE_TEMPLATE')))
 
     def _handle(self, environ):
-        path = environ['bottle.raw_path'] = environ['PATH_INFO']
-        environ['PATH_INFO'] = _wsgi_recode(path)
+        raw_path = environ.get('bottle.raw_path', environ.get('PATH_INFO', ''))
+        environ.setdefault('bottle.raw_path', raw_path)
+        environ.setdefault('bottle.raw_path.original', raw_path)
+        environ['bottle.raw_path.digest'] = _path_digest(
+            environ['bottle.raw_path.original'])
+        strict = bool(self.config['strict_routing']
+                      or self.config.get('strict_paths')
+                      or self.config.get('strict_path')
+                      or getattr(self.router, 'strict_paths', False))
+        environ['bottle.strict_routing'] = strict
 
         environ['bottle.app'] = self
         request.bind(environ)
@@ -947,6 +1092,31 @@ class Bottle:
 
         try:
             try:
+                if strict:
+                    try:
+                        configured_max = (
+                            self.config.get('strict_path_max')
+                            or self.config.get('max_path_length')
+                            or self.config.get('maxlen'))
+                        max_length = int(configured_max
+                                         or self.router.MAX_PATH_LENGTH)
+                        if configured_max == self.router.MAX_PATH_LENGTH:
+                            max_length = int(getattr(
+                                self.router, 'max_path_length', max_length))
+                        environ['bottle.strict_path_max'] = max_length
+                        path = _normalize_strict_path(
+                            raw_path, max_length)
+                    except HTTPError:
+                        # Error handlers must not render or inspect the
+                        # rejected raw path.
+                        environ['PATH_INFO'] = '/'
+                        environ['bottle.path'] = '/'
+                        raise
+                    environ['PATH_INFO'] = path
+                    environ['bottle.path'] = path
+                else:
+                    environ['PATH_INFO'] = _wsgi_recode(
+                        environ.get('PATH_INFO', ''))
                 self.trigger_hook('before_request')
                 route, args = self.router.match(environ)
                 environ['route.handle'] = route
@@ -1144,6 +1314,17 @@ class BaseRequest:
     def path(self):
         """ The value of ``PATH_INFO`` with exactly one prefixed slash (to fix
             broken clients and avoid the "empty path" edge case). """
+        if self.environ.get('bottle.strict_routing'):
+            path = self.environ.get('bottle.path')
+            if path is None:
+                raw_path = self.environ.get('bottle.raw_path',
+                                            self.environ.get('PATH_INFO', ''))
+                max_length = int(self.environ.get(
+                    'bottle.strict_path_max', Router.MAX_PATH_LENGTH))
+                path = _normalize_strict_path(raw_path, max_length)
+                self.environ['PATH_INFO'] = path
+                self.environ['bottle.path'] = path
+            return path
         return '/' + self.environ.get('PATH_INFO', '').lstrip('/')
 
     @property
@@ -1426,8 +1607,18 @@ class BaseRequest:
            :param shift: The number of path segments to shift. May be negative
                          to change the shift direction. (default: 1)
         """
-        script, path = path_shift(self.environ.get('SCRIPT_NAME', '/'), self.path, shift)
+        script_name = self.environ.get('SCRIPT_NAME', '/')
+        raw_path = self.environ.get('bottle.raw_path')
+        script, path = path_shift(script_name, self.path, shift)
         self['SCRIPT_NAME'], self['PATH_INFO'] = script, path
+        if raw_path is not None:
+            try:
+                _, raw_path = path_shift(script_name, raw_path, shift)
+            except AssertionError:
+                raw_path = path
+            self['bottle.raw_path'] = raw_path
+        if 'bottle.path' in self.environ:
+            self['bottle.path'] = path
 
     @property
     def content_length(self):

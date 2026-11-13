@@ -164,3 +164,76 @@ class TestRouter(unittest.TestCase):
 class TestRouterInCGIMode(TestRouter):
     ''' Makes no sense since the default route does not optimize CGI anymore.'''
     CGI = True
+
+
+class TestStrictRouter(unittest.TestCase):
+    def setUp(self):
+        self.r = bottle.Router(strict_paths=True)
+
+    def add(self, path, target, method='GET'):
+        self.r.add(path, method, target)
+
+    def match(self, path, method='GET', **extra):
+        env = {'PATH_INFO': path, 'REQUEST_METHOD': method}
+        env.update(extra)
+        return self.r.match(env)
+
+    def assertRejected(self, path, method='GET'):
+        self.assertRaises(bottle.HTTPError, self.match, path, method)
+
+    def test_decodes_once_and_keeps_real_values(self):
+        self.add('/uni/<name>', 'unicode')
+        self.add('/files/<name:path>', 'path')
+        self.assertEqual(('unicode', {'name': '瓶'}),
+                         self.match('/uni/%E7%93%B6'))
+        self.assertEqual(('path', {'name': 'a b/c'}),
+                         self.match('/files/a%20b/c'))
+
+    def test_static_and_dynamic_priority(self):
+        self.add('/reports/<rest:path>', 'reports')
+        self.add('/admin/export', 'admin')
+        self.assertEqual('admin', self.match('/admin/export')[0])
+        self.assertEqual(('reports', {'rest': 'a/b'}),
+                         self.match('/reports/a/b'))
+
+    def test_raw_path_is_the_strict_source(self):
+        self.add('/admin/export', 'admin')
+        self.assertEqual('admin', self.match(
+            '/not/the/path',
+            **{'bottle.raw_path': '/admin/export'})[0])
+
+    def test_rejects_ambiguous_paths(self):
+        for path in (
+            '/reports/../admin/export',
+            '/reports/./admin/export',
+            '/reports/%2e%2e/admin/export',
+            '/reports/%252e%252e/admin/export',
+            '/reports%2fadmin/export',
+            '/reports%5cadmin/export',
+            '/reports\\admin/export',
+            '//reports/admin/export',
+            '/reports/%00admin',
+            '/reports/%0dadmin',
+            '/reports/%0aadmin',
+            '/reports/%zzadmin',
+            '/reports/%',
+        ):
+            self.assertRejected(path)
+
+    def test_405_uses_normalized_path(self):
+        self.add('/locked', 'locked', method='POST')
+        self.assertRejected('/locked')
+        try:
+            self.match('/%6cocked')
+        except bottle.HTTPError as error:
+            self.assertEqual(405, error.status_code)
+            self.assertIn('POST', error.headers['Allow'])
+        else:
+            self.fail('Expected HTTPError(405)')
+
+    def test_path_length_limit(self):
+        router = bottle.Router(strict_paths=True, max_path_length=8)
+        router.add('/123456789', 'GET', 'too-long')
+        self.assertRaises(
+            bottle.HTTPError, router.match,
+            {'PATH_INFO': '/123456789', 'REQUEST_METHOD': 'GET'})

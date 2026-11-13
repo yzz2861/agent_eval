@@ -113,3 +113,36 @@ In fact, any :class:`Bottle` instance routing can be configured same way::
     app = Bottle()
     setup_routing(app)
 
+
+Strict Path Routing
+--------------------------------------------------------------------------------
+
+By default, Bottle keeps its historical handling of ``PATH_INFO``. Applications
+behind a proxy that normalizes paths before forwarding requests can opt into
+strict path routing instead::
+
+    app = Bottle(strict_routing=True)
+
+    # Equivalent, for applications that configure their router directly:
+    app.router = Router(strict_paths=True, max_path_length=8192)
+
+In strict mode, Bottle starts from ``bottle.raw_path`` and applies exactly one
+percent-decoding pass. The normalized result is stored in ``bottle.path`` and
+is used consistently by static routes, dynamic routes, 405 probes and error
+handlers. Route arguments therefore contain their decoded values.
+
+Ambiguous inputs are rejected with ``400 Bad Request`` before routing. This
+includes malformed escapes, encoded slashes or backslashes, NUL, CR or LF,
+``.``/``..`` segments, repeated slashes, over-long paths, and paths that still
+contain a percent escape after decoding. The original path is retained as
+``bottle.raw_path`` and a digest is available as
+``bottle.raw_path.digest`` for audit logging; rejected paths are not included
+in error responses.
+
+The behavior can also be enabled through configuration::
+
+    app.config['strict_routing'] = True
+    app.config['strict_path_max'] = 8192
+
+The default mode is unchanged for backwards compatibility.
+

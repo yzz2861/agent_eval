@@ -49,6 +49,35 @@ class TestRequest(unittest.TestCase):
         # No path at all
         self.assertEqual('/', BaseRequest({}).path)
 
+    def test_strict_path(self):
+        env = {
+            'PATH_INFO': '/uni/%E7%93%B6',
+            'bottle.raw_path': '/uni/%E7%93%B6',
+            'bottle.strict_routing': True,
+        }
+        request = BaseRequest(env)
+        self.assertEqual('/uni/瓶', request.path)
+        self.assertEqual('/uni/瓶', env['PATH_INFO'])
+        self.assertEqual('/uni/%E7%93%B6', env['bottle.raw_path'])
+
+    def test_strict_path_shift_updates_raw_path(self):
+        env = {
+            'SCRIPT_NAME': '',
+            'PATH_INFO': '/mount/瓶',
+            'bottle.path': '/mount/瓶',
+            'bottle.raw_path': '/mount/%E7%93%B6',
+            'bottle.strict_routing': True,
+        }
+        request = BaseRequest(env)
+        request.path_shift(1)
+        self.assertEqual('/mount', request['SCRIPT_NAME'])
+        self.assertEqual('/瓶', request.path)
+        self.assertEqual('/%E7%93%B6', request['bottle.raw_path'])
+        request.path_shift(-1)
+        self.assertEqual('/', request['SCRIPT_NAME'])
+        self.assertEqual('/mount/瓶', request.path)
+        self.assertEqual('/mount/%E7%93%B6', request['bottle.raw_path'])
+
     def test_method(self):
         self.assertEqual(BaseRequest({}).method, 'GET')
         self.assertEqual(BaseRequest({'REQUEST_METHOD':'GET'}).method, 'GET')

@@ -198,6 +198,122 @@ class TestErrorHandling(ServerTestBase):
         self.assertBody("999 Unknown", '/999')
 
 
+class TestDefaultRoutingCompat(ServerTestBase):
+    def test_path_parameters_keep_default_semantics(self):
+        @bottle.route('/reports/<rest:path>')
+        def reports(rest):
+            return rest
+        self.assertBody('../admin/export', '/reports/../admin/export')
+
+
+class TestStrictWsgi(ServerTestBase):
+    def setUp(self):
+        super().setUp()
+        self.app.config['strict_routing'] = True
+
+    def test_static_dynamic_and_decoded_values(self):
+        @self.app.route('/admin/export')
+        def admin():
+            return 'admin'
+
+        @self.app.route('/reports/<rest:path>')
+        def reports(rest):
+            return 'reports:' + rest
+
+        @self.app.route('/files/<name:path>')
+        def files(name):
+            return name
+
+        @self.app.route('/瓶')
+        def unicode_static():
+            return 'bottle'
+
+        self.assertBody('admin', '/admin/export')
+        self.assertBody('admin', '/%61dmin/export')
+        self.assertBody('reports:a/b', '/reports/a/b')
+        self.assertBody('a b/c', '/files/a%20b/c')
+        self.assertBody('bottle', '/%E7%93%B6')
+
+    def test_unicode_path_and_parameter(self):
+        @self.app.route('/uni/<value>')
+        def unicode_route(value):
+            return value
+        self.assertBody('瓶', '/uni/%E7%93%B6')
+        self.assertBody('瓶', '/uni/瓶')
+
+    def test_rejects_ambiguous_paths(self):
+        @self.app.route('/admin/export')
+        def admin():
+            return 'admin'
+
+        for path in (
+            '/reports/../admin/export',
+            '/reports/%252e%252e/admin/export',
+            '/reports%2fadmin/export',
+            '/reports%5cadmin/export',
+            '/reports\\admin/export',
+            '//reports/admin/export',
+            '/reports/%00admin',
+            '/reports/%0dadmin',
+            '/reports/%0aadmin',
+        ):
+            self.assertStatus(400, path)
+
+    def test_405_uses_normalized_path(self):
+        @self.app.route('/api', method='POST')
+        def api():
+            return 'api'
+        self.assertStatus(405, '/api')
+        self.assertStatus(405, '/%61pi')
+
+    def test_error_handlers_use_normalized_path(self):
+        @self.app.error(404)
+        def not_found(error):
+            return 'missing:' + bottle.request.path
+
+        @self.app.error(400)
+        def bad_path(error):
+            return 'bad:' + bottle.request.path
+
+        self.assertBody('missing:/missing/瓶', '/missing/%E7%93%B6')
+        result = self.urlopen('/%00TOP_SECRET')
+        self.assertEqual(400, result['code'])
+        self.assertEqual(b'bad:/', result['body'])
+
+    def test_script_name_and_mount(self):
+        @self.app.route('/path')
+        def path():
+            return bottle.request.script_name + '|' + bottle.request.path
+
+        self.assertBody('/base/|/path', '/path',
+                        env={'SCRIPT_NAME': '/base'})
+
+        child = bottle.Bottle(strict_routing=True)
+
+        @child.route('/test/<value:path>')
+        def mounted(value):
+            return bottle.request.script_name + '|' + value
+
+        self.app.mount('/mount', child.wsgi)
+        self.assertBody('/mount/|a/瓶', '/mount/test/a/%E7%93%B6')
+
+    def test_audit_keeps_raw_path_and_digest(self):
+        @self.app.route('/audit/<value>')
+        def audit(value):
+            env = bottle.request.environ
+            return '%s|%s|%s' % (env['bottle.raw_path'],
+                                 bottle.request.path,
+                                 env['bottle.raw_path.digest'][:8])
+
+        result = self.urlopen('/%61udit/%E7%93%B6')
+        self.assertEqual(200, result['code'])
+        self.assertIn(tob('/%61udit/%E7%93%B6|/audit/瓶|'), result['body'])
+
+    def test_path_length_limit(self):
+        self.app.config['strict_path_max'] = 24
+        self.assertStatus(400, '/' + ('a' * 32))
+
+
 class CloseableBody:
 
     def __init__(self, body):
