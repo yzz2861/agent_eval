@@ -1,5 +1,6 @@
 from joserfc.errors import ExpiredTokenError
 from joserfc.errors import InvalidClaimError
+from joserfc.errors import MissingClaimError
 
 from authlib.common.errors import ContinueIteration
 from authlib.oauth2.rfc6750.errors import InvalidTokenError
@@ -89,7 +90,7 @@ class JWTIntrospectionEndpoint(IntrospectionEndpoint):
             token.validate()
         except ExpiredTokenError:
             return {"active": False}
-        except InvalidClaimError as exc:
+        except (InvalidClaimError, MissingClaimError) as exc:
             if exc.claim == "iss":
                 raise ContinueIteration() from exc
             raise InvalidTokenError() from exc

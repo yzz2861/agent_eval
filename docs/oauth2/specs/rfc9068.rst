@@ -63,6 +63,79 @@ scope. The resource server gives the same identifier to
 :class:`~authlib.oauth2.rfc9068.JWTBearerTokenValidator` as
 ``resource_server``.
 
+Token validation
+----------------
+
+Per :rfc:`RFC 9068 §4 <9068#section-4>`,
+:class:`~authlib.oauth2.rfc9068.JWTBearerTokenValidator` validates incoming
+JWT access tokens in five layers:
+
+1. **Signature trust**: the token is verified with the keys returned by
+   :meth:`~authlib.oauth2.rfc9068.JWTBearerTokenValidator.get_jwks`. A token
+   that carries a ``jku`` or ``jwk`` header is always rejected: the key never
+   comes from the token itself.
+2. **Issuer binding**: the ``iss`` claim must match the issuer whose key
+   verified the signature.
+3. **Type and purpose**: the ``typ`` header must be ``at+jwt`` (or
+   ``application/at+jwt`` in the default, backward-compatible profile).
+4. **Claim structure**: ``iss``, ``sub``, ``client_id``, ``aud``, ``exp``,
+   ``iat`` and ``jti`` must be present with the JSON type required by
+   :rfc:`RFC 9068 §2.2 <9068#section-2.2>`. A missing claim and a claim with
+   the wrong type raise distinct errors that carry the claim name, so audits
+   can tell them apart.
+5. **Resource audience**: the ``aud`` claim must contain the configured
+   ``resource_server``.
+
+Every failure becomes the generic RFC 6750 ``invalid_token`` error for the
+client. The internal logs only contain the error kind and the claim name; the
+raw JWT and identifying claims such as ``jti`` are never logged.
+
+Strict profile
+~~~~~~~~~~~~~~
+
+The default profile keeps accepting tokens already in production. Pass
+``strict=True`` to enable the stricter rules of :rfc:`RFC 9068 §2.1
+<9068#section-2.1>` and :rfc:`RFC 8693 §4.2 <8693#section-4.2>`:
+
+- the ``typ`` header must be the canonical ``at+jwt`` value;
+- the ``scope`` claim, when present, must be a space-separated string rather
+  than a JSON array.
+
+.. code-block:: python
+
+    validator = MyJWTBearerTokenValidator(
+        issuer="https://authorization-server.example.org",
+        resource_server="https://resource-server.example.org",
+        strict=True,
+    )
+
+Several issuers
+~~~~~~~~~~~~~~~
+
+A resource server can accept tokens from several issuers by passing a mapping
+as the ``issuer`` argument. Each value binds an issuer to its JWK set and,
+optionally, its own resource server identifier:
+
+.. code-block:: python
+
+    validator = JWTBearerTokenValidator(
+        issuer={
+            "https://as-a.example.org": {
+                "jwks": jwks_a,
+                "resource_server": "https://api.example.org",
+            },
+            "https://as-b.example.org": {
+                "jwks": jwks_b,
+                "resource_server": "https://api.example.org",
+            },
+        }
+    )
+
+The unverified ``iss`` claim is only used to select the issuer-bound key; it
+is checked again once the signature is verified. You can also omit the
+``jwks`` keys and re-implement ``get_jwks(issuer)`` to load the key set of
+the selected issuer dynamically.
+
 UserInfo endpoint
 -----------------
 

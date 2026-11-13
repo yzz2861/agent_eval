@@ -1,6 +1,7 @@
 import time
 
 import pytest
+from flask import Flask
 from flask import json
 from flask import jsonify
 from joserfc import jws
@@ -11,6 +12,7 @@ from authlib.common.security import generate_token
 from authlib.deprecate import AuthlibDeprecationWarning
 from authlib.integrations.flask_oauth2 import ResourceProtector
 from authlib.integrations.flask_oauth2 import current_token
+from authlib.oauth2.rfc6750.errors import InvalidTokenError
 from authlib.oauth2.rfc9068 import JWTBearerTokenValidator
 from tests.util import read_file_path
 
@@ -318,6 +320,59 @@ def test_scope_restriction(test_client, claims, jwks):
     rv = test_client.get("/protected-by-scope", headers=headers)
     resp = json.loads(rv.data)
     assert resp["error"] == "insufficient_scope"
+
+
+def test_scope_array_rejected_in_strict_mode(claims, jwks):
+    """In strict mode, 'scope' must be a space-separated string: a JSON array
+    is a non-compliant claim and the token cannot access the resource.
+    """
+
+    class StrictJWTBearerTokenValidator(JWTBearerTokenValidator):
+        def get_jwks(self):
+            return jwks
+
+    strict_validator = StrictJWTBearerTokenValidator(
+        issuer=issuer, resource_server=resource_server, strict=True
+    )
+    protector = ResourceProtector()
+    protector.register_token_validator(strict_validator)
+
+    app = Flask(__name__)
+
+    @app.route("/strict")
+    @protector()
+    def strict_resource():
+        return "ok"
+
+    claims["scope"] = ["profile"]
+    access_token = create_access_token(claims, jwks)
+    client = app.test_client()
+
+    rv = client.get("/strict", headers={"Authorization": f"Bearer {access_token}"})
+    resp = json.loads(rv.data)
+    assert resp["error"] == "invalid_token"
+
+    claims["scope"] = "profile"
+    valid_token = create_access_token(claims, jwks)
+    rv = client.get("/strict", headers={"Authorization": f"Bearer {valid_token}"})
+    assert rv.status_code == 200
+
+
+def test_strict_mode_rejects_application_typ(claims, jwks):
+    """The strict profile only accepts the canonical 'at+jwt' type."""
+
+    class StrictJWTBearerTokenValidator(JWTBearerTokenValidator):
+        def get_jwks(self):
+            return jwks
+
+    strict_validator = StrictJWTBearerTokenValidator(
+        issuer=issuer, resource_server=resource_server, strict=True
+    )
+    access_token = create_access_token(claims, jwks, typ="application/at+jwt")
+    token = strict_validator.authenticate_token(access_token)
+
+    with pytest.raises(InvalidTokenError):
+        strict_validator.validate_token(token, None, None)
 
 
 def test_entitlements_restriction(test_client, client, user, jwks):
