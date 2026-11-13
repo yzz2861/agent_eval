@@ -2,7 +2,6 @@ import ipaddress
 import pickle
 
 import pytest
-
 import service_identity.hazmat
 
 from service_identity.cryptography import extract_patterns
@@ -10,6 +9,7 @@ from service_identity.exceptions import (
     CertificateError,
     DNSMismatch,
     SRVMismatch,
+    URIMismatch,
     VerificationError,
 )
 from service_identity.hazmat import (
@@ -82,7 +82,13 @@ class TestVerifyServiceIdentity:
                 DNS_IDS, obligatory_ids=[i], optional_ids=[]
             )
 
-        assert [DNSMismatch(mismatched_id=i)] == e.value.errors
+        assert [
+            DNSMismatch(
+                mismatched_id=i,
+                mismatched_categories=("host",),
+                normalized_id="wrong.host",
+            )
+        ] == e.value.errors
 
     def test_single_label_hostname_mismatch(self):
         """
@@ -97,7 +103,13 @@ class TestVerifyServiceIdentity:
                 optional_ids=[],
             )
 
-        assert [DNSMismatch(mismatched_id=i)] == e.value.errors
+        assert [
+            DNSMismatch(
+                mismatched_id=i,
+                mismatched_categories=("host",),
+                normalized_id="localhost",
+            )
+        ] == e.value.errors
 
     def test_ip_address_success(self):
         """
@@ -127,7 +139,13 @@ class TestVerifyServiceIdentity:
                 obligatory_ids=[SRV_ID("_mail.example.net"), i],
                 optional_ids=[],
             )
-        assert [DNSMismatch(mismatched_id=i)] == e.value.errors
+        assert [
+            DNSMismatch(
+                mismatched_id=i,
+                mismatched_categories=("host",),
+                normalized_id="example.net",
+            )
+        ] == e.value.errors
 
     def test_obligatory_mismatch(self):
         """
@@ -143,7 +161,13 @@ class TestVerifyServiceIdentity:
                 obligatory_ids=[SRV_ID("_mail.example.net"), i],
                 optional_ids=[],
             )
-        assert [DNSMismatch(mismatched_id=i)] == e.value.errors
+        assert [
+            DNSMismatch(
+                mismatched_id=i,
+                mismatched_categories=("host",),
+                normalized_id="example.net",
+            )
+        ] == e.value.errors
 
     def test_optional_missing(self):
         """
@@ -172,7 +196,13 @@ class TestVerifyServiceIdentity:
                 obligatory_ids=[DNS_ID("example.net")],
                 optional_ids=[i],
             )
-        assert [SRVMismatch(mismatched_id=i)] == e.value.errors
+        assert [
+            SRVMismatch(
+                mismatched_id=i,
+                mismatched_categories=("service",),
+                normalized_id="_xmpp.example.com",
+            )
+        ] == e.value.errors
 
     def test_contains_optional_and_matches(self):
         """
@@ -187,6 +217,76 @@ class TestVerifyServiceIdentity:
             optional_ids=[i],
         )
         assert ServiceMatch(cert_pattern=p, service_id=i) == rv[1]
+
+    def test_multi_tenant_optional_uri_is_checked(self):
+        """
+        Regression: optional URI-IDs must be verified whenever the
+        certificate carries any URI pattern, including the optional-only
+        case where only DNS/SRV identities were obligatory.
+        """
+        cert_patterns = [
+            SRVPattern.from_bytes(b"_xmpp._tcp.example.com"),
+            URIPattern.from_bytes(b"spiffe://example.com/tenant-a"),
+        ]
+        cross_tenant = URI_ID("spiffe://example.com/tenant-b")
+
+        with pytest.raises(VerificationError) as e:
+            verify_service_identity(
+                cert_patterns,
+                obligatory_ids=[
+                    SRV_ID(
+                        "_xmpp._tcp.example.com",
+                        allowed_ports={5222},
+                        port=5222,
+                    )
+                ],
+                optional_ids=[cross_tenant],
+            )
+
+        (error,) = e.value.errors
+        assert isinstance(error, URIMismatch)
+        assert error.mismatched_categories == ("path",)
+        assert error.normalized_id == ("spiffe://example.com/tenant-b")
+        assert "tenant-a" not in str(e.value)
+
+    def test_multi_tenant_legitimate_optional_uri_passes(self):
+        """
+        A matching optional URI alongside obligatory SRV/DNS IDs passes and
+        returns every match.
+        """
+        srv_pattern = SRVPattern.from_bytes(b"_xmpp._tcp.example.com")
+        uri_pattern = URIPattern.from_bytes(b"spiffe://example.com/tenant-a")
+        srv_id = SRV_ID(
+            "_xmpp._tcp.example.com",
+            allowed_ports={5222},
+            port=5222,
+        )
+        uri_id = URI_ID("SPIFFE://example.com/tenant-a/")
+
+        rv = verify_service_identity(
+            [srv_pattern, uri_pattern],
+            obligatory_ids=[srv_id],
+            optional_ids=[uri_id],
+        )
+
+        assert rv == [
+            ServiceMatch(cert_pattern=srv_pattern, service_id=srv_id),
+            ServiceMatch(cert_pattern=uri_pattern, service_id=uri_id),
+        ]
+
+    def test_optional_srv_without_srv_pattern_is_allowed(self):
+        """
+        An optional SRV-ID passes when the certificate only has other types.
+        """
+        dns = DNSPattern.from_bytes(b"example.com")
+        rv = verify_service_identity(
+            [dns],
+            obligatory_ids=[DNS_ID("example.com")],
+            optional_ids=[SRV_ID("_xmpp._tcp.example.com")],
+        )
+        assert [
+            ServiceMatch(cert_pattern=dns, service_id=DNS_ID("example.com"))
+        ] == rv
 
 
 class TestContainsInstance:
@@ -331,12 +431,128 @@ class TestURI_ID:
         uri_id = URI_ID("sIp:foo.com")
         assert b"sip" == uri_id.protocol
 
+    def test_scheme_case_normalized(self):
+        """
+        Upper-case schemes are normalized before matching.
+        """
+        assert URI_ID("HTTPS://Example.COM/a").verify(
+            URIPattern.from_bytes(b"https://example.com/a")
+        )
+
     def test_catches_missing_colon(self):
         """
         Raise ValueError if there's no colon within a URI-ID.
         """
         with pytest.raises(ValueError):
             URI_ID("sip;foo.com")
+
+    @pytest.mark.parametrize(
+        "invalid_uri",
+        [
+            "1scheme://foo.com",
+            "bad scheme://foo.com",
+            "https://user@foo.com/",
+            "https://[::1]/",
+            "https://foo.com:99999/",
+            "https://foo.com:notaport/",
+            "https:///relative",
+        ],
+    )
+    def test_catches_invalid_uri(self, invalid_uri):
+        """
+        Malformed schemes, user info, IP literals, bad ports and empty hosts
+        are rejected with a ValueError instead of leaking parser internals.
+        """
+        with pytest.raises(ValueError):
+            URI_ID(invalid_uri)
+
+    def test_non_ascii_host_uses_idna(self):
+        """
+        Non-ASCII authorities are IDNA-encoded and match A-labels.
+        """
+        assert URI_ID("https://f\u00f8\u00f8.com/x").verify(
+            URIPattern.from_bytes(b"https://xn--f-5gaa.com/x")
+        )
+
+    def test_non_ascii_path_raises_value_error(self):
+        """
+        A non-ASCII path raises ValueError instead of UnicodeEncodeError.
+        """
+        with pytest.raises(ValueError):
+            URI_ID("https://foo.com/\u00f8")
+
+    def test_explicit_port_matches_default_port(self):
+        """
+        An explicit default port equals a certificate URI without a port.
+        """
+        assert URI_ID("https://foo.com:443/a").verify(
+            URIPattern.from_bytes(b"https://foo.com/a")
+        )
+
+    def test_default_port_matches_explicit_port(self):
+        """
+        A client relying on the default port matches an explicit cert port.
+        """
+        assert URI_ID("https://foo.com/a").verify(
+            URIPattern.from_bytes(b"https://foo.com:443/a")
+        )
+
+    def test_port_mismatch(self):
+        """
+        Different ports never match, even with equal scheme/host/path.
+        """
+        assert not URI_ID("https://foo.com:8443/a").verify(
+            URIPattern.from_bytes(b"https://foo.com/a")
+        )
+
+    def test_unknown_scheme_without_port_is_none(self):
+        """
+        Unknown schemes have no default port, so an omitted cert port only
+        matches an omitted client port.
+        """
+        assert URI_ID("spiffe://foo.com/ns").verify(
+            URIPattern.from_bytes(b"spiffe://foo.com/ns")
+        )
+        assert not URI_ID("spiffe://foo.com:1234/ns").verify(
+            URIPattern.from_bytes(b"spiffe://foo.com/ns")
+        )
+
+    def test_path_normalization(self):
+        """
+        Empty and trailing-slash paths normalize to the same identity, and
+        percent-encoding hex digits are upper-cased.
+        """
+        pattern = URIPattern.from_bytes(b"https://foo.com/a/b")
+        for uri in [
+            "https://foo.com/a/b",
+            "https://foo.com/a/b/",
+            "https://foo.com/a/b/?x=1",
+            "https://foo.com/a/b#frag",
+            "https://foo.com/a%2fb",
+        ]:
+            if uri.endswith("%2fb"):
+                assert URI_ID(uri).verify(
+                    URIPattern.from_bytes(b"https://foo.com/a%2Fb")
+                )
+            else:
+                assert URI_ID(uri).verify(pattern)
+
+    def test_path_boundary(self):
+        """
+        Host and path are separate components; a prefix in the path never
+        substitutes for a different host.
+        """
+        assert not URI_ID("https://foo.com/bar").verify(
+            URIPattern.from_bytes(b"https://evil.com/bar")
+        )
+
+    def test_query_and_fragment_are_ignored(self):
+        """
+        Query and fragment components are not part of the identity.
+        """
+        assert URI_ID("https://foo.com/a?b=c#d").verify(
+            URIPattern.from_bytes(b"https://foo.com/a")
+        )
 
     def test_is_only_valid_for_uri(self):
         """
@@ -368,6 +584,150 @@ class TestURI_ID:
         assert URI_ID("sip:foo.com").verify(
             URIPattern.from_bytes(b"sip:foo.com")
         )
+
+    def test_tenant_path_isolation(self):
+        """
+        A different tenant path cannot be accepted when the certificate
+        carries a URI of the same scheme/host.
+        """
+        cert = [URIPattern.from_bytes(b"spiffe://example.com/tenant-a")]
+        other_tenant = URI_ID("spiffe://example.com/tenant-b")
+
+        with pytest.raises(VerificationError) as e:
+            verify_service_identity(
+                cert_patterns=cert,
+                obligatory_ids=[],
+                optional_ids=[other_tenant],
+            )
+
+        mismatch = e.value.errors[0]
+        assert isinstance(mismatch, URIMismatch)
+        assert mismatch.mismatched_categories == ("path",)
+        assert mismatch.normalized_id == ("spiffe://example.com/tenant-b")
+        # Certificate contents must not be echoed into the error.
+        assert "tenant-a" not in str(e.value)
+
+    def test_port_mismatch_reports_port_category(self):
+        """
+        A mismatched port is reported as its own category without leaking the
+        certificate's other URI values.
+        """
+        cert = [
+            URIPattern.from_bytes(b"https://example.com/a"),
+            URIPattern.from_bytes(b"http://example.com/secret-tenant"),
+        ]
+        with pytest.raises(VerificationError) as e:
+            verify_service_identity(
+                cert_patterns=cert,
+                obligatory_ids=[URI_ID("https://example.com:8443/a")],
+                optional_ids=[],
+            )
+
+        mismatch = e.value.errors[0]
+        assert mismatch.mismatched_categories == (
+            "scheme",
+            "port",
+            "path",
+        )
+        assert mismatch.normalized_id == ("https://example.com:8443/a")
+        assert "secret-tenant" not in str(e.value)
+
+    def test_isolated_port_category_with_matching_remainder(self):
+        """
+        With an otherwise identical certificate URI, only the port category
+        is reported.
+        """
+        cert = [URIPattern.from_bytes(b"https://example.com/a")]
+        with pytest.raises(VerificationError) as e:
+            verify_service_identity(
+                cert_patterns=cert,
+                obligatory_ids=[URI_ID("https://example.com:8443/a")],
+                optional_ids=[],
+            )
+
+        mismatch = e.value.errors[0]
+        assert mismatch.mismatched_categories == ("port",)
+
+    def test_scheme_mismatch_reports_scheme_category(self):
+        """
+        Only the scheme category is reported when host, port and path agree.
+        """
+        cert = [URIPattern.from_bytes(b"http://example.com/a")]
+        with pytest.raises(VerificationError) as e:
+            verify_service_identity(
+                cert_patterns=cert,
+                obligatory_ids=[URI_ID("https://example.com/a")],
+                optional_ids=[],
+            )
+
+        mismatch = e.value.errors[0]
+        assert mismatch.mismatched_categories == ("scheme", "port")
+        assert mismatch.normalized_id == ("https://example.com:443/a")
+
+    def test_optional_uri_without_uri_pattern_is_allowed(self):
+        """
+        An optional URI is not an error if the certificate has no URI at all,
+        even when DNS patterns are present.
+        """
+        dns = DNSPattern.from_bytes(b"example.com")
+        rv = verify_service_identity(
+            [dns],
+            obligatory_ids=[DNS_ID("example.com")],
+            optional_ids=[URI_ID("spiffe://example.com/tenant-a")],
+        )
+        assert [
+            ServiceMatch(cert_pattern=dns, service_id=DNS_ID("example.com"))
+        ] == rv
+
+    def test_obligatory_uri_missing_reports_all_categories(self):
+        """
+        A missing obligatory URI reports every URI category but never leaks
+        certificate data.
+        """
+        uri_id = URI_ID("spiffe://example.com/tenant-a")
+        with pytest.raises(VerificationError) as e:
+            verify_service_identity(
+                [DNSPattern.from_bytes(b"example.com")],
+                obligatory_ids=[uri_id],
+                optional_ids=[],
+            )
+
+        mismatch = e.value.errors[0]
+        assert mismatch.mismatched_categories == (
+            "scheme",
+            "host",
+            "port",
+            "path",
+        )
+        assert mismatch.normalized_id == ("spiffe://example.com/tenant-a")
+
+    def test_cross_type_evidence_does_not_satisfy_uri(self):
+        """
+        A DNS or SRV pattern can never satisfy a URI identity.
+        """
+        with pytest.raises(VerificationError):
+            verify_service_identity(
+                [
+                    DNSPattern.from_bytes(b"example.com"),
+                    SRVPattern.from_bytes(b"_xmpp._tcp.example.com"),
+                ],
+                obligatory_ids=[URI_ID("https://example.com/")],
+                optional_ids=[],
+            )
+
+    def test_cross_type_evidence_does_not_satisfy_srv(self):
+        """
+        A DNS or URI pattern can never satisfy an SRV identity.
+        """
+        with pytest.raises(VerificationError):
+            verify_service_identity(
+                [
+                    DNSPattern.from_bytes(b"example.com"),
+                    URIPattern.from_bytes(b"https://example.com/"),
+                ],
+                obligatory_ids=[SRV_ID("_xmpp._tcp.example.com")],
+                optional_ids=[],
+            )
 
 
 class TestSRV_ID:
@@ -406,6 +766,32 @@ class TestSRV_ID:
         """
         with pytest.raises(ValueError):
             SRV_ID("imaps.foo.com")
+
+    @pytest.mark.parametrize(
+        "invalid_srv",
+        [
+            "_.example.com",
+            "_bad label.example.com",
+            "_mail._.example.com",
+            "_mail._bad proto.example.com",
+        ],
+    )
+    def test_catches_invalid_labels(self, invalid_srv):
+        """
+        Empty or illegal service/protocol labels raise ValueError.
+        """
+        with pytest.raises(ValueError):
+            SRV_ID(invalid_srv)
+
+    def test_parses_protocol_label(self):
+        """
+        A two-label SRV-ID exposes service, protocol and domain separately.
+        """
+        srv_id = SRV_ID("_xmpp._tcp.example.com")
+        assert b"xmpp" == srv_id.name
+        assert b"tcp" == srv_id.protocol
+        assert DNS_ID("example.com") == srv_id.dns_id
+        assert "_xmpp._tcp.example.com" == srv_id.normalized_id
 
     def test_is_only_valid_for_SRV(self):
         """
@@ -449,6 +835,88 @@ class TestSRV_ID:
                 SRVPattern.from_bytes(b"_mail.bar.com")
             )
         )
+
+    def test_protocol_match(self):
+        """
+        Service, protocol and domain all participate in matching.
+        """
+        assert SRV_ID("_xmpp._tcp.example.com").verify(
+            SRVPattern.from_bytes(b"_xmpp._tcp.example.com")
+        )
+
+    def test_mismatch_protocol(self):
+        """
+        A different protocol label fails even with equal service and domain.
+        """
+        assert not SRV_ID("_xmpp._tcp.example.com").verify(
+            SRVPattern.from_bytes(b"_xmpp._udp.example.com")
+        )
+
+    def test_mismatch_service_name_two_label(self):
+        """
+        Swapping service names fails independently of protocol/domain.
+        """
+        assert not SRV_ID("_mail._tcp.example.com").verify(
+            SRVPattern.from_bytes(b"_xmpp._tcp.example.com")
+        )
+
+    def test_legacy_id_against_two_label_pattern_fails(self):
+        """
+        A legacy single-label SRV-ID cannot match a protocol-specific
+        certificate pattern.
+        """
+        assert not SRV_ID("_xmpp.example.com").verify(
+            SRVPattern.from_bytes(b"_xmpp._tcp.example.com")
+        )
+
+    def test_allowed_port_policy_match(self):
+        """
+        A caller-provided port inside the policy is accepted.
+        """
+        srv_id = SRV_ID(
+            "_xmpp._tcp.example.com",
+            allowed_ports={5222, 5223},
+            port=5223,
+        )
+        assert srv_id.verify(SRVPattern.from_bytes(b"_xmpp._tcp.example.com"))
+        assert srv_id.normalized_id == ("_xmpp._tcp.example.com:5223")
+
+    def test_port_outside_policy_rejected(self):
+        """
+        A concrete port outside the caller's policy raises at construction.
+        """
+        with pytest.raises(ValueError, match="port policy"):
+            SRV_ID(
+                "_xmpp._tcp.example.com",
+                allowed_ports={5222},
+                port=5223,
+            )
+
+    @pytest.mark.parametrize("bad_port", [-1, 65536, "5222", True])
+    def test_invalid_policy_ports(self, bad_port):
+        """
+        Out-of-range and non-integer policy entries are rejected.
+        """
+        with pytest.raises(ValueError):
+            SRV_ID("_xmpp._tcp.example.com", allowed_ports={bad_port})
+
+    def test_optional_srv_mismatch_reports_categories(self):
+        """
+        An optional SRV conflicting with a present SRV pattern reports the
+        normalized identity and the failing categories only.
+        """
+        srv_id = SRV_ID("_xmpp._udp.example.com")
+        with pytest.raises(VerificationError) as e:
+            verify_service_identity(
+                [SRVPattern.from_bytes(b"_xmpp._tcp.example.com")],
+                obligatory_ids=[],
+                optional_ids=[srv_id],
+            )
+
+        mismatch = e.value.errors[0]
+        assert isinstance(mismatch, SRVMismatch)
+        assert mismatch.mismatched_categories == ("protocol",)
+        assert mismatch.normalized_id == ("_xmpp._udp.example.com")
 
 
 class TestDNSPattern:
@@ -511,6 +979,59 @@ class TestURIPattern:
         with pytest.raises(CertificateError):
             URIPattern.from_bytes(b"sip:*.foo.com")
 
+    def test_wildcard_cannot_cross_authority(self):
+        """
+        A wildcard in the authority of a hierarchical URI is invalid, so it
+        can never be smuggled through the path comparison.
+        """
+        with pytest.raises(CertificateError):
+            URIPattern.from_bytes(b"https://*.foo.com/a")
+
+    def test_parses_hierarchical_uri(self):
+        """
+        Scheme, host, port and path are stored as normalized components.
+        """
+        pattern = URIPattern.from_bytes(b"HTTPS://Example.COM:8443/A/B/?x=1")
+        assert pattern.protocol_pattern == b"https"
+        assert pattern.dns_pattern == DNSPattern.from_bytes(b"example.com")
+        assert pattern.port_pattern == 8443
+        assert pattern.path_pattern == b"/a/b"
+
+    def test_defaults_path_when_absent(self):
+        """
+        A hierarchical URI without a path normalizes to a single slash.
+        """
+        pattern = URIPattern.from_bytes(b"https://example.com")
+        assert pattern.port_pattern is None
+        assert pattern.path_pattern == b"/"
+
+    def test_legacy_uri_keeps_empty_path(self):
+        """
+        Legacy scheme:host URIs keep working and carry no hierarchical path.
+        """
+        pattern = URIPattern.from_bytes(b"sip:foo.com")
+        assert pattern.protocol_pattern == b"sip"
+        assert pattern.dns_pattern == DNSPattern.from_bytes(b"foo.com")
+        assert pattern.port_pattern is None
+        assert pattern.path_pattern == b"/"
+
+    @pytest.mark.parametrize(
+        "invalid",
+        [
+            b"https://user@foo.com/",
+            b"https://[::1]/",
+            b"https://foo.com:99999/",
+            b"1scheme://foo.com/",
+        ],
+    )
+    def test_catches_invalid_authority(self, invalid):
+        """
+        User info, IP literals, invalid ports and bad schemes raise
+        CertificateError during extraction.
+        """
+        with pytest.raises(CertificateError):
+            URIPattern.from_bytes(invalid)
+
 
 class TestSRVPattern:
     def test_enforces_bytes(self):
@@ -533,6 +1054,38 @@ class TestSRVPattern:
         """
         with pytest.raises(CertificateError):
             SRVPattern.from_bytes(b"sip:*.foo.com")
+
+    def test_parses_protocol_label(self):
+        """
+        Two-label SRV patterns expose service, protocol and domain.
+        """
+        pattern = SRVPattern.from_bytes(b"_XMPP._TCP.Example.COM")
+        assert pattern.name_pattern == b"xmpp"
+        assert pattern.protocol_pattern == b"tcp"
+        assert pattern.dns_pattern == DNSPattern.from_bytes(b"example.com")
+
+    def test_legacy_pattern_has_no_protocol(self):
+        """
+        Single-label SRV patterns remain supported with protocol=None.
+        """
+        pattern = SRVPattern.from_bytes(b"_xmpp.example.com")
+        assert pattern.name_pattern == b"xmpp"
+        assert pattern.protocol_pattern is None
+
+    @pytest.mark.parametrize(
+        "invalid",
+        [
+            b"_.example.com",
+            b"_mail._.example.com",
+            b"_bad name._tcp.example.com",
+        ],
+    )
+    def test_catches_invalid_labels(self, invalid):
+        """
+        Empty or malformed service/protocol labels raise CertificateError.
+        """
+        with pytest.raises(CertificateError):
+            SRVPattern.from_bytes(invalid)
 
 
 class TestValidateDNSWildcardPattern:
@@ -740,3 +1293,24 @@ class TestVerificationError:
         # Exceptions can't be compared.
         assert exc.__class__ == new_exc.__class__
         assert exc.__dict__ == new_exc.__dict__
+
+    def test_enriched_mismatch_pickle_and_privacy(self):
+        """
+        Enriched mismatch metadata survives pickling and never contains data
+        from certificate patterns, only from the caller-supplied identity.
+        """
+        uri_id = URI_ID("spiffe://example.com/tenant-b")
+        mismatch = URIMismatch(
+            mismatched_id=uri_id,
+            mismatched_categories=("path",),
+            normalized_id=uri_id.normalized_id,
+        )
+        exc = VerificationError(errors=[mismatch])
+
+        loaded = pickle.loads(pickle.dumps(exc))
+
+        assert loaded.errors[0].mismatched_categories == ("path",)
+        assert loaded.errors[0].normalized_id == (
+            "spiffe://example.com/tenant-b"
+        )
+        assert "tenant-a" not in str(loaded)

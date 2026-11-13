@@ -36,25 +36,42 @@ class Mismatch:
     mismatched_id: ServiceID = attr.ib()
 
 
-class DNSMismatch(Mismatch):
+@attr.s(slots=True)
+class CategoryMismatch(Mismatch):
+    """
+    A mismatch that records which identity components did not match.
+
+    Only the caller-supplied, normalized identity is recorded; certificate
+    contents are never echoed, so unrelated tenants' identities do not leak
+    through error messages.
+    """
+
+    #: The normalized identity components that failed to match, in a stable
+    #: order (e.g. ``("scheme", "host", "port", "path")``).
+    mismatched_categories: tuple[str, ...] = attr.ib(factory=tuple)
+    #: A canonical, text representation of the caller-supplied identity.
+    normalized_id: str | None = attr.ib(default=None)
+
+
+class DNSMismatch(CategoryMismatch):
     """
     No matching DNSPattern could be found.
     """
 
 
-class SRVMismatch(Mismatch):
+class SRVMismatch(CategoryMismatch):
     """
     No matching SRVPattern could be found.
     """
 
 
-class URIMismatch(Mismatch):
+class URIMismatch(CategoryMismatch):
     """
     No matching URIPattern could be found.
     """
 
 
-class IPAddressMismatch(Mismatch):
+class IPAddressMismatch(CategoryMismatch):
     """
     No matching IPAddressPattern could be found.
     """

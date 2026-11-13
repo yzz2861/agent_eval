@@ -7,7 +7,7 @@ from __future__ import annotations
 import ipaddress
 import re
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import Protocol, runtime_checkable
 
 import attr
@@ -63,9 +63,7 @@ def verify_service_identity(
     matched_ids = [match.service_id for match in matches]
     for i in obligatory_ids:
         if i not in matched_ids:
-            errors.append(  # noqa: PERF401
-                i.error_on_mismatch(mismatched_id=i)
-            )
+            errors.append(i.mismatch(cert_patterns))  # noqa: PERF401
 
     for i in optional_ids:
         # If an optional ID is not matched by a certificate pattern *but* there
@@ -75,9 +73,7 @@ def verify_service_identity(
         if i not in matched_ids and _contains_instance_of(
             cert_patterns, i.pattern_class
         ):
-            errors.append(  # noqa: PERF401
-                i.error_on_mismatch(mismatched_id=i)
-            )
+            errors.append(i.mismatch(cert_patterns))  # noqa: PERF401
 
     if errors:
         raise VerificationError(errors=errors)
@@ -199,6 +195,10 @@ class URIPattern:
     protocol_pattern: bytes = attr.ib()
     #: The pattern for the DNS part.
     dns_pattern: DNSPattern = attr.ib()
+    #: The authority port, or `None` if the certificate omits it.
+    port_pattern: int | None = attr.ib(default=None)
+    #: The normalized path part, always beginning with a slash.
+    path_pattern: bytes = attr.ib(default=b"/")
 
     @classmethod
     def from_bytes(cls, pattern: bytes) -> URIPattern:
@@ -206,17 +206,22 @@ class URIPattern:
             msg = "The URI pattern must be a bytes string."
             raise TypeError(msg)
 
-        pattern = pattern.strip().translate(_TRANS_TO_LOWER)
+        pattern = pattern.strip()
 
         if b":" not in pattern or b"*" in pattern or _is_ip_address(pattern):
             msg = f"Invalid URI pattern {pattern!r}."
             raise CertificateError(msg)
 
-        protocol_pattern, hostname = pattern.split(b":")
+        scheme, remainder = pattern.split(b":", 1)
+        protocol_pattern = _normalize_scheme(scheme)
+        authority, path = _split_authority_path(remainder)
+        hostname, port = _parse_authority(authority)
 
         return cls(
             protocol_pattern=protocol_pattern,
-            dns_pattern=DNSPattern.from_bytes(hostname),
+            dns_pattern=DNSPattern.from_bytes(hostname.lower()),
+            port_pattern=port,
+            path_pattern=_normalize_cert_path(path),
         )
 
 
@@ -230,6 +235,9 @@ class SRVPattern:
     name_pattern: bytes = attr.ib()
     #: The pattern for the DNS part.
     dns_pattern: DNSPattern = attr.ib()
+    #: The pattern for the protocol part, or `None` for legacy
+    #: single-label SRV-IDs (``_service.domain``).
+    protocol_pattern: bytes | None = attr.ib(default=None)
 
     @classmethod
     def from_bytes(cls, pattern: bytes) -> SRVPattern:
@@ -249,8 +257,26 @@ class SRVPattern:
             raise CertificateError(msg)
 
         name, hostname = pattern.split(b".", 1)
+
+        service = name[1:]
+        protocol = None
+        if b"." in hostname:
+            first_label, rest = hostname.split(b".", 1)
+            if first_label.startswith(b"_"):
+                protocol = first_label[1:]
+                if not protocol or not _RE_SRV_LABEL.match(protocol):
+                    msg = f"Invalid SRV pattern {pattern!r}."
+                    raise CertificateError(msg)
+                hostname = rest
+
+        if not service or not _RE_SRV_LABEL.match(service):
+            msg = f"Invalid SRV pattern {pattern!r}."
+            raise CertificateError(msg)
+
         return cls(
-            name_pattern=name[1:], dns_pattern=DNSPattern.from_bytes(hostname)
+            name_pattern=service,
+            dns_pattern=DNSPattern.from_bytes(hostname),
+            protocol_pattern=protocol,
         )
 
 
@@ -270,6 +296,10 @@ class ServiceID(Protocol):
     def error_on_mismatch(self) -> type[Mismatch]: ...
 
     def verify(self, pattern: CertificatePattern) -> bool: ...
+
+    def mismatch(
+        self, cert_patterns: Sequence[CertificatePattern]
+    ) -> Mismatch: ...
 
 
 @attr.s(init=False, slots=True)
@@ -318,6 +348,16 @@ class DNS_ID:
 
         return False
 
+    def mismatch(
+        self,
+        cert_patterns: Sequence[CertificatePattern],  # noqa: ARG002
+    ) -> Mismatch:
+        return self.error_on_mismatch(
+            mismatched_id=self,
+            mismatched_categories=("host",),
+            normalized_id=self.hostname.decode("ascii"),
+        )
+
 
 @attr.s(slots=True)
 class IPAddress_ID:
@@ -341,15 +381,32 @@ class IPAddress_ID:
 
         return False
 
+    def mismatch(
+        self,
+        cert_patterns: Sequence[CertificatePattern],  # noqa: ARG002
+    ) -> Mismatch:
+        return self.error_on_mismatch(
+            mismatched_id=self,
+            mismatched_categories=("ip",),
+            normalized_id=str(self.ip),
+        )
+
 
 @attr.s(init=False, slots=True)
 class URI_ID:
     """
     An URI service ID.
+
+    The identity is normalized so that comparisons cover the lower-cased
+    scheme, the IDNA-encoded host, the explicit port (falling back to the
+    scheme's default port) and the normalized path.  Wildcards never cross
+    the authority/path boundary and are not allowed at all in a service ID.
     """
 
     protocol: bytes = attr.ib()
     dns_id: DNS_ID = attr.ib()
+    port: int | None = attr.ib()
+    path: bytes = attr.ib()
 
     pattern_class = URIPattern
     error_on_mismatch = URIMismatch
@@ -360,26 +417,103 @@ class URI_ID:
             raise TypeError(msg)
 
         uri = uri.strip()
-        if ":" not in uri or _is_ip_address(uri):
+        if ":" not in uri:
             msg = "Invalid URI-ID."
             raise ValueError(msg)
 
-        prot, hostname = uri.split(":")
+        scheme, remainder = uri.split(":", 1)
+        try:
+            self.protocol = _normalize_scheme(scheme.strip().encode("ascii"))
+        except (UnicodeEncodeError, CertificateError) as e:
+            msg = "Invalid URI-ID."
+            raise ValueError(msg) from e
 
-        self.protocol = prot.encode("ascii").translate(_TRANS_TO_LOWER)
-        self.dns_id = DNS_ID(hostname.strip("/"))
+        try:
+            authority_text, path_text = _split_authority_path_text(remainder)
+            hostname_text, port = _parse_authority_text(authority_text)
+        except CertificateError as e:
+            msg = "Invalid URI-ID."
+            raise ValueError(msg) from e
+
+        if port is None:
+            port = _DEFAULT_PORTS.get(self.protocol)
+
+        self.dns_id = DNS_ID(hostname_text)
+        self.port = port
+        try:
+            self.path = _normalize_client_path(path_text.encode("ascii"))
+        except UnicodeEncodeError as e:
+            msg = "Invalid URI-ID."
+            raise ValueError(msg) from e
 
     def verify(self, pattern: CertificatePattern) -> bool:
         """
         https://tools.ietf.org/search/rfc6125#section-6.5.2
         """
-        if isinstance(pattern, self.pattern_class):
-            return (
-                pattern.protocol_pattern == self.protocol
-                and self.dns_id.verify(pattern.dns_pattern)
-            )
+        if not isinstance(pattern, self.pattern_class):
+            return False
 
-        return False
+        cert_port = pattern.port_pattern
+        if cert_port is None:
+            cert_port = _DEFAULT_PORTS.get(pattern.protocol_pattern)
+
+        return (
+            pattern.protocol_pattern == self.protocol
+            and self.dns_id.verify(pattern.dns_pattern)
+            and cert_port == self.port
+            and pattern.path_pattern == self.path
+        )
+
+    def mismatch(
+        self, cert_patterns: Sequence[CertificatePattern]
+    ) -> Mismatch:
+        categories: set[str] = set()
+        uri_patterns = [
+            p for p in cert_patterns if isinstance(p, self.pattern_class)
+        ]
+        if not uri_patterns:
+            categories.update(("scheme", "host", "port", "path"))
+        else:
+            for pattern in uri_patterns:
+                categories.update(self._failing_categories(pattern))
+
+        return self.error_on_mismatch(
+            mismatched_id=self,
+            mismatched_categories=tuple(
+                category
+                for category in ("scheme", "host", "port", "path")
+                if category in categories
+            ),
+            normalized_id=self.normalized_id,
+        )
+
+    def _failing_categories(self, pattern: URIPattern) -> tuple[str, ...]:
+        categories = []
+        if pattern.protocol_pattern != self.protocol:
+            categories.append("scheme")
+        if not self.dns_id.verify(pattern.dns_pattern):
+            categories.append("host")
+
+        cert_port = pattern.port_pattern
+        if cert_port is None:
+            cert_port = _DEFAULT_PORTS.get(pattern.protocol_pattern)
+        if cert_port != self.port:
+            categories.append("port")
+
+        if pattern.path_pattern != self.path:
+            categories.append("path")
+
+        return tuple(categories)
+
+    @property
+    def normalized_id(self) -> str:
+        authority = self.dns_id.hostname.decode("ascii")
+        if self.port is not None:
+            authority = f"{authority}:{self.port}"
+        return (
+            f"{self.protocol.decode('ascii')}://{authority}"
+            f"{self.path.decode('ascii')}"
+        )
 
 
 @attr.s(init=False, slots=True)
@@ -390,11 +524,25 @@ class SRV_ID:
 
     name: bytes = attr.ib()
     dns_id: DNS_ID = attr.ib()
+    #: The protocol label (e.g. ``b"tcp"``), or `None` for legacy
+    #: single-label SRV-IDs.
+    protocol: bytes | None = attr.ib()
+    #: Ports the caller is willing to accept for this service.
+    allowed_ports: frozenset[int] = attr.ib()
+    #: The concrete port of the connection, or `None` if the caller
+    #: provided a policy without selecting a port.
+    port: int | None = attr.ib(default=None)
 
     pattern_class = SRVPattern
     error_on_mismatch = SRVMismatch
 
-    def __init__(self, srv: str):
+    def __init__(
+        self,
+        srv: str,
+        *,
+        allowed_ports: Iterable[int] | None = None,
+        port: int | None = None,
+    ):
         if not isinstance(srv, str):
             msg = "SRV-ID must be a text string."
             raise TypeError(msg)
@@ -406,19 +554,122 @@ class SRV_ID:
 
         name, hostname = srv.split(".", 1)
 
-        self.name = name[1:].encode("ascii").translate(_TRANS_TO_LOWER)
+        service = name[1:].encode("ascii").translate(_TRANS_TO_LOWER)
+        if not service or not _RE_SRV_LABEL.match(service):
+            msg = "Invalid SRV-ID."
+            raise ValueError(msg)
+        self.name = service
+        self.protocol = None
+        if hostname.startswith("_") and "." in hostname:
+            protocol_label, rest = hostname.split(".", 1)
+            protocol = protocol_label[1:]
+            protocol_bytes = protocol.encode("ascii").translate(
+                _TRANS_TO_LOWER
+            )
+            if not _RE_SRV_LABEL.match(protocol_bytes):
+                msg = "Invalid SRV-ID."
+                raise ValueError(msg)
+            self.protocol = protocol_bytes
+            hostname = rest
+
         self.dns_id = DNS_ID(hostname)
+
+        if allowed_ports is not None and not isinstance(
+            allowed_ports, Iterable
+        ):
+            msg = "Invalid SRV-ID port policy."
+            raise ValueError(msg)
+        self.allowed_ports = frozenset(allowed_ports or ())
+        if any(
+            not isinstance(p, int)
+            or isinstance(p, bool)
+            or not 0 <= p <= 65535
+            for p in self.allowed_ports
+        ):
+            msg = "Invalid SRV-ID port policy."
+            raise ValueError(msg)
+
+        if port is not None and (
+            not isinstance(port, int)
+            or isinstance(port, bool)
+            or not 0 <= port <= 65535
+        ):
+            msg = "Invalid SRV-ID port."
+            raise ValueError(msg)
+        if self.allowed_ports and port not in self.allowed_ports:
+            msg = "Port is not allowed by the SRV-ID port policy."
+            raise ValueError(msg)
+        self.port = port
 
     def verify(self, pattern: CertificatePattern) -> bool:
         """
         https://tools.ietf.org/search/rfc6125#section-6.5.1
         """
-        if isinstance(pattern, self.pattern_class):
-            return self.name == pattern.name_pattern and self.dns_id.verify(
-                pattern.dns_pattern
-            )
+        if not isinstance(pattern, self.pattern_class):
+            return False
 
-        return False
+        if self.name != pattern.name_pattern:
+            return False
+        if pattern.protocol_pattern is not None and (
+            self.protocol is None or self.protocol != pattern.protocol_pattern
+        ):
+            return False
+        if not self.dns_id.verify(pattern.dns_pattern):
+            return False
+
+        return self.port is None or self.port in self.allowed_ports
+
+    def mismatch(
+        self, cert_patterns: Sequence[CertificatePattern]
+    ) -> Mismatch:
+        categories: set[str] = set()
+        srv_patterns = [
+            p for p in cert_patterns if isinstance(p, self.pattern_class)
+        ]
+        if not srv_patterns:
+            categories.update(("service", "protocol", "domain"))
+        else:
+            for pattern in srv_patterns:
+                categories.update(self._failing_categories(pattern))
+
+        if self.port is not None and self.port not in self.allowed_ports:
+            categories.add("port")
+
+        return self.error_on_mismatch(
+            mismatched_id=self,
+            mismatched_categories=tuple(
+                category
+                for category in ("service", "protocol", "domain", "port")
+                if category in categories
+            ),
+            normalized_id=self.normalized_id,
+        )
+
+    def _failing_categories(self, pattern: SRVPattern) -> tuple[str, ...]:
+        categories = []
+        if self.name != pattern.name_pattern:
+            categories.append("service")
+        if pattern.protocol_pattern is not None and (
+            self.protocol is None or self.protocol != pattern.protocol_pattern
+        ):
+            categories.append("protocol")
+        if not self.dns_id.verify(pattern.dns_pattern):
+            categories.append("domain")
+
+        return tuple(categories)
+
+    @property
+    def normalized_id(self) -> str:
+        service = self.name.decode("ascii")
+        domain = self.dns_id.hostname.decode("ascii")
+        if self.protocol is None:
+            identity = f"_{service}.{domain}"
+        else:
+            identity = f"_{service}._{self.protocol.decode('ascii')}.{domain}"
+        if self.port is not None:
+            identity = f"{identity}:{self.port}"
+
+        return identity
 
 
 def _hostname_matches(cert_pattern: bytes, actual_hostname: bytes) -> bool:
@@ -439,6 +690,225 @@ def _hostname_matches(cert_pattern: bytes, actual_hostname: bytes) -> bool:
         return cert_head in (b"*", actual_head)
 
     return cert_pattern == actual_hostname
+
+
+#: Default ports for schemes whose well-known ports are needed to compare a
+#: certificate URI without an explicit port with a client URI.
+_DEFAULT_PORTS: dict[bytes, int] = {
+    b"acap": 674,
+    b"afp": 548,
+    b"caldav": 80,
+    b"carddav": 80,
+    b"dict": 2628,
+    b"dns": 53,
+    b"ftp": 21,
+    b"ftps": 990,
+    b"git": 9418,
+    b"http": 80,
+    b"https": 443,
+    b"imap": 143,
+    b"imaps": 993,
+    b"ipp": 631,
+    b"ipps": 631,
+    b"irc": 194,
+    b"ircs": 6697,
+    b"ldap": 389,
+    b"ldaps": 636,
+    b"mssql": 1433,
+    b"mysql": 3306,
+    b"nfs": 2049,
+    b"nntp": 119,
+    b"nntps": 563,
+    b"pop": 110,
+    b"pop3": 110,
+    b"pop3s": 995,
+    b"postgres": 5432,
+    b"postgresql": 5432,
+    b"prospero": 1525,
+    b"redis": 6379,
+    b"rsync": 873,
+    b"rtsp": 554,
+    b"sip": 5060,
+    b"sips": 5061,
+    b"smtp": 25,
+    b"smtps": 465,
+    b"snmp": 161,
+    b"ssh": 22,
+    b"svn": 3690,
+    b"telnet": 23,
+    b"tftp": 69,
+    b"xmpp": 5222,
+    b"xmpp-server": 5269,
+}
+
+
+def _normalize_scheme(scheme: bytes) -> bytes:
+    """
+    Lower-case and validate an URI scheme.
+    """
+    scheme = scheme.strip().translate(_TRANS_TO_LOWER)
+    if not scheme or not re.fullmatch(rb"[a-z][a-z0-9+\-.]*", scheme):
+        msg = f"Invalid URI scheme {scheme!r}."
+        raise CertificateError(msg)
+
+    return scheme
+
+
+def _split_authority_path(remainder: bytes) -> tuple[bytes, bytes]:
+    """
+    Split the part of an URI following the scheme into authority and path.
+
+    A hierarchical URI starts with ``//``; everything up to the first slash
+    is the authority and the rest (including the slash) is the path.  Query
+    and fragment components are not part of service identity and are dropped.
+    A legacy ``scheme:host`` URI has no path at all.
+    """
+    if not remainder.startswith(b"//"):
+        return remainder, b""
+
+    authority_and_path = remainder[2:]
+    slash = authority_and_path.find(b"/")
+    if slash == -1:
+        authority = authority_and_path
+        path = b"/"
+    else:
+        authority = authority_and_path[:slash]
+        path = authority_and_path[slash:]
+
+    for separator in (b"?", b"#"):
+        position = authority.find(separator)
+        if position != -1:
+            authority = authority[:position]
+        position = path.find(separator)
+        if position != -1:
+            path = path[:position]
+
+    return authority, path
+
+
+def _split_authority_path_text(remainder: str) -> tuple[str, str]:
+    """
+    Text counterpart of :func:`_split_authority_path`.
+    """
+    if not remainder.startswith("//"):
+        return remainder, ""
+
+    authority_and_path = remainder[2:]
+    slash = authority_and_path.find("/")
+    if slash == -1:
+        authority = authority_and_path
+        path = "/"
+    else:
+        authority = authority_and_path[:slash]
+        path = authority_and_path[slash:]
+
+    for separator in ("?", "#"):
+        position = authority.find(separator)
+        if position != -1:
+            authority = authority[:position]
+        position = path.find(separator)
+        if position != -1:
+            path = path[:position]
+
+    return authority, path
+
+
+def _parse_authority(authority: bytes) -> tuple[bytes, int | None]:
+    """
+    Split an authority into host and optional port.
+
+    User info and IP literals are rejected and the wildcard character may not
+    appear in the authority, so it can never reach the path comparison.
+    """
+    if b"*" in authority or b"@" in authority or authority.startswith(b"["):
+        msg = f"Invalid URI authority {authority!r}."
+        raise CertificateError(msg)
+
+    if b":" in authority:
+        host, port_text = authority.rsplit(b":", 1)
+        try:
+            port = int(port_text)
+        except ValueError:
+            port = -1
+        if not 0 <= port <= 65535 or not host:
+            msg = f"Invalid URI authority {authority!r}."
+            raise CertificateError(msg)
+
+        return host, port
+
+    return authority, None
+
+
+def _parse_authority_text(authority: str) -> tuple[str, int | None]:
+    """
+    Text counterpart of :func:`_parse_authority`.
+    """
+    if "*" in authority or "@" in authority or authority.startswith("["):
+        msg = f"Invalid URI authority {authority!r}."
+        raise CertificateError(msg)
+
+    if ":" in authority:
+        host, port_text = authority.rsplit(":", 1)
+        try:
+            port = int(port_text)
+        except ValueError:
+            port = -1
+        if not 0 <= port <= 65535 or not host:
+            msg = f"Invalid URI authority {authority!r}."
+            raise CertificateError(msg)
+
+        return host, port
+
+    return authority, None
+
+
+def _normalize_cert_path(path: bytes) -> bytes:
+    """
+    Normalize a certificate URI path for byte-wise comparison.
+    """
+    if not path:
+        return b"/"
+    if not path.startswith(b"/"):
+        msg = f"Invalid URI path {path!r}."
+        raise CertificateError(msg)
+
+    path = _uppercase_percent_encoding(path.translate(_TRANS_TO_LOWER))
+    if len(path) > 1:
+        path = path.rstrip(b"/") or b"/"
+
+    return path
+
+
+def _normalize_client_path(path: bytes) -> bytes:
+    """
+    Normalize a client-supplied URI path.
+
+    Unlike certificate patterns, the client path keeps its case (only
+    percent-encoding triplets are upper-cased) but is required to be
+    hierarchical.
+    """
+    if not path:
+        return b"/"
+    if not path.startswith(b"/"):
+        msg = "Invalid URI-ID."
+        raise ValueError(msg)
+
+    path = _uppercase_percent_encoding(path)
+    if len(path) > 1:
+        path = path.rstrip(b"/") or b"/"
+
+    return path
+
+
+def _uppercase_percent_encoding(path: bytes) -> bytes:
+    """
+    Upper-case the hex digits of every percent-encoded octet.
+    """
+    return re.sub(
+        rb"%[0-9a-fA-F]{2}",
+        lambda match: match.group(0).upper(),
+        path,
+    )
 
 
 def _validate_pattern(cert_pattern: bytes) -> None:
@@ -467,3 +937,7 @@ def _validate_pattern(cert_pattern: bytes) -> None:
 _TRANS_TO_LOWER = bytes.maketrans(
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZ", b"abcdefghijklmnopqrstuvwxyz"
 )
+
+# RFC 6335 service/protocol labels: 1-15 chars, alphanumeric and hyphens,
+# starting and ending alphanumeric.
+_RE_SRV_LABEL = re.compile(rb"^[a-z0-9](?:[a-z0-9-]{0,13}[a-z0-9])?$")

@@ -9,7 +9,6 @@ from cryptography.x509 import (
     SubjectAlternativeName,
     load_pem_x509_certificate,
 )
-
 from service_identity.cryptography import (
     ID_ON_DNS_SRV,
     extract_ids,
@@ -21,15 +20,18 @@ from service_identity.exceptions import (
     CertificateError,
     DNSMismatch,
     IPAddressMismatch,
+    URIMismatch,
     VerificationError,
 )
 from service_identity.hazmat import (
     DNS_ID,
+    URI_ID,
     DNSPattern,
     IPAddress_ID,
     IPAddressPattern,
     SRVPattern,
     URIPattern,
+    verify_service_identity,
 )
 
 from .certificates import (
@@ -86,7 +88,11 @@ class TestPublicAPI:
             verify_certificate_hostname(X509_DNS_ONLY, "google.com")
 
         assert [
-            DNSMismatch(mismatched_id=DNS_ID("google.com"))
+            DNSMismatch(
+                mismatched_id=DNS_ID("google.com"),
+                mismatched_categories=("host",),
+                normalized_id="google.com",
+            )
         ] == ei.value.errors
 
     @pytest.mark.parametrize("ip", ["1.1.1.1", "::1"])
@@ -107,7 +113,11 @@ class TestPublicAPI:
             verify_certificate_ip_address(CERT_EVERYTHING, ip)
 
         assert [
-            IPAddressMismatch(mismatched_id=IPAddress_ID(ip))
+            IPAddressMismatch(
+                mismatched_id=IPAddress_ID(ip),
+                mismatched_categories=("ip",),
+                normalized_id=ip,
+            )
         ] == ei.value.errors
 
 
@@ -136,6 +146,34 @@ class TestExtractPatterns:
         assert [URIPattern.from_bytes(b"http://example.com/")] == [
             id for id in rv if isinstance(id, URIPattern)
         ]
+
+    def test_uri_pattern_components(self):
+        """
+        Extracted URI patterns expose normalized scheme, host, port and path
+        components and never echo unrelated certificate URIs on failure.
+        """
+        (pattern,) = [
+            id
+            for id in extract_patterns(X509_OTHER_NAME)
+            if isinstance(id, URIPattern)
+        ]
+        assert pattern.protocol_pattern == b"http"
+        assert pattern.port_pattern is None
+        assert pattern.path_pattern == b"/"
+
+        assert URI_ID("HTTP://EXAMPLE.com/").verify(pattern)
+        assert not URI_ID("http://example.com:8080/").verify(pattern)
+
+        with pytest.raises(VerificationError) as ei:
+            verify_service_identity(
+                extract_patterns(X509_OTHER_NAME),
+                obligatory_ids=[],
+                optional_ids=[URI_ID("http://example.com/other")],
+            )
+        mismatch = ei.value.errors[0]
+        assert isinstance(mismatch, URIMismatch)
+        assert mismatch.mismatched_categories == ("path",)
+        assert mismatch.normalized_id == ("http://example.com:80/other")
 
     def test_srv(self):
         """

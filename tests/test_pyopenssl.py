@@ -65,7 +65,11 @@ class TestPublicAPI:
             verify_hostname(FakeConnection(), "google.com")
 
         assert [
-            DNSMismatch(mismatched_id=DNS_ID("google.com"))
+            DNSMismatch(
+                mismatched_id=DNS_ID("google.com"),
+                mismatched_categories=("host",),
+                normalized_id="google.com",
+            )
         ] == ei.value.errors
 
     @pytest.mark.parametrize("ip", ["1.1.1.1", "::1"])
@@ -96,7 +100,11 @@ class TestPublicAPI:
             verify_ip_address(FakeConnection(), ip)
 
         assert [
-            IPAddressMismatch(mismatched_id=IPAddress_ID(ip))
+            IPAddressMismatch(
+                mismatched_id=IPAddress_ID(ip),
+                mismatched_categories=("ip",),
+                normalized_id=ip,
+            )
         ] == ei.value.errors
 
 

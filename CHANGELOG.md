@@ -15,6 +15,19 @@ You can find out backwards-compatibility policy [here](https://github.com/pyca/s
 
 ## [Unreleased](https://github.com/pyca/service-identity/compare/26.1.0...HEAD)
 
+### Changed
+
+- `URI_ID` and `URIPattern` now compare the full normalized identity: lower-cased scheme, IDNA host, explicit or default port and normalized path.
+  Query and fragment components are ignored, user info and IP literals are rejected, and wildcards can no longer cross the authority/path boundary.
+- `SRV_ID` and `SRVPattern` now distinguish the service name, protocol label (e.g. `_xmpp._tcp`) and domain, while keeping legacy single-label SRV-IDs working.
+  `SRV_ID` accepts a caller-provided `allowed_ports` policy and an optional concrete `port`.
+- Mismatch errors (`DNSMismatch`, `SRVMismatch`, `URIMismatch`, `IPAddressMismatch`) carry a stable tuple of `mismatched_categories` and a `normalized_id`.
+  Only the caller-supplied identity is included; certificate contents such as other tenants' URIs are never echoed.
+
+### Fixed
+
+- Optional `URI_ID`s and `SRV_ID`s are now fully verified whenever the certificate contains a pattern of the respective type, so a cross-tenant URI or a conflicting SRV identity can no longer pass merely because the ID was optional.
+
 ### Removed
 
 - Support for Python 3.8 and 3.9.
