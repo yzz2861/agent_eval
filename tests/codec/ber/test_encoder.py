@@ -618,6 +618,14 @@ class SetOfEncoderTestCase(BaseTestCase):
         s.clear()
         assert encoder.encode(s) == bytes((49, 0))
 
+    def testDuplicatesPreserved(self):
+        s = univ.SetOf(componentType=univ.OctetString())
+        s.append('a')
+        s.append('a')
+
+        assert encoder.encode(s) == bytes(
+            (49, 6, 4, 1, 97, 4, 1, 97))
+
     def testDefMode(self):
         s = univ.SetOf()
         s.setComponentByPosition(0, univ.OctetString('quick brown'))

@@ -14,6 +14,7 @@ from pyasn1.type import tag
 from pyasn1.type import namedtype
 from pyasn1.type import opentype
 from pyasn1.type import univ
+from pyasn1.codec.der import decoder
 from pyasn1.codec.der import encoder
 
 
@@ -74,6 +75,164 @@ class SetOfEncoderTestCase(BaseTestCase):
         self.s.append('b')
 
         assert encoder.encode(self.s) == bytes((49, 6, 4, 1, 97, 4, 1, 98))
+
+
+class SetOfCanonicalOrderingTestCase(BaseTestCase):
+    def testSortsByFullTlvWhenPythonValuesAreEqual(self):
+        s = univ.SetOf()
+        s.append(univ.Integer(1).subtype(
+            implicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatSimple, 5)))
+        s.append(univ.Integer(1))
+
+        assert encoder.encode(s) == bytes(
+            (49, 6, 2, 1, 1, 133, 1, 1))
+
+    def testDistinguishesTypesWithEqualPythonValue(self):
+        s = univ.SetOf()
+        s.append(univ.Enumerated(1))
+        s.append(univ.Integer(1))
+
+        assert encoder.encode(s) == bytes(
+            (49, 6, 2, 1, 1, 10, 1, 1))
+
+    def testNestedSetOfIsSortedBeforeOuterOrdering(self):
+        inner = univ.SetOf(componentType=univ.Integer())
+
+        unordered = inner.clone()
+        unordered.extend([2, 1])
+
+        greater = inner.clone()
+        greater.extend([3])
+
+        s = univ.SetOf(componentType=inner)
+        s.append(unordered)
+        s.append(greater)
+
+        assert encoder.encode(s) == bytes(
+            (49, 13,
+             49, 3, 2, 1, 3,
+             49, 6, 2, 1, 1, 2, 1, 2))
+
+    def testLongFormLengthOrdering(self):
+        s = univ.SetOf(componentType=univ.OctetString())
+        s.append(b'\x00' * 130)
+        s.append(b'\xff')
+
+        assert encoder.encode(s) == bytes(
+            (49, 129, 136, 4, 1, 255, 4, 129, 130)) + b'\x00' * 130
+
+    def testSecondEncodingIsIdempotent(self):
+        s = univ.SetOf(componentType=univ.OctetString())
+        s.extend(['b', 'aa', 'a'])
+
+        encoded = encoder.encode(s)
+        decoded, _ = decoder.decode(encoded, asn1Spec=s.clone())
+
+        reencoded = encoder.encode(decoded, asn1Spec=s.clone())
+        assert reencoded == encoded
+
+        decoded, _ = decoder.decode(reencoded, asn1Spec=s.clone())
+
+        assert encoder.encode(decoded, asn1Spec=s.clone()) == reencoded
+
+    def testEachComponentEncodedOnceBeforeOrdering(self):
+        s = univ.SetOf(componentType=univ.OctetString())
+        s.extend(['b', 'aa', 'a'])
+
+        calls = []
+        original = encoder.SingleItemEncoder.__call__
+
+        def countingCall(singleItemEncoder, value, asn1Spec=None, **options):
+            calls.append(value)
+
+            return original(
+                singleItemEncoder, value, asn1Spec=asn1Spec, **options)
+
+        encoder.SingleItemEncoder.__call__ = countingCall
+
+        try:
+            encoder.encode(s)
+
+        finally:
+            encoder.SingleItemEncoder.__call__ = original
+
+        assert len(calls) == 4
+
+
+class SetOfDuplicatePolicyTestCase(BaseTestCase):
+    def setUp(self):
+        BaseTestCase.setUp(self)
+
+        self.s = univ.SetOf(componentType=univ.OctetString())
+        self.s.extend(['Q' * 100, 'Q' * 100])
+
+    def testDuplicateRejectedByDefault(self):
+        try:
+            encoder.encode(self.s)
+
+        except encoder.DuplicateSetOfElementError as exc:
+            assert exc.index == 1
+            assert exc.firstIndex == 0
+            assert exc.category == 'der-tlv'
+
+            message = str(exc)
+            assert 'index 1' in message
+            assert 'comparison category' in message
+            assert 'Q' not in message
+
+        else:
+            assert 0, 'duplicate SET OF components tolerated'
+
+    def testDuplicateDeduplicatedOnRequest(self):
+        single = univ.SetOf(componentType=univ.OctetString())
+        single.append('Q' * 100)
+
+        assert encoder.encode(
+            self.s, duplicatePolicy='dedupe') == encoder.encode(single)
+
+    def testDuplicateAllowedOnRequest(self):
+        single = encoder.encode(self.s, duplicatePolicy='dedupe')
+
+        assert encoder.encode(
+            self.s, duplicatePolicy='allow'
+        ) == bytes((49, 129, 204)) + single[2:] + single[2:]
+
+    def testBooleanPolicyAliases(self):
+        single = encoder.encode(self.s, duplicatePolicy='dedupe')
+
+        assert encoder.encode(self.s, deduplicate=True) == single
+        assert encoder.encode(
+            self.s, allowDuplicates=True
+        ) == bytes((49, 129, 204)) + single[2:] + single[2:]
+        assert encoder.encode(
+            self.s, deduplicate=False
+        ) == bytes((49, 129, 204)) + single[2:] + single[2:]
+
+    def testEncoderInstancePolicy(self):
+        single = univ.SetOf(componentType=univ.OctetString())
+        single.append('Q' * 100)
+
+        custom = encoder.Encoder(duplicatePolicy='dedupe')
+
+        assert custom(self.s) == encoder.encode(single)
+
+    def testInvalidDuplicatePolicy(self):
+        try:
+            encoder.encode(self.s, duplicatePolicy='unknown')
+
+        except PyAsn1Error as exc:
+            assert 'duplicate-policy' in str(exc)
+
+        else:
+            assert 0, 'unknown duplicate policy tolerated'
+
+    def testDifferentTypesWithEqualValueAreNotDuplicates(self):
+        s = univ.SetOf()
+        s.append(univ.Enumerated(1))
+        s.append(univ.Integer(1))
+
+        assert encoder.encode(s) == bytes(
+            (49, 6, 2, 1, 1, 10, 1, 1))
 
 
 class SetWithAlternatingChoiceEncoderTestCase(BaseTestCase):

@@ -103,6 +103,8 @@ class AbstractItemEncoder(object):
                     )
 
                 except error.PyAsn1Error as exc:
+                    if getattr(exc, 'suppressValueEcho', False):
+                        raise
                     raise error.PyAsn1Error(
                         'Error encoding %r: %s' % (value, exc))
 

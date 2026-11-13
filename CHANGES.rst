@@ -1,6 +1,12 @@
 Revision 0.7.0, released XX-XX-2026
 ---------------------------------------
 
+- DER SET OF components are now ordered by their complete DER TLV octets
+  rather than by decoded Python values, and are encoded once before the
+  ordering comparison. Duplicate components are rejected by default; the
+  caller can select ``duplicatePolicy='dedupe'`` or ``'allow'`` through
+  ``encode()`` or the ``Encoder`` constructor. Rejection errors report the
+  duplicate index and comparison category without echoing component data.
 - Fixed OverflowError from BER/CER/DER length values that fit in the
   supported 8-octet length field but exceed the platform maximum readable
   size. Such oversized definite lengths are now rejected with PyAsn1Error.

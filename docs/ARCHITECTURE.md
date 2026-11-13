@@ -767,7 +767,7 @@ flowchart LR
     subgraph DER["DER - pyasn1/codec/der"]
         direction TB
         DEM["encoder TAG_MAP + TYPE_MAP<br/>copy of CER plus update"]
-        DEO["REAL OVERRIDE - one class only<br/>SetEncoder DYNAMIC choice key<br/>resolves the chosen alternative"]
+        DEO["REAL OVERRIDES<br/>SetEncoder DYNAMIC choice key<br/>resolves the chosen alternative<br/>SetOfEncoder full-TLV byte order<br/>and duplicate policy"]
         DSE["SingleItemEncoder<br/>fixedDefLengthMode True<br/>fixedChunkSize 0"]
         DDM["decoder TAG_MAP + TYPE_MAP<br/>copy plus backfill that adds nothing"]
         DDO["REAL OVERRIDES<br/>BitString supportConstructedForm False<br/>OctetString supportConstructedForm False"]
@@ -841,8 +841,8 @@ re-instantiated but behaviorally identical `RealPayloadDecoder`: the
 `RealPayloadDecoder = decoder.RealPayloadDecoder` alias in `der/decoder.py`,
 whose `# TODO: prohibit non-canonical encoding` comment marks it as a
 placeholder for a stricter decoder nobody wrote. Between CER and DER the
-coupling is tighter still: DER's entire encoder-side contribution is one class
-plus two class attributes.
+coupling is tighter still: DER's entire encoder-side contribution is two
+classes (`SetEncoder` and `SetOfEncoder`) plus two class attributes.
 
 Editing a BER payload codec thus edits DER, and there is no indirection
 to absorb the change. An edit to `IntegerEncoder.encodeValue` in
@@ -981,10 +981,18 @@ right-padded with `\x00`. `SetEncoder` sorts SET components with a static
 not a shortcut: X.690 9.3 orders an untagged CHOICE by the smallest tag among
 its (nested) alternatives, which is exactly this sort.
 
-DER's encoder contribution is a single class. `SetEncoder` replaces CER's
+DER's encoder contribution is two classes. `SetEncoder` replaces CER's
 static sort key with a dynamic `_componentSortKey` that resolves the actual
 chosen alternative, the ordering X.690 10.3 (read with X.680 8.6) requires of
-DER. The difference is observable (structure from
+DER. `SetOfEncoder` replaces CER's padded-chunk sort with an explicit
+comparison of each component's complete DER TLV octets. Components are
+encoded once by `_encodeComponents` before that comparison, so ordering
+cannot recurse back into encoding. After ordering, duplicate TLV octets are
+rejected (`DuplicateSetOfElementError`), deduplicated, or retained according
+to the `duplicatePolicy` option. The rejection error carries the duplicate's
+original index, the first occurrence's index and the `der-tlv` comparison
+category, and deliberately suppresses the caller-visible value echo.
+The SET difference is observable (structure from
 `SetWithAlternatingChoiceEncoderTestCase` in
 `tests/codec/der/test_encoder.py`, a SET of Integer plus an untagged Choice of
 OctetString/Boolean): with the OctetString alternative chosen, DER emits
@@ -1840,9 +1848,10 @@ them as a drive-by; each needs its own dedicated change with tests.
 - **The dead integer key in CER's encoder `TAG_MAP`**: unreachable,
   inherited by DER; safe to delete, unsafe to repair. Details in
   [Registration and import order](#registration-and-import-order).
-- **DER's encoder `TAG_MAP` loses CER's `SetOfEncoder`** because
-  `univ.Set.tagSet == univ.SetOf.tagSet`. Harmless only because `TYPE_MAP` is
-  consulted first. Details in
+- **DER's encoder `TAG_MAP` loses the `SetOfEncoder` entry** because
+  `univ.Set.tagSet == univ.SetOf.tagSet`, so the SET entry overwrites it. DER
+  registers its own full-TLV `SetOfEncoder` in `TYPE_MAP`; the tag-keyed path
+  remains harmless only because `TYPE_MAP` is consulted first. Details in
   [Registration and import order](#registration-and-import-order).
 - **`SequenceOf`/`SetOf` positional arguments are unsafe.** The constructor
   loop in `SequenceOfAndSetOfBase.__init__` (`univ.py`) writes a literal
@@ -1882,4 +1891,3 @@ them as a drive-by; each needs its own dedicated change with tests.
   literal text. Not worth a churn-heavy rewrite mid-release; if ever fixed,
   do it as a dedicated pass verified with `tox -e docs`, since the file is
   compiled into the `-W` build.
-

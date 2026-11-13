@@ -10,7 +10,134 @@ from pyasn1 import error
 from pyasn1.codec.cer import encoder
 from pyasn1.type import univ
 
-__all__ = ['Encoder', 'encode']
+__all__ = ['Encoder', 'encode', 'SetOfEncoder',
+           'DuplicateSetOfElementError']
+
+
+DUPLICATE_POLICY_REJECT = 'reject'
+DUPLICATE_POLICY_DEDUPE = 'dedupe'
+DUPLICATE_POLICY_ALLOW = 'allow'
+DEFAULT_DUPLICATE_POLICY = DUPLICATE_POLICY_REJECT
+
+_DUPLICATE_POLICY_ALIASES = {
+    'reject': DUPLICATE_POLICY_REJECT,
+    'error': DUPLICATE_POLICY_REJECT,
+    'raise': DUPLICATE_POLICY_REJECT,
+    'strict': DUPLICATE_POLICY_REJECT,
+    'dedupe': DUPLICATE_POLICY_DEDUPE,
+    'deduplicate': DUPLICATE_POLICY_DEDUPE,
+    'drop': DUPLICATE_POLICY_DEDUPE,
+    'drop-duplicates': DUPLICATE_POLICY_DEDUPE,
+    'allow': DUPLICATE_POLICY_ALLOW,
+    'keep': DUPLICATE_POLICY_ALLOW,
+    'preserve': DUPLICATE_POLICY_ALLOW,
+}
+
+
+def _normalizeDuplicatePolicy(policy):
+    """Turn a caller-supplied duplicate policy into a canonical name."""
+
+    try:
+        if isinstance(policy, bytes):
+            policy = policy.decode('ascii', 'strict')
+
+        policy = str(policy).strip().lower().replace('_', '-')
+
+    except (AttributeError, TypeError, ValueError):
+        policy = None
+
+    try:
+        return _DUPLICATE_POLICY_ALIASES[policy]
+
+    except KeyError:
+        raise error.PyAsn1Error(
+            'Invalid SET OF duplicate policy %r; comparison category: '
+            'duplicate-policy; expected one of %s' % (
+                policy,
+                ', '.join((DUPLICATE_POLICY_REJECT,
+                           DUPLICATE_POLICY_DEDUPE,
+                           DUPLICATE_POLICY_ALLOW)))
+        )
+
+
+class DuplicateSetOfElementError(error.PyAsn1Error):
+    """Raised when DER SET OF contains two components with equal TLV bytes."""
+
+    category = 'der-tlv'
+    suppressValueEcho = True
+
+    def __init__(self, index, firstIndex):
+        self.index = index
+        self.firstIndex = firstIndex
+
+        message = (
+            'Duplicate SET OF element at index %d (first occurrence at '
+            'index %d); comparison category: %s' % (
+                index, firstIndex, self.category))
+
+        error.PyAsn1Error.__init__(self, message)
+        Exception.__init__(self, message)
+
+    def __str__(self):
+        return self._args[0]
+
+
+class SetOfEncoder(encoder.SetOfEncoder):
+    """DER SET OF encoder ordering components by their complete DER TLV."""
+
+    duplicatePolicy = DEFAULT_DUPLICATE_POLICY
+
+    def _getDuplicatePolicy(self, options):
+        policy = options.get('duplicatePolicy')
+
+        if policy is None:
+            if 'deduplicate' in options:
+                policy = (DUPLICATE_POLICY_DEDUPE
+                          if options['deduplicate']
+                          else DUPLICATE_POLICY_ALLOW)
+
+            elif 'allowDuplicates' in options:
+                policy = (DUPLICATE_POLICY_ALLOW
+                          if options['allowDuplicates']
+                          else DUPLICATE_POLICY_REJECT)
+
+            else:
+                policy = self.duplicatePolicy
+
+        return _normalizeDuplicatePolicy(policy)
+
+    def encodeValue(self, value, asn1Spec, encodeFun, **options):
+        chunks = self._encodeComponents(
+            value, asn1Spec, encodeFun, **options)
+
+        # Each component is encoded exactly once above.  Ordering below only
+        # compares those pre-computed TLV octets; it must never call encodeFun
+        # again, because that would permit unbounded re-encoding while sorting.
+        indexedChunks = list(enumerate(chunks))
+        indexedChunks.sort(key=lambda indexed: indexed[1])
+
+        policy = self._getDuplicatePolicy(options)
+
+        if policy == DUPLICATE_POLICY_ALLOW:
+            chunks = [chunk for _, chunk in indexedChunks]
+
+        else:
+            chunks = []
+            firstIndex = None
+            previousChunk = None
+
+            for index, chunk in indexedChunks:
+                if previousChunk is not None and chunk == previousChunk:
+                    if policy == DUPLICATE_POLICY_REJECT:
+                        raise DuplicateSetOfElementError(index, firstIndex)
+
+                    continue
+
+                firstIndex = index
+                previousChunk = chunk
+                chunks.append(chunk)
+
+        return b''.join(chunks), True, True
 
 
 class SetEncoder(encoder.SetEncoder):
@@ -48,7 +175,7 @@ class SetEncoder(encoder.SetEncoder):
 TAG_MAP = encoder.TAG_MAP.copy()
 
 TAG_MAP.update({
-    # Set & SetOf have same tags
+    # Set & SetOf have same tags; SetOf is registered by typeId below
     univ.Set.tagSet: SetEncoder()
 })
 
@@ -56,6 +183,7 @@ TYPE_MAP = encoder.TYPE_MAP.copy()
 
 TYPE_MAP.update({
     # Set & SetOf have same tags
+    univ.SetOf.typeId: SetOfEncoder(),
     univ.Set.typeId: SetEncoder()
 })
 
@@ -70,6 +198,38 @@ class SingleItemEncoder(encoder.SingleItemEncoder):
 
 class Encoder(encoder.Encoder):
     SINGLE_ITEM_ENCODER = SingleItemEncoder
+
+    # None means "use SetOfEncoder.duplicatePolicy", which callers can
+    # reconfigure without rebuilding the encoder maps.
+    duplicatePolicy = None
+
+    def __init__(self, *args, **kwargs):
+        policy = kwargs.pop('duplicatePolicy', None)
+
+        if policy is None:
+            if 'deduplicate' in kwargs:
+                policy = (DUPLICATE_POLICY_DEDUPE
+                          if kwargs.pop('deduplicate')
+                          else DUPLICATE_POLICY_ALLOW)
+
+            elif 'allowDuplicates' in kwargs:
+                policy = (DUPLICATE_POLICY_ALLOW
+                          if kwargs.pop('allowDuplicates')
+                          else DUPLICATE_POLICY_REJECT)
+
+        if policy is not None:
+            self.duplicatePolicy = _normalizeDuplicatePolicy(policy)
+
+        encoder.Encoder.__init__(self, *args, **kwargs)
+
+    def __call__(self, pyObject, asn1Spec=None, **options):
+        if (not any(option in options for option in (
+                'duplicatePolicy', 'deduplicate', 'allowDuplicates')) and
+                self.duplicatePolicy is not None):
+            options['duplicatePolicy'] = self.duplicatePolicy
+
+        return encoder.Encoder.__call__(
+            self, pyObject, asn1Spec=asn1Spec, **options)
 
 
 #: Turns ASN.1 object into DER octet stream.

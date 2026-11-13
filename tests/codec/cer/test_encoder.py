@@ -238,6 +238,23 @@ class SetOfEncoderTestCase(BaseTestCase):
         s.clear()
         assert encoder.encode(s) == bytes((49, 128, 0, 0))
 
+    def testDuplicatesPreserved(self):
+        s = univ.SetOf(componentType=univ.OctetString())
+        s.append('a')
+        s.append('a')
+
+        assert encoder.encode(s) == bytes(
+            (49, 128, 4, 1, 97, 4, 1, 97, 0, 0))
+
+    def testLongLengthOrderingUnchanged(self):
+        s = univ.SetOf(componentType=univ.OctetString())
+        s.append(b'\x00' * 130)
+        s.append(b'\xff')
+
+        assert encoder.encode(s) == bytes(
+            (49, 128, 4, 1, 255, 4, 129, 130)) + b'\x00' * 130 + bytes(
+                (0, 0))
+
     def testDefMode1(self):
         s = univ.SetOf()
         s.append(univ.OctetString('a'))
