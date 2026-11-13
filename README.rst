@@ -74,7 +74,8 @@ Options
 -  ``force_https_permanent``, default ``False``, uses ``301`` instead of
    ``302`` for ``https`` redirects.
 -  ``frame_options``, default ``SAMEORIGIN``, can be ``SAMEORIGIN``,
-   ``DENY``, or ``ALLOWFROM``.
+   ``DENY``, ``ALLOW_FROM``, or ``None``. It is reconciled with the CSP
+   ``frame-ancestors`` directive, see `Frame embedding policy`_.
 -  ``frame_options_allow_from``, default ``None``, a string indicating
    the domains that are allowed to embed the site via iframe.
 -  ``strict_transport_security``, default ``True``, whether to send HSTS
@@ -137,6 +138,41 @@ Sometimes you want to change the policy for a specific view. The
     @talisman(frame_options=ALLOW_FROM, frame_options_allow_from='*')
     def embeddable():
         return 'Embeddable'
+
+Frame embedding policy
+~~~~~~~~~~~~~~~~~~~~~~
+
+Browsers evaluate both ``X-Frame-Options`` and the CSP
+``frame-ancestors`` directive, so the two must describe the same set of
+embedding sources. Talisman treats ``frame_options``,
+``frame_options_allow_from`` and the view's ``frame-ancestors`` directive
+as one frame policy group and reconciles them into a single source of
+truth:
+
+-  When ``frame_options`` is left at its default, an equivalent
+   ``X-Frame-Options`` value is derived from ``frame-ancestors``:
+   ``'none'`` becomes ``DENY``, ``'self'`` becomes ``SAMEORIGIN`` and a
+   single origin becomes ``ALLOW-FROM``. A ``frame-ancestors`` policy
+   with several origins cannot be expressed by ``X-Frame-Options``, so
+   that header is omitted and CSP remains authoritative.
+-  When ``frame_options`` is provided explicitly it must match the
+   ``frame-ancestors`` category. Contradictions (for example
+   ``SAMEORIGIN`` together with multiple external origins) raise
+   ``TalismanFramePolicyError`` at configuration time for application
+   wide settings and at request time for per-view overrides.
+-  ``ALLOW-FROM`` is kept only as a legacy compatibility option. It must
+   name an origin and may only coexist with a single-origin
+   ``frame-ancestors`` policy naming the same origin; it is never allowed
+   to silently narrow a wider CSP.
+-  Set ``frame_options=None`` to suppress ``X-Frame-Options`` and rely on
+   CSP exclusively.
+
+Per-view decorator options replace the whole frame group for that view;
+overriding one header never leaves the other header in a contradictory
+state. The normalized decision is also recorded on ``flask.request`` as
+``talisman_frame_audit``. Audit records and error messages only contain
+source categories (``none``, ``self``, ``single-origin``,
+``multiple-origins``); concrete origins and paths are never echoed back.
 
 Content Security Policy
 -----------------------

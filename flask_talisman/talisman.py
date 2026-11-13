@@ -22,6 +22,22 @@ SAMEORIGIN = 'SAMEORIGIN'
 ALLOW_FROM = 'ALLOW-FROM'
 ONE_YEAR_IN_SECS = 31556926
 
+# Categories used to describe the embedding sources configured through the
+# CSP ``frame-ancestors`` directive. They deliberately describe the *kind* of
+# source only and never carry a concrete origin, so they are safe to reuse in
+# error messages and audit records.
+FRAME_ANCESTORS_NONE = 'none'
+FRAME_ANCESTORS_SELF = 'self'
+FRAME_ANCESTORS_SINGLE_ORIGIN = 'single-origin'
+FRAME_ANCESTORS_MULTIPLE_ORIGINS = 'multiple-origins'
+
+# Sentinel used to distinguish an explicit ``frame_options`` argument from the
+# implicit SAMEORIGIN default.
+_FRAME_OPTIONS_UNSET = object()
+
+# X-Frame-Options values that are understood by browsers.
+_FRAME_OPTIONS_CHOICES = (DENY, SAMEORIGIN, ALLOW_FROM)
+
 DEFAULT_REFERRER_POLICY = 'strict-origin-when-cross-origin'
 
 DEFAULT_CSP_POLICY = {
@@ -48,6 +64,14 @@ DEFAULT_FEATURE_POLICY = {
 NONCE_LENGTH = 16
 
 
+class TalismanFramePolicyError(ValueError):
+    """Raised when frame embedding policies cannot be reconciled.
+
+    The message only names the category of embedding source involved; it never
+    echoes a full origin or path.
+    """
+
+
 class Talisman(object):
     """
     Talisman is a Flask extension for HTTP security headers.
@@ -64,7 +88,7 @@ class Talisman(object):
             force_https=True,
             force_https_permanent=False,
             force_file_save=False,
-            frame_options=SAMEORIGIN,
+            frame_options=_FRAME_OPTIONS_UNSET,
             frame_options_allow_from=None,
             strict_transport_security=True,
             strict_transport_security_preload=False,
@@ -88,9 +112,14 @@ class Talisman(object):
                 debug mode.
             force_https_permanent: Uses 301 instead of 302 redirects.
             frame_options: Sets the X-Frame-Options header, defaults to
-                SAMEORIGIN.
+                SAMEORIGIN. When the CSP contains a frame-ancestors
+                directive, the two are reconciled so the emitted headers
+                describe the same embedding sources; contradictory settings
+                raise TalismanFramePolicyError.
             frame_options_allow_from: Used when frame_options is set to
-                ALLOW_FROM and is a string of domains to allow frame embedding.
+                ALLOW_FROM and is a string of domains to allow frame
+                embedding. ALLOW_FROM cannot silently coexist with a wider
+                frame-ancestors policy.
             strict_transport_security: Sets HSTS headers.
             strict_transport_security_preload: Enables HSTS preload. See
                 https://hstspreload.org.
@@ -126,7 +155,12 @@ class Talisman(object):
         self.force_https = force_https
         self.force_https_permanent = force_https_permanent
 
-        self.frame_options = frame_options
+        if frame_options is _FRAME_OPTIONS_UNSET:
+            self.frame_options = SAMEORIGIN
+            self.frame_options_explicit = False
+        else:
+            self.frame_options = frame_options
+            self.frame_options_explicit = True
         self.frame_options_allow_from = frame_options_allow_from
 
         self.strict_transport_security = strict_transport_security
@@ -141,6 +175,15 @@ class Talisman(object):
             self.content_security_policy = OrderedDict(content_security_policy)
         else:
             self.content_security_policy = content_security_policy
+
+        # Reconcile the frame policy group at configuration time so that an
+        # application which can never embed correctly fails fast instead of
+        # emitting contradictory headers on every request.
+        self._resolve_frame_policy(
+            self.frame_options,
+            self.frame_options_explicit,
+            self.frame_options_allow_from,
+            self.content_security_policy)
         self.content_security_policy_report_uri = \
             content_security_policy_report_uri
         self.content_security_policy_report_only = \
@@ -175,11 +218,18 @@ class Talisman(object):
     def _get_local_options(self):
         view_function = flask.current_app.view_functions.get(
             flask.request.endpoint)
-        view_options = getattr(
-            view_function, 'talisman_view_options', {})
+        view_options = dict(getattr(
+            view_function, 'talisman_view_options', {}))
 
         view_options.setdefault('force_https', self.force_https)
-        view_options.setdefault('frame_options', self.frame_options)
+        if 'frame_options' in view_options:
+            frame_options_explicit = True
+            frame_options = view_options['frame_options']
+        else:
+            frame_options_explicit = self.frame_options_explicit
+            frame_options = self.frame_options
+        view_options['frame_options'] = frame_options
+        view_options['frame_options_explicit'] = frame_options_explicit
         view_options.setdefault(
             'frame_options_allow_from', self.frame_options_allow_from)
         view_options.setdefault(
@@ -274,14 +324,169 @@ class Talisman(object):
 
         headers['Feature-Policy'] = policy
 
-    def _set_frame_options_headers(self, headers, options):
-        if not options['frame_options']:
-            return
-        headers['X-Frame-Options'] = options['frame_options']
+    def _frame_ancestors(self, content_security_policy):
+        """Return the raw tokens of the CSP ``frame-ancestors`` directive.
 
-        if options['frame_options'] == ALLOW_FROM:
-            headers['X-Frame-Options'] += " {}".format(
-                options['frame_options_allow_from'])
+        Returns ``None`` when the directive is absent and an empty list when
+        it is present but carries no sources. Both dictionaries and pre-built
+        policy strings are supported.
+        """
+        if not content_security_policy:
+            return None
+
+        if isinstance(content_security_policy, string_types):
+            for policy_part in content_security_policy.split(';'):
+                tokens = policy_part.strip().split()
+                if tokens and tokens[0].lower() == 'frame-ancestors':
+                    return tokens[1:]
+            return None
+
+        for directive, value in iteritems(content_security_policy):
+            if directive.lower() == 'frame-ancestors':
+                if isinstance(value, string_types):
+                    tokens = value.split()
+                else:
+                    tokens = list(value)
+                return tokens
+        return None
+
+    def _frame_ancestors_category(self, tokens):
+        if not tokens:
+            return FRAME_ANCESTORS_NONE
+        if len(tokens) == 1:
+            if tokens[0].lower() == "'none'":
+                return FRAME_ANCESTORS_NONE
+            if tokens[0].lower() == "'self'":
+                return FRAME_ANCESTORS_SELF
+            return FRAME_ANCESTORS_SINGLE_ORIGIN
+        return FRAME_ANCESTORS_MULTIPLE_ORIGINS
+
+    def _resolve_frame_policy(
+            self, frame_options, frame_options_explicit,
+            frame_options_allow_from, content_security_policy):
+        """Normalize the frame policy group into a single source of truth.
+
+        The CSP ``frame-ancestors`` directive and the ``X-Frame-Options``
+        header must describe the same set of embedding sources whenever both
+        are emitted. When a source set cannot be expressed with
+        X-Frame-Options, the header is omitted (or an explicit contradiction
+        raises). Returns a tuple of ``(xfo_value, audit)`` where ``xfo_value``
+        is either ``None`` or the full X-Frame-Options header value and
+        ``audit`` only records source categories.
+        """
+        if (frame_options is not None and
+                frame_options not in _FRAME_OPTIONS_CHOICES):
+            raise TalismanFramePolicyError(
+                'frame_options must be one of DENY, SAMEORIGIN, ALLOW_FROM '
+                'or None')
+
+        tokens = self._frame_ancestors(content_security_policy)
+        has_frame_ancestors = tokens is not None
+        category = (
+            self._frame_ancestors_category(tokens)
+            if has_frame_ancestors else None)
+
+        audit = {
+            'frame_options': frame_options,
+            'frame_options_explicit': frame_options_explicit,
+            'frame_ancestors_category': category,
+        }
+
+        if not has_frame_ancestors:
+            if frame_options == ALLOW_FROM and not frame_options_allow_from:
+                raise TalismanFramePolicyError(
+                    'frame_options ALLOW_FROM requires an allowed embedding '
+                    'origin category')
+            return self._build_xfo(frame_options, frame_options_allow_from), \
+                audit
+
+        if not frame_options_explicit:
+            # Derive an explicit, equivalent X-Frame-Options policy when the
+            # source set can be expressed, otherwise rely on CSP alone.
+            if category == FRAME_ANCESTORS_NONE:
+                frame_options = DENY
+            elif category == FRAME_ANCESTORS_SELF:
+                frame_options = SAMEORIGIN
+            elif category == FRAME_ANCESTORS_SINGLE_ORIGIN:
+                frame_options = ALLOW_FROM
+                frame_options_allow_from = ' '.join(tokens)
+            else:
+                frame_options = None
+            audit['frame_options'] = frame_options
+            return self._build_xfo(frame_options, frame_options_allow_from), \
+                audit
+
+        if frame_options is None:
+            # Explicitly suppressing X-Frame-Options cannot contradict the
+            # CSP, which remains the sole frame embedding policy.
+            return None, audit
+
+        if category == FRAME_ANCESTORS_MULTIPLE_ORIGINS:
+            raise TalismanFramePolicyError(
+                'X-Frame-Options cannot express a multiple-origins '
+                'frame-ancestors policy; set frame_options to None to rely '
+                'on CSP exclusively')
+
+        if category == FRAME_ANCESTORS_NONE:
+            if frame_options == DENY:
+                return self._build_xfo(DENY, None), audit
+            raise TalismanFramePolicyError(
+                'frame-ancestors denies all embedding but X-Frame-Options '
+                'allows a frame-options category')
+
+        if category == FRAME_ANCESTORS_SELF:
+            if frame_options == SAMEORIGIN:
+                return self._build_xfo(SAMEORIGIN, None), audit
+            raise TalismanFramePolicyError(
+                'frame-ancestors allows same-origin embedding but '
+                'X-Frame-Options declares a different category')
+
+        if frame_options != ALLOW_FROM:
+            raise TalismanFramePolicyError(
+                'a single-origin frame-ancestors policy requires '
+                'X-Frame-Options ALLOW_FROM')
+        if not frame_options_allow_from:
+            raise TalismanFramePolicyError(
+                'frame_options ALLOW_FROM requires an allowed embedding '
+                'origin category')
+
+        # ALLOW-FROM may only coexist with a frame-ancestors policy of the
+        # same width; a wider CSP (self or multiple origins) must not be
+        # silently narrowed by the legacy header.
+        allow_from_tokens = frame_options_allow_from.split()
+        allow_from_category = self._frame_ancestors_category(
+            allow_from_tokens)
+        if allow_from_category != FRAME_ANCESTORS_SINGLE_ORIGIN:
+            raise TalismanFramePolicyError(
+                'ALLOW_FROM may only coexist with a single-origin '
+                'frame-ancestors policy')
+        if ' '.join(allow_from_tokens) != ' '.join(tokens):
+            raise TalismanFramePolicyError(
+                'ALLOW_FROM origin category conflicts with the '
+                'frame-ancestors origin category')
+
+        return (
+            self._build_xfo(ALLOW_FROM, frame_options_allow_from), audit)
+
+    @staticmethod
+    def _build_xfo(frame_options, frame_options_allow_from):
+        if not frame_options:
+            return None
+        if frame_options == ALLOW_FROM:
+            return '{} {}'.format(ALLOW_FROM, frame_options_allow_from)
+        return frame_options
+
+    def _set_frame_options_headers(self, headers, options):
+        xfo_value, audit = self._resolve_frame_policy(
+            options['frame_options'],
+            options['frame_options_explicit'],
+            options['frame_options_allow_from'],
+            options['content_security_policy'])
+
+        if xfo_value is not None:
+            headers['X-Frame-Options'] = xfo_value
+
+        flask.request.talisman_frame_audit = audit
 
     def _set_content_security_policy_headers(self, headers, options):
         headers['X-XSS-Protection'] = '1; mode=block'
@@ -332,7 +537,10 @@ class Talisman(object):
         view.
 
         Only frame_options, frame_options_allow_from, and
-        content_security_policy can be set on a per-view basis.
+        content_security_policy can be set on a per-view basis. The frame
+        options and frame-ancestors directive of the view's CSP are merged
+        into one frame policy group and reconciled together; overriding only
+        one header never leaves the other in a contradictory state.
 
         Example:
 

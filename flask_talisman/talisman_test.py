@@ -17,7 +17,10 @@ from __future__ import absolute_import
 import unittest
 
 import flask
-from flask_talisman import ALLOW_FROM, DENY, NONCE_LENGTH, Talisman
+from flask_talisman import (
+    ALLOW_FROM, DENY, FRAME_ANCESTORS_MULTIPLE_ORIGINS,
+    FRAME_ANCESTORS_NONE, FRAME_ANCESTORS_SELF, FRAME_ANCESTORS_SINGLE_ORIGIN,
+    NONCE_LENGTH, SAMEORIGIN, Talisman, TalismanFramePolicyError)
 from six import iteritems
 
 
@@ -38,6 +41,7 @@ class TestTalismanExtension(unittest.TestCase):
 
     def setUp(self):
         self.app = flask.Flask(__name__)
+        self.app.testing = True
         self.talisman = Talisman(self.app)
         self.client = self.app.test_client()
 
@@ -262,3 +266,255 @@ class TestTalismanExtension(unittest.TestCase):
         Talisman(app, feature_policy='vibrate \'none\'')
         response = app.test_client().get('/', environ_overrides=HTTPS_ENVIRON)
         self.assertIn('vibrate \'none\'', response.headers['Feature-Policy'])
+
+
+class TestFramePolicyReconciliation(unittest.TestCase):
+    """Covers the normalized frame-ancestors / X-Frame-Options rules."""
+
+    def _make_app(self, **talisman_kwargs):
+        app = flask.Flask(__name__)
+        app.testing = True
+        talisman = Talisman(app, **talisman_kwargs)
+        app.route('/')(hello_world)
+        return app, talisman
+
+    def _get(self, app, path='/'):
+        client = app.test_client()
+        holder = {}
+        with client:
+            response = client.get(path, environ_overrides=HTTPS_ENVIRON)
+            holder['audit'] = getattr(
+                flask.request, 'talisman_frame_audit', None)
+        response._frame_audit = holder['audit']
+        return response
+
+    def testFrameDefaultResponseUnchanged(self):
+        app, _ = self._make_app()
+        response = self._get(app)
+
+        self.assertEqual(response.headers['X-Frame-Options'], SAMEORIGIN)
+        self.assertEqual(
+            response.headers['Content-Security-Policy'],
+            "default-src 'self'")
+        self.assertEqual(
+            response._frame_audit['frame_ancestors_category'], None)
+        self.assertEqual(
+            response._frame_audit['frame_options'], SAMEORIGIN)
+
+    def testFrameDenyWithoutFrameAncestors(self):
+        app, _ = self._make_app(frame_options=DENY)
+        response = self._get(app)
+
+        self.assertEqual(response.headers['X-Frame-Options'], DENY)
+        self.assertNotIn('frame-ancestors',
+                         response.headers['Content-Security-Policy'])
+
+    def testFrameAncestorsNoneNormalizesToDeny(self):
+        csp = {'default-src': "'self'", 'frame-ancestors': "'none'"}
+        app, _ = self._make_app(content_security_policy=csp)
+        response = self._get(app)
+
+        self.assertEqual(response.headers['X-Frame-Options'], DENY)
+        self.assertIn("frame-ancestors 'none'",
+                      response.headers['Content-Security-Policy'])
+        self.assertEqual(
+            response._frame_audit['frame_ancestors_category'],
+            FRAME_ANCESTORS_NONE)
+
+    def testFrameAncestorsSelfNormalizesToSameOrigin(self):
+        csp = {'default-src': "'self'", 'frame-ancestors': "'self'"}
+        app, _ = self._make_app(content_security_policy=csp)
+        response = self._get(app)
+
+        self.assertEqual(response.headers['X-Frame-Options'], SAMEORIGIN)
+        self.assertIn("frame-ancestors 'self'",
+                      response.headers['Content-Security-Policy'])
+        self.assertEqual(
+            response._frame_audit['frame_ancestors_category'],
+            FRAME_ANCESTORS_SELF)
+
+    def testFrameAncestorsSingleOriginDerivesAllowFrom(self):
+        csp = {'frame-ancestors': 'https://partner.example'}
+        app, _ = self._make_app(content_security_policy=csp)
+        response = self._get(app)
+
+        self.assertEqual(
+            response.headers['X-Frame-Options'],
+            'ALLOW-FROM https://partner.example')
+        self.assertIn('frame-ancestors https://partner.example',
+                      response.headers['Content-Security-Policy'])
+        self.assertEqual(
+            response._frame_audit['frame_ancestors_category'],
+            FRAME_ANCESTORS_SINGLE_ORIGIN)
+
+    def testFrameAncestorsSingleOriginExplicitAllowFromMatch(self):
+        csp = {'frame-ancestors': 'https://partner.example'}
+        app, _ = self._make_app(
+            frame_options=ALLOW_FROM,
+            frame_options_allow_from='https://partner.example',
+            content_security_policy=csp)
+        response = self._get(app)
+
+        self.assertEqual(
+            response.headers['X-Frame-Options'],
+            'ALLOW-FROM https://partner.example')
+
+    def testFrameAncestorsMultipleOriginsOmitsXfoByDefault(self):
+        csp = {
+            'frame-ancestors':
+            "'self' https://partner.example https://other.example"
+        }
+        app, _ = self._make_app(content_security_policy=csp)
+        response = self._get(app)
+
+        self.assertNotIn('X-Frame-Options', response.headers)
+        self.assertIn('frame-ancestors',
+                      response.headers['Content-Security-Policy'])
+        self.assertEqual(
+            response._frame_audit['frame_ancestors_category'],
+            FRAME_ANCESTORS_MULTIPLE_ORIGINS)
+        self.assertIsNone(
+            response._frame_audit['frame_options'])
+
+    def testFrameAncestorsMultipleOriginsConflictsWithExplicitXfo(self):
+        csp = {
+            'frame-ancestors':
+            'https://partner.example https://other.example'
+        }
+        # An explicit SAMEORIGIN cannot express the multiple-origins CSP.
+        app, talisman = self._make_app()
+
+        @app.route('/conflict')
+        @talisman(frame_options=SAMEORIGIN,
+                  content_security_policy=csp)
+        def conflict():
+            return 'Conflict'
+
+        with self.assertRaises(TalismanFramePolicyError) as raised:
+            self._get(app, '/conflict')
+        self.assertNotIn('partner.example', str(raised.exception))
+        self.assertNotIn('other.example', str(raised.exception))
+
+    def testFrameAncestorsMultipleOriginsAllowsExplicitXfoNone(self):
+        csp = {
+            'frame-ancestors':
+            'https://partner.example https://other.example'
+        }
+        app, _ = self._make_app(
+            frame_options=None, content_security_policy=csp)
+        response = self._get(app)
+
+        self.assertNotIn('X-Frame-Options', response.headers)
+        self.assertIn('frame-ancestors',
+                      response.headers['Content-Security-Policy'])
+
+    def testAllowFromRequiresAnOrigin(self):
+        with self.assertRaises(TalismanFramePolicyError):
+            self._make_app(frame_options=ALLOW_FROM)
+
+    def testAllowFromConflictsWithWiderFrameAncestors(self):
+        csp = {
+            'frame-ancestors':
+            'https://partner.example https://other.example'
+        }
+        with self.assertRaises(TalismanFramePolicyError):
+            self._make_app(
+                frame_options=ALLOW_FROM,
+                frame_options_allow_from='https://partner.example',
+                content_security_policy=csp)
+
+    def testAllowFromConflictsWithDifferentSingleOrigin(self):
+        csp = {'frame-ancestors': 'https://partner.example'}
+        with self.assertRaises(TalismanFramePolicyError) as raised:
+            self._make_app(
+                frame_options=ALLOW_FROM,
+                frame_options_allow_from='https://different.example',
+                content_security_policy=csp)
+        message = str(raised.exception)
+        self.assertNotIn('partner.example', message)
+        self.assertNotIn('different.example', message)
+
+    def testFrameOptionsDenyConflictsWithSelfFrameAncestors(self):
+        csp = {'frame-ancestors': "'self'"}
+        with self.assertRaises(TalismanFramePolicyError):
+            self._make_app(frame_options=DENY, content_security_policy=csp)
+
+    def testConfigTimeFrameConflictRaises(self):
+        csp = {'frame-ancestors': "'self'"}
+        with self.assertRaises(TalismanFramePolicyError):
+            self._make_app(frame_options=DENY, content_security_policy=csp)
+
+    def testRouteOverrideReplacesWholeFrameGroup(self):
+        app, talisman = self._make_app(frame_options=DENY)
+
+        @app.route('/embeddable')
+        @talisman(
+            frame_options=ALLOW_FROM,
+            frame_options_allow_from='https://partner.example',
+            content_security_policy={
+                'frame-ancestors': 'https://partner.example'
+            })
+        def embeddable():
+            return 'Embeddable'
+
+        normal = self._get(app)
+        self.assertEqual(normal.headers['X-Frame-Options'], DENY)
+
+        embedded = self._get(app, '/embeddable')
+        self.assertEqual(
+            embedded.headers['X-Frame-Options'],
+            'ALLOW-FROM https://partner.example')
+        self.assertIn('frame-ancestors https://partner.example',
+                      embedded.headers['Content-Security-Policy'])
+
+    def testRouteOverrideCspOnlyDropsGlobalXfo(self):
+        app, talisman = self._make_app()
+
+        @app.route('/multi')
+        @talisman(content_security_policy={
+            'frame-ancestors':
+            'https://partner.example https://other.example'
+        })
+        def multi():
+            return 'Multi'
+
+        response = self._get(app, '/multi')
+        self.assertNotIn('X-Frame-Options', response.headers)
+        self.assertIn('frame-ancestors',
+                      response.headers['Content-Security-Policy'])
+        self.assertEqual(
+            response._frame_audit['frame_ancestors_category'],
+            FRAME_ANCESTORS_MULTIPLE_ORIGINS)
+
+    def testRouteOverrideConflictRaisesAtRequestTime(self):
+        app, talisman = self._make_app()
+
+        @app.route('/conflict')
+        @talisman(content_security_policy={
+            'frame-ancestors':
+            'https://partner.example https://other.example'
+        }, frame_options=SAMEORIGIN)
+        def conflict():
+            return 'Conflict'
+
+        with self.assertRaises(TalismanFramePolicyError):
+            self._get(app, '/conflict')
+
+    def testFrameAncestorsFromStringCsp(self):
+        csp = "default-src 'self'; frame-ancestors 'self'"
+        app, _ = self._make_app(content_security_policy=csp)
+        response = self._get(app)
+
+        self.assertEqual(response.headers['X-Frame-Options'], SAMEORIGIN)
+
+    def testAuditAndErrorsNeverEchoOriginPaths(self):
+        csp = {'frame-ancestors': 'https://partner.example/path'}
+        app, _ = self._make_app(content_security_policy=csp)
+        response = self._get(app)
+
+        audit = response._frame_audit
+        self.assertNotIn('partner.example', str(audit))
+        self.assertNotIn('/path', str(audit))
+        self.assertEqual(
+            audit['frame_ancestors_category'],
+            FRAME_ANCESTORS_SINGLE_ORIGIN)
