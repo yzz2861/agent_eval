@@ -23,6 +23,7 @@
    THE SOFTWARE.
 """
 import os
+import re
 import sys
 
 # pylint: disable=unused-import
@@ -35,6 +36,14 @@ from ssh_audit.utils import Utils
 class OutputBuffer:
     LEVELS: Sequence[str] = ('info', 'warn', 'fail')
     COLORS = {'head': 36, 'good': 32, 'warn': 33, 'fail': 31}
+
+    # CSI/OSC terminal sequences and C0/C1 control characters other than
+    # tab/newline are stripped from every message before output, so data read
+    # from remote hosts can never rewrite the terminal (the color codes added
+    # below are applied afterwards).
+    _RX_CSI = re.compile(r'\x1b\[[\x20-\x3f]*[\x40-\x7e]')
+    _RX_OSC = re.compile(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)')
+    _RX_TERMINAL_CONTROLS = re.compile(r'[\x00-\x08\x0b\x0c\x0d-\x1f\x7f-\x9f]')
 
     # Use brighter colors on Windows for better readability.
     if Utils.is_windows():
@@ -56,6 +65,8 @@ class OutputBuffer:
 
     def _print(self, level: str, s: str = '', line_ended: bool = True, always_print: bool = False) -> None:
         '''Saves output to buffer (if in buffered mode), or immediately prints to stdout otherwise.'''
+
+        s = self.sanitize_output(s)
 
         # If we're logging only 'warn' or above, and this is an 'info', ignore message, unless always_print is True (useful for printing informational lines regardless of the level setting).
         if (always_print is False) and (self.get_level(level) < self.__level):
@@ -114,6 +125,14 @@ class OutputBuffer:
         if cname not in self.LEVELS:
             return sys.maxsize
         return self.LEVELS.index(cname)
+
+    @classmethod
+    def sanitize_output(cls, s: str) -> str:
+        '''Removes terminal control characters (bare CR, ESC sequences, NUL,
+        etc.) while preserving tabs and newlines.'''
+        s = cls._RX_CSI.sub('', s)
+        s = cls._RX_OSC.sub('', s)
+        return cls._RX_TERMINAL_CONTROLS.sub('', s)
 
     @property
     def colors_supported(self) -> bool:

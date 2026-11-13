@@ -17,6 +17,35 @@ class TestSoftware:
         assert ps('SSH-1.99-AlfaMegaServer') is None
         assert ps('SSH-2.0-BetaMegaServer 0.0.1') is None
 
+    def test_software_length_guard(self):
+        from ssh_audit.software import Software
+        # Over-long software fields must be rejected (and thus never reach the
+        # recognition regexes), instead of being mis-identified as unknown.
+        long_line = 'SSH-2.0-OpenSSH_' + ('1' * (Software.MAX_SOFTWARE_LEN + 1))
+        assert self.banner.parse(long_line) is None
+        assert Software.MAX_SOFTWARE_LEN == self.banner.MAX_SOFTWARE_LEN
+
+    def test_multi_segment_banners_recognized(self):
+        ps = lambda x: self.software.parse(self.banner.parse(x))  # noqa
+        s = ps('SSH-2.0-SSH-2.0-OpenSSH_7.3')
+        assert s is not None
+        assert s.product == 'OpenSSH'
+        assert s.version == '7.3'
+        s = ps('SSH-1.99-SSH-2.0-dropbear_2022.82')
+        assert s is not None
+        assert s.product == 'Dropbear SSH'
+        assert s.version == '2022.82'
+
+    def test_control_sequences_do_not_change_recognition(self):
+        ps = lambda x: self.software.parse(self.banner.parse(x))  # noqa
+        s = ps('SSH-2.0-OpenSSH_7.3\x1b[2J\x1b[H')
+        assert s is not None
+        assert s.product == 'OpenSSH'
+        assert s.version == '7.3'
+        s = ps('SSH-2.0-dropbear_2022.82\r')
+        assert s is not None
+        assert s.product == 'Dropbear SSH'
+
     def test_openssh_software(self):
         # pylint: disable=too-many-statements
         ps = lambda x: self.software.parse(self.banner.parse(x))  # noqa

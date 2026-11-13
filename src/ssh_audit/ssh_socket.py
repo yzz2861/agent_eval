@@ -34,7 +34,7 @@ from typing import Dict, List, Set, Sequence, Tuple, Iterable  # noqa: F401
 from typing import Callable, Optional, Union, Any  # noqa: F401
 
 from ssh_audit import exitcodes
-from ssh_audit.banner import Banner
+from ssh_audit.banner import Banner, BannerReader, BannerError, BannerLimitError
 from ssh_audit.globals import SSH_HEADER
 from ssh_audit.outputbuffer import OutputBuffer
 from ssh_audit.protocol import Protocol
@@ -302,22 +302,41 @@ class SSH_Socket(ReadBuf, WriteBuf):
         if self.__state < self.SM_BANNER_SENT:
             self.send_banner(banner)
 
-        s = 0
-        e = None
-        while s >= 0:
-            s, e = self.recv()
-            if s < 0:
-                continue
-            while self.unread_len > 0:
-                line = self.read_line()
-                if len(line.strip()) == 0:
-                    continue
-                self.__banner = Banner.parse(line)
-                if self.__banner is not None:
-                    return self.__banner, self.__header, None
-                self.__header.append(line)
+        # Read the banner through a budget-bounded streaming reader so a
+        # malicious peer cannot exhaust memory with endless lines, or hijack
+        # the terminal via control characters embedded in header lines.
+        def _recv_chunk() -> Optional[bytes]:
+            if self.__sock is None:
+                raise OSError('not connected')
+            try:
+                chunk = self.__sock.recv(2048)
+            except socket.timeout as e:
+                raise TimeoutError(str(e)) from e
+            except socket.error as e:
+                if e.args[0] in (errno.EAGAIN, errno.EWOULDBLOCK):
+                    return None
+                raise OSError(str(e.args[-1])) from e
+            return chunk
 
-        return self.__banner, self.__header, e
+        reader = BannerReader(_recv_chunk, timeout=float(self.__timeout))
+        try:
+            self.__banner = reader.read()
+        except BannerError as e:
+            if isinstance(e, BannerLimitError):
+                return None, reader.header, 'banner resource limit exceeded: {}'.format(e)
+            return None, reader.header, str(e)
+
+        leftover = reader.leftover
+        if len(leftover) > 0:
+            position = self._buf.tell()
+            self._buf.seek(0, 2)
+            self._buf.write(leftover)
+            self._len += len(leftover)
+            self._buf.seek(position, 0)
+
+        self.__header.extend(reader.header)
+        self.__outputbuffer.d('Banner (escaped): {}'.format(self.__banner.escaped_raw), write_now=True)
+        return self.__banner, self.__header, None
 
 
     def recv(self, size: int = 2048) -> Tuple[int, Optional[str]]:

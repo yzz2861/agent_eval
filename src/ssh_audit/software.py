@@ -32,6 +32,10 @@ from ssh_audit.product import Product
 
 
 class Software:
+    # Keep this in sync with Banner.MAX_SOFTWARE_LEN: never feed unbounded
+    # attacker-controlled strings to the recognition regexes.
+    MAX_SOFTWARE_LEN = Banner.MAX_SOFTWARE_LEN
+
     def __init__(self, vendor: Optional[str], product: str, version: str, patch: Optional[str], os_version: Optional[str]) -> None:
         self.__vendor = vendor
         self.__product = product
@@ -198,6 +202,8 @@ class Software:
     def parse(cls, banner: 'Banner') -> Optional['Software']:
         # pylint: disable=too-many-return-statements
         software = str(banner.software)
+        if len(software) > cls.MAX_SOFTWARE_LEN:
+            return None
         mx = re.match(r'^dropbear_([\d\.]+\d+)(.*)', software)
         v: Optional[str] = None
         if mx is not None:
