@@ -38,6 +38,7 @@ class TestTalismanExtension(unittest.TestCase):
 
     def setUp(self):
         self.app = flask.Flask(__name__)
+        self.app.testing = True
         self.talisman = Talisman(self.app)
         self.client = self.app.test_client()
 
@@ -247,6 +248,8 @@ class TestTalismanExtension(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
 
     def testFeaturePolicy(self):
+        # the legacy Feature-Policy header requires an explicit opt-in
+        self.talisman.legacy_feature_policy = True
         self.talisman.feature_policy['geolocation'] = '\'none\''
         response = self.client.get('/', environ_overrides=HTTPS_ENVIRON)
         feature_policy = response.headers['Feature-Policy']
@@ -259,6 +262,167 @@ class TestTalismanExtension(unittest.TestCase):
 
         # string policy at initialization
         app = flask.Flask(__name__)
-        Talisman(app, feature_policy='vibrate \'none\'')
+        Talisman(app, feature_policy='vibrate \'none\'',
+                 legacy_feature_policy=True)
         response = app.test_client().get('/', environ_overrides=HTTPS_ENVIRON)
         self.assertIn('vibrate \'none\'', response.headers['Feature-Policy'])
+
+    def testFeaturePolicyDisabledByDefault(self):
+        # without the legacy switch no feature/permissions headers are sent
+        self.talisman.feature_policy['geolocation'] = '\'none\''
+        response = self.client.get('/', environ_overrides=HTTPS_ENVIRON)
+        self.assertNotIn('Feature-Policy', response.headers)
+        self.assertNotIn('Permissions-Policy', response.headers)
+
+    def testPermissionsPolicyDefaults(self):
+        response = self.client.get('/', environ_overrides=HTTPS_ENVIRON)
+        self.assertNotIn('Permissions-Policy', response.headers)
+        self.assertNotIn('Feature-Policy', response.headers)
+
+    def testPermissionsPolicyCameraMicrophone(self):
+        self.talisman.permissions_policy = {
+            'camera': 'self',
+            'microphone': 'self',
+        }
+        response = self.client.get('/', environ_overrides=HTTPS_ENVIRON)
+        self.assertEqual(
+            response.headers['Permissions-Policy'],
+            'camera=(self), microphone=(self)')
+
+    def testPermissionsPolicyAllowlistSyntax(self):
+        self.talisman.permissions_policy = {
+            'camera': 'self',
+            'microphone': 'none',
+            'fullscreen': '*',
+            'geolocation': 'https://example.com',
+            'payment': ['self', 'https://shop.example.com'],
+            'usb': [],
+        }
+        response = self.client.get('/', environ_overrides=HTTPS_ENVIRON)
+        self.assertEqual(
+            response.headers['Permissions-Policy'],
+            'camera=(self), microphone=(), fullscreen=*, '
+            'geolocation=("https://example.com"), '
+            'payment=(self "https://shop.example.com"), usb=()')
+
+    def testPermissionsPolicyLegacyKeywords(self):
+        # legacy quoted keywords are normalized to the new syntax
+        self.talisman.permissions_policy = {
+            'camera': "'self'",
+            'microphone': "'none'",
+            'fullscreen': "'*'",
+        }
+        response = self.client.get('/', environ_overrides=HTTPS_ENVIRON)
+        self.assertEqual(
+            response.headers['Permissions-Policy'],
+            'camera=(self), microphone=(), fullscreen=*')
+
+    def testPermissionsPolicyString(self):
+        app = flask.Flask(__name__)
+        Talisman(app, permissions_policy='camera=(self), microphone=()')
+        response = app.test_client().get('/', environ_overrides=HTTPS_ENVIRON)
+        self.assertEqual(
+            response.headers['Permissions-Policy'],
+            'camera=(self), microphone=()')
+
+    def testPermissionsPolicyViewMerge(self):
+        self.talisman.permissions_policy = {
+            'camera': 'self',
+            'microphone': 'self',
+        }
+
+        @self.app.route('/camera_only')
+        @self.talisman(permissions_policy={
+            'camera': ['self', 'https://video.example.com'],
+        })
+        def camera_only():
+            return 'camera'
+
+        # global policy untouched on other routes
+        response = self.client.get('/', environ_overrides=HTTPS_ENVIRON)
+        self.assertEqual(
+            response.headers['Permissions-Policy'],
+            'camera=(self), microphone=(self)')
+
+        # the view overrides camera but keeps the global microphone
+        response = self.client.get('/camera_only',
+                                   environ_overrides=HTTPS_ENVIRON)
+        self.assertEqual(
+            response.headers['Permissions-Policy'],
+            'camera=(self "https://video.example.com"), microphone=(self)')
+
+    def testPermissionsPolicyViewDisable(self):
+        self.talisman.permissions_policy = {'camera': 'self'}
+
+        @self.app.route('/no_camera')
+        @self.talisman(permissions_policy=None)
+        def no_camera():
+            return 'no camera'
+
+        response = self.client.get('/no_camera',
+                                   environ_overrides=HTTPS_ENVIRON)
+        self.assertNotIn('Permissions-Policy', response.headers)
+
+    def testPermissionsPolicyUnknownDirective(self):
+        # unknown directives are passed through with valid syntax
+        self.talisman.permissions_policy = {'interest-cohort': 'none'}
+        response = self.client.get('/', environ_overrides=HTTPS_ENVIRON)
+        self.assertEqual(
+            response.headers['Permissions-Policy'], 'interest-cohort=()')
+
+        # but directive names are still validated
+        self.talisman.permissions_policy = {'not a directive!': 'self'}
+        with self.assertRaises(ValueError):
+            self.client.get('/', environ_overrides=HTTPS_ENVIRON)
+
+    def testPermissionsPolicyInvalidOrigin(self):
+        # origins with a query string are rejected without leaking it
+        self.talisman.permissions_policy = {
+            'camera': 'https://example.com/?token=secret',
+        }
+        with self.assertRaises(ValueError) as cm:
+            self.client.get('/', environ_overrides=HTTPS_ENVIRON)
+        self.assertNotIn('token=secret', str(cm.exception))
+
+        # invalid origins are also rejected at initialization
+        app = flask.Flask(__name__)
+        with self.assertRaises(ValueError) as cm:
+            Talisman(app, permissions_policy={
+                'camera': 'https://example.com/?token=secret',
+            })
+        self.assertNotIn('token=secret', str(cm.exception))
+
+    def testPermissionsPolicyInvalidAllowlist(self):
+        self.talisman.permissions_policy = {
+            'camera': ['self', 'none'],
+        }
+        with self.assertRaises(ValueError):
+            self.client.get('/', environ_overrides=HTTPS_ENVIRON)
+
+        self.talisman.permissions_policy = {
+            'fullscreen': ['*', 'self'],
+        }
+        with self.assertRaises(ValueError):
+            self.client.get('/', environ_overrides=HTTPS_ENVIRON)
+
+    def testFeaturePolicyPermissionsPolicyConflict(self):
+        # the legacy header cannot be mixed with Permissions-Policy
+        app = flask.Flask(__name__)
+        with self.assertRaises(ValueError):
+            Talisman(
+                app,
+                feature_policy={'geolocation': "'none'"},
+                permissions_policy={'camera': 'self'},
+                legacy_feature_policy=True)
+
+        # the same conflict introduced by a view is also an error
+        self.talisman.legacy_feature_policy = True
+        self.talisman.feature_policy = {'geolocation': "'none'"}
+
+        @self.app.route('/conflict')
+        @self.talisman(permissions_policy={'camera': 'self'})
+        def conflict():
+            return 'conflict'
+
+        with self.assertRaises(ValueError):
+            self.client.get('/conflict', environ_overrides=HTTPS_ENVIRON)

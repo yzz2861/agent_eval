@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import re
 from collections import OrderedDict
 
 import flask
@@ -45,7 +46,26 @@ GOOGLE_CSP_POLICY = {
 DEFAULT_FEATURE_POLICY = {
 }
 
+DEFAULT_PERMISSIONS_POLICY = {
+}
+
 NONCE_LENGTH = 16
+
+# Directive names such as ``camera`` or ``interest-cohort``. Unknown
+# directives are passed through but must still be syntactically valid.
+PERMISSIONS_POLICY_DIRECTIVE_RE = re.compile(r'^[a-zA-Z][a-zA-Z0-9_-]*$')
+
+# A serialized origin: scheme://host[:port] with an optional wildcard
+# subdomain. Paths, queries and fragments are not allowed.
+PERMISSIONS_POLICY_ORIGIN_RE = re.compile(
+    r'^[a-zA-Z][a-zA-Z0-9+.-]*://'
+    r'(\*\.)?[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?'
+    r'(:[0-9]+)?$')
+
+# Tokens inside a permissions policy allowlist, e.g. ``self`` or
+# ``"https://example.com"``.
+PERMISSIONS_POLICY_ALLOWLIST_ITEM_RE = re.compile(
+    r'"[^"]*"|\'[^\']*\'|\S+')
 
 
 class Talisman(object):
@@ -61,6 +81,8 @@ class Talisman(object):
             self,
             app,
             feature_policy=DEFAULT_FEATURE_POLICY,
+            permissions_policy=DEFAULT_PERMISSIONS_POLICY,
+            legacy_feature_policy=False,
             force_https=True,
             force_https_permanent=False,
             force_file_save=False,
@@ -83,7 +105,13 @@ class Talisman(object):
         Args:
             app: A Flask application.
             feature_policy: A string or dictionary describing the
-                feature policy for the response.
+                legacy Feature-Policy header for the response. Only sent
+                when legacy_feature_policy is enabled.
+            permissions_policy: A string or dictionary describing the
+                Permissions-Policy header for the response.
+            legacy_feature_policy: Send the legacy Feature-Policy header
+                for feature_policy instead of ignoring it. Cannot be
+                combined with permissions_policy.
             force_https: Redirects non-http requests to https, disabled in
                 debug mode.
             force_https_permanent: Uses 301 instead of 302 redirects.
@@ -123,6 +151,25 @@ class Talisman(object):
             self.feature_policy = OrderedDict(feature_policy)
         else:
             self.feature_policy = feature_policy
+
+        if isinstance(permissions_policy, dict):
+            self.permissions_policy = OrderedDict(permissions_policy)
+        else:
+            self.permissions_policy = permissions_policy
+
+        self.legacy_feature_policy = legacy_feature_policy
+
+        if (self.legacy_feature_policy and self.feature_policy and
+                self.permissions_policy):
+            raise ValueError(
+                'The legacy Feature-Policy header cannot be combined with '
+                'Permissions-Policy; disable legacy_feature_policy or '
+                'remove one of the policies')
+
+        if self.permissions_policy:
+            # Validate eagerly so configuration errors surface at startup.
+            self._parse_permissions_policy(self.permissions_policy)
+
         self.force_https = force_https
         self.force_https_permanent = force_https_permanent
 
@@ -175,8 +222,8 @@ class Talisman(object):
     def _get_local_options(self):
         view_function = flask.current_app.view_functions.get(
             flask.request.endpoint)
-        view_options = getattr(
-            view_function, 'talisman_view_options', {})
+        view_options = dict(getattr(
+            view_function, 'talisman_view_options', {}))
 
         view_options.setdefault('force_https', self.force_https)
         view_options.setdefault('frame_options', self.frame_options)
@@ -184,11 +231,57 @@ class Talisman(object):
             'frame_options_allow_from', self.frame_options_allow_from)
         view_options.setdefault(
             'content_security_policy', self.content_security_policy)
-        view_options.setdefault(
-            'feature_policy', self.feature_policy
-        )
+
+        # Feature and permissions policies are merged per-directive:
+        # view-level directives override global directives with the same
+        # name, all other global directives are kept.
+        view_options['feature_policy'] = self._merge_view_policy(
+            self.feature_policy, view_options, 'feature_policy',
+            self._feature_policy_string_to_dict)
+        view_options['permissions_policy'] = self._merge_view_policy(
+            self.permissions_policy, view_options, 'permissions_policy',
+            self._permissions_policy_string_to_dict)
 
         return view_options
+
+    def _merge_view_policy(self, global_policy, view_options, key,
+                           string_to_dict):
+        """Merge a global policy with view-level overrides.
+
+        View-level directives take precedence over global directives with
+        the same name. Setting the option to ``None`` or ``False`` on a
+        view disables the header for that view.
+        """
+        if key not in view_options:
+            return global_policy
+
+        view_policy = view_options[key]
+        if view_policy is None or view_policy is False:
+            return None
+        if not view_policy:
+            return global_policy
+        if not global_policy:
+            return view_policy
+
+        merged = self._policy_to_ordered_dict(global_policy, string_to_dict)
+        merged.update(self._policy_to_ordered_dict(view_policy,
+                                                   string_to_dict))
+        return merged
+
+    def _policy_to_ordered_dict(self, policy, string_to_dict):
+        if isinstance(policy, string_types):
+            return string_to_dict(policy)
+        return OrderedDict(policy)
+
+    def _feature_policy_string_to_dict(self, policy_string):
+        policy = OrderedDict()
+        for policy_part in policy_string.split(';'):
+            policy_part = policy_part.strip()
+            if not policy_part:
+                continue
+            policy_parts = policy_part.split(' ')
+            policy[policy_parts[0]] = ' '.join(policy_parts[1:])
+        return policy
 
     def _force_https(self):
         """Redirect any non-https requests to https.
@@ -265,14 +358,132 @@ class Talisman(object):
 
         return policy
 
+    def _permissions_policy_string_to_dict(self, policy_string):
+        policy = OrderedDict()
+        for part in self._split_permissions_policy(policy_string):
+            directive, separator, allowlist = part.partition('=')
+            if not separator:
+                raise ValueError(
+                    'Invalid Permissions-Policy: expected '
+                    '"directive=allowlist" entries')
+            directive = directive.strip()
+            allowlist = allowlist.strip()
+            if allowlist == '*':
+                policy[directive] = ['*']
+            elif allowlist.startswith('(') and allowlist.endswith(')'):
+                items = PERMISSIONS_POLICY_ALLOWLIST_ITEM_RE.findall(
+                    allowlist[1:-1])
+                policy[directive] = items
+            else:
+                raise ValueError(
+                    'Invalid Permissions-Policy allowlist for directive '
+                    "'{}'".format(directive))
+        return policy
+
+    def _split_permissions_policy(self, policy_string):
+        parts = []
+        depth = 0
+        current = []
+        for char in policy_string:
+            if char == '(':
+                depth += 1
+            elif char == ')':
+                depth -= 1
+                if depth < 0:
+                    raise ValueError(
+                        'Unbalanced parentheses in Permissions-Policy')
+            if char == ',' and depth == 0:
+                parts.append(''.join(current))
+                current = []
+            else:
+                current.append(char)
+        if depth != 0:
+            raise ValueError('Unbalanced parentheses in Permissions-Policy')
+        parts.append(''.join(current))
+        return [part.strip() for part in parts if part.strip()]
+
+    def _parse_permissions_policy(self, policy):
+        if isinstance(policy, string_types):
+            policy = self._permissions_policy_string_to_dict(policy)
+
+        parts = []
+        for directive, allowlist in iteritems(policy):
+            directive = directive.strip()
+            if not PERMISSIONS_POLICY_DIRECTIVE_RE.match(directive):
+                raise ValueError(
+                    'Invalid Permissions-Policy directive name: '
+                    '{!r}'.format(directive))
+            parts.append('{}={}'.format(
+                directive,
+                self._parse_permissions_allowlist(directive, allowlist)))
+
+        return ', '.join(parts)
+
+    def _parse_permissions_allowlist(self, directive, allowlist):
+        if allowlist is None:
+            return '()'
+        if isinstance(allowlist, string_types):
+            items = allowlist.split()
+        else:
+            items = list(allowlist)
+
+        normalized = []
+        for item in items:
+            token = item.strip()
+            if (len(token) >= 2 and token[0] == token[-1] and
+                    token[0] in ('\'', '"')):
+                token = token[1:-1]
+            if token == 'self':
+                normalized.append('self')
+            elif token == '*':
+                normalized.append('*')
+            elif token == 'none':
+                normalized.append('none')
+            else:
+                self._validate_permissions_origin(directive, token)
+                normalized.append('"{}"'.format(token))
+
+        if 'none' in normalized:
+            if len(normalized) > 1:
+                raise ValueError(
+                    "Permissions-Policy directive '{}' cannot combine "
+                    "'none' with other allowlist entries".format(directive))
+            return '()'
+        if '*' in normalized:
+            if len(normalized) > 1:
+                raise ValueError(
+                    "Permissions-Policy directive '{}' cannot combine "
+                    "'*' with other allowlist entries".format(directive))
+            return '*'
+        if not normalized:
+            return '()'
+        return '({})'.format(' '.join(normalized))
+
+    def _validate_permissions_origin(self, directive, origin):
+        if not PERMISSIONS_POLICY_ORIGIN_RE.match(origin):
+            # The raw origin is deliberately not included in the message
+            # so that sensitive query strings are never leaked.
+            raise ValueError(
+                "Invalid origin in Permissions-Policy directive '{}'; "
+                'origins must be serialized as scheme://host[:port] '
+                'without path, query or fragment'.format(directive))
+
     def _set_feature_headers(self, headers, options):
-        if not options['feature_policy']:
-            return
+        permissions_policy = options.get('permissions_policy')
+        feature_policy = options.get('feature_policy')
 
-        policy = options['feature_policy']
-        policy = self._parse_policy(policy)
+        if (permissions_policy and feature_policy and
+                self.legacy_feature_policy):
+            raise ValueError(
+                'The legacy Feature-Policy header cannot be combined with '
+                'Permissions-Policy; disable legacy_feature_policy or '
+                'remove one of the policies')
 
-        headers['Feature-Policy'] = policy
+        if permissions_policy:
+            headers['Permissions-Policy'] = self._parse_permissions_policy(
+                permissions_policy)
+        elif self.legacy_feature_policy and feature_policy:
+            headers['Feature-Policy'] = self._parse_policy(feature_policy)
 
     def _set_frame_options_headers(self, headers, options):
         if not options['frame_options']:
@@ -331,8 +542,12 @@ class Talisman(object):
         """Use talisman as a decorator to configure options for a particular
         view.
 
-        Only frame_options, frame_options_allow_from, and
-        content_security_policy can be set on a per-view basis.
+        Only frame_options, frame_options_allow_from,
+        content_security_policy, feature_policy, and permissions_policy
+        can be set on a per-view basis. feature_policy and
+        permissions_policy are merged with the global configuration
+        per-directive; view-level directives take precedence over global
+        directives with the same name.
 
         Example:
 

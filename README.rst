@@ -69,6 +69,10 @@ Options
 -------
 
 -  ``feature_policy``, default ``{}``, see the `Feature Policy`_ section.
+-  ``permissions_policy``, default ``{}``, see the `Permissions Policy`_ section.
+-  ``legacy_feature_policy``, default ``False``, send the legacy
+   ``Feature-Policy`` header for ``feature_policy``. Cannot be combined
+   with ``permissions_policy``.
 -  ``force_https``, default ``True``, forces all non-debug connects to
    ``https``.
 -  ``force_https_permanent``, default ``False``, uses ``301`` instead of
@@ -305,6 +309,38 @@ As you can see above the policy can be defined simply just like the official
 specification requires the HTTP header to be set: As a semicolon separated
 list of individual CSP directives.
 
+Permissions Policy
+------------------
+
+The default permissions policy is empty, as this is the default expected
+behaviour. The policy is sent as the standard ``Permissions-Policy``
+header. Each directive maps to an allowlist of ``self``, ``*``, ``none``
+or serialized origins; legacy quoted keywords such as ``'self'`` are
+normalized automatically.
+
+Camera and Microphone Example
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Allow camera and microphone for the current origin only.
+
+.. code:: python
+
+    permissions_policy = {
+        'camera': 'self',
+        'microphone': 'self',
+    }
+    talisman = Talisman(app, permissions_policy=permissions_policy)
+
+This sends ``Permissions-Policy: camera=(self), microphone=(self)``.
+Use ``'none'`` or an empty list for an empty allowlist (``camera=()``),
+``'*'`` to allow all origins (``fullscreen=*``), and origins such as
+``https://example.com`` for cross-origin access. Origins must be
+serialized as ``scheme://host[:port]`` without path, query or fragment.
+
+View-level policies set with the ``talisman`` decorator are merged with
+the global policy per-directive: view-level directives override global
+directives with the same name, and all other global directives are kept.
+
 Feature Policy
 --------------
 
@@ -313,8 +349,9 @@ Note that the Feature Policy is still a `draft https://wicg.github.io/feature-po
 but is `supported in some form in most browsers
 <https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Feature-Policy#Browser_compatibility>`_.
 Please note this has been `renamed Permissions Policy <https://github.com/w3c/webappsec-feature-policy/issues/359>`_
-in the latest draft by at this writing, browsers and this extension only
-supports the Feature-Policy HTTP Header name.
+in the latest draft. The legacy ``Feature-Policy`` header is only sent
+when ``legacy_feature_policy=True`` is set, and cannot be combined with
+``permissions_policy``.
 
 Geolocation Example
 ~~~~~~~~~~~~~~~~~~~
@@ -326,7 +363,8 @@ Disable access to Geolocation interface.
     feature_policy = {
         'geolocation': '\'none\''
     }
-    talisman = Talisman(app, feature_policy=feature_policy)
+    talisman = Talisman(app, feature_policy=feature_policy,
+                        legacy_feature_policy=True)
 
 Disclaimer
 ----------
