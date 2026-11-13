@@ -83,8 +83,11 @@ downstream callers depend on. Rationale in
   because the fully inherited `TYPE_MAP` is consulted before `TAG_MAP`
   whenever an `asn1Spec` is supplied. DER's `supportConstructedForm=False` and
   CER's canonical Boolean check are inert there; only
-  `supportIndefLength=False` is unconditional. Test strictness changes both
-  with and without a schema.
+  the header-level checks are unconditional: `supportIndefLength=False` and
+  DER's `_checkTlvHeader` override, which rejects indefinite lengths,
+  non-minimal length fields and constructed universal-string tags
+  (X.690 10.1/10.2) when the TLV header is read, before any value is
+  constructed. Test strictness changes both with and without a schema.
 - **Do not weaken the decoder limits.** `MAX_OID_ARC_CONTINUATION_OCTETS`,
   `MAX_TAG_OCTETS`, `MAX_NESTING_DEPTH` and `MAX_LENGTH_OCTETS` sit at the top
   of `pyasn1/codec/ber/decoder.py`; the unnamed `length > sys.maxsize` guard

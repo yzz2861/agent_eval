@@ -771,7 +771,7 @@ flowchart LR
         DSE["SingleItemEncoder<br/>fixedDefLengthMode True<br/>fixedChunkSize 0"]
         DDM["decoder TAG_MAP + TYPE_MAP<br/>copy plus backfill that adds nothing"]
         DDO["REAL OVERRIDES<br/>BitString supportConstructedForm False<br/>OctetString supportConstructedForm False"]
-        DSD["SingleItemDecoder<br/>supportIndefLength False"]
+        DSD["SingleItemDecoder<br/>supportIndefLength False<br/>_checkTlvHeader rejects non-DER headers"]
         DEO -->|"update"| DEM
         DSE -->|"reads"| DEM
         DDO -->|"update"| DDM
@@ -914,19 +914,22 @@ X.509 and LDAP consumers actually call pyasn1) takes the
 `typeMap[chosenSpec.typeId]` first, and the `TYPE_MAP` hit returns BER's
 permissive decoder. Two probes confirm it:
 
-- `der.decode(b'\x24\x06\x04\x01a\x04\x01b')` raises
-  `Constructed encoding form prohibited`, but the same bytes with
-  `asn1Spec=univ.OctetString()` decode fine.
 - `cer.decode(b'\x01\x01\x01')` raises `Unexpected Boolean payload: 1`, but
   with `asn1Spec=univ.Boolean()` returns `True`.
 
-The one DER restriction that always applies is `supportIndefLength = False`,
-because it sits on `der/decoder.py`'s `SingleItemDecoder` itself rather than
-in a map. Removing the `typeId not in TYPE_MAP` guard from the derived
-backfill loops looks like a cleanup but would newly route schema-driven
-CER/DER decodes through the strict subclasses, breaking every caller that
-currently (if accidentally) relies on DER accepting constructed OCTET STRINGs
-under a schema.
+The payload-decoder strictness in the maps is not the whole DER story,
+though. Header-level DER rules sit on `der/decoder.py`'s
+`SingleItemDecoder` itself rather than in a map, so they fire on both
+paths: `supportIndefLength = False`, and the `_checkTlvHeader` override
+that rejects indefinite lengths, non-minimal length fields and constructed
+string encodings the moment the TLV header is read, before any value is
+constructed (see [The per-item state
+machine](#the-per-item-state-machine)). A constructed OCTET STRING such as
+`der.decode(b'\x24\x06\x04\x01a\x04\x01b')` is therefore rejected with or
+without an `asn1Spec`. Removing the `typeId not in TYPE_MAP` guard from the
+derived backfill loops looks like a cleanup but would newly route
+schema-driven CER/DER decodes through the strict subclasses, changing
+behavior for every caller that relies on the current dispatch order.
 
 Registration history has also left dead weight in the maps. The module-level
 `TAG_MAP.update({...})` block in `cer/encoder.py` registers
@@ -1008,9 +1011,17 @@ subclasses, `BitStringPayloadDecoder` and `OctetStringPayloadDecoder`, setting
 `supportConstructedForm = False` (enforced by the
 `if not self.supportConstructedForm:` checks in the parent classes'
 `valueDecoder` methods in `ber/decoder.py`), plus
-`supportIndefLength = False` on its `SingleItemDecoder`; how that one
-attribute shuts indefinite framing off entirely is covered in [Two framing
-modes](#two-framing-modes).
+`supportIndefLength = False` and a `_checkTlvHeader` override on its
+`SingleItemDecoder`. The override rejects indefinite-length framing,
+non-minimal (padded or long-form-where-short-suffices) length fields and
+constructed encodings of universal string tags — every universal
+constructed tag except SEQUENCE (16) and SET (17) — the moment the TLV
+header has been read, naming the violated X.690 clause and the stream
+offset, and never echoing substrate content. Because the hook runs in
+`stDecodeLength`, ahead of both dispatch tables, these rejections also
+fire on the schema-driven path that the map-carried strictness misses;
+how `supportIndefLength` alone shuts indefinite framing off is covered in
+[Two framing modes](#two-framing-modes).
 
 ### Configuration surfaces
 
@@ -1377,7 +1388,14 @@ In execution order:
   `tagSet = lastTag + tagSet` statement prepends to an already-populated
   `tagSet`: that is how nested EXPLICIT tags build up.
 - `stDecodeLength` handles short, long and indefinite (`length = -1`) forms;
-  both length limits fire here ([Decoder limits](#decoder-limits)).
+  both length limits fire here ([Decoder limits](#decoder-limits)). The
+  block ends by calling the `_checkTlvHeader` hook with the decoded tag
+  set, length, raw long-form length octets and the TLV's stream offset;
+  the base implementation is a no-op and DER's override in
+  `der/decoder.py` rejects indefinite lengths, non-minimal length fields
+  and constructed universal-string tags (X.690 10.1/10.2) at this point,
+  before a single value octet is consumed and regardless of whether an
+  `asn1Spec` guided the decode.
 - `stGetValueDecoder` is a two-way switch: no `asn1Spec` means tag-driven,
   otherwise spec-driven. The block comment right after this `if` explains
   why both exist: IMPLICIT tagging destroys base-type information, so the
@@ -1515,6 +1533,20 @@ over-consumed. When debugging exact-length failures, enable the decoder
 debug log ([The debug hook](#the-debug-hook)) and read the last successful
 codec choice rather than staring at the raising frame.
 
+The constructed string assembly loops are the exception to that diagnostic
+distance: `BitStringPayloadDecoder` and `OctetStringPayloadDecoder` (the
+latter also serving every character-string type) police their own fragment
+stream. A fragment ending past the enclosing definite length raises
+`Constructed string fragment at offset N overruns enclosing length M`, a
+fragment stream drying up before the declared length raises `Truncated
+constructed string fragment at offset N`, and an indefinite-length string
+whose substrate ends before the end-of-octets sentinel raises `Missing
+end-of-octets sentinel ... at offset N` — each naming a stable stream
+offset, and each raised instead of the `EndOfStreamError` that previously
+escaped unannotated. The offsets make BER parsing differentials
+debuggable; the checks change error reporting, not which encodings BER
+accepts.
+
 A loosened check would let malformed nested encodings decode into
 structurally valid but wrong objects, the classic BER-parsing differential
 that signature verification depends on not happening. Symmetry in the
@@ -1560,16 +1592,20 @@ while the same bytes inside an indefinite container terminate it.
 off with that one attribute (`supportIndefLength = False` on its
 `SingleItemDecoder` in `der/decoder.py`): the gate means DER never even
 consumes the two probe octets, and the
-`length == -1 and not self.supportIndefLength` guard in `stDecodeLength`
-rejects a `0x80` length outright. Moving the `supportIndefLength` test out
+`_checkTlvHeader` hook in `stDecodeLength`
+rejects a `0x80` length outright, before the legacy
+`length == -1 and not self.supportIndefLength` guard is reached. Moving
+the `supportIndefLength` test out
 of the gate makes DER consume two octets it must not; re-enabling it on DER
 defeats the `testIndefMode` cases of `BitStringDecoderTestCase` and
 `OctetStringDecoderTestCase` in `tests/codec/der/test_decoder.py`. CER keeps
 indefinite-length support enabled; CER requires indefinite-length framing
 for long strings. DER's remaining decoder overrides are inventoried under
-[What each dialect changes](#what-each-dialect-changes), and this attribute
-is the one DER restriction that applies on every decode path
-([Registration and import order](#registration-and-import-order)).
+[What each dialect changes](#what-each-dialect-changes). The header-level
+DER restrictions — this attribute and the `_checkTlvHeader` override — are
+the ones that apply on every decode path
+([Registration and import order](#registration-and-import-order)); the
+map-carried payload strictness still does not.
 
 ### Deferred typing: ANY and open types
 
@@ -1882,4 +1918,3 @@ them as a drive-by; each needs its own dedicated change with tests.
   literal text. Not worth a churn-heavy rewrite mid-release; if ever fixed,
   do it as a dedicated pass verified with `tox -e docs`, since the file is
   compiled into the `-W` build.
-

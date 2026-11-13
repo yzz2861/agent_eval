@@ -301,6 +301,122 @@ class OctetStringDecoderTestCase(BaseTestCase):
             (4, 4, 81, 117, 105, 99, 4, 4, 107, 32, 98, 114, 4, 4, 111, 119, 110, 32, 4, 3, 102, 111, 120, 0, 0)), b'')
 
 
+class ConstructedStringAssemblyTestCase(BaseTestCase):
+    def testDefModeChunkedCursor(self):
+        # assembled value and trailing cursor stay as before
+        substrate = bytes(
+            (36, 6, 4, 1, 97, 4, 1, 98, 5, 0))
+
+        value, rest = decoder.decode(substrate)
+
+        assert value.asOctets() == b'ab'
+        assert rest == bytes((5, 0))
+
+    def testIndefModeChunkedCursor(self):
+        substrate = bytes(
+            (36, 128, 4, 1, 97, 4, 1, 98, 0, 0, 5, 0))
+
+        value, rest = decoder.decode(substrate)
+
+        assert value.asOctets() == b'ab'
+        assert rest == bytes((5, 0))
+
+    def testFragmentOverrunsEnclosingLength(self):
+        # declared length 3, first fragment alone needs 6 octets
+        substrate = bytes((36, 3, 4, 4, 65, 66, 67, 68))
+
+        try:
+            decoder.decode(substrate)
+        except error.PyAsn1Error as exc:
+            assert 'overruns' in str(exc), \
+                'overrun not reported: %s' % exc
+            assert 'offset 2' in str(exc), \
+                'fragment offset missing from error: %s' % exc
+        else:
+            assert 0, 'fragment overrunning enclosing length tolerated'
+
+    def testDeclaredLengthExceedsSubstrate(self):
+        # declared length 8, fragments run out after 3 octets
+        substrate = bytes((36, 8, 4, 1, 65))
+
+        try:
+            decoder.decode(substrate)
+        except error.PyAsn1Error as exc:
+            assert 'Truncated' in str(exc), \
+                'truncation not reported: %s' % exc
+            assert 'offset 5' in str(exc), \
+                'fragment offset missing from error: %s' % exc
+        else:
+            assert 0, 'declared length exceeding substrate tolerated'
+
+    def testMissingEndOfOctets(self):
+        # indefinite-length constructed OCTET STRING without the EOO sentinel
+        substrate = bytes((36, 128, 4, 1, 65))
+
+        try:
+            decoder.decode(substrate)
+        except error.PyAsn1Error as exc:
+            assert 'end-of-octets' in str(exc), \
+                'missing EOO not reported: %s' % exc
+            assert 'offset 2' in str(exc), \
+                'value offset missing from error: %s' % exc
+        else:
+            assert 0, 'missing end-of-octets sentinel tolerated'
+
+    def testNestedMissingEndOfOctets(self):
+        # nested indefinite-length constructed OCTET STRING, inner EOO present,
+        # outer EOO absent
+        substrate = bytes((36, 128, 36, 128, 4, 1, 65, 0, 0))
+
+        try:
+            decoder.decode(substrate)
+        except error.PyAsn1Error as exc:
+            assert 'end-of-octets' in str(exc), \
+                'missing EOO not reported: %s' % exc
+        else:
+            assert 0, 'missing outer end-of-octets sentinel tolerated'
+
+    def testNestedFragmentOverrunsEnclosingLength(self):
+        # inner constructed OCTET STRING claims 6 octets within a 4-octet outer
+        substrate = bytes((36, 4, 36, 6, 4, 1, 65))
+
+        try:
+            decoder.decode(substrate)
+        except error.PyAsn1Error as exc:
+            assert 'offset' in str(exc), \
+                'offset missing from error: %s' % exc
+        else:
+            assert 0, 'nested fragment overrun tolerated'
+
+    def testBitStringFragmentOverrunsEnclosingLength(self):
+        # declared length 3, first BIT STRING fragment alone needs 5 octets
+        substrate = bytes((35, 3, 3, 2, 0, 169, 138))
+
+        try:
+            decoder.decode(substrate)
+        except error.PyAsn1Error as exc:
+            assert 'overruns' in str(exc), \
+                'overrun not reported: %s' % exc
+            assert 'offset 2' in str(exc), \
+                'fragment offset missing from error: %s' % exc
+        else:
+            assert 0, 'BIT STRING fragment overrun tolerated'
+
+    def testBitStringMissingEndOfOctets(self):
+        # indefinite-length constructed BIT STRING without the EOO sentinel
+        substrate = bytes((35, 128, 3, 2, 0, 169))
+
+        try:
+            decoder.decode(substrate)
+        except error.PyAsn1Error as exc:
+            assert 'end-of-octets' in str(exc), \
+                'missing EOO not reported: %s' % exc
+            assert 'offset 2' in str(exc), \
+                'value offset missing from error: %s' % exc
+        else:
+            assert 0, 'missing end-of-octets sentinel tolerated'
+
+
 class ExpTaggedOctetStringDecoderTestCase(BaseTestCase):
     def setUp(self):
         BaseTestCase.setUp(self)

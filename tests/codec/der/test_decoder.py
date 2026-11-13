@@ -4,6 +4,7 @@
 # Copyright (c) 2005-2020, Ilya Etingof <etingof@gmail.com>
 # License: https://pyasn1.readthedocs.io/en/latest/license.html
 #
+import io
 import sys
 import unittest
 
@@ -47,12 +48,13 @@ class BitStringDecoderTestCase(BaseTestCase):
 
     def testSchemaDrivenChunkedWithIntermediatePadding(self):
         fragments = b'\x03\x02\x03\x10\x03\x02\x00\xa5'
-        value, rest = decoder.decode(b'\x23\x08' + fragments,
-                                     asn1Spec=univ.BitString())
-
-        assert value == univ.BitString(binValue='0001010100101')
-        assert len(value) == 13
-        assert rest == b''
+        try:
+            decoder.decode(b'\x23\x08' + fragments,
+                           asn1Spec=univ.BitString())
+        except PyAsn1Error:
+            pass
+        else:
+            assert 0, 'constructed BIT STRING tolerated under DER'
 
 
 class OctetStringDecoderTestCase(BaseTestCase):
@@ -83,18 +85,160 @@ class OctetStringDecoderTestCase(BaseTestCase):
 
     def testSchemaDrivenManyFragments(self):
         fragments = b'\x04\x01A' * 64
-        value, rest = decoder.decode(b'\x24\x81\xc0' + fragments,
-                                     asn1Spec=univ.OctetString())
-
-        assert value.asOctets() == b'A' * 64
-        assert rest == b''
+        try:
+            decoder.decode(b'\x24\x81\xc0' + fragments,
+                           asn1Spec=univ.OctetString())
+        except PyAsn1Error:
+            pass
+        else:
+            assert 0, 'constructed OCTET STRING tolerated under DER'
 
     def testConstructedCharacterString(self):
         fragments = b'\x0c\x01A' * 64
-        value, rest = decoder.decode(b'\x2c\x81\xc0' + fragments)
+        try:
+            decoder.decode(b'\x2c\x81\xc0' + fragments)
+        except PyAsn1Error:
+            pass
+        else:
+            assert 0, 'constructed UTF8String tolerated under DER'
 
-        assert value == char.UTF8String(b'A' * 64)
+
+class DerTlvHeaderEnforcementTestCase(BaseTestCase):
+    def testConstructedOctetStringRejected(self):
+        # constructed OCTET STRING, two one-octet fragments
+        substrate = b'\x24\x06\x04\x01a\x04\x01b'
+
+        for asn1Spec in None, univ.OctetString():
+            try:
+                decoder.decode(substrate, asn1Spec=asn1Spec)
+            except PyAsn1Error as exc:
+                assert 'X.690 10.2' in str(exc), \
+                    'DER rule missing from error: %s' % exc
+                assert 'offset 0' in str(exc), \
+                    'offset missing from error: %s' % exc
+            else:
+                assert 0, 'constructed OCTET STRING tolerated under DER'
+
+    def testConstructedBitStringRejected(self):
+        # constructed BIT STRING, two fragments
+        substrate = bytes((35, 8, 3, 2, 0, 169, 3, 2, 1, 138))
+
+        for asn1Spec in None, univ.BitString():
+            try:
+                decoder.decode(substrate, asn1Spec=asn1Spec)
+            except PyAsn1Error as exc:
+                assert 'X.690 10.2' in str(exc)
+            else:
+                assert 0, 'constructed BIT STRING tolerated under DER'
+
+    def testConstructedCharacterStringsRejected(self):
+        # constructed UTF8String, PrintableString, IA5String, UniversalString
+        for constructedTag in 0x2c, 0x33, 0x36, 0x3c:
+            # definite-length constructed form holding one primitive fragment
+            substrate = bytes((constructedTag, 3, constructedTag & 0x1f, 1, 65))
+
+            try:
+                decoder.decode(substrate)
+            except PyAsn1Error as exc:
+                assert 'X.690 10.2' in str(exc)
+            else:
+                assert 0, 'constructed character string tolerated under DER'
+
+    def testIndefiniteLengthRejected(self):
+        # indefinite-length OCTET STRING
+        substrate = bytes((4, 128, 1, 65, 0, 0))
+
+        try:
+            decoder.decode(substrate)
+        except PyAsn1Error as exc:
+            assert 'X.690 10.1' in str(exc), \
+                'DER rule missing from error: %s' % exc
+            assert 'offset 0' in str(exc), \
+                'offset missing from error: %s' % exc
+        else:
+            assert 0, 'indefinite length tolerated under DER'
+
+    def testLongFormLengthForShortValueRejected(self):
+        # long-form length encoding a value below 128
+        substrate = b'\x04\x81\x03abc'
+
+        try:
+            decoder.decode(substrate)
+        except PyAsn1Error as exc:
+            assert 'X.690 10.1' in str(exc)
+            assert 'offset 0' in str(exc)
+        else:
+            assert 0, 'non-minimal length tolerated under DER'
+
+    def testPaddedLongFormLengthRejected(self):
+        # long-form length with a leading zero octet
+        substrate = b'\x04\x82\x00\x80' + b'x' * 128
+
+        try:
+            decoder.decode(substrate)
+        except PyAsn1Error as exc:
+            assert 'X.690 10.1' in str(exc)
+        else:
+            assert 0, 'padded length tolerated under DER'
+
+    def testMinimalLongFormLengthAccepted(self):
+        # long-form length is required at 128 octets and beyond
+        substrate = b'\x04\x81\x80' + b'x' * 128
+
+        value, rest = decoder.decode(substrate)
+
+        assert value.asOctets() == b'x' * 128
         assert rest == b''
+
+    def testErrorBeforeValueConstruction(self):
+        # the stream must be left right past the TLV header, before any
+        # value octets are consumed
+        substrate = io.BytesIO(b'\x24\x06\x04\x01a\x04\x01b')
+
+        try:
+            list(decoder.StreamingDecoder(substrate))
+        except PyAsn1Error:
+            pass
+        else:
+            assert 0, 'constructed OCTET STRING tolerated under DER'
+
+        assert substrate.tell() == 2, \
+            'value octets consumed before the error: %d' % substrate.tell()
+
+    def testNestedConstructedStringRejected(self):
+        # constructed OCTET STRING nested in a SEQUENCE
+        substrate = b'\x30\x08\x24\x06\x04\x01a\x04\x01b'
+
+        try:
+            decoder.decode(substrate)
+        except PyAsn1Error as exc:
+            assert 'offset 2' in str(exc), \
+                'inner TLV offset missing from error: %s' % exc
+        else:
+            assert 0, 'nested constructed OCTET STRING tolerated under DER'
+
+    def testErrorMessageHidesContent(self):
+        substrate = b'\x24\x06\x04\x01a\x04\x01b'
+
+        try:
+            decoder.decode(substrate)
+        except PyAsn1Error as exc:
+            assert 'ab' not in str(exc), \
+                'sensitive content echoed in error: %s' % exc
+        else:
+            assert 0, 'constructed OCTET STRING tolerated under DER'
+
+    def testPrimitiveStringsRoundTrip(self):
+        for asn1Value in (univ.OctetString(b'fox'),
+                          char.UTF8String('renard'),
+                          char.PrintableString('fox'),
+                          char.IA5String('fox')):
+            substrate = encoder.encode(asn1Value)
+
+            value, rest = decoder.decode(substrate, asn1Spec=asn1Value.clone())
+
+            assert value == asn1Value
+            assert rest == b''
 
 
 class LargeTagDecoderTestCase(BaseTestCase):

@@ -274,11 +274,27 @@ class BitStringPayloadDecoder(AbstractSimplePayloadDecoder):
         current_position = substrate.tell()
 
         while substrate.tell() - current_position < length:
-            for component in decodeFun(
-                    substrate, self.protoComponent, substrateFun=substrateFun,
-                    **options):
-                if isinstance(component, SubstrateUnderrunError):
-                    yield component
+            fragment_position = substrate.tell()
+
+            try:
+                for component in decodeFun(
+                        substrate, self.protoComponent, substrateFun=substrateFun,
+                        **options):
+                    if isinstance(component, SubstrateUnderrunError):
+                        yield component
+
+            except error.EndOfStreamError:
+                raise error.PyAsn1Error(
+                    'Truncated constructed string fragment at offset %d: '
+                    'declared length %d exceeds available substrate' % (
+                        fragment_position, length)
+                )
+
+            if substrate.tell() - current_position > length:
+                raise error.PyAsn1Error(
+                    'Constructed string fragment at offset %d overruns '
+                    'enclosing length %d' % (fragment_position, length)
+                )
 
             bitLength = self._appendFragment(assembled, component, bitLength)
 
@@ -307,17 +323,27 @@ class BitStringPayloadDecoder(AbstractSimplePayloadDecoder):
         assembled = bytearray()
         bitLength = 0
 
+        original_position = substrate.tell()
+
         while True:  # loop over fragments
 
-            for component in decodeFun(
-                    substrate, self.protoComponent, substrateFun=substrateFun,
-                    allowEoo=True, **options):
+            try:
+                for component in decodeFun(
+                        substrate, self.protoComponent, substrateFun=substrateFun,
+                        allowEoo=True, **options):
 
-                if component is eoo.endOfOctets:
-                    break
+                    if component is eoo.endOfOctets:
+                        break
 
-                if isinstance(component, SubstrateUnderrunError):
-                    yield component
+                    if isinstance(component, SubstrateUnderrunError):
+                        yield component
+
+            except error.EndOfStreamError:
+                raise error.PyAsn1Error(
+                    'Missing end-of-octets sentinel for indefinite-length '
+                    'constructed string value at offset %d' % (
+                        original_position,)
+                )
 
             if component is eoo.endOfOctets:
                 break
@@ -368,10 +394,26 @@ class OctetStringPayloadDecoder(AbstractSimplePayloadDecoder):
         original_position = substrate.tell()
         # head = popSubstream(substrate, length)
         while substrate.tell() - original_position < length:
-            for component in decodeFun(
-                    substrate, self.protoComponent, **options):
-                if isinstance(component, SubstrateUnderrunError):
-                    yield component
+            fragment_position = substrate.tell()
+
+            try:
+                for component in decodeFun(
+                        substrate, self.protoComponent, **options):
+                    if isinstance(component, SubstrateUnderrunError):
+                        yield component
+
+            except error.EndOfStreamError:
+                raise error.PyAsn1Error(
+                    'Truncated constructed string fragment at offset %d: '
+                    'declared length %d exceeds available substrate' % (
+                        fragment_position, length)
+                )
+
+            if substrate.tell() - original_position > length:
+                raise error.PyAsn1Error(
+                    'Constructed string fragment at offset %d overruns '
+                    'enclosing length %d' % (fragment_position, length)
+                )
 
             fragments.append(bytes(component))
 
@@ -392,16 +434,26 @@ class OctetStringPayloadDecoder(AbstractSimplePayloadDecoder):
         # Assemble the logical value of each fragment, including nested ones.
         fragments = []
 
+        original_position = substrate.tell()
+
         while True:  # loop over fragments
 
-            for component in decodeFun(
-                    substrate, self.protoComponent, allowEoo=True, **options):
+            try:
+                for component in decodeFun(
+                        substrate, self.protoComponent, allowEoo=True, **options):
 
-                if isinstance(component, SubstrateUnderrunError):
-                    yield component
+                    if isinstance(component, SubstrateUnderrunError):
+                        yield component
 
-                if component is eoo.endOfOctets:
-                    break
+                    if component is eoo.endOfOctets:
+                        break
+
+            except error.EndOfStreamError:
+                raise error.PyAsn1Error(
+                    'Missing end-of-octets sentinel for indefinite-length '
+                    'constructed string value at offset %d' % (
+                        original_position,)
+                )
 
             if component is eoo.endOfOctets:
                 break
@@ -1596,6 +1648,27 @@ class SingleItemDecoder(object):
         self._tagCache = {}
         self._tagSetCache = {}
 
+    def _checkTlvHeader(self, tagSet, length, lengthOctets, headerOffset):
+        """Verify codec-specific TLV header constraints.
+
+        Called once per TLV, right after its tag and length fields have
+        been decoded and before any value octets are consumed. BER imposes
+        no constraints here; stricter codecs (e.g. DER) override this hook
+        to reject non-conforming headers before the value is materialized.
+
+        Parameters
+        ----------
+        tagSet: :py:class:`~pyasn1.type.tag.TagSet`
+            Tag set decoded from the TLV identifier octets.
+        length: :py:class:`int`
+            Decoded value length, or -1 for the indefinite form.
+        lengthOctets: :py:class:`list` or None
+            Raw long-form length octets, None for the short or the
+            indefinite length form.
+        headerOffset: :py:class:`int`
+            Stream offset of the first identifier octet of this TLV.
+        """
+
     def __call__(self, substrate, asn1Spec=None,
                  tagSet=None, length=None, state=stDecodeTag,
                  decodeFun=None, substrateFun=None,
@@ -1641,6 +1714,8 @@ class SingleItemDecoder(object):
         value = noValue
 
         substrate.markedPosition = substrate.tell()
+
+        headerOffset = substrate.tell()
 
         while state is not stStop:
 
@@ -1721,6 +1796,8 @@ class SingleItemDecoder(object):
 
             if state is stDecodeLength:
                 # Decode length
+                lengthOctets = None
+
                 for firstOctet in readFromStream(substrate, 1, options):
                     if isinstance(firstOctet, SubstrateUnderrunError):
                         yield firstOctet
@@ -1761,8 +1838,12 @@ class SingleItemDecoder(object):
                                 length, sys.maxsize)
                         )
 
+                    lengthOctets = encodedLength
+
                 else:  # 128 means indefinite
                     length = -1
+
+                self._checkTlvHeader(tagSet, length, lengthOctets, headerOffset)
 
                 if length == -1 and not self.supportIndefLength:
                     raise error.PyAsn1Error('Indefinite length encoding not supported by this codec')

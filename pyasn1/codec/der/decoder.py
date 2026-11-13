@@ -6,10 +6,16 @@
 #
 import warnings
 
+from pyasn1 import error
 from pyasn1.codec.cer import decoder
+from pyasn1.type import tag
 from pyasn1.type import univ
 
 __all__ = ['decode', 'StreamingDecoder']
+
+# Universal tags keeping the constructed encoding form under DER:
+# SEQUENCE/SEQUENCE OF (16) and SET/SET OF (17)
+_DER_CONSTRUCTED_TAG_IDS = (16, 17)
 
 
 class BitStringPayloadDecoder(decoder.BitStringPayloadDecoder):
@@ -47,6 +53,33 @@ class SingleItemDecoder(decoder.SingleItemDecoder):
     TYPE_MAP = TYPE_MAP
 
     supportIndefLength = False
+
+    def _checkTlvHeader(self, tagSet, length, lengthOctets, headerOffset):
+        # X.690 10.1: the definite form of length encoding is required,
+        # serialized into the minimum number of octets
+        if length == -1:
+            raise error.PyAsn1Error(
+                'Indefinite length encoding prohibited by DER (X.690 10.1) '
+                'at offset %d' % headerOffset
+            )
+
+        if lengthOctets is not None and (not lengthOctets[0] or length < 128):
+            raise error.PyAsn1Error(
+                'Non-minimal length encoding prohibited by DER (X.690 10.1) '
+                'at offset %d' % headerOffset
+            )
+
+        # X.690 10.2: string types must use the primitive encoding form;
+        # of the universal tags, only SEQUENCE/SET stay constructed
+        firstTag = tagSet[0]
+
+        if (firstTag.tagClass == tag.tagClassUniversal and
+                firstTag.tagFormat == tag.tagFormatConstructed and
+                firstTag.tagId not in _DER_CONSTRUCTED_TAG_IDS):
+            raise error.PyAsn1Error(
+                'Constructed encoding of a string type prohibited by DER '
+                '(X.690 10.2) at offset %d' % headerOffset
+            )
 
 
 class StreamingDecoder(decoder.StreamingDecoder):

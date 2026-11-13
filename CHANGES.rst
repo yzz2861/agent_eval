@@ -1,6 +1,16 @@
 Revision 0.7.0, released XX-XX-2026
 ---------------------------------------
 
+- Hardened the DER decoder to enforce X.690 10.1/10.2 header rules at TLV
+  header read time, before any value is constructed: indefinite lengths,
+  non-minimal (padded or long-form-where-short-suffices) length fields and
+  constructed encodings of string types are now rejected on every decode
+  path, including the schema-driven one that previously accepted
+  constructed OCTET STRING and character strings. Errors name the violated
+  DER clause and the stream offset without echoing substrate content.
+  BER constructed string assembly now also reports stable stream offsets
+  for fragments overrunning the enclosing length, truncated fragment
+  streams and missing end-of-octets sentinels
 - Fixed OverflowError from BER/CER/DER length values that fit in the
   supported 8-octet length field but exceed the platform maximum readable
   size. Such oversized definite lengths are now rejected with PyAsn1Error.
