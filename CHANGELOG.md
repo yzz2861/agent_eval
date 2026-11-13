@@ -1,6 +1,22 @@
 # Changelog
 
 
+## Unreleased
+
+- Normalize SAML entityIDs before indexing: scheme and host are lower-cased,
+  default ports removed, percent-encoding canonicalized and query parameters
+  sorted, while trailing-slash semantics are preserved
+- Reject metadata that binds different XML content or certificates to the
+  same normalized entityID (`strict_conflicts=True`); loading order no longer
+  silently overrides an existing entity
+- Track expired descriptors, duplicate certificates, missing entityID,
+  oversized EntityDescriptors and content conflicts in independent result
+  buckets accessible through `MetaData.errors()` / `MetadataStore.errors()`
+- Add `saml2.entityid` helpers (`normalize_entity_id`, `entity_ids_equal`,
+  `entity_id_cache_key`) and a hash-keyed `saml2.metadata_cache.FileMetadataCache`
+  that invalidates legacy raw-URL cache entries
+
+
 ## v7.5.5 (2026-09-17)
 
 - Resolve CVE-2026-26007 by migrating to the from pyOpenSSL to the cryptography APIs

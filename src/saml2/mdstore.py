@@ -42,6 +42,13 @@ from saml2.extension.mdui import UIInfo
 from saml2.extension.shibmd import NAMESPACE as NS_SHIBMD
 from saml2.extension.shibmd import Scope
 from saml2.httpbase import HTTPBase
+from saml2.entityid import DEFAULT_ENTITY_DESCRIPTOR_MAX_SIZE
+from saml2.entityid import DuplicateCertificate
+from saml2.entityid import EntityConflict
+from saml2.entityid import EntityDescriptorTooLarge
+from saml2.entityid import ExpiredEntity
+from saml2.entityid import MissingEntityID
+from saml2.entityid import normalize_entity_id
 from saml2.md import NAMESPACE as NS_MD
 from saml2.md import ArtifactResolutionService
 from saml2.md import EntitiesDescriptor
@@ -241,7 +248,17 @@ def repack_cert(cert):
 
 
 class MetaData:
-    def __init__(self, attrc, metadata="", node_name=None, check_validity=True, security=None, **kwargs):
+    def __init__(
+        self,
+        attrc,
+        metadata="",
+        node_name=None,
+        check_validity=True,
+        security=None,
+        entity_descriptor_max_size=DEFAULT_ENTITY_DESCRIPTOR_MAX_SIZE,
+        strict_conflicts=False,
+        **kwargs,
+    ):
         self.attrc = attrc
         self.metadata = metadata
         self.entity = None
@@ -250,6 +267,88 @@ class MetaData:
         self.node_name = node_name
         self.check_validity = check_validity
         self.security = security
+        self.entity_descriptor_max_size = entity_descriptor_max_size
+        self.strict_conflicts = strict_conflicts
+        # Independent outcome buckets for entity descriptors that can not be
+        # indexed. Every reason is tracked separately so callers never have
+        # to infer failures from log messages or load ordering.
+        self.expired = []
+        self.duplicate_certificates = []
+        self.missing_entity_id = []
+        self.oversized = []
+        self.conflicts = []
+        self.content_conflicts = []
+
+    @staticmethod
+    def normalize_entity_id(entity_id):
+        return normalize_entity_id(entity_id)
+
+    def _entity_certificates(self, entity_dict):
+        """Return the set of base64 certificates declared by an entity dict."""
+        certificates = set()
+        for descriptor_name in [
+            "spsso_descriptor",
+            "idpsso_descriptor",
+            "role_descriptor",
+            "authn_authority_descriptor",
+            "attribute_authority_descriptor",
+            "pdp_descriptor",
+        ]:
+            for descriptor in entity_dict.get(descriptor_name) or []:
+                for key_descriptor in descriptor.get("key_descriptor", []):
+                    key_info = key_descriptor.get("key_info") or {}
+                    for data in key_info.get("x509_data") or []:
+                        certificate = (data.get("x509_certificate") or {}).get("text")
+                        if certificate is not None:
+                            certificates.add("".join(certificate.split()))
+        return certificates
+
+    @staticmethod
+    def _comparable_entity(entity_dict):
+        """Strip source-only attributes (e.g. xml:base) before comparison.
+
+        Aggregators routinely repeat the same EntityDescriptor inside an
+        EntitiesDescriptor with only a different xml:base hint. Such copies
+        must not be reported as conflicts, while real content or certificate
+        differences still must be.
+        """
+        comparable = dict(entity_dict)
+        extension_attributes = dict(comparable.get("extension_attributes") or {})
+        extension_attributes.pop("{http://www.w3.org/XML/1998/namespace}base", None)
+        if extension_attributes:
+            comparable["extension_attributes"] = extension_attributes
+        else:
+            comparable.pop("extension_attributes", None)
+        return comparable
+
+    def _check_duplicate_certificates(self, entity_id, entity_descr):
+        """Record descriptors that declare the same certificate more than once."""
+        seen = set()
+        descriptors = chain(
+            getattr(entity_descr, "spsso_descriptor", []) or [],
+            getattr(entity_descr, "idpsso_descriptor", []) or [],
+            getattr(entity_descr, "role_descriptor", []) or [],
+            getattr(entity_descr, "authn_authority_descriptor", []) or [],
+            getattr(entity_descr, "attribute_authority_descriptor", []) or [],
+            getattr(entity_descr, "pdp_descriptor", []) or [],
+        )
+        for descriptor in descriptors:
+            for key_descriptor in getattr(descriptor, "key_descriptor", []) or []:
+                key_info = getattr(key_descriptor, "key_info", None)
+                if key_info is None:
+                    continue
+                for data in getattr(key_info, "x509_data", []) or []:
+                    certificate = getattr(getattr(data, "x509_certificate", None), "text", None)
+                    if certificate is None:
+                        continue
+                    compact = "".join(certificate.split())
+                    if compact in seen and entity_id not in self.duplicate_certificates:
+                        self.duplicate_certificates.append(entity_id)
+                        return DuplicateCertificate(
+                            f"Duplicate certificate in EntityDescriptor '{entity_id}'"
+                        )
+                    seen.add(compact)
+        return None
 
     def items(self):
         """
@@ -516,7 +615,14 @@ class MetaData:
 
 class InMemoryMetaData(MetaData):
     def __init__(self, attrc, metadata="", node_name=None, check_validity=True, security=None, **kwargs):
-        super().__init__(attrc, metadata=metadata)
+        super().__init__(
+            attrc,
+            metadata=metadata,
+            node_name=node_name,
+            check_validity=check_validity,
+            security=security,
+            **kwargs,
+        )
         self.entity = {}
         self.security = security
         self.node_name = node_name
@@ -541,31 +647,58 @@ class InMemoryMetaData(MetaData):
         return len(self.entity)
 
     def __contains__(self, item):
-        return item in self.entity.keys()
+        try:
+            self._lookup_key(item)
+        except (KeyError, MissingEntityID):
+            return False
+        else:
+            return True
 
     def __getitem__(self, item):
-        return self.entity[item]
+        return self.entity[self._lookup_key(item)]
 
     def __setitem__(self, key, value):
-        self.entity[key] = value
+        self.entity[normalize_entity_id(key)] = value
 
     def __delitem__(self, key):
-        del self.entity[key]
+        del self.entity[self._lookup_key(key)]
+
+    def _lookup_key(self, entity_id):
+        """Resolve a raw or canonical entityID to the storage key."""
+        normalized = normalize_entity_id(entity_id)
+        if normalized in self.entity:
+            return normalized
+        # Fallback for identifiers that can not be canonicalized (empty etc.)
+        # or data loaded through legacy paths keyed by the raw identifier.
+        if entity_id in self.entity:
+            return entity_id
+        raise KeyError(entity_id)
 
     def do_entity_descriptor(self, entity_descr):
+        raw_entity_id = getattr(entity_descr, "entity_id", None)
+        if not raw_entity_id:
+            self.missing_entity_id.append(None)
+            raise MissingEntityID("EntityDescriptor without an entityID attribute")
+
+        serialized = f"{entity_descr}"
+        if len(serialized.encode("utf-8")) > self.entity_descriptor_max_size:
+            self.oversized.append(raw_entity_id)
+            raise EntityDescriptorTooLarge(
+                f"EntityDescriptor '{raw_entity_id}' exceeds the maximum size "
+                f"of {self.entity_descriptor_max_size} bytes"
+            )
+
         if self.check_validity:
             try:
                 if not valid(entity_descr.valid_until):
-                    logger.error("Entity descriptor (entity id:%s) too old", entity_descr.entity_id)
-                    self.to_old.append(entity_descr.entity_id)
-                    return
+                    logger.error("Entity descriptor (entity id:%s) too old", raw_entity_id)
+                    self.to_old.append(raw_entity_id)
+                    self.expired.append(raw_entity_id)
+                    raise ExpiredEntity(f"EntityDescriptor '{raw_entity_id}' is no longer valid")
             except AttributeError:
                 pass
 
-        # have I seen this entity_id before ? If so if log: ignore it
-        if entity_descr.entity_id in self.entity:
-            print(f"Duplicated Entity descriptor (entity id: '{entity_descr.entity_id}')", file=sys.stderr)
-            return
+        duplicate_certificate_error = self._check_duplicate_certificates(raw_entity_id, entity_descr)
 
         _ent = to_dict(entity_descr, metadata_modules())
         flag = 0
@@ -597,8 +730,52 @@ class InMemoryMetaData(MetaData):
             if not _ent:
                 flag = 0
 
-        if flag:
-            self.entity[entity_descr.entity_id] = _ent
+        if not flag:
+            if duplicate_certificate_error is not None:
+                raise duplicate_certificate_error
+            return
+
+        normalized_entity_id = normalize_entity_id(raw_entity_id)
+        existing = self.entity.get(normalized_entity_id)
+        if existing is not None:
+            comparable_existing = self._comparable_entity(existing)
+            comparable_new = self._comparable_entity(_ent)
+            if comparable_existing == comparable_new:
+                # Same normalized entityID and identical content: the
+                # descriptor is simply duplicated, keep the first copy and
+                # never let load order mutate the store.
+                if duplicate_certificate_error is not None:
+                    raise duplicate_certificate_error
+                return
+            if self._entity_certificates(comparable_existing) != self._entity_certificates(comparable_new):
+                message = (
+                    f"Conflicting metadata for entityID '{raw_entity_id}': "
+                    "different certificates declared for the same normalized entityID"
+                )
+                self.conflicts.append(raw_entity_id)
+                if self.strict_conflicts:
+                    raise EntityConflict(message)
+                logger.error("%s; keeping the first loaded descriptor", message)
+                return
+            else:
+                # Same trust anchor but different descriptive content: this
+                # is common in aggregated metadata. Record it independently
+                # and keep the first loaded descriptor instead of silently
+                # overwriting it based on load order.
+                if raw_entity_id not in self.content_conflicts:
+                    self.content_conflicts.append(raw_entity_id)
+                logger.warning(
+                    "Different non-certificate content for normalized entityID '%s'; "
+                    "keeping the first loaded descriptor",
+                    raw_entity_id,
+                )
+                if duplicate_certificate_error is not None:
+                    raise duplicate_certificate_error
+                return
+
+        self.entity[normalized_entity_id] = _ent
+        if duplicate_certificate_error is not None:
+            raise duplicate_certificate_error
 
     def parse(self, xmlstr):
         try:
@@ -616,13 +793,16 @@ class InMemoryMetaData(MetaData):
         if not self.entities_descr:
             self.entity_descr = md.entity_descriptor_from_string(xmlstr)
             if self.entity_descr:
-                self.do_entity_descriptor(self.entity_descr)
+                self._index_entity_descriptor(self.entity_descr)
         else:
             try:
                 valid_instance(self.entities_descr)
-            except NotValid as exc:
-                logger.error("Invalid XML message: %s", exc.args[0])
-                return
+            except (NotValid, ValueError) as exc:
+                # The aggregate as a whole may be invalid because a single
+                # descriptor is malformed (e.g. missing entityID). Validate
+                # descriptors independently so the good ones are still
+                # indexed and every failure lands in a dedicated bucket.
+                logger.warning("Invalid aggregate metadata, validating descriptors separately: %s", exc.args[0])
 
             if self.check_validity:
                 try:
@@ -635,7 +815,35 @@ class InMemoryMetaData(MetaData):
                     pass
 
             for entity_descr in self.entities_descr.entity_descriptor:
-                self.do_entity_descriptor(entity_descr)
+                self._index_entity_descriptor(entity_descr)
+
+    def _index_entity_descriptor(self, entity_descr):
+        """Index one descriptor, recording independent non-fatal outcomes.
+
+        Expired, oversized, malformed (missing entityID) and duplicate
+        certificate descriptors are recorded in dedicated buckets and skipped.
+        Certificate conflicts honor ``strict_conflicts``: they propagate only
+        when the caller explicitly opted into the strict policy.
+        """
+        try:
+            self.do_entity_descriptor(entity_descr)
+        except (ExpiredEntity, EntityDescriptorTooLarge, MissingEntityID, DuplicateCertificate):
+            logger.info(
+                "Skipped EntityDescriptor (entity id:%s): %s",
+                getattr(entity_descr, "entity_id", None),
+                sys.exc_info()[1],
+            )
+
+    def errors(self):
+        """Return all independently recorded descriptor outcomes."""
+        return {
+            "expired": list(self.expired),
+            "duplicate_certificates": list(self.duplicate_certificates),
+            "missing_entity_id": list(self.missing_entity_id),
+            "oversized": list(self.oversized),
+            "conflicts": list(self.conflicts),
+            "content_conflicts": list(self.content_conflicts),
+        }
 
     def service(self, entity_id, typ, service, binding=None):
         """Get me all services with a specified
@@ -887,7 +1095,7 @@ class MetaDataMD(InMemoryMetaData):
         with open(self.filename) as fp:
             data = json.load(fp)
         for key, item in data:
-            self.entity[key] = item
+            self.entity[normalize_entity_id(key)] = item
 
 
 class MetaDataMDX(InMemoryMetaData):
@@ -973,23 +1181,31 @@ class MetaDataMDX(InMemoryMetaData):
             raise KeyError(error_msg)
 
         curr_time = str_to_time(instant())
-        self.expiration_date[item] = add_duration(curr_time, self.freshness_period)
-        return self.entity[item]
+        normalized = normalize_entity_id(item)
+        self.expiration_date[normalized] = add_duration(curr_time, self.freshness_period)
+        return self.entity[normalized]
 
     def _is_metadata_fresh(self, item):
-        return before(self.expiration_date[item])
+        return before(self.expiration_date[normalize_entity_id(item)])
 
     def __getitem__(self, item):
-        if item not in self.entity:
+        normalized = normalize_entity_id(item)
+        if normalized not in self.entity:
             entity = self._fetch_metadata(item)
-        elif not self._is_metadata_fresh(item):
+        elif not self._is_metadata_fresh(normalized):
             msg = f"Metadata for {item} have expired; refreshing metadata"
             logger.info(msg)
-            _ = self.entity.pop(item)
+            _ = self.entity.pop(normalized)
             entity = self._fetch_metadata(item)
         else:
-            entity = self.entity[item]
+            entity = self.entity[normalized]
         return entity
+
+    def __contains__(self, item):
+        try:
+            return normalize_entity_id(item) in self.entity
+        except MissingEntityID:
+            return item in self.entity
 
     def single_sign_on_service(self, entity_id, binding=None, typ="idpsso"):
         if binding is None:
@@ -1007,6 +1223,7 @@ class MetadataStore(MetaData):
         disable_ssl_certificate_validation=False,
         filter=None,
         http_client_timeout=None,
+        strict_conflicts=False,
     ):
         """
         :params attrc:
@@ -1028,12 +1245,15 @@ class MetadataStore(MetaData):
         self.filter = filter
         self.to_old = {}
         self.http_client_timeout = http_client_timeout
+        self.conflicts = []
+        self.content_conflicts = []
+        self.strict_conflicts = strict_conflicts
 
     def load(self, *args, **kwargs):
         if self.filter:
-            _args = {"filter": self.filter}
+            _args = {"filter": self.filter, "strict_conflicts": self.strict_conflicts}
         else:
-            _args = {}
+            _args = {"strict_conflicts": self.strict_conflicts}
 
         typ = args[0]
         if typ == "local":
@@ -1054,7 +1274,7 @@ class MetadataStore(MetaData):
             self.ii += 1
             key = self.ii
             kwargs.update(_args)
-            _md = InMemoryMetaData(self.attrc, args[1])
+            _md = InMemoryMetaData(self.attrc, args[1], **kwargs)
         elif typ == "remote":
             if "url" not in kwargs:
                 raise ValueError("Remote metadata must be structured as a dict containing the key 'url'")
@@ -1099,6 +1319,64 @@ class MetadataStore(MetaData):
             raise SAMLError(f"Unknown metadata type '{typ}'")
         _md.load()
         self.metadata[key] = _md
+        self._detect_cross_source_conflicts(_md)
+
+    def _detect_cross_source_conflicts(self, new_md):
+        """Enforce the conflict policy across metadata sources."""
+        for entity_id, new_entity in new_md.items():
+            for source_key, other_md in self.metadata.items():
+                if other_md is new_md:
+                    continue
+                try:
+                    existing_entity = other_md[entity_id]
+                except KeyError:
+                    continue
+                comparable_existing = InMemoryMetaData._comparable_entity(existing_entity)
+                comparable_new = InMemoryMetaData._comparable_entity(new_entity)
+                if comparable_existing == comparable_new:
+                    continue
+                if self._certificate_set(comparable_existing) != self._certificate_set(comparable_new):
+                    self.conflicts.append(entity_id)
+                    message = (
+                        f"Conflicting metadata for normalized entityID '{entity_id}' "
+                        f"from source '{source_key}'"
+                    )
+                    if self.strict_conflicts:
+                        raise EntityConflict(message)
+                    logger.error("%s; keeping the first loaded descriptor", message)
+                    continue
+                if entity_id not in self.content_conflicts:
+                    self.content_conflicts.append(entity_id)
+                logger.warning(
+                    "Non-certificate content conflict for '%s' from source '%s'; keeping earlier descriptor",
+                    entity_id,
+                    source_key,
+                )
+
+    @staticmethod
+    def _certificate_set(entity_dict):
+        return InMemoryMetaData(None)._entity_certificates(entity_dict)
+
+    def errors(self):
+        """Aggregate the independent descriptor outcomes of every source."""
+        buckets = {
+            "expired": [],
+            "duplicate_certificates": [],
+            "missing_entity_id": [],
+            "oversized": [],
+            "conflicts": list(self.conflicts),
+            "content_conflicts": list(self.content_conflicts),
+        }
+        for _md in self.metadata.values():
+            if not hasattr(_md, "errors"):
+                continue
+            source_errors = _md.errors()
+            for bucket, values in source_errors.items():
+                buckets.setdefault(bucket, [])
+                for value in values:
+                    if value not in buckets[bucket]:
+                        buckets[bucket].append(value)
+        return buckets
 
     def reload(self, spec):
         # Save the old set of metadata
@@ -1145,6 +1423,7 @@ class MetadataStore(MetaData):
 
                 if self.filter:
                     kwargs["filter"] = self.filter
+                kwargs["strict_conflicts"] = self.strict_conflicts
 
                 for key in item["metadata"]:
                     # Separately handle MetaDataFile and directory
@@ -1152,7 +1431,7 @@ class MetadataStore(MetaData):
                         files = [f for f in os.listdir(key[0]) if isfile(join(key[0], f))]
                         for fil in files:
                             _fil = join(key[0], fil)
-                            _md = MetaDataFile(self.attrc, _fil)
+                            _md = MetaDataFile(self.attrc, _fil, strict_conflicts=self.strict_conflicts)
                             _md.load()
                             self.metadata[_fil] = _md
                             if _md.to_old:
@@ -1171,8 +1450,9 @@ class MetadataStore(MetaData):
     def service(self, entity_id, typ, service, binding=None):
         known_entity = False
         logger.debug("service(%s, %s, %s, %s)", entity_id, typ, service, binding)
+        normalized = normalize_entity_id(entity_id)
         for key, _md in self.metadata.items():
-            srvs = _md.service(entity_id, typ, service, binding)
+            srvs = _md.service(normalized, typ, service, binding)
             if srvs:
                 return srvs
             elif srvs is None:
@@ -1358,9 +1638,10 @@ class MetadataStore(MetaData):
         return res
 
     def __getitem__(self, item):
+        normalized = normalize_entity_id(item)
         for _md in self.metadata.values():
             try:
-                return _md[item]
+                return _md[normalized]
             except KeyError:
                 pass
 
@@ -1368,6 +1649,13 @@ class MetadataStore(MetaData):
 
     def __setitem__(self, key, value):
         self.metadata[key] = value
+
+    def __contains__(self, item):
+        try:
+            normalized = normalize_entity_id(item)
+        except MissingEntityID:
+            return False
+        return any(normalized in _md for _md in self.metadata.values())
 
     def entities(self):
         num = 0

@@ -12,6 +12,17 @@ from saml2.algsupport import algorithm_support_in_metadata
 from saml2.attribute_converter import from_local_name
 from saml2.cert import read_cert_from_file
 from saml2.config import Config
+from saml2.entityid import DEFAULT_ENTITY_DESCRIPTOR_MAX_SIZE
+from saml2.entityid import ENTITY_CACHE_VERSION
+from saml2.entityid import DuplicateCertificate
+from saml2.entityid import EntityConflict
+from saml2.entityid import EntityDescriptorTooLarge
+from saml2.entityid import ExpiredEntity
+from saml2.entityid import MetadataError
+from saml2.entityid import MissingEntityID
+from saml2.entityid import entity_id_cache_key
+from saml2.entityid import entity_ids_equal
+from saml2.entityid import normalize_entity_id
 from saml2.extension import idpdisc
 from saml2.extension import mdattr
 from saml2.extension import mdui
