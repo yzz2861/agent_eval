@@ -514,6 +514,39 @@ This controls the rate of throttling. The sequence of 1, 2, 4, 8… seconds is
 multiplied by this factor to define the delay imposed after 1, 2, 3, 4…
 successive failures. Set to 0 to disable throttling completely.
 
+
+.. setting:: OTP_EMAIL_FAILURE_WINDOW
+
+**OTP_EMAIL_FAILURE_WINDOW**
+
+Default: ``300``
+
+The sliding window, in seconds, over which consecutive failed challenge
+generations (for example, when the mail server rejects a message) are counted.
+A failed generation never claims a cooldown or invalidates an existing token;
+the cooldown and the new token are committed together only once the message
+has been accepted for delivery. Once :setting:`OTP_EMAIL_FAILURE_LIMIT`
+failures accumulate within this window, further generation attempts are
+refused until the window expires, so a broken mail backend cannot consume the
+mail quota indefinitely. Set to 0 to disable the failure limit.
+
+
+.. setting:: OTP_EMAIL_FAILURE_LIMIT
+
+**OTP_EMAIL_FAILURE_LIMIT**
+
+Default: ``5``
+
+The maximum number of consecutive failed challenge generations permitted
+within :setting:`OTP_EMAIL_FAILURE_WINDOW`. Set to 0 to disable the failure
+limit.
+
+All externally visible challenge failures (an unconfirmed device, a missing
+recipient address, or a server-side delivery error) return the same generic
+message, so callers cannot use the response to enumerate accounts or devices.
+The precise, stable reason code is only written to the
+``django_otp.plugins.otp_email`` audit logger.
+
 .. _other-plugins:
 
 Other Plugins

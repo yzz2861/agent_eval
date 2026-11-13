@@ -333,9 +333,15 @@ class GenerateNotAllowed(enum.Enum):
        Indicates that a token was generated recently and we're waiting for the
        cooldown period to expire.
 
+    .. data:: GENERATION_RETRY_LIMIT_PENDING
+
+       Indicates that too many consecutive challenge generations have failed
+       within the failure window and we're waiting for that window to expire.
+
     """
 
     COOLDOWN_DURATION_PENDING = 'COOLDOWN_DURATION_PENDING'
+    GENERATION_RETRY_LIMIT_PENDING = 'GENERATION_RETRY_LIMIT_PENDING'
 
 
 class CooldownMixin(models.Model):
@@ -354,12 +360,39 @@ class CooldownMixin(models.Model):
 
         The last time a token was generated for this device.
 
+    .. attribute:: generation_failure_count
+
+        The number of consecutive failed challenge generations within the
+        current failure window.
+
+    .. attribute:: generation_failure_timestamp
+
+        The datetime of the most recent failed challenge generation.
+
     """
 
     last_generated_timestamp = models.DateTimeField(
         null=True,
         blank=True,
         help_text="The last time a token was generated for this device.",
+    )
+
+    generation_failure_count = models.PositiveIntegerField(
+        default=0,
+        help_text=(
+            "The number of consecutive failed challenge generations within the"
+            " current failure window."
+        ),
+    )
+
+    generation_failure_timestamp = models.DateTimeField(
+        null=True,
+        blank=True,
+        default=None,
+        help_text=(
+            "The datetime of the most recent failed challenge generation. Null"
+            " if the last attempt succeeded."
+        ),
     )
 
     class Meta:
@@ -370,17 +403,30 @@ class CooldownMixin(models.Model):
         If token generation is allowed, returns ``(True, None)``. Otherwise,
         returns ``(False, data_dict)``.
 
-        ``data_dict`` contains further information. Currently it can be::
+        ``data_dict`` contains further information. It can be::
 
             {
                 'reason': GenerateNotAllowed.COOLDOWN_DURATION_PENDING,
                 'next_generation_at': when,
             }
 
-        where ``when`` is a datetime marking the end of the cooldown period.
-        See :class:`GenerateNotAllowed`.
+        where ``when`` is a datetime marking the end of the cooldown period,
+        or::
+
+            {
+                'reason': GenerateNotAllowed.GENERATION_RETRY_LIMIT_PENDING,
+                'failure_count': n,
+                'retry_after': when,
+            }
+
+        where ``n`` is the number of consecutive failures and ``when`` marks
+        the end of the failure window. See :class:`GenerateNotAllowed`.
 
         """
+        retry_allowed, failure_dict = self.generation_is_retry_allowed()
+        if not retry_allowed:
+            return False, failure_dict
+
         dt_now = timezone.now()
         if (
             not self.last_generated_timestamp
@@ -394,6 +440,79 @@ class CooldownMixin(models.Model):
                 'next_generation_at': self.last_generated_timestamp
                 + timedelta(seconds=self.get_cooldown_duration()),
             }
+
+    def generation_is_retry_allowed(self):
+        """
+        Checks whether the configured limit of consecutive failed challenge
+        generations has been reached within the current failure window.
+
+        If generation is allowed, returns ``(True, None)``. Otherwise,
+        returns ``(False, data_dict)`` where ``data_dict`` carries a
+        :class:`GenerateNotAllowed` reason and the end of the failure window.
+        A failure limit or window of ``0`` disables this check entirely.
+
+        """
+        failure_limit = self.get_generation_failure_limit()
+        failure_window = self.get_generation_failure_window()
+        if (
+            (failure_limit > 0)
+            and (failure_window > 0)
+            and (self.generation_failure_count >= failure_limit)
+            and (self.generation_failure_timestamp is not None)
+        ):
+            dt_now = timezone.now()
+            window_expires_at = self.generation_failure_timestamp + timedelta(
+                seconds=failure_window
+            )
+            if dt_now < window_expires_at:
+                return False, {
+                    'reason': GenerateNotAllowed.GENERATION_RETRY_LIMIT_PENDING,
+                    'failure_count': self.generation_failure_count,
+                    'retry_after': window_expires_at,
+                }
+
+        return True, None
+
+    def generation_failure_record(self, commit=True):
+        """
+        Records a failed challenge generation.
+
+        Consecutive failures are counted within the configured failure window.
+        A failure outside of the window (or when no window is configured)
+        starts a new count.
+
+        :param bool commit: Pass False if you intend to save the instance
+            yourself.
+
+        """
+        dt_now = timezone.now()
+        failure_window = self.get_generation_failure_window()
+        if (
+            failure_window <= 0
+            or self.generation_failure_timestamp is None
+            or (dt_now - self.generation_failure_timestamp).total_seconds()
+            > failure_window
+        ):
+            self.generation_failure_count = 0
+
+        self.generation_failure_count += 1
+        self.generation_failure_timestamp = dt_now
+        if commit:
+            self.save()
+
+    def generation_failure_reset(self, commit=True):
+        """
+        Clears the record of consecutive failed challenge generations
+        (normally after a successful generation).
+
+        :param bool commit: Pass False if you intend to save the instance
+            yourself.
+
+        """
+        self.generation_failure_count = 0
+        self.generation_failure_timestamp = None
+        if commit:
+            self.save()
 
     def cooldown_reset(self, commit=True):
         """
@@ -446,6 +565,28 @@ class CooldownMixin(models.Model):
 
         """
         raise NotImplementedError()
+
+    def get_generation_failure_window(self):
+        """
+        Returns the sliding window, in seconds, over which consecutive
+        failed challenge generations are counted.
+
+        A value of 0 disables the failure limit. Subclasses normally wrap a
+        plugin-specific setting here.
+
+        """
+        return 0
+
+    def get_generation_failure_limit(self):
+        """
+        Returns the maximum number of consecutive failed challenge
+        generations permitted within the failure window.
+
+        A value of 0 disables the failure limit. Subclasses normally wrap a
+        plugin-specific setting here.
+
+        """
+        return 0
 
 
 class VerifyNotAllowed(enum.Enum):

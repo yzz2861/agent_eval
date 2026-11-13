@@ -1,3 +1,22 @@
+v1.7.6 - Unreleased - Reliable email challenge delivery
+--------------------------------------------------------------------------------
+
+- Email challenge generation now runs the cooldown claim, token generation
+  and message delivery inside a single transaction. Delivery failures roll
+  the cooldown and new token back, keeping any previously issued token valid;
+  a new token is only committed once the message has been accepted for
+  delivery, so a "message sent but no usable token" state can no longer occur.
+- Consecutive delivery failures are now capped within
+  :setting:`OTP_EMAIL_FAILURE_WINDOW` /
+  :setting:`OTP_EMAIL_FAILURE_LIMIT`, and concurrent challenges serialize on
+  a row lock so that only one request can claim a send.
+- Unconfirmed devices, missing recipient addresses and server-side delivery
+  failures now return an identical generic message; the distinct, stable
+  reason codes are only emitted to the ``django_otp.plugins.otp_email``
+  audit logger, preventing account/device enumeration through challenge
+  responses.
+
+
 v1.7.5 - October 16, 2026 - Revoke sessions for unconfirmed devices
 --------------------------------------------------------------------------------
 
