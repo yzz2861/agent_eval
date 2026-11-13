@@ -27,12 +27,15 @@ to your users.
 """
 
 import hashlib
+import logging
 import os
 import sys
 import typing
 from hmac import compare_digest
 
-from . import common, transform, core, key
+from . import asn1, common, transform, core, key
+
+logger = logging.getLogger(__name__)
 
 if typing.TYPE_CHECKING:
     HashType = hashlib._Hash
@@ -64,6 +67,27 @@ HASH_METHODS: typing.Dict[str, typing.Callable[[], HashType]] = {
     "SHA3-512": hashlib.sha3_512,
 }
 """Hash methods supported by this library."""
+
+# OBJECT IDENTIFIER values of the hash algorithms in HASH_ASN1, in dotted form.
+HASH_OIDS: typing.Dict[str, str] = {
+    "MD5": "1.2.840.113549.2.5",
+    "SHA-1": "1.3.14.3.2.26",
+    "SHA-224": "2.16.840.1.101.3.4.2.4",
+    "SHA-256": "2.16.840.1.101.3.4.2.1",
+    "SHA-384": "2.16.840.1.101.3.4.2.2",
+    "SHA-512": "2.16.840.1.101.3.4.2.3",
+    "SHA3-256": "2.16.840.1.101.3.4.2.8",
+    "SHA3-384": "2.16.840.1.101.3.4.2.9",
+    "SHA3-512": "2.16.840.1.101.3.4.2.10",
+}
+
+OID_TO_HASH: typing.Dict[str, str] = {oid: name for name, oid in HASH_OIDS.items()}
+
+# Verification stages, kept separate for audit logging. Externally every stage
+# is reported as the same generic failure.
+_STAGE_ENCODING = "encoding"
+_STAGE_STRUCTURE = "structure"
+_STAGE_HASH = "hash"
 
 
 class CryptoError(Exception):
@@ -326,42 +350,117 @@ def sign(message: bytes, priv_key: key.PrivateKey, hash_method: str) -> bytes:
     return sign_hash(msg_hash, priv_key, hash_method)
 
 
-def verify(message: bytes, signature: bytes, pub_key: key.PublicKey) -> str:
+def verify(
+    message: bytes,
+    signature: bytes,
+    pub_key: key.PublicKey,
+    hash_method: typing.Optional[str] = None,
+) -> str:
     """Verifies that the signature matches the message.
 
-    The hash method is detected automatically from the signature.
+    The hash method is detected from the signature's DigestInfo. When
+    ``hash_method`` is given, the OBJECT IDENTIFIER in the DigestInfo must
+    identify that same hash.
+
+    Verification parses the full EMSA-PKCS1-v1_5 encoded message instead of
+    matching a prefix or the trailing hash, so DigestInfo structures with the
+    wrong OID, wrong digest length, non-minimal DER, extra trailing fields or
+    padding shorter than 8 bytes are rejected.
 
     :param message: the signed message. Can be an 8-bit string or a file-like
         object. If ``message`` has a ``read()`` method, it is assumed to be a
         file-like object.
     :param signature: the signature block, as created with :py:func:`rsa.sign`.
     :param pub_key: the :py:class:`rsa.PublicKey` of the person signing the message.
-    :raise VerificationError: when the signature doesn't match the message.
+    :param hash_method: optional hash name ('MD5', 'SHA-1', 'SHA-256', ...)
+        that the signature is expected to use.
+    :raise VerificationError: when the signature doesn't match the message. The
+        message is always generic and never contains signature material.
     :returns: the name of the used hash.
 
     """
 
+    if hash_method is not None and hash_method not in HASH_METHODS:
+        raise ValueError("Invalid hash method: %s" % hash_method)
+
     keylength = common.byte_size(pub_key.n)
     if len(signature) != keylength:
+        # This checks the public signature length, so no key material leaks.
+        logger.debug("verification failed at stage %s", _STAGE_ENCODING)
         raise VerificationError("Verification failed")
-    
+
     encrypted = transform.bytes2int(signature)
     decrypted = core.encrypt_int(encrypted, pub_key.e, pub_key.n)
     clearsig = transform.int2bytes(decrypted, keylength)
 
-    # Get the hash method
-    method_name = _find_method_hash(clearsig)
-    message_hash = compute_hash(message, method_name)
+    try:
+        method_name, embedded_hash = _parse_encoded_message(clearsig)
+        if hash_method is not None and method_name != hash_method:
+            raise _VerificationFailure(_STAGE_STRUCTURE, "DigestInfo OID mismatch")
 
-    # Reconstruct the expected padded hash
-    cleartext = HASH_ASN1[method_name] + message_hash
-    expected = _pad_for_signing(cleartext, keylength)
+        # The OCTET STRING must contain exactly one digest of the declared hash.
+        expected_length = HASH_METHODS[method_name]().digest_size
+        if len(embedded_hash) != expected_length:
+            raise _VerificationFailure(_STAGE_STRUCTURE, "digest length mismatch")
 
-    # Compare with the signed one
-    if expected != clearsig:
+        message_hash = compute_hash(message, method_name)
+        if not compare_digest(embedded_hash, message_hash):
+            raise _VerificationFailure(_STAGE_HASH, "digest mismatch")
+    except _VerificationFailure as failure:
+        logger.debug("verification failed at stage %s", failure.stage)
         raise VerificationError("Verification failed")
 
     return method_name
+
+
+class _VerificationFailure(Exception):
+    """Internal, audit-only verification failure carrying the failure stage."""
+
+    def __init__(self, stage: str, reason: str) -> None:
+        super().__init__(reason)
+        self.stage = stage
+
+
+def _check_signature_padding(encoded_message: bytes) -> bytes:
+    """Validates the 00 01 FF... FF 00 PKCS#1 v1.5 signature padding.
+
+    Returns the bytes of the DigestInfo, i.e. everything after the 00
+    separator. Requires at least 8 padding bytes, all equal to 0xFF.
+    """
+
+    if len(encoded_message) < 11 or encoded_message[:2] != b"\x00\x01":
+        raise _VerificationFailure(_STAGE_STRUCTURE, "bad PKCS#1 padding header")
+
+    separator = encoded_message.find(b"\x00", 2)
+    if separator < 0:
+        raise _VerificationFailure(_STAGE_STRUCTURE, "missing PKCS#1 padding separator")
+
+    padding = encoded_message[2:separator]
+    if len(padding) < 8 or padding != b"\xff" * len(padding):
+        raise _VerificationFailure(_STAGE_STRUCTURE, "invalid PKCS#1 padding")
+
+    digest_info = encoded_message[separator + 1 :]
+    if not digest_info:
+        raise _VerificationFailure(_STAGE_STRUCTURE, "empty DigestInfo")
+
+    return digest_info
+
+
+def _parse_encoded_message(clearsig: bytes) -> typing.Tuple[str, bytes]:
+    """Parses a recovered PKCS#1 v1.5 signature into (hash_name, digest)."""
+
+    digest_info = _check_signature_padding(clearsig)
+
+    try:
+        oid, digest = asn1.parse_digest_info(digest_info)
+    except asn1.Asn1Error as error:
+        raise _VerificationFailure(_STAGE_STRUCTURE, str(error))
+
+    method_name = OID_TO_HASH.get(oid)
+    if method_name is None:
+        raise _VerificationFailure(_STAGE_STRUCTURE, "unsupported DigestInfo OID")
+
+    return method_name, digest
 
 
 def find_signature_hash(signature: bytes, pub_key: key.PublicKey) -> str:
@@ -376,11 +475,20 @@ def find_signature_hash(signature: bytes, pub_key: key.PublicKey) -> str:
     """
 
     keylength = common.byte_size(pub_key.n)
+    if len(signature) != keylength:
+        raise VerificationError("Verification failed")
+
     encrypted = transform.bytes2int(signature)
-    decrypted = core.decrypt_int(encrypted, pub_key.e, pub_key.n)
+    decrypted = core.encrypt_int(encrypted, pub_key.e, pub_key.n)
     clearsig = transform.int2bytes(decrypted, keylength)
 
-    return _find_method_hash(clearsig)
+    try:
+        method_name, _ = _parse_encoded_message(clearsig)
+    except _VerificationFailure as failure:
+        logger.debug("signature hash detection failed at stage %s", failure.stage)
+        raise VerificationError("Verification failed")
+
+    return method_name
 
 
 def yield_fixedblocks(infile: typing.BinaryIO, blocksize: int) -> typing.Iterator[bytes]:
@@ -430,21 +538,6 @@ def compute_hash(message: typing.Union[bytes, typing.BinaryIO], method_name: str
             hasher.update(block)
 
     return hasher.digest()
-
-
-def _find_method_hash(clearsig: bytes) -> str:
-    """Finds the hash method.
-
-    :param clearsig: full padded ASN1 and hash.
-    :return: the used hash method.
-    :raise VerificationFailed: when the hash method cannot be found
-    """
-
-    for (hashname, asn1code) in HASH_ASN1.items():
-        if asn1code in clearsig:
-            return hashname
-
-    raise VerificationError("Verification failed")
 
 
 __all__ = [
