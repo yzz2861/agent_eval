@@ -1,6 +1,7 @@
 # pylint: disable=arguments-differ
 # pylint generates false negatives from proxy class method overrides
 
+from datetime import datetime
 from logging import getLogger
 from typing import Optional
 
@@ -73,6 +74,10 @@ class AxesProxyHandler(AbstractAxesHandler, AxesBaseHandler):
         return cls.get_implementation().remove_out_of_limit_failure_logs(
             username=username
         )
+
+    @classmethod
+    def apply_retention_policy(cls, *, now: Optional[datetime] = None):
+        return cls.get_implementation().apply_retention_policy(now=now)
 
     @staticmethod
     def update_request(request):

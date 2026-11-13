@@ -1,9 +1,12 @@
-from datetime import timedelta, datetime
+import json
+import re
+from datetime import datetime, timedelta
 from hashlib import sha256
+from html import unescape
 from logging import getLogger
 from string import Template
-from typing import Callable, Optional, Type, Union, List
-from urllib.parse import urlencode
+from typing import Any, Callable, Iterable, Optional, Type, Union, List
+from urllib.parse import unquote, urlencode
 
 from django.contrib.auth import get_user_model
 from django.core.cache import BaseCache, caches
@@ -16,6 +19,31 @@ from axes.conf import LockoutTier, settings
 from axes.models import AccessBase
 
 log = getLogger(__name__)
+
+# Stable placeholders used whenever a value is removed from a log payload.
+# The fixed-width mask intentionally reveals nothing about the original value.
+SENSITIVE_VALUE_MASK = "********************"
+TRUNCATED_VALUE_MARKER = "[truncated]"
+TRUNCATED_PAYLOAD_MARKER = "[truncated]"
+_MAX_DECODE_ITERATIONS = 5
+
+# Substrings that always identify a secret-like field, independent of casing,
+# percent/HTML encoding or Django form prefixes (e.g. login-PASSWORD or
+# form[0].access_token are both recognized).
+SENSITIVE_KEY_TOKENS = (
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "apikey",
+    "api_key",
+    "auth",
+    "credential",
+    "cookie",
+    "session",
+    "email",
+    "mail",
+)
 
 try:
     import ipware.ip
@@ -299,11 +327,23 @@ def get_client_ip_address(
 
 
 def get_client_user_agent(request: HttpRequest) -> str:
-    return request.META.get("HTTP_USER_AGENT", "<unknown>")[:255]
+    return request.META.get("HTTP_USER_AGENT", "<unknown>")[
+        : settings.AXES_LOG_USER_AGENT_MAX_LENGTH
+    ]
 
 
 def get_client_path_info(request: HttpRequest) -> str:
-    return request.META.get("PATH_INFO", "<unknown>")[:255]
+    return request.META.get("PATH_INFO", "<unknown>")[
+        : settings.AXES_LOG_PATH_MAX_LENGTH
+    ]
+
+
+def get_client_http_referer(request: HttpRequest) -> str:
+    """Return a length-bounded HTTP Referer value for safe log storage."""
+
+    return request.META.get("HTTP_REFERER", "")[
+        : settings.AXES_LOG_REFERER_MAX_LENGTH
+    ]
 
 
 def get_client_http_accept(request: HttpRequest) -> str:
@@ -470,6 +510,230 @@ def get_client_str(
     client_str = ", ".join(template.substitute(item) for item in items)
     client_str = "{" + client_str + "}"
     return client_str
+
+
+def _decode_key_variants(key: Any) -> str:
+    """
+    Normalize a field name across casing and common encoding variants.
+
+    Repeated percent decoding resolves double/triple encoded names such as
+    ``%2570assword`` and HTML entity decoding resolves e.g. ``&#112;assword``.
+    Non-alphanumeric runs collapse into path separators so that form prefixes,
+    JSON paths and whitespace do not hide sensitive fields while keeping word
+    boundaries (e.g. ``username`` does not match the ``session`` token).
+    """
+
+    decoded = str(key)
+    for _ in range(_MAX_DECODE_ITERATIONS):
+        previous = decoded
+        decoded = unquote(decoded)
+        if decoded == previous:
+            break
+    decoded = unescape(decoded).lower()
+    # Keep a single separator for form prefixes and nested paths while
+    # dropping casing, punctuation and other formatting noise.
+    return re.sub(r"[^a-z0-9]+", ".", decoded).strip(".")
+
+
+def _configured_sensitive_tokens() -> set:
+    tokens = set()
+    for raw_token in SENSITIVE_KEY_TOKENS:
+        normalized = _decode_key_variants(raw_token)
+        if normalized:
+            tokens.add(normalized)
+            # Both snake/camel and compact spellings should match.
+            tokens.add(normalized.replace(".", ""))
+    configured = list(settings.AXES_SENSITIVE_PARAMETERS)
+    if settings.AXES_PASSWORD_FORM_FIELD:
+        configured.append(settings.AXES_PASSWORD_FORM_FIELD)
+    for parameter in configured:
+        token = _decode_key_variants(parameter)
+        if token:
+            tokens.add(token)
+            tokens.add(token.replace(".", ""))
+    # The legacy implementation always cleanses the bare password field.
+    tokens.add("password")
+    return tokens
+
+
+def is_sensitive_key(key: Any) -> bool:
+    """
+    Return True when *key* names a secret-like field.
+
+    Matching is token based: the normalized key is sensitive when it equals a
+    sensitive token or contains one at a word boundary, which covers Django
+    form prefixes (``login-password``) and nested paths (``form.token.value``).
+    """
+
+    normalized = _decode_key_variants(key)
+    if not normalized:
+        return False
+    for token in _configured_sensitive_tokens():
+        if not token:
+            continue
+        if normalized == token:
+            return True
+        # Django form prefixes and JSON paths keep tokens adjacent to other
+        # words; underscore/letter adjacency (e.g. ``username`` vs
+        # ``session``) must not trigger a match, so split on word boundaries.
+        if re.search(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", normalized):
+            return True
+    return False
+
+
+def looks_like_email(value: str) -> bool:
+    """Conservative email check used to mask addresses inside arbitrary values."""
+
+    return bool(re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", value))
+
+
+def _is_json_container(text: str) -> bool:
+    stripped = text.strip()
+    return stripped[:1] in ("{", "[") and stripped[-1:] in ("}", "]")
+
+
+def _parse_json_value(value: str) -> Any:
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError, RecursionError):
+        return value
+    if isinstance(parsed, (dict, list)):
+        return parsed
+    return value
+
+
+def _render_scalar(value: Any, sensitive: bool) -> str:
+    if value is None or isinstance(value, bool):
+        rendered = "null" if value is None else json.dumps(value)
+    elif isinstance(value, (int, float)):
+        rendered = json.dumps(value)
+    else:
+        text = str(value)
+        if sensitive or looks_like_email(text):
+            return json.dumps(SENSITIVE_VALUE_MASK)
+        encoded = json.dumps(text, ensure_ascii=False)
+        max_bytes = settings.AXES_LOG_MAX_VALUE_BYTES
+        if len(encoded.encode("utf-8")) <= max_bytes:
+            return encoded
+        encoded_bytes = encoded.encode("utf-8")[:max_bytes].decode(
+            "utf-8", errors="ignore"
+        )
+        if encoded_bytes.startswith('"'):
+            encoded_bytes = encoded_bytes[1:]
+        return json.dumps(encoded_bytes + TRUNCATED_VALUE_MARKER)
+    if sensitive:
+        return json.dumps(SENSITIVE_VALUE_MASK)
+    return rendered
+
+
+def sanitize_log_value(value: Any, *, sensitive: bool = False, depth: int = 0) -> str:
+    """
+    Project one request value into a bounded, JSON-encoded representation.
+
+    Nested dict/list values are walked recursively. Sensitive fields and email
+    addresses are replaced with a stable mask instead of being truncated into a
+    partial secret. Depth, per-container item count, per-value size and total
+    serialized size are all bounded to keep the output below database limits.
+    """
+
+    max_depth = settings.AXES_LOG_MAX_DEPTH
+    max_items = settings.AXES_LOG_MAX_ITEMS
+    max_total_bytes = settings.AXES_LOG_MAX_TOTAL_BYTES
+    # Reserve room so the truncation marker itself always fits while the
+    # assembled output stays valid JSON and under the configured byte budget.
+    marker_size = len(json.dumps(TRUNCATED_PAYLOAD_MARKER).encode("utf-8"))
+    budget = {"bytes": max(0, max_total_bytes - marker_size), "exhausted": False}
+
+    def charge(rendered: str) -> None:
+        budget["bytes"] -= len(rendered.encode("utf-8"))
+        if budget["bytes"] <= 0:
+            budget["exhausted"] = True
+
+    def truncation_marker() -> str:
+        return json.dumps(TRUNCATED_PAYLOAD_MARKER)
+
+    def walk(node: Any, *, node_sensitive: bool, level: int) -> str:
+        if budget["exhausted"]:
+            return truncation_marker()
+        if isinstance(node, str) and not node_sensitive and _is_json_container(node):
+            node = _parse_json_value(node)
+
+        if isinstance(node, dict):
+            if level >= max_depth:
+                return truncation_marker()
+            parts = []
+            for index, (key, item) in enumerate(node.items()):
+                if index >= max_items:
+                    parts.append(
+                        json.dumps(TRUNCATED_PAYLOAD_MARKER)
+                        + ": "
+                        + truncation_marker()
+                    )
+                    break
+                child_sensitive = node_sensitive or is_sensitive_key(key)
+                if budget["exhausted"]:
+                    break
+                fragment = json.dumps(str(key)) + ": "
+                rendered_child = walk(
+                    item, node_sensitive=child_sensitive, level=level + 1
+                )
+                fragment += rendered_child
+                charge(fragment)
+                parts.append(fragment)
+            return "{" + ", ".join(part for part in parts if part) + "}"
+
+        if isinstance(node, (list, tuple)) or (
+            not isinstance(node, (str, bytes, dict)) and isinstance(node, Iterable)
+        ):
+            if level >= max_depth:
+                return truncation_marker()
+            parts = []
+            for index, item in enumerate(node):
+                if index >= max_items:
+                    parts.append(truncation_marker())
+                    break
+                if budget["exhausted"]:
+                    parts.append(truncation_marker())
+                    break
+                rendered_child = walk(
+                    item, node_sensitive=node_sensitive, level=level + 1
+                )
+                parts.append(rendered_child)
+            return "[" + ", ".join(part for part in parts if part) + "]"
+
+        rendered = _render_scalar(node, node_sensitive)
+        charge(rendered)
+        return rendered
+
+    rendered = walk(value, node_sensitive=sensitive, level=depth)
+    if len(rendered.encode("utf-8")) > max_total_bytes:
+        return truncation_marker()
+    return rendered
+
+
+def sanitize_request_payload(payload: Any) -> str:
+    """
+    Sanitize a request mapping (including a Django QueryDict) into JSON text.
+
+    Repeated keys are represented with all of their values so that no payload
+    variant can smuggle a secret in an overwritten entry. The output never
+    exceeds the configured total byte budget.
+    """
+
+    if hasattr(payload, "lists"):
+        items = list(payload.lists())
+    elif isinstance(payload, dict):
+        items = list(payload.items())
+    else:
+        items = [(None, payload)]
+
+    projected = {}
+    for key, value in items:
+        if isinstance(value, list) and len(value) == 1:
+            projected[str(key)] = value[0]
+        else:
+            projected[str(key)] = value
+    return sanitize_log_value(projected)
 
 
 def cleanse_parameters(params: dict) -> dict:

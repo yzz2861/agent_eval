@@ -2,6 +2,28 @@
 Changes
 =======
 
+Unreleased
+----------
+
+Features and fixes
+~~~~~~~~~~~~~~~~~~
+
+- Add opt-in ``AXES_LOG_FIELD_PROJECTION_ENABLED`` payload projection: sensitive
+  keys are detected across casing, percent/HTML encoding and form-prefix
+  variants, nested dict/list payloads are bounded by depth, item count and
+  byte budget, and secrets/emails are replaced with a stable mask instead of
+  truncated partial values. User agent, path and HTTP Referer are length
+  bounded as well.
+- Add ``http_referer`` to the log models and ``session_hash`` to
+  ``AccessFailureLog`` so a lockout can be correlated with the later successful
+  ``AccessLog``; under field projection the log tables keep only correlation
+  fields while ``AccessAttempt`` retains the failure counter and sanitized
+  payload.
+- Add opt-in ``AXES_RETENTION_ENABLED`` / ``AXES_RETENTION_DAYS`` tiered
+  retention policy with an idempotent ``axes_apply_retention`` management
+  command. Cleanup failures are isolated from the login flow and reported via
+  category/reason/count audit entries without echoing deleted content.
+
 9.0.0 (2026-10-30)
 ------------------
 

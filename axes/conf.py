@@ -183,6 +183,52 @@ settings.AXES_RESET_COOL_OFF_ON_FAILURE_DURING_LOCKOUT = getattr(
     settings, "AXES_RESET_COOL_OFF_ON_FAILURE_DURING_LOCKOUT", True
 )
 
+# Log field projection and payload sanitization. Disabled by default so the
+# legacy plaintext field logging behaviour is unchanged until explicitly opted in.
+settings.AXES_LOG_FIELD_PROJECTION_ENABLED = getattr(
+    settings, "AXES_LOG_FIELD_PROJECTION_ENABLED", False
+)
+
+# Maximum nesting depth kept when sanitizing dict/list request payloads.
+settings.AXES_LOG_MAX_DEPTH = getattr(settings, "AXES_LOG_MAX_DEPTH", 8)
+
+# Maximum number of items kept for each dict or list container.
+settings.AXES_LOG_MAX_ITEMS = getattr(settings, "AXES_LOG_MAX_ITEMS", 32)
+
+# Maximum byte length kept for individual non-sensitive scalar values.
+settings.AXES_LOG_MAX_VALUE_BYTES = getattr(
+    settings, "AXES_LOG_MAX_VALUE_BYTES", 256
+)
+
+# Maximum serialized byte length of a sanitized GET/POST payload.
+settings.AXES_LOG_MAX_TOTAL_BYTES = getattr(
+    settings, "AXES_LOG_MAX_TOTAL_BYTES", 4096
+)
+
+# Boundaries for request metadata that is copied into the log models.
+settings.AXES_LOG_USER_AGENT_MAX_LENGTH = getattr(
+    settings, "AXES_LOG_USER_AGENT_MAX_LENGTH", 255
+)
+settings.AXES_LOG_PATH_MAX_LENGTH = getattr(
+    settings, "AXES_LOG_PATH_MAX_LENGTH", 255
+)
+settings.AXES_LOG_REFERER_MAX_LENGTH = getattr(
+    settings, "AXES_LOG_REFERER_MAX_LENGTH", 255
+)
+
+# Tiered retention policy, keyed by log category. Values are retention days;
+# None means the category is not pruned by the policy. The feature is opt-in.
+settings.AXES_RETENTION_ENABLED = getattr(settings, "AXES_RETENTION_ENABLED", False)
+settings.AXES_RETENTION_DAYS = getattr(
+    settings,
+    "AXES_RETENTION_DAYS",
+    {
+        "failure": 30,
+        "success": 90,
+        "attempt": None,
+    },
+)
+
 
 ###
 # django-ipware settings for client IP address calculation and proxy detection

@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 from logging import getLogger
 from typing import List, Optional
 
@@ -6,6 +6,7 @@ from django.db import router, transaction
 from django.db.models import F, Q, QuerySet, Sum, Value
 from django.db.models.functions import Concat
 from django.http import HttpRequest
+from django.http import QueryDict
 from django.http.multipartparser import MultiPartParserError
 from django.utils import timezone
 
@@ -14,6 +15,7 @@ from axes.conf import settings
 from axes.handlers.base import AbstractAxesHandler, AxesBaseHandler
 from axes.helpers import (
     get_client_parameters,
+    get_client_http_referer,
     get_client_session_hash,
     get_client_str,
     get_client_username,
@@ -22,6 +24,7 @@ from axes.helpers import (
     get_lockout_parameters,
     get_query_str,
     get_attempt_expiration,
+    sanitize_request_payload,
 )
 from axes.models import (
     AccessAttempt,
@@ -109,6 +112,120 @@ class AxesDatabaseHandler(AbstractAxesHandler, AxesBaseHandler):
                 count += 1
         return count
 
+    def apply_retention_policy(
+        self, *, now: Optional[datetime] = None
+    ) -> List[dict]:
+        """
+        Apply the age based retention policy to every configured log category.
+
+        The operation is opt-in (``settings.AXES_RETENTION_ENABLED``) and
+        idempotent: rerunning it only deletes rows that still cross the age
+        threshold. Audit entries contain a category, reason and count but never
+        any deleted row content. Database errors are reported in the audit list
+        instead of propagating so a cleanup failure can not break login flows.
+        """
+
+        audit: List[dict] = []
+        if not settings.AXES_RETENTION_ENABLED:
+            log.debug("AXES: Retention policy is disabled, skipping cleanup.")
+            return audit
+
+        reference_time = now or timezone.now()
+        category_models = {
+            "failure": AccessFailureLog,
+            "success": AccessLog,
+            "attempt": AccessAttempt,
+        }
+
+        for category, model in category_models.items():
+            age_days = settings.AXES_RETENTION_DAYS.get(category)
+            if age_days is None:
+                continue
+            try:
+                age_days = int(age_days)
+                if age_days < 0:
+                    raise ValueError("retention age must be zero or positive")
+                cutoff = reference_time - timedelta(days=age_days)
+                count, _ = model.objects.filter(attempt_time__lte=cutoff).delete()
+            except (TypeError, ValueError) as error:
+                log.exception(
+                    "AXES: Retention policy configuration is invalid for category %s: %s",
+                    category,
+                    error.__class__.__name__,
+                )
+                audit.append(
+                    {
+                        "category": category,
+                        "reason": "invalid_configuration",
+                        "count": 0,
+                        "error": error.__class__.__name__,
+                    }
+                )
+                continue
+            except Exception as error:  # pylint: disable=broad-except
+                log.exception(
+                    "AXES: Retention cleanup failed for category %s: %s",
+                    category,
+                    error.__class__.__name__,
+                )
+                audit.append(
+                    {
+                        "category": category,
+                        "reason": "delete_failed",
+                        "count": 0,
+                        "error": error.__class__.__name__,
+                    }
+                )
+                continue
+
+            reason = f"age_over_{age_days}_days"
+            log.info(
+                "AXES: Retention policy deleted %d %s log record(s) (%s).",
+                count,
+                category,
+                reason,
+            )
+            audit.append(
+                {"category": category, "reason": reason, "count": count}
+            )
+
+        return audit
+
+    def _safe_apply_retention_policy(
+        self, *, now: Optional[datetime] = None
+    ) -> None:
+        """Run retention cleanup while guaranteeing login flow isolation."""
+
+        try:
+            self.apply_retention_policy(now=now)
+        except Exception as error:  # pylint: disable=broad-except
+            log.exception(
+                "AXES: Retention policy aborted without affecting login flow: %s",
+                error.__class__.__name__,
+            )
+
+    @staticmethod
+    def _minimum_field(value: Optional[str]) -> str:
+        """
+        Project a metadata field down to the minimum value needed for joins.
+
+        Under field projection the log rows keep only correlation fields
+        (username/IP/user agent/session hash); descriptive metadata is dropped
+        rather than stored. The legacy behaviour keeps the supplied value.
+        """
+
+        if settings.AXES_LOG_FIELD_PROJECTION_ENABLED:
+            return ""
+        return value or ""
+
+    @staticmethod
+    def _project_request_data(query: QueryDict) -> str:
+        """Return sanitized JSON when projection is enabled, legacy text otherwise."""
+
+        if settings.AXES_LOG_FIELD_PROJECTION_ENABLED:
+            return sanitize_request_payload(query).replace("\0", "0x00")
+        return get_query_str(query).replace("\0", "0x00")
+
     def get_failures(self, request, credentials: Optional[dict] = None) -> int:
         attempts_list = self.get_user_attempts(request, credentials)
         attempt_count = max(
@@ -140,6 +257,9 @@ class AxesDatabaseHandler(AbstractAxesHandler, AxesBaseHandler):
         # 1. database query: Clean up expired user attempts from the database before logging new attempts
         self.clean_expired_user_attempts(request, credentials)
 
+        # Retention is best-effort: a pruning failure must never block sign-in.
+        self._safe_apply_retention_policy()
+
         username = get_client_username(request, credentials)
         client_str = get_client_str(
             username,
@@ -163,10 +283,11 @@ class AxesDatabaseHandler(AbstractAxesHandler, AxesBaseHandler):
             )
             return
 
-        # This replaces null byte chars that crash saving failures.
-        get_data = get_query_str(request.GET).replace("\0", "0x00")
+        # This replaces null byte chars that crash saving failures. When field
+        # projection is enabled the payload is sanitized recursively instead.
+        get_data = self._project_request_data(request.GET)
         try:
-            post_data = get_query_str(request.POST).replace("\0", "0x00")
+            post_data = self._project_request_data(request.POST)
         except MultiPartParserError as ex:
             post_data = (
                 f'Could not access "request.POST": {ex.__class__.__name__}: {ex}'
@@ -196,6 +317,7 @@ class AxesDatabaseHandler(AbstractAxesHandler, AxesBaseHandler):
                         "post_data": post_data,
                         "http_accept": request.axes_http_accept,
                         "path_info": request.axes_path_info,
+                        "http_referer": get_client_http_referer(request),
                         "failures_since_start": 1,
                         "attempt_time": request.axes_attempt_time,
                     },
@@ -215,12 +337,20 @@ class AxesDatabaseHandler(AbstractAxesHandler, AxesBaseHandler):
                 # because attackers can request the site with multiple different configurations
                 # in order to bypass the defense mechanisms that are used by the site.
                 else:
-                    separator = "\n---------\n"
+                    if settings.AXES_LOG_FIELD_PROJECTION_ENABLED:
+                        # Keep the latest bounded, parseable projection instead
+                        # of concatenating payloads into an ever growing field.
+                        attempt.get_data = get_data
+                        attempt.post_data = post_data
+                    else:
+                        separator = "\n---------\n"
 
-                    attempt.get_data = Concat("get_data", Value(separator + get_data))
-                    attempt.post_data = Concat(
-                        "post_data", Value(separator + post_data)
-                    )
+                        attempt.get_data = Concat(
+                            "get_data", Value(separator + get_data)
+                        )
+                        attempt.post_data = Concat(
+                            "post_data", Value(separator + post_data)
+                        )
                     attempt.http_accept = request.axes_http_accept
                     attempt.path_info = request.axes_path_info
                     attempt.failures_since_start = F("failures_since_start") + 1
@@ -277,10 +407,12 @@ class AxesDatabaseHandler(AbstractAxesHandler, AxesBaseHandler):
                     username=username,
                     ip_address=request.axes_ip_address,
                     user_agent=request.axes_user_agent,
-                    http_accept=request.axes_http_accept,
-                    path_info=request.axes_path_info,
+                    http_accept=self._minimum_field(request.axes_http_accept),
+                    path_info=self._minimum_field(request.axes_path_info),
+                    http_referer=self._minimum_field(get_client_http_referer(request)),
                     attempt_time=request.axes_attempt_time,
                     locked_out=request.axes_locked_out,
+                    session_hash=get_client_session_hash(request),
                 )
                 self.remove_out_of_limit_failure_logs(username=username)
 
@@ -304,14 +436,20 @@ class AxesDatabaseHandler(AbstractAxesHandler, AxesBaseHandler):
         # 1. database query: Clean up expired user attempts from the database
         self.clean_expired_user_attempts(request, credentials)
 
+        # Best-effort age based cleanup, isolated from the login transaction.
+        self._safe_apply_retention_policy()
+
         if not settings.AXES_DISABLE_ACCESS_LOG:
             # 2. database query: Insert new access logs with login time
             AccessLog.objects.create(
                 username=username,
                 ip_address=request.axes_ip_address,
                 user_agent=request.axes_user_agent,
-                http_accept=request.axes_http_accept,
-                path_info=request.axes_path_info,
+                http_accept=self._minimum_field(request.axes_http_accept),
+                path_info=self._minimum_field(request.axes_path_info),
+                http_referer=self._minimum_field(
+                    get_client_http_referer(request)
+                ),
                 attempt_time=request.axes_attempt_time,
                 # evaluate session hash here to ensure having the correct
                 # value which is stored on the backend

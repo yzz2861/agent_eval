@@ -1,5 +1,6 @@
 import re
 from abc import ABC, abstractmethod
+from datetime import datetime
 from typing import Optional
 from warnings import warn
 
@@ -231,6 +232,17 @@ class AxesBaseHandler:  # pylint: disable=unused-argument
 
         """
         return 0
+
+    def apply_retention_policy(
+        self, *, now: Optional[datetime] = None
+    ) -> list:
+        """
+        Apply the age based retention policy.
+
+        Only handlers with persistent log storage have records to prune, so
+        the default implementation is a no-op returning an empty audit list.
+        """
+        return []
 
 
 class AxesHandler(AbstractAxesHandler, AxesBaseHandler):

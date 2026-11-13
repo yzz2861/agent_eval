@@ -256,3 +256,46 @@ with third party applications and plugins such as
 - Django REST Framework
 - Django Allauth
 - Django Simple Captcha
+
+
+Log field projection and retention
+----------------------------------
+
+Axes can project the GET/POST payloads stored in ``AccessAttempt`` into a
+bounded JSON representation and prune log tables on an age based schedule.
+Both features are opt-in and leave the legacy logging behaviour unchanged
+until explicitly enabled.
+
+Set ``AXES_LOG_FIELD_PROJECTION_ENABLED = True`` to enable payload
+sanitization. Sensitive fields (passwords, tokens, cookies, credentials and
+the fields configured in ``AXES_SENSITIVE_PARAMETERS``) are recognized case
+insensitively across percent/HTML encoded variants and Django form prefixes.
+Their values, as well as email addresses, are replaced with a fixed width
+mask instead of being truncated into a partial secret. Nested dict/list
+payloads are walked recursively with the following bounds:
+
+- ``AXES_LOG_MAX_DEPTH`` (default 8): maximum nesting depth retained.
+- ``AXES_LOG_MAX_ITEMS`` (default 32): maximum items per dict/list.
+- ``AXES_LOG_MAX_VALUE_BYTES`` (default 256): maximum scalar value size.
+- ``AXES_LOG_MAX_TOTAL_BYTES`` (default 4096): maximum serialized payload size.
+
+``AXES_LOG_USER_AGENT_MAX_LENGTH``, ``AXES_LOG_PATH_MAX_LENGTH`` and
+``AXES_LOG_REFERER_MAX_LENGTH`` (all default 255) bound the request metadata
+copied into the log models. When projection is enabled, ``AccessLog`` and
+``AccessFailureLog`` keep only the correlation fields (username, IP, user
+agent and session hash), while ``AccessAttempt`` retains the sanitized
+payloads and the failure counter needed to explain lockouts.
+
+Set ``AXES_RETENTION_ENABLED = True`` to enable the tiered retention policy
+configured by ``AXES_RETENTION_DAYS``::
+
+    AXES_RETENTION_DAYS = {
+        "failure": 30,  # AccessFailureLog
+        "success": 90,  # AccessLog
+        "attempt": None,  # AccessAttempt, None disables pruning
+    }
+
+The policy runs idempotently on login events and can also be invoked with the
+``python manage.py axes_apply_retention`` command. Cleanup errors are logged
+and reported in the audit output (category, reason and count only) without
+interrupting the login flow or echoing deleted content.

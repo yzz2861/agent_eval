@@ -12,6 +12,7 @@ from axes.helpers import (
     cleanse_parameters,
     get_cache_timeout,
     get_client_cache_keys,
+    get_client_http_referer,
     get_client_ip_address,
     get_client_parameters,
     get_client_str,
@@ -26,6 +27,9 @@ from axes.helpers import (
     is_client_method_whitelisted,
     is_ip_address_in_blacklist,
     is_ip_address_in_whitelist,
+    is_sensitive_key,
+    sanitize_log_value,
+    sanitize_request_payload,
     is_user_attempt_whitelisted,
     set_retry_after_header,
     toggleable,
@@ -1439,3 +1443,140 @@ class AxesLockoutTiersTestCase(AxesTestCase):
         data = json.loads(response.content)
         self.assertEqual(data["failure_count"], 3)
         self.assertIn("cooloff_time", data)
+
+
+@override_settings(AXES_SENSITIVE_PARAMETERS=[])
+class AxesSensitiveKeyTestCase(AxesTestCase):
+    def test_case_insensitive(self):
+        self.assertTrue(is_sensitive_key("PASSWORD"))
+        self.assertTrue(is_sensitive_key("Password"))
+
+    def test_encoding_variants(self):
+        self.assertTrue(is_sensitive_key("%70%61ssword"))
+        self.assertTrue(is_sensitive_key("%2570assword"))
+        self.assertTrue(is_sensitive_key("p&#97;ssword"))
+
+    def test_form_prefix_and_nested_paths(self):
+        self.assertTrue(is_sensitive_key("login-password"))
+        self.assertTrue(is_sensitive_key("form[0].access_token"))
+        self.assertTrue(is_sensitive_key("headers.Cookie"))
+
+    def test_token_and_cookie_families(self):
+        self.assertTrue(is_sensitive_key("access_token"))
+        self.assertTrue(is_sensitive_key("X-Auth-Token"))
+        self.assertTrue(is_sensitive_key("session_cookie"))
+
+    def test_email_family(self):
+        self.assertTrue(is_sensitive_key("email"))
+        self.assertTrue(is_sensitive_key("USER_EMAIL"))
+        self.assertTrue(is_sensitive_key("contact.mail"))
+
+    def test_benign_fields_not_flagged(self):
+        self.assertFalse(is_sensitive_key("username"))
+        self.assertFalse(is_sensitive_key("remember_me"))
+
+
+@override_settings(AXES_SENSITIVE_PARAMETERS=[])
+class AxesLogProjectionTestCase(AxesTestCase):
+    SECRET = "super-secret-value"
+
+    def test_password_token_and_email_are_masked(self):
+        import json
+
+        projected = json.loads(
+            sanitize_request_payload(
+                {
+                    "password": self.SECRET,
+                    "access_token": "tok-123",
+                    "email": "victim@example.com",
+                    "username": "plain-user",
+                }
+            )
+        )
+        self.assertEqual(projected["password"], "*" * 20)
+        self.assertEqual(projected["access_token"], "*" * 20)
+        self.assertEqual(projected["email"], "*" * 20)
+        self.assertEqual(projected["username"], "plain-user")
+        rendered = json.dumps(projected)
+        self.assertNotIn(self.SECRET, rendered)
+        self.assertNotIn("tok-123", rendered)
+        self.assertNotIn("victim@example.com", rendered)
+
+    def test_nested_json_string_is_walked(self):
+        import json
+
+        projected = json.loads(
+            sanitize_log_value(
+                '{"headers": {"Cookie": "sessionid=abc123"}, "ok": 1}'
+            )
+        )
+        self.assertEqual(projected["headers"]["Cookie"], "*" * 20)
+        self.assertEqual(projected["ok"], 1)
+        self.assertNotIn("abc123", json.dumps(projected))
+
+    def test_depth_is_limited(self):
+        deep = "leaf"
+        for _ in range(500):
+            deep = {"child": deep}
+        rendered = sanitize_log_value(deep)
+        json.loads(rendered)
+        self.assertLessEqual(rendered.count("{"), 9)
+        self.assertIn("[truncated]", rendered)
+
+    def test_pathologically_nested_json_string_does_not_raise(self):
+        nested = "{\"leaf\": 1}"
+        for _ in range(3000):
+            nested = '{"outer": ' + nested + "}"
+        rendered = sanitize_log_value(nested)
+        json.loads(rendered)
+        self.assertLessEqual(len(rendered.encode("utf-8")), 4096)
+
+    def test_container_items_are_limited(self):
+        payload = {f"key_{index}": "value" for index in range(100)}
+        projected = json.loads(sanitize_log_value(payload))
+        self.assertLessEqual(len(projected), 33)
+
+    def test_total_byte_budget_is_enforced_with_valid_json(self):
+        payload = {f"key_{index}": "y" * 100 for index in range(200)}
+        rendered = sanitize_log_value(payload)
+        self.assertLessEqual(len(rendered.encode("utf-8")), 4096)
+        json.loads(rendered)
+
+    def test_long_scalar_is_marked_not_half_secret(self):
+        secret = "z" * 5000
+        projected = json.loads(sanitize_log_value({"password": secret}))
+        self.assertEqual(projected["password"], "*" * 20)
+
+        long_note = json.loads(sanitize_log_value({"note": "q" * 5000}))
+        self.assertTrue(long_note["note"].endswith("[truncated]"))
+        self.assertLessEqual(len(long_note["note"]), 256 + 20)
+
+    def test_repeated_keys_keep_all_values_masked(self):
+        import json
+
+        class QueryLike:
+            def lists(self):
+                return [
+                    ("password", ["first", "second"]),
+                    ("name", ["alice"]),
+                ]
+
+        projected = json.loads(sanitize_request_payload(QueryLike()))
+        self.assertEqual(projected["password"], ["*" * 20, "*" * 20])
+        self.assertEqual(projected["name"], "alice")
+
+
+class AxesRequestMetadataBoundaryTestCase(AxesTestCase):
+    def test_user_agent_path_and_referer_are_bounded(self):
+        self.request.META["HTTP_USER_AGENT"] = "u" * 500
+        self.request.META["PATH_INFO"] = "/" + "p" * 500
+        self.request.META["HTTP_REFERER"] = "https://example.com/" + "r" * 500
+
+        from axes.helpers import (
+            get_client_path_info,
+            get_client_user_agent,
+        )
+
+        self.assertEqual(len(get_client_user_agent(self.request)), 255)
+        self.assertEqual(len(get_client_path_info(self.request)), 255)
+        self.assertEqual(len(get_client_http_referer(self.request)), 255)

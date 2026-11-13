@@ -58,7 +58,17 @@ class AccessAttemptAdmin(admin.ModelAdmin):
             {"fields": ("username", "path_info", "failures_since_start", "expiration")},
         ),
         (_("Form Data"), {"fields": ("get_data", "post_data")}),
-        (_("Meta Data"), {"fields": ("user_agent", "ip_address", "http_accept")}),
+        (
+            _("Meta Data"),
+            {
+                "fields": (
+                    "user_agent",
+                    "ip_address",
+                    "http_accept",
+                    "http_referer",
+                )
+            },
+        ),
     )
 
     readonly_fields = [
@@ -67,6 +77,7 @@ class AccessAttemptAdmin(admin.ModelAdmin):
         "username",
         "http_accept",
         "path_info",
+        "http_referer",
         "attempt_time",
         "get_data",
         "post_data",
@@ -118,7 +129,18 @@ class AccessLogAdmin(admin.ModelAdmin):
 
     fieldsets = (
         (None, {"fields": ("username", "path_info")}),
-        (_("Meta Data"), {"fields": ("user_agent", "ip_address", "http_accept")}),
+        (
+            _("Meta Data"),
+            {
+                "fields": (
+                    "user_agent",
+                    "ip_address",
+                    "http_accept",
+                    "http_referer",
+                    "session_hash",
+                )
+            },
+        ),
     )
 
     readonly_fields = [
@@ -127,8 +149,10 @@ class AccessLogAdmin(admin.ModelAdmin):
         "username",
         "http_accept",
         "path_info",
+        "http_referer",
         "attempt_time",
         "logout_time",
+        "session_hash",
     ]
 
     def has_add_permission(self, request: HttpRequest) -> bool:
@@ -143,6 +167,7 @@ class AccessFailureLogAdmin(admin.ModelAdmin):
         "user_agent",
         "path_info",
         "locked_out",
+        "session_hash",
     )
 
     list_filter = ["attempt_time", "locked_out", "path_info"]
@@ -153,7 +178,18 @@ class AccessFailureLogAdmin(admin.ModelAdmin):
 
     fieldsets = (
         (None, {"fields": ("username", "path_info")}),
-        (_("Meta Data"), {"fields": ("user_agent", "ip_address", "http_accept")}),
+        (
+            _("Meta Data"),
+            {
+                "fields": (
+                    "user_agent",
+                    "ip_address",
+                    "http_accept",
+                    "http_referer",
+                    "session_hash",
+                )
+            },
+        ),
     )
 
     readonly_fields = [
@@ -162,8 +198,10 @@ class AccessFailureLogAdmin(admin.ModelAdmin):
         "username",
         "http_accept",
         "path_info",
+        "http_referer",
         "attempt_time",
         "locked_out",
+        "session_hash",
     ]
 
     def has_add_permission(self, request: HttpRequest) -> bool:
