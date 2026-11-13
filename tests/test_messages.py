@@ -1,7 +1,24 @@
-from ntlm_auth.constants import AvId, NegotiateFlags, MessageTypes, \
+import hashlib
+import struct
+
+import pytest
+
+from ntlm_auth.compute_response import ComputeResponse
+from ntlm_auth.constants import AvFlags, AvId, NegotiateFlags, MessageTypes, \
     NTLM_SIGNATURE
+from ntlm_auth.exceptions import TargetInfoError
 from ntlm_auth.messages import AuthenticateMessage, ChallengeMessage, \
     NegotiateMessage, TargetInfo, get_random_export_session_key
+
+try:
+    hashlib.new('md4')
+    MD4_SUPPORTED = True
+except ValueError:
+    MD4_SUPPORTED = False
+
+requires_md4 = pytest.mark.skipif(
+    not MD4_SUPPORTED,
+    reason="MD4 is not supported by the hashlib backend of this Python")
 
 
 class TestGeneric(object):
@@ -223,6 +240,7 @@ class TestChallenge(object):
         assert actual_version == expected_version
 
 
+@requires_md4
 class TestAuthenticate(object):
 
     def test_authenticate_message_ntlm_v1(self, monkeypatch):
@@ -623,3 +641,209 @@ class TestAuthenticate(object):
         actual.add_mic(test_negotiate_message, test_challenge_message)
         actual = actual.get_data()
         assert actual == expected
+
+
+class TestTargetInfoParsing(object):
+    EOL = struct.pack("<HH", AvId.MSV_AV_EOL, 0)
+
+    @staticmethod
+    def _challenge_message(target_info):
+        msg2 = b"\x4e\x54\x4c\x4d\x53\x53\x50\x00"
+        msg2 += b"\x02\x00\x00\x00\x0c\x00\x0c\x00"
+        msg2 += b"\x38\x00\x00\x00\x33\x82\x8a\xe2"
+        msg2 += b"\x01\x23\x45\x67\x89\xab\xcd\xef"
+        msg2 += b"\x00\x00\x00\x00\x00\x00\x00\x00"
+        msg2 += struct.pack("<HHI", len(target_info), len(target_info), 0x44)
+        msg2 += b"\x06\x00\x70\x17\x00\x00\x00\x0f"
+        msg2 += b"\x53\x00\x65\x00\x72\x00\x76\x00"
+        msg2 += b"\x65\x00\x72\x00"
+        msg2 += target_info
+        return msg2
+
+    def test_duplicate_av_pair_first_wins(self):
+        ts1 = struct.pack("<q", 132514796160000000)
+        ts2 = struct.pack("<q", 132514796160000000 + 36000000000)
+        domain = "Domain".encode('utf-16-le')
+
+        target_info = struct.pack("<HH", AvId.MSV_AV_TIMESTAMP, 8) + ts1
+        target_info += struct.pack("<HH", AvId.MSV_AV_NB_DOMAIN_NAME, 12)
+        target_info += domain
+        target_info += struct.pack("<HH", AvId.MSV_AV_TIMESTAMP, 8) + ts2
+        target_info += self.EOL
+
+        challenge = ChallengeMessage(self._challenge_message(target_info))
+        actual = challenge.target_info
+
+        # The first timestamp must be kept, the later duplicate discarded
+        assert actual[AvId.MSV_AV_TIMESTAMP] == ts1
+        assert actual.duplicates == [(AvId.MSV_AV_TIMESTAMP, 100)]
+        assert actual.sources[AvId.MSV_AV_TIMESTAMP] == (72, 8)
+        assert actual.sources[AvId.MSV_AV_NB_DOMAIN_NAME] == (84, 12)
+
+        expected_pack = struct.pack("<HH", AvId.MSV_AV_TIMESTAMP, 8) + ts1
+        expected_pack += struct.pack("<HH", AvId.MSV_AV_NB_DOMAIN_NAME, 12)
+        expected_pack += domain
+        expected_pack += self.EOL
+        assert actual.pack() == expected_pack
+
+    def test_timestamp_invalid_length(self):
+        for length in (0, 4, 12):
+            target_info = struct.pack("<HH", AvId.MSV_AV_TIMESTAMP, length)
+            target_info += b"\x00" * length
+            target_info += self.EOL
+
+            with pytest.raises(TargetInfoError):
+                ChallengeMessage(self._challenge_message(target_info))
+
+    def test_flags_invalid_length(self):
+        target_info = struct.pack("<HH", AvId.MSV_AV_FLAGS, 8)
+        target_info += b"\x02\x00\x00\x00\x00\x00\x00\x00"
+        target_info += self.EOL
+
+        with pytest.raises(TargetInfoError):
+            ChallengeMessage(self._challenge_message(target_info))
+
+    def test_name_odd_length(self):
+        target_info = struct.pack("<HH", AvId.MSV_AV_DNS_DOMAIN_NAME, 3)
+        target_info += b"\x61\x00\x62"
+        target_info += self.EOL
+
+        with pytest.raises(TargetInfoError):
+            ChallengeMessage(self._challenge_message(target_info))
+
+    def test_name_invalid_utf16(self):
+        # A lone UTF-16 surrogate half is not a valid encoding
+        target_info = struct.pack("<HH", AvId.MSV_AV_TARGET_NAME, 2)
+        target_info += b"\x00\xd8"
+        target_info += self.EOL
+
+        with pytest.raises(TargetInfoError):
+            ChallengeMessage(self._challenge_message(target_info))
+
+    def test_unknown_av_pair_retained(self):
+        unknown_id = 0x7f
+        flags = struct.pack("<I", AvFlags.MIC_PROVIDED)
+
+        target_info = struct.pack("<HH", unknown_id, 4) + b"\xde\xad\xbe\xef"
+        target_info += struct.pack("<HH", AvId.MSV_AV_FLAGS, 4) + flags
+        target_info += self.EOL
+
+        challenge = ChallengeMessage(self._challenge_message(target_info))
+        actual = challenge.target_info
+
+        # Unknown pairs are kept for round tripping but are flagged as
+        # unknown and never influence the known security relevant values
+        assert actual[unknown_id] == b"\xde\xad\xbe\xef"
+        assert unknown_id in actual.unknown
+        assert actual.sources[unknown_id] == (72, 4)
+        assert actual[AvId.MSV_AV_FLAGS] == flags
+        assert actual[AvId.MSV_AV_TIMESTAMP] is None
+        assert actual.pack() == target_info
+
+    def test_zero_length_pairs(self):
+        # A zero length name and a zero length unknown pair are both valid
+        target_info = struct.pack("<HH", AvId.MSV_AV_NB_DOMAIN_NAME, 0)
+        target_info += struct.pack("<HH", 0x7f, 0)
+        target_info += self.EOL
+
+        challenge = ChallengeMessage(self._challenge_message(target_info))
+        actual = challenge.target_info
+
+        assert actual[AvId.MSV_AV_NB_DOMAIN_NAME] == b""
+        assert actual[0x7f] == b""
+
+    def test_eol_with_nonzero_length(self):
+        target_info = struct.pack("<HH", AvId.MSV_AV_EOL, 4)
+        target_info += b"\x00" * 4
+
+        with pytest.raises(TargetInfoError):
+            ChallengeMessage(self._challenge_message(target_info))
+
+    def test_av_pair_length_exceeds_buffer(self):
+        target_info = struct.pack("<HH", AvId.MSV_AV_NB_DOMAIN_NAME, 0xFFFF)
+        target_info += b"\x00" * 4
+        target_info += self.EOL
+
+        with pytest.raises(TargetInfoError):
+            ChallengeMessage(self._challenge_message(target_info))
+
+    def test_av_pair_truncated_header(self):
+        target_info = struct.pack("<HH", AvId.MSV_AV_NB_DOMAIN_NAME, 0)
+        target_info += b"\x01\x00"
+
+        with pytest.raises(TargetInfoError):
+            ChallengeMessage(self._challenge_message(target_info))
+
+    def test_av_pair_missing_eol(self):
+        target_info = struct.pack("<HH", AvId.MSV_AV_NB_DOMAIN_NAME, 0)
+
+        with pytest.raises(TargetInfoError):
+            ChallengeMessage(self._challenge_message(target_info))
+
+    def test_target_info_offset_out_of_buffer(self):
+        msg2 = bytearray(self._challenge_message(self.EOL))
+        struct.pack_into("<I", msg2, 44, 0x00FFFFFF)
+
+        with pytest.raises(TargetInfoError):
+            ChallengeMessage(bytes(msg2))
+
+    def test_target_info_length_out_of_buffer(self):
+        msg2 = bytearray(self._challenge_message(self.EOL))
+        struct.pack_into("<H", msg2, 40, 0xFFFF)
+
+        with pytest.raises(TargetInfoError):
+            ChallengeMessage(bytes(msg2))
+
+    def test_target_name_offset_out_of_buffer(self):
+        msg2 = bytearray(self._challenge_message(self.EOL))
+        # Set NTLMSSP_REQUEST_TARGET so the target name is parsed
+        msg2[20:24] = b"\x37\x82\x8a\xe2"
+        struct.pack_into("<I", msg2, 16, 0x00FFFFFF)
+
+        with pytest.raises(TargetInfoError):
+            ChallengeMessage(bytes(msg2))
+
+    def test_challenge_data_matches_parsed_message(self):
+        # The raw challenge bytes used for the MIC calculation must be the
+        # same bytes the target info was parsed from
+        target_info = struct.pack("<HH", AvId.MSV_AV_TIMESTAMP, 8)
+        target_info += b"\x00" * 8
+        target_info += self.EOL
+        msg2 = self._challenge_message(target_info)
+
+        challenge = ChallengeMessage(msg2)
+        assert challenge.get_data() == msg2
+
+    def test_ntlmv2_blob_uses_parsed_target_info(self):
+        ts1 = struct.pack("<q", 132514796160000000)
+        ts2 = struct.pack("<q", 132514796160000000 + 36000000000)
+        domain = "Domain".encode('utf-16-le')
+
+        target_info = struct.pack("<HH", AvId.MSV_AV_TIMESTAMP, 8) + ts1
+        target_info += struct.pack("<HH", AvId.MSV_AV_NB_DOMAIN_NAME, 12)
+        target_info += domain
+        target_info += struct.pack("<HH", 0x7f, 4) + b"\xde\xad\xbe\xef"
+        target_info += struct.pack("<HH", AvId.MSV_AV_TIMESTAMP, 8) + ts2
+        target_info += self.EOL
+
+        challenge = ChallengeMessage(self._challenge_message(target_info))
+        client_challenge = b"\xaa" * 8
+        blob = ComputeResponse._get_NTLMv2_temp(
+            challenge.target_info[AvId.MSV_AV_TIMESTAMP], client_challenge,
+            challenge.target_info)
+
+        # The blob is serialised from the parsed target info only, the
+        # duplicate timestamp from the raw bytes must not appear
+        expected = b"\x01\x01\x00\x00" + b"\x00" * 4
+        expected += ts1
+        expected += client_challenge
+        expected += b"\x00" * 4
+        expected += struct.pack("<HH", AvId.MSV_AV_TIMESTAMP, 8) + ts1
+        expected += struct.pack("<HH", AvId.MSV_AV_NB_DOMAIN_NAME, 12)
+        expected += domain
+        expected += struct.pack("<HH", 0x7f, 4) + b"\xde\xad\xbe\xef"
+        expected += self.EOL
+        expected += b"\x00" * 4
+
+        assert blob == expected
+        assert ts2 not in blob

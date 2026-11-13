@@ -4,3 +4,7 @@
 
 class NoAuthContextError(Exception):
     pass
+
+
+class TargetInfoError(Exception):
+    pass

@@ -9,6 +9,7 @@ import struct
 from ntlm_auth.compute_response import ComputeResponse
 from ntlm_auth.constants import AvId, AvFlags, MessageTypes, NegotiateFlags, \
     NTLM_SIGNATURE
+from ntlm_auth.exceptions import TargetInfoError
 from ntlm_auth.rc4 import ARC4
 
 try:
@@ -18,9 +19,49 @@ except ImportError:  # pragma: no cover
 
 
 class TargetInfo(object):
+    # AV_PAIR AvIds whose value MUST be a fixed number of bytes.
+    _FIXED_LENGTH_AV_IDS = {
+        AvId.MSV_AV_FLAGS: 4,
+        AvId.MSV_AV_TIMESTAMP: 8,
+    }
+
+    # AV_PAIR AvIds whose value MUST be a UTF-16-LE encoded string.
+    _UTF16_AV_IDS = frozenset([
+        AvId.MSV_AV_NB_COMPUTER_NAME,
+        AvId.MSV_AV_NB_DOMAIN_NAME,
+        AvId.MSV_AV_DNS_COMPUTER_NAME,
+        AvId.MSV_AV_DNS_DOMAIN_NAME,
+        AvId.MSV_AV_DNS_TREE_NAME,
+        AvId.MSV_AV_TARGET_NAME,
+    ])
+
+    # All AvIds defined in [MS-NLMP] 2.2.2.1, anything else is unknown and
+    # is retained for round tripping but never used in security decisions.
+    _KNOWN_AV_IDS = frozenset([
+        AvId.MSV_AV_EOL,
+        AvId.MSV_AV_NB_COMPUTER_NAME,
+        AvId.MSV_AV_NB_DOMAIN_NAME,
+        AvId.MSV_AV_DNS_COMPUTER_NAME,
+        AvId.MSV_AV_DNS_DOMAIN_NAME,
+        AvId.MSV_AV_DNS_TREE_NAME,
+        AvId.MSV_AV_FLAGS,
+        AvId.MSV_AV_TIMESTAMP,
+        AvId.MSV_AV_SINGLE_HOST,
+        AvId.MSV_AV_TARGET_NAME,
+        AvId.MSV_AV_CHANNEL_BINDINGS,
+    ])
 
     def __init__(self):
         self.fields = OrderedDict()
+        # Provenance of each parsed AV_PAIR, maps the AvId to the
+        # (value_offset, value_length) tuple relative to the start of the
+        # buffer the target info was parsed from.
+        self.sources = {}
+        # (AvId, value_offset) tuples of duplicate AV_PAIRs that were
+        # discarded during parsing, the first occurrence always wins.
+        self.duplicates = []
+        # AvIds not defined in MS-NLMP, retained but not security relevant.
+        self.unknown = set()
 
     def __setitem__(self, key, value):
         self.fields[key] = value
@@ -30,6 +71,8 @@ class TargetInfo(object):
 
     def __delitem__(self, key):
         del self.fields[key]
+        self.sources.pop(key, None)
+        self.unknown.discard(key)
 
     def pack(self):
         if AvId.MSV_AV_EOL in self.fields:
@@ -44,13 +87,66 @@ class TargetInfo(object):
         data += struct.pack('<HH', AvId.MSV_AV_EOL, 0)
         return data
 
-    def unpack(self, data):
-        attribute_type = None
-        while attribute_type != AvId.MSV_AV_EOL:
-            attribute_type = struct.unpack("<H", data[:2])[0]
-            attribute_length = struct.unpack("<H", data[2:4])[0]
-            self[attribute_type] = data[4:attribute_length + 4]
-            data = data[4 + attribute_length:]
+    def unpack(self, data, base_offset=0):
+        offset = 0
+        data_length = len(data)
+        while True:
+            if offset + 4 > data_length:
+                raise TargetInfoError(
+                    "TargetInfo AV_PAIR header at offset %d is truncated, "
+                    "only %d byte(s) remain in the buffer"
+                    % (base_offset + offset, data_length - offset))
+
+            attribute_type, attribute_length = \
+                struct.unpack("<HH", data[offset:offset + 4])
+            value_offset = offset + 4
+            value_end = value_offset + attribute_length
+            if value_end > data_length:
+                raise TargetInfoError(
+                    "TargetInfo AV_PAIR %d value at offset %d with length %d "
+                    "extends past the end of the buffer (%d bytes)"
+                    % (attribute_type, base_offset + value_offset,
+                       attribute_length, data_length))
+
+            value = data[value_offset:value_end]
+            if attribute_type == AvId.MSV_AV_EOL:
+                if attribute_length != 0:
+                    raise TargetInfoError(
+                        "TargetInfo MSV_AV_EOL pair must have a zero length "
+                        "value, actual %d" % attribute_length)
+                break
+
+            self._add_pair(attribute_type, value, base_offset + value_offset)
+            offset = value_end
+
+    def _add_pair(self, attribute_type, value, value_offset):
+        if attribute_type in self.fields:
+            # A duplicate AvId must not overwrite the value that was parsed
+            # first, record it for auditing and discard the value.
+            self.duplicates.append((attribute_type, value_offset))
+            return
+
+        self._validate_pair(attribute_type, value)
+        self.fields[attribute_type] = value
+        self.sources[attribute_type] = (value_offset, len(value))
+        if attribute_type not in self._KNOWN_AV_IDS:
+            self.unknown.add(attribute_type)
+
+    def _validate_pair(self, attribute_type, value):
+        fixed_length = self._FIXED_LENGTH_AV_IDS.get(attribute_type)
+        if fixed_length is not None and len(value) != fixed_length:
+            raise TargetInfoError(
+                "TargetInfo AV_PAIR %d must have a value length of %d "
+                "bytes, actual %d"
+                % (attribute_type, fixed_length, len(value)))
+
+        if attribute_type in self._UTF16_AV_IDS:
+            try:
+                value.decode('utf-16-le')
+            except UnicodeDecodeError as exc:
+                raise TargetInfoError(
+                    "TargetInfo AV_PAIR %d value is not valid UTF-16-LE: %s"
+                    % (attribute_type, exc))
 
 
 class NegotiateMessage(object):
@@ -221,22 +317,32 @@ class ChallengeMessage(object):
         if self.negotiate_flags & NegotiateFlags.NTLMSSP_REQUEST_TARGET:
             target_name_len = struct.unpack("<H", msg2[12:14])[0]
             target_name_max_len = struct.unpack("<H", msg2[14:16])[0]
-            target_name_offset_mix = struct.unpack("<I", msg2[16:20])[0]
-            target_offset_max = target_name_offset_mix + target_name_len
-            self.target_name = msg2[target_name_offset_mix:target_offset_max]
+            target_name_offset_min = struct.unpack("<I", msg2[16:20])[0]
+            self._check_payload_bounds(target_name_offset_min, target_name_len,
+                                       len(msg2), "TargetName")
+            target_offset_max = target_name_offset_min + target_name_len
+            self.target_name = msg2[target_name_offset_min:target_offset_max]
         else:
             self.target_name = None
 
         if self.negotiate_flags & NegotiateFlags.NTLMSSP_NEGOTIATE_TARGET_INFO:
+            if len(msg2) < 48:
+                raise TargetInfoError(
+                    "Challenge message of %d bytes is too small to contain "
+                    "the TargetInfoFields structure" % len(msg2))
+
             target_info_len = struct.unpack("<H", msg2[40:42])[0]
             target_info_max_len = struct.unpack("<H", msg2[42:44])[0]
             target_info_offset_min = struct.unpack("<I", msg2[44:48])[0]
+            self._check_payload_bounds(target_info_offset_min, target_info_len,
+                                       len(msg2), "TargetInfo")
             target_info_offset_max = target_info_offset_min + target_info_len
 
             target_info_raw = \
                 msg2[target_info_offset_min:target_info_offset_max]
             self.target_info = TargetInfo()
-            self.target_info.unpack(target_info_raw)
+            self.target_info.unpack(target_info_raw,
+                                    base_offset=target_info_offset_min)
         else:
             self.target_info = None
 
@@ -247,6 +353,14 @@ class ChallengeMessage(object):
 
     def get_data(self):
         return self.data
+
+    @staticmethod
+    def _check_payload_bounds(offset, length, buffer_length, field_name):
+        if offset > buffer_length or length > buffer_length - offset:
+            raise TargetInfoError(
+                "%s payload at offset %d with length %d extends past the "
+                "end of the challenge buffer (%d bytes)"
+                % (field_name, offset, length, buffer_length))
 
 
 class AuthenticateMessage(object):

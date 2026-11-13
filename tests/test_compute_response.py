@@ -1,9 +1,22 @@
+import hashlib
 import struct
 import time
+
+import pytest
 
 from ntlm_auth.compute_response import ComputeResponse, get_windows_timestamp
 from ntlm_auth.constants import AvId, AvFlags
 from ntlm_auth.messages import ChallengeMessage, TargetInfo
+
+try:
+    hashlib.new('md4')
+    MD4_SUPPORTED = True
+except ValueError:
+    MD4_SUPPORTED = False
+
+requires_md4 = pytest.mark.skipif(
+    not MD4_SUPPORTED,
+    reason="MD4 is not supported by the hashlib backend of this Python")
 
 
 class TestGeneric(object):
@@ -27,6 +40,7 @@ class TestHashResults(object):
                                                     server_challenge)
         assert actual == expected
 
+    @requires_md4
     def test_get_LMv2_response(self):
         # 4.2.4.2.1 - LMv2 Response
         server_challenge = b"\x01\x23\x45\x67\x89\xab\xcd\xef"
@@ -39,6 +53,7 @@ class TestHashResults(object):
                                                     client_challenge)
         assert actual == expected
 
+    @requires_md4
     def test_get_NTLMv1_response(self):
         # 4.2.2.2.1 - NTLMv1 Response
         server_challenge = b"\x01\x23\x45\x67\x89\xab\xcd\xef"
@@ -52,6 +67,7 @@ class TestHashResults(object):
         assert actual_response == expected_response
         assert actual_key == expected_key
 
+    @requires_md4
     def test_get_NTLM2_response(self):
         # 4.2.3.2.2 - NTLMv1 Response
         server_challenge = b"\x01\x23\x45\x67\x89\xab\xcd\xef"
@@ -90,6 +106,7 @@ class TestHashResults(object):
                                                   test_target_info)
         assert actual == expected
 
+    @requires_md4
     def test_get_NTLMv2_response(self):
         # 4.2.4.2.2 - NTLMv2 Response
         server_challenge = b"\x01\x23\x45\x67\x89\xab\xcd\xef"
@@ -166,6 +183,7 @@ class TestChallengeResults(object):
                                  1).get_lm_challenge_response()
         assert actual == expected
 
+    @requires_md4
     def test_lm_v1_with_ntlm_2_response(self):
         test_challenge_message = ChallengeMessage(
             b"\x4e\x54\x4c\x4d\x53\x53\x50\x00"
@@ -187,6 +205,7 @@ class TestChallengeResults(object):
                                  2).get_lm_challenge_response()
         assert actual == expected
 
+    @requires_md4
     def test_lm_v2_response(self, monkeypatch):
         monkeypatch.setattr('os.urandom', lambda s: b"\xaa" * 8)
 
@@ -214,6 +233,7 @@ class TestChallengeResults(object):
                                  3).get_lm_challenge_response()
         assert actual == expected
 
+    @requires_md4
     def test_lm_v2_response_with_no_target_info_timestamp(self, monkeypatch):
         monkeypatch.setattr('os.urandom', lambda s: b"\xaa" * 8)
 
@@ -248,6 +268,7 @@ class TestChallengeResults(object):
                                  3).get_lm_challenge_response()
         assert actual == expected
 
+    @requires_md4
     def test_lm_v2_response_with_server_target_info_timestamp(self):
         test_target_info = TargetInfo()
         test_target_info[AvId.MSV_AV_NB_DOMAIN_NAME] = \
@@ -280,6 +301,7 @@ class TestChallengeResults(object):
                                  3).get_lm_challenge_response()
         assert actual == expected
 
+    @requires_md4
     def test_nt_v1_response(self):
         test_challenge_message = ChallengeMessage(
             b"\x4e\x54\x4c\x4d\x53\x53\x50\x00"
@@ -309,6 +331,7 @@ class TestChallengeResults(object):
         assert actual_exchange_key == expected_exchange_key
         assert actual_target_info == expected_target_info
 
+    @requires_md4
     def test_nt_v1_with_extended_security_response(self, monkeypatch):
         monkeypatch.setattr('os.urandom', lambda s: b"\xaa" * 8)
 
@@ -342,6 +365,7 @@ class TestChallengeResults(object):
         assert actual_exchange_key == expected_exchange_key
         assert actual_target_info == expected_target_info
 
+    @requires_md4
     def test_nt_v2_response(self, monkeypatch):
         monkeypatch.setattr('os.urandom', lambda s: b"\xaa" * 8)
         monkeypatch.setattr('ntlm_auth.compute_response.get_windows_timestamp',
@@ -400,6 +424,7 @@ class TestChallengeResults(object):
     # The following tests are different from the Microsoft examples, they don't
     # give an example of these scenarios so I have made them up
 
+    @requires_md4
     def test_nt_v2_response_no_target_info(self, monkeypatch):
         monkeypatch.setattr('os.urandom', lambda s: b"\xaa" * 8)
         monkeypatch.setattr('ntlm_auth.compute_response.get_windows_timestamp',
@@ -445,6 +470,7 @@ class TestChallengeResults(object):
         assert actual_exchange_key == expected_exchange_key
         assert actual_target_info.pack() == expected_target_info.pack()
 
+    @requires_md4
     def test_nt_v2_response_with_timestamp_av_pair(self, monkeypatch):
         monkeypatch.setattr('os.urandom', lambda s: b"\xaa" * 8)
 
