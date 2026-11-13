@@ -1352,6 +1352,9 @@ class SigningKey(object):
         :type sigencode: callable
         :param extra_entropy: additional data that will be fed into the random
             number generator used in the RFC6979 process. Entirely optional.
+            Must be a bytes-like object of at most
+            ``rfc6979.MAX_EXTRA_ENTROPY_LENGTH`` bytes, it will be
+            normalised to ``bytes`` before use.
             Ignored with EdDSA.
         :type extra_entropy: :term:`bytes-like object`
 
@@ -1364,7 +1367,7 @@ class SigningKey(object):
         if isinstance(self.curve.curve, CurveEdTw):
             return self.privkey.sign(data)
 
-        extra_entropy = normalise_bytes(extra_entropy)
+        extra_entropy = rfc6979.validate_extra_entropy(extra_entropy)
         digest = hashfunc(data).digest()
 
         return self.sign_digest_deterministic(
@@ -1412,11 +1415,20 @@ class SigningKey(object):
         :type sigencode: callable
         :param extra_entropy: additional data that will be fed into the random
             number generator used in the RFC6979 process. Entirely optional.
+            Must be a bytes-like object of at most
+            ``rfc6979.MAX_EXTRA_ENTROPY_LENGTH`` bytes, it will be
+            normalised to ``bytes`` before use.
         :type extra_entropy: :term:`bytes-like object`
         :param bool allow_truncate: if True, the provided digest can have
             bigger bit-size than the order of the curve, the extra bits (at
             the end of the digest) will be truncated. Use it when signing
             SHA-384 output using NIST256p or in similar situations.
+
+        :raises TypeError: if ``extra_entropy`` is not a bytes-like object
+        :raises ValueError: if ``extra_entropy`` is longer than
+            ``rfc6979.MAX_EXTRA_ENTROPY_LENGTH`` bytes
+        :raises rfc6979.NonceGenerationError: if no valid nonce was found
+            within ``rfc6979.MAX_RETRY_GENERATION`` retries
 
         :return: encoded signature for the `digest` hash
         :rtype: bytes or sigencode function dependent type
@@ -1426,7 +1438,7 @@ class SigningKey(object):
         secexp = self.privkey.secret_multiplier
         hashfunc = hashfunc or self.default_hashfunc
         digest = normalise_bytes(digest)
-        extra_entropy = normalise_bytes(extra_entropy)
+        extra_entropy = rfc6979.validate_extra_entropy(extra_entropy)
 
         def simple_r_s(r, s, order):
             return r, s, order
@@ -1451,6 +1463,11 @@ class SigningKey(object):
                 break
             except RSZeroError:
                 retry_gen += 1
+                if retry_gen > rfc6979.MAX_RETRY_GENERATION:
+                    raise rfc6979.NonceGenerationError(
+                        "no valid deterministic signature found after "
+                        "{0} retries".format(rfc6979.MAX_RETRY_GENERATION)
+                    )
 
         return sigencode(r, s, order)
 

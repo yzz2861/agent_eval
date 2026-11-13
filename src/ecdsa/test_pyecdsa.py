@@ -2142,6 +2142,237 @@ class RFC6979(unittest.TestCase):
             ),
         )
 
+    def test_extra_entropy_vector(self):
+        # fixed vector for generate_k() with extra_entropy as per
+        # section-3.6 of RFC6979
+        actual = rfc6979.generate_k(
+            SECP256k1.generator.order(),
+            int("9d0219792467d7d37b4d43298a7d0c05", 16),
+            hashlib.sha256,
+            hashlib.sha256(b"sample").digest(),
+            extra_entropy=b"\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11",
+        )
+        self.assertEqual(
+            int(
+                "20ae8a5160dda8e55676bb9319ec6ecd92b9de443c4089f7df31d29f5a87135",
+                16,
+            ),
+            actual,
+        )
+
+    def test_same_inputs_same_k(self):
+        args = (
+            SECP256k1.generator.order(),
+            int("9d0219792467d7d37b4d43298a7d0c05", 16),
+            hashlib.sha256,
+            hashlib.sha256(b"sample").digest(),
+        )
+        kwargs = {"extra_entropy": b"tenant-a"}
+        self.assertEqual(
+            rfc6979.generate_k(*args, **kwargs),
+            rfc6979.generate_k(*args, **kwargs),
+        )
+
+    def test_different_entropy_different_k(self):
+        order = SECP256k1.generator.order()
+        secexp = int("9d0219792467d7d37b4d43298a7d0c05", 16)
+        hsh = hashlib.sha256(b"sample").digest()
+        k1 = rfc6979.generate_k(
+            order, secexp, hashlib.sha256, hsh, extra_entropy=b"tenant-a"
+        )
+        k2 = rfc6979.generate_k(
+            order, secexp, hashlib.sha256, hsh, extra_entropy=b"tenant-b"
+        )
+        self.assertNotEqual(k1, k2)
+
+    def test_empty_entropy_same_as_default(self):
+        order = SECP256k1.generator.order()
+        secexp = int("9d0219792467d7d37b4d43298a7d0c05", 16)
+        hsh = hashlib.sha256(b"sample").digest()
+        self.assertEqual(
+            rfc6979.generate_k(order, secexp, hashlib.sha256, hsh),
+            rfc6979.generate_k(
+                order, secexp, hashlib.sha256, hsh, extra_entropy=b""
+            ),
+        )
+
+    def test_entropy_normalisation(self):
+        # equivalent bytes-like objects must produce the same nonce
+        order = SECP256k1.generator.order()
+        secexp = int("9d0219792467d7d37b4d43298a7d0c05", 16)
+        hsh = hashlib.sha256(b"sample").digest()
+        expected = rfc6979.generate_k(
+            order, secexp, hashlib.sha256, hsh, extra_entropy=b"\x01\x02"
+        )
+        for conv in (bytearray, memoryview):
+            self.assertEqual(
+                expected,
+                rfc6979.generate_k(
+                    order,
+                    secexp,
+                    hashlib.sha256,
+                    hsh,
+                    extra_entropy=conv(b"\x01\x02"),
+                ),
+            )
+
+    def test_too_long_entropy(self):
+        order = SECP256k1.generator.order()
+        secexp = int("9d0219792467d7d37b4d43298a7d0c05", 16)
+        hsh = hashlib.sha256(b"sample").digest()
+        for entropy in (
+            b"\x00" * (rfc6979.MAX_EXTRA_ENTROPY_LENGTH + 1),
+            b"\x00" * (10 * 1024 * 1024),
+        ):
+            with self.assertRaises(ValueError):
+                rfc6979.generate_k(
+                    order,
+                    secexp,
+                    hashlib.sha256,
+                    hsh,
+                    extra_entropy=entropy,
+                )
+
+    def test_max_length_entropy_accepted(self):
+        order = SECP256k1.generator.order()
+        secexp = int("9d0219792467d7d37b4d43298a7d0c05", 16)
+        hsh = hashlib.sha256(b"sample").digest()
+        k = rfc6979.generate_k(
+            order,
+            secexp,
+            hashlib.sha256,
+            hsh,
+            extra_entropy=b"\x00" * rfc6979.MAX_EXTRA_ENTROPY_LENGTH,
+        )
+        self.assertTrue(1 <= k < order)
+
+    def test_invalid_entropy_type(self):
+        order = SECP256k1.generator.order()
+        secexp = int("9d0219792467d7d37b4d43298a7d0c05", 16)
+        hsh = hashlib.sha256(b"sample").digest()
+        for entropy in ("text", 123, None, ["\x01"]):
+            with self.assertRaises(TypeError):
+                rfc6979.generate_k(
+                    order,
+                    secexp,
+                    hashlib.sha256,
+                    hsh,
+                    extra_entropy=entropy,
+                )
+
+    def test_nonce_in_valid_range(self):
+        order = SECP256k1.generator.order()
+        secexp = int("9d0219792467d7d37b4d43298a7d0c05", 16)
+        for i in range(8):
+            hsh = hashlib.sha256(b"sample %d" % i).digest()
+            k = rfc6979.generate_k(
+                order,
+                secexp,
+                hashlib.sha256,
+                hsh,
+                extra_entropy=b"entropy %d" % i,
+            )
+            self.assertTrue(1 <= k < order)
+
+    def _patched_bits2int(self, values):
+        """Replace rfc6979.bits2int with a callable returning `values`
+        in sequence in Step H, then the real implementation."""
+        real_bits2int = rfc6979.bits2int
+        values = list(values)
+        calls = []
+
+        def replacement(data, qlen):
+            calls.append(1)
+            # the first call in every generate_k() execution comes from
+            # bits2octets(), let it through unmodified
+            if len(calls) > 1 and values:
+                return values.pop(0)
+            return real_bits2int(data, qlen)
+
+        rfc6979.bits2int = replacement
+        return real_bits2int
+
+    def test_nonce_boundaries(self):
+        order = SECP256k1.generator.order()
+        secexp = int("9d0219792467d7d37b4d43298a7d0c05", 16)
+        hsh = hashlib.sha256(b"sample").digest()
+
+        # 1 and order-1 are valid nonces
+        for boundary in (1, order - 1):
+            real = self._patched_bits2int([boundary])
+            try:
+                k = rfc6979.generate_k(
+                    order, secexp, hashlib.sha256, hsh, max_retries=0
+                )
+            finally:
+                rfc6979.bits2int = real
+            self.assertEqual(boundary, k)
+
+        # 0 and order are not valid nonces
+        for boundary in (0, order):
+            real = self._patched_bits2int([boundary] * 4)
+            try:
+                with self.assertRaises(rfc6979.NonceGenerationError):
+                    rfc6979.generate_k(
+                        order, secexp, hashlib.sha256, hsh, max_retries=3
+                    )
+            finally:
+                rfc6979.bits2int = real
+
+    def test_retry_exhaustion(self):
+        order = SECP256k1.generator.order()
+        secexp = int("9d0219792467d7d37b4d43298a7d0c05", 16)
+        hsh = hashlib.sha256(b"sample").digest()
+        real = self._patched_bits2int([order] * 100)
+        try:
+            with self.assertRaises(rfc6979.NonceGenerationError):
+                rfc6979.generate_k(
+                    order, secexp, hashlib.sha256, hsh, max_retries=5
+                )
+        finally:
+            rfc6979.bits2int = real
+
+    def test_retries_only_on_invalid_values(self):
+        # two invalid values are retried, the third (valid) value is
+        # returned; retries must not be counted for valid values
+        order = SECP256k1.generator.order()
+        secexp = int("9d0219792467d7d37b4d43298a7d0c05", 16)
+        hsh = hashlib.sha256(b"sample").digest()
+        real = self._patched_bits2int([order, 0])
+        try:
+            k = rfc6979.generate_k(
+                order, secexp, hashlib.sha256, hsh, max_retries=2
+            )
+        finally:
+            rfc6979.bits2int = real
+        self.assertTrue(1 <= k < order)
+
+        # one retry too few and the error is raised
+        real = self._patched_bits2int([order, 0])
+        try:
+            with self.assertRaises(rfc6979.NonceGenerationError):
+                rfc6979.generate_k(
+                    order, secexp, hashlib.sha256, hsh, max_retries=1
+                )
+        finally:
+            rfc6979.bits2int = real
+
+    def test_error_message_does_not_leak_secrets(self):
+        order = SECP256k1.generator.order()
+        secexp = int("9d0219792467d7d37b4d43298a7d0c05", 16)
+        hsh = hashlib.sha256(b"sample").digest()
+        real = self._patched_bits2int([order] * 10)
+        try:
+            with self.assertRaises(rfc6979.NonceGenerationError) as exc:
+                rfc6979.generate_k(
+                    order, secexp, hashlib.sha256, hsh, max_retries=3
+                )
+        finally:
+            rfc6979.bits2int = real
+        msg = str(exc.exception)
+        self.assertNotIn(hexlify(hsh).decode(), msg)
+        self.assertNotIn(format(secexp, "x"), msg)
+
 
 class ECDH(unittest.TestCase):
     def _do(self, curve, generator, dA, x_qA, y_qA, dB, x_qB, y_qB, x_Z, y_Z):

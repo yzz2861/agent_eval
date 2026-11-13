@@ -12,6 +12,7 @@ import os
 import array
 import pytest
 import hashlib
+from binascii import hexlify, unhexlify
 
 from .keys import (
     VerifyingKey,
@@ -19,6 +20,7 @@ from .keys import (
     MalformedPointError,
     BadSignatureError,
 )
+from . import rfc6979
 from .der import (
     unpem,
     UnexpectedDER,
@@ -38,7 +40,7 @@ from .util import (
 )
 from .curves import NIST256p, Curve, BRAINPOOLP160r1, Ed25519, Ed448
 from .ellipticcurve import Point, PointJacobi, CurveFp, INFINITY
-from .ecdsa import generator_brainpoolp160r1
+from .ecdsa import generator_brainpoolp160r1, RSZeroError
 
 
 class TestVerifyingKeyFromString(unittest.TestCase):
@@ -1082,6 +1084,161 @@ def test_SigningKey_sign_digest(convert):
     sig = sk.sign_digest(convert(data_hash))
 
     vk.verify(sig, data)
+
+
+# the deterministic API output must never change for the same
+# key, digest, message and entropy
+det_sig_no_entropy = unhexlify(
+    b"13d5af8696c22435a1e38ab31703c6f3c80cea4e59e863c4a7fea3e9d7ef0312"
+    b"8d31e8e793f398f892e6cfc4dfd911cf"
+)
+det_sig_with_entropy = unhexlify(
+    b"061763457f1e20bb11b717f2371ada307109c87648c654babab968ebc5dbe00e"
+    b"afe893d34b218c687649861aabc42ac6"
+)
+
+
+def test_SigningKey_sign_deterministic_no_regression():
+    assert sk.sign_deterministic(data, hashlib.sha1) == det_sig_no_entropy
+    assert (
+        sk.sign_digest_deterministic(data_hash, hashlib.sha1)
+        == det_sig_no_entropy
+    )
+    assert (
+        sk.sign_digest_deterministic(
+            data_hash, hashlib.sha1, extra_entropy=extra_entropy
+        )
+        == det_sig_with_entropy
+    )
+
+
+def test_SigningKey_sign_deterministic_stable_across_instances():
+    # a fresh instance with the same key material must produce exactly the
+    # same signature bytes (as would a different process or tenant instance)
+    sk2 = SigningKey.from_der(key_bytes)
+    sig1 = sk.sign_deterministic(
+        data, hashlib.sha1, extra_entropy=extra_entropy
+    )
+    sig2 = sk2.sign_deterministic(
+        data, hashlib.sha1, extra_entropy=extra_entropy
+    )
+
+    assert sig1 == sig2
+
+
+def test_SigningKey_sign_deterministic_entropy_changes_signature():
+    sig1 = sk.sign_deterministic(data, hashlib.sha1, extra_entropy=b"t-a")
+    sig2 = sk.sign_deterministic(data, hashlib.sha1, extra_entropy=b"t-b")
+
+    assert sig1 != sig2
+    vk.verify(sig1, data, hashfunc=hashlib.sha1)
+    vk.verify(sig2, data, hashfunc=hashlib.sha1)
+
+
+def test_SigningKey_sign_deterministic_empty_entropy():
+    assert (
+        sk.sign_deterministic(data, hashlib.sha1, extra_entropy=b"")
+        == det_sig_no_entropy
+    )
+    assert (
+        sk.sign_digest_deterministic(
+            data_hash, hashlib.sha1, extra_entropy=b""
+        )
+        == det_sig_no_entropy
+    )
+
+
+def test_SigningKey_sign_deterministic_entropy_normalisation():
+    # equivalent bytes-like objects must give identical signatures
+    assert (
+        sk.sign_deterministic(
+            data, hashlib.sha1, extra_entropy=bytearray(extra_entropy)
+        )
+        == det_sig_with_entropy
+    )
+    assert (
+        sk.sign_deterministic(
+            data, hashlib.sha1, extra_entropy=memoryview(extra_entropy)
+        )
+        == det_sig_with_entropy
+    )
+
+
+def test_SigningKey_sign_deterministic_too_long_entropy():
+    too_long = b"\x00" * (rfc6979.MAX_EXTRA_ENTROPY_LENGTH + 1)
+    huge = b"\x00" * (10 * 1024 * 1024)
+
+    with pytest.raises(ValueError):
+        sk.sign_deterministic(data, hashlib.sha1, extra_entropy=too_long)
+    with pytest.raises(ValueError):
+        sk.sign_digest_deterministic(
+            data_hash, hashlib.sha1, extra_entropy=too_long
+        )
+    with pytest.raises(ValueError):
+        sk.sign_digest_deterministic(
+            data_hash, hashlib.sha1, extra_entropy=huge
+        )
+
+
+def test_SigningKey_sign_deterministic_max_length_entropy():
+    sig = sk.sign_deterministic(
+        data,
+        hashlib.sha1,
+        extra_entropy=b"\x00" * rfc6979.MAX_EXTRA_ENTROPY_LENGTH,
+    )
+
+    vk.verify(sig, data, hashfunc=hashlib.sha1)
+
+
+def test_SigningKey_sign_deterministic_invalid_entropy_type():
+    for entropy in ("text", 123, None):
+        with pytest.raises(TypeError):
+            sk.sign_deterministic(data, hashlib.sha1, extra_entropy=entropy)
+        with pytest.raises(TypeError):
+            sk.sign_digest_deterministic(
+                data_hash, hashlib.sha1, extra_entropy=entropy
+            )
+
+
+def test_SigningKey_sign_digest_deterministic_retry_exhaustion(monkeypatch):
+    def always_zero(self, digest, sigencode, k, allow_truncate):
+        raise RSZeroError("forced failure")
+
+    monkeypatch.setattr(SigningKey, "sign_digest", always_zero)
+    monkeypatch.setattr(rfc6979, "MAX_RETRY_GENERATION", 3)
+
+    with pytest.raises(rfc6979.NonceGenerationError):
+        sk.sign_digest_deterministic(data_hash, hashlib.sha1)
+
+
+def test_SigningKey_deterministic_errors_do_not_leak_secrets():
+    too_long = b"\x00" * (rfc6979.MAX_EXTRA_ENTROPY_LENGTH + 1)
+
+    with pytest.raises(ValueError) as exc:
+        sk.sign_digest_deterministic(
+            data_hash, hashlib.sha1, extra_entropy=too_long
+        )
+    msg = str(exc.value)
+    assert hexlify(prv_key_bytes).decode() not in msg
+    assert hexlify(data_hash).decode() not in msg
+
+    with pytest.raises(TypeError) as exc:
+        sk.sign_digest_deterministic(
+            data_hash, hashlib.sha1, extra_entropy="text"
+        )
+    msg = str(exc.value)
+    assert hexlify(prv_key_bytes).decode() not in msg
+    assert hexlify(data_hash).decode() not in msg
+
+
+def test_SigningKey_sign_random_not_affected():
+    sig1 = sk.sign(data)
+    sig2 = sk.sign(data)
+
+    vk.verify(sig1, data)
+    vk.verify(sig2, data)
+    # the randomised path uses a fresh random k for every signature
+    assert sig1 != sig2
 
 
 def test_SigningKey_with_unlikely_value():
