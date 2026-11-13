@@ -276,6 +276,12 @@ Note that we used the ``:path`` route filter here to allow slash characters in `
 
 The :func:`static_file` helper function has a lot of benefits compared to handling files manually. Most importantly it prevents `directory traversal attacks <https://owasp.org/www-community/attacks/Path_Traversal>`_ (e.g. ``GET /static/../../../../etc/secrets``) by restricting file access to the specified ``root`` directory. Make sure to use an absolut path for ``root``, though. Relative paths (staring with ``./``) are resolved against the current work directory which may not always be the same as your project directory.
 
+For stronger guarantees, pass ``strict=True``. In strict mode the search root is normalized and bound first, percent encoded separators are decoded, alternate separators and trailing dots are normalized and platform specific case folding is handled before any symlink is followed. Symlinks (and the final resolved path) must stay within the normalized root, so a link inside your public directory that points at a shared certificate directory or another location outside of the root is refused with ``403``::
+
+  return static_file(filepath, root='/path/to/your/static/files', strict=True)
+
+The default behavior (``strict=False``) is unchanged for backwards compatibility.
+
 The :func:`static_file` function returns :class:`HTTPResponse` or :class:`HTTPError`, which can be raised as an exception if you need to.
 
 .. rubric:: File downloads
@@ -803,4 +809,3 @@ Glossary
    source directory
       The directory which, including its subdirectories, contains all
       source files for one Sphinx project.
-

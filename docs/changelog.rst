@@ -50,10 +50,14 @@ Release 0.14 (in development)
 .. rubric:: Changes
 
 * Form values, query parameters, path elements and cookies are now always decoded as `utf8` with `errors='surrogateescape'`. This is the correct approach for almost all modern web applications, but still allows applications to recover the original byte sequence if needed. This also means that ``bottle.FormsDict`` no longer re-encodes PEP-3333 `latin1` strings to `utf8` on demand (via attribute access). The ``FormsDict.getunicode()`` and ``FormsDict.decode()`` methods are deprecated and do nothing, as all values are already transcoded to `utf8`.
+* :func:`bottle.static_file` now validates HTTP ``Range`` requests more strictly. Only the ``bytes`` unit is accepted, the number of ranges is bounded by ``bottle.MAX_RANGE_REQUESTS`` and malformed, unsatisfiable, reversed or overlapping ranges receive a deterministic ``416 Requested Range Not Satisfiable`` response (with a ``Content-Range: bytes */<size>`` header) instead of being partially ignored. Open (``bytes=100-``) and suffix (``bytes=-100``) ranges keep their documented semantics, and ``206`` responses always carry the entity ``ETag``, ``Last-Modified``, ``Content-Length`` and ``Content-Range`` of a single consistent entity.
+* :func:`bottle.static_file` no longer lets semicolons or quote characters inside a ``download`` name truncate or break the ``Content-Disposition`` header. Non-ASCII download names are now exposed through an RFC 5987 ``filename*`` parameter in addition to the ASCII ``filename`` fallback.
+* Error responses returned by :func:`bottle.static_file` no longer carry filesystem paths, symlink targets or file contents.
 
 .. rubric:: New features
 
 * ``bottle.HTTPError`` raised on invalid JSON now include the underlying exception in the ``exception`` field.
+* :func:`bottle.static_file` gained an optional ``strict`` mode. With ``strict=True`` the search root is bound and normalized first, percent encoded path separators are decoded, alternate separators and Windows style trailing dots are normalized and platform specific case folding is taken into account before symlinks are followed. Every symlink (and the final resolved path) must stay within the normalized root, so a public link that points at a shared directory outside of the root is refused with ``403``. The default (``strict=False``) preserves the historical, prefix based behavior for backwards compatibility.
 
 
 Release 0.13
@@ -272,4 +276,3 @@ This is an incomplete list of new features and improved functionality.
 * New :func:`get`, :func:`post`, :func:`put` and :func:`delete` decorators.
 * The :class:`SimpleTemplate` engine got full unicode support.
 * Lots of non-critical bugfixes.
-

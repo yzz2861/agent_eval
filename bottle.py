@@ -2722,12 +2722,190 @@ def _rangeiter(fp, offset, limit, bufsize=1024 * 1024):
         yield part
 
 
+#: Maximum number of byte ranges accepted in a single HTTP ``Range`` request.
+MAX_RANGE_REQUESTS = 10
+
+_RANGE_DIGITS = re.compile(r'^[0-9]+$')
+
+
+@functools.lru_cache(maxsize=None)
+def _case_insensitive_fs(path):
+    """ Return True if the filesystem hosting *path* compares path names
+        case-insensitively (e.g. Windows or a default macOS volume). """
+    if sys.platform == 'win32':
+        return True
+    if os.path.normcase(path) == path:
+        return False  # POSIX case-sensitive semantics
+    try:
+        probe = path
+        while not os.path.exists(probe) and probe != os.path.dirname(probe):
+            probe = os.path.dirname(probe)
+        return os.path.exists(probe) and os.path.exists(probe.upper())
+    except OSError:
+        return True
+
+
+def _is_within(path, root, casefold=False):
+    """ Return True if the fully resolved *path* is equal to or located below
+        the fully resolved *root*. Symlinks are resolved before the check, so
+        a link that points outside of *root* is never accepted. """
+    root_key = root.lower() if casefold else root
+    path_key = path.lower() if casefold else path
+    base = root_key.rstrip(os.path.sep)
+    return path_key == root_key or path_key.startswith(base + os.path.sep)
+
+
+def _normalize_static_name(filename):
+    """ Decode and normalize a user supplied static file path.
+
+        URL percent encoding is decoded, alternate path separators are
+        unified and the Windows specific trailing dots/spaces of path
+        components are removed. Parent (``..``) components are preserved so
+        that paths which resolve back into the search root still work; the
+        containment check in :func:`_resolve_static_path` rejects anything
+        that ends up outside of the root. """
+    if isinstance(filename, bytes):
+        filename = touni(filename, 'utf8', 'surrogateescape')
+    filename = urlunquote(filename).replace('\\', '/')
+    parts = []
+    for part in filename.split('/'):
+        if part != '..':
+            part = part.rstrip(' .')
+        if part:
+            parts.append(part)
+    return '/'.join(parts)
+
+
+def _resolve_static_path(filename, root, strict):
+    """ Resolve *filename* against the search *root* directory.
+
+        In strict mode, *root* is bound first and normalized; percent encoded
+        separators, alternate separators, trailing dots and platform specific
+        case folding are handled before any symlink is followed, and the final
+        path must resolve to a location equal to or below *root*. A result of
+        ``None`` means the request must be refused without touching the file.
+        A path that stays within the root but does not exist is returned so
+        that the caller can distinguish a missing file (404) from a
+        containment or symlink violation (403).
+
+        In default mode the historical, prefix based behavior is preserved so
+        that existing applications keep working unchanged. """
+    root = os.path.abspath(root)
+    if not strict:
+        root_prefix = os.path.join(root, '')
+        target = os.path.abspath(
+            os.path.join(root_prefix, filename.strip('/\\')))
+        if not target.startswith(root_prefix):
+            return None
+        return target
+
+    casefold = _case_insensitive_fs(root)
+    root_real = os.path.realpath(root)
+    if not os.path.isdir(root_real) or \
+            not _is_within(root_real, root_real, casefold):
+        return None
+
+    current = root_real
+    relative = _normalize_static_name(filename)
+    components = relative.split('/') if relative else []
+    for index, part in enumerate(components):
+        if part == '.':
+            continue
+        if part == '..':
+            # Navigate the logical path. Stepping above the root is only
+            # acceptable if a later component leads back inside; the final
+            # containment check below makes sure nothing outside is served.
+            current = os.path.dirname(current)
+            continue
+        candidate = os.path.join(current, part)
+        try:
+            exists = os.path.lexists(candidate)
+        except (OSError, ValueError):
+            return None
+        resolved = os.path.realpath(candidate)
+        if not _is_within(resolved, root_real, casefold):
+            return None
+        current = resolved
+        if not exists:
+            # A non-existing path inside the root: keep the candidate so the
+            # caller answers 404 instead of treating it like an escape.
+            remaining = components[index + 1:]
+            return os.path.join(current, *remaining) if remaining else current
+    return current
+
+
+def _content_disposition(download):
+    """ Build a safe ``Content-Disposition`` header value.
+
+        Quotes and semicolons are neutralized in the ASCII fallback name so
+        that intermediary caches cannot split or misplace the ``filename``
+        parameter. Non-ASCII names are additionally exposed through an RFC
+        5987 ``filename*`` parameter. """
+    download = download.replace('\r', '').replace('\n', '') \
+                       .replace('\0', '').replace('"', '')
+    ascii_name = download.replace(';', '_') \
+                         .encode('ascii', 'ignore').decode('ascii')
+    disposition = 'attachment; filename="%s"' % ascii_name
+    if any(ord(char) > 127 for char in download):
+        disposition += "; filename*=UTF-8''%s" % urlquote(download, safe='')
+    return disposition
+
+
+def _validate_ranges(header, maxlen, max_ranges=MAX_RANGE_REQUESTS):
+    """ Parse and validate an HTTP ``Range`` header against the entity size.
+
+        Return a list of non-inclusive ``(start, end)`` tuples, or ``None``
+        if the header uses an unsupported unit, is malformed, carries too
+        many, unsatisfiable, reversed or overlapping ranges. Open and
+        suffix ranges follow the semantics of :func:`parse_range_header`. """
+    if not header or '=' not in header:
+        return None
+    unit, _, spec = header.partition('=')
+    if unit.strip().lower() != 'bytes':
+        return None
+    pieces = [piece.strip() for piece in spec.split(',')]
+    if not pieces or len(pieces) > max_ranges:
+        return None
+
+    ranges = []
+    for piece in pieces:
+        if not piece or piece.count('-') != 1:
+            return None
+        start_text, end_text = piece.split('-')
+        if not start_text:  # bytes=-100 -> last 100 bytes
+            if not _RANGE_DIGITS.fullmatch(end_text):
+                return None
+            suffix = int(end_text)
+            if suffix <= 0:
+                return None
+            start, end = max(0, maxlen - suffix), maxlen
+        elif not end_text:  # bytes=100- -> all but the first 99 bytes
+            if not _RANGE_DIGITS.fullmatch(start_text):
+                return None
+            start, end = int(start_text), maxlen
+        else:  # bytes=100-200 -> bytes 100 through 200 (inclusive)
+            if not _RANGE_DIGITS.fullmatch(start_text) \
+                    or not _RANGE_DIGITS.fullmatch(end_text):
+                return None
+            start, end = int(start_text), int(end_text)
+            if start > end:
+                return None
+            end = min(end + 1, maxlen)
+        if not (0 <= start < end <= maxlen):
+            return None
+        if ranges and start < ranges[-1][1]:
+            return None  # unsorted or overlapping range
+        ranges.append((start, end))
+    return ranges
+
+
 def static_file(filename, root,
                 mimetype=True,
                 download=False,
                 charset='UTF-8',
                 etag=None,
-                headers=None):
+                headers=None,
+                strict=False):
     """ Open a file in a safe way and return an instance of :exc:`HTTPResponse`
         that can be sent back to the client.
 
@@ -2746,6 +2924,14 @@ def static_file(filename, root,
             If set to ``False``, ETag handling is disabled.
             (default: auto-generate ETag from file metadata)
         :param headers: Additional headers dict to add to the response.
+        :param strict: Enable strict path validation. The search ``root`` is
+            bound and normalized before the user supplied path is decoded and
+            joined; percent encoded separators, alternate separators,
+            trailing dots and platform specific case folding are handled
+            explicitly. Symlinks are only followed while their resolved
+            target stays within the normalized root, so a link (or any final
+            path) pointing outside of the root is refused. The default
+            ``False`` preserves the historical prefix based behavior.
 
         While checking user input is always a good idea, this function provides
         additional protection against malicious ``filename`` parameters from
@@ -2758,19 +2944,34 @@ def static_file(filename, root,
         ``If-None-Match``) are answered with ``304 Not Modified`` whenever
         possible. ``HEAD`` and ``Range`` requests (used by download managers to
         check or continue partial downloads) are also handled automatically.
+        Malformed or unsatisfiable ``Range`` headers result in a deterministic
+        ``416 Requested Range Not Satisfiable`` response, never in an empty
+        ``200``. Error responses never include filesystem paths, symlink
+        targets or file contents.
     """
 
-    root = os.path.join(os.path.abspath(root), '')
-    filename = os.path.abspath(os.path.join(root, filename.strip('/\\')))
     headers = headers.copy() if headers else {}
     getenv = request.environ.get
 
-    if not filename.startswith(root):
+    try:
+        target = _resolve_static_path(filename, root, strict)
+    except (OSError, UnicodeError, ValueError):
+        target = None
+
+    # Generic error texts only: never expose the requested path, a symlink
+    # target or any file content in an error response.
+    if target is None:
         return HTTPError(403, "Access denied.")
-    if not os.path.isfile(filename):
+    try:
+        if not os.path.isfile(target):
+            return HTTPError(404, "File does not exist.")
+        if not os.access(target, os.R_OK):
+            return HTTPError(403,
+                             "You do not have permission to access this file.")
+        stats = os.stat(target)
+    except (OSError, UnicodeError, ValueError):
         return HTTPError(404, "File does not exist.")
-    if not os.access(filename, os.R_OK):
-        return HTTPError(403, "You do not have permission to access this file.")
+    clen = stats.st_size
 
     if mimetype is True:
         name = download if isinstance(download, str) else filename
@@ -2788,20 +2989,18 @@ def static_file(filename, root,
         headers['Content-Type'] = mimetype
 
     if download is True:
-        download = os.path.basename(filename)
+        download = os.path.basename(target)
 
     if download:
-        download = download.replace('"', '')
-        headers['Content-Disposition'] = 'attachment; filename="%s"' % download
+        headers['Content-Disposition'] = _content_disposition(download)
 
-    stats = os.stat(filename)
-    headers['Content-Length'] = clen = stats.st_size
+    headers['Content-Length'] = clen
     headers['Last-Modified'] = email.utils.formatdate(stats.st_mtime, usegmt=True)
     headers['Date'] = email.utils.formatdate(time.time(), usegmt=True)
 
     if etag is None:
         etag = '"%s"' % hashlib.sha1(tob('%d:%d:%d:%d:%s' % (
-            stats.st_dev, stats.st_ino, stats.st_mtime, clen, filename
+            stats.st_dev, stats.st_ino, stats.st_mtime, clen, target
         ))).hexdigest()
 
     if etag:
@@ -2817,20 +3016,24 @@ def static_file(filename, root,
         if ims >= stats.st_mtime:
             return HTTPResponse(status=304, **headers)
 
-    body = '' if request.method == 'HEAD' else open(filename, 'rb')
-
     headers["Accept-Ranges"] = "bytes"
     range_header = getenv('HTTP_RANGE')
     if range_header:
-        ranges = list(parse_range_header(range_header, clen))
-        if not ranges:
-            return HTTPError(416, "Requested Range Not Satisfiable")
+        ranges = _validate_ranges(range_header, clen)
+        if ranges is None:
+            # RFC 7233: a 416 response includes the entity length. No
+            # entity headers or body content are exposed on errors.
+            return HTTPError(
+                416, "Requested Range Not Satisfiable",
+                **{'Content-Range': 'bytes */%d' % clen})
         offset, end = ranges[0]
         rlen = end - offset
         headers["Content-Range"] = "bytes %d-%d/%d" % (offset, end - 1, clen)
         headers["Content-Length"] = str(rlen)
+        body = '' if request.method == 'HEAD' else open(target, 'rb')
         if body: body = _closeiter(_rangeiter(body, offset, rlen), body.close)
         return HTTPResponse(body, status=206, **headers)
+    body = '' if request.method == 'HEAD' else open(target, 'rb')
     return HTTPResponse(body, **headers)
 
 ###############################################################################
