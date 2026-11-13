@@ -7,7 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Placeholder for upcoming changes.
+### Added
+
+- `SetCookie` builder for explicit, validated `Set-Cookie` response headers.
+  - Enforces `__Host-` rules (no `Domain`, `Path=/`, `Secure` required), `__Secure-`
+    `Secure` requirement, `SameSite=None`/`Partitioned` requiring `Secure`, and the
+    `Max-Age`/`Expires` mutual exclusion.
+  - Validates cookie names, values, `Path`, `Domain`, expiry types, and the 4096-byte
+    UTF-8 payload limit; rejects control characters and structural characters that
+    break cookie parsing while preserving non-ASCII values such as Chinese text.
+  - Fails at construction time for combinations browsers silently drop, and never
+    echoes the sensitive cookie value in exception messages or `repr()`.
+  - Provides `set_on()` / `set_on_async()` response emission alongside the unchanged
+    header builders, `Secure` facade, and ASGI/WSGI middleware.
 
 ## [2.0.1] - 2026-04-21
 

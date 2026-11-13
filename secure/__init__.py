@@ -6,6 +6,7 @@ from secure.secure import (
     Secure,
 )
 
+from .cookies import SameSite, SetCookie
 from .headers.cache_control import CacheControl
 from .headers.content_security_policy import ContentSecurityPolicy
 from .headers.cross_origin_embedder_policy import CrossOriginEmbedderPolicy
@@ -34,8 +35,10 @@ __all__ = [
     "PermissionsPolicy",
     "Preset",
     "ReferrerPolicy",
+    "SameSite",
     "Secure",
     "Server",
+    "SetCookie",
     "StrictTransportSecurity",
     "XContentTypeOptions",
     "XDnsPrefetchControl",

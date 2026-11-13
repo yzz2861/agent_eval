@@ -20,6 +20,8 @@ class TestExportSurface(unittest.TestCase):
             "PermissionsPolicy",
             "Preset",
             "ReferrerPolicy",
+            "SameSite",
+            "SetCookie",
             "Secure",
             "Server",
             "StrictTransportSecurity",

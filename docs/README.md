@@ -16,6 +16,10 @@ The recommended default throughout the docs is `Secure.with_default_headers()`, 
 - [Configuration](./configuration.md)
 - [Security considerations](./security_considerations.md)
 
+## Cookie builders
+
+- [Set-Cookie](./cookies/set_cookie.md)
+
 ## Header builders
 
 - [Cache-Control](./headers/cache_control.md)

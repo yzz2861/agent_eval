@@ -137,3 +137,23 @@ for name, value in secure_headers.header_items():
 ```
 
 For framework-specific examples, see [Framework Integration](./frameworks.md).
+
+## Set-Cookie
+
+Use the standalone `SetCookie` builder when you also need to emit cookies. It validates the `__Host-` / `__Secure-` prefix rules, `SameSite=None` and `Partitioned` Secure requirements, expiry attributes, names, values, and length, and never echoes sensitive values in errors or `repr()`.
+
+```python
+from secure import SameSite, SetCookie
+
+cookie = SetCookie(
+    "__Host-session",
+    token,
+    path="/",
+    secure=True,
+    http_only=True,
+    same_site=SameSite.STRICT,
+)
+cookie.set_on(response)
+```
+
+See the [Set-Cookie guide](./cookies/set_cookie.md) for the full rule reference.
