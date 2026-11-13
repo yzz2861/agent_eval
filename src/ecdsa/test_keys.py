@@ -1136,3 +1136,76 @@ def test_SigningKey_from_pem_pkcs8v2_EdDSA():
 
     sk = SigningKey.from_pem(pem)
     assert sk.curve == Ed25519
+
+
+@pytest.mark.parametrize("curve", [Ed25519, Ed448])
+def test_eddsa_high_level_modes_round_trip(curve):
+    from . import eddsa
+
+    sk = SigningKey.generate(curve)
+    vk = sk.verifying_key
+    data = b"cross-service payload"
+    context = b"tenant-7"
+
+    sig_pure = sk.sign(data)
+    sig_ph = sk.sign(data, mode=eddsa.PREHASH)
+    sig_ctx = sk.sign(data, mode=eddsa.CONTEXT, context=context)
+
+    assert vk.verify(sig_pure, data)
+    assert vk.verify(sig_ph, data, mode=eddsa.PREHASH)
+    assert vk.verify(sig_ctx, data, mode=eddsa.CONTEXT, context=context)
+
+    # sign_deterministic exposes the same mode selection
+    assert sk.sign_deterministic(data, mode=eddsa.PREHASH) == sig_ph
+
+
+@pytest.mark.parametrize("curve", [Ed25519, Ed448])
+def test_eddsa_high_level_cross_mode_replay_fails(curve):
+    from . import eddsa
+
+    sk = SigningKey.generate(curve)
+    vk = sk.verifying_key
+    data = b"cross-service payload"
+    context = b"tenant-7"
+
+    signatures = [
+        sk.sign(data),
+        sk.sign(data, mode=eddsa.PREHASH),
+        sk.sign(data, mode=eddsa.CONTEXT, context=context),
+    ]
+    verifier_arguments = [
+        dict(),
+        dict(mode=eddsa.PREHASH),
+        dict(mode=eddsa.CONTEXT, context=context),
+    ]
+
+    for index, signature in enumerate(signatures):
+        for other_index, kwargs in enumerate(verifier_arguments):
+            if index == other_index:
+                continue
+            with pytest.raises(BadSignatureError):
+                vk.verify(signature, data, **kwargs)
+
+
+@pytest.mark.parametrize("curve", [Ed25519, Ed448])
+def test_eddsa_high_level_context_boundary(curve):
+    from . import eddsa
+
+    sk = SigningKey.generate(curve)
+    vk = sk.verifying_key
+
+    signature = sk.sign(b"m", mode=eddsa.CONTEXT, context=b"a" * 255)
+    assert vk.verify(signature, b"m", mode=eddsa.CONTEXT, context=b"a" * 255)
+    with pytest.raises((ValueError, BadSignatureError)):
+        sk.sign(b"m", mode=eddsa.CONTEXT, context=b"a" * 256)
+
+
+def test_eddsa_high_level_does_not_affect_ecdsa_entry_points():
+    from . import eddsa
+
+    # the new keyword arguments are EdDSA-only; ECDSA keeps its own flow
+    sk = SigningKey.generate(NIST256p)
+    data = b"ecdsa payload"
+    signature = sk.sign(data, hashfunc=hashlib.sha256)
+    assert sk.verifying_key.verify(signature, data, hashfunc=hashlib.sha256)
+    assert eddsa.PURE == "pure"

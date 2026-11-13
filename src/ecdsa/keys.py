@@ -633,6 +633,8 @@ class VerifyingKey(object):
         hashfunc=None,
         sigdecode=sigdecode_string,
         allow_truncate=True,
+        mode=eddsa.PURE,
+        context=None,
     ):
         """
         Verify a signature made over provided data.
@@ -665,6 +667,16 @@ class VerifyingKey(object):
             SHA-384 output using NIST256p or in similar situations. Defaults to
             True.
 
+        :param str mode: EdDSA verification mode, one of ``eddsa.PURE``,
+            ``eddsa.PREHASH`` or ``eddsa.CONTEXT``. It has to match the
+            mode used when signing; a mismatch makes the verification fail
+            instead of falling back to a pure verification. Ignored with
+            ECDSA.
+        :param context: EdDSA context string, only accepted together with
+            ``eddsa.CONTEXT`` and at most 255 bytes long; it has to match
+            the context used when signing. Ignored with ECDSA.
+        :type context: :term:`bytes-like object`
+
         :raises BadSignatureError: if the signature is invalid or malformed
 
         :return: True if the verification was successful
@@ -676,7 +688,9 @@ class VerifyingKey(object):
         if isinstance(self.curve.curve, CurveEdTw):
             signature = normalise_bytes(signature)
             try:
-                return self.pubkey.verify(data, signature)
+                return self.pubkey.verify(
+                    data, signature, mode=mode, context=context
+                )
             except (ValueError, MalformedPointError) as e:
                 raise BadSignatureError("Signature verification failed", e)
 
@@ -1318,6 +1332,8 @@ class SigningKey(object):
         hashfunc=None,
         sigencode=sigencode_string,
         extra_entropy=b"",
+        mode=eddsa.PURE,
+        context=None,
     ):
         """
         Create signature over data.
@@ -1354,6 +1370,14 @@ class SigningKey(object):
             number generator used in the RFC6979 process. Entirely optional.
             Ignored with EdDSA.
         :type extra_entropy: :term:`bytes-like object`
+        :param str mode: EdDSA signing mode, one of ``eddsa.PURE``,
+            ``eddsa.PREHASH`` or ``eddsa.CONTEXT``. Selects the RFC 8032
+            domain separation used for the signature; prehashing happens
+            only when ``eddsa.PREHASH`` is selected. Ignored with ECDSA.
+        :param context: EdDSA context string, only accepted together with
+            ``eddsa.CONTEXT`` and at most 255 bytes long. The verifier has
+            to supply the same mode and context. Ignored with ECDSA.
+        :type context: :term:`bytes-like object`
 
         :return: encoded signature over `data`
         :rtype: bytes or sigencode function dependent type
@@ -1362,7 +1386,7 @@ class SigningKey(object):
         data = normalise_bytes(data)
 
         if isinstance(self.curve.curve, CurveEdTw):
-            return self.privkey.sign(data)
+            return self.privkey.sign(data, mode=mode, context=context)
 
         extra_entropy = normalise_bytes(extra_entropy)
         digest = hashfunc(data).digest()
@@ -1462,6 +1486,8 @@ class SigningKey(object):
         sigencode=sigencode_string,
         k=None,
         allow_truncate=True,
+        mode=eddsa.PURE,
+        context=None,
     ):
         """
         Create signature over data.
@@ -1519,6 +1545,13 @@ class SigningKey(object):
             SHA-384 output using NIST256p or in similar situations. True by
             default.
             Ignored for EdDSA.
+        :param str mode: EdDSA signing mode, one of ``eddsa.PURE``,
+            ``eddsa.PREHASH`` or ``eddsa.CONTEXT``; see
+            :meth:`sign_deterministic`. Ignored with ECDSA.
+        :param context: EdDSA context string, only accepted together with
+            ``eddsa.CONTEXT`` and at most 255 bytes long. Ignored with
+            ECDSA.
+        :type context: :term:`bytes-like object`
 
         :raises RSZeroError: in the unlikely event when *r* parameter or
             *s* parameter of the created signature is equal 0, as that would
@@ -1532,7 +1565,7 @@ class SigningKey(object):
         hashfunc = hashfunc or self.default_hashfunc
         data = normalise_bytes(data)
         if isinstance(self.curve.curve, CurveEdTw):
-            return self.sign_deterministic(data)
+            return self.sign_deterministic(data, mode=mode, context=context)
         h = hashfunc(data).digest()
         return self.sign_digest(h, entropy, sigencode, k, allow_truncate)
 

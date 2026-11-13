@@ -9,6 +9,7 @@ from ._compat import (
     bytes_to_int,
     int_to_bytes,
     compat26_str,
+    normalise_bytes,
 )
 
 # edwards25519, defined in RFC7748
@@ -79,6 +80,91 @@ generator_ed448 = ellipticcurve.PointEdwards(
     curve_ed448, _Gx, _Gy, 1, _Gx * _Gy % _p, _r, generator=True
 )
 
+# Signature modes as defined by RFC 8032. The mode is an explicit parameter
+# of every signing and verification call, it is never folded into the data
+# that gets signed, so a signature produced in one mode can't be accepted
+# while verifying it in a different one.
+PURE = "pure"
+PREHASH = "prehash"
+CONTEXT = "context"
+
+# RFC 8032 limits the context string to a single octet length.
+MAX_CONTEXT_LENGTH = 255
+
+_MODES = frozenset((PURE, PREHASH, CONTEXT))
+
+
+def _normalise_context(context):
+    """Validate and normalise an EdDSA context string."""
+    if context is None:
+        return None
+    context = normalise_bytes(context)
+    if not isinstance(context, (bytes, bytearray, memoryview)):
+        raise TypeError("context must be a bytes-like object")
+    if len(context) > MAX_CONTEXT_LENGTH:
+        raise ValueError(
+            "context is too long, at most {0} bytes are allowed".format(
+                MAX_CONTEXT_LENGTH
+            )
+        )
+    return bytes(context)
+
+
+def _check_mode(mode, context):
+    """Validate the mode/context combination and return the normalised ctx."""
+    if mode not in _MODES:
+        raise ValueError(
+            "invalid mode, allowed values are: {0}, {1} and {2}".format(
+                PURE, PREHASH, CONTEXT
+            )
+        )
+    context = _normalise_context(context)
+    if mode != CONTEXT and context is not None:
+        raise ValueError(
+            "a context is only allowed together with the '{0}' mode".format(
+                CONTEXT
+            )
+        )
+    return context
+
+
+def _domain_separation(curve, mode, context):
+    """Build the dom2/dom4 prefix for an EdDSA signing operation.
+
+    Ed25519 (RFC 8032 section 5.1) has no prefix for PureEdDSA, while
+    Ed448 (section 5.2) always uses one. The prehash flag and the context
+    length are part of the prefix, so the three modes are not interchangeable.
+    """
+    if curve == curve_ed25519:
+        if mode == PURE:
+            return bytearray()
+        prefix = b"SigEd25519 no Ed25519 collisions"
+    else:
+        prefix = b"SigEd448"
+
+    if mode == PREHASH:
+        flag = 1
+    else:
+        flag = 0
+
+    if context is None:
+        context = b""
+
+    return bytearray(prefix + bytearray((flag, len(context))) + bytes(context))
+
+
+def _prepare_message(curve, mode, data):
+    """Apply prehashing when the caller selected the prehash mode."""
+    if mode == PREHASH:
+        if curve == curve_ed25519:
+            # Ed25519ph: SHA-512, 64 octets (RFC 8032 section 5.1)
+            return bytes(curve.hash_func(data))
+        # Ed448ph: SHAKE256 with a fixed 512-bit output (section 5.2);
+        # the curve hash function itself produces the 114-octet digest
+        # used inside the signature, so it can't be reused here
+        return bytes(shake_256(data, 64))
+    return data
+
 
 class PublicKey(object):
     """Public key for the Edwards Digital Signature Algorithm."""
@@ -128,8 +214,26 @@ class PublicKey(object):
     def public_key(self):
         return self.__encoded
 
-    def verify(self, data, signature):
-        """Verify a Pure EdDSA signature over data."""
+    def verify(self, data, signature, mode=PURE, context=None):
+        """Verify an EdDSA signature over data.
+
+        :param data: the message that was signed
+        :type data: :term:`bytes-like object`
+        :param bytes signature: the signature to verify
+        :param str mode: one of :data:`PURE`, :data:`PREHASH` or
+            :data:`CONTEXT`. The same mode (and, for :data:`CONTEXT`, the
+            same context) has to be provided as when signing; a mismatch
+            makes the verification fail instead of being treated as a
+            pure signature.
+        :param context: optional context string, only accepted together
+            with the :data:`CONTEXT` mode, at most
+            :data:`MAX_CONTEXT_LENGTH` bytes long
+        :type context: :term:`bytes-like object`
+
+        :raises ValueError: if the signature is malformed, the parameters
+            are invalid or the signature does not verify
+        """
+        context = _check_mode(mode, context)
         data = compat26_str(data)
         if len(signature) != 2 * self.baselen:
             raise ValueError(
@@ -144,9 +248,8 @@ class PublicKey(object):
         if S >= self.generator.order():
             raise ValueError("Invalid signature")
 
-        dom = bytearray()
-        if self.curve == curve_ed448:
-            dom = bytearray(b"SigEd448" + b"\x00\x00")
+        dom = _domain_separation(self.curve, mode, context)
+        data = _prepare_message(self.curve, mode, data)
 
         k = bytes_to_int(
             self.curve.hash_func(dom + R.to_bytes() + self.__encoded + data),
@@ -230,16 +333,30 @@ class PrivateKey(object):
 
         return self.__public_key
 
-    def sign(self, data):
-        """Perform a Pure EdDSA signature over data."""
+    def sign(self, data, mode=PURE, context=None):
+        """Perform an EdDSA signature over data.
+
+        :param data: the message to sign
+        :type data: :term:`bytes-like object`
+        :param str mode: one of :data:`PURE`, :data:`PREHASH` or
+            :data:`CONTEXT`. Prehashing is applied only when
+            :data:`PREHASH` is selected explicitly.
+        :param context: optional context string, only accepted together
+            with the :data:`CONTEXT` mode, at most
+            :data:`MAX_CONTEXT_LENGTH` bytes long
+        :type context: :term:`bytes-like object`
+
+        :return: the encoded signature
+        :rtype: bytes
+        """
+        context = _check_mode(mode, context)
         data = compat26_str(data)
         A = self.public_key().public_key()
 
         prefix = self.__h[self.baselen :]
 
-        dom = bytearray()
-        if self.curve == curve_ed448:
-            dom = bytearray(b"SigEd448" + b"\x00\x00")
+        dom = _domain_separation(self.curve, mode, context)
+        data = _prepare_message(self.curve, mode, data)
 
         r = bytes_to_int(self.curve.hash_func(dom + prefix + data), "little")
         R = (self.generator * r).to_bytes()

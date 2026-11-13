@@ -17,6 +17,12 @@ from .eddsa import (
     curve_ed448,
     PrivateKey,
     PublicKey,
+    PURE,
+    PREHASH,
+    CONTEXT,
+    MAX_CONTEXT_LENGTH,
+    _domain_separation,
+    _prepare_message,
 )
 from .ecdsa import generator_256, curve_256
 from .errors import MalformedPointError
@@ -1122,3 +1128,321 @@ def test_vectors(generator, private_key, public_key, message, signature):
     assert gen_sig == signature
 
     assert ver_key.verify(message, signature)
+
+
+# ---------------------------------------------------------------------------
+# RFC 8032 Ed25519ph / Ed25519ctx / Ed448ph / Ed448 with context
+# ---------------------------------------------------------------------------
+
+_EDDSA_CURVES = [
+    pytest.param(generator_ed25519, curve_ed25519, "ed25519"),
+    pytest.param(generator_ed448, curve_ed448, "ed448"),
+]
+
+_SAMPLE_MESSAGES = [
+    b"",
+    b"single byte",
+    b"payload repeated" * 33,
+    bytes(bytearray(range(256))),
+]
+
+_SAMPLE_CONTEXTS = [
+    b"",
+    b"tenant-42",
+    "中文租户上下文".encode("utf-8"),
+    b"a" * MAX_CONTEXT_LENGTH,
+]
+
+
+def _key_pair(generator):
+    baselen = (generator.curve().p().bit_length() + 1 + 7) // 8
+    private = PrivateKey(generator, b"\x42" * baselen)
+    return private, private.public_key()
+
+
+@pytest.mark.parametrize("generator,curve,name", _EDDSA_CURVES)
+def test_mode_constants_are_distinct(generator, curve, name):
+    assert len({PURE, PREHASH, CONTEXT}) == 3
+    assert MAX_CONTEXT_LENGTH == 255
+
+
+@pytest.mark.parametrize("generator,curve,name", _EDDSA_CURVES)
+def test_pure_default_is_unchanged(generator, curve, name):
+    private, public = _key_pair(generator)
+    for message in _SAMPLE_MESSAGES:
+        assert private.sign(message) == private.sign(message, mode=PURE)
+        assert public.verify(message, private.sign(message))
+
+
+@pytest.mark.parametrize("generator,curve,name", _EDDSA_CURVES)
+def test_domain_separation_structure(generator, curve, name):
+    if name == "ed25519":
+        assert _domain_separation(curve, PURE, None) == bytearray()
+        prefix = b"SigEd25519 no Ed25519 collisions"
+    else:
+        # Ed448 always carries a dom4 prefix, even for PureEdDSA
+        assert bytes(_domain_separation(curve, PURE, None)) == (
+            b"SigEd448\x00\x00"
+        )
+        prefix = b"SigEd448"
+
+    context = b"abc"
+    pure_ctx = bytes(_domain_separation(curve, CONTEXT, context))
+    prehash = bytes(_domain_separation(curve, PREHASH, None))
+    assert pure_ctx == prefix + b"\x00\x03" + context
+    assert prehash == prefix + b"\x01\x00"
+    # the prehash flag makes the two modes cryptographically distinct
+    assert pure_ctx != prehash
+
+
+@pytest.mark.parametrize("generator,curve,name", _EDDSA_CURVES)
+def test_prehash_message_length(generator, curve, name):
+    expected = 64
+    for message in _SAMPLE_MESSAGES:
+        prepared = _prepare_message(curve, PREHASH, message)
+        assert len(prepared) == expected
+        # pure mode never hashes the message ahead of signing
+        assert _prepare_message(curve, PURE, message) == message
+        assert _prepare_message(curve, CONTEXT, message) == message
+
+
+@pytest.mark.parametrize("generator,curve,name", _EDDSA_CURVES)
+@pytest.mark.parametrize("message", _SAMPLE_MESSAGES)
+def test_three_modes_round_trip(generator, curve, name, message):
+    private, public = _key_pair(generator)
+
+    sig_pure = private.sign(message, mode=PURE)
+    sig_ph = private.sign(message, mode=PREHASH)
+    sig_ctx = private.sign(
+        message, mode=CONTEXT, context=b"tenant/\xe4\xb8\xad\xe6\x96\x87"
+    )
+
+    assert public.verify(message, sig_pure, mode=PURE)
+    assert public.verify(message, sig_ph, mode=PREHASH)
+    assert public.verify(
+        message,
+        sig_ctx,
+        mode=CONTEXT,
+        context=b"tenant/\xe4\xb8\xad\xe6\x96\x87",
+    )
+
+
+@pytest.mark.parametrize("generator,curve,name", _EDDSA_CURVES)
+@pytest.mark.parametrize("message", _SAMPLE_MESSAGES)
+def test_cross_mode_replay_all_mismatches_fail(
+    generator, curve, name, message
+):
+    """Every off-diagonal entry of the 3x3 mode matrix must reject."""
+    private, public = _key_pair(generator)
+    context = b"tenant-context"
+
+    signatures = {
+        PURE: private.sign(message, mode=PURE),
+        PREHASH: private.sign(message, mode=PREHASH),
+        CONTEXT: private.sign(message, mode=CONTEXT, context=context),
+    }
+    verifier_modes = [
+        (PURE, None),
+        (PREHASH, None),
+        (CONTEXT, context),
+    ]
+
+    for sign_mode, signature in signatures.items():
+        for verify_mode, verify_context in verifier_modes:
+            if verify_mode == sign_mode and verify_mode != CONTEXT:
+                continue
+            if (
+                verify_mode == CONTEXT
+                and sign_mode == CONTEXT
+                and verify_context == context
+            ):
+                continue
+            with pytest.raises(ValueError):
+                public.verify(
+                    message,
+                    signature,
+                    mode=verify_mode,
+                    context=verify_context,
+                )
+
+
+@pytest.mark.parametrize("generator,curve,name", _EDDSA_CURVES)
+def test_distinct_modes_produce_distinct_signatures(generator, curve, name):
+    private, _ = _key_pair(generator)
+    message = b"same payload"
+    sig_pure = private.sign(message, mode=PURE)
+    sig_ph = private.sign(message, mode=PREHASH)
+    sig_ctx = private.sign(message, mode=CONTEXT, context=b"c")
+    signatures = [bytes(sig_pure), bytes(sig_ph), bytes(sig_ctx)]
+    assert len(set(signatures)) == 3
+
+
+@pytest.mark.parametrize("generator,curve,name", _EDDSA_CURVES)
+@pytest.mark.parametrize("context", _SAMPLE_CONTEXTS)
+def test_context_round_trip_and_value_binding(generator, curve, name, context):
+    private, public = _key_pair(generator)
+    message = b"audit record"
+    signature = private.sign(message, mode=CONTEXT, context=context)
+
+    assert public.verify(message, signature, mode=CONTEXT, context=context)
+
+    # for Ed448 an empty context is, per RFC 8032, the same signing operation
+    # as PureEdDSA, so only check value binding for non-empty contexts
+    if context:
+        with pytest.raises(ValueError):
+            public.verify(
+                message, signature, mode=CONTEXT, context=context + b"x"
+            )
+        with pytest.raises(ValueError):
+            public.verify(message, signature, mode=PURE)
+    # the prehash domain-separation flag always makes this verification fail
+    with pytest.raises(ValueError):
+        public.verify(message, signature, mode=PREHASH)
+
+
+@pytest.mark.parametrize("generator,curve,name", _EDDSA_CURVES)
+def test_empty_context_is_accepted(generator, curve, name):
+    private, public = _key_pair(generator)
+    signature = private.sign(b"msg", mode=CONTEXT, context=b"")
+    assert public.verify(b"msg", signature, mode=CONTEXT, context=b"")
+
+
+@pytest.mark.parametrize("generator,curve,name", _EDDSA_CURVES)
+def test_chinese_context_round_trip(generator, curve, name):
+    private, public = _key_pair(generator)
+    context = "审计：租户甲".encode("utf-8")
+    signature = private.sign(b"record", mode=CONTEXT, context=context)
+    assert public.verify(b"record", signature, mode=CONTEXT, context=context)
+    with pytest.raises(ValueError):
+        public.verify(
+            b"record",
+            signature,
+            mode=CONTEXT,
+            context="审计：租户乙".encode("utf-8"),
+        )
+
+
+@pytest.mark.parametrize("generator,curve,name", _EDDSA_CURVES)
+def test_context_255_byte_boundary_accepted(generator, curve, name):
+    private, public = _key_pair(generator)
+    context = bytes(bytearray(i % 256 for i in range(255)))
+    signature = private.sign(b"msg", mode=CONTEXT, context=context)
+    assert public.verify(b"msg", signature, mode=CONTEXT, context=context)
+
+
+@pytest.mark.parametrize("generator,curve,name", _EDDSA_CURVES)
+def test_context_256_bytes_rejected_without_truncation(generator, curve, name):
+    private, public = _key_pair(generator)
+    context = b"a" * 256
+    with pytest.raises(ValueError):
+        private.sign(b"msg", mode=CONTEXT, context=context)
+    with pytest.raises(ValueError):
+        public.verify(
+            b"msg",
+            b"\x00" * 2 * public.baselen,
+            mode=CONTEXT,
+            context=context,
+        )
+    # a 256-byte context must never be silently reduced to its first 255
+    short = private.sign(b"msg", mode=CONTEXT, context=context[:255])
+    with pytest.raises(ValueError):
+        public.verify(b"msg", short, mode=CONTEXT, context=context)
+
+
+@pytest.mark.parametrize("generator,curve,name", _EDDSA_CURVES)
+def test_context_only_allowed_in_context_mode(generator, curve, name):
+    private, public = _key_pair(generator)
+    for mode in (PURE, PREHASH):
+        with pytest.raises(ValueError):
+            private.sign(b"msg", mode=mode, context=b"c")
+        with pytest.raises(ValueError):
+            public.verify(
+                b"msg",
+                b"\x00" * 2 * public.baselen,
+                mode=mode,
+                context=b"c",
+            )
+
+
+@pytest.mark.parametrize("generator,curve,name", _EDDSA_CURVES)
+def test_unknown_mode_rejected(generator, curve, name):
+    private, public = _key_pair(generator)
+    with pytest.raises(ValueError):
+        private.sign(b"msg", mode="prefixed")
+    with pytest.raises(ValueError):
+        public.verify(b"msg", b"\x00" * 2 * public.baselen, mode="prefixed")
+
+
+@pytest.mark.parametrize("generator,curve,name", _EDDSA_CURVES)
+def test_context_must_be_bytes_like(generator, curve, name):
+    private, _ = _key_pair(generator)
+    with pytest.raises((TypeError, ValueError)):
+        private.sign(b"msg", mode=CONTEXT, context="not bytes")
+    with pytest.raises((TypeError, ValueError)):
+        private.sign(b"msg", mode=CONTEXT, context=1234)
+
+
+@pytest.mark.parametrize("generator,curve,name", _EDDSA_CURVES)
+def test_corrupted_signature_fails_in_every_mode(generator, curve, name):
+    private, public = _key_pair(generator)
+    context = b"tenant"
+    valid = [
+        private.sign(b"msg", mode=PURE),
+        private.sign(b"msg", mode=PREHASH),
+        private.sign(b"msg", mode=CONTEXT, context=context),
+    ]
+    for signature in valid:
+        corrupted = bytearray(signature)
+        corrupted[-1] ^= 0x01
+        with pytest.raises(ValueError):
+            public.verify(bytes(corrupted), b"msg", mode=PURE)
+        with pytest.raises(ValueError):
+            public.verify(bytes(corrupted), b"msg", mode=PREHASH)
+        with pytest.raises(ValueError):
+            public.verify(
+                bytes(corrupted), b"msg", mode=CONTEXT, context=context
+            )
+
+
+@pytest.mark.parametrize("generator,curve,name", _EDDSA_CURVES)
+def test_bad_signature_length_in_non_pure_modes(generator, curve, name):
+    _, public = _key_pair(generator)
+    for mode, context in (
+        (PREHASH, None),
+        (CONTEXT, b"c"),
+    ):
+        with pytest.raises(ValueError):
+            public.verify(
+                b"msg",
+                b"\x01" * (2 * public.baselen - 1),
+                mode=mode,
+                context=context,
+            )
+
+
+def test_cross_curve_signature_rejected():
+    ed25519_private, _ = _key_pair(generator_ed25519)
+    _, ed448_public = _key_pair(generator_ed448)
+    signature = ed25519_private.sign(b"msg", mode=PURE)
+    with pytest.raises(ValueError):
+        ed448_public.verify(b"msg", signature, mode=PURE)
+    signature_ph = ed25519_private.sign(b"msg", mode=PREHASH)
+    with pytest.raises(ValueError):
+        ed448_public.verify(b"msg", signature_ph, mode=PREHASH)
+
+
+@pytest.mark.parametrize("generator,curve,name", _EDDSA_CURVES)
+def test_exception_messages_hide_context_and_digest(generator, curve, name):
+    private, public = _key_pair(generator)
+    secret_context = b"super-secret-context-value"
+    with pytest.raises(ValueError) as exc:
+        public.verify(
+            b"msg",
+            b"\x00" * 2 * public.baselen,
+            mode=CONTEXT,
+            context=secret_context,
+        )
+    assert secret_context not in str(exc.value).encode("utf-8", "ignore")
+    with pytest.raises(ValueError) as exc:
+        private.sign(b"msg", mode=CONTEXT, context=b"a" * 256)
+    assert b"a" * 20 not in str(exc.value).encode("utf-8", "ignore")
