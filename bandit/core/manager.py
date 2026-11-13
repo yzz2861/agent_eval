@@ -8,7 +8,6 @@ import io
 import json
 import logging
 import os
-import re
 import sys
 import tokenize
 import traceback
@@ -20,12 +19,11 @@ from bandit.core import extension_loader
 from bandit.core import issue
 from bandit.core import meta_ast as b_meta_ast
 from bandit.core import metrics
+from bandit.core import nosec as b_nosec
 from bandit.core import node_visitor as b_node_visitor
 from bandit.core import test_set as b_test_set
 
 LOG = logging.getLogger(__name__)
-NOSEC_COMMENT = re.compile(r"#\s*nosec:?\s*(?P<tests>[^#]+)?#?")
-NOSEC_COMMENT_TESTS = re.compile(r"(?:(B\d+|[a-z\d_]+),?)+", re.IGNORECASE)
 PROGRESS_THRESHOLD = 50
 
 
@@ -67,6 +65,10 @@ class BanditManager:
         self.skipped = []
         self.results = []
         self.baseline = []
+        # Structured nosec records, keyed by file name then physical line.
+        self.nosec_records = {}
+        # Findings suppressed by nosec directives, retained for auditing.
+        self.suppressed = []
         self.agg_type = agg_type
         self.metrics = metrics.Metrics()
         self.b_ts = b_test_set.BanditTestSet(config, profile)
@@ -305,17 +307,17 @@ class BanditManager:
             lines = data.splitlines()
             self.metrics.begin(fname)
             self.metrics.count_locs(lines)
-            # nosec_lines is a dict of line number -> set of tests to ignore
-            #                                         for the line
-            nosec_lines = dict()
+            # nosec_lines maps each physical line covered by a statement
+            # carrying a nosec directive to its structured NosecRecord.  It
+            # is rebuilt per file so directives cannot leak across files.
+            nosec_lines = {}
+            self.nosec_records[fname] = {}
             try:
                 fdata.seek(0)
                 tokens = tokenize.tokenize(fdata.readline)
 
                 if not self.ignore_nosec:
-                    for toktype, tokval, (lineno, _), _, _ in tokens:
-                        if toktype == tokenize.COMMENT:
-                            nosec_lines[lineno] = _parse_nosec_comment(tokval)
+                    nosec_lines = self._collect_nosec_lines(fname, tokens)
 
             except tokenize.TokenError:
                 pass
@@ -360,11 +362,109 @@ class BanditManager:
             self.debug,
             nosec_lines,
             self.metrics,
+            self.suppressed,
         )
 
         score = res.process(data)
         self.results.extend(res.tester.results)
         return score
+
+    def _collect_nosec_lines(self, fname, tokens):
+        """Build the physical-line -> NosecRecord mapping for one file.
+
+        Inline comments are attached to every physical line in the logical
+        statement they terminate; standalone comments attach to the next
+        statement.  Records are stored per file under ``nosec_records`` so a
+        directive can never apply outside the file being scanned.
+        """
+        extman = extension_loader.MANAGER
+        # Physical line -> list of records; a line can carry both a
+        # standalone comment from the line above and an inline directive.
+        nosec_lines = collections.defaultdict(list)
+        pending = None
+        statement_lines = set()
+        inline_records = []
+        at_statement_boundary = True
+
+        def attach(record, covered_lines):
+            if record is None or not record.valid:
+                return
+            for covered_line in covered_lines:
+                existing_records = nosec_lines[covered_line]
+                if record in existing_records:
+                    continue
+                if existing_records:
+                    existing = existing_records[0]
+                    LOG.warning(
+                        "Conflicting nosec directives for line %i in %s; "
+                        "specific selectors take precedence and blanket "
+                        "directives are merged; keeping both %r and %r",
+                        covered_line,
+                        fname,
+                        existing.comment,
+                        record.comment,
+                    )
+                existing_records.append(record)
+            record.line_range = sorted(
+                set(record.line_range) | set(covered_lines)
+            )
+
+        for toktype, tokval, (lineno, _), _, line in tokens:
+            if toktype == tokenize.COMMENT:
+                record = b_nosec.parse_nosec_comment(
+                    tokval, lineno, extman
+                )
+                if record is None:
+                    continue
+                self.nosec_records[fname][lineno] = record
+                if line.strip().startswith("#"):
+                    if pending is not None:
+                        LOG.warning(
+                            "Multiple standalone nosec comments before line "
+                            "%i in %s; ignoring earlier directive %r",
+                            lineno,
+                            fname,
+                            pending.comment,
+                        )
+                    pending = record
+                else:
+                    # An inline comment covers the whole logical statement
+                    # in progress (or just its own line at a boundary).
+                    attach(record, statement_lines | {lineno})
+                    inline_records.append(record)
+                    pending = None
+            elif toktype == tokenize.NEWLINE:
+                if pending is not None:
+                    attach(pending, statement_lines or {pending.lineno})
+                    pending = None
+                statement_lines = set()
+                inline_records = []
+                at_statement_boundary = True
+            elif toktype in (
+                tokenize.ENCODING,
+                tokenize.NL,
+                tokenize.INDENT,
+                tokenize.DEDENT,
+                tokenize.ENDMARKER,
+            ):
+                continue
+            else:
+                if at_statement_boundary and pending is not None:
+                    # Standalone comment above the statement: bind it to the
+                    # statement's first physical line now, then keep growing
+                    # its coverage as continuation lines are encountered.
+                    attach(pending, {lineno})
+                at_statement_boundary = False
+                statement_lines.add(lineno)
+                if pending is not None:
+                    attach(pending, statement_lines)
+                for inline_record in inline_records:
+                    attach(inline_record, statement_lines)
+
+        if pending is not None:
+            # A trailing standalone comment only covers its own physical line.
+            attach(pending, {pending.lineno})
+        return nosec_lines
 
 
 def _get_files_from_dir(
@@ -459,41 +559,3 @@ def _find_candidate_matches(unmatched_issues, results_list):
         ]
 
     return issue_candidates
-
-
-def _find_test_id_from_nosec_string(extman, match):
-    test_id = extman.check_id(match)
-    if test_id:
-        return match
-    # Finding by short_id didn't work, let's check the test name
-    test_id = extman.get_test_id(match)
-    if not test_id:
-        # Name and short id didn't work:
-        LOG.warning(
-            "Test in comment: %s is not a test name or id, ignoring", match
-        )
-    return test_id  # We want to return None or the string here regardless
-
-
-def _parse_nosec_comment(comment):
-    found_no_sec_comment = NOSEC_COMMENT.search(comment)
-    if not found_no_sec_comment:
-        # there was no nosec comment
-        return None
-
-    matches = found_no_sec_comment.groupdict()
-    nosec_tests = matches.get("tests", set())
-
-    # empty set indicates that there was a nosec comment without specific
-    # test ids or names
-    test_ids = set()
-    if nosec_tests:
-        extman = extension_loader.MANAGER
-        # lookup tests by short code or name
-        for test in NOSEC_COMMENT_TESTS.finditer(nosec_tests):
-            test_match = test.group(1)
-            test_id = _find_test_id_from_nosec_string(extman, test_match)
-            if test_id:
-                test_ids.add(test_id)
-
-    return test_ids

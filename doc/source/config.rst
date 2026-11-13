@@ -119,6 +119,24 @@ as an issue.
 
   assert yaml.load("{}") == []  # nosec assert_used
 
+The directive follows a fixed grammar that is normalized before the comment
+is applied: the colon after ``nosec`` is optional, selectors are separated by
+commas, surrounding whitespace is ignored and test IDs (``B602``) as well as
+plugin names (``assert_used``) are case-insensitive. A wildcard such as
+``B60*`` suppresses every matching test ID. Selectors may be mixed on one
+line, for example ``# nosec: B602, subprocess_popen_with_shell_equals_true``.
+A directive without any selector (``# nosec``) remains a blanket suppression
+of the whole line.
+
+Malformed directives are never treated as a blanket suppression. Unknown test
+IDs or plugin names, duplicated selectors and space separated selectors (for
+example ``# nosec B607 B602``) are logged as invalid nosec comments and the
+underlying findings keep being reported. For statements spanning multiple
+lines, an inline directive applies to every physical line of the statement,
+while a standalone directive on the line above applies to the next statement.
+When a specific selector and a blanket directive overlap, the specific
+selector wins so unrelated findings stay visible.
+
 -----------------
 Scanning Behavior
 -----------------

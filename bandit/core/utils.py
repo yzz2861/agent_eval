@@ -391,8 +391,9 @@ def check_ast_node(name):
 
 
 def get_nosec(nosec_lines, context):
+    """Return the structured nosec record covering a context's line range."""
     for lineno in context["linerange"]:
-        nosec = nosec_lines.get(lineno, None)
-        if nosec is not None:
-            return nosec
+        records = nosec_lines.get(lineno)
+        if records:
+            return records
     return None

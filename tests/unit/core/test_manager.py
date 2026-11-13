@@ -12,6 +12,7 @@ from bandit.core import config
 from bandit.core import constants
 from bandit.core import issue
 from bandit.core import manager
+from bandit.core import nosec as b_nosec
 
 
 class ManagerTests(testtools.TestCase):
@@ -393,3 +394,201 @@ class ManagerTests(testtools.TestCase):
                 [issue_a, issue_b], [issue_a, issue_b, issue_c]
             ),
         )
+
+    def _scan_source(self, source, fname="sample.py"):
+        temp_directory = self.useFixture(fixtures.TempDir()).path
+        path = os.path.join(temp_directory, fname)
+        with open(path, "w") as fd:
+            fd.write(source)
+        mgr = manager.BanditManager(config=self.config, agg_type="file")
+        mgr.discover_files([path], True)
+        mgr.run_tests()
+        return mgr, path
+
+    def _issue_ids(self, mgr, path):
+        return [
+            (item.lineno, item.test_id)
+            for item in mgr.get_issue_list()
+            if item.fname == path
+        ]
+
+    def test_nosec_specific_id_leaves_other_plugins_reported(self):
+        source = (
+            "import subprocess\n"
+            "subprocess.Popen('ls', shell=True)  # nosec B602\n"
+            "subprocess.Popen('/bin/b', shell=True)\n"
+        )
+        mgr, path = self._scan_source(source)
+        reported = self._issue_ids(mgr, path)
+        self.assertNotIn((2, "B602"), reported)
+        self.assertIn((2, "B607"), reported)
+        self.assertIn((3, "B602"), reported)
+        suppressed = [
+            (item.lineno, item.test_id, item.nosec_comment)
+            for item in mgr.suppressed
+        ]
+        self.assertIn((2, "B602", "# nosec B602"), suppressed)
+
+    def test_nosec_colon_form_with_alias_and_case(self):
+        source = (
+            "import subprocess\n"
+            "subprocess.Popen('/bin/a', shell=True)  "
+            "# NOSEC: B602, SUBPROCESS_POPEN_WITH_SHELL_EQUALS_TRUE\n"
+        )
+        mgr, path = self._scan_source(source)
+        reported = self._issue_ids(mgr, path)
+        self.assertNotIn((2, "B602"), reported)
+        record = next(iter(mgr.nosec_records[path].values()))
+        self.assertEqual(
+            ["B602", "subprocess_popen_with_shell_equals_true"],
+            record.selectors,
+        )
+
+    def test_nosec_covers_multiline_statement(self):
+        source = (
+            "import subprocess\n"
+            "subprocess.Popen(  # nosec B602\n"
+            "    '/bin/a',\n"
+            "    shell=True,\n"
+            ")\n"
+        )
+        mgr, path = self._scan_source(source)
+        self.assertNotIn((2, "B602"), self._issue_ids(mgr, path))
+        record = mgr.nosec_records[path][2]
+        self.assertEqual([2, 3, 4, 5], record.line_range)
+
+    def test_nosec_comment_on_last_line_covers_full_statement(self):
+        source = (
+            "import subprocess\n"
+            "subprocess.Popen(\n"
+            "    '/bin/a',\n"
+            "    shell=True)  # nosec B602\n"
+        )
+        mgr, path = self._scan_source(source)
+        self.assertNotIn((2, "B602"), self._issue_ids(mgr, path))
+        record = mgr.nosec_records[path][4]
+        self.assertEqual([2, 3, 4], record.line_range)
+
+    def test_standalone_nosec_attaches_to_next_statement(self):
+        source = (
+            "import subprocess\n"
+            "# nosec B602\n"
+            "subprocess.Popen('/bin/a', shell=True)\n"
+            "subprocess.Popen('/bin/b', shell=True)\n"
+        )
+        mgr, path = self._scan_source(source)
+        reported = self._issue_ids(mgr, path)
+        self.assertNotIn((3, "B602"), reported)
+        self.assertIn((4, "B602"), reported)
+
+    def test_inline_selector_overrides_previous_line_blanket(self):
+        source = (
+            "import subprocess\n"
+            "# nosec\n"
+            "subprocess.Popen('ls', shell=True)  # nosec B602\n"
+        )
+        mgr, path = self._scan_source(source)
+        reported = self._issue_ids(mgr, path)
+        # B602 is explicitly suppressed; B607 must still be reported even
+        # though the previous line carried a blanket directive.
+        self.assertNotIn((3, "B602"), reported)
+        self.assertIn((3, "B607"), reported)
+        line_records = mgr.nosec_records[path]
+        self.assertTrue(line_records[2].blanket)
+        self.assertEqual(["B602"], line_records[3].selectors)
+
+    def test_invalid_nosec_does_not_suppress_anything(self):
+        source = (
+            "import subprocess\n"
+            "subprocess.Popen('/bin/a', shell=True)  # nosec B999\n"
+        )
+        mgr, path = self._scan_source(source)
+        self.assertIn((2, "B602"), self._issue_ids(mgr, path))
+        record = mgr.nosec_records[path][2]
+        self.assertIsInstance(record, b_nosec.NosecRecord)
+        self.assertFalse(record.valid)
+        self.assertEqual([], mgr.suppressed)
+
+    def test_nosec_does_not_leak_across_function_scope(self):
+        source = (
+            "import subprocess\n"
+            "def f():\n"
+            "    subprocess.Popen('a', shell=True)  # nosec B602\n"
+            "\n"
+            "subprocess.Popen('b', shell=True)\n"
+        )
+        mgr, path = self._scan_source(source, fname="scope.py")
+        reported = self._issue_ids(mgr, path)
+        # The directive lives inside the function and must not reach the
+        # module-level statement on line 5.
+        self.assertNotIn((3, "B602"), reported)
+        self.assertIn((5, "B602"), reported)
+
+    def test_nosec_records_are_isolated_per_file(self):
+        first = (
+            "import subprocess\n"
+            "subprocess.Popen('/bin/a', shell=True)  # nosec B602\n"
+        )
+        second = (
+            "import subprocess\n"
+            "subprocess.Popen('/bin/b', shell=True)\n"
+        )
+        temp_directory = self.useFixture(fixtures.TempDir()).path
+        first_path = os.path.join(temp_directory, "first.py")
+        second_path = os.path.join(temp_directory, "second.py")
+        with open(first_path, "w") as fd:
+            fd.write(first)
+        with open(second_path, "w") as fd:
+            fd.write(second)
+        mgr = manager.BanditManager(config=self.config, agg_type="file")
+        mgr.discover_files([first_path, second_path], True)
+        mgr.run_tests()
+        self.assertEqual([2], list(mgr.nosec_records[first_path]))
+        self.assertEqual({}, mgr.nosec_records[second_path])
+        self.assertIn((2, "B602"), self._issue_ids(mgr, second_path))
+
+    def test_nosec_does_not_change_baseline_issue_equality(self):
+        issue_a = self._get_issue_instance()
+        issue_b = self._get_issue_instance()
+        issue_a.nosec_comment = "# nosec B602"
+        issue_a.nosec_test_id = "B602"
+        self.assertEqual(issue_a, issue_b)
+
+    def test_suppressed_issue_serializes_like_a_normal_issue(self):
+        suppressed = self._get_issue_instance()
+        suppressed.nosec_comment = "# nosec B602"
+        suppressed.nosec_test_id = "B602"
+        normal = self._get_issue_instance()
+        self.assertEqual(
+            suppressed.as_dict(with_code=False),
+            normal.as_dict(with_code=False),
+        )
+        round_trip = issue.issue_from_dict(normal.as_dict())
+        self.assertEqual(round_trip, suppressed)
+
+    def test_blanket_nosec_remains_compatible(self):
+        source = (
+            "import subprocess\n"
+            "subprocess.Popen('/bin/a', shell=True)  # nosec\n"
+        )
+        mgr, path = self._scan_source(source)
+        self.assertEqual(
+            [(1, "B404")], self._issue_ids(mgr, path)
+        )
+        record = mgr.nosec_records[path][2]
+        self.assertTrue(record.blanket)
+        self.assertTrue(record.valid)
+
+    def test_suppressed_audit_keeps_id_and_raw_comment(self):
+        source = (
+            "import subprocess\n"
+            "subprocess.Popen('/bin/a', shell=True)  # nosec: b602\n"
+        )
+        mgr, path = self._scan_source(source)
+        self.assertEqual(1, len(mgr.suppressed))
+        suppressed = mgr.suppressed[0]
+        self.assertEqual("B602", suppressed.nosec_test_id)
+        self.assertEqual("# nosec: b602", suppressed.nosec_comment)
+        record = mgr.nosec_records[path][2]
+        self.assertEqual("# nosec: b602", record.comment)
+        self.assertEqual({"B602"}, record.test_ids)

@@ -35,8 +35,9 @@ def format_secure():
     safestring.mark_safe('<b>{}</b>'.format(my_secure_str))
     safestring.mark_safe('<b>{} {}</b>'.format(my_secure_str, 'a'))
     safestring.mark_safe('<b>{} {}</b>'.format(*[my_secure_str, 'a']))
-    safestring.mark_safe('<b>{b}</b>'.format(b=my_secure_str))  # nosec TODO
-    safestring.mark_safe('<b>{b}</b>'.format(**{'b': my_secure_str}))  # nosec TODO
+    # TODO: blanket nosec retained while the mark_safe calls are reviewed
+    safestring.mark_safe('<b>{b}</b>'.format(b=my_secure_str))  # nosec
+    safestring.mark_safe('<b>{b}</b>'.format(**{'b': my_secure_str}))  # nosec
     my_secure_str = '<b>{}</b>'.format(my_secure_str)
     safestring.mark_safe(my_secure_str)
 
@@ -46,7 +47,8 @@ def percent_secure():
     my_secure_str = 'secure'
     safestring.mark_safe('<b>%s</b>' % my_secure_str)
     safestring.mark_safe('<b>%s %s</b>' % (my_secure_str, 'a'))
-    safestring.mark_safe('<b>%(b)s</b>' % {'b': my_secure_str})  # nosec TODO
+    # TODO: blanket nosec retained while the mark_safe calls are reviewed
+    safestring.mark_safe('<b>%(b)s</b>' % {'b': my_secure_str})  # nosec
 
 
 def with_secure(path):

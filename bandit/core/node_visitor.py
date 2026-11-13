@@ -15,7 +15,15 @@ LOG = logging.getLogger(__name__)
 
 class BanditNodeVisitor:
     def __init__(
-        self, fname, fdata, metaast, testset, debug, nosec_lines, metrics
+        self,
+        fname,
+        fdata,
+        metaast,
+        testset,
+        debug,
+        nosec_lines,
+        metrics,
+        suppressed=None,
     ):
         self.debug = debug
         self.nosec_lines = nosec_lines
@@ -31,7 +39,7 @@ class BanditNodeVisitor:
         self.imports = set()
         self.import_aliases = {}
         self.tester = b_tester.BanditTester(
-            self.testset, self.debug, nosec_lines, metrics
+            self.testset, self.debug, nosec_lines, metrics, suppressed
         )
 
         # in some cases we can't determine a qualified name

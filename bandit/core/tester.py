@@ -15,13 +15,14 @@ LOG = logging.getLogger(__name__)
 
 
 class BanditTester:
-    def __init__(self, testset, debug, nosec_lines, metrics):
+    def __init__(self, testset, debug, nosec_lines, metrics, suppressed=None):
         self.results = []
         self.testset = testset
         self.last_result = None
         self.debug = debug
         self.nosec_lines = nosec_lines
         self.metrics = metrics
+        self.suppressed = suppressed if suppressed is not None else []
 
     def run_tests(self, raw_context, checktype):
         """Runs all tests for a certain type of check, for example
@@ -76,22 +77,22 @@ class BanditTester:
                     if result.test_id == "":
                         result.test_id = test._test_id
 
-                    # don't skip the test if there was no nosec comment
-                    if nosec_tests_to_skip is not None:
-                        # If the set is empty then it means that nosec was
-                        # used without test number -> update nosecs counter.
-                        # If the test id is in the set of tests to skip,
-                        # log and increment the skip by test count.
-                        if not nosec_tests_to_skip:
+                    suppressing_record = self._find_suppressing_record(
+                        nosec_tests_to_skip, result.test_id
+                    )
+                    if suppressing_record is not None:
+                        if suppressing_record.blanket:
                             LOG.debug("skipped, nosec without test number")
                             self.metrics.note_nosec()
-                            continue
-                        if result.test_id in nosec_tests_to_skip:
+                        else:
                             LOG.debug(
                                 f"skipped, nosec for test {result.test_id}"
                             )
                             self.metrics.note_skipped_test()
-                            continue
+                        result.nosec_comment = suppressing_record.comment
+                        result.nosec_test_id = result.test_id
+                        self.suppressed.append(result)
+                        continue
 
                     self.results.append(result)
 
@@ -106,9 +107,8 @@ class BanditTester:
                     nosec_tests_to_skip = self._get_nosecs_from_contexts(
                         temp_context
                     )
-                    if (
-                        nosec_tests_to_skip
-                        and test._test_id in nosec_tests_to_skip
+                    if self._find_suppressing_record(
+                        nosec_tests_to_skip, test._test_id
                     ):
                         LOG.warning(
                             f"nosec encountered ({test._test_id}), but no "
@@ -125,33 +125,43 @@ class BanditTester:
         return scores
 
     def _get_nosecs_from_contexts(self, context, test_result=None):
-        """Use context and optional test result to get set of tests to skip.
+        """Collect structured nosec records covering the current context.
+
         :param context: temp context
         :param test_result: optional test result
-        :return: set of tests to skip for the line based on contexts
+        :return: list of NosecRecord objects, empty when no comment applies
         """
-        nosec_tests_to_skip = set()
-        base_tests = (
-            self.nosec_lines.get(test_result.lineno, None)
-            if test_result
-            else None
-        )
-        context_tests = utils.get_nosec(self.nosec_lines, context)
+        records = []
+        if test_result is not None:
+            base_records = self.nosec_lines.get(test_result.lineno) or []
+            for base_record in base_records:
+                if base_record not in records:
+                    records.append(base_record)
+        context_record = utils.get_nosec(self.nosec_lines, context)
+        if context_record is not None:
+            for record in context_record:
+                if record not in records:
+                    records.append(record)
+        return records
 
-        # if both are none there were no comments
-        # this is explicitly different from being empty.
-        # empty set indicates blanket nosec comment without
-        # individual test names or ids
-        if base_tests is None and context_tests is None:
-            nosec_tests_to_skip = None
-
-        # combine tests from current line and context line
-        if base_tests is not None:
-            nosec_tests_to_skip.update(base_tests)
-        if context_tests is not None:
-            nosec_tests_to_skip.update(context_tests)
-
-        return nosec_tests_to_skip
+    @staticmethod
+    def _find_suppressing_record(records, test_id):
+        """Return the record that explicitly covers ``test_id``, if any."""
+        blanket_match = None
+        has_specific_record = False
+        for record in records:
+            if record.blanket:
+                if record.suppresses(test_id):
+                    blanket_match = record
+                continue
+            has_specific_record = True
+            if record.suppresses(test_id):
+                # Specific selectors always win over a blanket directive,
+                # including when the two comments sit on adjacent lines.
+                return record
+        # A blanket directive only applies when no specific directive is in
+        # scope; otherwise an unrelated id must stay visible to the scanner.
+        return None if has_specific_record else blanket_match
 
     @staticmethod
     def report_error(test, context, error):
