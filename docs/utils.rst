@@ -57,6 +57,14 @@ Security Helpers
 
 .. autofunction:: check_password_hash
 
+.. autofunction:: diagnose_password_hash
+
+.. autoclass:: PasswordHashDiagnostic
+    :members:
+
+.. autoclass:: PasswordHashStatus
+    :members:
+
 .. autofunction:: safe_join
 
 
