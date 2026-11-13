@@ -8,6 +8,7 @@ import itertools
 import logging
 import os
 import re
+import weakref
 from datetime import datetime
 from datetime import timezone
 from importlib.resources import files as _resource_files
@@ -98,6 +99,211 @@ class SignatureError(XmlsecError):
 
 class BadSignature(SigverError):
     """The signature is invalid."""
+
+
+class SignatureBindingError(SignatureError):
+    """A signature cannot be bound to a unique business node.
+
+    The cryptographic material itself may be valid, but the document does
+    not allow the verifier to prove *which* node was signed: duplicate or
+    malformed IDs, signature references that do not resolve to a unique
+    node or references pointing at a different object than the one carrying
+    the signature all end up here.
+    """
+
+
+# XML 1.0 (Fifth Edition) NCName, the type of SAML ID attribute values.
+# A NCName is a Name without a colon: NameStartChar followed by NameChar's.
+_NAME_START_CHAR = (
+    r"A-Z_a-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u02FF"
+    r"\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F"
+    r"\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD"
+)
+_NAME_CHAR = _NAME_START_CHAR + r"0-9\-.\u00B7\u0300-\u036F\u203F-\u2040"
+NCNAME_RE = re.compile(f"^[{_NAME_START_CHAR}][{_NAME_CHAR}]*$")
+
+# The XML namespace that carries xml:id and the local name of ID attributes.
+_XML_NS = "http://www.w3.org/XML/1998/namespace"
+_ID_LOCAL_NAME = "ID"
+
+
+def valid_ncname(value):
+    """Return True if *value* is a legal XML NCName (and thus a legal ID)."""
+    return isinstance(value, str) and NCNAME_RE.match(value) is not None
+
+
+def _node_id_attribute(node):
+    """Extract the SAML ID attribute of *node*, if present.
+
+    Both the namespace-qualified ``xml:id`` form and the SAML convention of
+    an unprefixed ``ID`` attribute are recognized. The local name match is
+    case sensitive, so ``id``/``Id`` are not treated as identifiers.
+    """
+    id_attr = f"{{{_XML_NS}}}{_ID_LOCAL_NAME}"
+    if isinstance(node, ExtensionElement):
+        attributes = node.attributes
+        if id_attr in attributes:
+            return attributes[id_attr]
+        if _ID_LOCAL_NAME in attributes:
+            return attributes[_ID_LOCAL_NAME]
+        # Unknown elements keep SAML namespaced attributes in Clark notation.
+        for name, value in attributes.items():
+            if name == f"{{{saml.NAMESPACE}}}{_ID_LOCAL_NAME}":
+                return value
+        return None
+
+    if id_attr in node.extension_attributes:
+        return node.extension_attributes[id_attr]
+    if _ID_LOCAL_NAME in node.extension_attributes:
+        return node.extension_attributes[_ID_LOCAL_NAME]
+    return getattr(node, "id", None)
+
+
+def _iter_model_nodes(node, seen=None):
+    """Yield every SamlBase/ExtensionElement reachable from *node* once."""
+    if seen is None:
+        seen = set()
+    node_identity = id(node)
+    if node_identity in seen:
+        return
+    seen.add(node_identity)
+    yield node
+
+    children = []
+    if isinstance(node, SamlBase):
+        children.extend(node.children_with_values())
+        # SamlBase inherits the extension container and may carry unknown
+        # content (XSW wrapper/extension attacks live here).
+        for child in node.extension_elements or []:
+            children.append(child)
+    elif isinstance(node, ExtensionElement):
+        for child in node.children or []:
+            children.append(child)
+    for child in children:
+        if isinstance(child, (SamlBase, ExtensionElement)):
+            yield from _iter_model_nodes(child, seen)
+
+
+def build_id_index(root):
+    """Build an ID -> unique node index for every element inside *root*.
+
+    The index is built before any signature is validated. Empty IDs, IDs
+    that are not legal XML NCNames and IDs that occur on more than one node
+    make the document ambiguous and are rejected with a
+    :class:`SignatureBindingError`.
+
+    :return: dict mapping the ID string to exactly one model node
+    """
+    index = {}
+    for node in _iter_model_nodes(root):
+        identifier = _node_id_attribute(node)
+        if identifier is None:
+            continue
+        if not identifier:
+            raise SignatureBindingError(f"Empty ID attribute on node <{_node_label(node)}>")
+        if not valid_ncname(identifier):
+            raise SignatureBindingError(f"ID '{identifier}' on node <{_node_label(node)}> is not a legal NCName")
+        if identifier in index and index[identifier] is not node:
+            raise SignatureBindingError(
+                f"Duplicate ID '{identifier}' found on multiple nodes; "
+                "signature references cannot be resolved to a unique node"
+            )
+        index[identifier] = node
+    return index
+
+
+def _node_label(node):
+    """Best-effort human readable element name for error messages."""
+    namespace = getattr(node, "c_namespace", None) or getattr(node, "namespace", None) or ""
+    tag = getattr(node, "c_tag", None) or getattr(node, "tag", None) or "unknown"
+    if namespace:
+        return f"{{{namespace}}}{tag}"
+    return str(tag)
+
+
+def resolve_signature_reference(item, reference_uri, id_index):
+    """Resolve a signature Reference URI against the document ID index.
+
+    Only same-document fragment references (``#id``) are accepted and the
+    referenced ID must resolve to exactly one node, which moreover has to be
+    the node that carries the signature.
+
+    :return: the uniquely referenced node
+    """
+    if not reference_uri or not reference_uri.startswith("#") or len(reference_uri) <= 1:
+        raise SignatureBindingError(f"Signature reference '{reference_uri}' is not a same-document ID reference")
+
+    identifier = reference_uri[1:]
+    if not valid_ncname(identifier):
+        raise SignatureBindingError(f"Signature reference '{reference_uri}' does not contain a legal NCName")
+
+    referenced = id_index.get(identifier)
+    if referenced is None:
+        raise SignatureBindingError(
+            f"Signature reference '{reference_uri}' does not match any node in the document ID index"
+        )
+    if referenced is not item:
+        raise SignatureBindingError(
+            f"Signature reference '{reference_uri}' points to node <{_node_label(referenced)}> "
+            f"but is carried by node <{_node_label(item)}>"
+        )
+    return referenced
+
+
+# Verification state is kept outside the SAML model objects on purpose:
+# storing it on the instance would leak into keyswv()/serialization. SamlBase
+# overrides __eq__ which makes instances unhashable, so the registries are
+# keyed by id() with a weakref finalizer that drops stale entries.
+_VERIFIED_SIGNATURE_NODES = {}
+
+
+def _register_with_weak_root(registry, root, value):
+    """Store *value* for *root* without keeping *root* alive."""
+    root_identity = id(root)
+
+    def _drop(_ref):
+        registry.pop(root_identity, None)
+
+    registry[root_identity] = (weakref.ref(root, _drop), value)
+
+
+def _lookup_by_weak_root(registry, root):
+    entry = registry.get(id(root))
+    if entry is None:
+        return None
+    reference, value = entry
+    if reference() is None:
+        registry.pop(id(root), None)
+        return None
+    return value
+
+
+def mark_node_signature_verified(item, references, id_index):
+    """Record the identity proven by the signature on *item*.
+
+    The binding is stored in a process-wide weak registry rather than on the
+    model object, so later processing can prove the business object in use is
+    the one that was signed without affecting serialization.
+    """
+    signed_ids = []
+    for reference in references:
+        signed_node = resolve_signature_reference(item, reference.uri, id_index)
+        identifier = getattr(signed_node, "id", None)
+        if identifier and identifier not in signed_ids:
+            signed_ids.append(identifier)
+    _register_with_weak_root(_VERIFIED_SIGNATURE_NODES, item, {"ids": signed_ids})
+    return item
+
+
+def node_signature_verified(item):
+    """Return True if *item* is the exact object that passed verification."""
+    return _lookup_by_weak_root(_VERIFIED_SIGNATURE_NODES, item) is not None
+
+
+def verified_node_identity(item):
+    """Return the signed IDs recorded for a verified node, or None."""
+    binding = _lookup_by_weak_root(_VERIFIED_SIGNATURE_NODES, item)
+    return binding["ids"] if binding else None
 
 
 def get_pem_wrapped_unwrapped(cert):
@@ -1355,6 +1561,14 @@ class SecurityContext:
     def _check_signature(
         self, decoded_xml, item, node_name=NODE_NAME, origdoc=None, must=False, only_valid_cert=False, issuer=None
     ):
+        # Bind the signature to business objects before touching the crypto
+        # backend: the document is indexed by ID, every reference must resolve
+        # to exactly one node and that node has to be the signature carrier.
+        # The binding index is rooted at *item* so the reference and its
+        # carrier live in one object graph. Document-wide duplicate/malformed
+        # IDs were already rejected when the enclosing message was parsed.
+        id_index = build_id_index(item)
+
         try:
             _issuer = item.issuer.text.strip()
         except AttributeError:
@@ -1419,6 +1633,15 @@ class SecurityContext:
         # * the anchor points to the enclosing element's ID attribute
         signed_info = item.signature.signed_info
         references = signed_info.reference
+
+        # Object binding (XSW defense) comes before the SAML profile checks:
+        # every reference has to resolve through the unique-ID index to the
+        # exact node that carries this signature. Running this first also
+        # rejects documents with more than one Reference before the profile
+        # validation below assumes a single reference.
+        for reference in references:
+            resolve_signature_reference(item, getattr(reference, "uri", None), id_index)
+
         signatures_must_have_a_single_reference_element = len(references) == 1
         the_Reference_element_must_have_a_URI_attribute = signatures_must_have_a_single_reference_element and hasattr(
             references[0], "uri"
@@ -1514,6 +1737,10 @@ class SecurityContext:
         else:
             raise SignatureError("Failed to verify signature")
 
+        # Record the identity of the node that the signature actually proved.
+        # Business code must consume this exact object instead of querying the
+        # document again by name or path.
+        mark_node_signature_verified(item, references, id_index)
         return item
 
     def check_signature(self, item, node_name=NODE_NAME, origdoc=None, must=False, issuer=None):
@@ -1562,6 +1789,9 @@ class SecurityContext:
             else:
                 return msg
 
+        # Reject ambiguous documents before the crypto backend gets a chance
+        # to pick a different node than the business parser will use.
+        build_id_index(msg)
         return self._check_signature(
             decoded_xml, msg, class_name(msg), origdoc, must=must, only_valid_cert=only_valid_cert
         )
@@ -1649,6 +1879,11 @@ class SecurityContext:
         response = samlp.any_response_from_string(decoded_xml)
         if not response:
             raise TypeError("Not a Response")
+
+        # Index the whole document (including nested assertions) before any
+        # signature is validated, so duplicate/malformed IDs cannot be used to
+        # make verifier and business parser disagree on the target node.
+        build_id_index(response)
 
         if response.signature:
             if "do_not_verify" in kwargs:

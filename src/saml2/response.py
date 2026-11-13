@@ -42,7 +42,9 @@ from saml2.samlp import STATUS_UNKNOWN_PRINCIPAL
 from saml2.samlp import STATUS_UNSUPPORTED_BINDING
 from saml2.samlp import STATUS_VERSION_MISMATCH
 from saml2.sigver import DecryptError
+from saml2.sigver import SignatureBindingError
 from saml2.sigver import SignatureError
+from saml2.sigver import node_signature_verified
 from saml2.sigver import security_context
 from saml2.sigver import signed
 from saml2.time_util import later_than
@@ -519,12 +521,38 @@ class AuthnResponse(StatusResponse):
             self.extension_schema = {}
 
     def check_subject_confirmation_in_response_to(self, irp):
-        for assertion in self.response.assertion:
+        for assertion in self._trusted_response_assertions():
             for _sc in assertion.subject.subject_confirmation:
                 if _sc.subject_confirmation_data.in_response_to != irp:
                     return False
 
         return True
+
+    def _trusted_response_assertions(self):
+        """Return the response assertions that are safe to consume.
+
+        A signed assertion is only trusted when it is the exact object that
+        passed signature verification. Unsigned assertions are returned when
+        signature enforcement is not configured, but signed-but-unverified
+        assertions are never exposed to audience/recipient/identity parsing.
+        """
+        trusted = []
+        for assertion in self.response.assertion or []:
+            if assertion.signature:
+                if node_signature_verified(assertion):
+                    trusted.append(assertion)
+            else:
+                trusted.append(assertion)
+        return trusted
+
+    def _response_assertions_for_verification(self):
+        """Return all parsed assertions that still need signature handling.
+
+        Unlike :meth:`_trusted_response_assertions` this keeps signed but not
+        yet verified assertions so the crypto backend gets a chance to report
+        a genuine signature failure rather than a binding failure.
+        """
+        return list(self.response.assertion or [])
 
     def loads(self, xmldata, decode=True, origxml=None):
         self._loads(xmldata, decode, origxml)
@@ -787,7 +815,8 @@ class AuthnResponse(StatusResponse):
                 raise SignatureError("Signature missing for assertion")
         else:
             logger.debug("signed")
-            if not verified and self.do_not_verify is False:
+            already_bound = node_signature_verified(assertion)
+            if not verified and not already_bound and self.do_not_verify is False:
                 try:
                     self.sec.check_signature(assertion, class_name(assertion), self.xmlstr)
                 except Exception as exc:
@@ -795,6 +824,16 @@ class AuthnResponse(StatusResponse):
                     logger.debug("correctly_signed_response: %s", exc)
                     raise
 
+        # Object binding: the assertion used for audience, recipient and
+        # identity checks has to be the exact node that was verified.
+        unbound_signed_assertion = (
+            assertion.signature
+            and not verified
+            and self.do_not_verify is False
+            and not node_signature_verified(assertion)
+        )
+        if unbound_signed_assertion:
+            raise SignatureBindingError("Refusing to parse an assertion that was not signature-verified")
         self.assertion = assertion
         logger.debug("assertion context: %s", self.context)
         logger.debug("assertion keys: %s", assertion.keyswv())
@@ -914,9 +953,10 @@ class AuthnResponse(StatusResponse):
             if n_assertions != 1 and n_assertions_enc != 1 and self.assertion is None:
                 raise InvalidAssertion(f"Invalid number of assertions in Response: {n_assertions + n_assertions_enc}")
 
+        plain_assertions = self._response_assertions_for_verification()
         if self.response.assertion:
             logger.debug("***Unencrypted assertion***")
-            for assertion in self.response.assertion:
+            for assertion in plain_assertions:
                 if not self._assertion(assertion, False):
                     return False
 
@@ -992,8 +1032,8 @@ class AuthnResponse(StatusResponse):
             if len(_enc_assertions) > 0:
                 self.response.encrypted_assertion = []
 
-        if self.response.assertion:
-            for assertion in self.response.assertion:
+        for assertion in self._trusted_response_assertions():
+            if not any(assertion is existing for existing in self.assertions):
                 self.assertions.append(assertion)
 
         if self.assertions and len(self.assertions) > 0:
