@@ -71,7 +71,7 @@ class AxesProxyHandler(AbstractAxesHandler, AxesBaseHandler):
         cls, *, username: str, limit: Optional[int] = None
     ) -> int:
         return cls.get_implementation().remove_out_of_limit_failure_logs(
-            username=username
+            username=username, limit=limit
         )
 
     @staticmethod

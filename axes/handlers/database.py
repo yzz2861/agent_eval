@@ -98,15 +98,47 @@ class AxesDatabaseHandler(AbstractAxesHandler, AxesBaseHandler):
         self,
         *,
         username: str,
-        limit: Optional[int] = settings.AXES_ACCESS_FAILURE_LOG_PER_USER_LIMIT,
+        limit: Optional[int] = None,
     ) -> int:
-        count = 0
-        failures = AccessFailureLog.objects.filter(username=username)
-        out_of_limit_failures_logs = failures.count() - limit
-        if out_of_limit_failures_logs > 0:
-            for failure in failures[:out_of_limit_failures_logs]:
-                failure.delete()
-                count += 1
+        """
+        Remove access failure logs that are over the per-user limit for username,
+        keeping the newest records ordered by attempt_time with pk as a stable tie-break.
+
+        The limit check and the deletion run in a single transaction that locks
+        the failure log rows of the user, so concurrent writers trimming the same
+        username are serialized and can not delete each others newest records.
+        """
+
+        if limit is None:
+            limit = settings.AXES_ACCESS_FAILURE_LOG_PER_USER_LIMIT
+        if limit is None:
+            return 0
+        limit = max(limit, 0)
+
+        using = router.db_for_write(AccessFailureLog)
+        with transaction.atomic(using=using):
+            failures = (
+                AccessFailureLog.objects.using(using)
+                .select_for_update()
+                .filter(username=username)
+                .order_by("-attempt_time", "-pk")
+            )
+            out_of_limit_pks = list(failures.values_list("pk", flat=True)[limit:])
+            if not out_of_limit_pks:
+                return 0
+            count, _ = (
+                AccessFailureLog.objects.using(using)
+                .filter(pk__in=out_of_limit_pks)
+                .delete()
+            )
+
+        if count:
+            log.info(
+                "AXES: Removed %d access failure logs for user %s over the per-user limit of %d.",
+                count,
+                username,
+                limit,
+            )
         return count
 
     def get_failures(self, request, credentials: Optional[dict] = None) -> int:
@@ -282,7 +314,18 @@ class AxesDatabaseHandler(AbstractAxesHandler, AxesBaseHandler):
                     attempt_time=request.axes_attempt_time,
                     locked_out=request.axes_locked_out,
                 )
+
+            # Trim out-of-limit failure logs in a separate transaction so that
+            # a trimming failure (e.g. a deadlock with a concurrent trim) never
+            # rolls back the security event recorded above nor blocks the login flow.
+            try:
                 self.remove_out_of_limit_failure_logs(username=username)
+            except Exception:  # pylint: disable=broad-except
+                log.exception(
+                    "AXES: Failed to remove out-of-limit access failure logs for user %s with per-user limit %s.",
+                    username,
+                    settings.AXES_ACCESS_FAILURE_LOG_PER_USER_LIMIT,
+                )
 
     def user_logged_in(self, sender, request, user, **kwargs):
         """
