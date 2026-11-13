@@ -34,6 +34,15 @@ def with_nonce():
     )
 
 
+def parse_csp(policy):
+    directives = {}
+    for part in policy.split(';'):
+        pieces = part.strip().split()
+        if pieces:
+            directives[pieces[0]] = ' '.join(pieces[1:])
+    return directives
+
+
 class TestTalismanExtension(unittest.TestCase):
 
     def setUp(self):
@@ -213,6 +222,254 @@ class TestTalismanExtension(unittest.TestCase):
                 response.data.decode("utf-8")
             )
             self.assertEqual(len(flask.request.csp_nonce), NONCE_LENGTH)
+
+    def testContentSecurityPolicyDualEnforceAndReportOnly(self):
+        self.talisman.content_security_policy = \
+            "default-src 'self'; script-src 'self'"
+        self.talisman.content_security_policy_report_only_policy = \
+            "default-src 'self' https://legacy.example; script-src *"
+        self.talisman.content_security_policy_report_uri = \
+            'https://reports.example/csp'
+
+        response = self.client.get('/', environ_overrides=HTTPS_ENVIRON)
+
+        self.assertIn('Content-Security-Policy', response.headers)
+        self.assertIn(
+            'Content-Security-Policy-Report-Only', response.headers)
+        enforce = parse_csp(
+            response.headers['Content-Security-Policy'])
+        report_only = parse_csp(
+            response.headers['Content-Security-Policy-Report-Only'])
+
+        self.assertEqual(
+            enforce,
+            {'default-src': "'self'", 'script-src': "'self'"})
+        self.assertEqual(
+            report_only,
+            {
+                'default-src': "'self' https://legacy.example",
+                'script-src': '*',
+                'report-uri': 'https://reports.example/csp',
+            })
+
+    def testContentSecurityPolicyReportUriAndReportTo(self):
+        app = flask.Flask(__name__)
+        app.route('/')(hello_world)
+        Talisman(
+            app,
+            content_security_policy="default-src 'self'",
+            content_security_policy_report_only="default-src 'self' *",
+            content_security_policy_report_uri=(
+                'https://reports.example/legacy?token=legacy-secret'),
+            content_security_policy_report_to='csp-endpoint',
+            content_security_policy_report_to_endpoint=(
+                'https://reports.example/new?token=new-secret'),
+        )
+        response = app.test_client().get(
+            '/', environ_overrides=HTTPS_ENVIRON)
+
+        report_only = parse_csp(
+            response.headers['Content-Security-Policy-Report-Only'])
+        self.assertEqual(
+            report_only['report-uri'],
+            'https://reports.example/legacy')
+        self.assertEqual(report_only['report-to'], 'csp-endpoint')
+        self.assertEqual(
+            response.headers['Reporting-Endpoints'],
+            'csp-endpoint="https://reports.example/new"')
+        self.assertNotIn(
+            'legacy-secret', str(response.headers))
+        self.assertNotIn(
+            'new-secret', str(response.headers))
+
+    def testContentSecurityPolicyNestedDualConfig(self):
+        app = flask.Flask(__name__)
+        app.route('/')(hello_world)
+        Talisman(
+            app,
+            content_security_policy={
+                'enforce': {
+                    'default-src': "'self'",
+                    'script-src': "'self'",
+                },
+                'report_only': {
+                    'directives': {
+                        'default-src': "'self'",
+                        'script-src': '*',
+                    },
+                    'report_uri': 'https://reports.example/csp',
+                },
+            },
+        )
+        response = app.test_client().get(
+            '/', environ_overrides=HTTPS_ENVIRON)
+
+        enforce = parse_csp(
+            response.headers['Content-Security-Policy'])
+        report_only = parse_csp(
+            response.headers['Content-Security-Policy-Report-Only'])
+        self.assertEqual(
+            enforce,
+            {'default-src': "'self'", 'script-src': "'self'"})
+        self.assertEqual(
+            report_only,
+            {
+                'default-src': "'self'",
+                'script-src': '*',
+                'report-uri': 'https://reports.example/csp',
+            })
+
+    def testContentSecurityPolicyDictWithReportUri(self):
+        app = flask.Flask(__name__)
+        app.route('/')(hello_world)
+        Talisman(
+            app,
+            content_security_policy={
+                'default-src': "'self'",
+                'report-uri': 'https://reports.example/csp',
+            },
+        )
+        response = app.test_client().get(
+            '/', environ_overrides=HTTPS_ENVIRON)
+        directives = parse_csp(
+            response.headers['Content-Security-Policy'])
+        self.assertEqual(
+            directives,
+            {
+                'default-src': "'self'",
+                'report-uri': 'https://reports.example/csp',
+            })
+        self.assertNotIn(
+            'Content-Security-Policy-Report-Only', response.headers)
+
+    def testContentSecurityPolicyNestedReportingConfig(self):
+        app = flask.Flask(__name__)
+        app.route('/')(hello_world)
+        Talisman(
+            app,
+            content_security_policy={
+                'enforce': "default-src 'self'",
+                'report_only': "default-src 'self' *",
+                'report-uri': 'https://reports.example/csp',
+                'report-to': 'csp-endpoint',
+                'report-to-endpoint': 'https://reports.example/api',
+            },
+        )
+        response = app.test_client().get(
+            '/', environ_overrides=HTTPS_ENVIRON)
+        report_only = parse_csp(
+            response.headers['Content-Security-Policy-Report-Only'])
+        self.assertEqual(report_only['report-uri'],
+                         'https://reports.example/csp')
+        self.assertEqual(report_only['report-to'], 'csp-endpoint')
+        self.assertEqual(
+            response.headers['Reporting-Endpoints'],
+            'csp-endpoint="https://reports.example/api"')
+
+    def testContentSecurityPolicyDualNonce(self):
+        policy = {
+            'default-src': "'self'",
+            'script-src': "'self'",
+            'style-src': "'self'",
+        }
+        self.talisman.content_security_policy = policy
+        self.talisman.content_security_policy_report_only_policy = dict(
+            policy)
+        self.talisman.content_security_policy_report_uri = \
+            'https://reports.example/csp'
+        self.talisman.content_security_policy_nonce_in = ['script-src']
+
+        with self.app.test_client() as client:
+            response = client.get(
+                '/with_nonce', environ_overrides=HTTPS_ENVIRON)
+            nonce = flask.request.csp_nonce
+            enforce = parse_csp(
+                response.headers['Content-Security-Policy'])
+            report_only = parse_csp(
+                response.headers['Content-Security-Policy-Report-Only'])
+
+            self.assertEqual(
+                enforce['script-src'],
+                "'self' 'nonce-{}'".format(nonce))
+            self.assertEqual(
+                report_only['script-src'],
+                "'self' 'nonce-{}'".format(nonce))
+            self.assertNotIn('nonce-', enforce['style-src'])
+            self.assertNotIn('nonce-', report_only['style-src'])
+            self.assertNotIn('nonce-', enforce['default-src'])
+            self.assertNotIn('nonce-', report_only['default-src'])
+            self.assertIn(nonce, response.data.decode('utf-8'))
+
+    def testContentSecurityPolicyRouteOverride(self):
+        self.talisman.content_security_policy = "default-src 'self'"
+        self.talisman.content_security_policy_report_only_policy = \
+            "default-src 'self'"
+        self.talisman.content_security_policy_report_uri = \
+            'https://reports.example/csp'
+
+        @self.app.route('/override')
+        @self.talisman(
+            content_security_policy="default-src 'none'",
+            content_security_policy_report_only="default-src *",
+        )
+        def override():
+            return 'Override'
+
+        response = self.client.get(
+            '/override', environ_overrides=HTTPS_ENVIRON)
+        enforce = parse_csp(
+            response.headers['Content-Security-Policy'])
+        report_only = parse_csp(
+            response.headers['Content-Security-Policy-Report-Only'])
+
+        self.assertEqual(enforce, {'default-src': "'none'"})
+        self.assertEqual(report_only['default-src'], '*')
+        self.assertEqual(
+            report_only['report-uri'], 'https://reports.example/csp')
+
+        with self.assertRaises(ValueError):
+            self.talisman(
+                content_security_policy="default-src 'self'",
+                content_security_policy_report_only=False)
+
+    def testContentSecurityPolicyConflictsAndValidation(self):
+        app = flask.Flask(__name__)
+        self.assertRaises(
+            ValueError, Talisman, app,
+            content_security_policy=(
+                "default-src 'self'; default-src *"))
+
+        self.assertRaises(
+            ValueError, Talisman, app,
+            content_security_policy="default-src 'self'",
+            content_security_policy_report_only=(
+                "default-src *; report-uri https://reports.example/a"),
+            content_security_policy_report_uri=(
+                'https://reports.example/b'))
+
+        self.assertRaises(
+            ValueError, Talisman, app,
+            content_security_policy_report_only_policy="default-src *")
+
+        self.assertRaises(
+            ValueError, Talisman, app,
+            content_security_policy_report_to='not a group',
+            content_security_policy_report_to_endpoint=(
+                'https://reports.example/csp'))
+
+        Talisman(
+            app,
+            content_security_policy="default-src 'self'",
+            content_security_policy_report_only=(
+                "default-src *; report-uri https://reports.example/a"),
+            content_security_policy_report_uri=(
+                'https://reports.example/a'))
+        response = app.test_client().get(
+            '/', environ_overrides=HTTPS_ENVIRON)
+        directives = parse_csp(
+            response.headers['Content-Security-Policy-Report-Only'])
+        self.assertEqual(directives['report-uri'],
+                         'https://reports.example/a')
 
     def testDecorator(self):
         @self.app.route('/nocsp')

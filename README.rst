@@ -101,6 +101,22 @@ Options
 -  ``content_security_policy_report_uri``, default ``None``, a string
    indicating the report URI used for `CSP violation reports
    <https://developer.mozilla.org/en-US/docs/Web/Security/CSP/Using_CSP_violation_reports>`_
+-  ``content_security_policy_enforce``, default ``None``, explicit enforcing
+   CSP directives. It takes precedence over ``content_security_policy`` and is
+   mainly useful when both policies are configured together.
+-  ``content_security_policy_report_only_policy``, default ``None``, explicit
+   report-only CSP directives. Supplying this option emits both the enforcing
+   and report-only headers. ``content_security_policy_report_only`` also
+   accepts a string or dictionary in the same way; its boolean form remains
+   the legacy single-policy report-only mode.
+-  ``content_security_policy_report_to``, default ``None``, a Reporting API
+   endpoint group name for the CSP ``report-to`` directive.
+-  ``content_security_policy_report_to_endpoint``, default ``None``, the
+   Reporting API endpoint URL associated with
+   ``content_security_policy_report_to``. The endpoint is published through
+   the ``Reporting-Endpoints`` response header.
+-  ``content_security_policy_reporting_endpoints``, default ``None``, a
+   dictionary mapping multiple Reporting API group names to endpoint URLs.
 -  ``referrer_policy``, default ``strict-origin-when-cross-origin``, a string
    that sets the Referrer Policy header to send a full URL when performing a same-origin
    request, only send the origin of the document to an equally secure destination
@@ -120,6 +136,11 @@ Per-view options
 Sometimes you want to change the policy for a specific view. The
 ``force_https``, ``frame_options``, ``frame_options_allow_from``, and
 ``content_security_policy`` options can be changed on a per-view basis.
+The enforcing and report-only CSP policies can be overridden independently
+with ``content_security_policy_enforce``/``content_security_policy`` and
+``content_security_policy_report_only``. A view cannot explicitly disable
+report-only CSP while retaining an enforcing policy; that raises
+``ValueError`` instead of silently dropping reports.
 
 .. code:: python
 
@@ -304,6 +325,49 @@ Then in the app code you can read the CSP directives from the environment:
 As you can see above the policy can be defined simply just like the official
 specification requires the HTTP header to be set: As a semicolon separated
 list of individual CSP directives.
+
+Enforcing and report-only policies
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To enforce a known-good baseline while continuing to report violations
+against a broader policy, configure both policies in one response:
+
+.. code:: python
+
+    talisman = Talisman(
+        app,
+        content_security_policy="default-src 'self'",
+        content_security_policy_report_only="default-src 'self' *",
+        content_security_policy_report_uri='https://reports.example/csp',
+        content_security_policy_report_to='csp-endpoint',
+        content_security_policy_report_to_endpoint=(
+            'https://reports.example/reporting-api'),
+    )
+
+This sends both ``Content-Security-Policy`` and
+``Content-Security-Policy-Report-Only``. The same configuration can be
+expressed as one dictionary:
+
+.. code:: python
+
+    content_security_policy={
+        'enforce': "default-src 'self'",
+        'report_only': {
+            'directives': "default-src 'self' *",
+            'report_uri': 'https://reports.example/csp',
+        },
+    }
+
+A report-only policy must have an endpoint, supplied through ``report-uri``
+or a ``report-to`` group and endpoint. Missing endpoints and invalid
+``report-to`` group names raise ``ValueError`` when the extension is
+initialized or the view is configured. A policy cannot contain the same
+directive twice, and conflicting report directives in a dual-policy
+configuration raise ``ValueError``. Reporting endpoint query strings and
+fragments are removed before endpoints are written to response headers.
+The nonce configured by ``content_security_policy_nonce_in`` is added only to
+the named directives; ``content_security_policy_report_only_nonce_in`` can be
+used to scope the nonce differently for the report-only policy.
 
 Feature Policy
 --------------
