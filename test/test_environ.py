@@ -13,6 +13,7 @@ import wsgiref.util
 import base64
 
 from bottle import BaseRequest, BaseResponse, LocalRequest
+from bottle import StrictInputProfile, JSONDuplicateValues
 
 
 class TestRequest(unittest.TestCase):
@@ -466,6 +467,167 @@ class TestRequest(unittest.TestCase):
 
             # Unknown attributes raise AttributeError.
             self.assertRaises(AttributeError, getattr, r, 'somevalue')
+
+
+class TestStrictInputProfile(unittest.TestCase):
+    """ Tests for the optional strict input profile (JSON and forms). """
+
+    def make_request(self, body, ctype='application/json', profile=None):
+        e = {'CONTENT_TYPE': ctype}
+        wsgiref.util.setup_testing_defaults(e)
+        e['wsgi.input'].write(tob(body))
+        e['wsgi.input'].seek(0)
+        e['CONTENT_LENGTH'] = str(len(tob(body)))
+        if profile is not None:
+            e['bottle.request.strict_input'] = profile
+        return BaseRequest(e)
+
+    def assert_rejected(self, request, reason=None):
+        try:
+            request.json
+        except HTTPError as err:
+            self.assertEqual(400, err.status_code)
+            if reason is not None:
+                self.assertEqual(reason, err.exception.reason)
+                # Stable reasons never echo attacker-controlled values.
+                self.assertNotIn('value', str(err.exception))
+            return
+        self.fail('Expected HTTPError(400) for reason %r' % reason)
+
+    def test_duplicate_keys_rejected(self):
+        """ Strict: duplicated JSON object keys are rejected by default. """
+        r = self.make_request('{"a": 1, "a": 2}', profile=StrictInputProfile())
+        self.assert_rejected(r, 'duplicate_key')
+
+    def test_duplicate_keys_kept_as_auditable_list(self):
+        """ Strict: duplicate_keys='keep' preserves all values in order. """
+        profile = StrictInputProfile(duplicate_keys='keep')
+        r = self.make_request('{"a": 1, "a": 2, "a": 3}', profile=profile)
+        values = r.json['a']
+        self.assertIsInstance(values, JSONDuplicateValues)
+        self.assertEqual([1, 2, 3], list(values))
+
+    def test_duplicate_keys_legacy_last_wins(self):
+        """ Legacy: without a profile the last value still wins. """
+        r = self.make_request('{"a": 1, "a": 2}')
+        self.assertEqual({'a': 2}, r.json)
+
+    def test_nan_and_infinity_rejected(self):
+        """ Strict: non-standard NaN/Infinity constants are rejected. """
+        for token in ('NaN', 'Infinity', '-Infinity'):
+            r = self.make_request('{"x": %s}' % token,
+                                  profile=StrictInputProfile())
+            self.assert_rejected(r, 'non_standard_constant')
+
+    def test_nan_legacy_compatible(self):
+        """ Legacy: without a profile NaN is still accepted. """
+        r = self.make_request('{"x": NaN}')
+        self.assertNotEqual(r.json['x'], r.json['x'])  # NaN != NaN
+
+    def test_deep_nesting_rejected(self):
+        """ Strict: deeply nested arrays fail with 400, not RecursionError. """
+        body = '[' * 5000 + ']' * 5000
+        r = self.make_request(body, profile=StrictInputProfile())
+        self.assert_rejected(r, 'max_depth_exceeded')
+
+    def test_max_nodes_rejected(self):
+        """ Strict: documents with too many nodes are rejected. """
+        profile = StrictInputProfile(max_nodes=10)
+        r = self.make_request('[' + ','.join(['1'] * 20) + ']', profile=profile)
+        self.assert_rejected(r, 'max_nodes_exceeded')
+
+    def test_invalid_utf8_rejected(self):
+        """ Strict: invalid UTF-8 fails before reaching the business layer. """
+        r = self.make_request(b'{"a": "\xff"}', profile=StrictInputProfile())
+        self.assert_rejected(r, 'invalid_utf8')
+
+    def test_long_key_rejected(self):
+        """ Strict: keys longer than max_key_length are rejected. """
+        profile = StrictInputProfile(max_key_length=8)
+        r = self.make_request('{"abcdefghij": 1}', profile=profile)
+        self.assert_rejected(r, 'key_too_long')
+
+    def test_long_string_rejected(self):
+        """ Strict: string values longer than max_string_length are rejected. """
+        profile = StrictInputProfile(max_string_length=4)
+        r = self.make_request('{"a": "xxxxx"}', profile=profile)
+        self.assert_rejected(r, 'string_too_long')
+
+    def test_non_string_key_rejected(self):
+        """ Strict: non-string object keys are rejected. """
+        r = self.make_request('{1: 2}', profile=StrictInputProfile())
+        self.assert_rejected(r, 'non_string_key')
+
+    def test_body_size_budget(self):
+        """ Strict: bodies larger than max_body_size are rejected with 413. """
+        profile = StrictInputProfile(max_body_size=16)
+        r = self.make_request('{"a": "' + 'x' * 100 + '"}', profile=profile)
+        try:
+            r.json
+        except HTTPError as err:
+            self.assertEqual(413, err.status_code)
+        else:
+            self.fail('Expected HTTPError(413)')
+
+    def test_valid_json_accepted(self):
+        """ Strict: ordinary objects, arrays and unicode still parse. """
+        profile = StrictInputProfile()
+        test = dict(a=5, b='t\xe4st \u74f6', c=[1, 2, {'d': None}], e=True)
+        r = self.make_request(json_dumps(test), profile=profile)
+        self.assertEqual(r.json, test)
+        r = self.make_request('[1, "two", 3.0]', profile=profile)
+        self.assertEqual(r.json, [1, 'two', 3.0])
+
+    def test_empty_body_accepted(self):
+        """ Strict: an empty body still yields None. """
+        r = self.make_request('', profile=StrictInputProfile())
+        self.assertEqual(r.json, None)
+
+    def test_content_type_rules_unchanged(self):
+        """ Strict: non-JSON content types still yield no json object. """
+        r = self.make_request('{"a": 1}', ctype='text/plain',
+                              profile=StrictInputProfile())
+        self.assertEqual(r.json, None)
+
+    def test_form_multi_value_keep(self):
+        """ Strict: repeated form keys keep all values; item access is last. """
+        r = self.make_request('a=1&a=2&b=3',
+                              ctype='application/x-www-form-urlencoded',
+                              profile=StrictInputProfile())
+        self.assertEqual('2', r.POST['a'])
+        self.assertEqual(['1', '2'], r.POST.getall('a'))
+        self.assertEqual('3', r.POST['b'])
+
+    def test_form_multi_value_reject(self):
+        """ Strict: form_duplicates='reject' fails on repeated form keys. """
+        profile = StrictInputProfile(form_duplicates='reject')
+        r = self.make_request('a=1&a=2',
+                              ctype='application/x-www-form-urlencoded',
+                              profile=profile)
+        self.assertRaises(HTTPError, lambda: r.POST)
+
+    def test_form_invalid_utf8_rejected(self):
+        """ Strict: invalid UTF-8 in form bodies is rejected. """
+        r = self.make_request(b'a=\xff',
+                              ctype='application/x-www-form-urlencoded',
+                              profile=StrictInputProfile())
+        self.assertRaises(HTTPError, lambda: r.POST)
+
+    def test_form_normal_request(self):
+        """ Strict: ordinary urlencoded forms and unicode still work. """
+        r = self.make_request('a=1&b=%E7%93%B6',
+                              ctype='application/x-www-form-urlencoded',
+                              profile=StrictInputProfile())
+        self.assertEqual('1', r.POST['a'])
+        self.assertEqual('\u74f6', r.POST['b'])
+
+    def test_json_and_post_entry_points_consistent(self):
+        """ Strict: a hostile JSON body is never accepted as form data. """
+        r = self.make_request('{"a": 1, "a": 2}', ctype='application/json',
+                              profile=StrictInputProfile())
+        self.assert_rejected(r, 'duplicate_key')
+        # The same body must not be silently re-interpreted as form data.
+        self.assertEqual(0, len(r.POST))
 
 
 class TestResponse(unittest.TestCase):

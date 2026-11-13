@@ -15,3 +15,14 @@ class TestFormsDict(unittest.TestCase):
         """ FomsDict.attribute returs u'' on missing keys. """
         d = FormsDict()
         self.assertEqual('', d.missing)
+
+    def test_duplicate_keys_consistent_last_value(self):
+        """ FormsDict: repeated keys keep all values, and item, attribute
+            and get() access consistently return the last value. """
+        d = FormsDict()
+        d.append('key', 'first')
+        d.append('key', 'last')
+        self.assertEqual('last', d['key'])
+        self.assertEqual('last', d.key)
+        self.assertEqual('last', d.get('key'))
+        self.assertEqual(['first', 'last'], d.getall('key'))

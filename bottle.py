@@ -103,6 +103,228 @@ callable = lambda x: hasattr(x, '__call__')
 _UNSET = object()
 
 
+class StrictInputError(ValueError):
+    """ Raised when a request body violates the strict input profile.
+
+        Carries a stable ``reason`` code plus an optional ``position``
+        (character or byte offset) and ``dimension`` (the budget or policy
+        that was violated). Attacker-controlled values are never echoed,
+        only locations and limits.
+    """
+
+    def __init__(self, reason, position=None, dimension=None):
+        self.reason = reason
+        self.position = position
+        self.dimension = dimension
+        message = reason
+        if dimension:
+            message += ' (%s)' % dimension
+        if position is not None:
+            message += ' at position %d' % position
+        ValueError.__init__(self, message)
+
+
+class StrictInputProfile(object):
+    """ Optional strict input profile for JSON bodies and form data.
+
+        Assign an instance to :attr:`BaseRequest.strict_input` or to the
+        ``bottle.request.strict_input`` environ key to opt in. ``None``
+        (the default) keeps the legacy, fully compatible behavior.
+
+        :param max_body_size: Body size budget in bytes. ``None`` falls
+            back to :attr:`BaseRequest.MEMFILE_MAX`.
+        :param max_depth: Maximum JSON container nesting depth.
+        :param max_nodes: Maximum total number of JSON tokens (values,
+            keys and containers).
+        :param max_string_length: Maximum length of a single JSON string
+            value in characters.
+        :param max_key_length: Maximum length of a single JSON object key
+            in characters.
+        :param duplicate_keys: ``'reject'`` fails on duplicated object
+            keys, ``'keep'`` collects all values into an auditable
+            :class:`JSONDuplicateValues` list.
+        :param allow_nan: Accept the non-standard ``NaN``, ``Infinity``
+            and ``-Infinity`` constants. Disabled by default.
+        :param form_duplicates: ``'keep'`` stores all values of repeated
+            form keys in the :class:`FormsDict` (item access consistently
+            returns the last value), ``'reject'`` fails the request.
+    """
+
+    def __init__(self, max_body_size=None, max_depth=100, max_nodes=100000,
+                 max_string_length=1024 * 1024, max_key_length=1024,
+                 duplicate_keys='reject', allow_nan=False,
+                 form_duplicates='keep'):
+        if duplicate_keys not in ('reject', 'keep'):
+            raise ValueError("duplicate_keys must be 'reject' or 'keep'")
+        if form_duplicates not in ('reject', 'keep'):
+            raise ValueError("form_duplicates must be 'reject' or 'keep'")
+        self.max_body_size = max_body_size
+        self.max_depth = max_depth
+        self.max_nodes = max_nodes
+        self.max_string_length = max_string_length
+        self.max_key_length = max_key_length
+        self.duplicate_keys = duplicate_keys
+        self.allow_nan = allow_nan
+        self.form_duplicates = form_duplicates
+
+
+class JSONDuplicateValues(list):
+    """ Auditable list of all values found for a duplicated JSON object
+        key, in document order. Produced by the strict input profile when
+        ``duplicate_keys='keep'`` so callers can distinguish preserved
+        duplicates from genuine JSON arrays. """
+
+
+def _strict_json_scan(text, profile):
+    """ Single-pass budget and policy scan of a JSON document.
+
+        Enforces depth, node-count, string-length and key-length budgets
+        and detects duplicated keys, non-string keys and non-standard
+        constants *before* the document is materialized, so a hostile
+        body cannot exhaust the parser stack or memory first. Raises
+        :class:`StrictInputError` on violation. Malformed syntax that
+        passes this scan is still rejected by the real parser afterwards.
+    """
+    max_depth = profile.max_depth
+    max_nodes = profile.max_nodes
+    max_string = profile.max_string_length
+    max_key = profile.max_key_length
+    reject_duplicates = profile.duplicate_keys == 'reject'
+    allow_nan = profile.allow_nan
+    from json import loads as _decode_key
+    nodes, depth, i, n = 0, 0, 0, len(text)
+    stack = []  # frames: [is_object, expect_key, seen_keys]
+
+    def count_node(position):
+        nonlocal nodes
+        nodes += 1
+        if nodes > max_nodes:
+            raise StrictInputError('max_nodes_exceeded', position=position,
+                                   dimension='max_nodes')
+
+    while i < n:
+        ch = text[i]
+        if ch in ' \t\r\n':
+            i += 1
+            continue
+        if stack and stack[-1][0] and stack[-1][1] and ch not in '"}':
+            raise StrictInputError('non_string_key', position=i)
+        if ch == '"':
+            end = i + 1
+            while True:
+                if end >= n:
+                    return  # Unterminated: let the real parser report it.
+                c = text[end]
+                if c == '\\':
+                    end += 2
+                    continue
+                if c == '"':
+                    break
+                end += 1
+            length = end - i - 1
+            frame = stack[-1] if stack else None
+            if frame is not None and frame[0] and frame[1]:
+                if length > max_key:
+                    raise StrictInputError('key_too_long', position=i,
+                                           dimension='max_key_length')
+                if reject_duplicates:
+                    key = _decode_key(text[i:end + 1])
+                    if key in frame[2]:
+                        raise StrictInputError('duplicate_key', position=i)
+                    frame[2].add(key)
+                frame[1] = False
+            else:
+                if length > max_string:
+                    raise StrictInputError('string_too_long', position=i,
+                                           dimension='max_string_length')
+            count_node(i)
+            i = end + 1
+            continue
+        if ch == '{' or ch == '[':
+            depth += 1
+            count_node(i)
+            if depth > max_depth:
+                raise StrictInputError('max_depth_exceeded', position=i,
+                                       dimension='max_depth')
+            stack.append([ch == '{', ch == '{', set() if ch == '{' else None])
+            i += 1
+            continue
+        if ch == '}' or ch == ']':
+            depth -= 1
+            if stack:
+                stack.pop()
+            i += 1
+            continue
+        if ch == ',':
+            if stack and stack[-1][0]:
+                stack[-1][1] = True
+            i += 1
+            continue
+        if ch == ':':
+            i += 1
+            continue
+        end = i
+        while end < n and text[end] not in ' \t\r\n{}[],:"':
+            end += 1
+        token = text[i:end]
+        if token in ('NaN', 'Infinity', '-Infinity') and not allow_nan:
+            raise StrictInputError('non_standard_constant', position=i)
+        count_node(i)
+        i = end if end > i else i + 1
+    return
+
+
+def _strict_object_pairs(pairs, profile):
+    """ ``object_pairs_hook`` factory for the strict input profile.
+
+        Objects are built from pairs (never through a plain dict callback)
+        so duplicated keys are either rejected or preserved as an
+        auditable :class:`JSONDuplicateValues` list instead of being
+        silently collapsed to the last value.
+    """
+    result = {}
+    if profile.duplicate_keys == 'keep':
+        for key, value in pairs:
+            if key in result:
+                previous = result[key]
+                if isinstance(previous, JSONDuplicateValues):
+                    previous.append(value)
+                else:
+                    result[key] = JSONDuplicateValues([previous, value])
+            else:
+                result[key] = value
+        return result
+    # 'reject': duplicates are already caught by the pre-scan; this is a
+    # second line of defense so the two paths can never disagree.
+    for key, value in pairs:
+        if key in result:
+            raise StrictInputError('duplicate_key')
+        result[key] = value
+    return result
+
+
+def _strict_json_loads(body, profile):
+    """ Parse a JSON request body under a :class:`StrictInputProfile`.
+
+        Budgets are enforced by :func:`_strict_json_scan` before any
+        object graph is constructed. Raises :class:`StrictInputError` for
+        policy violations and ``ValueError`` for malformed JSON.
+    """
+    from json import loads as _stdlib_loads
+    try:
+        text = touni(body)
+    except UnicodeDecodeError as err:
+        raise StrictInputError('invalid_utf8', position=err.start)
+    _strict_json_scan(text, profile)
+
+    def reject_constant(token):
+        raise StrictInputError('non_standard_constant')
+
+    return _stdlib_loads(text, parse_constant=reject_constant,
+                         object_pairs_hook=lambda pairs:
+                         _strict_object_pairs(pairs, profile))
+
+
 def _wsgi_recode(src):
     """ Translate a PEP-3333 latin1-string to utf8+surrogateescape """
     if src.isascii():
@@ -1118,6 +1340,12 @@ class BaseRequest:
     #: Maximum size of memory buffer for :attr:`body` in bytes.
     MEMFILE_MAX = 102400
 
+    #: Optional :class:`StrictInputProfile` for JSON and form parsing.
+    #: ``None`` (the default) keeps the legacy, fully compatible behavior.
+    #: Can also be set per request via the ``bottle.request.strict_input``
+    #: environ key.
+    strict_input = None
+
     def __init__(self, environ=None):
         """ Wrap a WSGI environ dictionary. """
         #: The wrapped WSGI environ dictionary. This is the only real attribute.
@@ -1241,12 +1469,30 @@ class BaseRequest:
             of the request body. Only requests smaller than :attr:`MEMFILE_MAX`
             are processed to avoid memory exhaustion.
             Invalid JSON raises a 400 error response.
+
+            If a :class:`StrictInputProfile` is active (see
+            :attr:`strict_input`), the body is validated against the
+            profile budgets and policies before any object graph is
+            constructed, and violations raise a 400 error response with a
+            stable reason that never echoes attacker-controlled values.
         """
         ctype = self.environ.get('CONTENT_TYPE', '').lower().split(';')[0]
         if ctype in ('application/json', 'application/json-rpc'):
-            b = self._get_body_string(self.MEMFILE_MAX)
+            profile = self.environ.get('bottle.request.strict_input',
+                                       self.strict_input)
+            maxread = self.MEMFILE_MAX
+            if profile is not None and profile.max_body_size is not None:
+                maxread = min(maxread, profile.max_body_size)
+            b = self._get_body_string(maxread)
             if not b:
                 return None
+            if profile is not None:
+                try:
+                    return _strict_json_loads(b, profile)
+                except StrictInputError as err:
+                    raise HTTPError(400, 'Invalid JSON: %s' % err, exception=err)
+                except (ValueError, TypeError) as err:
+                    raise HTTPError(400, 'Invalid JSON', exception=err)
             try:
                 return json_loads(b)
             except (ValueError, TypeError) as err:
@@ -1348,12 +1594,46 @@ class BaseRequest:
         post = FormsDict()
         content_type = self.environ.get('CONTENT_TYPE', '')
         content_type, options = _parse_http_header(content_type)[0]
+        profile = self.environ.get('bottle.request.strict_input',
+                                   self.strict_input)
         # We default to application/x-www-form-urlencoded for everything that
         # is not multipart and take the fast path (also: 3.1 workaround)
         if not content_type.startswith('multipart/'):
-            body = self._get_body_string(self.MEMFILE_MAX).decode('utf8', 'surrogateescape')
-            for key, value in _parse_qsl(body, 'utf8'):
-                post[key] = value
+            if profile is not None and content_type.lower() not in (
+                    '', 'application/x-www-form-urlencoded'):
+                # Strict profile: do not form-parse bodies that declare a
+                # non-form content type (e.g. application/json). This keeps
+                # the ``json`` and ``POST`` entry points from drawing
+                # contradictory conclusions about the same body.
+                return post
+            maxread = self.MEMFILE_MAX
+            if profile is not None and profile.max_body_size is not None:
+                maxread = min(maxread, profile.max_body_size)
+            raw = self._get_body_string(maxread)
+            if profile is not None:
+                try:
+                    body = raw.decode('utf8', 'strict')
+                except UnicodeDecodeError as err:
+                    reason = StrictInputError('invalid_utf8',
+                                              position=err.start)
+                    raise HTTPError(400, 'Invalid form body: %s' % reason,
+                                    exception=reason)
+            else:
+                body = raw.decode('utf8', 'surrogateescape')
+            pairs = _parse_qsl(body, 'utf8')
+            if profile is not None and profile.form_duplicates == 'reject':
+                seen = set()
+                for key, value in pairs:
+                    if key in seen:
+                        reason = StrictInputError('duplicate_key')
+                        raise HTTPError(400,
+                                        'Invalid form body: %s' % reason,
+                                        exception=reason)
+                    seen.add(key)
+                    post[key] = value
+            else:
+                for key, value in pairs:
+                    post[key] = value
             return post
 
         charset = options.get("charset", "utf8")
@@ -2131,6 +2411,13 @@ class FormsDict(MultiDict):
         Additionally to the normal dict-like item access methods, this container
         also supports attribute-like access to its values. Missing attributes
         default to an empty string.
+
+        Repeated keys keep all of their values: :meth:`getall` returns the
+        full list in document order, while item access, :meth:`get` and
+        attribute access all consistently return the most recent (last)
+        value. With a :class:`StrictInputProfile` active, the
+        ``form_duplicates`` policy can instead reject repeated keys with a
+        400 error before any value reaches the business layer.
 
         .. versionchanged:: 0.14
             All keys and values are now decoded as utf8 by default, item and
