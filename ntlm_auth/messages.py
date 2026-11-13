@@ -255,7 +255,8 @@ class AuthenticateMessage(object):
 
     def __init__(self, user_name, password, domain_name, workstation,
                  challenge_message, ntlm_compatibility,
-                 server_certificate_hash=None, cbt_data=None):
+                 server_certificate_hash=None, cbt_data=None,
+                 channel_binding_hash=None, channel_binding_policy=None):
         """
         [MS-NLMP] v28.0 2016-07-14
 
@@ -348,7 +349,9 @@ class AuthenticateMessage(object):
             compute_response.get_lm_challenge_response()
         self.nt_challenge_response, key_exchange_key, target_info = \
             compute_response.get_nt_challenge_response(
-                self.lm_challenge_response, server_certificate_hash, cbt_data)
+                self.lm_challenge_response, server_certificate_hash, cbt_data,
+                channel_binding_hash=channel_binding_hash,
+                channel_binding_policy=channel_binding_policy)
         self.target_info = target_info
 
         if self.negotiate_flags & NegotiateFlags.NTLMSSP_NEGOTIATE_KEY_EXCH:

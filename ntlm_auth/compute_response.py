@@ -15,7 +15,10 @@ import ntlm_auth.messages
 
 from ntlm_auth.des import DES
 from ntlm_auth.constants import AvId, AvFlags, NegotiateFlags
-from ntlm_auth.gss_channel_bindings import GssChannelBindingsStruct
+from ntlm_auth.exceptions import ChannelBindingStructureError
+from ntlm_auth.gss_channel_bindings import GssChannelBindingsStruct, \
+    compute_ntlm_channel_binding_hash, \
+    validate_precomputed_channel_binding_hash
 
 
 class ComputeResponse():
@@ -101,7 +104,9 @@ class ComputeResponse():
         return response
 
     def get_nt_challenge_response(self, lm_challenge_response,
-                                  server_certificate_hash=None, cbt_data=None):
+                                  server_certificate_hash=None, cbt_data=None,
+                                  channel_binding_hash=None,
+                                  channel_binding_policy=None):
         """
         [MS-NLMP] v28.0 2016-07-14
 
@@ -120,7 +125,14 @@ class ComputeResponse():
         :param server_certificate_hash: This is deprecated and will be removed
             in a future version, use cbt_data instead
         :param cbt_data: The GssChannelBindingsStruct to bind in the NTLM
-            response
+            response. A TLSChannelBinding from gss_channel_bindings is also
+            accepted and goes through the same normalization and policy
+            checks before being hashed
+        :param channel_binding_hash: A pre-computed 16-byte MD5 of the GSS
+            channel binding bytes. Its length is validated. Mutually
+            exclusive with cbt_data and server_certificate_hash
+        :param channel_binding_policy: An optional ChannelBindingPolicy that
+            enforces the trust mode (local/proxy/none) for cbt_data
         :return response: (NtChallengeResponse) - The NT response to the server
             challenge. Computed by the client
         :return session_base_key: (SessionBaseKey) - A session key calculated
@@ -128,6 +140,14 @@ class ComputeResponse():
         :return target_info: (AV_PAIR) - The AV_PAIR structure used in the
             nt_challenge calculations
         """
+        if channel_binding_hash is not None:
+            validate_precomputed_channel_binding_hash(channel_binding_hash)
+            if cbt_data is not None or server_certificate_hash is not None:
+                raise ChannelBindingStructureError(
+                    "A pre-computed channel binding hash is mutually "
+                    "exclusive with cbt_data and server_certificate_hash"
+                )
+
         if self._negotiate_flags & \
                 NegotiateFlags.NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY and \
                 self._ntlm_compatibility < 3:
@@ -188,9 +208,16 @@ class ComputeResponse():
                 cbt_data[cbt_data.APPLICATION_DATA] = \
                     b'tls-server-end-point:' + certificate_digest
 
-            if cbt_data is not None:
-                cbt_bytes = cbt_data.get_data()
-                cbt_hash = hashlib.md5(cbt_bytes).digest()
+            if channel_binding_hash is not None:
+                target_info[AvId.MSV_AV_CHANNEL_BINDINGS] = \
+                    channel_binding_hash
+            elif cbt_data is not None:
+                # Single point that enforces the trust policy and computes
+                # the MD5 of the GSS bytes, regardless of whether the caller
+                # used the legacy struct or the TLSChannelBinding builder.
+                cbt_hash = compute_ntlm_channel_binding_hash(
+                    cbt_data, channel_binding_policy
+                )
                 target_info[AvId.MSV_AV_CHANNEL_BINDINGS] = cbt_hash
 
             response, session_base_key = \

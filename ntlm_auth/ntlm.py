@@ -5,7 +5,9 @@ import base64
 import struct
 
 from ntlm_auth.constants import NegotiateFlags
-from ntlm_auth.exceptions import NoAuthContextError
+from ntlm_auth.exceptions import ChannelBindingStructureError, NoAuthContextError
+from ntlm_auth.gss_channel_bindings import ChannelBindingPolicy, \
+    TRUST_MODE_LOCAL, validate_precomputed_channel_binding_hash
 from ntlm_auth.messages import AuthenticateMessage, ChallengeMessage, \
     NegotiateMessage
 from ntlm_auth.session_security import SessionSecurity
@@ -14,7 +16,9 @@ from ntlm_auth.session_security import SessionSecurity
 class NtlmContext(object):
 
     def __init__(self, username, password, domain=None, workstation=None,
-                 cbt_data=None, ntlm_compatibility=3):
+                 cbt_data=None, ntlm_compatibility=3,
+                 channel_binding_hash=None,
+                 channel_binding_policy=None):
         r"""
         Initialises a NTLM context to use when authenticating using the NTLM
         protocol.
@@ -28,8 +32,16 @@ class NtlmContext(object):
         :param password: The password for the username
         :param domain: The domain part of the username (None if n/a)
         :param workstation: The localworkstation (None if n/a)
-        :param cbt_data: A GssChannelBindingsStruct or None to bind channel
-            data with the auth process
+        :param cbt_data: A GssChannelBindingsStruct or TLSChannelBinding (or
+            None) to bind channel data with the auth process. A
+            TLSChannelBinding marked as injected by a proxy is only accepted
+            when channel_binding_policy trusts the proxy
+        :param channel_binding_hash: A pre-computed 16-byte MD5 of the GSS
+            channel binding bytes, supplied by a trusted TLS terminator. Its
+            length is validated; it is mutually exclusive with cbt_data
+        :param channel_binding_policy: A ChannelBindingPolicy controlling the
+            trust mode. Defaults to a local-only policy which rejects proxy
+            injected bindings
         :param ntlm_compatibility: (Default 3)
             The Lan Manager Compatibility Level to use with the auth message
             This is set by an Administrator in the registry key
@@ -45,7 +57,24 @@ class NtlmContext(object):
         self.password = password
         self.domain = domain
         self.workstation = workstation
+        if cbt_data is not None and channel_binding_hash is not None:
+            raise ChannelBindingStructureError(
+                "cbt_data and channel_binding_hash are mutually exclusive"
+            )
+
+        if channel_binding_hash is not None:
+            validate_precomputed_channel_binding_hash(channel_binding_hash)
+
+        if channel_binding_policy is None:
+            channel_binding_policy = ChannelBindingPolicy(TRUST_MODE_LOCAL)
+
+        # Fail fast on an untrusted binding instead of producing an
+        # authenticate message the server is guaranteed to reject.
+        channel_binding_policy.check(cbt_data)
+
         self.cbt_data = cbt_data
+        self.channel_binding_hash = channel_binding_hash
+        self.channel_binding_policy = channel_binding_policy
         self._server_certificate_hash = None  # deprecated for backwards compat
         self.ntlm_compatibility = ntlm_compatibility
         self.complete = False
@@ -99,7 +128,9 @@ class NtlmContext(object):
                 self.username, self.password, self.domain, self.workstation,
                 self._challenge_message, self.ntlm_compatibility,
                 server_certificate_hash=self._server_certificate_hash,
-                cbt_data=self.cbt_data
+                cbt_data=self.cbt_data,
+                channel_binding_hash=self.channel_binding_hash,
+                channel_binding_policy=self.channel_binding_policy
             )
             self._authenticate_message.add_mic(self._negotiate_message,
                                                self._challenge_message)

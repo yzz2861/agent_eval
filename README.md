@@ -76,7 +76,9 @@ The variables required are outlined below;
 * `password` - The password of the user to authenticate with
 * `domain` - The domain of the user, i.e. DOMAIN. Can be blank if not in a domain environment
 * `workstation` - The workstation you are running on. Can be blank if you do not wish to send this
-* `cbt_data` - (NTLMv2 only) The `gss_channel_bindings.GssChannelBindingsStruct` used to bind with the auth response. Can be None if no binding needs to occur
+* `cbt_data` - (NTLMv2 only) The `gss_channel_bindings.GssChannelBindingsStruct` or `gss_channel_bindings.TLSChannelBinding` used to bind with the auth response. Can be None if no binding needs to occur
+* `channel_binding_hash` - (NTLMv2 only) A pre-computed 16-byte MD5 of the GSS channel binding bytes, typically supplied by a trusted TLS terminator. Its length is validated and it is mutually exclusive with `cbt_data`
+* `channel_binding_policy` - A `gss_channel_bindings.ChannelBindingPolicy` that controls which binding origins are trusted. Defaults to a local-only policy that rejects proxy injected bindings
 
 
 #### LM Auth/NTLMv1 Auth
@@ -136,6 +138,37 @@ authenticate_message = ntlm_context.step(challenge_message)
 
 # Attach the authenticate_message ot your NTLM_NEGOTIATE HTTP header and send to the server. You are now authenticated with NTLMv1
 ```
+
+##### Channel Binding Construction and Trust Modes
+
+The low level `GssChannelBindingsStruct` only serializes the GSS-API structure and leaves endpoint normalization, digest validation and hashing to the caller. Prefer the `build_tls_channel_bindings()` entry point which performs all of that work in one place before the NTLMv2 MD5 is calculated.
+
+```python
+from ntlm_auth.gss_channel_bindings import (
+    TRUST_MODE_PROXY, ChannelBindingPolicy, build_tls_channel_bindings,
+)
+from ntlm_auth.ntlm import NtlmContext
+
+# The leaf certificate digest (SHA-256/SHA-384/SHA-512). Endpoint literals
+# are canonicalized, so IPv6 letter case and packed/text forms cannot change
+# the serialized bytes. The TLS version never becomes part of the binding.
+cbt_data = build_tls_channel_bindings(
+    certificate_digest=certificate_digest,
+    initiator_endpoint='192.0.2.10',
+    acceptor_endpoint='2001:db8::1',
+    tls_version='TLSv1.3',
+)
+
+ntlm_context = NtlmContext(username, password, domain, workstation,
+                           cbt_data=cbt_data)
+```
+
+Three trust boundaries are modelled:
+* **No endpoint binding** - omit the digest (or pass `cbt_data=None`). The header-only GSS structure is still well defined but no server identity is proven.
+* **Empty/absent certificate digest** - produces an empty `application_data` field and must only be used when the peer does not enforce CBT or another layer protects the connection.
+* **TLS terminated at a reverse proxy** - the proxy observes the client TLS connection and injects the binding into the inner NTLM exchange. Build the binding with `injected_by_proxy=True` and configure `NtlmContext(..., channel_binding_policy=ChannelBindingPolicy(TRUST_MODE_PROXY))`. The default `local` policy rejects injected bindings so a plaintext inner hop cannot be confused for a verified end-to-end channel.
+
+Errors are split into three types in `ntlm_auth.exceptions` so callers can react precisely: `ChannelBindingStructureError` (bad input shape/type), `ChannelBindingDigestError` (illegal digest or pre-computed hash length) and `ChannelBindingPolicyError` (trust mode forbids the binding origin). Certificate material and raw application data are never placed in exception messages, so the errors can be logged without leaking the certificate.
 
 #### Signing/Sealing
 

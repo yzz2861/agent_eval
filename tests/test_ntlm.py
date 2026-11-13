@@ -10,8 +10,14 @@ import pytest
 from requests.auth import AuthBase
 
 from ntlm_auth.constants import NegotiateFlags
-from ntlm_auth.exceptions import NoAuthContextError
-from ntlm_auth.gss_channel_bindings import GssChannelBindingsStruct
+from ntlm_auth.compute_response import ComputeResponse
+from ntlm_auth.constants import AvId
+from ntlm_auth.exceptions import ChannelBindingDigestError, \
+    ChannelBindingPolicyError, ChannelBindingStructureError, NoAuthContextError
+from ntlm_auth.gss_channel_bindings import GssChannelBindingsStruct, \
+    TRUST_MODE_LOCAL, TRUST_MODE_NONE, TRUST_MODE_PROXY, \
+    ChannelBindingPolicy, build_tls_channel_bindings
+from ntlm_auth.messages import ChallengeMessage
 from ntlm_auth.ntlm import Ntlm, NtlmContext
 from ntlm_auth.session_security import SessionSecurity
 
@@ -939,3 +945,206 @@ class NtlmAuth(AuthBase):
         server_certificate_hash = hash_object.hexdigest().upper()
 
         return server_certificate_hash
+
+
+class TestChannelBindingIntegration(object):
+    """Exercises the channel binding plumbing without the password hashing
+    step (MD4 is unavailable on OpenSSL 3 based interpreters). The target
+    info AV_PAIR handling and every policy/validation branch are covered."""
+
+    CHALLENGE = base64.b64encode(
+        b"\x4e\x54\x4c\x4d\x53\x53\x50\x00"
+        b"\x02\x00\x00\x00\x2f\x82\x88\xe2"
+        b"\x38\x00\x00\x00\x33\x82\x8a\xe2"
+        b"\x01\x23\x45\x67\x89\xab\xcd\xef"
+        b"\x00\x00\x00\x00\x00\x00\x00\x00"
+        b"\x24\x00\x24\x00\x44\x00\x00\x00"
+        b"\x06\x00\x70\x17\x00\x00\x00\x0f"
+        b"\x53\x00\x65\x00\x72\x00\x76\x00"
+        b"\x65\x00\x72\x00\x02\x00\x0c\x00"
+        b"\x44\x00\x6f\x00\x6d\x00\x61\x00"
+        b"\x69\x00\x6e\x00\x01\x00\x0c\x00"
+        b"\x53\x00\x65\x00\x72\x00\x76\x00"
+        b"\x65\x00\x72\x00\x00\x00\x00\x00"
+    )
+
+    CERT_HEX = 'E3CA49271E5089CC48CE82109F1324F41DBEDDC29A777410C738F7868C4FF405'
+    # MD5 of the GSS bytes built from CERT_HEX, asserted independently below.
+    EXPECTED_CBT_HASH = base64.b16decode('6EA19DF066DA4622051F9C4F92C6DF74')
+
+    @pytest.fixture(autouse=True)
+    def _stub_md4(self, monkeypatch):
+        # OpenSSL 3 no longer exposes MD4, but the channel binding tests do
+        # not validate the password OWF. Replace it with a deterministic 16
+        # byte value so the NTLMv2 target-info branch can still be exercised.
+        monkeypatch.setattr(
+            'ntlm_auth.compute_hash._ntowfv1',
+            lambda password: b"\x01" * 16
+        )
+
+    def _challenge_message(self):
+        return ChallengeMessage(base64.b64decode(self.CHALLENGE))
+
+    def _target_info_hash(self, **kwargs):
+        # NTLMv2 compatibility level so the target info branch is taken.
+        response = ComputeResponse(
+            "User", "Password", "Domain",
+            self._challenge_message(), 3
+        )
+        _, _, target_info = response.get_nt_challenge_response(
+            b"\x00" * 24, **kwargs
+        )
+        return target_info[AvId.MSV_AV_CHANNEL_BINDINGS]
+
+    def test_legacy_struct_produces_same_hash(self):
+        cbt_data = GssChannelBindingsStruct()
+        cbt_data[GssChannelBindingsStruct.APPLICATION_DATA] = \
+            b"tls-server-end-point:" + base64.b16decode(self.CERT_HEX)
+        actual = self._target_info_hash(cbt_data=cbt_data)
+        assert actual == self.EXPECTED_CBT_HASH
+
+    def test_builder_produces_legacy_identical_hash(self):
+        binding = build_tls_channel_bindings(
+            certificate_digest=base64.b16decode(self.CERT_HEX)
+        )
+        actual = self._target_info_hash(cbt_data=binding)
+        assert actual == self.EXPECTED_CBT_HASH
+
+    def test_tls13_binding_is_byte_identical_to_tls12(self):
+        digest = base64.b16decode(self.CERT_HEX)
+        tls12 = build_tls_channel_bindings(
+            certificate_digest=digest, tls_version='TLSv1.2'
+        )
+        tls13 = build_tls_channel_bindings(
+            certificate_digest=digest, tls_version='TLSv1.3'
+        )
+        assert tls13.get_data() == tls12.get_data()
+        assert self._target_info_hash(cbt_data=tls13) == \
+            self.EXPECTED_CBT_HASH
+
+    def test_precomputed_hash_is_used_directly(self):
+        value = b"\x11" * 16
+        actual = self._target_info_hash(channel_binding_hash=value)
+        assert actual == value
+
+    def test_precomputed_hash_wrong_length_raises_digest_error(self):
+        with pytest.raises(ChannelBindingDigestError):
+            self._target_info_hash(channel_binding_hash=b"\x11" * 15)
+
+    def test_precomputed_hash_mutually_exclusive_with_cbt(self):
+        binding = build_tls_channel_bindings(
+            certificate_digest=base64.b16decode(self.CERT_HEX)
+        )
+        with pytest.raises(ChannelBindingStructureError):
+            self._target_info_hash(
+                cbt_data=binding, channel_binding_hash=b"\x11" * 16
+            )
+
+    def test_proxy_policy_allows_injected_binding(self):
+        binding = build_tls_channel_bindings(
+            certificate_digest=base64.b16decode(self.CERT_HEX),
+            injected_by_proxy=True
+        )
+        policy = ChannelBindingPolicy(TRUST_MODE_PROXY)
+        actual = self._target_info_hash(
+            cbt_data=binding, channel_binding_policy=policy
+        )
+        assert actual == self.EXPECTED_CBT_HASH
+
+    def test_local_policy_rejects_injected_binding(self):
+        binding = build_tls_channel_bindings(
+            certificate_digest=base64.b16decode(self.CERT_HEX),
+            injected_by_proxy=True
+        )
+        policy = ChannelBindingPolicy(TRUST_MODE_LOCAL)
+        with pytest.raises(ChannelBindingPolicyError):
+            self._target_info_hash(
+                cbt_data=binding, channel_binding_policy=policy
+            )
+
+    def test_none_policy_rejects_any_binding(self):
+        binding = build_tls_channel_bindings(
+            certificate_digest=base64.b16decode(self.CERT_HEX)
+        )
+        policy = ChannelBindingPolicy(TRUST_MODE_NONE)
+        with pytest.raises(ChannelBindingPolicyError):
+            self._target_info_hash(
+                cbt_data=binding, channel_binding_policy=policy
+            )
+
+
+class TestNtlmContextChannelBindingPolicy(object):
+
+    CERT_DIGEST = base64.b16decode(
+        'E3CA49271E5089CC48CE82109F1324F41DBEDDC29A777410C738F7868C4FF405'
+    )
+
+    def test_local_default_rejects_proxy_injected_binding(self):
+        binding = build_tls_channel_bindings(
+            certificate_digest=self.CERT_DIGEST,
+            injected_by_proxy=True
+        )
+        with pytest.raises(ChannelBindingPolicyError):
+            NtlmContext("User", "Password", cbt_data=binding)
+
+    def test_proxy_policy_accepts_injected_binding(self):
+        binding = build_tls_channel_bindings(
+            certificate_digest=self.CERT_DIGEST,
+            injected_by_proxy=True
+        )
+        context = NtlmContext(
+            "User", "Password",
+            cbt_data=binding,
+            channel_binding_policy=ChannelBindingPolicy(TRUST_MODE_PROXY)
+        )
+        assert context.cbt_data is binding
+
+    def test_local_binding_accepted_by_default(self):
+        binding = build_tls_channel_bindings(
+            certificate_digest=self.CERT_DIGEST
+        )
+        context = NtlmContext("User", "Password", cbt_data=binding)
+        assert context.cbt_data is binding
+
+    def test_none_policy_rejects_binding(self):
+        binding = build_tls_channel_bindings(
+            certificate_digest=self.CERT_DIGEST
+        )
+        with pytest.raises(ChannelBindingPolicyError):
+            NtlmContext(
+                "User", "Password", cbt_data=binding,
+                channel_binding_policy=ChannelBindingPolicy(TRUST_MODE_NONE)
+            )
+
+    def test_precomputed_hash_accepted_and_stored(self):
+        value = b"\x22" * 16
+        context = NtlmContext(
+            "User", "Password", channel_binding_hash=value
+        )
+        assert context.channel_binding_hash == value
+        assert context.cbt_data is None
+
+    def test_precomputed_hash_wrong_length_fails_fast(self):
+        with pytest.raises(ChannelBindingDigestError):
+            NtlmContext("User", "Password",
+                        channel_binding_hash=b"\x22" * 15)
+
+    def test_hash_and_cbt_are_mutually_exclusive(self):
+        binding = build_tls_channel_bindings(
+            certificate_digest=self.CERT_DIGEST
+        )
+        with pytest.raises(ChannelBindingStructureError):
+            NtlmContext("User", "Password", cbt_data=binding,
+                        channel_binding_hash=b"\x22" * 16)
+
+    def test_legacy_struct_still_accepted(self):
+        cbt_data = GssChannelBindingsStruct()
+        cbt_data[GssChannelBindingsStruct.APPLICATION_DATA] = \
+            b"tls-server-end-point:" + self.CERT_DIGEST
+        context = NtlmContext("User", "Password", cbt_data=cbt_data)
+        assert context.cbt_data is cbt_data
+
+    def test_no_binding_remains_supported(self):
+        context = NtlmContext("User", "Password")
+        assert context.cbt_data is None
+        assert context.channel_binding_hash is None

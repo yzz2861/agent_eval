@@ -1,5 +1,14 @@
 # Changes
 
+## 1.6.0
+
+* Added the `build_tls_channel_bindings()` entry point and `TLSChannelBinding` class which normalize IPv4/IPv6 endpoints and the binding type, validate the certificate digest length and serialize the GSS-API length-prefixed structure before the NTLMv2 MD5 is calculated
+* Added `ChannelBindingPolicy` with explicit `local`, `proxy` and `none` trust modes to distinguish locally observed bindings from those injected by a reverse proxy that terminates TLS; the default policy remains local only
+* Added `NtlmContext.channel_binding_hash` for a trusted, pre-computed 16-byte channel binding hash with strict length validation; it is mutually exclusive with `cbt_data`
+* Split channel binding failures into `ChannelBindingStructureError`, `ChannelBindingDigestError` and `ChannelBindingPolicyError` in `ntlm_auth.exceptions`; error messages never contain certificate or application-data material
+* Endpoint and binding normalization guarantees identical binding bytes for IPv6 case differences, packed/text IP literals, TLS 1.2 vs TLS 1.3 and certificate chain changes that keep the same leaf digest
+* Existing `GssChannelBindingsStruct` and `server_certificate_hash` callers keep producing byte identical channel binding hashes
+
 ## 1.5.0 (Jun 16, 2020)
 
 * Added the `mic_present` property to the `NtlmContext` class to determine if a MIC has been added to the authentication message.
