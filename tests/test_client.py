@@ -42,6 +42,7 @@ from paramiko.ed25519key import Ed25519Key
 from paramiko.pkey import PublicBlob, UnknownKeyType
 from paramiko.ssh_exception import AuthenticationException, SSHException
 
+from ._loop import LoopSocket
 from ._util import _support, slow
 
 FINGERPRINTS = {
@@ -761,3 +762,68 @@ class PasswordPassphraseTests(ClientTest):
             password="television",
             passphrase="wat? lol no",
         )
+
+
+class ClientHostKeyNormalizationTest(unittest.TestCase):
+    """Host key handling over in-memory sockets; no real network is used."""
+
+    def setUp(self):
+        self.server_sock = LoopSocket()
+        self.client_sock = LoopSocket()
+        self.server_sock.link(self.client_sock)
+        host_key = paramiko.RSAKey.from_private_key_file(_support("rsa.key"))
+        self.public_host_key = paramiko.RSAKey(data=host_key.asbytes())
+        self.event = threading.Event()
+        self.transport = paramiko.Transport(self.server_sock)
+        self.transport.add_server_key(host_key)
+        self.transport.start_server(
+            self.event, NullServer(allowed_keys=FINGERPRINTS.keys())
+        )
+
+    def tearDown(self):
+        self.transport.close()
+
+    def _connect(self, host_keys, hostname, port=22):
+        client = SSHClient()
+        client._host_keys = host_keys
+        client._system_host_keys = paramiko.HostKeys()
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        client.connect(
+            hostname=hostname,
+            port=port,
+            username="slowdive",
+            password="pygmalion",
+            look_for_keys=False,
+            allow_agent=False,
+            sock=self.client_sock,
+        )
+        return client
+
+    def test_default_port_matches_bare_host_entry(self):
+        host_keys = paramiko.HostKeys()
+        host_keys.add("db.internal", "ssh-rsa", self.public_host_key)
+        client = self._connect(host_keys, "db.internal")
+        assert client.get_transport().is_active()
+        client.close()
+
+    def test_non_default_port_uses_bracket_entry(self):
+        host_keys = paramiko.HostKeys()
+        host_keys.add("[db.internal]:2222", "ssh-rsa", self.public_host_key)
+        client = self._connect(host_keys, "db.internal", port=2222)
+        assert client.get_transport().is_active()
+        client.close()
+
+    def test_strict_host_keys_do_not_fall_back_to_bare_host(self):
+        host_keys = paramiko.HostKeys(strict=True)
+        host_keys.add("db.internal", "ssh-rsa", self.public_host_key)
+        with pytest.raises(paramiko.SSHException):
+            self._connect(host_keys, "db.internal", port=2222)
+
+    def test_ipv6_bracket_entry_is_not_misparsed(self):
+        host_keys = paramiko.HostKeys()
+        host_keys.add(
+            "[2001:db8::1]:2222", "ssh-rsa", self.public_host_key
+        )
+        client = self._connect(host_keys, "2001:db8::1", port=2222)
+        assert client.get_transport().is_active()
+        client.close()

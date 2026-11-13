@@ -26,6 +26,7 @@ import os
 import unittest
 
 import paramiko
+import pytest
 
 from ._util import _support
 
@@ -167,3 +168,255 @@ class HostKeysTabsTest(HostKeysTest):
     def setUp(self):
         with open("hostfile.temp", "w") as f:
             f.write(test_hosts_file_tabs)
+
+
+class HostKeyNormalizationTest(unittest.TestCase):
+    def setUp(self):
+        self.key = paramiko.RSAKey(data=decodebytes(keyblob))
+
+    def test_dns_case_and_trailing_dot_are_equivalent(self):
+        hostdict = paramiko.HostKeys()
+        hostdict.add("Secure.Example.COM.", "ssh-rsa", self.key)
+        for hostname in (
+            "secure.example.com",
+            "SECURE.EXAMPLE.COM",
+            "secure.example.com.",
+        ):
+            assert hostdict.lookup(hostname) is not None
+        assert hostdict.keys() == ["secure.example.com"]
+
+    def test_non_default_port_uses_bracket_canonical_form(self):
+        normalized = paramiko.hostkeys.normalize_host_key(
+            "db.internal:2222"
+        )
+        assert normalized.canonical == "[db.internal]:2222"
+        assert normalized.port == 2222
+        assert normalized.family == "dns"
+
+        hostdict = paramiko.HostKeys()
+        hostdict.add("[db.internal]:2222", "ssh-rsa", self.key)
+        assert hostdict.lookup("[db.internal]:2222") is not None
+        assert hostdict.lookup("db.internal") is None
+
+    def test_default_port_matches_bare_entry(self):
+        hostdict = paramiko.HostKeys()
+        hostdict.add("db.internal", "ssh-rsa", self.key)
+        assert hostdict.lookup("[db.internal]:22") is not None
+
+    def test_lenient_lookup_falls_back_to_bare_host(self):
+        hostdict = paramiko.HostKeys()
+        hostdict.add("db.internal", "ssh-rsa", self.key)
+        result = hostdict.explain("[db.internal]:2222")
+        assert result.matched is True
+        assert result.fallback_used is True
+        assert hostdict.lookup("[db.internal]:2222") is not None
+
+    def test_strict_lookup_does_not_fall_back_to_bare_host(self):
+        hostdict = paramiko.HostKeys(strict=True)
+        hostdict.add("db.internal", "ssh-rsa", self.key)
+        assert hostdict.lookup("[db.internal]:2222") is None
+        result = hostdict.explain("[db.internal]:2222")
+        assert result.matched is False
+        assert result.fallback_used is False
+        with pytest.raises(paramiko.hostkeys.UnknownHostKey):
+            result.require()
+
+    def test_ipv4_port_and_family(self):
+        normalized = paramiko.hostkeys.normalize_host_key(
+            "10.20.30.40:2222"
+        )
+        assert normalized.family == "ipv4"
+        assert normalized.canonical == "[10.20.30.40]:2222"
+
+        hostdict = paramiko.HostKeys()
+        hostdict.add("10.20.30.40:2222", "ssh-rsa", self.key)
+        assert hostdict.lookup("[10.20.30.40]:2222") is not None
+        assert hostdict.lookup("10.20.30.40") is None
+
+    def test_bare_ipv6_is_not_split_on_colons(self):
+        for value in ("2001:DB8::1", "[2001:db8::1]"):
+            normalized = paramiko.hostkeys.normalize_host_key(value)
+            assert normalized.family == "ipv6"
+            assert normalized.host == "2001:db8::1"
+            assert normalized.port == 22
+
+        hostdict = paramiko.HostKeys()
+        hostdict.add("2001:db8::1", "ssh-rsa", self.key)
+        assert hostdict.lookup("2001:DB8::1") is not None
+
+    def test_bracketed_ipv6_with_port(self):
+        normalized = paramiko.hostkeys.normalize_host_key(
+            "[2001:db8::1]:2222"
+        )
+        assert normalized.family == "ipv6"
+        assert normalized.port == 2222
+        assert normalized.canonical == "[2001:db8::1]:2222"
+
+        hostdict = paramiko.HostKeys()
+        hostdict.add("[2001:db8::1]:2222", "ssh-rsa", self.key)
+        assert hostdict.lookup("[2001:DB8::1]:2222") is not None
+        assert hostdict.lookup("[2001:db8::1]:3333") is None
+        assert hostdict.lookup("2001:db8::1") is None
+
+    def test_ipv6_scope_id_is_preserved(self):
+        normalized = paramiko.hostkeys.normalize_host_key(
+            "[fe80::1%eth0]:2222"
+        )
+        assert normalized.scope_id == "eth0"
+        assert normalized.canonical == "[fe80::1%eth0]:2222"
+
+        hostdict = paramiko.HostKeys()
+        hostdict.add("fe80::1%eth0", "ssh-rsa", self.key)
+        assert hostdict.lookup("FE80::1%eth0") is not None
+        assert hostdict.lookup("fe80::1%wlan0") is None
+        with pytest.raises(paramiko.hostkeys.HostKeyParseError):
+            paramiko.hostkeys.normalize_host_key("fe80::1%eth0:2222")
+
+    def test_combined_line_matches_each_independent_host(self):
+        hostdict = paramiko.HostKeys()
+        hostdict.add("a.example.com", "ssh-rsa", self.key)
+        entry = paramiko.hostkeys.HostKeyEntry(
+            [
+                "b.example.com",
+                "B.EXAMPLE.COM.",
+                "[2001:DB8::1]:2222",
+            ],
+            self.key,
+        )
+        hostdict._entries.append(entry)
+        assert hostdict.lookup("b.example.com") is not None
+        assert hostdict.lookup("[2001:db8::1]:2222") is not None
+        assert hostdict.lookup("a.example.com") is not None
+
+    def test_wildcard_matches_one_label_only(self):
+        hostdict = paramiko.HostKeys()
+        hostdict.add("*.example.com", "ssh-rsa", self.key)
+        assert hostdict.lookup("foo.example.com") is not None
+        assert hostdict.lookup("a.b.example.com") is None
+        assert hostdict.lookup("example.com") is None
+
+    def test_question_mark_matches_one_character_only(self):
+        hostdict = paramiko.HostKeys()
+        hostdict.add("a?c.example.com", "ssh-rsa", self.key)
+        assert hostdict.lookup("abc.example.com") is not None
+        assert hostdict.lookup("axxc.example.com") is None
+        assert hostdict.lookup("a.c.example.com") is None
+
+    def test_wildcard_does_not_span_ports(self):
+        hostdict = paramiko.HostKeys()
+        hostdict.add("*.example.com", "ssh-rsa", self.key)
+        assert hostdict.lookup("[foo.example.com]:2222") is None
+
+    def test_hashed_lookup_uses_canonical_hmac_input(self):
+        salt = "BMsIC6cUIP2zBuXR3t2LRcJYjzM="
+        hashed = paramiko.HostKeys.hash_host(
+            "[DB.Internal.]:2222", salt
+        )
+        hostdict = paramiko.HostKeys()
+        hostdict.add(hashed, "ssh-rsa", self.key)
+        assert hostdict.lookup("[db.internal]:2222") is not None
+        assert hostdict.lookup("[db.internal]:3333") is None
+        assert hostdict.lookup("db.internal") is None
+
+    def test_hashed_and_plain_spellings_share_canonical_value(self):
+        salt = "BMsIC6cUIP2zBuXR3t2LRcJYjzM="
+        assert paramiko.HostKeys.hash_host(
+            "FOO.Example.Com.", salt
+        ) == paramiko.HostKeys.hash_host("foo.example.com", salt)
+        assert paramiko.HostKeys.hash_host(
+            "[2001:DB8::1]:2222", salt
+        ) == paramiko.HostKeys.hash_host(
+            "[2001:db8::1]:2222", salt
+        )
+
+    def test_hashed_bare_entry_does_not_match_port_lookup(self):
+        salt = "BMsIC6cUIP2zBuXR3t2LRcJYjzM="
+        hashed = paramiko.HostKeys.hash_host("db.internal", salt)
+        hostdict = paramiko.HostKeys()
+        hostdict.add(hashed, "ssh-rsa", self.key)
+        assert hostdict.lookup("[db.internal]:2222") is None
+
+    def test_save_round_trip_normalizes_host_fields(self):
+        hostdict = paramiko.HostKeys()
+        hostdict.add("DB.Internal.", "ssh-rsa", self.key)
+        hostdict.add("[db.internal]:2222", "ssh-rsa", self.key)
+        hostdict.add("[2001:DB8::1]:2222", "ssh-rsa", self.key)
+        hostdict.save("hostfile.normalized.temp")
+        try:
+            contents = open("hostfile.normalized.temp").read()
+            assert "db.internal ssh-rsa" in contents
+            assert "[db.internal]:2222 ssh-rsa" in contents
+            assert "[2001:db8::1]:2222 ssh-rsa" in contents
+            reloaded = paramiko.HostKeys("hostfile.normalized.temp")
+            assert reloaded.lookup("db.internal") is not None
+            assert reloaded.lookup("[db.internal]:2222") is not None
+            assert reloaded.lookup("[2001:db8::1]:2222") is not None
+        finally:
+            os.unlink("hostfile.normalized.temp")
+
+
+class HostKeyLoadErrorTest(unittest.TestCase):
+    def setUp(self):
+        self.key = paramiko.RSAKey(data=decodebytes(keyblob))
+        self.other_key = paramiko.RSAKey.generate(2048)
+
+    def _write(self, lines):
+        with open("hostfile.errors.temp", "w") as f:
+            f.write("\n".join(lines) + "\n")
+
+    def tearDown(self):
+        if os.path.exists("hostfile.errors.temp"):
+            os.unlink("hostfile.errors.temp")
+
+    def test_bad_line_is_distinct_from_unknown_host(self):
+        self._write(["onlytwo fields"])
+        hostdict = paramiko.HostKeys("hostfile.errors.temp")
+        assert len(hostdict.load_errors) == 1
+        assert isinstance(
+            hostdict.load_errors[0], paramiko.hostkeys.HostKeyParseError
+        )
+        assert hostdict.lookup("anything.example") is None
+        result = hostdict.explain("anything.example")
+        assert isinstance(
+            result, paramiko.hostkeys.HostKeyLookupResult
+        )
+
+    def test_duplicate_and_conflict_are_distinct_errors(self):
+        base = "db.internal ssh-rsa {}".format(self.key.get_base64())
+        duplicate = "DB.INTERNAL. ssh-rsa {}".format(self.key.get_base64())
+        conflict = "db.internal ssh-rsa {}".format(
+            self.other_key.get_base64()
+        )
+        self._write([base, duplicate, conflict])
+        hostdict = paramiko.HostKeys("hostfile.errors.temp")
+        error_types = [type(error) for error in hostdict.load_errors]
+        assert paramiko.hostkeys.DuplicateHostKeyEntry in error_types
+        assert paramiko.hostkeys.ConflictingHostKeyType in error_types
+        assert hostdict.lookup("db.internal") is not None
+
+    def test_strict_mode_raises_each_error_type(self):
+        cases = [
+            (["onlytwo fields"], paramiko.hostkeys.HostKeyParseError),
+            (
+                [
+                    "db.internal ssh-rsa {}".format(self.key.get_base64()),
+                    "DB.INTERNAL. ssh-rsa {}".format(
+                        self.key.get_base64()
+                    ),
+                ],
+                paramiko.hostkeys.DuplicateHostKeyEntry,
+            ),
+            (
+                [
+                    "db.internal ssh-rsa {}".format(self.key.get_base64()),
+                    "db.internal ssh-rsa {}".format(
+                        self.other_key.get_base64()
+                    ),
+                ],
+                paramiko.hostkeys.ConflictingHostKeyType,
+            ),
+        ]
+        for lines, expected in cases:
+            self._write(lines)
+            with pytest.raises(expected):
+                paramiko.HostKeys("hostfile.errors.temp", strict=True)
