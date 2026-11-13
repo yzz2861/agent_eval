@@ -11,6 +11,7 @@ from authlib.oauth2.claims import JWTClaims
 from authlib.oauth2.rfc6749.util import normalize_response_type
 from authlib.oauth2.rfc6749.util import scope_to_list
 
+from .util import RESPONSE_TYPE_MATRIX
 from .util import create_half_hash
 
 __all__ = [
@@ -97,6 +98,8 @@ class IDToken(JWTClaims):
         value is a case sensitive string.
         """
         nonce_value = self.params.get("nonce")
+        if "nonce" in self and not isinstance(self["nonce"], str):
+            raise InvalidClaimError("nonce")
         if nonce_value:
             if "nonce" not in self:
                 raise MissingClaimError("nonce")
@@ -145,8 +148,10 @@ class IDToken(JWTClaims):
         access_token value with SHA-256, then take the left-most 128 bits and
         base64url encode them. The at_hash value is a case sensitive string.
         """
-        access_token = self.params.get("access_token")
         at_hash = self.get("at_hash")
+        if at_hash is not None and not isinstance(at_hash, str):
+            raise InvalidClaimError("at_hash")
+        access_token = self.params.get("access_token")
         if at_hash and access_token:
             if not _verify_hash(at_hash, access_token, self.header["alg"]):
                 raise InvalidClaimError("at_hash")
@@ -169,8 +174,8 @@ class ImplicitIDToken(IDToken):
         Token is issued, which is the case for the response_type value
         id_token.
         """
-        access_token = self.params.get("access_token")
-        if access_token and "at_hash" not in self:
+        bound = _required_hash_claims(type(self)).get("at_hash", "access_token")
+        if self.params.get(bound) and "at_hash" not in self:
             raise MissingClaimError("at_hash")
         super().validate_at_hash()
 
@@ -195,8 +200,11 @@ class HybridIDToken(ImplicitIDToken):
         which is the case for the response_type values code id_token and code
         id_token token, this is REQUIRED; otherwise, its inclusion is OPTIONAL.
         """
-        code = self.params.get("code")
         c_hash = self.get("c_hash")
+        if c_hash is not None and not isinstance(c_hash, str):
+            raise InvalidClaimError("c_hash")
+        bound = _required_hash_claims(type(self)).get("c_hash", "code")
+        code = self.params.get(bound)
         if code:
             if not c_hash:
                 raise MissingClaimError("c_hash")
@@ -300,6 +308,22 @@ def get_claim_cls_by_response_type(response_type):
             normalize_response_type(rt) for rt in claims_cls.RESPONSE_TYPES
         }:
             return claims_cls
+
+
+def _required_hash_claims(claims_cls):
+    """Return the hash claims required with the response types of a claims
+    class, mapped to the response parameter each of them binds, per the
+    response matrix.
+
+    :param claims_cls: a claims class, with ``RESPONSE_TYPES``
+    :return: a dict of claim name to response parameter name
+    """
+    required = {}
+    for response_type in claims_cls.RESPONSE_TYPES:
+        spec = RESPONSE_TYPE_MATRIX.get(normalize_response_type(response_type))
+        if spec is not None:
+            required.update(spec["hash_claims"])
+    return required
 
 
 def _verify_hash(signature, s, alg):

@@ -8,8 +8,12 @@ from authlib.common.encoding import to_native
 from authlib.deprecate import deprecate
 from authlib.oauth2.form_post import FormPost
 from authlib.oauth2.multiple_response_types import MultipleResponseTypes
+from authlib.oauth2.multiple_response_types.grant import (
+    validate_response_params as _validate_response_params,
+)
 from authlib.oauth2.rfc6749 import AuthorizationResponse
 from authlib.oauth2.rfc6749 import InvalidRequestError
+from authlib.oauth2.rfc6749 import OAuth2Error
 from authlib.oauth2.rfc6749 import scope_to_list
 from authlib.oauth2.rfc9470 import get_max_age
 from authlib.oauth2.rfc9470 import is_login_required
@@ -19,6 +23,7 @@ from ..errors import ConsentRequiredError
 from ..errors import InteractionRequiredError
 from ..errors import LoginRequiredError
 from ..util import create_half_hash
+from ..util import get_response_type_spec
 
 _warned_servers = weakref.WeakSet()
 _warned_session_servers = weakref.WeakSet()
@@ -234,6 +239,33 @@ def validate_nonce(request, exists_nonce, required=False):
 
     if exists_nonce(nonce, request):
         raise InvalidRequestError("Replay attack")
+
+
+def validate_grant_response(grant, params):
+    """Validate an authorization response against the matrix of its
+    response type, before anything of it is saved.
+
+    The response MUST contain the parameters of its response type, each of
+    them exactly once and as a string, and no parameter MUST appear twice.
+    A token generator hook cannot make the grant emit a response with a
+    missing or duplicated parameter.
+
+    :param grant: the grant that created the response
+    :param params: the ``(name, value)`` pairs of the response, without
+        ``state``
+    :raises OAuth2Error: a ``server_error``, without details, redirected in
+        the fragment, if the response does not match the matrix
+    """
+    spec = get_response_type_spec(grant.request.payload.response_type)
+    if spec is None:
+        return
+
+    try:
+        _validate_response_params(params, required=spec["params"])
+    except OAuth2Error as error:
+        error.redirect_uri = grant.request.payload.redirect_uri
+        error.redirect_fragment = True
+        raise
 
 
 def generate_id_token(

@@ -1,8 +1,32 @@
 from ..rfc6749 import AccessDeniedError
 from ..rfc6749 import AuthorizationResponse
+from ..rfc6749 import OAuth2Error
 from ..rfc6749.grants import BaseGrant
 from ..rfc6749.grants.authorization_code import validate_code_authorization_request
 from ..rfc6749.grants.base import AuthorizationEndpointMixin
+
+
+def validate_response_params(params, required=(), forbidden=()):
+    """Validate the parameters of an authorization response.
+
+    The response MUST contain the ``required`` parameters, each of them
+    exactly once and as a string, it MUST NOT contain the ``forbidden``
+    ones, and no parameter MUST appear twice.
+
+    :param params: the ``(name, value)`` pairs of the response
+    :param required: the names of the required parameters
+    :param forbidden: the names of the forbidden parameters
+    :raises OAuth2Error: a ``server_error``, without details, if the
+        parameters do not match
+    """
+    names = [name for name, _ in params]
+    values = dict(params)
+    if (
+        len(names) != len(values)
+        or any(not isinstance(values.get(name), str) for name in required)
+        or any(name in values for name in forbidden)
+    ):
+        raise OAuth2Error(error="server_error")
 
 
 class NoneResponseTypeGrant(BaseGrant, AuthorizationEndpointMixin):
@@ -44,6 +68,16 @@ class NoneResponseTypeGrant(BaseGrant, AuthorizationEndpointMixin):
         params = []
         if self.request.payload.state:
             params.append(("state", self.request.payload.state))
+
+        # Per OAuth 2.0 Multiple Response Type Encoding Practices 4, the
+        # response contains no code and no token.
+        try:
+            validate_response_params(
+                params, forbidden=("code", "access_token", "id_token")
+            )
+        except OAuth2Error as error:
+            error.redirect_uri = redirect_uri
+            raise
 
         return AuthorizationResponse(
             redirect_uri, params, self.response_mode or self.RESPONSE_MODE

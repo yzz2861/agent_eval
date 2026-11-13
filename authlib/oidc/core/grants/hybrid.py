@@ -6,8 +6,10 @@ from authlib.oauth2.rfc6749.grants.authorization_code import (
     validate_code_authorization_request,
 )
 
+from ..util import is_nonce_required
 from .implicit import OpenIDImplicitGrant
 from .util import is_openid_scope
+from .util import validate_grant_response
 from .util import validate_nonce
 from .util import validate_response_mode
 
@@ -52,7 +54,9 @@ class OpenIDHybridGrant(OpenIDImplicitGrant):
     def validate_authorization_request(self):
         self.register_hook(
             lambda grant, redirect_uri: validate_nonce(
-                grant.request, grant.exists_nonce, required=True
+                grant.request,
+                grant.exists_nonce,
+                required=is_nonce_required(grant.request.payload.response_type),
             ),
             after=self.validate_authorization_request_payload,
         )
@@ -70,8 +74,6 @@ class OpenIDHybridGrant(OpenIDImplicitGrant):
         self.request.user = grant_user
         client = self.request.client
         code = self.generate_authorization_code()
-        self.save_authorization_code(code, self.request)
-        params = [("code", code)]
         token = self.generate_token(
             grant_type="implicit",
             user=grant_user,
@@ -81,14 +83,24 @@ class OpenIDHybridGrant(OpenIDImplicitGrant):
 
         response_types = self.request.payload.response_type.split()
         if "token" in response_types:
-            log.debug("Grant token %r to %r", token, client)
-            self.server.save_token(token, self.request)
+            granted_token = token
             if "id_token" in response_types:
-                token = self.process_implicit_token(token, code)
+                token = self.process_implicit_token(dict(token), code)
         else:
             # response_type is "code id_token"
+            granted_token = None
             token = {"expires_in": token["expires_in"], "scope": token["scope"]}
             token = self.process_implicit_token(token, code)
 
+        params = [("code", code)]
         params.extend([(k, token[k]) for k in token])
+        validate_grant_response(self, params)
+
+        # Save the code and the token only when the whole response is
+        # valid, so a failure does not leave a half-issued authorization
+        # behind.
+        self.save_authorization_code(code, self.request)
+        if granted_token is not None:
+            log.debug("Grant token %r to %r", granted_token, client)
+            self.server.save_token(granted_token, self.request)
         return params

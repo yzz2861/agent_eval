@@ -5,6 +5,7 @@ import pytest
 from joserfc import jwt
 from joserfc.jwk import OctKey
 
+from authlib.common.encoding import to_native
 from authlib.common.urls import add_params_to_uri
 from authlib.common.urls import url_decode
 from authlib.common.urls import urlparse
@@ -13,10 +14,13 @@ from authlib.oauth2.multiple_response_types import MultipleResponseTypes
 from authlib.oauth2.rfc6749 import AuthorizationServer
 from authlib.oidc.core import ImplicitIDToken
 from authlib.oidc.core.grants import OpenIDImplicitGrant as _OpenIDImplicitGrant
+from authlib.oidc.core.util import create_half_hash
+from authlib.oidc.core.util import get_response_type_spec
 from tests.util import HMAC_SECRET
 from tests.util import parse_form
 
 from .models import AuthorizationSession
+from .models import Token
 from .models import exists_nonce
 from .oauth2_server import SupportedPromptValues
 from .oauth2_server import register_form_post
@@ -771,3 +775,98 @@ def test_consent_required(test_client, monkeypatch):
     rv = test_client.get(add_params_to_uri("/oauth/authorize", query))
     params = dict(url_decode(urlparse.urlparse(rv.location).fragment))
     assert params["error"] == "consent_required"
+
+
+@pytest.mark.parametrize("alg", ["HS256", "HS384", "HS512"])
+@pytest.mark.parametrize("response_type", ["id_token", "id_token token"])
+def test_response_matrix(test_client, client, db, alg, response_type):
+    """The generated response matches the matrix of its response type, and
+    its ID Token passes the validation of the same matrix: the at_hash
+    covers the access_token of the response, and the nonce the one of the
+    request.
+    """
+    client.set_client_metadata(
+        {**client.client_metadata, "id_token_signed_response_alg": alg}
+    )
+    db.session.commit()
+    rv = test_client.post(
+        "/oauth/authorize", data={**IMPLICIT_PARAMS, "response_type": response_type}
+    )
+    params = dict(url_decode(urlparse.urlparse(rv.location).fragment))
+    spec = get_response_type_spec(response_type)
+
+    for name in spec["params"]:
+        assert name in params
+    if "access_token" not in spec["params"]:
+        assert "access_token" not in params
+
+    assert Token.query.count() == (1 if "token" in response_type.split() else 0)
+
+    token = jwt.decode(
+        params["id_token"], OctKey.import_key(HMAC_SECRET), algorithms=[alg]
+    )
+    for claim, param in spec["hash_claims"].items():
+        assert token.claims[claim] == to_native(create_half_hash(params[param], alg))
+    assert token.claims["nonce"] == "abc"
+
+    params["client_id"] = "client-id"
+    validate_claims(params["id_token"], params, alg=alg)
+
+
+def test_alg_none_is_rejected_without_saving_token(test_client, client, db):
+    """The 'none' alg is refused in implicit flows, before the token is
+    saved."""
+    client.set_client_metadata(
+        {**client.client_metadata, "id_token_signed_response_alg": "none"}
+    )
+    db.session.commit()
+    rv = test_client.post(
+        "/oauth/authorize",
+        data={**IMPLICIT_PARAMS, "response_type": "id_token token"},
+    )
+    params = dict(url_decode(urlparse.urlparse(rv.location).fragment))
+    assert params["error"] == "invalid_request"
+    assert "id_token" not in params
+    assert Token.query.count() == 0
+
+
+def test_generator_missing_access_token(test_client, server):
+    """A token generator that omits the access_token of an 'id_token
+    token' response is refused with a minimal error, and nothing is
+    saved."""
+
+    def generate_token(client, grant_type, user, scope, **kwargs):
+        return {"token_type": "Bearer", "expires_in": 3600, "scope": scope}
+
+    server.register_token_generator("implicit", generate_token)
+    rv = test_client.post(
+        "/oauth/authorize",
+        data={**IMPLICIT_PARAMS, "response_type": "id_token token"},
+    )
+    params = dict(url_decode(urlparse.urlparse(rv.location).fragment))
+    assert params["error"] == "server_error"
+    assert "error_description" not in params
+    assert "id_token" not in params
+    assert Token.query.count() == 0
+
+
+def test_generator_non_string_access_token(test_client, server):
+    """A token generator that returns a non-string access_token is
+    refused, and nothing is saved."""
+
+    def generate_token(client, grant_type, user, scope, **kwargs):
+        return {
+            "access_token": b"raw-token",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "scope": scope,
+        }
+
+    server.register_token_generator("implicit", generate_token)
+    rv = test_client.post(
+        "/oauth/authorize",
+        data={**IMPLICIT_PARAMS, "response_type": "id_token token"},
+    )
+    params = dict(url_decode(urlparse.urlparse(rv.location).fragment))
+    assert params["error"] == "server_error"
+    assert Token.query.count() == 0

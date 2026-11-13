@@ -12,6 +12,7 @@ from authlib.oauth2.rfc6749 import InvalidScopeError
 from authlib.oauth2.rfc6749 import OAuth2Error
 from authlib.oauth2.rfc6749.errors import InvalidRequestError
 
+from ..util import is_nonce_required
 from ._legacy import LegacyMixin
 from .util import OPENID_AUTHORIZATION_PARAMETERS
 from .util import create_half_hash
@@ -19,6 +20,7 @@ from .util import has_multiple_response_types
 from .util import is_openid_scope
 from .util import resolve_auth_time
 from .util import set_silent
+from .util import validate_grant_response
 from .util import validate_nonce
 from .util import validate_prompt_none
 from .util import validate_request_prompt
@@ -90,7 +92,11 @@ class OpenIDImplicitGrant(LegacyMixin, ImplicitGrant):
                 redirect_fragment=True,
             )
         try:
-            validate_nonce(self.request, self.exists_nonce, required=True)
+            validate_nonce(
+                self.request,
+                self.exists_nonce,
+                required=is_nonce_required(self.request.payload.response_type),
+            )
         except OAuth2Error as error:
             error.redirect_uri = redirect_uri
             error.redirect_fragment = True
@@ -140,16 +146,24 @@ class OpenIDImplicitGrant(LegacyMixin, ImplicitGrant):
             include_refresh_token=False,
         )
         if self.request.payload.response_type == "id_token":
+            granted_token = None
             token = {
                 "expires_in": token["expires_in"],
                 "scope": token["scope"],
             }
             token = self.process_implicit_token(token)
         else:
-            log.debug("Grant token %r to %r", token, client)
-            self.server.save_token(token, self.request)
-            token = self.process_implicit_token(token)
+            granted_token = token
+            token = self.process_implicit_token(dict(token))
+
         params = [(k, token[k]) for k in token]
+        validate_grant_response(self, params)
+
+        # Save the token only when the whole response is valid, so a
+        # failure does not leave a half-issued token behind.
+        if granted_token is not None:
+            log.debug("Grant token %r to %r", granted_token, client)
+            self.server.save_token(granted_token, self.request)
         return params
 
     def process_implicit_token(self, token, code=None):
