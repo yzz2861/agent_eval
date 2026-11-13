@@ -4,7 +4,9 @@ import pytest
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.x509 import (
+    DNSName,
     ExtensionOID,
+    IPAddress,
     OtherName,
     SubjectAlternativeName,
     load_pem_x509_certificate,
@@ -212,3 +214,142 @@ class TestExtractPatterns:
             == w.message.args[0]
         )
         assert __file__ == w.filename
+
+
+class _Extension:
+    def __init__(self, value):
+        self.value = value
+
+
+class _Extensions:
+    def __init__(self, san):
+        self._san = san
+
+    def get_extension_for_oid(self, oid):
+        assert oid == ExtensionOID.SUBJECT_ALTERNATIVE_NAME
+
+        return _Extension(self._san)
+
+
+class _Certificate:
+    def __init__(self, san):
+        self.extensions = _Extensions(san)
+
+
+class TestIPAddressVerification:
+    def test_mapped_ipv6_matches_ipv4_san(self):
+        """
+        An IPv4-mapped IPv6 connection address matches a certificate that
+        carries the plain IPv4 address, and vice versa.
+        """
+        cert = _Certificate(
+            SubjectAlternativeName(
+                [IPAddress(ipaddress.IPv4Address("10.0.0.7"))]
+            )
+        )
+
+        verify_certificate_ip_address(cert, "::ffff:10.0.0.7")
+
+        cert_v6 = _Certificate(
+            SubjectAlternativeName(
+                [IPAddress(ipaddress.IPv6Address("::ffff:10.0.0.7"))]
+            )
+        )
+
+        verify_certificate_ip_address(cert_v6, "10.0.0.7")
+
+    def test_zone_id_is_not_part_of_the_comparison(self):
+        """
+        A scoped connection address matches a certificate SAN without a
+        zone ID; the zone itself is never encoded into the certificate.
+        """
+        cert = _Certificate(
+            SubjectAlternativeName(
+                [IPAddress(ipaddress.IPv6Address("fe80::1"))]
+            )
+        )
+
+        verify_certificate_ip_address(cert, "fe80::1%en0")
+
+    def test_spellings_of_same_address_match(self):
+        """
+        Compressed and fully expanded spellings of the same IPv6 address
+        compare equal.
+        """
+        cert = _Certificate(
+            SubjectAlternativeName(
+                [
+                    IPAddress(
+                        ipaddress.IPv6Address(
+                            "2001:0db8:0000:0000:0000:ff00:0042:8329"
+                        )
+                    )
+                ]
+            )
+        )
+
+        verify_certificate_ip_address(cert, "2001:db8::ff00:42:8329")
+
+    def test_missing_address_is_mismatch(self):
+        """
+        A valid address absent from the certificate is a verification
+        failure, not a certificate parsing error.
+        """
+        cert = _Certificate(
+            SubjectAlternativeName(
+                [IPAddress(ipaddress.IPv4Address("10.0.0.7"))]
+            )
+        )
+
+        with pytest.raises(VerificationError) as ei:
+            verify_certificate_ip_address(cert, "10.0.0.8")
+
+        assert [
+            IPAddressMismatch(mismatched_id=IPAddress_ID("10.0.0.8"))
+        ] == ei.value.errors
+
+    def test_invalid_address_text_is_value_error(self):
+        """
+        Illegal address text raises ValueError before verification.
+        """
+        cert = _Certificate(
+            SubjectAlternativeName(
+                [IPAddress(ipaddress.IPv4Address("10.0.0.7"))]
+            )
+        )
+
+        with pytest.raises(ValueError, match="Invalid IP address"):
+            verify_certificate_ip_address(cert, "10.0.0")
+
+    def test_unsupported_address_family_is_type_error(self):
+        """
+        Values of an unsupported type raise TypeError, distinct from invalid
+        text and missing matches.
+        """
+        cert = _Certificate(
+            SubjectAlternativeName(
+                [IPAddress(ipaddress.IPv4Address("10.0.0.7"))]
+            )
+        )
+
+        with pytest.raises(TypeError, match="Unsupported IP address type"):
+            verify_certificate_ip_address(cert, 42)
+
+    @pytest.mark.parametrize(
+        "fake_ip",
+        [
+            "10.0.0.7",
+            "::1",
+            "::ffff:10.0.0.7",
+            "fe80::1%en0",
+        ],
+    )
+    def test_ip_like_dns_san_is_certificate_error(self, fake_ip):
+        """
+        IP-looking text in a DNS SAN is rejected while extracting patterns
+        and is never treated as a host name.
+        """
+        cert = _Certificate(SubjectAlternativeName([DNSName(fake_ip)]))
+
+        with pytest.raises(CertificateError, match="Invalid DNS pattern"):
+            extract_patterns(cert)

@@ -480,6 +480,24 @@ class TestDNSPattern:
         with pytest.raises(CertificateError):
             DNSPattern.from_bytes(b"192.168.0.0")
 
+    @pytest.mark.parametrize(
+        "fake_ip",
+        [
+            b"192.168.0.0",
+            b"::1",
+            b"::ffff:10.0.0.7",
+            b"fe80::1%en0",
+            b"2001:0db8:0000:0000:0000:ff00:0042:8329",
+        ],
+    )
+    def test_rejects_ip_like_dns_san(self, fake_ip):
+        """
+        IP-looking DNS SAN entries are rejected as certificate errors and
+        never fall back to host-name matching.
+        """
+        with pytest.raises(CertificateError):
+            DNSPattern.from_bytes(fake_ip)
+
     def test_invalid_wildcard(self):
         """
         Integration test with _validate_pattern: catches double wildcards thus
@@ -588,6 +606,98 @@ class TestIPAddressPattern:
         with pytest.raises(CertificateError):
             IPAddressPattern.from_bytes(b"127.o.o.1")
 
+    def test_enforces_bytes(self):
+        """
+        from_bytes() requires a bytes string, like the other patterns.
+        """
+        with pytest.raises(TypeError):
+            IPAddressPattern.from_bytes("127.0.0.1")
+
+    def test_from_bytes_accepts_textual_ip(self):
+        """
+        Textual IPv4 and IPv6 addresses are parsed into ipaddress objects.
+        """
+        assert IPAddressPattern.from_bytes(b"1.1.1.1") == IPAddressPattern(
+            ipaddress.IPv4Address("1.1.1.1")
+        )
+        assert IPAddressPattern.from_bytes(b"::1") == IPAddressPattern(
+            ipaddress.IPv6Address("::1")
+        )
+
+    def test_ipv4_mapped_ipv6_normalizes_to_ipv4(self):
+        """
+        IPv4-mapped IPv6 addresses are normalized to the embedded IPv4
+        address on both sides of the comparison.
+        """
+        mapped = ipaddress.IPv6Address("::ffff:10.0.0.7")
+        ipv4 = ipaddress.IPv4Address("10.0.0.7")
+
+        assert IPAddressPattern(mapped) == IPAddressPattern(ipv4)
+        assert IPAddress_ID("::ffff:10.0.0.7").ip == ipv4
+        assert (
+            IPAddress_ID("::ffff:10.0.0.7").verify(IPAddressPattern(ipv4))
+            is True
+        )
+        assert (
+            IPAddress_ID("10.0.0.7").verify(IPAddressPattern(mapped)) is True
+        )
+
+    def test_ipv6_zone_id_is_ignored(self):
+        """
+        IPv6 zone IDs never participate in the certificate comparison.
+        """
+        pattern = IPAddressPattern(ipaddress.IPv6Address("fe80::1"))
+
+        assert IPAddress_ID("fe80::1%en0").ip == ipaddress.IPv6Address(
+            "fe80::1"
+        )
+        assert IPAddress_ID("fe80::1%en0").verify(pattern) is True
+        assert IPAddress_ID("fe80::1%eth0").verify(pattern) is True
+        assert IPAddress_ID("fe80::1").verify(pattern) is True
+
+    @pytest.mark.parametrize(
+        ("text", "canonical"),
+        [
+            (
+                "2001:0db8:0000:0000:0000:ff00:0042:8329",
+                "2001:db8::ff00:42:8329",
+            ),
+            ("2001:db8::ff00:42:8329", "2001:db8::ff00:42:8329"),
+            ("0:0:0:0:0:0:0:1", "::1"),
+            ("::ffff:1.2.3.4", "1.2.3.4"),
+        ],
+    )
+    def test_spellings_converge(self, text, canonical):
+        """
+        Compressed, expanded and mapped spellings of the same address are
+        equal.
+        """
+        assert IPAddress_ID(text).ip == ipaddress.ip_address(canonical)
+        assert IPAddress_ID(text).verify(
+            IPAddressPattern(ipaddress.ip_address(canonical))
+        )
+
+    @pytest.mark.parametrize(
+        "invalid", ["not-an-ip", "10.0.0", ":::1", "1.2.3.4%en0"]
+    )
+    def test_invalid_ip_text_raises_value_error(self, invalid):
+        """
+        Invalid address text is a ValueError, distinct from a missing match.
+        """
+        with pytest.raises(ValueError, match="Invalid IP address"):
+            IPAddress_ID(invalid)
+
+    def test_unsupported_address_type_raises_type_error(self):
+        """
+        Values that are neither address text nor ipaddress objects are a
+        TypeError, distinct from invalid text and missing matches.
+        """
+        with pytest.raises(TypeError, match="Unsupported IP address type"):
+            IPAddress_ID(1234)
+
+        with pytest.raises(TypeError, match="Unsupported IP address type"):
+            IPAddressPattern(object())
+
     @pytest.mark.parametrize("ip_s", ["1.1.1.1", "::1"])
     def test_verify_equal(self, ip_s):
         """
@@ -682,6 +792,8 @@ class TestIsIPAddress:
             "*.0.0.1",
             "::1",
             "*::1",
+            "::ffff:10.0.0.7",
+            "fe80::1%en0",
             "2001:0db8:0000:0000:0000:ff00:0042:8329",
             "2001:0db8::ff00:0042:8329",
         ],

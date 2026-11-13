@@ -134,11 +134,53 @@ def _is_ip_address(pattern: str | bytes) -> bool:
         return True
 
     try:
-        ipaddress.ip_address(pattern.replace("*", "1"))
+        _coerce_ip_address(pattern.replace("*", "1"))
     except ValueError:
         return False
 
     return True
+
+
+AnyIPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
+
+
+def _coerce_ip_address(
+    value: str | AnyIPAddress,
+) -> AnyIPAddress:
+    """
+    Parse *value* into a canonical :mod:`ipaddress` object.
+
+    All textual spellings of the same address (compressed or expanded
+    notation, leading zeros within IPv6 groups, ...) converge to the same
+    object.  IPv4-mapped IPv6 addresses (``::ffff:a.b.c.d``) are normalized
+    to the embedded IPv4 address and IPv6 zone IDs are dropped because they
+    have no meaning in certificate address comparisons.
+
+    Raises:
+        ValueError: If *value* is not a valid IP address text.
+        TypeError: If *value* has an unsupported type or address family.
+    """
+    if isinstance(value, str):
+        try:
+            address = ipaddress.ip_address(value)
+        except ValueError as e:
+            msg = f"Invalid IP address {value!r}."
+            raise ValueError(msg) from e
+    elif isinstance(value, (ipaddress.IPv4Address, ipaddress.IPv6Address)):
+        address = value
+    else:
+        msg = f"Unsupported IP address type {type(value).__name__}."
+        raise TypeError(msg)
+
+    # Zone IDs are link-local scoping information that must never influence
+    # the comparison with an address stored in a certificate.
+    if isinstance(address, ipaddress.IPv6Address):
+        address = ipaddress.IPv6Address(address.packed)
+        mapped = address.ipv4_mapped
+        if mapped is not None:
+            return mapped
+
+    return address
 
 
 @attr.s(slots=True)
@@ -178,13 +220,23 @@ class IPAddressPattern:
     """
 
     #: The pattern.
-    pattern: ipaddress.IPv4Address | ipaddress.IPv6Address = attr.ib()
+    pattern: AnyIPAddress = attr.ib(converter=_coerce_ip_address)
 
     @classmethod
     def from_bytes(cls, bs: bytes) -> IPAddressPattern:
+        if not isinstance(bs, bytes):
+            msg = "The IP address pattern must be a bytes string."
+            raise TypeError(msg)
+
         try:
-            return cls(pattern=ipaddress.ip_address(bs))
-        except ValueError:
+            text = bs.decode("ascii")
+        except UnicodeError:
+            msg = f"Invalid IP address pattern {bs!r}."
+            raise CertificateError(msg) from None
+
+        try:
+            return cls(pattern=_coerce_ip_address(text))
+        except (ValueError, TypeError):
             msg = f"Invalid IP address pattern {bs!r}."
             raise CertificateError(msg) from None
 
@@ -325,9 +377,7 @@ class IPAddress_ID:
     An IP address service ID.
     """
 
-    ip: ipaddress.IPv4Address | ipaddress.IPv6Address = attr.ib(
-        converter=ipaddress.ip_address
-    )
+    ip: AnyIPAddress = attr.ib(converter=_coerce_ip_address)
 
     pattern_class = IPAddressPattern
     error_on_mismatch = IPAddressMismatch

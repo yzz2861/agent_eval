@@ -15,6 +15,17 @@ You can find out backwards-compatibility policy [here](https://github.com/pyca/s
 
 ## [Unreleased](https://github.com/pyca/service-identity/compare/26.1.0...HEAD)
 
+### Fixed
+
+- IP address identities are now canonicalized through :mod:`ipaddress` on
+  both the certificate and the connection side.
+  IPv4-mapped IPv6 addresses (for example `::ffff:10.0.0.7`) match the
+  embedded IPv4 address, IPv6 zone IDs (for example `fe80::1%en0`) are
+  excluded from the comparison, and compressed, expanded and otherwise
+  equivalent spellings of the same address compare equal.
+  IP-looking text in a DNS ``subjectAltName`` entry is rejected as invalid
+  certificate data instead of being matched like a host name.
+
 ### Removed
 
 - Support for Python 3.8 and 3.9.

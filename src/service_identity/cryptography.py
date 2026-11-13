@@ -23,6 +23,7 @@ from cryptography.x509.extensions import ExtensionNotFound
 from .exceptions import CertificateError
 from .hazmat import (
     DNS_ID,
+    AnyIPAddress,
     CertificatePattern,
     DNSPattern,
     IPAddress_ID,
@@ -115,6 +116,23 @@ def verify_certificate_ip_address(
 ID_ON_DNS_SRV = ObjectIdentifier("1.3.6.1.5.5.7.8.7")  # id_on_dnsSRV
 
 
+def _ip_address_pattern(
+    ip: AnyIPAddress,
+) -> IPAddressPattern:
+    """
+    Build an :class:`IPAddressPattern` from a SAN IP value.
+
+    Addresses are normalized through :mod:`ipaddress` so unexpected data is
+    reported as invalid certificate content rather than leaking a raw
+    parsing exception.
+    """
+    try:
+        return IPAddressPattern(ip)
+    except (TypeError, ValueError) as e:
+        msg = f"Unexpected certificate content: {e}"
+        raise CertificateError(msg) from e
+
+
 def extract_patterns(cert: Certificate) -> Sequence[CertificatePattern]:
     """
     Extract all valid ID patterns from a certificate for service verification.
@@ -152,7 +170,7 @@ def extract_patterns(cert: Certificate) -> Sequence[CertificatePattern]:
         )
         ids.extend(
             [
-                IPAddressPattern(ip)
+                _ip_address_pattern(ip)
                 for ip in ext.value.get_values_for_type(IPAddress)
             ]
         )
