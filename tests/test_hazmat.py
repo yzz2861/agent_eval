@@ -1,8 +1,8 @@
 import ipaddress
 import pickle
+import unicodedata
 
 import pytest
-
 import service_identity.hazmat
 
 from service_identity.cryptography import extract_patterns
@@ -84,6 +84,24 @@ class TestVerifyServiceIdentity:
 
         assert [DNSMismatch(mismatched_id=i)] == e.value.errors
 
+    def test_dns_mismatch_keeps_normalized_values(self):
+        """
+        Mismatch errors retain the normalized pattern and hostname without
+        changing their equality semantics.
+        """
+        i = DNS_ID("a.b.example.com")
+        pattern = DNSPattern.from_bytes(b"*.example.com")
+
+        with pytest.raises(VerificationError) as e:
+            verify_service_identity(
+                [pattern], obligatory_ids=[i], optional_ids=[]
+            )
+
+        error = e.value.errors[0]
+        assert error.pattern == b"*.example.com"
+        assert error.mismatched_id.hostname == b"a.b.example.com"
+        assert error == DNSMismatch(mismatched_id=i)
+
     def test_single_label_hostname_mismatch(self):
         """
         A single-label hostname that does not match a wildcard cert pattern
@@ -98,6 +116,55 @@ class TestVerifyServiceIdentity:
             )
 
         assert [DNSMismatch(mismatched_id=i)] == e.value.errors
+
+    def test_wildcard_only_matches_one_label_level(self):
+        """
+        A ``*.example.com`` pattern matches one sub-domain level, never
+        ``a.b.example.com``.
+        """
+        pattern = DNSPattern.from_bytes(b"*.example.com")
+
+        assert DNS_ID("www.example.com").verify(pattern)
+        assert not DNS_ID("a.b.example.com").verify(pattern)
+
+        with pytest.raises(VerificationError) as e:
+            verify_service_identity(
+                [pattern],
+                obligatory_ids=[DNS_ID("a.b.example.com")],
+                optional_ids=[],
+            )
+
+        mismatch = e.value.errors[0]
+        assert isinstance(mismatch, DNSMismatch)
+        assert mismatch.pattern == b"*.example.com"
+        assert mismatch.mismatched_id.hostname == b"a.b.example.com"
+
+    def test_trailing_dots_and_case_match(self):
+        """
+        Trailing dots and mixed case are normalized before comparison.
+        """
+        pattern = DNSPattern.from_bytes(b"WWW.Example.COM.")
+
+        assert DNS_ID("www.example.com").verify(pattern)
+        assert DNS_ID("WWW.example.COM.").verify(pattern)
+
+    @pytest.mark.skipif(idna is None, reason="idna not installed")
+    def test_unicode_and_a_label_match(self):
+        """
+        Unicode hostnames match certificates that carry A-labels.
+        """
+        pattern = DNSPattern.from_bytes(b"xn--bcher-kva.example")
+
+        assert DNS_ID("b\u00fccher.example").verify(pattern)
+
+    @pytest.mark.skipif(idna is None, reason="idna not installed")
+    def test_wildcard_never_matches_a_label(self):
+        """
+        Wildcards do not match an IDNA A-label per RFC 6125.
+        """
+        pattern = DNSPattern.from_bytes(b"*.example.com")
+
+        assert not DNS_ID("xn--bcher-kva.example.com").verify(pattern)
 
     def test_ip_address_success(self):
         """
@@ -236,6 +303,67 @@ class TestDNS_ID:
         dns = DNS_ID("f\xf8\xf8.com")
         assert b"xn--f-5gaa.com" == dns.hostname
 
+    @pytest.mark.skipif(idna is None, reason="idna not installed")
+    def test_unicode_and_a_label_normalize_identically(self):
+        """
+        Unicode names and their A-label spellings normalize to the same
+        value.
+        """
+        unicode_id = DNS_ID("b\u00fccher.example")
+        a_label_id = DNS_ID("xn--bcher-kva.example")
+
+        assert b"xn--bcher-kva.example" == unicode_id.hostname
+        assert unicode_id == a_label_id
+
+    @pytest.mark.skipif(idna is None, reason="idna not installed")
+    def test_nfc_and_nfd_normalize_identically(self):
+        """
+        NFC and NFD spellings of the same name cannot lead to different
+        identities.
+        """
+        name = "b\u00fccher.example"
+        nfc = DNS_ID(unicodedata.normalize("NFC", name))
+        nfd = DNS_ID(unicodedata.normalize("NFD", name))
+
+        assert nfc == nfd
+        assert b"xn--bcher-kva.example" == nfc.hostname
+
+    def test_trailing_dot_is_stripped(self):
+        """
+        A single trailing dot is part of the name's presentation, not its
+        identity.
+        """
+        assert DNS_ID("foo.com.").hostname == DNS_ID("foo.com").hostname
+        assert b"foo.com" == DNS_ID("foo.com.").hostname
+
+    def test_mixed_case_is_lowercased(self):
+        """
+        Upper- and lower-case spellings describe the same DNS-ID.
+        """
+        assert b"www.example.com" == DNS_ID("WWW.Example.COM").hostname
+
+    @pytest.mark.parametrize(
+        "invalid_id",
+        [
+            "foo..bar.com",
+            ".foo.com",
+            "foo.com..",
+            "*.example.com",
+            "foo.*.com",
+            "a*.example.com",
+            "foo bar.com",
+            "foo_bar.com",
+            "xn--.com",
+        ],
+    )
+    def test_catches_illegal_labels_and_wildcards(self, invalid_id):
+        """
+        Empty labels, misplaced wildcards and illegal characters never make
+        it into a normalized DNS-ID.
+        """
+        with pytest.raises(ValueError):
+            DNS_ID(invalid_id)
+
     @pytest.mark.parametrize(
         "invalid_id",
         [
@@ -304,8 +432,18 @@ class TestDNS_ID:
             (b"f*.example.com", b"foo.example.com"),
             (b"*oo.bar.com", b"foo.bar.com"),
             (b"fo*oo.bar.com", b"fooooo.bar.com"),
+            (b"*.example.com", b"xn--gtter-jua.example.com"),
         ]:
             assert not _hostname_matches(cert, actual)
+
+    def test_wildcard_matches_exactly_one_label(self):
+        """
+        A wildcard stands for exactly the left-most label and never spans
+        multiple labels.
+        """
+        assert _hostname_matches(b"*.example.com", b"www.example.com")
+        assert not _hostname_matches(b"*.example.com", b"a.b.example.com")
+        assert not _hostname_matches(b"*.example.com", b"example.com")
 
 
 class TestURI_ID:
@@ -488,6 +626,67 @@ class TestDNSPattern:
         with pytest.raises(CertificateError):
             DNSPattern.from_bytes(b"*.foo.*")
 
+    @pytest.mark.parametrize(
+        ("raw", "normalized"),
+        [
+            (b"WWW.Example.COM", b"www.example.com"),
+            (b"www.example.com.", b"www.example.com"),
+            (b"  www.example.com  ", b"www.example.com"),
+            (b"*.example.com", b"*.example.com"),
+        ],
+    )
+    def test_normalizes_case_and_trailing_dot(self, raw, normalized):
+        """
+        Certificate patterns are stored as canonical A-label names.
+        """
+        assert normalized == DNSPattern.from_bytes(raw).pattern
+
+    @pytest.mark.skipif(idna is None, reason="idna not installed")
+    def test_normalizes_unicode_a_labels(self):
+        """
+        Unicode and A-label spellings of the same pattern end up equal.
+        """
+        pattern = DNSPattern.from_bytes("b\u00fccher.example".encode())
+
+        assert b"xn--bcher-kva.example" == pattern.pattern
+        assert pattern == DNSPattern.from_bytes(b"xn--bcher-kva.example")
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            b"*",
+            b"*.com",
+            b"a*.example.com",
+            b"*a.example.com",
+            b"foo.*.com",
+            b"foo.bar.*",
+            b"*.*.com",
+            b"foo..bar.com",
+            b".foo.com",
+            b"foo.bar..",
+            b"foo bar.com",
+            b"foo_bar.com",
+            b"xn--.com",
+        ],
+    )
+    def test_rejects_bad_wildcards_and_illegal_labels(self, raw):
+        """
+        Only a full left-most wildcard and well-formed non-empty labels are
+        accepted.
+        """
+        with pytest.raises(CertificateError):
+            DNSPattern.from_bytes(raw)
+
+    def test_certificate_error_keeps_normalized_pattern(self):
+        """
+        Wildcard errors expose the normalized pattern for diagnostics.
+        """
+        with pytest.raises(CertificateError) as e:
+            DNSPattern.from_bytes(b"*.EXAMPLE")
+
+        assert e.value.pattern == b"*.example"
+        assert "BEGIN CERTIFICATE" not in str(e.value)
+
 
 class TestURIPattern:
     def test_enforces_bytes(self):
@@ -547,7 +746,15 @@ class TestValidateDNSWildcardPattern:
         """
         Raise CertificateError if wildcard is not in the left-most part.
         """
-        for hn in [b"foo.b*r.com", b"foo.bar.c*m", b"foo.*", b"foo.*.com"]:
+        for hn in [
+            b"foo.b*r.com",
+            b"foo.bar.c*m",
+            b"foo.*",
+            b"foo.*.com",
+            b"*oo.bar.com",
+            b"f*.bar.com",
+            b"f*o.bar.com",
+        ]:
             with pytest.raises(CertificateError):
                 _validate_pattern(hn)
 
@@ -558,10 +765,6 @@ class TestValidateDNSWildcardPattern:
         for hn in [
             b"*",
             b"*.com",
-            b"*fail.com",
-            b"*foo",
-            b"foo*",
-            b"f*o",
             b"*.example.",
         ]:
             with pytest.raises(CertificateError):
@@ -569,15 +772,19 @@ class TestValidateDNSWildcardPattern:
 
     def test_valid_patterns(self):
         """
-        Does not throw CertificateError on valid patterns.
+        Only a pattern whose left-most label is exactly ``*`` is valid.
         """
-        for pattern in [
-            b"*.bar.com",
-            b"*oo.bar.com",
-            b"f*.bar.com",
-            b"f*o.bar.com",
-        ]:
-            _validate_pattern(pattern)
+        _validate_pattern(b"*.bar.com")
+        _validate_pattern(b"*.service.identity.invalid")
+
+    def test_error_keeps_pattern(self):
+        """
+        Validation errors carry the offending normalized pattern.
+        """
+        with pytest.raises(CertificateError) as e:
+            _validate_pattern(b"*.example.")
+
+        assert e.value.pattern == b"*.example."
 
 
 class TestIPAddressPattern:

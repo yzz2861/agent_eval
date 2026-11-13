@@ -9,7 +9,6 @@ from cryptography.x509 import (
     SubjectAlternativeName,
     load_pem_x509_certificate,
 )
-
 from service_identity.cryptography import (
     ID_ON_DNS_SRV,
     extract_ids,
@@ -76,6 +75,39 @@ class TestPublicAPI:
         verify_certificate_hostname succeeds if the hostnames match.
         """
         verify_certificate_hostname(X509_DNS_ONLY, "twistedmatrix.com")
+
+    @pytest.mark.parametrize(
+        "hostname",
+        [
+            "TWISTEDMATRIX.COM",
+            "TwistedMatrix.com.",
+            "  www.twistedmatrix.com  ",
+        ],
+    )
+    def test_certificate_verify_normalized_hostname_ok(self, hostname):
+        """
+        Case, trailing dots and surrounding whitespace are normalized before
+        matching a SAN.
+        """
+        verify_certificate_hostname(X509_DNS_ONLY, hostname)
+
+    def test_wildcard_san_does_not_span_multiple_labels(self):
+        """
+        A wildcard SAN only validates one sub-domain level.
+        """
+        with pytest.raises(VerificationError):
+            verify_certificate_hostname(
+                CERT_EVERYTHING,
+                "multi.level.wildcard.service.identity.invalid",
+            )
+
+    def test_wildcard_san_matches_one_label(self):
+        """
+        A wildcard SAN validates a host one label below its parent zone.
+        """
+        verify_certificate_hostname(
+            CERT_EVERYTHING, "node.wildcard.service.identity.invalid"
+        )
 
     def test_certificate_verify_hostname_fail(self):
         """

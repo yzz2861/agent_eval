@@ -15,6 +15,22 @@ You can find out backwards-compatibility policy [here](https://github.com/pyca/s
 
 ## [Unreleased](https://github.com/pyca/service-identity/compare/26.1.0...HEAD)
 
+### Changed
+
+- DNS host names and certificate DNS patterns are now normalized through a
+  single canonical pipeline before comparison: they are put into Unicode NFC,
+  lower-cased, stripped of a trailing dot and encoded to IDNA A-labels.  NFC and
+  NFD spellings of the same Unicode name, as well as its U-label and A-label
+  forms, now produce the same identity; invalid Unicode is rejected instead of
+  being silently ignored.
+- A DNS wildcard is only accepted as the complete left-most label and matches
+  exactly one label.  Bare ``*`` patterns, partial or non-left-most wildcards,
+  consecutive dots and empty labels are all rejected.  As required by
+  RFC 6125, wildcards never match an A-label.
+- `DNSMismatch` and `CertificateError` expose the normalized pattern and host
+  name involved in a failure for diagnostics.  Exception messages never contain
+  the full certificate.
+
 ### Removed
 
 - Support for Python 3.8 and 3.9.

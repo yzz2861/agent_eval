@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import unicodedata
 
 from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
@@ -27,6 +28,20 @@ try:
     import idna
 except ImportError:
     idna = None  # type: ignore[assignment]
+
+
+class _InvalidDNSNameError(ValueError):
+    """
+    A DNS name or pattern that cannot be normalized to A-labels.
+    """
+
+
+# Labels of an ASCII (LDH) name consist of letters, digits and hyphens.
+_RE_ASCII_LABEL = re.compile(rb"^[a-z0-9-]+$")
+
+# The maximum length of a single DNS label and of a full domain name.
+_MAX_LABEL_LENGTH = 63
+_MAX_DOMAIN_LENGTH = 253
 
 
 @attr.s(slots=True)
@@ -64,7 +79,7 @@ def verify_service_identity(
     for i in obligatory_ids:
         if i not in matched_ids:
             errors.append(  # noqa: PERF401
-                i.error_on_mismatch(mismatched_id=i)
+                _mismatch_error(i, cert_patterns)
             )
 
     for i in optional_ids:
@@ -76,7 +91,7 @@ def verify_service_identity(
             cert_patterns, i.pattern_class
         ):
             errors.append(  # noqa: PERF401
-                i.error_on_mismatch(mismatched_id=i)
+                _mismatch_error(i, cert_patterns)
             )
 
     if errors:
@@ -108,6 +123,23 @@ def _find_matches(
 
 def _contains_instance_of(seq: Sequence[object], cl: type) -> bool:
     return any(isinstance(e, cl) for e in seq)
+
+
+def _mismatch_error(
+    service_id: ServiceID, cert_patterns: Sequence[CertificatePattern]
+) -> Mismatch:
+    """
+    Build the mismatch error for *service_id*, attaching the normalized DNS
+    pattern that was considered when there is one.
+    """
+    error = service_id.error_on_mismatch(mismatched_id=service_id)
+    if isinstance(error, DNSMismatch):
+        for pattern in cert_patterns:
+            if isinstance(pattern, DNSPattern):
+                error.pattern = pattern.pattern
+                break
+
+    return error
 
 
 def _is_ip_address(pattern: str | bytes) -> bool:
@@ -150,25 +182,35 @@ class DNSPattern:
     #: The pattern.
     pattern: bytes = attr.ib()
 
-    _RE_LEGAL_CHARS = re.compile(rb"^[a-z0-9\-_.]+$")
-
     @classmethod
     def from_bytes(cls, pattern: bytes) -> DNSPattern:
         if not isinstance(pattern, bytes):
             msg = "The DNS pattern must be a bytes string."
             raise TypeError(msg)
 
-        pattern = pattern.strip()
+        raw_pattern = pattern.strip()
 
-        if pattern == b"" or _is_ip_address(pattern) or b"\0" in pattern:
-            msg = f"Invalid DNS pattern {pattern!r}."
-            raise CertificateError(msg)
+        if (
+            raw_pattern == b""
+            or _is_ip_address(raw_pattern)
+            or b"\0" in raw_pattern
+        ):
+            msg = f"Invalid DNS pattern {raw_pattern!r}."
+            raise CertificateError(msg, pattern=raw_pattern)
 
-        pattern = pattern.translate(_TRANS_TO_LOWER)
-        if b"*" in pattern:
-            _validate_pattern(pattern)
+        try:
+            normalized = _encode_dns_name(raw_pattern)
+        except ImportError as e:
+            msg = f"Invalid DNS pattern {raw_pattern!r}: {e}"
+            raise CertificateError(msg) from e
+        except _InvalidDNSNameError as e:
+            msg = f"Invalid DNS pattern {raw_pattern!r}: {e}"
+            raise CertificateError(msg) from None
 
-        return cls(pattern=pattern)
+        if b"*" in normalized:
+            _validate_pattern(normalized)
+
+        return cls(pattern=normalized)
 
 
 @attr.s(slots=True)
@@ -216,7 +258,7 @@ class URIPattern:
 
         return cls(
             protocol_pattern=protocol_pattern,
-            dns_pattern=DNSPattern.from_bytes(hostname),
+            dns_pattern=DNSPattern.from_bytes(hostname.strip(b"/")),
         )
 
 
@@ -280,8 +322,6 @@ class DNS_ID:
 
     hostname: bytes = attr.ib()
 
-    # characters that are legal in a normalized hostname
-    _RE_LEGAL_CHARS = re.compile(rb"^[a-z0-9\-_.]+$")
     pattern_class = DNSPattern
     error_on_mismatch = DNSMismatch
 
@@ -290,24 +330,21 @@ class DNS_ID:
             msg = "DNS-ID must be a text string."
             raise TypeError(msg)
 
-        hostname = hostname.strip()
-        if not hostname or _is_ip_address(hostname):
+        raw_hostname = hostname.strip()
+        if not raw_hostname or _is_ip_address(raw_hostname):
             msg = "Invalid DNS-ID."
             raise ValueError(msg)
-
-        if any(ord(c) > 127 for c in hostname):
-            if idna:
-                ascii_id = idna.encode(hostname)
-            else:
-                msg = "idna library is required for non-ASCII IDs."
-                raise ImportError(msg)
-        else:
-            ascii_id = hostname.encode("ascii")
-
-        self.hostname = ascii_id.translate(_TRANS_TO_LOWER)
-        if self._RE_LEGAL_CHARS.match(self.hostname) is None:
-            msg = "Invalid DNS-ID."
+        if "*" in raw_hostname:
+            msg = "DNS-IDs must not contain wildcards."
             raise ValueError(msg)
+
+        try:
+            self.hostname = _encode_dns_name(raw_hostname)
+        except ImportError:
+            raise
+        except _InvalidDNSNameError:
+            msg = "Invalid DNS-ID."
+            raise ValueError(msg) from None
 
     def verify(self, pattern: CertificatePattern) -> bool:
         """
@@ -424,19 +461,23 @@ class SRV_ID:
 def _hostname_matches(cert_pattern: bytes, actual_hostname: bytes) -> bool:
     """
     :return: `True` if *cert_pattern* matches *actual_hostname*, else `False`.
+
+    Both arguments are normalized A-label names as produced by
+    :func:`_encode_dns_name`.  A wildcard is only honored as the complete
+    left-most label and matches exactly one label of the hostname.
     """
-    if b"*" in cert_pattern:
-        if b"." not in actual_hostname:
-            return False
-        cert_head, cert_tail = cert_pattern.split(b".", 1)
-        actual_head, actual_tail = actual_hostname.split(b".", 1)
-        if cert_tail != actual_tail:
-            return False
-        # No patterns for IDNA
-        if actual_head.startswith(b"xn--"):
+    cert_labels = cert_pattern.split(b".")
+    host_labels = actual_hostname.split(b".")
+
+    if len(cert_labels) != len(host_labels):
+        return False
+
+    if cert_labels[0] == b"*":
+        # Wildcards never match an A-label (punycode) label.
+        if host_labels[0].startswith(b"xn--"):
             return False
 
-        return cert_head in (b"*", actual_head)
+        return cert_labels[1:] == host_labels[1:]
 
     return cert_pattern == actual_hostname
 
@@ -445,22 +486,126 @@ def _validate_pattern(cert_pattern: bytes) -> None:
     """
     Check whether the usage of wildcards within *cert_pattern* conforms with
     our expectations.
+
+    A wildcard must be the only character of the left-most label, the
+    pattern needs at least three labels and every label must be non-empty.
     """
-    cnt = cert_pattern.count(b"*")
-    if cnt > 1:
-        msg = f"Certificate's DNS-ID {cert_pattern!r} contains too many wildcards."
-        raise CertificateError(msg)
     parts = cert_pattern.split(b".")
     if len(parts) < 3:
         msg = f"Certificate's DNS-ID {cert_pattern!r} has too few host components for wildcard usage."
-        raise CertificateError(msg)
-    # We assume there will always be only one wildcard allowed.
-    if b"*" not in parts[0]:
-        msg = f"Certificate's DNS-ID {cert_pattern!r} has a wildcard outside the left-most part."
-        raise CertificateError(msg)
+        raise CertificateError(msg, pattern=cert_pattern)
     if any(not len(p) for p in parts):
         msg = f"Certificate's DNS-ID {cert_pattern!r} contains empty parts."
-        raise CertificateError(msg)
+        raise CertificateError(msg, pattern=cert_pattern)
+    if cert_pattern.count(b"*") > 1:
+        msg = f"Certificate's DNS-ID {cert_pattern!r} contains too many wildcards."
+        raise CertificateError(msg, pattern=cert_pattern)
+    if parts[0] != b"*":
+        msg = f"Certificate's DNS-ID {cert_pattern!r} has a wildcard outside the left-most part."
+        raise CertificateError(msg, pattern=cert_pattern)
+
+
+def _encode_dns_name(name: str | bytes) -> bytes:
+    """
+    Normalize *name* to ASCII A-labels suitable for byte-wise comparison.
+
+    The name is decoded when necessary, put into Unicode NFC, lower-cased,
+    stripped of a single trailing dot and then encoded with IDNA.  Any
+    wildcard is only legal as the complete left-most label and is preserved
+    while the remaining labels are normalized like an ordinary hostname.
+
+    Raises:
+        _InvalidDNSNameError: If *name* contains empty labels, illegal
+            characters, a misplaced wildcard or cannot be IDNA-encoded.
+        ImportError: If *name* contains non-ASCII data but the optional
+            ``idna`` dependency is not installed.
+    """
+    if isinstance(name, bytes):
+        try:
+            text_name = name.decode("ascii")
+        except UnicodeDecodeError:
+            try:
+                text_name = name.decode("utf-8")
+            except UnicodeDecodeError as e:
+                msg = "not valid UTF-8"
+                raise _InvalidDNSNameError(msg) from e
+    else:
+        text_name = name
+
+    # NFC first so that equivalent NFC/NFD inputs get the same A-labels.
+    text_name = unicodedata.normalize("NFC", text_name).lower()
+
+    had_trailing_dot = text_name.endswith(".")
+    text_name = text_name[:-1] if had_trailing_dot else text_name
+
+    if not text_name:
+        msg = "empty DNS name"
+        raise _InvalidDNSNameError(msg)
+
+    labels = text_name.split(".")
+    if any(label == "" for label in labels):
+        msg = "contains empty labels"
+        raise _InvalidDNSNameError(msg)
+
+    wildcard = labels[0] == "*"
+    wildcard_labels = [
+        index for index, label in enumerate(labels) if "*" in label
+    ]
+    if wildcard_labels and wildcard_labels != [0]:
+        msg = "wildcards are only allowed as the complete left-most label"
+        raise _InvalidDNSNameError(msg)
+
+    labels_to_encode = labels[1:] if wildcard else labels
+    encoded_labels = [_encode_dns_label(label) for label in labels_to_encode]
+
+    if wildcard:
+        encoded_labels.insert(0, b"*")
+
+    encoded = b".".join(encoded_labels)
+    if len(encoded) > _MAX_DOMAIN_LENGTH:
+        msg = "DNS name is too long"
+        raise _InvalidDNSNameError(msg)
+
+    return encoded
+
+
+def _encode_dns_label(label: str) -> bytes:
+    """
+    Encode a single, already lower-cased DNS label to an A-label.
+    """
+    if len(label) > _MAX_LABEL_LENGTH:
+        msg = f"label {label!r} is too long"
+        raise _InvalidDNSNameError(msg)
+
+    try:
+        ascii_label = label.encode("ascii")
+    except UnicodeEncodeError:
+        if idna is None:
+            msg = "idna library is required for non-ASCII IDs."
+            raise ImportError(msg) from None
+        try:
+            return idna.encode(label)
+        except idna.IDNAError as e:
+            raise _InvalidDNSNameError(str(e)) from e
+
+    if _RE_ASCII_LABEL.match(ascii_label) is None:
+        msg = f"label {label!r} contains illegal characters"
+        raise _InvalidDNSNameError(msg)
+
+    if ascii_label.startswith(b"xn--"):
+        # Works without the optional idna dependency; idna adds full
+        # punycode/IDNA validation when it is installed.  Valid punycode
+        # payloads may themselves contain hyphens.
+        if not ascii_label[4:]:
+            msg = f"malformed A-label {label!r}"
+            raise _InvalidDNSNameError(msg)
+        if idna is not None:
+            try:
+                return idna.encode(label)
+            except idna.IDNAError as e:
+                raise _InvalidDNSNameError(str(e)) from e
+
+    return ascii_label
 
 
 # Ensure no locale magic interferes.
