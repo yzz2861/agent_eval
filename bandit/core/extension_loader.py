@@ -83,15 +83,21 @@ class Manager:
                 self.blacklist_by_id[b["id"]] = b
                 self.blacklist_by_name[b["name"]] = b
 
-    def validate_profile(self, profile):
+    def validate_profile(self, profile, strict=False):
         """Validate that everything in the configured profiles looks good."""
         for inc in profile["include"]:
             if not self.check_id(inc):
-                LOG.warning(f"Unknown test found in profile: {inc}")
+                message = f"Unknown test found in profile: {inc}"
+                if strict:
+                    raise ValueError(message)
+                LOG.warning(message)
 
         for exc in profile["exclude"]:
             if not self.check_id(exc):
-                LOG.warning(f"Unknown test found in profile: {exc}")
+                message = f"Unknown test found in profile: {exc}"
+                if strict:
+                    raise ValueError(message)
+                LOG.warning(message)
 
         union = set(profile["include"]) & set(profile["exclude"])
         if len(union) > 0:

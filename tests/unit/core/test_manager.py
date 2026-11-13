@@ -192,6 +192,42 @@ class ManagerTests(testtools.TestCase):
 
         self.assertEqual([3, 2, 1], r)
 
+    def test_strict_mode_filters_sub_threshold_results(self):
+        strict_config = mock.MagicMock()
+        strict_config.get_option.side_effect = lambda key: (
+            True if key == "strict" else None
+        )
+        strict_manager = manager.BanditManager(
+            config=strict_config, agg_type="file"
+        )
+        self.assertTrue(strict_manager.strict)
+
+        strict_manager.results = [
+            self._get_issue_instance(sev=constants.LOW, conf=constants.HIGH),
+            self._get_issue_instance(
+                sev=constants.HIGH, conf=constants.HIGH
+            ),
+        ]
+        filtered = strict_manager.filter_results(
+            constants.MEDIUM, constants.LOW
+        )
+        self.assertEqual(1, len(filtered))
+        self.assertEqual(constants.HIGH, filtered[0].severity)
+
+    def test_default_mode_keeps_legacy_filtering_behaviour(self):
+        self.assertFalse(self.manager.strict)
+        self.manager.results = [
+            self._get_issue_instance(sev=constants.LOW, conf=constants.LOW),
+        ]
+        # Even below the threshold the result is still available; filtering
+        # simply excludes it exactly as it did before strict mode existed.
+        self.assertEqual(
+            [],
+            self.manager.filter_results(
+                constants.MEDIUM, constants.MEDIUM
+            ),
+        )
+
     def test_output_results_invalid_format(self):
         # Test that output_results succeeds given an invalid format
         temp_directory = self.useFixture(fixtures.TempDir()).path

@@ -40,6 +40,16 @@ OPTIONS
                         comma-separated list of test IDs to run
   -s SKIPS, --skip SKIPS
                         comma-separated list of test IDs to skip
+  --rule-severity RULE_SEVERITY
+                        override a rule severity as TEST_ID:LEVEL (for
+                        example B105:HIGH); may be repeated and accepts
+                        wildcard test ids; takes precedence over profile and
+                        config file overrides
+  --rule-confidence RULE_CONFIDENCE
+                        override a rule confidence as TEST_ID:LEVEL (for
+                        example B602:HIGH); may be repeated and accepts
+                        wildcard test ids; takes precedence over profile and
+                        config file overrides
   -l, --level           report only issues of a given severity level or higher
                         (-l for LOW, -ll for MEDIUM, -lll for HIGH)
   -l, --severity-level={all,high,medium,low}

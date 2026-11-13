@@ -317,3 +317,128 @@ class TestTomlConfig(TestConfigCompat):
         """
     )
     suffix = ".toml"
+
+
+class TestRuleValidation(testtools.TestCase):
+    def _write(self, contents):
+        f = self.useFixture(TempFile(contents))
+        return f.name
+
+    def test_strict_invalid_enum_raises(self):
+        contents = textwrap.dedent(
+            """
+            strict: true
+            rule_overrides:
+              B105:
+                severity: CRITICAL
+            """
+        )
+        name = self._write(contents)
+        self.assertRaisesRegex(
+            utils.ConfigError,
+            "invalid severity",
+            config.BanditConfig,
+            name,
+        )
+
+    def test_strict_unknown_test_id_raises(self):
+        contents = textwrap.dedent(
+            """
+            strict: true
+            rule_overrides:
+              B999:
+                severity: HIGH
+            """
+        )
+        name = self._write(contents)
+        self.assertRaisesRegex(
+            utils.ConfigError,
+            "unknown test id",
+            config.BanditConfig,
+            name,
+        )
+
+    def test_strict_conflicting_wildcards_raise(self):
+        contents = textwrap.dedent(
+            """
+            strict: true
+            rule_overrides:
+              "B3*":
+                severity: LOW
+              "B30*":
+                severity: HIGH
+            """
+        )
+        name = self._write(contents)
+        self.assertRaisesRegex(
+            utils.ConfigError,
+            "conflicting wildcard",
+            config.BanditConfig,
+            name,
+        )
+
+    def test_strict_profile_unknown_id_raises(self):
+        contents = textwrap.dedent(
+            """
+            strict: true
+            profiles:
+              bad:
+                include: [B999]
+            """
+        )
+        name = self._write(contents)
+        self.assertRaisesRegex(
+            utils.ConfigError,
+            "unknown test id",
+            config.BanditConfig,
+            name,
+        )
+
+    def test_profile_include_exclude_conflict_raises(self):
+        contents = textwrap.dedent(
+            """
+            profiles:
+              bad:
+                include: [B105]
+                exclude: [B105]
+            """
+        )
+        name = self._write(contents)
+        self.assertRaisesRegex(
+            utils.ConfigError,
+            "both include and exclude",
+            config.BanditConfig,
+            name,
+        )
+
+    def test_lenient_invalid_enum_does_not_raise(self):
+        contents = textwrap.dedent(
+            """
+            rule_overrides:
+              B105:
+                severity: CRITICAL
+            """
+        )
+        loaded = config.BanditConfig(self._write(contents))
+        self.assertEqual(
+            "CRITICAL",
+            loaded.get_option("rule_overrides")["B105"]["severity"],
+        )
+
+    def test_profile_rule_overrides_survive_legacy_conversion(self):
+        contents = textwrap.dedent(
+            """
+            profiles:
+              harden:
+                include: [assert_used]
+                rule_overrides:
+                  B101:
+                    severity: HIGH
+            """
+        )
+        loaded = config.BanditConfig(self._write(contents))
+        profile = loaded.get_option("profiles")["harden"]
+        self.assertEqual(
+            "HIGH",
+            profile["rule_overrides"]["B101"]["severity"],
+        )

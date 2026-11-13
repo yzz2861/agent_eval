@@ -76,6 +76,27 @@ class BanditTester:
                     if result.test_id == "":
                         result.test_id = test._test_id
 
+                    # Apply the centrally resolved severity/confidence
+                    # overrides.  This is the single place findings can be
+                    # re-graded, so plugin defaults and configuration layers
+                    # never need to negotiate precedence themselves.
+                    resolver = self.testset.rule_resolver
+                    original_severity = result.severity
+                    original_confidence = result.confidence
+                    resolver.apply(result)
+                    if (
+                        original_severity != result.severity
+                        or original_confidence != result.confidence
+                    ):
+                        LOG.debug(
+                            "finding from %s re-graded %s/%s -> %s/%s",
+                            result.test_id,
+                            original_severity,
+                            original_confidence,
+                            result.severity,
+                            result.confidence,
+                        )
+
                     # don't skip the test if there was no nosec comment
                     if nosec_tests_to_skip is not None:
                         # If the set is empty then it means that nosec was

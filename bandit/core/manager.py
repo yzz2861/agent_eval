@@ -41,6 +41,7 @@ class BanditManager:
         quiet=False,
         profile=None,
         ignore_nosec=False,
+        cli_overrides=None,
     ):
         """Get logger, config, AST handler, and result store ready
 
@@ -69,7 +70,10 @@ class BanditManager:
         self.baseline = []
         self.agg_type = agg_type
         self.metrics = metrics.Metrics()
-        self.b_ts = b_test_set.BanditTestSet(config, profile)
+        self.b_ts = b_test_set.BanditTestSet(
+            config, profile, cli_overrides=cli_overrides
+        )
+        self.strict = bool(config.get_option("strict"))
         self.scores = []
 
     def get_skipped(self):
@@ -115,9 +119,25 @@ class BanditManager:
         :param conf_filter: confidence level filter to apply
         """
 
-        results = [
-            i for i in self.results if i.filter(sev_filter, conf_filter)
-        ]
+        results = []
+        for issue_item in self.results:
+            if issue_item.filter(sev_filter, conf_filter):
+                results.append(issue_item)
+            elif self.strict:
+                # In strict mode sub-threshold findings must never reach a
+                # report, but the reason they were dropped is still emitted
+                # for debugging / audit purposes.
+                LOG.debug(
+                    "strict mode: dropping %s at %s:%s "
+                    "(severity=%s confidence=%s, thresholds %s/%s)",
+                    issue_item.test_id,
+                    issue_item.fname,
+                    issue_item.lineno,
+                    issue_item.severity,
+                    issue_item.confidence,
+                    sev_filter,
+                    conf_filter,
+                )
 
         if not self.baseline:
             return results

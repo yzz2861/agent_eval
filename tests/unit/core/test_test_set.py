@@ -10,6 +10,7 @@ from stevedore import extension
 from bandit.blacklists import utils
 from bandit.core import extension_loader
 from bandit.core import issue
+from bandit.core import rule_set
 from bandit.core import test_properties as test
 from bandit.core import test_set
 
@@ -59,6 +60,7 @@ class BanditTestSetTests(testtools.TestCase):
         extension_loader.MANAGER = extension_loader.Manager()
         self.config = mock.MagicMock()
         self.config.get_setting.return_value = None
+        self.config.get_option.return_value = None
 
     def tearDown(self):
         self.patchExtMan.stop()
@@ -167,3 +169,59 @@ class BanditTestSetTests(testtools.TestCase):
         self.assertNotIn("Import", blacklist._config)
         self.assertNotIn("ImportFrom", blacklist._config)
         self.assertEqual(1, len(blacklist._config["Call"]))
+
+    def test_rule_resolver_attached(self):
+        ts = test_set.BanditTestSet(self.config)
+        self.assertIsInstance(ts.rule_resolver, rule_set.RuleResolver)
+
+    def test_rule_resolver_uses_profile_and_cli_layers(self):
+        profile = {
+            "include": [],
+            "rule_overrides": {"B000": {"severity": "HIGH"}},
+        }
+        cli = {"B000": {"severity": "LOW"}}
+        ts = test_set.BanditTestSet(self.config, profile, cli_overrides=cli)
+        # CLI overrides the profile layer.
+        self.assertEqual(
+            "LOW", ts.rule_resolver.get_override("B000")["severity"]
+        )
+
+    def test_plugin_state_is_not_shared_between_test_sets(self):
+        first = test_set.BanditTestSet(self.config)
+        second = test_set.BanditTestSet(self.config)
+        first_plugin = first.get_tests("Str")[0]
+        second_plugin = second.get_tests("Str")[0]
+
+        self.assertIsNot(first_plugin, second_plugin)
+        first_plugin._isolation_marker = True
+        self.assertFalse(hasattr(second_plugin, "_isolation_marker"))
+
+    def test_blacklist_state_is_not_shared_between_test_sets(self):
+        first = test_set.BanditTestSet(self.config)
+        second = test_set.BanditTestSet(self.config)
+        first_blacklist = first.get_tests("Call")[0]
+        second_blacklist = second.get_tests("Call")[0]
+
+        self.assertIsNot(first_blacklist, second_blacklist)
+        first_blacklist._isolation_marker = True
+        self.assertFalse(hasattr(second_blacklist, "_isolation_marker"))
+
+    def test_strict_wildcard_conflict_raises_when_building_test_set(self):
+        strict_config = mock.MagicMock()
+        strict_config.get_setting.return_value = None
+        strict_config.get_option.side_effect = lambda key: (
+            True if key == "strict" else None
+        )
+        profile = {
+            "include": [],
+            "rule_overrides": {
+                "B*": {"severity": "LOW"},
+                "B0*": {"severity": "HIGH"},
+            },
+        }
+        self.assertRaises(
+            rule_set.RuleConfigError,
+            test_set.BanditTestSet,
+            strict_config,
+            profile,
+        )

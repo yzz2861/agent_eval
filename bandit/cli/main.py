@@ -14,6 +14,7 @@ import bandit
 from bandit.core import config as b_config
 from bandit.core import constants
 from bandit.core import manager as b_manager
+from bandit.core import rule_set
 from bandit.core import utils
 
 BASE_CONFIG = "bandit.yaml"
@@ -115,10 +116,16 @@ def _get_profile(config, profile_name, config_path):
         profile = profiles.get(profile_name)
         if profile is None:
             raise utils.ProfileNotFound(config_path, profile_name)
+        # Keep any rule overrides attached to the profile while the rest of
+        # the CLI only needs the include/exclude sets.
+        profile = dict(profile)
+        profile.setdefault("include", set())
+        profile.setdefault("exclude", set())
         LOG.debug("read in legacy profile '%s': %s", profile_name, profile)
     else:
         profile["include"] = set(config.get_option("tests") or [])
         profile["exclude"] = set(config.get_option("skips") or [])
+        profile["rule_overrides"] = None
     return profile
 
 
@@ -129,6 +136,31 @@ def _log_info(args, profile):
     LOG.info("profile exclude tests: %s", exc)
     LOG.info("cli include tests: %s", args.tests)
     LOG.info("cli exclude tests: %s", args.skips)
+
+
+def _parse_cli_rule_overrides(arguments):
+    """Parse ``--rule-severity`` / ``--rule-confidence`` arguments.
+
+    Each value is a ``TEST_ID:LEVEL`` pair, for example
+    ``B105:HIGH`` or ``B*:LOW``.  The resulting mapping forms the highest
+    priority override layer.
+    """
+    overrides = {}
+
+    def _consume(values, key):
+        for value in values or []:
+            if ":" not in value:
+                raise ValueError(
+                    f"rule override '{value}' must look like TEST_ID:LEVEL"
+                )
+            test_id, level = value.split(":", 1)
+            test_id = test_id.strip()
+            level = level.strip().upper()
+            overrides.setdefault(test_id, {})[key] = level
+
+    _consume(arguments.rule_severity, "severity")
+    _consume(arguments.rule_confidence, "confidence")
+    return overrides
 
 
 def main():
@@ -228,6 +260,26 @@ def main():
         default=None,
         type=str,
         help="comma-separated list of test IDs to skip",
+    )
+    parser.add_argument(
+        "--rule-severity",
+        dest="rule_severity",
+        action="append",
+        default=None,
+        type=str,
+        help="override a rule severity, e.g. B105:HIGH; may be repeated and "
+        "accepts wildcard test ids such as B*:LOW. Takes precedence over "
+        "profile and config file overrides.",
+    )
+    parser.add_argument(
+        "--rule-confidence",
+        dest="rule_confidence",
+        action="append",
+        default=None,
+        type=str,
+        help="override a rule confidence, e.g. B602:HIGH; may be repeated "
+        "and accepts wildcard test ids such as B*:LOW. Takes precedence "
+        "over profile and config file overrides.",
     )
     severity_group = parser.add_mutually_exclusive_group(required=False)
     severity_group.add_argument(
@@ -621,7 +673,27 @@ def main():
 
         profile["include"].update(args.tests.split(",") if args.tests else [])
         profile["exclude"].update(args.skips.split(",") if args.skips else [])
-        extension_mgr.validate_profile(profile)
+        strict = bool(b_conf.get_option("strict"))
+        try:
+            cli_overrides = _parse_cli_rule_overrides(args)
+            rule_set._normalise_overrides(
+                cli_overrides,
+                "command line",
+                strict=True,
+            )
+            # Building the resolver here makes configuration problems (bad
+            # enums, unknown ids, wildcard conflicts) fail before any file
+            # is scanned.
+            rule_set.RuleResolver(
+                repository=b_conf.get_option("rule_overrides"),
+                profile=profile.get("rule_overrides"),
+                command_line=cli_overrides,
+                strict=strict,
+            )
+        except (ValueError, rule_set.RuleConfigError) as e:
+            LOG.error(e)
+            sys.exit(2)
+        extension_mgr.validate_profile(profile, strict=strict)
 
     except (utils.ProfileNotFound, ValueError) as e:
         LOG.error(e)
@@ -635,6 +707,7 @@ def main():
         verbose=args.verbose,
         quiet=args.quiet,
         ignore_nosec=args.ignore_nosec,
+        cli_overrides=cli_overrides,
     )
 
     if args.baseline is not None:

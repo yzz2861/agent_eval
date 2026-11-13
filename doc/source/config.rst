@@ -291,6 +291,87 @@ The specific content of the configuration block is determined by the plugin
 test itself. See the `plugin test list`_ for complete information on
 configuring each one.
 
+Rule Severity and Confidence Overrides
+--------------------------------------
+
+Individual rule severities and confidence levels can be re-graded without
+writing a new plugin.  Overrides are mappings of test id to the enum values
+``LOW``, ``MEDIUM`` or ``HIGH``.  Wildcard test ids containing shell glob
+characters (``*``, ``?`` or ``[]``) are supported, for example ``B*``.
+
+Repository wide defaults live under the top level ``rule_overrides`` block,
+while a named profile may carry its own ``rule_overrides`` block:
+
+.. code-block:: yaml
+
+  strict: true
+
+  rule_overrides:
+    B105:
+      severity: MEDIUM
+    "B*":
+      confidence: HIGH
+
+  profiles:
+    harden:
+      rule_overrides:
+        B105:
+          severity: HIGH
+
+The same overrides can be supplied on the command line, where they form the
+highest priority layer:
+
+.. code-block:: console
+
+  bandit -c bandit.yaml -p harden \
+    --rule-severity B105:HIGH --rule-confidence B602:HIGH -r .
+
+Resolution order
+~~~~~~~~~~~~~~~~
+
+The effective severity/confidence for a finding is resolved with a single,
+deterministic order that does not depend on plugin load order:
+
+1. an explicit test id override always wins over a wildcard override;
+2. command line overrides win over profile overrides;
+3. profile overrides win over repository (top level config) overrides;
+4. the values shipped with the plugin or blacklist entry are used when no
+   override applies.
+
+Blacklist versus plugin findings
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When a line matches both a regular plugin (for example ``B102`` for
+``exec``) and a blacklist entry (for example ``B307`` for ``eval``), both
+findings keep their own test id and are graded independently.  Within the
+blacklist itself an exact qualname always beats a wildcard qualname, and
+wildcard entries are evaluated in sorted order, so the result is identical
+on repeated runs and independent of the order in which plugins were loaded.
+
+Strict configuration mode
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Setting ``strict: true`` makes configuration problems fail the scan before
+any source file is read:
+
+- a severity or confidence value that is not one of ``LOW``, ``MEDIUM`` or
+  ``HIGH``;
+- an unknown test id in an override or in a profile include/exclude list;
+- a profile name that does not exist, or a test id present in both the
+  profile include and exclude lists;
+- two wildcard overrides that can match the same test id while assigning
+  different severity/confidence values.
+
+Without ``strict: true`` these situations are tolerated with a warning and
+the historical, lenient behaviour is preserved, so existing configurations
+and report formats keep working unchanged.
+
+In strict mode findings below the configured ``--level`` /
+``--confidence`` thresholds are removed from the final report.  They are
+still recorded in the debug log (``--debug``), together with the override
+reason, for example which profile or wildcard rule re-graded them and why
+they were dropped.
+
 
 .. _YAML: https://yaml.org/
 .. _plugin test list: plugins/index.html

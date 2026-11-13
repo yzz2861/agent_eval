@@ -17,6 +17,7 @@ else:
 
 from bandit.core import constants
 from bandit.core import extension_loader
+from bandit.core import rule_set
 from bandit.core import utils
 
 LOG = logging.getLogger(__name__)
@@ -66,12 +67,11 @@ class BanditConfig:
                     LOG.error(err)
                     raise utils.ConfigError("Error parsing file.", config_file)
 
-            self.validate(config_file)
-
             # valid config must be a dict
             if not isinstance(self._config, dict):
                 raise utils.ConfigError("Error parsing file.", config_file)
 
+            self.validate(config_file)
             self.convert_legacy_config()
 
         else:
@@ -160,7 +160,10 @@ class BanditConfig:
                 (extman.get_test_id(i) or i)
                 for i in (profile.get("exclude") or [])
             }
-            updated_profiles[name] = {"include": include, "exclude": exclude}
+            updated = dict(profile)
+            updated["include"] = include
+            updated["exclude"] = exclude
+            updated_profiles[name] = updated
         return updated_profiles
 
     def convert_legacy_blacklist_data(self):
@@ -259,6 +262,8 @@ class BanditConfig:
                 _test("blacklist_import_func", "blacklist_imports", inc, exc)
                 _test("blacklist_calls", "blacklist_calls", inc, exc)
 
+        self._validate_rule_configuration(path)
+
         # show deprecation message
         if legacy:
             LOG.warning(
@@ -269,3 +274,83 @@ class BanditConfig:
                 "removed in a future bandit version.",
                 path,
             )
+
+    def _validate_rule_configuration(self, path):
+        """Validate new style rule overrides and profile test selections.
+
+        Structural problems (invalid severity/confidence enums, unknown test
+        ids, conflicting wildcard rules) are always rejected before a scan.
+        With ``strict: true`` even suspicious but usable configurations fail
+        fast instead of being tolerated with a warning.
+        """
+        strict = bool(self._config.get("strict"))
+
+        # Normalisation validates enum values, keys and test ids for the
+        # repository layer and every profile layer.
+        layers = [
+            (self._config.get("rule_overrides"), "config file"),
+        ]
+        profiles = self._config.get("profiles") or {}
+        if not isinstance(profiles, dict):
+            raise utils.ConfigError("profiles must be a mapping", path)
+        for profile_name, profile in profiles.items():
+            layers.append(
+                (
+                    profile.get("rule_overrides"),
+                    f"profile '{profile_name}'",
+                )
+            )
+        for raw, source in layers:
+            try:
+                rule_set._normalise_overrides(raw, source, strict=strict)
+            except rule_set.RuleConfigError as err:
+                raise utils.ConfigError(str(err), path)
+
+        extman = extension_loader.MANAGER
+        for profile_name, profile in profiles.items():
+            if not isinstance(profile, dict):
+                raise utils.ConfigError(
+                    f"profile '{profile_name}' must be a mapping", path
+                )
+            include = profile.get("include") or []
+            exclude = profile.get("exclude") or []
+            if not isinstance(include, list) or not isinstance(
+                exclude, list
+            ):
+                raise utils.ConfigError(
+                    f"profile '{profile_name}' include/exclude must be "
+                    "lists",
+                    path,
+                )
+            for test_id in set(include) & set(exclude):
+                raise utils.ConfigError(
+                    f"profile '{profile_name}' contains '{test_id}' in "
+                    "both include and exclude",
+                    path,
+                )
+            # Legacy configs use names converted later, so only validate
+            # ids that already look like a bandit test id.
+            for test_id in list(include) + list(exclude):
+                if isinstance(test_id, str) and test_id.startswith(
+                    "B"
+                ) and not extman.check_id(test_id):
+                    message = (
+                        f"unknown test id '{test_id}' in profile "
+                        f"'{profile_name}'"
+                    )
+                    if strict:
+                        raise utils.ConfigError(message, path)
+                    LOG.warning(message)
+
+        # Wildcard conflict detection across the repository layer; profile
+        # specific conflicts are caught when the profile is selected and its
+        # resolver is built.  Only strict mode fails pre-scan; default mode
+        # keeps the historical lenient behaviour with a logged warning.
+        if strict:
+            try:
+                rule_set.RuleResolver(
+                    repository=self._config.get("rule_overrides"),
+                    strict=True,
+                )
+            except rule_set.RuleConfigError as err:
+                raise utils.ConfigError(str(err), path)

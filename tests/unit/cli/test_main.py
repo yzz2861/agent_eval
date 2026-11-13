@@ -128,6 +128,76 @@ class BanditCLIMainTests(testtools.TestCase):
         # Test that an extension loader manager is returned
         self.assertEqual(ext_loader.MANAGER, bandit._init_extensions())
 
+    def test_parse_cli_rule_overrides_merges_severity_and_confidence(self):
+        arguments = mock.Mock(
+            rule_severity=["B105:HIGH", "B*:LOW"],
+            rule_confidence=["B105:medium"],
+        )
+        overrides = bandit._parse_cli_rule_overrides(arguments)
+        self.assertEqual(
+            {
+                "B105": {"severity": "HIGH", "confidence": "MEDIUM"},
+                "B*": {"severity": "LOW"},
+            },
+            overrides,
+        )
+
+    def test_parse_cli_rule_overrides_rejects_malformed_value(self):
+        arguments = mock.Mock(rule_severity=["B105"], rule_confidence=[])
+        self.assertRaises(
+            ValueError, bandit._parse_cli_rule_overrides, arguments
+        )
+
+    def test_three_layer_rule_overrides_apply_to_findings(self):
+        temp_directory = self.useFixture(fixtures.TempDir()).path
+        os.chdir(temp_directory)
+        with open("target.py", "w") as fd:
+            fd.write('password = "hunter2"\n')
+        with open("bandit.yaml", "w") as fd:
+            fd.write(
+                "\n".join(
+                    [
+                        "strict: true",
+                        "rule_overrides:",
+                        "  B105:",
+                        "    severity: MEDIUM",
+                        "profiles:",
+                        "  harden:",
+                        "    rule_overrides:",
+                        "      B105:",
+                        "        severity: HIGH",
+                    ]
+                )
+            )
+        argv = [
+            "bandit",
+            "-c",
+            "bandit.yaml",
+            "-p",
+            "harden",
+            "--rule-severity",
+            "B105:LOW",
+            "-f",
+            "json",
+            "-o",
+            "output.json",
+            "target.py",
+        ]
+        with mock.patch("sys.argv", argv):
+            try:
+                bandit.main()
+            except SystemExit:
+                pass
+        import json
+
+        with open("output.json") as fd:
+            report = json.load(fd)
+        result = next(
+            item for item in report["results"] if item["test_id"] == "B105"
+        )
+        # CLI override beats both the profile and repository layers.
+        self.assertEqual("LOW", result["issue_severity"])
+
     def test_log_option_source_arg_val(self):
         # Test that the command argument value is returned when provided
         # with None or a string default value
