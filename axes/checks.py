@@ -7,6 +7,7 @@ from django.utils.module_loading import import_string
 
 from axes.backends import AxesStandaloneBackend
 from axes.conf import LockoutTier, settings
+from axes.helpers import normalize_ip_network
 
 
 class Messages:
@@ -34,6 +35,10 @@ class Messages:
     LOCKOUT_TIERS_INVALID = (
         "AXES_LOCKOUT_TIERS must be a list of LockoutTier instances."
     )
+    IP_LIST_INVALID = (
+        "{location} is not a valid IP address or CIDR network"
+        " and will be ignored during IP list matching."
+    )
 
 
 class Hints:
@@ -45,6 +50,7 @@ class Hints:
     LOCKOUT_PARAMETERS_INVALID = "Add 'ip_address' to AXES_LOCKOUT_PARAMETERS."
     LOCKOUT_TIERS_CONFLICT = "Remove AXES_COOLOFF_TIME when using AXES_LOCKOUT_TIERS."
     LOCKOUT_TIERS_INVALID = "Use: AXES_LOCKOUT_TIERS = [LockoutTier(failures=3, cooloff=timedelta(minutes=15)), ...]"
+    IP_LIST_INVALID = "Use canonical IP addresses or CIDR prefixes such as '10.20.0.0/16' or '2001:db8::/32'."
 
 
 class Codes:
@@ -56,6 +62,7 @@ class Codes:
     LOCKOUT_PARAMETERS_INVALID = "axes.W006"
     LOCKOUT_TIERS_CONFLICT = "axes.W007"
     LOCKOUT_TIERS_INVALID = "axes.W008"
+    IP_LIST_INVALID = "axes.W009"
 
 
 @register(Tags.security, Tags.caches, Tags.compatibility)
@@ -237,6 +244,43 @@ def is_valid_tiers_list(tiers) -> bool:
     if not isinstance(tiers, (list, tuple)):
         return False
     return all(isinstance(t, LockoutTier) for t in tiers)
+
+
+@register(Tags.security)
+def axes_ip_list_check(app_configs, **kwargs):  # pylint: disable=unused-argument
+    """
+    Validate configured IP lists against the standard address/network parser.
+
+    Entries that do not parse are reported by configuration location and
+    category only; raw values are never echoed so that forwarded header
+    chains or other sensitive contents are not leaked into check output.
+    """
+
+    warnings = []
+
+    ip_list_settings = [
+        "AXES_IP_WHITELIST",
+        "AXES_IP_BLACKLIST",
+        "AXES_IPWARE_PROXY_TRUSTED_IPS",
+    ]
+
+    for setting_name in ip_list_settings:
+        entries = getattr(settings, setting_name, None)
+        if not entries:
+            continue
+        for index, entry in enumerate(entries):
+            if normalize_ip_network(entry) is None:
+                warnings.append(
+                    Warning(
+                        msg=Messages.IP_LIST_INVALID.format(
+                            location=f"{setting_name}[{index}]"
+                        ),
+                        hint=Hints.IP_LIST_INVALID,
+                        id=Codes.IP_LIST_INVALID,
+                    )
+                )
+
+    return warnings
 
 
 @register

@@ -1,5 +1,13 @@
 from datetime import timedelta, datetime
 from hashlib import sha256
+from ipaddress import (
+    IPv4Address,
+    IPv4Network,
+    IPv6Address,
+    IPv6Network,
+    ip_address,
+    ip_network,
+)
 from logging import getLogger
 from string import Template
 from typing import Callable, Optional, Type, Union, List
@@ -17,12 +25,135 @@ from axes.models import AccessBase
 
 log = getLogger(__name__)
 
+IPAddress = Union[IPv4Address, IPv6Address]
+IPNetwork = Union[IPv4Network, IPv6Network]
+
 try:
     import ipware.ip
 
     IPWARE_INSTALLED = True
 except ImportError:
     IPWARE_INSTALLED = False
+
+
+def normalize_ip_address(value) -> Optional[IPAddress]:
+    """
+    Parse *value* into a canonical IP address object.
+
+    IPv4-mapped IPv6 addresses (``::ffff:10.20.1.7``) are mapped to their
+    IPv4 host identity so the same client produces the same access control
+    decision no matter which request header supplied the address. IPv6 zone
+    identifiers (``fe80::1%eth0``) are stripped before parsing. Values with
+    ports, out-of-range or leading-zero octets, or otherwise unparseable
+    text return ``None``; a missing address is never treated as
+    ``0.0.0.0`` or automatically allowed.
+    """
+
+    address: Optional[IPAddress] = None
+    if isinstance(value, (IPv4Address, IPv6Address)):
+        address = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if text:
+            # Drop any IPv6 zone identifier (``%eth0``) so that zone
+            # spellings do not change comparison results.
+            text = text.partition("%")[0]
+            try:
+                address = ip_address(text)
+            except ValueError:
+                address = None
+
+    if isinstance(address, IPv6Address):
+        mapped_address = address.ipv4_mapped
+        if mapped_address is not None:
+            return mapped_address
+    return address
+
+
+def normalize_ip_network(value) -> Optional[IPNetwork]:
+    """
+    Parse *value* into a canonical IP network object.
+
+    Bare addresses become single-host networks. CIDR prefixes with host
+    bits set are normalized to their canonical network address. Illegal
+    prefix lengths, leading-zero or out-of-range octets, ports, and
+    unparseable values return ``None``. IPv4-mapped IPv6 networks are
+    converted to the equivalent IPv4 network so that they compare
+    consistently against IPv4 client addresses.
+    """
+
+    network: Optional[IPNetwork] = None
+    if isinstance(value, (IPv4Network, IPv6Network)):
+        network = value
+    elif isinstance(value, (IPv4Address, IPv6Address)):
+        network = ip_network(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if text:
+            text = text.partition("%")[0]
+            try:
+                network = ip_network(text, strict=False)
+            except ValueError:
+                network = None
+
+    if isinstance(network, IPv6Network):
+        mapped_network = _get_ipv4_mapped_network(network)
+        if mapped_network is not None:
+            return mapped_network
+    return network
+
+
+def _get_ipv4_mapped_network(network: IPv6Network) -> Optional[IPv4Network]:
+    """Return the IPv4 equivalent of an IPv4-mapped IPv6 *network*, if any."""
+
+    if network.prefixlen < 96:
+        return None
+    first = network.network_address.ipv4_mapped
+    last = network.broadcast_address.ipv4_mapped
+    if first is None or last is None:
+        return None
+    return IPv4Network(f"{first}/{network.prefixlen - 96}", strict=False)
+
+
+def get_canonical_ip_networks(values) -> List[str]:
+    """
+    Return canonical CIDR strings for the parseable entries in *values*.
+
+    Entries that do not parse as an IP address or network are dropped so
+    that downstream consumers such as django-ipware proxy trust checks
+    operate on standard network objects only.
+    """
+
+    networks = []
+    for value in values or []:
+        network = normalize_ip_network(value)
+        if network is not None:
+            networks.append(str(network))
+    return networks
+
+
+def ip_address_in_list(ip_address_value, ip_list) -> bool:
+    """
+    Return True if *ip_address_value* matches any entry in *ip_list*.
+
+    Both the client address and the list entries are parsed into standard
+    address and network objects before comparison, so equivalent spellings
+    (IPv4-mapped IPv6, compressed IPv6, zone identifiers) reach the same
+    conclusion regardless of which request header supplied the address.
+    Unparseable client addresses never match, unparseable entries are
+    ignored, and mixed address families never match.
+    """
+
+    address = normalize_ip_address(ip_address_value)
+    if address is None:
+        return False
+    for entry in ip_list or []:
+        network = normalize_ip_network(entry)
+        if network is None or address.version != network.version:
+            continue
+        if address in network:
+            return True
+    return False
 
 
 def get_cache() -> BaseCache:
@@ -283,11 +414,15 @@ def get_client_ip_address(
     if use_ipware:
         log.debug("Using django-ipware to get client IP address")
 
+        proxy_trusted_ips = settings.AXES_IPWARE_PROXY_TRUSTED_IPS
+        if settings.AXES_IP_VALIDATION_STRICT and proxy_trusted_ips:
+            proxy_trusted_ips = get_canonical_ip_networks(proxy_trusted_ips)
+
         client_ip_address, _ = ipware.ip.get_client_ip(
             request,
             proxy_order=settings.AXES_IPWARE_PROXY_ORDER,
             proxy_count=settings.AXES_IPWARE_PROXY_COUNT,
-            proxy_trusted_ips=settings.AXES_IPWARE_PROXY_TRUSTED_IPS,
+            proxy_trusted_ips=proxy_trusted_ips,
             request_header_order=settings.AXES_IPWARE_META_PRECEDENCE_ORDER,
         )
         return client_ip_address
@@ -632,6 +767,9 @@ def is_ip_address_in_whitelist(ip_address: str) -> bool:
     if not settings.AXES_IP_WHITELIST:
         return False
 
+    if settings.AXES_IP_VALIDATION_STRICT:
+        return ip_address_in_list(ip_address, settings.AXES_IP_WHITELIST)
+
     return (  # pylint: disable=unsupported-membership-test
         ip_address in settings.AXES_IP_WHITELIST
     )
@@ -640,6 +778,9 @@ def is_ip_address_in_whitelist(ip_address: str) -> bool:
 def is_ip_address_in_blacklist(ip_address: str) -> bool:
     if not settings.AXES_IP_BLACKLIST:
         return False
+
+    if settings.AXES_IP_VALIDATION_STRICT:
+        return ip_address_in_list(ip_address, settings.AXES_IP_BLACKLIST)
 
     return (  # pylint: disable=unsupported-membership-test
         ip_address in settings.AXES_IP_BLACKLIST

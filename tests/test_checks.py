@@ -154,6 +154,68 @@ class LockoutParametersCheckTestCase(AxesTestCase):
         self.assertEqual(warnings, [warning])
 
 
+class IPListCheckTestCase(AxesTestCase):
+    @override_settings(
+        AXES_IP_WHITELIST=["10.20.0.0/16", "2001:db8::/32", "127.0.0.1"],
+        AXES_IP_BLACKLIST=["192.0.2.0/24"],
+        AXES_IPWARE_PROXY_TRUSTED_IPS=["10.0.0.0/8"],
+    )
+    def test_valid_ip_lists_no_warnings(self):
+        warnings = run_checks()
+        self.assertEqual(warnings, [])
+
+    def test_missing_ip_lists_no_warnings(self):
+        warnings = run_checks()
+        self.assertEqual(warnings, [])
+
+    @override_settings(AXES_IP_WHITELIST=["not-an-ip", "10.20.0.0/33"])
+    def test_invalid_whitelist_entries_warn(self):
+        warnings = run_checks()
+        expected = [
+            Warning(
+                msg=Messages.IP_LIST_INVALID.format(location="AXES_IP_WHITELIST[0]"),
+                hint=Hints.IP_LIST_INVALID,
+                id=Codes.IP_LIST_INVALID,
+            ),
+            Warning(
+                msg=Messages.IP_LIST_INVALID.format(location="AXES_IP_WHITELIST[1]"),
+                hint=Hints.IP_LIST_INVALID,
+                id=Codes.IP_LIST_INVALID,
+            ),
+        ]
+        self.assertEqual(warnings, expected)
+
+    @override_settings(AXES_IP_BLACKLIST=["010.20.0.0/16"])
+    def test_invalid_blacklist_entry_warns(self):
+        warnings = run_checks()
+        warning = Warning(
+            msg=Messages.IP_LIST_INVALID.format(location="AXES_IP_BLACKLIST[0]"),
+            hint=Hints.IP_LIST_INVALID,
+            id=Codes.IP_LIST_INVALID,
+        )
+        self.assertEqual(warnings, [warning])
+
+    @override_settings(AXES_IPWARE_PROXY_TRUSTED_IPS=["10.0.0.0/8", "bad"])
+    def test_invalid_proxy_trusted_ip_entry_warns(self):
+        warnings = run_checks()
+        warning = Warning(
+            msg=Messages.IP_LIST_INVALID.format(
+                location="AXES_IPWARE_PROXY_TRUSTED_IPS[1]"
+            ),
+            hint=Hints.IP_LIST_INVALID,
+            id=Codes.IP_LIST_INVALID,
+        )
+        self.assertEqual(warnings, [warning])
+
+    @override_settings(AXES_IP_WHITELIST=["10.0.0.1, 10.0.0.2, forged-chain"])
+    def test_warning_message_only_carries_location_and_category(self):
+        warnings = run_checks()
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("AXES_IP_WHITELIST[0]", warnings[0].msg)
+        self.assertNotIn("forged-chain", warnings[0].msg)
+        self.assertNotIn("10.0.0.1", warnings[0].msg)
+
+
 class LockoutTiersCheckTestCase(AxesTestCase):
     SAMPLE_TIERS = [
         LockoutTier(failures=3, cooloff=timedelta(minutes=15)),

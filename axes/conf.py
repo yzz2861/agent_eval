@@ -140,6 +140,12 @@ settings.AXES_IP_WHITELIST = getattr(settings, "AXES_IP_WHITELIST", None)
 
 settings.AXES_IP_BLACKLIST = getattr(settings, "AXES_IP_BLACKLIST", None)
 
+# parse client addresses, IP lists, and proxy trust entries into canonical
+# address/network objects before comparison instead of raw string matching
+settings.AXES_IP_VALIDATION_STRICT = getattr(
+    settings, "AXES_IP_VALIDATION_STRICT", False
+)
+
 # message to show when locked out and have cooloff enabled
 settings.AXES_COOLOFF_MESSAGE = getattr(
     settings,

@@ -1,5 +1,6 @@
 from datetime import timedelta
 from hashlib import sha256
+from ipaddress import IPv4Address, IPv4Network, IPv6Address
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
@@ -10,6 +11,7 @@ from axes.apps import AppConfig
 from axes.conf import LockoutTier
 from axes.helpers import (
     cleanse_parameters,
+    get_canonical_ip_networks,
     get_cache_timeout,
     get_client_cache_keys,
     get_client_ip_address,
@@ -21,12 +23,15 @@ from axes.helpers import (
     get_lockout_response,
     get_username_from_data,
     get_lockout_tier,
+    ip_address_in_list,
     is_client_ip_address_blacklisted,
     is_client_ip_address_whitelisted,
     is_client_method_whitelisted,
     is_ip_address_in_blacklist,
     is_ip_address_in_whitelist,
     is_user_attempt_whitelisted,
+    normalize_ip_address,
+    normalize_ip_network,
     set_retry_after_header,
     toggleable,
 )
@@ -1060,6 +1065,187 @@ class IPWhitelistTestCase(AxesTestCase):
     @override_settings(AXES_IP_WHITELIST=["127.0.0.2"])
     def test_is_client_ip_address_whitelisted_not(self):
         self.assertFalse(is_client_ip_address_whitelisted(self.request))
+
+
+class IPAddressNormalizationTestCase(AxesTestCase):
+    def test_normalize_ip_address_ipv4(self):
+        self.assertEqual(normalize_ip_address("10.20.1.7"), IPv4Address("10.20.1.7"))
+
+    def test_normalize_ip_address_ipv4_mapped_ipv6(self):
+        self.assertEqual(
+            normalize_ip_address("::ffff:10.20.1.7"), IPv4Address("10.20.1.7")
+        )
+
+    def test_normalize_ip_address_ipv4_mapped_ipv6_hex_form(self):
+        self.assertEqual(
+            normalize_ip_address("::ffff:0a14:0107"), IPv4Address("10.20.1.7")
+        )
+
+    def test_normalize_ip_address_zone_id_stripped(self):
+        self.assertEqual(normalize_ip_address("fe80::1%eth0"), IPv6Address("fe80::1"))
+
+    def test_normalize_ip_address_ipv6_compressed_form(self):
+        self.assertEqual(
+            normalize_ip_address("2001:0db8:0000:0000:0000:0000:0000:0001"),
+            IPv6Address("2001:db8::1"),
+        )
+
+    def test_normalize_ip_address_leading_zeros_invalid(self):
+        self.assertIsNone(normalize_ip_address("010.20.1.7"))
+
+    def test_normalize_ip_address_out_of_range_octet_invalid(self):
+        self.assertIsNone(normalize_ip_address("300.20.1.7"))
+
+    def test_normalize_ip_address_with_port_invalid(self):
+        self.assertIsNone(normalize_ip_address("10.20.1.7:8080"))
+        self.assertIsNone(normalize_ip_address("[2001:db8::1]:8080"))
+
+    def test_normalize_ip_address_missing_values(self):
+        self.assertIsNone(normalize_ip_address(None))
+        self.assertIsNone(normalize_ip_address(""))
+        self.assertIsNone(normalize_ip_address("   "))
+
+    def test_normalize_ip_network_bare_address(self):
+        self.assertEqual(normalize_ip_network("10.20.1.7"), IPv4Network("10.20.1.7/32"))
+
+    def test_normalize_ip_network_non_canonical_prefix(self):
+        self.assertEqual(
+            normalize_ip_network("10.20.1.7/24"), IPv4Network("10.20.1.0/24")
+        )
+
+    def test_normalize_ip_network_illegal_prefix_length(self):
+        self.assertIsNone(normalize_ip_network("10.20.0.0/33"))
+        self.assertIsNone(normalize_ip_network("2001:db8::/129"))
+
+    def test_normalize_ip_network_leading_zeros_invalid(self):
+        self.assertIsNone(normalize_ip_network("010.20.0.0/16"))
+
+    def test_normalize_ip_network_ipv4_mapped_ipv6_network(self):
+        self.assertEqual(
+            normalize_ip_network("::ffff:10.20.0.0/112"),
+            IPv4Network("10.20.0.0/16"),
+        )
+
+    def test_normalize_ip_network_missing_values(self):
+        self.assertIsNone(normalize_ip_network(None))
+        self.assertIsNone(normalize_ip_network(""))
+
+    def test_get_canonical_ip_networks_drops_invalid_entries(self):
+        self.assertEqual(
+            get_canonical_ip_networks(
+                ["10.20.1.7/24", "not-an-ip", "::ffff:10.20.0.0/112"]
+            ),
+            ["10.20.1.0/24", "10.20.0.0/16"],
+        )
+
+    def test_ip_address_in_list_cross_family_never_matches(self):
+        self.assertFalse(ip_address_in_list("10.20.1.7", ["2001:db8::/32"]))
+        self.assertFalse(ip_address_in_list("2001:db8::1", ["10.20.0.0/16"]))
+
+    def test_ip_address_in_list_missing_address_never_matches(self):
+        self.assertFalse(ip_address_in_list(None, ["0.0.0.0/0"]))
+        self.assertFalse(ip_address_in_list("", ["10.20.0.0/16"]))
+
+
+@override_settings(AXES_IP_VALIDATION_STRICT=True)
+class StrictIPWhitelistTestCase(AxesTestCase):
+    def setUp(self):
+        self.request = HttpRequest()
+        self.request.method = "POST"
+        self.request.axes_ip_address = "10.20.1.7"
+
+    @override_settings(AXES_IP_WHITELIST=["10.20.0.0/16"])
+    def test_ip_whitelist_mapped_ipv6_matches_ipv4_network(self):
+        self.assertTrue(is_ip_address_in_whitelist("::ffff:10.20.1.7"))
+        self.assertFalse(is_ip_address_in_whitelist("::ffff:10.21.1.7"))
+
+    @override_settings(AXES_IP_BLACKLIST=["10.20.0.0/16"])
+    def test_ip_blacklist_mapped_ipv6_matches_ipv4_network(self):
+        self.assertTrue(is_ip_address_in_blacklist("::ffff:10.20.1.7"))
+        self.assertFalse(is_ip_address_in_blacklist("::ffff:10.21.1.7"))
+
+    @override_settings(AXES_IP_WHITELIST=["fe80::1"])
+    def test_ip_whitelist_zone_id_matches(self):
+        self.assertTrue(is_ip_address_in_whitelist("fe80::1%eth0"))
+
+    @override_settings(AXES_IP_WHITELIST=["2001:db8::1"])
+    def test_ip_whitelist_ipv6_compressed_form_matches(self):
+        self.assertTrue(
+            is_ip_address_in_whitelist("2001:0db8:0000:0000:0000:0000:0000:0001")
+        )
+
+    @override_settings(AXES_IP_WHITELIST=["10.20.0.0/16"])
+    def test_ip_whitelist_cross_family_never_matches(self):
+        self.assertFalse(is_ip_address_in_whitelist("2001:db8::1"))
+
+    @override_settings(AXES_IP_WHITELIST=["2001:db8::/32"])
+    def test_ip_whitelist_cross_family_never_matches_v6_list(self):
+        self.assertFalse(is_ip_address_in_whitelist("10.20.1.7"))
+
+    @override_settings(AXES_IP_WHITELIST=["10.20.0.0/33"])
+    def test_ip_whitelist_illegal_prefix_entry_ignored(self):
+        self.assertFalse(is_ip_address_in_whitelist("10.20.1.7"))
+
+    @override_settings(AXES_IP_WHITELIST=["010.20.0.0/16"])
+    def test_ip_whitelist_leading_zero_entry_ignored(self):
+        self.assertFalse(is_ip_address_in_whitelist("10.20.1.7"))
+
+    @override_settings(AXES_IP_WHITELIST=["10.20.0.0/16"])
+    def test_ip_whitelist_none_address_not_allowed(self):
+        self.assertFalse(is_ip_address_in_whitelist(None))
+
+    @override_settings(AXES_IP_WHITELIST=["0.0.0.0/0"])
+    def test_ip_whitelist_none_address_not_mapped_to_default_route(self):
+        self.assertFalse(is_ip_address_in_whitelist(None))
+
+    @override_settings(AXES_IP_WHITELIST=["10.20.0.0/16"])
+    def test_ip_whitelist_port_value_not_matched(self):
+        self.assertFalse(is_ip_address_in_whitelist("10.20.1.7:8080"))
+
+    @override_settings(AXES_IP_WHITELIST=["127.0.0.1", "2001:db8::/32"])
+    def test_ip_whitelist_legal_entries_still_match(self):
+        self.assertTrue(is_ip_address_in_whitelist("127.0.0.1"))
+        self.assertTrue(is_ip_address_in_whitelist("2001:db8::1"))
+        self.assertFalse(is_ip_address_in_whitelist("127.0.0.2"))
+
+    @override_settings(AXES_NEVER_LOCKOUT_WHITELIST=True)
+    @override_settings(AXES_IP_WHITELIST=["10.20.0.0/16"])
+    def test_same_address_from_different_header_paths_same_conclusion(self):
+        request_ipv4 = HttpRequest()
+        request_ipv4.axes_ip_address = "10.20.1.7"
+        request_mapped = HttpRequest()
+        request_mapped.axes_ip_address = "::ffff:10.20.1.7"
+
+        self.assertTrue(is_client_ip_address_whitelisted(request_ipv4))
+        self.assertTrue(is_client_ip_address_whitelisted(request_mapped))
+        self.assertEqual(
+            is_client_ip_address_whitelisted(request_ipv4),
+            is_client_ip_address_whitelisted(request_mapped),
+        )
+
+    @override_settings(AXES_IP_WHITELIST=["10.20.0.0/16"])
+    def test_ipware_source_address_matches_direct_address(self):
+        request_direct = HttpRequest()
+        request_direct.META["REMOTE_ADDR"] = "10.20.1.7"
+        request_mapped = HttpRequest()
+        request_mapped.META["REMOTE_ADDR"] = "::ffff:10.20.1.7"
+
+        direct = get_client_ip_address(request_direct, use_ipware=True)
+        mapped = get_client_ip_address(request_mapped, use_ipware=True)
+
+        self.assertEqual(
+            is_ip_address_in_whitelist(direct),
+            is_ip_address_in_whitelist(mapped),
+        )
+        self.assertTrue(is_ip_address_in_whitelist(direct))
+
+    @override_settings(AXES_ONLY_WHITELIST=True)
+    @override_settings(AXES_IP_WHITELIST=["10.20.0.0/16"])
+    def test_missing_address_not_auto_allowed_with_only_whitelist(self):
+        request = HttpRequest()
+        request.axes_ip_address = None
+        self.assertFalse(is_client_ip_address_whitelisted(request))
+        self.assertTrue(is_client_ip_address_blacklisted(request))
 
 
 class MethodWhitelistTestCase(AxesTestCase):
