@@ -30,6 +30,15 @@ from axes.helpers import (
     set_retry_after_header,
     toggleable,
 )
+from axes.helpers import (
+    UsernameNormalizationError,
+    get_raw_client_username,
+    get_unresolved_username_bucket,
+    get_username_audit_category,
+    get_username_audit_fingerprint,
+    get_username_normalization_rules,
+    normalize_username,
+)
 from axes.models import AccessAttempt, AccessBase
 from tests.base import AxesTestCase
 
@@ -954,6 +963,289 @@ class GetUsernameFromDataTestCase(AxesTestCase):
 
 def get_username(request, credentials: dict) -> str:
     return "username"
+
+
+def get_username_normalization_overrides(request, credentials) -> dict:
+    return {"casefold": False}
+
+
+class DummyAuthBackend:
+    """Module-level stand-in for an authentication backend declaring its own rules."""
+
+
+class UsernameNormalizationTestCase(AxesTestCase):
+    """Unit tests for the username identity normalization pipeline."""
+
+    def test_normalize_username_none_and_empty(self):
+        self.assertIsNone(normalize_username(None))
+        self.assertEqual("", normalize_username(""))
+
+    def test_normalize_username_fullwidth(self):
+        # full-width letters, digits and at-sign fold to ASCII under NFKC
+        self.assertEqual(
+            "user1@example.com", normalize_username("\uff55\uff53\uff45\uff52\uff11\uff20example.com")
+        )
+        self.assertEqual("user@example.com", normalize_username("user\uff20example.com"))
+
+    def test_normalize_username_combining_characters(self):
+        combining = "cafe\u0301@example.com"  # e + combining acute accent
+        composed = "caf\u00e9@example.com"  # precomposed e-acute
+        self.assertEqual(composed, normalize_username(combining))
+        self.assertEqual(normalize_username(composed), normalize_username(combining))
+
+    def test_normalize_username_zero_width_and_invisible(self):
+        self.assertEqual(
+            "user@example.com", normalize_username("u\u200bser@\u200bexample.com")
+        )
+        self.assertEqual(
+            "user@example.com", normalize_username("\ufeffuser@example.com\u2060")
+        )
+        self.assertEqual("user@example.com", normalize_username("user\u00ad@example.com"))
+
+    def test_normalize_username_casefold(self):
+        self.assertEqual("user@example.com", normalize_username("USER@Example.COM"))
+        self.assertEqual(normalize_username("User@Example.com"), normalize_username("user@example.COM"))
+
+    def test_normalize_username_whitespace(self):
+        self.assertEqual("user@example.com", normalize_username("  user@example.com\t\n"))
+        self.assertEqual("user name", normalize_username("user \t\n  name"))
+
+    def test_normalize_username_not_a_string_stable_reason(self):
+        for raw in (b"bytes", 123, ["list"]):
+            with self.subTest(raw=raw):
+                with self.assertRaises(UsernameNormalizationError) as ctx:
+                    normalize_username(raw)
+                self.assertEqual("not-a-string", ctx.exception.reason)
+                self.assertIs(ctx.exception.raw, raw)
+
+    def test_normalize_username_empty_after_normalization_stable_reason(self):
+        with self.assertRaises(UsernameNormalizationError) as ctx:
+            normalize_username("\u200b\u200b")
+        self.assertEqual("empty-after-normalization", ctx.exception.reason)
+
+    def test_normalize_username_rules_override(self):
+        self.assertEqual(
+            "USER@example.com",
+            normalize_username("USER@example.com", {"casefold": False}),
+        )
+        self.assertEqual(
+            "  x  y  ",
+            normalize_username("  x  y  ", {"strip": False, "collapse_whitespace": False}),
+        )
+
+    def test_normalize_username_does_not_merge_distinct_identities(self):
+        # local parts and tenant suffixes are normalized uniformly, so two
+        # legitimate users never collapse into one identity
+        self.assertNotEqual(
+            normalize_username("user@tenant-a.example.com"),
+            normalize_username("user@tenant-b.example.com"),
+        )
+        self.assertNotEqual(
+            normalize_username("alice@example.com"),
+            normalize_username("alice@example.org"),
+        )
+        self.assertNotEqual(
+            normalize_username("alice@example.com"),
+            normalize_username("alice2@example.com"),
+        )
+
+    def test_get_username_normalization_rules_defaults(self):
+        rules = get_username_normalization_rules(HttpRequest(), None)
+        self.assertEqual("NFKC", rules["form"])
+        self.assertTrue(rules["casefold"])
+        self.assertTrue(rules["strip"])
+        self.assertTrue(rules["collapse_whitespace"])
+        self.assertTrue(rules["strip_invisible"])
+
+    @override_settings(AXES_USERNAME_NORMALIZATION={"casefold": False})
+    def test_get_username_normalization_rules_global_override(self):
+        rules = get_username_normalization_rules(HttpRequest(), None)
+        self.assertFalse(rules["casefold"])
+        self.assertEqual("NFKC", rules["form"])
+
+    @override_settings(
+        AXES_USERNAME_NORMALIZATION=lambda request, credentials: {"strip": False}
+    )
+    def test_get_username_normalization_rules_callable(self):
+        rules = get_username_normalization_rules(HttpRequest(), None)
+        self.assertFalse(rules["strip"])
+
+    @override_settings(
+        AXES_USERNAME_NORMALIZATION="tests.test_helpers.get_username_normalization_overrides"
+    )
+    def test_get_username_normalization_rules_import_string(self):
+        rules = get_username_normalization_rules(HttpRequest(), None)
+        self.assertFalse(rules["casefold"])
+
+    @override_settings(AXES_USERNAME_NORMALIZATION=42)
+    def test_get_username_normalization_rules_invalid_type(self):
+        with self.assertRaises(TypeError):
+            get_username_normalization_rules(HttpRequest(), None)
+
+    @override_settings(
+        AXES_USERNAME_BACKEND_NORMALIZATION={"my.auth.Backend": {"casefold": False}}
+    )
+    def test_backend_specific_rules_from_credentials(self):
+        credentials = {"username": "USER@example.com", "backend": "my.auth.Backend"}
+        self.assertEqual("USER@example.com", get_client_username(HttpRequest(), credentials))
+
+    @override_settings(
+        AXES_USERNAME_BACKEND_NORMALIZATION={"my.auth.Backend": {"casefold": False}}
+    )
+    def test_backend_specific_rules_from_request_attribute(self):
+        request = HttpRequest()
+        request.POST["username"] = "USER@example.com"
+        request.axes_backend = "my.auth.Backend"
+        self.assertEqual("USER@example.com", get_client_username(request))
+        # other backends still fall back to the default rules
+        request.axes_backend = "my.auth.OtherBackend"
+        self.assertEqual("user@example.com", get_client_username(request))
+
+    @override_settings(
+        AXES_USERNAME_BACKEND_NORMALIZATION={
+            "tests.test_helpers.DummyAuthBackend": {"casefold": False}
+        }
+    )
+    def test_backend_specific_rules_class_and_instance(self):
+        credentials = {"username": "USER@example.com", "backend": DummyAuthBackend}
+        self.assertEqual("USER@example.com", get_client_username(HttpRequest(), credentials))
+        credentials = {"username": "USER@example.com", "backend": DummyAuthBackend()}
+        self.assertEqual("USER@example.com", get_client_username(HttpRequest(), credentials))
+
+
+class ClientUsernameNormalizationTestCase(AxesTestCase):
+    """get_client_username applies one shared normalization pipeline to all sources."""
+
+    VARIANTS = [
+        "user@example.com",
+        "USER@example.com",
+        "User@Example.Com",
+        "\uff55\uff53\uff45\uff52\uff20\uff45\uff58\uff41\uff4d\uff50\uff4c\uff45\uff0e\uff43\uff4f\uff4d",
+        "  user@example.com  ",
+        "\tuser@example.com\n",
+        "user\u200b@example.com",
+        "user@example.com\u2060",
+        "user\uff20example.com",
+        "user@example\uff0ecom",
+    ]
+
+    def test_all_sources_normalize_to_same_identity(self):
+        expected = "user@example.com"
+        for variant in self.VARIANTS:
+            with self.subTest(variant=variant):
+                request = HttpRequest()
+                request.POST["username"] = variant
+                self.assertEqual(expected, get_client_username(request))
+
+                request = HttpRequest()
+                request.data = {"username": variant}
+                self.assertEqual(expected, get_client_username(request))
+
+                self.assertEqual(
+                    expected, get_client_username(HttpRequest(), {"username": variant})
+                )
+
+                with override_settings(
+                    AXES_USERNAME_CALLABLE=lambda request, credentials: variant
+                ):
+                    self.assertEqual(expected, get_client_username(HttpRequest()))
+
+    @override_settings(AXES_LOCKOUT_PARAMETERS=["username"])
+    def test_lockout_cache_key_shared_across_variants(self):
+        keys = set()
+        for variant in self.VARIANTS:
+            request = HttpRequest()
+            request.POST["username"] = variant
+            request.META["REMOTE_ADDR"] = "127.0.0.1"
+            request.META["HTTP_USER_AGENT"] = "test-browser"
+            keys.update(get_client_cache_keys(request))
+        self.assertEqual(1, len(keys))
+
+    @override_settings(AXES_LOCKOUT_PARAMETERS=["username"])
+    def test_lockout_cache_keys_distinct_for_legitimate_users(self):
+        keys = set()
+        for username in ("user@tenant-a.example.com", "user@tenant-b.example.com"):
+            request = HttpRequest()
+            request.POST["username"] = username
+            request.META["REMOTE_ADDR"] = "127.0.0.1"
+            request.META["HTTP_USER_AGENT"] = "test-browser"
+            keys.update(get_client_cache_keys(request))
+        self.assertEqual(2, len(keys))
+
+    def test_normalization_failure_uses_isolated_stable_bucket(self):
+        bucket1 = get_client_username(HttpRequest(), {"username": 123})
+        bucket2 = get_client_username(HttpRequest(), {"username": 123})
+        bucket3 = get_client_username(HttpRequest(), {"username": 456})
+        self.assertIsNotNone(bucket1)
+        self.assertEqual(bucket1, bucket2)
+        self.assertNotEqual(bucket1, bucket3)
+        self.assertTrue(bucket1.startswith("axes-unresolved-"))
+
+    def test_invisible_only_username_uses_isolated_bucket(self):
+        bucket = get_client_username(HttpRequest(), {"username": "\u200b\u200b"})
+        self.assertTrue(bucket.startswith("axes-unresolved-"))
+
+    def test_normalization_failure_logs_stable_reason(self):
+        with patch("axes.helpers.log.warning") as warning:
+            get_client_username(HttpRequest(), {"username": 123})
+        warning.assert_called_once_with(
+            "AXES: Username normalization failed (%s); using an isolated unresolved bucket.",
+            "not-a-string",
+        )
+
+    def test_get_unresolved_username_bucket_deterministic(self):
+        self.assertEqual(
+            get_unresolved_username_bucket("x"), get_unresolved_username_bucket("x")
+        )
+        self.assertNotEqual(
+            get_unresolved_username_bucket("x"), get_unresolved_username_bucket("y")
+        )
+
+    def test_truncation_applies_after_normalization(self):
+        max_length = AccessBase._meta.get_field("username").max_length
+        raw = "\uff38" * (max_length + 1)  # full-width X folds to ASCII "x"
+        self.assertEqual(
+            "x" * max_length, get_client_username(HttpRequest(), {"username": raw})
+        )
+
+    @override_settings(
+        AXES_WHITELIST_CALLABLE=lambda request, credentials: get_client_username(
+            request, credentials
+        ) == "user@example.com"
+    )
+    def test_whitelist_callable_sees_normalized_username(self):
+        request = HttpRequest()
+        request.POST["username"] = " USER\uff20example.com "
+        self.assertTrue(is_user_attempt_whitelisted(request))
+
+        request = HttpRequest()
+        request.POST["username"] = "other@example.com"
+        self.assertFalse(is_user_attempt_whitelisted(request))
+
+
+class UsernameAuditTestCase(AxesTestCase):
+    """Audit helpers classify and fingerprint raw usernames without storing them."""
+
+    def test_username_audit_category(self):
+        self.assertEqual("missing", get_username_audit_category(None))
+        self.assertEqual("invalid-type", get_username_audit_category(123))
+        self.assertEqual("empty", get_username_audit_category(""))
+        self.assertEqual("email-like", get_username_audit_category("user@example.com"))
+        self.assertEqual("phone-like", get_username_audit_category("+1 (555) 010-1234"))
+        self.assertEqual("username", get_username_audit_category("plain-user"))
+
+    def test_username_audit_fingerprint(self):
+        self.assertEqual("", get_username_audit_fingerprint(None))
+        self.assertEqual("", get_username_audit_fingerprint(""))
+        fingerprint = get_username_audit_fingerprint("user@example.com")
+        self.assertEqual(12, len(fingerprint))
+        self.assertEqual(
+            fingerprint, get_username_audit_fingerprint("user@example.com")
+        )
+        self.assertNotEqual(
+            fingerprint, get_username_audit_fingerprint("other@example.com")
+        )
+        self.assertNotIn("user@example.com", fingerprint)
 
 
 def get_ip(request: HttpRequest) -> str:

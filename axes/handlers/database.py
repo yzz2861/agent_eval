@@ -22,6 +22,9 @@ from axes.helpers import (
     get_lockout_parameters,
     get_query_str,
     get_attempt_expiration,
+    get_raw_client_username,
+    get_username_audit_category,
+    get_username_audit_fingerprint,
 )
 from axes.models import (
     AccessAttempt,
@@ -141,6 +144,16 @@ class AxesDatabaseHandler(AbstractAxesHandler, AxesBaseHandler):
         self.clean_expired_user_attempts(request, credentials)
 
         username = get_client_username(request, credentials)
+        raw_username = get_raw_client_username(request, credentials)
+        if raw_username != username:
+            # Audit trail for the applied identity normalization: record a
+            # controlled category and an irreversible fingerprint of the raw
+            # input instead of the full, potentially sensitive, raw value.
+            log.info(
+                "AXES: Login failure username normalized (category=%s, fingerprint=%s).",
+                get_username_audit_category(raw_username),
+                get_username_audit_fingerprint(raw_username),
+            )
         client_str = get_client_str(
             username,
             request.axes_ip_address,
@@ -274,6 +287,9 @@ class AxesDatabaseHandler(AbstractAxesHandler, AxesBaseHandler):
         if settings.AXES_ENABLE_ACCESS_FAILURE_LOG:
             with transaction.atomic(using=router.db_for_write(AccessFailureLog)):
                 AccessFailureLog.objects.create(
+                    # store the normalized identity, never the full raw input,
+                    # so audit records stay free of sensitive values while
+                    # remaining correlatable with the lockout records
                     username=username,
                     ip_address=request.axes_ip_address,
                     user_agent=request.axes_user_agent,

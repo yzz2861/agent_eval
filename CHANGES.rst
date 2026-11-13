@@ -2,6 +2,26 @@
 Changes
 =======
 
+Unreleased
+----------
+
+Features and fixes
+~~~~~~~~~~~~~~~~~~
+
+- Normalize usernames into stable identities before lockout key generation
+  and access record writes: Unicode normalization (NFKC), case folding,
+  whitespace handling, and invisible character removal are applied to every
+  username source (``AXES_USERNAME_CALLABLE``, credentials, and request
+  data) through one shared pipeline, so visually distinct writings of the
+  same account share one failure count. The rules are configurable with
+  ``AXES_USERNAME_NORMALIZATION`` globally and
+  ``AXES_USERNAME_BACKEND_NORMALIZATION`` per authentication backend.
+- Failed username normalization now maps each distinct bad input to an
+  isolated, deterministic bucket with a stable logged reason instead of
+  collapsing into a shared ``None`` bucket, and audit records store the
+  normalized identity plus a controlled category and fingerprint of the raw
+  input rather than the full, potentially sensitive, raw value.
+
 9.0.0 (2026-10-30)
 ------------------
 

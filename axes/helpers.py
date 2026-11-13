@@ -1,8 +1,10 @@
+import re
+import unicodedata
 from datetime import timedelta, datetime
 from hashlib import sha256
 from logging import getLogger
 from string import Template
-from typing import Callable, Optional, Type, Union, List
+from typing import Callable, Dict, Optional, Type, Union, List
 from urllib.parse import urlencode
 
 from django.contrib.auth import get_user_model
@@ -190,20 +192,227 @@ def get_username_from_data(data: dict) -> Optional[str]:
     return username
 
 
-def get_client_username(
-    request: HttpRequest, credentials: Optional[dict] = None
-) -> str:
+class UsernameNormalizationError(ValueError):
     """
-    Resolve client username from the given request or credentials if supplied.
+    Raised when a raw username value can not be normalized into a stable identity.
+
+    The ``reason`` attribute is a stable, machine-readable slug describing
+    why normalization failed, and ``raw`` holds the offending value so callers
+    can derive an isolated fallback bucket instead of collapsing every bad
+    input into a single shared one.
+    """
+
+    def __init__(self, reason: str, raw):
+        self.reason = reason
+        self.raw = raw
+        super().__init__(reason)
+
+
+# Default identity normalization rules applied to usernames before they are
+# used for lockout keys or access records. Each rule can be toggled or tuned
+# with ``settings.AXES_USERNAME_NORMALIZATION`` globally or with
+# ``settings.AXES_USERNAME_BACKEND_NORMALIZATION`` per authentication backend.
+DEFAULT_USERNAME_NORMALIZATION: Dict[str, object] = {
+    # Unicode normalization form; NFKC folds full-width and compatibility
+    # characters (e.g. a full-width at sign) into their canonical equivalents
+    "form": "NFKC",
+    # Unicode casefolding so that e.g. upper and lower case writings of the
+    # same identifier resolve to the same identity
+    "casefold": True,
+    # strip leading and trailing whitespace
+    "strip": True,
+    # collapse runs of internal whitespace into a single space
+    "collapse_whitespace": True,
+    # strip invisible characters (Unicode category Cf) such as zero-width
+    # spaces, word joiners, and soft hyphens
+    "strip_invisible": True,
+}
+
+
+def get_client_backend_path(
+    request: Optional[HttpRequest] = None, credentials: Optional[dict] = None
+) -> Optional[str]:
+    """
+    Resolve the dotted path of the authentication backend that produced
+    the given credentials, if it is declared.
+
+    The backend can be declared either as a ``backend`` key in the
+    credentials or as an ``axes_backend`` attribute on the request, and
+    can be given as a dotted path string, a class, or an instance.
+    """
+
+    backend = None
+    if credentials:
+        backend = credentials.get("backend")
+    if backend is None and request is not None:
+        backend = getattr(request, "axes_backend", None)
+    if backend is None:
+        return None
+    if isinstance(backend, str):
+        return backend
+    if isinstance(backend, type):
+        return f"{backend.__module__}.{backend.__qualname__}"
+    return f"{type(backend).__module__}.{type(backend).__qualname__}"
+
+
+def get_username_normalization_rules(
+    request: Optional[HttpRequest] = None, credentials: Optional[dict] = None
+) -> Dict[str, object]:
+    """
+    Resolve the identity normalization rules for the given request.
+
+    Rules are layered in the following order, later sources overriding
+    earlier ones:
+
+    1. ``DEFAULT_USERNAME_NORMALIZATION``
+    2. ``settings.AXES_USERNAME_NORMALIZATION`` - a dict of overrides,
+       or a callable / dotted path to a callable taking
+       ``(request, credentials)`` and returning a dict of overrides
+    3. ``settings.AXES_USERNAME_BACKEND_NORMALIZATION`` - a dict mapping
+       authentication backend dotted paths to rule overrides, allowing
+       each backend to declare its own stable identifier rules
+    """
+
+    rules = dict(DEFAULT_USERNAME_NORMALIZATION)
+
+    configured = settings.AXES_USERNAME_NORMALIZATION
+    if isinstance(configured, str):
+        configured = import_string(configured)
+    if callable(configured):
+        configured = configured(request, credentials)  # pylint: disable=not-callable
+    if configured is not None:
+        if not isinstance(configured, dict):
+            raise TypeError(
+                "settings.AXES_USERNAME_NORMALIZATION needs to be a dict, "
+                "a callable returning a dict, a dotted path, or None."
+            )
+        rules.update(configured)
+
+    backend_path = get_client_backend_path(request, credentials)
+    backend_overrides = settings.AXES_USERNAME_BACKEND_NORMALIZATION
+    if backend_path and isinstance(backend_overrides, dict):
+        overrides = backend_overrides.get(backend_path)
+        if overrides:
+            rules.update(overrides)
+
+    return rules
+
+
+def normalize_username(
+    username: Optional[str], rules: Optional[Dict[str, object]] = None
+) -> Optional[str]:
+    """
+    Normalize a raw username into a stable identity string.
+
+    The normalization pipeline applies, in order: Unicode normalization
+    (``form``), invisible character removal (``strip_invisible``),
+    leading/trailing whitespace stripping (``strip``), internal whitespace
+    collapsing (``collapse_whitespace``), and case folding (``casefold``).
+
+    The whole value is normalized uniformly, so distinct identifiers such
+    as email local parts and tenant suffixes are never merged together.
+
+    Returns ``None`` for a ``None`` input and an empty string for an empty input.
+
+    :raises UsernameNormalizationError: if the value is not a string, or a
+        non-empty value normalizes to an empty string; the exception carries
+        a stable ``reason`` and the offending ``raw`` value.
+    """
+
+    if username is None:
+        return None
+    if not isinstance(username, str):
+        raise UsernameNormalizationError("not-a-string", username)
+
+    if rules is None:
+        rules = dict(DEFAULT_USERNAME_NORMALIZATION)
+
+    normalized = username
+
+    form = rules.get("form")
+    if form:
+        normalized = unicodedata.normalize(str(form), normalized)
+
+    if rules.get("strip_invisible"):
+        normalized = "".join(
+            char for char in normalized if unicodedata.category(char) != "Cf"
+        )
+
+    if rules.get("strip"):
+        normalized = normalized.strip()
+
+    if rules.get("collapse_whitespace"):
+        normalized = re.sub(r"\s+", " ", normalized)
+
+    if rules.get("casefold"):
+        normalized = normalized.casefold()
+
+    if username and not normalized:
+        raise UsernameNormalizationError("empty-after-normalization", username)
+
+    return normalized
+
+
+def get_unresolved_username_bucket(raw) -> str:
+    """
+    Derive an isolated, stable bucket identifier for a raw username value
+    that failed normalization.
+
+    Distinct bad inputs map to distinct buckets while the same bad input
+    always maps to the same bucket, so failures can not be pooled into one
+    shared, permissive bucket and a single bad actor still accumulates
+    failures towards the lockout threshold.
+    """
+
+    digest = sha256(force_bytes(repr(raw))).hexdigest()[:16]
+    return f"axes-unresolved-{digest}"
+
+
+def get_username_audit_category(username) -> str:
+    """
+    Classify a raw username into a controlled, non-sensitive category
+    suitable for audit records.
+    """
+
+    if username is None:
+        return "missing"
+    if not isinstance(username, str):
+        return "invalid-type"
+    if not username:
+        return "empty"
+    if "@" in username:
+        return "email-like"
+    if re.fullmatch(r"\+?[\d\s().-]*\d[\d\s().-]*", username):
+        return "phone-like"
+    return "username"
+
+
+def get_username_audit_fingerprint(username) -> str:
+    """
+    Return a short, irreversible fingerprint of a raw username for audit
+    correlation, or an empty string if there is no usable value.
+
+    The fingerprint lets auditors correlate records belonging to the same
+    raw input without storing the full, potentially sensitive, input.
+    """
+
+    if not isinstance(username, str) or not username:
+        return ""
+    return sha256(force_bytes(username)).hexdigest()[:12]
+
+
+def get_raw_client_username(
+    request: HttpRequest, credentials: Optional[dict] = None
+) -> Optional[str]:
+    """
+    Resolve the raw, unnormalized client username from the given request
+    or credentials if supplied.
 
     The order of preference for fetching the username is as follows:
 
     1. If configured, use ``AXES_USERNAME_CALLABLE``, and supply ``request, credentials`` as arguments
     2. If given, use ``credentials`` and fetch username from ``AXES_USERNAME_FORM_FIELD`` (defaults to ``username``)
     3. Use request.POST and fetch username from ``AXES_USERNAME_FORM_FIELD`` (defaults to ``username``)
-
-    Truncate usernames to the maximum length of ``AccessBase.username`` so
-    database records and lockout lookups use the same value.
 
     :param request: incoming Django ``HttpRequest`` or similar object from authentication backend or other source
     :param credentials: incoming credentials ``dict`` or similar object from authentication backend or other source
@@ -235,6 +444,49 @@ def get_client_username(
         )
         request_data = getattr(request, "data", request.POST)
         username = get_username_from_data(request_data)
+
+    return username
+
+
+def get_client_username(
+    request: HttpRequest, credentials: Optional[dict] = None
+) -> str:
+    """
+    Resolve the normalized client username from the given request or
+    credentials if supplied.
+
+    The raw username is first extracted with :func:`get_raw_client_username`
+    from the explicitly configured source (``AXES_USERNAME_CALLABLE``,
+    ``credentials``, or the request data), and then normalized with
+    :func:`normalize_username` using the rules resolved by
+    :func:`get_username_normalization_rules`, so that every source shares
+    one stable identity pipeline.
+
+    If normalization fails, the failure is logged with a stable reason and
+    an isolated, deterministic bucket derived from the offending value is
+    returned instead of ``None``, so distinct bad inputs never share
+    a single permissive bucket.
+
+    Finally, usernames are truncated to the maximum length of
+    ``AccessBase.username`` so database records and lockout lookups
+    use the same value.
+
+    :param request: incoming Django ``HttpRequest`` or similar object from authentication backend or other source
+    :param credentials: incoming credentials ``dict`` or similar object from authentication backend or other source
+    """
+
+    username = get_raw_client_username(request, credentials)
+
+    if username is not None:
+        rules = get_username_normalization_rules(request, credentials)
+        try:
+            username = normalize_username(username, rules)
+        except UsernameNormalizationError as exc:
+            log.warning(
+                "AXES: Username normalization failed (%s); using an isolated unresolved bucket.",
+                exc.reason,
+            )
+            username = get_unresolved_username_bucket(exc.raw)
 
     max_length = AccessBase._meta.get_field("username").max_length
     if isinstance(username, str) and len(username) > max_length:

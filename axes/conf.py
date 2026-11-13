@@ -85,6 +85,20 @@ settings.AXES_PASSWORD_FORM_FIELD = getattr(
 # use a provided callable to transform the POSTed username into the one used in credentials
 settings.AXES_USERNAME_CALLABLE = getattr(settings, "AXES_USERNAME_CALLABLE", None)
 
+# identity normalization rules applied to the extracted username before
+# it is used for lockout keys and access records; can be a dict of rule
+# overrides, a callable, or a dotted path to a callable returning a dict
+settings.AXES_USERNAME_NORMALIZATION = getattr(
+    settings, "AXES_USERNAME_NORMALIZATION", None
+)
+
+# per-authentication-backend normalization rule overrides, keyed by the
+# dotted path of the authentication backend declaring its own stable
+# identifier rules
+settings.AXES_USERNAME_BACKEND_NORMALIZATION = getattr(
+    settings, "AXES_USERNAME_BACKEND_NORMALIZATION", {}
+)
+
 # determine if given user should be always allowed to attempt authentication
 settings.AXES_WHITELIST_CALLABLE = getattr(settings, "AXES_WHITELIST_CALLABLE", None)
 

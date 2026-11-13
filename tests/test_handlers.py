@@ -238,6 +238,62 @@ class ResetAttemptsTestCase(AxesHandlerBaseTestCase):
     AXES_ENABLE_ACCESS_FAILURE_LOG=True,
 )
 class AxesDatabaseHandlerTestCase(AxesHandlerBaseTestCase):
+    @override_settings(AXES_LOCKOUT_PARAMETERS=["username"], AXES_FAILURE_LIMIT=10)
+    def test_user_login_failed_ten_username_variants_share_lockout(self):
+        """
+        Ten different writings of the same account (full-width characters,
+        combining marks, zero-width characters, case, and whitespace) share
+        one failure count, so the eleventh attempt is already locked out.
+        """
+        variants = [
+            "user@example.com",
+            "USER@example.com",
+            "User@Example.Com",
+            "\uff55\uff53\uff45\uff52\uff20example.com",
+            "  user@example.com  ",
+            "user\u200b@example.com",
+            "user@example.com\u2060",
+            "user\uff20example.com",
+            "user@example\uff0ecom",
+            "\tuser@example.com\n",
+        ]
+        for variant in variants:
+            AxesProxyHandler.user_login_failed(
+                sender=None, request=self.request, credentials={"username": variant}
+            )
+
+        attempt = AccessAttempt.objects.get()
+        self.assertEqual("user@example.com", attempt.username)
+        self.assertEqual(10, attempt.failures_since_start)
+
+        # the eleventh attempt is already locked out before any new record
+        self.request.axes_locked_out = False
+        self.assertFalse(
+            AxesProxyHandler.is_allowed(self.request, {"username": "USER@EXAMPLE.COM"})
+        )
+
+    @override_settings(AXES_LOCKOUT_PARAMETERS=["username"], AXES_FAILURE_LIMIT=3)
+    def test_user_login_failed_legitimate_users_do_not_share_attempts(self):
+        """Two legitimate users with distinct tenant suffixes never collide."""
+        for _ in range(2):
+            AxesProxyHandler.user_login_failed(
+                sender=None,
+                request=self.request,
+                credentials={"username": "user@tenant-a.example.com"},
+            )
+        AxesProxyHandler.user_login_failed(
+            sender=None,
+            request=self.request,
+            credentials={"username": "user@tenant-b.example.com"},
+        )
+
+        attempts = AccessAttempt.objects.order_by("username")
+        self.assertEqual(2, attempts.count())
+        self.assertEqual("user@tenant-a.example.com", attempts[0].username)
+        self.assertEqual(2, attempts[0].failures_since_start)
+        self.assertEqual("user@tenant-b.example.com", attempts[1].username)
+        self.assertEqual(1, attempts[1].failures_since_start)
+
     def test_user_login_failed_truncates_long_username(self):
         max_length = AccessAttempt._meta.get_field("username").max_length
         username = "x" * (max_length + 1)
