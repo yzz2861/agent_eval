@@ -10,6 +10,7 @@ from .models import StaticDevice, StaticToken
 
 class StaticTokenInline(admin.TabularInline):
     model = StaticToken
+    fields = ['token']
     extra = 0
 
 

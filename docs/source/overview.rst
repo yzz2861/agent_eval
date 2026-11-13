@@ -364,7 +364,7 @@ Static Devices
 .. module:: django_otp.plugins.otp_static
 
 .. automodule:: django_otp.plugins.otp_static.models
-    :members: StaticDevice, StaticToken
+    :members: StaticDevice, StaticToken, StaticTokenBatch
 
 .. autoclass:: django_otp.plugins.otp_static.admin.StaticDeviceAdmin
 
@@ -388,7 +388,11 @@ addstatictoken
 The static plugin also includes a management command called ``addstatictoken``,
 which will add a single static token to any account. This is useful for
 bootstrapping and emergency access. Run ``manage.py addstatictoken -h`` for
-details.
+details. Use ``--count`` to issue several codes as one revocable batch.
+
+``importstatictokens`` imports a CSV file idempotently. Recovery codes are
+normalized for case and presentation separators, and duplicate values are
+skipped. ``revokestaticbatch`` revokes all unused codes in a batch.
 
 
 Email Devices
