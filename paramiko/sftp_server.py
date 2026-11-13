@@ -76,6 +76,7 @@ from paramiko.sftp import (
     int64,
 )
 from paramiko.sftp_attr import SFTPAttributes
+from paramiko.sftp_path import RootedPathResolver, SFTPPathError
 from paramiko.sftp_si import SFTPServerInterface
 from paramiko.util import b
 
@@ -96,6 +97,7 @@ class SFTPServer(BaseSFTP, SubsystemHandler):
         name,
         server,
         sftp_si=SFTPServerInterface,
+        sftp_root=None,
         *args,
         **kwargs,
     ):
@@ -112,9 +114,20 @@ class SFTPServer(BaseSFTP, SubsystemHandler):
         :param sftp_si:
             a subclass of `.SFTPServerInterface` to use for handling individual
             requests.
+        :param str sftp_root:
+            local directory that forms the root of the SFTP filesystem. Every
+            client-supplied path is decoded, normalized and (following
+            symlinks) verified to stay inside this directory before any
+            server-interface callback is invoked. Defaults to the current
+            working directory. The process working directory itself is never
+            changed.
         """
         BaseSFTP.__init__(self)
         SubsystemHandler.__init__(self, channel, name, server)
+        if sftp_root is None:
+            sftp_root = os.getcwd()
+        self.sftp_root = sftp_root
+        self.path_resolver = RootedPathResolver(sftp_root)
         transport = channel.get_transport()
         self.logger = util.get_logger(transport.get_log_channel() + ".sftp")
         self.ultra_debug = transport.get_hexdump()
@@ -122,6 +135,7 @@ class SFTPServer(BaseSFTP, SubsystemHandler):
         # map of handle-string to SFTPHandle for files & folders:
         self.file_table = {}
         self.folder_table = {}
+        kwargs.setdefault("sftp_root", self.path_resolver.root)
         self.server = sftp_si(server, *args, **kwargs)
 
     def _log(self, level, msg):
@@ -374,12 +388,41 @@ class SFTPServer(BaseSFTP, SubsystemHandler):
             flags |= os.O_EXCL
         return flags
 
+    def _path_error_status(self, error):
+        """Translate an `.SFTPPathError` into the matching SFTP status."""
+        return error.sftp_code
+
+    def _safe_virtual_path(self, path, follow_final=True):
+        """
+        Validate one client path against the configured SFTP root.
+
+        Returns the normalized virtual path (still in SFTP ``/`` notation)
+        so existing server-interface implementations keep working unchanged.
+        The containment check itself runs against the real local filesystem,
+        including symlink resolution, and raises `.SFTPPathError` before any
+        application callback can perform I/O.
+        """
+        if follow_final:
+            self.path_resolver.resolve(path)
+        else:
+            self.path_resolver.resolve_lstat(path)
+        return self.path_resolver.normalize_virtual(path)
+
+    def _safe_link_target(self, link_path, target_path):
+        """Validate the target of a client-requested symbolic link."""
+        self.path_resolver.resolve_link_target(link_path, target_path)
+
     def _process(self, t, request_number, msg):
         self._log(DEBUG, "Request: {}".format(CMD_NAMES[t]))
         if t == CMD_OPEN:
             path = msg.get_text()
             flags = self._convert_pflags(msg.get_int())
             attr = SFTPAttributes._from_msg(msg)
+            try:
+                path = self._safe_virtual_path(path)
+            except SFTPPathError as e:
+                self._send_status(request_number, self._path_error_status(e))
+                return
             self._send_handle_response(
                 request_number, self.server.open(path, flags, attr)
             )
@@ -428,22 +471,48 @@ class SFTPServer(BaseSFTP, SubsystemHandler):
             )
         elif t == CMD_REMOVE:
             path = msg.get_text()
+            try:
+                path = self._safe_virtual_path(path)
+            except SFTPPathError as e:
+                self._send_status(request_number, self._path_error_status(e))
+                return
             self._send_status(request_number, self.server.remove(path))
         elif t == CMD_RENAME:
             oldpath = msg.get_text()
             newpath = msg.get_text()
+            try:
+                oldpath = self._safe_virtual_path(oldpath)
+                newpath = self._safe_virtual_path(newpath)
+            except SFTPPathError as e:
+                self._send_status(request_number, self._path_error_status(e))
+                return
             self._send_status(
                 request_number, self.server.rename(oldpath, newpath)
             )
         elif t == CMD_MKDIR:
             path = msg.get_text()
             attr = SFTPAttributes._from_msg(msg)
+            try:
+                path = self._safe_virtual_path(path)
+            except SFTPPathError as e:
+                self._send_status(request_number, self._path_error_status(e))
+                return
             self._send_status(request_number, self.server.mkdir(path, attr))
         elif t == CMD_RMDIR:
             path = msg.get_text()
+            try:
+                path = self._safe_virtual_path(path)
+            except SFTPPathError as e:
+                self._send_status(request_number, self._path_error_status(e))
+                return
             self._send_status(request_number, self.server.rmdir(path))
         elif t == CMD_OPENDIR:
             path = msg.get_text()
+            try:
+                path = self._safe_virtual_path(path)
+            except SFTPPathError as e:
+                self._send_status(request_number, self._path_error_status(e))
+                return
             self._open_folder(request_number, path)
             return
         elif t == CMD_READDIR:
@@ -457,6 +526,11 @@ class SFTPServer(BaseSFTP, SubsystemHandler):
             self._read_folder(request_number, folder)
         elif t == CMD_STAT:
             path = msg.get_text()
+            try:
+                path = self._safe_virtual_path(path)
+            except SFTPPathError as e:
+                self._send_status(request_number, self._path_error_status(e))
+                return
             resp = self.server.stat(path)
             if issubclass(type(resp), SFTPAttributes):
                 self._response(request_number, CMD_ATTRS, resp)
@@ -464,6 +538,13 @@ class SFTPServer(BaseSFTP, SubsystemHandler):
                 self._send_status(request_number, resp)
         elif t == CMD_LSTAT:
             path = msg.get_text()
+            try:
+                # inspect the link itself rather than following it, but
+                # parent components are still fully resolved & contained.
+                path = self._safe_virtual_path(path, follow_final=False)
+            except SFTPPathError as e:
+                self._send_status(request_number, self._path_error_status(e))
+                return
             resp = self.server.lstat(path)
             if issubclass(type(resp), SFTPAttributes):
                 self._response(request_number, CMD_ATTRS, resp)
@@ -484,6 +565,11 @@ class SFTPServer(BaseSFTP, SubsystemHandler):
         elif t == CMD_SETSTAT:
             path = msg.get_text()
             attr = SFTPAttributes._from_msg(msg)
+            try:
+                path = self._safe_virtual_path(path)
+            except SFTPPathError as e:
+                self._send_status(request_number, self._path_error_status(e))
+                return
             self._send_status(request_number, self.server.chattr(path, attr))
         elif t == CMD_FSETSTAT:
             handle = msg.get_binary()
@@ -498,6 +584,11 @@ class SFTPServer(BaseSFTP, SubsystemHandler):
             )
         elif t == CMD_READLINK:
             path = msg.get_text()
+            try:
+                path = self._safe_virtual_path(path, follow_final=False)
+            except SFTPPathError as e:
+                self._send_status(request_number, self._path_error_status(e))
+                return
             resp = self.server.readlink(path)
             if isinstance(resp, (bytes, str)):
                 self._response(
@@ -510,11 +601,22 @@ class SFTPServer(BaseSFTP, SubsystemHandler):
             # path always follows target_path
             target_path = msg.get_text()
             path = msg.get_text()
+            try:
+                path = self._safe_virtual_path(path, follow_final=False)
+                self._safe_link_target(path, target_path)
+            except SFTPPathError as e:
+                self._send_status(request_number, self._path_error_status(e))
+                return
             self._send_status(
                 request_number, self.server.symlink(target_path, path)
             )
         elif t == CMD_REALPATH:
             path = msg.get_text()
+            try:
+                path = self._safe_virtual_path(path)
+            except SFTPPathError as e:
+                self._send_status(request_number, self._path_error_status(e))
+                return
             rpath = self.server.canonicalize(path)
             self._response(
                 request_number, CMD_NAME, 1, rpath, "", SFTPAttributes()
@@ -526,6 +628,14 @@ class SFTPServer(BaseSFTP, SubsystemHandler):
             elif tag == "posix-rename@openssh.com":
                 oldpath = msg.get_text()
                 newpath = msg.get_text()
+                try:
+                    oldpath = self._safe_virtual_path(oldpath)
+                    newpath = self._safe_virtual_path(newpath)
+                except SFTPPathError as e:
+                    self._send_status(
+                        request_number, self._path_error_status(e)
+                    )
+                    return
                 self._send_status(
                     request_number, self.server.posix_rename(oldpath, newpath)
                 )
