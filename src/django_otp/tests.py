@@ -7,7 +7,8 @@ import unittest
 from django.contrib.auth.models import AnonymousUser
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.db import IntegrityError, connection
+from django.db import IntegrityError, connection, transaction
+from django.db.transaction import TransactionManagementError
 from django.test import AsyncRequestFactory, RequestFactory, skipUnlessDBFeature
 from django.test.utils import override_settings
 from django.urls import reverse
@@ -27,6 +28,7 @@ from django_otp.forms import (
     otp_verification_failed,
 )
 from django_otp.middleware import OTPMiddleware
+from django_otp.models import Device
 from django_otp.plugins.otp_static.models import StaticDevice, StaticToken
 
 from .test_utils import TestCase, TransactionTestCase
@@ -90,6 +92,243 @@ class APITestCase(TestCase):
         classes = list(device_classes())
 
         self.assertFalse(any(model._meta.proxy for model in classes))
+
+
+class DevicePersistentIdTestCase(TestCase):
+    def setUp(self):
+        try:
+            self.alice = self.create_user('alice', 'password')
+            self.bob = self.create_user('bob', 'password')
+        except IntegrityError:
+            self.skipTest("Unable to create a test user.")
+        else:
+            self.device = self.alice.staticdevice_set.create()
+            self.device.token_set.create(token='alice')
+            self.bob_device = self.bob.staticdevice_set.create()
+            self.bob_device.token_set.create(token='alice')
+            self.unconfirmed_device = self.alice.staticdevice_set.create(
+                confirmed=False
+            )
+            self.unconfirmed_device.token_set.create(token='alice')
+
+    def test_round_trip(self):
+        self.assertEqual(
+            Device.from_persistent_id(self.device.persistent_id, user=self.alice),
+            self.device,
+        )
+        # The generic, unscoped lookup remains available for non-verification
+        # use cases.
+        self.assertEqual(
+            Device.from_persistent_id(self.device.persistent_id), self.device
+        )
+
+    def test_invalid_persistent_ids(self):
+        device_id = self.device.id
+        model_label = self.device.model_label()
+        invalid_ids = [
+            'otp_bogus.bogusdevice/{}'.format(device_id),
+            'otp_static.nosuchmodel/{}'.format(device_id),
+            '{}.{}/{}'.format(
+                self.alice._meta.app_label,
+                self.alice._meta.model_name,
+                self.alice.id,
+            ),
+            '{}/0{}'.format(model_label, device_id),
+            '{}/-{}'.format(model_label, device_id),
+            '{}/+{}'.format(model_label, device_id),
+            '{}/{}/extra'.format(model_label, device_id),
+            '{}.extra/{}'.format(model_label, device_id),
+            '{}/{} '.format(model_label, device_id),
+            '{}/  {}'.format(model_label, device_id),
+        ]
+        # This one is valid, so the list above can't just be "anything weird".
+        self.assertIsNotNone(
+            Device.from_persistent_id('{}/{}'.format(model_label, device_id))
+        )
+
+        for invalid_id in invalid_ids:
+            with self.subTest(persistent_id=invalid_id):
+                self.assertIsNone(
+                    Device.from_persistent_id(invalid_id, user=self.alice)
+                )
+
+    def test_cross_user_lookup_is_indistinguishable_from_missing(self):
+        self.assertIsNone(
+            Device.from_persistent_id(self.bob_device.persistent_id, user=self.alice)
+        )
+        self.assertIsNone(
+            Device.from_persistent_id(
+                'otp_static.staticdevice/{}'.format(self.bob_device.id + 1000),
+                user=self.alice,
+            )
+        )
+
+        self.assertIsNone(
+            verify_token(self.alice, self.bob_device.persistent_id, 'alice')
+        )
+        self.assertIsNone(
+            verify_token(
+                self.alice,
+                'otp_static.staticdevice/{}'.format(self.bob_device.id + 1000),
+                'alice',
+            )
+        )
+
+    def test_unconfirmed_device_is_not_loadable_for_verification(self):
+        with transaction.atomic():
+            self.assertIsNone(
+                Device.from_persistent_id(
+                    self.unconfirmed_device.persistent_id,
+                    user=self.alice,
+                    for_verify=True,
+                )
+            )
+
+        self.assertIsNone(
+            Device.from_persistent_id(
+                self.unconfirmed_device.persistent_id, user=self.alice
+            )
+        )
+        self.assertIsNone(
+            verify_token(self.alice, self.unconfirmed_device.persistent_id, 'alice')
+        )
+
+    def test_for_verify_binds_user_and_confirmation(self):
+        with transaction.atomic():
+            self.assertEqual(
+                Device.from_persistent_id(
+                    self.device.persistent_id, user=self.alice, for_verify=True
+                ),
+                self.device,
+            )
+
+    async def test_async_round_trip(self):
+        self.assertEqual(
+            await Device.afrom_persistent_id(
+                self.device.persistent_id, user=self.alice
+            ),
+            self.device,
+        )
+
+    async def test_async_for_verify_inside_transaction(self):
+        self.assertEqual(
+            await Device.afrom_persistent_id(
+                self.device.persistent_id, user=self.alice, for_verify=True
+            ),
+            self.device,
+        )
+
+    async def test_async_reuses_the_same_parsing_rules(self):
+        for invalid_id in [
+            'otp_bogus.bogusdevice/{}'.format(self.device.id),
+            '{}/0{}'.format(self.device.model_label(), self.device.id),
+            '{}/-{}'.format(self.device.model_label(), self.device.id),
+            '{}/{}/extra'.format(self.device.model_label(), self.device.id),
+        ]:
+            with self.subTest(persistent_id=invalid_id):
+                self.assertIsNone(
+                    await Device.afrom_persistent_id(invalid_id, user=self.alice)
+                )
+
+    async def test_async_cross_user_and_unconfirmed(self):
+        self.assertIsNone(
+            await Device.afrom_persistent_id(
+                self.bob_device.persistent_id, user=self.alice
+            )
+        )
+        self.assertIsNone(
+            await Device.afrom_persistent_id(
+                self.unconfirmed_device.persistent_id, user=self.alice
+            )
+        )
+
+
+class DevicePersistentIdTransactionTestCase(TransactionTestCase):
+    def setUp(self):
+        try:
+            self.alice = self.create_user('alice', 'password')
+        except IntegrityError:
+            self.skipTest("Unable to create a test user.")
+        else:
+            self.device = self.alice.staticdevice_set.create()
+            self.unconfirmed_device = self.alice.staticdevice_set.create(
+                confirmed=False
+            )
+
+    def test_for_verify_requires_a_transaction(self):
+        with self.assertRaises(TransactionManagementError):
+            Device.from_persistent_id(
+                self.device.persistent_id, user=self.alice, for_verify=True
+            )
+
+    async def test_async_for_verify_requires_a_transaction(self):
+        with self.assertRaises(TransactionManagementError):
+            await Device.afrom_persistent_id(
+                self.device.persistent_id, user=self.alice, for_verify=True
+            )
+
+    def test_for_verify_inside_a_transaction(self):
+        with transaction.atomic():
+            self.assertEqual(
+                Device.from_persistent_id(
+                    self.device.persistent_id, user=self.alice, for_verify=True
+                ),
+                self.device,
+            )
+
+
+class OTPAuthenticationFormPersistentIdTestCase(TestCase):
+    def setUp(self):
+        try:
+            self.alice = self.create_user('alice', 'password')
+            self.bob = self.create_user('bob', 'password')
+        except IntegrityError:
+            self.skipTest("Unable to create a test user.")
+        else:
+            self.device = self.alice.staticdevice_set.create()
+            self.device.token_set.create(token='alice')
+            self.bob_device = self.bob.staticdevice_set.create()
+            self.bob_device.token_set.create(token='alice')
+            self.unconfirmed_device = self.alice.staticdevice_set.create(
+                confirmed=False
+            )
+            self.unconfirmed_device.token_set.create(token='alice')
+
+    def _form_error_code(self, device_id):
+        form = OTPAuthenticationForm(
+            None,
+            {
+                'username': 'alice',
+                'password': 'password',
+                'otp_device': device_id,
+                'otp_token': 'alice',
+            },
+        )
+        self.assertFalse(form.is_valid())
+        return form.errors['__all__'].as_data()[0].code
+
+    def test_cross_user_selection_matches_missing_device(self):
+        self.assertEqual(
+            self._form_error_code(self.bob_device.persistent_id), 'device_required'
+        )
+        self.assertEqual(
+            self._form_error_code(
+                'otp_static.staticdevice/{}'.format(self.bob_device.id + 1000)
+            ),
+            'device_required',
+        )
+
+    def test_unconfirmed_selection_is_rejected(self):
+        self.assertEqual(
+            self._form_error_code(self.unconfirmed_device.persistent_id),
+            'device_required',
+        )
+        self.assertEqual(
+            self._form_error_code(
+                'otp_static.staticdevice/{}'.format(self.bob_device.id + 1000)
+            ),
+            'device_required',
+        )
 
 
 class OTPVerificationFailedSignalTestCase(TestCase):

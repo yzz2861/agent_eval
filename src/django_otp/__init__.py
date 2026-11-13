@@ -62,12 +62,8 @@ def verify_token(user, device_id, token):
 
     verified = None
     with transaction.atomic():
-        device = Device.from_persistent_id(device_id, for_verify=True)
-        if (
-            (device is not None)
-            and (device.user_id == user.pk)
-            and device.verify_token(token)
-        ):
+        device = Device.from_persistent_id(device_id, user=user, for_verify=True)
+        if (device is not None) and device.verify_token(token):
             verified = device
 
     return verified

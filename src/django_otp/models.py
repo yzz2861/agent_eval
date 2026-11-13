@@ -1,11 +1,13 @@
-from contextlib import suppress
 from datetime import timedelta
 import enum
+
+from asgiref.sync import sync_to_async
 
 from django.apps import apps
 from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
-from django.db import models
+from django.db import models, transaction
+from django.db.transaction import TransactionManagementError
 from django.utils import timezone
 from django.utils.functional import cached_property
 
@@ -128,40 +130,169 @@ class Device(models.Model):
         return '{0}.{1}'.format(cls._meta.app_label, cls._meta.model_name)
 
     @classmethod
-    def from_persistent_id(cls, persistent_id, for_verify=False):
+    def from_persistent_id(cls, persistent_id, *args, user=None, for_verify=False):
         """
         Loads a device from its persistent id::
 
             device == Device.from_persistent_id(device.persistent_id)
 
+        :param user: The user that must own the device. When omitted, the
+            lookup is unscoped; device verification always requires a
+            user scope.
+
         :param bool for_verify: If ``True``, we'll load the device with
             :meth:`~django.db.models.query.QuerySet.select_for_update` to
-            prevent concurrent verifications from succeeding. In which case,
-            this must be called inside a transaction.
+            prevent concurrent verifications from succeeding, and only a
+            confirmed device belonging to ``user`` can be returned. In which
+            case, this must be called inside a transaction.
 
         """
-        with suppress(ValueError, LookupError):
-            return cls._filter_persistent_id(persistent_id, for_verify).first()
-        return None
+        user, for_verify = cls._normalize_persistent_id_args(args, user, for_verify)
+
+        device_set = cls._filter_persistent_id(
+            persistent_id, user=user, for_verify=for_verify
+        )
+        if device_set is None:
+            return None
+        return device_set.first()
 
     @classmethod
-    async def afrom_persistent_id(cls, persistent_id, for_verify=False):
-        with suppress(ValueError, LookupError):
-            return await cls._filter_persistent_id(persistent_id, for_verify).afirst()
-        return None
+    async def afrom_persistent_id(
+        cls, persistent_id, *args, user=None, for_verify=False
+    ):
+        user, for_verify = cls._normalize_persistent_id_args(args, user, for_verify)
+
+        device_set = cls._filter_persistent_id(
+            persistent_id,
+            user=user,
+            for_verify=for_verify,
+            check_transaction=False,
+        )
+        if device_set is None:
+            return None
+
+        if for_verify:
+            await sync_to_async(
+                cls._validate_for_verify_transaction, thread_sensitive=True
+            )(device_set.db)
+
+        return await device_set.afirst()
+
+    @staticmethod
+    def _normalize_persistent_id_args(args, user, for_verify):
+        # Support both historical and current positional orderings without
+        # making ``user`` and ``for_verify`` ambiguous when passed by keyword.
+        if len(args) > 2:
+            raise TypeError("from_persistent_id() takes at most 3 positional arguments")
+
+        if len(args) == 1:
+            if isinstance(args[0], bool):
+                for_verify = args[0]
+            else:
+                user = args[0]
+        elif len(args) == 2:
+            first, second = args
+            if isinstance(first, bool):
+                for_verify, user = first, second
+            elif isinstance(second, bool):
+                user, for_verify = first, second
+            else:
+                raise TypeError("from_persistent_id() expects a user and a boolean")
+
+        if isinstance(user, bool):
+            return None, user
+        return user, for_verify
 
     @classmethod
-    def _filter_persistent_id(cls, persistent_id, for_verify=False):
-        model_label, device_id = persistent_id.rsplit("/", 1)
+    def _parse_persistent_id(cls, persistent_id):
+        """
+        Parses a persistent id into ``(device_model, device_id)``.
+
+        Returns ``None`` for anything that isn't an unambiguous, canonical
+        persistent id naming a registered :class:`Device` subclass. This is
+        shared by the sync and async loading paths so they can't diverge.
+        """
+        if not isinstance(persistent_id, str):
+            return None
+
+        # The separator and the model label separator must each be unique. This
+        # rules out extra slashes as well as full import paths in model labels.
+        if persistent_id.count("/") != 1:
+            return None
+
+        model_label, device_id = persistent_id.split("/")
+        if model_label.count(".") != 1:
+            return None
+
         app_label, model_name = model_label.split(".")
+        if not app_label or not model_name or not device_id:
+            return None
 
-        device_cls = apps.get_model(app_label, model_name)
-        if issubclass(device_cls, Device):
-            device_set = device_cls.objects.filter(id=int(device_id))
-            if for_verify:
-                device_set = device_set.select_for_update()
-            return device_set
-        return None
+        # Only a canonical decimal id (no sign, whitespace, or leading zero)
+        # is accepted.
+        if not device_id.isascii() or not device_id.isdigit():
+            return None
+        if len(device_id) > 1 and device_id[0] == "0":
+            return None
+
+        try:
+            device_id = int(device_id)
+        except ValueError:
+            return None
+
+        try:
+            device_cls = apps.get_model(app_label, model_name)
+        except (LookupError, ValueError):
+            return None
+
+        if not issubclass(device_cls, Device):
+            return None
+
+        return device_cls, device_id
+
+    @classmethod
+    def _filter_persistent_id(
+        cls,
+        persistent_id,
+        for_verify=False,
+        user=None,
+        confirmed=True,
+        check_transaction=True,
+    ):
+        parsed = cls._parse_persistent_id(persistent_id)
+        if parsed is None:
+            return None
+
+        device_cls, device_id = parsed
+
+        if for_verify:
+            # Verification without an explicit user scope would allow a
+            # caller to load somebody else's device by id.
+            if user is None:
+                return None
+
+            if check_transaction:
+                cls._validate_for_verify_transaction(device_cls.objects.db)
+
+        device_set = device_cls.objects.filter(pk=device_id)
+
+        if user is not None:
+            device_set = device_set.filter(user=user)
+
+        if for_verify:
+            device_set = device_set.filter(confirmed=True).select_for_update()
+        elif confirmed is not None:
+            device_set = device_set.filter(confirmed=bool(confirmed))
+
+        return device_set
+
+    @staticmethod
+    def _validate_for_verify_transaction(using=None):
+        connection = transaction.get_connection(using)
+        if connection.get_autocommit():
+            raise TransactionManagementError(
+                "select_for_update cannot be used outside of a transaction."
+            )
 
     def is_interactive(self):
         """

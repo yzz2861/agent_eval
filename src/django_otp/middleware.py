@@ -98,7 +98,7 @@ class OTPMiddleware:
         if user.is_authenticated:
             persistent_id = request.session.get(DEVICE_ID_SESSION_KEY)
             device = (
-                self._device_from_persistent_id(persistent_id)
+                self._device_from_persistent_id(persistent_id, user)
                 if persistent_id
                 else None
             )
@@ -106,9 +106,9 @@ class OTPMiddleware:
 
         return user
 
-    def _device_from_persistent_id(self, persistent_id: str):
+    def _device_from_persistent_id(self, persistent_id: str, user):
         persistent_id = self._normalize_persistent_id(persistent_id)
-        return Device.from_persistent_id(persistent_id)
+        return Device.from_persistent_id(persistent_id, user=user)
 
     async def _verify_user_async_via_auser(self, request, auser):
         user = await auser()
@@ -117,7 +117,7 @@ class OTPMiddleware:
         if user.is_authenticated:
             persistent_id = request.session.get(DEVICE_ID_SESSION_KEY)
             device = (
-                await self._adevice_from_persistent_id(persistent_id)
+                await self._adevice_from_persistent_id(persistent_id, user)
                 if persistent_id
                 else None
             )
@@ -125,6 +125,6 @@ class OTPMiddleware:
 
         return user
 
-    async def _adevice_from_persistent_id(self, persistent_id: str):
+    async def _adevice_from_persistent_id(self, persistent_id: str, user):
         persistent_id = self._normalize_persistent_id(persistent_id)
-        return await Device.afrom_persistent_id(persistent_id)
+        return await Device.afrom_persistent_id(persistent_id, user=user)
