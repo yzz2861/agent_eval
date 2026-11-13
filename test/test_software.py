@@ -287,3 +287,40 @@ class TestSoftware:
         assert s.os == 'Microsoft Windows (RemoteSupportManager 1.0.023)'
         assert str(s) == 'OpenSSH 3.8 running on Microsoft Windows (RemoteSupportManager 1.0.023)'
         assert repr(s) == '<Software(product=OpenSSH, version=3.8, os=Microsoft Windows (RemoteSupportManager 1.0.023))>'
+
+    def test_vendor_platform_suffix_retained(self):
+        '''Vendor/platform suffixes must be retained for evidence even though the legacy version/patch/os fields stay unchanged.'''
+        ps = lambda x: self.software.parse(self.banner.parse(x))  # noqa
+
+        s = ps('SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.5')
+        assert s.version == '9.6'
+        assert s.patch == 'p1'
+        assert s.raw_suffix == 'p1'
+        assert s.platform == 'Ubuntu'
+        assert s.vendor_suffix == 'Ubuntu-3ubuntu13.5'
+        assert s.is_backported is True
+        # Legacy display behaviour is unchanged.
+        assert str(s) == 'OpenSSH 9.6p1'
+
+        s = ps('SSH-2.0-OpenSSH_8.4p1 Debian-5+deb11u3')
+        assert s.platform == 'Debian'
+        assert s.vendor_suffix == 'Debian-5+deb11u3'
+        assert s.is_backported is True
+
+        s = ps('SSH-2.0-OpenSSH_7.2-OVH-rescue FreeBSD')
+        assert s.platform == 'FreeBSD'
+        assert s.raw_suffix == 'OVH-rescue'
+        assert s.vendor_suffix == 'OVH-rescue'
+        assert s.os == 'FreeBSD'
+
+        # An unmodified upstream banner has no platform or vendor suffix.
+        s = ps('SSH-2.0-OpenSSH_9.6p1')
+        assert s.platform is None
+        assert s.vendor_suffix is None
+        assert s.is_backported is False
+
+        # In-band suffixes (without banner comments) are still captured.
+        s = ps('SSH-2.0-OpenSSH_7.2-hpn14v5')
+        assert s.raw_suffix == 'hpn14v5'
+        assert s.platform == 'HPN'
+        assert s.vendor_suffix == 'hpn14v5'

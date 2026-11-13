@@ -33,6 +33,8 @@ from ssh_audit import exitcodes
 from ssh_audit.banner import Banner
 from ssh_audit.builtin_policies import BUILTIN_POLICIES
 from ssh_audit.globals import SNAP_PACKAGE, SNAP_PERMISSIONS_ERROR
+from ssh_audit.evidence import EvidenceModel
+from ssh_audit.software import Software
 from ssh_audit.ssh2_kex import SSH2_Kex
 
 
@@ -59,6 +61,9 @@ class Policy:
         self._allow_larger_keys = False
         self._errors: List[Any] = []
         self._updated_builtin_policy_available = False  # If True, an outdated built-in policy was loaded.
+
+        # Evidence reconciling the banner version claim with the capabilities observed during the key exchange.  Populated by evaluate(); absent until then so legacy consumers are unaffected.
+        self._evidence: Optional[Dict[str, Any]] = None
 
         self._name_and_version: str = ''
 
@@ -338,10 +343,21 @@ macs = %s
         return policy_data
 
 
-    def evaluate(self, banner: Optional['Banner'], kex: Optional['SSH2_Kex']) -> Tuple[bool, List[Dict[str, str]], str]:
-        '''Evaluates a server configuration against this policy.  Returns a tuple of a boolean (True if server adheres to policy) and an array of strings that holds error messages.'''
+    def evaluate(self, banner: Optional[Union['Banner', str]], kex: Optional['SSH2_Kex']) -> Tuple[bool, List[Dict[str, str]], str]:
+        '''Evaluates a server configuration against this policy.  Returns a tuple of a boolean (True if server adheres to policy) and an array of strings that holds error messages.
+
+        The version advertised by the banner is never trusted on its own: it is
+        reconciled against the algorithms observed in the key exchange and the
+        resulting evidence model is exposed through :py:meth:`evidence`.
+        A back-filled version string therefore cannot turn a failing policy
+        result into a passing one, while a legitimate back-port that only adds
+        algorithms is not mis-flagged.
+        '''
 
         ret = True
+
+        # Build the version-vs-capability evidence first.  It never modifies the legacy error list or return ordering, so existing consumers keep working unchanged.
+        self._evidence = self._build_evidence(banner, kex)
 
         banner_str = str(banner)
         if (self._banner is not None) and (banner_str != self._banner):
@@ -469,6 +485,29 @@ macs = %s
 
         error_list, error_str = self._get_errors()
         return ret, error_list, error_str
+
+    @staticmethod
+    def _build_evidence(banner: Optional[Union['Banner', str]], kex: Optional['SSH2_Kex']) -> Optional[Dict[str, Any]]:
+        '''Reconciles the claimed software version with the observed KEX/host-key capabilities and returns a JSON-serializable evidence structure (or None when neither input exists).'''
+
+        software = None
+        parsed_banner: Optional[Banner] = None
+        if isinstance(banner, Banner):
+            parsed_banner = banner
+        elif isinstance(banner, str) and len(banner) > 0:
+            parsed_banner = Banner.parse(banner)
+
+        if parsed_banner is not None:
+            software = Software.parse(parsed_banner)
+
+        if software is None and kex is None:
+            return None
+
+        return EvidenceModel(software, kex).to_dict()
+
+    def evidence(self) -> Optional[Dict[str, Any]]:
+        '''Returns the version/capability evidence collected during the last :py:meth:`evaluate` call, or None if evaluate() has not run.'''
+        return copy.deepcopy(self._evidence)
 
 
     def _get_errors(self) -> Tuple[List[Any], str]:

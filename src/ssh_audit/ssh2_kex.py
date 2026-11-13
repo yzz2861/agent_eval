@@ -22,7 +22,7 @@
    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
    THE SOFTWARE.
 """
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 from typing import Union
 
 from ssh_audit.outputbuffer import OutputBuffer
@@ -90,6 +90,26 @@ class SSH2_Kex:
 
     def host_keys(self) -> Dict[str, Dict[str, Union[bytes, str, int]]]:
         return self.__host_keys
+
+    def capability_evidence(self, product: Optional[str] = None) -> Dict[str, Any]:
+        '''Derives an evidence model from the algorithms observed in this key exchange.
+
+        The product advertised by the banner (typically OpenSSH) selects which
+        version database is used for capability derivation.  Callers that have
+        not parsed a banner may omit it, in which case OpenSSH is assumed.
+        '''
+        # Imported lazily to avoid a circular import at module load time.
+        from ssh_audit.evidence import EvidenceModel  # pylint: disable=import-outside-toplevel
+        from ssh_audit.product import Product as _Product  # pylint: disable=import-outside-toplevel
+
+        target_product = product or _Product.OpenSSH
+        if target_product != _Product.OpenSSH:
+            # Only OpenSSH has a complete capability timeline today; other products still get a structured, but empty, observation.
+            from ssh_audit.software import Software as _Software  # pylint: disable=import-outside-toplevel
+            model = EvidenceModel(_Software(None, target_product, '', None, None), self)
+        else:
+            model = EvidenceModel(None, self)
+        return model.to_dict()
 
     def write(self, wbuf: 'WriteBuf') -> None:
         wbuf.write(self.cookie)

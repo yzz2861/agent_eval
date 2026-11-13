@@ -3,9 +3,12 @@ import struct
 import pytest
 
 from ssh_audit.auditconf import AuditConf
+from ssh_audit.banner import Banner
+from ssh_audit.evidence import EvidenceModel
 from ssh_audit.outputbuffer import OutputBuffer
 from ssh_audit.protocol import Protocol
 from ssh_audit.readbuf import ReadBuf
+from ssh_audit.software import Software
 from ssh_audit.ssh2_kex import SSH2_Kex
 from ssh_audit.ssh2_kexparty import SSH2_KexParty
 from ssh_audit.ssh_audit import audit
@@ -200,3 +203,94 @@ class TestSSH2:
         # Ensure that none of the lines are reported as "unknown algorithm".
         for line in lines:
             assert line.find('unknown algorithm') == -1
+
+    def _get_kex_with_algorithms(self, kex_algs, key_algs=None, enc=None, mac=None):
+        '''Builds an SSH2_Kex from explicit algorithm lists for capability/evidence testing.'''
+        key_algs = key_algs if key_algs is not None else ['ssh-ed25519', 'rsa-sha2-512']
+        enc = enc if enc is not None else ['chacha20-poly1305@openssh.com', 'aes256-ctr', 'aes128-gcm@openssh.com']
+        mac = mac if mac is not None else ['hmac-sha2-512-etm@openssh.com', 'hmac-sha2-256-etm@openssh.com']
+        srv = self.ssh2_kexparty(list(enc), list(mac), ['none'], [])
+        cli = self.ssh2_kexparty(list(enc), list(mac), ['none'], [])
+        return self.ssh2_kex(self.OutputBuffer, b'\x00' * 16, list(kex_algs), list(key_algs), cli, srv, 0)
+
+    def _model(self, banner_text, kex):
+        software = Software.parse(Banner.parse(banner_text))
+        return EvidenceModel(software, kex).to_dict()
+
+    def test_capabilities_derived_from_observed_algorithms(self):
+        '''The capability window is derived from observed algorithm introduction/removal versions, not from the banner.'''
+        kex = self._get_kex_with_algorithms(['curve25519-sha256', 'diffie-hellman-group14-sha256'], ['rsa-sha2-512', 'ssh-ed25519'])
+        evidence = self._model('SSH-2.0-OpenSSH_9.6p1', kex)
+        observation = evidence['capability_observation']
+        # curve25519-sha256 was introduced in 7.4, which is the newest introduction among the observed set.
+        assert observation['since_version'] == '7.4'
+        assert observation['observed_counts'] == {'kex': 2, 'key': 2, 'enc': 3, 'mac': 2}
+        # Every mapped algorithm (2 kex + 2 host-key + 3 ciphers + 2 MACs) is reported as an evidence item.
+        assert len(observation['algorithms']) == 9
+
+    def test_backfilled_version_requires_multiple_capability_features(self):
+        '''A high version claim combined with several removed algorithms across multiple categories is flagged as back-filled.'''
+        kex = self._get_kex_with_algorithms(
+            ['curve25519-sha256', 'diffie-hellman-group1-sha1'],
+            ['ssh-ed25519', 'ssh-dss'],
+            ['aes128-ctr', '3des-cbc'],
+            ['hmac-sha2-256', 'hmac-md5', 'hmac-md5-96'])
+        evidence = self._model('SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.5', kex)
+        assert evidence['status'] == EvidenceModel.BACKFILL_SUSPECTED
+        assert evidence['backfill_score'] >= evidence['backfill_threshold']
+        behind = evidence['capability_observation']['features_behind']
+        assert len(behind) >= evidence['backfill_min_features']
+        assert len({item['type'] for item in behind}) >= 2
+        ids = [item['id'] for item in evidence['evidence']]
+        assert 'backfilled_version' in ids
+        assert 'legacy_feature' in ids
+        assert any(item['severity'] == 'fail' for item in evidence['evidence'])
+
+    def test_single_legacy_algorithm_does_not_trigger_backfill(self):
+        '''A single legacy algorithm (sparse/missing-feature case) must stay a conflict, not a back-fill finding.'''
+        kex = self._get_kex_with_algorithms(['diffie-hellman-group1-sha1'], ['ssh-ed25519'], ['aes128-ctr'], ['hmac-sha2-256'])
+        evidence = self._model('SSH-2.0-OpenSSH_9.6p1', kex)
+        assert evidence['status'] == EvidenceModel.CONFLICT
+        assert len(evidence['capability_observation']['features_behind']) == 1
+        assert 'backfilled_version' not in [item['id'] for item in evidence['evidence']]
+
+    def test_backport_with_new_algorithms_is_not_misflagged(self):
+        '''A low version claim that gains a newer algorithm via a vendor back-port is reported but never upgraded to a safe version.'''
+        kex = self._get_kex_with_algorithms(['curve25519-sha256', 'sntrup761x25519-sha512@openssh.com'], ['ssh-ed25519'])
+        evidence = self._model('SSH-2.0-OpenSSH_8.4p1 Debian-5+deb11u3', kex)
+        assert evidence['status'] == EvidenceModel.FORWARD_FEATURES_ON_OLD_CLAIM
+        assert evidence['backfill_score'] == 0
+        ahead = evidence['capability_observation']['features_ahead']
+        assert any(item['algorithm'] == 'sntrup761x25519-sha512@openssh.com' for item in ahead)
+        ids = [item['id'] for item in evidence['evidence']]
+        assert 'backported_feature' in ids
+        assert 'backfilled_version' not in ids
+
+    def test_genuine_modern_build_is_consistent(self):
+        '''A modern build whose observed modern markers match its claim is consistent and produces no conflict evidence.'''
+        kex = self._get_kex_with_algorithms(
+            ['curve25519-sha256', 'ext-info-s', 'sntrup761x25519-sha512@openssh.com'],
+            ['ssh-ed25519', 'sk-ssh-ed25519@openssh.com'])
+        evidence = self._model('SSH-2.0-OpenSSH_9.6p1', kex)
+        assert evidence['status'] == EvidenceModel.CONSISTENT
+        assert evidence['capability_observation']['features_behind'] == []
+        assert 'backfilled_version' not in [item['id'] for item in evidence['evidence']]
+
+    def test_capability_only_observation(self):
+        '''Without a banner, the model still reports an observation derived purely from the KEX.'''
+        kex = self._get_kex_with_algorithms(['curve25519-sha256'], ['ssh-ed25519'])
+        evidence = EvidenceModel(None, kex).to_dict()
+        assert evidence['status'] == EvidenceModel.CAPABILITY_ONLY
+        assert evidence['version_claim'] is None
+        assert evidence['capability_observation']['since_version'] == '7.4'
+        assert kex.capability_evidence()['status'] == EvidenceModel.CAPABILITY_ONLY
+
+    def test_evidence_items_are_serializable_and_sorted_stable(self):
+        '''Evidence items always carry the documented keys and survive JSON serialization.'''
+        import json
+        kex = self._get_kex_with_algorithms(['diffie-hellman-group1-sha1'], ['ssh-dss'], ['3des-cbc'], ['hmac-md5', 'hmac-md5-96'])
+        evidence = self._model('SSH-2.0-OpenSSH_9.6p1', kex)
+        for item in evidence['evidence']:
+            assert 'id' in item and 'severity' in item and 'message' in item
+        serialized = json.dumps(evidence)
+        assert 'backfilled_version' in serialized

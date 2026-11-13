@@ -32,12 +32,15 @@ from ssh_audit.product import Product
 
 
 class Software:
-    def __init__(self, vendor: Optional[str], product: str, version: str, patch: Optional[str], os_version: Optional[str]) -> None:
+    def __init__(self, vendor: Optional[str], product: str, version: str, patch: Optional[str], os_version: Optional[str], raw_suffix: Optional[str] = None, platform: Optional[str] = None, vendor_suffix: Optional[str] = None) -> None:
         self.__vendor = vendor
         self.__product = product
         self.__version = version
         self.__patch = patch
         self.__os = os_version
+        self.__raw_suffix = raw_suffix
+        self.__platform = platform
+        self.__vendor_suffix = vendor_suffix
 
     @property
     def vendor(self) -> Optional[str]:
@@ -58,6 +61,32 @@ class Software:
     @property
     def os(self) -> Optional[str]:
         return self.__os
+
+    @property
+    def raw_suffix(self) -> Optional[str]:
+        '''Returns the unmodified vendor/platform suffix following the version number (i.e.: 'Ubuntu-1ubuntu2.1' in 'OpenSSH_9.6p1 Ubuntu-3ubuntu13.5'), or None if no suffix was present.'''
+        return self.__raw_suffix
+
+    @property
+    def platform(self) -> Optional[str]:
+        '''Returns the platform/vendor distribution embedded in a back-ported version string, or None if it could not be identified.'''
+        return self.__platform
+
+    @property
+    def vendor_suffix(self) -> Optional[str]:
+        '''Returns the full vendor/platform suffix (including distribution build identifiers from banner comments), or None when no such suffix exists.'''
+        return self.__vendor_suffix
+
+    @property
+    def is_backported(self) -> bool:
+        '''Returns True when the banner carries a non-portable vendor/platform build identifier (i.e. more than the upstream portable-release patch such as p1).  This is only a hint: actual security decisions are based on observed capabilities.'''
+        portable_patch = self.__patch is not None and re.match(r'^p\d+$', self.__patch) is not None
+        if self.__platform is not None:
+            return True
+        if self.__raw_suffix is None:
+            return False
+        # An upstream portable patch (p1, p2, ...) alone is an official OpenBSD portable release, not a distribution back-port.
+        return not (portable_patch and self.__raw_suffix == self.__patch)
 
     def compare_version(self, other: Union[None, 'Software', str]) -> int:
         # pylint: disable=too-many-branches,too-many-return-statements
@@ -162,6 +191,58 @@ class Software:
         return re.sub(r'^[-_\.]+', '', patch) or None
 
     @staticmethod
+    def _normalize_suffix(suffix: str) -> Optional[str]:
+        '''Returns the unmodified vendor/platform suffix following the version, stripping only leading separator characters that are part of the banner grammar.'''
+        return re.sub(r'^[-_\.]+', '', suffix).strip() or None
+
+    @classmethod
+    def _build_vendor_suffix(cls, raw_suffix: Optional[str], comments: Optional[str]) -> Optional[str]:
+        '''Combines the in-band version suffix with banner comments into a single retained vendor/platform identifier.'''
+        parts = []
+        if raw_suffix and not re.match(r'^p\d+$', raw_suffix):
+            parts.append(raw_suffix)
+        if comments:
+            # OS comments already surfaced through the os property (e.g. FreeBSD/NetBSD markers) are not duplicated in the vendor suffix.
+            if cls._extract_os_version(comments) is None:
+                parts.append(comments.strip())
+        if len(parts) == 0:
+            return None
+        return ' '.join(part for part in parts if part).strip() or None
+
+    # Vendor / distribution markers embedded in back-ported version strings.  Each marker maps to a normalized platform name.
+    _PLATFORM_MARKERS = [
+        (re.compile(r'(?i)ubuntu'), 'Ubuntu'),
+        (re.compile(r'(?i)debian'), 'Debian'),
+        (re.compile(r'(?i)\brhel\b|red[ _-]?hat|el\d'), 'Red Hat Enterprise Linux'),
+        (re.compile(r'(?i)centos'), 'CentOS'),
+        (re.compile(r'(?i)fedora'), 'Fedora'),
+        (re.compile(r'(?i)rocky'), 'Rocky Linux'),
+        (re.compile(r'(?i)alma'), 'AlmaLinux'),
+        (re.compile(r'(?i)amazon|amzn'), 'Amazon Linux'),
+        (re.compile(r'(?i)\bsuse\b|sles|opensuse'), 'SUSE'),
+        (re.compile(r'(?i)alpine'), 'Alpine Linux'),
+        (re.compile(r'(?i)arch\b'), 'Arch Linux'),
+        (re.compile(r'(?i)gentoo'), 'Gentoo'),
+        (re.compile(r'(?i)freebsd'), 'FreeBSD'),
+        (re.compile(r'(?i)netbsd'), 'NetBSD'),
+        (re.compile(r'(?i)openbsd'), 'OpenBSD'),
+        (re.compile(r'(?i)hpn'), 'HPN'),
+        (re.compile(r'(?i)caspur'), 'CASPUR'),
+        (re.compile(r'(?i)fips'), 'FIPS'),
+        # Generic vendor markers are evaluated last so an embedded OS comment (e.g. 'OVH-rescue FreeBSD') wins over the vendor name.
+        (re.compile(r'(?i)ovh'), 'OVH'),
+    ]
+
+    @classmethod
+    def _extract_platform(cls, raw_suffix: Optional[str], comments: Optional[str]) -> Optional[str]:
+        '''Identifies the distribution / vendor behind a back-ported build from the raw version suffix and banner comments.'''
+        combined = '{} {}'.format(raw_suffix or '', comments or '')
+        for marker_regex, platform_name in cls._PLATFORM_MARKERS:
+            if marker_regex.search(combined):
+                return platform_name
+        return None
+
+    @staticmethod
     def _fix_date(d: Optional[str]) -> Optional[str]:
         if d is not None and len(d) == 8:
             return '{}-{}-{}'.format(d[:4], d[4:6], d[6:8])
@@ -201,34 +282,49 @@ class Software:
         mx = re.match(r'^dropbear_([\d\.]+\d+)(.*)', software)
         v: Optional[str] = None
         if mx is not None:
-            patch = cls._fix_patch(mx.group(2))
+            raw_suffix = mx.group(2)
+            patch = cls._fix_patch(raw_suffix)
             v, p = 'Matt Johnston', Product.DropbearSSH
             v = None
-            return cls(v, p, mx.group(1), patch, None)
+            platform = cls._extract_platform(raw_suffix, banner.comments)
+            vendor_suffix = cls._build_vendor_suffix(cls._normalize_suffix(raw_suffix), banner.comments)
+            return cls(v, p, mx.group(1), patch, None, cls._normalize_suffix(raw_suffix), platform, vendor_suffix)
         mx = re.match(r'^OpenSSH[_\.-]+([\d\.]+\d+)(.*)', software)
         if mx is not None:
-            patch = cls._fix_patch(mx.group(2))
+            raw_suffix = mx.group(2)
+            patch = cls._fix_patch(raw_suffix)
             v, p = 'OpenBSD', Product.OpenSSH
             v = None
             os_version = cls._extract_os_version(banner.comments)
-            return cls(v, p, mx.group(1), patch, os_version)
+            platform = cls._extract_platform(raw_suffix, banner.comments)
+            vendor_suffix = cls._build_vendor_suffix(cls._normalize_suffix(raw_suffix), banner.comments)
+            return cls(v, p, mx.group(1), patch, os_version, cls._normalize_suffix(raw_suffix), platform, vendor_suffix)
         mx = re.match(r'^libssh-([\d\.]+\d+)(.*)', software)
         if mx is not None:
-            patch = cls._fix_patch(mx.group(2))
+            raw_suffix = mx.group(2)
+            patch = cls._fix_patch(raw_suffix)
             v, p = None, Product.LibSSH
             os_version = cls._extract_os_version(banner.comments)
-            return cls(v, p, mx.group(1), patch, os_version)
+            platform = cls._extract_platform(raw_suffix, banner.comments)
+            vendor_suffix = cls._build_vendor_suffix(cls._normalize_suffix(raw_suffix), banner.comments)
+            return cls(v, p, mx.group(1), patch, os_version, cls._normalize_suffix(raw_suffix), platform, vendor_suffix)
         mx = re.match(r'^libssh_([\d\.]+\d+)(.*)', software)
         if mx is not None:
-            patch = cls._fix_patch(mx.group(2))
+            raw_suffix = mx.group(2)
+            patch = cls._fix_patch(raw_suffix)
             v, p = None, Product.LibSSH
             os_version = cls._extract_os_version(banner.comments)
-            return cls(v, p, mx.group(1), patch, os_version)
+            platform = cls._extract_platform(raw_suffix, banner.comments)
+            vendor_suffix = cls._build_vendor_suffix(cls._normalize_suffix(raw_suffix), banner.comments)
+            return cls(v, p, mx.group(1), patch, os_version, cls._normalize_suffix(raw_suffix), platform, vendor_suffix)
         mx = re.match(r'^RomSShell_([\d\.]+\d+)(.*)', software)
         if mx is not None:
-            patch = cls._fix_patch(mx.group(2))
+            raw_suffix = mx.group(2)
+            patch = cls._fix_patch(raw_suffix)
             v, p = 'Allegro Software', 'RomSShell'
-            return cls(v, p, mx.group(1), patch, None)
+            platform = cls._extract_platform(raw_suffix, banner.comments)
+            vendor_suffix = cls._build_vendor_suffix(cls._normalize_suffix(raw_suffix), banner.comments)
+            return cls(v, p, mx.group(1), patch, None, cls._normalize_suffix(raw_suffix), platform, vendor_suffix)
         mx = re.match(r'^mpSSH_([\d\.]+\d+)', software)
         if mx is not None:
             v, p = 'HP', 'iLO (Integrated Lights-Out) sshd'

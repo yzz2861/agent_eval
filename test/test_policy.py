@@ -3,8 +3,10 @@ import pytest
 from datetime import date
 
 from ssh_audit.builtin_policies import BUILTIN_POLICIES
+from ssh_audit.banner import Banner
 from ssh_audit.outputbuffer import OutputBuffer
 from ssh_audit.policy import Policy
+from ssh_audit.software import Software
 from ssh_audit.ssh2_kex import SSH2_Kex
 from ssh_audit.writebuf import WriteBuf
 
@@ -520,6 +522,93 @@ macs = mac_alg2, mac_alg1, mac_alg3, mac_alg0'''
         assert ret is False
         assert len(errors) == 1
         assert error_str.find("Key exchanges did not match.") != -1
+
+    def _get_openssh_kex(self, kex_algs, key_algs, enc, mac):
+        '''Builds an SSH2_Kex using realistic OpenSSH algorithm names.'''
+        w = self.wbuf()
+        w.write(b'\x00' * 16)
+        w.write_list(list(kex_algs))
+        w.write_list(list(key_algs))
+        w.write_list(list(enc))
+        w.write_list(list(enc))
+        w.write_list(list(mac))
+        w.write_list(list(mac))
+        w.write_list(['none'])
+        w.write_list(['none'])
+        w.write_list([''])
+        w.write_list([''])
+        w.write_byte(False)
+        w.write_int(0)
+        return self.ssh2_kex.parse(self.OutputBuffer, w.write_flush())
+
+    def test_policy_evaluate_populates_evidence_without_changing_legacy_result(self):
+        '''The evidence model is populated during evaluate() while the legacy fail/warn contract is preserved.'''
+        kex = self._get_openssh_kex(
+            ['curve25519-sha256', 'diffie-hellman-group1-sha1'],
+            ['ssh-ed25519', 'ssh-dss'],
+            ['aes128-ctr', '3des-cbc'],
+            ['hmac-sha2-256', 'hmac-md5', 'hmac-md5-96'])
+        banner = Banner.parse('SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.5')
+
+        policy_data = 'name = "Test Policy"\nversion = 1\nhost keys = ssh-ed25519\nkey exchanges = curve25519-sha256\nciphers = aes128-ctr\nmacs = hmac-sha2-256'
+        policy = self.Policy(policy_data=policy_data)
+        assert policy.evidence() is None
+
+        passed, errors, error_str = policy.evaluate(banner, kex)
+        evidence = policy.evidence()
+
+        # Legacy structures keep their original shape and ordering.
+        assert passed is False
+        assert len(errors) > 0
+        assert 'Host keys did not match.' in error_str
+
+        # The new, additive evidence is fully populated and distinguishes the claim from the observation.
+        assert evidence is not None
+        assert evidence['status'] == 'backfill_suspected'
+        assert evidence['version_claim']['version'] == '9.6'
+        assert evidence['version_claim']['platform'] == 'Ubuntu'
+        assert evidence['capability_observation']['since_version'] is not None
+        assert len(evidence['evidence']) > 0
+        assert any(item['id'] == 'backfilled_version' for item in evidence['evidence'])
+
+        # evidence() returns a copy, so callers cannot mutate policy state.
+        evidence['status'] = 'tampered'
+        assert policy.evidence()['status'] == 'backfill_suspected'
+
+    def test_policy_evidence_handles_backport_and_missing_features(self):
+        '''Vendor back-ports avoid false back-fill findings, and sparse feature sets do not raise the effective version.'''
+        backport_kex = self._get_openssh_kex(
+            ['curve25519-sha256', 'sntrup761x25519-sha512@openssh.com'],
+            ['ssh-ed25519'],
+            ['chacha20-poly1305@openssh.com'],
+            ['hmac-sha2-512-etm@openssh.com'])
+        backport_banner = Banner.parse('SSH-2.0-OpenSSH_8.4p1 Debian-5+deb11u3')
+        policy_data = 'name = "T"\nversion = 1\nhost keys = ssh-ed25519\nkey exchanges = curve25519-sha256\nciphers = chacha20-poly1305@openssh.com\nmacs = hmac-sha2-512-etm@openssh.com'
+        policy = self.Policy(policy_data=policy_data)
+        policy.evaluate(backport_banner, backport_kex)
+        backport_evidence = policy.evidence()
+        assert backport_evidence['status'] == 'forward_features_on_old_claim'
+        assert backport_evidence['backfill_score'] == 0
+        assert backport_evidence['version_claim']['version'] == '8.4'
+
+        sparse_kex = self._get_openssh_kex(['diffie-hellman-group1-sha1'], ['ssh-ed25519'], ['aes128-ctr'], ['hmac-sha2-256'])
+        policy.evaluate(Banner.parse('SSH-2.0-OpenSSH_9.6p1'), sparse_kex)
+        sparse_evidence = policy.evidence()
+        assert sparse_evidence['status'] == 'conflict'
+        assert sparse_evidence['backfill_score'] < sparse_evidence['backfill_threshold']
+
+    def test_policy_evidence_without_kex(self):
+        '''A banner-only evaluation still yields a version claim evidence structure.'''
+        policy_data = 'name = "T"\nversion = 1\nhost keys = ssh-ed25519\nkey exchanges = curve25519-sha256\nciphers = aes128-ctr\nmacs = hmac-sha2-256'
+        policy = self.Policy(policy_data=policy_data)
+        banner = Banner.parse('SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.5')
+        passed, errors, _ = policy.evaluate(banner, None)
+        evidence = policy.evidence()
+        assert passed is True
+        assert errors == []
+        assert evidence['status'] == 'version_claim_only'
+        assert evidence['version_claim']['platform'] == 'Ubuntu'
+        assert evidence['capability_observation'] is None
 
 
     def test_policy_evaluate_subset_failing_3(self):

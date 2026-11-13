@@ -278,6 +278,7 @@ For convenience, a web front-end on top of the command-line tool is available at
  - Added SOCKS5 proxy support (specify the proxy with `--socks5 host:port`); partial credit [Michał Majchrowicz](https://github.com/sectroyer).
  - Updated built-in policy for Debian 12.
  - Added built-in policies for OpenSSH 10.0, 10.1, 10.2, 10.3, and 10.4.
+ - Added an additive `software_evidence` field to JSON output (and an `evidence` field to JSON policy results) that reconciles the banner's version claim with capabilities observed from the actual KEX/host-key lists, including scored back-fill detection and individual evidence items; existing JSON fields and policy fail/warn results are unchanged.
  - Added hardening guides and policies for Debian 13.
  - Added hardening guides and policies for Rocky Linux 10.
  - Added hardening guides and policies for Ubuntu 26.04.

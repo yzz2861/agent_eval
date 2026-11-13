@@ -601,7 +601,8 @@ def evaluate_policy(out: OutputBuffer, aconf: AuditConf, banner: Optional['Banne
         if aconf.policy.is_outdated_builtin_policy():
             warnings.append("A newer version of this built-in policy is available.")
 
-        json_struct = {'host': aconf.host, 'port': aconf.port, 'policy': aconf.policy.get_name_and_version(), 'passed': passed, 'errors': error_struct, 'warnings': warnings}
+        # The evidence field is additive: legacy consumers keep reading the same keys unchanged.
+        json_struct = {'host': aconf.host, 'port': aconf.port, 'policy': aconf.policy.get_name_and_version(), 'passed': passed, 'errors': error_struct, 'warnings': warnings, 'evidence': aconf.policy.evidence()}
 
         out.info(json.dumps(json_struct, indent=4 if aconf.json_print_indent else None, sort_keys=True))
     else:
@@ -1144,6 +1145,11 @@ def build_struct(target_host: str, banner: Optional['Banner'], kex: Optional['SS
 
     # Add in the recommendations.
     res['recommendations'] = get_algorithm_recommendations(algorithms, algorithm_recommendation_suppress_list, software, for_server=True)
+
+    # Add the version-claim vs observed-capability evidence.  This is a new, additive key so older JSON consumers are unaffected.
+    if software is not None or kex is not None:
+        from ssh_audit.evidence import EvidenceModel  # pylint: disable=import-outside-toplevel
+        res['software_evidence'] = EvidenceModel(software, kex).to_dict()
 
     # Add in the additional notes.
     res['additional_notes'] = additional_notes
