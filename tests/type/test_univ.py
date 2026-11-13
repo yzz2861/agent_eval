@@ -18,6 +18,7 @@ from pyasn1.type import constraint
 from pyasn1.type import namedtype
 from pyasn1.type import namedval
 from pyasn1.type import error
+from pyasn1 import error as codec_error
 from pyasn1.error import PyAsn1Error
 from pyasn1.error import PyAsn1UnicodeEncodeError, PyAsn1UnicodeDecodeError
 
@@ -957,6 +958,101 @@ class ObjectIdentifierPicklingTestCase(unittest.TestCase):
         assert serialised
         new_asn1 = pickle.loads(serialised)
         assert new_asn1 == (2, 3, 1, 1, 2)
+
+
+class OidArcHelpersTestCase(BaseTestCase):
+    def testEncodeOidArcMinimal(self):
+        assert univ.encodeOidArc(0) == (0,)
+        assert univ.encodeOidArc(127) == (127,)
+        assert univ.encodeOidArc(128) == (0x81, 0x00)
+        assert univ.encodeOidArc(840) == (0x86, 0x48)
+        assert univ.encodeOidArc(16384) == (0x81, 0x80, 0x00)
+
+    def testEncodeOidArcRejectsNegative(self):
+        try:
+            univ.encodeOidArc(-1)
+        except error.PyAsn1Error:
+            pass
+        else:
+            assert 0, 'negative arc tolerated'
+
+    def testDecodeSingleOctetArc(self):
+        assert univ.decodeOidArc(b'\x2b', 0, 0, 20, False) == (43, 1)
+        assert univ.decodeOidArc(b'\x00\x05', 1, 1, 20, True) == (5, 2)
+
+    def testDecodeMultiOctetArc(self):
+        assert univ.decodeOidArc(b'\x86\x48', 0, 0, 20, True) == (840, 2)
+        assert univ.decodeOidArc(b'\x81\x80\x00', 0, 0, 20, True) == (16384, 3)
+
+    def testDecodeTruncatedArc(self):
+        try:
+            univ.decodeOidArc(b'\x81', 0, 3, 20, False)
+        except codec_error.SubstrateUnderrunError as exc:
+            assert 'arc 3' in str(exc)
+            assert 'truncated' in str(exc)
+        else:
+            assert 0, 'truncated arc tolerated'
+
+    def testDecodeOverflowNamesArcAndCategory(self):
+        substrate = bytes([0x81] * 21) + bytes([0x01])
+        try:
+            univ.decodeOidArc(substrate, 0, 2, 20, False)
+        except error.PyAsn1Error as exc:
+            assert 'arc 2' in str(exc)
+            assert 'limit' in str(exc)
+        else:
+            assert 0, 'overflow arc tolerated'
+
+    def testStrictRejectsLeading0x80(self):
+        try:
+            univ.decodeOidArc(b'\x80\x01', 0, 0, 20, True)
+        except error.PyAsn1Error as exc:
+            assert 'arc 0' in str(exc)
+            assert '0x80' in str(exc)
+        else:
+            assert 0, 'leading 0x80 tolerated in strict mode'
+
+    def testStrictRejectsNonMinimalArc(self):
+        # 0x80 0x81 0x00 == 128, shortest form is 0x81 0x00
+        try:
+            univ.decodeOidArc(b'\x80\x81\x00', 0, 0, 20, True)
+        except error.PyAsn1Error as exc:
+            assert 'non-minimal' in str(exc)
+        else:
+            assert 0, 'non-minimal arc tolerated in strict mode'
+
+    def testLooseAlsoRejectsBareLeading0x80(self):
+        try:
+            univ.decodeOidArc(b'\x80\x81\x00', 0, 0, 20, False)
+        except error.PyAsn1Error as exc:
+            assert '0x80' in str(exc)
+        else:
+            assert 0, 'bare leading 0x80 tolerated in loose mode'
+
+    def testStrictAcceptsEmbeddedZeroGroup(self):
+        # The 0x80 in the middle of 0x81 0x80 0x00 is required, not redundant
+        assert univ.decodeOidArc(b'\x81\x80\x00', 0, 0, 20, True) == (16384, 3)
+
+    def testStrictAcceptsLongMinimalArc(self):
+        # 0x81 0x80 0x80 0x00 is the minimal 4-octet encoding of 2097152
+        assert univ.decodeOidArc(
+            b'\x81\x80\x80\x00', 0, 0, 20, True
+        ) == (2097152, 4)
+
+    def testMergeOidFirstArcs(self):
+        assert univ.mergeOidFirstArcs([0]) == (0, 0)
+        assert univ.mergeOidFirstArcs([39, 6]) == (0, 39, 6)
+        assert univ.mergeOidFirstArcs([43, 6]) == (1, 3, 6)
+        assert univ.mergeOidFirstArcs([79]) == (1, 39)
+        assert univ.mergeOidFirstArcs([80]) == (2, 0)
+        assert univ.mergeOidFirstArcs([120]) == (2, 40)
+
+    def testEncodeDecodeArcRoundTrip(self):
+        for value in (0, 1, 127, 128, 840, 16384, 2 ** 100):
+            encoded = bytes(univ.encodeOidArc(value))
+            decoded, position = univ.decodeOidArc(encoded, 0, 0, 20, True)
+            assert decoded == value
+            assert position == len(encoded)
 
 
 class RelativeOID(BaseTestCase):

@@ -301,7 +301,8 @@ class ObjectIdentifierEncoder(AbstractItemEncoder):
 
         oid = value.asTuple()
 
-        # Build the first pair
+        # Validate the whole tuple first so an illegal OID fails atomically
+        # with a stable error instead of emitting a partially encoded value.
         try:
             first = oid[0]
             second = oid[1]
@@ -328,25 +329,13 @@ class ObjectIdentifierEncoder(AbstractItemEncoder):
         octets = []
 
         # Cycle through subIds
-        for subOid in oid:
-            if 0 <= subOid <= 127:
-                # Optimize for the common case
-                octets.append(subOid)
-
-            elif subOid > 127:
-                # Pack large Sub-Object IDs
-                res = [subOid & 0x7f]
-                subOid >>= 7
-
-                while subOid:
-                    res.append(0x80 | (subOid & 0x7f))
-                    subOid >>= 7
-
-                # Add packed Sub-Object ID to resulted Object ID
-                octets.extend(reversed(res))
-
-            else:
-                raise error.PyAsn1Error('Negative OID arc %s at %s' % (subOid, value))
+        for arcIndex, subOid in enumerate(oid):
+            try:
+                octets.extend(univ.encodeOidArc(subOid))
+            except error.PyAsn1Error as exc:
+                raise error.PyAsn1Error(
+                    '%s at OID arc %d of %s' % (exc, arcIndex, value)
+                )
 
         return tuple(octets), False, False
 
@@ -360,26 +349,15 @@ class RelativeOIDEncoder(AbstractItemEncoder):
 
         octets = []
 
-        # Cycle through subIds
-        for subOid in value.asTuple():
-            if 0 <= subOid <= 127:
-                # Optimize for the common case
-                octets.append(subOid)
-
-            elif subOid > 127:
-                # Pack large Sub-Object IDs
-                res = [subOid & 0x7f]
-                subOid >>= 7
-
-                while subOid:
-                    res.append(0x80 | (subOid & 0x7f))
-                    subOid >>= 7
-
-                # Add packed Sub-Object ID to resulted RELATIVE-OID
-                octets.extend(reversed(res))
-
-            else:
-                raise error.PyAsn1Error('Negative RELATIVE-OID arc %s at %s' % (subOid, value))
+        # Validate and pack every arc up front; a negative or otherwise
+        # illegal arc must raise before any substrate would be written.
+        for arcIndex, subOid in enumerate(value.asTuple()):
+            try:
+                octets.extend(univ.encodeOidArc(subOid))
+            except error.PyAsn1Error as exc:
+                raise error.PyAsn1Error(
+                    '%s at RELATIVE-OID arc %d of %s' % (exc, arcIndex, value)
+                )
 
         return tuple(octets), False, False
 

@@ -680,6 +680,96 @@ class EmptyInnerFieldOfSequenceEncoderTestCase(BaseTestCase):
         assert encoder.encode(self.s) == bytes((48, 0))
 
 
+class ObjectIdentifierEncoderTestCase(BaseTestCase):
+    def testLegalOidsRoundTrip(self):
+        from pyasn1.codec.der import decoder
+
+        for dotted in ('1.3.6', '2.5.4.3', '1.2.840.113549.1.1.11',
+                       '2.999.18446744073709551535184467440737095'):
+            oid = univ.ObjectIdentifier(dotted)
+            substrate = encoder.encode(oid)
+            decoded, rest = decoder.decode(substrate)
+            assert decoded == oid
+            assert rest == b''
+            assert encoder.encode(decoded) == substrate
+
+    def testShortTupleRaisesStableError(self):
+        try:
+            encoder.encode(univ.ObjectIdentifier((0,)))
+        except PyAsn1Error as exc:
+            assert 'Short OID' in str(exc)
+        else:
+            assert 0, 'single-arc OID tolerated'
+
+    def testEmptyTupleRaisesStableError(self):
+        try:
+            encoder.encode(univ.ObjectIdentifier(()))
+        except PyAsn1Error:
+            pass
+        else:
+            assert 0, 'empty OID tuple tolerated'
+
+    def testImpossibleFirstArcsRaise(self):
+        for bad in ((3, 1), (0, 40), (1, 40)):
+            try:
+                encoder.encode(univ.ObjectIdentifier(bad))
+            except PyAsn1Error:
+                pass
+            else:
+                assert 0, 'impossible arcs %r tolerated' % (bad,)
+
+    def testNegativeArcRaisesWithIndex(self):
+        try:
+            encoder.encode(univ.ObjectIdentifier((1, 3, -6)))
+        except PyAsn1Error as exc:
+            assert 'Malformed' in str(exc)
+        else:
+            assert 0, 'negative arc tolerated'
+
+    def testReencodingProducesMinimalBytes(self):
+        # Every encoded arc must itself be in shortest form: decode a valid
+        # multi-octet OID and confirm the re-encoded bytes are identical and
+        # no arc opens with a bare 0x80 group.
+        from pyasn1.codec.der import decoder
+
+        oid = univ.ObjectIdentifier((1, 3, 128, 16384, 2097152))
+        substrate = encoder.encode(oid)
+        decoded, rest = decoder.decode(substrate)
+        canonical = encoder.encode(decoded)
+        assert canonical == substrate
+        assert rest == b''
+        payload = substrate[2:]
+        assert payload[0] != 0x80
+        for i in range(1, len(payload)):
+            if payload[i - 1] < 0x80:
+                assert payload[i] != 0x80, 'arc must not open with bare 0x80'
+
+
+class RelativeOIDEncoderTestCase(BaseTestCase):
+    def testLegalRoundTrip(self):
+        from pyasn1.codec.der import decoder
+
+        reloid = univ.RelativeOID((5, 6, 16384))
+        substrate = encoder.encode(reloid)
+        decoded, rest = decoder.decode(substrate)
+        assert decoded == reloid
+        assert rest == b''
+        assert encoder.encode(decoded) == substrate
+
+    def testEmptyTupleEncodesEmptyValue(self):
+        # RELATIVE-OID permits an empty arc sequence; it encodes no payload
+        substrate = encoder.encode(univ.RelativeOID(()))
+        assert substrate == bytes((13, 0))
+
+    def testNegativeArcRaisesStableError(self):
+        try:
+            encoder.encode(univ.RelativeOID((5, -6, 7)))
+        except PyAsn1Error:
+            pass
+        else:
+            assert 0, 'negative RELATIVE-OID arc tolerated'
+
+
 class ClassConstructorTestCase(BaseTestCase):
     def testKeywords(self):
         tagmap = {"tagmap": True}

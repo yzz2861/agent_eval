@@ -78,10 +78,23 @@ class AbstractPayloadDecoder(object):
 
 
 class AbstractSimplePayloadDecoder(AbstractPayloadDecoder):
+    # Codec-level default for OID subidentifier strictness; DER overrides it.
+    strictOid = False
+
     @staticmethod
     def substrateCollector(asn1Object, substrate, length, options):
         for chunk in readFromStream(substrate, length, options):
             yield chunk
+
+    def _isStrictOid(self, asn1Spec, options):
+        if 'strictOid' in options:
+            # An explicit option wins over codec default and type constraints
+            return bool(options['strictOid'])
+
+        if asn1Spec is not None and asn1Spec.subtypeSpec:
+            return True
+
+        return self.strictOid
 
     def _createComponent(self, asn1Spec, tagSet, value, **options):
         if options.get('native'):
@@ -451,54 +464,25 @@ class ObjectIdentifierPayloadDecoder(AbstractSimplePayloadDecoder):
         if not chunk:
             raise error.PyAsn1Error('Empty substrate')
 
-        oid = []
+        strict = self._isStrictOid(asn1Spec, options)
+
+        arcs = []
         index = 0
+        arcIndex = 0
         substrateLen = len(chunk)
+
         while index < substrateLen:
-            subId = chunk[index]
-            index += 1
-            if subId < 128:
-                oid.append(subId)
-            elif subId > 128:
-                # Construct subid from a number of octets
-                nextSubId = subId
-                subId = 0
-                continuationOctetCount = 0
-                while nextSubId >= 128:
-                    continuationOctetCount += 1
-                    if continuationOctetCount > MAX_OID_ARC_CONTINUATION_OCTETS:
-                        raise error.PyAsn1Error(
-                            'OID arc exceeds maximum continuation octets limit (%d) '
-                            'at position %d' % (MAX_OID_ARC_CONTINUATION_OCTETS, index)
-                        )
-                    subId = (subId << 7) + (nextSubId & 0x7F)
-                    if index >= substrateLen:
-                        raise error.SubstrateUnderrunError(
-                            'Short substrate for sub-OID past %s' % (tuple(oid),)
-                        )
-                    nextSubId = chunk[index]
-                    index += 1
-                oid.append((subId << 7) + nextSubId)
-            elif subId == 128:
-                # ASN.1 spec forbids leading zeros (0x80) in OID
-                # encoding, tolerating it opens a vulnerability. See
-                # https://www.esat.kuleuven.be/cosic/publications/article-1432.pdf
-                # page 7
-                raise error.PyAsn1Error('Invalid octet 0x80 in OID encoding')
+            arc, index = univ.decodeOidArc(
+                chunk, index, arcIndex,
+                MAX_OID_ARC_CONTINUATION_OCTETS, strict
+            )
+            arcs.append(arc)
+            arcIndex += 1
 
         # Decode two leading arcs
-        if 0 <= oid[0] <= 39:
-            oid.insert(0, 0)
-        elif 40 <= oid[0] <= 79:
-            oid[0] -= 40
-            oid.insert(0, 1)
-        elif oid[0] >= 80:
-            oid[0] -= 80
-            oid.insert(0, 2)
-        else:
-            raise error.PyAsn1Error('Malformed first OID octet: %s' % chunk[0])
+        oid = univ.mergeOidFirstArcs(arcs)
 
-        yield self._createComponent(asn1Spec, tagSet, tuple(oid), **options)
+        yield self._createComponent(asn1Spec, tagSet, oid, **options)
 
 
 class RelativeOIDPayloadDecoder(AbstractSimplePayloadDecoder):
@@ -518,40 +502,20 @@ class RelativeOIDPayloadDecoder(AbstractSimplePayloadDecoder):
         if not chunk:
             raise error.PyAsn1Error('Empty substrate')
 
+        strict = self._isStrictOid(asn1Spec, options)
+
         reloid = []
         index = 0
+        arcIndex = 0
         substrateLen = len(chunk)
+
         while index < substrateLen:
-            subId = chunk[index]
-            index += 1
-            if subId < 128:
-                reloid.append(subId)
-            elif subId > 128:
-                # Construct subid from a number of octets
-                nextSubId = subId
-                subId = 0
-                continuationOctetCount = 0
-                while nextSubId >= 128:
-                    continuationOctetCount += 1
-                    if continuationOctetCount > MAX_OID_ARC_CONTINUATION_OCTETS:
-                        raise error.PyAsn1Error(
-                            'RELATIVE-OID arc exceeds maximum continuation octets limit (%d) '
-                            'at position %d' % (MAX_OID_ARC_CONTINUATION_OCTETS, index)
-                        )
-                    subId = (subId << 7) + (nextSubId & 0x7F)
-                    if index >= substrateLen:
-                        raise error.SubstrateUnderrunError(
-                            'Short substrate for sub-OID past %s' % (tuple(reloid),)
-                        )
-                    nextSubId = chunk[index]
-                    index += 1
-                reloid.append((subId << 7) + nextSubId)
-            elif subId == 128:
-                # ASN.1 spec forbids leading zeros (0x80) in OID
-                # encoding, tolerating it opens a vulnerability. See
-                # https://www.esat.kuleuven.be/cosic/publications/article-1432.pdf
-                # page 7
-                raise error.PyAsn1Error('Invalid octet 0x80 in RELATIVE-OID encoding')
+            arc, index = univ.decodeOidArc(
+                chunk, index, arcIndex,
+                MAX_OID_ARC_CONTINUATION_OCTETS, strict
+            )
+            reloid.append(arc)
+            arcIndex += 1
 
         yield self._createComponent(asn1Spec, tagSet, tuple(reloid), **options)
 

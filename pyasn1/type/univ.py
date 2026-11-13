@@ -1288,6 +1288,114 @@ class RelativeOID(base.SimpleAsn1Type):
         return '.'.join([str(x) for x in value])
 
 
+def decodeOidArc(substrate, index, arcIndex, maxContinuationOctets, strict):
+    """Decode a single base-128 OID subidentifier starting at `index`.
+
+    Returns a tuple of the decoded non-negative arc value and the
+    substrate position immediately past the terminating octet.
+
+    Raises :class:`~pyasn1.error.SubstrateUnderrunError` when the arc has
+    no terminating octet before the end of the substrate,
+    :class:`~pyasn1.error.PyAsn1Error` on overflow or, when `strict` is
+    true, on a non-minimal (DER-forbidden) encoding. The error message
+    names the affected arc index and the encoding category.
+    """
+    firstOctet = substrate[index]
+
+    if firstOctet < 0x80:
+        return firstOctet, index + 1
+
+    if firstOctet == 0x80:
+        # ASN.1 spec forbids leading zeros (0x80) in OID encoding,
+        # tolerating it opens a vulnerability. See
+        # https://www.esat.kuleuven.be/cosic/publications/article-1432.pdf
+        # page 7
+        raise error.PyAsn1Error(
+            'OID arc %d uses forbidden leading 0x80 octet (non-minimal '
+            'encoding)' % arcIndex
+        )
+
+    arcValue = 0
+    position = index
+    continuationOctets = 0
+
+    while True:
+        octet = substrate[position]
+
+        if octet >= 0x80:
+            continuationOctets += 1
+            if continuationOctets > maxContinuationOctets:
+                raise error.PyAsn1Error(
+                    'OID arc %d exceeds maximum continuation octets limit '
+                    '(%d) (overflow)' % (arcIndex, maxContinuationOctets)
+                )
+
+            arcValue = (arcValue << 7) + (octet & 0x7F)
+            position += 1
+
+            if position >= len(substrate):
+                raise error.SubstrateUnderrunError(
+                    'OID arc %d is truncated: terminating octet missing' % arcIndex
+                )
+
+        else:
+            arcValue = (arcValue << 7) + octet
+            position += 1
+            break
+
+    if strict:
+        # Minimal form check (ITU-T X.690 section 11.1): a subidentifier
+        # encoded in n octets must be at least 2**(7*(n-1)); a smaller value
+        # means a redundant leading 0x80 group made the encoding over-long.
+        octetCount = position - index
+        if octetCount > 1 and arcValue < (1 << (7 * (octetCount - 1))):
+            raise error.PyAsn1Error(
+                'OID arc %d uses non-minimal encoding (redundant leading '
+                '0x80 octet)' % arcIndex
+            )
+
+    return arcValue, position
+
+
+def mergeOidFirstArcs(arcs):
+    """Split the combined first subidentifier of an OID into arcs one and two.
+
+    ITU-T X.690 section 8.19.4 packs the first two arcs into a single
+    base-128 subidentifier as ``40 * first + second``, with the first arc
+    limited to 0, 1 or 2.
+    """
+    combined = arcs[0]
+
+    if combined <= 39:
+        return (0, combined) + tuple(arcs[1:])
+
+    elif combined <= 79:
+        return (1, combined - 40) + tuple(arcs[1:])
+
+    elif combined >= 80:
+        return (2, combined - 80) + tuple(arcs[1:])
+
+
+def encodeOidArc(arc):
+    """Encode a single non-negative OID arc as a minimal base-128 tuple."""
+    if arc < 0:
+        raise error.PyAsn1Error('Negative OID arc %s' % (arc,))
+
+    if arc <= 0x7F:
+        return (arc,)
+
+    octets = [arc & 0x7F]
+    arc >>= 7
+
+    while arc:
+        octets.append(0x80 | (arc & 0x7F))
+        arc >>= 7
+
+    octets.reverse()
+
+    return tuple(octets)
+
+
 class Real(base.SimpleAsn1Type):
     """Create |ASN.1| schema or value object.
 

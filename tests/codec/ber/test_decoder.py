@@ -610,6 +610,105 @@ class ObjectIdentifierDecoderTestCase(BaseTestCase):
         else:
             assert 0, 'Excessive 0xFF continuation octets tolerated'
 
+    def testTruncatedLastArc(self):
+        """A final subidentifier without a terminating octet is rejected."""
+        # 43 decodes the first pair (1.3), then 0x81 never terminates
+        substrate = bytes((6, 2, 43, 0x81))
+        try:
+            decoder.decode(substrate)
+        except error.SubstrateUnderrunError as exc:
+            assert 'arc 1' in str(exc), 'error must name the arc index: %s' % exc
+            assert 'truncated' in str(exc), 'error must name the category: %s' % exc
+        else:
+            assert 0, 'truncated last subidentifier tolerated'
+
+    def testTruncatedOnlyArc(self):
+        substrate = bytes((6, 1, 0x81))
+        try:
+            decoder.decode(substrate)
+        except error.SubstrateUnderrunError:
+            pass
+        else:
+            assert 0, 'truncated single subidentifier tolerated'
+
+    def testLooseModeRejectsBareLeading0x80(self):
+        """A value-preserving non-minimal arc starts with a bare 0x80."""
+        # 0x80 0x81 0x00 encodes 128 non-minimally (minimal: 0x81 0x00);
+        # the security rule rejects the leading 0x80 in every mode.
+        non_minimal = bytes((6, 4, 43, 0x80, 0x81, 0x00))
+        try:
+            decoder.decode(non_minimal)
+        except error.PyAsn1Error as exc:
+            assert 'arc 1' in str(exc)
+            assert '0x80' in str(exc)
+        else:
+            assert 0, 'leading 0x80 tolerated in loose mode'
+
+    def testStrictOptionRejectsNonMinimalArc(self):
+        non_minimal = bytes((6, 4, 43, 0x80, 0x81, 0x00))
+        try:
+            decoder.decode(non_minimal, strictOid=True)
+        except error.PyAsn1Error as exc:
+            assert 'arc 1' in str(exc), 'error must name the arc index: %s' % exc
+            assert 'non-minimal' in str(exc) or '0x80' in str(exc)
+        else:
+            assert 0, 'non-minimal arc tolerated under strictOid'
+
+    def testStrictOptionRejectsRedundantLeading0x80(self):
+        substrate = bytes((6, 4, 43, 0x80, 0x81, 0x00))
+        try:
+            decoder.decode(substrate, strictOid=True)
+        except error.PyAsn1Error as exc:
+            assert 'arc 1' in str(exc)
+        else:
+            assert 0, 'redundant leading 0x80 tolerated under strictOid'
+
+    def testStrictOptionAcceptsMinimalArc(self):
+        value, rest = decoder.decode(
+            bytes((6, 2, 43, 6)), strictOid=True
+        )
+        assert value == (1, 3, 6)
+        assert rest == b''
+
+    def testStrictOptionRejectsTruncation(self):
+        try:
+            decoder.decode(bytes((6, 2, 43, 0x81)), strictOid=True)
+        except error.SubstrateUnderrunError:
+            pass
+        else:
+            assert 0, 'truncation tolerated under strictOid'
+
+    def testStrictOptionRejectsOverflowWithArcIndex(self):
+        substrate = bytes([0x06, 22]) + bytes([0x81] * 21) + bytes([0x01])
+        try:
+            decoder.decode(substrate, strictOid=True)
+        except error.PyAsn1Error as exc:
+            assert 'arc 0' in str(exc)
+            assert 'overflow' in str(exc) or 'limit' in str(exc)
+        else:
+            assert 0, 'oversized arc tolerated under strictOid'
+
+    def testConstrainedSchemaEnablesStrictDecoding(self):
+        from pyasn1.type import constraint
+
+        class SizedOID(univ.ObjectIdentifier):
+            subtypeSpec = univ.ObjectIdentifier.subtypeSpec + constraint.ValueSizeConstraint(2, 10)
+
+        non_minimal = bytes((6, 4, 43, 0x80, 0x81, 0x00))
+        try:
+            decoder.decode(non_minimal, asn1Spec=SizedOID())
+        except error.PyAsn1Error:
+            pass
+        else:
+            assert 0, 'non-minimal arc tolerated with constrained schema'
+
+    def testFirstTwoArcsMergedInAllForms(self):
+        assert decoder.decode(bytes((6, 1, 0))) == ((0, 0), b'')
+        assert decoder.decode(bytes((6, 1, 39))) == ((0, 39), b'')
+        assert decoder.decode(bytes((6, 1, 40))) == ((1, 0), b'')
+        assert decoder.decode(bytes((6, 1, 79))) == ((1, 39), b'')
+        assert decoder.decode(bytes((6, 1, 80))) == ((2, 0), b'')
+
 
 class RelativeOIDDecoderTestCase(BaseTestCase):
     def testOne(self):
@@ -756,6 +855,67 @@ class RelativeOIDDecoderTestCase(BaseTestCase):
             pass
         else:
             assert 0, 'Excessive 0xFF continuation octets tolerated'
+
+    def testTruncatedArc(self):
+        substrate = bytes((13, 1, 0x81))
+        try:
+            decoder.decode(substrate)
+        except error.SubstrateUnderrunError as exc:
+            assert 'arc 0' in str(exc)
+            assert 'truncated' in str(exc)
+        else:
+            assert 0, 'truncated RELATIVE-OID arc tolerated'
+
+    def testLooseModeRejectsBareLeading0x80(self):
+        # 0x80 0x81 0x00 == 128 non-minimally (minimal: 0x81 0x00)
+        non_minimal = bytes((13, 3, 0x80, 0x81, 0x00))
+        try:
+            decoder.decode(non_minimal)
+        except error.PyAsn1Error as exc:
+            assert 'arc 0' in str(exc)
+        else:
+            assert 0, 'leading 0x80 tolerated in loose mode'
+
+    def testStrictOptionRejectsNonMinimalArc(self):
+        non_minimal = bytes((13, 3, 0x80, 0x81, 0x00))
+        try:
+            decoder.decode(non_minimal, strictOid=True)
+        except error.PyAsn1Error as exc:
+            assert 'arc 0' in str(exc)
+            assert 'non-minimal' in str(exc)
+        else:
+            assert 0, 'non-minimal RELATIVE-OID arc tolerated under strictOid'
+
+    def testStrictOptionAcceptsMinimalArc(self):
+        value, rest = decoder.decode(bytes((13, 2, 5, 6)), strictOid=True)
+        assert value == (5, 6)
+        assert rest == b''
+
+    def testConstrainedSchemaRejectsTooManyArcs(self):
+        from pyasn1.type import constraint
+
+        class SizedRelOID(univ.RelativeOID):
+            subtypeSpec = univ.RelativeOID.subtypeSpec + constraint.ValueSizeConstraint(1, 2)
+
+        substrate = bytes((13, 3, 5, 6, 7))
+        try:
+            decoder.decode(substrate, asn1Spec=SizedRelOID())
+        except error.PyAsn1Error:
+            pass
+        else:
+            assert 0, 'over-sized RELATIVE-OID tolerated with constrained schema'
+
+    def testConstrainedSchemaAcceptsWithinLimit(self):
+        from pyasn1.type import constraint
+
+        class SizedRelOID(univ.RelativeOID):
+            subtypeSpec = univ.RelativeOID.subtypeSpec + constraint.ValueSizeConstraint(1, 2)
+
+        value, rest = decoder.decode(
+            bytes((13, 2, 5, 6)), asn1Spec=SizedRelOID()
+        )
+        assert value == (5, 6)
+        assert rest == b''
 
 
 class RealDecoderTestCase(BaseTestCase):

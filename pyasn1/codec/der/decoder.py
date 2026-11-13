@@ -6,6 +6,7 @@
 #
 import warnings
 
+from pyasn1.codec.ber import decoder as ber_decoder
 from pyasn1.codec.cer import decoder
 from pyasn1.type import univ
 
@@ -20,17 +21,41 @@ class OctetStringPayloadDecoder(decoder.OctetStringPayloadDecoder):
     supportConstructedForm = False
 
 
+class ObjectIdentifierPayloadDecoder(ber_decoder.ObjectIdentifierPayloadDecoder):
+    # DER (ITU-T X.690 section 11.1) requires the shortest base-128
+    # encoding of every subidentifier and forbids redundant leading
+    # 0x80 octets. BER keeps the loose historical behavior.
+    strictOid = True
+
+
+class RelativeOIDPayloadDecoder(ber_decoder.RelativeOIDPayloadDecoder):
+    strictOid = True
+
+
 # TODO: prohibit non-canonical encoding
 RealPayloadDecoder = decoder.RealPayloadDecoder
+
+_objectIdentifierDecoder = ObjectIdentifierPayloadDecoder()
+_relativeOIDDecoder = RelativeOIDPayloadDecoder()
 
 TAG_MAP = decoder.TAG_MAP.copy()
 TAG_MAP.update(
     {univ.BitString.tagSet: BitStringPayloadDecoder(),
      univ.OctetString.tagSet: OctetStringPayloadDecoder(),
+     univ.ObjectIdentifier.tagSet: _objectIdentifierDecoder,
+     univ.RelativeOID.tagSet: _relativeOIDDecoder,
      univ.Real.tagSet: RealPayloadDecoder()}
 )
 
 TYPE_MAP = decoder.TYPE_MAP.copy()
+
+# OID decoders must also win on the schema-driven path, where TYPE_MAP is
+# consulted before TAG_MAP; the inherited BER entries would otherwise keep
+# the loose BER behavior even under DER.
+TYPE_MAP.update({
+    univ.ObjectIdentifier.typeId: _objectIdentifierDecoder,
+    univ.RelativeOID.typeId: _relativeOIDDecoder
+})
 
 # Put in non-ambiguous types for faster codec lookup
 for typeDecoder in TAG_MAP.values():

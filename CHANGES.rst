@@ -21,6 +21,18 @@ Revision 0.7.0, released XX-XX-2026
   qualifies for a private advisory and a CVE versus what is handled
   as an ordinary public bug report
   [issue #96](https://github.com/pyasn1/pyasn1/issues/96)
+- Hardened OBJECT IDENTIFIER and RELATIVE-OID decoding. The base-128
+  subidentifier parser now lives in shared helpers
+  (`pyasn1.type.univ.decodeOidArc`, `mergeOidFirstArcs`, `encodeOidArc`),
+  rejects truncated and over-long arcs with errors naming the arc index
+  and encoding category, and supports a strict shortest-form check. The
+  DER decoder enables strict mode by default through new
+  `ObjectIdentifierPayloadDecoder`/`RelativeOIDPayloadDecoder` subclasses
+  covering both the tag-driven and schema-driven paths; BER keeps its
+  loose behavior and only goes strict when the `strictOid` decode option
+  is set or the target type carries a `subtypeSpec`. OID encoders now
+  validate the whole Python tuple before emitting any octets, so illegal
+  tuples fail atomically with a stable error instead of a partial encoding
 
 Revision 0.6.5, released 26-10-2026
 ---------------------------------------

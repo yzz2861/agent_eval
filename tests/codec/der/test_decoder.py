@@ -14,6 +14,7 @@ from pyasn1.type import tag
 from pyasn1.type import namedtype
 from pyasn1.type import opentype
 from pyasn1.type import univ
+from pyasn1 import error
 from pyasn1.codec.der import decoder
 from pyasn1.codec.der import encoder
 from pyasn1.error import PyAsn1Error
@@ -427,6 +428,170 @@ class SequenceDecoderWithExplicitlyTaggedSetOfOpenTypesTestCase(BaseTestCase):
         assert not r
         assert s[0] == 3
         assert s[1][0] == univ.OctetString(hexValue='02010C')
+
+
+class ObjectIdentifierStrictDecoderTestCase(BaseTestCase):
+    """DER must reject every non-minimal OID subidentifier (X.690 11.1)."""
+
+    def testMinimalRoundTrip(self):
+        from pyasn1.codec.ber import encoder as ber_encoder
+
+        oid = univ.ObjectIdentifier('1.2.840.113549.1.1.11')
+        substrate = ber_encoder.encode(oid)
+        decoded, rest = decoder.decode(substrate)
+        assert decoded == oid
+        assert rest == b''
+        assert encoder.encode(decoded) == substrate
+
+    def testCommonCertificateOidsRoundTrip(self):
+        cert_oids = (
+            '1.2.840.113549.1.1.11',       # sha256WithRSAEncryption
+            '1.2.840.113549.1.7.1',        # data
+            '2.5.4.3',                     # commonName
+            '2.5.29.17',                   # subjectAltName
+            '1.3.6.1.5.5.7.1.1',           # authorityInfoAccess
+            '0.9.2342.19200300.100.1.25',  # domainComponent
+        )
+        for dotted in cert_oids:
+            oid = univ.ObjectIdentifier(dotted)
+            substrate = encoder.encode(oid)
+            decoded, rest = decoder.decode(substrate)
+            assert decoded == oid
+            assert str(decoded) == dotted
+            assert rest == b''
+            assert encoder.encode(decoded) == substrate
+
+    def testNonMinimalFirstArcRejected(self):
+        # 0x80 0x81 0x00 encodes 128 non-minimally; minimal is 0x81 0x00
+        substrate = bytes((6, 4, 43, 0x80, 0x81, 0x00))
+        try:
+            decoder.decode(substrate)
+        except PyAsn1Error as exc:
+            assert 'arc 1' in str(exc)
+            assert 'non-minimal' in str(exc)
+        else:
+            assert 0, 'DER tolerated non-minimal first subidentifier'
+
+    def testNonMinimalLaterArcRejected(self):
+        # first pair 1.3 (0x2b), arc 6, then a non-minimal 128
+        substrate = bytes((6, 5, 0x2b, 0x06, 0x80, 0x81, 0x00))
+        try:
+            decoder.decode(substrate)
+        except PyAsn1Error as exc:
+            assert 'arc 2' in str(exc), 'error must name the offending arc: %s' % exc
+            assert 'non-minimal' in str(exc)
+        else:
+            assert 0, 'DER tolerated non-minimal later subidentifier'
+
+    def testRedundantLeading0x80Rejected(self):
+        substrate = bytes((6, 4, 43, 0x80, 0x81, 0x00))
+        try:
+            decoder.decode(substrate)
+        except PyAsn1Error:
+            pass
+        else:
+            assert 0, 'DER tolerated redundant leading 0x80'
+
+    def testTruncatedArcRejected(self):
+        substrate = bytes((6, 2, 43, 0x81))
+        try:
+            decoder.decode(substrate)
+        except error.SubstrateUnderrunError:
+            pass
+        else:
+            assert 0, 'DER tolerated truncated subidentifier'
+
+    def testOversizedArcRejected(self):
+        substrate = bytes([0x06, 22]) + bytes([0x81] * 21) + bytes([0x01])
+        try:
+            decoder.decode(substrate)
+        except PyAsn1Error:
+            pass
+        else:
+            assert 0, 'DER tolerated oversized subidentifier'
+
+    def testEmptySubstrateRejected(self):
+        try:
+            decoder.decode(bytes((6, 0)))
+        except PyAsn1Error:
+            pass
+        else:
+            assert 0, 'DER tolerated empty OID substrate'
+
+    def testStrictOidFalseRestoresLooseBehavior(self):
+        # strictOid=False cannot relax the unconditional leading-0x80
+        # security rule, but a loose-accepted multibyte arc still works
+        substrate = bytes((6, 4, 43, 0x81, 0x80, 0x00))
+        value, rest = decoder.decode(substrate, strictOid=False)
+        assert value == (1, 3, 16384)
+        assert rest == b''
+
+    def testNonMinimalRejectedWithSchema(self):
+        substrate = bytes((6, 4, 43, 0x80, 0x81, 0x00))
+        try:
+            decoder.decode(substrate, asn1Spec=univ.ObjectIdentifier())
+        except PyAsn1Error:
+            pass
+        else:
+            assert 0, 'DER schema-driven path tolerated non-minimal arc'
+
+
+class RelativeOIDStrictDecoderTestCase(BaseTestCase):
+
+    def testMinimalRoundTrip(self):
+        reloid = univ.RelativeOID((840, 113549, 7))
+        substrate = encoder.encode(reloid)
+        decoded, rest = decoder.decode(substrate)
+        assert decoded == reloid
+        assert rest == b''
+        assert encoder.encode(decoded) == substrate
+
+    def testNonMinimalArcRejected(self):
+        # 0x80 0x81 0x00 == 128 non-minimally
+        substrate = bytes((13, 3, 0x80, 0x81, 0x00))
+        try:
+            decoder.decode(substrate)
+        except PyAsn1Error as exc:
+            assert 'arc 0' in str(exc)
+            assert 'non-minimal' in str(exc)
+        else:
+            assert 0, 'DER tolerated non-minimal RELATIVE-OID arc'
+
+    def testTruncatedArcRejected(self):
+        try:
+            decoder.decode(bytes((13, 1, 0x82)))
+        except error.SubstrateUnderrunError:
+            pass
+        else:
+            assert 0, 'DER tolerated truncated RELATIVE-OID arc'
+
+    def testEmptySubstrateRejected(self):
+        try:
+            decoder.decode(bytes((13, 0)))
+        except PyAsn1Error:
+            pass
+        else:
+            assert 0, 'DER tolerated empty RELATIVE-OID substrate'
+
+    def testSizeConstraintEnforced(self):
+        from pyasn1.type import constraint
+
+        class SizedRelOID(univ.RelativeOID):
+            subtypeSpec = univ.RelativeOID.subtypeSpec + constraint.ValueSizeConstraint(1, 2)
+
+        try:
+            decoder.decode(bytes((13, 3, 5, 6, 7)), asn1Spec=SizedRelOID())
+        except PyAsn1Error:
+            pass
+        else:
+            assert 0, 'DER tolerated RELATIVE-OID outside size constraint'
+
+    def testStrictOidFalseRestoresLooseBehavior(self):
+        value, rest = decoder.decode(
+            bytes((13, 2, 0x81, 0x00)), strictOid=False
+        )
+        assert value == (128,)
+        assert rest == b''
 
 
 class NestingDepthLimitTestCase(BaseTestCase):

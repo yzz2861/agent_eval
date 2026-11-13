@@ -1012,6 +1012,20 @@ subclasses, `BitStringPayloadDecoder` and `OctetStringPayloadDecoder`, setting
 attribute shuts indefinite framing off entirely is covered in [Two framing
 modes](#two-framing-modes).
 
+The DER decoder also adds `ObjectIdentifierPayloadDecoder` and
+`RelativeOIDPayloadDecoder` subclasses of the BER classes that flip
+`strictOid = True`, registering them in both `TAG_MAP` and `TYPE_MAP` so the
+check fires on the tag-driven *and* schema-driven paths (see
+[Sharing by identity](#sharing-by-identity) for why an entry in only one map
+is bypassed when an `asn1Spec` is supplied). Strict mode delegates to
+`univ.decodeOidArc` with `strict=True`, which rejects non-minimal
+subidentifiers per X.690 11.1. BER leaves `strictOid = False`; it only
+strict-checks when the caller passes the `strictOid` decode option or the
+target type carries a non-empty `subtypeSpec`, resolved in
+`AbstractSimplePayloadDecoder._isStrictOid`. The bare leading-`0x80`
+rejection is unconditional in every codec because it is a security guard, not
+a DER-only canonicalization rule.
+
 ### Configuration surfaces
 
 The encoder is configured at construction: `Encoder.__init__(tagMap, typeMap,
@@ -1694,6 +1708,7 @@ type system rather than the decoder; its mechanism is described in
 | `MAX_LENGTH_OCTETS` | 8 octets | the `stDecodeLength` block of `SingleItemDecoder.__call__`, before any length octet is read | An oversized length header produced an `OverflowError` escaping as a non-`PyAsn1Error` | No CVE; issue #54 / PR #100, 0.6.3, commit `6d40bde`, `CHANGES.rst` under `Revision 0.6.3` |
 | `length > sys.maxsize` guard | platform-dependent | inline in the `stDecodeLength` block, after length accumulation; no named constant | An 8-octet length can still encode 2^64-1, which no `read()` can satisfy | No CVE; PR #108, commit `100f3af`, `CHANGES.rst` under the pending `Revision 0.7.0`; on `main` before the 0.6.4 release-prep commit, but absent from the shipped `v0.6.4` tag lineage |
 | *Supplementary:* OID arcs accumulate in a list | not numeric | `ObjectIdentifierPayloadDecoder.valueDecoder` / `RelativeOIDPayloadDecoder.valueDecoder`: `list.append` per arc, one `tuple()` at the final yield | The previous `oid += (subId,)` was quadratic in arc count | CVE-2026-59885 / GHSA-8ppf-4f7h-5ppj, 0.6.4, commit `5932cc8`, `CHANGES.rst` under `Revision 0.6.4` |
+| OID subidentifier shape checks (truncation, bare leading `0x80`, DER shortest form) | not numeric | `univ.decodeOidArc`, called from the two OID `valueDecoder` methods; truncation raises `SubstrateUnderrunError`, the leading-`0x80` guard is unconditional, the shortest-form threshold (`arcValue < 2**(7*(n-1))`) only runs when `_isStrictOid` is true | A truncated final subidentifier or over-long encoding decodes to a value that does not re-encode to the same bytes, so signature verification and re-encoding disagree | Pending `Revision 0.7.0`; BER stays loose unless `strictOid` is passed or the type has a `subtypeSpec`, DER is strict by default via `der/decoder.py` OID subclasses |
 
 The checks fire before the value they guard is materialized: the tag limit
 before the shift, the length-octet limit before the octets are read, the OID
@@ -1738,6 +1753,7 @@ each guard.
 | Length-octet count cap | `AbstractItemEncoder.encodeLength` (`ber/encoder.py`) | Emitting a long-form length needing >126 octets, a corrupt header instead of an exception | `598be09`, 2007 |
 | Negative OID arc rejection | `ObjectIdentifierEncoder.encodeValue` (`ber/encoder.py`) | A negative arc falling through the base-128 packer and emitting no octets at all rather than raising | `daa77af`, 2013 |
 | Negative RELATIVE-OID arc rejection | `RelativeOIDEncoder.encodeValue` (`ber/encoder.py`) | The same hazard on the separate RELATIVE-OID path | `d17e0e1`, 2024 |
+| OID encoder atomic validation | both OID `encodeValue` methods (`ber/encoder.py`) via `univ.encodeOidArc` | The whole tuple is validated and packed into a local list before any header or payload is returned, so an illegal tuple (short, impossible first/second pair, negative arc) raises a stable error naming the arc instead of leaving a half-written encoding | Pending `Revision 0.7.0` |
 | Impossible first/second arc rejection | the two `Impossible first/second arcs` raise sites in `ObjectIdentifierEncoder.encodeValue` (`ber/encoder.py`) | OIDs whose first two arcs cannot pack into the combined first octet | `8d34914`, 2017 |
 | REAL scale-factor bound | `RealEncoder.encodeValue` (`ber/encoder.py`, grep `# bug if raised`) | Guards the 2-bit scale field; the `# bug if raised` comment marks it an internal assertion, not input validation | `44bdb82`, 2013 |
 | REAL exponent-length bound | `RealEncoder.encodeValue` (`ber/encoder.py`, grep `Real exponent overflow`) | Caps the exponent at 255 octets; distinct from the CVE-2026-59886 type-layer fix in `Real.__float__` (`univ.py`), a separate fix in a separate module ([Bounded conversion of Real](#bounded-conversion-of-real)) | `ae6f36f`, 2011 |
@@ -1882,4 +1898,3 @@ them as a drive-by; each needs its own dedicated change with tests.
   literal text. Not worth a churn-heavy rewrite mid-release; if ever fixed,
   do it as a dedicated pass verified with `tox -e docs`, since the file is
   compiled into the `-W` build.
-
