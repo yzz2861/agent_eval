@@ -41,6 +41,8 @@ from .ecdh import (
     NoKeyError,
     NoCurveError,
     InvalidCurveError,
+    InvalidPointError,
+    InvalidSubgroupError,
     InvalidSharedSecretError,
 )
 from .der import UnexpectedDER
@@ -67,6 +69,8 @@ _hush_pyflakes = [
     MalformedPointError,
     UnexpectedDER,
     InvalidCurveError,
+    InvalidPointError,
+    InvalidSubgroupError,
     NoKeyError,
     InvalidSharedSecretError,
     ECDH,

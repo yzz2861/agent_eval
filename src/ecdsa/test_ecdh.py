@@ -16,20 +16,25 @@ from .curves import (
     NIST256p,
     NIST384p,
     NIST521p,
+    SECP256k1,
     BRAINPOOLP160r1,
     SECP112r2,
     SECP128r1,
+    Curve,
 )
 from .curves import curves
 from .ecdh import (
     ECDH,
     InvalidCurveError,
+    InvalidPointError,
     InvalidSharedSecretError,
+    InvalidSubgroupError,
     NoKeyError,
     NoCurveError,
 )
+from .errors import MalformedPointError
 from .keys import SigningKey, VerifyingKey
-from .ellipticcurve import CurveEdTw
+from .ellipticcurve import CurveEdTw, CurveFp, INFINITY, PointJacobi
 
 
 if "--fast" in sys.argv:  # pragma: no cover
@@ -153,6 +158,173 @@ def test_ecdh_invalid_shared_secret_curve():
 
     with pytest.raises(InvalidSharedSecretError):
         ecdh1.generate_sharedsecret_bytes()
+
+
+@pytest.mark.parametrize(
+    "vcurve",
+    [NIST256p, SECP256k1],
+    ids=["NIST256p", "SECP256k1"],
+)
+def test_ecdh_valid_curve_roundtrip_is_equal_nonzero_and_fixed_length(
+    vcurve,
+):
+    ecdh1 = ECDH(curve=vcurve, strict=True)
+    ecdh2 = ECDH(curve=vcurve, strict=True)
+
+    public_key1 = ecdh1.generate_private_key()
+    public_key2 = ecdh2.generate_private_key()
+    ecdh1.load_received_public_key(public_key2, strict=True)
+    ecdh2.load_received_public_key(public_key1, strict=True)
+
+    secret1 = ecdh1.generate_sharedsecret_bytes()
+    secret2 = ecdh2.generate_sharedsecret_bytes()
+
+    assert secret1 == secret2
+    assert len(secret1) == 32
+    assert secret1 != b"\x00" * 32
+
+
+def test_ecdh_rejects_peer_public_key_from_another_curve():
+    ecdh1 = ECDH(curve=NIST256p, strict=True)
+    ecdh1.generate_private_key()
+    ecdh2 = ECDH(curve=SECP256k1, strict=True)
+    public_key2 = ecdh2.generate_private_key()
+
+    with pytest.raises(InvalidCurveError):
+        ecdh1.load_received_public_key(public_key2)
+
+    with pytest.raises(InvalidCurveError):
+        ecdh1.load_received_public_key_bytes(
+            public_key2.to_string(), curve=SECP256k1
+        )
+
+    with pytest.raises(InvalidCurveError):
+        ecdh1.load_received_public_key_der(public_key2.to_der())
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_ecdh_rejects_infinity_public_key(strict):
+    ecdh = ECDH(curve=NIST256p, strict=strict)
+    ecdh.generate_private_key()
+    peer_key = SigningKey.generate(NIST256p).verifying_key
+    peer_key.pubkey.point = INFINITY
+
+    with pytest.raises(InvalidPointError) as e:
+        ecdh.load_received_public_key(peer_key, strict=strict)
+
+    assert "infinity" in str(e.value)
+
+
+def test_ecdh_rejects_all_zero_raw_public_point():
+    ecdh = ECDH(curve=NIST256p, strict=True)
+    ecdh.generate_private_key()
+
+    with pytest.raises(InvalidPointError):
+        ecdh.load_received_public_key_bytes(
+            b"\x00" * 64, valid_encodings={"raw"}
+        )
+
+
+def _small_subgroup_curve():
+    field = CurveFp(17, 0, 1, 2)
+    generator = PointJacobi(field, 1, 6, 1, 9)
+    return Curve("small-subgroup", field, generator, None)
+
+
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("small_point", [(2, 3), (16, 0)])
+def test_ecdh_rejects_small_order_public_point(strict, small_point):
+    curve = _small_subgroup_curve()
+    private_key = SigningKey.from_secret_exponent(1, curve)
+    ecdh = ECDH(curve=curve, private_key=private_key, strict=strict)
+
+    peer_key = VerifyingKey.from_public_point(
+        curve.generator, curve, validate_point=False
+    )
+    peer_key.pubkey.point = PointJacobi(
+        curve.curve, small_point[0], small_point[1], 1
+    )
+
+    with pytest.raises(InvalidSubgroupError) as e:
+        ecdh.load_received_public_key(peer_key)
+
+    assert "subgroup" in str(e.value)
+
+
+def test_ecdh_degenerate_secret_error_does_not_leak_material():
+    ecdh = ECDH(curve=NIST256p, strict=True)
+    ecdh.generate_private_key()
+    ecdh.load_received_public_key(SigningKey.generate(NIST256p).verifying_key)
+
+    shared_secret = ecdh.generate_sharedsecret_bytes()
+    ecdh.private_key.privkey.secret_multiplier = NIST256p.order
+
+    with pytest.raises(InvalidSharedSecretError) as e:
+        ecdh.generate_sharedsecret_bytes()
+
+    message = str(e.value)
+    assert shared_secret.hex() not in message
+    assert str(NIST256p.order) not in message
+
+
+def test_ecdh_old_interface_bytes_and_integer_api():
+    ecdh1 = ECDH(NIST256p)
+    ecdh2 = ECDH(NIST256p)
+
+    public_key1 = ecdh1.generate_private_key()
+    public_key2 = ecdh2.generate_private_key()
+    ecdh1.load_received_public_key_bytes(public_key2.to_string())
+    ecdh2.load_received_public_key_bytes(public_key1.to_string())
+
+    shared1 = ecdh1.generate_sharedsecret()
+    shared2 = ecdh2.generate_sharedsecret()
+    assert isinstance(shared1, int)
+    assert shared1 == shared2
+    assert ecdh1.generate_sharedsecret_bytes() == (
+        ecdh2.generate_sharedsecret_bytes()
+    )
+
+
+def test_ecdh_bytes_import_respects_valid_encodings():
+    peer_key = SigningKey.generate(NIST256p).verifying_key
+    compressed = peer_key.to_string("compressed")
+
+    ecdh = ECDH(curve=NIST256p)
+    ecdh.generate_private_key()
+    ecdh.load_received_public_key_bytes(
+        compressed, valid_encodings={"compressed"}
+    )
+
+    ecdh = ECDH(curve=NIST256p)
+    ecdh.generate_private_key()
+    with pytest.raises(InvalidPointError):
+        ecdh.load_received_public_key_bytes(
+            compressed, valid_encodings={"uncompressed"}
+        )
+
+
+def test_ecdh_explicit_der_same_curve_roundtrip():
+    ecdh1 = ECDH(curve=NIST256p, strict=True)
+    ecdh2 = ECDH(curve=NIST256p, strict=True)
+
+    public_key1 = ecdh1.generate_private_key()
+    public_key2 = ecdh2.generate_private_key()
+    ecdh1.load_received_public_key_der(
+        public_key2.to_der(curve_parameters_encoding="explicit"),
+        strict=True,
+    )
+    ecdh2.load_received_public_key(public_key1, strict=True)
+
+    assert ecdh1.generate_sharedsecret_bytes() == (
+        ecdh2.generate_sharedsecret_bytes()
+    )
+
+
+def test_verifying_key_import_rejects_infinity():
+    with pytest.raises(MalformedPointError):
+        VerifyingKey.from_public_point(
+            INFINITY, NIST256p, validate_point=False
+        )
 
 
 # https://github.com/scogliani/ecc-test-vectors/blob/master/ecdh_kat/secp192r1.txt
