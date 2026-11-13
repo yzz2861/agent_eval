@@ -32,6 +32,7 @@ from .utils import login_url
 from .utils import login_user
 from .utils import logout_user
 from .utils import make_next_param
+from .utils import parse_safe_next_url
 from .utils import set_login_view
 
 __all__ = [
@@ -69,6 +70,7 @@ __all__ = [
     "login_user",
     "logout_user",
     "make_next_param",
+    "parse_safe_next_url",
     "set_login_view",
 ]
 

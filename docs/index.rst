@@ -597,6 +597,8 @@ Utilities
 ---------
 .. autofunction:: login_url
 
+.. autofunction:: parse_safe_next_url
+
 .. autoclass:: FlaskLoginClient
 
 

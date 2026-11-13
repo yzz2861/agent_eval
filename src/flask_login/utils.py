@@ -1,13 +1,17 @@
 import hmac
+import logging
+import unicodedata
 from functools import wraps
 from hashlib import sha512
 from urllib.parse import parse_qs
+from urllib.parse import unquote
 from urllib.parse import urlencode
 from urllib.parse import urlsplit
 from urllib.parse import urlunsplit
 
 from flask import current_app
 from flask import g
+from flask import has_app_context
 from flask import has_request_context
 from flask import request
 from flask import session
@@ -23,6 +27,14 @@ from .signals import user_login_confirmed
 #: A proxy for the current user. If no user is logged in, this will be an
 #: anonymous user
 current_user = LocalProxy(lambda: _get_user())
+
+logger = logging.getLogger(__name__)
+
+_MAX_NEXT_URL_LENGTH = 4096
+_MAX_DECODE_ROUNDS = 32
+_ALLOWED_SCHEMES = {"http", "https"}
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+_CONTROL_CATEGORIES = {"Cc", "Cf"}
 
 
 def encode_cookie(payload, key=None):
@@ -63,24 +75,332 @@ def decode_cookie(cookie, key=None):
         return payload
 
 
-def make_next_param(login_url, current_url):
+class _UnsafeNextUrl(Exception):
+    def __init__(self, category):
+        super().__init__(category)
+        self.category = category
+
+
+def _find_forbidden_character(value):
+    for char in value:
+        if char == "\\":
+            return "backslash"
+
+        if (
+            ord(char) < 0x20
+            or ord(char) == 0x7F
+            or ord(char) in {0x2028, 0x2029, 0xFEFF}
+            or unicodedata.category(char) in _CONTROL_CATEGORIES
+        ):
+            return "control_character"
+
+    return None
+
+
+def _has_malformed_percent_encoding(value):
+    for index, char in enumerate(value):
+        if char == "%" and (
+            index + 2 >= len(value)
+            or any(c not in "0123456789abcdefABCDEF" for c in value[index + 1 : index + 3])
+        ):
+            return True
+
+    return False
+
+
+def _decode_for_security(value):
+    """Repeatedly decode escapes that a browser or redirect handler may decode."""
+    for _ in range(_MAX_DECODE_ROUNDS):
+        decoded = unquote(value)
+
+        if decoded == value:
+            break
+
+        category = _find_forbidden_character(decoded)
+
+        if category is not None:
+            raise _UnsafeNextUrl(category)
+
+        value = decoded
+
+    return value
+
+
+def _origin_from_url(url):
+    try:
+        parsed = urlsplit(url)
+    except ValueError as e:
+        raise _UnsafeNextUrl("malformed_url") from e
+
+    scheme = parsed.scheme.lower()
+
+    if scheme not in _ALLOWED_SCHEMES:
+        raise _UnsafeNextUrl("invalid_scheme")
+
+    if not parsed.netloc:
+        raise _UnsafeNextUrl("missing_host")
+
+    if parsed.username is not None or parsed.password is not None or "@" in parsed.netloc:
+        raise _UnsafeNextUrl("userinfo")
+
+    if "%" in parsed.netloc:
+        raise _UnsafeNextUrl("encoded_host")
+
+    netloc_host = parsed.netloc.rsplit("@", 1)[-1]
+
+    if netloc_host.endswith(":"):
+        raise _UnsafeNextUrl("invalid_port")
+
+    try:
+        host = parsed.hostname
+    except ValueError as e:
+        raise _UnsafeNextUrl("malformed_url") from e
+
+    if not host:
+        raise _UnsafeNextUrl("missing_host")
+
+    try:
+        host.encode("ascii")
+    except UnicodeEncodeError as e:
+        raise _UnsafeNextUrl("invalid_host") from e
+
+    if any(char.isspace() for char in host):
+        raise _UnsafeNextUrl("invalid_host")
+
+    try:
+        port = parsed.port
+    except ValueError as e:
+        raise _UnsafeNextUrl("invalid_port") from e
+
+    if port is None:
+        port = _DEFAULT_PORTS[scheme]
+
+    return scheme, host.lower(), port
+
+
+def _try_origin_from_url(url):
+    try:
+        return _origin_from_url(url)
+    except Exception:
+        return None
+
+
+def _get_current_origin(current_url=None, fallback_url=None):
+    if current_url is not None:
+        origin = _try_origin_from_url(current_url)
+
+        if origin is not None:
+            return origin
+
+    if has_request_context():
+        origin = _try_origin_from_url(request.host_url)
+
+        if origin is not None:
+            return origin
+
+    if has_app_context():
+        server_name = current_app.config.get("SERVER_NAME")
+
+        if server_name:
+            scheme = current_app.config.get("PREFERRED_URL_SCHEME", "http")
+            origin = _try_origin_from_url(f"{scheme}://{server_name}")
+
+            if origin is not None:
+                return origin
+
+    if fallback_url is not None:
+        return _try_origin_from_url(fallback_url)
+
+    return None
+
+
+def _relative_target(parsed):
+    path = parsed.path or "/"
+
+    if _decode_for_security(path).startswith("//"):
+        raise _UnsafeNextUrl("encoded_separator")
+
+    return urlunsplit(("", "", path, parsed.query, parsed.fragment))
+
+
+def _parse_next_url(url, origin):
+    if not isinstance(url, str):
+        raise _UnsafeNextUrl("invalid_type")
+
+    if not url:
+        raise _UnsafeNextUrl("empty")
+
+    if len(url) > _MAX_NEXT_URL_LENGTH:
+        raise _UnsafeNextUrl("too_long")
+
+    category = _find_forbidden_character(url)
+
+    if category is not None:
+        raise _UnsafeNextUrl(category)
+
+    if _has_malformed_percent_encoding(url):
+        raise _UnsafeNextUrl("malformed_percent")
+
+    decoded = _decode_for_security(url)
+
+    if url.startswith("//"):
+        raise _UnsafeNextUrl("protocol_relative")
+
+    if decoded.startswith("//"):
+        raise _UnsafeNextUrl("encoded_separator")
+
+    try:
+        parsed = urlsplit(url)
+    except ValueError as e:
+        raise _UnsafeNextUrl("malformed_url") from e
+
+    if parsed.scheme:
+        if not parsed.netloc:
+            raise _UnsafeNextUrl("missing_host")
+
+        absolute_origin = _origin_from_url(url)
+
+        if origin is None:
+            raise _UnsafeNextUrl("unknown_origin")
+
+        if absolute_origin[0] != origin[0]:
+            raise _UnsafeNextUrl("cross_scheme")
+
+        if absolute_origin[1] != origin[1]:
+            raise _UnsafeNextUrl("cross_host")
+
+        if absolute_origin[2] != origin[2]:
+            raise _UnsafeNextUrl("cross_port")
+
+        relative = _relative_target(parsed)
+        absolute = urlunsplit(parsed)
+
+        return relative, absolute
+
+    if parsed.netloc:
+        raise _UnsafeNextUrl("protocol_relative")
+
+    if not parsed.path.startswith("/"):
+        raise _UnsafeNextUrl("relative_path_required")
+
+    if parsed.path.startswith("//"):
+        raise _UnsafeNextUrl("path_delimiter")
+
+    relative = _relative_target(parsed)
+
+    return relative, None
+
+
+def _log_rejected_next_url(url, category):
+    try:
+        length = len(url) if isinstance(url, str) else 0
+    except Exception:
+        length = -1
+
+    target_logger = current_app.logger if has_app_context() else logger
+    target_logger.warning(
+        "Rejected unsafe next URL: length=%d, category=%s",
+        length,
+        category,
+    )
+
+
+def _fallback_next_url(default, origin):
+    if default is None:
+        return None
+
+    try:
+        return _parse_next_url(default, origin)[0]
+    except _UnsafeNextUrl as e:
+        _log_rejected_next_url(default, f"invalid_default_{e.category}")
+    except Exception:
+        _log_rejected_next_url(default, "invalid_default_parser_error")
+
+    return "/"
+
+
+def parse_safe_next_url(next_url, current_url=None, default="/"):
+    """Resolve a user-supplied redirect target against the current app.
+
+    Only paths relative to this application and absolute URLs with the same
+    scheme, host, and port as the current application are accepted. Percent
+    escapes are decoded repeatedly during validation so encoded path
+    separators cannot bypass the origin check. Relative targets retain their
+    path, query, and fragment.
+
+    Absolute same-origin URLs are returned as relative targets so the redirect
+    cannot be reinterpreted as a protocol-relative URL. If validation fails,
+    ``default`` is returned instead. If ``default`` is also invalid, ``/`` is
+    returned. Pass ``default=None`` to get ``None`` when validation fails.
+
+    :param next_url: The untrusted redirect target.
+    :type next_url: str
+    :param current_url: A URL identifying the current application origin. If
+        omitted, the current request or ``SERVER_NAME`` is used.
+    :type current_url: str
+    :param default: The safe path to use if ``next_url`` is rejected.
+    :type default: str
+    """
+    origin = None
+
+    try:
+        origin = _get_current_origin(current_url)
+        relative, _absolute = _parse_next_url(next_url, origin)
+    except _UnsafeNextUrl as e:
+        _log_rejected_next_url(next_url, e.category)
+        return _fallback_next_url(default, origin)
+    except Exception:
+        _log_rejected_next_url(next_url, "parser_error")
+        return _fallback_next_url(default, origin)
+
+    return relative
+
+
+def make_next_param(login_url, current_url, default="/"):
     """
     Reduces the scheme and host from a given URL so it can be passed to
     the given `login` URL more efficiently.
+
+    The URL is validated as a same-origin redirect target first. If it is
+    rejected, ``default`` is returned instead.
 
     :param login_url: The login URL being redirected to.
     :type login_url: str
     :param current_url: The URL to reduce.
     :type current_url: str
+    :param default: The safe path to use if ``current_url`` is rejected.
+    :type default: str
     """
-    l_url = urlsplit(login_url)
-    c_url = urlsplit(current_url)
+    origin = None
 
-    if (not l_url.scheme or l_url.scheme == c_url.scheme) and (
-        not l_url.netloc or l_url.netloc == c_url.netloc
-    ):
-        return urlunsplit(("", "", c_url.path, c_url.query, ""))
-    return current_url
+    try:
+        origin = _get_current_origin(fallback_url=login_url)
+        relative, absolute = _parse_next_url(current_url, origin)
+    except _UnsafeNextUrl as e:
+        _log_rejected_next_url(current_url, e.category)
+        return _fallback_next_url(default, origin)
+    except Exception:
+        _log_rejected_next_url(current_url, "parser_error")
+        return _fallback_next_url(default, origin)
+
+    if absolute is None:
+        return relative
+
+    try:
+        login_parsed = urlsplit(login_url)
+    except Exception:
+        login_parsed = None
+
+    if login_parsed is None or (not login_parsed.scheme and not login_parsed.netloc):
+        return relative
+
+    login_origin = _try_origin_from_url(login_url)
+    target_origin = _try_origin_from_url(absolute)
+
+    if login_origin is not None and login_origin == target_origin:
+        return relative
+
+    return absolute
 
 
 def expand_login_view(login_view):
@@ -97,7 +417,7 @@ def expand_login_view(login_view):
     return url_for(login_view)
 
 
-def login_url(login_view, next_url=None, next_field="next"):
+def login_url(login_view, next_url=None, next_field="next", default_next="/"):
     """
     Creates a URL for redirecting to a login page. If only `login_view` is
     provided, this will just return the URL for it. If `next_url` is provided,
@@ -116,6 +436,8 @@ def login_url(login_view, next_url=None, next_field="next"):
     :param next_field: What field to store the next URL in. (It defaults to
                        ``next``.)
     :type next_field: str
+    :param default_next: The safe path to use if ``next_url`` is rejected.
+    :type default_next: str
     """
     base = expand_login_view(login_view)
 
@@ -124,7 +446,11 @@ def login_url(login_view, next_url=None, next_field="next"):
 
     parsed_result = urlsplit(base)
     md = parse_qs(parsed_result.query, keep_blank_values=True)
-    md[next_field] = make_next_param(base, next_url)
+    next_param = make_next_param(base, next_url, default=default_next)
+
+    if next_param is not None:
+        md[next_field] = next_param
+
     netloc = current_app.config.get("FORCE_HOST_FOR_REDIRECTS") or parsed_result.netloc
     parsed_result = parsed_result._replace(netloc=netloc, query=urlencode(md, doseq=True))
     return urlunsplit(parsed_result)

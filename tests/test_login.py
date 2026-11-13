@@ -7,10 +7,14 @@ from datetime import timezone
 from unittest.mock import ANY
 from unittest.mock import Mock
 from unittest.mock import patch
+from urllib.parse import parse_qs
+from urllib.parse import urlsplit
 
 from flask import Blueprint
 from flask import Flask
 from flask import get_flashed_messages
+from flask import redirect
+from flask import request
 from flask import Response
 from flask import session
 from flask.views import MethodView
@@ -30,6 +34,7 @@ from flask_login import login_user
 from flask_login import LoginManager
 from flask_login import logout_user
 from flask_login import make_next_param
+from flask_login import parse_safe_next_url
 from flask_login import session_protected
 from flask_login import set_login_view
 from flask_login import user_accessed
@@ -1285,6 +1290,156 @@ class TestLoginUrlGeneration(unittest.TestCase):
 
     def test_login_url_no_next_url(self):
         self.assertEqual(login_url("/foo"), "/foo")
+
+
+class SafeNextUrlTestCase(unittest.TestCase):
+    def setUp(self):
+        self.app = Flask(__name__)
+        self.app.config["SECRET_KEY"] = "deterministic"
+        self.login_manager = LoginManager()
+        self.login_manager.init_app(self.app)
+        self.login_manager.login_view = "login"
+
+        @self.login_manager.user_loader
+        def load_user(user_id):
+            return USERS.get(str(user_id))
+
+        @self.app.route("/login")
+        def login():
+            return redirect(parse_safe_next_url(request.args.get("next"), default="/tickets"))
+
+        @self.app.route("/ticket/<ticket_id>")
+        @login_required
+        def ticket(ticket_id):
+            return ticket_id
+
+        @self.app.route("/tickets")
+        def tickets():
+            return "Ticket list"
+
+    def test_parse_next_url_preserves_relative_path_query_and_fragment(self):
+        with self.app.test_request_context():
+            target = "/ticket/42?tab=history&sort=asc#reply"
+            self.assertEqual(parse_safe_next_url(target), target)
+
+    def test_parse_next_url_accepts_same_origin_absolute_url(self):
+        with self.app.test_request_context():
+            self.assertEqual(
+                parse_safe_next_url("http://localhost/ticket/42?tab=history#reply"),
+                "/ticket/42?tab=history#reply",
+            )
+            self.assertEqual(
+                parse_safe_next_url("http://localhost:80/ticket/42"),
+                "/ticket/42",
+            )
+
+    def test_parse_next_url_rejects_cross_host_and_default_port(self):
+        with self.app.test_request_context():
+            for target in (
+                "http://evil.example/ticket/42",
+                "https://localhost/ticket/42",
+                "http://localhost:81/ticket/42",
+            ):
+                self.assertEqual(parse_safe_next_url(target, default="/tickets"), "/tickets")
+
+    def test_parse_next_url_rejects_protocol_relative_userinfo_and_backslash(self):
+        with self.app.test_request_context():
+            targets = (
+                "//evil.example/ticket/42",
+                "https://user@evil.example/ticket/42",
+                "https://user:password@localhost/ticket/42",
+                "https:\\\\evil.example/ticket/42",
+                "\\\\evil.example/ticket/42",
+            )
+
+            for target in targets:
+                self.assertEqual(parse_safe_next_url(target, default="/tickets"), "/tickets")
+
+    def test_parse_next_url_rejects_double_encoded_separators(self):
+        with self.app.test_request_context():
+            targets = (
+                "/%252F%252Fevil.example/ticket/42?tab=history",
+                "%252F%252Fevil.example/ticket/42",
+                "/%255C%255Cevil.example/ticket/42",
+            )
+
+            for target in targets:
+                self.assertEqual(parse_safe_next_url(target, default="/tickets"), "/tickets")
+
+    def test_parse_next_url_rejects_control_characters_and_malformed_percent(self):
+        with self.app.test_request_context():
+            targets = (
+                "/ticket/42\nLocation: https://evil.example",
+                "/ticket/42%0D%0ALocation:%20https://evil.example",
+                "/ticket/42%250A",
+                "/ticket/42?tab=%ZZ",
+                "/ticket/42?tab=%2",
+            )
+
+            for target in targets:
+                self.assertEqual(parse_safe_next_url(target, default="/tickets"), "/tickets")
+
+    def test_login_url_uses_custom_next_field_and_preserves_target(self):
+        with self.app.test_request_context():
+            result = login_url(
+                "/login",
+                "http://localhost/ticket/42?tab=history#reply",
+                "return_to",
+            )
+
+            self.assertEqual(
+                result,
+                "/login?return_to=%2Fticket%2F42%3Ftab%3Dhistory%23reply",
+            )
+
+    def test_login_url_rejects_unsafe_target_with_safe_default(self):
+        with self.app.test_request_context():
+            result = login_url("/login", "//evil.example/ticket/42", default_next="/tickets")
+            self.assertEqual(result, "/login?next=%2Ftickets")
+
+    def test_login_redirect_location_matches_parser(self):
+        with self.app.test_client() as client:
+            login_response = client.get("/ticket/42?tab=history&sort=asc")
+            self.assertEqual(login_response.status_code, 302)
+
+            parsed_location = urlsplit(login_response.location)
+            next_value = parse_qs(parsed_location.query, strict_parsing=True)["next"][0]
+            self.assertEqual(next_value, "/ticket/42?tab=history&sort=asc")
+            self.assertEqual(parse_safe_next_url(next_value), next_value)
+
+            redirect_response = client.get(login_response.location)
+            self.assertEqual(redirect_response.status_code, 302)
+            self.assertEqual(
+                redirect_response.location,
+                "/ticket/42?tab=history&sort=asc",
+            )
+
+    def test_login_redirect_location_rejects_unsafe_next(self):
+        targets = (
+            "//evil.example/ticket/42",
+            "https:\\\\evil.example/ticket/42",
+            "https://user@evil.example/ticket/42",
+            "/%252F%252Fevil.example/ticket/42?tab=history",
+            "/ticket/42\nLocation: https://evil.example",
+        )
+
+        with self.app.test_client() as client:
+            for target in targets:
+                response = client.get("/login", query_string={"next": target})
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(response.location, "/tickets")
+
+    def test_rejection_log_contains_only_length_and_category(self):
+        malicious = "//evil.example/secret?token=super-secret"
+
+        with self.assertLogs("flask_login.utils", level="WARNING") as logs:
+            self.assertEqual(parse_safe_next_url(malicious, default=None), None)
+
+        message = logs.output[0]
+        self.assertIn(f"length={len(malicious)}", message)
+        self.assertIn("protocol_relative", message)
+        self.assertNotIn("evil", message)
+        self.assertNotIn("super-secret", message)
 
 
 class CookieEncodingTestCase(unittest.TestCase):
