@@ -51,6 +51,7 @@ from .exceptions import (
     SystemTimeWarning,
 )
 from .util import SKIP_HEADER, SKIPPABLE_HEADERS, connection, ssl_
+from .util.proxy import strip_target_auth_headers
 from .util.request import body_to_chunks
 from .util.ssl_ import assert_fingerprint as _assert_fingerprint
 from .util.ssl_ import (
@@ -173,6 +174,7 @@ class HTTPConnection(_HTTPConnection):
 
     _has_connected_to_proxy: bool
     _response_options: _ResponseOptions | None
+    _tunnel_completed: bool
     _tunnel_host: str | None
     _tunnel_port: int | None
     _tunnel_scheme: str | None
@@ -204,6 +206,7 @@ class HTTPConnection(_HTTPConnection):
 
         self._has_connected_to_proxy = False
         self._response_options = None
+        self._tunnel_completed = False
         self._tunnel_host: str | None = None
         self._tunnel_port: int | None = None
         self._tunnel_scheme: str | None = None
@@ -286,129 +289,138 @@ class HTTPConnection(_HTTPConnection):
         super().set_tunnel(host, port=port, headers=headers)
         self._tunnel_scheme = scheme
 
-    if sys.version_info < (3, 11, 16) or ((3, 12) <= sys.version_info < (3, 12, 14)):
-        # Taken from python/cpython#100986 which was backported in 3.11.9 and 3.12.3.
+    # Header validation and IPv6 handling are taken from CPython security
+    # fixes (python/cpython#100986, python/cpython#146211) and applied on all
+    # supported Python versions by our own `_tunnel` implementation below.
+    _is_legal_header_name = staticmethod(re.compile(rb"[^:\s][^:\r\n]*").fullmatch)
+    _is_illegal_header_value = staticmethod(
+        re.compile(rb"\n(?![ \t])|\r(?![ \t\n])").search
+    )
+    _contains_disallowed_url_pchar_re = re.compile("[\x00-\x20\x7f]")
+
+    def _wrap_ipv6(self, ip: bytes) -> bytes:
         # When using connection_from_host, host will come without brackets.
-        # With a security patch from python/cpython#146211.
-        def _wrap_ipv6(self, ip: bytes) -> bytes:
-            if b":" in ip and ip[0] != b"["[0]:
-                return b"[" + ip + b"]"
-            return ip
+        if b":" in ip and ip[0] != b"["[0]:
+            return b"[" + ip + b"]"
+        return ip
 
-        # Copied from CPython 3.12.13 Lib/http/client.py
-        _is_legal_header_name = staticmethod(re.compile(rb"[^:\s][^:\r\n]*").fullmatch)
-        _is_illegal_header_value = staticmethod(
-            re.compile(rb"\n(?![ \t])|\r(?![ \t\n])").search
+    def _tunnel(self) -> None:
+        if self._tunnel_completed:
+            # The tunnel is already established on this connection. Running
+            # the CONNECT handshake again on a reused connection would send
+            # a plaintext CONNECT (and proxy credentials) through the
+            # tunnel to the target origin.
+            return
+        if self._contains_disallowed_url_pchar_re.search(self._tunnel_host):  # type: ignore[arg-type]
+            raise ValueError(
+                "Tunnel host can't contain control characters %r" % (self._tunnel_host,)
+            )
+        if self.sock is None:
+            raise OSError("Tunnel connection failed: not connected to the proxy")
+
+        # The CONNECT handshake maintains its own proxy-auth challenge
+        # state per connection. `Proxy-Authorization` is only ever
+        # generated from the configured proxy credential source.
+        auth_session = None
+        if self.proxy_config is not None and self.proxy_config.auth is not None:
+            auth_session = self.proxy_config.auth.create_session()
+
+        tunnel_host = self._tunnel_host
+        tunnel_port = self._tunnel_port
+        connect = b"CONNECT %s:%d HTTP/1.1\r\n" % (  # type: ignore[str-format]
+            self._wrap_ipv6(tunnel_host.encode("idna")),  # type: ignore[union-attr]
+            tunnel_port,
         )
-        _contains_disallowed_url_pchar_re = re.compile("[\x00-\x20\x7f]")
+        authority = f"{tunnel_host}:{tunnel_port}"
 
-        if sys.version_info < (3, 11, 16):
-            # `_tunnel` copied from 3.11.15 backporting
-            # https://github.com/python/cpython/commit/0d4026432591d43185568dd31cef6a034c4b9261
-            # and https://github.com/python/cpython/commit/6fbc61070fda2ffb8889e77e3b24bca4249ab4d1
-            # plus a fix from https://github.com/python/cpython/commit/56b7100b04e44ea27989242b176beb8f016b2c53
-            def _tunnel(self) -> None:
-                if self._contains_disallowed_url_pchar_re.search(self._tunnel_host):  # type: ignore[arg-type]
-                    raise ValueError(
-                        "Tunnel host can't contain control characters %r"
-                        % (self._tunnel_host,)
-                    )
-                _MAXLINE = http.client._MAXLINE  # type: ignore[attr-defined]
-                connect = b"CONNECT %s:%d HTTP/1.0\r\n" % (  # type: ignore[str-format]
-                    self._wrap_ipv6(self._tunnel_host.encode("ascii")),  # type: ignore[union-attr]
-                    self._tunnel_port,
+        while True:
+            headers = [connect]
+            # Target-origin credentials (e.g. an `Authorization: Bearer`
+            # header) must never be sent to the proxy, including on 407
+            # retries.
+            tunnel_headers = strip_target_auth_headers(self._tunnel_headers)  # type: ignore[attr-defined]
+            if auth_session is not None:
+                auth_value = auth_session.proxy_authorization_header(
+                    "CONNECT", authority
                 )
-                headers = [connect]
-                for header, value in self._tunnel_headers.items():  # type: ignore[attr-defined]
-                    header_bytes = header.encode("latin-1")
-                    value_bytes = value.encode("latin-1")
-                    if not self._is_legal_header_name(header_bytes):
-                        raise ValueError(f"Invalid header name {header_bytes!r}")
-                    if self._is_illegal_header_value(value_bytes):
-                        raise ValueError(f"Invalid header value {value_bytes!r}")
-                    headers.append(b"%s: %s\r\n" % (header_bytes, value_bytes))
-                headers.append(b"\r\n")
-                # Making a single send() call instead of one per line encourages
-                # the host OS to use a more optimal packet size instead of
-                # potentially emitting a series of small packets.
-                self.send(b"".join(headers))
-                del headers
+                if auth_value is not None:
+                    # The strategy is the only source of proxy credentials;
+                    # it replaces any statically configured header.
+                    tunnel_headers = {
+                        header: value
+                        for header, value in tunnel_headers.items()
+                        if header.lower() != "proxy-authorization"
+                    }
+                    tunnel_headers["Proxy-Authorization"] = auth_value
+            for header, value in tunnel_headers.items():
+                header_bytes = header.encode("latin-1")
+                value_bytes = value.encode("latin-1")
+                if not self._is_legal_header_name(header_bytes):
+                    raise ValueError(f"Invalid header name {header_bytes!r}")
+                if self._is_illegal_header_value(value_bytes):
+                    raise ValueError(f"Invalid header value {value_bytes!r}")
+                headers.append(b"%s: %s\r\n" % (header_bytes, value_bytes))
+            headers.append(b"\r\n")
+            # Making a single send() call instead of one per line encourages
+            # the host OS to use a more optimal packet size instead of
+            # potentially emitting a series of small packets.
+            self.send(b"".join(headers))
+            del headers
 
-                response = self.response_class(self.sock, method=self._method)  # type: ignore[attr-defined]
-                try:
-                    version, code, message = response._read_status()  # type: ignore[attr-defined]
+            response = self.response_class(self.sock, method=self._method)  # type: ignore[attr-defined]
+            try:
+                response.begin()
+                code, message = response.status, response.reason
 
-                    if code != http.HTTPStatus.OK:
-                        self.close()
+                self._raw_proxy_headers = response.headers  # type: ignore[attr-defined]
+
+                if self.debuglevel > 0:
+                    for header in self._raw_proxy_headers:
+                        print("header:", header.decode())
+
+                if code == http.HTTPStatus.OK:
+                    connection_tokens = {
+                        token.strip().lower()
+                        for value in self._raw_proxy_headers.get_all("Connection", [])
+                        for token in value.split(",")
+                    }
+                    if "close" in connection_tokens:
+                        # The proxy returned 200 but is closing the
+                        # connection: no tunnel was actually established.
                         raise OSError(
-                            f"Tunnel connection failed: {code} {message.strip()}"
+                            "Tunnel connection failed: proxy returned "
+                            f"{code} {message.strip()} but closed the connection"
                         )
-                    while True:
-                        line = response.fp.readline(_MAXLINE + 1)
-                        if len(line) > _MAXLINE:
-                            raise http.client.LineTooLong("header line")
-                        if not line:
-                            # for sites which EOF without sending a trailer
-                            break
-                        if line in (b"\r\n", b"\n", b""):
-                            break
+                    self._tunnel_completed = True
+                    return
 
-                        if self.debuglevel > 0:
-                            print("header:", line.decode())
-                finally:
-                    response.close()
-
-        elif (3, 12) <= sys.version_info < (3, 12, 14):
-            # `_tunnel` copied from 3.12.13 backporting
-            # https://github.com/python/cpython/commit/23aef575c7629abcd4aaf028ebd226fb41a4b3c8
-            # plus a fix from https://github.com/python/cpython/commit/c00c386faa579ad71196d33408644478488e43ec
-            def _tunnel(self) -> None:  # noqa: F811
-                if self._contains_disallowed_url_pchar_re.search(self._tunnel_host):  # type: ignore[arg-type]
-                    raise ValueError(
-                        "Tunnel host can't contain control characters %r"
-                        % (self._tunnel_host,)
-                    )
-                connect = b"CONNECT %s:%d HTTP/1.1\r\n" % (  # type: ignore[str-format]
-                    self._wrap_ipv6(self._tunnel_host.encode("idna")),  # type: ignore[union-attr]
-                    self._tunnel_port,
-                )
-                headers = [connect]
-                for header, value in self._tunnel_headers.items():  # type: ignore[attr-defined]
-                    header_bytes = header.encode("latin-1")
-                    value_bytes = value.encode("latin-1")
-                    if not self._is_legal_header_name(header_bytes):
-                        raise ValueError(f"Invalid header name {header_bytes!r}")
-                    if self._is_illegal_header_value(value_bytes):
-                        raise ValueError(f"Invalid header value {value_bytes!r}")
-                    headers.append(b"%s: %s\r\n" % (header_bytes, value_bytes))
-                headers.append(b"\r\n")
-                # Making a single send() call instead of one per line encourages
-                # the host OS to use a more optimal packet size instead of
-                # potentially emitting a series of small packets.
-                self.send(b"".join(headers))
-                del headers
-
-                response = self.response_class(self.sock, method=self._method)  # type: ignore[attr-defined]
-                try:
-                    version, code, message = response._read_status()  # type: ignore[attr-defined]
-
-                    self._raw_proxy_headers = http.client._read_headers(response.fp)  # type: ignore[attr-defined]
-
-                    if self.debuglevel > 0:
-                        for header in self._raw_proxy_headers:
-                            print("header:", header.decode())
-
-                    if code != http.HTTPStatus.OK:
-                        self.close()
+                if code == http.HTTPStatus.PROXY_AUTHENTICATION_REQUIRED:
+                    # Drain the response body so the connection can be
+                    # reused for the next CONNECT attempt. The body is
+                    # deliberately never included in errors or logs: error
+                    # pages may echo the credentials back.
+                    if response.length:
+                        response.read()
+                    if response.will_close:
                         raise OSError(
-                            f"Tunnel connection failed: {code} {message.strip()}"
+                            "Tunnel connection failed: proxy closed the "
+                            "connection while requesting authentication"
                         )
+                    if auth_session is not None:
+                        challenges = self._raw_proxy_headers.get_all(
+                            "Proxy-Authenticate", []
+                        )
+                        if auth_session.handle_challenge(challenges):
+                            continue
+                    raise OSError(f"Tunnel connection failed: {code} {message.strip()}")
 
-                finally:
-                    response.close()
+                raise OSError(f"Tunnel connection failed: {code} {message.strip()}")
+            finally:
+                response.close()
 
     def connect(self) -> None:
         self.sock = self._new_conn()
+        self._tunnel_completed = False
         if self._tunnel_host:
             # If we're tunneling it means we're connected to our proxy.
             self._has_connected_to_proxy = True
@@ -463,6 +475,7 @@ class HTTPConnection(_HTTPConnection):
             self.proxy_is_verified = None
             self._has_connected_to_proxy = False
             self._response_options = None
+            self._tunnel_completed = False
             self._tunnel_host = None
             self._tunnel_port = None
             self._tunnel_scheme = None
@@ -851,6 +864,7 @@ class HTTPSConnection(HTTPConnection):
         try:
             sock: socket.socket | ssl.SSLSocket
             self.sock = sock = self._new_conn()
+            self._tunnel_completed = False
             server_hostname: str = self.host
             tls_in_tls = False
 

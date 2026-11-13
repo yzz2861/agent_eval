@@ -21,6 +21,7 @@ from ..exceptions import (
     ReadTimeoutError,
     ResponseError,
 )
+from .proxy import redact_url_userinfo
 from .util import reraise
 
 if typing.TYPE_CHECKING:
@@ -493,6 +494,10 @@ class Retry:
             # Disabled, indicate to re-raise the error.
             raise reraise(type(error), error, _stacktrace)
 
+        # Credentials in URLs (e.g. proxy or origin userinfo) must never be
+        # persisted in the retry/redirect history, logs, or exceptions.
+        url = redact_url_userinfo(url)
+
         total = self.total
         if total is not None:
             total -= 1
@@ -532,7 +537,7 @@ class Retry:
             cause = "too many redirects"
             response_redirect_location = response.get_redirect_location()
             if response_redirect_location:
-                redirect_location = response_redirect_location
+                redirect_location = redact_url_userinfo(response_redirect_location)
             status = response.status
 
         else:

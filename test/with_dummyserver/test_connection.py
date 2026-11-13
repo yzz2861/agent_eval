@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import sys
 import typing
 from http.client import ResponseNotReady
 from unittest import mock
@@ -15,12 +14,9 @@ from urllib3.response import HTTPResponse
 # See https://github.com/python/cpython/issues/146211
 # Xfail only on Python versions where neither the stdlib nor urllib3's
 # compatibility _tunnel implementation rejects invalid tunnel input.
-_MISSING_TUNNEL_CONTROL_CHAR_FIX = (
-    # 3.13 before 3.13.14 missing fix (no ported implementation for this version)
-    (sys.version_info[:2] == (3, 13) and sys.version_info[2] < 14)
-    # 3.14 before 3.14.5 missing fix (no ported implementation for this version)
-    or (sys.version_info[:2] == (3, 14) and sys.version_info[2] < 5)
-)
+# urllib3 ships its own `_tunnel` implementation which applies the control
+# character fixes on all supported Python versions.
+_MISSING_TUNNEL_CONTROL_CHAR_FIX = False
 
 
 @pytest.fixture()

@@ -41,7 +41,12 @@ from .exceptions import (
 )
 from .response import BaseHTTPResponse
 from .util.connection import is_connection_dropped
-from .util.proxy import connection_requires_http_tunnel
+from .util.proxy import (
+    connection_requires_http_tunnel,
+    redact_url_userinfo,
+    strip_proxy_headers,
+    strip_target_auth_headers,
+)
 from .util.request import _TYPE_BODY_POSITION, set_file_position
 from .util.retry import Retry
 from .util.ssl_match_hostname import CertificateError
@@ -743,6 +748,11 @@ class HTTPConnectionPool(ConnectionPool, RequestMethods):
         if not http_tunnel_required:
             headers = headers.copy()  # type: ignore[attr-defined]
             headers.update(self.proxy_headers)  # type: ignore[union-attr]
+        else:
+            # The tunnel is established: proxy-specific headers (such as
+            # Proxy-Authorization) must not be forwarded to the target
+            # origin inside the tunnel.
+            headers = strip_proxy_headers(headers)  # type: ignore[arg-type]
 
         # Must keep the exception bound to a separate variable or else Python 3
         # complains about UnboundLocalError.
@@ -768,7 +778,9 @@ class HTTPConnectionPool(ConnectionPool, RequestMethods):
                     self._prepare_proxy(conn)
                 except (BaseSSLError, OSError, SocketTimeout) as e:
                     self._raise_timeout(
-                        err=e, url=self.proxy.url, timeout_value=conn.timeout
+                        err=e,
+                        url=redact_url_userinfo(self.proxy),  # type: ignore[arg-type]
+                        timeout_value=conn.timeout,
                     )
                     raise
 
@@ -1058,7 +1070,9 @@ class HTTPSConnectionPool(HTTPConnectionPool):
             scheme=tunnel_scheme,
             host=self._tunnel_host,
             port=self.port,
-            headers=self.proxy_headers,
+            # Target-origin credentials must never be sent to the proxy,
+            # only headers explicitly meant for the proxy hop.
+            headers=strip_target_auth_headers(self.proxy_headers),
         )
         conn.connect()
 

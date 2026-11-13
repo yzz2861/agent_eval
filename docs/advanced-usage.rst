@@ -278,6 +278,36 @@ an `absolute URI <https://datatracker.ietf.org/doc/html/rfc9112#name-absolute-fo
 **only use this option with trusted or corporate proxies** as the proxy will have
 full visibility of your requests.
 
+.. _proxy_authentication:
+
+Proxy authentication
+~~~~~~~~~~~~~~~~~~~~
+
+If your proxy requires authentication, provide credentials via the
+``proxy_auth`` argument (or the userinfo of the proxy URL). Proxy
+credentials are a separate configuration from the target origin's
+credentials and are only ever sent to the proxy:
+
+.. code-block:: python
+
+    import urllib3
+
+    # Basic auth (the default scheme) via the proxy URL userinfo:
+    proxy = urllib3.ProxyManager("http://user:password@localhost:3128/")
+
+    # Or explicitly, choosing the scheme ("basic" or "digest"):
+    proxy = urllib3.ProxyManager(
+        "http://localhost:3128/",
+        proxy_auth=("user", "password"),
+        proxy_auth_scheme="digest",
+    )
+
+When the proxy answers the CONNECT request with a ``407`` challenge, the
+handshake is retried with a fresh ``Proxy-Authorization`` header generated
+from the configured proxy credentials, up to a bounded number of attempts.
+Userinfo in the proxy URL may be percent-encoded, and usernames or
+passwords containing special characters (such as ``@``) are supported.
+
 .. _https_proxy_error_http_proxy:
 
 Your proxy appears to only use HTTP and not HTTPS

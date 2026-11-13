@@ -25,7 +25,7 @@ from .exceptions import (
 )
 from .response import BaseHTTPResponse
 from .util.connection import _TYPE_SOCKET_OPTIONS
-from .util.proxy import connection_requires_http_tunnel
+from .util.proxy import ProxyAuthStrategy, connection_requires_http_tunnel
 from .util.retry import Retry
 from .util.timeout import Timeout
 from .util.url import Url, parse_url
@@ -563,6 +563,20 @@ class ProxyManager(PoolManager):
     :param proxy_assert_fingerprint:
         The fingerprint of the certificate to verify against.
 
+    :param proxy_auth:
+        Credentials used to authenticate to the proxy, and only to the
+        proxy. Accepts a :class:`urllib3.util.proxy.ProxyAuthStrategy`, a
+        ``(username, password)`` tuple, or a ``"username:password"`` string.
+        If not given, the userinfo of ``proxy_url`` is used when present.
+        These credentials are a separate configuration key from the target
+        origin's credentials (``headers`` / ``Authorization``) and are never
+        mixed with them.
+
+    :param proxy_auth_scheme:
+        The proxy authentication scheme to use when ``proxy_auth`` is given
+        as credentials rather than a strategy: ``"basic"`` (default) or
+        ``"digest"``. The scheme is never negotiated down.
+
     Example:
 
     .. code-block:: python
@@ -597,6 +611,8 @@ class ProxyManager(PoolManager):
         use_forwarding_for_https: bool = False,
         proxy_assert_hostname: None | str | typing.Literal[False] = None,
         proxy_assert_fingerprint: str | None = None,
+        proxy_auth: ProxyAuthStrategy | tuple[str, str] | str | None = None,
+        proxy_auth_scheme: str = "basic",
         **connection_pool_kw: typing.Any,
     ) -> None:
         if isinstance(proxy_url, HTTPConnectionPool):
@@ -632,11 +648,13 @@ class ProxyManager(PoolManager):
 
         self.proxy = proxy
         self.proxy_headers = proxy_headers or {}
+        self.proxy_auth = self._build_proxy_auth_strategy(proxy_auth, proxy_auth_scheme)
         self.proxy_config = ProxyConfig(
             proxy_ssl_context,
             use_forwarding_for_https,
             proxy_assert_hostname,
             proxy_assert_fingerprint,
+            auth=self.proxy_auth,
         )
 
         connection_pool_kw["_proxy"] = self.proxy
@@ -644,6 +662,29 @@ class ProxyManager(PoolManager):
         connection_pool_kw["_proxy_config"] = self.proxy_config
 
         super().__init__(num_pools, headers, **connection_pool_kw)
+
+    def _build_proxy_auth_strategy(
+        self,
+        proxy_auth: ProxyAuthStrategy | tuple[str, str] | str | None,
+        proxy_auth_scheme: str,
+    ) -> ProxyAuthStrategy | None:
+        """
+        Resolve the proxy authentication strategy from the explicit
+        ``proxy_auth`` configuration, falling back to the userinfo of the
+        proxy URL. Returns ``None`` when no proxy credentials are
+        configured.
+        """
+        if proxy_auth is None:
+            return ProxyAuthStrategy.from_url(self.proxy, scheme=proxy_auth_scheme)
+        if isinstance(proxy_auth, ProxyAuthStrategy):
+            return proxy_auth
+        if isinstance(proxy_auth, str):
+            username, _, password = proxy_auth.partition(":")
+        else:
+            username, password = proxy_auth
+        return ProxyAuthStrategy(
+            username=username, password=password, scheme=proxy_auth_scheme
+        )
 
     def connection_from_host(
         self,

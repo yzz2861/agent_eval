@@ -1,0 +1,10 @@
+Added explicit proxy authentication for HTTP CONNECT tunnels. ``ProxyManager``
+now accepts ``proxy_auth`` (credentials or a
+:class:`urllib3.util.proxy.ProxyAuthStrategy`) and ``proxy_auth_scheme``
+(``"basic"`` or ``"digest"``), and also builds a strategy from the proxy URL
+userinfo. The CONNECT handshake answers 407 challenges with a bounded number
+of retries, proxy credentials are only ever generated from the configured
+proxy credential source, target ``Authorization`` headers are never sent to
+the proxy, and proxy-specific headers are stripped from requests forwarded
+through the tunnel. Credentials are redacted from errors, logs, redirect
+history, and exception reprs.

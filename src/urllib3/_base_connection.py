@@ -3,6 +3,7 @@ from __future__ import annotations
 import typing
 
 from .util.connection import _TYPE_SOCKET_OPTIONS
+from .util.proxy import ProxyAuthStrategy
 from .util.timeout import _DEFAULT_TIMEOUT, _TYPE_TIMEOUT
 from .util.url import Url
 
@@ -16,6 +17,10 @@ class ProxyConfig(typing.NamedTuple):
     use_forwarding_for_https: bool
     assert_hostname: None | str | typing.Literal[False]
     assert_fingerprint: str | None
+    # Explicit proxy authentication policy. Credentials for the proxy hop
+    # only ever come from this field (or the proxy URL userinfo it was
+    # derived from), never from target request headers.
+    auth: ProxyAuthStrategy | None = None
 
 
 class _ResponseOptions(typing.NamedTuple):
