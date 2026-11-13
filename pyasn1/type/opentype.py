@@ -5,7 +5,19 @@
 # License: https://pyasn1.readthedocs.io/en/latest/license.html
 #
 
-__all__ = ['OpenType']
+from pyasn1 import error
+
+__all__ = ['OpenType', 'AmbiguousOpenTypeError']
+
+
+class AmbiguousOpenTypeError(error.PyAsn1Error):
+    """Open type selector resolved to more than one matching schema.
+
+    The exception is raised when an explicit selector mapping offers
+    multiple candidate schemas whose tags match the serialized value.
+    Callers must not rely on the order in which candidates were
+    registered with :class:`OpenType`.
+    """
 
 
 class OpenType(object):
@@ -35,7 +47,10 @@ class OpenType(object):
 
     typeMap: :py:class:`dict`
         A map of value->ASN.1 type. It's stored by reference and can be
-        mutated later to register new mappings.
+        mutated later to register new mappings. A mapping value may also
+        be a list, tuple or set of tag-distinguishable ASN.1 types for
+        one selector value. Lookups never fall back to scanning other
+        mapping entries by tag.
 
     Examples
     --------
@@ -70,6 +85,10 @@ class OpenType(object):
                           openType=openType)
             )
         )
+
+    A selector value mapped to several candidates is disambiguated by the
+    tag of the serialized value. Duplicate matching tags raise
+    :class:`AmbiguousOpenTypeError`; registration order is not used.
     """
 
     def __init__(self, name, typeMap=None):
@@ -102,3 +121,94 @@ class OpenType(object):
 
     def __iter__(self):
         return iter(self.__typeMap)
+
+    @staticmethod
+    def _isCandidateCollection(value):
+        return isinstance(value, (list, tuple, set, frozenset))
+
+    def getCandidates(self, selectorValue):
+        """Return schema candidates explicitly mapped to *selectorValue*.
+
+        A mapping value is normally a single ASN.1 schema. Values may also
+        be a list, tuple or set of schemas when one selector value permits
+        more than one tag-distinguishable alternative. In the latter case
+        the caller has to select the candidate whose tag matches the
+        serialized value.
+
+        Returns an empty tuple if *selectorValue* is not present in the
+        explicit map. No tag-based fallback is attempted.
+        """
+        try:
+            mappedValue = self.__typeMap[selectorValue]
+
+        except (KeyError, TypeError):
+            return ()
+
+        if self._isCandidateCollection(mappedValue):
+            return tuple(mappedValue)
+
+        return (mappedValue,)
+
+    @staticmethod
+    def _candidateMatchesTag(candidate, tagSet):
+        try:
+            if candidate.tagSet == tagSet:
+                return True
+
+        except AttributeError:
+            return False
+
+        try:
+            return tagSet in candidate.tagMap
+
+        except (AttributeError, error.PyAsn1Error):
+            return False
+
+    def resolve(self, selectorValue, tagSet=None):
+        """Resolve an explicit selector value to a schema candidate.
+
+        With a single candidate the schema is returned directly. With a
+        collection of candidates *tagSet* is used to narrow the selection.
+        More than one matching candidate is an error: registration order
+        must never decide which schema is used.
+
+        Returns :obj:`None` when the selector is not present in the
+        explicit map or when no candidate matches the given *tagSet*.
+        """
+        candidates = self.getCandidates(selectorValue)
+
+        if not candidates:
+            return None
+
+        if tagSet is None or len(candidates) == 1:
+            return candidates[0]
+
+        matches = [
+            candidate for candidate in candidates
+            if self._candidateMatchesTag(candidate, tagSet)
+        ]
+
+        if len(matches) == 1:
+            return matches[0]
+
+        if len(matches) > 1:
+            descriptions = sorted(
+                candidate.__class__.__name__ for candidate in matches
+            )
+
+            raise AmbiguousOpenTypeError(
+                'Ambiguous open type selector %r: %d of %d candidate '
+                'schemas match tag %s (%s); tag conflict; registration '
+                'order must not decide the schema' % (
+                    self.name, len(matches), len(candidates), tagSet,
+                    ', '.join(descriptions)
+                ),
+                context={
+                    'selector': self.name,
+                    'candidates': len(candidates),
+                    'matches': len(matches),
+                    'tagSet': tagSet
+                }
+            )
+
+        return None

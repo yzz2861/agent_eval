@@ -1573,6 +1573,241 @@ class SequenceDecoderWithExplicitlyTaggedSetOfOpenTypesTestCase(BaseTestCase):
         assert s[1][0] == univ.OctetString(hexValue='02010C')
 
 
+class SequenceDecoderWithOpenTypeResolutionTestCase(BaseTestCase):
+
+    @staticmethod
+    def _sequence(selectorSpec, openType, trailingSpec):
+        return univ.Sequence(
+            componentType=namedtype.NamedTypes(
+                selectorSpec,
+                namedtype.NamedType('blob', univ.Any(), openType=openType),
+                trailingSpec
+            )
+        )
+
+    def testCandidateCollectionUsesMatchingTag(self):
+        openType = opentype.OpenType(
+            'id',
+            {1: [char.PrintableString(), char.UTF8String()]}
+        )
+        schema = self._sequence(
+            namedtype.NamedType('id', univ.Integer()),
+            openType,
+            namedtype.NamedType('tail', univ.Integer())
+        )
+
+        s, r = decoder.decode(
+            bytes((48, 15, 2, 1, 1, 12, 7,
+                   104, 101, 108, 108, 111, 33, 33, 2, 1, 9)),
+            asn1Spec=schema, decodeOpenTypes=True
+        )
+
+        assert not r
+        assert s['id'] == 1
+        assert s['blob'] == 'hello!!'
+        assert s['tail'] == 9
+
+    def testCandidateCollectionRejectsDuplicateTag(self):
+        openType = opentype.OpenType(
+            'id', {1: [univ.Integer(), univ.Integer()]}
+        )
+        schema = self._sequence(
+            namedtype.NamedType('id', univ.Integer()),
+            openType,
+            namedtype.NamedType('tail', univ.Integer())
+        )
+
+        try:
+            decoder.decode(
+                bytes((48, 9, 2, 1, 1, 2, 1, 7, 2, 1, 9)),
+                asn1Spec=schema, decodeOpenTypes=True
+            )
+
+        except error.PyAsn1Error as exc:
+            message = str(exc)
+            assert 'Ambiguous open type' in message
+            assert 'Sequence.blob' in message
+            assert "selector 'id'" in message
+            assert '2 of 2 candidate schemas' in message
+            assert exc.context['candidates'] == 2
+            assert exc.context['matches'] == 2
+
+        else:
+            assert False, 'duplicate open type tag tolerated'
+
+    def testChoiceCandidateRejectsDuplicateTag(self):
+        # Both CHOICE alternatives carry INTEGER tag 0:0:2, so the
+        # payload could be either one of them.
+        duplicateChoice = univ.Choice(
+            componentType=namedtype.NamedTypes(
+                namedtype.NamedType('first', univ.Integer()),
+                namedtype.NamedType('second', univ.Integer())
+            )
+        )
+        openType = opentype.OpenType('id', {1: duplicateChoice})
+        schema = self._sequence(
+            namedtype.NamedType('id', univ.Integer()),
+            openType,
+            namedtype.NamedType('tail', univ.Integer())
+        )
+
+        try:
+            decoder.decode(
+                bytes((48, 9, 2, 1, 1, 2, 1, 7, 2, 1, 9)),
+                asn1Spec=schema, decodeOpenTypes=True
+            )
+
+        except error.PyAsn1Error as exc:
+            message = str(exc)
+            assert 'Ambiguous open type' in message
+            assert '2 of 2 candidate schemas' in message
+            assert 'first' not in message
+            assert 'second' not in message
+
+        else:
+            assert False, 'ambiguous CHOICE open type tolerated'
+
+    def testUniqueChoiceCandidateStillDecodes(self):
+        choice = univ.Choice(
+            componentType=namedtype.NamedTypes(
+                namedtype.NamedType('string', char.UTF8String()),
+                namedtype.NamedType('number', univ.Integer())
+            )
+        )
+        openType = opentype.OpenType('id', {1: choice})
+        schema = self._sequence(
+            namedtype.NamedType('id', univ.Integer()),
+            openType,
+            namedtype.NamedType('tail', univ.Integer())
+        )
+
+        s, r = decoder.decode(
+            bytes((48, 9, 2, 1, 1, 2, 1, 7, 2, 1, 9)),
+            asn1Spec=schema, decodeOpenTypes=True
+        )
+
+        assert not r
+        assert s['blob']['number'] == 7
+        assert s['tail'] == 9
+
+    def testUnknownOidPreservesRawTlvAndTrailingField(self):
+        openType = opentype.OpenType(
+            'id',
+            {univ.ObjectIdentifier('1.2.3'): char.UTF8String()}
+        )
+        schema = self._sequence(
+            namedtype.NamedType('id', univ.ObjectIdentifier()),
+            openType,
+            namedtype.NamedType('tail', univ.Integer())
+        )
+        rawTlv = bytes((12, 5, 104, 101, 108, 108, 111))
+        wire = bytes((48, 14, 6, 2, 42, 99, 12, 5,
+                      104, 101, 108, 108, 111, 2, 1, 5))
+
+        s, r = decoder.decode(
+            wire, asn1Spec=schema, decodeOpenTypes=True
+        )
+
+        assert not r
+        assert s['id'] == univ.ObjectIdentifier('1.2.99')
+        assert s['blob'].asOctets() == rawTlv
+        assert s['tail'] == 5
+        assert encoder.encode(s) == wire
+
+    def testMissingSelectorPreservesRawTlvAndTrailingField(self):
+        openType = opentype.OpenType(
+            'id',
+            {1: char.UTF8String()}
+        )
+        schema = self._sequence(
+            namedtype.OptionalNamedType('id', univ.Integer()),
+            openType,
+            namedtype.NamedType('tail', univ.Integer())
+        )
+        rawTlv = bytes((12, 5, 104, 101, 108, 108, 111))
+        wire = bytes((48, 10, 12, 5, 104, 101, 108, 108, 111, 2, 1, 99))
+
+        s, r = decoder.decode(
+            wire, asn1Spec=schema, decodeOpenTypes=True
+        )
+
+        assert not r
+        assert not s['id'].isValue
+        assert s['blob'].asOctets() == rawTlv
+        assert s['tail'] == 99
+        assert encoder.encode(s) == wire
+
+    def testNestedOpenTypeDecodesAndRoundTrips(self):
+        innerOpenType = opentype.OpenType(
+            'kind', {1: char.UTF8String(), 2: univ.Integer()}
+        )
+        innerSchema = univ.Sequence(
+            componentType=namedtype.NamedTypes(
+                namedtype.NamedType('kind', univ.Integer()),
+                namedtype.NamedType(
+                    'innerBlob', univ.Any(), openType=innerOpenType)
+            )
+        )
+        outerOpenType = opentype.OpenType('id', {1: innerSchema})
+        outerSchema = self._sequence(
+            namedtype.NamedType('id', univ.Integer()),
+            outerOpenType,
+            namedtype.NamedType('tail', univ.Integer())
+        )
+        wire = bytes((48, 15, 2, 1, 1,
+                      48, 7, 2, 1, 1, 12, 2, 104, 105,
+                      2, 1, 9))
+
+        s, r = decoder.decode(
+            wire, asn1Spec=outerSchema, decodeOpenTypes=True
+        )
+
+        assert not r
+        assert s['blob']['kind'] == 1
+        assert s['blob']['innerBlob'] == 'hi'
+        assert s['tail'] == 9
+        assert encoder.encode(s) == wire
+
+    def testPlainAnyStillStoresWholeTlv(self):
+        schema = univ.Sequence(
+            componentType=namedtype.NamedTypes(
+                namedtype.NamedType('blob', univ.Any())
+            )
+        )
+        wire = bytes((48, 7, 12, 5, 104, 101, 108, 108, 111))
+
+        s, r = decoder.decode(
+            wire, asn1Spec=schema, decodeOpenTypes=True
+        )
+
+        assert not r
+        assert s['blob'].asOctets() == bytes(
+            (12, 5, 104, 101, 108, 108, 111))
+
+    def testDecodeDoesNotReuseResolvedOpenTypeState(self):
+        openType = opentype.OpenType('id', {1: char.UTF8String()})
+        schema = univ.Sequence(
+            componentType=namedtype.NamedTypes(
+                namedtype.NamedType('id', univ.Integer()),
+                namedtype.NamedType('blob', univ.Any(), openType=openType)
+            )
+        )
+
+        known, _ = decoder.decode(
+            bytes((48, 10, 2, 1, 1, 12, 5,
+                   104, 101, 108, 108, 111)),
+            asn1Spec=schema, decodeOpenTypes=True
+        )
+        unknown, _ = decoder.decode(
+            bytes((48, 6, 2, 1, 2, 2, 1, 7)),
+            asn1Spec=schema, decodeOpenTypes=True
+        )
+
+        assert known['blob'] == 'hello'
+        assert unknown['blob'].asOctets() == bytes((2, 1, 7))
+        assert unknown['blob'].typeId == univ.Any.typeId
+
+
 class SetDecoderTestCase(BaseTestCase):
     def setUp(self):
         BaseTestCase.setUp(self)

@@ -23,6 +23,7 @@ from pyasn1.type import char
 from pyasn1.type import tag
 from pyasn1.type import tagmap
 from pyasn1.type import univ
+from pyasn1.type import opentype
 from pyasn1.type import useful
 
 __all__ = ['StreamingDecoder', 'Decoder', 'decode']
@@ -44,6 +45,51 @@ MAX_NESTING_DEPTH = 100
 
 # Maximum number of bytes in a BER length field (8 bytes = up to 2^64-1)
 MAX_LENGTH_OCTETS = 8
+
+
+def peekTagSet(value):
+    """Recover the outer tag set from a serialized ASN.1 value.
+
+    *value* is a :class:`bytes`-like object starting at a complete tag.
+    Only the tag is consumed, so the payload (which may be an unknown
+    open type) is never interpreted here.
+    """
+    if not value:
+        return None
+
+    firstOctet = value[0]
+    tagClass = firstOctet & 0xC0
+    tagFormat = firstOctet & 0x20
+    tagId = firstOctet & 0x1F
+
+    if tagId == 0x1F:
+        tagId = 0
+        octetCount = 0
+        offset = 1
+
+        while True:
+            if offset >= len(value):
+                raise error.PyAsn1Error(
+                    'Short octet stream on long tag decoding'
+                )
+
+            integerTag = value[offset]
+            offset += 1
+            octetCount += 1
+
+            if octetCount > MAX_TAG_OCTETS:
+                raise error.PyAsn1Error(
+                    'Tag ID octet count exceeds limit (%d)' % (
+                        MAX_TAG_OCTETS,)
+                )
+
+            tagId <<= 7
+            tagId |= integerTag & 0x7F
+
+            if not integerTag & 0x80:
+                break
+
+    return tag.TagSet((), tag.Tag(tagClass, tagFormat, tagId))
 
 
 class AbstractPayloadDecoder(object):
@@ -675,6 +721,242 @@ class ConstructedPayloadDecoderBase(AbstractConstructedPayloadDecoder):
     def _getComponentPositionByType(self, asn1Object, tagSet, idx):
         raise NotImplementedError
 
+    @staticmethod
+    def _iterOpenTypeLeaves(schema, _seen=None):
+        """Yield schemas that can independently match an encoded tag."""
+        if _seen is None:
+            _seen = set()
+
+        schemaId = id(schema)
+
+        if schemaId in _seen:
+            return
+
+        _seen.add(schemaId)
+
+        if getattr(schema, 'typeId', None) == univ.Choice.typeId:
+            componentType = getattr(schema, 'componentType', None)
+
+            if componentType is not None:
+                for namedType in componentType.namedTypes:
+                    for leaf in ConstructedPayloadDecoderBase._iterOpenTypeLeaves(
+                            namedType.asn1Object, set(_seen)):
+                        yield leaf
+
+                return
+
+        yield schema
+
+    @staticmethod
+    def _openTypeAcceptedTags(schema):
+        acceptedTags = set()
+        wildcard = False
+
+        try:
+            if schema.tagSet:
+                acceptedTags.add(schema.tagSet)
+
+        except AttributeError:
+            pass
+
+        tagMap = getattr(schema, 'tagMap', None)
+
+        if tagMap is not None:
+            try:
+                wildcard = tagMap.defaultType is not None
+
+                for acceptedTagSet in tagMap.presentTypes:
+                    if acceptedTagSet:
+                        acceptedTags.add(acceptedTagSet)
+
+            except AttributeError:
+                pass
+
+        return acceptedTags, wildcard
+
+    @staticmethod
+    def _openTypeFieldPath(asn1Object, namedType, options):
+        parentPath = options.get('_openTypePath')
+        fieldPath = '%s.%s' % (
+            asn1Object.__class__.__name__, namedType.name)
+
+        if parentPath:
+            fieldPath = '%s/%s' % (parentPath, namedType.name)
+
+        return fieldPath
+
+    def _raiseAmbiguousOpenType(self, fieldPath, selectorName,
+                                candidateCount, matches, tagSet):
+        descriptions = sorted(
+            leaf.__class__.__name__ for _, leaf in matches)
+
+        raise opentype.AmbiguousOpenTypeError(
+            'Ambiguous open type at %s governed by selector %r: '
+            '%d of %d candidate schemas match tag %s (%s); '
+            'tag conflict; mapping order must not decide the schema' % (
+                fieldPath, selectorName, len(matches), candidateCount,
+                tagSet, ', '.join(descriptions)
+            ),
+            context={
+                'path': fieldPath,
+                'selector': selectorName,
+                'candidates': candidateCount,
+                'matches': len(matches),
+                'tagSet': tagSet
+            }
+        )
+
+    def _selectOpenTypeCandidate(self, candidates, rawValue,
+                                 fieldPath, selectorName):
+        """Choose one explicitly mapped schema by the encoded tag."""
+        if len(candidates) == 1:
+            candidate = candidates[0]
+
+            # A CHOICE schema owns the alternative selection and already
+            # reports duplicate tags, but only after the payload is
+            # decoded. Resolve the conflict here, before decoding, so the
+            # error carries the selector path and candidate count.
+            if getattr(candidate, 'typeId', None) != univ.Choice.typeId:
+                return candidate
+
+        tagSet = peekTagSet(rawValue)
+
+        leaves = [
+            (candidate, leaf)
+            for candidate in candidates
+            for leaf in self._iterOpenTypeLeaves(candidate)
+        ]
+
+        concreteMatches = []
+        wildcardMatches = []
+
+        for candidate, leaf in leaves:
+            acceptedTags, wildcard = self._openTypeAcceptedTags(leaf)
+
+            if tagSet is not None and tagSet in acceptedTags:
+                concreteMatches.append((candidate, leaf))
+
+            elif wildcard:
+                wildcardMatches.append((candidate, leaf))
+
+        if len(concreteMatches) > 1:
+            self._raiseAmbiguousOpenType(
+                fieldPath, selectorName, len(leaves),
+                concreteMatches, tagSet
+            )
+
+        if concreteMatches:
+            return concreteMatches[0][0]
+
+        if len(wildcardMatches) > 1:
+            self._raiseAmbiguousOpenType(
+                fieldPath, selectorName, len(leaves),
+                wildcardMatches, tagSet
+            )
+
+        if wildcardMatches:
+            return wildcardMatches[0][0]
+
+        if len(candidates) == 1:
+            # Preserve the historical behavior: decoding a known type
+            # whose tag does not match raises the codec's own error.
+            return candidates[0]
+
+        raise error.PyAsn1Error(
+            'No open type candidate matches tag %s at %s governed by '
+            'selector %r (%d candidates considered)' % (
+                tagSet, fieldPath, selectorName, len(candidates)
+            ),
+            context={
+                'path': fieldPath,
+                'selector': selectorName,
+                'candidates': len(candidates),
+                'tagSet': tagSet
+            }
+        )
+
+    @staticmethod
+    def _lookupOpenType(container, selectorValue):
+        try:
+            mappedValue = container[selectorValue]
+
+        except (KeyError, TypeError):
+            return None, False
+
+        return mappedValue, True
+
+    def _resolveOpenTypeCandidates(self, asn1Object, namedType, options):
+        """Return explicit schema candidates for an open type field."""
+        selectorName = namedType.openType.name
+
+        try:
+            governingValue = asn1Object.getComponentByName(
+                selectorName, instantiate=False)
+
+        except error.PyAsn1Error:
+            governingValue = noValue
+
+        if (governingValue is noValue or not getattr(
+                governingValue, 'isValue', False)):
+            try:
+                selectorIdx = asn1Object.componentType.getPositionByName(
+                    selectorName)
+                selectorNamedType = asn1Object.componentType[selectorIdx]
+
+            except (AttributeError, error.PyAsn1Error):
+                selectorNamedType = None
+
+            if (selectorNamedType is not None and
+                    selectorNamedType.isDefaulted):
+                governingValue = selectorNamedType.asn1Object
+
+        if governingValue is noValue or not getattr(
+                governingValue, 'isValue', False):
+            if LOG:
+                LOG('open type selector "%s" is missing, leaving raw '
+                    'value in place' % (selectorName,))
+
+            return None
+
+        openTypes = options.get('openTypes', {})
+
+        mappedValue, found = self._lookupOpenType(
+            openTypes, governingValue)
+
+        if found:
+            if opentype.OpenType._isCandidateCollection(mappedValue):
+                candidates = tuple(mappedValue)
+
+            else:
+                candidates = (mappedValue,)
+
+        else:
+            getCandidates = getattr(
+                namedType.openType, 'getCandidates', None)
+
+            if getCandidates is not None:
+                candidates = getCandidates(governingValue)
+
+            else:
+                try:
+                    candidates = (namedType.openType[governingValue],)
+
+                except (KeyError, TypeError):
+                    candidates = ()
+
+        if not candidates:
+            if LOG:
+                LOG('failed to resolve open type by governing value '
+                    '%r' % (governingValue,))
+
+            return None
+
+        if LOG:
+            LOG('resolved %d open type candidate(s) by governing value '
+                '%r' % (len(candidates), governingValue))
+
+        return candidates, governingValue
+
     def _decodeComponentsSchemaless(
             self, substrate, tagSet=None, decodeFun=None,
             length=None, **options):
@@ -860,62 +1142,59 @@ class ConstructedPayloadDecoderBase(AbstractConstructedPayloadDecoder):
                             if not namedType.openType:
                                 continue
 
-                            if namedType.isOptional and not asn1Object.getComponentByPosition(idx).isValue:
+                            containerValue = asn1Object.getComponentByPosition(
+                                idx, instantiate=False)
+
+                            if containerValue is noValue or not containerValue.isValue:
                                 continue
 
-                            governingValue = asn1Object.getComponentByName(
-                                namedType.openType.name
-                            )
+                            resolved = self._resolveOpenTypeCandidates(
+                                asn1Object, namedType, options)
 
-                            try:
-                                openType = openTypes[governingValue]
+                            if resolved is None:
+                                continue
 
-                            except KeyError:
+                            candidates, governingValue = resolved
 
-                                if LOG:
-                                    LOG('default open types map of component '
-                                        '"%s.%s" governed by component "%s.%s"'
-                                        ':' % (asn1Object.__class__.__name__,
-                                               namedType.name,
-                                               asn1Object.__class__.__name__,
-                                               namedType.openType.name))
+                            fieldPath = self._openTypeFieldPath(
+                                asn1Object, namedType, options)
 
-                                    for k, v in namedType.openType.items():
-                                        LOG('%s -> %r' % (k, v))
-
-                                try:
-                                    openType = namedType.openType[governingValue]
-
-                                except KeyError:
-                                    if LOG:
-                                        LOG('failed to resolve open type by governing '
-                                            'value %r' % (governingValue,))
-                                    continue
-
-                            if LOG:
-                                LOG('resolved open type %r by governing '
-                                    'value %r' % (openType, governingValue))
-
-                            containerValue = asn1Object.getComponentByPosition(idx)
+                            selectorName = namedType.openType.name
 
                             if containerValue.typeId in (
                                     univ.SetOf.typeId, univ.SequenceOf.typeId):
 
-                                for pos, containerElement in enumerate(
-                                        containerValue):
+                                for pos in range(len(containerValue)):
+                                    containerElement = containerValue[pos]
 
-                                    stream = asSeekableStream(containerValue[pos].asOctets())
+                                    openType = self._selectOpenTypeCandidate(
+                                        candidates, containerElement.asOctets(),
+                                        fieldPath, selectorName)
 
-                                    for component in decodeFun(stream, asn1Spec=openType, **options):
+                                    stream = asSeekableStream(
+                                        containerElement.asOctets())
+
+                                    for component in decodeFun(
+                                            stream, asn1Spec=openType,
+                                            **dict(options,
+                                                   _openTypePath=fieldPath)):
                                         if isinstance(component, SubstrateUnderrunError):
                                             yield component
 
                                     containerValue[pos] = component
 
                             else:
-                                stream = asSeekableStream(asn1Object.getComponentByPosition(idx).asOctets())
+                                openType = self._selectOpenTypeCandidate(
+                                    candidates, containerValue.asOctets(),
+                                    fieldPath, selectorName)
 
-                                for component in decodeFun(stream, asn1Spec=openType, **options):
+                                stream = asSeekableStream(
+                                    containerValue.asOctets())
+
+                                for component in decodeFun(
+                                        stream, asn1Spec=openType,
+                                        **dict(options,
+                                               _openTypePath=fieldPath)):
                                     if isinstance(component, SubstrateUnderrunError):
                                         yield component
 
@@ -1079,54 +1358,42 @@ class ConstructedPayloadDecoderBase(AbstractConstructedPayloadDecoder):
                             if not namedType.openType:
                                 continue
 
-                            if namedType.isOptional and not asn1Object.getComponentByPosition(idx).isValue:
+                            containerValue = asn1Object.getComponentByPosition(
+                                idx, instantiate=False)
+
+                            if containerValue is noValue or not containerValue.isValue:
                                 continue
 
-                            governingValue = asn1Object.getComponentByName(
-                                namedType.openType.name
-                            )
+                            resolved = self._resolveOpenTypeCandidates(
+                                asn1Object, namedType, options)
 
-                            try:
-                                openType = openTypes[governingValue]
+                            if resolved is None:
+                                continue
 
-                            except KeyError:
+                            candidates, governingValue = resolved
 
-                                if LOG:
-                                    LOG('default open types map of component '
-                                        '"%s.%s" governed by component "%s.%s"'
-                                        ':' % (asn1Object.__class__.__name__,
-                                               namedType.name,
-                                               asn1Object.__class__.__name__,
-                                               namedType.openType.name))
+                            fieldPath = self._openTypeFieldPath(
+                                asn1Object, namedType, options)
 
-                                    for k, v in namedType.openType.items():
-                                        LOG('%s -> %r' % (k, v))
-
-                                try:
-                                    openType = namedType.openType[governingValue]
-
-                                except KeyError:
-                                    if LOG:
-                                        LOG('failed to resolve open type by governing '
-                                            'value %r' % (governingValue,))
-                                    continue
-
-                            if LOG:
-                                LOG('resolved open type %r by governing '
-                                    'value %r' % (openType, governingValue))
-
-                            containerValue = asn1Object.getComponentByPosition(idx)
+                            selectorName = namedType.openType.name
 
                             if containerValue.typeId in (
                                     univ.SetOf.typeId, univ.SequenceOf.typeId):
 
-                                for pos, containerElement in enumerate(
-                                        containerValue):
+                                for pos in range(len(containerValue)):
+                                    containerElement = containerValue[pos]
 
-                                    stream = asSeekableStream(containerValue[pos].asOctets())
+                                    openType = self._selectOpenTypeCandidate(
+                                        candidates, containerElement.asOctets(),
+                                        fieldPath, selectorName)
 
-                                    for component in decodeFun(stream, asn1Spec=openType,
-                                                               **dict(options, allowEoo=True)):
+                                    stream = asSeekableStream(
+                                        containerElement.asOctets())
+
+                                    for component in decodeFun(
+                                            stream, asn1Spec=openType,
+                                            **dict(options, allowEoo=True,
+                                                   _openTypePath=fieldPath)):
                                         if isinstance(component, SubstrateUnderrunError):
                                             yield component
 
@@ -1136,9 +1403,17 @@ class ConstructedPayloadDecoderBase(AbstractConstructedPayloadDecoder):
                                     containerValue[pos] = component
 
                             else:
-                                stream = asSeekableStream(asn1Object.getComponentByPosition(idx).asOctets())
-                                for component in decodeFun(stream, asn1Spec=openType,
-                                                           **dict(options, allowEoo=True)):
+                                openType = self._selectOpenTypeCandidate(
+                                    candidates, containerValue.asOctets(),
+                                    fieldPath, selectorName)
+
+                                stream = asSeekableStream(
+                                    containerValue.asOctets())
+
+                                for component in decodeFun(
+                                        stream, asn1Spec=openType,
+                                        **dict(options, allowEoo=True,
+                                               _openTypePath=fieldPath)):
                                     if isinstance(component, SubstrateUnderrunError):
                                         yield component
 

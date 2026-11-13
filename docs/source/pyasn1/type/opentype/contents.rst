@@ -33,7 +33,32 @@ is expressed in ASN.1 by the *DEFINE BY* clause.
 
 From ASN.1 perspective, it is not an error if the decoder does
 not know a type selector value it receives. In that case pyasn1 decoder
-just leaves serialized blob in the open type field.
+just leaves the complete serialized TLV in the open type field as an
+untagged :ref:`Any <univ.Any>` (or the field's own ``OctetString``
+wrapper). The enclosing container still advances by the length of that
+TLV, so fields following the extension remain aligned. The same happens
+when the selector component is absent: pyasn1 does not guess the schema
+from the payload tag.
+
+One selector value may map to a collection of tag-distinguishable
+candidates:
+
+.. code-block:: python
+
+   openType = OpenType(
+       'algorithm',
+       {ObjectIdentifier('1.2.840.113549.1.1.1'):
+            [rsaEncryption(), alternativeEncoding()]}
+   )
+
+The decoder chooses by the tag recovered from the raw value. If more
+than one candidate accepts the same tag, decoding fails with
+``opentype.AmbiguousOpenTypeError`` rather than using the registration
+order. The error reports the open type field path, the selector, the
+number of candidates and the conflicting tag set. A single ``CHOICE``
+mapping value is treated the same way, and the ambiguity check recurses
+through nested ``CHOICE`` alternatives without following recursive
+schema references indefinitely.
 
 .. note::
 

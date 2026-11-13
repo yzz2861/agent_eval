@@ -93,6 +93,64 @@ class TaggedAnyOpenTypeTestCase(BaseTestCase):
         self.s['blob'] = univ.Integer(123)
 
 
+class OpenTypeCandidateTestCase(BaseTestCase):
+
+    def testSingleCandidate(self):
+        openType = opentype.OpenType('id', {1: univ.Integer()})
+
+        candidates = openType.getCandidates(1)
+
+        assert len(candidates) == 1
+        assert candidates[0].typeId == univ.Integer.typeId
+
+    def testCandidateCollection(self):
+        openType = opentype.OpenType(
+            'id', {1: [univ.Integer(), univ.OctetString()]}
+        )
+
+        candidates = openType.getCandidates(1)
+
+        assert len(candidates) == 2
+        assert tuple(candidate.typeId for candidate in candidates) == (
+            univ.Integer.typeId, univ.OctetString.typeId
+        )
+
+    def testUnknownSelectorHasNoCandidates(self):
+        openType = opentype.OpenType('id', {1: univ.Integer()})
+
+        assert openType.getCandidates(2) == ()
+        assert openType.resolve(2) is None
+
+    def testResolveSingleCandidateByTag(self):
+        openType = opentype.OpenType(
+            'id', {1: [univ.Integer(), univ.OctetString()]}
+        )
+
+        resolved = openType.resolve(1, univ.OctetString().tagSet)
+
+        assert resolved is not None
+        assert resolved.typeId == univ.OctetString.typeId
+
+    def testResolveAmbiguousCandidateCollection(self):
+        openType = opentype.OpenType(
+            'id', {1: [univ.Integer(), univ.Integer()]}
+        )
+
+        try:
+            openType.resolve(1, univ.Integer().tagSet)
+
+        except opentype.AmbiguousOpenTypeError as exc:
+            message = str(exc)
+            assert 'id' in message
+            assert '2 of 2' in message
+            assert 'Integer' in message
+            assert exc.context['candidates'] == 2
+            assert exc.context['matches'] == 2
+
+        else:
+            assert False, 'ambiguous open type candidates tolerated'
+
+
 suite = unittest.TestLoader().loadTestsFromModule(sys.modules[__name__])
 
 

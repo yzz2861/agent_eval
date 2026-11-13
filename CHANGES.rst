@@ -1,6 +1,14 @@
 Revision 0.7.0, released XX-XX-2026
 ---------------------------------------
 
+- Open type decoding now resolves schemas only through the explicit
+  selector mapping. A mapping value may hold multiple tag-distinguishable
+  candidate schemas, but duplicate tags that match the same payload raise
+  ``opentype.AmbiguousOpenTypeError`` with the field path, selector name,
+  candidate count and conflicting tag instead of choosing by mapping order.
+  Unknown or missing selectors leave the exact raw ``ANY``/``OctetString``
+  TLV in place, keeping subsequent fields aligned, and raw values remain
+  re-encodable.
 - Fixed OverflowError from BER/CER/DER length values that fit in the
   supported 8-octet length field but exceed the platform maximum readable
   size. Such oversized definite lengths are now rejected with PyAsn1Error.

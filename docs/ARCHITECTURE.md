@@ -1605,9 +1605,33 @@ component's octets (the `asSeekableStream(...asOctets())` calls in
 `ConstructedPayloadDecoderBase.valueDecoder` and `indefLenValueDecoder`).
 The fresh stream gives the payload its own position space; `**options` still
 crosses that boundary, so the nesting counter keeps counting. Resolution
-failure is non-fatal: logged and skipped, raw octets left in place (the
-inner `except KeyError` around the `namedType.openType[governingValue]`
-lookup).
+uses only the explicit selector map (`openTypes=...` first, then
+`namedType.openType`). It never scans the whole map looking for a schema
+whose tag happens to match the payload: with an unknown or missing selector
+there is no authoritative mapping, so the component keeps its raw
+`Any`/`OctetString` value and the enclosing decoder advances by the length
+it already consumed. This is what keeps fields following an unknown
+extension aligned; substituting a default schema would reinterpret payload
+octets that may not belong to that schema.
+
+A selector may map to a collection of tag-distinguishable candidate schemas
+(`OpenType.getCandidates`); a single mapping value may also be a `CHOICE`.
+The decoder recovers the outer tag from the raw TLV (`peekTagSet`), counts
+the candidates that accept it, and requires exactly one.
+`_selectOpenTypeCandidate` raises
+`opentype.AmbiguousOpenTypeError` for duplicate tags before decoding, and the
+message carries the field path, selector name, candidate/match counts and
+the conflicting tag set. Registration order is never used as a tie-breaker.
+The same check recurses through `CHOICE` alternatives with a cycle guard;
+nested open types pass `_openTypePath` through the options so the error
+identifies the outer field as well.
+
+Resolution failure is non-fatal: logged and skipped, raw octets left in
+place. Decoding a known selector whose single explicit schema does not
+match the payload tag still fails in the codec, preserving the historical
+error. No resolved schema or value state is cached on `OpenType` or on the
+message: each decode resolves from its own cloned container and re-decodes
+on its own stream.
 
 ### Bounding nesting depth
 
@@ -1882,4 +1906,3 @@ them as a drive-by; each needs its own dedicated change with tests.
   literal text. Not worth a churn-heavy rewrite mid-release; if ever fixed,
   do it as a dedicated pass verified with `tox -e docs`, since the file is
   compiled into the `-W` build.
-
