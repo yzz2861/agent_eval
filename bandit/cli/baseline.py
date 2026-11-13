@@ -19,6 +19,8 @@ import subprocess  # nosec: B404
 import sys
 import tempfile
 
+from bandit.core import manager as b_manager
+
 try:
     import git
 except ImportError:
@@ -48,6 +50,11 @@ def main():
     report_fname = None
 
     init_logger()
+
+    # explicit migration of a legacy baseline report, then exit
+    migrate_target = _migrate_baseline_target()
+    if migrate_target is not None:
+        sys.exit(0 if migrate_baseline_file(migrate_target) else 2)
 
     output_format, repo, report_fname = initialize()
 
@@ -130,6 +137,61 @@ def main():
     sys.exit(return_code)
 
 
+# #################### Migrate legacy baseline reports ########################
+def _migrate_baseline_target():
+    """Return the --migrate-baseline argument value, if provided."""
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument(
+        "--migrate-baseline",
+        metavar="BASELINE_REPORT",
+        default=None,
+        help="migrate a legacy baseline report to stable fingerprints "
+        "and exit",
+    )
+    args, _ = parser.parse_known_args(bandit_args)
+    return args.migrate_baseline
+
+
+def migrate_baseline_file(path):
+    """Migrate a legacy baseline report to stable fingerprints.
+
+    Rewrites the report in place, adding a fingerprint to every issue
+    that can be migrated from its stored code snippet. Issues that
+    cannot be migrated keep legacy equality matching, they are never
+    blindly treated as already existing.
+
+    :param path: Path to the baseline report to migrate
+    :return: True if the report was migrated and written successfully
+    """
+    try:
+        with open(path) as fd:
+            data = fd.read()
+    except OSError as e:
+        LOG.error("Unable to read baseline report %s: %s", path, e)
+        return False
+
+    try:
+        data, migrated, failed = b_manager.migrate_baseline_data(data)
+    except ValueError as e:
+        LOG.error("Unable to parse baseline report %s: %s", path, e)
+        return False
+
+    try:
+        with open(path, "w") as fd:
+            fd.write(data)
+    except OSError as e:
+        LOG.error("Unable to write baseline report %s: %s", path, e)
+        return False
+
+    LOG.info(
+        "Migrated %d issue(s) to stable fingerprints, %d issue(s) "
+        "could not be migrated",
+        migrated,
+        failed,
+    )
+    return True
+
+
 # #################### Clean up before exit ###################################
 @contextlib.contextmanager
 def baseline_setup():
@@ -187,6 +249,14 @@ def initialize():
         default="terminal",
         help="specify output format",
         choices=valid_baseline_formats,
+    )
+
+    parser.add_argument(
+        "--migrate-baseline",
+        metavar="BASELINE_REPORT",
+        default=None,
+        help="migrate a legacy baseline report to stable fingerprints "
+        "and exit",
     )
 
     args, _ = parser.parse_known_args()

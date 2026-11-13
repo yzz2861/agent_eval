@@ -2,14 +2,17 @@
 # Copyright 2014 Hewlett-Packard Development Company, L.P.
 #
 # SPDX-License-Identifier: Apache-2.0
+import ast
 import collections
 import fnmatch
+import hashlib
 import io
 import json
 import logging
 import os
 import re
 import sys
+import textwrap
 import tokenize
 import traceback
 
@@ -27,6 +30,12 @@ LOG = logging.getLogger(__name__)
 NOSEC_COMMENT = re.compile(r"#\s*nosec:?\s*(?P<tests>[^#]+)?#?")
 NOSEC_COMMENT_TESTS = re.compile(r"(?:(B\d+|[a-z\d_]+),?)+", re.IGNORECASE)
 PROGRESS_THRESHOLD = 50
+
+# Fingerprint versions: b1 fingerprints include the semantic scope, b0
+# (legacy) fingerprints are scope-less and only used to migrate baseline
+# reports that were created before fingerprints existed.
+FINGERPRINT_VERSION = "b1"
+LEGACY_FINGERPRINT_VERSION = "b0"
 
 
 class BanditManager:
@@ -93,6 +102,14 @@ class BanditManager:
         This will populate a list of baseline issues discovered from a previous
         run of bandit. Later this baseline can be used to filter out the result
         set, see filter_results.
+
+        Legacy reports without fingerprints remain readable: issues are
+        migrated in memory to stable (scope-less) fingerprints whenever
+        their stored code snippet can be parsed. Issues that cannot be
+        migrated fall back to legacy equality matching, they are never
+        blindly treated as already existing. Use
+        'bandit-baseline --migrate-baseline <report>' to migrate the
+        report file itself.
         """
         items = []
         try:
@@ -100,16 +117,29 @@ class BanditManager:
             items = [issue.issue_from_dict(j) for j in jdata["results"]]
         except Exception as e:
             LOG.warning("Failed to load baseline data: %s", e)
+        migrated, failed = _migrate_legacy_baseline(items)
+        if migrated or failed:
+            LOG.warning(
+                "Baseline report uses a legacy format without "
+                "fingerprints: migrated %d issue(s), %d issue(s) could "
+                "not be migrated and will use legacy matching. Run "
+                "'bandit-baseline --migrate-baseline <report>' to "
+                "migrate the report file.",
+                migrated,
+                failed,
+            )
         self.baseline = items
 
     def filter_results(self, sev_filter, conf_filter):
         """Returns a list of results filtered by the baseline
 
-        This works by checking the number of results returned from each file we
-        process. If the number of results is different to the number reported
-        for the same file in the baseline, then we return all results for the
-        file. We can't reliably return just the new results, as line numbers
-        will likely have changed.
+        This works by comparing the stable fingerprint of each result
+        against the fingerprints recorded in the baseline. A result
+        whose fingerprint is present in the baseline is considered
+        already known and is filtered out, regardless of the file or
+        line it is reported on. Only genuinely new results are
+        returned, with duplicate identical findings accounted for
+        individually.
 
         :param sev_filter: severity level filter to apply
         :param conf_filter: confidence level filter to apply
@@ -363,6 +393,7 @@ class BanditManager:
         )
 
         score = res.process(data)
+        compute_issue_fingerprints(data, res.tester.results)
         self.results.extend(res.tester.results)
         return score
 
@@ -428,14 +459,47 @@ def _matches_glob_list(filename, glob_list):
 def _compare_baseline_results(baseline, results):
     """Compare a baseline list of issues to list of results
 
-    This function compares a baseline set of issues to a current set of issues
-    to find results that weren't present in the baseline.
+    Issues are matched by their stable fingerprint using multiset
+    semantics: every baseline entry can satisfy exactly one identical
+    result, so duplicate identical findings are accounted for
+    individually and can never mask one another. Baseline issues
+    without a fingerprint (legacy reports) are matched by their
+    migrated legacy fingerprint when one could be computed, and
+    otherwise by legacy issue equality.
 
     :param baseline: Baseline list of issues
     :param results: Current list of issues
     :return: List of unmatched issues
     """
-    return [a for a in results if a not in baseline]
+    fingerprints = collections.Counter()
+    legacy_fingerprints = collections.Counter()
+    legacy_issues = []
+    for item in baseline:
+        fingerprint = getattr(item, "fingerprint", None) or ""
+        legacy = getattr(item, "_legacy_fingerprint", None)
+        if fingerprint.startswith(FINGERPRINT_VERSION + ":"):
+            fingerprints[fingerprint] += 1
+        elif fingerprint.startswith(LEGACY_FINGERPRINT_VERSION + ":"):
+            legacy_fingerprints[fingerprint] += 1
+        elif legacy:
+            legacy_fingerprints[legacy] += 1
+        else:
+            legacy_issues.append(item)
+
+    unmatched = []
+    for item in results:
+        fingerprint = getattr(item, "fingerprint", None)
+        if fingerprint and fingerprints[fingerprint] > 0:
+            fingerprints[fingerprint] -= 1
+            continue
+        legacy = getattr(item, "_legacy_fingerprint", None)
+        if legacy and legacy_fingerprints[legacy] > 0:
+            legacy_fingerprints[legacy] -= 1
+            continue
+        if item in legacy_issues:
+            continue
+        unmatched.append(item)
+    return unmatched
 
 
 def _find_candidate_matches(unmatched_issues, results_list):
@@ -446,6 +510,10 @@ def _find_candidate_matches(unmatched_issues, results_list):
     issues in the file are new, so it will show all three.  The user should
     be able to pick out the new one.
 
+    Candidates are grouped by stable fingerprint when available, so
+    identical findings keep grouping together even when they moved to a
+    different file or line number.
+
     :param unmatched_issues: List of issues that weren't present before
     :param results_list: main list of current Bandit findings
     :return: A dictionary with a list of candidates for each issue
@@ -454,11 +522,269 @@ def _find_candidate_matches(unmatched_issues, results_list):
     issue_candidates = collections.OrderedDict()
 
     for unmatched in unmatched_issues:
-        issue_candidates[unmatched] = [
-            i for i in results_list if unmatched == i
-        ]
+        fingerprint = getattr(unmatched, "fingerprint", None)
+        if fingerprint:
+            issue_candidates[unmatched] = [
+                i
+                for i in results_list
+                if getattr(i, "fingerprint", None) == fingerprint
+            ]
+        else:
+            issue_candidates[unmatched] = [
+                i for i in results_list if unmatched == i
+            ]
 
     return issue_candidates
+
+
+def _normalize_statement(node):
+    """Return a canonical dump of an AST node.
+
+    Location attributes are not part of the dump, and comments or
+    formatting never reach the AST, so the result only depends on the
+    syntactic and semantic content of the statement.
+    """
+    return ast.dump(node)
+
+
+def _make_fingerprint(test_id, scope, statement_dump):
+    payload = json.dumps([test_id or "", scope or "", statement_dump])
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return "%s:%s" % (FINGERPRINT_VERSION, digest)
+
+
+def _make_legacy_fingerprint(test_id, statement_dump):
+    payload = json.dumps([test_id or "", statement_dump])
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return "%s:%s" % (LEGACY_FINGERPRINT_VERSION, digest)
+
+
+def _index_ast(tree):
+    """Index AST nodes by position, recording parents and scopes.
+
+    The scope of a node is the tuple of names of the functions and
+    classes it is nested in. It deliberately excludes anything derived
+    from the file path so that moving a file does not change it.
+    """
+    index = {}
+    line_index = {}
+    parents = {}
+
+    def _visit(node, scope):
+        child_scope = scope
+        if isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        ):
+            child_scope = scope + (node.name,)
+        if hasattr(node, "lineno") and hasattr(node, "col_offset"):
+            entry = (node, scope)
+            index.setdefault((node.lineno, node.col_offset), []).append(entry)
+            line_index.setdefault(node.lineno, []).append(entry)
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+            _visit(child, child_scope)
+
+    _visit(tree, ())
+    return index, line_index, parents
+
+
+def _find_issue_node(index, line_index, issue):
+    """Locate the AST node an issue was reported on."""
+    lineno = issue.lineno
+    if not isinstance(lineno, int) or lineno < 1:
+        return None
+    candidates = index.get((lineno, issue.col_offset))
+    if not candidates:
+        candidates = line_index.get(lineno)
+    if not candidates:
+        return None
+    if len(candidates) > 1:
+        for node, scope in candidates:
+            if getattr(node, "end_col_offset", None) == (
+                issue.end_col_offset
+            ):
+                return node, scope
+    # nodes are recorded outermost first, so the last candidate is the
+    # innermost node at this position
+    return candidates[-1]
+
+
+def _enclosing_statement(node, parents):
+    current = node
+    while current is not None and not isinstance(current, ast.stmt):
+        current = parents.get(id(current))
+    return current
+
+
+def _fallback_statement_dump(issue, source_lines):
+    """Best-effort normalization when no AST node can be located."""
+    lineno = issue.lineno
+    if isinstance(lineno, int) and 1 <= lineno <= len(source_lines):
+        linerange = [
+            line
+            for line in (issue.linerange or [lineno])
+            if isinstance(line, int) and 1 <= line <= len(source_lines)
+        ] or [lineno]
+        text = "\n".join(
+            source_lines[line - 1]
+            for line in range(min(linerange), max(linerange) + 1)
+        )
+        try:
+            parsed = ast.parse(textwrap.dedent(text))
+        except (SyntaxError, ValueError):
+            pass
+        else:
+            if len(parsed.body) == 1:
+                return _normalize_statement(parsed.body[0])
+        return "raw:" + " ".join(text.split())
+    return "raw:" + " ".join((issue.text or "").split())
+
+
+def compute_issue_fingerprints(data, issues):
+    """Compute stable, location-independent fingerprints for issues.
+
+    A fingerprint is derived from the plugin (test) id, the semantic
+    scope (names of the enclosing functions and classes) and a
+    normalized AST dump of the statement the issue was reported on.
+    File names, line numbers, comments and formatting do not influence
+    the fingerprint, so an unchanged code block keeps its identity when
+    it is moved or reformatted, while renaming its function, changing
+    its parameters or altering its logic produces a new identity.
+
+    :param data: Raw source of the file the issues were found in
+    :param issues: List of issues found in that file
+    """
+    if not issues:
+        return
+    try:
+        tree = ast.parse(data)
+    except (SyntaxError, ValueError):
+        tree = None
+    if tree is not None:
+        index, line_index, parents = _index_ast(tree)
+    source = (
+        data.decode("utf-8", errors="replace")
+        if isinstance(data, bytes)
+        else data
+    )
+    source_lines = source.splitlines()
+    for iss in issues:
+        statement_dump = None
+        scope = ""
+        if tree is not None:
+            found = _find_issue_node(index, line_index, iss)
+            if found is not None:
+                node, node_scope = found
+                statement = _enclosing_statement(node, parents)
+                if statement is not None:
+                    statement_dump = _normalize_statement(statement)
+                    scope = ".".join(node_scope)
+        if statement_dump is None:
+            statement_dump = _fallback_statement_dump(iss, source_lines)
+        iss.fingerprint = _make_fingerprint(
+            iss.test_id, scope, statement_dump
+        )
+        iss._legacy_fingerprint = _make_legacy_fingerprint(
+            iss.test_id, statement_dump
+        )
+
+
+def _extract_numbered_lines(code):
+    """Extract (line number, source) pairs from a report code snippet."""
+    lines = []
+    for raw in code.splitlines():
+        match = re.match(r"^(\d+)[ \t](.*)$", raw)
+        if match:
+            lines.append((int(match.group(1)), match.group(2)))
+    return lines
+
+
+def migrate_issue_fingerprint(issue):
+    """Compute a legacy fingerprint for an issue from an old baseline.
+
+    Legacy baseline reports carry no fingerprints. When the report
+    contains the issue's source code snippet, a scope-less legacy
+    fingerprint is derived from the normalized statement found in that
+    snippet. Returns None when the snippet cannot be parsed, in which
+    case the issue keeps legacy equality matching.
+    """
+    code = getattr(issue, "code", None)
+    if not isinstance(code, str) or not code.strip():
+        return None
+    numbered = _extract_numbered_lines(code)
+    if not numbered:
+        return None
+    wanted = []
+    if isinstance(issue.linerange, list):
+        wanted = [line for line in issue.linerange if isinstance(line, int)]
+    if not wanted and isinstance(issue.lineno, int):
+        wanted = [issue.lineno]
+    selected = [text for number, text in numbered if number in wanted]
+    if not selected:
+        return None
+    # the snippet may cut a multi-line statement off, so extend it with
+    # the following snippet lines until it parses as one statement
+    following = [text for number, text in numbered if number > max(wanted)]
+    for extra in range(len(following) + 1):
+        text = "\n".join(selected + following[:extra])
+        try:
+            tree = ast.parse(textwrap.dedent(text))
+        except (SyntaxError, ValueError):
+            continue
+        if len(tree.body) != 1:
+            return None
+        return _make_legacy_fingerprint(
+            issue.test_id, _normalize_statement(tree.body[0])
+        )
+    return None
+
+
+def _migrate_legacy_baseline(items):
+    """Migrate legacy baseline issues to fingerprints, in memory."""
+    migrated = 0
+    failed = 0
+    for item in items:
+        if getattr(item, "fingerprint", None):
+            continue
+        try:
+            legacy = migrate_issue_fingerprint(item)
+        except Exception:
+            legacy = None
+        if legacy:
+            item._legacy_fingerprint = legacy
+            migrated += 1
+        else:
+            failed += 1
+    return migrated, failed
+
+
+def migrate_baseline_data(data):
+    """Migrate a legacy baseline report to stable fingerprints.
+
+    Parses a baseline report (JSON string) and adds a fingerprint to
+    every result that can be migrated from its stored code snippet.
+
+    :param data: Baseline report as a JSON string
+    :return: Tuple of (migrated report as a JSON string, number of
+        migrated issues, number of issues that could not be migrated)
+    """
+    jdata = json.loads(data)
+    migrated = 0
+    failed = 0
+    for entry in jdata.get("results", []):
+        if entry.get("fingerprint"):
+            continue
+        legacy = migrate_issue_fingerprint(issue.issue_from_dict(entry))
+        if legacy:
+            entry["fingerprint"] = legacy
+            migrated += 1
+        else:
+            failed += 1
+    return (
+        json.dumps(jdata, sort_keys=True, indent=2, separators=(",", ": ")),
+        migrated,
+        failed,
+    )
 
 
 def _find_test_id_from_nosec_string(extman, match):

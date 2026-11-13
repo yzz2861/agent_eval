@@ -361,6 +361,117 @@ class ManagerTests(testtools.TestCase):
             ),
         )
 
+    def test_compare_baseline_fingerprints(self):
+        # identical fingerprints match even when the file name changed
+        issue_a = self._get_issue_instance()
+        issue_a.fname = "old.py"
+        issue_a.fingerprint = "b1:aaa"
+
+        issue_b = self._get_issue_instance()
+        issue_b.fname = "new.py"
+        issue_b.fingerprint = "b1:aaa"
+
+        self.assertEqual(
+            [], manager._compare_baseline_results([issue_a], [issue_b])
+        )
+
+        # a different fingerprint is a new issue
+        issue_b.fingerprint = "b1:bbb"
+        self.assertEqual(
+            [issue_b], manager._compare_baseline_results([issue_a], [issue_b])
+        )
+
+    def test_compare_baseline_fingerprint_duplicates(self):
+        # duplicate identical findings each consume one baseline entry
+        def _issue():
+            new_issue = self._get_issue_instance()
+            new_issue.fingerprint = "b1:dup"
+            return new_issue
+
+        # one baseline entry, two identical results: one is new
+        extra = _issue()
+        self.assertEqual(
+            [extra],
+            manager._compare_baseline_results(
+                [_issue()], [_issue(), extra]
+            ),
+        )
+
+        # two baseline entries, two identical results: nothing is new
+        self.assertEqual(
+            [],
+            manager._compare_baseline_results(
+                [_issue(), _issue()], [_issue(), _issue()]
+            ),
+        )
+
+    def test_compare_baseline_legacy_fingerprints(self):
+        # a migrated legacy baseline entry matches the legacy
+        # fingerprint of a current result
+        issue_a = self._get_issue_instance()
+        issue_a._legacy_fingerprint = "b0:aaa"
+
+        issue_b = self._get_issue_instance()
+        issue_b.fingerprint = "b1:bbb"
+        issue_b._legacy_fingerprint = "b0:aaa"
+
+        self.assertEqual(
+            [], manager._compare_baseline_results([issue_a], [issue_b])
+        )
+
+        # a migrated baseline report stores the legacy fingerprint in
+        # the fingerprint field directly
+        issue_a.fingerprint = "b0:aaa"
+        del issue_a._legacy_fingerprint
+        self.assertEqual(
+            [], manager._compare_baseline_results([issue_a], [issue_b])
+        )
+
+    def test_compute_issue_fingerprints(self):
+        def _fingerprint(source, lineno, col_offset=4):
+            new_issue = issue.Issue(
+                severity=constants.LOW,
+                cwe=issue.Cwe.OS_COMMAND_INJECTION,
+                confidence=constants.HIGH,
+                text="Test issue",
+                test_id="B602",
+                lineno=lineno,
+                col_offset=col_offset,
+            )
+            new_issue.linerange = [lineno]
+            manager.compute_issue_fingerprints(
+                source.encode("utf-8"), [new_issue]
+            )
+            return new_issue.fingerprint
+
+        source = (
+            "import subprocess\n"
+            "\n"
+            "def run():\n"
+            "    subprocess.Popen('/bin/ls *', shell=True)\n"
+        )
+        fingerprint = _fingerprint(source, 4)
+        self.assertTrue(fingerprint.startswith("b1:"))
+
+        # blank lines, comments and formatting do not change it
+        reformatted = (
+            "import subprocess\n"
+            "\n"
+            "\n"
+            "def run():\n"
+            "    # list the files\n"
+            "    subprocess.Popen('/bin/ls *', shell=True)\n"
+        )
+        self.assertEqual(fingerprint, _fingerprint(reformatted, 6))
+
+        # renaming the enclosing function changes it
+        renamed = source.replace("def run():", "def execute():")
+        self.assertNotEqual(fingerprint, _fingerprint(renamed, 4))
+
+        # changing the parameters changes it
+        changed = source.replace("'/bin/ls *'", "'/bin/ls -la *'")
+        self.assertNotEqual(fingerprint, _fingerprint(changed, 4))
+
     def test_find_candidate_matches(self):
         issue_a = self._get_issue_instance()
         issue_b = self._get_issue_instance()

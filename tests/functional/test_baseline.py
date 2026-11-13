@@ -1,6 +1,7 @@
 # Copyright 2016 IBM Corp.
 #
 # SPDX-License-Identifier: Apache-2.0
+import json
 import os
 import shutil
 import subprocess
@@ -297,6 +298,7 @@ class BaselineFunctionalTests(testtools.TestCase):
         # candidate #6
         self.assertIn(candidate_example_six, return_value)
 
+
     def test_new_candidates_include_nosec_new_nosecs(self):
         """Test to check nosec references with new candidates, including nosecs
 
@@ -339,3 +341,240 @@ class BaselineFunctionalTests(testtools.TestCase):
         self.assertIn(candidate_example_five, return_value)
         # candidate #6
         self.assertIn(candidate_example_six, return_value)
+
+
+class BaselineFingerprintFunctionalTests(testtools.TestCase):
+    """Functional tests for stable, location-independent issue identity.
+
+    Issues are matched to the baseline by a fingerprint derived from
+    the plugin id, the semantic scope and a normalized AST dump of the
+    flagged statement. Moving a file, inserting blank lines, adding
+    comments or reordering imports must not turn existing issues into
+    new candidates, while renaming a function, changing parameters or
+    altering logic must.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.baseline_report_file = "baseline_report.json"
+
+    def _write_files(self, target_directory, files):
+        for name, content in files.items():
+            path = os.path.join(target_directory, name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fd:
+                fd.write(content)
+
+    def _create_baseline(self, files):
+        """Create a baseline report for the given file contents."""
+        target_directory = self.useFixture(fixtures.TempDir()).path
+        baseline_report = os.path.join(
+            target_directory, self.baseline_report_file
+        )
+        self._write_files(target_directory, files)
+        cmds = [
+            "bandit",
+            "-r",
+            "-f",
+            "json",
+            "-o",
+            baseline_report,
+            target_directory,
+        ]
+        process = subprocess.Popen(
+            cmds,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+        )
+        process.communicate()
+        return (target_directory, baseline_report)
+
+    def _run_baseline(self, target_directory, baseline_report):
+        """Run bandit against a baseline, return (results, return code)."""
+        cmds = [
+            "bandit",
+            "-r",
+            "-b",
+            baseline_report,
+            "-f",
+            "json",
+            target_directory,
+        ]
+        process = subprocess.Popen(
+            cmds,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+        )
+        stdout, _ = process.communicate()
+        results = json.loads(stdout.decode("utf-8"))
+        return (results["results"], process.poll())
+
+    def _run_scenario(self, baseline_files, final_files):
+        target_directory, baseline_report = self._create_baseline(
+            baseline_files
+        )
+        for name in baseline_files:
+            os.remove(os.path.join(target_directory, name))
+        self._write_files(target_directory, final_files)
+        return self._run_baseline(target_directory, baseline_report)
+
+    def test_moved_reformatted_file_no_new_candidates(self):
+        """Tests that moving and reformatting code keeps its identity
+
+        Moving a file, inserting blank lines, adding comments and
+        reordering imports must not produce new candidates.
+        """
+        baseline_files = {
+            "app.py": (
+                "import os\n"
+                "import subprocess\n"
+                "\n"
+                "\n"
+                "def run():\n"
+                "    subprocess.Popen('/bin/ls *', shell=True)\n"
+            )
+        }
+        final_files = {
+            "service/runner.py": (
+                "import subprocess\n"
+                "import os\n"
+                "\n"
+                "\n"
+                "def run():\n"
+                "\n"
+                "    # list the files\n"
+                "    subprocess.Popen('/bin/ls *', shell=True)\n"
+            )
+        }
+        results, return_code = self._run_scenario(baseline_files, final_files)
+        self.assertEqual(0, return_code)
+        self.assertEqual([], results)
+
+    def test_duplicate_snippet_reports_one_new_candidate(self):
+        """Tests that duplicated identical snippets are counted
+
+        Copying an existing flagged snippet must produce exactly one
+        new candidate, identical snippets must not mask each other.
+        """
+        baseline_files = {
+            "app.py": (
+                "import subprocess\n"
+                "\n"
+                "\n"
+                "def run():\n"
+                "    subprocess.Popen('/bin/ls *', shell=True)\n"
+            )
+        }
+        final_files = {
+            "app.py": (
+                "import subprocess\n"
+                "\n"
+                "\n"
+                "def run():\n"
+                "    subprocess.Popen('/bin/ls *', shell=True)\n"
+                "    subprocess.Popen('/bin/ls *', shell=True)\n"
+            )
+        }
+        results, return_code = self._run_scenario(baseline_files, final_files)
+        self.assertEqual(1, return_code)
+        self.assertEqual(1, len(results))
+        # both identical copies are reported as candidates
+        self.assertEqual(2, len(results[0]["candidates"]))
+
+    def test_modified_parameters_new_candidate(self):
+        """Tests that changing parameters produces a new identity"""
+        baseline_files = {
+            "app.py": (
+                "import subprocess\n"
+                "\n"
+                "\n"
+                "def run():\n"
+                "    subprocess.Popen('/bin/ls *', shell=True)\n"
+            )
+        }
+        final_files = {
+            "app.py": (
+                "import subprocess\n"
+                "\n"
+                "\n"
+                "def run():\n"
+                "    subprocess.Popen('/bin/ls -la *', shell=True)\n"
+            )
+        }
+        results, return_code = self._run_scenario(baseline_files, final_files)
+        self.assertEqual(1, return_code)
+        self.assertEqual(1, len(results))
+
+    def test_renamed_function_new_candidate(self):
+        """Tests that renaming the enclosing function is a new identity"""
+        baseline_files = {
+            "app.py": (
+                "import subprocess\n"
+                "\n"
+                "\n"
+                "def run():\n"
+                "    subprocess.Popen('/bin/ls *', shell=True)\n"
+            )
+        }
+        final_files = {
+            "app.py": (
+                "import subprocess\n"
+                "\n"
+                "\n"
+                "def execute():\n"
+                "    subprocess.Popen('/bin/ls *', shell=True)\n"
+            )
+        }
+        results, return_code = self._run_scenario(baseline_files, final_files)
+        self.assertEqual(1, return_code)
+        self.assertEqual(1, len(results))
+
+    def test_legacy_baseline_report_no_new_candidates(self):
+        """Tests that legacy baseline reports remain readable
+
+        A baseline report without fingerprints is migrated in memory
+        from its stored code snippets and still matches existing
+        issues, even when the file moved.
+        """
+        baseline_files = {
+            "app.py": (
+                "import subprocess\n"
+                "\n"
+                "\n"
+                "def run():\n"
+                "    subprocess.Popen('/bin/ls *', shell=True)\n"
+            )
+        }
+        target_directory, baseline_report = self._create_baseline(
+            baseline_files
+        )
+        # strip the fingerprints to simulate a legacy baseline report
+        with open(baseline_report) as fd:
+            legacy_report = json.load(fd)
+        for result in legacy_report["results"]:
+            result.pop("fingerprint", None)
+        with open(baseline_report, "w") as fd:
+            json.dump(legacy_report, fd)
+
+        os.remove(os.path.join(target_directory, "app.py"))
+        self._write_files(
+            target_directory,
+            {
+                "service/runner.py": (
+                    "import subprocess\n"
+                    "\n"
+                    "\n"
+                    "def run():\n"
+                    "    subprocess.Popen('/bin/ls *', shell=True)\n"
+                )
+            },
+        )
+        results, return_code = self._run_baseline(
+            target_directory, baseline_report
+        )
+        self.assertEqual(0, return_code)
+        self.assertEqual([], results)

@@ -104,6 +104,7 @@ class Issue:
         self.col_offset = col_offset
         self.end_col_offset = end_col_offset
         self.linerange = []
+        self.fingerprint = None
 
     def __str__(self):
         return (
@@ -212,6 +213,7 @@ class Issue:
             "line_range": self.linerange,
             "col_offset": self.col_offset,
             "end_col_offset": self.end_col_offset,
+            "fingerprint": self.fingerprint,
         }
 
         if with_code:
@@ -231,6 +233,7 @@ class Issue:
         self.linerange = data["line_range"]
         self.col_offset = data.get("col_offset", 0)
         self.end_col_offset = data.get("end_col_offset", 0)
+        self.fingerprint = data.get("fingerprint")
 
 
 def cwe_from_dict(data):

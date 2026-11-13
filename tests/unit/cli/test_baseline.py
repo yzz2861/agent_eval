@@ -2,6 +2,7 @@
 # Copyright 2015 Hewlett-Packard Enterprise
 #
 # SPDX-License-Identifier: Apache-2.0
+import json
 import os
 import subprocess
 from unittest import mock
@@ -299,3 +300,99 @@ class BanditBaselineToolTests(testtools.TestCase):
 
         # assert bandit did not run due to existing temporary report file
         self.assertEqual((None, None, None), return_value)
+
+
+legacy_baseline_report = """{
+    "results": [
+        {
+            "code": "4     subprocess.Popen('/bin/ls *', shell=True)\\n",
+            "filename": "app.py",
+            "issue_severity": "LOW",
+            "issue_cwe": {
+                "id": 78,
+                "link": "https://cwe.mitre.org/data/definitions/78.html"
+            },
+            "issue_confidence": "HIGH",
+            "issue_text": "Starting a process with a shell.",
+            "test_name": "subprocess_popen_with_shell_equals_true",
+            "test_id": "B602",
+            "line_number": 4,
+            "line_range": [4],
+            "col_offset": 4,
+            "end_col_offset": 47
+        }
+    ]
+}
+"""
+
+
+class BanditBaselineMigrationTests(testtools.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.repo_directory = self.useFixture(fixtures.TempDir()).path
+        self.report_file = os.path.join(self.repo_directory, "baseline.json")
+
+    def _write_report(self, contents):
+        with open(self.report_file, "w") as fd:
+            fd.write(contents)
+
+    def test_migrate_baseline_file(self):
+        # Test that a legacy baseline report is migrated in place
+        self._write_report(legacy_baseline_report)
+
+        self.assertTrue(baseline.migrate_baseline_file(self.report_file))
+
+        with open(self.report_file) as fd:
+            migrated = json.load(fd)
+        fingerprint = migrated["results"][0]["fingerprint"]
+        # legacy entries are migrated to scope-less legacy fingerprints
+        self.assertTrue(fingerprint.startswith("b0:"))
+
+    def test_migrate_baseline_file_unparseable_code(self):
+        # Test that issues whose code cannot be parsed are left without
+        # a fingerprint instead of being treated as already existing
+        report = json.loads(legacy_baseline_report)
+        report["results"][0]["code"] = "4     not python code\\n"
+        self._write_report(json.dumps(report))
+
+        self.assertTrue(baseline.migrate_baseline_file(self.report_file))
+
+        with open(self.report_file) as fd:
+            migrated = json.load(fd)
+        self.assertNotIn("fingerprint", migrated["results"][0])
+
+    def test_migrate_baseline_file_invalid_json(self):
+        # Test that an invalid report is not migrated
+        self._write_report("not json")
+
+        self.assertFalse(baseline.migrate_baseline_file(self.report_file))
+
+    def test_migrate_baseline_file_missing(self):
+        # Test that a missing report is not migrated
+        self.assertFalse(baseline.migrate_baseline_file(self.report_file))
+
+    def test_main_migrate_baseline(self):
+        # Test that bandit-baseline --migrate-baseline migrates the
+        # report and exits successfully
+        self._write_report(legacy_baseline_report)
+
+        with mock.patch.object(
+            baseline,
+            "bandit_args",
+            ["--migrate-baseline", self.report_file],
+        ):
+            self.assertRaisesRegex(SystemExit, "0", baseline.main)
+
+        with open(self.report_file) as fd:
+            migrated = json.load(fd)
+        self.assertIn("fingerprint", migrated["results"][0])
+
+    def test_main_migrate_baseline_failure(self):
+        # Test that bandit-baseline --migrate-baseline exits with an
+        # error when the report cannot be migrated
+        with mock.patch.object(
+            baseline,
+            "bandit_args",
+            ["--migrate-baseline", self.report_file],
+        ):
+            self.assertRaisesRegex(SystemExit, "2", baseline.main)
