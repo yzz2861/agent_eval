@@ -32,6 +32,7 @@ of pyasn1.
 """
 
 import abc
+import inspect
 import math
 import threading
 import typing
@@ -47,6 +48,9 @@ import rsa.core
 
 DEFAULT_EXPONENT = 65537
 
+BlindingError = rsa.core.BlindingError
+UnblindedOperationError = rsa.core.UnblindedOperationError
+
 
 T = typing.TypeVar("T", bound="AbstractKey")
 
@@ -54,18 +58,38 @@ T = typing.TypeVar("T", bound="AbstractKey")
 class AbstractKey(metaclass=abc.ABCMeta):
     """Abstract superclass for private and public keys."""
 
-    __slots__ = ("n", "e", "blindfac", "blindfac_inverse", "mutex")
+    __slots__ = (
+        "n",
+        "e",
+        "blindfac",
+        "blindfac_inverse",
+        "mutex",
+        "_randfunc",
+        "_active_blindfacs",
+        "_active_tokens",
+        "_recent_blindfacs",
+    )
 
-    def __init__(self, n: int, e: int) -> None:
+    def __init__(
+        self,
+        n: int,
+        e: int,
+        randfunc: typing.Optional[typing.Callable[[int], int]] = None,
+    ) -> None:
         self.n = n
         self.e = e
 
         # These will be computed properly on the first call to blind().
         self.blindfac = self.blindfac_inverse = -1
+        self._randfunc = randfunc
+        self._active_blindfacs: typing.Set[int] = set()
+        self._active_tokens: typing.Dict[int, rsa.core.BlindingToken] = {}
+        self._recent_blindfacs: typing.List[int] = []
 
         # Used to protect updates to the blinding factor in multi-threaded
-        # environments.
-        self.mutex = threading.Lock()
+        # environments.  It is re-entrant so the unified private operation can
+        # reserve a factor and mark it active atomically.
+        self.mutex = threading.RLock()
 
     @classmethod
     @abc.abstractmethod
@@ -162,19 +186,210 @@ class AbstractKey(metaclass=abc.ABCMeta):
         method = self._assert_format_exists(format, methods)
         return method()
 
+    @property
+    def randfunc(self) -> typing.Optional[typing.Callable[[int], int]]:
+        """The injectable source of blinding randomness, if one was supplied."""
+
+        return self._randfunc
+
+    @randfunc.setter
+    def randfunc(
+        self, value: typing.Optional[typing.Callable[[int], int]]
+    ) -> None:
+        if value is not None and not callable(value):
+            raise TypeError("randfunc must be callable")
+        self._randfunc = value
+
+    def set_blinding_random_source(
+        self, randfunc: typing.Optional[typing.Callable[[int], int]]
+    ) -> None:
+        """Sets the random source used to seed blinding factors.
+
+        ``randfunc`` is called with ``n - 1`` and must return an integer in
+        ``1 .. n - 1``.  A zero-argument callable is also accepted.
+        """
+
+        self.randfunc = randfunc
+
+    def _call_random_source(
+        self, randfunc: typing.Optional[typing.Callable[[int], int]]
+    ) -> int:
+        maxvalue = self.n - 1
+        randfunc = self._randfunc if randfunc is None else randfunc
+
+        if randfunc is None:
+            try:
+                return rsa.randnum.randint(maxvalue)
+            except Exception as ex:
+                raise BlindingError(
+                    "failed to obtain a blinding factor from rsa.randnum"
+                ) from ex
+
+        try:
+            signature = inspect.signature(randfunc)
+        except (TypeError, ValueError):
+            accepts_maxvalue = True
+        else:
+            accepts_maxvalue = True
+            try:
+                signature.bind(maxvalue)
+            except TypeError:
+                accepts_maxvalue = False
+                try:
+                    signature.bind()
+                except TypeError as ex:
+                    raise BlindingError(
+                        "blinding random source must accept n - 1 or no arguments"
+                    ) from ex
+
+        try:
+            if accepts_maxvalue:
+                return randfunc(maxvalue)
+            zero_arg_randfunc = typing.cast(typing.Callable[[], int], randfunc)
+            return zero_arg_randfunc()
+        except Exception as ex:
+            if isinstance(ex, BlindingError):
+                raise
+            raise BlindingError(
+                "failed to obtain a blinding factor from the configured random source"
+            ) from ex
+
+    def _is_usable_blinding_factor(self, candidate: int) -> bool:
+        return (
+            isinstance(candidate, int)
+            and not isinstance(candidate, bool)
+            and 1 < candidate < self.n - 1
+            and rsa.prime.are_relatively_prime(self.n, candidate)
+        )
+
+    def _initial_blinding_factor(
+        self, randfunc: typing.Optional[typing.Callable[[int], int]] = None
+    ) -> int:
+        for _ in range(1000):
+            blind_r = self._call_random_source(randfunc)
+            if self._is_usable_blinding_factor(blind_r):
+                return blind_r
+        raise BlindingError("unable to find blinding factor")
+
+    def _next_blinding_factor_locked(
+        self, randfunc: typing.Optional[typing.Callable[[int], int]]
+    ) -> typing.Tuple[int, int]:
+        """Derive a factor that is not in use by an unfinished operation."""
+
+        # A configured random source seeds every operation.  With the default
+        # source only the first factor is expensive; later factors are
+        # deterministically advanced by squaring (Schindler section 9).
+        custom_source = randfunc is not None or self._randfunc is not None
+        if custom_source or self.blindfac < 0:
+            factor = self._initial_blinding_factor(randfunc)
+            inverse = rsa.common.inverse(factor, self.n)
+            if custom_source:
+                # Advance once so a constant injected source cannot make
+                # consecutive operations reuse the same factor.
+                factor = pow(factor, 2, self.n)
+                inverse = pow(inverse, 2, self.n)
+        else:
+            factor = pow(self.blindfac, 2, self.n)
+            inverse = pow(self.blindfac_inverse, 2, self.n)
+
+        # Controlled squaring gives concurrent operations distinct factors
+        # even if the injected random source returns the same value repeatedly.
+        for _ in range(1000):
+            if factor in (1, self.n - 1):
+                raise BlindingError("blinding factor degenerated to a trivial value")
+            if (
+                factor != self.blindfac
+                and factor not in self._active_blindfacs
+                and factor not in self._recent_blindfacs
+            ):
+                return factor, inverse
+            factor = pow(factor, 2, self.n)
+            inverse = pow(inverse, 2, self.n)
+
+        raise BlindingError("unable to derive an unused blinding factor")
+
+    def _update_blinding_factor(
+        self, randfunc: typing.Optional[typing.Callable[[int], int]] = None
+    ) -> typing.Tuple[int, int]:
+        """Update blinding factors.
+
+        Computing a blinding factor is expensive, so instead this function
+        does this once, then updates the blinding factor as per section 9
+        of 'A Timing Attack against RSA with the Chinese Remainder Theorem'
+        by Werner Schindler.
+        See https://tls.mbed.org/public/WSchindler-RSA_Timing_Attack.pdf
+
+        :return: the new blinding factor and its inverse.
+        """
+
+        with self.mutex:
+            factor, inverse = self._next_blinding_factor_locked(randfunc)
+            self.blindfac = factor
+            self.blindfac_inverse = inverse
+            self._recent_blindfacs.append(factor)
+            if len(self._recent_blindfacs) > 256:
+                del self._recent_blindfacs[0]
+            return factor, inverse
+
+    def _reserve_blinding_factor(
+        self, randfunc: typing.Optional[typing.Callable[[int], int]] = None
+    ) -> typing.Tuple[int, int, rsa.core.BlindingToken]:
+        """Atomically obtains a factor and marks it as in use."""
+
+        with self.mutex:
+            factor, inverse = self._update_blinding_factor(randfunc)
+            if factor in self._active_blindfacs:
+                raise BlindingError("blinding factor is already in use")
+
+            token = rsa.core._new_blinding_token(self.n, factor, inverse)
+            self._active_blindfacs.add(factor)
+            self._active_tokens[inverse] = token
+            return factor, inverse, token
+
+    def _release_blinding_token(
+        self,
+        token: typing.Optional[rsa.core.BlindingToken] = None,
+        blindfac_inverse: typing.Optional[int] = None,
+    ) -> None:
+        with self.mutex:
+            if blindfac_inverse is not None:
+                token = self._active_tokens.pop(blindfac_inverse, token)
+
+            if token is None:
+                return
+
+            registered = self._active_tokens.pop(token.inverse, None)
+            if registered is None or registered is token:
+                self._active_blindfacs.discard(token.factor)
+            token._close()
+
+    def _blind_with_token(
+        self, message: int
+    ) -> typing.Tuple[int, int, rsa.core.BlindingToken]:
+        blindfac, blindfac_inverse, token = self._reserve_blinding_factor()
+        blinded = (message * pow(blindfac, self.e, self.n)) % self.n
+        return blinded, blindfac_inverse, token
+
+    def _token_for_inverse(
+        self, blindfac_inverse: int
+    ) -> rsa.core.BlindingToken:
+        with self.mutex:
+            token = self._active_tokens.get(blindfac_inverse)
+            if token is None:
+                raise BlindingError("blinding was not completed for this operation")
+            return token
+
     def blind(self, message: int) -> typing.Tuple[int, int]:
         """Performs blinding on the message.
 
         :param message: the message, as integer, to blind.
-        :param r: the random number to blind with.
         :return: tuple (the blinded message, the inverse of the used blinding factor)
 
         The blinding is such that message = unblind(decrypt(blind(encrypt(message))).
 
         See https://en.wikipedia.org/wiki/Blinding_%28cryptography%29
         """
-        blindfac, blindfac_inverse = self._update_blinding_factor()
-        blinded = (message * pow(blindfac, self.e, self.n)) % self.n
+        blinded, blindfac_inverse, _ = self._blind_with_token(message)
         return blinded, blindfac_inverse
 
     def unblind(self, blinded: int, blindfac_inverse: int) -> int:
@@ -188,38 +403,9 @@ class AbstractKey(metaclass=abc.ABCMeta):
 
         See https://en.wikipedia.org/wiki/Blinding_%28cryptography%29
         """
-        return (blindfac_inverse * blinded) % self.n
-
-    def _initial_blinding_factor(self) -> int:
-        for _ in range(1000):
-            blind_r = rsa.randnum.randint(self.n - 1)
-            if rsa.prime.are_relatively_prime(self.n, blind_r):
-                return blind_r
-        raise RuntimeError("unable to find blinding factor")
-
-    def _update_blinding_factor(self) -> typing.Tuple[int, int]:
-        """Update blinding factors.
-
-        Computing a blinding factor is expensive, so instead this function
-        does this once, then updates the blinding factor as per section 9
-        of 'A Timing Attack against RSA with the Chinese Remainder Theorem'
-        by Werner Schindler.
-        See https://tls.mbed.org/public/WSchindler-RSA_Timing_Attack.pdf
-
-        :return: the new blinding factor and its inverse.
-        """
-
-        with self.mutex:
-            if self.blindfac < 0:
-                # Compute initial blinding factor, which is rather slow to do.
-                self.blindfac = self._initial_blinding_factor()
-                self.blindfac_inverse = rsa.common.inverse(self.blindfac, self.n)
-            else:
-                # Reuse previous blinding factor.
-                self.blindfac = pow(self.blindfac, 2, self.n)
-                self.blindfac_inverse = pow(self.blindfac_inverse, 2, self.n)
-
-            return self.blindfac, self.blindfac_inverse
+        unblinded = (blindfac_inverse * blinded) % self.n
+        self._release_blinding_token(blindfac_inverse=blindfac_inverse)
+        return unblinded
 
 
 class PublicKey(AbstractKey):
@@ -423,10 +609,11 @@ class PrivateKey(AbstractKey):
         p: int,
         q: int,
         rs: typing.Optional[typing.List[int]] = None,
+        randfunc: typing.Optional[typing.Callable[[int], int]] = None,
     ) -> None:
         rs = [] if rs is None else rs
 
-        AbstractKey.__init__(self, n, e)
+        AbstractKey.__init__(self, n, e, randfunc)
         self.d = d
         self.p = p
         self.q = q
@@ -544,15 +731,33 @@ class PrivateKey(AbstractKey):
         :rtype: int
         """
 
-        # Blinding and un-blinding should be using the same factor
+        # Blinding and un-blinding must use the same factor.  The token makes
+        # the core helper refuse to perform the private exponentiation unless
+        # this operation has reserved a completed, unused blinding factor.
         blinded, blindfac_inverse = self.blind(encrypted)
-        decrypted = rsa.core.decrypt_int_fast(
-            blinded,
-            [self.p, self.q] + self.rs,
-            [self.exp1, self.exp2] + self.ds,
-            [self.coef] + self.ts,
-        )
-        return self.unblind(decrypted, blindfac_inverse)
+        token = self._token_for_inverse(blindfac_inverse)
+        context_token = rsa.core._set_current_blinding_token(token)
+        try:
+            decrypted = rsa.core.decrypt_int_fast(
+                blinded,
+                [self.p, self.q] + self.rs,
+                [self.exp1, self.exp2] + self.ds,
+                [self.coef] + self.ts,
+            )
+            return self.unblind(decrypted, blindfac_inverse)
+        finally:
+            rsa.core._reset_current_blinding_token(context_token)
+            self._release_blinding_token(token=token)
+
+    def decrypt_int(self, encrypted: int) -> int:
+        """Unified private-key operation for decryption and signing.
+
+        All library entry points that need a private exponentiation go through
+        this method.  It always blinds and never falls back to an unblinded
+        operation when factor generation fails.
+        """
+
+        return self.blinded_decrypt(encrypted)
 
     @classmethod
     def _load_pkcs1_der(cls, keyfile: bytes) -> "PrivateKey":
@@ -960,7 +1165,13 @@ def newkeys(
     return (PublicKey(n, e), PrivateKey(n, e, d, p, q, rs))
 
 
-__all__ = ["PublicKey", "PrivateKey", "newkeys"]
+__all__ = [
+    "PublicKey",
+    "PrivateKey",
+    "newkeys",
+    "BlindingError",
+    "UnblindedOperationError",
+]
 
 if __name__ == "__main__":
     import doctest

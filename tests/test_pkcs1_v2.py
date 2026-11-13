@@ -18,9 +18,14 @@ Most of the mocked values come from the test vectors found at:
 http://www.itomorrowmag.com/emc-plus/rsa-labs/standards-initiatives/pkcs-rsa-cryptography-standard.htm
 """
 
+import hashlib
+import os
 import unittest
+from unittest import mock
 
+import rsa
 from rsa import pkcs1_v2
+from rsa import common, core, transform
 
 
 class MGFTest(unittest.TestCase):
@@ -77,3 +82,42 @@ class MGFTest(unittest.TestCase):
     def test_invalid_length(self):
         with self.assertRaises(OverflowError):
             pkcs1_v2.mgf1(b"\x06\xe1\xde\xb2", length=2 ** 50)
+
+
+class OAEPPrivateOperationTest(unittest.TestCase):
+    def test_oaep_style_decrypt_uses_blinded_private_operation(self):
+        (pub_key, priv_key) = rsa.newkeys(512)
+        keylength = common.byte_size(pub_key.n)
+        message = b"OAEP"
+        hash_length = hashlib.sha1().digest_size
+        label_hash = hashlib.sha1(b"").digest()
+
+        padding = b"\x00" * (
+            keylength - len(label_hash) - hash_length - len(message) - 2
+        )
+        data_block = label_hash + padding + b"\x01" + message
+        seed = os.urandom(hash_length)
+        data_mask = pkcs1_v2.mgf1(seed, len(data_block))
+        masked_data = bytes(a ^ b for a, b in zip(data_block, data_mask))
+        seed_mask = pkcs1_v2.mgf1(masked_data, hash_length)
+        masked_seed = bytes(a ^ b for a, b in zip(seed, seed_mask))
+        encoded = b"\x00" + masked_seed + masked_data
+
+        encrypted = core.encrypt_int(transform.bytes2int(encoded), pub_key.e, pub_key.n)
+        observed_factors = []
+        original = core.decrypt_int_fast
+
+        def recording_helper(*args, **kwargs):
+            token = kwargs.get("blinding_token") or core.current_blinding_token()
+            self.assertTrue(token.blinded)
+            observed_factors.append(token.factor)
+            return original(*args, **kwargs)
+
+        with mock.patch.object(core, "decrypt_int_fast", recording_helper):
+            decrypted = priv_key.decrypt_int(encrypted)
+
+        self.assertEqual(1, len(observed_factors))
+        self.assertEqual(
+            transform.bytes2int(encoded),
+            decrypted,
+        )

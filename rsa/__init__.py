@@ -22,6 +22,7 @@ prevent repetitions, or other common security improvements. Use with care.
 """
 
 from rsa.key import newkeys, PrivateKey, PublicKey
+from rsa.core import BlindingError, UnblindedOperationError
 from rsa.pkcs1 import (
     encrypt,
     decrypt,
@@ -52,6 +53,8 @@ __all__ = [
     "verify",
     "PublicKey",
     "PrivateKey",
+    "BlindingError",
+    "UnblindedOperationError",
     "DecryptionError",
     "VerificationError",
     "find_signature_hash",

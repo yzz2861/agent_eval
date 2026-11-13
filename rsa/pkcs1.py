@@ -241,7 +241,7 @@ def decrypt(crypto: bytes, priv_key: key.PrivateKey) -> bytes:
 
     blocksize = common.byte_size(priv_key.n)
     encrypted = transform.bytes2int(crypto)
-    decrypted = priv_key.blinded_decrypt(encrypted)
+    decrypted = priv_key.decrypt_int(encrypted)
     cleartext = transform.int2bytes(decrypted, blocksize)
 
     # Detect leading zeroes in the crypto. These are not reflected in the
@@ -298,7 +298,7 @@ def sign_hash(hash_value: bytes, priv_key: key.PrivateKey, hash_method: str) -> 
     padded = _pad_for_signing(cleartext, keylength)
 
     payload = transform.bytes2int(padded)
-    encrypted = priv_key.blinded_decrypt(payload)
+    encrypted = priv_key.decrypt_int(payload)
     block = transform.int2bytes(encrypted, keylength)
 
     return block
@@ -346,7 +346,7 @@ def verify(message: bytes, signature: bytes, pub_key: key.PublicKey) -> str:
         raise VerificationError("Verification failed")
     
     encrypted = transform.bytes2int(signature)
-    decrypted = core.encrypt_int(encrypted, pub_key.e, pub_key.n)
+    decrypted = core.decrypt_int(encrypted, pub_key.e, pub_key.n)
     clearsig = transform.int2bytes(decrypted, keylength)
 
     # Get the hash method

@@ -17,8 +17,10 @@
 import struct
 import sys
 import unittest
+from unittest import mock
 
 import rsa
+import rsa.core
 from rsa import pkcs1
 
 
@@ -209,6 +211,57 @@ class MultiprimeSignatureTest(unittest.TestCase):
         message = b"je moeder"
         signature = pkcs1.sign(message, self.priv, "SHA-256")
         self.assertEqual("SHA-256", pkcs1.verify(message, signature, self.pub))
+
+
+class BlindedCallPathTest(unittest.TestCase):
+    def setUp(self):
+        (self.pub, self.priv) = rsa.newkeys(512)
+        self.original_helper = rsa.core.decrypt_int_fast
+        self.observed_factors = []
+
+    def recording_helper(self, *args, **kwargs):
+        token = kwargs.get("blinding_token") or rsa.core.current_blinding_token()
+        self.assertIsNotNone(token)
+        self.assertTrue(token.blinded)
+        self.assertIn(token.factor, self.priv._active_blindfacs)
+        self.observed_factors.append(token.factor)
+        return self.original_helper(*args, **kwargs)
+
+    def test_decrypt_uses_blinded_private_operation(self):
+        message = b"blinded decrypt"
+        encrypted = pkcs1.encrypt(message, self.pub)
+
+        with mock.patch.object(
+            rsa.core, "decrypt_int_fast", self.recording_helper
+        ):
+            self.assertEqual(message, pkcs1.decrypt(encrypted, self.priv))
+
+        self.assertEqual(1, len(self.observed_factors))
+
+    def test_sign_hash_uses_blinded_private_operation(self):
+        message = b"blinded signature"
+        digest = pkcs1.compute_hash(message, "SHA-256")
+
+        with mock.patch.object(
+            rsa.core, "decrypt_int_fast", self.recording_helper
+        ):
+            signature = pkcs1.sign_hash(digest, self.priv, "SHA-256")
+
+        self.assertEqual(1, len(self.observed_factors))
+        self.assertEqual("SHA-256", pkcs1.verify(message, signature, self.pub))
+
+    def test_private_operation_failure_does_not_fallback(self):
+        encrypted = pkcs1.encrypt(b"no fallback", self.pub)
+
+        with mock.patch.object(
+            rsa.core,
+            "decrypt_int_fast",
+            side_effect=RuntimeError("private operation failed"),
+        ), mock.patch.object(rsa.core, "decrypt_int") as fallback:
+            with self.assertRaises(RuntimeError):
+                pkcs1.decrypt(encrypted, self.priv)
+
+        fallback.assert_not_called()
 
 
 class PaddingSizeTest(unittest.TestCase):
