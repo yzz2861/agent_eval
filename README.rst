@@ -85,9 +85,24 @@ Options
    Firefox and Chrome will never load your site over a non-secure
    connection.
 -  ``strict_transport_security_max_age``, default ``ONE_YEAR_IN_SECS``,
-   length of time the browser will respect the HSTS header.
+   length of time the browser will respect the HSTS header. Must be a
+   non-negative integer; negative or non-integer values raise ``ValueError``
+   when ``init_app`` runs, because browsers silently ignore such headers.
 -  ``strict_transport_security_include_subdomains``, default ``True``,
    whether subdomains should also use HSTS.
+-  ``strict_transport_security_preload`` additionally requires
+   ``strict_transport_security_include_subdomains`` to be ``True`` and a
+   ``strict_transport_security_max_age`` of at least one year; otherwise
+   ``init_app`` raises ``ValueError``. Pass
+   ``strict_transport_security=False`` to disable HSTS entirely, for example
+   in development or test environments serving HTTP on ``localhost``.
+-  ``trusted_proxy``, default ``False``, set to ``True`` only when the
+   application runs behind a reverse proxy that terminates TLS and sets the
+   ``X-Forwarded-Proto`` header. The HSTS header is sent only when the
+   request is confirmed to be HTTPS: either the direct connection is secure,
+   or (with ``trusted_proxy`` enabled) the proxy header indicates ``https``.
+   The header is never trusted unconditionally because clients can spoof it,
+   and HSTS is never sent over plain HTTP.
 -  ``content_security_policy``, default ``default-src: 'self'``, see the
    `Content Security Policy`_ section.
 -  ``content_security_policy_nonce_in``, default ``[]``. Adds a per-request nonce

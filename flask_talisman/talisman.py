@@ -14,13 +14,16 @@
 from collections import OrderedDict
 
 import flask
-from six import iteritems, string_types
+from six import integer_types, iteritems, string_types
 
 
 DENY = 'DENY'
 SAMEORIGIN = 'SAMEORIGIN'
 ALLOW_FROM = 'ALLOW-FROM'
 ONE_YEAR_IN_SECS = 31556926
+
+# https://hstspreload.org requires a max-age of at least one year.
+HSTS_PRELOAD_MIN_MAX_AGE = ONE_YEAR_IN_SECS
 
 DEFAULT_REFERRER_POLICY = 'strict-origin-when-cross-origin'
 
@@ -76,7 +79,8 @@ class Talisman(object):
             content_security_policy_nonce_in=None,
             referrer_policy=DEFAULT_REFERRER_POLICY,
             session_cookie_secure=True,
-            session_cookie_http_only=True):
+            session_cookie_http_only=True,
+            trusted_proxy=False):
         """
         Initialization.
 
@@ -116,6 +120,11 @@ class Talisman(object):
                 session cookie.
             force_file_save: Prevents the user from opening a file download
                 directly on >= IE 8
+            trusted_proxy: Whether to trust the X-Forwarded-Proto header set
+                by a reverse proxy to determine that the original request was
+                made over HTTPS. Only enable this when the application is
+                deployed behind a proxy that sets (and overwrites) that
+                header; otherwise clients can spoof it.
 
         See README.rst for a detailed description of each option.
         """
@@ -136,6 +145,9 @@ class Talisman(object):
             strict_transport_security_max_age
         self.strict_transport_security_include_subdomains = \
             strict_transport_security_include_subdomains
+        self.trusted_proxy = trusted_proxy
+
+        self._validate_strict_transport_security()
 
         if isinstance(content_security_policy, dict):
             self.content_security_policy = OrderedDict(content_security_policy)
@@ -172,6 +184,51 @@ class Talisman(object):
         app.before_request(self._make_nonce)
         app.after_request(self._set_response_headers)
 
+    def _validate_strict_transport_security(self):
+        """Validates the HSTS configuration.
+
+        Raises:
+            ValueError: If the configuration would produce an HSTS header
+                that browsers reject or that cannot be preloaded.
+        """
+        if not self.strict_transport_security:
+            return
+
+        max_age = self.strict_transport_security_max_age
+        if isinstance(max_age, bool) or not isinstance(
+                max_age, integer_types) or max_age < 0:
+            raise ValueError(
+                'strict_transport_security_max_age must be a non-negative '
+                'integer; got {!r}'.format(max_age))
+
+        if self.strict_transport_security_preload:
+            if not self.strict_transport_security_include_subdomains:
+                raise ValueError(
+                    'HSTS preload requires '
+                    'strict_transport_security_include_subdomains to be '
+                    'enabled.')
+            if max_age < HSTS_PRELOAD_MIN_MAX_AGE:
+                raise ValueError(
+                    'HSTS preload requires '
+                    'strict_transport_security_max_age of at least {} '
+                    'seconds.'.format(HSTS_PRELOAD_MIN_MAX_AGE))
+
+    def _request_is_https(self):
+        """Returns True only when the request is confirmed to be HTTPS.
+
+        A direct HTTPS connection is always trusted. The
+        X-Forwarded-Proto header is only consulted when the caller has
+        explicitly opted in via trusted_proxy.
+        """
+        if flask.request.is_secure:
+            return True
+
+        if not self.trusted_proxy:
+            return False
+
+        return flask.request.headers.get(
+            'X-Forwarded-Proto', '').lower() == 'https'
+
     def _get_local_options(self):
         view_function = flask.current_app.view_functions.get(
             flask.request.endpoint)
@@ -202,8 +259,7 @@ class Talisman(object):
 
         criteria = [
             self.app.debug,
-            flask.request.is_secure,
-            flask.request.headers.get('X-Forwarded-Proto', 'http') == 'https',
+            self._request_is_https(),
         ]
 
         local_options = self._get_local_options()
@@ -307,11 +363,7 @@ class Talisman(object):
         headers[csp_header] = policy
 
     def _set_hsts_headers(self, headers):
-        criteria = [
-            flask.request.is_secure,
-            flask.request.headers.get('X-Forwarded-Proto', 'http') == 'https',
-        ]
-        if not self.strict_transport_security or not any(criteria):
+        if not self.strict_transport_security or not self._request_is_https():
             return
 
         value = 'max-age={}'.format(self.strict_transport_security_max_age)

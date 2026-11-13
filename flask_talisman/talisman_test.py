@@ -28,6 +28,13 @@ def hello_world():
     return 'Hello, world'
 
 
+def make_app(**talisman_kwargs):
+    app = flask.Flask(__name__)
+    talisman = Talisman(app, **talisman_kwargs)
+    app.route('/')(hello_world)
+    return app, talisman
+
+
 def with_nonce():
     return flask.render_template_string(
         '<script nonce="{{csp_nonce()}}"></script>'
@@ -62,6 +69,8 @@ class TestTalismanExtension(unittest.TestCase):
             self.assertEqual(response.headers.get(key), value)
 
     def testForceSslOptionOptions(self):
+        self.talisman.trusted_proxy = True
+
         # HTTP request from Proxy
         response = self.client.get('/', headers={
             'X-Forwarded-Proto': 'https'
@@ -84,7 +93,7 @@ class TestTalismanExtension(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
 
     def testHstsOptions(self):
-        self.talisman.force_ssl = False
+        self.talisman.force_https = False
 
         # No HSTS headers for non-ssl requests
         response = self.client.get('/')
@@ -99,10 +108,12 @@ class TestTalismanExtension(unittest.TestCase):
         self.talisman.strict_transport_security = True
 
         # HTTPS request through proxy
+        self.talisman.trusted_proxy = True
         response = self.client.get('/', headers={
             'X-Forwarded-Proto': 'https'
         })
         self.assertIn('Strict-Transport-Security', response.headers)
+        self.talisman.trusted_proxy = False
 
         # No subdomains
         self.talisman.strict_transport_security_include_subdomains = False
@@ -111,9 +122,106 @@ class TestTalismanExtension(unittest.TestCase):
             'includeSubDomains', response.headers['Strict-Transport-Security'])
 
         # Preload
+        self.talisman.strict_transport_security_include_subdomains = True
         self.talisman.strict_transport_security_preload = True
         response = self.client.get('/', environ_overrides=HTTPS_ENVIRON)
-        self.assertIn('preload', response.headers['Strict-Transport-Security'])
+        hsts = response.headers['Strict-Transport-Security']
+        self.assertIn('preload', hsts)
+        self.assertIn('includeSubDomains', hsts)
+
+    def testHstsDefaultMode(self):
+        response = self.client.get('/', environ_overrides=HTTPS_ENVIRON)
+        self.assertEqual(
+            response.headers['Strict-Transport-Security'],
+            'max-age=31556926; includeSubDomains')
+
+    def testHstsNegativeMaxAgeRejected(self):
+        with self.assertRaises(ValueError):
+            make_app(strict_transport_security_max_age=-1)
+
+    def testHstsNonIntegerMaxAgeRejected(self):
+        with self.assertRaises(ValueError):
+            make_app(strict_transport_security_max_age=3600.5)
+
+    def testHstsBooleanMaxAgeRejected(self):
+        with self.assertRaises(ValueError):
+            make_app(strict_transport_security_max_age=True)
+
+    def testHstsZeroMaxAgeAccepted(self):
+        app, _ = make_app(
+            strict_transport_security_max_age=0,
+            strict_transport_security_include_subdomains=False)
+        response = app.test_client().get(
+            '/', environ_overrides=HTTPS_ENVIRON)
+        self.assertEqual(
+            response.headers['Strict-Transport-Security'], 'max-age=0')
+
+    def testHstsPreloadRequiresIncludeSubdomains(self):
+        with self.assertRaises(ValueError):
+            make_app(
+                strict_transport_security_preload=True,
+                strict_transport_security_include_subdomains=False)
+
+    def testHstsPreloadRequiresLongMaxAge(self):
+        with self.assertRaises(ValueError):
+            make_app(
+                strict_transport_security_preload=True,
+                strict_transport_security_max_age=3600)
+
+    def testHstsValidPreloadConfiguration(self):
+        app, _ = make_app(strict_transport_security_preload=True)
+        response = app.test_client().get(
+            '/', environ_overrides=HTTPS_ENVIRON)
+        self.assertEqual(
+            response.headers['Strict-Transport-Security'],
+            'max-age=31556926; includeSubDomains; preload')
+
+    def testHstsDisabledForDevelopment(self):
+        # Explicitly turning HSTS off must not raise even when the copied
+        # production values would otherwise fail validation.
+        app, _ = make_app(
+            strict_transport_security=False,
+            strict_transport_security_max_age=-1)
+        response = app.test_client().get(
+            '/', environ_overrides=HTTPS_ENVIRON)
+        self.assertNotIn('Strict-Transport-Security', response.headers)
+
+    def testHstsNotSentOnPlainHttpLocalhost(self):
+        # A plain HTTP request (e.g. the localhost debug port) must never
+        # receive an HSTS header.
+        app, _ = make_app(force_https=False)
+        response = app.test_client().get('/')
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn('Strict-Transport-Security', response.headers)
+
+    def testHstsIgnoresSpoofedForwardedProtoByDefault(self):
+        # Without opting in, X-Forwarded-Proto must not be trusted.
+        app, _ = make_app(force_https=False)
+        response = app.test_client().get(
+            '/', headers={'X-Forwarded-Proto': 'https'})
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn('Strict-Transport-Security', response.headers)
+
+    def testHstsTrustedProxyHttps(self):
+        # The caller explicitly trusts the proxy header.
+        app, _ = make_app(force_https=False, trusted_proxy=True)
+        response = app.test_client().get(
+            '/', headers={'X-Forwarded-Proto': 'https'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.headers['Strict-Transport-Security'],
+            'max-age=31556926; includeSubDomains')
+
+    def testHstsLegacyConfigurationStillSupported(self):
+        app, _ = make_app(
+            strict_transport_security_max_age=63072000,
+            strict_transport_security_include_subdomains=True,
+            strict_transport_security_preload=False)
+        response = app.test_client().get(
+            '/', environ_overrides=HTTPS_ENVIRON)
+        self.assertEqual(
+            response.headers['Strict-Transport-Security'],
+            'max-age=63072000; includeSubDomains')
 
     def testFrameOptions(self):
         self.talisman.frame_options = DENY
@@ -242,6 +350,7 @@ class TestTalismanExtension(unittest.TestCase):
     def testBadEndpoint(self):
         response = self.client.get('/bad_endpoint')
         self.assertEqual(response.status_code, 302)
+        self.talisman.trusted_proxy = True
         response = self.client.get('/bad_endpoint',
                                    headers={'X-Forwarded-Proto': 'https'})
         self.assertEqual(response.status_code, 404)
