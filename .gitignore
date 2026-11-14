@@ -1,0 +1,12 @@
+*~
+*.pyc
+.venv*
+/bin
+/dist
+*.egg
+*.egg-info
+.coverage
+.coverage.*
+/.cache
+*.pcapng
+/.build-venv/
