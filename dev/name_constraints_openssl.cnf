@@ -1,0 +1,140 @@
+# OpenSSL extension definitions used by
+# dev/generate_name_constraint_fixtures.sh. Keep section names in sync with the
+# -extensions arguments in that script.
+
+[ req ]
+distinguished_name = req_distinguished_name
+prompt             = no
+
+[ req_distinguished_name ]
+CN = placeholder
+
+[ v3_root_ca ]
+basicConstraints       = critical, CA:TRUE
+keyUsage               = critical, keyCertSign, cRLSign
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid:always
+
+[ v3_dns_constrained_ca ]
+basicConstraints       = critical, CA:TRUE, pathlen:0
+keyUsage               = critical, keyCertSign, cRLSign
+nameConstraints        = critical, permitted;DNS:example.com
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid:always
+
+[ v3_ip_constrained_ca ]
+basicConstraints       = critical, CA:TRUE, pathlen:0
+keyUsage               = critical, keyCertSign, cRLSign
+# 10.0.0.0/255.0.0.0 and 2001:db8::/32 encoded as address + mask pairs.
+nameConstraints        = critical, permitted;IP:10.0.0.0/255.0.0.0, permitted;IP:2001:db8::/ffff:ffff::
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid:always
+
+[ v3_idna_constrained_ca ]
+basicConstraints       = critical, CA:TRUE, pathlen:0
+keyUsage               = critical, keyCertSign, cRLSign
+# Punycode A-label form of an IDNA domain; the validator must normalize both
+# the constraint and any U-label SANs before comparing them.
+nameConstraints        = critical, permitted;DNS:xn--mnich-kva.example.com
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid:always
+
+[ v3_excluded_dns_ca ]
+basicConstraints       = critical, CA:TRUE, pathlen:0
+keyUsage               = critical, keyCertSign, cRLSign
+nameConstraints        = critical, excluded;DNS:forbidden.example.com
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid:always
+
+[ v3_uri_constrained_ca ]
+basicConstraints       = critical, CA:TRUE, pathlen:0
+keyUsage               = critical, keyCertSign, cRLSign
+nameConstraints        = critical, permitted;URI:.example.com
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid:always
+
+[ v3_eku_constrained_ca ]
+basicConstraints       = critical, CA:TRUE, pathlen:0
+keyUsage               = critical, keyCertSign, cRLSign
+extendedKeyUsage       = critical, clientAuth, emailProtection
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid:always
+
+[ v3_ee_san_example ]
+basicConstraints       = critical, CA:FALSE
+keyUsage               = critical, digitalSignature, keyEncipherment
+extendedKeyUsage       = critical, serverAuth
+subjectAltName         = DNS:good.example.com, DNS:www.example.com
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid:always
+
+[ v3_ee_san_evil ]
+basicConstraints       = critical, CA:FALSE
+keyUsage               = critical, digitalSignature, keyEncipherment
+extendedKeyUsage       = critical, serverAuth
+subjectAltName         = DNS:evil.test
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid:always
+
+[ v3_ee_cn_only ]
+basicConstraints       = critical, CA:FALSE
+keyUsage               = critical, digitalSignature, keyEncipherment
+extendedKeyUsage       = critical, serverAuth
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid:always
+
+[ v3_ee_san_idna ]
+basicConstraints       = critical, CA:FALSE
+keyUsage               = critical, digitalSignature, keyEncipherment
+extendedKeyUsage       = critical, serverAuth
+subjectAltName         = DNS:xn--mnich-kva.example.com
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid:always
+
+[ v3_ee_san_idna_ulabel ]
+basicConstraints       = critical, CA:FALSE
+keyUsage               = critical, digitalSignature, keyEncipherment
+extendedKeyUsage       = critical, serverAuth
+subjectAltName         = DNS:münich.example.com
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid:always
+
+[ v3_ee_san_excluded ]
+basicConstraints       = critical, CA:FALSE
+keyUsage               = critical, digitalSignature, keyEncipherment
+extendedKeyUsage       = critical, serverAuth
+subjectAltName         = DNS:host.forbidden.example.com
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid:always
+
+[ v3_ee_san_uri_good ]
+basicConstraints       = critical, CA:FALSE
+keyUsage               = critical, digitalSignature, keyEncipherment
+extendedKeyUsage       = critical, serverAuth
+subjectAltName         = URI:https://api.example.com/v1/resource
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid:always
+
+[ v3_ee_san_ip_good ]
+basicConstraints       = critical, CA:FALSE
+keyUsage               = critical, digitalSignature, keyEncipherment
+extendedKeyUsage       = critical, serverAuth
+subjectAltName         = IP:10.1.2.3, IP:2001:db8::1
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid:always
+
+[ v3_ee_san_ip_bad ]
+basicConstraints       = critical, CA:FALSE
+keyUsage               = critical, digitalSignature, keyEncipherment
+extendedKeyUsage       = critical, serverAuth
+subjectAltName         = IP:192.0.2.10, IP:2001:db9::1
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid:always
+
+[ v3_ee_server_auth ]
+basicConstraints       = critical, CA:FALSE
+keyUsage               = critical, digitalSignature, keyEncipherment
+extendedKeyUsage       = critical, serverAuth
+subjectAltName         = DNS:eku-conflict.example.com
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid:always

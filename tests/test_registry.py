@@ -14,6 +14,10 @@ fixtures_dir = os.path.join(tests_root, 'fixtures')
 
 class RegistryTests(unittest.TestCase):
 
+    def _load_fixture_cert(self, filename):
+        with open(os.path.join(fixtures_dir, 'name_constraints', filename), 'rb') as f:
+            return x509.Certificate.load(f.read())
+
     def test_build_paths(self):
         with open(os.path.join(fixtures_dir, 'mozilla.org.crt'), 'rb') as f:
             cert_bytes = f.read()
@@ -74,3 +78,36 @@ class RegistryTests(unittest.TestCase):
             ],
             [item.subject.sha1 for item in path]
         )
+
+    def test_build_paths_through_name_constrained_intermediate(self):
+        cert = self._load_fixture_cert('ee_dns_evil.crt')
+        intermediate = self._load_fixture_cert('nc_dns_ca.crt')
+        root = self._load_fixture_cert('nc_root.crt')
+
+        repo = CertificateRegistry(
+            trust_roots=[root],
+            other_certs=[intermediate]
+        )
+        paths = repo.build_paths(cert)
+
+        self.assertEqual(1, len(paths))
+        path = paths[0]
+        self.assertEqual(3, len(path))
+        self.assertEqual(
+            [root.subject.sha1, intermediate.subject.sha1, cert.subject.sha1],
+            [item.subject.sha1 for item in path]
+        )
+
+    def test_build_paths_through_ip_constrained_intermediate(self):
+        cert = self._load_fixture_cert('ee_ip_good.crt')
+        intermediate = self._load_fixture_cert('nc_ip_ca.crt')
+        root = self._load_fixture_cert('nc_root.crt')
+
+        repo = CertificateRegistry(
+            trust_roots=[root],
+            other_certs=[intermediate]
+        )
+        paths = repo.build_paths(cert)
+
+        self.assertEqual(1, len(paths))
+        self.assertEqual(3, len(paths[0]))

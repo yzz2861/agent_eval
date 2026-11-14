@@ -15,9 +15,15 @@ from .errors import (
     InvalidCertificateError,
     OCSPNoMatchesError,
     OCSPValidationIndeterminateError,
+    PathValidationIndeterminateError,
     PathValidationError,
     RevokedError,
     SoftFailError,
+)
+from ._name_constraints import (
+    NameConstraintIndeterminate,
+    NameConstraintViolation,
+    _NameConstraintState,
 )
 from .path import ValidationPath
 
@@ -25,8 +31,9 @@ from .path import ValidationPath
 def validate_path(validation_context, path):
     """
     Validates the path using the algorithm from
-    https://tools.ietf.org/html/rfc5280#section-6.1, with the exception
-    that name constraints are not checked or enforced.
+    https://tools.ietf.org/html/rfc5280#section-6.1, including the name
+    constraints, basic constraints and extended key usage processing in
+    sections 6.1.3, 6.1.4 and 6.1.5.
 
     Critical extensions on the end-entity certificate are not validated
     and are left up to the consuming application to process and/or fail on.
@@ -262,15 +269,26 @@ def _validate_path(validation_context, path, end_entity_name_override=None):
     # the trust anchor is not part of the path
     path_length = len(path) - 1
 
-    # We don't accept any certificate policy or name constraint values as input
-    # and instead just start allowing everything during initialization
+    # We don't accept any certificate policy values as input and instead just
+    # start allowing everything during initialization
 
     # Step 1: initialization
 
     # Step 1 a
     valid_policy_tree = PolicyTreeRoot('any_policy', set(), set(['any_policy']))
 
-    # Steps 1 b-c skipped since they relate to name constraints
+    # Step 1 b: permitted-subtrees and excluded-subtrees start out empty,
+    # meaning every name type is initially permitted. Constraints are
+    # accumulated from every CA in the path instead of being accepted as input.
+    name_constraints = _NameConstraintState()
+
+    # Step 1 c is not needed since we do not track the constraints themselves
+    # as separate working state beyond the normalized constraint state.
+
+    # Extended key usages are intersected across the path. A value of None
+    # means no EKU extension has been encountered yet, which is distinct from
+    # an empty intersection resulting from conflicting EKU extensions.
+    permitted_extended_key_usages = None
 
     # Steps 1 d-f
     # We do not use initial-explicit-policy, initial-any-policy-inhibit or
@@ -296,6 +314,19 @@ def _validate_path(validation_context, path, end_entity_name_override=None):
     validation_context.record_validation(trust_anchor, completed_path)
 
     cert = trust_anchor
+
+    # Name constraints and EKUs may be asserted by the trust anchor itself,
+    # in which case they apply to every certificate beneath it in the path.
+    try:
+        name_constraints.add_certificate(trust_anchor)
+        if trust_anchor.extended_key_usage_value is not None:
+            permitted_extended_key_usages = set(trust_anchor.extended_key_usage_value.native)
+    except (NameConstraintIndeterminate) as e:
+        raise PathValidationIndeterminateError(
+            pretty_message(str_cls(e)),
+            [str_cls(e)]
+        )
+
     while index <= last_index:
         cert = path[index]
 
@@ -448,7 +479,42 @@ def _validate_path(validation_context, path, end_entity_name_override=None):
                 _cert_type(index, last_index, end_entity_name_override),
             ))
 
-        # Steps 2 b-c skipped since they relate to name constraints
+        # Steps 2 b-c: verify the certificate against the name constraints
+        # accumulated from the trust anchor and preceding CAs, then fold in
+        # any constraints asserted by this certificate for its descendants.
+        try:
+            name_constraints.check_certificate(cert)
+        except (NameConstraintViolation) as e:
+            raise PathValidationError(pretty_message(str_cls(e)))
+        except (NameConstraintIndeterminate) as e:
+            raise PathValidationIndeterminateError(
+                pretty_message(str_cls(e)),
+                [str_cls(e)]
+            )
+
+        # Intersect the extended key usages asserted along the path. A
+        # certificate without an EKU extension does not widen the set of
+        # permitted purposes, while an explicit EKU extension narrows it.
+        if cert.extended_key_usage_value is not None:
+            cert_eku = set(cert.extended_key_usage_value.native)
+            # anyExtendedKeyUsage matches every purpose already asserted by
+            # the path, but never introduces a purpose on its own.
+            if 'any_extended_key_usage' in cert_eku:
+                cert_eku.discard('any_extended_key_usage')
+                if permitted_extended_key_usages is not None:
+                    cert_eku.update(permitted_extended_key_usages)
+            if permitted_extended_key_usages is None:
+                permitted_extended_key_usages = cert_eku
+            else:
+                permitted_extended_key_usages = permitted_extended_key_usages & cert_eku
+            if not permitted_extended_key_usages:
+                raise PathValidationError(pretty_message(
+                    '''
+                    The path could not be validated because the extended key
+                    usages asserted along the path do not share any common
+                    purpose
+                    '''
+                ))
 
         # Steps 2 d
         if cert.certificate_policies_value and valid_policy_tree is not None:
@@ -599,7 +665,15 @@ def _validate_path(validation_context, path, end_entity_name_override=None):
             if copy_params:
                 working_public_key['algorithm']['parameters'] = copy_params
 
-            # Step 3 g skipped since it relates to name constraints
+            # Step 3 g: fold this CA's name constraints into the accumulated
+            # permitted and excluded subtrees used for the next certificate.
+            try:
+                name_constraints.add_certificate(cert)
+            except (NameConstraintIndeterminate) as e:
+                raise PathValidationIndeterminateError(
+                    pretty_message(str_cls(e)),
+                    [str_cls(e)]
+                )
 
             # Step 3 h
             if not cert.self_issued:
@@ -673,6 +747,7 @@ def _validate_path(validation_context, path, end_entity_name_override=None):
             'freshest_crl',
             'key_identifier',
             'key_usage',
+            'name_constraints',
             'ocsp_no_check',
             'certificate_policies',
             'policy_mappings',

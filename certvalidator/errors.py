@@ -66,6 +66,13 @@ class PathValidationError(ValidationError):
     pass
 
 
+class PathValidationIndeterminateError(PathValidationError):
+
+    @property
+    def failures(self):
+        return self.args[1]
+
+
 class RevokedError(PathValidationError):
 
     pass
