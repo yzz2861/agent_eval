@@ -6,6 +6,7 @@ from .._headers import (
     has_expect_100_continue,
     Headers,
     normalize_and_validate,
+    reject_framing_header_conflicts,
     set_comma_header,
 )
 from .._util import LocalProtocolError
@@ -92,6 +93,58 @@ def test_normalize_and_validate() -> None:
             [("Transfer-Encoding", "chunked"), ("Transfer-Encoding", "gzip")]
         )
     assert excinfo.value.error_status_hint == 501  # Not Implemented
+
+
+def test_local_framing_headers_allow_transfer_encoding_override() -> None:
+    assert normalize_and_validate(
+        [("Content-Length", "5"), ("Transfer-Encoding", "chunked")]
+    ) == [(b"content-length", b"5"), (b"transfer-encoding", b"chunked")]
+
+
+def test_framing_header_conflicts_are_rejected() -> None:
+    with pytest.raises(LocalProtocolError, match="mutually exclusive"):
+        reject_framing_header_conflicts(
+            normalize_and_validate(
+                [(b"Content-Length", b"5"), (b"Transfer-Encoding", b"chunked")],
+                _parsed=True,
+            )
+        )
+
+    with pytest.raises(LocalProtocolError, match="mutually exclusive"):
+        reject_framing_header_conflicts(
+            normalize_and_validate(
+                [
+                    (b"tRaNsFeR-eNcOdInG", b"cHuNkEd"),
+                    (b"CoNtEnT-LeNgTh", b"5"),
+                ],
+                _parsed=True,
+            )
+        )
+
+
+def test_transfer_encoding_final_transfer_coding_must_be_chunked() -> None:
+    assert normalize_and_validate(
+        [(b"Transfer-Encoding", b"cHuNkEd")], _parsed=True
+    ) == [(b"transfer-encoding", b"chunked")]
+
+    for value in [b"gzip", b"gzip, chunked", b"chunked, gzip", b"chunkedx"]:
+        with pytest.raises(LocalProtocolError) as excinfo:
+            normalize_and_validate([(b"Transfer-Encoding", value)], _parsed=True)
+        assert excinfo.value.error_status_hint == 501
+
+    assert normalize_and_validate(
+        [(b"Transfer-Encoding", b"chunked; foo=bar")], _parsed=True
+    ) == [(b"transfer-encoding", b"chunked; foo=bar")]
+
+    with pytest.raises(LocalProtocolError) as excinfo:
+        normalize_and_validate(
+            [
+                (b"Transfer-Encoding", b"gzip"),
+                (b"Transfer-Encoding", b"chunked"),
+            ],
+            _parsed=True,
+        )
+    assert excinfo.value.error_status_hint == 501
 
 
 def test_get_set_comma_header() -> None:

@@ -22,7 +22,12 @@ from ._events import (
     Request,
     Response,
 )
-from ._headers import get_comma_header, has_expect_100_continue, set_comma_header
+from ._headers import (
+    get_comma_header,
+    has_expect_100_continue,
+    set_comma_header,
+    transfer_encoding_ends_with_chunked,
+)
 from ._readers import READERS, ReadersType
 from ._receivebuffer import ReceiveBuffer
 from ._state import (
@@ -126,7 +131,7 @@ def _body_framing(
     # Step 2: check for Transfer-Encoding (T-E beats C-L):
     transfer_encodings = get_comma_header(event.headers, b"transfer-encoding")
     if transfer_encodings:
-        assert transfer_encodings == [b"chunked"]
+        assert transfer_encoding_ends_with_chunked(event.headers)
         return ("chunked", ())
 
     # Step 3: check for Content-Length

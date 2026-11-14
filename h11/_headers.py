@@ -183,20 +183,28 @@ def normalize_and_validate(
             elif seen_content_length != value:
                 raise LocalProtocolError("conflicting Content-Length headers")
         elif name == b"transfer-encoding":
-            # "A server that receives a request message with a transfer coding
-            # it does not understand SHOULD respond with 501 (Not
-            # Implemented)."
-            # https://tools.ietf.org/html/rfc7230#section-3.3.1
             if saw_transfer_encoding:
                 raise LocalProtocolError(
                     "multiple Transfer-Encoding headers", error_status_hint=501
                 )
-            # "All transfer-coding names are case-insensitive"
-            # -- https://tools.ietf.org/html/rfc7230#section-4
             value = value.lower()
-            if value != b"chunked":
+            transfer_encodings = [
+                transfer_encoding.strip()
+                for transfer_encoding in value.split(b",")
+                if transfer_encoding.strip()
+            ]
+            if not transfer_encodings:
                 raise LocalProtocolError(
-                    "Only Transfer-Encoding: chunked is supported",
+                    "only Transfer-Encoding: chunked is supported",
+                    error_status_hint=501,
+                )
+            final_transfer_encoding = transfer_encodings[-1]
+            if len(transfer_encodings) != 1 or (
+                final_transfer_encoding != b"chunked"
+                and not final_transfer_encoding.startswith(b"chunked;")
+            ):
+                raise LocalProtocolError(
+                    "only Transfer-Encoding: chunked is supported",
                     error_status_hint=501,
                 )
             saw_transfer_encoding = True
@@ -204,6 +212,28 @@ def normalize_and_validate(
         else:
             new_headers.append((raw_name, name, value))
     return Headers(new_headers)
+
+
+def reject_framing_header_conflicts(headers: Headers) -> None:
+    has_content_length = any(name == b"content-length" for name, _ in headers)
+    has_transfer_encoding = any(
+        name == b"transfer-encoding" for name, _ in headers
+    )
+    if has_content_length and has_transfer_encoding:
+        raise LocalProtocolError(
+            "Content-Length and Transfer-Encoding headers are mutually exclusive"
+        )
+
+
+def transfer_encoding_ends_with_chunked(headers: Headers) -> bool:
+    transfer_encodings = get_comma_header(headers, b"transfer-encoding")
+    if not transfer_encodings:
+        return False
+    final_transfer_encoding = transfer_encodings[-1]
+    return len(transfer_encodings) == 1 and (
+        final_transfer_encoding == b"chunked"
+        or final_transfer_encoding.startswith(b"chunked;")
+    )
 
 
 def get_comma_header(headers: Headers, name: bytes) -> List[bytes]:

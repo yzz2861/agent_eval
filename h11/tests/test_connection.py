@@ -16,6 +16,7 @@ from .._state import (
     CLOSED,
     DONE,
     ERROR,
+    IDLE,
     MIGHT_SWITCH_PROTOCOL,
     MUST_CLOSE,
     SEND_BODY,
@@ -87,10 +88,10 @@ def test__body_framing() -> None:
             assert _body_framing(meth, r) == ("content-length", (0,))
 
     # Transfer-encoding
+    assert _body_framing(None, req(te=True)) == ("chunked", ())  # type: ignore
     for kwargs in [{"te": True}, {"cl": 100, "te": True}]:
         kwargs = cast(Dict[str, Any], kwargs)
-        for meth, r in [(None, req(**kwargs)), (b"GET", resp(**kwargs))]:  # type: ignore
-            assert _body_framing(meth, r) == ("chunked", ())
+        assert _body_framing(b"GET", resp(**kwargs)) == ("chunked", ())
 
     # Content-Length
     for meth, r in [(None, req(cl=100)), (b"GET", resp(cl=100))]:  # type: ignore
@@ -238,6 +239,172 @@ def test_chunk_boundaries() -> None:
     assert conn.next_event() == EndOfMessage()
 
 
+def test_chunked_trailer_headers_are_case_insensitive() -> None:
+    conn = Connection(our_role=SERVER)
+    conn.receive_data(
+        b"POST / HTTP/1.1\r\n"
+        b"Host: example.com\r\n"
+        b"tRaNsFeR-eNcOdInG: cHuNkEd\r\n"
+        b"\r\n"
+        b"5\r\nhello\r\n"
+        b"0\r\n"
+        b"X-Test: value\r\n"
+        b"x-other: other value\r\n"
+        b"\r\n"
+    )
+
+    assert conn.next_event() == Request(
+        method="POST",
+        target="/",
+        headers=[
+            ("Host", "example.com"),
+            ("transfer-encoding", "chunked"),
+        ],
+    )
+    assert conn.next_event() == Data(data=b"hello", chunk_start=True, chunk_end=True)
+    assert conn.next_event() == EndOfMessage(
+        headers=[("x-test", "value"), ("x-other", "other value")]
+    )
+    assert conn.their_state is DONE
+
+
+def test_incoming_framing_header_conflict_is_rejected_before_body() -> None:
+    conn = Connection(our_role=SERVER)
+    conn.receive_data(
+        b"POST / HTTP/1.1\r\n"
+        b"Host: example.com\r\n"
+        b"Content-Length: 5\r\n"
+        b"Transfer-Encoding: chunked\r\n"
+        b"\r\n"
+        b"5\r\nhello\r\n0\r\n\r\n"
+    )
+    unprocessed_body = b"5\r\nhello\r\n0\r\n\r\n"
+
+    with pytest.raises(RemoteProtocolError, match="mutually exclusive") as excinfo:
+        conn.next_event()
+    assert excinfo.value.error_status_hint == 400
+    assert conn.their_state is ERROR
+    assert conn.our_state is IDLE
+    assert conn.trailing_data == (unprocessed_body, False)
+
+    assert (
+        conn.send(Response(status_code=400, headers=[]))
+        == b"HTTP/1.1 400 \r\nConnection: close\r\n\r\n"
+    )
+
+
+def test_incoming_framing_header_conflict_is_case_insensitive() -> None:
+    conn = Connection(our_role=SERVER)
+    conn.receive_data(
+        b"POST / HTTP/1.1\r\n"
+        b"Host: example.com\r\n"
+        b"CoNtEnT-LeNgTh: 5\r\n"
+        b"tRaNsFeR-eNcOdInG: cHuNkEd\r\n"
+        b"\r\n"
+        b"hello"
+    )
+
+    with pytest.raises(RemoteProtocolError, match="mutually exclusive"):
+        conn.next_event()
+    assert conn.their_state is ERROR
+    assert conn.our_state is IDLE
+
+
+def test_local_request_framing_header_conflict_is_rejected() -> None:
+    with pytest.raises(LocalProtocolError, match="mutually exclusive"):
+        Request(
+            method="POST",
+            target="/",
+            headers=[
+                ("Host", "example.com"),
+                ("Content-Length", "5"),
+                ("Transfer-Encoding", "chunked"),
+            ],
+        )
+
+
+def test_incoming_duplicate_content_length_headers_must_match() -> None:
+    conn = Connection(our_role=SERVER)
+    conn.receive_data(
+        b"POST / HTTP/1.1\r\n"
+        b"Host: example.com\r\n"
+        b"Content-Length: 5\r\n"
+        b"Content-Length: 6\r\n"
+        b"\r\n"
+        b"hello"
+    )
+
+    with pytest.raises(RemoteProtocolError, match="conflicting Content-Length"):
+        conn.next_event()
+    assert conn.their_state is ERROR
+    assert conn.our_state is IDLE
+
+
+def test_incoming_matching_duplicate_content_length_headers_are_accepted() -> None:
+    conn = Connection(our_role=SERVER)
+    conn.receive_data(
+        b"POST / HTTP/1.1\r\n"
+        b"Host: example.com\r\n"
+        b"Content-Length: 5\r\n"
+        b"content-length: 5\r\n"
+        b"\r\n"
+        b"hello"
+    )
+
+    assert conn.next_event() == Request(
+        method="POST",
+        target="/",
+        headers=[
+            ("Host", "example.com"),
+            ("content-length", "5"),
+        ],
+    )
+    assert conn.next_event() == Data(data=b"hello")
+    assert conn.next_event() == EndOfMessage()
+    assert conn.their_state is DONE
+
+
+def test_incoming_transfer_encoding_must_end_with_chunked() -> None:
+    conn = Connection(our_role=SERVER)
+    conn.receive_data(
+        b"POST / HTTP/1.1\r\n"
+        b"Host: example.com\r\n"
+        b"Transfer-Encoding: chunked, gzip\r\n"
+        b"\r\n"
+        b"hello"
+    )
+
+    with pytest.raises(RemoteProtocolError) as excinfo:
+        conn.next_event()
+    assert "only Transfer-Encoding: chunked" in str(excinfo.value)
+    assert excinfo.value.error_status_hint == 501
+    assert conn.their_state is ERROR
+    assert conn.our_state is IDLE
+
+
+def test_incoming_transfer_encoding_accepts_chunked_parameters() -> None:
+    conn = Connection(our_role=SERVER)
+    conn.receive_data(
+        b"POST / HTTP/1.1\r\n"
+        b"Host: example.com\r\n"
+        b"Transfer-Encoding: chunked; foo=bar\r\n"
+        b"\r\n"
+        b"5\r\nhello\r\n0\r\n\r\n"
+    )
+
+    assert conn.next_event() == Request(
+        method="POST",
+        target="/",
+        headers=[
+            ("Host", "example.com"),
+            ("transfer-encoding", "chunked; foo=bar"),
+        ],
+    )
+    assert conn.next_event() == Data(data=b"hello", chunk_start=True, chunk_end=True)
+    assert conn.next_event() == EndOfMessage()
+    assert conn.their_state is DONE
+
+
 def test_client_talking_to_http10_server() -> None:
     c = Connection(CLIENT)
     c.send(Request(method="GET", target="/", headers=[("Host", "example.com")]))
@@ -331,6 +498,60 @@ def test_automatic_transfer_encoding_in_response() -> None:
             == b"HTTP/1.1 200 \r\nConnection: close\r\n\r\n"
         )
         assert c.send(Data(data=b"12345")) == b"12345"
+
+
+def test_no_body_responses_ignore_framing_headers() -> None:
+    for status_code in (204, 304):
+        for framing_headers in (
+            b"Content-Length: 5\r\n",
+            b"Transfer-Encoding: chunked\r\n",
+            b"Content-Length: 5\r\nTransfer-Encoding: chunked\r\n",
+        ):
+            conn = Connection(our_role=CLIENT)
+            conn.receive_data(
+                b"HTTP/1.1 %d \r\n" % status_code + framing_headers + b"\r\n"
+            )
+
+            event = conn.next_event()
+            assert type(event) is Response
+            assert event.status_code == status_code
+            assert conn.next_event() == EndOfMessage()
+            assert conn.their_state is DONE
+
+
+def test_incoming_response_framing_header_conflict_is_rejected() -> None:
+    conn = Connection(our_role=CLIENT)
+    conn.receive_data(
+        b"HTTP/1.1 200 \r\n"
+        b"Content-Length: 5\r\n"
+        b"Transfer-Encoding: chunked\r\n"
+        b"\r\n"
+        b"hello"
+    )
+
+    with pytest.raises(RemoteProtocolError, match="mutually exclusive"):
+        conn.next_event()
+    assert conn.their_state is ERROR
+    assert conn.our_state is IDLE
+
+
+def test_incoming_chunked_response_remains_supported() -> None:
+    conn = Connection(our_role=CLIENT)
+    conn.receive_data(
+        b"HTTP/1.1 200 \r\n"
+        b"Transfer-Encoding: chunked\r\n"
+        b"\r\n"
+        b"5\r\nhello\r\n"
+        b"0\r\nX-Test: value\r\n\r\n"
+    )
+
+    assert conn.next_event() == Response(
+        status_code=200,
+        headers=[("transfer-encoding", "chunked")],
+    )
+    assert conn.next_event() == Data(data=b"hello", chunk_start=True, chunk_end=True)
+    assert conn.next_event() == EndOfMessage(headers=[("x-test", "value")])
+    assert conn.their_state is DONE
 
 
 def test_automagic_connection_close_handling() -> None:

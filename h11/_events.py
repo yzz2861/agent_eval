@@ -11,7 +11,11 @@ from dataclasses import dataclass
 from typing import List, Tuple, Union
 
 from ._abnf import method, request_target
-from ._headers import Headers, normalize_and_validate
+from ._headers import (
+    Headers,
+    normalize_and_validate,
+    reject_framing_header_conflicts,
+)
 from ._util import bytesify, LocalProtocolError, validate
 
 # Everything in __all__ gets re-exported as part of the h11 public API.
@@ -95,6 +99,7 @@ class Request(Event):
             object.__setattr__(
                 self, "headers", normalize_and_validate(headers, _parsed=_parsed)
             )
+        reject_framing_header_conflicts(self.headers)
         if not _parsed:
             object.__setattr__(self, "method", bytesify(method))
             object.__setattr__(self, "target", bytesify(target))
@@ -150,6 +155,8 @@ class _ResponseBase(Event):
             object.__setattr__(
                 self, "headers", normalize_and_validate(headers, _parsed=_parsed)
             )
+        if _parsed and status_code not in (204, 304):
+            reject_framing_header_conflicts(self.headers)
         if not _parsed:
             object.__setattr__(self, "reason", bytesify(reason))
             object.__setattr__(self, "http_version", bytesify(http_version))
