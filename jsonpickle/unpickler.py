@@ -16,6 +16,118 @@ from .backend import json
 ClassesType: TypeAlias = type | dict[str, type] | Sequence[type] | None
 # handler for missing classes: either a policy name or a callback
 MissingHandler: TypeAlias = str | Callable[[str], Any]
+# classes/functions whitelisted for safe-mode decoding, as exact dotted paths
+SafeWhitelistType: TypeAlias = (
+    "str | type | Callable[..., Any] | dict[str, Any] | Sequence[Any] | None"
+)
+
+#: Default maximum nesting depth enforced when decoding in safe mode.
+DEFAULT_MAX_DEPTH: int = 100
+
+#: Maximum length of an attacker-controlled dotted path that is included
+#: in safe-mode error messages. Keeps error output from echoing payloads.
+_MAX_SAFE_NAME_LENGTH: int = 120
+
+#: Dotted paths of functions that are categorically refused in safe mode,
+#: even if a caller accidentally whitelists them.
+_DANGEROUS_FUNCTION_NAMES: frozenset = frozenset(
+    {
+        "builtins.eval",
+        "builtins.exec",
+        "builtins.compile",
+        "builtins.__import__",
+        "builtins.open",
+        "builtins.input",
+        "builtins.breakpoint",
+        "builtins.globals",
+        "builtins.locals",
+        "builtins.vars",
+        "builtins.getattr",
+        "builtins.setattr",
+        "builtins.delattr",
+        "builtins.exit",
+        "builtins.quit",
+        "os.system",
+        "os.popen",
+        "os.execl",
+        "os.execv",
+        "os.execvp",
+        "os.spawnl",
+        "os.spawnlp",
+        "subprocess.Popen",
+        "subprocess.call",
+        "subprocess.run",
+        "subprocess.check_output",
+        "pickle.load",
+        "pickle.loads",
+        "marshal.load",
+        "marshal.loads",
+        "shutil.rmtree",
+        "os.remove",
+        "os.unlink",
+        "os.rmdir",
+        "code.interact",
+        "code.InteractiveConsole.interact",
+    }
+)
+
+
+def _safe_name(name: Any, limit: int = _MAX_SAFE_NAME_LENGTH) -> str:
+    """Return a truncated string for use in safe-mode error messages.
+
+    Error messages must never echo the complete payload, so any
+    attacker-controlled value included in an error is truncated.
+    """
+    text = str(name)
+    if len(text) > limit:
+        text = text[:limit] + "..."
+    return text
+
+
+def _is_private_path(path: str) -> bool:
+    """Return True if any part of a dotted path is private.
+
+    A part is private when it starts with an underscore, unless it is a
+    dunder name such as __main__ or __init__.
+    """
+    for part in path.split("."):
+        if part.startswith("_") and not (
+            part.startswith("__") and part.endswith("__") and len(part) > 4
+        ):
+            return True
+    return False
+
+
+def _normalize_safe_entries(entries: SafeWhitelistType, kind: str) -> dict:
+    """Normalize a safe-mode whitelist into a {dotted_path: object} table.
+
+    Entries must be exact dotted paths (or objects resolvable to one);
+    wildcards are rejected. String entries are resolved lazily from the
+    caller-provided configuration only -- never from message content.
+    """
+    if entries is None:
+        return {}
+    if isinstance(entries, dict):
+        pairs = list(entries.items())
+    elif isinstance(entries, (str, type)) or callable(entries):
+        pairs = [(entries if isinstance(entries, str) else None, entries)]
+    else:
+        pairs = [
+            (entry if isinstance(entry, str) else None, entry) for entry in entries
+        ]
+    table = {}
+    for name, value in pairs:
+        if name is None:
+            name = util.importable_name(value)
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"safe mode {kind} entries must be dotted path strings")
+        if "*" in name or "?" in name:
+            raise ValueError(
+                f"safe mode {kind} entries must be exact dotted paths, "
+                f"not wildcard patterns: {_safe_name(name)!r}"
+            )
+        table[name] = value
+    return table
 
 
 def decode(
@@ -29,6 +141,10 @@ def decode(
     on_missing: MissingHandler = "ignore",
     handle_readonly: bool = False,
     handler_context: Any = None,
+    safe_mode: bool = False,
+    allowed_classes: SafeWhitelistType = None,
+    allowed_functions: SafeWhitelistType = None,
+    max_depth: "int | None" = DEFAULT_MAX_DEPTH,
 ) -> Any:
     """Convert a JSON string into a Python object.
 
@@ -81,6 +197,34 @@ def decode(
         behavior at runtime based off data. Defaults to ``None``. An example can
         be found in the examples/ directory on GitHub.
 
+    :param safe_mode: If set to ``True``, decode in safe mode. Safe mode only
+        restores builtin scalars/containers and the classes explicitly listed
+        in ``allowed_classes``. ``py/reduce`` and ``py/function`` references
+        are refused unless their function is registered in
+        ``allowed_functions``. Objects are reconstituted without calling
+        ``__init__`` or ``__setstate__`` -- only side-effect-free
+        construction (``cls.__new__(cls)``) and attribute assignment are
+        used. Unknown classes, private modules, dangerous builtin functions,
+        recursive references and excessively deep payloads fail with
+        categorized :mod:`jsonpickle.errors` exceptions that never echo the
+        complete payload.
+
+    :param allowed_classes: Classes that safe mode may restore, given as
+        class objects, exact dotted path strings, a mapping of dotted paths
+        to classes, or a sequence of those. Matching is exact: wildcards are
+        rejected and no dynamic import of message-controlled paths is
+        performed. The whitelist is scoped to this decode call (or to the
+        provided ``context``); it is never stored in a global registry, so
+        later messages cannot be polluted by earlier calls.
+
+    :param allowed_functions: Pure functions that safe mode may invoke from
+        ``py/reduce`` or ``py/function`` references, in the same form as
+        ``allowed_classes``. Known-dangerous builtins are always refused.
+
+    :param max_depth: Maximum nesting depth allowed in safe mode. Payloads
+        nested deeper raise :class:`jsonpickle.errors.MaxDepthExceededError`.
+        Set to ``None`` to disable the limit. Defaults to 100.
+
     >>> decode('"my string"') == 'my string'
     True
     >>> decode('36')
@@ -95,16 +239,40 @@ def decode(
         )
 
     is_ephemeral_context = context is None
-    context = context or Unpickler(
-        keys=keys,
-        safe=safe,
-        on_missing=on_missing,
-        handle_readonly=handle_readonly,
-        handler_context=handler_context,
-    )
+    if context is None:
+        context = Unpickler(
+            keys=keys,
+            safe=safe,
+            on_missing=on_missing,
+            handle_readonly=handle_readonly,
+            handler_context=handler_context,
+            safe_mode=safe_mode,
+            allowed_classes=allowed_classes,
+            allowed_functions=allowed_functions,
+            max_depth=max_depth,
+        )
+    elif safe_mode:
+        # A pre-built context was supplied along with safe-mode options;
+        # apply the options to the context for this call.
+        context.safe_mode = True
+        context.max_depth = max_depth
+        context._safe_classes = _normalize_safe_entries(
+            allowed_classes, "allowed_classes"
+        )
+        context._safe_functions = _normalize_safe_entries(
+            allowed_functions, "allowed_functions"
+        )
     if handler_context is not None:
         context.handler_context = handler_context
-    data = json.decode(string)
+    if context.safe_mode:
+        try:
+            data = json.decode(string)
+        except RecursionError as error:
+            raise errors.MaxDepthExceededError(
+                "safe mode could not parse the payload: nesting is too deep"
+            ) from error
+    else:
+        data = json.decode(string)
     result = context.restore(data, reset=reset, classes=classes)
     if is_ephemeral_context:
         # Avoid holding onto references to external objects, which can
@@ -324,6 +492,10 @@ class Unpickler:
         on_missing: MissingHandler = "ignore",
         handle_readonly: bool = False,
         handler_context: Any = None,
+        safe_mode: bool = False,
+        allowed_classes: SafeWhitelistType = None,
+        allowed_functions: SafeWhitelistType = None,
+        max_depth: "int | None" = DEFAULT_MAX_DEPTH,
     ) -> None:
         self.backend = json
         self.keys = keys
@@ -332,6 +504,14 @@ class Unpickler:
         self.handle_readonly = handle_readonly
         # Custom context passed through to custom handlers, see #452
         self.handler_context = handler_context
+        # Safe-mode configuration. The whitelists are exact-match tables
+        # scoped to this Unpickler instance; they are never global.
+        self.safe_mode = safe_mode
+        self.max_depth = max_depth
+        self._safe_classes = _normalize_safe_entries(allowed_classes, "allowed_classes")
+        self._safe_functions = _normalize_safe_entries(
+            allowed_functions, "allowed_functions"
+        )
 
         self.reset()
 
@@ -341,9 +521,32 @@ class Unpickler:
         self._obj_to_idx = {}
         self._objs = []
         self._proxies = []
+        # Current nesting depth, tracked when decoding in safe mode
+        self._depth = 0
+        # Indices in _objs of containers currently being constructed,
+        # used to detect recursive references in safe mode
+        self._safe_open_refs = set()
 
         # Extra local classes not accessible globally
         self._classes = {}
+
+    def _lookup_safe(self, table: dict, name: str) -> Any | None:
+        """Look up a dotted path in a safe-mode whitelist table.
+
+        String entries are caller-provided configuration and are resolved
+        lazily; message-controlled paths are only ever used as lookup keys
+        and are never imported dynamically.
+        """
+        try:
+            value = table[name]
+        except KeyError:
+            return None
+        if isinstance(value, str):
+            value = util.loadclass(value)
+            if value is None:
+                return None
+            table[name] = value
+        return value
 
     def _swap_proxies(self) -> None:
         """Replace proxies with their corresponding instances"""
@@ -360,6 +563,16 @@ class Unpickler:
             restore = _passthrough
         else:
             restore = self._restore_tags(obj)
+        if self.safe_mode and type(obj) in (dict, list):
+            if self.max_depth is not None and self._depth >= self.max_depth:
+                raise errors.MaxDepthExceededError(
+                    f"safe mode maximum nesting depth of {self.max_depth} exceeded"
+                )
+            self._depth += 1
+            try:
+                return restore(obj)
+            finally:
+                self._depth -= 1
         return restore(obj)
 
     def restore(
@@ -447,6 +660,15 @@ class Unpickler:
     def _restore_list(self, obj: list[Any]) -> list[Any]:
         parent = []
         self._mkref(parent)
+        if self.safe_mode:
+            ref_idx = self._obj_to_idx[id(parent)]
+            self._safe_open_refs.add(ref_idx)
+            try:
+                children = [self._restore(v) for v in obj]
+            finally:
+                self._safe_open_refs.discard(ref_idx)
+            parent.extend(children)
+            return parent
         children = [self._restore(v) for v in obj]
         parent.extend(children)
         method = _obj_setvalue
@@ -480,6 +702,8 @@ class Unpickler:
         Assumes that iterator items (the last two) are represented as lists
         as per pickler implementation.
         """
+        if self.safe_mode:
+            return self._restore_reduce_safe(obj)
         proxy = _Proxy()
         self._mkref(proxy)
         try:
@@ -556,7 +780,98 @@ class Unpickler:
         self._swapref(proxy, stage1)
         return stage1
 
+    def _restore_reduce_safe(self, obj: dict[str, Any]) -> Any:
+        """Safe-mode reduce restoration.
+
+        Every callable and class inside the reduce tuple is resolved through
+        the safe-mode gates, so only whitelisted classes and registered pure
+        functions can be reached. Classes are never called (that would run
+        ``__init__``) and ``__setstate__`` is never invoked.
+        """
+        proxy = _Proxy()
+        self._mkref(proxy)
+        try:
+            reduce_val = list(map(self._restore, obj[tags.REDUCE]))
+        except TypeError:
+            result = []
+            proxy.reset(result)
+            self._swapref(proxy, result)
+            return result
+        if len(reduce_val) < 6:
+            reduce_val.extend([None] * (6 - len(reduce_val)))
+        f, args, state, listitems, dictitems, state_setter = reduce_val
+
+        if f == tags.NEWOBJ or getattr(f, "__name__", "") == "__newobj__":
+            # mandated special case; cls was resolved through the
+            # py/object safe-mode gate and __new__ does not run __init__
+            cls = args[0]
+            if not isinstance(cls, type):
+                cls = self._restore(cls)
+            stage1 = cls.__new__(cls, *args[1:])
+        else:
+            if isinstance(f, type) or not callable(f):
+                raise errors.DisallowedFunctionError(
+                    "safe mode only allows registered pure functions in py/reduce"
+                )
+            # f was restored through the py/function safe-mode gate, so it
+            # is a registered pure function
+            stage1 = f(*args)
+
+        if state and state_setter is None:
+            # never call __setstate__ in safe mode; use the prescribed
+            # default assignment paths instead
+            try:
+                for k, v in stage1.__dict__.items():
+                    state.setdefault(k, v)
+                stage1.__dict__ = state
+            except AttributeError:
+                try:
+                    for k, v in state.items():
+                        setattr(stage1, k, v)
+                except Exception:  # ruff: ignore[BLE001]
+                    dict_state, slots_state = state
+                    if dict_state:
+                        stage1.__dict__.update(dict_state)
+                    if slots_state:
+                        for k, v in slots_state.items():
+                            setattr(stage1, k, v)
+        elif state:
+            # state_setter was restored through the py/function gate
+            state_setter(stage1, state)
+
+        if listitems:
+            try:
+                stage1.extend(listitems)
+            except AttributeError:
+                for x in listitems:
+                    stage1.append(x)
+
+        if dictitems:
+            for k, v in dictitems:
+                stage1.__setitem__(k, v)
+
+        proxy.reset(stage1)
+        self._swapref(proxy, stage1)
+        return stage1
+
     def _restore_id(self, obj: dict[str, Any]) -> Any:
+        if self.safe_mode:
+            idx = obj[tags.ID]
+            if (
+                not isinstance(idx, int)
+                or isinstance(idx, bool)
+                or idx < 0
+                or idx >= len(self._objs)
+            ):
+                raise errors.RecursiveReferenceError(
+                    "safe mode received an invalid py/id reference"
+                )
+            value = self._objs[idx]
+            if isinstance(value, _Proxy) or idx in self._safe_open_refs:
+                raise errors.RecursiveReferenceError(
+                    "safe mode does not allow recursive object references"
+                )
+            return value
         try:
             idx = obj[tags.ID]
             return self._objs[idx]
@@ -566,16 +881,42 @@ class Unpickler:
             return None
 
     def _restore_type(self, obj: dict[str, Any]) -> Any:
+        if self.safe_mode:
+            type_name = obj[tags.TYPE]
+            if not isinstance(type_name, str) or not type_name:
+                raise errors.DisallowedClassError(
+                    "safe mode requires a string py/type name"
+                )
+            if _is_private_path(type_name):
+                raise errors.PrivateModuleError(
+                    "safe mode does not allow private modules or attributes: "
+                    f"{_safe_name(type_name)!r}"
+                )
+            typeref = self._lookup_safe(self._safe_classes, type_name)
+            if typeref is None:
+                raise errors.DisallowedClassError(
+                    f"safe mode does not allow type {_safe_name(type_name)!r}; "
+                    "add it to allowed_classes"
+                )
+            return typeref
         typeref = util.loadclass(obj[tags.TYPE], classes=self._classes)
         if typeref is None:
             return obj
         return typeref
 
     def _restore_module(self, obj: dict[str, Any]) -> Any:
+        if self.safe_mode:
+            raise errors.DisallowedClassError(
+                "safe mode does not allow py/mod module references"
+            )
         new_obj = _loadmodule(obj[tags.MODULE])
         return self._mkref(new_obj)
 
     def _restore_repr_safe(self, obj: dict[str, Any]) -> Any:
+        if self.safe_mode:
+            raise errors.DisallowedClassError(
+                "safe mode does not allow py/repr references"
+            )
         new_obj = _loadmodule(obj[tags.REPR])
         return self._mkref(new_obj)
 
@@ -716,7 +1057,7 @@ class Unpickler:
             isinstance(state, tuple) and len(state) == 2 and isinstance(state[1], dict)
         )
         has_slots_and_dict = has_slots and isinstance(state[0], dict)
-        if hasattr(instance, "__setstate__"):
+        if not self.safe_mode and hasattr(instance, "__setstate__"):
             instance.__setstate__(state)
         elif isinstance(state, dict):
             # implements described default handling
@@ -825,6 +1166,8 @@ class Unpickler:
 
     def _restore_object(self, obj: dict[str, Any]) -> Any:
         class_name = obj[tags.OBJECT]
+        if self.safe_mode:
+            return self._restore_object_safe(obj, class_name)
         cls = util.loadclass(class_name, classes=self._classes)
         handler = handlers.get(cls, handlers.get(class_name))  # type: ignore[arg-type]
         if handler is not None:  # custom handler
@@ -842,8 +1185,116 @@ class Unpickler:
 
         return self._restore_object_instance(obj, cls, class_name)
 
+    def _restore_object_safe(self, obj: dict[str, Any], class_name: Any) -> Any:
+        """Safe-mode object restoration.
+
+        Only classes explicitly whitelisted via ``allowed_classes`` (or
+        classes with an application-registered custom handler) can be
+        restored. Matching is exact and message-controlled paths are never
+        imported dynamically.
+        """
+        if not isinstance(class_name, str) or not class_name:
+            raise errors.DisallowedClassError(
+                "safe mode requires a string py/object class name"
+            )
+        if _is_private_path(class_name):
+            raise errors.PrivateModuleError(
+                "safe mode does not allow private modules or attributes: "
+                f"{_safe_name(class_name)!r}"
+            )
+        cls = self._lookup_safe(self._safe_classes, class_name)
+        handler = handlers.get(cls, handlers.get(class_name))  # type: ignore[arg-type]
+        if handler is not None:  # custom handler registered by the application
+            proxy = _Proxy()
+            self._mkref(proxy)
+            handler_instance = handler(self)
+            instance = self._call_handler_restore(handler_instance, obj)
+            proxy.reset(instance)
+            self._swapref(proxy, instance)
+            return instance
+
+        if cls is None:
+            raise errors.DisallowedClassError(
+                f"safe mode does not allow class {_safe_name(class_name)!r}; "
+                "add it to allowed_classes"
+            )
+
+        return self._restore_object_instance_safe(obj, cls)
+
+    def _restore_object_instance_safe(self, obj: dict[str, Any], cls: type) -> Any:
+        """Instantiate a whitelisted class without running ``__init__``.
+
+        Only side-effect-free construction (``cls.__new__(cls)``) and
+        attribute assignment are used; constructor arguments, factories and
+        ``__setstate__`` from the message are ignored.
+        """
+        # A placeholder proxy lets us detect recursive references to the
+        # not-yet-constructed instance and reject them categorically.
+        proxy = _Proxy()
+        self._mkref(proxy)
+
+        try:
+            instance = cls.__new__(cls)
+        except TypeError:
+            try:
+                instance = object.__new__(cls)
+            except TypeError as error:
+                raise errors.DisallowedClassError(
+                    "safe mode cannot instantiate "
+                    f"{_safe_name(util.importable_name(cls))!r} "
+                    "without calling __init__"
+                ) from error
+
+        instance = self._restore_from_dict(obj, instance)
+
+        # Handle list and set subclasses
+        if has_tag(obj, tags.SEQ):
+            if hasattr(instance, "append"):
+                for v in obj[tags.SEQ]:
+                    instance.append(self._restore(v))
+            elif hasattr(instance, "add"):
+                for v in obj[tags.SEQ]:
+                    instance.add(self._restore(v))
+
+        if has_tag(obj, tags.STATE):
+            instance = self._restore_state(obj, instance)
+
+        proxy.reset(instance)
+        self._swapref(proxy, instance)
+        return instance
+
     def _restore_function(self, obj: dict[str, Any]) -> Any:
+        if self.safe_mode:
+            return self._restore_function_safe(obj[tags.FUNCTION])
         return util.loadclass(obj[tags.FUNCTION], classes=self._classes)
+
+    def _restore_function_safe(self, name: Any) -> Any:
+        """Resolve a py/function reference against the safe-mode whitelist.
+
+        Only functions explicitly registered via ``allowed_functions`` are
+        returned; known-dangerous builtins and private paths are refused
+        categorically and nothing is imported dynamically.
+        """
+        if not isinstance(name, str) or not name:
+            raise errors.DisallowedFunctionError(
+                "safe mode requires a string py/function name"
+            )
+        if _is_private_path(name):
+            raise errors.PrivateModuleError(
+                "safe mode does not allow private modules or attributes: "
+                f"{_safe_name(name)!r}"
+            )
+        if name in _DANGEROUS_FUNCTION_NAMES:
+            raise errors.DangerousFunctionError(
+                f"safe mode blocks dangerous function {_safe_name(name)!r}"
+            )
+        fn = self._lookup_safe(self._safe_functions, name)
+        if fn is None:
+            raise errors.DisallowedFunctionError(
+                f"safe mode does not allow function {_safe_name(name)!r}; "
+                "register it via allowed_functions"
+            )
+        return fn
 
     def _restore_set(self, obj: dict[str, Any]) -> set[Any]:
         try:
@@ -854,6 +1305,10 @@ class Unpickler:
     def _restore_dict(self, obj: dict[str, Any]) -> dict[str, Any]:
         data = {}
         self._mkref(data)
+        if self.safe_mode:
+            # Track containers under construction so that py/id references
+            # back to them (recursive references) can be rejected.
+            self._safe_open_refs.add(self._obj_to_idx[id(data)])
 
         # If we are decoding dicts that can have non-string keys then we
         # need to do a two-phase decode where the non-string keys are
@@ -892,6 +1347,8 @@ class Unpickler:
                 data[k] = result = self._restore(v)
                 if isinstance(result, _Proxy):
                     self._proxies.append((data, k, result, _obj_setvalue))
+        if self.safe_mode:
+            self._safe_open_refs.discard(self._obj_to_idx[id(data)])
         return data
 
     def _restore_tuple(self, obj: dict[str, Any]) -> tuple[Any, ...]:

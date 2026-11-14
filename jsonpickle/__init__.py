@@ -68,6 +68,15 @@ added to JSON::
 
 # Export other names not in __all__
 from .backend import JSONBackend, json  # noqa: F401
+from .errors import (  # noqa: F401
+    DangerousFunctionError,
+    DisallowedClassError,
+    DisallowedFunctionError,
+    MaxDepthExceededError,
+    PrivateModuleError,
+    RecursiveReferenceError,
+    SafeDecodeError,
+)
 from .handlers import register, unregister  # noqa: F401
 from .pickler import Pickler, encode  # noqa: F401
 from .unpickler import Unpickler, decode  # noqa: F401
