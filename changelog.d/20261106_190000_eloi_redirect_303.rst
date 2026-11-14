@@ -1,0 +1,7 @@
+Breaking changes
+~~~~~~~~~~~~~~~~
+
+- The OAuth 2 and OpenID Connect authorization server redirects with a 303
+  status code instead of 302, per :rfc:`9700#section-4.12`. This covers the
+  authorization responses, the errors sent to the redirect URI, and the
+  RP-Initiated Logout redirection. :pr:`1016`

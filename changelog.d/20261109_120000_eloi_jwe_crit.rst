@@ -1,0 +1,7 @@
+Breaking changes
+~~~~~~~~~~~~~~~~
+
+- ``JsonWebEncryption`` rejects a JWE whose ``crit`` header lists an unknown
+  header parameter, or is not in the protected header, like
+  ``JsonWebSignature``. Add the private header parameters listed in ``crit``
+  to ``private_headers``.

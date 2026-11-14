@@ -1,0 +1,7 @@
+Breaking changes
+~~~~~~~~~~~~~~~~
+
+- The :rfc:`9068` ``JWTBearerTokenValidator`` refuses a JWT access token
+  without a ``typ`` header, per :rfc:`9068#section-4`. Another JWT without
+  ``typ`` from the same issuer, such as an ID token, used to be accepted as an
+  access token.

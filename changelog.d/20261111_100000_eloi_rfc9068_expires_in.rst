@@ -1,0 +1,6 @@
+Fixed
+~~~~~
+
+- ``JWTBearerTokenGenerator`` uses the ``expires_in`` given to ``generate``
+  for the ``exp`` claim. The JWT used to keep the default lifetime, while the
+  response announced the given one.
