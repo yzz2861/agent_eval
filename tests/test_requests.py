@@ -1812,7 +1812,11 @@ class TestRequests:
         """
         with pytest.raises(InvalidHeader) as excinfo:
             requests.get(httpbin("get"), headers=invalid_header)
-        assert key in str(excinfo.value)
+        # Error messages must name the field category without echoing the
+        # offending data, which could contain secrets.
+        message = str(excinfo.value)
+        assert "header value" in message
+        assert key not in message
 
     @pytest.mark.parametrize(
         "invalid_header",
@@ -1882,6 +1886,59 @@ class TestRequests:
             httpbin("get"), headers={MyString("x-custom"): MyBytes(b"myheader")}
         )
         assert r_mixed.request.headers["x-custom"] == b"myheader"
+
+    @pytest.mark.parametrize(
+        "invalid_header",
+        (
+            {"foo": "bar\x00baz"},
+            {"foo": "bar\x01baz"},
+            {"fo\x00o": "bar"},
+            {"foo": "bar\x7fbaz"},
+            {"foo": b"bar\x00baz"},
+        ),
+    )
+    def test_header_rejects_control_and_nul(self, invalid_header):
+        """NUL and other control characters are rejected at prepare time."""
+        with pytest.raises(InvalidHeader):
+            requests.Request(
+                "GET", "http://example.com", headers=invalid_header
+            ).prepare()
+
+    def test_header_rejects_embedded_tab_strict(self):
+        """Whitespace folding is not supported: tab is rejected everywhere,
+        not only at the field boundary."""
+        with pytest.raises(InvalidHeader):
+            requests.Request(
+                "GET", "http://example.com", headers={"foo": "a\tb"}
+            ).prepare()
+
+    def test_header_error_does_not_echo_value(self):
+        """Error messages name the field category but never the secret value."""
+        with pytest.raises(InvalidHeader) as excinfo:
+            requests.Request(
+                "GET",
+                "http://example.com",
+                headers={"foo": "secret-token\r\nX-Admin: 1"},
+            ).prepare()
+        message = str(excinfo.value)
+        assert "header value" in message
+        assert "secret-token" not in message
+        assert "X-Admin" not in message
+
+    def test_valid_non_ascii_and_latin1_headers_are_kept(self):
+        """Valid non-ASCII header values pass through unchanged so the
+        configured encoding strategy (latin-1/utf-8) keeps working."""
+        headers = {
+            "X-Latin-1": "caf\xe9",
+            "X-Unicode": "\u4e2d\u6587",
+            "X-Bytes": b"caf\xe9",
+        }
+        prepared = requests.Request(
+            "GET", "http://example.com", headers=headers
+        ).prepare()
+        assert prepared.headers["X-Latin-1"] == "caf\xe9"
+        assert prepared.headers["X-Unicode"] == "\u4e2d\u6587"
+        assert prepared.headers["X-Bytes"] == b"caf\xe9"
 
     @pytest.mark.parametrize("files", ("foo", b"foo", bytearray(b"foo")))
     def test_can_send_objects_with_files(self, httpbin, files):
@@ -3092,3 +3149,140 @@ def test_json_decode_errors_are_serializable_deserializable():
     )
     deserialized_error = pickle.loads(pickle.dumps(json_decode_error))
     assert repr(json_decode_error) == repr(deserialized_error)
+
+
+class TestRequestInjectionValidation:
+    """Centralized injection boundary checks performed while building a
+    PreparedRequest, before any adapter or transport call."""
+
+    @pytest.mark.parametrize(
+        "method",
+        (
+            "GET\r\nX-Admin: 1",
+            "GE\nT",
+            "GET\x00",
+            "GET\t",
+            "GET X",
+            "",
+        ),
+    )
+    def test_invalid_method_rejected(self, method):
+        with pytest.raises(InvalidURL):
+            requests.Request(method, "http://example.com").prepare()
+
+    @pytest.mark.parametrize(
+        "method",
+        ("GET", "get", "PROPFIND", "MKCOL", b"POST"),
+    )
+    def test_valid_method_accepted(self, method):
+        prepared = requests.Request(method, "http://example.com").prepare()
+        expected = (
+            method.decode("ascii").upper()
+            if isinstance(method, bytes)
+            else method.upper()
+        )
+        assert prepared.method == expected
+
+    def test_none_method_stays_none(self):
+        prepared = requests.PreparedRequest()
+        prepared.prepare(method=None, url="http://example.com")
+        assert prepared.method is None
+
+    @pytest.mark.parametrize(
+        "url",
+        (
+            "http://example.com/path\r\nX-Admin: 1",
+            "http://example.com/path\n",
+            "http://example.com/path?a=1\r\nX-Admin: 1",
+            "http://ex\x00ample.com/",
+            "http://user\r:pass@example.com/",
+            "http://user:pass\n@example.com/",
+            "http://example.com/path\t/x",
+            "http://example.com/path\x7f",
+        ),
+    )
+    def test_invalid_url_rejected_before_adapter(self, url):
+        with pytest.raises(InvalidURL):
+            requests.Request("GET", url).prepare()
+
+    def test_url_error_names_component_without_echoing_value(self):
+        with pytest.raises(InvalidURL) as excinfo:
+            requests.Request("GET", "http://example.com/secret\r\nX-Admin: 1").prepare()
+        message = str(excinfo.value)
+        assert "URL" in message
+        assert "secret" not in message
+        assert "X-Admin" not in message
+
+    @pytest.mark.parametrize(
+        "params",
+        (
+            {"a": "1\r\nX-Admin: 1"},
+            {"k\x00": "v"},
+            {"k\t": "v"},
+            [("a", "1\n2")],
+            {"a": ["ok", "bad\rvalue"]},
+            b"a=secret\r\nX-Admin: 1",
+            "a=secret\nX-Admin: 1",
+        ),
+    )
+    def test_invalid_params_rejected(self, params):
+        with pytest.raises(InvalidURL):
+            requests.Request("GET", "http://example.com", params=params).prepare()
+
+    def test_param_error_does_not_echo_secret(self):
+        with pytest.raises(InvalidURL) as excinfo:
+            requests.Request(
+                "GET",
+                "http://example.com",
+                params={"token": "hunter2\r\nX-Admin: 1"},
+            ).prepare()
+        message = str(excinfo.value)
+        assert "parameter" in message
+        assert "hunter2" not in message
+        assert "X-Admin" not in message
+
+    @pytest.mark.parametrize(
+        "params",
+        (
+            {"f\u00f8\u00f8": "f\u00f8\u00f8"},
+            {"a": "1"},
+            [("a", "1"), ("b", "2")],
+            {"a": ["1", "2"]},
+            {"a": None},
+            b"test=foo",
+        ),
+    )
+    def test_valid_params_unchanged_behavior(self, params):
+        prepared = requests.Request(
+            "GET", "http://example.com/", params=params
+        ).prepare()
+        assert prepared.url.startswith("http://example.com/")
+
+    def test_percent_encoded_control_chars_remain_valid(self):
+        prepared = requests.Request(
+            "GET", "http://example.com/p", params={"a": "%0d%0a"}
+        ).prepare()
+        assert "%250d%250a" in prepared.url
+
+    def test_validation_happens_during_prepare_not_send(self):
+        """Invalid input must fail while building the PreparedRequest, so no
+        adapter (and no socket) is ever touched."""
+        prepared = requests.PreparedRequest()
+        with mock.patch.object(
+            prepared, "prepare_url", wraps=prepared.prepare_url
+        ) as wrapped:
+            with pytest.raises(InvalidURL):
+                prepared.prepare(
+                    method="GET",
+                    url="http://example.com/a\r\nX-Admin: 1",
+                )
+            wrapped.assert_called_once()
+
+    def test_prepare_return_and_public_attributes_unchanged(self):
+        req = requests.Request("GET", "http://example.com", params={"a": "b"})
+        prepared = req.prepare()
+        assert isinstance(prepared, PreparedRequest)
+        assert prepared.method == "GET"
+        assert prepared.url == "http://example.com/?a=b"
+        assert prepared.headers is not None
+        assert prepared.body is None

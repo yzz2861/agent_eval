@@ -40,6 +40,8 @@ from ._internal_utils import (  # noqa: F401
     _HEADER_VALIDATORS_BYTE,
     _HEADER_VALIDATORS_STR,
     HEADER_VALIDATORS,
+    contains_control_characters,
+    is_valid_method_token,
     to_native_string,
 )
 from ._types import SupportsItems as _SupportsItems
@@ -1085,8 +1087,16 @@ def get_auth_from_url(url: str) -> tuple[str, str]:
 
 
 def check_header_validity(header: tuple[str | bytes, str | bytes]) -> None:
-    """Verifies that header parts don't contain leading whitespace
-    reserved characters, or return characters.
+    """Verifies that a header name and value are safe to place on the wire.
+
+    Header injection (bare CR/LF), NUL bytes and other ASCII control
+    characters are rejected for both name and value. Header folding is not
+    supported: a tab or space is only legal away from the field boundary,
+    i.e. leading whitespace is always rejected. Valid non-ASCII text is left
+    untouched so the configured header encoding strategy keeps working.
+
+    Error messages only name the offending field category; the supplied value
+    is never echoed so secrets cannot leak through exceptions or logs.
 
     :param header: tuple, in the format (name, value).
     """
@@ -1100,6 +1110,7 @@ def _validate_header_part(
     header_part: str | bytes,
     header_validator_index: int,
 ) -> None:
+    header_kind = "name" if header_validator_index == 0 else "value"
     if isinstance(header_part, str):
         validator = _HEADER_VALIDATORS_STR[header_validator_index]
     elif isinstance(header_part, bytes):
@@ -1107,15 +1118,65 @@ def _validate_header_part(
         validator = _HEADER_VALIDATORS_BYTE[header_validator_index]
     else:
         raise InvalidHeader(
-            f"Header part ({header_part!r}) from {header} "
-            f"must be of type str or bytes, not {type(header_part)}"
+            f"Invalid header {header_kind}: must be of type str or bytes, "
+            f"not {type(header_part).__name__}"
         )
 
-    if not validator.match(header_part):  # type: ignore[arg-type]
-        header_kind = "name" if header_validator_index == 0 else "value"
+    if not validator.match(header_part) or contains_control_characters(  # type: ignore[arg-type]
+        header_part
+    ):
         raise InvalidHeader(
-            f"Invalid leading whitespace, reserved character(s), or return "
-            f"character(s) in header {header_kind}: {header_part!r}"
+            f"Invalid header {header_kind}: leading whitespace, control "
+            f"character(s), NUL, or return character(s) are not allowed"
+        )
+
+
+def check_method_validity(method: str | None) -> None:
+    """Validate the request method before the request is prepared.
+
+    A method is an HTTP token and therefore cannot contain whitespace,
+    bare CR/LF, NUL bytes or any other control character. The offending
+    value is never included in the error message.
+    """
+    if method is None or not is_valid_method_token(method):
+        raise InvalidURL(
+            "Invalid request method: method must be a non-empty token "
+            "without whitespace or control characters"
+        )
+
+
+def check_url_part_validity(part: str | bytes | None, part_name: str) -> None:
+    """Reject bare control characters in a parsed URL component.
+
+    Only raw, unencoded characters are inspected, so percent-encoded
+    sequences such as ``%0d%0a`` remain valid. ``part_name`` identifies the
+    URL component (for example ``host`` or ``path``) in the error message;
+    the value itself is not echoed.
+    """
+    if part is not None and contains_control_characters(part):
+        raise InvalidURL(
+            f"Invalid URL {part_name}: bare control characters, NUL, CR or "
+            f"LF are not allowed"
+        )
+
+
+def check_param_validity(key: Any, value: Any) -> None:
+    """Reject raw control characters in query parameter keys and values.
+
+    Parameters are checked before percent-encoding so injection attempts fail
+    fast instead of being normalized deep inside the transport layer. Only
+    the field category (parameter key/value) is reported, never the data,
+    which may contain secrets.
+    """
+    if isinstance(key, (str, bytes)) and contains_control_characters(key):
+        raise InvalidURL(
+            "Invalid URL query parameter key: bare control characters, NUL, "
+            "CR or LF are not allowed"
+        )
+    if isinstance(value, (str, bytes)) and contains_control_characters(value):
+        raise InvalidURL(
+            "Invalid URL query parameter value: bare control characters, NUL, "
+            "CR or LF are not allowed"
         )
 
 

@@ -71,6 +71,9 @@ from .status_codes import codes
 from .structures import CaseInsensitiveDict
 from .utils import (
     check_header_validity,
+    check_method_validity,
+    check_param_validity,
+    check_url_part_validity,
     get_auth_from_url,
     guess_filename,
     guess_json_utf,
@@ -128,6 +131,29 @@ class RequestEncodingMixin:
             url.append(query)
 
         return "".join(url)
+
+    @staticmethod
+    def _validate_params(data: _t.EncodableDataType) -> None:
+        """Reject raw control characters in query parameters before encoding.
+
+        Raw string/bytes payloads are returned verbatim by the encoder, so
+        they are checked as a whole. Structured parameters are walked with
+        the same key/value expansion rules as the encoder, including values
+        that expand into lists. Values of ``None`` are skipped because the
+        encoder drops them.
+        """
+        if isinstance(data, (str, bytes)) or _t.has_read(data):
+            check_param_validity("", data)
+            return
+
+        if hasattr(data, "__iter__"):
+            for key, values in to_key_val_list(data):
+                check_param_validity(key, "")
+                if isinstance(values, basestring) or not hasattr(values, "__iter__"):
+                    values = [values]
+                for value in values:
+                    if value is not None:
+                        check_param_validity("", value)
 
     @overload
     @staticmethod
@@ -466,9 +492,10 @@ class PreparedRequest(RequestEncodingMixin, RequestHooksMixin):
 
     def prepare_method(self, method: str | None) -> None:
         """Prepares the given HTTP method."""
-        self.method = method
-        if self.method is not None:
-            self.method = to_native_string(self.method.upper())
+        if method is not None:
+            method = to_native_string(method)
+            check_method_validity(method)
+        self.method = method.upper() if method is not None else None
 
     @staticmethod
     def _get_idna_encoded_host(host: str) -> str:
@@ -499,6 +526,11 @@ class PreparedRequest(RequestEncodingMixin, RequestHooksMixin):
         # Remove leading whitespaces from url
         url = url.lstrip()
 
+        # Check the raw URL before any parsing or percent-encoding happens so
+        # bare CR/LF, NUL and control characters cannot survive normalization
+        # by the URL parser and reach the transport layer.
+        check_url_part_validity(url, "url")
+
         # Don't do any URL preparation for non-HTTP schemes like `mailto`,
         # `data` etc to work around exceptions from `url_parse`, which
         # handles RFC 3986 only.
@@ -520,6 +552,14 @@ class PreparedRequest(RequestEncodingMixin, RequestHooksMixin):
 
         if not host:
             raise InvalidURL(f"Invalid URL {url!r}: No host supplied")
+
+        # Reject request smuggling at the normalization boundary. Bare CR/LF,
+        # NUL and other control characters must never reach the adapter or the
+        # underlying connection; percent-encoded sequences are still allowed.
+        check_url_part_validity(auth, "userinfo")
+        check_url_part_validity(host, "host")
+        check_url_part_validity(path, "path")
+        check_url_part_validity(query, "query")
 
         # In general, we want to try IDNA encoding the hostname if the string contains
         # non-ASCII characters. This allows users to automatically get the correct IDNA
@@ -549,6 +589,7 @@ class PreparedRequest(RequestEncodingMixin, RequestHooksMixin):
             params = to_native_string(params)
 
         if params is not None:
+            self._validate_params(params)
             enc_params = self._encode_params(params)
         else:
             enc_params = ""

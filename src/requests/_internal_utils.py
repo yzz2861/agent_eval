@@ -22,6 +22,38 @@ HEADER_VALIDATORS = {
     str: _HEADER_VALIDATORS_STR,
 }
 
+# Characters that may never appear verbatim in a request field that is placed
+# on the wire: the NUL byte, the other ASCII control characters and DEL.
+# CR and LF are part of this range, so a single check covers request smuggling
+# via bare carriage returns and line feeds.
+_CONTROL_CHAR_RE_STR = re.compile(r"[\x00-\x1f\x7f]")
+_CONTROL_CHAR_RE_BYTE = re.compile(rb"[\x00-\x1f\x7f]")
+
+
+def contains_control_characters(value: str | bytes) -> bool:
+    """Return ``True`` if ``value`` contains a bare NUL, CR, LF, tab or any
+    other ASCII control character (including DEL).
+
+    Percent-encoded sequences such as ``%0d`` are left untouched: only raw,
+    unencoded control characters are considered dangerous.
+    """
+    if isinstance(value, bytes):
+        return _CONTROL_CHAR_RE_BYTE.search(value) is not None
+    return _CONTROL_CHAR_RE_STR.search(value) is not None
+
+
+def is_valid_method_token(method: str) -> bool:
+    """Validate an HTTP request token (method) before it is sent.
+
+    HTTP methods are ``token`` values per RFC 9110 and therefore must not
+    contain whitespace or control characters.
+    """
+    if not isinstance(method, str) or not method:
+        return False
+    if contains_control_characters(method):
+        return False
+    return all(ch != " " for ch in method)
+
 
 def to_native_string(string: str | bytes, encoding: str = "ascii") -> str:
     """Given a string object, regardless of type, returns a representation of
