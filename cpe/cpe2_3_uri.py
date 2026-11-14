@@ -120,15 +120,73 @@ class CPE2_3_URI(CPE2_3):
         elif (value == CPEComponent2_3_URI.VALUE_NA):
             comp = CPEComponentNotApplicable()
         else:
-            comp = CPEComponentNotApplicable()
-            try:
-                comp = CPEComponent2_3_URI(value, att)
-            except ValueError:
-                errmsg = "Invalid value of attribute '{0}': {1} ".format(att,
-                                                                         value)
-                raise ValueError(errmsg)
+            # The component decoder raises an offset-aware ValueError;
+            # let it propagate so callers can locate the exact problem.
+            comp = CPEComponent2_3_URI(value, att)
 
         return comp
+
+    @classmethod
+    def _split_parts(cls, cpe_str):
+        """
+        Split a CPE 2.3 URI name into its seven components.
+
+        The split is performed on the raw, still percent-encoded name, so a
+        percent-encoded colon ('%3a') stays inside its component and only a
+        real ':' separates fields. Names with too many fields are rejected.
+
+        :param string cpe_str: raw CPE URI name
+        :returns: tuple with the values of part, vendor, product, version,
+            update, edition and language attributes
+        :rtype: tuple of strings
+        :exception: ValueError - bad-formed CPE Name
+        """
+
+        prefix = "cpe:/"
+        if not cpe_str.startswith(prefix):
+            raise ValueError(
+                "Bad-formed CPE Name at offset 0: expected prefix 'cpe:/'")
+
+        body = cpe_str[len(prefix):]
+        fields = body.split(CPEComponent2_3_URI.SEPARATOR_COMP)
+
+        if len(fields) > len(CPEComponent.CPE_COMP_KEYS):
+            # Locate the first separator that creates the extra field.
+            offset = len(prefix)
+            for index in range(len(CPEComponent.CPE_COMP_KEYS)):
+                offset += len(fields[index]) + 1
+            raise ValueError(
+                "Bad-formed CPE Name at offset {0}: too many components "
+                "(expected at most {1})".format(
+                    offset, len(CPEComponent.CPE_COMP_KEYS)))
+
+        # Normalize to the seven URI components, padding missing trailing
+        # components with the undefined logical value (None).
+        fields += [CPEComponent2_3_URI.VALUE_UNDEFINED] * (
+            len(CPEComponent.CPE_COMP_KEYS) - len(fields))
+        return tuple(fields)
+
+    @classmethod
+    def _component_offset(cls, cpe_str, component_index):
+        """
+        Return the offset at which the component at ``component_index``
+        starts in the raw CPE URI name.
+
+        :param string cpe_str: raw CPE URI name
+        :param int component_index: zero-based component index (part is 0)
+        :returns: character offset of the component in ``cpe_str``
+        :rtype: int
+        """
+
+        prefix = "cpe:/"
+        offset = len(prefix)
+        for index in range(component_index):
+            separator = cpe_str.find(
+                CPEComponent2_3_URI.SEPARATOR_COMP, offset)
+            if separator == -1:
+                return offset
+            offset = separator + 1
+        return offset
 
     @classmethod
     def _unpack_edition(cls, value):
@@ -143,7 +201,18 @@ class CPE2_3_URI(CPE2_3):
         :exception: ValueError - invalid value of edition attribute
         """
 
-        components = value.split(CPEComponent2_3_URI.SEPARATOR_PACKED_EDITION)
+        separator = CPEComponent2_3_URI.SEPARATOR_PACKED_EDITION
+        components = value.split(separator)
+
+        # A packed edition must contain exactly five values delimited by
+        # tildes: '~edition~sw_edition~target_sw~target_hw~other'.
+        if len(components) != 6 or components[0] != "":
+            offset = value.rfind(separator)
+            raise ValueError(
+                "Bad-formed CPE Name: packed edition '{0}' must contain "
+                "exactly five '~'-delimited components (error at offset "
+                "{1})".format(value, offset))
+
         d = dict()
 
         ed = components[1]
@@ -253,46 +322,47 @@ class CPE2_3_URI(CPE2_3):
 
     def _parse(self):
         """
-        Checks if the CPE Name is valid.
+        Checks if the CPE Name is valid and builds its components.
 
         :returns: None
         :exception: ValueError - bad-formed CPE Name
         """
 
         # CPE Name must not have whitespaces
-        if (self._str.find(" ") != -1):
-            msg = "Bad-formed CPE Name: it must not have whitespaces"
+        space_offset = self._str.find(" ")
+        if space_offset != -1:
+            msg = ("Bad-formed CPE Name at offset {0}: it must not have "
+                   "whitespaces").format(space_offset)
             raise ValueError(msg)
 
-        # Partitioning of CPE Name
-        parts_match = CPE2_3_URI._parts_rxc.match(self._str)
-
-        # Validation of CPE Name parts
-        if (parts_match is None):
-            msg = "Bad-formed CPE Name: validation of parts failed"
-            raise ValueError(msg)
+        # Partitioning of CPE Name. The raw, percent-encoded string is split
+        # on real colons only, so an encoded '%3a' cannot inject a field.
+        field_values = CPE2_3_URI._split_parts(self._str)
 
         components = dict()
         edition_parts = dict()
 
-        for ck in CPEComponent.CPE_COMP_KEYS:
-            value = parts_match.group(ck)
-
+        for index, ck in enumerate(CPEComponent.CPE_COMP_KEYS):
+            value = field_values[index]
             try:
                 if (ck == CPEComponent.ATT_EDITION and value is not None):
                     if value[0] == CPEComponent2_3_URI.SEPARATOR_PACKED_EDITION:
                         # Unpack the edition part
                         edition_parts = CPE2_3_URI._unpack_edition(value)
+                        components[ck] = CPEComponentUndefined()
                     else:
                         comp = CPE2_3_URI._create_component(ck, value)
+                        components[ck] = comp
                 else:
                     comp = CPE2_3_URI._create_component(ck, value)
-            except ValueError:
-                errmsg = "Bad-formed CPE Name: not correct value '{0}'".format(
-                    value)
+                    components[ck] = comp
+            except ValueError as decode_error:
+                # Preserve the decoder's offset-aware message and add the
+                # name of the offending component for top-level callers.
+                offset = CPE2_3_URI._component_offset(self._str, index)
+                errmsg = ("Bad-formed CPE Name in component '{0}' (starts at "
+                          "offset {1}): {2}").format(ck, offset, decode_error)
                 raise ValueError(errmsg)
-            else:
-                components[ck] = comp
 
         components = dict(components, **edition_parts)
 
@@ -329,7 +399,7 @@ class CPE2_3_URI(CPE2_3):
             # Create internal structure of CPE Name in parts:
             # one of them is filled with identified components,
             # the rest are empty
-            system = parts_match.group(CPEComponent.ATT_PART)
+            system = field_values[0]
             if system in CPEComponent.SYSTEM_VALUES:
                 self._create_cpe_parts(system, components)
             else:
