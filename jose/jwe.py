@@ -6,9 +6,14 @@ from struct import pack
 
 from . import jwk
 from .backends import get_random_bytes
-from .constants import ALGORITHMS, JWE_SIZE_LIMIT, ZIPS
-from .exceptions import JWEError, JWEParseError
+from .budgets import JWEBudget
+from .constants import ALGORITHMS, ZIPS
+from .exceptions import JWEError, JWEParseError, JWEPayloadError
 from .utils import base64url_decode, base64url_encode, ensure_binary
+
+# Header parameters this implementation understands and is therefore allowed
+# to accept inside a "crit" header parameter (RFC 7515 section 4.1.11).
+_SUPPORTED_HEADER_PARAMETERS = frozenset(("alg", "enc", "zip", "cty", "kid"))
 
 
 def encrypt(plaintext, key, encryption=ALGORITHMS.A256GCM, algorithm=ALGORITHMS.DIR, zip=None, cty=None, kid=None):
@@ -57,13 +62,19 @@ def encrypt(plaintext, key, encryption=ALGORITHMS.A256GCM, algorithm=ALGORITHMS.
     return jwe_string
 
 
-def decrypt(jwe_str, key):
+def decrypt(jwe_str, key, budget=None):
     """Decrypts a JWE compact serialized string and returns the plaintext.
 
     Args:
         jwe_str (str): A JWE to be decrypt.
         key (str or dict): A key to attempt to decrypt the payload with. Can be
             individual JWK or JWK set.
+        budget (JWEBudget, optional): Resource budget applied to the compact
+            token size, decompression and (for :func:`decrypt_json`) JSON
+            parsing. Defaults to a fresh :class:`JWEBudget` with the library
+            defaults. Budgets only hold configuration, so passing one in does
+            not share mutable state between calls and limits can never be
+            disabled.
 
     Returns:
         bytes: The plaintext bytes, assuming the authentication tag is valid.
@@ -77,13 +88,19 @@ def decrypt(jwe_str, key):
         'Hello, World!'
     """
 
-    # Limit the token size - if the data is compressed then decompressing the
-    # data could lead to large memory usage. This helps address This addresses
-    # CVE-2024-33664. Also see _decompress()
-    if len(jwe_str) > JWE_SIZE_LIMIT:
-        raise JWEError(f"JWE string {len(jwe_str)} bytes exceeds {JWE_SIZE_LIMIT} bytes")
+    budget = _get_budget(budget)
+
+    # Limit the token size before any parsing or cryptographic work. If the
+    # data is compressed the decompression budget in JWEBudget additionally
+    # bounds the expanded output and its compression ratio.
+    budget.check_compact_size(len(jwe_str))
 
     header, encoded_header, encrypted_key, iv, cipher_text, auth_tag = _jwe_compact_deserialize(jwe_str)
+
+    # Header policy (duplicate parameters and "crit") must be enforced before
+    # decompression, so a token cannot reach the memory-sensitive zip path via
+    # an unsupported or unvalidated header.
+    _validate_header_policy(header)
 
     # Verify that the implementation understands and can process all
     # fields that it is required to support, whether required by this
@@ -191,9 +208,59 @@ def decrypt(jwe_str, key):
     # If a "zip" parameter was included, uncompress the decrypted
     # plaintext using the specified compression algorithm.
     if plain_text is not None:
-        plain_text = _decompress(header.get("zip"), plain_text)
+        plain_text = _decompress(header.get("zip"), plain_text, budget)
 
     return plain_text if cek_valid else None
+
+
+def decrypt_json(jwe_str, key, budget=None):
+    """Decrypt a JWE and parse the plaintext as JSON under a budget.
+
+    Decompression and JSON parsing share one per-call :class:`JWEBudget`, so
+    nesting depth and container counts are enforced while parsing instead of
+    after an unbounded object graph has been built.
+
+    Args:
+        jwe_str (str): A JWE to decrypt.
+        key (str or dict): A key to attempt to decrypt the payload with.
+        budget (JWEBudget, optional): Resource budget for the call.
+
+    Returns:
+        object: The parsed JSON payload.
+
+    Raises:
+        JWEPolicyError: If a configured budget is exceeded.
+        JWEDecompressError: If the compressed payload cannot be decompressed.
+        JWEPayloadError: If the plaintext is not valid JSON.
+    """
+    budget = _get_budget(budget)
+    plain_text = decrypt(jwe_str, key, budget)
+    if plain_text is None:
+        raise JWEPayloadError("JWE payload could not be decrypted")
+    return budget.loads(plain_text)
+
+
+def _get_budget(budget):
+    if budget is None:
+        return JWEBudget()
+    if not isinstance(budget, JWEBudget):
+        raise TypeError("budget must be a JWEBudget instance")
+    return budget
+
+
+def _validate_header_policy(header):
+    crit = header.get("crit")
+    if crit is None:
+        return
+    if not isinstance(crit, list) or not crit or any(not isinstance(name, str) for name in crit):
+        raise JWEParseError("Invalid crit header: must be a non-empty list of header parameter names")
+    if len(set(crit)) != len(crit):
+        raise JWEParseError("Invalid crit header: duplicate parameter names")
+    for name in crit:
+        if name not in _SUPPORTED_HEADER_PARAMETERS:
+            raise JWEParseError(f"Critical header parameter '{name}' is not supported")
+        if name not in header:
+            raise JWEParseError(f"Critical header parameter '{name}' is not present")
 
 
 def get_unverified_header(jwe_str):
@@ -304,7 +371,9 @@ def _jwe_compact_deserialize(jwe_bytes):
     # values that together comprise the JOSE Header.
 
     try:
-        header = json.loads(header_data)
+        header = json.loads(header_data, object_pairs_hook=_reject_duplicate_header_keys)
+    except _DuplicateHeaderParameter as e:
+        raise JWEParseError(f"Invalid header string: {e}")
     except ValueError as e:
         raise JWEParseError(f"Invalid header string: {e}")
 
@@ -332,6 +401,20 @@ def _jwe_compact_deserialize(jwe_bytes):
         raise JWEParseError("Invalid auth tag")
 
     return header, header_segment, encrypted_key, iv, ciphertext, auth_tag
+
+
+class _DuplicateHeaderParameter(ValueError):
+    pass
+
+
+def _reject_duplicate_header_keys(pairs):
+    header = {}
+    for key, value in pairs:
+        if key in header:
+            # Do not include the parameter value in the error message.
+            raise _DuplicateHeaderParameter(f"duplicate header parameter '{key}'")
+        header[key] = value
+    return header
 
 
 def _encoded_header(alg, enc, zip, cty, kid):
@@ -441,31 +524,19 @@ def _compress(zip, plaintext):
     return compressed
 
 
-def _decompress(zip, compressed):
+def _decompress(zip, compressed, budget=None):
     """
     Decompress the plaintext based on the algorithm supplied
 
     Args:
         zip (str): Compression Algorithm
-        plaintext (bytes): plaintext to decompress
+        compressed (bytes): plaintext to decompress
+        budget (JWEBudget): Resource budget for this decompression
 
     Returns:
-        (bytes): Compressed plaintext
+        (bytes): Decompressed plaintext
     """
-    if zip not in ZIPS.SUPPORTED:
-        raise NotImplementedError(f"ZIP {zip} is not supported!")
-    if zip is None:
-        decompressed = compressed
-    elif zip == ZIPS.DEF:
-        # If, during decompression, there is more data than expected, the
-        # decompression halts and raise an error. This addresses CVE-2024-33664
-        decompressor = zlib.decompressobj()
-        decompressed = decompressor.decompress(compressed, max_length=JWE_SIZE_LIMIT)
-        if decompressor.unconsumed_tail:
-            raise JWEError(f"Decompressed JWE string exceeds {JWE_SIZE_LIMIT} bytes")
-    else:
-        raise NotImplementedError(f"ZIP {zip} is not implemented!")
-    return decompressed
+    return _get_budget(budget).decompress(zip, compressed)
 
 
 def _get_cek(enc, alg, key):

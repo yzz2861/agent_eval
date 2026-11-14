@@ -57,3 +57,30 @@ class JWEAlgorithmUnsupportedError(JWEError):
     """
 
     pass
+
+
+class JWEPolicyError(JWEError):
+    """A configured resource budget or header policy was exceeded.
+
+    Raised for oversized tokens or payloads, excessive compression ratios,
+    too deeply nested JSON or too many JSON containers. Error messages only
+    describe numeric limits, never the decrypted content.
+    """
+
+    pass
+
+
+class JWEDecompressError(JWEError):
+    """The compressed JWE payload could not be decompressed.
+
+    Raised for unknown compression algorithms, truncated streams and trailing
+    bytes after the end of the compressed stream.
+    """
+
+    pass
+
+
+class JWEPayloadError(JWEError):
+    """The decompressed JWE payload is not valid for the requested format."""
+
+    pass

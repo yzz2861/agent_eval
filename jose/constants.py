@@ -98,3 +98,17 @@ class Zips:
 ZIPS = Zips()
 
 JWE_SIZE_LIMIT = 250 * 1024
+
+# Default resource budget applied while decompressing a JWE "zip" payload and
+# while parsing the decompressed JSON. These limits are enforced inside the
+# library itself (rather than only at a gateway) so that a small, highly
+# compressible token cannot make the process allocate gigabytes of memory.
+#
+# Maximum size of the decompressed plaintext in bytes.
+JWE_MAX_DECOMPRESSED_SIZE = JWE_SIZE_LIMIT
+# Maximum accepted ratio between decompressed and compressed bytes.
+JWE_MAX_COMPRESSION_RATIO = 100
+# Maximum nesting depth of objects/arrays inside decompressed JSON.
+JWE_MAX_JSON_DEPTH = 100
+# Maximum number of objects and arrays inside decompressed JSON.
+JWE_MAX_JSON_CONTAINERS = 10_000

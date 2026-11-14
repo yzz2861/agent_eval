@@ -1,5 +1,19 @@
 # Changelog #
 
+## Unreleased ##
+
+### Security ###
+
+* JWE ``zip`` decompression now runs behind a per-call ``JWEBudget`` that
+  bounds the compact token size, decompressed byte count, compression ratio
+  and (via ``jwe.decrypt_json``) JSON nesting depth and container count.
+  Decompression is streamed so a compression bomb is rejected without
+  materialising the expanded payload. The ``crit`` header and duplicate header
+  parameters are validated before decompression; unknown compression
+  algorithms, truncated streams and trailing data raise distinct error types
+  (``JWEPolicyError``, ``JWEDecompressError``, ``JWEPayloadError``) without
+  echoing plaintext.
+
 ## 3.5.0 -- 2025-05-28 ##
 
 ### News ###
