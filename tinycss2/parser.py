@@ -4,18 +4,22 @@ from .ast import AtRule, Declaration, ParseError, QualifiedRule
 from .tokenizer import parse_component_value_list
 
 
-def _to_token_iterator(input, skip_comments=False):
+def _to_token_iterator(input, skip_comments=False, limits=None):
     """Iterate component values out of string or component values iterable.
 
     :type input: :obj:`str` or :term:`iterable`
     :param input: A string or an iterable of :term:`component values`.
     :type skip_comments: :obj:`bool`
     :param skip_comments: If the input is a string, ignore all CSS comments.
+    :type limits: :class:`~tinycss2.limits.ResourceLimits` or :obj:`None`
+    :param limits: Per-parse resource limits, see
+        :func:`~tinycss2.tokenizer.parse_component_value_list`.
     :returns: An iterator yielding :term:`component values`.
 
     """
     if isinstance(input, str):
-        input = parse_component_value_list(input, skip_comments)
+        input = parse_component_value_list(
+            input, skip_comments=skip_comments, limits=limits)
     return iter(input)
 
 
@@ -32,7 +36,7 @@ def _next_significant(tokens):
             return token
 
 
-def parse_one_component_value(input, skip_comments=False):
+def parse_one_component_value(input, skip_comments=False, limits=None):
     """Parse a single :diagram:`component value`.
 
     This is used e.g. for an attribute value
@@ -47,7 +51,7 @@ def parse_one_component_value(input, skip_comments=False):
         or a :class:`~tinycss2.ast.ParseError`.
 
     """
-    tokens = _to_token_iterator(input, skip_comments)
+    tokens = _to_token_iterator(input, skip_comments, limits)
     first = _next_significant(tokens)
     second = _next_significant(tokens)
     if first is None:
@@ -60,7 +64,7 @@ def parse_one_component_value(input, skip_comments=False):
         return first
 
 
-def parse_one_declaration(input, skip_comments=False):
+def parse_one_declaration(input, skip_comments=False, limits=None):
     """Parse a single :diagram:`declaration`.
 
     This is used e.g. for a declaration in an `@supports
@@ -77,7 +81,7 @@ def parse_one_declaration(input, skip_comments=False):
     Any whitespace or comment before the ``:`` colon is dropped.
 
     """
-    tokens = _to_token_iterator(input, skip_comments)
+    tokens = _to_token_iterator(input, skip_comments, limits)
     first_token = _next_significant(tokens)
     if first_token is None:
         return ParseError(1, 1, 'empty', 'Input is empty')
@@ -201,7 +205,8 @@ def _consume_declaration_in_list(first_token, tokens):
     return _parse_declaration(first_token, iter(other_declaration_tokens))
 
 
-def parse_blocks_contents(input, skip_comments=False, skip_whitespace=False):
+def parse_blocks_contents(input, skip_comments=False, skip_whitespace=False,
+                         limits=None):
     """Parse a block’s contents.
 
     This is used e.g. for the :attr:`~tinycss2.ast.QualifiedRule.content`
@@ -237,7 +242,7 @@ def parse_blocks_contents(input, skip_comments=False, skip_whitespace=False):
         and :class:`~tinycss2.ast.ParseError` objects
 
     """
-    tokens = _to_token_iterator(input, skip_comments)
+    tokens = _to_token_iterator(input, skip_comments, limits)
     result = []
     for token in tokens:
         if token.type == 'whitespace':
@@ -253,7 +258,8 @@ def parse_blocks_contents(input, skip_comments=False, skip_whitespace=False):
     return result
 
 
-def parse_declaration_list(input, skip_comments=False, skip_whitespace=False):
+def parse_declaration_list(input, skip_comments=False, skip_whitespace=False,
+                           limits=None):
     """Parse a :diagram:`declaration list` (which may also contain at-rules).
 
     Deprecated and removed from CSS Syntax Level 3. Use
@@ -289,7 +295,7 @@ def parse_declaration_list(input, skip_comments=False, skip_whitespace=False):
         and :class:`~tinycss2.ast.ParseError` objects
 
     """
-    tokens = _to_token_iterator(input, skip_comments)
+    tokens = _to_token_iterator(input, skip_comments, limits)
     result = []
     for token in tokens:
         if token.type == 'whitespace':
@@ -305,7 +311,7 @@ def parse_declaration_list(input, skip_comments=False, skip_whitespace=False):
     return result
 
 
-def parse_one_rule(input, skip_comments=False):
+def parse_one_rule(input, skip_comments=False, limits=None):
     """Parse a single :diagram:`qualified rule` or :diagram:`at-rule`.
 
     This would be used e.g. by `insertRule()
@@ -325,7 +331,7 @@ def parse_one_rule(input, skip_comments=False):
     Any whitespace or comment before or after the rule is dropped.
 
     """
-    tokens = _to_token_iterator(input, skip_comments)
+    tokens = _to_token_iterator(input, skip_comments, limits)
     first = _next_significant(tokens)
     if first is None:
         return ParseError(1, 1, 'empty', 'Input is empty')
@@ -339,7 +345,8 @@ def parse_one_rule(input, skip_comments=False):
     return rule
 
 
-def parse_rule_list(input, skip_comments=False, skip_whitespace=False):
+def parse_rule_list(input, skip_comments=False, skip_whitespace=False,
+                    limits=None):
     """Parse a non-top-level :diagram:`rule list`.
 
     Deprecated and removed from CSS Syntax. Use :func:`parse_blocks_contents`
@@ -372,7 +379,7 @@ def parse_rule_list(input, skip_comments=False, skip_whitespace=False):
         and :class:`~tinycss2.ast.ParseError` objects.
 
     """
-    tokens = _to_token_iterator(input, skip_comments)
+    tokens = _to_token_iterator(input, skip_comments, limits)
     result = []
     for token in tokens:
         if token.type == 'whitespace':
@@ -386,7 +393,8 @@ def parse_rule_list(input, skip_comments=False, skip_whitespace=False):
     return result
 
 
-def parse_stylesheet(input, skip_comments=False, skip_whitespace=False):
+def parse_stylesheet(input, skip_comments=False, skip_whitespace=False,
+                     limits=None):
     """Parse :diagram:`stylesheet` from text.
 
     This is used e.g. for a ``<style>`` HTML element.
@@ -417,7 +425,7 @@ def parse_stylesheet(input, skip_comments=False, skip_whitespace=False):
         and :class:`~tinycss2.ast.ParseError` objects.
 
     """
-    tokens = _to_token_iterator(input, skip_comments)
+    tokens = _to_token_iterator(input, skip_comments, limits)
     result = []
     for token in tokens:
         if token.type == 'whitespace':

@@ -1,3 +1,4 @@
+import dataclasses
 import functools
 import json
 import pprint
@@ -10,6 +11,7 @@ from tinycss2 import (  # isort:skip
     parse_blocks_contents, parse_component_value_list, parse_declaration_list,
     parse_one_component_value, parse_one_declaration, parse_one_rule,
     parse_rule_list, parse_stylesheet, parse_stylesheet_bytes, serialize)
+from tinycss2.limits import ResourceLimits  # isort:skip
 from tinycss2.ast import (  # isort:skip
     AtKeywordToken, AtRule, Comment, CurlyBracketsBlock, Declaration,
     DimensionToken, FunctionBlock, HashToken, IdentToken, LiteralToken,
@@ -725,3 +727,197 @@ def test_escape_in_function_name():
     function, = parse_component_value_list('\\dddf()')
     assert function.type == 'function'
     assert function.name == '\udddf'
+
+
+def _walk(nodes):
+    for node in nodes:
+        yield node
+        for attr in ('content', 'arguments'):
+            if hasattr(node, attr):
+                yield from _walk(getattr(node, attr))
+
+
+def _errors(nodes):
+    return [node for node in _walk(nodes) if node.type == 'error']
+
+
+def test_resource_limits_validation():
+    assert ResourceLimits() == ResourceLimits(None, None, None, None, None)
+    for kwargs in (
+            {'max_characters': 0},
+            {'max_token_bytes': -1},
+            {'max_nesting': ResourceLimits.ABSOLUTE_MAX_NESTING + 1},
+            {'max_consecutive_escapes': '100'},
+            {'max_tokens': True},
+            {'max_characters': 1.5}):
+        with pytest.raises(ValueError):
+            ResourceLimits(**kwargs)
+    # Values up to the absolute maximum are accepted.
+    limits = ResourceLimits(
+        max_characters=ResourceLimits.ABSOLUTE_MAX_CHARACTERS,
+        max_token_bytes=ResourceLimits.ABSOLUTE_MAX_TOKEN_BYTES,
+        max_nesting=ResourceLimits.ABSOLUTE_MAX_NESTING,
+        max_consecutive_escapes=(
+            ResourceLimits.ABSOLUTE_MAX_CONSECUTIVE_ESCAPES),
+        max_tokens=ResourceLimits.ABSOLUTE_MAX_TOKENS)
+    assert limits.max_nesting == ResourceLimits.ABSOLUTE_MAX_NESTING
+    with pytest.raises(TypeError):
+        parse_component_value_list('a', limits={'max_tokens': 1})
+
+
+def test_input_too_long_reports_position_one():
+    limits = ResourceLimits(max_characters=4)
+    errors = _errors(parse_component_value_list('abcdef', limits=limits))
+    assert len(errors) == 1
+    assert errors[0].kind == 'input-too-long'
+    assert (errors[0].source_line, errors[0].source_column) == (1, 1)
+
+
+def test_token_too_long_identifier_and_position():
+    limits = ResourceLimits(max_token_bytes=4)
+    tokens = parse_component_value_list('aa aaaaaa', limits=limits)
+    error, = _errors(tokens)
+    assert error.kind == 'token-too-long'
+    # The oversized identifier starts on column 4 (after "aa ").
+    assert (error.source_line, error.source_column) == (1, 4)
+    # The small identifier before the failure is preserved.
+    assert tokens[0].type == 'ident'
+
+
+def test_token_too_long_unclosed_string():
+    limits = ResourceLimits(max_token_bytes=8)
+    tokens = parse_component_value_list('"' + 'x' * 100, limits=limits)
+    error, = _errors(tokens)
+    assert error.kind == 'token-too-long'
+    assert (error.source_line, error.source_column) == (1, 1)
+
+
+def test_token_too_long_url_and_quoted_url():
+    limits = ResourceLimits(max_token_bytes=16)
+    tokens = parse_component_value_list(
+        'url(data:text/plain,' + 'A' * 100 + ')', limits=limits)
+    assert [e.kind for e in _errors(tokens)] == ['token-too-long']
+    quoted = parse_component_value_list(
+        'url("' + 'B' * 100 + '")', limits=limits)
+    assert [e.kind for e in _errors(quoted)] == ['token-too-long']
+
+
+def test_nesting_limit_blocks_reports_deepest_position():
+    limits = ResourceLimits(max_nesting=2)
+    tokens = parse_component_value_list('{ [ ( x', limits=limits)
+    error, = _errors(tokens)
+    assert error.kind == 'nesting-too-deep'
+    # '(' is the third opener, at column 5.
+    assert (error.source_line, error.source_column) == (1, 5)
+
+
+def test_nesting_limit_deep_comment():
+    limits = ResourceLimits(max_nesting=3)
+    css = '/*' + '/*' * 10 + '*/'
+    tokens = parse_component_value_list(css, limits=limits)
+    error, = _errors(tokens)
+    assert error.kind == 'nesting-too-deep'
+    assert (error.source_line, error.source_column) == (1, 1)
+    # A comment within the budget is still parsed.
+    assert parse_component_value_list(
+        '/* a /* b */', limits=limits)[0].type == 'comment'
+
+
+def test_consecutive_escapes_limited_in_ident_and_string():
+    limits = ResourceLimits(max_consecutive_escapes=3)
+    ident_errors = _errors(
+        parse_component_value_list(r'\a ' * 10, limits=limits))
+    assert [e.kind for e in ident_errors] == ['too-many-escapes']
+    string_errors = _errors(
+        parse_component_value_list('"' + r'\a ' * 10, limits=limits))
+    assert [e.kind for e in string_errors] == ['too-many-escapes']
+
+
+def test_token_count_limited():
+    limits = ResourceLimits(max_tokens=3)
+    tokens = parse_component_value_list('a b c d e', limits=limits)
+    error, = _errors(tokens)
+    assert error.kind == 'too-many-tokens'
+    # The error replaces the 4th token, at the position where the budget
+    # was exhausted.
+    assert (error.source_line, error.source_column) == (1, 4)
+
+
+def test_budgets_are_not_shared_between_parses():
+    limits = ResourceLimits(max_tokens=20, max_token_bytes=100)
+    first = parse_component_value_list('a b c d', limits=limits)
+    second = parse_component_value_list('w x y z', limits=limits)
+    assert _errors(first) == []
+    assert _errors(second) == []
+    assert [t.type for t in first] == ['ident', 'whitespace', 'ident',
+                                       'whitespace', 'ident', 'whitespace',
+                                       'ident']
+
+
+def test_limits_apply_through_parser_and_bytes_apis():
+    limits = ResourceLimits(max_characters=2)
+    tokenizer_error, = _errors(
+        parse_component_value_list('abc', limits=limits))
+    assert tokenizer_error.kind == 'input-too-long'
+    error = parse_one_declaration('abc', limits=limits)
+    assert error.type == 'error'
+    rules, encoding = parse_stylesheet_bytes(
+        'abc'.encode('ascii'), limits=limits)
+    assert rules[0].type == 'error'
+    assert encoding.name == 'utf-8'
+
+
+def test_legitimate_large_data_uri_accepted_by_defaults():
+    # A 1 MB base64 data URI is a single URL token and must not trip the
+    # default per-token budget.
+    css = 'background:url(data:image/png;base64,' + 'A' * 1_000_000 + ')'
+    tokens = parse_component_value_list(css)
+    assert _errors(tokens) == []
+    url_token = next(node for node in _walk(tokens) if node.type == 'url')
+    assert len(url_token.value.encode('utf-8')) > 1_000_000
+
+
+def test_raised_limits_allow_larger_inputs():
+    css = 'x' * 10_000
+    assert _errors(parse_component_value_list(
+        css, limits=ResourceLimits(max_token_bytes=50)))
+    assert _errors(parse_component_value_list(
+        css, limits=ResourceLimits(max_token_bytes=50_000))) == []
+
+
+def test_limits_are_inclusive_and_count_utf8_bytes():
+    # Input exactly at the character limit is accepted.
+    assert parse_component_value_list(
+        'ab', limits=ResourceLimits(max_characters=2))[0].type == 'ident'
+    # Each e-acute is 2 UTF-8 bytes: 4 chars == 8 bytes is accepted.
+    assert _errors(parse_component_value_list(
+        '\u00e9' * 4, limits=ResourceLimits(max_token_bytes=8))) == []
+    errors = _errors(parse_component_value_list(
+        '\u00e9' * 5, limits=ResourceLimits(max_token_bytes=8)))
+    assert [e.kind for e in errors] == ['token-too-long']
+
+
+def test_comment_limits_apply_even_when_comments_skipped():
+    errors = _errors(parse_component_value_list(
+        '/*' + '/*' * 200, skip_comments=True,
+        limits=ResourceLimits(max_nesting=5)))
+    assert [e.kind for e in errors] == ['nesting-too-deep']
+
+
+def test_resource_limits_are_frozen():
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        ResourceLimits().max_tokens = 1
+
+
+@pytest.mark.parametrize('css', [
+    '"' + 'a' * 50_000,                 # unclosed string
+    '/*' + 'a' * 50_000,                # unclosed comment
+    'a' * 50_000,                       # long identifier
+    '"' + '\\"' * 25_000,              # escaped quotes in a string
+    '{' * 10_000,                       # unclosed nested blocks
+    'a(' * 10_000,                      # unclosed functions
+])
+def test_pathological_inputs_finish_in_linear_time(css):
+    # The point of the test is the hard timeout rather than a tight bound:
+    # a quadratic implementation would blow past it on these inputs.
+    parse_component_value_list(css)

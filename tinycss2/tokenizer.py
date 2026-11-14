@@ -8,13 +8,14 @@ from .ast import (  # isort: skip
     HashToken, IdentToken, LiteralToken, NumberToken, ParenthesesBlock, ParseError,
     PercentageToken, SquareBracketsBlock, StringToken, UnicodeRangeToken, URLToken,
     WhitespaceToken)
+from .limits import _Budget
 from .serializer import serialize_string_value, serialize_url
 
 _NUMBER_RE = re.compile(r'[-+]?([0-9]*\.)?[0-9]+([eE][+-]?[0-9]+)?')
 _HEX_ESCAPE_RE = re.compile(r'([0-9A-Fa-f]{1,6})[ \n\t]?')
 
 
-def parse_component_value_list(css, skip_comments=False):
+def parse_component_value_list(css, skip_comments=False, limits=None):
     """Parse a list of component values.
 
     :type css: :obj:`str`
@@ -24,6 +25,11 @@ def parse_component_value_list(css, skip_comments=False):
         Ignore CSS comments.
         The return values (and recursively its blocks and functions)
         will not contain any :class:`~tinycss2.ast.Comment` object.
+    :type limits: :class:`~tinycss2.limits.ResourceLimits` or :obj:`None`
+    :param limits:
+        Per-parse resource limits.  A fresh budget is always created for
+        each call, so counters are never shared between parses.  When
+        :obj:`None`, the documented default limits are used.
     :returns: A list of :term:`component values`.
 
     """
@@ -31,12 +37,44 @@ def parse_component_value_list(css, skip_comments=False):
            # This turns out to be faster than a regexp:
            .replace('\r\n', '\n').replace('\r', '\n').replace('\f', '\n'))
     length = len(css)
+    budget = _Budget(limits)
+    if length > budget.limits.max_characters:
+        return [ParseError(
+            1, 1, 'input-too-long',
+            f'Input has {length} characters, limit is '
+            f'{budget.limits.max_characters}')]
     token_start_pos = pos = 0  # Character index in the css source.
     line = 1  # First line is line 1.
     last_newline = -1
     root = tokens = []
     end_char = None  # Pop the stack when encountering this character.
     stack = []  # Stack of nested blocks: (tokens, end_char) tuples.
+    nesting_depth = 0
+
+    def emit(node):
+        """Append a token, enforcing the output token budget."""
+        error = budget.add_token()
+        if error is not None:
+            tokens.append(ParseError(line, column, *error))
+            return error
+        tokens.append(node)
+        return None
+
+    def push_block(block, end_marker, content):
+        """Open a nested block, enforcing the nesting budget."""
+        nonlocal tokens, end_char, nesting_depth
+        error = budget.add_token()
+        if error is not None:
+            return error
+        if nesting_depth >= budget.limits.max_nesting:
+            return ('nesting-too-deep',
+                    f'Nesting depth exceeds {budget.limits.max_nesting}')
+        tokens.append(block)
+        stack.append((tokens, end_char))
+        end_char = end_marker
+        tokens = content
+        nesting_depth += 1
+        return None
 
     while pos < length:
         newline = css.rfind('\n', token_start_pos, pos)
@@ -47,27 +85,34 @@ def parse_component_value_list(css, skip_comments=False):
         column = pos - last_newline
         token_start_pos = pos
         c = css[pos]
+        budget.begin_token()
 
         if c in ' \n\t':
             pos += 1
             while css.startswith((' ', '\n', '\t'), pos):
                 pos += 1
-            value = css[token_start_pos:pos]
-            tokens.append(WhitespaceToken(line, column, value))
+            if emit(WhitespaceToken(line, column, css[token_start_pos:pos])):
+                break
             continue
         elif (c in 'Uu' and pos + 2 < length and css[pos + 1] == '+' and
               css[pos + 2] in '0123456789abcdefABCDEF?'):
             start, end, pos = _consume_unicode_range(css, pos + 2)
-            tokens.append(UnicodeRangeToken(line, column, start, end))
+            if emit(UnicodeRangeToken(line, column, start, end)):
+                break
             continue
         elif css.startswith('-->', pos):  # Check before identifiers
-            tokens.append(LiteralToken(line, column, '-->'))
+            if emit(LiteralToken(line, column, '-->')):
+                break
             pos += 3
             continue
         elif _is_ident_start(css, pos):
-            value, pos = _consume_ident(css, pos)
+            value, pos, size_error = _consume_ident(css, pos, budget)
+            if size_error is not None:
+                emit(ParseError(line, column, *size_error))
+                break
             if not css.startswith('(', pos):  # Not a function
-                tokens.append(IdentToken(line, column, value))
+                if emit(IdentToken(line, column, value)):
+                    break
                 continue
             pos += 1  # Skip the '('
             try:
@@ -79,8 +124,8 @@ def parse_component_value_list(css, skip_comments=False):
                 while css.startswith((' ', '\n', '\t'), url_pos):
                     url_pos += 1
                 if url_pos >= length or css[url_pos] not in ('"', "'"):
-                    value, pos, error = _consume_url(css, pos)
-                    if value is not None:
+                    value, pos, error = _consume_url(css, pos, budget)
+                    if value is not None and not _is_budget_error(error):
                         repr = f'url({serialize_url(value)})'
                         if error is not None:
                             error_key = error[0]
@@ -89,15 +134,20 @@ def parse_component_value_list(css, skip_comments=False):
                             else:
                                 assert error_key == 'eof-in-url'
                                 repr = repr[:-1]
-                        tokens.append(URLToken(line, column, value, repr))
+                        if emit(URLToken(line, column, value, repr)):
+                            break
                     if error is not None:
-                        tokens.append(ParseError(line, column, *error))
+                        if emit(ParseError(line, column, *error)):
+                            break
+                        if _is_budget_error(error):
+                            break
                     continue
             arguments = []
-            tokens.append(FunctionBlock(line, column, value, arguments))
-            stack.append((tokens, end_char))
-            end_char = ')'
-            tokens = arguments
+            block_error = push_block(
+                FunctionBlock(line, column, value, arguments), ')', arguments)
+            if block_error is not None:
+                emit(ParseError(line, column, *block_error))
+                break
             continue
 
         match = _NUMBER_RE.match(css, pos)
@@ -107,21 +157,34 @@ def parse_component_value_list(css, skip_comments=False):
             value = float(repr_)
             int_value = int(repr_) if not any(match.groups()) else None
             if pos < length and _is_ident_start(css, pos):
-                unit, pos = _consume_ident(css, pos)
-                tokens.append(DimensionToken(
-                    line, column, value, int_value, repr_, unit))
+                unit, pos, size_error = _consume_ident(css, pos, budget)
+                if size_error is not None:
+                    emit(ParseError(line, column, *size_error))
+                    break
+                if emit(DimensionToken(
+                        line, column, value, int_value, repr_, unit)):
+                    break
             elif css.startswith('%', pos):
                 pos += 1
-                tokens.append(PercentageToken(line, column, value, int_value, repr_))
+                if emit(PercentageToken(
+                        line, column, value, int_value, repr_)):
+                    break
             else:
-                tokens.append(NumberToken(line, column, value, int_value, repr_))
+                if emit(NumberToken(
+                        line, column, value, int_value, repr_)):
+                    break
         elif c == '@':
             pos += 1
             if pos < length and _is_ident_start(css, pos):
-                value, pos = _consume_ident(css, pos)
-                tokens.append(AtKeywordToken(line, column, value))
+                value, pos, size_error = _consume_ident(css, pos, budget)
+                if size_error is not None:
+                    emit(ParseError(line, column, *size_error))
+                    break
+                if emit(AtKeywordToken(line, column, value)):
+                    break
             else:
-                tokens.append(LiteralToken(line, column, '@'))
+                if emit(LiteralToken(line, column, '@')):
+                    break
         elif c == '#':
             pos += 1
             if pos < length and (
@@ -131,72 +194,94 @@ def parse_component_value_list(css, skip_comments=False):
                     # Valid escape:
                     (css[pos] == '\\' and not css.startswith('\\\n', pos))):
                 is_identifier = _is_ident_start(css, pos)
-                value, pos = _consume_ident(css, pos)
-                tokens.append(HashToken(line, column, value, is_identifier))
+                value, pos, size_error = _consume_ident(css, pos, budget)
+                if size_error is not None:
+                    emit(ParseError(line, column, *size_error))
+                    break
+                if emit(HashToken(line, column, value, is_identifier)):
+                    break
             else:
-                tokens.append(LiteralToken(line, column, '#'))
+                if emit(LiteralToken(line, column, '#')):
+                    break
         elif c == '{':
             content = []
-            tokens.append(CurlyBracketsBlock(line, column, content))
-            stack.append((tokens, end_char))
-            end_char = '}'
-            tokens = content
+            block = CurlyBracketsBlock(line, column, content)
+            block_error = push_block(block, '}', content)
             pos += 1
+            if block_error is not None:
+                emit(ParseError(line, column, *block_error))
+                break
         elif c == '[':
             content = []
-            tokens.append(SquareBracketsBlock(line, column, content))
-            stack.append((tokens, end_char))
-            end_char = ']'
-            tokens = content
+            block = SquareBracketsBlock(line, column, content)
+            block_error = push_block(block, ']', content)
             pos += 1
+            if block_error is not None:
+                emit(ParseError(line, column, *block_error))
+                break
         elif c == '(':
             content = []
-            tokens.append(ParenthesesBlock(line, column, content))
-            stack.append((tokens, end_char))
-            end_char = ')'
-            tokens = content
+            block = ParenthesesBlock(line, column, content)
+            block_error = push_block(block, ')', content)
             pos += 1
+            if block_error is not None:
+                emit(ParseError(line, column, *block_error))
+                break
         elif c == end_char:  # Matching }, ] or )
             # The top-level end_char is None (never equal to a character),
             # so we never get here if the stack is empty.
             tokens, end_char = stack.pop()
+            nesting_depth -= 1
             pos += 1
         elif c in '}])':
-            tokens.append(ParseError(line, column, c, 'Unmatched ' + c))
+            if emit(ParseError(line, column, c, 'Unmatched ' + c)):
+                break
             pos += 1
         elif c in ('"', "'"):
-            value, pos, error = _consume_quoted_string(css, pos)
-            if value is not None:
+            if nesting_depth >= budget.limits.max_nesting:
+                emit(ParseError(
+                    line, column, 'nesting-too-deep',
+                    f'Nesting depth exceeds {budget.limits.max_nesting}'))
+                break
+            value, pos, error = _consume_quoted_string(css, pos, budget)
+            if value is not None and not _is_budget_error(error):
                 repr = f'"{serialize_string_value(value)}"'
                 if error is not None:
                     repr = repr[:-1]
-                tokens.append(StringToken(line, column, value, repr))
+                if emit(StringToken(line, column, value, repr)):
+                    break
             if error is not None:
-                tokens.append(ParseError(line, column, *error))
+                if emit(ParseError(line, column, *error)):
+                    break
+                if _is_budget_error(error):
+                    break
         elif css.startswith('/*', pos):  # Comment
-            pos = css.find('*/', pos + 2)
-            if pos == -1:
-                if not skip_comments:
-                    tokens.append(Comment(line, column, css[token_start_pos + 2:]))
+            pos, error = _consume_comment(
+                css, pos, budget, skip_comments, line, column, emit)
+            if error is not None:
+                if emit(ParseError(line, column, *error)):
+                    break
                 break
-            if not skip_comments:
-                tokens.append(Comment(line, column, css[token_start_pos + 2:pos]))
-            pos += 2
         elif css.startswith('<!--', pos):
-            tokens.append(LiteralToken(line, column, '<!--'))
+            if emit(LiteralToken(line, column, '<!--')):
+                break
             pos += 4
         elif css.startswith('||', pos):
-            tokens.append(LiteralToken(line, column, '||'))
+            if emit(LiteralToken(line, column, '||')):
+                break
             pos += 2
         elif c in '~|^$*':
             pos += 1
             if css.startswith('=', pos):
                 pos += 1
-                tokens.append(LiteralToken(line, column, c + '='))
+                if emit(LiteralToken(line, column, c + '=')):
+                    break
             else:
-                tokens.append(LiteralToken(line, column, c))
+                if emit(LiteralToken(line, column, c)):
+                    break
         else:
-            tokens.append(LiteralToken(line, column, c))
+            if emit(LiteralToken(line, column, c)):
+                break
             pos += 1
     return root
 
@@ -227,16 +312,32 @@ def _is_ident_start(css, pos):
     return False
 
 
-def _consume_ident(css, pos):
-    """Return (unescaped_value, new_pos).
+# Errors raised by the resource budget: they stop tokenization immediately
+# because continuing could keep spending the very resource that was exceeded.
+_BUDGET_ERRORS = frozenset((
+    'token-too-long', 'too-many-escapes', 'too-many-tokens',
+    'nesting-too-deep'))
+
+
+def _is_budget_error(error):
+    return error is not None and error[0] in _BUDGET_ERRORS
+
+
+def _consume_ident(css, pos, budget):
+    """Return (unescaped_value, new_pos, budget_error).
 
     Assumes pos starts at a valid identifier. See :func:`_is_ident_start`.
+
+    The budget error is :obj:`None` unless a resource limit was exceeded;
+    when it is set the value still contains everything consumed so far and
+    ``new_pos`` points just after the last consumed character.
 
     """
     # http://dev.w3.org/csswg/css-syntax/#consume-a-name
     chunks = []
     length = len(css)
     start_pos = pos
+    budget_error = None
     while pos < length:
         c = css[pos]
         if c in ('abcdefghijklmnopqrstuvwxyz-_0123456789'
@@ -244,18 +345,34 @@ def _consume_ident(css, pos):
             pos += 1
         elif c == '\\' and not css.startswith('\\\n', pos):
             # Valid escape
-            chunks.append(css[start_pos:pos])
+            chunk = css[start_pos:pos]
+            if budget.add_token_bytes(chunk) is not None:
+                budget_error = ('token-too-long',
+                                'Token exceeds '
+                                f'{budget.limits.max_token_bytes} bytes')
+                break
+            chunks.append(chunk)
+            budget_error = budget.charge_escape()
+            if budget_error is not None:
+                break
             c, pos = _consume_escape(css, pos + 1)
+            if budget.add_token_bytes(c) is not None:
+                budget_error = ('token-too-long',
+                                'Token exceeds '
+                                f'{budget.limits.max_token_bytes} bytes')
+                break
             chunks.append(c)
             start_pos = pos
         else:
             break
+    if budget_error is None:
+        budget_error = budget.add_token_bytes(css[start_pos:pos])
     chunks.append(css[start_pos:pos])
-    return ''.join(chunks), pos
+    return ''.join(chunks), pos, budget_error
 
 
-def _consume_quoted_string(css, pos):
-    """Return (unescaped_value, new_pos)."""
+def _consume_quoted_string(css, pos, budget):
+    """Return (unescaped_value, new_pos, error)."""
     # https://drafts.csswg.org/css-syntax/#consume-a-string-token
     error = None
     quote = css[pos]
@@ -267,17 +384,37 @@ def _consume_quoted_string(css, pos):
     while pos < length:
         c = css[pos]
         if c == quote:
+            if budget.add_token_bytes(css[start_pos:pos]) is not None:
+                error = ('token-too-long',
+                         'Token exceeds '
+                         f'{budget.limits.max_token_bytes} bytes')
+                pos += 1
+                break
             chunks.append(css[start_pos:pos])
             pos += 1
             break
         elif c == '\\':
+            if budget.add_token_bytes(css[start_pos:pos]) is not None:
+                error = ('token-too-long',
+                         'Token exceeds '
+                         f'{budget.limits.max_token_bytes} bytes')
+                break
             chunks.append(css[start_pos:pos])
             pos += 1
             if pos < length:
                 if css[pos] == '\n':  # Ignore escaped newlines
                     pos += 1
                 else:
+                    escape_error = budget.charge_escape()
+                    if escape_error is not None:
+                        error = escape_error
+                        break
                     c, pos = _consume_escape(css, pos)
+                    if budget.add_token_bytes(c) is not None:
+                        error = ('token-too-long',
+                                 'Token exceeds '
+                                 f'{budget.limits.max_token_bytes} bytes')
+                        break
                     chunks.append(c)
             # else: Escaped EOF, do nothing
             start_pos = pos
@@ -287,8 +424,63 @@ def _consume_quoted_string(css, pos):
             pos += 1
     else:
         error = ('eof-in-string', 'EOF in string')
+        if budget.add_token_bytes(css[start_pos:pos]) is not None:
+            error = ('token-too-long',
+                     'Token exceeds '
+                     f'{budget.limits.max_token_bytes} bytes')
         chunks.append(css[start_pos:pos])
     return ''.join(chunks), pos, error
+
+
+def _consume_comment(css, pos, budget, skip_comments, line, column, emit):
+    """Consume a comment in a single forward scan.
+
+    Returns the position just after the closing ``*/`` (or the end of the
+    input for an unclosed comment) and an optional budget error tuple.
+    Nested comment openers are counted while moving forward instead of
+    restarting a search, so error recovery never rescans an already
+    consumed prefix.
+
+    """
+    length = len(css)
+    content_start = pos + 2
+    scan = content_start
+    nested_openers = 0
+
+    def comment_too_large(comment_end):
+        size = len(css[content_start:comment_end].encode(
+            'utf-8', 'surrogatepass'))
+        if size > budget.limits.max_token_bytes:
+            return ('token-too-long',
+                    'Token exceeds '
+                    f'{budget.limits.max_token_bytes} bytes')
+        return None
+
+    while scan < length:
+        if css.startswith('*/', scan):
+            end = scan
+            pos = scan + 2
+            break
+        if css.startswith('/*', scan):
+            nested_openers += 1
+            if nested_openers > budget.limits.max_nesting:
+                return scan, ('nesting-too-deep',
+                              'Comment nesting depth exceeds '
+                              f'{budget.limits.max_nesting}')
+            scan += 2
+        else:
+            scan += 1
+    else:
+        end = length
+        pos = length
+    if not skip_comments:
+        budget_error = comment_too_large(end)
+        if budget_error is not None:
+            return pos, budget_error
+        budget_error = emit(Comment(line, column, css[content_start:end]))
+        if budget_error is not None:
+            return pos, budget_error
+    return pos, None
 
 
 def _consume_escape(css, pos):
@@ -310,7 +502,7 @@ def _consume_escape(css, pos):
         return '\uFFFD', pos
 
 
-def _consume_url(css, pos):
+def _consume_url(css, pos, budget):
     """Return (unescaped_url, new_pos)
 
     The given pos is assumed to be just after the '(' of 'url('.
@@ -326,7 +518,7 @@ def _consume_url(css, pos):
         return '', pos, ('eof-in-url', 'EOF in URL')
     c = css[pos]
     if c in ('"', "'"):
-        value, pos, error = _consume_quoted_string(css, pos)
+        value, pos, error = _consume_quoted_string(css, pos, budget)
     elif c == ')':
         return '', pos + 1, error
     else:
@@ -334,22 +526,51 @@ def _consume_url(css, pos):
         start_pos = pos
         while 1:
             if pos >= length:  # EOF
+                if budget.add_token_bytes(css[start_pos:pos]) is not None:
+                    return None, pos, ('token-too-long',
+                                       'Token exceeds '
+                                       f'{budget.limits.max_token_bytes} '
+                                       'bytes')
                 chunks.append(css[start_pos:pos])
                 return ''.join(chunks), pos, ('eof-in-url', 'EOF in URL')
             c = css[pos]
             if c == ')':
+                if budget.add_token_bytes(css[start_pos:pos]) is not None:
+                    return None, pos, ('token-too-long',
+                                       'Token exceeds '
+                                       f'{budget.limits.max_token_bytes} '
+                                       'bytes')
                 chunks.append(css[start_pos:pos])
                 pos += 1
                 return ''.join(chunks), pos, error
             elif c in ' \n\t':
+                if budget.add_token_bytes(css[start_pos:pos]) is not None:
+                    return None, pos, ('token-too-long',
+                                       'Token exceeds '
+                                       f'{budget.limits.max_token_bytes} '
+                                       'bytes')
                 chunks.append(css[start_pos:pos])
                 value = ''.join(chunks)
                 pos += 1
                 break
             elif c == '\\' and not css.startswith('\\\n', pos):
                 # Valid escape
-                chunks.append(css[start_pos:pos])
+                plain_chunk = css[start_pos:pos]
+                if budget.add_token_bytes(plain_chunk) is not None:
+                    return None, pos, ('token-too-long',
+                                       'Token exceeds '
+                                       f'{budget.limits.max_token_bytes} '
+                                       'bytes')
+                chunks.append(plain_chunk)
+                escape_error = budget.charge_escape()
+                if escape_error is not None:
+                    return None, pos, escape_error
                 c, pos = _consume_escape(css, pos + 1)
+                if budget.add_token_bytes(c) is not None:
+                    return None, pos, ('token-too-long',
+                                       'Token exceeds '
+                                       f'{budget.limits.max_token_bytes} '
+                                       'bytes')
                 chunks.append(c)
                 start_pos = pos
             elif (c in

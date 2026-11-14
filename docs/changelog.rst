@@ -2,6 +2,18 @@ Changelog
 =========
 
 
+Version 1.6.0
+-------------
+
+* Add configurable :class:`~tinycss2.limits.ResourceLimits` to bound input
+  length, per-token byte size, comment/block nesting depth, consecutive
+  escapes and the number of output tokens, with documented absolute maximums
+* Enforce limits in linear time on unclosed strings and comments, bad
+  escapes and unclosed blocks, reporting the source position and error kind
+* Add a ``limits`` parameter to every parsing entry point; budgets are
+  created per parse and never shared between calls
+
+
 Version 1.5.1
 -------------
 

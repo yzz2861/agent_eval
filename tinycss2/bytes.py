@@ -47,7 +47,8 @@ def decode_stylesheet_bytes(css_bytes, protocol_encoding=None,
 
 def parse_stylesheet_bytes(css_bytes, protocol_encoding=None,
                            environment_encoding=None,
-                           skip_comments=False, skip_whitespace=False):
+                           skip_comments=False, skip_whitespace=False,
+                           limits=None):
     """Parse :diagram:`stylesheet` from bytes,
     determining the character encoding as web browsers do.
 
@@ -75,6 +76,9 @@ def parse_stylesheet_bytes(css_bytes, protocol_encoding=None,
         Whitespace is still preserved
         in the :attr:`~tinycss2.ast.QualifiedRule.prelude`
         and the :attr:`~tinycss2.ast.QualifiedRule.content` of rules.
+    :type limits: :class:`~tinycss2.limits.ResourceLimits` or :obj:`None`
+    :param limits: Per-parse resource limits, see
+        :func:`~tinycss2.tokenizer.parse_component_value_list`.
     :returns:
         A ``(rules, encoding)`` tuple.
 
@@ -109,5 +113,7 @@ def parse_stylesheet_bytes(css_bytes, protocol_encoding=None,
     """
     css_unicode, encoding = decode_stylesheet_bytes(
         css_bytes, protocol_encoding, environment_encoding)
-    stylesheet = parse_stylesheet(css_unicode, skip_comments, skip_whitespace)
+    stylesheet = parse_stylesheet(
+        css_unicode, skip_comments=skip_comments,
+        skip_whitespace=skip_whitespace, limits=limits)
     return stylesheet, encoding

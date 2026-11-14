@@ -28,6 +28,28 @@ functions.
 .. autofunction:: parse_one_component_value
 
 
+Resource limits
+---------------
+
+The tokenizer can run out of time or memory on adversarial stylesheets such
+as unclosed strings or comments, deeply nested blocks, very long identifiers,
+long runs of escape sequences or inputs producing a very large number of
+tokens.  A :class:`~tinycss2.limits.ResourceLimits` object bounds the work of
+a single parse; every parsing function accepts it through its ``limits``
+parameter and creates an independent budget for each call.
+
+.. autoclass:: tinycss2.limits.ResourceLimits
+   :members:
+
+Each limit can be raised up to an absolute maximum to accept unusually large
+but legitimate inputs (for example a long base64 ``data:`` URI) while still
+guaranteeing a hard ceiling.  Exceeding a limit stops tokenization in linear
+time and appends a :class:`~tinycss2.ast.ParseError` whose ``kind`` is one of
+``input-too-long``, ``token-too-long``, ``nesting-too-deep``,
+``too-many-escapes`` or ``too-many-tokens``.  The error carries the source
+line and column where the limit was reached.
+
+
 Serialization
 -------------
 
