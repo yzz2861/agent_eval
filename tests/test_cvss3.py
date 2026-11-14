@@ -498,5 +498,104 @@ class TestCVSS3(unittest.TestCase):
         self.assertIn("confidentialityRequirement", json_data)
 
 
+    def test_json_severity_boundaries(self):
+        doc = (
+            "Severity buckets follow the CVSS v3 rating scale, with the inclusive "
+            "upper boundary rounded per specification (None 0.0, Low 0.1-3.9, "
+            "Medium 4.0-6.9, High 7.0-8.9, Critical 9.0-10.0)."
+        )
+        boundaries = {
+            "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N": "NONE",
+            "CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:U/C:L/I:L/A:L": "LOW",
+            "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:L/I:N/A:N": "MEDIUM",
+            "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:L/A:L": "HIGH",
+            "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:H/A:L": "CRITICAL",
+        }
+        for vector, expected_severity in boundaries.items():
+            cvss = CVSS3(vector)
+            score = cvss.scores()[0]
+            data = cvss.as_json()
+            self.assertEqual(expected_severity, data["baseSeverity"], vector)
+            self.assertEqual(score, data["baseScore"], vector)
+            self.assertNotIn("None", data.values())
+
+    def test_json_minimal_base_only_structure(self):
+        doc = "Minimal JSON contains only the required base section and keeps the prefix."
+        v = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:L"
+        data = CVSS3(v).as_json(minimal=True)
+        self.assertEqual("3.1", data["version"])
+        self.assertEqual(v, data["vectorString"])
+        for key in (
+            "temporalScore",
+            "temporalSeverity",
+            "exploitCodeMaturity",
+            "environmentalScore",
+            "environmentalSeverity",
+            "modifiedAttackVector",
+        ):
+            self.assertNotIn(key, data)
+        self.assertEqual(12, len(data))
+
+    def test_json_unset_optional_metrics_not_faked_as_defaults(self):
+        doc = "Unset optional metrics serialize to NOT_DEFINED, never substituted defaults."
+        v = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:L/E:H"
+        data = CVSS3(v).as_json()
+        self.assertEqual("HIGH", data["exploitCodeMaturity"])
+        self.assertEqual("NOT_DEFINED", data["remediationLevel"])
+        self.assertEqual("NOT_DEFINED", data["confidentialityRequirement"])
+        self.assertEqual("NOT_DEFINED", data["modifiedAttackVector"])
+        self.assertEqual("NOT_DEFINED", data["modifiedScope"])
+        self.assertEqual("NOT_DEFINED", data["modifiedConfidentialityImpact"])
+        v_explicit = (
+            "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:L/"
+            "MAV:X/MC:X/CR:X/E:X"
+        )
+        data_explicit = CVSS3(v_explicit).as_json()
+        self.assertEqual("NOT_DEFINED", data_explicit["modifiedAttackVector"])
+        self.assertEqual("NOT_DEFINED", data_explicit["modifiedConfidentialityImpact"])
+        self.assertEqual("NOT_DEFINED", data_explicit["confidentialityRequirement"])
+        self.assertEqual("NOT_DEFINED", data_explicit["exploitCodeMaturity"])
+
+    def test_json_round_trip_preserves_scores(self):
+        doc = "JSON dump/load round-trip preserves scores, severity, and vector rebuild."
+        vectors = [
+            "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N",
+            "CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:U/C:L/I:L/A:L",
+            "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:H/A:H",
+            "CVSS:3.0/AV:P/AC:H/PR:H/UI:R/S:C/C:H/I:H/A:N/"
+            "E:H/RL:O/RC:R/CR:H/MAC:H/MC:L",
+        ]
+        for vector in vectors:
+            original = CVSS3(vector)
+            decoded = json.loads(json.dumps(original.as_json()))
+            self.assertEqual(original.scores()[0], decoded["baseScore"], vector)
+            self.assertEqual(original.as_json()["baseSeverity"], decoded["baseSeverity"], vector)
+            rebuilt = CVSS3(decoded["vectorString"])
+            self.assertEqual(original.scores(), rebuilt.scores(), vector)
+            self.assertEqual(original.as_json(), rebuilt.as_json(), vector)
+
+    def test_json_round_trip_minimal_and_sorted(self):
+        v = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:L"
+        for kwargs in ({"minimal": True}, {"sort": True}, {"sort": True, "minimal": True}):
+            data = CVSS3(v).as_json(**kwargs)
+            decoded = json.loads(json.dumps(data))
+            self.assertEqual(data, decoded)
+            self.assertEqual(7.3, decoded["baseScore"])
+
+    def test_json_contains_only_serializable_primitives(self):
+        v = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:L/E:H/CR:H/MAV:P"
+        data = CVSS3(v).as_json()
+        json.dumps(data)
+        for value in data.values():
+            self.assertIsInstance(value, (str, float, int, bool, type(None)))
+
+    def test_json_serialization_errors_are_library_exceptions(self):
+        doc = "Serialization failures raise CVSS library exceptions, not raw KeyError."
+        cvss = CVSS3("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:L")
+        cvss.original_metrics["E"] = "BOGUS"
+        self.assertRaises(CVSS3MalformedError, cvss.as_json)
+        self.assertTrue(cvss.clean_vector().startswith("CVSS:3.1/"))
+
+
 if __name__ == "__main__":
     unittest.main()

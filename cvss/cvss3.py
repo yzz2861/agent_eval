@@ -471,6 +471,16 @@ class CVSS3(object):
         CVSS v3.0: https://www.first.org/cvss/cvss-v3.0.json?20170531
         CVSS v3.1: https://www.first.org/cvss/cvss-v3.1.json?20190610
 
+        The returned dictionary uses a stable, schema-compatible contract shared across CVSS
+        versions:
+
+        - metric and severity values are upper-cased schema enums (e.g. ``"NONE"``),
+        - optional metrics which are missing or explicitly marked as ``X`` are reported as
+          ``"NOT_DEFINED"`` rather than the default values substituted for score computation,
+        - only JSON primitives (str/float/bool/None/dict/list) are used, and
+        - ``minimal`` omits the temporal and environmental sections when they are not present
+          in the source vector.
+
         Serialize a `cvss` instance to JSON with:
 
         json.dumps(cvss.as_json())
@@ -493,7 +503,22 @@ class CVSS3(object):
 
         def add_metric_to_data(metric):
             k = METRICS_ABBREVIATIONS_JSON[metric]
-            data[k] = us(self.get_value_description(metric))
+            try:
+                if metric in METRICS_MANDATORY:
+                    description = self.get_value_description(metric)
+                else:
+                    # Use the original vector value so unset optional metrics are reported as
+                    # NOT_DEFINED instead of the substituted computation defaults.
+                    original_value = self.original_metrics.get(metric, "X")
+                    if original_value == "X":
+                        description = "Not Defined"
+                    else:
+                        description = METRICS_VALUE_NAMES[metric][original_value]
+            except KeyError:
+                raise CVSS3MalformedError(
+                    'Malformed CVSS3 metric "{0}", cannot serialize to JSON'.format(metric)
+                )
+            data[k] = us(description)
 
         base_severity, temporal_severity, environmental_severity = self.severities()
 

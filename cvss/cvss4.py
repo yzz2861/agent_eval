@@ -690,6 +690,16 @@ class CVSS4(object):
 
         CVSS v4.0: https://www.first.org/cvss/cvss-v4.0.json?20231011
 
+        The returned dictionary uses a stable, schema-compatible contract shared across CVSS
+        versions:
+
+        - metric and severity values are upper-cased schema enums (e.g. ``"NONE"``),
+        - optional metrics which are missing or explicitly marked as ``X`` are reported as
+          ``"NOT_DEFINED"`` rather than the default values substituted for score computation,
+        - only JSON primitives (str/float/bool/None/dict/list) are used, and
+        - ``minimal`` only serializes the mandatory metrics plus the optional metrics which are
+          actually present in the source vector.
+
         Serialize a `cvss` instance to JSON with:
 
         json.dumps(cvss.as_json())
@@ -703,26 +713,56 @@ class CVSS4(object):
         """
 
         def us(text):
-            # If this is the (modified) attack vector description, convert it from "adjacent" to
-            # "adjacent network" as defined by the schema.
-            if text == "Adjacent":
-                return "ADJACENT_NETWORK"
+            # The CVSS v4.0 schema spells the proof-of-concept exploit maturity differently from
+            # its metric value name.
+            if text == "POC":
+                return "PROOF_OF_CONCEPT"
             # Uppercase and convert to snake case
             return text.upper().replace("-", "_").replace(" ", "_")
 
         def add_metric_to_data(metric):
             k = METRICS_ABBREVIATIONS_JSON[metric]
-            data[k] = us(self.get_value_description(metric))
+            try:
+                if metric in METRICS_MANDATORY:
+                    description = self.get_value_description(metric)
+                else:
+                    # Use the original vector value so unset optional metrics are reported as
+                    # NOT_DEFINED instead of the substituted computation defaults.
+                    original_value = self.original_metrics.get(metric, "X")
+                    if original_value == "X":
+                        description = "Not Defined"
+                    else:
+                        description = METRICS_VALUE_NAMES[metric][original_value]
+            except KeyError:
+                raise CVSS4MalformedError(
+                    'Malformed CVSS4 metric "{0}", cannot serialize to JSON'.format(metric)
+                )
+            # The v4.0 schema uses NONE (not NEGLIGIBLE) for the Modified Sub System impact
+            # metrics; NEGLIGIBLE only remains valid for the Safety metric.
+            if metric in ("MSC", "MSI", "MSA") and description == "Negligible":
+                description = "None"
+            data[k] = us(description)
 
         data = {
-            "version": "4",
+            "version": "4.0",
             "vectorString": self.vector,
         }
 
-        for metric in METRICS:
+        for metric in METRICS_MANDATORY:
             add_metric_to_data(metric)
+
+        optional_metrics = [metric for metric in METRICS if metric not in METRICS_MANDATORY]
+        if not minimal:
+            serialized_metrics = optional_metrics
+        else:
+            serialized_metrics = [
+                metric for metric in optional_metrics if metric in self.original_metrics
+            ]
+        for metric in serialized_metrics:
+            add_metric_to_data(metric)
+
         data["baseScore"] = float(self.base_score)
-        data["baseSeverity"] = self.severity
+        data["baseSeverity"] = us(self.severity)
 
         if sort:
             data = OrderedDict(sorted(data.items()))
