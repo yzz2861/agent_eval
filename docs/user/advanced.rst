@@ -628,6 +628,25 @@ to your needs)::
     >>> import requests
     >>> requests.get('http://example.org')
 
+Disabling proxies for specific hosts is configured through ``no_proxy`` (or
+``NO_PROXY``). Its comma-separated entries use the following rules, which are
+evaluated without any DNS lookup:
+
+- CIDR ranges, such as ``10.0.0.0/8`` or ``2001:db8::/32``, match IP literal
+  URLs inside the network. Malformed ranges never match and never raise.
+- IP literals, such as ``192.168.1.1`` or ``[::1]``, match that exact address
+  regardless of the URL's port.
+- A plain host name, such as ``example.com``, matches the host itself and its
+  subdomains (``www.example.com``) but never a similar string such as
+  ``evilexample.com``.
+- A leading dot, such as ``.example.com``, has the same subdomain semantics;
+  suffix matching always respects the domain boundary.
+- Wildcards use shell-style globbing: ``*.example.com`` matches
+  ``www.example.com`` but not ``example.com``.
+- A ``host:port`` entry, such as ``example.com:8443``, only matches that port;
+  entries without a port apply to every port.
+- Host names are matched case-insensitively and a trailing dot is ignored.
+
 To use HTTP Basic Auth with your proxy, use the `http://user:password@host/`
 syntax in any of the above configuration entries::
 

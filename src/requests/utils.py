@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import codecs
 import contextlib
+import fnmatch
 import io
+import ipaddress
 import os
 import re
 import socket
@@ -50,8 +52,6 @@ from .compat import (
     getproxies_environment,
     integer_types,
     is_urllib3_1,
-    proxy_bypass,
-    proxy_bypass_environment,  # type: ignore[attr-defined]  # https://github.com/python/cpython/issues/145331
     quote,
     str,
     unquote,
@@ -94,8 +94,9 @@ DEFAULT_ACCEPT_ENCODING: Final = ", ".join(
 
 
 if sys.platform == "win32":
-    # provide a proxy_bypass version on Windows without DNS lookups
-
+    # On Windows the registry may define proxy bypass rules when no proxy
+    # environment variables are set. This only reads the registry and never
+    # performs DNS lookups.
     def proxy_bypass_registry(host: str) -> bool:
         try:
             import winreg
@@ -133,17 +134,6 @@ if sys.platform == "win32":
             if re.match(test, host, re.I):
                 return True
         return False
-
-    def proxy_bypass(host: str) -> bool:  # noqa
-        """Return True, if the host should be bypassed.
-
-        Checks proxy settings gathered from the environment, if specified,
-        or the registry.
-        """
-        if getproxies_environment():
-            return proxy_bypass_environment(host)
-        else:
-            return proxy_bypass_registry(host)
 
 
 def dict_to_sequence(
@@ -807,9 +797,143 @@ def set_environ(env_name: str, value: str | None) -> Generator[None, None, None]
                 os.environ[env_name] = old_value
 
 
+def _parse_no_proxy_entry(entry: str) -> dict[str, Any]:
+    """Parse a single ``no_proxy`` entry into a structured matching rule.
+
+    Entries are normalized by lower-casing and stripping a trailing dot so
+    that matching is case-insensitive and DNS-name agnostic. The supported
+    rule kinds are:
+
+    * ``cidr``    - an IP network such as ``10.0.0.0/8`` or ``::1/128``
+    * ``ip``      - a literal IPv4 or IPv6 address
+    * ``wildcard`` - a glob pattern containing ``*`` or ``?``
+    * ``suffix``   - a rule with a leading dot, e.g. ``.example.com``
+    * ``host``     - an exact host name, optionally carrying a port
+
+    Malformed CIDR entries fall back to host matching instead of raising.
+    """
+    rule: dict[str, Any] = {"kind": "host", "value": entry, "port": None}
+
+    if "/" in entry:
+        try:
+            network = ipaddress.ip_network(entry, strict=False)
+        except ValueError:
+            # Keep invalid CIDR values usable as plain host entries so a bad
+            # configuration never raises while deciding on a proxy.
+            rule["kind"] = "host"
+        else:
+            rule["kind"] = "cidr"
+            rule["network"] = network
+            return rule
+
+    candidate = entry
+    leading_dot = False
+    if candidate.startswith("."):
+        leading_dot = True
+        candidate = candidate[1:]
+
+    # Split an optional port before interpreting the host part. Bracketed
+    # values carry the port for IPv6 literals, e.g. "[::1]:8080".
+    if candidate.startswith("["):
+        bracket, separator, port = candidate.partition("]")
+        host_part = bracket[1:]
+        if separator and port.startswith(":"):
+            try:
+                rule["port"] = int(port[1:])
+            except ValueError:
+                rule["port"] = None
+    else:
+        host_part = candidate
+        # A bare IPv6 literal contains multiple colons and is handled below;
+        # only a single colon may denote a host:port pair.
+        if host_part.count(":") == 1:
+            host_text, port_text = host_part.split(":")
+            try:
+                rule["port"] = int(port_text)
+            except ValueError:
+                rule["port"] = None
+            else:
+                host_part = host_text
+
+    try:
+        rule["value"] = ipaddress.ip_address(host_part)
+    except ValueError:
+        rule["value"] = host_part.rstrip(".")
+    else:
+        rule["kind"] = "ip"
+        # IP literals are matched regardless of the requested port.
+        rule["port"] = None
+        return rule
+
+    if "*" in host_part or "?" in host_part:
+        rule["kind"] = "wildcard"
+        rule["pattern"] = re.compile(fnmatch.translate(rule["value"]))
+    elif leading_dot:
+        rule["kind"] = "suffix"
+
+    return rule
+
+
+def _no_proxy_entry_matches(
+    rule: dict[str, Any],
+    host: str,
+    port: int | None,
+    host_ip: ipaddress.IPv4Address | ipaddress.IPv6Address | None,
+) -> bool:
+    kind = rule["kind"]
+
+    if kind == "cidr":
+        return host_ip is not None and host_ip in rule["network"]
+
+    if kind == "ip":
+        return host_ip is not None and host_ip == rule["value"]
+
+    # Domain-based rules only match a port when the rule itself specifies
+    # one; a rule without a port applies to every port.
+    if rule["port"] is not None and port != rule["port"]:
+        return False
+
+    if kind == "wildcard":
+        return bool(rule["pattern"].match(host))
+
+    if kind == "suffix":
+        return host == rule["value"] or host.endswith("." + rule["value"])
+
+    # An exact host entry matches the host itself and any subdomain, but
+    # never a string that merely ends with the same characters
+    # (e.g. "evilcorp.example" must not match "corp.example").
+    return host == rule["value"] or host.endswith("." + rule["value"])
+
+
+def _should_bypass_no_proxy(no_proxy: str, hostname: str, port: int | None) -> bool:
+    """Return whether ``hostname`` matches one of the ``no_proxy`` rules.
+
+    Matching is fully deterministic and never performs DNS resolution: IP
+    rules are only evaluated when the URL itself contains an IP literal.
+    """
+    normalized_host = hostname.lower().rstrip(".")
+    try:
+        host_ip = ipaddress.ip_address(normalized_host)
+    except ValueError:
+        host_ip = None
+
+    entries = (entry.strip().lower() for entry in no_proxy.split(","))
+    for entry in entries:
+        if not entry:
+            continue
+        rule = _parse_no_proxy_entry(entry)
+        if _no_proxy_entry_matches(rule, normalized_host, port, host_ip):
+            return True
+    return False
+
+
 def should_bypass_proxies(url: str, no_proxy: str | None) -> bool:
     """
     Returns whether we should bypass proxies or not.
+
+    The decision is based solely on the ``no_proxy`` argument or the
+    ``no_proxy``/``NO_PROXY`` environment variables and, on Windows, the
+    Internet Settings registry key. No DNS lookup is ever performed.
 
     :rtype: bool
     """
@@ -821,7 +945,6 @@ def should_bypass_proxies(url: str, no_proxy: str | None) -> bool:
 
     # First check whether no_proxy is defined. If it is, check that the URL
     # we're getting isn't in the no_proxy list.
-    no_proxy_arg = no_proxy
     if no_proxy is None:
         no_proxy = get_proxy("no_proxy")
     parsed = urlparse(url)
@@ -831,41 +954,14 @@ def should_bypass_proxies(url: str, no_proxy: str | None) -> bool:
         # URLs don't always have hostnames, e.g. file:/// urls.
         return True
 
-    if no_proxy:
-        # We need to check whether we match here. We need to see if we match
-        # the end of the hostname, both with and without the port.
-        no_proxy_hosts = (host for host in no_proxy.replace(" ", "").split(",") if host)
-
-        if is_ipv4_address(hostname):
-            for proxy_ip in no_proxy_hosts:
-                if is_valid_cidr(proxy_ip):
-                    if address_in_network(hostname, proxy_ip):
-                        return True
-                elif hostname == proxy_ip:
-                    # If no_proxy ip was defined in plain IP notation instead of cidr notation &
-                    # matches the IP of the index
-                    return True
-        else:
-            host_with_port = hostname
-            if parsed.port:
-                host_with_port += f":{parsed.port}"
-
-            for host in no_proxy_hosts:
-                host = host.lstrip(".")
-                if hostname == host or host_with_port == host:
-                    return True
-                host = "." + host
-                if hostname.endswith(host) or host_with_port.endswith(host):
-                    return True
-
-    with set_environ("no_proxy", no_proxy_arg):
-        try:
-            bypass = proxy_bypass(hostname)
-        except (TypeError, socket.gaierror):
-            bypass = False
-
-    if bypass:
+    if no_proxy and _should_bypass_no_proxy(no_proxy, hostname, parsed.port):
         return True
+
+    if sys.platform == "win32":
+        # Environment-based proxy settings are fully handled above; the
+        # registry only contributes when no environment proxies are present.
+        if not getproxies_environment():
+            return proxy_bypass_registry(hostname)
 
     return False
 

@@ -774,23 +774,31 @@ def test_should_bypass_proxies(url, expected, monkeypatch):
 @pytest.mark.parametrize(
     "url, expected",
     (
-        ("http://172.16.1.1/", "172.16.1.1"),
-        ("http://172.16.1.1:5000/", "172.16.1.1"),
-        ("http://user:pass@172.16.1.1", "172.16.1.1"),
-        ("http://user:pass@172.16.1.1:5000", "172.16.1.1"),
-        ("http://hostname/", "hostname"),
-        ("http://hostname:5000/", "hostname"),
-        ("http://user:pass@hostname", "hostname"),
-        ("http://user:pass@hostname:5000", "hostname"),
+        ("http://172.16.1.1/", False),
+        ("http://172.16.1.1:5000/", False),
+        ("http://user:pass@172.16.1.1", False),
+        ("http://user:pass@172.16.1.1:5000", False),
+        ("http://hostname/", False),
+        ("http://hostname:5000/", False),
+        ("http://user:pass@hostname", False),
+        ("http://user:pass@hostname:5000", False),
     ),
 )
-def test_should_bypass_proxies_pass_only_hostname(url, expected):
-    """The proxy_bypass function should be called with a hostname or IP without
-    a port number or auth credentials.
+def test_should_bypass_proxies_never_resolves_dns(url, expected):
+    """Deciding whether to bypass a proxy must never trigger DNS resolution
+    or depend on the platform proxy_bypass implementation.
     """
-    with mock.patch("requests.utils.proxy_bypass") as proxy_bypass:
-        should_bypass_proxies(url, no_proxy=None)
-        proxy_bypass.assert_called_once_with(expected)
+    with (
+        mock.patch(
+            "socket.getaddrinfo", side_effect=AssertionError("DNS lookup")
+        ) as getaddrinfo,
+        mock.patch(
+            "socket.gethostbyname", side_effect=AssertionError("DNS lookup")
+        ) as gethostbyname,
+    ):
+        assert should_bypass_proxies(url, no_proxy=None) is expected
+    getaddrinfo.assert_not_called()
+    gethostbyname.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -865,6 +873,137 @@ def test_should_bypass_proxies_no_proxy_domain_boundary(url, expected):
     """
     no_proxy = "localhost, anotherdomain.com, newdomain.com:1234, .d.o.t"
     assert should_bypass_proxies(url, no_proxy=no_proxy) == expected
+
+
+@pytest.mark.parametrize(
+    "url, expected",
+    (
+        # CIDR boundaries: network and broadcast addresses count, the next
+        # address outside the range does not, and ports are irrelevant.
+        ("http://10.0.0.0/", True),
+        ("http://10.255.255.255/", True),
+        ("http://10.1.2.3:9999/", True),
+        ("http://9.255.255.255/", False),
+        ("http://11.0.0.0/", False),
+        # Similar domains must not be treated as substring matches.
+        ("http://evilcorp.example/", False),
+        ("http://notcorp.example/", False),
+        ("http://corp.example/", True),
+        ("http://api.corp.example/", True),
+        # Case and trailing dot normalization.
+        ("http://API.CORP.EXAMPLE/", True),
+        ("http://api.corp.example./", True),
+        ("http://EVILCORP.EXAMPLE/", False),
+        # Wildcards only match within their glob pattern.
+        ("http://a.wild.example/", True),
+        ("http://a.b.wild.example/", True),
+        ("http://wild.example/", False),
+        # IPv6 literals and IPv6 CIDR ranges.
+        ("http://[::1]/", True),
+        ("http://[::1]:8443/", True),
+        ("http://[2001:db8::1]/", True),
+        ("http://[2001:db8:ffff::1]/", True),
+        ("http://[2001:db9::1]/", False),
+        # Exact IP literal matching ignores the port.
+        ("http://192.168.1.1:80/", True),
+        ("http://192.168.1.2/", False),
+    ),
+)
+def test_should_bypass_proxies_explicit_rules(url, expected):
+    """Exercise the deterministic no_proxy rule set: CIDR, IP literal, exact
+    host, leading-dot suffix and wildcard semantics.
+    """
+    no_proxy = (
+        "10.0.0.0/8,.corp.example,localhost,192.168.1.1,*.wild.example,"
+        "::1,2001:db8::/32"
+    )
+    assert should_bypass_proxies(url, no_proxy=no_proxy) is expected
+
+
+@pytest.mark.parametrize(
+    "entry, url, expected",
+    (
+        ("10.0.0.0/99", "http://10.0.0.1/", False),
+        ("10.0.0.0/99", "http://10.0.0.0/", False),
+        ("not-an-ip/24", "http://10.0.0.1/", False),
+        ("10.0.0.0/-1", "http://example.com/", False),
+        ("10.0.0.0/abc", "http://10.0.0.1/", False),
+        ("::1/200", "http://[::1]/", False),
+    ),
+)
+def test_should_bypass_proxies_invalid_cidr_is_stable(entry, url, expected):
+    """Malformed CIDR entries must never raise and never match addresses."""
+    assert should_bypass_proxies(url, no_proxy=entry) is expected
+
+
+@pytest.mark.parametrize(
+    "url, no_proxy, expected",
+    (
+        ("http://host.example:1234/", "host.example:1234", True),
+        ("http://host.example:1235/", "host.example:1234", False),
+        ("http://host.example/", "host.example:1234", False),
+        ("http://sub.host.example:1234/", "host.example:1234", True),
+        ("http://host.example:1234/", ".host.example", True),
+        ("http://host.example:9999/", ".host.example", True),
+        ("http://10.0.0.1:80/", "10.0.0.1", True),
+        ("http://10.0.0.1:80/", "10.0.0.0/24", True),
+    ),
+)
+def test_should_bypass_proxies_port_handling(url, no_proxy, expected):
+    """Ports only constrain domain rules; IP literal and CIDR rules ignore
+    the request port.
+    """
+    assert should_bypass_proxies(url, no_proxy=no_proxy) is expected
+
+
+def test_should_bypass_proxies_env_case(monkeypatch):
+    """Lowercase environment variables win when both cases are set; either
+    case works on its own.
+    """
+    monkeypatch.setenv("no_proxy", "lower.example")
+    monkeypatch.setenv("NO_PROXY", "upper.example")
+    assert should_bypass_proxies("http://lower.example/", no_proxy=None) is True
+    assert should_bypass_proxies("http://upper.example/", no_proxy=None) is False
+
+    monkeypatch.delenv("no_proxy", raising=False)
+    assert should_bypass_proxies("http://upper.example/", no_proxy=None) is True
+
+
+def test_should_bypass_proxies_missing_environment(monkeypatch):
+    """With no no_proxy configuration and no host, results stay stable."""
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    assert should_bypass_proxies("http://example.com/", no_proxy=None) is False
+    assert should_bypass_proxies("file:///tmp/path", no_proxy=None) is True
+
+
+def test_get_environ_proxies_bypass_with_proxy_variables(monkeypatch):
+    """A matching no_proxy entry removes every proxy, including all_proxy."""
+    monkeypatch.setenv("http_proxy", "http://proxy.example:3128")
+    monkeypatch.setenv("https_proxy", "http://tls-proxy.example:3128")
+    monkeypatch.setenv("all_proxy", "socks5://all-proxy.example:1080")
+    monkeypatch.setenv("no_proxy", "10.0.0.0/8,.corp.example")
+
+    assert get_environ_proxies("http://10.1.2.3/", no_proxy=None) == {}
+    assert get_environ_proxies("https://api.corp.example/", no_proxy=None) == {}
+
+    proxies = get_environ_proxies("https://other.example/", no_proxy=None)
+    assert proxies["https"] == "http://tls-proxy.example:3128"
+
+
+def test_get_environ_proxies_request_method_ignores_uppercase_http_proxy(
+    monkeypatch,
+):
+    """Under CGI (REQUEST_METHOD set) uppercase HTTP_PROXY must not be used,
+    matching urllib's HTTPoxy protection.
+    """
+    monkeypatch.setenv("REQUEST_METHOD", "GET")
+    monkeypatch.setenv("HTTP_PROXY", "http://uppercase-proxy.example:3128")
+    assert get_environ_proxies("http://example.com/", no_proxy=None) == {}
+
+    monkeypatch.setenv("http_proxy", "http://lowercase-proxy.example:3128")
+    proxies = get_environ_proxies("http://example.com/", no_proxy=None)
+    assert proxies["http"] == "http://lowercase-proxy.example:3128"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Test only on Windows")

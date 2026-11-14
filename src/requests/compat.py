@@ -103,8 +103,6 @@ from urllib.request import (
     getproxies,
     getproxies_environment,
     parse_http_list,
-    proxy_bypass,
-    proxy_bypass_environment,  # type: ignore[attr-defined]  # https://github.com/python/cpython/issues/145331
 )
 
 builtin_str = str
