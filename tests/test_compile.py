@@ -5,6 +5,8 @@ from copy import deepcopy
 import shutil
 import os
 
+from asn1tools import compiler as asn1_compiler
+
 sys.path.append('tests/files')
 sys.path.append('tests/files/ietf')
 sys.path.append('tests/files/3gpp')
@@ -25,6 +27,9 @@ from parameterization import EXPECTED as PARAMETERIZATION
 from parameterization_pp import EXPECTED as PARAMETERIZATION_PP
 from time_types import EXPECTED as TIME_TYPES
 from time_types_pp import EXPECTED as TIME_TYPES_PP
+from asn1tools.limits import CompileLimits
+from asn1tools.limits import LimitExceeded
+from asn1tools.limits import ParameterizationCycleError
 
 
 class Asn1ToolsCompileTest(unittest.TestCase):
@@ -52,15 +57,8 @@ class Asn1ToolsCompileTest(unittest.TestCase):
         self.assertEqual(actual, MODULE_TAGS_AUTOMATIC_PP)
 
     def test_pre_process_x683(self):
-        # Todo: Remove expected RecursionError parameterization of
-        #       recursive types has been implemented.
-        if sys.version_info[0] == 2:
-            return
-
-        with self.assertRaises(RecursionError):
-            actual = asn1tools.pre_process_dict(deepcopy(X683))
-
-            self.assertEqual(actual, X683_PP)
+        actual = asn1tools.pre_process_dict(deepcopy(X683))
+        self.assertEqual(actual, X683_PP)
 
     def test_pre_process_parameterization(self):
         actual = asn1tools.pre_process_dict(deepcopy(PARAMETERIZATION))
@@ -223,6 +221,176 @@ class Asn1ToolsCompileTest(unittest.TestCase):
 
         self.assertEqual(str(cm.exception),
                          "Value 'missing-value' not found in module 'A'.")
+
+    def test_self_referencing_parameterized_type_compiles(self):
+        spec = (
+            'X683 DEFINITIONS ::= BEGIN '
+            'List1 { ElementTypeParam } ::= SEQUENCE { '
+            '  elem ElementTypeParam, '
+            '  next List1 { ElementTypeParam } OPTIONAL '
+            '} '
+            'IntegerList1 ::= List1 { INTEGER } '
+            'END ')
+
+        foo = asn1tools.compile_string(spec)
+        encoded = foo.encode('IntegerList1', {
+            'elem': 7,
+            'next': {'elem': 8}
+        })
+
+        self.assertEqual(
+            foo.decode('IntegerList1', encoded),
+            {'elem': 7, 'next': {'elem': 8}})
+
+    def test_parameterization_substitution_limit(self):
+        spec = (
+            'A DEFINITIONS ::= BEGIN '
+            'P { T } ::= SEQUENCE { a T, b T } '
+            'Top ::= P { P { P { P { INTEGER } } } } '
+            'END ')
+
+        with self.assertRaises(LimitExceeded) as cm:
+            asn1tools.compile_string(
+                spec,
+                limits=CompileLimits(max_parameter_substitutions=2))
+
+        self.assertEqual(cm.exception.stage,
+                         'parameterization-expansion')
+        self.assertEqual(cm.exception.location['module'], 'A')
+        self.assertEqual(cm.exception.location['type'], 'Top')
+        self.assertEqual(cm.exception.location['referenced-type'], 'P')
+
+    def test_parameterization_generated_type_limit(self):
+        spec = (
+            'A DEFINITIONS ::= BEGIN '
+            'P { T } ::= SEQUENCE { a T } '
+            'Top ::= P { P { P { INTEGER } } } '
+            'END ')
+
+        with self.assertRaises(LimitExceeded) as cm:
+            asn1tools.compile_string(
+                spec,
+                limits=CompileLimits(max_generated_types=1))
+
+        self.assertEqual(cm.exception.stage,
+                         'parameterization-expansion')
+        self.assertEqual(cm.exception.what, 'generated types')
+
+    def test_parameterization_node_limit_stops_exponential_bomb(self):
+        expression = 'INTEGER'
+
+        for _ in range(18):
+            expression = 'P { ' + expression + ' }'
+
+        spec = (
+            'A DEFINITIONS ::= BEGIN '
+            'P { T } ::= SEQUENCE { a T, b T } '
+            'Top ::= ' + expression + ' END ')
+
+        with self.assertRaises(LimitExceeded) as cm:
+            asn1tools.compile_string(spec)
+
+        self.assertIn(cm.exception.stage,
+                      ('parse', 'parameterization-expansion'))
+        self.assertIsInstance(cm.exception, asn1tools.CompileError)
+
+    def test_parameterization_cycle_detected(self):
+        spec = (
+            'A DEFINITIONS ::= BEGIN '
+            'P { T } ::= SEQUENCE { a T } '
+            'Q { T } ::= P { Q { T } } '
+            'Top ::= Q { INTEGER } '
+            'END ')
+
+        with self.assertRaises(ParameterizationCycleError) as cm:
+            asn1tools.compile_string(spec)
+
+        self.assertEqual(cm.exception.stage,
+                         'parameterization-expansion')
+        self.assertEqual(cm.exception.location['module'], 'A')
+        self.assertIn('Circular parameterized type expansion',
+                      str(cm.exception))
+
+    def test_cross_module_parameterized_import(self):
+        foo = asn1tools.compile_files(
+            'tests/files/parameterization.asn')
+
+        self.assertEqual(
+            set(foo.modules),
+            {'Parameterization',
+             'Parameterization2',
+             'Parameterization3'})
+        self.assertIn('S', foo.modules['Parameterization'])
+
+        encoded = foo.encode('F', [])
+        self.assertEqual(foo.decode('F', encoded), [])
+
+    def test_cross_module_recursive_parameterized_import(self):
+        spec = (
+            'M1 DEFINITIONS ::= BEGIN '
+            'Box { T } ::= SEQUENCE { '
+            '  value T, '
+            '  next Box { T } OPTIONAL '
+            '} '
+            'END '
+            'M2 DEFINITIONS ::= BEGIN '
+            'IMPORTS Box FROM M1; '
+            'IntBox ::= Box { INTEGER } '
+            'END ')
+
+        foo = asn1tools.compile_string(spec)
+        encoded = foo.encode('IntBox', {'value': 5})
+
+        self.assertEqual(foo.decode('IntBox', encoded),
+                         {'value': 5})
+
+    def test_large_schema_within_default_limits(self):
+        asn1tools.compile_files('tests/files/3gpp/rrc_14_4_0.asn')
+
+    def test_cache_hit_does_not_bypass_limits(self):
+        if not asn1_compiler.has_diskcache:
+            self.skipTest('diskcache is not installed')
+
+        cache_dir = 'test_cache_limits'
+
+        if os.path.exists(cache_dir):
+            shutil.rmtree(cache_dir)
+
+        spec_path = os.path.join(cache_dir + '_input.asn')
+
+        if os.path.exists(spec_path):
+            os.remove(spec_path)
+
+        try:
+            with open(spec_path, 'w') as fout:
+                fout.write(
+                    'A DEFINITIONS ::= BEGIN '
+                    'B ::= INTEGER '
+                    'END ')
+
+            strict = CompileLimits(max_nodes=1)
+
+            with self.assertRaises(LimitExceeded):
+                asn1tools.compile_files(spec_path,
+                                        cache_dir=cache_dir,
+                                        limits=strict)
+
+            # Populate the cache with default limits.
+            asn1tools.compile_files(spec_path, cache_dir=cache_dir)
+
+            # A cache hit must still enforce the strict active limits.
+            with self.assertRaises(LimitExceeded) as cm:
+                asn1tools.compile_files(spec_path,
+                                        cache_dir=cache_dir,
+                                        limits=strict)
+
+            self.assertEqual(cm.exception.stage, 'parse')
+        finally:
+            if os.path.exists(cache_dir):
+                shutil.rmtree(cache_dir)
+
+            if os.path.exists(spec_path):
+                os.remove(spec_path)
 
 
 if __name__ == '__main__':

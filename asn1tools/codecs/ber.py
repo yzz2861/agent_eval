@@ -1769,8 +1769,8 @@ class Compiler(compiler.Compiler):
             additions.append(compiled_member)
 
 
-def compile_dict(specification, numeric_enums=False):
-    return Compiler(specification, numeric_enums).process()
+def compile_dict(specification, numeric_enums=False, limits=None):
+    return Compiler(specification, numeric_enums, limits).process()
 
 
 def decode_full_length(data):
@@ -1785,5 +1785,4 @@ def decode_full_length(data):
         return e.offset + e.expected_length
     except OutOfByteDataError:
         return None
-
 

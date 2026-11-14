@@ -33,6 +33,9 @@ from .errors import EncodeError
 from .errors import DecodeError
 from .errors import CompileError
 from .errors import ConstraintsError
+from .limits import CompileLimits
+from .limits import LimitExceeded
+from .limits import ParameterizationCycleError
 from . source import c
 from . source import rust
 from .version import __version__

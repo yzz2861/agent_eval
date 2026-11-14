@@ -641,8 +641,8 @@ class Compiler(compiler.Compiler):
         return compiled
 
 
-def compile_dict(specification, numeric_enums=False):
-    return Compiler(specification, numeric_enums).process()
+def compile_dict(specification, numeric_enums=False, limits=None):
+    return Compiler(specification, numeric_enums, limits).process()
 
 
 def decode_full_length(_data):

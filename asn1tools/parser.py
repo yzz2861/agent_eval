@@ -30,6 +30,9 @@ from pyparsing import ParseResults
 from pyparsing import lineno
 
 from .errors import Error
+from .limits import CompileLimits
+from .limits import LimitExceeded
+from .limits import PARSE_STAGE
 
 
 LOGGER = logging.getLogger(__name__)
@@ -1778,6 +1781,78 @@ def create_grammar():
     return specification
 
 
+def _count_nodes(node):
+    """Return the number of dict, list and scalar nodes in given parsed
+    node. Shared references are counted once.
+
+    """
+
+    count = 0
+    seen = set()
+    stack = [node]
+
+    while stack:
+        current = stack.pop()
+
+        if isinstance(current, (dict, list)):
+            identity = id(current)
+
+            if identity in seen:
+                continue
+
+            seen.add(identity)
+            count += 1
+
+            if isinstance(current, dict):
+                stack.extend(current.values())
+            else:
+                stack.extend(current)
+        else:
+            count += 1
+
+    return count
+
+
+def _enforce_import_limits(specification, limits):
+    """Enforce the per-module import quota.
+
+    Imports are declared per module as
+    ``{from_module: [imported names]}``.
+
+    Module imports may legally form cycles in ASN.1 (each module keeps
+    its own symbol table), so only the number of imports is limited at
+    parse time. Resolution-time loops are guarded while looking up
+    imported symbols.
+
+    """
+
+    for module_name, module in specification.items():
+        imports = module.get('imports', {})
+        total = sum(len(names) for names in imports.values())
+        limits.module_imports(
+            total,
+            {'module': module_name})
+
+
+def enforce_parse_limits(specification, limits=None):
+    """Apply parser stage limits to given parsed specification.
+
+    Returns the same specification. A fresh default
+    :class:`~asn1tools.limits.CompileLimits` is created when no limits
+    object is given.
+
+    """
+
+    if limits is None:
+        limits = CompileLimits()
+
+    _enforce_import_limits(specification, limits)
+    limits.count_nodes(_count_nodes(specification),
+                       PARSE_STAGE)
+
+    return specification
+
+
 def ignore_comments(string):
     """Ignore comments in given string by replacing them with spaces. This
     reduces the parsing time by roughly a factor of two.
@@ -1843,12 +1918,15 @@ def ignore_comments(string):
     return ''.join(chunks)
 
 
-def parse_string(string):
+def parse_string(string, limits=None):
     """Parse given ASN.1 specification string and return a dictionary of
     its contents.
 
     The dictionary can later be compiled with
     :func:`~asn1tools.compile_dict()`.
+
+    Give a :class:`~asn1tools.limits.CompileLimits` object as `limits`
+    to enforce parse-time quotas for imports and schema node count.
 
     >>> with open('foo.asn') as fin:
     ...     foo = asn1tools.parse_string(fin.read())
@@ -1860,6 +1938,13 @@ def parse_string(string):
     try:
         string = ignore_comments(string)
         tokens = grammar.parse_string(string).asList()
+    except RecursionError:
+        effective_limits = limits if limits is not None else CompileLimits()
+        raise LimitExceeded('nested type expansion depth',
+                            effective_limits.max_expansion_depth,
+                            effective_limits.max_expansion_depth,
+                            PARSE_STAGE,
+                            None)
     except (ParseException, ParseSyntaxException) as e:
         raise ParseError("Invalid ASN.1 syntax at line {}, column {}: '{}': {}.".format(
             e.lineno,
@@ -1867,15 +1952,22 @@ def parse_string(string):
             e.mark_input_line(),
             e.msg))
 
-    return tokens[0]
+    specification = tokens[0]
+
+    enforce_parse_limits(specification, limits)
+
+    return specification
 
 
-def parse_files(filenames, encoding='utf-8'):
+def parse_files(filenames, encoding='utf-8', limits=None):
     """Parse given ASN.1 specification file(s) and return a dictionary of
     its/their contents.
 
     The dictionary can later be compiled with
     :func:`~asn1tools.compile_dict()`.
+
+    `limits` carries the parse-time resource quotas, see
+    :class:`~asn1tools.limits.CompileLimits`.
 
     `encoding` is the text encoding. This argument is passed to the
     built-in function `open()`.
@@ -1899,4 +1991,4 @@ def parse_files(filenames, encoding='utf-8'):
                 string += fin.read()
                 string += '\n'
 
-    return parse_string(string)
+    return parse_string(string, limits)

@@ -25,6 +25,8 @@ from .codecs import constraints_checker
 from .errors import CompileError
 from .errors import EncodeError
 from .errors import DecodeError
+from .limits import CompileLimits
+from .limits import LimitExceeded
 
 
 class Specification(object):
@@ -247,7 +249,8 @@ def _compile_files_cache(filenames,
                          any_defined_by_choices,
                          encoding,
                          cache_dir,
-                         numeric_enums):
+                         numeric_enums,
+                         limits):
     key = [codec.encode('ascii')]
 
     if isinstance(filenames, str):
@@ -257,25 +260,81 @@ def _compile_files_cache(filenames,
         with open(filename, 'rb') as fin:
             key.append(fin.read())
 
+    key.append(repr(_limits_quota_key(limits)).encode('ascii'))
     key = b''.join(key)
     cache = diskcache.Cache(cache_dir)
 
     try:
-        return cache[key]
+        entry = cache[key]
     except KeyError:
-        compiled = compile_dict(parse_files(filenames, encoding),
-                                codec,
-                                any_defined_by_choices,
-                                numeric_enums)
-        cache[key] = compiled
+        entry = None
 
-        return compiled
+    # Re-parse and enforce every quota on every call so that a cache
+    # hit can never bypass the active resource limits.
+    specification = parse_files(filenames, encoding, limits)
+
+    if entry is not None:
+        _verify_cached_limits(entry, limits)
+
+        return entry[0]
+
+    compiled = compile_dict(specification,
+                            codec,
+                            any_defined_by_choices,
+                            numeric_enums,
+                            limits)
+    cache[key] = (compiled, limits.as_dict())
+
+    return compiled
+
+
+def _limits_quota_key(limits):
+    return {
+        name: getattr(limits, name)
+        for name in (
+            'max_module_imports',
+            'max_parameter_substitutions',
+            'max_generated_types',
+            'max_nodes',
+            'max_expansion_depth')
+    }
+
+
+def _verify_cached_limits(entry, limits):
+    if not (isinstance(entry, tuple) and len(entry) == 2):
+        # Entries written by older versions carry no usage data, so
+        # they cannot prove compliance with the active limits.
+        raise LimitExceeded('cache quota validation',
+                            0,
+                            0,
+                            'cache',
+                            None)
+
+    _unused_compiled, snapshot = entry
+
+    metrics = {
+        'parameter_substitutions': 'max_parameter_substitutions',
+        'generated_types': 'max_generated_types',
+        'total_nodes': 'max_nodes',
+        'expansion_depth': 'max_expansion_depth'
+    }
+
+    for metric_name, limit_name in metrics.items():
+        limit = getattr(limits, limit_name)
+
+        if limit is not None and snapshot[metric_name] > limit:
+            raise LimitExceeded(metric_name.replace('_', ' '),
+                                snapshot[metric_name],
+                                limit,
+                                'cache',
+                                None)
 
 
 def compile_dict(specification,
                  codec='ber',
                  any_defined_by_choices=None,
-                 numeric_enums=False):
+                 numeric_enums=False,
+                 limits=None):
     """Compile given ASN.1 specification dictionary and return a
     :class:`~asn1tools.compiler.Specification` object that can be used
     to encode and decode data structures with given codec
@@ -285,9 +344,16 @@ def compile_dict(specification,
     Give `numeric_enums` as ``True`` for numeric enumeration values
     instead of strings.
 
+    Give a :class:`~asn1tools.limits.CompileLimits` object as `limits`
+    to override the default compile-time resource quotas. The same
+    limits are enforced while parsing and expanding the schema.
+
     >>> foo = asn1tools.compile_dict(asn1tools.parse_files('foo.asn'))
 
     """
+
+    if limits is None:
+        limits = CompileLimits()
 
     codecs = {
         'ber': ber,
@@ -310,18 +376,22 @@ def compile_dict(specification,
                                         any_defined_by_choices)
 
     return Specification(codec.compile_dict(specification,
-                                            numeric_enums),
+                                            numeric_enums,
+                                            limits),
                          codec.decode_full_length,
                          type_checker.compile_dict(specification,
-                                                   numeric_enums),
+                                                   numeric_enums,
+                                                   limits),
                          constraints_checker.compile_dict(specification,
-                                                          numeric_enums))
+                                                          numeric_enums,
+                                                          limits))
 
 
 def compile_string(string,
                    codec='ber',
                    any_defined_by_choices=None,
-                   numeric_enums=False):
+                   numeric_enums=False,
+                   limits=None):
     """Compile given ASN.1 specification string and return a
     :class:`~asn1tools.compiler.Specification` object that can be used
     to encode and decode data structures with given codec
@@ -331,15 +401,19 @@ def compile_string(string,
     Give `numeric_enums` as ``True`` for numeric enumeration values
     instead of strings.
 
+    `limits` controls the compile-time resource quotas, see
+    :class:`~asn1tools.limits.CompileLimits`.
+
     >>> with open('foo.asn') as fin:
     ...     foo = asn1tools.compile_string(fin.read())
 
     """
 
-    return compile_dict(parse_string(string),
+    return compile_dict(parse_string(string, limits),
                         codec,
                         any_defined_by_choices,
-                        numeric_enums)
+                        numeric_enums,
+                        limits)
 
 
 def compile_files(filenames,
@@ -347,7 +421,8 @@ def compile_files(filenames,
                   any_defined_by_choices=None,
                   encoding='utf-8',
                   cache_dir=None,
-                  numeric_enums=False):
+                  numeric_enums=False,
+                  limits=None):
     """Compile given ASN.1 specification file(s) and return a
     :class:`~asn1tools.compiler.Specification` object that can be used
     to encode and decode data structures with given codec
@@ -368,6 +443,11 @@ def compile_files(filenames,
     Give `numeric_enums` as ``True`` for numeric enumeration values
     instead of strings.
 
+    `limits` controls the compile-time resource quotas, see
+    :class:`~asn1tools.limits.CompileLimits`. Quotas are re-checked on
+    every call, including cache hits, so a cached compilation can never
+    bypass the active limits.
+
     >>> foo = asn1tools.compile_files('foo.asn')
 
     Give `cache_dir` as a string to use a cache.
@@ -376,11 +456,15 @@ def compile_files(filenames,
 
     """
 
+    if limits is None:
+        limits = CompileLimits()
+
     if cache_dir is None:
-        return compile_dict(parse_files(filenames, encoding),
+        return compile_dict(parse_files(filenames, encoding, limits),
                             codec,
                             any_defined_by_choices,
-                            numeric_enums)
+                            numeric_enums,
+                            limits)
     else:
         if not has_diskcache:
             raise RuntimeError(
@@ -391,13 +475,14 @@ def compile_files(filenames,
                                     any_defined_by_choices,
                                     encoding,
                                     cache_dir,
-                                    numeric_enums)
+                                    numeric_enums,
+                                    limits)
 
 
-def pre_process_dict(specification):
+def pre_process_dict(specification, limits=None):
     """Pre-process given specification dictionary, expanding COMPONENTS OF
     and adding extension markers if EXTENSIBILITY IMPLIED is active.
 
     """
 
-    return compiler.pre_process(specification)
+    return compiler.pre_process(specification, limits)

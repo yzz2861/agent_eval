@@ -10,6 +10,9 @@ import bitstruct
 from copy import copy
 from copy import deepcopy
 from ..errors import CompileError
+from ..limits import CompileLimits
+from ..limits import EXPANSION_STAGE
+from ..limits import ParameterizationCycleError
 from ..parser import EXTENSION_MARKER
 
 
@@ -188,13 +191,49 @@ class CompiledOpenTypes(CompiledType):
 
 class Compiler(object):
 
-    def __init__(self, specification, numeric_enums=False):
+    def __init__(self, specification, numeric_enums=False, limits=None):
         self._specification = specification
         self._numeric_enums = numeric_enums
         self._types_backtrace = []
+        self._expansion_stack = []
+        self.limits = limits if limits is not None else CompileLimits()
         self.recursive_types = []
         self.compiled = {}
         self.current_type_descriptor = None
+
+    def _count_descriptor_nodes(self, type_descriptor):
+        count = 0
+        seen = set()
+        stack = [type_descriptor]
+
+        while stack:
+            current = stack.pop()
+
+            if isinstance(current, dict):
+                identity = id(current)
+
+                if identity in seen:
+                    continue
+
+                seen.add(identity)
+                count += 1
+                stack.extend(current.values())
+            elif isinstance(current, list):
+                identity = id(current)
+
+                if identity in seen:
+                    continue
+
+                seen.add(identity)
+                count += 1
+                stack.extend(current)
+            else:
+                count += 1
+
+        return count
+
+    def _parameter_signature(self, parameters):
+        return repr(parameters)
 
     def types_backtrace_push(self, type_name):
         self._types_backtrace.append(type_name)
@@ -560,6 +599,12 @@ class Compiler(object):
         if 'actual-parameters' not in type_descriptor:
             return
 
+        location = {
+            'module': module_name,
+            'type': type_name,
+            'referenced-type': type_descriptor['type']
+        }
+
         (parameterized_type_descriptor,
          parameterized_module_name) = self.lookup_type_descriptor(
             type_descriptor['type'],
@@ -585,20 +630,51 @@ class Compiler(object):
                                       type_name,
                                       module_name))
 
+        expansion_name = '{}:{}'.format(parameterized_module_name,
+                                        type_descriptor['type'])
+        expansion_key = (
+            expansion_name,
+            self._parameter_signature(actual_parameters))
+
+        if expansion_key in self._expansion_stack:
+            raise ParameterizationCycleError(
+                expansion_name,
+                [name for name, _key in self._expansion_stack],
+                location)
+
+        self.limits.expansion_depth(len(self._expansion_stack) + 1, location)
+        self._expansion_stack.append(expansion_key)
+        self.limits.substitution(location)
+
         parameterized_type_descriptor = deepcopy(parameterized_type_descriptor)
+        self.limits.generated_type(location)
+        self.limits.count_nodes(
+            self._count_descriptor_nodes(parameterized_type_descriptor),
+            EXPANSION_STAGE,
+            location)
 
-        self.pre_process_parameterization_step_1_dummy_to_actual_type(
-            parameterized_type_descriptor,
-            dummy_parameters,
-            actual_parameters,
-            parameterized_module_name)
+        try:
+            self.pre_process_parameterization_rewrite_self_references(
+                parameterized_type_descriptor,
+                type_descriptor['type'],
+                type_name,
+                module_name,
+                parameterized_module_name)
 
-        self.pre_process_parameterization_step_1_type(
-            parameterized_type_descriptor,
-            type_name,
-            parameterized_module_name)
+            self.pre_process_parameterization_step_1_dummy_to_actual_type(
+                parameterized_type_descriptor,
+                dummy_parameters,
+                actual_parameters,
+                parameterized_module_name)
 
-        type_descriptor.update(parameterized_type_descriptor)
+            self.pre_process_parameterization_step_1_type(
+                parameterized_type_descriptor,
+                type_name,
+                parameterized_module_name)
+
+            type_descriptor.update(parameterized_type_descriptor)
+        finally:
+            self._expansion_stack.pop()
 
         if 'module-name' not in type_descriptor:
             if module_name != parameterized_module_name:
@@ -677,6 +753,52 @@ class Compiler(object):
                     actual_restricted_to.append((minimum, maximum))
 
                 type_descriptor['restricted-to'] = actual_restricted_to
+
+    def pre_process_parameterization_rewrite_self_references(
+            self,
+            type_descriptor,
+            parameterized_type_name,
+            outer_type_name,
+            outer_module_name,
+            parameterized_module_name):
+        """Rewrite references of a parameterized type to itself as a
+        reference to the named type being expanded, keeping legal
+        recursive ASN.1 types as named references instead of expanding
+        them forever.
+
+        """
+
+        if 'members' in type_descriptor:
+            for member in type_descriptor['members']:
+                if member == EXTENSION_MARKER:
+                    continue
+
+                self.pre_process_parameterization_rewrite_self_references(
+                    member,
+                    parameterized_type_name,
+                    outer_type_name,
+                    outer_module_name,
+                    parameterized_module_name)
+        elif 'element' in type_descriptor:
+            self.pre_process_parameterization_rewrite_self_references(
+                type_descriptor['element'],
+                parameterized_type_name,
+                outer_type_name,
+                outer_module_name,
+                parameterized_module_name)
+
+        if type_descriptor.get('type') != parameterized_type_name:
+            return
+
+        if 'actual-parameters' not in type_descriptor:
+            return
+
+        del type_descriptor['actual-parameters']
+        type_descriptor['type'] = outer_type_name
+
+        if (outer_module_name != parameterized_module_name
+                and 'module-name' not in type_descriptor):
+            type_descriptor['module-name'] = outer_module_name
 
     def pre_process_parameterization_step_2(self, types):
         """X.683 parameterization pre processing - step 2.
@@ -1021,13 +1143,26 @@ class Compiler(object):
             pass
         return module_name
 
-    def lookup_in_modules(self, section, debug_string, name, module_name):
+    def lookup_in_modules(self, section, debug_string, name, module_name,
+                          _visited=None):
         begin_debug_string = debug_string[:1].upper() + debug_string[1:]
         module = self._specification[module_name]
 
         if name in module[section]:
             return module[section][name], module_name
         else:
+            if _visited is None:
+                _visited = set()
+
+            visit_key = (section, name, module_name)
+
+            if visit_key in _visited:
+                raise CompileError(
+                    "Circular import detected while resolving {} '{}' "
+                    "in module '{}'.".format(debug_string, name, module_name))
+
+            _visited.add(visit_key)
+
             for from_module_name, imports in module['imports'].items():
                 if name not in imports:
                     continue
@@ -1044,7 +1179,8 @@ class Compiler(object):
                     return self.lookup_in_modules(section,
                                                   debug_string,
                                                   name,
-                                                  from_module_name)
+                                                  from_module_name,
+                                                  _visited)
                 except CompileError:
                     raise CompileError(
                         "{} '{}' imported by module '{}' not found in "
@@ -1193,5 +1329,5 @@ def enum_values_split(values):
         return values, None
 
 
-def pre_process(specification):
-    return Compiler(specification).pre_process()
+def pre_process(specification, limits=None):
+    return Compiler(specification, limits=limits).pre_process()

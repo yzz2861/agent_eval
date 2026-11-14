@@ -3,6 +3,8 @@ import unittest
 import importlib
 
 import asn1tools
+from asn1tools.limits import CompileLimits
+from asn1tools.limits import LimitExceeded
 
 sys.path.append('tests/files')
 sys.path.append('tests/files/3gpp')
@@ -545,6 +547,68 @@ class Asn1ToolsParseTest(unittest.TestCase):
 
     def test_parse_encoding(self):
         asn1tools.parse_files('tests/files/foo.asn', encoding='ascii')
+
+    def test_parse_node_limit(self):
+        limits = CompileLimits(max_nodes=10)
+
+        with self.assertRaises(LimitExceeded) as cm:
+            asn1tools.parse_string(
+                'A DEFINITIONS ::= BEGIN B ::= SEQUENCE { a INTEGER } END',
+                limits)
+
+        self.assertEqual(cm.exception.stage, 'parse')
+        self.assertEqual(cm.exception.what, 'total schema nodes')
+        self.assertGreater(cm.exception.value, cm.exception.limit)
+
+    def test_parse_module_import_limit(self):
+        imported = ', '.join('T{}'.format(i) for i in range(5))
+        spec = (
+            'A DEFINITIONS ::= BEGIN IMPORTS {} FROM B; '
+            'C ::= INTEGER END '
+            'B DEFINITIONS ::= BEGIN '
+            '{} '
+            'END').format(
+                imported,
+                ' '.join('T{} ::= INTEGER'.format(i) for i in range(5)))
+
+        with self.assertRaises(LimitExceeded) as cm:
+            asn1tools.parse_string(
+                spec,
+                CompileLimits(max_module_imports=2))
+
+        self.assertEqual(cm.exception.stage, 'import')
+        self.assertEqual(cm.exception.location, {'module': 'A'})
+        self.assertIn('module imports', str(cm.exception))
+
+    def test_parse_circular_module_imports_are_legal(self):
+        spec = (
+            'A DEFINITIONS ::= BEGIN '
+            'IMPORTS Btype FROM B; Atype ::= INTEGER END '
+            'B DEFINITIONS ::= BEGIN '
+            'IMPORTS Atype FROM A; Btype ::= BOOLEAN END')
+
+        parsed = asn1tools.parse_string(spec)
+
+        self.assertEqual(set(parsed), {'A', 'B'})
+
+        foo = asn1tools.compile_dict(parsed)
+        self.assertEqual(set(foo.types), {'Atype', 'Btype'})
+
+    def test_parse_deeply_nested_type_raises_limit_not_recursion_error(self):
+        expression = 'INTEGER'
+
+        for _ in range(600):
+            expression = 'P { ' + expression + ' }'
+
+        spec = (
+            'A DEFINITIONS ::= BEGIN '
+            'P { T } ::= SEQUENCE { a T } '
+            'Top ::= ' + expression + ' END')
+
+        with self.assertRaises(LimitExceeded) as cm:
+            asn1tools.parse_string(spec)
+
+        self.assertEqual(cm.exception.stage, 'parse')
 
 
 if __name__ == '__main__':
