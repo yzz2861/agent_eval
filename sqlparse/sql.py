@@ -10,7 +10,10 @@
 import re
 
 from sqlparse import tokens as T
+from sqlparse.identity import ObjectIdentity, ObjectNamePart
 from sqlparse.utils import imt, remove_quotes
+
+__all__ = ("ObjectIdentity", "ObjectNamePart")
 
 
 class NameAliasMixin:
@@ -411,6 +414,19 @@ class TokenList(Token):
 class Statement(TokenList):
     """Represents a SQL statement."""
 
+    def get_object_identities(self, strict=False, casefold=None,
+                              dialect=None, kind="table"):
+        """Yield normalized object identities contained in this statement."""
+        from sqlparse.identity import iter_object_identities
+
+        yield from iter_object_identities(
+            self,
+            strict=strict,
+            casefold=casefold,
+            dialect=dialect,
+            kind=kind,
+        )
+
     def get_type(self):
         """Returns the type of a statement.
 
@@ -477,6 +493,15 @@ class Identifier(NameAliasMixin, TokenList):
             if isinstance(token, SquareBrackets):
                 # Use [1:-1] index to discard the square brackets
                 yield token.tokens[1:-1]
+
+    def get_object_identity(self, strict=False, casefold=None, dialect=None,
+                            kind="table"):
+        """Return original parts and a normalized object-identity key."""
+        from sqlparse.identity import build_object_identity
+
+        return build_object_identity(
+            self, strict=strict, casefold=casefold, dialect=dialect, kind=kind
+        )
 
 
 class IdentifierList(TokenList):
@@ -625,6 +650,15 @@ class Case(TokenList):
 
 class Function(NameAliasMixin, TokenList):
     """A function or procedure call."""
+
+    def get_object_identity(self, strict=False, casefold=None, dialect=None,
+                            kind="table"):
+        """Return normalized identity information for this function call."""
+        from sqlparse.identity import build_object_identity
+
+        return build_object_identity(
+            self, strict=strict, casefold=casefold, dialect=dialect, kind=kind
+        )
 
     def get_parameters(self):
         """Return a list of parameters."""

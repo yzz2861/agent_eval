@@ -41,6 +41,21 @@ The following classes represent distinct parts of a SQL statement.
 .. autoclass:: sqlparse.sql.IdentifierList
    :members:
 
+Object Identity
+---------------
+
+:meth:`~sqlparse.sql.Identifier.get_object_identity` returns the original
+dotted name parts together with a normalized policy key. Unquoted parts are
+folded with the selected dialect rule, while quoted parts keep their exact
+case and quote character. Escaped quotes are retained in the key so names
+with different quoting cannot collapse into one identity.
+
+.. autoclass:: sqlparse.sql.ObjectIdentity
+   :members:
+
+.. autoclass:: sqlparse.sql.ObjectNamePart
+   :members:
+
 .. autoclass:: sqlparse.sql.Where
    :members:
 
@@ -61,4 +76,3 @@ The following classes represent distinct parts of a SQL statement.
 
 .. autoclass:: sqlparse.sql.Comparison
    :members:
-
