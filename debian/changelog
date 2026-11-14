@@ -1,0 +1,122 @@
+python-securesystemslib (0.26.0-1) unstable; urgency=medium
+
+  * New upstream release includes among other things:
+    - A new flexible signing API with added support for Google Cloud KMS
+      signing, HSM signing, and Post-quantum signing schemes, see
+      https://theupdateframework.github.io/python-tuf/2023/01/24/securesystemslib-signer-api.html
+    - Removal of colorama and mock (test) dependencies
+    - Various fixes in the gpg subpackage
+    - And much more (see upstream CHANGELOG.md)
+
+  * d/control
+    - bump standards version to 4.6.2
+    - adopt upstream requirements changes
+  * d/patches:
+    - remove obsolete patches
+    - patch tests that require unavailable PySPX package
+    - other minor fixes suggested by lintian
+  * d/rules:
+    - export path to pkcs11 library for softhsm testing
+
+ -- Lukas Puehringer <lukas.puehringer@nyu.edu>  Tue, 31 Jan 2023 13:12:22 +0100
+
+python-securesystemslib (0.23.0-1) unstable; urgency=medium
+
+  * New upstream release includes among other things:
+    - fix race condition in gpg test cleanup function (Closes: #1008349)
+
+ -- Lukas Puehringer <lukas.puehringer@nyu.edu>  Tue, 26 Apr 2022 12:19:30 +0200
+
+python-securesystemslib (0.22.0-1) unstable; urgency=medium
+
+  * New upstream release includes among other things:
+    - bug fix in the Signer abstract base class (#348)
+    - machinery for static type checking with mypy (#361)
+    - type annotations for a few modules (progress tracked in #358)
+    - enhancements in the Signature class (#383, #387)
+
+  * d/control:
+    - bump standards version to 4.6.0.1
+
+ -- Lukas Puehringer <lukas.puehringer@nyu.edu>  Mon, 21 Feb 2022 12:52:17 +0100
+
+python-securesystemslib (0.20.0-1) unstable; urgency=medium
+
+  * New upstream release includes among other things:
+    - a new signing abstraction to facilitate custom implementations,
+    - and a fix for a GnuPG/OpenSSL compatibility issue with OpenPGP EdDSA
+      signatures.
+
+ -- Lukas Puehringer <lukas.puehringer@nyu.edu>  Fri, 26 Feb 2021 13:58:03 +0200
+
+python-securesystemslib (0.18.0-2) unstable; urgency=medium
+
+  Fix misc lintian warnings and other Debian metadata changes:
+
+  * d/watch:
+    - update to latest version 4 (fix older-debian-watch-file-standard)
+    - add missing trailing newline
+  * d/patches/01_use_python3_interpreter_in_tests.diff:
+    - add "Forwarded: not-needed" header field for downstream-only patch
+      (fix patch-not-forwarded-upstream)
+  * d/control:
+    - specify upstream tracking branch for downstream-related changes
+    - use correct section according to package name, i.e. "python"
+      (fix wrong-section-according-to-package-name)
+  * d/upstream/metadata:
+    - add basic metadata file (fix upstream-metadata-file-is-missing)
+  * d/copyright:
+    - add Upstream-Contact field
+    - remove duplicate License field
+    - use lower-maintenance first publication date instead of date range
+  * d/changelog:
+    - amend 0.18.0-1 entry to mention upstream signing key change
+
+ -- Lukas Puehringer <lukas.puehringer@nyu.edu>  Tue, 02 Feb 2021 10:55:52 +0200
+
+python-securesystemslib (0.18.0-1) unstable; urgency=medium
+
+  * New upstream release includes among other things:
+    - an enhanced key generation, export and import interface,
+    - updated documentation of interface functions,
+    - and more and better tests.
+
+  * Update d/control to:
+    - remove obsolete python-dateutil dependency,
+    - bump standards version to 4.5.1,
+    - and compat to 13.
+
+  * Update d/upstream/signing-key.asc
+
+ -- Lukas Puehringer <lukas.puehringer@nyu.edu>  Wed, 09 Dec 2020 08:44:34 +0200
+
+python-securesystemslib (0.16.0-1) unstable; urgency=medium
+
+  * New upstream release that includes i.a.:
+    - New enhanced OpenPGP interface (transferred from in-toto)
+    - New file and directory abstraction
+    - More signature schemes and hashing algorithms
+    - Improved optional/recommended dependency handling
+
+  * Update d/rules to run newly included upstream tests on build
+  * Add d/patches to fix interpreter location issues in tests
+  * Update d/rules
+    - Add required build dependencies for newly included tests
+    - Add recommended dependencies
+    - Change section from devel to utils
+    - Set "Rules-Requires-Root: no" for good practice
+    - Bump Standards-Version
+
+ -- Lukas Puehringer <lukas.puehringer@nyu.edu>  Thu, 13 Aug 2020 14:13:34 +0200
+
+python-securesystemslib (0.11.3-2) unstable; urgency=medium
+
+  * No change source upload to allow migration to bullseye.
+
+ -- Holger Levsen <holger@debian.org>  Sat, 19 Oct 2019 01:30:45 +0200
+
+python-securesystemslib (0.11.3-1) unstable; urgency=low
+
+  * Initial Debian release. (Closes: #934137)
+
+ -- Lukas Puehringer <lukas.puehringer@nyu.edu>  Wed, 07 Aug 2019 05:16:51 -0400

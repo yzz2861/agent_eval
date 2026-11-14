@@ -1,0 +1,23 @@
+# root-level directories
+dist/*
+build/*
+env/*
+
+# global file patterns
+*.log
+*.pyc
+*.session
+*.swo
+*.swp
+*.egg-info
+.coverage
+.tox/*
+tests/htmlcov/*
+.DS_Store
+.python-version
+
+# PyCharm IDE
+.idea/
+
+# Sphinx documentation
+docs/_build/

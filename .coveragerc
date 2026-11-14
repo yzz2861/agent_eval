@@ -1,0 +1,15 @@
+[run]
+branch = True
+
+omit =
+  */python?.?/*
+  */securesystemslib/_vendor/*
+  */tests/*
+  */site-packages/*
+
+[report]
+exclude_lines =
+  pragma: no cover
+  def get_password
+  def __str__
+  if __name__ == .__main__.:

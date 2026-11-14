@@ -1,0 +1,47 @@
+Source: python-securesystemslib
+Section: python
+Priority: optional
+Maintainer: NYU Secure Systems Lab <securesystemslib-dev@googlegroups.com>
+Uploaders:
+ Santiago Torres-Arias <santiago@nyu.edu>,
+ Holger Levsen <holger@debian.org>,
+ Lukas Puehringer <lukas.puehringer@nyu.edu>,
+ Justin Cappos <jcappos@nyu.edu>,
+Build-Depends:
+ dh-python,
+ debhelper-compat (= 13),
+ pybuild-plugin-pyproject,
+ python3-all,
+ python3-hatchling,
+ python3-nacl,
+ python3-cryptography,
+ python3-pykcs11,
+ python3-asn1crypto,
+ softhsm2,
+ gnupg2,
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+Homepage: https://ssl.engineering.nyu.edu
+Vcs-Git: https://github.com/secure-systems-lab/securesystemslib.git -b debian
+Vcs-Browser: https://github.com/secure-systems-lab/securesystemslib/
+
+Package: python3-securesystemslib
+Architecture: all
+Depends:
+  ${python3:Depends},
+  ${misc:Depends},
+Recommends:
+ gnupg2,
+ python3-cryptography,
+ python3-nacl,
+ python3-pykcs11,
+ python3-asn1crypto,
+Description: crypto and schema library for TUF and in-toto
+ securesystemslib provides a high-level interface to cryptographic functions.
+ It supports public-key and other cryptographic algorithms, such as ECDSA,
+ Ed25519, RSA, SHA256, SHA512, etc. and a schema definition and validation
+ framework.
+ .
+ securesystemslib is developed at the Secure Systems Lab of NYU and is used by
+ the Python implementations of The Update Framework (TUF) and the software
+ supply chain integrity framework in-toto.

@@ -1,0 +1,128 @@
+name: CD
+concurrency: cd
+
+on:
+  push:
+    tags:
+      - v*
+
+permissions: {}
+
+jobs:
+  test:
+    name: Test
+    uses: $/.github/workflows/_test.yml
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.workflow_run.head_branch }}
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.x'
+
+      - name: Install build dependency
+        run: python3 -m pip install --constraint requirements-build.txt build
+
+      - name: Build binary wheel and source tarball
+        run: python3 -m build --sdist --wheel --outdir dist/ .
+
+      - name: Store build artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # NOTE: The GitHub release page contains the release artifacts too, but using
+        # GitHub upload/download actions seems robuster: there is no need to compute
+        # download URLs and tampering with artifacts between jobs is more limited.
+        with:
+          name: build-artifacts
+          path: dist
+
+  candidate_release:
+    name: Release candidate on Github for review
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write # to modify GitHub releases
+    outputs:
+      release_id: ${{ steps.gh-release.outputs.result }}
+    steps:
+      - name: Fetch build artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: build-artifacts
+          path: dist
+
+      - id: gh-release
+        name: Publish GitHub release draft
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const fs = require('fs')
+            const res = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: process.env.REF_NAME + '-rc',
+              tag_name: process.env.REF,
+              body: 'Release waiting for review...',
+              draft: true,
+            });
+
+            for (const file of fs.readdirSync('dist/')) {
+              await github.rest.repos.uploadReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: res.data.id,
+                name: file,
+                data: fs.readFileSync('dist/' + file),
+              });
+            }
+            return res.data.id
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF: ${{ github.ref }}
+
+
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    needs: candidate_release
+    environment: release
+    permissions:
+      contents: write # to modify GitHub releases
+      id-token: write # to authenticate as Trusted Publisher to pypi.org
+    steps:
+      - name: Fetch build artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: build-artifacts
+          path: dist
+
+      - name: Publish binary wheel and source tarball on PyPI
+        # Only attempt pypi upload in upstream repository
+        if: github.repository == 'secure-systems-lab/securesystemslib'
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+
+      - name: Finalize GitHub release
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: Number(process.env.RELEASE_ID),
+              name: process.env.REF_NAME,
+              body: 'See [CHANGELOG.md](https://github.com/' +
+                     context.repo.owner + '/' + context.repo.repo +
+                    '/blob/' + process.env.REF_NAME + '/CHANGELOG.md) for details.',
+              draft: false,
+            })
+        env:
+          RELEASE_ID: ${{ needs.candidate_release.outputs.release_id }}
+          REF_NAME: ${{ github.ref_name }}

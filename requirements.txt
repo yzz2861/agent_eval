@@ -1,0 +1,10 @@
+# Requirements for full feature install (includes all optional dependencies).
+#
+# This file together with 'pip-compile' is used to generate a pinned
+# requirements file with all immediate and transitive dependencies.
+#
+# 'requirements-pinned.txt' is updated on GitHub with Dependabot, which
+# triggers CI/CD builds to automatically test against updated dependencies.
+cryptography >= 48.0.0
+keylet
+python-pkcs11
