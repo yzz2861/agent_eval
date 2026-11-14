@@ -7,7 +7,10 @@ from unittest import mock
 
 import pytest
 
+from detect_secrets.__version__ import VERSION
 from detect_secrets.core import baseline
+from detect_secrets.core.potential_secret import PotentialSecret
+from detect_secrets.core.secrets_collection import SecretsCollection
 from detect_secrets.settings import get_settings
 from detect_secrets.util.path import get_relative_path_if_in_cwd
 from testing.mocks import mock_named_temporary_file
@@ -138,3 +141,190 @@ def test_upgrade_succeeds():
 
     assert new_baseline     # assert *something* exists
     assert current_baseline != new_baseline
+
+
+class TestUpdate:
+    SECRET_A = '60b725f10c9c85c70d97880dfe8191b3'
+    SECRET_B = '3b5d5c3712955042212316173ccf37be'
+
+    @staticmethod
+    def _create_collection(*secrets):
+        collection = SecretsCollection()
+        for secret in secrets:
+            collection[secret.filename].add(secret)
+
+        return collection
+
+    @staticmethod
+    def _create_baseline(*secrets):
+        return {
+            'version': VERSION,
+            'results': TestUpdate._create_collection(*secrets).json(),
+        }
+
+    @staticmethod
+    def _get_secret(collection, filename, secret_value):
+        secret_hash = PotentialSecret.hash_secret(secret_value)
+        return next(
+            secret
+            for secret in collection[filename]
+            if secret.secret_hash == secret_hash
+        )
+
+    def test_line_move_keeps_exemption_bound_to_content(self):
+        # The audited false positive moved offsets, and a *different* secret now
+        # sits at the previously exempted line. The exemption must follow the
+        # content hash, not the line number.
+        old_baseline = self._create_baseline(
+            PotentialSecret(
+                'Hex High Entropy String',
+                'file.py',
+                self.SECRET_A,
+                line_number=5,
+                is_secret=False,
+            ),
+        )
+        new_scan = self._create_collection(
+            PotentialSecret(
+                'Hex High Entropy String',
+                'file.py',
+                self.SECRET_A,
+                line_number=9,
+            ),
+            PotentialSecret(
+                'Hex High Entropy String',
+                'file.py',
+                self.SECRET_B,
+                line_number=5,
+            ),
+        )
+
+        updated = baseline.update(new_scan, old_baseline)
+
+        moved_secret = self._get_secret(updated, 'file.py', self.SECRET_A)
+        assert moved_secret.is_secret is False
+        assert moved_secret.line_number == 9
+
+        new_secret = self._get_secret(updated, 'file.py', self.SECRET_B)
+        assert new_secret.is_secret is None
+
+    def test_deleted_file_entries_are_dropped(self):
+        old_baseline = self._create_baseline(
+            PotentialSecret(
+                'Hex High Entropy String',
+                'kept.py',
+                self.SECRET_A,
+                line_number=1,
+                is_secret=False,
+            ),
+            PotentialSecret(
+                'Hex High Entropy String',
+                'deleted.py',
+                self.SECRET_B,
+                line_number=1,
+                is_secret=False,
+            ),
+        )
+        new_scan = self._create_collection(
+            PotentialSecret(
+                'Hex High Entropy String',
+                'kept.py',
+                self.SECRET_A,
+                line_number=1,
+            ),
+        )
+
+        updated = baseline.update(new_scan, old_baseline)
+
+        assert updated.files == {'kept.py'}
+
+    def test_new_secrets_are_not_inherited_as_known(self):
+        old_baseline = self._create_baseline(
+            PotentialSecret(
+                'Hex High Entropy String',
+                'file.py',
+                self.SECRET_A,
+                line_number=1,
+                is_secret=False,
+                is_verified=True,
+            ),
+        )
+        new_scan = self._create_collection(
+            PotentialSecret(
+                'Hex High Entropy String',
+                'file.py',
+                self.SECRET_A,
+                line_number=1,
+            ),
+            PotentialSecret(
+                'Hex High Entropy String',
+                'file.py',
+                self.SECRET_B,
+                line_number=2,
+            ),
+        )
+
+        updated = baseline.update(new_scan, old_baseline)
+
+        known_secret = self._get_secret(updated, 'file.py', self.SECRET_A)
+        assert known_secret.is_secret is False
+        assert known_secret.is_verified is True
+
+        new_secret = self._get_secret(updated, 'file.py', self.SECRET_B)
+        assert new_secret.is_secret is None
+        assert new_secret.is_verified is False
+
+    @pytest.mark.parametrize(
+        'old_label, new_label',
+        (
+            (False, True),
+            (True, False),
+        ),
+    )
+    def test_conflicting_labels_resolve_to_strictest(self, old_label, new_label):
+        old_baseline = self._create_baseline(
+            PotentialSecret(
+                'Hex High Entropy String',
+                'file.py',
+                self.SECRET_A,
+                line_number=1,
+                is_secret=old_label,
+            ),
+        )
+        new_scan = self._create_collection(
+            PotentialSecret(
+                'Hex High Entropy String',
+                'file.py',
+                self.SECRET_A,
+                line_number=1,
+                is_secret=new_label,
+            ),
+        )
+
+        updated = baseline.update(new_scan, old_baseline)
+
+        assert self._get_secret(updated, 'file.py', self.SECRET_A).is_secret is True
+
+    def test_unaudited_old_entries_stay_unaudited(self):
+        old_baseline = self._create_baseline(
+            PotentialSecret(
+                'Hex High Entropy String',
+                'file.py',
+                self.SECRET_A,
+                line_number=1,
+            ),
+        )
+        new_scan = self._create_collection(
+            PotentialSecret(
+                'Hex High Entropy String',
+                'file.py',
+                self.SECRET_A,
+                line_number=3,
+            ),
+        )
+
+        updated = baseline.update(new_scan, old_baseline)
+
+        secret = self._get_secret(updated, 'file.py', self.SECRET_A)
+        assert secret.is_secret is None
+        assert secret.line_number == 3

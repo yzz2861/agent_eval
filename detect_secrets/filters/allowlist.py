@@ -4,13 +4,39 @@ from functools import lru_cache
 from typing import Dict
 from typing import Iterable
 from typing import List
+from typing import Optional
 from typing import Pattern
+from typing import Set
 from typing import Tuple
 
+from ..core.potential_secret import PotentialSecret
+from ..settings import get_plugins
 from ..util.code_snippet import CodeSnippet
+from ..util.inject import call_function_with_arguments
 
 
-def is_line_allowlisted(filename: str, line: str, context: CodeSnippet) -> bool:
+def is_line_allowlisted(
+    filename: str,
+    line: str,
+    context: CodeSnippet,
+    secret: Optional[str] = None,
+) -> bool:
+    """
+    :param secret: if provided, checks whether the allowlist pragma covers this
+        specific candidate, rather than the line in general.
+    """
+    if not _has_allowlist_pragma(filename=filename, line=line, context=context):
+        return False
+
+    return _is_pragma_scoped_to_single_candidate(
+        filename=filename,
+        line=line,
+        context=context,
+        secret=secret,
+    )
+
+
+def _has_allowlist_pragma(filename: str, line: str, context: CodeSnippet) -> bool:
     for payload, regexes in zip(
         [line, context.previous_line],
         _get_allowlist_regexes_for_file(filename),
@@ -20,6 +46,67 @@ def is_line_allowlisted(filename: str, line: str, context: CodeSnippet) -> bool:
                 return True
 
     return False
+
+
+def _is_pragma_scoped_to_single_candidate(
+    filename: str,
+    line: str,
+    context: CodeSnippet,
+    secret: Optional[str],
+) -> bool:
+    """
+    An inline pragma can only cover a single candidate on the same line. If the
+    line carries several distinct candidates, the exemption is ambiguous, and
+    the strictest outcome is applied: nothing on the line is allowlisted.
+    """
+    candidate_hashes = _get_candidate_secret_hashes(
+        filename=filename,
+        line=line,
+        context=context,
+    )
+    if candidate_hashes is None:
+        # Unable to determine the candidates on this line (e.g. no plugins
+        # configured), so fall back to legacy line-level behavior.
+        return True
+
+    if len(candidate_hashes) > 1:
+        return False
+
+    if secret is None:
+        return True
+
+    return PotentialSecret.hash_secret(secret) in candidate_hashes
+
+
+def _get_candidate_secret_hashes(
+    filename: str,
+    line: str,
+    context: CodeSnippet,
+) -> Optional[Set[str]]:
+    """
+    Returns the distinct secret values that plugins identify on this line, or
+    None if they cannot be determined.
+    """
+    try:
+        plugins = get_plugins()
+    except FileNotFoundError:
+        return None
+
+    if not plugins:
+        return None
+
+    output = set()
+    for plugin in plugins:
+        for secret in call_function_with_arguments(
+            plugin.analyze_line,
+            filename=filename,
+            line=line,
+            line_number=0,
+            context=context,
+        ) or set():
+            output.add(secret.secret_hash)
+
+    return output
 
 
 @lru_cache(maxsize=1)

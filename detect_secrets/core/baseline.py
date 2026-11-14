@@ -15,6 +15,7 @@ from ..settings import configure_settings_from_baseline
 from ..settings import get_settings
 from ..util.importlib import import_modules_from_package
 from ..util.semver import Version
+from .potential_secret import PotentialSecret
 from .scan import get_files_to_scan
 from .secrets_collection import SecretsCollection
 
@@ -37,6 +38,68 @@ def create(
     )
 
     return secrets
+
+
+def update(
+    secrets: SecretsCollection,
+    baseline: Dict[str, Any],
+) -> SecretsCollection:
+    """
+    Updates an old baseline with the results of a fresh scan, and returns the
+    new state of the world.
+
+    This applies strict scoping rules, so that exemptions cannot drift onto
+    secrets that they were never audited for:
+
+    1.  Audited labels (e.g. `is_secret`) are bound to the content hash of the
+        secret (within the same file) -- never to line numbers alone. As such,
+        inserting lines into a file will not cause an old exemption to cover a
+        different secret that now sits at the previously exempted offset.
+        Conversely, a known secret that merely moved offsets retains its
+        labels, and its recorded offset is refreshed from the scan.
+    2.  New secrets are never inherited as known items: anything not present
+        in the old baseline stays unaudited.
+    3.  Entries whose files no longer appear in the scan (e.g. deleted files)
+        are dropped.
+    4.  Conflicting labels resolve to the strictest outcome: a secret that was
+        ever marked as a real secret stays marked as one.
+
+    NOTE: This mutates (and reuses) the PotentialSecret objects in `secrets`,
+    much like SecretsCollection.merge.
+    """
+    old_results = SecretsCollection.load_from_baseline(upgrade(baseline))
+
+    output = SecretsCollection(root=secrets.root)
+    for filename in secrets.files:
+        # Exemptions are matched by content hash (and secret type), through
+        # PotentialSecret's equality semantics -- line numbers play no part in
+        # this binding.
+        old_secrets = {
+            secret: secret
+            for secret in old_results.data.get(filename, set())
+        }
+
+        for secret in secrets[filename]:
+            old_secret = old_secrets.get(secret)
+            if old_secret is not None:
+                _merge_audit_labels(secret, old_secret)
+
+            output[filename].add(secret)
+
+    return output
+
+
+def _merge_audit_labels(new_secret: PotentialSecret, old_secret: PotentialSecret) -> None:
+    """Carries over audited labels from a hash-matched old baseline entry."""
+    if new_secret.is_secret is None:
+        # Inherit the old audited label (True/False), or stay unaudited (None).
+        new_secret.is_secret = old_secret.is_secret
+    elif old_secret.is_secret is not None and new_secret.is_secret != old_secret.is_secret:
+        # Conflicting rules resolve to the strictest outcome.
+        new_secret.is_secret = True
+
+    if not new_secret.is_verified:
+        new_secret.is_verified = old_secret.is_verified
 
 
 def load(baseline: Dict[str, Any], filename: str = '') -> SecretsCollection:

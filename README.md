@@ -564,6 +564,10 @@ You can also use:
 API_KEY = 'WillAlsoBeIgnored'
 ```
 
+Note that an inline pragma can only cover a single candidate on the same line. If several
+distinct secrets share one line, the exemption is considered ambiguous and none of them are
+allowlisted -- move the false positive to its own line instead.
+
 This may be a convenient way for you to ignore secrets, without needing to regenerate the entire
 baseline again. If you need to explicitly search for these allowlisted secrets, you can also do:
 
