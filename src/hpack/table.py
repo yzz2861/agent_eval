@@ -1,6 +1,7 @@
 # flake8: noqa
 from collections import deque
 import logging
+import threading
 from typing import Optional
 
 from .exceptions import InvalidTableIndex
@@ -112,6 +113,9 @@ class HeaderTable:
         self._current_size = 0
         self.resized = False
         self.dynamic_entries: deque[tuple[bytes, bytes]] = deque()
+        # Guards every read and mutation of the dynamic table so that concurrent
+        # encoders/decoders never observe a partially evicted table.
+        self._lock = threading.RLock()
 
     def get_by_index(self, index: int) -> tuple[bytes, bytes]:
         """
@@ -126,14 +130,15 @@ class HeaderTable:
         the dynamic table depending on the value of index.
         """
         original_index = index
-        index -= 1
-        if 0 <= index:
-            if index < HeaderTable.STATIC_TABLE_LENGTH:
-                return HeaderTable.STATIC_TABLE[index]
+        with self._lock:
+            index -= 1
+            if 0 <= index:
+                if index < HeaderTable.STATIC_TABLE_LENGTH:
+                    return HeaderTable.STATIC_TABLE[index]
 
-            index -= HeaderTable.STATIC_TABLE_LENGTH
-            if index < len(self.dynamic_entries):
-                return self.dynamic_entries[index]
+                index -= HeaderTable.STATIC_TABLE_LENGTH
+                if index < len(self.dynamic_entries):
+                    return self.dynamic_entries[index]
 
         raise InvalidTableIndex("Invalid table index %d" % original_index)
 
@@ -151,16 +156,26 @@ class HeaderTable:
         We reduce the table size if the entry will make the
         table size greater than maxsize.
         """
-        # We just clear the table if the entry is too big
         size = table_entry_size(name, value)
-        if size > self._maxsize:
-            self.dynamic_entries.clear()
-            self._current_size = 0
-        else:
-            # Add new entry
-            self.dynamic_entries.appendleft((name, value))
-            self._current_size += size
-            self._shrink()
+        with self._lock:
+            # We just clear the table if the entry is too big
+            if size > self._maxsize:
+                self.dynamic_entries.clear()
+                self._current_size = 0
+                return
+
+            # Stage the insertion and every eviction it needs on a private
+            # copy, then commit the resulting state in a single step so a
+            # concurrent reader never sees a partially updated table.
+            candidate = deque(self.dynamic_entries)
+            candidate.appendleft((name, value))
+            candidate_size = self._current_size + size
+            candidate_size = self._evict_to_fit(
+                candidate, candidate_size, self._maxsize,
+            )
+
+            self.dynamic_entries = candidate
+            self._current_size = candidate_size
 
     def search(self, name: bytes, value: bytes) -> Optional[tuple[int, bytes, Optional[bytes]]]:
         """
@@ -174,21 +189,22 @@ class HeaderTable:
         """
         partial = None
 
-        header_name_search_result = HeaderTable.STATIC_TABLE_MAPPING.get(name)
-        if header_name_search_result:
-            index = header_name_search_result[1].get(value)
-            if index is not None:
-                return index, name, value
-            else:
-                partial = (header_name_search_result[0], name, None)
+        with self._lock:
+            header_name_search_result = HeaderTable.STATIC_TABLE_MAPPING.get(name)
+            if header_name_search_result:
+                index = header_name_search_result[1].get(value)
+                if index is not None:
+                    return index, name, value
+                else:
+                    partial = (header_name_search_result[0], name, None)
 
-        offset = HeaderTable.STATIC_TABLE_LENGTH + 1
-        for (i, (n, v)) in enumerate(self.dynamic_entries):
-            if n == name:
-                if v == value:
-                    return i + offset, n, v
-                elif partial is None:
-                    partial = (i + offset, n, None)
+            offset = HeaderTable.STATIC_TABLE_LENGTH + 1
+            for (i, (n, v)) in enumerate(self.dynamic_entries):
+                if n == name:
+                    if v == value:
+                        return i + offset, n, v
+                    elif partial is None:
+                        partial = (i + offset, n, None)
         return partial
 
     @property
@@ -198,26 +214,58 @@ class HeaderTable:
     @maxsize.setter
     def maxsize(self, newmax: int) -> None:
         newmax = int(newmax)
-        log.debug("Resizing header table to %d from %d", newmax, self._maxsize)
-        oldmax = self._maxsize
-        self._maxsize = newmax
-        self.resized = (newmax != oldmax)
-        if newmax <= 0:
-            self.dynamic_entries.clear()
-            self._current_size = 0
-        elif oldmax > newmax:
-            self._shrink()
+        with self._lock:
+            oldmax = self._maxsize
+            log.debug("Resizing header table to %d from %d", newmax, oldmax)
+            self.resized = (newmax != oldmax)
+            if newmax == oldmax:
+                return
+
+            # Stage the whole resize on a private copy. Nothing is mutated
+            # until the post-resize table is fully computed, so a capacity
+            # change either completes entirely or leaves prior state intact.
+            candidate = deque(self.dynamic_entries)
+            candidate_size = self._current_size
+
+            if newmax <= 0:
+                candidate.clear()
+                candidate_size = 0
+            elif oldmax > newmax:
+                candidate_size = self._evict_to_fit(
+                    candidate, candidate_size, newmax,
+                )
+
+            self._maxsize = newmax
+            self.dynamic_entries = candidate
+            self._current_size = candidate_size
 
     def _shrink(self) -> None:
         """
         Shrinks the dynamic table to be at or below maxsize
         """
-        cursize = self._current_size
-        while cursize > self._maxsize:
-            name, value = self.dynamic_entries.pop()
-            cursize -= table_entry_size(name, value)
+        with self._lock:
+            self._current_size = self._evict_to_fit(
+                self.dynamic_entries, self._current_size, self._maxsize,
+            )
+
+    @staticmethod
+    def _evict_to_fit(
+        entries: deque[tuple[bytes, bytes]],
+        current_size: int,
+        maxsize: int,
+    ) -> int:
+        """
+        Evicts entries from the tail of ``entries`` until the table fits
+        ``maxsize`` and returns the resulting size.
+
+        This only touches the state it is given, letting callers stage an
+        entire change before committing it atomically.
+        """
+        while current_size > maxsize and entries:
+            name, value = entries.pop()
+            current_size -= table_entry_size(name, value)
             log.debug("Evicting %s: %s from the header table", name, value)
-        self._current_size = cursize
+        return current_size
 
 
 def _build_static_table_mapping() -> dict[bytes, tuple[int, dict[bytes, int]]]:

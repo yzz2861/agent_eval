@@ -333,9 +333,23 @@ class Encoder:
         # can use the indexed literal.
         index, name, perfect = match
 
-        if perfect is not None:
-            # Indexed representation.
+        if perfect is not None and not (
+            sensitive
+            and index > self.header_table.STATIC_TABLE_LENGTH
+        ):
+            # Indexed representation. A perfect match that points at the
+            # dynamic table is never emitted as an index when the field was
+            # marked sensitive: that would let later requests reuse a value
+            # (e.g. a credential) even after the entry is evicted or the
+            # context changes. Static-table entries carry no per-peer secret
+            # and remain safe to reference by index.
             encoded = self._encode_indexed(index)
+        elif perfect is not None and sensitive:
+            # Sensitive field whose exact value happens to live in the
+            # dynamic table. Emit a fully literal, never-indexed field so no
+            # dynamic index referencing the stored value is produced and the
+            # table is left untouched.
+            encoded = self._encode_literal(name, value, INDEX_NEVER, huffman)
         else:
             # Indexed literal. We are going to add header to the
             # header table unconditionally. It is a future todo to

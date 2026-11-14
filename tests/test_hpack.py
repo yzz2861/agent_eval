@@ -1,4 +1,5 @@
 import itertools
+from collections import deque
 import pytest
 
 from hypothesis import given
@@ -765,6 +766,176 @@ class TestHPACKDecoder:
 
         with pytest.raises(HPACKDecodingError):
             d.decode(data)
+
+
+class TestSensitiveEncodingAndCredentialIsolation:
+    def test_sensitive_three_tuple_is_never_added_to_dynamic_table(self):
+        e = Encoder()
+        token = b'Bearer user-one-token'
+
+        e.encode([('authorization', token, True)], huffman=False)
+
+        assert e.header_table.dynamic_entries == deque()
+        assert e.header_table._current_size == 0
+
+    def test_sensitive_header_tuple_is_never_added_to_dynamic_table(self):
+        e = Encoder()
+        token = b'Bearer user-one-token'
+
+        e.encode([NeverIndexedHeaderTuple(b'authorization', token)], huffman=False)
+
+        assert e.header_table.dynamic_entries == deque()
+        assert e.header_table._current_size == 0
+
+    def test_non_sensitive_header_is_still_indexed(self):
+        e = Encoder()
+        e.encode([('x-custom', 'value')], huffman=False)
+        assert len(e.header_table.dynamic_entries) == 1
+
+    def test_sensitive_field_uses_never_indexed_literal_wire_format(self):
+        e = Encoder()
+        name = b'authorization'
+        value = b'Bearer token'
+
+        out = e.encode([(name, value, True)], huffman=False)
+
+        # Never-indexed representation. With a literal name the prefix byte is
+        # 0x10; here the name matches static-table index 23, so the 4-bit
+        # never-indexed prefix (0x10) carries that index and becomes 0x1f. In
+        # either case the high two bits must not request indexing.
+        assert out[0] & 0xF0 == 0x10
+        assert value in out
+        assert e.header_table.dynamic_entries == deque()
+
+        # A name absent from every table uses a fully literal never-indexed
+        # field, whose first byte is exactly 0x10.
+        literal_out = e.encode([(b'x-unknown', value, True)], huffman=False)
+        assert literal_out[0] == 0x10
+        assert literal_out[1] == len(b'x-unknown')
+        assert e.header_table.dynamic_entries == deque()
+
+    def test_sensitive_field_already_in_dynamic_table_is_not_referenced_by_index(self):
+        # First, an ordinary (non-sensitive) request puts the credential into
+        # the encoder's dynamic table.
+        e = Encoder()
+        name = b'authorization'
+        value = b'Bearer previous-user-token'
+        e.encode([(name, value)], huffman=False)
+        assert len(e.header_table.dynamic_entries) == 1
+        dynamic_index = e.header_table.STATIC_TABLE_LENGTH + 1
+
+        # A later request marks the same field sensitive. The stored value must
+        # not be reused through the dynamic-table index.
+        out = e.encode([(name, value, True)], huffman=False)
+
+        # The indexed representation would start with the high bit set and
+        # encode exactly the dynamic index. It must not appear here.
+        indexed_repr = e._encode_indexed(dynamic_index)
+        assert indexed_repr not in out
+        assert out[0] == 0x10  # never-indexed, literal name
+        # The sensitive request leaves the table exactly as it was.
+        assert e.header_table.dynamic_entries[0] == (name, value)
+        assert len(e.header_table.dynamic_entries) == 1
+
+    def test_credential_does_not_leak_between_consecutive_requests(self):
+        e = Encoder()
+        d = Decoder()
+        # Keep the table tiny so eviction pressure is realistic.
+        e.header_table_size = 128
+
+        user_one = [
+            (':method', 'GET'),
+            ('authorization', 'Bearer user-one', True),
+            ('x-other', 'a' * 40),
+        ]
+        first_block = e.encode(user_one, huffman=False)
+        assert d.decode(first_block, raw=True) == [
+            (b':method', b'GET'),
+            (b'authorization', b'Bearer user-one'),
+            (b'x-other', b'a' * 40),
+        ]
+        # The credential was never stored, even under eviction pressure.
+        assert all(
+            name != b'authorization'
+            for name, _ in e.header_table.dynamic_entries
+        )
+
+        user_two = [
+            (':method', 'GET'),
+            ('authorization', 'Bearer user-two', True),
+            ('x-other', 'b' * 40),
+        ]
+        second_block = e.encode(user_two, huffman=False)
+        decoded = d.decode(second_block, raw=True)
+
+        assert decoded == [
+            (b':method', b'GET'),
+            (b'authorization', b'Bearer user-two'),
+            (b'x-other', b'b' * 40),
+        ]
+        # Neither user's secret may appear in the shared dynamic table.
+        assert all(
+            b'user-one' not in value and b'user-two' not in value
+            for _, value in e.header_table.dynamic_entries
+        )
+
+    def test_sensitive_fields_preserve_header_order(self):
+        e = Encoder()
+        d = Decoder()
+        headers = [
+            (':method', 'GET'),
+            ('authorization', 'Bearer x', True),
+            ('x-a', '1'),
+            ('cookie', 'session=abc', True),
+            ('x-b', '2'),
+        ]
+        out = e.encode(headers, huffman=False)
+        assert d.decode(out, raw=True) == [
+            (b':method', b'GET'),
+            (b'authorization', b'Bearer x'),
+            (b'x-a', b'1'),
+            (b'cookie', b'session=abc'),
+            (b'x-b', b'2'),
+        ]
+
+    def test_decoder_accepts_never_indexed_field_and_does_not_index_it(self):
+        d = Decoder()
+        data = b'\x10\rauthorization\x0cbearer-token'
+        headers = d.decode(data, raw=True)
+        assert headers == [(b'authorization', b'bearer-token')]
+        assert isinstance(headers[0], NeverIndexedHeaderTuple)
+        assert d.header_table.dynamic_entries == deque()
+
+    def test_decoder_accepts_without_indexing_field_and_does_not_index_it(self):
+        d = Decoder()
+        # Literal without indexing (0x00), indexed name ':path' (index 4).
+        data = b'\x04\x0c/sample/path'
+        headers = d.decode(data, raw=True)
+        assert headers == [(b':path', b'/sample/path')]
+        assert d.header_table.dynamic_entries == deque()
+
+    def test_decoder_unknown_dynamic_index_is_not_guessed(self):
+        d = Decoder()
+        # Index well beyond both static and (empty) dynamic tables.
+        invalid_index = d.header_table.STATIC_TABLE_LENGTH + 5
+        data = bytes([0x80 | invalid_index])
+        with pytest.raises(InvalidTableIndex):
+            d.decode(data)
+        # The table stays empty: nothing was synthesised as a "recent" entry.
+        assert d.header_table.dynamic_entries == deque()
+
+    def test_decoder_unknown_index_in_literal_name_is_rejected(self):
+        d = Decoder()
+        # Literal with incremental indexing (0x40), indexed name in the 6-bit
+        # prefix. Pick an index that still fits in one byte (so the varint is
+        # well-formed) but beyond both static and dynamic table ranges.
+        invalid_index = d.header_table.STATIC_TABLE_LENGTH + 1
+        assert invalid_index < 0x3F
+        first = 0x40 | invalid_index
+        data = bytes([first]) + b'\x03abc'
+        with pytest.raises(InvalidTableIndex):
+            d.decode(data)
+        assert d.header_table.dynamic_entries == deque()
 
 
 class TestDictToIterable:
