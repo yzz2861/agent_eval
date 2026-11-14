@@ -30,13 +30,15 @@ class FullLoader(Reader, Scanner, Parser, Composer, FullConstructor, Resolver):
 
 class SafeLoader(Reader, Scanner, Parser, Composer, SafeConstructor, Resolver):
 
-    def __init__(self, stream):
+    def __init__(self, stream, duplicate_key_policy=None):
         Reader.__init__(self, stream)
         Scanner.__init__(self)
         Parser.__init__(self)
         Composer.__init__(self)
         SafeConstructor.__init__(self)
         Resolver.__init__(self)
+        if duplicate_key_policy is not None:
+            self.duplicate_key_policy = duplicate_key_policy
 
 class Loader(Reader, Scanner, Parser, Composer, Constructor, Resolver):
 

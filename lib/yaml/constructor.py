@@ -170,6 +170,14 @@ class BaseConstructor:
 
 class SafeConstructor(BaseConstructor):
 
+    # Policy for duplicate keys in mappings constructed through the
+    # SafeLoader path:
+    #   'error'  - reject duplicate keys (default)
+    #   'strict' - reject and report the line/column of both occurrences
+    #   'allow'  - legacy behavior, the last value wins; must be enabled
+    #              explicitly
+    duplicate_key_policy = 'error'
+
     def construct_scalar(self, node):
         if isinstance(node, MappingNode):
             for key_node, value_node in node.value:
@@ -179,7 +187,7 @@ class SafeConstructor(BaseConstructor):
 
     def flatten_mapping(self, node):
         merge = []
-        merge_key_ids = set()  # anchor referent node objects should have reference equality here
+        merge_keys = set()
         index = 0
         while index < len(node.value):
             key_node, value_node = node.value[index]
@@ -188,8 +196,8 @@ class SafeConstructor(BaseConstructor):
                 if isinstance(value_node, MappingNode):
                     self.flatten_mapping(value_node)
                     for pair in value_node.value:
-                        if (key_id := id(pair[0].value)) not in merge_key_ids:
-                            merge_key_ids.add(key_id)
+                        if (merge_key := self.merge_key_identity(pair[0])) not in merge_keys:
+                            merge_keys.add(merge_key)
                             merge.append(pair)
                 elif isinstance(value_node, SequenceNode):
                     for subnode in value_node.value:
@@ -200,8 +208,8 @@ class SafeConstructor(BaseConstructor):
                                     % subnode.id, subnode.start_mark)
                         self.flatten_mapping(subnode)
                         for pair in subnode.value:
-                            if (key_id := id(pair[0].value)) not in merge_key_ids:
-                                merge_key_ids.add(key_id)
+                            if (merge_key := self.merge_key_identity(pair[0])) not in merge_keys:
+                                merge_keys.add(merge_key)
                                 merge.append(pair)
                 else:
                     raise ConstructorError("while constructing a mapping", node.start_mark,
@@ -215,10 +223,63 @@ class SafeConstructor(BaseConstructor):
         if merge:
             node.value = merge + node.value
 
+    @staticmethod
+    def merge_key_identity(key_node):
+        # Merged mappings keep the first occurrence of a key; scalar keys
+        # are compared by their resolved tag and value so that the same
+        # key merged through different anchors (or repeated aliases of one
+        # anchor) is expanded only once.
+        if isinstance(key_node, ScalarNode):
+            return (key_node.tag, key_node.value)
+        return id(key_node)
+
     def construct_mapping(self, node, deep=False):
         if isinstance(node, MappingNode):
             self.flatten_mapping(node)
+            self.check_duplicate_keys(node)
         return super().construct_mapping(node, deep=deep)
+
+    def check_duplicate_keys(self, node):
+        policy = self.duplicate_key_policy
+        if policy == 'allow':
+            return
+        if policy not in ('error', 'strict'):
+            raise ConstructorError(None, None,
+                    "unknown duplicate key policy %r" % (policy,),
+                    node.start_mark)
+        seen = {}
+        for key_node, value_node in node.value:
+            key = self.construct_object(key_node)
+            if not isinstance(key, collections.abc.Hashable):
+                # Unhashable keys are reported by the base constructor.
+                continue
+            # Compare keys by their constructed YAML type and value, not by
+            # their source text (e.g. 0x10 and 16 are the same int key,
+            # while 1 and "1" are different keys).
+            marker = (type(key), key)
+            if marker in seen:
+                first_key_node = seen[marker]
+                if policy == 'strict':
+                    first_mark = first_key_node.start_mark
+                    problem = ("found duplicate key %s "
+                            "(first occurrence at line %d, column %d)"
+                            % (self.short_key_repr(key),
+                                first_mark.line+1, first_mark.column+1))
+                else:
+                    problem = "found duplicate key %s" \
+                            % self.short_key_repr(key)
+                raise ConstructorError("while constructing a mapping",
+                        node.start_mark, problem, key_node.start_mark)
+            seen[marker] = key_node
+
+    @staticmethod
+    def short_key_repr(key, limit=32):
+        # Never embed a full key (which may be a secret or maliciously
+        # long) into an exception message.
+        text = repr(key)
+        if len(text) > limit:
+            text = text[:limit-3] + '...'
+        return text
 
     def construct_yaml_null(self, node):
         self.construct_scalar(node)
@@ -714,6 +775,11 @@ FullConstructor.add_multi_constructor(
     FullConstructor.construct_python_name)
 
 class UnsafeConstructor(FullConstructor):
+
+    # The unsafe Loader/UnsafeLoader path keeps the legacy "last value
+    # wins" behavior for duplicate keys; duplicate key rejection applies
+    # to the SafeLoader/FullLoader path.
+    duplicate_key_policy = 'allow'
 
     def find_python_module(self, name, mark):
         return super(UnsafeConstructor, self).find_python_module(name, mark, unsafe=True)
