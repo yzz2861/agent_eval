@@ -73,6 +73,51 @@ METRICS_MANDATORY = [
     "SA",
 ]
 
+# CVSS4 metric groups following the specification structure. They are used for
+# dependency checks, inheritance of undefined values, and JSON output.
+METRICS_THREAT = ["E"]
+
+METRICS_ENVIRONMENTAL_REQUIREMENTS = ["CR", "IR", "AR"]
+
+METRICS_MODIFIED = [
+    "MAV",
+    "MAC",
+    "MAT",
+    "MPR",
+    "MUI",
+    "MVC",
+    "MVI",
+    "MVA",
+    "MSC",
+    "MSI",
+    "MSA",
+]
+
+METRICS_ENVIRONMENTAL = METRICS_ENVIRONMENTAL_REQUIREMENTS + METRICS_MODIFIED
+
+METRICS_SUPPLEMENTAL = ["S", "AU", "R", "V", "RE", "U"]
+
+# Each modified (environmental) metric depends on its base counterpart. A
+# modified metric which is not set inherits the value of the metric it depends
+# on. The order of this mapping is the fixed order in which inheritance is
+# resolved, so the resulting score does not depend on the order of fields in
+# the input vector.
+METRICS_DEPENDENCIES = OrderedDict(
+    [
+        ("MAV", "AV"),
+        ("MAC", "AC"),
+        ("MAT", "AT"),
+        ("MPR", "PR"),
+        ("MUI", "UI"),
+        ("MVC", "VC"),
+        ("MVI", "VI"),
+        ("MVA", "VA"),
+        ("MSC", "SC"),
+        ("MSI", "SI"),
+        ("MSA", "SA"),
+    ]
+)
+
 METRICS_ABBREVIATIONS = OrderedDict(
     [
         ("AV", "Attack Vector"),

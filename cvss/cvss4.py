@@ -43,14 +43,18 @@ from .constants4 import (
     EPSILON,
     MAX_COMPOSED,
     MAX_SEVERITY,
-    METRICS,
     METRICS_ABBREVIATIONS,
     METRICS_ABBREVIATIONS_JSON,
+    METRICS_DEPENDENCIES,
+    METRICS_ENVIRONMENTAL,
     METRICS_MANDATORY,
+    METRICS_SUPPLEMENTAL,
+    METRICS_THREAT,
     METRICS_VALUE_NAMES,
     OrderedDict,
 )
 from .exceptions import (
+    CVSS4DependencyError,
     CVSS4MalformedError,
     CVSS4MandatoryError,
     CVSS4RHMalformedError,
@@ -91,6 +95,7 @@ class CVSS4(object):
         self.severity = None
 
         self.parse_vector()
+        self.check_dependencies()
         self.check_mandatory()
         self.add_missing_optional()
         self.compute_base_score()
@@ -150,28 +155,46 @@ class CVSS4(object):
         if missing:
             raise CVSS4MandatoryError('Missing mandatory metrics "{0}"'.format(", ".join(missing)))
 
+    def check_dependencies(self):
+        """
+        Checks if dependencies of modified metrics are satisfied. Every modified
+        (environmental) metric depends on its base counterpart, so a modified
+        metric which is explicitly set requires the metric it depends on to be
+        defined as well. Illegal combinations are rejected here instead of
+        silently falling back to default values.
+
+        Raises:
+            CVSS4DependencyError: if a modified metric is set, but the metric it
+                                  depends on is not defined
+        """
+        for modified_metric, base_metric in METRICS_DEPENDENCIES.items():
+            modified_value = self.metrics.get(modified_metric)
+            if modified_value is None or modified_value == "X":
+                continue
+            if self.metrics.get(base_metric) is None:
+                raise CVSS4DependencyError(
+                    'Metric "{0}" ("{1}") depends on metric "{2}" ("{3}") which is '
+                    "not defined".format(
+                        modified_metric,
+                        METRICS_ABBREVIATIONS[modified_metric],
+                        base_metric,
+                        METRICS_ABBREVIATIONS[base_metric],
+                    )
+                )
+
     def add_missing_optional(self):
         """
-        Adds missing optional parameters, so they match the mandatory ones. Original metrics are
-        also stored, as they may be used for printing back the minimal vector.
+        Adds missing optional parameters. Modified metrics which are not set inherit the already
+        defined value of the base metric they depend on. Inheritance is resolved in the fixed
+        order given by METRICS_DEPENDENCIES, so the resulting score does not depend on the order
+        of fields in the input vector. Original metrics are also stored, as they may be used for
+        printing back the minimal vector.
         """
         self.original_metrics = copy.copy(self.metrics)
 
-        for abbreviation in [
-            "MAV",
-            "MAC",
-            "MAT",
-            "MPR",
-            "MUI",
-            "MVC",
-            "MVI",
-            "MVA",
-            "MSC",
-            "MSI",
-            "MSA",
-        ]:
-            if abbreviation not in self.metrics or self.metrics[abbreviation] == "X":
-                self.metrics[abbreviation] = self.metrics[abbreviation[1:]]
+        for modified_metric, base_metric in METRICS_DEPENDENCIES.items():
+            if modified_metric not in self.metrics or self.metrics[modified_metric] == "X":
+                self.metrics[modified_metric] = self.metrics[base_metric]
 
         for abbreviation in [
             "S",
@@ -639,6 +662,16 @@ class CVSS4(object):
         result = METRICS_VALUE_NAMES[abbreviation][string_value]
         return result
 
+    def get_original_value_description(self, abbreviation):
+        """
+        Gets textual description of specific metric specified by its abbreviation, based on the
+        original selection. Metrics which were not set in the vector are reported as
+        "Not Defined" instead of reporting the values they inherited for scoring.
+        """
+        string_value = self.original_metrics.get(abbreviation, "X")
+        result = METRICS_VALUE_NAMES[abbreviation][string_value]
+        return result
+
     def compute_severity(self):
         """
         Returns the severity based on score.
@@ -692,6 +725,10 @@ class CVSS4(object):
 
         Serialize a `cvss` instance to JSON with:
 
+        Metric values reflect the original selections made in the vector, so optional metrics
+        which were not set are reported as "NOT_DEFINED" and a round-trip through the JSON
+        representation preserves the original vector.
+
         json.dumps(cvss.as_json())
 
         Or get sorted JSON in an OrderedDict with:
@@ -712,17 +749,29 @@ class CVSS4(object):
 
         def add_metric_to_data(metric):
             k = METRICS_ABBREVIATIONS_JSON[metric]
-            data[k] = us(self.get_value_description(metric))
+            data[k] = us(self.get_original_value_description(metric))
 
         data = {
             "version": "4",
             "vectorString": self.vector,
         }
 
-        for metric in METRICS:
+        for metric in METRICS_MANDATORY:
             add_metric_to_data(metric)
         data["baseScore"] = float(self.base_score)
         data["baseSeverity"] = self.severity
+
+        if not minimal or any(metric in self.original_metrics for metric in METRICS_THREAT):
+            for metric in METRICS_THREAT:
+                add_metric_to_data(metric)
+
+        if not minimal or any(metric in self.original_metrics for metric in METRICS_ENVIRONMENTAL):
+            for metric in METRICS_ENVIRONMENTAL:
+                add_metric_to_data(metric)
+
+        if not minimal or any(metric in self.original_metrics for metric in METRICS_SUPPLEMENTAL):
+            for metric in METRICS_SUPPLEMENTAL:
+                add_metric_to_data(metric)
 
         if sort:
             data = OrderedDict(sorted(data.items()))

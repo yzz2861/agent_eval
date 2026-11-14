@@ -7,7 +7,9 @@ sys.path.insert(0, path.dirname(path.dirname(path.abspath(__file__))))
 
 from cvss.cvss4 import CVSS4
 from cvss.exceptions import (
+    CVSS4DependencyError,
     CVSS4MalformedError,
+    CVSS4MandatoryError,
     CVSS4RHMalformedError,
     CVSS4RHScoreDoesNotMatch,
 )
@@ -257,6 +259,165 @@ class TestCVSS4(unittest.TestCase):
             "MVA:N/MSC:N/MSI:N/MSA:N/S:P/AU:Y/R:I/V:C/RE:H/U:Red"
         )
         self.assertEqual(CVSS4(v).clean_vector(), v, "Invalid CVSS4 metric field order")
+    def test_modified_metric_dependencies(self):
+        """
+        Modified (environmental) metrics depend on their base counterparts. Setting a
+        modified metric without the metric it depends on must raise an error which
+        names both metrics, instead of silently falling back to default values.
+        """
+        # MSI depends on SI
+        v = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:N/SC:N/SA:N/MSI:H"
+        error = ""
+        try:
+            CVSS4(v)
+        except CVSS4DependencyError as e:
+            error = str(e)
+        self.assertIn("MSI", error)
+        self.assertIn("SI", error)
+
+        # MSC depends on SC
+        v = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:N/SI:N/SA:N/MSC:H"
+        error = ""
+        try:
+            CVSS4(v)
+        except CVSS4DependencyError as e:
+            error = str(e)
+        self.assertIn("MSC", error)
+        self.assertIn("SC", error)
+
+        # MSA depends on SA
+        v = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:N/SC:N/SI:N/MSA:S"
+        error = ""
+        try:
+            CVSS4(v)
+        except CVSS4DependencyError as e:
+            error = str(e)
+        self.assertIn("MSA", error)
+        self.assertIn("SA", error)
+
+        # MAV depends on AV
+        v = "CVSS:4.0/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:N/SC:N/SI:N/SA:N/MAV:N"
+        error = ""
+        try:
+            CVSS4(v)
+        except CVSS4DependencyError as e:
+            error = str(e)
+        self.assertIn("MAV", error)
+        self.assertIn("AV", error)
+
+        # Dependency errors are malformed vectors
+        v = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:N/SC:N/SA:N/MSI:H"
+        self.assertRaises(CVSS4MalformedError, CVSS4, v)
+
+        # Modified metric explicitly set to X is not defined, so it does not
+        # require its dependency and falls back to the mandatory check
+        v = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:N/SC:N/SA:N/MSI:X"
+        self.assertRaises(CVSS4MandatoryError, CVSS4, v)
+
+    def test_modified_metric_inheritance(self):
+        """
+        Modified metrics which are not set inherit the defined value of the metric
+        they depend on, so the score is the same whether the modified metric is
+        missing, set to X, or set to the same value as its dependency.
+        """
+        base = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H"
+        inherited = CVSS4(base)
+        explicit_x = CVSS4(base + "/MSI:X")
+        explicit_same = CVSS4(base + "/MSI:H")
+        explicit_other = CVSS4(base + "/MAV:P")
+        self.assertEqual(inherited.base_score, explicit_x.base_score)
+        self.assertEqual(inherited.base_score, explicit_same.base_score)
+        self.assertNotEqual(inherited.base_score, explicit_other.base_score)
+
+    def test_scoring_order_stable(self):
+        """
+        The score and the cleaned vector must not depend on the order of fields in
+        the input vector.
+        """
+        v_ordered = (
+            "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H/"
+            "E:P/MSI:S"
+        )
+        v_shuffled = (
+            "CVSS:4.0/MSI:S/E:P/SA:H/SI:H/SC:H/VA:H/VI:H/VC:H/UI:N/PR:N/AT:N/"
+            "AC:L/AV:N"
+        )
+        ordered = CVSS4(v_ordered)
+        shuffled = CVSS4(v_shuffled)
+        self.assertEqual(ordered.base_score, shuffled.base_score)
+        self.assertEqual(ordered.clean_vector(), shuffled.clean_vector())
+        self.assertEqual(ordered, shuffled)
+
+    def test_base_threat_environmental_combinations(self):
+        """
+        Scores and JSON output for base, base+threat, base+environmental, and
+        base+threat+environmental metric combinations.
+        """
+        base = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H"
+
+        # Base metrics only
+        c = CVSS4(base)
+        self.assertEqual(c.base_score, 10.0)
+        self.assertEqual(c.severity, "Critical")
+        json_data = c.as_json(minimal=True)
+        self.assertIn("attackVector", json_data)
+        self.assertNotIn("exploitMaturity", json_data)
+        self.assertNotIn("modifiedAttackVector", json_data)
+        self.assertNotIn("safety", json_data)
+
+        # Base + threat
+        c = CVSS4(base + "/E:U")
+        self.assertEqual(c.base_score, 9.1)
+        json_data = c.as_json(minimal=True)
+        self.assertEqual(json_data["exploitMaturity"], "UNREPORTED")
+        self.assertNotIn("modifiedAttackVector", json_data)
+
+        # Base + environmental
+        c = CVSS4(base + "/CR:L/IR:L/AR:L/MVC:L/MVI:L/MVA:L")
+        self.assertEqual(c.base_score, 7.9)
+        json_data = c.as_json(minimal=True)
+        self.assertEqual(json_data["confidentialityRequirements"], "LOW")
+        self.assertEqual(json_data["modifiedVulnerableSystemImpactConfidentiality"], "LOW")
+        self.assertNotIn("exploitMaturity", json_data)
+
+        # Base + threat + environmental (+ supplemental, which does not score)
+        v = base + "/E:U/CR:L/IR:L/AR:L/MVC:L/MVI:L/MVA:L"
+        c = CVSS4(v)
+        self.assertEqual(c.base_score, 5.0)
+        self.assertEqual(c.severity, "Medium")
+        c_supplemental = CVSS4(v + "/S:P/AU:Y/R:A/V:C/RE:H/U:Red")
+        self.assertEqual(c_supplemental.base_score, 5.0)
+        json_data = c_supplemental.as_json(minimal=True)
+        self.assertEqual(json_data["exploitMaturity"], "UNREPORTED")
+        self.assertEqual(json_data["safety"], "PRESENT")
+
+    def test_json_round_trip_preserves_original_selection(self):
+        """
+        as_json() reports the original selections (unset optional metrics are
+        NOT_DEFINED, not the values they inherited for scoring) and a round-trip
+        through the JSON vector string preserves the original vector.
+        """
+        v = (
+            "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H/"
+            "E:P/MSI:S"
+        )
+        c = CVSS4(v)
+        json_data = c.as_json()
+        self.assertEqual(json_data["vectorString"], v)
+        self.assertEqual(json_data["modifiedSubsequentSystemImpactIntegrity"], "SAFETY")
+        self.assertEqual(json_data["modifiedSubsequentSystemImpactConfidentiality"], "NOT_DEFINED")
+        self.assertEqual(json_data["modifiedAttackVector"], "NOT_DEFINED")
+        self.assertEqual(json_data["exploitMaturity"], "POC")
+
+        restored = CVSS4(json_data["vectorString"])
+        self.assertEqual(c, restored)
+        self.assertEqual(c.base_score, restored.base_score)
+        self.assertEqual(c.as_json(), restored.as_json())
+
+        # Round-trip through the cleaned (minimal) vector is also stable
+        cleaned = CVSS4(c.clean_vector())
+        self.assertEqual(c, cleaned)
+        self.assertEqual(c.base_score, cleaned.base_score)
 
 
 if __name__ == "__main__":
