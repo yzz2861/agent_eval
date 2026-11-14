@@ -1,0 +1,10 @@
+build/
+dist/
+*.pyc
+*.pyo
+cscope.out
+.tox
+.coverage
+*.egg-info
+env
+*.swp
