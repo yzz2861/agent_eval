@@ -20,6 +20,18 @@ Bug fixes:
 
 * The sanitizer now permits ``<summary>`` tags. It used to allow ``<details>``
   already. (#423)
+* The sanitizer now bases all decisions on the parsed
+  (namespace, localName, attributes) of each token and shares the
+  foreign-content policy tables with the parser, so its output is a fixed
+  point of parsing: serializing and re-parsing sanitized content yields the
+  same safe tree (no mutation XSS).  HTML integration points
+  (``foreignObject``, ``annotation-xml``), raw-text elements, table
+  foster-parenting contexts and HTML auto-closing rules are handled
+  contextually; event handler attributes, dangerous URL schemes (including
+  SVG animation and non-local ``use`` references) are removed; dropped or
+  escaped items are recorded in an audit log.  The serializer now also
+  preserves namespace prefixes (e.g. ``xlink:href``) on attributes instead
+  of dropping them.
 
 1.1
 ~~~

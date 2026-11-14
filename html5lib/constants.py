@@ -437,6 +437,23 @@ mathmlTextIntegrationPointElements = frozenset([
     (namespaces["mathml"], "mtext")
 ])
 
+# Start tag names which make the HTML parser "break out" of foreign
+# content (SVG/MathML) and continue parsing in HTML content.  This is the
+# single policy table shared by the tree builder (html5lib.html5parser)
+# and the sanitizer (html5lib.filters.sanitizer): both must agree on how
+# the serialized output of the sanitizer will be re-parsed, otherwise the
+# re-parsed tree mutates (mutation XSS).
+foreignContentBreakoutElements = frozenset([
+    "b", "big", "blockquote", "body", "br",
+    "center", "code", "dd", "div", "dl", "dt",
+    "em", "embed", "h1", "h2", "h3",
+    "h4", "h5", "h6", "head", "hr", "i", "img",
+    "li", "listing", "menu", "meta", "nobr",
+    "ol", "p", "pre", "ruby", "s", "small",
+    "span", "strong", "strike", "sub", "sup",
+    "table", "tt", "u", "ul", "var"
+])
+
 adjustSVGAttributes = {
     "attributename": "attributeName",
     "attributetype": "attributeType",

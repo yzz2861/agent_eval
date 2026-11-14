@@ -7,6 +7,7 @@ from codecs import register_error, xmlcharrefreplace_errors
 
 from .constants import voidElements, booleanAttributes, spaceCharacters
 from .constants import rcdataElements, entities, xmlEntities
+from .constants import unadjustForeignAttributes, prefixes
 from . import treewalkers, _utils
 from xml.sax.saxutils import escape
 
@@ -298,9 +299,16 @@ class HTMLSerializer(object):
                     in_cdata = True
                 elif in_cdata:
                     self.serializeError("Unexpected child element of a CDATA element")
-                for (_, attr_name), attr_value in token["data"].items():
-                    # TODO: Add namespace support here
-                    k = attr_name
+                for (attr_namespace, attr_name), attr_value in token["data"].items():
+                    if attr_namespace is None:
+                        k = attr_name
+                    elif (attr_namespace, attr_name) in unadjustForeignAttributes:
+                        # e.g. xlink:href, xml:lang, xmlns
+                        k = unadjustForeignAttributes[(attr_namespace, attr_name)]
+                    elif attr_namespace in prefixes:
+                        k = "%s:%s" % (prefixes[attr_namespace], attr_name)
+                    else:
+                        k = attr_name
                     v = attr_value
                     yield self.encodeStrict(' ')
 

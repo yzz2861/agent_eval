@@ -14,6 +14,7 @@ from .constants import (
     tokenTypes,
     namespaces,
     htmlIntegrationPointElements, mathmlTextIntegrationPointElements,
+    foreignContentBreakoutElements,
     adjustForeignAttributes as adjustForeignAttributesMap,
     adjustMathMLAttributes, adjustSVGAttributes,
     E,
@@ -2416,14 +2417,9 @@ class InSelectInTablePhase(Phase):
 class InForeignContentPhase(Phase):
     __slots__ = tuple()
 
-    breakoutElements = frozenset(["b", "big", "blockquote", "body", "br",
-                                  "center", "code", "dd", "div", "dl", "dt",
-                                  "em", "embed", "h1", "h2", "h3",
-                                  "h4", "h5", "h6", "head", "hr", "i", "img",
-                                  "li", "listing", "menu", "meta", "nobr",
-                                  "ol", "p", "pre", "ruby", "s", "small",
-                                  "span", "strong", "strike", "sub", "sup",
-                                  "table", "tt", "u", "ul", "var"])
+    # Shared with html5lib.filters.sanitizer so that both agree on which
+    # elements break out of foreign content when output is re-parsed.
+    breakoutElements = foreignContentBreakoutElements
 
     def adjustSVGTagNames(self, token):
         replacements = {"altglyph": "altGlyph",

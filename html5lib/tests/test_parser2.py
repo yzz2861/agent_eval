@@ -91,3 +91,11 @@ def test_self_closing_col():
     parser = HTMLParser()
     parser.parseFragment('<table><colgroup><col /></colgroup></table>')
     assert not parser.errors
+
+
+def test_foreign_content_policy_table_is_shared():
+    # the parser and the sanitizer must agree on which elements break out
+    # of foreign content, otherwise sanitized output mutates on re-parse
+    from html5lib.constants import foreignContentBreakoutElements
+    from html5lib.html5parser import InForeignContentPhase
+    assert InForeignContentPhase.breakoutElements is foreignContentBreakoutElements
