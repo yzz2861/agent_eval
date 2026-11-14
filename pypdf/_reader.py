@@ -566,6 +566,15 @@ class PdfReader(PdfDocCommon):
         if key in self.resolved_objects:
             return retval
 
+        # An explicit free entry in the newest revision mentioning the object
+        # means it was deleted. This must win even when the same object still
+        # exists physically in an older revision or an object stream; a mere
+        # absence of an entry is not treated as a deletion.
+        if self.xref_free_entry.get(indirect_reference.generation, {}).get(
+            indirect_reference.idnum, False
+        ):
+            return NullObject()
+
         if (
             indirect_reference.generation == 0
             and indirect_reference.idnum in self.xref_objStm
@@ -575,10 +584,6 @@ class PdfReader(PdfDocCommon):
             indirect_reference.generation in self.xref
             and indirect_reference.idnum in self.xref[indirect_reference.generation]
         ):
-            if self.xref_free_entry.get(indirect_reference.generation, {}).get(
-                indirect_reference.idnum, False
-            ):
-                return NullObject()
             start = self.xref[indirect_reference.generation][indirect_reference.idnum]
             self.stream.seek(start, 0)
             try:
@@ -832,26 +837,45 @@ class PdfReader(PdfDocCommon):
             stream.seek(loc, 0)  # return to where it was
 
         # remove wrong objects (not pointing to correct structures) - cf #2326
-        if not self.strict:
-            loc = stream.tell()
-            for gen, xref_entry in self.xref.items():
-                if gen == 65535:
+        self._audit_xref_offsets(stream)
+
+    def _audit_xref_offsets(self, stream: StreamType) -> None:
+        """
+        Check every in-use cross-reference offset against the object header.
+
+        A valid offset must land on the matching ``<id> <generation> obj``
+        header (optional whitespace and comments aside). Offsets pointing at
+        blank space, comments only, or an object whose header does not match
+        are reported deterministically with the offending chain offset and
+        dropped in non-strict mode so lazy resolution cannot read the wrong
+        object.
+        """
+        if self.strict:
+            return
+        loc = stream.tell()
+        for gen, xref_entry in self.xref.items():
+            if gen == 65535:
+                continue
+            for xref_id in list(xref_entry.keys()):
+                offset = xref_entry[xref_id]
+                stream.seek(offset, 0)
+                try:
+                    actual_id, actual_generation = self.read_object_header(stream)
+                except ValueError:
+                    actual_id = -1
+                    actual_generation = -1
+                if actual_id == xref_id and actual_generation == gen:
                     continue
-                ids = list(xref_entry.keys())
-                for xref_id in ids:
-                    stream.seek(xref_entry[xref_id], 0)
-                    try:
-                        self.read_object_header(stream)
-                    except ValueError:
-                        logger_warning(
-                            "Ignoring wrong pointing object %(id)d %(gen)d (offset %(offset)d)",
-                            source=__name__,
-                            id=xref_id,
-                            gen=gen,
-                            offset=xref_entry[xref_id],
-                        )
-                        del xref_entry[xref_id]  # we can delete the id, we are parsing ids
-            stream.seek(loc, 0)  # return to where it was
+                logger_warning(
+                    "Ignoring wrong pointing object %(id)d %(gen)d (offset %(offset)d)",
+                    source=__name__,
+                    id=xref_id,
+                    gen=gen,
+                    offset=offset,
+                )
+                del xref_entry[xref_id]  # we can delete the id, we are parsing ids
+                self.xref_objStm.pop(xref_id, None)
+        stream.seek(loc, 0)  # return to where it was
 
     def _basic_validation(self, stream: StreamType) -> None:
         """Ensure the stream is valid and not empty."""
@@ -1155,23 +1179,21 @@ class PdfReader(PdfDocCommon):
                 if generation not in self.xref:
                     self.xref[generation] = {}
                     self.xref_free_entry[generation] = {}
-                if num in self.xref[generation]:
-                    # It really seems like we should allow the last
-                    # xref table in the file to override previous
-                    # ones. Since we read the file backwards, assume
-                    # any existing key is already set correctly.
+                if 65535 not in self.xref_free_entry:
+                    self.xref_free_entry[65535] = {}
+                is_free = entry_type_b == b"f"
+                already_known = num in self.xref_free_entry.get(generation, {})
+                if already_known:
+                    # The chain is read from newest revision to oldest. A
+                    # newer entry always wins: never let an older in-use
+                    # entry resurrect an object that a newer free entry
+                    # deleted, and never overwrite a newer offset.
                     pass
                 else:
-                    if entry_type_b == b"n":
+                    if not is_free:
                         self.xref[generation][num] = offset
                     try:
-                        self.xref_free_entry[generation][num] = entry_type_b == b"f"
-                    except MemoryError:  # pragma: no cover  # TODO: BLE001
-                        raise
-                    except Exception:
-                        pass
-                    try:
-                        self.xref_free_entry[65535][num] = entry_type_b == b"f"
+                        self.xref_free_entry[generation][num] = is_free
                     except MemoryError:  # pragma: no cover  # TODO: BLE001
                         raise
                     except Exception:
@@ -1213,17 +1235,20 @@ class PdfReader(PdfDocCommon):
         self.xref_objStm = {}
         self._xref_stream_entry_count = 0
         self.trailer = DictionaryObject()
+        # The cross-reference sections form a directed update chain: the
+        # final startxref points at the newest section and every /Prev only
+        # walks backwards towards the head of the file. Track the visited
+        # offsets so a self-reference or a longer cycle cannot make the
+        # parser loop, and remember the order for diagnostics.
         visited_xref_offsets: set[int] = set()
+        stream_size = get_stream_size(stream)
         while startxref is not None:
-            # Detect circular /Prev references in the xref chain
-            if startxref in visited_xref_offsets:
-                logger_warning(
-                    "Circular xref chain detected at offset %(startxref)d, stopping",
-                    source=__name__,
-                    startxref=startxref,
-                )
+            if not self._validate_xref_chain_offset(
+                offset=startxref,
+                visited_xref_offsets=visited_xref_offsets,
+                stream_size=stream_size,
+            ):
                 break
-            visited_xref_offsets.add(startxref)
             # load the xref table
             stream.seek(startxref, 0)
             x = stream.read(1)
@@ -1258,6 +1283,59 @@ class PdfReader(PdfDocCommon):
                     break
             else:
                 startxref = self._read_xref_other_error(stream, startxref)
+
+    def _validate_xref_chain_offset(
+        self,
+        offset: int | None,
+        visited_xref_offsets: set[int],
+        stream_size: int,
+    ) -> bool:
+        """
+        Validate the next offset of the directed cross-reference update chain.
+
+        The chain starts at the final ``startxref`` and may only move
+        backwards through ``/Prev``. Offsets have to stay inside the file and
+        a section may never be visited twice. A violation is either raised in
+        strict mode or logged with the offending offset so recovery can keep
+        going from the sections already parsed.
+
+        Args:
+            stream: The PDF byte stream.
+            offset: The next cross-reference section offset.
+            visited_xref_offsets: Offsets of sections already visited, in
+                chain order.
+            stream_size: Total size of the stream in bytes.
+
+        Returns:
+            ``True`` when the offset may be parsed, ``False`` when the chain
+            must stop.
+        """
+        if offset is None:
+            return False
+        if not isinstance(offset, int) or offset < 0 or offset >= stream_size:
+            message = f"xref chain offset {offset} is outside the file boundaries (file size {stream_size}); stopping"
+            if self.strict:
+                raise PdfReadError(message)
+            logger_warning(message, source=__name__)
+            return False
+        if offset in visited_xref_offsets:
+            message = f"Circular xref chain detected at offset {offset}, stopping"
+            if self.strict:
+                raise PdfReadError(message)
+            logger_warning(message, source=__name__)
+            return False
+        if visited_xref_offsets and offset >= max(visited_xref_offsets):
+            # A normal incremental update only walks backwards. Linearized
+            # documents however place the main cross-reference section near
+            # the start while its /Prev points at a section further into the
+            # file, so a forward jump is reported but not fatal. The cycle
+            # check above still guarantees the walk terminates.
+            message = (
+                f"xref /Prev offset {offset} does not point backwards from offset {max(visited_xref_offsets)}"
+            )
+            logger_warning(message, source=__name__)
+        visited_xref_offsets.add(offset)
+        return True
 
     # The trailer keys a PDF 1.5+ cross-reference stream carries in place of a
     # `trailer` keyword (PDF 2.0 specification, table 17).
@@ -1446,8 +1524,14 @@ class PdfReader(PdfDocCommon):
             return 0
 
         def used_before(num: int, generation: int | tuple[int, ...]) -> bool:
-            # We move backwards through the xrefs, don't replace any.
-            return num in self.xref.get(generation, []) or num in self.xref_objStm  # type: ignore[arg-type]
+            # We move backwards through the xrefs (newest revision first),
+            # so any entry already recorded - in-use, compressed or an
+            # explicit free entry - wins over the older revision.
+            return (
+                num in self.xref.get(generation, [])  # type: ignore[arg-type]
+                or num in self.xref_free_entry.get(generation, {})  # type: ignore[arg-type]
+                or num in self.xref_objStm
+            )
 
         # Iterate through each subsection
         self._read_xref_subsections(index_pairs, get_entry, used_before)
@@ -1656,15 +1740,32 @@ class PdfReader(PdfDocCommon):
                 if xref_type == 0:
                     # linked list of free objects
                     next_free_object = get_entry(1)  # noqa: F841
-                    next_generation = get_entry(2)  # noqa: F841
+                    next_generation = get_entry(2)
+                    # A free entry is an explicit deletion. Record it so a
+                    # newer revision's free entry overrides the same object
+                    # in older revisions; an object merely absent from an
+                    # older section keeps whatever the newer section says.
+                    free_generation = next_generation if isinstance(next_generation, int) else 0
+                    if free_generation not in self.xref:
+                        self.xref[free_generation] = {}  # type: ignore[index]
+                        self.xref_free_entry[free_generation] = {}
+                    if not used_before(num, free_generation):
+                        self.xref_free_entry[free_generation][num] = True
+                        self.xref[free_generation].pop(num, None)
+                        self.xref_objStm.pop(num, None)
                 elif xref_type == 1:
                     # objects that are in use but are not compressed
                     byte_offset = get_entry(1)
                     generation = get_entry(2)
                     if generation not in self.xref:
                         self.xref[generation] = {}  # type: ignore[index]
+                        self.xref_free_entry[generation] = {}
                     if not used_before(num, generation):
                         self.xref[generation][num] = byte_offset  # type: ignore[index]
+                        # The newer in-use entry overrides an older explicit
+                        # deletion or compressed-object placement.
+                        self.xref_free_entry[generation][num] = False  # type: ignore[index]
+                        self.xref_objStm.pop(num, None)
                 elif xref_type == 2:
                     # compressed objects
                     objstr_num = get_entry(1)
@@ -1672,6 +1773,11 @@ class PdfReader(PdfDocCommon):
                     generation = 0  # PDF spec table 18, generation is 0
                     if not used_before(num, generation):
                         self.xref_objStm[num] = (objstr_num, obstr_idx)
+                        if generation not in self.xref:
+                            self.xref[generation] = {}
+                            self.xref_free_entry[generation] = {}
+                        self.xref_free_entry[generation][num] = False
+                        self.xref[generation].pop(num, None)
                 elif self.strict:
                     raise PdfReadError(f"Unknown xref type: {xref_type}")
 

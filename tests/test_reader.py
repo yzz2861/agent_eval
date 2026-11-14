@@ -872,6 +872,322 @@ def test_circular_xref_prev_reference(caplog):
     assert "Circular xref chain detected" in caplog.text
 
 
+def _build_directed_update_chain_pdf() -> tuple[bytes, int, int, int, dict[int, int]]:
+    """Two classic xref revisions; rev 2 frees object 3 and adds object 4."""
+    parts = [b"%PDF-1.7\n"]
+    offsets = {}
+
+    def add_object(number: int, body: bytes) -> None:
+        offsets[number] = sum(len(part) for part in parts)
+        parts.append(f"{number} 0 obj\n".encode() + body + b"\nendobj\n")
+
+    add_object(1, b"<< /Type /Catalog /Pages 2 0 R >>")
+    add_object(2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
+    add_object(
+        3,
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /V (old) >>",
+    )
+    first_xref = sum(len(part) for part in parts)
+    parts.append(b"xref\n0 4\n")
+    parts.append(b"0000000000 65535 f \n")
+    parts.extend(f"{offsets[number]:010d} 00000 n \n".encode() for number in (1, 2, 3))
+    parts.append(b"trailer << /Size 4 /Root 1 0 R >>\n")
+
+    add_object(
+        4,
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /V (new) >>",
+    )
+    second_xref = sum(len(part) for part in parts)
+    # A single zero-based subsection covering the free head, the unchanged
+    # objects and the new page keeps the table zero-indexed (xref_index=0).
+    parts.append(b"xref\n0 5\n")
+    parts.append(b"0000000000 65535 f \n")
+    parts.extend(f"{offsets[number]:010d} 00000 n \n".encode() for number in (1, 2))
+    parts.append(b"0000000000 00000 f \n")
+    parts.append(f"{offsets[4]:010d} 00000 n \n".encode())
+    parts.append(f"trailer << /Size 5 /Root 1 0 R /Prev {first_xref} >>\n".encode())
+    startxref_position = sum(len(part) for part in parts)
+    parts.append(f"startxref\n{second_xref}\n%%EOF\n".encode())
+    return b"".join(parts), first_xref, second_xref, startxref_position, offsets
+
+
+def _build_xref_stream_update_chain_pdf() -> tuple[bytes, int, int, int, dict[int, int]]:
+    """Two xref streams; rev 2 frees object 3 and adds object 6."""
+    parts = [b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n"]
+    offsets = {}
+
+    def add_object(number: int, body: bytes) -> None:
+        offsets[number] = sum(len(part) for part in parts)
+        parts.append(f"{number} 0 obj\n".encode() + body + b"\nendobj\n")
+
+    def entry(kind: int, value: int, generation: int) -> bytes:
+        return bytes([kind]) + value.to_bytes(4, "big") + generation.to_bytes(2, "big")
+
+    add_object(1, b"<< /Type /Catalog /Pages 2 0 R >>")
+    add_object(2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
+    add_object(
+        3,
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /V (old) >>",
+    )
+    first_xref = sum(len(part) for part in parts)
+    first_entries = b"".join(
+        [
+            entry(0, 0, 65535),
+            entry(1, offsets[1], 0),
+            entry(1, offsets[2], 0),
+            entry(1, offsets[3], 0),
+        ]
+    )
+    parts.append(
+        f"4 0 obj\n<< /Type /XRef /Size 5 /Root 1 0 R /W [1 4 2] /Length {len(first_entries)} >>\nstream\n".encode()
+        + first_entries
+        + b"\nendstream\nendobj\n"
+    )
+    add_object(
+        6,
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /V (new) >>",
+    )
+    second_xref = sum(len(part) for part in parts)
+    second_entries = entry(0, 0, 0) + entry(1, offsets[6], 0)
+    parts.append(
+        f"7 0 obj\n<< /Type /XRef /Size 8 /Root 1 0 R /W [1 4 2] "
+        f"/Index [3 1 6 1] /Prev {first_xref} "
+        f"/Length {len(second_entries)} >>\nstream\n".encode()
+        + second_entries
+        + b"\nendstream\nendobj\n"
+    )
+    startxref_position = sum(len(part) for part in parts)
+    parts.append(f"startxref\n{second_xref}\n%%EOF\n".encode())
+    return b"".join(parts), first_xref, second_xref, startxref_position, offsets
+
+
+def test_xref_update_chain_self_loop_prev_keeps_new_revision(caplog):
+    data, first_xref, second_xref, _start, _offsets = _build_directed_update_chain_pdf()
+    looping = data.replace(f"/Prev {first_xref}".encode(), f"/Prev {second_xref}".encode())
+
+    reader = PdfReader(BytesIO(looping))
+
+    assert f"Circular xref chain detected at offset {second_xref}" in caplog.text
+    assert isinstance(reader.get_object(3), NullObject)
+    assert reader.get_object(4)["/V"] == "new"
+
+
+def test_xref_update_chain_strict_self_loop_raises_with_offset():
+    data, first_xref, second_xref, _start, _offsets = _build_directed_update_chain_pdf()
+    looping = data.replace(f"/Prev {first_xref}".encode(), f"/Prev {second_xref}".encode())
+
+    with pytest.raises(PdfReadError, match=f"Circular xref chain detected at offset {second_xref}"):
+        PdfReader(BytesIO(looping), strict=True)
+
+
+def test_xref_update_chain_forward_prev_is_warned(caplog):
+    data, first_xref, second_xref, _start, _offsets = _build_directed_update_chain_pdf()
+    # /Prev must walk backwards; pointing beyond the current section is invalid.
+    forward = data.replace(f"/Prev {first_xref}".encode(), f"/Prev {second_xref + 5}".encode())
+
+    reader = PdfReader(BytesIO(forward))
+
+    warning = f"xref /Prev offset {second_xref + 5} does not point backwards"
+    assert warning in caplog.text
+    # Forward jumps are tolerated (linearized PDFs use them); the cycle guard
+    # is what terminates a loop.
+    assert isinstance(reader.get_object(3), NullObject)
+
+
+def test_xref_stale_startxref_exposes_old_revision():
+    data, first_xref, _second_xref, _start, _offsets = _build_directed_update_chain_pdf()
+    stale = data.replace(
+        f"startxref\n{_second_xref}".encode(),
+        f"startxref\n{first_xref}".encode(),
+    )
+
+    reader = PdfReader(BytesIO(stale))
+
+    assert reader._startxref == first_xref
+    old_page = reader.get_object(3)
+    assert not isinstance(old_page, NullObject)
+    assert old_page["/V"] == "old"
+    # Object 4 is missing from the old revision rather than explicitly free,
+    # so it is not exposed as NullObject; the tolerant fallback may still
+    # locate its physical bytes later in the file.
+    assert reader.xref_free_entry[0].get(4, False) is False
+    assert 4 not in reader.xref[0]
+
+
+def test_xref_free_entry_overrides_older_in_use_entry():
+    data, _first, _second, _start, _offsets = _build_directed_update_chain_pdf()
+
+    reader = PdfReader(BytesIO(data))
+
+    assert isinstance(reader.get_object(3), NullObject)
+    assert reader.xref_free_entry[0][3] is True
+    assert 3 not in reader.xref[0]
+    assert reader.get_object(4)["/V"] == "new"
+
+
+def test_xref_stream_free_entry_overrides_older_in_use_entry():
+    data, _first, _second, _start, _offsets = _build_xref_stream_update_chain_pdf()
+
+    reader = PdfReader(BytesIO(data))
+
+    assert isinstance(reader.get_object(3), NullObject)
+    assert reader.xref_free_entry[0][3] is True
+    assert 3 not in reader.xref[0]
+    assert reader.get_object(6)["/V"] == "new"
+
+
+def test_xref_free_entry_overrides_compressed_object():
+    # The first revision stores the page inside an object stream (type 2);
+    # the second revision frees it explicitly, which must win over the
+    # compressed-object placement recorded in xref_objStm.
+    pdf = _build_objstm_pdf(b"1")
+    page_id = 3
+    assert page_id in PdfReader(BytesIO(pdf)).xref_objStm
+
+    second_xref = len(pdf)
+    # Point /Prev at the original xref stream located at the old startxref.
+    old_startxref = int(pdf[pdf.rfind(b"startxref"):].split(b"\n")[1])
+    update = (
+        b"xref\n0 6\n"
+        b"0000000000 65535 f \n"
+        b"0000000000 00000 f \n"
+        b"0000000000 00000 f \n"
+        b"0000000000 00000 f \n"
+        b"0000000000 00000 f \n"
+        b"0000000000 00000 f \n"
+        + f"trailer << /Size 6 /Root 1 0 R /Prev {old_startxref} >>\n".encode()
+        + f"startxref\n{second_xref}\n%%EOF\n".encode()
+    )
+
+    reader = PdfReader(BytesIO(pdf + update))
+
+    assert isinstance(reader.get_object(page_id), NullObject)
+    assert page_id not in reader.xref_objStm
+    assert reader.xref_free_entry[0][page_id] is True
+
+
+def test_hybrid_xref_table_with_xrefstm_trailer():
+    # A classic xref table whose trailer references an additional xref
+    # stream through /XRefStm (a legal hybrid file, ISO 32000-1 7.5.8.4).
+    parts = [b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n"]
+    offsets = {}
+
+    def add_object(number: int, body: bytes) -> None:
+        offsets[number] = sum(len(part) for part in parts)
+        parts.append(f"{number} 0 obj\n".encode() + body + b"\nendobj\n")
+
+    add_object(1, b"<< /Type /Catalog /Pages 2 0 R >>")
+    add_object(2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
+    add_object(3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] >>")
+
+    # Object 4 is an object stream holding compressed object 5; object 6 is
+    # the cross-reference stream referenced through the classic /XRefStm.
+    object_stream_body = b"5 0 << /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] >>"
+    add_object(
+        4,
+        b"<< /Type /ObjStm /N 1 /First 4 /Length "
+        + str(len(object_stream_body)).encode()
+        + b" >>\nstream\n"
+        + object_stream_body
+        + b"\nendstream",
+    )
+
+    def xref_entry(kind: int, value: int, generation: int) -> bytes:
+        return bytes([kind]) + value.to_bytes(4, "big") + generation.to_bytes(2, "big")
+
+    stream_entries = (
+        xref_entry(0, 0, 65535)
+        + xref_entry(2, 4, 0)  # object 5 is the first object of object stream 4
+    )
+    # /XRefStm is read with a +1 seek, so it stores the byte just before the
+    # object number of the cross-reference stream.
+    xref_stm_pointer = sum(len(part) for part in parts)
+    parts.append(
+        f"6 0 obj\n<< /Type /XRef /Size 7 /W [1 4 2] /Index [0 1 5 1] "
+        f"/Length {len(stream_entries)} >>\nstream\n".encode()
+        + stream_entries
+        + b"\nendstream\nendobj\n"
+    )
+
+    table_xref = sum(len(part) for part in parts)
+    parts.append(b"xref\n0 1\n")
+    parts.append(b"0000000000 65535 f \n")
+    parts.append(b"1 3\n")
+    parts.extend(f"{offsets[number]:010d} 00000 n \n".encode() for number in (1, 2, 3))
+    parts.append(
+        f"trailer << /Size 7 /Root 1 0 R /XRefStm {xref_stm_pointer} >>\n".encode()
+        +
+        f"startxref\n{table_xref}\n%%EOF\n".encode()
+    )
+
+    reader = PdfReader(BytesIO(b"".join(parts)))
+
+    assert len(reader.pages) == 1
+    assert reader.xref_objStm == {5: (4, 0)}
+    assert reader.get_object(3)["/Type"] == "/Page"
+
+
+def test_xref_stream_self_loop_prev_keeps_new_revision(caplog):
+    data, first_xref, second_xref, _start, _offsets = _build_xref_stream_update_chain_pdf()
+    looping = data.replace(f"/Prev {first_xref}".encode(), f"/Prev {second_xref}".encode())
+
+    reader = PdfReader(BytesIO(looping))
+
+    assert f"Circular xref chain detected at offset {second_xref}" in caplog.text
+    assert isinstance(reader.get_object(3), NullObject)
+    assert reader.get_object(6)["/V"] == "new"
+
+
+def test_xref_chain_offset_outside_file_boundaries(caplog):
+    data, first_xref, _second, _start, _offsets = _build_directed_update_chain_pdf()
+    oversized = data.replace(f"/Prev {first_xref}".encode(), b"/Prev 999999999")
+
+    reader = PdfReader(BytesIO(oversized))
+
+    assert "xref chain offset 999999999 is outside the file boundaries" in caplog.text
+    assert isinstance(reader.get_object(3), NullObject)
+
+    with pytest.raises(PdfReadError, match="outside the file boundaries"):
+        PdfReader(BytesIO(oversized), strict=True)
+
+
+def test_xref_bad_offset_to_comment_is_reported_with_offset(caplog):
+    data, _first, second_xref, _start, _offsets = _build_directed_update_chain_pdf()
+    bad = bytearray(data)
+    entry_position = second_xref + len(b"xref\n0 5\n") + 4 * 20  # object 4 entry
+    # The blank byte right after the header cannot start an object header,
+    # so pointing the entry there must be reported instead of silently read.
+    comment_offset = len(b"%PDF-1.7")
+    bad[entry_position : entry_position + 10] = f"{comment_offset:010d}".encode()
+
+    reader = PdfReader(BytesIO(bytes(bad)))
+
+    assert f"Ignoring wrong pointing object 4 0 (offset {comment_offset})" in caplog.text
+    assert 4 not in reader.xref[0]
+
+
+def test_xref_bad_offset_header_mismatch_is_reported_with_offset(caplog):
+    data, _first, second_xref, _start, offsets = _build_directed_update_chain_pdf()
+    bad = bytearray(data)
+    entry_position = second_xref + len(b"xref\n0 5\n") + 4 * 20  # object 4 entry
+    bad[entry_position : entry_position + 10] = f"{offsets[3]:010d}".encode()
+
+    reader = PdfReader(BytesIO(bytes(bad)))
+
+    assert f"Ignoring wrong pointing object 4 0 (offset {offsets[3]})" in caplog.text
+    assert 4 not in reader.xref[0]
+
+
+def test_xref_truncated_final_revision_recovers(caplog):
+    data, _first, _second, _start, _offsets = _build_directed_update_chain_pdf()
+
+    reader = PdfReader(BytesIO(data[:-4]))
+
+    assert "EOF marker seems truncated" in caplog.text
+    # The newest complete entries stay available and lazy resolution works.
+    assert isinstance(reader.get_object(3), NullObject)
+
+
 def test_cyclic_pages_tree():
     """Circular /Pages reference (multi-hop cycle) must raise PdfReadError, not recurse infinitely (#3847)."""
     # Page tree: root /Pages (obj 2) -> /Pages obj 3 -> /Pages obj 4 -> /Pages obj 5 -> obj 3 (cycle)
