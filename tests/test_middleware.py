@@ -295,7 +295,10 @@ class CorsMiddlewareTests(TestCase):
         )
         assert resp.status_code == HTTPStatus.OK
         assert resp[ACCESS_CONTROL_ALLOW_ORIGIN] == "https://example.com"
-        assert resp["vary"] == "origin"
+        assert resp["vary"] == (
+            "origin, access-control-request-method, "
+            + "access-control-request-headers"
+        )
 
     @override_settings(CORS_ALLOW_CREDENTIALS=True, CORS_ALLOW_ALL_ORIGINS=True)
     def test_non_200_headers_still_set(self):
@@ -465,3 +468,206 @@ class CorsMiddlewareTests(TestCase):
             "/delete-enabled/", headers={"origin": "https://example.com"}
         )
         assert ACCESS_CONTROL_ALLOW_ORIGIN in resp
+
+    @override_settings(
+        CORS_ALLOWED_ORIGIN_REGEXES=[r"^https://partner\.example\.com$"],
+    )
+    def test_get_origin_with_attacker_suffix_not_allowed(self):
+        resp = self.client.get(
+            "/", headers={"origin": "https://partner.example.com.attacker.test"}
+        )
+        assert ACCESS_CONTROL_ALLOW_ORIGIN not in resp
+
+    @override_settings(
+        CORS_ALLOWED_ORIGIN_REGEXES=[r"^https://\w+\.example\.com$"],
+    )
+    def test_get_origin_regex_with_suffix_not_allowed(self):
+        resp = self.client.get(
+            "/", headers={"origin": "https://foo.example.com.attacker.test"}
+        )
+        assert ACCESS_CONTROL_ALLOW_ORIGIN not in resp
+
+    @override_settings(
+        CORS_ALLOWED_ORIGIN_REGEXES=[r"https://\w+\.example\.com"],
+    )
+    def test_get_origin_regex_without_anchors_still_matches(self):
+        resp = self.client.get("/", headers={"origin": "https://foo.example.com"})
+        assert resp[ACCESS_CONTROL_ALLOW_ORIGIN] == "https://foo.example.com"
+
+    @override_settings(CORS_ALLOWED_ORIGINS=["https://example.com"])
+    def test_get_origin_with_path_not_allowed(self):
+        resp = self.client.get("/", headers={"origin": "https://example.com/path"})
+        assert ACCESS_CONTROL_ALLOW_ORIGIN not in resp
+
+    @override_settings(CORS_ALLOWED_ORIGINS=["https://example.com"])
+    def test_get_origin_with_trailing_slash_not_allowed(self):
+        resp = self.client.get("/", headers={"origin": "https://example.com/"})
+        assert ACCESS_CONTROL_ALLOW_ORIGIN not in resp
+
+    @override_settings(CORS_ALLOWED_ORIGINS=["https://example.com"])
+    def test_get_origin_with_query_not_allowed(self):
+        resp = self.client.get("/", headers={"origin": "https://example.com/?x=1"})
+        assert ACCESS_CONTROL_ALLOW_ORIGIN not in resp
+
+    @override_settings(CORS_ALLOWED_ORIGINS=["https://example.com"])
+    def test_get_origin_with_userinfo_not_allowed(self):
+        resp = self.client.get(
+            "/", headers={"origin": "https://user:pass@example.com"}
+        )
+        assert ACCESS_CONTROL_ALLOW_ORIGIN not in resp
+
+    @override_settings(CORS_ALLOWED_ORIGINS=["https://example.com"])
+    def test_get_origin_with_whitespace_not_allowed(self):
+        resp = self.client.get("/", headers={"origin": "https://example.com "})
+        assert ACCESS_CONTROL_ALLOW_ORIGIN not in resp
+
+    @override_settings(CORS_ALLOWED_ORIGINS=["https://example.com"])
+    def test_get_origin_case_insensitive_scheme_and_host(self):
+        resp = self.client.get("/", headers={"origin": "HTTPS://EXAMPLE.COM"})
+        assert resp[ACCESS_CONTROL_ALLOW_ORIGIN] == "HTTPS://EXAMPLE.COM"
+
+    @override_settings(CORS_ALLOWED_ORIGINS=["https://example.com"])
+    def test_get_origin_with_default_port_allowed(self):
+        resp = self.client.get("/", headers={"origin": "https://example.com:443"})
+        assert resp[ACCESS_CONTROL_ALLOW_ORIGIN] == "https://example.com:443"
+
+    @override_settings(CORS_ALLOWED_ORIGINS=["http://example.com"])
+    def test_get_origin_with_default_http_port_allowed(self):
+        resp = self.client.get("/", headers={"origin": "http://example.com:80"})
+        assert resp[ACCESS_CONTROL_ALLOW_ORIGIN] == "http://example.com:80"
+
+    @override_settings(CORS_ALLOWED_ORIGINS=["https://example.com"])
+    def test_get_origin_with_non_default_port_not_allowed(self):
+        resp = self.client.get("/", headers={"origin": "https://example.com:444"})
+        assert ACCESS_CONTROL_ALLOW_ORIGIN not in resp
+
+    @override_settings(CORS_ALLOWED_ORIGINS=["https://example.com:8443"])
+    def test_get_origin_with_configured_port_allowed(self):
+        resp = self.client.get("/", headers={"origin": "https://example.com:8443"})
+        assert resp[ACCESS_CONTROL_ALLOW_ORIGIN] == "https://example.com:8443"
+
+    @override_settings(CORS_ALLOW_ALL_ORIGINS=True)
+    def test_allow_all_origins_malformed_origin_rejected(self):
+        resp = self.client.get("/", headers={"origin": "https://exa mple.com"})
+        assert ACCESS_CONTROL_ALLOW_ORIGIN not in resp
+
+    @override_settings(CORS_ALLOWED_ORIGIN_REGEXES=[r".*"])
+    def test_null_origin_not_allowed_by_regex(self):
+        resp = self.client.get("/", headers={"origin": "null"})
+        assert ACCESS_CONTROL_ALLOW_ORIGIN not in resp
+
+    @override_settings(CORS_ALLOWED_ORIGIN_REGEXES=[r".*"])
+    def test_file_origin_not_allowed_by_regex(self):
+        resp = self.client.get("/", headers={"origin": "file://"})
+        assert ACCESS_CONTROL_ALLOW_ORIGIN not in resp
+
+    @override_settings(
+        CORS_ALLOW_METHODS=["GET", "OPTIONS"],
+        CORS_ALLOW_ALL_ORIGINS=True,
+    )
+    def test_options_request_method_not_allowed(self):
+        resp = self.client.options(
+            "/",
+            headers={
+                "origin": "https://example.com",
+                "access-control-request-method": "DELETE",
+            },
+        )
+        assert resp.status_code == HTTPStatus.OK
+        assert ACCESS_CONTROL_ALLOW_METHODS not in resp
+
+    @override_settings(
+        CORS_ALLOW_METHODS=["GET", "OPTIONS"],
+        CORS_ALLOW_ALL_ORIGINS=True,
+    )
+    def test_options_request_method_allowed(self):
+        resp = self.client.options(
+            "/",
+            headers={
+                "origin": "https://example.com",
+                "access-control-request-method": "GET",
+            },
+        )
+        assert resp.status_code == HTTPStatus.OK
+        assert resp[ACCESS_CONTROL_ALLOW_METHODS] == "GET, OPTIONS"
+
+    @override_settings(
+        CORS_ALLOW_HEADERS=["content-type"],
+        CORS_ALLOW_ALL_ORIGINS=True,
+    )
+    def test_options_request_headers_not_allowed(self):
+        resp = self.client.options(
+            "/",
+            headers={
+                "origin": "https://example.com",
+                "access-control-request-method": "GET",
+                "access-control-request-headers": "x-evil-header",
+            },
+        )
+        assert resp.status_code == HTTPStatus.OK
+        assert ACCESS_CONTROL_ALLOW_HEADERS not in resp
+
+    @override_settings(
+        CORS_ALLOW_HEADERS=["content-type"],
+        CORS_ALLOW_ALL_ORIGINS=True,
+    )
+    def test_options_request_headers_allowed_case_insensitive(self):
+        resp = self.client.options(
+            "/",
+            headers={
+                "origin": "https://example.com",
+                "access-control-request-method": "GET",
+                "access-control-request-headers": "Content-Type",
+            },
+        )
+        assert resp.status_code == HTTPStatus.OK
+        assert resp[ACCESS_CONTROL_ALLOW_HEADERS] == "content-type"
+
+    @override_settings(CORS_ALLOW_ALL_ORIGINS=True)
+    def test_options_preflight_vary_headers(self):
+        resp = self.client.options(
+            "/",
+            headers={
+                "origin": "https://example.com",
+                "access-control-request-method": "GET",
+            },
+        )
+        assert resp.status_code == HTTPStatus.OK
+        assert resp["vary"] == (
+            "origin, access-control-request-method, "
+            + "access-control-request-headers"
+        )
+
+    @override_settings(CORS_ALLOW_PRIVATE_NETWORK=False, CORS_ALLOW_ALL_ORIGINS=True)
+    def test_options_private_network_requested_but_disabled(self):
+        resp = self.client.options(
+            "/",
+            headers={
+                "origin": "https://example.com",
+                "access-control-request-method": "GET",
+                "access-control-request-private-network": "true",
+            },
+        )
+        assert resp.status_code == HTTPStatus.OK
+        assert ACCESS_CONTROL_ALLOW_PRIVATE_NETWORK not in resp
+
+    @override_settings(CORS_ALLOW_PRIVATE_NETWORK=True, CORS_ALLOW_ALL_ORIGINS=True)
+    def test_options_private_network_requested_and_enabled(self):
+        resp = self.client.options(
+            "/",
+            headers={
+                "origin": "https://example.com",
+                "access-control-request-method": "GET",
+                "access-control-request-private-network": "true",
+            },
+        )
+        assert resp.status_code == HTTPStatus.OK
+        assert resp[ACCESS_CONTROL_ALLOW_PRIVATE_NETWORK] == "true"
+
+    def test_signal_handler_allows_origin_not_in_whitelist_on_get(self):
+        def handler(*args, **kwargs):
+            return True
+
+        with temporary_check_request_handler(handler):
+            resp = self.client.get("/", headers={"origin": "https://example.org"})
+            assert resp[ACCESS_CONTROL_ALLOW_ORIGIN] == "https://example.org"

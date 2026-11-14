@@ -107,6 +107,13 @@ def check_settings(**kwargs: Any) -> list[CheckMessage]:
             else:
                 # Only do this check in this case because if the scheme is not
                 # provided, netloc ends up in path
+                if parsed.username is not None or parsed.password is not None:
+                    errors.append(
+                        Error(
+                            f"Origin {repr(origin)} in {allowed_origins_alias} should not have userinfo",
+                            id="corsheaders.E014",
+                        )
+                    )
                 for part in ("path", "query", "fragment"):
                     if getattr(parsed, part) != "":
                         errors.append(

@@ -125,6 +125,11 @@ class ChecksTests(SimpleTestCase):
         errors = self.check_error_codes(["corsheaders.E014"])
         assert "in CORS_ORIGIN_WHITELIST" in errors[0].msg
 
+    @override_settings(CORS_ALLOWED_ORIGINS=["https://user@example.com"])
+    def test_cors_allowed_origins_userinfo(self):
+        errors = self.check_error_codes(["corsheaders.E014"])
+        assert "userinfo" in errors[0].msg
+
     @override_settings(CORS_ALLOWED_ORIGIN_REGEXES=object)
     def test_cors_allowed_origin_regexes_non_sequence(self):
         self.check_error_codes(["corsheaders.E007"])
