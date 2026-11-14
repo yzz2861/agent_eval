@@ -46,13 +46,14 @@ if sys.version_info >= (3, 11):
 else:
     from typing_extensions import Self
 
-from ._configuration import apply_legacy_configuration
+from ._configuration import apply_legacy_configuration, get_configuration
 from ._doc_common import PdfDocCommon, convert_to_int
 from ._encryption import Encryption, PasswordType
 from ._utils import (
     WHITESPACES_AS_BYTES,
     StrByteType,
     StreamType,
+    _ObjectGraphTraversal,
     _TraversalState,
     get_stream_data,
     get_stream_size,
@@ -116,6 +117,10 @@ class PdfReader(PdfDocCommon):
             this security measure, pass ``None``.
         xref_stream_maximum_entries: The maximum number of entries which are
             allowed inside a stream-based cross-reference stream.
+        object_graph_maximum_depth: The maximum nesting depth shared by the
+            page tree, outline, AcroForm, resource dictionary and object stream
+            traversals. When ``None``, the value of the current
+            :class:`~pypdf.Configuration` is used.
 
     """
 
@@ -130,6 +135,7 @@ class PdfReader(PdfDocCommon):
         *,
         root_object_recovery_limit: int | None = 10_000,
         xref_stream_maximum_entries: int = 2_000_000,
+        object_graph_maximum_depth: int | None = None,
     ) -> None:
         self.strict = strict
         self.flattened_pages: list[PageObject] | None = None
@@ -150,6 +156,9 @@ class PdfReader(PdfDocCommon):
         )
         self._xref_stream_maximum_entries = xref_stream_maximum_entries
         self._xref_stream_entry_count = 0
+        if object_graph_maximum_depth is None:
+            object_graph_maximum_depth = get_configuration().object_graph_maximum_depth
+        self.object_graph_maximum_depth = object_graph_maximum_depth
         apply_legacy_configuration()
 
         # Map page indirect_reference number to page number
@@ -169,6 +178,18 @@ class PdfReader(PdfDocCommon):
 
         self._named_destinations_cache: dict[str, Destination] | None = None
         self._object_stream_resolution_stack: list[int] = []
+
+    def new_object_graph_traversal(self, area: str) -> _ObjectGraphTraversal:
+        """
+        Create a traversal guard using this reader's shared depth budget.
+
+        Each structural traversal gets its own visited/active sets, while the
+        depth limit is the one configured for this reader instance.
+        """
+        return _ObjectGraphTraversal(
+            maximum_depth=self.object_graph_maximum_depth,
+            area=area,
+        )
 
     def _initialize_stream(self, stream: StrByteType | Path) -> None:
         if hasattr(stream, "mode") and "b" not in stream.mode:
@@ -384,6 +405,14 @@ class PdfReader(PdfDocCommon):
         self, indirect_reference: IndirectObject
     ) -> PdfObject:
         obj_id = indirect_reference.idnum
+        # The resolution stack is part of the shared object graph traversal:
+        # its length is bounded by the reader's depth budget so that a chain of
+        # nested object streams cannot exhaust the interpreter stack.
+        if len(self._object_stream_resolution_stack) >= self.object_graph_maximum_depth:
+            raise LimitReachedError(
+                "Maximum object stream resolution depth reached: "
+                f"{len(self._object_stream_resolution_stack) + 1} > {self.object_graph_maximum_depth}."
+            )
         if obj_id in self._object_stream_resolution_stack:
             start = self._object_stream_resolution_stack.index(obj_id)
             cycle = [*self._object_stream_resolution_stack[start:], obj_id]
@@ -1831,6 +1860,7 @@ class PdfReader(PdfDocCommon):
         visited: set[int] | None = None,
         depth: int = 0,
         traversal_state: _TraversalState | None = None,
+        graph_traversal: _ObjectGraphTraversal | None = None,
     ) -> dict[str, Destination]:
         """Override from PdfDocCommon. In the reader we can assume this is
         static, but not in the writer.
@@ -1842,6 +1872,7 @@ class PdfReader(PdfDocCommon):
                 visited=visited,
                 depth=depth,
                 traversal_state=traversal_state,
+                graph_traversal=graph_traversal,
             )
 
         if self._named_destinations_cache is None:

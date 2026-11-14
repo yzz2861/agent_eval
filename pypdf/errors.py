@@ -70,5 +70,17 @@ class LimitReachedError(PyPdfError):
     """Raised when a limit is reached."""
 
 
+class CyclicObjectGraphError(PyPdfError):
+    """
+    Raised when an object graph traversal (page tree, outline, AcroForm,
+    resource dictionary or object stream) reaches an object that is already
+    part of the current traversal path.
+
+    The message only carries object numbers and the traversal path, never the
+    contents of the involved objects (which may be an arbitrarily large object
+    stream).
+    """
+
+
 class XmpDocumentError(PyPdfError, RuntimeError):
     """Raised when the XMP XML document context is invalid or missing."""

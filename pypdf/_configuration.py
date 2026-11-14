@@ -116,6 +116,13 @@ class Configuration:
     form_fields_maximum_depth: int = 100
     """The maximum allowed depth for form fields."""
 
+    object_graph_maximum_depth: int = 100
+    """
+    The maximum allowed depth shared by object graph traversals (page tree, outline,
+    AcroForm, resource dictionaries and object streams). Individual, more specific
+    limits such as :attr:`page_tree_maximum_depth` take precedence where present.
+    """
+
     named_destinations_maximum_entries: int = 100_000
     """The maximum allowed number of named destination name tree nodes."""
     named_destinations_maximum_depth: int = 100

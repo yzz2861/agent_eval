@@ -736,3 +736,62 @@ class _TraversalState:
     """Sometimes we need mutable objects which just count something."""
     entry_count: int = 0
     has_logged: bool = False
+
+
+def _object_identity(obj: Any) -> Any:
+    """
+    Return a stable identity for an object reached while walking the object graph.
+
+    Indirect objects are identified by their ``(object number, generation)`` pair,
+    so the same object reached through two different references is recognized as
+    shared rather than mistaken for a cycle. Objects that are only available
+    inline (without an indirect reference) fall back to their Python object id.
+    """
+    indirect_reference = getattr(obj, "indirect_reference", None)
+    if indirect_reference is not None:
+        return ("indirect", indirect_reference.idnum, indirect_reference.generation)
+    return ("inline", id(obj))
+
+
+def _describe_object(obj: Any) -> str:
+    """
+    Describe an object for error messages without rendering the object itself.
+
+    Only the object number (and generation) is exposed, never the dictionary or
+    stream contents, so a malicious object cannot flood the error output.
+    """
+    indirect_reference = getattr(obj, "indirect_reference", None)
+    if indirect_reference is not None:
+        return f"object {indirect_reference.idnum} {indirect_reference.generation}"
+    return f"inline {type(obj).__name__}"
+
+
+class _ObjectGraphTraversal:
+    """
+    Shared bookkeeping for walks over a PDF object graph.
+
+    Every structural walk (page tree, outline, AcroForm, resource dictionary and
+    object stream) creates one of these through the owning document, so they all
+    rely on the same identity rules (:func:`_object_identity`) and the same
+    per-document depth budget while keeping independent traversal paths.
+
+    ``active`` holds the identities of the objects on the current root-to-node
+    path, keyed by object generation via :func:`_object_identity`. An object
+    encountered while it is still active closes a cycle and has to be reported
+    instead of being silently treated as an empty node. Once the branch is left,
+    the identity is removed, so reaching the same object again from a different
+    branch remains legal object sharing (for example one font resource referenced
+    by several pages).
+    """
+
+    def __init__(self, *, maximum_depth: int, area: str) -> None:
+        self.maximum_depth = maximum_depth
+        self.area = area
+        self.active: set[Any] = set()
+
+    def check_depth(self, depth: int) -> None:
+        if depth > self.maximum_depth:
+            raise LimitReachedError(
+                f"Maximum {self.area} traversal depth reached: "
+                f"{depth} > {self.maximum_depth}."
+            )

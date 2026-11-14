@@ -29,6 +29,7 @@
 # POSSIBILITY OF SUCH DAMAGE.
 
 import struct
+import sys
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import datetime
@@ -43,6 +44,9 @@ from ._encryption import Encryption
 from ._page import PageObject, _VirtualList
 from ._page_labels import index2labels
 from ._utils import (
+    _describe_object,
+    _object_identity,
+    _ObjectGraphTraversal,
     _TraversalState,
     deprecation_no_replacement,
     logger_warning,
@@ -59,7 +63,7 @@ from .constants import (
 from .constants import DocumentInformationAttributes as DI
 from .constants import FieldDictionaryAttributes as FA
 from .constants import PageAttributes as PG
-from .errors import LimitReachedError, PdfReadError, PyPdfError
+from .errors import CyclicObjectGraphError, LimitReachedError, PdfReadError, PyPdfError
 from .generic import (
     ArrayObject,
     BooleanObject,
@@ -294,6 +298,66 @@ class PdfDocCommon(ABC):
 
     _readonly: bool = False
 
+    def _new_object_graph_traversal(self, area: str) -> _ObjectGraphTraversal:
+        """
+        Create the shared object graph traversal guard for ``area``.
+
+        Readers provide their own, per-instance configured budget. Writers and
+        other in-memory documents fall back to the global configuration so that
+        their historical, lenient behavior is preserved.
+        """
+        factory = getattr(self, "new_object_graph_traversal", None)
+        if factory is not None:
+            return factory(area)
+        # In-memory documents are already protected by their area-specific
+        # configured limits (page tree, outline, form fields, ...). Use a
+        # permissive shared budget here so dynamically overwriting one of those
+        # limits keeps working without an additional, fixed cap.
+        return _ObjectGraphTraversal(
+            maximum_depth=sys.maxsize,
+            area=area,
+        )
+
+    def _raises_on_object_graph_cycles(self) -> bool:
+        """
+        Whether cyclic references must be reported as an error.
+
+        A :class:`~pypdf.PdfReader` reads potentially untrusted files and has to
+        fail loudly with an explainable error; a :class:`~pypdf.PdfWriter` is
+        built in memory and keeps the historical lenient warning behavior. Only
+        readers expose the per-instance traversal factory.
+        """
+        return hasattr(self, "new_object_graph_traversal")
+
+    def _report_object_graph_cycle(self, *, area: str, obj: Any, depth: int) -> None:
+        """
+        Report a cyclic reference reached while walking ``area``.
+
+        Readers fail with an explainable error; writers keep the historical
+        lenient warning behavior. Only the object number and traversal depth are
+        included, never object or object-stream contents.
+        """
+        message = (
+            f"Detected cyclic {area} reference at {_describe_object(obj)} "
+            f"(depth {depth})"
+        )
+        if self._raises_on_object_graph_cycles():
+            raise CyclicObjectGraphError(message)
+        logger_warning(
+            "%(detail)s; skipping the repeated node.",
+            source=__name__,
+            detail=message,
+        )
+
+    def _warn_or_raise_object_graph_cycle(self, *, area: str, obj: Any, depth: int) -> None:
+        """Readers raise an explainable error; writers keep the lenient warning."""
+        if self._raises_on_object_graph_cycles():
+            self._report_object_graph_cycle(area=area, obj=obj, depth=depth)
+        elif area == "named destination":
+            logger_warning("Detected cycle in destination tree.", source=__name__)
+        else:
+            self._report_object_graph_cycle(area=area, obj=obj, depth=depth)
+
     @property
     @abstractmethod
     def root_object(self) -> DictionaryObject:
@@ -490,6 +554,7 @@ class PdfDocCommon(ABC):
         visited: set[int] | None = None,
         depth: int = 0,
         traversal_state: _TraversalState | None = None,
+        graph_traversal: _ObjectGraphTraversal | None = None,
     ) -> dict[str, Destination]:
         """
         Retrieve the named destinations present in the document.
@@ -507,6 +572,8 @@ class PdfDocCommon(ABC):
         """
         if traversal_state is None:
             traversal_state = _TraversalState()
+        if graph_traversal is None:
+            graph_traversal = self._new_object_graph_traversal("named destination tree")
 
         if visited is None:
             visited = set()
@@ -542,10 +609,13 @@ class PdfDocCommon(ABC):
                 f"Maximum named destination depth exceeded: "
                 f"{depth} > {configuration.named_destinations_maximum_depth}."
             )
+        if graph_traversal.maximum_depth < configuration.named_destinations_maximum_depth:
+            graph_traversal.check_depth(depth)
 
         tree_id = id(tree)
-        if tree_id in visited:
-            logger_warning("Detected cycle in destination tree.", source=__name__)
+        tree_identity = _object_identity(tree)
+        if tree_identity in graph_traversal.active or tree_id in visited:
+            self._warn_or_raise_object_graph_cycle(area="named destination", obj=tree, depth=depth)
             return retval
         visited.add(tree_id)
 
@@ -566,14 +636,19 @@ class PdfDocCommon(ABC):
                 )
                 return retval
             # recurse down the tree
-            for kid in kids:
-                self._get_named_destinations(
-                    tree=kid.get_object(),
-                    retval=retval,
-                    visited=visited,
-                    depth=depth + 1,
-                    traversal_state=traversal_state,
-                )
+            graph_traversal.active.add(tree_identity)
+            try:
+                for kid in kids:
+                    self._get_named_destinations(
+                        tree=kid.get_object(),
+                        retval=retval,
+                        visited=visited,
+                        depth=depth + 1,
+                        traversal_state=traversal_state,
+                        graph_traversal=graph_traversal,
+                    )
+            finally:
+                graph_traversal.active.discard(tree_identity)
         # §7.9.6, entries in a name tree node dictionary
         elif CA.NAMES in tree:  # /Kids and /Names are exclusives (§7.9.6)
             names = tree[CA.NAMES].get_object()
@@ -631,6 +706,7 @@ class PdfDocCommon(ABC):
         _visited: set[int] | None = None,
         _depth: int = 0,
         _traversal_state: _TraversalState | None = None,
+        _graph_traversal: _ObjectGraphTraversal | None = None,
     ) -> dict[str, Any] | None:
         """
         Extract field data if this PDF contains interactive form fields.
@@ -658,10 +734,16 @@ class PdfDocCommon(ABC):
             deprecation_no_replacement(name="stack", removed_in="7.0.0")
 
         configuration = get_configuration()
-        if _depth >= configuration.form_fields_maximum_depth:
-            raise LimitReachedError("Reached maximum allowed form field depth.")
         if _traversal_state is None:
             _traversal_state = _TraversalState()
+        if _graph_traversal is None:
+            _graph_traversal = self._new_object_graph_traversal("AcroForm")
+        if _depth >= configuration.form_fields_maximum_depth:
+            raise LimitReachedError("Reached maximum allowed form field depth.")
+        # The per-reader shared depth budget acts as a backstop for the
+        # form-field-specific limit.
+        if _graph_traversal.maximum_depth < configuration.form_fields_maximum_depth:
+            _graph_traversal.check_depth(_depth)
 
         def _check_field_limit(_increment: int) -> None:
             _traversal_state.entry_count += _increment
@@ -708,6 +790,7 @@ class PdfDocCommon(ABC):
                 self._build_field(
                     field=field, retval=retval, fileobj=fileobj, field_attributes=field_attributes,
                     visited=_visited, depth=_depth, traversal_state=_traversal_state,
+                    graph_traversal=_graph_traversal,
                 )
         elif any(attr in tree for attr in field_attributes):
             # Tree is a field
@@ -715,6 +798,7 @@ class PdfDocCommon(ABC):
             self._build_field(
                 field=tree, retval=retval, fileobj=fileobj, field_attributes=field_attributes,
                 visited=_visited, depth=_depth, traversal_state=_traversal_state,
+                graph_traversal=_graph_traversal,
             )
         return retval
 
@@ -767,6 +851,7 @@ class PdfDocCommon(ABC):
         visited: set[int],
         depth: int,
         traversal_state: _TraversalState,
+        graph_traversal: _ObjectGraphTraversal,
     ) -> None:
         if not isinstance(field, DictionaryObject):
             logger_warning(
@@ -810,7 +895,8 @@ class PdfDocCommon(ABC):
                 del retval[key]["/_States_"][retval[key]["/_States_"].index("/Off")]
         # at last for order
         self._check_kids(
-            tree=field, retval=retval, fileobj=fileobj, visited=visited, depth=depth, traversal_state=traversal_state
+            tree=field, retval=retval, fileobj=fileobj, visited=visited, depth=depth,
+            traversal_state=traversal_state, graph_traversal=graph_traversal,
         )
 
     def _check_kids(
@@ -822,24 +908,28 @@ class PdfDocCommon(ABC):
         visited: set[int],
         depth: int,
         traversal_state: _TraversalState,
+        graph_traversal: _ObjectGraphTraversal,
     ) -> None:
         tree_id = id(tree)
-        if tree_id in visited:
-            logger_warning(
-                "%(field_name)s already parsed",
-                source=__name__,
-                field_name=self._get_qualified_field_name(parent=tree),
-            )
+        tree_identity = _object_identity(tree)
+        if tree_identity in graph_traversal.active or tree_id in visited:
+            self._warn_or_raise_object_graph_cycle(area="AcroForm", obj=tree, depth=depth)
             return
         visited.add(tree_id)
         if PagesAttributes.KIDS in tree:
-            # recurse down the tree
-            for kid in tree[PagesAttributes.KIDS]:  # type: ignore[attr-defined]
-                kid = kid.get_object()
-                self.get_fields(
-                    tree=kid, retval=retval, fileobj=fileobj,
-                    _visited=visited, _depth=depth + 1, _traversal_state=traversal_state
-                )
+            graph_traversal.active.add(tree_identity)
+            try:
+                # recurse down the tree
+                for kid in tree[PagesAttributes.KIDS]:  # type: ignore[attr-defined]
+                    kid = kid.get_object()
+                    self.get_fields(
+                        tree=kid, retval=retval, fileobj=fileobj,
+                        _visited=visited, _depth=depth + 1,
+                        _traversal_state=traversal_state,
+                        _graph_traversal=graph_traversal,
+                    )
+            finally:
+                graph_traversal.active.discard(tree_identity)
 
     def _write_field(self, fileobj: Any, field: Any, field_attributes: Any) -> None:
         field_attributes_tuple = FA.attributes()
@@ -1026,12 +1116,17 @@ class PdfDocCommon(ABC):
         outline: Any | None = None,
         visited: set[int] | None = None,
         depth: int = 0,
-        traversal_state: _TraversalState | None = None
+        traversal_state: _TraversalState | None = None,
+        graph_traversal: _ObjectGraphTraversal | None = None,
     ) -> OutlineType:
         if traversal_state is None:
             traversal_state = _TraversalState()
 
-        if outline is None:
+        is_root_call = outline is None
+        if graph_traversal is None:
+            graph_traversal = self._new_object_graph_traversal("outline")
+
+        if is_root_call:
             outline = []
             catalog = self.root_object
 
@@ -1063,16 +1158,25 @@ class PdfDocCommon(ABC):
         configuration = get_configuration()
         if depth > configuration.outline_maximum_depth:
             raise LimitReachedError(f"Maximum outline depth reached: {depth} > {configuration.outline_maximum_depth}.")
+        if graph_traversal.maximum_depth < configuration.outline_maximum_depth:
+            graph_traversal.check_depth(depth)
 
         # see if there are any more outline items
         if visited is None:
             visited = set()
         while True:
+            node_identity = _object_identity(node)
             node_id = id(node)
-            if node_id in visited:
-                logger_warning("Detected cycle in outline structure for %(node)s", source=__name__, node=node)
+            # ``visited`` covers the /Next chain at this level (copied on nesting
+            # so shared sub-trees stay legal), while the shared ``active`` set
+            # covers the /First nesting path across recursion levels.
+            if node_identity in graph_traversal.active or node_id in visited:
+                self._warn_or_raise_object_graph_cycle(
+                    area="outline",
+                    obj=node,
+                    depth=depth,
+                )
                 break
-            visited.add(node_id)
             traversal_state.entry_count += 1
             if traversal_state.entry_count > configuration.outline_maximum_entries:
                 raise LimitReachedError(
@@ -1088,24 +1192,31 @@ class PdfDocCommon(ABC):
                 )
                 break
 
-            outline_obj = self._build_outline_item(node)
-            if outline_obj:
-                outline.append(outline_obj)
+            visited.add(node_id)
+            graph_traversal.active.add(node_identity)
+            try:
+                outline_obj = self._build_outline_item(node)
+                if outline_obj:
+                    outline.append(outline_obj)
 
-            # check for sub-outline
-            if "/First" in node:
-                sub_outline: list[Any] = []
-                # Pass a copy to allow multiple outer entries to reference the same inner one.
-                inner_visited = visited.copy()
-                self._get_outline(
-                    node=cast(DictionaryObject, node["/First"]),
-                    outline=sub_outline,
-                    visited=inner_visited,
-                    depth=depth + 1,
-                    traversal_state=traversal_state,
-                )
-                if sub_outline:
-                    outline.append(sub_outline)
+                # check for sub-outline
+                if "/First" in node:
+                    sub_outline: list[Any] = []
+                    # A copy allows multiple outer entries to reference the same
+                    # inner object without mistaking legal sharing for a cycle.
+                    inner_visited = visited.copy()
+                    self._get_outline(
+                        node=cast(DictionaryObject, node["/First"]),
+                        outline=sub_outline,
+                        visited=inner_visited,
+                        depth=depth + 1,
+                        traversal_state=traversal_state,
+                        graph_traversal=graph_traversal,
+                    )
+                    if sub_outline:
+                        outline.append(sub_outline)
+            finally:
+                graph_traversal.active.discard(node_identity)
 
             if "/Next" not in node:
                 break
@@ -1408,9 +1519,12 @@ class PdfDocCommon(ABC):
         flattened_pages: list[PageObject] = []
         traversal_state = _TraversalState()
         remaining_page_entries = _TraversalState(entry_count=configuration.page_tree_maximum_page_entries)
-        # id() values of the nodes on the path from the root to the current node.
-        # Detects multi-hop cycles such as A→B→C→A that the single-parent check misses.
-        ancestor_ids: set[int] = set()
+        # Shared object graph guard: identities of the nodes on the path from the
+        # root to the current node. Keyed by object generation, so the same object
+        # reached from two different branches is legal sharing, while a node that
+        # is still on the active path closes a cycle (A→B→C→A, including self loops).
+        graph_traversal = self._new_object_graph_traversal("page tree")
+        ancestor_identities: set[Any] = set()
         # The /Pages nodes of that path whose /Kids are not exhausted yet.
         stack: list[_PageTreeFrame] = []
         item: _PageTreeItem | None = _PageTreeItem(
@@ -1421,6 +1535,10 @@ class PdfDocCommon(ABC):
                 raise LimitReachedError(
                     f"Maximum page tree depth reached: {item.depth} > {configuration.page_tree_maximum_depth}."
                 )
+            # The shared per-reader budget only acts as a backstop when it is
+            # stricter than the page-tree-specific limit.
+            if graph_traversal.maximum_depth < configuration.page_tree_maximum_depth:
+                graph_traversal.check_depth(item.depth)
 
             # Get the current node_type
             node = item.node
@@ -1437,7 +1555,7 @@ class PdfDocCommon(ABC):
 
             # Flatten that type of node
             if node_type == "/Pages":
-                ancestor_ids.add(id(node))
+                ancestor_identities.add(_object_identity(node))
                 stack.append(self._enter_page_tree_node(item))
             elif node_type == "/Page":
                 flattened_pages.append(
@@ -1446,7 +1564,7 @@ class PdfDocCommon(ABC):
                     )
                 )
 
-            item = self._pop_next_page_tree_kid(stack, ancestor_ids, traversal_state)
+            item = self._pop_next_page_tree_kid(stack, ancestor_identities, traversal_state)
 
         # Assigned only here, so that a failed traversal does not leave a partial page list behind.
         self.flattened_pages = flattened_pages
@@ -1474,7 +1592,7 @@ class PdfDocCommon(ABC):
     def _pop_next_page_tree_kid(
         self,
         stack: list[_PageTreeFrame],
-        ancestor_ids: set[int],
+        ancestor_identities: set[Any],
         traversal_state: _TraversalState,
     ) -> _PageTreeItem | None:
         """
@@ -1504,7 +1622,8 @@ class PdfDocCommon(ABC):
                 if not obj:
                     # An empty dictionary would otherwise be read as a blank page.
                     continue
-                if id(obj) in ancestor_ids:
+                obj_identity = _object_identity(obj)
+                if obj_identity in ancestor_identities:
                     raise PdfReadError("Detected cyclic page references.")
                 traversal_state.entry_count += 1
                 if traversal_state.entry_count > configuration.page_tree_maximum_entries:
@@ -1519,7 +1638,7 @@ class PdfDocCommon(ABC):
                     depth=parent.depth + 1,
                 )
             stack.pop()
-            ancestor_ids.discard(id(parent.node))
+            ancestor_identities.discard(_object_identity(parent.node))
         return None
 
     def _flatten_leaf_page(
