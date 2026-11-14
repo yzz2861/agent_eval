@@ -71,7 +71,7 @@ class TestJWT:
         try:
             token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhIjoiYiJ9.jiMyrsmD8AoHWeQgmxZ5yq8z0lXS67_QGs52AzC8Ru8"
 
-            def return_invalid_json(token, key, algorithms, verify=True):
+            def return_invalid_json(token, key, algorithms, verify=True, allow_none=False):
                 return b'["a", "b"}'
 
             jws.verify = return_invalid_json
@@ -86,7 +86,7 @@ class TestJWT:
         try:
             token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhIjoiYiJ9.jiMyrsmD8AoHWeQgmxZ5yq8z0lXS67_QGs52AzC8Ru8"
 
-            def return_encoded_array(token, key, algorithms, verify=True):
+            def return_encoded_array(token, key, algorithms, verify=True, allow_none=False):
                 return b'["a","b"]'
 
             jws.verify = return_encoded_array
@@ -531,3 +531,90 @@ class TestJWT:
         new_claims[claim] = value
         token = jwt.encode(new_claims, key)
         jwt.decode(token, key, options=options, audience=str(value))
+
+
+def make_none_token(alg="none", signature="", claims=None):
+    if claims is None:
+        claims = {"a": "b"}
+    header_segment = base64.urlsafe_b64encode(json.dumps({"alg": alg, "typ": "JWT"}).encode("utf-8")).rstrip(b"=")
+    payload_segment = base64.urlsafe_b64encode(json.dumps(claims).encode("utf-8")).rstrip(b"=")
+    return b".".join([header_segment, payload_segment, signature.encode("utf-8")]).decode("utf-8")
+
+
+class TestJWTNoneAlgorithm:
+    def test_none_rejected_by_default(self):
+        token = make_none_token()
+        with pytest.raises(JWTError, match="none"):
+            jwt.decode(token, "", algorithms=["none"])
+
+    def test_none_rejected_by_default_with_key(self, key):
+        token = make_none_token()
+        with pytest.raises(JWTError, match="none"):
+            jwt.decode(token, key, algorithms=["none"])
+
+    def test_none_rejected_when_key_configured(self, key):
+        token = make_none_token()
+        with pytest.raises(JWTError, match="key"):
+            jwt.decode(token, key, algorithms=["none"], allow_none=True)
+
+    @pytest.mark.parametrize("empty_key", ["", b"", None])
+    def test_none_allowed_explicitly_without_key(self, empty_key):
+        token = make_none_token()
+        assert jwt.decode(token, empty_key, algorithms=["none"], allow_none=True) == {"a": "b"}
+
+    def test_none_with_fake_signature_rejected(self):
+        token = make_none_token(signature="ZmFrZS1zaWduYXR1cmU")
+        with pytest.raises(JWTError, match="Signature verification failed"):
+            jwt.decode(token, "", algorithms=["none"], allow_none=True)
+
+    def test_none_never_enters_signature_backend(self, monkeypatch):
+        def fail_on_signature_compare(keys, signing_input, signature, alg):
+            raise AssertionError("signature backend must not be invoked for 'none'")
+
+        monkeypatch.setattr(jws, "_sig_matches_keys", fail_on_signature_compare)
+        token = make_none_token()
+        assert jwt.decode(token, "", algorithms=["none"], allow_none=True) == {"a": "b"}
+
+    @pytest.mark.parametrize("alg", ["None", "NONE", "nOnE"])
+    def test_none_case_variants_rejected(self, alg):
+        token = make_none_token(alg=alg)
+        with pytest.raises(JWTError, match="not allowed"):
+            jwt.decode(token, "", algorithms=["none", alg], allow_none=True)
+
+    def test_none_alg_not_in_whitelist(self):
+        token = make_none_token()
+        with pytest.raises(JWTError, match="alg value is not allowed"):
+            jwt.decode(token, "", algorithms=["HS256"], allow_none=True)
+
+    def test_none_empty_whitelist(self):
+        token = make_none_token()
+        with pytest.raises(JWTError, match="alg value is not allowed"):
+            jwt.decode(token, "", algorithms=[], allow_none=True)
+
+    def test_unknown_alg_rejected(self):
+        token = make_none_token(alg="HS999")
+        with pytest.raises(JWTError, match="unsupported"):
+            jwt.decode(token, "secret", algorithms=["HS999"])
+
+    def test_error_categories_are_distinct(self, key):
+        # Policy: 'none' is forbidden by default
+        with pytest.raises(JWTError, match="'none' algorithm is not allowed"):
+            jwt.decode(make_none_token(), "", algorithms=["none"])
+
+        # Whitelist: alg not permitted
+        with pytest.raises(JWTError, match="alg value is not allowed"):
+            jwt.decode(make_none_token(), "", algorithms=["HS256"], allow_none=True)
+
+        # Signature mismatch on a real signed token
+        token = jwt.encode({"a": "b"}, key)
+        with pytest.raises(JWTError, match="Signature verification failed"):
+            jwt.decode(token, "wrong-secret", algorithms=["HS256"])
+
+    def test_signed_tokens_unaffected(self, claims, key):
+        token = jwt.encode(claims, key)
+        assert jwt.decode(token, key, algorithms=["HS256"]) == claims
+
+    def test_none_with_verify_signature_disabled(self, key):
+        token = make_none_token()
+        options = {"verify_signature": False}
+        assert jwt.decode(token, key, algorithms=["none"], options=options) == {"a": "b"}

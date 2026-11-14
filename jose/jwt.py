@@ -17,7 +17,14 @@ except ImportError:
 from jose import jws
 
 from .constants import ALGORITHMS
-from .exceptions import ExpiredSignatureError, JWSError, JWTClaimsError, JWTError
+from .exceptions import (
+    ExpiredSignatureError,
+    JWSAlgorithmError,
+    JWSError,
+    JWSSignatureError,
+    JWTClaimsError,
+    JWTError,
+)
 from .utils import calculate_at_hash, timedelta_total_seconds
 
 
@@ -63,7 +70,17 @@ def encode(claims, key, algorithm=ALGORITHMS.HS256, headers=None, access_token=N
     return jws.sign(claims, key, headers=headers, algorithm=algorithm)
 
 
-def decode(token, key, algorithms=None, options=None, audience=None, issuer=None, subject=None, access_token=None):
+def decode(
+    token,
+    key,
+    algorithms=None,
+    options=None,
+    audience=None,
+    issuer=None,
+    subject=None,
+    access_token=None,
+    allow_none=False,
+):
     """Verifies a JWT string's signature and validates reserved claims.
 
     Args:
@@ -90,6 +107,10 @@ def decode(token, key, algorithms=None, options=None, audience=None, issuer=None
         access_token (str): An access token string. If the "at_hash" claim is included in the
             claim set, then the access_token must be included, and it must match
             the "at_hash" claim.
+        allow_none (bool): Whether to accept tokens using the "none" algorithm.
+            Defaults to False. The "none" algorithm is only accepted when this is
+            explicitly set to True, no verification key is configured, and the
+            signature segment is empty.
         options (dict): A dictionary of options for skipping validation steps.
 
             defaults = {
@@ -156,9 +177,13 @@ def decode(token, key, algorithms=None, options=None, audience=None, issuer=None
     verify_signature = defaults.get("verify_signature", True)
 
     try:
-        payload = jws.verify(token, key, algorithms, verify=verify_signature)
+        payload = jws.verify(token, key, algorithms, verify=verify_signature, allow_none=allow_none)
+    except JWSSignatureError as e:
+        raise JWTError("Signature verification failed.") from e
+    except JWSAlgorithmError as e:
+        raise JWTError(str(e)) from e
     except JWSError as e:
-        raise JWTError(e)
+        raise JWTError(str(e)) from e
 
     # Needed for at_hash verification
     algorithm = jws.get_unverified_header(token)["alg"]

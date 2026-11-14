@@ -9,7 +9,7 @@ except ImportError:
 from jose import jwk
 from jose.backends.base import Key
 from jose.constants import ALGORITHMS
-from jose.exceptions import JWSError, JWSSignatureError
+from jose.exceptions import JWKError, JWSAlgorithmError, JWSError, JWSSignatureError
 from jose.utils import base64url_decode, base64url_encode
 
 
@@ -49,7 +49,7 @@ def sign(payload, key, headers=None, algorithm=ALGORITHMS.HS256):
     return signed_output
 
 
-def verify(token, key, algorithms, verify=True):
+def verify(token, key, algorithms, verify=True, allow_none=False):
     """Verifies a JWS string's signature.
 
     Args:
@@ -57,6 +57,10 @@ def verify(token, key, algorithms, verify=True):
         key (str or dict): A key to attempt to verify the payload with. Can be
             individual JWK or JWK set.
         algorithms (str or list): Valid algorithms that should be used to verify the JWS.
+        allow_none (bool, optional): Whether to accept tokens using the "none"
+            algorithm. Defaults to False. The "none" algorithm is only accepted
+            when this is explicitly set to True, no verification key is
+            configured, and the signature segment is empty.
 
     Returns:
         str: The str representation of the payload, assuming the signature is valid.
@@ -74,7 +78,7 @@ def verify(token, key, algorithms, verify=True):
     header, payload, signing_input, signature = _load(token)
 
     if verify:
-        _verify_signature(signing_input, header, signature, key, algorithms)
+        _verify_signature(signing_input, header, signature, key, algorithms, allow_none=allow_none)
 
     return payload
 
@@ -250,19 +254,39 @@ def _get_keys(key):
         return (key,)
 
 
-def _verify_signature(signing_input, header, signature, key="", algorithms=None):
+def _verify_none_algorithm(signature, key, allow_none):
+    if not allow_none:
+        raise JWSError(
+            "The 'none' algorithm is not allowed. Pass allow_none=True to explicitly enable it."
+        )
+    if key:
+        raise JWSError("The 'none' algorithm cannot be used when a verification key is configured.")
+    if signature:
+        raise JWSSignatureError("The 'none' algorithm requires an empty signature segment.")
+
+
+def _verify_signature(signing_input, header, signature, key="", algorithms=None, allow_none=False):
     alg = header.get("alg")
     if not alg:
         raise JWSError("No algorithm was specified in the JWS header.")
 
+    if not isinstance(alg, str):
+        raise JWSAlgorithmError("Invalid algorithm type in the JWS header.")
+
     if algorithms is not None and alg not in algorithms:
-        raise JWSError("The specified alg value is not allowed")
+        raise JWSAlgorithmError("The specified alg value is not allowed")
+
+    if alg.lower() == ALGORITHMS.NONE:
+        if alg != ALGORITHMS.NONE:
+            raise JWSAlgorithmError("Algorithm %r is not allowed; only the exact 'none' value is valid." % alg)
+        _verify_none_algorithm(signature, key, allow_none)
+        return
 
     keys = _get_keys(key)
     try:
         if not _sig_matches_keys(keys, signing_input, signature, alg):
             raise JWSSignatureError()
     except JWSSignatureError:
-        raise JWSError("Signature verification failed.")
-    except JWSError:
-        raise JWSError("Invalid or unsupported algorithm: %s" % alg)
+        raise JWSSignatureError("Signature verification failed.")
+    except (JWSError, JWKError):
+        raise JWSAlgorithmError("Invalid or unsupported algorithm: %s" % alg)

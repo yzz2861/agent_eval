@@ -6,7 +6,8 @@ import pytest
 from jose import jwk, jws
 from jose.backends import RSAKey
 from jose.constants import ALGORITHMS
-from jose.exceptions import JWSError
+from jose.exceptions import JWSAlgorithmError, JWSError, JWSSignatureError
+from jose.utils import base64url_encode
 
 try:
     from jose.backends.cryptography_backend import CryptographyRSAKey
@@ -96,6 +97,82 @@ class TestJWK:
         key = jwk.construct(key_data, algorithm="HS256")
         token = jws.sign(payload, key, algorithm=ALGORITHMS.HS256)
         assert jws.verify(token, key_data, ALGORITHMS.HS256) == payload
+
+
+def make_unsigned_token(alg="none", signature="", payload=b'{"a": "b"}'):
+    header_segment = base64url_encode(json.dumps({"alg": alg, "typ": "JWT"}).encode("utf-8")).decode("utf-8")
+    payload_segment = base64url_encode(payload).decode("utf-8")
+    return ".".join([header_segment, payload_segment, signature])
+
+
+class TestNoneAlgorithm:
+    def test_none_rejected_by_default(self):
+        token = make_unsigned_token()
+        with pytest.raises(JWSError, match="none"):
+            jws.verify(token, "", ["none"])
+
+    def test_none_rejected_by_default_even_with_key(self):
+        token = make_unsigned_token()
+        with pytest.raises(JWSError, match="none"):
+            jws.verify(token, "secret", ["none"])
+
+    def test_none_rejected_when_key_configured(self):
+        token = make_unsigned_token()
+        with pytest.raises(JWSError, match="key"):
+            jws.verify(token, "secret", ["none"], allow_none=True)
+
+    @pytest.mark.parametrize("empty_key", ["", b"", None])
+    def test_none_allowed_explicitly_without_key(self, empty_key):
+        token = make_unsigned_token()
+        assert jws.verify(token, empty_key, ["none"], allow_none=True) == b'{"a": "b"}'
+
+    def test_none_with_fake_signature_rejected(self):
+        token = make_unsigned_token(signature="ZmFrZS1zaWduYXR1cmU")
+        with pytest.raises(JWSSignatureError):
+            jws.verify(token, "", ["none"], allow_none=True)
+
+    def test_none_signature_never_compared_with_hmac_key(self, monkeypatch):
+        def fail_on_signature_compare(keys, signing_input, signature, alg):
+            raise AssertionError("signature backend must not be invoked for 'none'")
+
+        monkeypatch.setattr(jws, "_sig_matches_keys", fail_on_signature_compare)
+        token = make_unsigned_token()
+        assert jws.verify(token, "", ["none"], allow_none=True) == b'{"a": "b"}'
+
+    @pytest.mark.parametrize("alg", ["None", "NONE", "nOnE"])
+    def test_none_case_variants_rejected(self, alg):
+        token = make_unsigned_token(alg=alg)
+        with pytest.raises(JWSAlgorithmError):
+            jws.verify(token, "", ["none", alg], allow_none=True)
+
+    def test_none_not_in_whitelist(self):
+        token = make_unsigned_token()
+        with pytest.raises(JWSAlgorithmError, match="not allowed"):
+            jws.verify(token, "", ["HS256"], allow_none=True)
+
+    def test_none_empty_whitelist(self):
+        token = make_unsigned_token()
+        with pytest.raises(JWSAlgorithmError, match="not allowed"):
+            jws.verify(token, "", [], allow_none=True)
+
+    def test_empty_alg_rejected(self):
+        token = make_unsigned_token(alg="")
+        with pytest.raises(JWSError, match="No algorithm"):
+            jws.verify(token, "", [""], allow_none=True)
+
+    def test_non_string_alg_rejected(self):
+        token = make_unsigned_token(alg=256)
+        with pytest.raises(JWSAlgorithmError):
+            jws.verify(token, "", None, allow_none=True)
+
+    def test_unknown_alg_rejected(self):
+        token = make_unsigned_token(alg="HS999")
+        with pytest.raises(JWSAlgorithmError, match="unsupported"):
+            jws.verify(token, "secret", ["HS999"])
+
+    def test_none_verify_disabled_skips_policy(self):
+        token = make_unsigned_token()
+        assert jws.verify(token, "secret", ["none"], verify=False) == b'{"a": "b"}'
 
 
 class TestHMAC:
