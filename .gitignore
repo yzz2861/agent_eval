@@ -1,0 +1,16 @@
+doc/build
+macholib.egg-info
+__pycache__
+build
+dist
+.DS_Store
+.tox
+.coverage
+htmlcov
+
+syntax: glob
+*.pyc
+*.pyo
+*.dSYM
+*.swp
+.coverage*
