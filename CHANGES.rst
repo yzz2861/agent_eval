@@ -4,7 +4,14 @@ Changes
 9.1 (unreleased)
 ----------------
 
-- Nothing changed yet.
+ - Add configurable compile budgets (``CompileBudget``) to ``compile.py``.
+   Exceeding a budget raises ``BudgetExceededError`` (a ``SyntaxError``
+   subclass) with structured diagnostics: the exhausted resource, the
+   configured limit, the measured value, the compilation phase and the
+   source position.  Budgets cover source size, AST depth, AST node count,
+   constant size and the size of the compiled code objects.  Interpreter
+   level ``RecursionError`` during parsing, transformation or compilation
+   is converted into ``BudgetExceededError`` instead of propagating.
 
 
 9.0 (2026-11-04)

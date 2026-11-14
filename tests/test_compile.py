@@ -1,8 +1,11 @@
+import ast
 import platform
 import types
 
 import pytest
 
+from RestrictedPython import BudgetExceededError
+from RestrictedPython import CompileBudget
 from RestrictedPython import CompileResult
 from RestrictedPython import compile_restricted
 from RestrictedPython import compile_restricted_eval
@@ -224,3 +227,92 @@ def test_compile_CPython_warning(recwarn, mocker):  # pragma: no cover
         'RestrictedPython is only supported on CPython: use on other Python '
         'implementations may create security issues.'
     )
+
+
+def _deep_expression_ast(depth):
+    """Build an attribute chain AST of ``depth`` levels, iteratively."""
+    node = ast.Name(id='x', ctx=ast.Load(), lineno=1, col_offset=0)
+    for _ in range(depth):
+        node = ast.Attribute(
+            value=node, attr='a', ctx=ast.Load(), lineno=1, col_offset=0)
+    return ast.Expression(node)
+
+
+def test_compile__budget_normal_script_unaffected():
+    """The default budget does not change normal compilation."""
+    result = compile_restricted_exec('a = 42')
+    assert result.errors == ()
+    assert result.code is not None
+
+
+def test_compile__budget_exceeded_ast_depth():
+    """Deeply nested ASTs are rejected with a located diagnostic."""
+    with pytest.raises(BudgetExceededError) as exc:
+        compile_restricted_eval(
+            _deep_expression_ast(5000),
+            budget=CompileBudget(max_ast_depth=100))
+    assert exc.value.resource == 'ast_depth'
+    assert exc.value.phase == 'parse'
+    assert exc.value.limit == 100
+    assert exc.value.actual == 101
+    assert exc.value.lineno == 1
+
+
+def test_compile__budget_exceeded_ast_nodes():
+    source = 'x = [' + ','.join(['1'] * 500) + ']'
+    with pytest.raises(BudgetExceededError) as exc:
+        compile_restricted_exec(source, budget=CompileBudget(max_ast_nodes=10))
+    assert exc.value.resource == 'ast_nodes'
+    assert exc.value.lineno == 1
+
+
+def test_compile__budget_exceeded_constant_size():
+    source = 'result = "' + 'x' * 200000 + '"'
+    with pytest.raises(BudgetExceededError) as exc:
+        compile_restricted_exec(
+            source, budget=CompileBudget(max_constant_size=1000))
+    assert exc.value.resource == 'constant_size'
+    assert exc.value.actual == 200000
+    assert exc.value.lineno == 1
+    assert exc.value.col_offset == 9
+
+
+def test_compile__budget_exceeded_source_length():
+    with pytest.raises(BudgetExceededError) as exc:
+        compile_restricted_exec(
+            'pass', budget=CompileBudget(max_source_length=2))
+    assert exc.value.resource == 'source_length'
+    assert exc.value.phase == 'parse'
+
+
+def test_compile__budget_exceeded_code_size():
+    source = '\n'.join('a%d = %d' % (i, i) for i in range(200))
+    with pytest.raises(BudgetExceededError) as exc:
+        compile_restricted_exec(source, budget=CompileBudget(max_code_size=10))
+    assert exc.value.resource == 'code_size'
+    assert exc.value.phase == 'code_object'
+
+
+def test_compile__budget_recursion_guard():
+    """Interpreter recursion limits become budget errors, not crashes."""
+    source = 'x' + '.attr' * 100000
+    with pytest.raises(BudgetExceededError) as exc:
+        compile_restricted_eval(source, budget=CompileBudget())
+    assert exc.value.resource == 'ast_depth'
+
+
+def test_compile__budget_exceeded_is_syntax_error():
+    """Budget errors stay catchable as SyntaxError for compatibility."""
+    with pytest.raises(SyntaxError):
+        compile_restricted(
+            'pass', '<string>', 'exec',
+            budget=CompileBudget(max_source_length=2))
+
+
+def test_compile__budget_failure_leaves_no_stale_state():
+    """A failed compilation does not affect subsequent compilations."""
+    with pytest.raises(BudgetExceededError):
+        compile_restricted_exec('pass', budget=CompileBudget(max_ast_nodes=1))
+    result = compile_restricted_exec('pass')
+    assert result.errors == ()
+    assert result.code is not None

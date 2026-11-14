@@ -34,6 +34,9 @@ from RestrictedPython.Utilities import utility_builtins  # isort:skip
 # Helper Methods
 from RestrictedPython.PrintCollector import PrintCollector  # isort:skip
 from RestrictedPython.compile import CompileResult  # isort:skip
+from RestrictedPython.compile import BudgetExceededError  # isort:skip
+from RestrictedPython.compile import CompileBudget  # isort:skip
+from RestrictedPython.compile import DEFAULT_COMPILE_BUDGET  # isort:skip
 
 # Policy
 from RestrictedPython.transformer import RestrictingNodeTransformer  # isort:skip

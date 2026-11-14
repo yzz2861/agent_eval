@@ -4,7 +4,7 @@ API overview
 ``compile_restricted`` methods
 ++++++++++++++++++++++++++++++
 
-.. py:method:: compile_restricted(source, filename, mode, flags, dont_inherit, policy)
+.. py:method:: compile_restricted(source, filename, mode, flags, dont_inherit, policy, budget)
     :module: RestrictedPython
 
     Compiles source code into interpretable byte code.
@@ -15,13 +15,39 @@ API overview
     :param flags: (optional). defaults to ``0``
     :param dont_inherit: (optional). defaults to ``False``
     :param policy: (optional). defaults to ``RestrictingNodeTransformer``
+    :param budget: (optional). defaults to ``DEFAULT_COMPILE_BUDGET``
     :type source: str or bytes or bytearray or ``ast.Module`` or ``ast.Expression`` or ``ast.Interactive``
     :type filename: str or bytes or os.PathLike[typing.Any]
     :type mode: str
     :type flags: int
     :type dont_inherit: int
     :type policy: RestrictingNodeTransformer class
+    :type budget: CompileBudget
     :return: Python ``code`` object
+
+Compile budgets
++++++++++++++++
+
+All ``compile_restricted*`` methods accept an optional ``budget`` argument
+of type ``CompileBudget``.  It defines limits for the compilation itself:
+
+- ``max_source_length``: length of the source in characters/bytes
+- ``max_ast_depth``: nesting depth of the parsed AST
+- ``max_ast_nodes``: total number of AST nodes
+- ``max_constant_size``: size of ``str``/``bytes`` constants
+- ``max_code_size``: summed bytecode size of all produced code objects
+
+Each limit may be set to ``None`` to disable it.  If no budget is given,
+``DEFAULT_COMPILE_BUDGET`` is used.
+
+Exceeding a budget raises ``BudgetExceededError``, a subclass of
+``SyntaxError`` carrying structured diagnostics: ``resource`` (which
+budget), ``limit``, ``actual``, ``phase`` (``'parse'``, ``'transform'``,
+``'compile'`` or ``'code_object'``), ``filename``, ``lineno`` and
+``col_offset``.  A ``RecursionError`` raised by the interpreter itself
+while parsing, transforming or compiling pathological input is converted
+into ``BudgetExceededError`` as well, so such input can never crash the
+compilation process.
 
 .. py:method:: compile_restricted_exec(source, filename, flags, dont_inherit, policy)
     :module: RestrictedPython
