@@ -519,6 +519,23 @@ class SignedDigestAlgorithm(_ForceNullParameters, Sequence):
             algorithm
         ))
 
+    def validate(self, strict=False):
+        """
+        Validates that this signature algorithm identifier is bound to
+        parameters that are consistent with its OID. This is an explicit
+        policy check; regular parsing remains permissive.
+
+        :param strict:
+            A bool - when True, missing required parameters are rejected
+
+        :raises:
+            asn1crypto._validation.AlgorithmValidationError - or a subclass
+        """
+
+        from ._validation import validate_signed_digest_algorithm
+
+        return validate_signed_digest_algorithm(self, strict=strict)
+
 
 class Pbkdf2Salt(Choice):
     _alternatives = [

@@ -1,5 +1,18 @@
 # changelog
 
+## Unreleased
+
+ - Added centralized algorithm/parameter/key policy validation in the new
+   `asn1crypto._validation` module. Explicit `validate()` entry points on
+   `algos.SignedDigestAlgorithm`, `keys.PublicKeyInfo`,
+   `keys.PrivateKeyInfo`, `x509.Certificate` and `csr.CertificationRequest`
+   bind algorithm OIDs to their parameters and key material. Default parsing
+   stays permissive (unknown algorithms still parse), while verification
+   entry points reject unknown OIDs, missing/conflicting parameters,
+   unsupported EC curves and point encodings, weak RSA/DSA parameters,
+   EdDSA parameters and keyUsage mismatches, with errors that report the OID
+   and parameter type without exposing key material
+
 ## 1.5.1
 
  - Handle RSASSA-PSS in `keys.PrivateKeyInfo.bit_size` and

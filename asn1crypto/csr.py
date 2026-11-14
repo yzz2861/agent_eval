@@ -131,3 +131,24 @@ class CertificationRequest(Sequence):
         ('signature_algorithm', SignedDigestAlgorithm),
         ('signature', OctetBitString),
     ]
+
+    def validate(self, strict=False, usage=None):
+        """
+        Validates the signature algorithm identifier and the subject public
+        key binding of this CSR. This is an explicit policy check and does
+        not change regular parsing behavior.
+
+        :param strict:
+            A bool - when True, RFC profile requirements are enforced
+        :param usage:
+            An optional unicode string operation validated against any
+            keyUsage extension requested through the extensionRequest
+            attribute
+
+        :raises:
+            asn1crypto._validation.AlgorithmValidationError - or a subclass
+        """
+
+        from ._validation import validate_csr
+
+        return validate_csr(self, strict=strict, usage=usage)

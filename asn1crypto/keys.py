@@ -982,6 +982,23 @@ class PrivateKeyInfo(Sequence):
             'asn1crypto.keys.PrivateKeyInfo().fingerprint has been removed, '
             'please use oscrypto.asymmetric.PrivateKey().fingerprint instead')
 
+    def validate(self, strict=False):
+        """
+        Validates that the algorithm identifier, parameters and key material
+        are bound together consistently. This is an explicit policy check and
+        does not change regular parsing behavior.
+
+        :param strict:
+            A bool - when True, additional profile requirements are enforced
+
+        :raises:
+            asn1crypto._validation.AlgorithmValidationError - or a subclass
+        """
+
+        from ._validation import validate_private_key
+
+        return validate_private_key(self, strict=strict)
+
 
 class EncryptedPrivateKeyInfo(Sequence):
     """
@@ -1311,3 +1328,20 @@ class PublicKeyInfo(Sequence):
         raise APIException(
             'asn1crypto.keys.PublicKeyInfo().fingerprint has been removed, '
             'please use oscrypto.asymmetric.PublicKey().fingerprint instead')
+
+    def validate(self, strict=False):
+        """
+        Validates that the algorithm identifier, parameters and key material
+        are bound together consistently. This is an explicit policy check and
+        does not change regular parsing behavior.
+
+        :param strict:
+            A bool - when True, additional profile requirements are enforced
+
+        :raises:
+            asn1crypto._validation.AlgorithmValidationError - or a subclass
+        """
+
+        from ._validation import validate_public_key
+
+        return validate_public_key(self, strict=strict)

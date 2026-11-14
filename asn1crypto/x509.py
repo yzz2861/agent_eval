@@ -2891,6 +2891,29 @@ class Certificate(Sequence):
 
         return ' '.join('%02X' % c for c in bytes_to_list(self.sha256))
 
+    def validate(self, strict=False, usage=None):
+        """
+        Validates the algorithm identifiers, their parameters and the subject
+        public key of this certificate. This is an explicit policy check and
+        does not change regular parsing behavior. The signature itself is not
+        cryptographically verified, but every value a verification backend
+        would consume is checked for a safe, unambiguous interpretation.
+
+        :param strict:
+            A bool - when True, RFC profile requirements are enforced
+        :param usage:
+            An optional unicode string operation (e.g. "sign",
+            "cert_sign", "key_encipherment") validated against the
+            certificate's keyUsage extension
+
+        :raises:
+            asn1crypto._validation.AlgorithmValidationError - or a subclass
+        """
+
+        from ._validation import validate_certificate
+
+        return validate_certificate(self, strict=strict, usage=usage)
+
     def is_valid_domain_ip(self, domain_ip):
         """
         Check if a domain name or IP address is valid according to the
