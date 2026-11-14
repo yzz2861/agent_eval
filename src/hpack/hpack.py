@@ -494,12 +494,38 @@ class Decoder:
         log.debug("Decoding %s", data)
 
         data_mem = memoryview(data)
+        # A header block is all-or-nothing: if decoding fails, the dynamic
+        # table must be restored to the state it had before the block started,
+        # so a malformed block cannot poison the table (and any cache keys
+        # derived from it) with partially applied state.
+        table_snapshot = self.header_table.snapshot()
+
+        try:
+            headers = self._decode_block(data, data_mem)
+            return [_unicode_if_needed(h, raw) for h in headers]
+        except UnicodeDecodeError as err:
+            self.header_table.restore(table_snapshot)
+            msg = "Unable to decode headers as UTF-8 during the header field phase"
+            raise HPACKDecodingError(msg) from err
+        except HPACKDecodingError:
+            self.header_table.restore(table_snapshot)
+            raise
+
+    def _decode_block(self, data: bytes, data_mem: memoryview) -> list[HeaderTuple]:
+        """
+        Walks a complete header block, applying any leading dynamic table size
+        updates before decoding the header field representations.
+        """
         headers: list[HeaderTuple] = []
-        data_len = len(data)
         inflated_size = 0
         current_index = 0
+        # Dynamic table size updates are only legal at the very start of a
+        # header block, before any header field representation (RFC 7541
+        # section 4.2). Track the phase explicitly so that ordering violations
+        # are reported even when no header has been appended yet.
+        seen_header_representation = False
 
-        while current_index < data_len:
+        while current_index < len(data):
             # Work out what kind of header we're decoding.
             # If the high bit is 1, it's an indexed field.
             current = data[current_index]
@@ -514,26 +540,29 @@ class Decoder:
             encoding_update = bool(current & 0x20)
 
             if indexed:
+                seen_header_representation = True
                 header, consumed = self._decode_indexed(
                     data_mem[current_index:],
                 )
             elif literal_index:
                 # It's a literal header that does affect the header table.
+                seen_header_representation = True
                 header, consumed = self._decode_literal_index(
                     data_mem[current_index:],
                 )
             elif encoding_update:
                 # It's an update to the encoding context. These are forbidden
-                # in a header block after any actual header.
-                if headers:
-                    msg = "Table size update not at the start of the block"
-                    raise HPACKDecodingError(msg)
+                # in a header block after any header field representation.
+                if seen_header_representation:
+                    self._raise_out_of_order_size_update(current_index)
                 consumed = self._update_encoding_context(
                     data_mem[current_index:],
+                    current_index,
                 )
                 header = None
             else:
                 # It's a literal header that does not affect the header table.
+                seen_header_representation = True
                 header, consumed = self._decode_literal_no_index(
                     data_mem[current_index:],
                 )
@@ -553,11 +582,19 @@ class Decoder:
         # remote peer hasn't actually done that.
         self._assert_valid_table_size()
 
-        try:
-            return [_unicode_if_needed(h, raw) for h in headers]
-        except UnicodeDecodeError as err:
-            msg = "Unable to decode headers as UTF-8"
-            raise HPACKDecodingError(msg) from err
+        return headers
+
+    @staticmethod
+    def _raise_out_of_order_size_update(byte_index: int) -> None:
+        """
+        Report a dynamic table size update that appears after the block's
+        leading preamble.
+        """
+        msg = (
+            "Dynamic table size update not at the start of the header block "
+            f"at byte index {byte_index} during the header field phase"
+        )
+        raise HPACKDecodingError(msg)
 
     def _assert_valid_table_size(self) -> None:
         """
@@ -568,14 +605,28 @@ class Decoder:
             msg = "Encoder did not shrink table size to within the max"
             raise InvalidTableSizeError(msg)
 
-    def _update_encoding_context(self, data: bytes | memoryview) -> int:
+    def _update_encoding_context(self, data: bytes | memoryview, byte_index: int = 0) -> int:
         """
-        Handles a byte that updates the encoding context.
+        Handles a dynamic table size update (RFC 7541 section 6.3).
+
+        Every update in the leading preamble of the header block is applied in
+        order, so a legal encoder may emit several updates in a single block.
+        The new size must be non-negative and must not exceed the most recent
+        SETTINGS_HEADER_TABLE_SIZE acknowledged from the peer.
         """
-        # We've been asked to resize the header table.
         new_size, consumed = decode_integer(data, 5)
+        if new_size < 0:
+            msg = (
+                f"Negative dynamic table size update {new_size} at byte "
+                f"index {byte_index} during the table size update phase"
+            )
+            raise InvalidTableSizeError(msg)
         if new_size > self.max_allowed_table_size:
-            msg = "Encoder exceeded max allowable table size"
+            msg = (
+                f"Dynamic table size update {new_size} at byte index "
+                f"{byte_index} during the table size update phase exceeds "
+                f"the max allowed table size {self.max_allowed_table_size}"
+            )
             raise InvalidTableSizeError(msg)
         self.header_table_size = new_size
         return consumed

@@ -3,7 +3,7 @@ from collections import deque
 import logging
 from typing import Optional
 
-from .exceptions import InvalidTableIndex
+from .exceptions import InvalidTableIndex, InvalidTableSizeError
 
 log = logging.getLogger(__name__)
 
@@ -144,6 +144,28 @@ class HeaderTable:
             self.dynamic_entries
         )
 
+    def snapshot(self) -> tuple[int, int, bool, deque[tuple[bytes, bytes]]]:
+        """
+        Capture the full mutable state of the table so that a failed header
+        block decode can be rolled back atomically.
+        """
+        return (
+            self._maxsize,
+            self._current_size,
+            self.resized,
+            deque(self.dynamic_entries),
+        )
+
+    def restore(self, snapshot: tuple[int, int, bool, deque[tuple[bytes, bytes]]]) -> None:
+        """
+        Restore the table to a state previously captured by :meth:`snapshot`.
+        """
+        maxsize, current_size, resized, dynamic_entries = snapshot
+        self._maxsize = maxsize
+        self._current_size = current_size
+        self.resized = resized
+        self.dynamic_entries = deque(dynamic_entries)
+
     def add(self, name: bytes, value: bytes) -> None:
         """
         Adds a new entry to the table
@@ -198,6 +220,9 @@ class HeaderTable:
     @maxsize.setter
     def maxsize(self, newmax: int) -> None:
         newmax = int(newmax)
+        if newmax < 0:
+            msg = f"Header table size cannot be negative, got {newmax}"
+            raise InvalidTableSizeError(msg)
         log.debug("Resizing header table to %d from %d", newmax, self._maxsize)
         oldmax = self._maxsize
         self._maxsize = newmax

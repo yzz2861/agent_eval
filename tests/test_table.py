@@ -1,6 +1,6 @@
 import pytest
 
-from hpack import InvalidTableIndex
+from hpack import InvalidTableIndex, InvalidTableSizeError
 from hpack.table import HeaderTable, table_entry_size
 
 
@@ -141,3 +141,61 @@ class TestHeaderTable:
         tbl.maxsize = 146
         assert len(tbl.dynamic_entries) == 2
         assert tbl._current_size == 98
+
+    def test_negative_maxsize_rejected(self):
+        tbl = HeaderTable()
+        tbl.add(b'TestName', b'TestValue')
+
+        with pytest.raises(InvalidTableSizeError) as exc_info:
+            tbl.maxsize = -1
+
+        assert "-1" in str(exc_info.value)
+        # The table is untouched when the size is rejected.
+        assert tbl.maxsize == HeaderTable.DEFAULT_SIZE
+        assert len(tbl.dynamic_entries) == 1
+
+    def test_zero_maxsize_clears_dynamic_entries(self):
+        tbl = HeaderTable()
+        tbl.add(b'TestName', b'TestValue')
+        assert len(tbl.dynamic_entries) == 1
+
+        tbl.maxsize = 0
+
+        assert tbl.maxsize == 0
+        assert tbl._current_size == 0
+        assert len(tbl.dynamic_entries) == 0
+
+    def test_repeated_maxsize_updates_apply_in_order(self):
+        tbl = HeaderTable()
+        tbl.add(b'TestName', b'TestValue')
+
+        # A legal encoder can emit several size updates in one block.
+        tbl.maxsize = 0
+        assert len(tbl.dynamic_entries) == 0
+
+        tbl.maxsize = 49
+        tbl.add(b'TestName', b'TestValue')
+        assert len(tbl.dynamic_entries) == 1
+
+        # Shrinking again evicts entries that no longer fit.
+        tbl.maxsize = 1
+        assert tbl.maxsize == 1
+        assert tbl._current_size == 0
+        assert len(tbl.dynamic_entries) == 0
+
+    def test_snapshot_restore_rolls_back_all_changes(self):
+        tbl = HeaderTable()
+        tbl.add(b'Keep', b'Me')
+        snapshot = tbl.snapshot()
+
+        tbl.maxsize = 0
+        assert len(tbl.dynamic_entries) == 0
+        tbl.maxsize = 100
+        tbl.add(b'New', b'Entry')
+
+        tbl.restore(snapshot)
+
+        assert tbl.maxsize == HeaderTable.DEFAULT_SIZE
+        assert len(tbl.dynamic_entries) == 1
+        assert tbl.get_by_index(len(HeaderTable.STATIC_TABLE) + 1) == (b'Keep', b'Me')
+        assert tbl._current_size == table_entry_size(b'Keep', b'Me')
