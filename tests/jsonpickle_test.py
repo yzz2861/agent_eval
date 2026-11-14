@@ -16,6 +16,7 @@ import jsonpickle
 import jsonpickle.backend
 import jsonpickle.handlers
 from jsonpickle import tags, util
+from jsonpickle.errors import TagError
 
 
 class ListLike:
@@ -1083,6 +1084,112 @@ def test_reserved_tag_dict_key_nested_in_object_with_keys_enabled():
     assert restored.child == {tags.OBJECT: "x", "k": "cd"}
 
 
+def test_conflicting_type_tags_are_rejected_with_path():
+    payload = {tags.OBJECT: "builtins.int", tags.TYPE: "builtins.str"}
+
+    with pytest.raises(TagError) as exc_info:
+        jsonpickle.decode(jsonpickle.backend.json.encode(payload))
+
+    message = str(exc_info.value)
+    assert tags.OBJECT in message
+    assert tags.TYPE in message
+    assert "$" in message
+    assert "builtins.int" not in message
+    assert "builtins.str" not in message
+
+
+def test_nested_tuple_tags_restore_in_protocol_positions():
+    payload = {
+        tags.TUPLE: [
+            {tags.TUPLE: [1, 2]},
+            {tags.OBJECT: "builtins.complex", tags.NEWARGS: {tags.TUPLE: [3, 4]}},
+        ]
+    }
+
+    restored = jsonpickle.decode(jsonpickle.backend.json.encode(payload))
+
+    assert restored == ((1, 2), complex(3, 4))
+
+
+def test_reserved_tag_name_in_business_dict_does_not_trigger_restore():
+    payload = {"child": {tags.OBJECT: "x", "k": "cd"}}
+
+    assert jsonpickle.decode(jsonpickle.backend.json.encode(payload)) == payload
+
+
+def test_reserved_tag_name_as_business_key_round_trips_without_restore():
+    payload = {tags.OBJECT: "x", "k": "cd"}
+    encoded = jsonpickle.encode(payload, keys=True)
+
+    assert tags.JSON_KEY in encoded
+    assert jsonpickle.decode(encoded, keys=True) == payload
+
+
+def test_unknown_py_tag_is_rejected_in_strict_mode():
+    payload = {"py/made-up": True}
+
+    with pytest.raises(TagError, match="unknown tag 'py/made-up'"):
+        jsonpickle.decode(jsonpickle.backend.json.encode(payload))
+
+
+def test_auxiliary_tag_without_object_tag_is_rejected():
+    payload = {tags.STATE: {"normal": True}}
+
+    with pytest.raises(TagError, match=tags.STATE):
+        jsonpickle.decode(jsonpickle.backend.json.encode(payload))
+
+
+def test_id_proxy_conflicting_with_object_tag_is_rejected():
+    payload = {tags.ID: 0, tags.OBJECT: "builtins.int"}
+
+    with pytest.raises(TagError, match=tags.ID):
+        jsonpickle.decode(jsonpickle.backend.json.encode(payload))
+
+
+def test_id_proxy_with_extra_business_key_is_rejected():
+    payload = {tags.ID: 0, "normal": True}
+
+    with pytest.raises(TagError, match=tags.ID):
+        jsonpickle.decode(jsonpickle.backend.json.encode(payload))
+
+
+def test_state_mapping_rejects_untagged_business_key_looking_like_object():
+    payload = {
+        tags.OBJECT: "jsonpickle_test.PickleProtocol2GetStateDict",
+        tags.NEWARGS: {tags.TUPLE: ["value"]},
+        tags.STATE: {tags.OBJECT: "x"},
+    }
+
+    with pytest.raises(TagError) as exc_info:
+        jsonpickle.decode(jsonpickle.backend.json.encode(payload))
+
+    message = str(exc_info.value)
+    assert f"{tags.STATE}.mapping" in message
+    assert tags.OBJECT in message
+    assert "x" not in message
+
+
+def test_state_mapping_preserves_custom_setstate():
+    encoded = jsonpickle.encode(StateWithCustomSetState())
+    restored = jsonpickle.decode(encoded)
+
+    assert restored.state == {"normal": "business"}
+
+
+def test_legacy_object_tuple_and_id_messages_remain_compatible():
+    value = complex(1, 2)
+    encoded = jsonpickle.encode([value, value])
+    payload = jsonpickle.backend.json.decode(encoded)
+
+    assert payload[0][tags.OBJECT] == "builtins.complex"
+    assert payload[0][tags.NEWARGS][tags.TUPLE] == [1.0, 2.0]
+    assert payload[1] == {tags.ID: 1}
+
+    restored = jsonpickle.decode(encoded)
+    assert restored == [value, value]
+    assert restored[0] is restored[1]
+
+
 def test_string_key_not_requiring_escape_dict_keys_with_keys_enabled():
     """String keys that do not require escaping are not escaped"""
     str_dict = {"name": [1, 2]}
@@ -1510,6 +1617,14 @@ class PickleProtocol2GetStateNestedDict(PickleProtocol2Thing):
 
     def __getstate__(self):
         return {"nested": {"magic": True}}
+
+
+class StateWithCustomSetState:
+    def __getstate__(self):
+        return {"normal": "business"}
+
+    def __setstate__(self, state):
+        self.state = state
 
 
 class PickleProtocol2GetStateSlots(PickleProtocol2Thing):

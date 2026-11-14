@@ -8,6 +8,7 @@ import pytest
 
 import jsonpickle
 import jsonpickle.handlers
+from jsonpickle.errors import TagError
 
 
 class CustomObject:
@@ -168,3 +169,12 @@ class HandlerTestCase:
         decoded = jsonpickle.decode(encoded, handler_context={"suffix": "ignored"})
 
         assert decoded.name == "alpha"
+
+    def test_unknown_tag_is_rejected_before_handler_restore(self):
+        payload = {
+            "py/object": "handler_test.CustomObject",
+            "py/made-up": True,
+        }
+
+        with pytest.raises(TagError, match="py/made-up"):
+            jsonpickle.decode(jsonpickle.backend.json.encode(payload))

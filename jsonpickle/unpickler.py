@@ -7,6 +7,7 @@
 import dataclasses
 import warnings
 from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass, replace
 from typing import Any, TypeAlias
 
 from . import errors, handlers, tags, util
@@ -188,6 +189,113 @@ def _obj_setvalue(obj: Any, idx: Any, proxy: _Proxy) -> None:
     obj[idx] = proxy.get()
 
 
+@dataclass(frozen=True)
+class _TagContext:
+    node_type: str
+    path: str = "$"
+
+
+@dataclass(frozen=True)
+class _TagResolution:
+    tag: str
+    restore: Callable[..., Any]
+    allowed_tags: frozenset[str]
+
+
+class _TagPolicy:
+    def resolve(
+        self, unpickler: "Unpickler", obj: dict[str, Any], context: _TagContext
+    ) -> _TagResolution | None:
+        present_tags = [
+            key for key in obj if isinstance(key, str) and key.startswith("py/")
+        ]
+        reserved_tags = [key for key in present_tags if key in tags.RESERVED]
+        primary_present = [key for key in reserved_tags if key in tags.PRIMARY]
+        unknown_tags = [key for key in present_tags if key not in tags.RESERVED]
+
+        if unknown_tags:
+            raise errors.TagError(
+                self._message(context, f"unknown tag {unknown_tags[0]!r}")
+            )
+
+        if len(primary_present) > 1:
+            raise errors.TagError(
+                self._message(
+                    context,
+                    f"conflicting type tags {self._tag_names(primary_present)}",
+                )
+            )
+
+        if reserved_tags and not primary_present:
+            raise errors.TagError(
+                self._message(
+                    context,
+                    f"tag {reserved_tags[0]!r} is not valid at this position",
+                )
+            )
+
+        if not primary_present:
+            return None
+
+        tag = primary_present[0]
+        allowed_tags = frozenset((tag,))
+        if tag == tags.OBJECT:
+            allowed_tags = tags.OBJECT_TAGS
+        elif tag == tags.ID and len(obj) != 1:
+            invalid_tags = [key for key in obj if key != tags.ID]
+            raise errors.TagError(
+                self._message(
+                    context,
+                    f"conflicting tags {self._tag_names([tag, *invalid_tags])}",
+                )
+            )
+
+        invalid_tags = [key for key in reserved_tags if key not in allowed_tags]
+        if invalid_tags:
+            raise errors.TagError(
+                self._message(
+                    context,
+                    f"conflicting tags {self._tag_names([tag, *invalid_tags])}",
+                )
+            )
+
+        restore = self._restoration_function(unpickler, tag)
+        return _TagResolution(tag, restore, allowed_tags)
+
+    def _restoration_function(
+        self, unpickler: "Unpickler", tag: str
+    ) -> Callable[..., Any]:
+        restoration_functions = {
+            tags.TUPLE: unpickler._restore_tuple,
+            tags.SET: unpickler._restore_set,
+            tags.B64: unpickler._restore_base64,
+            tags.B85: unpickler._restore_base85,
+            tags.BYTEARRAY: unpickler._restore_bytearray,
+            tags.MEMORYVIEW: unpickler._restore_memoryview,
+            tags.ID: unpickler._restore_id,
+            tags.ITERATOR: unpickler._restore_iterator,
+            tags.OBJECT: unpickler._restore_object,
+            tags.TYPE: unpickler._restore_type,
+            tags.REDUCE: unpickler._restore_reduce,
+            tags.FUNCTION: unpickler._restore_function,
+            tags.MODULE: unpickler._restore_module,
+            tags.REPR: (
+                unpickler._restore_repr_safe
+                if unpickler.safe
+                else unpickler._restore_repr
+            ),
+        }
+        return restoration_functions[tag]
+
+    def _tag_names(self, tag_names: Sequence[str]) -> str:
+        return ", ".join(repr(tag_name) for tag_name in tag_names)
+
+    def _message(self, context: _TagContext, detail: str) -> str:
+        return (
+            f"Invalid jsonpickle tag at {context.path} ({context.node_type}): {detail}"
+        )
+
+
 def has_tag(obj: Any, tag: str) -> bool:
     """Helper class that tests to see if the obj is a dictionary
     and contains a particular key/tag.
@@ -332,6 +440,7 @@ class Unpickler:
         self.handle_readonly = handle_readonly
         # Custom context passed through to custom handlers, see #452
         self.handler_context = handler_context
+        self._tag_policy = _TagPolicy()
 
         self.reset()
 
@@ -354,13 +463,35 @@ class Unpickler:
     def _restore(
         self, obj: Any, _passthrough: Callable[[Any], Any] = _passthrough
     ) -> Any:
-        # if obj isn't in these types, neither it nor nothing in it can have a tag
-        # don't change the tuple of types to a set, it won't work with isinstance
-        if not isinstance(obj, (str, list, dict, set, tuple)):
-            restore = _passthrough
-        else:
-            restore = self._restore_tags(obj)
-        return restore(obj)
+        return self._restore_value(obj, _TagContext("protocol"))
+
+    def _restore_value(self, obj: Any, context: _TagContext) -> Any:
+        if type(obj) is list:
+            return self._restore_list(obj, context)
+        if type(obj) is dict:
+            return self._restore_mapping(obj, context)
+        return obj
+
+    def _child_context(
+        self, context: _TagContext, node_type: str, path: str
+    ) -> _TagContext:
+        return replace(context, node_type=node_type, path=path)
+
+    def _key_path(self, parent_path: str, key: Any) -> str:
+        if isinstance(key, str):
+            return f"{parent_path}.{key}"
+        return f"{parent_path}[{type(key).__name__}]"
+
+    def _tag_error(self, context: _TagContext, detail: str) -> str:
+        return (
+            f"Invalid jsonpickle tag at {context.path} ({context.node_type}): {detail}"
+        )
+
+    def _restore_mapping(self, obj: dict[str, Any], context: _TagContext) -> Any:
+        resolution = self._tag_policy.resolve(self, obj, context)
+        if resolution is None:
+            return self._restore_dict(obj, context)
+        return resolution.restore(obj, context)
 
     def restore(
         self, obj: Any, reset: bool = True, classes: ClassesType | None = None
@@ -380,7 +511,7 @@ class Unpickler:
             self.reset()
         if classes:
             self.register_classes(classes)
-        value = self._restore(obj)
+        value = self._restore_value(obj, _TagContext("protocol"))
         if reset:
             self._swap_proxies()
         return value
@@ -405,34 +536,52 @@ class Unpickler:
         else:
             self._classes[util.importable_name(classes)] = classes  # type: ignore[arg-type]
 
-    def _restore_base64(self, obj: dict[str, Any]) -> bytes:
+    def _restore_base64(
+        self, obj: dict[str, Any], context: _TagContext | None = None
+    ) -> bytes:
         try:
             return util.b64decode(obj[tags.B64].encode("utf-8"))
         except (AttributeError, UnicodeEncodeError) as error:
             warnings.warn(f"jsonpickle could not decode base64 payload: {error}")
             return b""
 
-    def _restore_base85(self, obj: dict[str, Any]) -> bytes:
+    def _restore_base85(
+        self, obj: dict[str, Any], context: _TagContext | None = None
+    ) -> bytes:
         try:
             return util.b85decode(obj[tags.B85].encode("utf-8"))
         except (AttributeError, UnicodeEncodeError) as error:
             warnings.warn(f"jsonpickle could not decode base85 payload: {error}")
             return b""
 
-    def _restore_bytearray(self, obj: dict[str, Any]) -> bytearray:
+    def _restore_bytearray(
+        self, obj: dict[str, Any], context: _TagContext | None = None
+    ) -> bytearray:
         payload = obj[tags.BYTEARRAY]
+        payload_context = self._child_context(
+            context or _TagContext("protocol"),
+            "tag-value",
+            f"{(context or _TagContext('protocol')).path}.{tags.BYTEARRAY}",
+        )
         if tags.B85 in payload:
-            data = self._restore_base85(payload)
+            data = self._restore_base85(payload, payload_context)
         else:
-            data = self._restore_base64(payload)
+            data = self._restore_base64(payload, payload_context)
         return bytearray(data)
 
-    def _restore_memoryview(self, obj: dict[str, Any]) -> memoryview:
+    def _restore_memoryview(
+        self, obj: dict[str, Any], context: _TagContext | None = None
+    ) -> memoryview:
         payload = obj[tags.MEMORYVIEW]
+        payload_context = self._child_context(
+            context or _TagContext("protocol"),
+            "tag-value",
+            f"{(context or _TagContext('protocol')).path}.{tags.MEMORYVIEW}",
+        )
         if tags.B85 in payload:
-            data = self._restore_base85(payload)
+            data = self._restore_base85(payload, payload_context)
         else:
-            data = self._restore_base64(payload)
+            data = self._restore_base64(payload, payload_context)
         return memoryview(data)
 
     def _mkref(self, obj: Any) -> Any:
@@ -444,10 +593,21 @@ class Unpickler:
             self._objs.append(obj)
         return obj
 
-    def _restore_list(self, obj: list[Any]) -> list[Any]:
+    def _restore_list(
+        self, obj: list[Any], context: _TagContext | None = None
+    ) -> list[Any]:
+        context = context or _TagContext("protocol")
         parent = []
         self._mkref(parent)
-        children = [self._restore(v) for v in obj]
+        children = [
+            self._restore_value(
+                value,
+                self._child_context(
+                    context, "list-element", f"{context.path}[{index}]"
+                ),
+            )
+            for index, value in enumerate(obj)
+        ]
         parent.extend(children)
         method = _obj_setvalue
         proxies = [
@@ -458,9 +618,16 @@ class Unpickler:
         self._proxies.extend(proxies)
         return parent
 
-    def _restore_iterator(self, obj: dict[str, Any]) -> Iterator[Any]:
+    def _restore_iterator(
+        self, obj: dict[str, Any], context: _TagContext | None = None
+    ) -> Iterator[Any]:
         try:
-            return iter(self._restore_list(obj[tags.ITERATOR]))
+            iterator_context = self._child_context(
+                context or _TagContext("protocol"),
+                "tag-value",
+                f"{(context or _TagContext('protocol')).path}.{tags.ITERATOR}",
+            )
+            return iter(self._restore_list(obj[tags.ITERATOR], iterator_context))
         except TypeError:
             return iter([])
 
@@ -474,7 +641,9 @@ class Unpickler:
 
         self._objs[instance_index] = instance
 
-    def _restore_reduce(self, obj: dict[str, Any]) -> Any:
+    def _restore_reduce(
+        self, obj: dict[str, Any], context: _TagContext | None = None
+    ) -> Any:
         """
         Supports restoring with all elements of __reduce__ as per pep 307.
         Assumes that iterator items (the last two) are represented as lists
@@ -482,8 +651,15 @@ class Unpickler:
         """
         proxy = _Proxy()
         self._mkref(proxy)
+        reduce_context = self._child_context(
+            context or _TagContext("protocol"),
+            "tag-value",
+            f"{(context or _TagContext('protocol')).path}.{tags.REDUCE}",
+        )
         try:
-            reduce_val = list(map(self._restore, obj[tags.REDUCE]))
+            reduce_val = [
+                self._restore_value(value, reduce_context) for value in obj[tags.REDUCE]
+            ]
         except TypeError:
             result = []
             proxy.reset(result)
@@ -497,7 +673,7 @@ class Unpickler:
             # mandated special case
             cls = args[0]
             if not isinstance(cls, type):
-                cls = self._restore(cls)
+                cls = self._restore_value(cls, reduce_context)
             stage1 = cls.__new__(cls, *args[1:])
         else:
             if not callable(f):
@@ -556,7 +732,9 @@ class Unpickler:
         self._swapref(proxy, stage1)
         return stage1
 
-    def _restore_id(self, obj: dict[str, Any]) -> Any:
+    def _restore_id(
+        self, obj: dict[str, Any], context: _TagContext | None = None
+    ) -> Any:
         try:
             idx = obj[tags.ID]
             return self._objs[idx]
@@ -565,25 +743,33 @@ class Unpickler:
         except TypeError:
             return None
 
-    def _restore_type(self, obj: dict[str, Any]) -> Any:
+    def _restore_type(
+        self, obj: dict[str, Any], context: _TagContext | None = None
+    ) -> Any:
         typeref = util.loadclass(obj[tags.TYPE], classes=self._classes)
         if typeref is None:
             return obj
         return typeref
 
-    def _restore_module(self, obj: dict[str, Any]) -> Any:
+    def _restore_module(
+        self, obj: dict[str, Any], context: _TagContext | None = None
+    ) -> Any:
         new_obj = _loadmodule(obj[tags.MODULE])
         return self._mkref(new_obj)
 
-    def _restore_repr_safe(self, obj: dict[str, Any]) -> Any:
+    def _restore_repr_safe(
+        self, obj: dict[str, Any], context: _TagContext | None = None
+    ) -> Any:
         new_obj = _loadmodule(obj[tags.REPR])
         return self._mkref(new_obj)
 
-    def _restore_repr(self, obj: dict[str, Any]) -> Any:
+    def _restore_repr(
+        self, obj: dict[str, Any], context: _TagContext | None = None
+    ) -> Any:
         obj = loadrepr(obj[tags.REPR])
         return self._mkref(obj)
 
-    def _loadfactory(self, obj: dict[str, Any]) -> Any | None:
+    def _loadfactory(self, obj: dict[str, Any], context: _TagContext) -> Any | None:
         default_factory = None
         for key in (tags.DEFAULT_FACTORY, "default_factory"):
             try:
@@ -593,7 +779,12 @@ class Unpickler:
                 continue
         if default_factory is None:
             return None
-        return self._restore(default_factory)
+        factory_context = self._child_context(
+            context,
+            "tag-value",
+            f"{context.path}.{tags.DEFAULT_FACTORY}",
+        )
+        return self._restore_value(default_factory, factory_context)
 
     def _process_missing(self, class_name: str) -> None:
         # most common case comes first
@@ -643,6 +834,7 @@ class Unpickler:
         self,
         obj: dict[str, Any],
         instance: Any,
+        context: _TagContext,
         ignorereserved: bool = True,
         restore_dict_items: bool = True,
     ) -> Any:
@@ -656,7 +848,11 @@ class Unpickler:
                 continue
             if restore_dict_items:
                 k = restore_key(k)
-                value = self._restore(v)
+                key_path = self._key_path(context.path, k)
+                value = self._restore_value(
+                    v,
+                    self._child_context(context, "dict-value", key_path),
+                )
             else:
                 value = v
             if util._is_noncomplex(instance) or util._is_dictionary_subclass(instance):
@@ -710,8 +906,16 @@ class Unpickler:
 
         return instance
 
-    def _restore_state(self, obj: dict[str, Any], instance: Any) -> Any:
-        state = self._restore(obj[tags.STATE])
+    def _restore_state(
+        self, obj: dict[str, Any], instance: Any, context: _TagContext
+    ) -> Any:
+        state_context = self._child_context(
+            context,
+            "tag-value",
+            f"{context.path}.{tags.STATE}",
+        )
+        state = self._restore_value(obj[tags.STATE], state_context)
+        self._validate_state_mapping(state, state_context)
         has_slots = (
             isinstance(state, tuple) and len(state) == 2 and isinstance(state[1], dict)
         )
@@ -723,15 +927,27 @@ class Unpickler:
             # of state for object with instance dict
             # and no slots
             instance = self._restore_from_dict(
-                state, instance, ignorereserved=False, restore_dict_items=False
+                state,
+                instance,
+                state_context,
+                ignorereserved=False,
+                restore_dict_items=False,
             )
         elif has_slots:
             instance = self._restore_from_dict(
-                state[1], instance, ignorereserved=False, restore_dict_items=False
+                state[1],
+                instance,
+                state_context,
+                ignorereserved=False,
+                restore_dict_items=False,
             )
             if has_slots_and_dict:
                 instance = self._restore_from_dict(
-                    state[0], instance, ignorereserved=False, restore_dict_items=False
+                    state[0],
+                    instance,
+                    state_context,
+                    ignorereserved=False,
+                    restore_dict_items=False,
                 )
         elif not hasattr(instance, "__getnewargs__") and not hasattr(
             instance, "__getnewargs_ex__"
@@ -743,28 +959,63 @@ class Unpickler:
             instance = state
         return instance
 
+    def _validate_state_mapping(self, state: Any, state_context: _TagContext) -> None:
+        mappings = []
+        if isinstance(state, dict):
+            mappings.append((state, f"{state_context.path}.mapping"))
+        elif isinstance(state, tuple) and len(state) == 2:
+            mappings.extend(
+                [
+                    (state[0], f"{state_context.path}.mapping[0]"),
+                    (state[1], f"{state_context.path}.mapping[1]"),
+                ]
+            )
+
+        for mapping, mapping_path in mappings:
+            if not isinstance(mapping, dict):
+                continue
+            mapping_context = self._child_context(
+                state_context, "state-mapping", mapping_path
+            )
+            present_tags = [
+                key for key in mapping if isinstance(key, str) and key.startswith("py/")
+            ]
+            if present_tags:
+                detail = f"tag {present_tags[0]!r} is not valid at this position"
+                raise errors.TagError(self._tag_error(mapping_context, detail))
+
     def _restore_object_instance_variables(
-        self, obj: dict[str, Any], instance: Any
+        self, obj: dict[str, Any], instance: Any, context: _TagContext
     ) -> Any:
-        instance = self._restore_from_dict(obj, instance)
+        instance = self._restore_from_dict(obj, instance, context)
 
         # Handle list and set subclasses
         if has_tag(obj, tags.SEQ):
+            seq_context = self._child_context(
+                context,
+                "tag-value",
+                f"{context.path}.{tags.SEQ}",
+            )
             if hasattr(instance, "append"):
                 for v in obj[tags.SEQ]:
-                    instance.append(self._restore(v))
+                    instance.append(self._restore_value(v, seq_context))
             elif hasattr(instance, "add"):
                 for v in obj[tags.SEQ]:
-                    instance.add(self._restore(v))
+                    instance.add(self._restore_value(v, seq_context))
 
         if has_tag(obj, tags.STATE):
-            instance = self._restore_state(obj, instance)
+            instance = self._restore_state(obj, instance, context)
 
         return instance
 
     def _restore_object_instance(
-        self, obj: dict[str, Any], cls: type, class_name: str = ""
+        self,
+        obj: dict[str, Any],
+        cls: type,
+        class_name: str = "",
+        context: _TagContext | None = None,
     ) -> Any:
+        context = context or _TagContext("protocol")
         # This is a placeholder proxy object which allows child objects to
         # reference the parent object before it has been instantiated.
         proxy = _Proxy()
@@ -772,7 +1023,7 @@ class Unpickler:
 
         # An object can install itself as its own factory, so load the factory
         # after the instance is available for referencing.
-        factory = self._loadfactory(obj)
+        factory = self._loadfactory(obj, context)
 
         if has_tag(obj, tags.NEWARGSEX):
             args, kwargs = obj[tags.NEWARGSEX]
@@ -780,9 +1031,23 @@ class Unpickler:
             args = getargs(obj, classes=self._classes)
             kwargs = {}
         if args:
-            args = self._restore(args)
+            args = self._restore_value(
+                args,
+                self._child_context(
+                    context,
+                    "tag-value",
+                    f"{context.path}.newargs",
+                ),
+            )
         if kwargs:
-            kwargs = self._restore(kwargs)
+            kwargs = self._restore_value(
+                kwargs,
+                self._child_context(
+                    context,
+                    "tag-value",
+                    f"{context.path}.newargsex",
+                ),
+            )
 
         is_oldstyle = not (isinstance(cls, type) or getattr(cls, "__meta__", None))
         try:
@@ -814,7 +1079,7 @@ class Unpickler:
         if isinstance(instance, tuple):
             return instance
 
-        instance = self._restore_object_instance_variables(obj, instance)
+        instance = self._restore_object_instance_variables(obj, instance, context)
 
         if _safe_hasattr(instance, "default_factory") and isinstance(
             instance.default_factory, _Proxy
@@ -823,7 +1088,10 @@ class Unpickler:
 
         return instance
 
-    def _restore_object(self, obj: dict[str, Any]) -> Any:
+    def _restore_object(
+        self, obj: dict[str, Any], context: _TagContext | None = None
+    ) -> Any:
+        context = context or _TagContext("protocol")
         class_name = obj[tags.OBJECT]
         cls = util.loadclass(class_name, classes=self._classes)
         handler = handlers.get(cls, handlers.get(class_name))  # type: ignore[arg-type]
@@ -840,18 +1108,36 @@ class Unpickler:
             self._process_missing(class_name)
             return self._mkref(obj)
 
-        return self._restore_object_instance(obj, cls, class_name)
+        return self._restore_object_instance(obj, cls, class_name, context)
 
-    def _restore_function(self, obj: dict[str, Any]) -> Any:
+    def _restore_function(
+        self, obj: dict[str, Any], context: _TagContext | None = None
+    ) -> Any:
         return util.loadclass(obj[tags.FUNCTION], classes=self._classes)
 
-    def _restore_set(self, obj: dict[str, Any]) -> set[Any]:
+    def _restore_set(
+        self, obj: dict[str, Any], context: _TagContext | None = None
+    ) -> set[Any]:
+        context = context or _TagContext("protocol")
         try:
-            return {self._restore(v) for v in obj[tags.SET]}
+            return {
+                self._restore_value(
+                    value,
+                    self._child_context(
+                        context,
+                        "tag-value",
+                        f"{context.path}.{tags.SET}[{index}]",
+                    ),
+                )
+                for index, value in enumerate(obj[tags.SET])
+            }
         except TypeError:
             return set()
 
-    def _restore_dict(self, obj: dict[str, Any]) -> dict[str, Any]:
+    def _restore_dict(
+        self, obj: dict[str, Any], context: _TagContext | None = None
+    ) -> dict[str, Any]:
+        context = context or _TagContext("business-dict")
         data = {}
         self._mkref(data)
 
@@ -864,7 +1150,12 @@ class Unpickler:
             for k, v in util.items(obj):
                 if _is_json_key(k):
                     continue
-                data[k] = result = self._restore(v)
+                data[k] = result = self._restore_value(
+                    v,
+                    self._child_context(
+                        context, "dict-value", self._key_path(context.path, k)
+                    ),
+                )
                 if isinstance(result, _Proxy):
                     self._proxies.append((data, k, result, _obj_setvalue))
 
@@ -873,7 +1164,14 @@ class Unpickler:
                 if not _is_json_key(k):
                     continue
                 restored_key = self._restore_pickled_key(k)
-                result = self._restore(v)
+                result = self._restore_value(
+                    v,
+                    self._child_context(
+                        context,
+                        "dict-value",
+                        self._key_path(context.path, restored_key),
+                    ),
+                )
                 try:
                     data[restored_key] = result
                 except TypeError:  # fail gracefully
@@ -889,65 +1187,34 @@ class Unpickler:
         else:
             # No special keys, thus we don't need to restore the keys either.
             for k, v in util.items(obj):
-                data[k] = result = self._restore(v)
+                data[k] = result = self._restore_value(
+                    v,
+                    self._child_context(
+                        context, "dict-value", self._key_path(context.path, k)
+                    ),
+                )
                 if isinstance(result, _Proxy):
                     self._proxies.append((data, k, result, _obj_setvalue))
         return data
 
-    def _restore_tuple(self, obj: dict[str, Any]) -> tuple[Any, ...]:
+    def _restore_tuple(
+        self, obj: dict[str, Any], context: _TagContext | None = None
+    ) -> tuple[Any, ...]:
+        context = context or _TagContext("protocol")
         try:
-            return tuple(self._restore(v) for v in obj[tags.TUPLE])
+            return tuple(
+                self._restore_value(
+                    value,
+                    self._child_context(
+                        context,
+                        "tag-value",
+                        f"{context.path}.{tags.TUPLE}[{index}]",
+                    ),
+                )
+                for index, value in enumerate(obj[tags.TUPLE])
+            )
         except TypeError:
             return ()
-
-    def _restore_tags(
-        self, obj: Any, _passthrough: Callable[[Any], Any] = _passthrough
-    ) -> Callable[[Any], Any]:
-        """Return the restoration function for the specified object"""
-        try:
-            if not tags.RESERVED <= set(obj) and type(obj) not in (list, dict):
-                return _passthrough
-        except TypeError:
-            pass
-        if type(obj) is dict:
-            if tags.TUPLE in obj:
-                restore = self._restore_tuple
-            elif tags.SET in obj:
-                restore = self._restore_set  # type: ignore[assignment]
-            elif tags.B64 in obj:
-                restore = self._restore_base64  # type: ignore[assignment]
-            elif tags.B85 in obj:
-                restore = self._restore_base85  # type: ignore[assignment]
-            elif tags.BYTEARRAY in obj:
-                restore = self._restore_bytearray  # type: ignore[assignment]
-            elif tags.MEMORYVIEW in obj:
-                restore = self._restore_memoryview  # type: ignore[assignment]
-            elif tags.ID in obj:
-                restore = self._restore_id
-            elif tags.ITERATOR in obj:
-                restore = self._restore_iterator  # type: ignore[assignment]
-            elif tags.OBJECT in obj:
-                restore = self._restore_object
-            elif tags.TYPE in obj:
-                restore = self._restore_type
-            elif tags.REDUCE in obj:
-                restore = self._restore_reduce
-            elif tags.FUNCTION in obj:
-                restore = self._restore_function
-            elif tags.MODULE in obj:
-                restore = self._restore_module
-            elif tags.REPR in obj:
-                if self.safe:
-                    restore = self._restore_repr_safe
-                else:
-                    restore = self._restore_repr
-            else:
-                restore = self._restore_dict  # type: ignore[assignment]
-        elif type(obj) is list:
-            restore = self._restore_list  # type: ignore[assignment]
-        else:
-            restore = _passthrough  # type: ignore[assignment]
-        return restore
 
     def _call_handler_restore(
         self, handler: handlers.BaseHandler, obj: dict[str, Any]

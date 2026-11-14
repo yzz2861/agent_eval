@@ -35,6 +35,8 @@ TYPE: str = "py/type"
 
 # All reserved tag names
 RESERVED: set[str] = {
+    B64,
+    B85,
     BYTES,
     BYTEARRAY,
     FUNCTION,
@@ -58,3 +60,38 @@ RESERVED: set[str] = {
     TUPLE,
     TYPE,
 }
+
+# Tags that identify the restoration path for a protocol mapping.
+PRIMARY: frozenset[str] = frozenset(
+    {
+        TUPLE,
+        SET,
+        B64,
+        B85,
+        BYTEARRAY,
+        MEMORYVIEW,
+        ID,
+        ITERATOR,
+        OBJECT,
+        TYPE,
+        REDUCE,
+        FUNCTION,
+        MODULE,
+        REPR,
+    }
+)
+
+# Tags permitted alongside an object marker.
+OBJECT_TAGS: frozenset[str] = frozenset(
+    {
+        OBJECT,
+        INITARGS,
+        NEWARGS,
+        NEWARGSEX,
+        SEQ,
+        STATE,
+        DEFAULT_FACTORY,
+        PROPERTY,
+        REF,
+    }
+)
