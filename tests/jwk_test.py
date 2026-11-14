@@ -1,5 +1,6 @@
 """Tests for josepy.jwk."""
 
+import base64
 import binascii
 import sys
 import unittest
@@ -39,6 +40,82 @@ class JWKTest(unittest.TestCase):
 
         with pytest.raises(errors.Error):
             JWKRSA.load(DSA_PEM)
+
+
+KA_TOKEN = "QfO9bMUP-W2WxV8v4t1qJQ"
+KA_OCT_THUMBPRINT = "8-e-qGDS2nDpfZzOPtD8Sb7NkifUbw70MeqOKIqyaRw"
+KA_OCT_RAW = b"QfO9bMUP-W2WxV8v4t1qJQ.8-e-qGDS2nDpfZzOPtD8Sb7NkifUbw70MeqOKIqyaRw"
+KA_OCT_DNS01 = "0FlqkMHfgJ7oDbu-W8NTjmtX3moup4MVnaHCoYVr7ds"
+
+
+class JWKKeyAuthorizationTest(unittest.TestCase):
+    """Tests for JWK-based ACME key authorization entries."""
+
+    def setUp(self) -> None:
+        from josepy.jwk import JWKOct
+
+        self.jwk = JWKOct(key=b"foo")
+
+    def test_thumbprint_b64url_is_unpadded_ascii(self) -> None:
+        thumbprint = self.jwk.thumbprint_b64url()
+        assert thumbprint == KA_OCT_THUMBPRINT
+        assert thumbprint.isascii()
+        assert "=" not in thumbprint
+        assert base64.urlsafe_b64encode(self.jwk.thumbprint()).rstrip(b"=") == thumbprint.encode(
+            "ascii"
+        )
+
+    def test_key_authorization_fixed_vector(self) -> None:
+        assert self.jwk.key_authorization(KA_TOKEN) == KA_OCT_RAW
+
+    def test_str_and_bytes_token_match(self) -> None:
+        assert self.jwk.key_authorization(KA_TOKEN) == self.jwk.key_authorization(
+            KA_TOKEN.encode("ascii")
+        )
+
+    def test_key_authorization_crosses_challenges(self) -> None:
+        from josepy.jws import dns01_validation, key_authorization_bytes
+
+        raw = self.jwk.key_authorization(KA_TOKEN)
+        assert raw == key_authorization_bytes(KA_TOKEN, self.jwk.thumbprint_b64url())
+        assert dns01_validation(KA_TOKEN, self.jwk.thumbprint_b64url()) == KA_OCT_DNS01
+
+    def test_jwk_dns01_matches_module_entry(self) -> None:
+        from josepy.jws import dns01_validation
+
+        assert self.jwk.dns01_validation(KA_TOKEN) == KA_OCT_DNS01
+        assert self.jwk.dns01_validation(KA_TOKEN) == dns01_validation(
+            KA_TOKEN, self.jwk.thumbprint_b64url()
+        )
+        with pytest.raises(errors.KeyAuthorizationError):
+            self.jwk.dns01_validation("")
+
+    def test_key_authorization_uses_public_thumbprint(self) -> None:
+        from josepy.jwk import JWKRSA
+
+        private = JWKRSA(key=RSA256_KEY)
+        public = private.public_key()
+        assert private.key_authorization(KA_TOKEN) == public.key_authorization(KA_TOKEN)
+        assert private.thumbprint_b64url() == public.thumbprint_b64url()
+
+    def test_key_authorization_rejects_invalid_tokens(self) -> None:
+        for bad in ("", b"", "a.", "a=", "a b", "\u00e9", b"\xff", "a\n"):
+            with pytest.raises(errors.KeyAuthorizationError):
+                self.jwk.key_authorization(bad)  # type: ignore[arg-type]
+        for bad in (None, 123):
+            with pytest.raises(TypeError):
+                self.jwk.key_authorization(bad)  # type: ignore[arg-type]
+
+    def test_key_authorization_rejects_overlong_token(self) -> None:
+        from josepy.jws import MAX_KEY_AUTHORIZATION_SIZE
+
+        with pytest.raises(errors.KeyAuthorizationError):
+            self.jwk.key_authorization("A" * MAX_KEY_AUTHORIZATION_SIZE)
+
+    def test_key_authorization_error_does_not_leak_key(self) -> None:
+        with pytest.raises(errors.KeyAuthorizationError) as exc_info:
+            self.jwk.key_authorization("")
+        assert "foo" not in str(exc_info.value)
 
 
 class JWKSubclassTest(Protocol):

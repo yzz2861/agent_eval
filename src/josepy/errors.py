@@ -18,6 +18,18 @@ class SerializationError(Error):
     """JSON serialization error."""
 
 
+class KeyAuthorizationError(SerializationError, ValueError):
+    """Invalid ACME key authorization input.
+
+    Inherits from :class:`SerializationError` for the JOSE error
+    hierarchy and from :class:`ValueError` for callers that treat
+    malformed challenge inputs as value errors.
+
+    Messages must never contain account key material; only the nature
+    of the invalid input is described.
+    """
+
+
 class UnrecognizedTypeError(DeserializationError):
     """Unrecognized type error.
 

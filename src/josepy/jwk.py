@@ -68,6 +68,43 @@ class JWK(json_util.TypedJSONObjectWithFields, metaclass=abc.ABCMeta):
         )
         return digest.finalize()
 
+    def thumbprint_b64url(self) -> str:
+        """Return the thumbprint as unpadded base64url ASCII text."""
+        from josepy import b64
+
+        return b64.b64encode(self.thumbprint()).decode("ascii")
+
+    def key_authorization(self, token: Union[str, bytes]) -> bytes:
+        """Compute the canonical ACME key authorization for this key.
+
+        See RFC 8555 section 8.1: ``token "." base64url(SHA-256(jwk))``.
+        The byte sequence is built without Unicode normalization, JSON
+        round-tripping, case changes or trailing dots. Use
+        :func:`josepy.jws.dns01_validation` with the same token to obtain
+        the DNS-01 TXT record value.
+
+        :param token: ACME challenge token (ASCII, unpadded base64url).
+
+        :raises TypeError: if ``token`` is neither ``str`` nor ``bytes``.
+        :raises josepy.errors.KeyAuthorizationError: if ``token`` is empty,
+            too long, non-ASCII, padded or contains invalid bytes.
+        """
+        from josepy import jws
+
+        return jws.key_authorization_bytes(token, self.thumbprint_b64url())
+
+    def dns01_validation(self, token: Union[str, bytes]) -> str:
+        """Return the DNS-01 TXT value for ``token`` and this key.
+
+        Equivalent to :func:`josepy.jws.dns01_validation` with
+        :meth:`thumbprint_b64url`; the SHA-256 digest is taken over the
+        exact key authorization bytes and the result is unpadded
+        base64url ASCII without a trailing dot.
+        """
+        from josepy import jws
+
+        return jws.dns01_validation(token, self.thumbprint_b64url())
+
     @abc.abstractmethod
     def public_key(self) -> "JWK":  # pragma: no cover
         """Generate JWK with public key.

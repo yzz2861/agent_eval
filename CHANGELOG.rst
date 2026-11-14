@@ -4,6 +4,13 @@ Changelog
 2.4.0 (main)
 ------------
 * Dropped support for Python 3.10.
+* Added a fixed-byte ACME key authorization flow: `JWK.key_authorization`,
+  `josepy.jws.key_authorization`/`key_authorization_bytes` for HTTP-01 raw
+  output and `josepy.jws.dns01_validation` for the DNS-01 SHA-256 base64url
+  TXT value. Inputs are validated byte by byte (ASCII, unpadded base64url,
+  no dots or whitespace, bounded length) and rejected with
+  `josepy.errors.KeyAuthorizationError`; no Unicode normalization, JSON
+  round-tripping, case changes or trailing dots are applied.
 
 2.3.0 (2026-11-10)
 ------------------

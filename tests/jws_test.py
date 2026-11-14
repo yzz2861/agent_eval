@@ -1,6 +1,8 @@
 """Tests for josepy.jws."""
 
 import base64
+import hashlib
+import json
 import sys
 import unittest
 from unittest import mock
@@ -14,6 +16,226 @@ from josepy import errors, json_util, jwa, jwk
 
 CERT = test_util.load_cert("cert.pem")
 KEY = jwk.JWKRSA.load(test_util.load_vector("rsa512_key.pem"))
+
+# Fixed ACME key authorization vectors. The expected values are recomputed
+# here with only the standard library so regressions in serialization,
+# Unicode handling, padding or digest input are caught byte by byte.
+KA_TOKEN = "QfO9bMUP-W2WxV8v4t1qJQ"
+KA_THUMBPRINT = "8-e-qGDS2nDpfZzOPtD8Sb7NkifUbw70MeqOKIqyaRw"
+KA_RAW = b"QfO9bMUP-W2WxV8v4t1qJQ.8-e-qGDS2nDpfZzOPtD8Sb7NkifUbw70MeqOKIqyaRw"
+KA_DNS01 = "0FlqkMHfgJ7oDbu-W8NTjmtX3moup4MVnaHCoYVr7ds"
+
+# Second fully hard-coded vector (no key object involved).
+KA2_TOKEN = "DGyRejmCefe7v4NfDGDKfA"
+KA2_THUMBPRINT = "Hn1om9Wq54M24cWOBXfkv1x7m0QzV0jY6R3N8l2a7b8"
+KA2_RAW = b"DGyRejmCefe7v4NfDGDKfA.Hn1om9Wq54M24cWOBXfkv1x7m0QzV0jY6R3N8l2a7b8"
+KA2_DNS01 = "Avh9EiZDF83IDRVYyRq6V3_sWO5XFZtVaNTwnG_DrGo"
+
+
+class KeyAuthorizationTest(unittest.TestCase):
+    """Tests for the fixed-byte ACME key authorization flow."""
+
+    def test_fixed_vectors(self) -> None:
+        from josepy.jws import key_authorization, key_authorization_bytes
+
+        assert key_authorization_bytes(KA_TOKEN, KA_THUMBPRINT) == KA_RAW
+        assert key_authorization(KA_TOKEN, KA_THUMBPRINT) == KA_RAW
+        assert key_authorization_bytes(KA2_TOKEN, KA2_THUMBPRINT) == KA2_RAW
+
+    def test_fixed_vectors_match_standard_library(self) -> None:
+        from josepy.jws import dns01_validation
+
+        for token, thumbprint, raw in (
+            (KA_TOKEN, KA_THUMBPRINT, KA_RAW),
+            (KA2_TOKEN, KA2_THUMBPRINT, KA2_RAW),
+        ):
+            assert token.encode("ascii") + b"." + thumbprint.encode("ascii") == raw
+            digest = hashlib.sha256(raw).digest()
+            assert base64.urlsafe_b64encode(digest).rstrip(b"=") == (
+                dns01_validation(token, thumbprint).encode("ascii")
+            )
+
+    def test_str_and_bytes_are_identical(self) -> None:
+        from josepy.jws import key_authorization_bytes
+
+        assert key_authorization_bytes(
+            KA_TOKEN.encode(), KA_THUMBPRINT.encode()
+        ) == key_authorization_bytes(KA_TOKEN, KA_THUMBPRINT)
+
+    def test_exact_byte_layout(self) -> None:
+        from josepy.jws import key_authorization_bytes
+
+        raw = key_authorization_bytes(KA_TOKEN, KA_THUMBPRINT)
+        token, thumbprint = raw.split(b".")
+        assert token == KA_TOKEN.encode("ascii")
+        assert thumbprint == KA_THUMBPRINT.encode("ascii")
+        assert raw.count(b".") == 1
+        assert not raw.endswith(b".")
+        assert not raw.endswith(b"\n")
+        assert b" " not in raw and b"\t" not in raw
+        assert b"=" not in raw
+        assert raw == raw.decode("ascii").encode("ascii")
+
+    def test_dns01_fixed_vectors(self) -> None:
+        from josepy.jws import dns01_validation, dns_challenge_response
+
+        assert dns01_validation(KA_TOKEN, KA_THUMBPRINT) == KA_DNS01
+        assert dns_challenge_response(KA2_TOKEN, KA2_THUMBPRINT) == KA2_DNS01
+        assert dns01_validation(KA_TOKEN, KA_THUMBPRINT) == (
+            dns_challenge_response(KA_TOKEN, KA_THUMBPRINT)
+        )
+
+    def test_dns01_has_no_padding_and_43_chars(self) -> None:
+        from josepy.jws import dns01_validation
+
+        value = dns01_validation(KA_TOKEN, KA_THUMBPRINT)
+        assert len(value) == 43
+        assert "=" not in value
+        assert value.isascii()
+        assert not value.endswith(".")
+        assert "\n" not in value
+
+    def test_http_and_dns_share_the_same_digest_input(self) -> None:
+        from josepy.jws import dns01_validation, key_authorization
+
+        raw = key_authorization(KA_TOKEN, KA_THUMBPRINT)
+        expected = (
+            base64.urlsafe_b64encode(hashlib.sha256(raw).digest()).rstrip(b"=").decode("ascii")
+        )
+        assert dns01_validation(KA_TOKEN, KA_THUMBPRINT) == expected
+
+    def test_trailing_dot_is_rejected_not_trimmed(self) -> None:
+        from josepy import errors
+        from josepy.jws import key_authorization_bytes
+
+        with pytest.raises(errors.KeyAuthorizationError):
+            key_authorization_bytes(KA_TOKEN + ".", KA_THUMBPRINT)
+        with pytest.raises(errors.KeyAuthorizationError):
+            key_authorization_bytes(KA_TOKEN, KA_THUMBPRINT + ".")
+
+    def test_newline_is_rejected(self) -> None:
+        from josepy import errors
+        from josepy.jws import key_authorization_bytes
+
+        with pytest.raises(errors.KeyAuthorizationError):
+            key_authorization_bytes(KA_TOKEN + "\n", KA_THUMBPRINT)
+        with pytest.raises(errors.KeyAuthorizationError):
+            key_authorization_bytes(KA_TOKEN, KA_THUMBPRINT + "\r\n")
+
+    def test_padded_thumbprint_is_rejected(self) -> None:
+        from josepy import errors
+        from josepy.jws import key_authorization_bytes
+
+        padded = KA_THUMBPRINT + "="
+        with pytest.raises(errors.KeyAuthorizationError):
+            key_authorization_bytes(KA_TOKEN, padded)
+        assert b"=" not in key_authorization_bytes(KA_TOKEN, KA_THUMBPRINT)
+
+    def test_case_is_preserved_byte_for_byte(self) -> None:
+        from josepy.jws import key_authorization_bytes
+
+        mixed = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_"
+        raw = key_authorization_bytes(mixed, mixed)
+        assert raw == mixed.encode("ascii") + b"." + mixed.encode("ascii")
+        assert raw != raw.lower()
+
+    def test_no_json_round_trip_or_normalization(self) -> None:
+        from josepy.jws import key_authorization_bytes
+
+        raw = key_authorization_bytes(KA_TOKEN, KA_THUMBPRINT)
+        jsonized = json.dumps(raw.decode("ascii")).encode("ascii")
+        assert jsonized != raw
+        assert jsonized.startswith(b'"') and jsonized.endswith(b'"')
+        spaced = json.dumps(
+            {"token": KA_TOKEN, "thumbprint": KA_THUMBPRINT}, separators=(", ", ": ")
+        ).encode("ascii")
+        assert b" " in spaced and spaced != raw
+
+    def test_invalid_token_is_rejected(self) -> None:
+        from josepy import errors
+        from josepy.jws import key_authorization_bytes
+
+        for bad_token in (
+            "",
+            b"",
+            "abc.def",
+            b"abc.def",
+            "abc=",
+            "a b",
+            "a\tb",
+            "a/+",
+            "\u00e9",
+            b"\xff",
+            "a\n",
+            "a.",
+            ".",
+        ):
+            with self.subTest(bad_token=bad_token):
+                with pytest.raises(errors.KeyAuthorizationError):
+                    key_authorization_bytes(bad_token, KA_THUMBPRINT)
+        for bad_token in (None, 123):
+            with self.subTest(bad_token=bad_token):
+                with pytest.raises(TypeError):
+                    key_authorization_bytes(bad_token, KA_THUMBPRINT)  # type: ignore[arg-type]
+
+    def test_invalid_thumbprint_is_rejected(self) -> None:
+        from josepy import errors
+        from josepy.jws import key_authorization_bytes
+
+        for bad_thumbprint in (
+            "",
+            b"",
+            "abc.",
+            "===",
+            "a b",
+            "\u00e9",
+            b"\xff",
+            "x\n",
+        ):
+            with self.subTest(bad_thumbprint=bad_thumbprint):
+                with pytest.raises(errors.KeyAuthorizationError):
+                    key_authorization_bytes(KA_TOKEN, bad_thumbprint)
+        for bad_thumbprint in (None, 123):
+            with self.subTest(bad_thumbprint=bad_thumbprint):
+                with pytest.raises(TypeError):
+                    key_authorization_bytes(KA_TOKEN, bad_thumbprint)  # type: ignore[arg-type]
+
+    def test_overlong_input_is_rejected(self) -> None:
+        from josepy import errors
+        from josepy.jws import MAX_KEY_AUTHORIZATION_SIZE, key_authorization_bytes
+
+        huge_token = "A" * MAX_KEY_AUTHORIZATION_SIZE
+        with pytest.raises(errors.KeyAuthorizationError):
+            key_authorization_bytes(huge_token, KA_THUMBPRINT)
+
+        boundary = "A" * (MAX_KEY_AUTHORIZATION_SIZE - 1 - len(KA_THUMBPRINT))
+        assert len(key_authorization_bytes(boundary, KA_THUMBPRINT)) == MAX_KEY_AUTHORIZATION_SIZE
+        with pytest.raises(errors.KeyAuthorizationError):
+            key_authorization_bytes(boundary + "A", KA_THUMBPRINT)
+
+    def test_error_type_and_message(self) -> None:
+        from josepy import errors
+        from josepy.jws import key_authorization_bytes
+
+        with pytest.raises(ValueError):
+            key_authorization_bytes("", KA_THUMBPRINT)
+        with pytest.raises(errors.SerializationError):
+            key_authorization_bytes("", KA_THUMBPRINT)
+        try:
+            key_authorization_bytes("bad token", KA_THUMBPRINT)
+        except errors.KeyAuthorizationError as error:
+            message = str(error)
+            assert "token" in message.lower()
+            assert KA_THUMBPRINT not in message
+
+    def test_aliases(self) -> None:
+        from josepy import jws
+
+        assert jws.http_challenge_response is jws.key_authorization
+        assert jws.dns_challenge_response is jws.dns01_validation
+        assert jws.http_challenge_response(KA_TOKEN, KA_THUMBPRINT) == jws.key_authorization_bytes(
+            KA_TOKEN, KA_THUMBPRINT
+        )
 
 
 class MediaTypeTest(unittest.TestCase):

@@ -31,6 +31,7 @@ from josepy.b64 import b64decode, b64encode
 from josepy.errors import (
     DeserializationError,
     Error,
+    KeyAuthorizationError,
     SerializationError,
     UnrecognizedTypeError,
 )
@@ -65,7 +66,18 @@ from josepy.jwa import (
     JWASignature,
 )
 from josepy.jwk import JWK, JWKEC, JWKRSA, JWKOct
-from josepy.jws import JWS, Header, Signature
+from josepy.jws import (
+    JWS,
+    Header,
+    Signature,
+    dns_01_validation,
+    dns_challenge,
+    dns01_validation,
+    dns_challenge_response,
+    http_challenge_response,
+    key_authorization,
+    key_authorization_bytes,
+)
 from josepy.util import (
     ComparableECKey,
     ComparableKey,

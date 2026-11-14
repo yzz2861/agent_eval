@@ -2,6 +2,8 @@
 
 import argparse
 import base64
+import hashlib
+import re
 import sys
 from collections.abc import Sequence
 from typing import (
@@ -13,6 +15,7 @@ from typing import (
     Optional,
     Tuple,
     Type,
+    Union,
     cast,
 )
 
@@ -22,6 +25,103 @@ from cryptography.hazmat.primitives.serialization import Encoding
 import josepy
 from josepy import b64, errors, json_util, jwa
 from josepy import jwk as jwk_mod
+
+# RFC 8555 section 8.1: key authorization values are ASCII strings made of
+# a token and a base64url-encoded (without padding) JWK thumbprint joined
+# by a single ".".
+_BASE64URL_UNPADDED = re.compile(rb"^[A-Za-z0-9_-]+$")
+MAX_KEY_AUTHORIZATION_SIZE = 4096
+"""Maximum accepted length, in bytes, of a key authorization input."""
+
+
+def _as_ascii(value: Union[str, bytes], component: str) -> bytes:
+    """Return the exact ASCII bytes of ``value`` without any transformation."""
+    if isinstance(value, str):
+        try:
+            return value.encode("ascii")
+        except UnicodeEncodeError:
+            raise errors.KeyAuthorizationError(
+                "ACME {0} must contain only ASCII characters".format(component)
+            )
+    if isinstance(value, bytes):
+        try:
+            value.decode("ascii")
+        except UnicodeDecodeError:
+            raise errors.KeyAuthorizationError(
+                "ACME {0} must contain only ASCII characters".format(component)
+            )
+        return value
+    raise TypeError(
+        "ACME {0} must be str or bytes, got {1}".format(component, type(value).__name__)
+    )
+
+
+def _validate_part(value: Union[str, bytes], component: str) -> bytes:
+    """Validate one dot-free base64url component byte by byte."""
+    raw = _as_ascii(value, component)
+    if not raw:
+        raise errors.KeyAuthorizationError("ACME {0} must not be empty".format(component))
+    if b"." in raw:
+        raise errors.KeyAuthorizationError(
+            "ACME {0} must not contain '.' separators".format(component)
+        )
+    if not _BASE64URL_UNPADDED.fullmatch(raw):
+        raise errors.KeyAuthorizationError("ACME {0} must be unpadded base64url".format(component))
+    return raw
+
+
+def key_authorization_bytes(token: Union[str, bytes], thumbprint: Union[str, bytes]) -> bytes:
+    """Build the canonical ACME key authorization as fixed bytes.
+
+    The result is exactly ``token + b"." + thumbprint`` where both
+    components are unpadded base64url ASCII. No Unicode normalization,
+    JSON serialization, case folding, trailing-dot handling or any other
+    transformation is performed.
+
+    :param token: ACME challenge token (ASCII, unpadded base64url).
+    :param thumbprint: JWK thumbprint as unpadded base64url ASCII.
+
+    :raises TypeError: if an argument is neither ``str`` nor ``bytes``.
+    :raises josepy.errors.KeyAuthorizationError: if an argument is empty,
+        too long, non-ASCII, padded, contains dots or other non-base64url
+        bytes.
+    """
+    token_bytes = _validate_part(token, "token")
+    thumbprint_bytes = _validate_part(thumbprint, "thumbprint")
+    authorization = token_bytes + b"." + thumbprint_bytes
+    if len(authorization) > MAX_KEY_AUTHORIZATION_SIZE:
+        raise errors.KeyAuthorizationError(
+            "ACME key authorization exceeds the maximum allowed size"
+        )
+    return authorization
+
+
+def key_authorization(token: Union[str, bytes], thumbprint: Union[str, bytes]) -> bytes:
+    """Return the HTTP-01 key authorization payload as exact bytes.
+
+    HTTP-01 serves these bytes verbatim; callers must not append a
+    trailing dot, newline or whitespace.
+    """
+    return key_authorization_bytes(token, thumbprint)
+
+
+def dns01_validation(token: Union[str, bytes], thumbprint: Union[str, bytes]) -> str:
+    """Return the DNS-01 TXT record value for a key authorization.
+
+    The SHA-256 digest is computed over the exact canonical key
+    authorization bytes, then encoded as unpadded base64url. No trailing
+    dot is added: the DNS name's root label is a transport concern and
+    must never be part of the digest input or the TXT value.
+    """
+    digest = hashlib.sha256(key_authorization_bytes(token, thumbprint)).digest()
+    return b64.b64encode(digest).decode("ascii")
+
+
+# Descriptive aliases for callers that think in terms of challenge types.
+dns_challenge_response = dns01_validation
+http_challenge_response = key_authorization
+dns_01_validation = dns01_validation
+dns_challenge = dns01_validation
 
 
 class MediaType:
