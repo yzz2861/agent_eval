@@ -6,8 +6,15 @@ import pytest
 from hypothesis import given
 from hypothesis.strategies import integers, binary, one_of
 
-from hpack import HPACKDecodingError
+from hpack import (
+    Decoder,
+    Encoder,
+    HPACKDecodingError,
+    NeverIndexedHeaderTuple,
+    OversizedHeaderListError,
+)
 from hpack.hpack import encode_integer, decode_integer
+from hpack.table import table_entry_size
 
 
 class TestIntegerEncoding:
@@ -145,3 +152,188 @@ class TestEncodingProperties:
         """
         with pytest.raises(HPACKDecodingError):
             decode_integer(b'\xff\xff\xff\xff\xff\xff', 5)
+
+
+class TestDecoderHeaderListSizeAccounting:
+    """
+    Tests for the header list size accounting in the unified decoder path.
+
+    Per RFC 7541 Section 4.1, each entry counts as the length of its name
+    plus the length of its value plus 32 bytes of overhead, accumulated
+    across the entire header block (however many HEADERS/CONTINUATION
+    fragments it was reassembled from). Decoding must stop before the limit
+    is exceeded, without committing the oversized entry, and the decoder
+    must remain usable for subsequent, independent header blocks.
+    """
+
+    def test_entry_size_includes_fixed_overhead(self):
+        """
+        A header whose name and value alone fit under the limit is still
+        rejected once the 32-byte per-entry overhead is accounted for.
+        """
+        headers = [(b'a', b'x' * 10)]
+        assert len(headers[0][0]) + len(headers[0][1]) < 40
+
+        e = Encoder()
+        d = Decoder(max_header_list_size=40)
+
+        with pytest.raises(OversizedHeaderListError):
+            d.decode(e.encode(headers, huffman=False))
+
+    def test_header_list_exactly_at_limit_is_accepted(self):
+        headers = [(b'hello', b'world')]
+        limit = table_entry_size(*headers[0])
+
+        e = Encoder()
+        d = Decoder(max_header_list_size=limit)
+
+        assert d.decode(e.encode(headers, huffman=False)) == [
+            ('hello', 'world'),
+        ]
+
+    def test_header_list_one_byte_over_limit_is_rejected(self):
+        headers = [(b'hello', b'world')]
+        limit = table_entry_size(*headers[0]) - 1
+
+        e = Encoder()
+        d = Decoder(max_header_list_size=limit)
+
+        with pytest.raises(OversizedHeaderListError):
+            d.decode(e.encode(headers, huffman=False))
+
+    def test_size_accumulates_across_entries_in_block(self):
+        headers = [(b'a', b'1'), (b'b', b'2'), (b'c', b'3')]
+        each = table_entry_size(b'a', b'1')
+        assert each == table_entry_size(b'b', b'2') == table_entry_size(b'c', b'3')
+
+        e = Encoder()
+        block = e.encode(headers, huffman=False)
+
+        # Exactly at the cumulative limit: accepted.
+        Decoder(max_header_list_size=each * 3).decode(block)
+
+        # One byte short of the cumulative limit: rejected.
+        with pytest.raises(OversizedHeaderListError):
+            Decoder(max_header_list_size=each * 3 - 1).decode(block)
+
+    def test_highly_compressed_block_cannot_bypass_limit(self):
+        """
+        A block that is tiny on the wire (one literal plus many indexed
+        references to it) still inflates beyond the limit and is rejected.
+        """
+        headers = [(b'x-long-header-name', b'v' * 200)] * 8
+        inflated = sum(table_entry_size(n, v) for n, v in headers)
+
+        e = Encoder()
+        block = e.encode(headers, huffman=True)
+        assert len(block) < inflated // 4
+
+        d = Decoder(max_header_list_size=inflated - 1)
+        with pytest.raises(OversizedHeaderListError):
+            d.decode(block)
+
+    def test_duplicate_headers_are_each_accounted(self):
+        headers = [(b'x-dup', b'v')] * 3
+        each = table_entry_size(*headers[0])
+
+        e = Encoder()
+        block = e.encode(headers, huffman=False)
+
+        Decoder(max_header_list_size=each * 3).decode(block)
+        with pytest.raises(OversizedHeaderListError):
+            Decoder(max_header_list_size=each * 3 - 1).decode(block)
+
+    def test_limit_applies_per_header_block(self):
+        """
+        The limit applies to each header block independently: decoding
+        several blocks in a row on one decoder does not accumulate size
+        across blocks.
+        """
+        headers = [(b'a', b'b')]
+        limit = table_entry_size(*headers[0])
+
+        e = Encoder()
+        block = e.encode(headers, huffman=False)
+        d = Decoder(max_header_list_size=limit)
+
+        for _ in range(3):
+            assert d.decode(block) == [('a', 'b')]
+
+    def test_decoder_remains_usable_after_oversized_block(self):
+        """
+        After an OversizedHeaderListError the decoder is in a consistent
+        state and a subsequent, independent header block decodes correctly.
+        """
+        e = Encoder()
+        d = Decoder(max_header_list_size=128)
+
+        with pytest.raises(OversizedHeaderListError):
+            d.decode(e.encode([(b'x' * 64, b'y' * 64)], huffman=False))
+
+        good = e.encode([(b':method', b'GET'), (b'x-ok', b'1')], huffman=False)
+        assert d.decode(good) == [(':method', 'GET'), ('x-ok', '1')]
+
+    def test_oversized_entry_is_not_committed_to_table(self):
+        """
+        Decoding stops before the limit is exceeded: entries that fit remain
+        committed to the dynamic table, the oversized entry does not.
+        """
+        headers = [(b'x-first', b'1'), (b'x-second', b'2' * 100)]
+        limit = table_entry_size(*headers[0])
+
+        e = Encoder()
+        d = Decoder(max_header_list_size=limit)
+
+        with pytest.raises(OversizedHeaderListError):
+            d.decode(e.encode(headers, huffman=False))
+
+        assert list(d.header_table.dynamic_entries) == [(b'x-first', b'1')]
+
+    @pytest.mark.parametrize('headers', [
+        [NeverIndexedHeaderTuple(b'authorization', b's' * 100)],
+        [(b'authorization', b's' * 100, True)],
+    ])
+    def test_sensitive_headers_count_toward_limit(self, headers):
+        """
+        Headers marked sensitive (never indexed) are accounted for just like
+        any other header.
+        """
+        e = Encoder()
+        d = Decoder(max_header_list_size=64)
+
+        with pytest.raises(OversizedHeaderListError):
+            d.decode(e.encode(headers, huffman=False))
+
+    def test_error_does_not_leak_header_values(self):
+        """
+        The OversizedHeaderListError message contains neither the name nor
+        the value of the sensitive header that tripped the limit.
+        """
+        secret = b'super-secret-token-value'
+        headers = [NeverIndexedHeaderTuple(b'authorization', secret)]
+
+        e = Encoder()
+        d = Decoder(max_header_list_size=32)
+
+        with pytest.raises(OversizedHeaderListError) as exc_info:
+            d.decode(e.encode(headers, huffman=False))
+
+        message = str(exc_info.value)
+        assert 'authorization' not in message
+        assert secret.decode('utf-8') not in message
+
+    def test_casing_and_duplicate_headers_unchanged(self):
+        """
+        Case and duplicate headers round-trip unchanged through the
+        accounting decoder path.
+        """
+        headers = [
+            (b'X-Mixed-Case', b'Value-One'),
+            (b'x-mixed-case', b'Value-One'),
+            (b'X-Mixed-Case', b'Value-One'),
+        ]
+
+        e = Encoder()
+        d = Decoder()
+
+        assert d.decode(e.encode(headers, huffman=True), raw=True) == headers

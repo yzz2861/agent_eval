@@ -12,6 +12,14 @@ dev
 
 **Bugfixes**
 
+- The decoder now enforces ``max_header_list_size`` before committing any
+  state for the header field that would exceed the limit: the cumulative
+  size (name + value + 32 bytes overhead per entry, as per RFC 7541 Section
+  4.1) is checked across the whole header block, and the oversized entry is
+  neither emitted nor added to the dynamic table. This leaves the decoder in
+  a consistent state so that subsequent header blocks can still be decoded
+  independently.
+
 
 4.2.0 (2026-06-22)
 ------------------

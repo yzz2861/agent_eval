@@ -429,9 +429,13 @@ class Decoder:
         amounts of memory to be allocated.
 
         If this amount of data is exceeded, a `OversizedHeaderListError
-        <hpack.OversizedHeaderListError>` exception will be raised. At this
-        point the connection should be shut down, as the HPACK state will no
-        longer be usable.
+        <hpack.OversizedHeaderListError>` exception will be raised. Decoding
+        stops before the limit is exceeded and no further state is committed,
+        so the decoder is left in a consistent state and subsequent header
+        blocks can still be decoded independently. Depending on how much of
+        the rejected block had already been applied to the dynamic table, the
+        compression context may however have diverged from the peer's, in
+        which case the connection should be shut down.
 
         Defaults to 64kB.
     :type max_header_list_size: ``int``
@@ -447,9 +451,10 @@ class Decoder:
         #: to be allocated.
         #:
         #: If this amount of data is exceeded, a `OversizedHeaderListError
-        #: <hpack.OversizedHeaderListError>` exception will be raised. At this
-        #: point the connection should be shut down, as the HPACK state will no
-        #: longer be usable.
+        #: <hpack.OversizedHeaderListError>` exception will be raised. Decoding
+        #: stops before the limit is exceeded and no further state is
+        #: committed, so subsequent header blocks can still be decoded
+        #: independently.
         #:
         #: Defaults to 64kB.
         #:
@@ -517,11 +522,13 @@ class Decoder:
                 header, consumed = self._decode_indexed(
                     data_mem[current_index:],
                 )
+                index_header = False
             elif literal_index:
                 # It's a literal header that does affect the header table.
                 header, consumed = self._decode_literal_index(
                     data_mem[current_index:],
                 )
+                index_header = True
             elif encoding_update:
                 # It's an update to the encoding context. These are forbidden
                 # in a header block after any actual header.
@@ -537,14 +544,33 @@ class Decoder:
                 header, consumed = self._decode_literal_no_index(
                     data_mem[current_index:],
                 )
+                index_header = False
 
             if header:
-                headers.append(header)
-                inflated_size += table_entry_size(header[0], header[1])
-
-                if inflated_size > self.max_header_list_size:
+                # Account for the size of this header field before committing
+                # any state: per RFC 7541 Section 4.1 each entry counts as the
+                # length of its name plus the length of its value plus 32
+                # bytes of overhead, accumulated across the entire header
+                # block (including any fragments delivered via CONTINUATION
+                # frames and reassembled before this call). If this entry
+                # would push the total over the limit we stop *before*
+                # exceeding it: the entry is neither emitted nor added to the
+                # dynamic table, leaving the decoder in a consistent state so
+                # that subsequent header blocks can still be decoded
+                # independently. The error message deliberately does not
+                # include the header name or value.
+                entry_size = table_entry_size(header[0], header[1])
+                if inflated_size + entry_size > self.max_header_list_size:
                     msg = f"A header list larger than {self.max_header_list_size} has been received"
                     raise OversizedHeaderListError(msg)
+
+                inflated_size += entry_size
+                headers.append(header)
+
+                # Only now that the entry is known to be within budget do we
+                # apply it to the dynamic table.
+                if index_header:
+                    self.header_table.add(header[0], header[1])
 
             current_index += consumed
 
@@ -598,6 +624,10 @@ class Decoder:
     def _decode_literal(self, data: bytes | memoryview, should_index: bool) -> tuple[HeaderTuple, int]:
         """
         Decodes a header represented with a literal.
+
+        This never adds the header to the header table, even when
+        should_index is True: that is left to the caller, which first checks
+        the decoded header against the maximum header list size.
         """
         if isinstance(data, memoryview):
             data = data.tobytes()  # pragma: no cover
@@ -662,10 +692,6 @@ class Decoder:
             header = NeverIndexedHeaderTuple(name, value)
         else:
             header = HeaderTuple(name, value)
-
-        # If we've been asked to index this, add it to the header table.
-        if should_index:
-            self.header_table.add(name, value)
 
         log.debug(
             "Decoded %s, total consumed %d bytes, indexed %s",
