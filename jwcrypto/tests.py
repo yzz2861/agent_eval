@@ -3,7 +3,9 @@
 from __future__ import unicode_literals
 
 import copy
+import math
 import unittest
+from unittest import mock
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -2281,6 +2283,224 @@ class TestJWT(unittest.TestCase):
             tok = s.serialize(compact=True)
             self.assertRaises(jwt.JWTInvalidClaimFormat, jwt.JWT,
                               jwt=tok, key=key)
+
+    def _make_claim_token(self, key, claims):
+        token = jwt.JWT(header={"alg": "HS256"}, claims=claims)
+        token.make_signed_token(key)
+        return token.serialize()
+
+    def test_claims_policy_audience_array_and_exact_set(self):
+        key = jwk.JWK(generate='oct', size=256)
+        token = self._make_claim_token(
+            key, {"aud": ["tenant-a", "tenant-b"], "iss": "issuer"})
+
+        jwt.JWT(jwt=token, key=key, claims_policy=jwt.JWTClaimsPolicy(
+            expected_claims={"aud": ["tenant-a"]}))
+        jwt.JWT(jwt=token, key=key, claims_policy=jwt.JWTClaimsPolicy(
+            allowed_audiences=["tenant-a", "tenant-b"]))
+
+        with self.assertRaises(jwt.JWTInvalidClaimValue):
+            jwt.JWT(jwt=token, key=key, claims_policy=jwt.JWTClaimsPolicy(
+                allowed_audiences=["tenant-a"]))
+        with self.assertRaises(jwt.JWTInvalidClaimValue):
+            jwt.JWT(jwt=token, key=key, claims_policy=jwt.JWTClaimsPolicy(
+                expected_claims={"aud": ["tenant-c"]}))
+        with self.assertRaises(jwt.JWTInvalidClaimFormat):
+            jwt.JWTClaimsPolicy(allowed_audiences=["tenant-a", 1])
+        with self.assertRaises(jwt.JWTInvalidClaimFormat):
+            jwt.JWTClaimsPolicy(allowed_audiences=[])
+
+        legacy_alias = jwt.JWTClaimsPolicy(allowed_claims=["client"])
+        only_alias = self._make_claim_token(key, {"aud": "client"})
+        jwt.JWT(jwt=only_alias, key=key, claims_policy=legacy_alias)
+
+    def test_claims_policy_issuer_and_azp_binding(self):
+        key = jwk.JWK(generate='oct', size=256)
+        token = self._make_claim_token(
+            key, {"iss": "https://issuer.example",
+                  "aud": "client", "azp": "client"})
+
+        jwt.JWT(jwt=token, key=key, claims_policy=jwt.JWTClaimsPolicy(
+            expected_claims={"iss": "https://issuer.example"},
+            client_id="client"))
+
+        with self.assertRaises(jwt.JWTInvalidClaimValue):
+            jwt.JWT(jwt=token, key=key, claims_policy=jwt.JWTClaimsPolicy(
+                expected_claims={"iss": "https://issuer.example/"}))
+        with self.assertRaises(jwt.JWTInvalidClaimValue):
+            jwt.JWT(jwt=token, key=key, claims_policy=jwt.JWTClaimsPolicy(
+                client_id="other-client"))
+
+        no_azp = self._make_claim_token(
+            key, {"iss": "https://issuer.example", "aud": "client"})
+        with self.assertRaises(jwt.JWTMissingClaim):
+            jwt.JWT(jwt=no_azp, key=key, claims_policy=jwt.JWTClaimsPolicy(
+                client_id="client"))
+
+        bad_azp = self._make_claim_token(
+            key, {"aud": ["client", "other"], "azp": "stranger"})
+        with self.assertRaises(jwt.JWTInvalidClaimValue):
+            jwt.JWT(jwt=bad_azp, key=key,
+                    claims_policy=jwt.JWTClaimsPolicy())
+
+    def test_claims_policy_time_types_and_single_now(self):
+        key = jwk.JWK(generate='oct', size=256)
+        fixed_now = 1000.0
+        calls = []
+
+        def now():
+            calls.append(fixed_now)
+            return fixed_now
+
+        good = self._make_claim_token(
+            key, {"iat": fixed_now - 1, "nbf": fixed_now,
+                  "exp": fixed_now})
+        jwt.JWT(jwt=good, key=key, claims_policy=jwt.JWTClaimsPolicy(
+            leeway=0, now=now))
+        self.assertEqual(len(calls), 1)
+
+        for invalid in (True, False, float('inf'), float('-inf'),
+                        float('nan'), "1000", [1000]):
+            bad = self._make_claim_token(key, {"nbf": invalid})
+            with self.assertRaises(jwt.JWTInvalidClaimFormat):
+                jwt.JWT(jwt=bad, key=key, claims_policy=jwt.JWTClaimsPolicy(
+                    leeway=0))
+        float_claim = self._make_claim_token(key, {"exp": 1000.25})
+        jwt.JWT(jwt=float_claim, key=key, claims_policy=jwt.JWTClaimsPolicy(
+            leeway=0, now=lambda: 1000.25))
+        with self.assertRaises(ValueError):
+            jwt.JWTClaimsPolicy(now=1000)
+
+    def test_claims_policy_time_boundaries_and_leeway(self):
+        key = jwk.JWK(generate='oct', size=256)
+        fixed_now = 1000.0
+
+        def policy(leeway):
+            return jwt.JWTClaimsPolicy(leeway=leeway, now=lambda: fixed_now)
+
+        for leeway in (-5, 0, 5, 10 ** 12):
+            self.assertEqual(jwt.JWTClaimsPolicy(leeway=leeway).leeway,
+                             leeway)
+
+        equal_exp = self._make_claim_token(key, {"exp": fixed_now})
+        equal_nbf = self._make_claim_token(key, {"nbf": fixed_now})
+        jwt.JWT(jwt=equal_exp, key=key, claims_policy=policy(0))
+        jwt.JWT(jwt=equal_nbf, key=key, claims_policy=policy(0))
+
+        zero_time = self._make_claim_token(key, {"iat": 0})
+        jwt.JWT(jwt=zero_time, key=key, claims_policy=policy(0))
+        with self.assertRaises(jwt.JWTExpired):
+            jwt.JWT(jwt=self._make_claim_token(key, {"exp": 0}),
+                    key=key, claims_policy=policy(0))
+        jwt.JWT(jwt=self._make_claim_token(key, {"nbf": 0}),
+                key=key, claims_policy=policy(0))
+
+        expired_within_leeway = self._make_claim_token(
+            key, {"exp": fixed_now - 5})
+        jwt.JWT(jwt=expired_within_leeway, key=key,
+                claims_policy=policy(5))
+        with self.assertRaises(jwt.JWTExpired):
+            jwt.JWT(jwt=expired_within_leeway, key=key,
+                    claims_policy=policy(-1))
+
+        future_within_leeway = self._make_claim_token(
+            key, {"nbf": fixed_now + 5})
+        jwt.JWT(jwt=future_within_leeway, key=key,
+                claims_policy=policy(5))
+        with self.assertRaises(jwt.JWTNotYetValid):
+            jwt.JWT(jwt=future_within_leeway, key=key,
+                    claims_policy=policy(-1))
+
+        huge = self._make_claim_token(key, {"exp": fixed_now})
+        jwt.JWT(jwt=huge, key=key, claims_policy=policy(10 ** 12))
+
+        mutable = jwt.JWT()
+        mutable.deserialize(future_within_leeway)
+        mutable._claims_policy = jwt.JWTClaimsPolicy(
+            leeway=0, now=lambda: fixed_now)
+        with self.assertRaises(jwt.JWTNotYetValid):
+            mutable.validate(key)
+        mutable.leeway = 10
+        mutable.deserialize(future_within_leeway)
+        mutable.validate(key)
+        self.assertEqual(mutable.claims_policy.leeway, 10)
+
+        for invalid in (True, False, float('inf'), float('-inf'),
+                        float('nan'), "10"):
+            with self.assertRaises((ValueError, TypeError)):
+                jwt.JWTClaimsPolicy(leeway=invalid)
+
+    def test_claims_policy_error_categories(self):
+        key = jwk.JWK(generate='oct', size=256)
+        token = self._make_claim_token(key, {"iss": "issuer",
+                                             "aud": "client"})
+
+        with self.assertRaises(jwt.JWTMissingClaim):
+            jwt.JWT(jwt=token, key=key, claims_policy=jwt.JWTClaimsPolicy(
+                expected_claims={"jti": "id"}))
+        with self.assertRaises(jwt.JWTInvalidClaimFormat):
+            jwt.JWT(jwt=token, key=key, claims_policy=jwt.JWTClaimsPolicy(
+                expected_claims={"aud": 1}))
+        with self.assertRaises(jwt.JWTInvalidClaimValue):
+            jwt.JWT(jwt=token, key=key, claims_policy=jwt.JWTClaimsPolicy(
+                expected_claims={"iss": "other"}))
+
+    def test_strict_claims_policy(self):
+        key = jwk.JWK(generate='oct', size=256)
+        valid = self._make_claim_token(
+            key, {"iss": "issuer", "aud": "client"})
+        jwt.JWT(jwt=valid, key=key, strict_claims=True)
+
+        missing_iss = self._make_claim_token(key, {"aud": "client"})
+        with self.assertRaises(jwt.JWTMissingClaim):
+            jwt.JWT(jwt=missing_iss, key=key, strict_claims=True)
+
+        unknown = self._make_claim_token(
+            key, {"iss": "issuer", "aud": "client",
+                  "custom": "allowed"})
+        with self.assertRaises(jwt.JWTInvalidClaimFormat):
+            jwt.JWT(jwt=unknown, key=key, strict_claims=True)
+
+        jwt.JWT(jwt=unknown, key=key, claims_policy=jwt.JWTClaimsPolicy(
+            strict=True, known_claims=["custom"]))
+        self.assertRaises(ValueError, jwt.JWT, jwt=valid, key=key,
+                          check_claims={}, strict_claims=True)
+
+    def test_claims_policy_payload_must_be_object(self):
+        key = jwk.JWK(generate='oct', size=256)
+        token = jws.JWS('["not-claims"]')
+        token.add_signature(key, protected={"alg": "HS256"})
+        with self.assertRaises(jwt.JWTInvalidClaimFormat):
+            jwt.JWT(jwt=token.serialize(compact=True), key=key,
+                    claims_policy=jwt.JWTClaimsPolicy())
+
+    def test_default_numeric_date_accepts_finite_float(self):
+        key = jwk.JWK(generate='oct', size=256)
+        token = self._make_claim_token(key, {"exp": 1000.25})
+        parsed = jwt.JWT(jwt=token, key=key, check_claims=False)
+        parsed._check_claims = None
+        parsed._leeway = 0
+        with mock.patch('jwcrypto.jwt.time.time', return_value=1000.25):
+            parsed.validate(key)
+
+    def test_claims_policy_log_never_contains_token(self):
+        key = jwk.JWK(generate='oct', size=256)
+        token = self._make_claim_token(key, {"iss": "issuer"})
+
+        failed = jwt.JWT()
+        failed.deserialize(token)
+        failed._claims_policy = jwt.JWTClaimsPolicy(
+            expected_claims={"iss": "other"})
+        with self.assertRaises(jwt.JWTInvalidClaimValue):
+            failed.validate(key)
+        self.assertIn('Claims validation failed',
+                      str(failed.deserializelog))
+        self.assertNotIn(token, str(failed.deserializelog))
+
+        ok = jwt.JWT(jwt=token, key=key, claims_policy=jwt.JWTClaimsPolicy(
+            expected_claims={"iss": "issuer"}))
+        self.assertIn('Claims validation succeeded', ok.deserializelog)
+        self.assertNotIn(token, str(ok.deserializelog))
 
     def test_unexpected(self):
         key = jwk.JWK(generate='oct', size=256)

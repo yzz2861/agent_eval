@@ -1,6 +1,8 @@
 # Copyright (C) 2015  JWCrypto Project Contributors - see LICENSE file
 
 import copy
+import logging
+import math
 import time
 import uuid
 
@@ -25,6 +27,15 @@ JWTClaimsRegistry = {'iss': 'Issuer',
                      'iat': 'Issued At',
                      'jti': 'JWT ID'}
 """Registry of RFC 7519 defined claims"""
+
+JWTRegisteredClaims = frozenset(JWTClaimsRegistry)
+"""Set of claims registered by RFC 7519"""
+
+JWTDefaultKnownClaims = JWTRegisteredClaims | frozenset(['typ', 'scope',
+                                                         'azp'])
+"""Claims understood by the built-in validation policy"""
+
+logger = logging.getLogger(__name__)
 
 
 # do not use this unless you know about CVE-2022-3102
@@ -160,6 +171,309 @@ class JWTMissingKey(JWKeyNotFound):
         super(JWTMissingKey, self).__init__(msg)
 
 
+class JWTClaimsPolicy:
+    """Explicit validation policy for JWT claims."""
+
+    def __init__(self, leeway=60, expected_claims=None,
+                 required_claims=None, allowed_audiences=None,
+                 known_claims=None, client_id=None, strict=False,
+                 now=None, check_time_claims=True, allowed_claims=None):
+        """Create a claims validation policy.
+
+        :param leeway: Number of seconds of clock skew to accept.
+        :param expected_claims: Optional mapping of claims that must match.
+        :param required_claims: Optional iterable of claims that must exist.
+        :param allowed_audiences: Optional iterable of allowed audience
+         values. Every token audience must be in this set.
+        :param known_claims: Optional iterable of claims accepted in strict
+         mode. Defaults to the RFC 7519 claims plus ``typ``, ``scope`` and
+         ``azp`` and any explicitly expected claims.
+        :param client_id: Optional client identifier bound to ``azp``.
+        :param strict: Require ``iss`` and ``aud`` and reject unknown
+         claim names.
+        :param now: Optional callable returning the current NumericDate.
+        :param check_time_claims: Check ``exp`` and ``nbf`` when present.
+        """
+        self._expected_claims = {}
+        self._required_claims = set()
+        self._allowed_audiences = None
+        self._client_id = None
+        self._known_claims = set(JWTDefaultKnownClaims)
+        self._strict = bool(strict)
+        self._now = now if now is not None else time.time
+        if not callable(self._now):
+            raise ValueError('now must be callable')
+        self._check_time_claims = bool(check_time_claims)
+        self.leeway = leeway
+
+        if allowed_claims is not None and allowed_audiences is not None:
+            raise ValueError(
+                'Use allowed_audiences; allowed_claims is a compatibility '
+                'alias')
+        if allowed_claims is not None:
+            allowed_audiences = allowed_claims
+
+        if expected_claims is not None:
+            self._validate_expected_claims(expected_claims)
+            self._expected_claims = dict(expected_claims)
+            self._known_claims.update(self._expected_claims)
+
+        if required_claims is not None:
+            required = set(required_claims)
+            self._validate_claim_names(required)
+            self._required_claims = required
+            self._known_claims.update(required)
+
+        if allowed_audiences is not None:
+            audiences = list(allowed_audiences)
+            if not audiences:
+                raise JWTInvalidClaimFormat(
+                    'At least one allowed audience is required')
+            if any(not isinstance(aud, str) for aud in audiences):
+                raise JWTInvalidClaimFormat(
+                    'Allowed audiences must be strings')
+            self._allowed_audiences = set(audiences)
+
+        if client_id is not None:
+            if not isinstance(client_id, str):
+                raise JWTInvalidClaimFormat('Client ID must be a string')
+            self._client_id = client_id
+
+        if known_claims is not None:
+            known = set(known_claims)
+            self._validate_claim_names(known)
+            self._known_claims.update(known)
+
+        if self._strict:
+            self._required_claims.update(['iss', 'aud'])
+
+    @property
+    def leeway(self):
+        return self._leeway
+
+    @leeway.setter
+    def leeway(self, value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError('Leeway must be a finite number')
+        if not math.isfinite(value):
+            raise ValueError('Leeway must be a finite number')
+        self._leeway = value
+
+    @property
+    def strict(self):
+        return self._strict
+
+    @staticmethod
+    def _validate_claim_names(names):
+        if any(not isinstance(name, str) or not name for name in names):
+            raise ValueError('Claim names must be non-empty strings')
+
+    def _validate_expected_claims(self, expected):
+        if not isinstance(expected, dict):
+            raise ValueError('Expected claims must be a dictionary')
+        self._validate_claim_names(expected)
+        for name, value in expected.items():
+            if name in ('iss', 'sub', 'jti', 'azp'):
+                if value is not None and not isinstance(value, str):
+                    raise JWTInvalidClaimFormat(
+                        'Claim %s must be a string' % name)
+            elif name == 'aud':
+                self._validate_audience_value(value)
+            elif name in ('exp', 'nbf', 'iat'):
+                if value is not None:
+                    self._validate_numeric_date(name, value)
+            elif name == 'scope':
+                if value is not None and not isinstance(value, str):
+                    raise JWTInvalidClaimFormat(
+                        'Claim scope must be a string')
+
+    @staticmethod
+    def _validate_audience_value(value):
+        if isinstance(value, list):
+            if not value or any(not isinstance(aud, str)
+                                for aud in value):
+                raise JWTInvalidClaimFormat(
+                    'Audience values must be non-empty strings')
+        elif not isinstance(value, str):
+            raise JWTInvalidClaimFormat(
+                'Audience value must be a string or list')
+
+    @staticmethod
+    def _validate_numeric_date(name, value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise JWTInvalidClaimFormat(
+                'Claim %s is not a finite NumericDate' % name)
+        if not math.isfinite(value):
+            raise JWTInvalidClaimFormat(
+                'Claim %s is not a finite NumericDate' % name)
+
+    @staticmethod
+    def _require_string(claims, name):
+        if name in claims and claims[name] is not None:
+            if not isinstance(claims[name], str):
+                raise JWTInvalidClaimFormat(
+                    'Claim %s is not a StringOrURI type' % name)
+
+    @staticmethod
+    def _require_audience(claims):
+        if 'aud' not in claims or claims['aud'] is None:
+            return
+        value = claims['aud']
+        if isinstance(value, list):
+            if not value or any(not isinstance(aud, str)
+                                for aud in value):
+                raise JWTInvalidClaimFormat(
+                    'Claim aud contains non StringOrURI types')
+        elif not isinstance(value, str):
+            raise JWTInvalidClaimFormat(
+                'Claim aud is not a StringOrURI type')
+
+    def _check_token_formats(self, claims):
+        for name in ('iss', 'sub', 'jti', 'typ', 'azp'):
+            self._require_string(claims, name)
+        self._require_audience(claims)
+        for name in ('exp', 'nbf', 'iat'):
+            if name in claims and claims[name] is not None:
+                self._validate_numeric_date(name, claims[name])
+
+    @staticmethod
+    def _as_audience_list(value):
+        if isinstance(value, list):
+            return value
+        return [value]
+
+    def _check_exp(self, value, now):
+        if value < now - self._leeway:
+            raise JWTExpired(
+                'Expired at %s, time: %s(leeway: %s)' % (
+                    value, now, self._leeway))
+
+    def _check_nbf(self, value, now):
+        if value > now + self._leeway:
+            raise JWTNotYetValid(
+                'Valid from %s, time: %s(leeway: %s)' % (
+                    value, now, self._leeway))
+
+    def _check_expected(self, name, value, claims, now):
+        token_value = claims[name]
+        if name in ('iss', 'sub', 'jti', 'azp'):
+            if value is not None and value != token_value:
+                raise JWTInvalidClaimValue(
+                    "Invalid '%s' value. Expected '%s' got '%s'" % (
+                        name, value, token_value))
+        elif name == 'aud':
+            token_audiences = set(self._as_audience_list(token_value))
+            expected_audiences = set(self._as_audience_list(value))
+            if not expected_audiences.issubset(token_audiences):
+                raise JWTInvalidClaimValue(
+                    "Invalid '%s' value. Expected '%s' in '%s'" % (
+                        name, value, token_value))
+        elif name == 'exp':
+            if value is not None:
+                self._check_exp(token_value, value)
+            elif self._check_time_claims:
+                self._check_exp(token_value, now)
+        elif name == 'nbf':
+            if value is not None:
+                self._check_nbf(token_value, value)
+            elif self._check_time_claims:
+                self._check_nbf(token_value, now)
+        elif name == 'iat' and value is not None and value != token_value:
+            raise JWTInvalidClaimValue(
+                "Invalid '%s' value. Expected '%s' got '%s'" % (
+                    name, value, token_value))
+        elif name == 'typ' and value is not None:
+            if JWT.norm_typ(value) != JWT.norm_typ(token_value):
+                raise JWTInvalidClaimValue(
+                    "Invalid '%s' value. '%s' does not normalize to '%s'"
+                    % (name, token_value, value))
+        elif name == 'scope' and value is not None:
+            if not isinstance(token_value, str):
+                raise JWTInvalidClaimValue(
+                    "Invalid '%s' value. Scope list has to be a string, "
+                    "got a %s instead: %s" % (
+                        name, type(token_value), str(token_value)))
+            if value not in token_value.split():
+                raise JWTInvalidClaimValue(
+                    "Invalid '%s' value. Scope list '%s' does not contain "
+                    "the required scope '%s'" % (
+                        name, token_value, value))
+        elif name not in ('exp', 'nbf', 'iat') and \
+                value is not None and value != token_value:
+            raise JWTInvalidClaimValue(
+                "Invalid '%s' value. Expected '%s' got '%s'" % (
+                    name, value, token_value))
+
+    def validate(self, payload):
+        """Validate decoded claims and return their JSON encoding."""
+        try:
+            if isinstance(payload, dict):
+                claims = copy.deepcopy(payload)
+            else:
+                claims = json_decode(payload)
+            if not isinstance(claims, dict):
+                raise ValueError()
+        except ValueError as e:
+            raise JWTInvalidClaimFormat(
+                'Claims must be encoded as a JSON object') from e
+
+        for name in self._required_claims:
+            if name not in claims:
+                raise JWTMissingClaim('Claim %s is missing' % name)
+
+        if self._strict:
+            unknown = set(claims) - self._known_claims
+            if unknown:
+                raise JWTInvalidClaimFormat(
+                    'Unknown claims: %s' % ', '.join(sorted(unknown)))
+
+        for name, value in claims.items():
+            if value is None:
+                raise JWTInvalidClaimFormat(
+                    'Invalid Claim format for %s' % name)
+
+        self._check_token_formats(claims)
+
+        now = self._now()
+        if self._check_time_claims:
+            if 'exp' in claims:
+                self._check_exp(claims['exp'], now)
+            if 'nbf' in claims:
+                self._check_nbf(claims['nbf'], now)
+
+        if self._allowed_audiences is not None:
+            if 'aud' not in claims:
+                raise JWTMissingClaim('Claim aud is missing')
+            audiences = set(self._as_audience_list(claims['aud']))
+            if not audiences.issubset(self._allowed_audiences):
+                raise JWTInvalidClaimValue(
+                    "Invalid 'aud' value. '%s' is not in allowed set '%s'"
+                    % (claims['aud'], sorted(self._allowed_audiences)))
+
+        token_audiences = claims.get('aud')
+        if token_audiences is not None and 'azp' in claims:
+            audiences = set(self._as_audience_list(token_audiences))
+            if claims['azp'] not in audiences:
+                raise JWTInvalidClaimValue(
+                    "Invalid 'azp' value. '%s' is not in '%s'" % (
+                        claims['azp'], token_audiences))
+
+        if self._client_id is not None:
+            if 'azp' not in claims:
+                raise JWTMissingClaim('Claim azp is missing')
+            if claims['azp'] != self._client_id:
+                raise JWTInvalidClaimValue(
+                    "Invalid 'azp' value. Expected '%s' got '%s'" % (
+                        self._client_id, claims['azp']))
+
+        for name, value in self._expected_claims.items():
+            if name not in claims:
+                raise JWTMissingClaim('Claim %s is missing' % name)
+            self._check_expected(name, value, claims, now)
+
+        return json_encode(claims)
+
+
 class JWT:
     """JSON Web token object
 
@@ -168,7 +482,8 @@ class JWT:
 
     def __init__(self, header=None, claims=None, jwt=None, key=None,
                  algs=None, default_claims=None, check_claims=None,
-                 expected_type=None, strict_serialization=False):
+                 expected_type=None, strict_serialization=False,
+                 claims_policy=None, strict_claims=False):
         """Creates a JWT object.
 
         :param header: A dict or a JSON string with the JWT Header data.
@@ -197,6 +512,13 @@ class JWT:
          so only the compact representation is accepted. The default is
          False to preserve backwards compatibility. It has no effect on
          token creation, which always produces the compact serialization.
+        :param claims_policy: An optional explicit
+         :class:`JWTClaimsPolicy`. When provided it replaces the legacy
+         ``check_claims`` policy and validates all claims from a single
+         decoded snapshot and one current-time value.
+        :param strict_claims: An optional boolean (default False). When
+         True a default strict policy is used: ``iss`` and ``aud`` are
+         required and only recognized claim names are accepted.
 
         Note: either the header,claims or jwt,key parameters should be
         provided as a deserialization operation (which occurs if the jwt
@@ -215,6 +537,7 @@ class JWT:
         self._algs = algs
         self._reg_claims = None
         self._check_claims = None
+        self._claims_policy = None
         self._leeway = 60  # 1 minute clock skew allowed
         self._validity = 600  # 10 minutes validity (up to 11 with leeway)
         self.deserializelog = None
@@ -231,6 +554,21 @@ class JWT:
             if check_claims is not False:
                 self._check_check_claims(check_claims)
             self._check_claims = check_claims
+
+        if claims_policy is not None:
+            if not isinstance(claims_policy, JWTClaimsPolicy):
+                raise TypeError('claims_policy must be a JWTClaimsPolicy')
+            if check_claims is not None:
+                raise ValueError(
+                    'claims_policy and check_claims cannot be used together')
+            self._claims_policy = claims_policy
+            self._leeway = claims_policy.leeway
+        elif strict_claims:
+            if check_claims is not None:
+                raise ValueError(
+                    'strict_claims and check_claims cannot be used together')
+            self._claims_policy = JWTClaimsPolicy(
+                leeway=self._leeway, strict=True)
 
         if claims is not None:
             self.claims = claims
@@ -296,7 +634,22 @@ class JWT:
 
     @leeway.setter
     def leeway(self, lwy):
-        self._leeway = int(lwy)
+        if isinstance(lwy, bool) or not isinstance(lwy, (int, float)):
+            raise ValueError('Leeway must be a finite number')
+        if not math.isfinite(lwy):
+            raise ValueError('Leeway must be a finite number')
+        self._leeway = lwy
+        if self._claims_policy is not None:
+            self._claims_policy.leeway = lwy
+
+    @property
+    def claims_policy(self):
+        return self._claims_policy
+
+    @property
+    def strict_claims(self):
+        return self._claims_policy is not None and \
+            self._claims_policy.strict
 
     @property
     def validity(self):
@@ -451,38 +804,48 @@ class JWT:
     def _check_integer_claim(self, name, claims):
         if name not in claims or claims[name] is None:
             return
-        if isinstance(claims[name], bool):
-            raise JWTInvalidClaimFormat(
-                "Claim %s is not an integer" % (name, ))
-        if not isinstance(claims[name], int):
+        value = claims[name]
+        if isinstance(value, bool) or not isinstance(value, int):
             raise JWTInvalidClaimFormat(
                 "Claim %s is not an integer" % (name, ))
 
+    def _check_numeric_date_claim(self, name, claims):
+        if name not in claims or claims[name] is None:
+            return
+        value = claims[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise JWTInvalidClaimFormat(
+                "Claim %s is not a finite NumericDate" % (name, ))
+        if not math.isfinite(value):
+            raise JWTInvalidClaimFormat(
+                "Claim %s is not a finite NumericDate" % (name, ))
+
     def _check_exp(self, claim, limit, leeway):
         if claim < limit - leeway:
-            raise JWTExpired('Expired at %d, time: %d(leeway: %d)' % (
+            raise JWTExpired('Expired at %s, time: %s(leeway: %s)' % (
                              claim, limit, leeway))
 
     def _check_nbf(self, claim, limit, leeway):
         if claim > limit + leeway:
-            raise JWTNotYetValid('Valid from %d, time: %d(leeway: %d)' % (
+            raise JWTNotYetValid('Valid from %s, time: %s(leeway: %s)' % (
                                  claim, limit, leeway))
 
-    def _check_default_claims(self, claims):
+    def _check_default_claims(self, claims, now):
         self._check_string_claim('iss', claims)
         self._check_string_claim('sub', claims)
         self._check_array_or_string_claim('aud', claims)
-        self._check_integer_claim('exp', claims)
-        self._check_integer_claim('nbf', claims)
-        self._check_integer_claim('iat', claims)
+        self._check_numeric_date_claim('exp', claims)
+        self._check_numeric_date_claim('nbf', claims)
+        self._check_numeric_date_claim('iat', claims)
         self._check_string_claim('jti', claims)
         self._check_string_claim('typ', claims)
+        self._check_string_claim('azp', claims)
 
         if self._check_claims is None:
             if 'exp' in claims:
-                self._check_exp(claims['exp'], time.time(), self._leeway)
+                self._check_exp(claims['exp'], now, self._leeway)
             if 'nbf' in claims:
-                self._check_nbf(claims['nbf'], time.time(), self._leeway)
+                self._check_nbf(claims['nbf'], now, self._leeway)
 
     def _check_check_claims(self, check_claims):
         self._check_string_claim('iss', check_claims)
@@ -494,6 +857,7 @@ class JWT:
         self._check_integer_claim('iat', check_claims)
         self._check_string_claim('jti', check_claims)
         self._check_string_claim('typ', check_claims)
+        self._check_string_claim('azp', check_claims)
 
     def _check_provided_claims(self, payload):
         try:
@@ -505,7 +869,7 @@ class JWT:
             if not isinstance(claims, dict):
                 raise ValueError()
         except ValueError as e:
-            if self._check_claims is None:
+            if self._claims_policy is None and self._check_claims is None:
                 return payload
             raise JWTInvalidClaimFormat("Claims check requested "
                                         "but claims is not a json "
@@ -515,12 +879,16 @@ class JWT:
         if self._check_claims is False:
             return json_encode(claims)
 
+        if self._claims_policy is not None:
+            return self._claims_policy.validate(claims)
+
+        now = time.time()
         for k, v in claims.items():
             if v is None:
                 raise JWTInvalidClaimFormat(
                     "Invalid Claim format for %s" % (k, ))
 
-        self._check_default_claims(claims)
+        self._check_default_claims(claims, now)
 
         if self._check_claims is None:
             return json_encode(claims)
@@ -529,7 +897,7 @@ class JWT:
             if name not in claims:
                 raise JWTMissingClaim("Claim %s is missing" % (name, ))
 
-            if name in ['iss', 'sub', 'jti']:
+            if name in ['iss', 'sub', 'jti', 'azp']:
                 if value is not None and value != claims[name]:
                     raise JWTInvalidClaimValue(
                         "Invalid '%s' value. Expected '%s' got '%s'" % (
@@ -555,13 +923,13 @@ class JWT:
                 if value is not None:
                     self._check_exp(claims[name], value, 0)
                 else:
-                    self._check_exp(claims[name], time.time(), self._leeway)
+                    self._check_exp(claims[name], now, self._leeway)
 
             elif name == 'nbf':
                 if value is not None:
                     self._check_nbf(claims[name], value, 0)
                 else:
-                    self._check_nbf(claims[name], time.time(), self._leeway)
+                    self._check_nbf(claims[name], now, self._leeway)
 
             elif name == 'typ':
                 if value is not None:
@@ -683,7 +1051,15 @@ class JWT:
         payload = self.token.payload
         if isinstance(payload, bytes):
             payload = payload.decode('utf-8')
-        self._claims = self._check_provided_claims(payload)
+        try:
+            self._claims = self._check_provided_claims(payload)
+        except JWException as claim_error:
+            entry = 'Claims validation failed: [%s]' % \
+                type(claim_error).__name__
+            self.deserializelog.append(entry)
+            logger.warning('%s', entry)
+            raise
+        self.deserializelog.append('Claims validation succeeded')
 
     @staticmethod
     def _is_json_serialization(jwt):

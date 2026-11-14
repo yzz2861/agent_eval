@@ -14,6 +14,10 @@ Classes
    :members:
    :show-inheritance:
 
+.. autoclass:: jwcrypto.jwt.JWTClaimsPolicy
+   :members:
+   :show-inheritance:
+
 Variables
 ---------
 
