@@ -43,6 +43,7 @@ from .models import (  # noqa: F401
     Request,
     Response,
 )
+from .redirects import RedirectPolicy
 from .status_codes import codes
 from .structures import CaseInsensitiveDict
 from .utils import (  # noqa: F401
@@ -128,6 +129,12 @@ class SessionRedirectMixin:
     max_redirects: int
     trust_env: bool
     cookies: RequestsCookieJar
+    redirect_policy: RedirectPolicy
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "redirect_policy":
+            return RedirectPolicy()
+        raise AttributeError(name)
 
     def send(self, request: PreparedRequest, **kwargs: Any) -> Response: ...
 
@@ -153,35 +160,7 @@ class SessionRedirectMixin:
 
     def should_strip_auth(self, old_url: str, new_url: str) -> bool:
         """Decide whether Authorization header should be removed when redirecting"""
-        old_parsed = urlparse(old_url)
-        new_parsed = urlparse(new_url)
-        if old_parsed.hostname != new_parsed.hostname:
-            return True
-        # Special case: allow http -> https redirect when using the standard
-        # ports. This isn't specified by RFC 7235, but is kept to avoid
-        # breaking backwards compatibility with older versions of requests
-        # that allowed any redirects on the same host.
-        if (
-            old_parsed.scheme == "http"
-            and old_parsed.port in (80, None)
-            and new_parsed.scheme == "https"
-            and new_parsed.port in (443, None)
-        ):
-            return False
-
-        # Handle default port usage corresponding to scheme.
-        changed_port = old_parsed.port != new_parsed.port
-        changed_scheme = old_parsed.scheme != new_parsed.scheme
-        default_port = (DEFAULT_PORTS.get(old_parsed.scheme, None), None)
-        if (
-            not changed_scheme
-            and old_parsed.port in default_port
-            and new_parsed.port in default_port
-        ):
-            return False
-
-        # Standard case: root URI must match
-        return changed_port or changed_scheme
+        return self.redirect_policy.should_strip_credentials(old_url, new_url)
 
     def resolve_redirects(
         self,
@@ -193,11 +172,13 @@ class SessionRedirectMixin:
         cert: _t.CertType = None,
         proxies: dict[str, str] | None = None,
         yield_requests: bool = False,
+        redirect_policy: RedirectPolicy | None = None,
         **adapter_kwargs: Any,
     ) -> Generator[Response, None, None]:
         """Receives a Response. Returns a generator of Responses or Requests."""
 
         hist: list[Response] = []  # keep track of history
+        policy = redirect_policy or self.redirect_policy
 
         url = self.get_redirect_target(resp)
         previous_fragment = urlparse(req.url).fragment
@@ -244,13 +225,25 @@ class SessionRedirectMixin:
 
             prepared_request.url = to_native_string(url)
 
+            strip_credentials = policy.should_strip_credentials(
+                req.url, prepared_request.url
+            )
+            policy.validate_redirect(
+                resp.status_code,
+                req.url,
+                prepared_request.url,
+                prepared_request,
+                resp,
+            )
+
+            original_method = cast(str, req.method)
+            rewrites_method_to_get = policy.rewrites_method_to_get(
+                resp.status_code, original_method
+            )
             self.rebuild_method(prepared_request, resp)
 
             # https://github.com/psf/requests/issues/1084
-            if resp.status_code not in (
-                codes.temporary_redirect,
-                codes.permanent_redirect,
-            ):
+            if rewrites_method_to_get:
                 # https://github.com/psf/requests/issues/3490
                 purged_headers = ("Content-Length", "Content-Type", "Transfer-Encoding")
                 for header in purged_headers:
@@ -258,18 +251,25 @@ class SessionRedirectMixin:
                 prepared_request.body = None
 
             headers = prepared_request.headers
-            headers.pop("Cookie", None)
+            if strip_credentials:
+                for header in policy.sensitive_header_names():
+                    headers.pop(header, None)
+            else:
+                headers.pop("Cookie", None)
 
-            # Extract any cookies sent on the response to the cookiejar
-            # in the new request. Because we've mutated our copied prepared
-            # request, use the old one that we haven't yet touched.
-            cookie_jar = cast("CookieJar", prepared_request._cookies)
-            extract_cookies_to_jar(cookie_jar, req, resp.raw)
-            merge_cookies(cookie_jar, self.cookies)
-            prepared_request.prepare_cookies(cookie_jar)
+            if not strip_credentials:
+                # Extract any cookies sent on the response to the cookiejar
+                # in the new request. Because we've mutated our copied prepared
+                # request, use the old one that we haven't yet touched.
+                cookie_jar = cast("CookieJar", prepared_request._cookies)
+                extract_cookies_to_jar(cookie_jar, req, resp.raw)
+                merge_cookies(cookie_jar, self.cookies)
+                prepared_request.prepare_cookies(cookie_jar)
 
             # Rebuild auth and proxy information.
             proxies = self.rebuild_proxies(prepared_request, proxies)
+            if strip_credentials:
+                headers.pop("Proxy-Authorization", None)
             self.rebuild_auth(prepared_request, resp)
 
             # A failed tell() sets `_body_position` to `object()`. This non-None
@@ -280,7 +280,9 @@ class SessionRedirectMixin:
             )
 
             # Attempt to rewind consumed file-like object.
-            if rewindable:
+            if rewindable and not (
+                "Transfer-Encoding" in headers and policy.allow_body_replay
+            ):
                 rewind_body(prepared_request)
 
             # Override the original request.
@@ -297,6 +299,7 @@ class SessionRedirectMixin:
                     cert=cert,
                     proxies=proxies,
                     allow_redirects=False,
+                    redirect_policy=policy,
                     **adapter_kwargs,
                 )
 
@@ -327,7 +330,11 @@ class SessionRedirectMixin:
             del headers["Authorization"]
 
         # .netrc might have more auth for us on our new host.
-        new_auth = get_netrc_auth(url) if self.trust_env else None
+        new_auth = (
+            get_netrc_auth(url)
+            if self.trust_env and not self.should_strip_auth(original_url, url)
+            else None
+        )
         if new_auth is not None:
             prepared_request.prepare_auth(new_auth)
 
@@ -375,18 +382,12 @@ class SessionRedirectMixin:
         """
         method = prepared_request.method
 
-        # https://tools.ietf.org/html/rfc7231#section-6.4.4
-        if response.status_code == codes.see_other and method != "HEAD":
-            method = "GET"
-
-        # Do what the browsers do, despite standards...
-        # First, turn 302s into GETs.
-        if response.status_code == codes.found and method != "HEAD":
-            method = "GET"
-
-        # Second, if a POST is responded to with a 301, turn it into a GET.
-        # This bizarre behaviour is explained in Issue 1704.
-        if response.status_code == codes.moved and method == "POST":
+        status_code = response.status_code
+        if method == "HEAD":
+            return
+        if status_code == codes.see_other or (
+            status_code in (codes.moved, codes.found) and method == "POST"
+        ):
             method = "GET"
 
         prepared_request.method = method
@@ -422,6 +423,7 @@ class Session(SessionRedirectMixin):
     max_redirects: int
     trust_env: bool
     cookies: RequestsCookieJar
+    redirect_policy: RedirectPolicy
     adapters: MutableMapping[str, BaseAdapter]
 
     __attrs__: list[str] = [
@@ -437,6 +439,7 @@ class Session(SessionRedirectMixin):
         "stream",
         "trust_env",
         "max_redirects",
+        "redirect_policy",
     ]
 
     def __init__(self) -> None:
@@ -486,6 +489,8 @@ class Session(SessionRedirectMixin):
         #: This defaults to requests.models.DEFAULT_REDIRECT_LIMIT, which is
         #: 30.
         self.max_redirects = DEFAULT_REDIRECT_LIMIT
+
+        self.redirect_policy = RedirectPolicy()
 
         #: Trust environment settings for proxy configuration, default
         #: authentication and similar.
@@ -572,6 +577,7 @@ class Session(SessionRedirectMixin):
         verify: _t.VerifyType | None = None,
         cert: _t.CertType = None,
         json: _t.JsonType = None,
+        redirect_policy: RedirectPolicy | None = None,
     ) -> Response:
         """Constructs a :class:`Request <Request>`, prepares it and sends it.
         Returns :class:`Response <Response>` object.
@@ -598,6 +604,8 @@ class Session(SessionRedirectMixin):
         :type timeout: float or tuple
         :param allow_redirects: (optional) Set to True by default.
         :type allow_redirects: bool
+        :param redirect_policy: (optional) Security policy used while following
+            redirects. Defaults to the session's policy.
         :param proxies: (optional) Dictionary mapping protocol or protocol and
             hostname to the URL of the proxy.
         :param hooks: (optional) Dictionary mapping hook name to one event or
@@ -620,6 +628,8 @@ class Session(SessionRedirectMixin):
             url = url.decode("utf-8")
 
         # Create the Request.
+        request_redirect_policy = redirect_policy or self.redirect_policy
+
         req = Request(
             method=method.upper(),
             url=url,
@@ -646,6 +656,7 @@ class Session(SessionRedirectMixin):
         send_kwargs = {
             "timeout": timeout,
             "allow_redirects": allow_redirects,
+            "redirect_policy": request_redirect_policy,
         }
         send_kwargs.update(settings)
         resp = self.send(prep, **send_kwargs)
@@ -771,6 +782,7 @@ class Session(SessionRedirectMixin):
 
         # Set up variables needed for resolve_redirects and dispatching of hooks
         allow_redirects = kwargs.pop("allow_redirects", True)
+        redirect_policy = kwargs.pop("redirect_policy", None)
         stream = kwargs.get("stream")
         hooks = request.hooks
 
@@ -801,7 +813,9 @@ class Session(SessionRedirectMixin):
         # Resolve redirects if allowed.
         if allow_redirects:
             # Redirect resolving generator.
-            gen = self.resolve_redirects(r, request, **kwargs)
+            gen = self.resolve_redirects(
+                r, request, redirect_policy=redirect_policy, **kwargs
+            )
             history = [resp for resp in gen]
         else:
             history = []
@@ -818,7 +832,13 @@ class Session(SessionRedirectMixin):
         if not allow_redirects:
             try:
                 r._next = next(  # type: ignore[assignment]  # yield_requests=True returns PreparedRequest
-                    self.resolve_redirects(r, request, yield_requests=True, **kwargs)
+                    self.resolve_redirects(
+                        r,
+                        request,
+                        yield_requests=True,
+                        redirect_policy=redirect_policy,
+                        **kwargs,
+                    )
                 )
             except StopIteration:
                 pass

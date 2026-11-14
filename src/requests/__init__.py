@@ -176,12 +176,15 @@ from .exceptions import (
     HTTPError,
     JSONDecodeError,
     ReadTimeout,
+    RedirectBodyError,
+    RedirectSecurityError,
     RequestException,
     Timeout,
     TooManyRedirects,
     URLRequired,
 )
 from .models import PreparedRequest, Request, Response
+from .redirects import RedirectPolicy
 from .sessions import Session, session
 from .status_codes import codes
 
@@ -192,6 +195,9 @@ __all__ = (
     "JSONDecodeError",
     "PreparedRequest",
     "ReadTimeout",
+    "RedirectBodyError",
+    "RedirectPolicy",
+    "RedirectSecurityError",
     "Request",
     "RequestException",
     "Response",

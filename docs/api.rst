@@ -32,6 +32,8 @@ Exceptions
 .. autoexception:: requests.ConnectionError
 .. autoexception:: requests.HTTPError
 .. autoexception:: requests.TooManyRedirects
+.. autoexception:: requests.RedirectSecurityError
+.. autoexception:: requests.RedirectBodyError
 .. autoexception:: requests.ConnectTimeout
 .. autoexception:: requests.ReadTimeout
 .. autoexception:: requests.Timeout
@@ -45,6 +47,8 @@ Request Sessions
 
 .. autoclass:: Session
    :inherited-members:
+
+.. autoclass:: requests.RedirectPolicy
 
 
 Lower-Level Classes

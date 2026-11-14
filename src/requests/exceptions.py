@@ -107,6 +107,14 @@ class TooManyRedirects(RequestException):
     """Too many redirects."""
 
 
+class RedirectSecurityError(RequestException):
+    """A redirect violated the configured redirect security policy."""
+
+
+class RedirectBodyError(RequestException):
+    """A redirect cannot safely replay the request body."""
+
+
 class MissingSchema(RequestException, ValueError):
     """The URL scheme (e.g. http or https) is missing."""
 

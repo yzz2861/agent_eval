@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     from .auth import AuthBase
     from .cookies import RequestsCookieJar
     from .models import PreparedRequest, Response
+    from .redirects import RedirectPolicy
     from .structures import CaseInsensitiveDict
 
     class _ValidatedRequest(PreparedRequest):
@@ -166,6 +167,7 @@ if TYPE_CHECKING:
         stream: bool | None
         verify: VerifyType | None
         cert: CertType
+        redirect_policy: RedirectPolicy
 
     class RequestKwargs(BaseRequestKwargs, total=False):
         """kwargs for request(), options(), head(), delete()."""

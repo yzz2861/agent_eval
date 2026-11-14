@@ -42,6 +42,8 @@ from requests.exceptions import (
     MissingSchema,
     ProxyError,
     ReadTimeout,
+    RedirectBodyError,
+    RedirectSecurityError,
     RequestException,
     RetryError,
     Timeout,
@@ -51,6 +53,7 @@ from requests.exceptions import (
 from requests.exceptions import SSLError as RequestsSSLError
 from requests.hooks import default_hooks
 from requests.models import PreparedRequest, urlencode
+from requests.redirects import RedirectPolicy
 from requests.sessions import SessionRedirectMixin
 from requests.structures import CaseInsensitiveDict
 
@@ -1949,13 +1952,11 @@ class TestRequests:
 
     def test_should_strip_auth_https_upgrade(self):
         s = requests.Session()
-        assert not s.should_strip_auth(
-            "http://example.com/foo", "https://example.com/bar"
-        )
-        assert not s.should_strip_auth(
+        assert s.should_strip_auth("http://example.com/foo", "https://example.com/bar")
+        assert s.should_strip_auth(
             "http://example.com:80/foo", "https://example.com/bar"
         )
-        assert not s.should_strip_auth(
+        assert s.should_strip_auth(
             "http://example.com/foo", "https://example.com:443/bar"
         )
         # Non-standard ports should trigger stripping
@@ -1964,6 +1965,11 @@ class TestRequests:
         )
         assert s.should_strip_auth(
             "http://example.com/foo", "https://example.com:8443/bar"
+        )
+
+        s.redirect_policy = RedirectPolicy(trusted_hosts=("example.com",))
+        assert not s.should_strip_auth(
+            "http://example.com/foo", "https://example.com/bar"
         )
 
     def test_should_strip_auth_port_change(self):
@@ -2612,6 +2618,7 @@ class RedirectSession(SessionRedirectMixin):
         self.max_redirects = 30
         self.cookies = {}
         self.trust_env = False
+        self.redirect_policy = RedirectPolicy()
 
     def send(self, *args, **kwargs):
         self.calls.append(SendCall(args, kwargs))
@@ -2636,6 +2643,41 @@ class RedirectSession(SessionRedirectMixin):
         string = StringIO.StringIO("")
         setattr(string, "release_conn", lambda *args: args)
         return string
+
+
+class RedirectPolicySession(SessionRedirectMixin):
+    def __init__(self, responses, policy=None):
+        self.redirects = responses
+        self.sent_requests = []
+        self.max_redirects = 30
+        self.cookies = cookiejar_from_dict({}, cookielib.CookieJar())
+        self.trust_env = False
+        self.redirect_policy = policy or RedirectPolicy()
+
+    def send(self, request, *args, **kwargs):
+        self.sent_requests.append(request)
+        status_code, location = self.redirects.pop(0)
+        response = requests.Response()
+        response.status_code = status_code
+        response.headers = CaseInsensitiveDict()
+        if location is not None:
+            response.headers["Location"] = location
+        response.raw = StringIO.StringIO("")
+        setattr(response.raw, "release_conn", lambda *args: args)
+        response.request = request
+        response.url = request.url
+        if location is not None:
+            response.url = requests.compat.urljoin(request.url, location)
+        return response
+
+
+def redirect_response(status_code, location):
+    response = requests.Response()
+    response.status_code = status_code
+    response.headers = CaseInsensitiveDict({"Location": location})
+    response.raw = StringIO.StringIO("")
+    setattr(response.raw, "release_conn", lambda *args: args)
+    return response
 
 
 def test_json_encodes_as_bytes():
@@ -2665,6 +2707,408 @@ def test_requests_are_updated_each_time(httpbin):
         assert response.request.method == "GET"
         send_call = SendCall((response.request,), default_keyword_args)
         assert session.calls[-1] == send_call
+
+
+def test_redirect_policy_rejects_https_to_http_downgrade():
+    session = RedirectPolicySession([(200, None)])
+    request = requests.Request("GET", "https://example.com/path").prepare()
+    response = redirect_response(302, "http://example.com/path")
+    response.request = request
+
+    with pytest.raises(RedirectSecurityError, match="HTTPS to HTTP") as exc_info:
+        list(session.resolve_redirects(response, request))
+
+    assert session.sent_requests == []
+    assert exc_info.value.response is response
+    assert exc_info.value.request.url == "http://example.com/path"
+
+
+def test_redirect_policy_allows_downgrade_but_strips_cross_origin_credentials():
+    policy = RedirectPolicy(allow_http_downgrade=True)
+    session = RedirectPolicySession([(200, None)], policy)
+    request = requests.Request(
+        "GET",
+        "https://example.com/start",
+        headers={"Authorization": "Bearer token"},
+    ).prepare()
+    response = redirect_response(302, "http://example.org/next")
+    response.request = request
+
+    redirected = next(session.resolve_redirects(response, request)).request
+
+    assert redirected.url == "http://example.org/next"
+    assert "Authorization" not in redirected.headers
+
+
+def test_redirect_policy_different_port_is_cross_origin():
+    session = RedirectPolicySession([(200, None)])
+    request = requests.Request(
+        "GET",
+        "https://example.com:8443/start",
+        headers={"Authorization": "Bearer token"},
+    ).prepare()
+    response = redirect_response(302, "https://example.com/next")
+    response.request = request
+
+    redirected = next(session.resolve_redirects(response, request)).request
+
+    assert "Authorization" not in redirected.headers
+
+
+def test_redirect_policy_does_not_rebuild_cross_origin_cookies():
+    session = RedirectPolicySession([(200, None)])
+    request = requests.Request(
+        "GET",
+        "https://safe.example/start",
+        headers={"Cookie": "session=abc"},
+    ).prepare()
+    response = redirect_response(302, "https://evil.example/next")
+    response.request = request
+
+    redirected = next(session.resolve_redirects(response, request)).request
+
+    assert "Cookie" not in redirected.headers
+
+
+def test_redirect_policy_strips_credentials_on_cross_origin_307():
+    session = RedirectPolicySession([(200, None)])
+    request = requests.Request(
+        "POST",
+        "https://safe.example/upload",
+        headers={"Authorization": "Bearer token"},
+        data=b"payload",
+    ).prepare()
+    response = redirect_response(307, "https://evil.example/received")
+    response.request = request
+
+    redirected = next(session.resolve_redirects(response, request)).request
+
+    assert redirected.method == "POST"
+    assert redirected.body == b"payload"
+    assert "Authorization" not in redirected.headers
+
+
+def test_redirect_policy_strips_credentials_across_hosts():
+    policy = RedirectPolicy(sensitive_headers=frozenset(("X-Api-Key",)))
+    session = RedirectPolicySession([(200, None)], policy)
+    request = requests.Request(
+        "POST",
+        "https://safe.example/start?host=https://evil.example/decoy",
+        headers={
+            "Authorization": "Bearer token",
+            "Proxy-Authorization": "Basic abc",
+            "Cookie": "session=abc",
+            "X-Api-Key": "secret",
+            "X-Trace": "kept",
+        },
+        data="signature=secret",
+    ).prepare()
+    response = redirect_response(
+        302,
+        "https://evil.example/next?redirect_host=https://safe.example/",
+    )
+    response.request = request
+
+    redirected = next(session.resolve_redirects(response, request)).request
+
+    assert redirected.method == "GET"
+    assert redirected.body is None
+    assert redirected.url.startswith("https://evil.example/next?")
+    assert "redirect_host=https://safe.example/" in redirected.url
+    for header in (
+        "Authorization",
+        "Proxy-Authorization",
+        "Cookie",
+        "X-Api-Key",
+    ):
+        assert header not in redirected.headers
+    assert redirected.headers["X-Trace"] == "kept"
+
+
+def test_redirect_policy_trusted_host_retains_credentials():
+    policy = RedirectPolicy(trusted_hosts=("trusted.example",))
+    session = RedirectPolicySession([(200, None)], policy)
+    request = requests.Request(
+        "GET",
+        "https://safe.example/start",
+        headers={"Authorization": "Bearer token", "X-Api-Key": "secret"},
+    ).prepare()
+    response = redirect_response(302, "https://api.trusted.example/next")
+    response.request = request
+
+    redirected = next(session.resolve_redirects(response, request)).request
+
+    assert redirected.headers["Authorization"] == "Bearer token"
+    assert redirected.headers["X-Api-Key"] == "secret"
+
+
+def test_redirect_policy_rechecks_trust_on_every_hop():
+    policy = RedirectPolicy(trusted_hosts=("trusted.example",))
+    session = RedirectPolicySession(
+        [
+            (302, "https://trusted.example/second"),
+            (200, None),
+        ],
+        policy,
+    )
+    request = requests.Request(
+        "GET",
+        "https://safe.example/start",
+        headers={"Authorization": "Bearer token"},
+    ).prepare()
+    response = redirect_response(302, "https://untrusted.example/first")
+    response.request = request
+
+    responses = list(session.resolve_redirects(response, request))
+    redirected = responses[-1].request
+
+    assert "Authorization" not in redirected.headers
+    assert all("Authorization" not in sent.headers for sent in session.sent_requests[1:])
+
+
+def test_redirect_policy_trusted_host_normalizes_idna():
+    policy = RedirectPolicy(trusted_hosts=["bücher.example"])
+
+    assert policy.is_trusted_host("https://xn--bcher-kva.example/a")
+    assert policy.is_trusted_host("https://bücher.example/a")
+
+
+def test_redirect_policy_rejects_string_configuration_lists():
+    with pytest.raises(TypeError, match="trusted_hosts"):
+        RedirectPolicy(trusted_hosts="example.com")
+    with pytest.raises(TypeError, match="sensitive_headers"):
+        RedirectPolicy(sensitive_headers="X-Secret")
+
+
+@pytest.mark.parametrize(
+    ("old_url", "new_url", "expected"),
+    (
+        ("https://example.com/a", "https://example.com/b", True),
+        ("https://example.com:443/a", "https://example.com/b", True),
+        ("http://example.com:80/a", "http://example.com/b", True),
+        ("https://xn--bcher-kva.example/a", "https://bücher.example/b", True),
+        (
+            "https://user:password@example.com/a",
+            "https://other:secret@example.com/b",
+            True,
+        ),
+        ("https://[2001:db8::1]:443/a", "https://[2001:db8::1]/b", True),
+        ("https://example.com:8443/a", "https://example.com/b", False),
+        ("https://example.com/a", "https://example.org/b", False),
+        ("http://example.com/a", "https://example.com/b", False),
+    ),
+)
+def test_redirect_policy_same_origin(old_url, new_url, expected):
+    assert RedirectPolicy().is_same_origin(old_url, new_url) is expected
+
+
+def test_redirect_policy_relative_and_multiple_hops_preserve_history():
+    session = RedirectPolicySession(
+        [(302, "/second"), (302, "https://example.com/third"), (200, None)]
+    )
+    request = requests.Request(
+        "GET",
+        "https://example.com/first",
+        headers={"Authorization": "Bearer token"},
+    ).prepare()
+    response = redirect_response(302, "/second")
+    response.request = request
+    response.url = request.url
+
+    final_response = list(session.resolve_redirects(response, request))[-1]
+
+    assert final_response.url == "https://example.com/third"
+    assert len(session.sent_requests) == 3
+    assert all(
+        sent.headers["Authorization"] == "Bearer token"
+        for sent in session.sent_requests
+    )
+    assert final_response.request.headers["Authorization"] == "Bearer token"
+
+
+def test_redirect_policy_loop_uses_existing_redirect_limit():
+    session = RedirectPolicySession([(302, "/loop") for _ in range(5)])
+    session.max_redirects = 2
+    request = requests.Request("GET", "https://example.com/start").prepare()
+    response = redirect_response(302, "/loop")
+    response.request = request
+
+    with pytest.raises(TooManyRedirects, match="Exceeded 2 redirects"):
+        list(session.resolve_redirects(response, request))
+
+
+@pytest.mark.parametrize("status_code", (307, 308))
+def test_redirect_policy_preserves_method_and_rewinds_body(status_code):
+    session = RedirectPolicySession([(200, None)])
+    body = io.BytesIO(b"payload")
+    request = requests.Request(
+        "POST", "https://example.com/upload", data=body
+    ).prepare()
+    response = redirect_response(status_code, "https://example.com/received")
+    response.request = request
+
+    redirected = next(session.resolve_redirects(response, request)).request
+
+    assert redirected.method == "POST"
+    assert redirected.body is body
+    assert redirected.body.read() == b"payload"
+    assert redirected.headers["Content-Length"] == "7"
+
+
+def test_redirect_policy_rejects_oversized_307_body():
+    policy = RedirectPolicy(max_redirect_body_size=3)
+    session = RedirectPolicySession([(200, None)], policy)
+    request = requests.Request(
+        "POST", "https://example.com/upload", data=b"abcd"
+    ).prepare()
+    response = redirect_response(307, "https://example.com/received")
+    response.request = request
+
+    with pytest.raises(RedirectBodyError, match="4-byte request body"):
+        list(session.resolve_redirects(response, request))
+
+
+def test_redirect_policy_rejects_oversized_body_when_method_is_preserved():
+    policy = RedirectPolicy(max_redirect_body_size=3)
+    session = RedirectPolicySession([(200, None)], policy)
+    request = requests.Request(
+        "PUT", "https://example.com/upload", data=b"abcd"
+    ).prepare()
+    response = redirect_response(302, "https://example.com/received")
+    response.request = request
+
+    with pytest.raises(RedirectBodyError, match="4-byte request body"):
+        list(session.resolve_redirects(response, request))
+
+
+def test_redirect_policy_rejects_unrewindable_307_body():
+    session = RedirectPolicySession([(200, None)])
+    request = requests.Request(
+        "POST",
+        "https://example.com/upload",
+        data=(b"chunk" for _ in range(1)),
+    ).prepare()
+    response = redirect_response(307, "https://example.com/received")
+    response.request = request
+
+    with pytest.raises(RedirectBodyError, match="chunked request body"):
+        list(session.resolve_redirects(response, request))
+
+
+def test_redirect_policy_allows_configured_chunked_replay():
+    policy = RedirectPolicy(allow_body_replay=True)
+    session = RedirectPolicySession([(200, None)], policy)
+    request = requests.Request(
+        "POST",
+        "https://example.com/upload",
+        data=(b"chunk" for _ in range(1)),
+    ).prepare()
+    response = redirect_response(307, "https://example.com/received")
+    response.request = request
+
+    redirected = next(session.resolve_redirects(response, request)).request
+
+    assert redirected.method == "POST"
+    assert "Transfer-Encoding" in redirected.headers
+
+
+@pytest.mark.parametrize(
+    ("status_code", "method", "expected_method", "expect_body"),
+    (
+        (301, "POST", "GET", False),
+        (301, "PUT", "PUT", True),
+        (301, "HEAD", "HEAD", False),
+        (302, "POST", "GET", False),
+        (302, "PUT", "PUT", True),
+        (302, "HEAD", "HEAD", False),
+        (303, "POST", "GET", False),
+        (303, "DELETE", "GET", False),
+        (303, "HEAD", "HEAD", False),
+        (307, "POST", "POST", True),
+        (308, "POST", "POST", True),
+    ),
+)
+def test_redirect_method_rewrite_rules(
+    status_code, method, expected_method, expect_body
+):
+    session = RedirectPolicySession([(200, None)])
+    request = requests.Request(
+        method,
+        "https://example.com/start",
+        data=b"body" if method != "HEAD" else None,
+    ).prepare()
+    response = redirect_response(status_code, "https://example.com/next")
+    response.request = request
+
+    redirected = next(session.resolve_redirects(response, request)).request
+
+    assert redirected.method == expected_method
+    assert (redirected.body is not None) is expect_body
+
+
+def test_redirect_mixin_without_explicit_policy_uses_default():
+    class BareRedirectSession(SessionRedirectMixin):
+        max_redirects = 30
+        trust_env = False
+        cookies = cookiejar_from_dict({}, cookielib.CookieJar())
+
+        def send(self, request, *args, **kwargs):
+            response = requests.Response()
+            response.status_code = 200
+            response.headers = CaseInsensitiveDict()
+            response.raw = StringIO.StringIO("")
+            setattr(response.raw, "release_conn", lambda *args: args)
+            response.request = request
+            response.url = request.url
+            return response
+
+    session = BareRedirectSession()
+    request = requests.Request("GET", "https://example.com/start").prepare()
+    response = redirect_response(302, "https://example.com/next")
+    response.request = request
+
+    redirected = next(session.resolve_redirects(response, request)).request
+
+    assert redirected.url == "https://example.com/next"
+
+
+def test_per_request_redirect_policy_does_not_mutate_session():
+    session = requests.Session()
+    policy = RedirectPolicy(allow_http_downgrade=True)
+    original_policy = session.redirect_policy
+    captured = []
+
+    class FakeAdapter:
+        def send(self, request, **kwargs):
+            captured.append(request.copy())
+            response = requests.Response()
+            response.status_code = 302 if len(captured) == 1 else 200
+            response.headers = CaseInsensitiveDict()
+            if len(captured) == 1:
+                response.headers["Location"] = "http://example.com/next"
+            response.raw = StringIO.StringIO("")
+            setattr(response.raw, "release_conn", lambda *args: args)
+            response.request = request
+            response.url = request.url
+            return response
+
+        def close(self):
+            pass
+
+    session.mount("https://", FakeAdapter())
+    session.mount("http://", FakeAdapter())
+    response = session.get(
+        "https://example.com/start",
+        redirect_policy=policy,
+        proxies={},
+    )
+
+    assert response.status_code == 200
+    assert len(captured) == 2
+    assert session.redirect_policy is original_policy
+    assert session.redirect_policy.allow_http_downgrade is False
+
+
 
 
 @pytest.mark.parametrize(

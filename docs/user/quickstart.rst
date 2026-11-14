@@ -223,7 +223,8 @@ Note: Custom headers are given less precedence than more specific sources of inf
   parameter. Requests will search for the netrc file at `~/.netrc`, `~/_netrc`,
   or at the path specified by the `NETRC` environment variable.
   Check details in :ref:`netrc authentication <authentication>`.
-* Authorization headers will be removed if you get redirected off-host.
+* Authorization, Proxy-Authorization, Cookie, and configured sensitive
+  headers will be removed when a redirect changes the scheme, host, or port.
 * Proxy-Authorization headers will be overridden by proxy credentials provided in the URL.
 * Content-Length headers will be overridden when we can determine the length of the content.
 
@@ -524,6 +525,26 @@ If you're using HEAD, you can enable redirection as well::
 
     >>> r.history
     [<Response [301]>]
+
+
+Redirect security
+~~~~~~~~~~~~~~~~~
+
+The default :class:`~requests.RedirectPolicy` refuses HTTPS to HTTP redirects.
+When a redirect changes the scheme, host, or port, Requests removes
+``Authorization``, ``Proxy-Authorization``, ``Cookie``, and any additional
+headers configured as sensitive. Explicitly trusted hosts can continue to
+receive credentials::
+
+    >>> policy = requests.RedirectPolicy(trusted_hosts=('partner.example',))
+    >>> s = requests.Session()
+    >>> s.redirect_policy = policy
+    >>> r = s.get('https://service.example/start')
+
+For 307 and 308 redirects, Requests preserves the request method and body only
+when the body is within the configured size limit and can be replayed safely.
+301, 302, and 303 redirects retain the established browser-compatible method
+rewrites, while HEAD remains HEAD.
 
 
 Timeouts

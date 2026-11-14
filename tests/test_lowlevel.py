@@ -339,6 +339,32 @@ def test_redirect_rfc1808_to_non_ascii_location():
         close_server.set()
 
 
+def test_redirect_307_replays_body_on_actual_request():
+    requests_seen = []
+
+    def redirect_resp_handler(sock):
+        requests_seen.append(consume_socket_content(sock, timeout=0.5))
+        sock.send(
+            b'HTTP/1.1 307 Temporary Redirect\r\n'
+            b'Content-Length: 0\r\n'
+            b'Location: /received\r\n\r\n'
+        )
+        requests_seen.append(consume_socket_content(sock, timeout=0.5))
+        sock.send(b'HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n')
+
+    close_server = threading.Event()
+    server = Server(redirect_resp_handler, wait_to_close_event=close_server)
+
+    with server as (host, port):
+        url = f'http://{host}:{port}/upload'
+        response = requests.post(url, data=b'payload', proxies={})
+
+        assert response.status_code == 200
+        assert requests_seen[1].startswith(b'POST /received HTTP/1.1')
+        assert requests_seen[1].endswith(b'\r\n\r\npayload')
+        close_server.set()
+
+
 def test_fragment_not_sent_with_request():
     """Verify that the fragment portion of a URI isn't sent to the server."""
     close_server = threading.Event()
