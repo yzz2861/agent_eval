@@ -17,10 +17,8 @@
 #   limitations under the License.
 from __future__ import absolute_import
 
-import re
-import xml.sax.saxutils
-
 import Evtx.Nodes as e_nodes
+import Evtx.Sanitizers as e_sanitizers
 
 XML_HEADER = '<?xml version="1.1" encoding="utf-8" standalone="yes" ?>\n'
 
@@ -30,15 +28,20 @@ class UnexpectedElementException(Exception):
         super(UnexpectedElementException, self).__init__(msg)
 
 
-# ref: https://www.w3.org/TR/xml11/#charsets
-RESTRICTED_CHARS = re.compile("[\x01-\x08\x0b\x0c\x0e-\x1f\x7f-\x84\x86-\x9f]")
+# kept for backwards compatibility; the canonical definitions live in Evtx.Sanitizers.
+RESTRICTED_CHARS = e_sanitizers.RESTRICTED_CHARS
+NAME_PATTERN = e_sanitizers.NAME_PATTERN
+validate_name = e_sanitizers.validate_name
 
 
 def escape_attr(s):
     """
-    escape the given string such that it can be placed in an XML attribute, like:
+    escape the given string such that it can be placed in a double-quoted
+    XML attribute, like:
 
-        <foo bar='$value'>
+        <foo bar="$value">
+
+    the returned value does not include the surrounding quotes.
 
     Args:
       s (str): the string to escape.
@@ -46,10 +49,7 @@ def escape_attr(s):
     Returns:
       str: the escaped string.
     """
-    esc = xml.sax.saxutils.quoteattr(s)
-    esc = esc.encode("ascii", "xmlcharrefreplace").decode("ascii")
-    esc = RESTRICTED_CHARS.sub("", esc)
-    return esc
+    return e_sanitizers.escape_attr(s)
 
 
 def escape_value(s):
@@ -66,62 +66,42 @@ def escape_value(s):
     Returns:
       str: the escaped string.
     """
-    esc = xml.sax.saxutils.escape(s)
-    esc = esc.encode("ascii", "xmlcharrefreplace").decode("ascii")
-    esc = RESTRICTED_CHARS.sub("", esc)
-    return esc
+    return e_sanitizers.escape_text(s)
 
 
-# ref: https://www.w3.org/TR/xml/#NT-NameStartChar
-# but we are going to require a even stricter subset.
-NAME_PATTERN = re.compile(r"[a-zA-Z_][a-zA-Z_\-]*")
-
-
-def validate_name(s):
-    """
-    ensure the given name can be used as an XML entity name, such as tag or attribute name.
-
-    Args:
-      s (str): the string to validate.
-
-    Raises:
-      RuntimeError: if the string is not suitable to be an XML name.
-    """
-    if not NAME_PATTERN.match(s):
-        raise RuntimeError("invalid xml name: %s" % (s))
-    return s
-
-
-def render_root_node_with_subs(root_node, subs):
+def render_root_node_with_subs(root_node, subs, strict=None, _depth=0):
     """
     render the given root node using the given substitutions into XML.
 
     Args:
       root_node (e_nodes.RootNode): the node to render.
       subs (list[str]): the substitutions that maybe included in the XML.
+      strict (bool|None): if given, reject invalid strings instead of
+        repairing them with U+FFFD. defaults to the process-wide setting.
+      _depth (int): internal recursion depth, for the render depth budget.
 
     Returns:
       str: the rendered XML document.
     """
 
-    def rec(node, acc):
+    def rec(node, acc, depth):
+        if depth > e_sanitizers.MAX_RENDER_DEPTH:
+            raise UnexpectedElementException("render depth budget of {} exceeded".format(e_sanitizers.MAX_RENDER_DEPTH))
         if isinstance(node, e_nodes.EndOfStreamNode):
             pass  # intended
         elif isinstance(node, e_nodes.OpenStartElementNode):
             acc.append("<")
-            acc.append(node.tag_name())
+            acc.append(validate_name(node.tag_name()))
             for child in node.children():
                 if isinstance(child, e_nodes.AttributeNode):
                     acc.append(" ")
                     acc.append(validate_name(child.attribute_name().string()))
                     acc.append('="')
-                    # TODO: should use xml.sax.saxutils.quoteattr here
-                    # but to do so, we'd need to ensure we're not double-quoting this value.
-                    rec(child.attribute_value(), acc)
+                    rec_attribute_value(child.attribute_value(), acc, depth)
                     acc.append('"')
             acc.append(">")
             for child in node.children():
-                rec(child, acc)
+                rec(child, acc, depth + 1)
             acc.append("</")
             acc.append(validate_name(node.tag_name()))
             acc.append(">\n")
@@ -132,50 +112,71 @@ def render_root_node_with_subs(root_node, subs):
         elif isinstance(node, e_nodes.CloseElementNode):
             pass  # intended
         elif isinstance(node, e_nodes.ValueNode):
-            acc.append(escape_value(node.children()[0].string()))
+            acc.append(e_sanitizers.escape_text(node.children()[0].string(), strict=strict))
         elif isinstance(node, e_nodes.AttributeNode):
             pass  # intended
         elif isinstance(node, e_nodes.CDataSectionNode):
             acc.append("<![CDATA[")
-            # TODO: is this correct escaping???
-            acc.append(escape_value(node.cdata()))
+            acc.append(e_sanitizers.escape_cdata(node.cdata(), strict=strict))
             acc.append("]]>")
+        elif isinstance(node, e_nodes.CharacterReferenceNode):
+            acc.append(e_sanitizers.escape_text(chr(node.entity()), strict=strict))
         elif isinstance(node, e_nodes.EntityReferenceNode):
-            acc.append(escape_value(node.entity_reference()))
+            acc.append("&")
+            acc.append(validate_name(node.entity_reference_name()))
+            acc.append(";")
         elif isinstance(node, e_nodes.ProcessingInstructionTargetNode):
-            acc.append(escape_value(node.processing_instruction_target()))
+            acc.append("<?")
+            acc.append(validate_name(node.processing_instruction_target_name()))
         elif isinstance(node, e_nodes.ProcessingInstructionDataNode):
-            acc.append(escape_value(node.string()))
+            data = node.processing_instruction_data()
+            if data:
+                acc.append(" ")
+                acc.append(e_sanitizers.escape_processing_instruction_data(data, strict=strict))
+            acc.append("?>")
         elif isinstance(node, e_nodes.TemplateInstanceNode):
             raise UnexpectedElementException("TemplateInstanceNode")
         elif isinstance(node, e_nodes.NormalSubstitutionNode):
             sub = subs[node.index()]
 
             if isinstance(sub, e_nodes.BXmlTypeNode):
-                sub = render_root_node(sub.root())
+                sub = render_root_node(sub.root(), strict=strict, _depth=depth + 1)
             else:
-                sub = escape_value(sub.string())
+                sub = e_sanitizers.escape_text(sub.string(), strict=strict)
 
             acc.append(sub)
         elif isinstance(node, e_nodes.ConditionalSubstitutionNode):
             sub = subs[node.index()]
 
             if isinstance(sub, e_nodes.BXmlTypeNode):
-                sub = render_root_node(sub.root())
+                sub = render_root_node(sub.root(), strict=strict, _depth=depth + 1)
             else:
-                sub = escape_value(sub.string())
+                sub = e_sanitizers.escape_text(sub.string(), strict=strict)
 
             acc.append(sub)
         elif isinstance(node, e_nodes.StreamStartNode):
             pass  # intended
 
+    def rec_attribute_value(node, acc, depth):
+        if isinstance(node, e_nodes.ValueNode):
+            acc.append(e_sanitizers.escape_attr(node.children()[0].string(), strict=strict))
+        elif isinstance(node, (e_nodes.NormalSubstitutionNode, e_nodes.ConditionalSubstitutionNode)):
+            sub = subs[node.index()]
+            if isinstance(sub, e_nodes.BXmlTypeNode):
+                sub = render_root_node(sub.root(), strict=strict, _depth=depth + 1)
+                acc.append(e_sanitizers.escape_attr(sub, strict=strict))
+            else:
+                acc.append(e_sanitizers.escape_attr(sub.string(), strict=strict))
+        else:
+            raise UnexpectedElementException("unexpected attribute value node: {!r}".format(node))
+
     acc = []
     for c in root_node.template().children():
-        rec(c, acc)
+        rec(c, acc, _depth)
     return "".join(acc)
 
 
-def render_root_node(root_node):
+def render_root_node(root_node, strict=None, _depth=0):
     subs = []
     for sub in root_node.substitutions():
         if isinstance(sub, str):
@@ -186,20 +187,26 @@ def render_root_node(root_node):
 
         subs.append(sub)
 
-    return render_root_node_with_subs(root_node, subs)
+    return render_root_node_with_subs(root_node, subs, strict=strict, _depth=_depth)
 
 
-def evtx_record_xml_view(record, cache=None):
+def evtx_record_xml_view(record, cache=None, strict=None):
     """
     render the given record into an XML document.
 
     Args:
       record (Evtx.Record): the record to render.
+      cache: unused, kept for backwards compatibility.
+      strict (bool|None): if given, reject invalid strings instead of
+        repairing them with U+FFFD. defaults to the process-wide setting.
 
     Returns:
       str: the rendered XML document.
     """
-    return render_root_node(record.root())
+    if strict is None:
+        return render_root_node(record.root())
+    with e_sanitizers.strict_mode(strict):
+        return render_root_node(record.root(), strict=strict)
 
 
 def evtx_chunk_xml_view(chunk):

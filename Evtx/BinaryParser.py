@@ -23,6 +23,8 @@ import struct
 import datetime
 from functools import partial
 
+from . import Sanitizers
+
 
 class memoize(object):
     """cache the return value of a method
@@ -478,7 +480,8 @@ class Block(object):
         Throws:
         - `OverrunBufferException`
         """
-        return self.unpack_binary(offset, length).decode("ascii")
+        Sanitizers.check_string_budget(length)
+        return Sanitizers.decode_string(self.unpack_binary(offset, length))
 
     def unpack_wstring(self, offset, length):
         """
@@ -488,14 +491,13 @@ class Block(object):
         - `offset`: The relative offset from the start of the block.
         - `length`: The length of the string.
         Throws:
-        - `UnicodeDecodeError`
+        - `UnicodeDecodeError`: in strict mode, if the data is not valid UTF-16.
+        - `StringBudgetExceededError`: if the length exceeds the string budget.
         """
+        Sanitizers.check_string_budget(length)
         start = self._offset + offset
         end = self._offset + offset + 2 * length
-        try:
-            return bytes(self._buf[start:end]).decode("utf16")
-        except AttributeError:  # already a 'str' ?
-            return bytes(self._buf[start:end]).decode("utf16")
+        return Sanitizers.decode_utf16le(bytes(self._buf[start:end]))
 
     def unpack_dosdate(self, offset):
         """

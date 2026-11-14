@@ -23,6 +23,7 @@ import itertools
 
 import hexdump
 
+from . import Sanitizers
 from .BinaryParser import Block, ParseException, memoize
 
 
@@ -675,6 +676,12 @@ class EntityReferenceNode(BXmlNode):
     def entity_reference(self):
         return "&{};".format(self._chunk.strings()[self.string_offset()].string())
 
+    def entity_reference_name(self):
+        """
+        @return The name of the referenced entity, without the & and ; delimiters.
+        """
+        return self._chunk.strings()[self.string_offset()].string()
+
     def flags(self):
         return self.token() >> 4
 
@@ -715,6 +722,12 @@ class ProcessingInstructionTargetNode(BXmlNode):
 
     def processing_instruction_target(self):
         return "<?{}".format(self._chunk.strings()[self.string_offset()].string())
+
+    def processing_instruction_target_name(self):
+        """
+        @return The processing instruction target, without the leading <?.
+        """
+        return self._chunk.strings()[self.string_offset()].string()
 
     def flags(self):
         return self.token() >> 4
@@ -763,6 +776,12 @@ class ProcessingInstructionDataNode(BXmlNode):
             return " {}?>".format(self._string)
         else:
             return "?>"
+
+    def processing_instruction_data(self):
+        """
+        @return The processing instruction data, without the trailing ?> delimiter.
+        """
+        return self._string
 
     def tag_length(self):
         return self._tag_length
@@ -1552,7 +1571,7 @@ class WstringArrayTypeNode(VariantTypeNode):
             if match:
                 frag = match.group()
                 acc.append("<string>")
-                acc.append(frag.decode("utf16"))
+                acc.append(Sanitizers.decode_utf16le(frag))
                 acc.append("</string>\n")
                 binary = binary[len(frag) + 2 :]
                 if len(binary) == 0:

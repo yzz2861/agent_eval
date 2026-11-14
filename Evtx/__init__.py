@@ -19,4 +19,5 @@ __all__ = [
     "BinaryParser",
     "Nodes",
     "Views",
+    "Sanitizers",
 ]
