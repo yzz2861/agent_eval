@@ -112,6 +112,100 @@ class TestGeneralFrameBehaviour:
         with pytest.raises(InvalidFrameError):
             Frame.parse_frame_header(b'\x00\x00\x08\x00\x01\x00\x00\x00')
 
+    def test_parse_frame_header_requires_nine_bytes(self):
+        for header in (b'', b'\x00' * 8, b'\x00' * 10):
+            with pytest.raises(InvalidFrameError):
+                Frame.parse_frame_header(memoryview(header))
+
+    def test_parse_frame_rejects_truncated_extreme_length(self):
+        # The length field claims the maximum 24-bit body size while only a
+        # few dozen bytes are actually present.
+        header = b'\xFF\xFF\xFF\x00\x00\x00\x00\x00\x01'
+        data = header + b'only a few bytes'
+
+        with pytest.raises(InvalidFrameError) as excinfo:
+            Frame.parse_frame(memoryview(data))
+
+        assert len(excinfo.value.args) == 1
+        assert b'only a few bytes' not in str(excinfo.value).encode()
+
+    def test_parse_frame_rejects_short_header(self):
+        with pytest.raises(InvalidFrameError):
+            Frame.parse_frame(b'\x00\x00\x00\x00\x00')
+
+    def test_parse_frame_enforces_configured_max_length(self):
+        frame = DataFrame(1, b'x' * 10)
+        data = frame.serialize()
+
+        with pytest.raises(InvalidFrameError) as excinfo:
+            Frame.parse_frame(data, max_length=9)
+
+        assert b'x' * 10 not in str(excinfo.value).encode()
+
+    def test_parse_frame_rejects_negative_max_length(self):
+        data = DataFrame(1, b'x').serialize()
+
+        with pytest.raises(InvalidFrameError):
+            Frame.parse_frame(data, max_length=-1)
+
+    def test_parse_frame_accepts_complete_extreme_length_frame(self):
+        body = b'x' * (2 ** 24 - 1)
+        frame = DataFrame(1, body)
+        data = frame.serialize()
+
+        parsed, total_length = Frame.parse_frame(memoryview(data))
+
+        assert isinstance(parsed, DataFrame)
+        assert parsed.data == body
+        assert total_length == len(data)
+
+    def test_unknown_frame_skipped_only_when_complete_and_within_limit(self):
+        complete = b'\x00\x00\x03\xFF\x00\x00\x00\x00\x01abc'
+        frame, total_length = Frame.parse_frame(complete)
+
+        assert isinstance(frame, ExtensionFrame)
+        assert frame.body == b'abc'
+        assert total_length == 12
+
+        truncated = b'\x00\x00\x03\xFF\x00\x00\x00\x00\x01ab'
+        with pytest.raises(InvalidFrameError):
+            Frame.parse_frame(truncated)
+
+        with pytest.raises(InvalidFrameError):
+            Frame.parse_frame(complete, max_length=2)
+
+    def test_unknown_empty_frame_is_skipped_within_limit(self):
+        data = b'\x00\x00\x00\xFF\x00\x00\x00\x00\x01'
+
+        frame, total_length = Frame.parse_frame(data, max_length=0)
+
+        assert isinstance(frame, ExtensionFrame)
+        assert frame.body == b''
+        assert total_length == 9
+
+    def test_parse_frames_handles_consecutive_frames(self):
+        first = DataFrame(1, b'one')
+        first.flags.add('END_STREAM')
+        second = PingFrame(0, opaque_data=b'12345678')
+        third = ExtensionFrame(0x22, 0, body=b'ext')
+        data = first.serialize() + second.serialize() + third.serialize()
+
+        parsed = Frame.parse_frames(memoryview(data))
+
+        assert [type(frame) for frame, _ in parsed] == [
+            DataFrame, PingFrame, ExtensionFrame,
+        ]
+        assert sum(length for _, length in parsed) == len(data)
+
+    def test_parse_frames_rejects_truncation_between_frames(self):
+        data = DataFrame(1, b'one').serialize() + b'\x00\x00\x08\x06\x00'
+
+        with pytest.raises(InvalidFrameError):
+            Frame.parse_frames(data)
+
+    def test_parse_frames_rejects_empty_buffer(self):
+        assert Frame.parse_frames(b'') == []
+
 
 class TestDataFrame:
     payload = b'\x00\x00\x08\x00\x01\x00\x00\x00\x01testdata'
@@ -244,6 +338,45 @@ class TestDataFrame:
         new_frame = decode_frame(data)
         assert new_frame.data == b''
 
+    def test_data_frame_with_padding_flag_and_zero_padding_parses(self):
+        f = DataFrame(1)
+        f.flags.add('PADDED')
+        f.pad_length = 0
+        data = f.serialize()
+
+        new_frame, total_length = Frame.parse_frame(data)
+
+        assert new_frame.data == b''
+        assert new_frame.pad_length == 0
+        assert total_length == len(data)
+
+    def test_data_frame_empty_padded_body_errors(self):
+        data = b'\x00\x00\x00\x00\x08\x00\x00\x00\x01'
+
+        with pytest.raises(InvalidFrameError):
+            Frame.parse_frame(data)
+
+    def test_data_frame_truncated_padding_field_errors(self):
+        data = b'\x00\x00\x01\x00\x08\x00\x00\x00\x01\x05'
+
+        with pytest.raises(InvalidPaddingError):
+            Frame.parse_frame(data)
+
+    def test_data_frame_error_does_not_echo_payload(self):
+        secret = b'secret-binary-payload'
+        pad_length = 1 + len(secret)
+        data = (
+            b'\x00\x00' + bytes([pad_length]) +
+            b'\x00\x08\x00\x00\x00\x01' + bytes([pad_length]) + secret +
+            b'\x00' * pad_length
+        )
+        data = data[:9 + pad_length]
+
+        with pytest.raises(InvalidPaddingError) as excinfo:
+            Frame.parse_frame(data)
+
+        assert secret not in str(excinfo.value).encode()
+
 
 class TestPriorityFrame:
     payload = b'\x00\x00\x05\x02\x00\x00\x00\x00\x01\x80\x00\x00\x04\x40'
@@ -293,6 +426,11 @@ class TestPriorityFrame:
                 b'\x00\x00\x06\x02\x00\x00\x00\x00\x01\x80\x00\x00\x04\x40\xFF'
             )
 
+    def test_priority_frame_empty_body_errors(self):
+        data = b'\x00\x00\x00\x02\x00\x00\x00\x00\x01'
+        with pytest.raises(InvalidFrameError):
+            Frame.parse_frame(data)
+
     def test_priority_frame_comes_on_a_stream(self):
         with pytest.raises(InvalidDataError):
             PriorityFrame(0)
@@ -339,6 +477,11 @@ class TestRstStreamFrame:
         f = RstStreamFrame(1)
         with pytest.raises(InvalidFrameError):
             f.parse_body(b'\x01')
+
+    def test_rst_stream_frame_empty_body_errors(self):
+        data = b'\x00\x00\x00\x03\x00\x00\x00\x00\x01'
+        with pytest.raises(InvalidFrameError):
+            Frame.parse_frame(data)
 
 
 class TestSettingsFrame:
@@ -425,6 +568,27 @@ class TestSettingsFrame:
     def test_short_settings_frame_errors(self):
         with pytest.raises(InvalidDataError):
             decode_frame(self.serialized[:-2])
+
+    def test_empty_settings_frame_parses(self):
+        data = b'\x00\x00\x00\x04\x00\x00\x00\x00\x00'
+
+        frame, total_length = Frame.parse_frame(data)
+
+        assert isinstance(frame, SettingsFrame)
+        assert frame.settings == {}
+        assert total_length == 9
+
+    def test_settings_ack_with_payload_is_invalid_data(self):
+        data = b'\x00\x00\x06\x04\x01\x00\x00\x00\x00' + b'\x00' * 6
+
+        with pytest.raises(InvalidDataError):
+            Frame.parse_frame(data)
+
+    def test_settings_body_must_be_multiple_of_six(self):
+        data = b'\x00\x00\x04\x04\x00\x00\x00\x00\x00' + b'\x00' * 4
+
+        with pytest.raises(InvalidFrameError):
+            Frame.parse_frame(data)
 
     def test_settings_frame_with_large_setting_ids(self):
         f = SettingsFrame()
@@ -541,6 +705,18 @@ class TestPushPromiseFrame:
         with pytest.raises(InvalidFrameError):
             decode_frame(s)
 
+    def test_push_promise_empty_body_errors(self):
+        data = b'\x00\x00\x00\x05\x00\x00\x00\x00\x01'
+
+        with pytest.raises(InvalidFrameError):
+            Frame.parse_frame(data)
+
+    def test_push_promise_empty_padded_body_errors(self):
+        data = b'\x00\x00\x00\x05\x08\x00\x00\x00\x01'
+
+        with pytest.raises(InvalidFrameError):
+            Frame.parse_frame(data)
+
 
 class TestPingFrame:
     def test_repr(self):
@@ -598,6 +774,11 @@ class TestPingFrame:
         f = PingFrame()
         with pytest.raises(InvalidFrameError):
             f.parse_body(b'\x01\x02\x03\x04\x05\x06\x07')
+
+    def test_ping_frame_empty_body_errors(self):
+        data = b'\x00\x00\x00\x06\x00\x00\x00\x00\x00'
+        with pytest.raises(InvalidFrameError):
+            Frame.parse_frame(data)
 
 
 class TestGoAwayFrame:
@@ -669,6 +850,11 @@ class TestGoAwayFrame:
         )
         with pytest.raises(InvalidFrameError):
             decode_frame(s)
+
+    def test_goaway_frame_empty_body_errors(self):
+        data = b'\x00\x00\x00\x07\x00\x00\x00\x00\x00'
+        with pytest.raises(InvalidFrameError):
+            Frame.parse_frame(data)
 
     def test_goaway_frame_with_reserved_bit_set_parses_properly(self):
         s = (
@@ -745,6 +931,11 @@ class TestWindowUpdateFrame:
 
         with pytest.raises(InvalidDataError):
             decode_frame(WindowUpdateFrame(2**31).serialize())
+
+    def test_window_update_empty_body_errors(self):
+        data = b'\x00\x00\x00\x08\x00\x00\x00\x00\x01'
+        with pytest.raises(InvalidFrameError):
+            Frame.parse_frame(data)
 
     def test_window_update_frame_with_reserved_bit_set_parses_properly(self):
         s = b'\x00\x00\x04\x08\x00\x00\x00\x00\x80\x00\x00\x02\x00'
@@ -836,6 +1027,27 @@ class TestHeadersFrame:
 
         assert f.serialize() == s
 
+    def test_headers_frame_with_priority_and_padding_parses(self):
+        f = HeadersFrame(1, b'hb')
+        f.flags.add('PRIORITY')
+        f.flags.add('PADDED')
+        f.depends_on = 4
+        f.stream_weight = 64
+        f.exclusive = True
+        f.pad_length = 2
+        data = f.serialize()
+
+        parsed, total_length = Frame.parse_frame(data)
+
+        assert isinstance(parsed, HeadersFrame)
+        assert parsed.flags == set(['PRIORITY', 'PADDED'])
+        assert parsed.data == b'hb'
+        assert parsed.pad_length == 2
+        assert parsed.depends_on == 4
+        assert parsed.stream_weight == 64
+        assert parsed.exclusive is True
+        assert total_length == len(data)
+
     def test_headers_frame_with_invalid_padding_fails_to_parse(self):
         # This frame has a padding length of 6 bytes, but a total length of
         # only 5.
@@ -852,6 +1064,24 @@ class TestHeadersFrame:
 
         new_frame = decode_frame(data)
         assert new_frame.data == b''
+
+    def test_headers_frame_priority_requires_five_bytes(self):
+        data = b'\x00\x00\x02\x01\x20\x00\x00\x00\x01\x00\x00'
+
+        with pytest.raises(InvalidFrameError):
+            Frame.parse_frame(data)
+
+    def test_headers_frame_empty_padded_body_errors(self):
+        data = b'\x00\x00\x00\x01\x08\x00\x00\x00\x01'
+
+        with pytest.raises(InvalidFrameError):
+            Frame.parse_frame(data)
+
+    def test_headers_frame_padding_longer_than_payload_errors(self):
+        data = b'\x00\x00\x05\x01\x08\x00\x00\x00\x01\x06\x54\x65\x73\x74'
+
+        with pytest.raises(InvalidPaddingError):
+            Frame.parse_frame(data)
 
 
 class TestContinuationFrame:
@@ -886,6 +1116,15 @@ class TestContinuationFrame:
         assert f.flags == set(['END_HEADERS'])
         assert f.data == b'hello world'
         assert f.body_len == 11
+
+    def test_continuation_frame_empty_body_parses(self):
+        data = b'\x00\x00\x00\x09\x00\x00\x00\x00\x01'
+
+        frame, total_length = Frame.parse_frame(data)
+
+        assert isinstance(frame, ContinuationFrame)
+        assert frame.data == b''
+        assert total_length == 9
 
 
 class TestAltSvcFrame:
@@ -977,6 +1216,12 @@ class TestAltSvcFrame:
         with pytest.raises(InvalidFrameError):
             decode_frame(self.payload_with_origin[:10])
 
+    def test_altsvc_frame_empty_body_errors(self):
+        data = b'\x00\x00\x00\x0A\x00\x00\x00\x00\x00'
+
+        with pytest.raises(InvalidFrameError):
+            Frame.parse_frame(data)
+
     def test_altsvc_with_unicode_origin_fails(self):
         with pytest.raises(InvalidDataError):
             AltSvcFrame(
@@ -995,3 +1240,12 @@ class TestExtensionFrame:
     def test_repr(self):
         f = ExtensionFrame(0xFF, 1, 42, b'hello')
         assert repr(f).endswith("type=255, flag_byte=42, body=<hex:68656c6c6f>")
+
+    def test_empty_extension_frame_parses(self):
+        data = b'\x00\x00\x00\xFF\x00\x00\x00\x00\x01'
+
+        frame, total_length = Frame.parse_frame(data)
+
+        assert isinstance(frame, ExtensionFrame)
+        assert frame.body == b''
+        assert total_length == 9

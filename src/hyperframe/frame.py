@@ -86,6 +86,85 @@ class Frame:
         return _raw_data_repr(self.serialize_body())
 
     @staticmethod
+    def parse_frame(
+        data: bytes | memoryview,
+        strict: bool = False,
+        max_length: int = FRAME_MAX_ALLOWED_LEN,
+    ) -> tuple[Frame, int]:
+        """
+        Parse a single complete frame from the start of ``data``.
+
+        Unlike :meth:`parse_frame_header`, this validates that the full frame
+        is present before any of the body is read, so a truncated or
+        length-exaggerating frame cannot trigger out-of-bounds parsing. It
+        also enforces the configured maximum frame length.
+
+        :param data: A buffer containing at least one complete frame.
+        :param strict: Whether to raise on unknown frame types.
+        :param max_length: Maximum permitted declared frame body length.
+        :raises hyperframe.exceptions.InvalidFrameError: If the frame is
+            truncated, exceeds ``max_length``, or is otherwise malformed.
+        :return: The parsed frame and its total serialized length including
+            the nine-byte header.
+        """
+        if not isinstance(data, memoryview):
+            data = memoryview(data)
+
+        if len(data) < 9:
+            msg = "Invalid frame header: not enough data for a 9-byte frame header."
+            raise InvalidFrameError(msg)
+
+        if max_length < 0:
+            msg = f"Maximum frame length must not be negative, got {max_length}."
+            raise InvalidFrameError(msg)
+
+        frame, body_length = Frame.parse_frame_header(data[:9], strict=strict)
+
+        if body_length > max_length:
+            msg = f"Frame body of {body_length} bytes exceeds maximum allowed length of {max_length} bytes."
+            raise InvalidFrameError(msg)
+
+        frame_length = 9 + body_length
+        if len(data) < frame_length:
+            msg = (
+                f"Truncated frame: header declares {body_length} body bytes, "
+                f"but only {len(data) - 9} are available."
+            )
+            raise InvalidFrameError(msg)
+
+        frame.parse_body(data[9:frame_length])
+        return frame, frame_length
+
+    @staticmethod
+    def parse_frames(
+        data: bytes | memoryview,
+        strict: bool = False,
+        max_length: int = FRAME_MAX_ALLOWED_LEN,
+    ) -> list[tuple[Frame, int]]:
+        """
+        Parse every complete frame contained in ``data``.
+
+        Unknown frame types are skipped (wrapped as :class:`ExtensionFrame`)
+        only when their full body is present and their declared length does
+        not exceed ``max_length``. A truncated or oversized frame raises
+        :class:`hyperframe.exceptions.InvalidFrameError` before any frame is
+        returned partially parsed.
+        """
+        if not isinstance(data, memoryview):
+            data = memoryview(data)
+
+        frames: list[tuple[Frame, int]] = []
+        offset = 0
+        while offset < len(data):
+            frame, frame_length = Frame.parse_frame(
+                data[offset:], strict=strict, max_length=max_length,
+            )
+            frames.append((frame, frame_length))
+            offset += frame_length
+
+        return frames
+
+    @staticmethod
     def explain(data: memoryview) -> tuple[Frame, int]:
         """
         Takes a bytestring and tries to parse a single frame and print it.
@@ -122,9 +201,13 @@ class Frame:
         .. versionchanged:: 5.0.0
             Added ``strict`` parameter to accommodate :class:`ExtensionFrame`
         """
+        if len(header) != 9:
+            msg = "Invalid frame header: expected exactly 9 bytes."
+            raise InvalidFrameError(msg)
+
         try:
             fields = _STRUCT_HBBBL.unpack(header)
-        except struct.error as err:
+        except struct.error as err:  # pragma: no cover
             msg = "Invalid frame header"
             raise InvalidFrameError(msg) from err
 
@@ -213,6 +296,9 @@ class Padding:
 
     def parse_padding_data(self, data: memoryview) -> int:
         if "PADDED" in self.flags:  # type: ignore
+            if len(data) < 1:
+                msg = "Invalid Padding data: frame body is too short for the padding length field."
+                raise InvalidFrameError(msg)
             try:
                 self.pad_length = struct.unpack("!B", data[:1])[0]
             except struct.error as err:
@@ -264,6 +350,9 @@ class Priority:
         )
 
     def parse_priority_data(self, data: memoryview) -> int:
+        if len(data) < 5:
+            msg = "Invalid Priority data: frame body is too short for the 5-byte priority field."
+            raise InvalidFrameError(msg)
         try:
             self.depends_on, self.stream_weight = _STRUCT_LB.unpack(data[:5])
         except struct.error as err:
@@ -307,11 +396,12 @@ class DataFrame(Padding, Frame):
         return b"".join([padding_data, self.data, padding])
 
     def parse_body(self, data: memoryview) -> None:
+        self.body_len = len(data)
         padding_data_length = self.parse_padding_data(data)
+
         self.data = (
             data[padding_data_length:len(data)-self.pad_length].tobytes()
         )
-        self.body_len = len(data)
 
         if self.pad_length and self.pad_length >= self.body_len:
             msg = "Padding is too long."
@@ -353,7 +443,7 @@ class PriorityFrame(Priority, Frame):
         return self.serialize_priority_data()
 
     def parse_body(self, data: memoryview) -> None:
-        if len(data) > 5:
+        if len(data) != 5:
             msg = f"PRIORITY must have 5 byte body: actual length {len(data)}."
             raise InvalidFrameError(msg)
 
@@ -468,6 +558,10 @@ class SettingsFrame(Frame):
             msg = f"SETTINGS ack frame must not have payload: got {len(data)} bytes"
             raise InvalidDataError(msg)
 
+        if len(data) % 6 != 0:
+            msg = f"Invalid SETTINGS body: payload length {len(data)} is not a multiple of 6."
+            raise InvalidFrameError(msg)
+
         body_len = 0
         for i in range(0, len(data), 6):
             try:
@@ -519,7 +613,12 @@ class PushPromiseFrame(Padding, Frame):
         return b"".join([padding_data, data, self.data, padding])
 
     def parse_body(self, data: memoryview) -> None:
+        self.body_len = len(data)
         padding_data_length = self.parse_padding_data(data)
+
+        if len(data) < padding_data_length + 4:
+            msg = "Invalid PUSH_PROMISE body: not enough data for the 4-byte promised stream identifier."
+            raise InvalidFrameError(msg)
 
         try:
             self.promised_stream_id = _STRUCT_L.unpack(
@@ -532,7 +631,6 @@ class PushPromiseFrame(Padding, Frame):
         self.data = (
             data[padding_data_length + 4:len(data)-self.pad_length].tobytes()
         )
-        self.body_len = len(data)
 
         if self.promised_stream_id == 0 or self.promised_stream_id % 2 != 0:
             msg = f"Invalid PUSH_PROMISE promised stream id: {self.promised_stream_id}"
@@ -631,6 +729,9 @@ class GoAwayFrame(Frame):
         return data
 
     def parse_body(self, data: memoryview) -> None:
+        if len(data) < 8:
+            msg = f"GOAWAY frame must have at least an 8 byte body: got {len(data)}"
+            raise InvalidFrameError(msg)
         try:
             self.last_stream_id, self.error_code = _STRUCT_LL.unpack(
                 data[:8],
@@ -684,7 +785,7 @@ class WindowUpdateFrame(Frame):
         )
 
     def parse_body(self, data: memoryview) -> None:
-        if len(data) > 4:
+        if len(data) != 4:
             msg = f"WINDOW_UPDATE frame must have 4 byte length: got {len(data)}"
             raise InvalidFrameError(msg)
 
@@ -751,10 +852,14 @@ class HeadersFrame(Padding, Priority, Frame):
         return b"".join([padding_data, priority_data, self.data, padding])
 
     def parse_body(self, data: memoryview) -> None:
+        total_body_len = len(data)
         padding_data_length = self.parse_padding_data(data)
         data = data[padding_data_length:]
 
         if "PRIORITY" in self.flags:
+            if len(data) < 5:
+                msg = "Invalid HEADERS frame: not enough data for the 5-byte priority field."
+                raise InvalidFrameError(msg)
             priority_data_length = self.parse_priority_data(data)
         else:
             priority_data_length = 0
@@ -764,7 +869,7 @@ class HeadersFrame(Padding, Priority, Frame):
             data[priority_data_length:len(data)-self.pad_length].tobytes()
         )
 
-        if self.pad_length and self.pad_length >= self.body_len:
+        if self.pad_length and self.pad_length >= total_body_len:
             msg = "Padding is too long."
             raise InvalidPaddingError(msg)
 
@@ -845,6 +950,9 @@ class AltSvcFrame(Frame):
         return b"".join([origin_len, self.origin, self.field])
 
     def parse_body(self, data: memoryview) -> None:
+        if len(data) < 2:
+            msg = "Invalid ALTSVC frame body: not enough data for the 2-byte origin length."
+            raise InvalidFrameError(msg)
         try:
             origin_len = _STRUCT_H.unpack(data[0:2])[0]
             self.origin = data[2:2+origin_len].tobytes()
@@ -884,15 +992,17 @@ class ExtensionFrame(Frame):
         self.type = type
         self.flag_byte = flag_byte
         self.body = body
+        self.body_len = len(body)
 
     def _body_repr(self) -> str:
         return f"type={self.type}, flag_byte={self.flag_byte}, body={_raw_data_repr(self.body)}"
 
-    def parse_flags(self, flag_byte: int) -> None:  # type: ignore
+    def parse_flags(self, flag_byte: int) -> Flags:  # type: ignore
         """
         For extension frames, we parse the flags by just storing a flag byte.
         """
         self.flag_byte = flag_byte
+        return self.flags
 
     def parse_body(self, data: memoryview) -> None:
         self.body = data.tobytes()
