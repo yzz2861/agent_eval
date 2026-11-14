@@ -1,0 +1,438 @@
+from __future__ import annotations
+
+import io
+
+import pytest
+
+from dissect.cstruct.cstruct import cstruct
+from tests.util import source_lines, verify_compiled
+
+
+def test_bitfield(cs: cstruct, compiled: bool) -> None:
+    cdef = """
+    struct test {
+        uint16  a:4;
+        uint16  b:4;
+        uint16  c:4;
+        uint16  d:4;
+        uint32  e;
+        uint16  f:2;
+        uint16  g:3;
+        uint32  h;
+    };
+    """
+    cs.load(cdef, compiled=compiled)
+
+    assert verify_compiled(cs.test, compiled)
+    assert len(cs.test) == 12
+
+    buf = b"\x12\x34\xff\x00\x00\x00\x1f\x00\x01\x00\x00\x00"
+    obj = cs.test(buf)
+
+    assert obj.a == 0b10
+    assert obj.b == 0b01
+    assert obj.c == 0b100
+    assert obj.d == 0b011
+    assert obj.e == 0xFF
+    assert obj.f == 0b11
+    assert obj.g == 0b111
+    assert obj.h == 1
+    assert obj.dumps() == buf
+
+
+def test_bitfield_consecutive(cs: cstruct, compiled: bool) -> None:
+    cdef = """
+    struct test {
+        uint16  a:4;
+        uint16  b:4;
+        uint16  c:4;
+        uint16  d:4;
+        uint16  e:16;
+        uint16  _pad1;
+        uint16  f:2;
+        uint16  g:3;
+        uint16  h:11;
+        uint16  _pad2;
+    };
+    """
+    cs.load(cdef, compiled=compiled)
+
+    assert verify_compiled(cs.test, compiled)
+    assert len(cs.test) == 10
+
+    buf = b"\x12\x34\xff\x00\x00\x00\x1f\x01\x00\x00"
+    obj = cs.test(buf)
+
+    assert obj.a == 0b10
+    assert obj.b == 0b01
+    assert obj.c == 0b100
+    assert obj.d == 0b011
+    assert obj.e == 0xFF
+    assert obj.f == 0b11
+    assert obj.g == 0b111
+    assert obj.h == 0b1000
+    assert obj.dumps() == buf
+
+
+def test_struct_after_bitfield(cs: cstruct, compiled: bool) -> None:
+    cdef = """
+    struct test {
+        uint16  a:4;
+        uint16  b:4;
+        uint32  c;
+        struct {
+            uint32 d;
+        } nested1;
+        uint16  e:4;
+        uint16  f:4;
+        struct {
+            uint32 g;
+        } nested2;
+        uint32  h;
+    };
+    """
+    cs.load(cdef, compiled=compiled)
+
+    assert verify_compiled(cs.test, compiled)
+    assert len(cs.test) == 20
+
+    buf = b"\x12\x00\xff\x00\x00\x00\x01\x00\x00\x00\x12\x00\x02\x00\x00\x00\xfe\x00\x00\x00"
+    obj = cs.test(buf)
+
+    assert obj.a == 0b10
+    assert obj.b == 0b01
+    assert obj.c == 0xFF
+    assert obj.nested1.d == 0x01
+    assert obj.e == 0b10
+    assert obj.f == 0b01
+    assert obj.nested2.g == 0x02
+    assert obj.h == 0xFE
+    assert obj.dumps() == buf
+
+
+def test_bitfield_be(cs: cstruct, compiled: bool) -> None:
+    cdef = """
+    struct test {
+        uint16  a:4;
+        uint16  b:4;
+        uint16  c:4;
+        uint16  d:4;
+        uint32  e;
+        uint16  f:2;
+        uint16  g:3;
+        uint16  h:4;
+        uint32  i;
+    };
+    """
+    cs.endian = ">"
+    cs.load(cdef, compiled=compiled)
+
+    assert verify_compiled(cs.test, compiled)
+    assert len(cs.test) == 12
+
+    buf = b"\x12\x34\x00\x00\x00\xff\x1f\x00\x00\x00\x00\x01"
+    obj = cs.test(buf)
+
+    assert obj.a == 0b01
+    assert obj.b == 0b10
+    assert obj.c == 0b011
+    assert obj.d == 0b100
+    assert obj.e == 0xFF
+    assert obj.f == 0
+    assert obj.g == 0b11
+    assert obj.h == 0b1110
+    assert obj.i == 1
+    assert obj.dumps() == buf
+
+
+def test_bitfield_straddle(cs: cstruct, compiled: bool) -> None:
+    cdef = """
+    struct test {
+        uint16  a:12;
+        uint16  b:12;
+        uint16  c:8;
+        uint32  d;
+        uint16  e:2;
+        uint16  f:3;
+        uint32  g;
+    };
+    """
+
+    with pytest.raises(ValueError, match="Straddled bit fields are unsupported"):
+        cs.load(cdef, compiled=compiled)
+
+
+def test_bitfield_write(cs: cstruct, compiled: bool) -> None:
+    cdef = """
+    struct test {
+        uint16  a:1;
+        uint16  b:1;
+        uint32  c;
+        uint16  d:2;
+        uint16  e:3;
+    };
+    """
+    cs.load(cdef, compiled=compiled)
+
+    obj = cs.test()
+    obj.a = 0b1
+    obj.b = 0b1
+    obj.c = 0xFF
+    obj.d = 0b11
+    obj.e = 0b111
+
+    assert obj.dumps() == b"\x03\x00\xff\x00\x00\x00\x1f\x00"
+
+
+def test_bitfield_write_be(cs: cstruct, compiled: bool) -> None:
+    cdef = """
+    struct test {
+        uint16  a:1;
+        uint16  b:1;
+        uint32  c;
+        uint16  d:2;
+        uint16  e:3;
+    };
+    """
+    cs.endian = ">"
+    cs.load(cdef, compiled=compiled)
+
+    assert verify_compiled(cs.test, compiled)
+
+    obj = cs.test()
+    obj.a = 0b1
+    obj.b = 0b1
+    obj.c = 0xFF
+    obj.d = 0b11
+    obj.e = 0b111
+
+    assert obj.dumps() == b"\xc0\x00\x00\x00\x00\xff\xf8\x00"
+
+
+def test_bitfield_with_enum_or_flag(cs: cstruct, compiled: bool) -> None:
+    cdef = """
+    flag Flag8 : uint8 {
+        A = 1,
+        B = 2
+    };
+
+    flag Flag16 : uint16 {
+        A = 1,
+        B = 2
+    };
+
+    struct test {
+        uint16  a:1;
+        uint16  b:1;
+        Flag16  c:2;
+        Flag8   d:4;
+    };
+    """
+    cs.endian = ">"
+    cs.load(cdef, compiled=compiled)
+
+    assert verify_compiled(cs.test, compiled)
+
+    buf = b"\xf0\x00\x30"
+    obj = cs.test(buf)
+
+    assert obj.a == 0b1
+    assert obj.b == 0b1
+    assert obj.c == cs.Flag16.A | cs.Flag16.B
+    assert obj.d == cs.Flag8.A | cs.Flag8.B
+
+    assert obj.dumps() == buf
+
+
+def test_bitfield_char(cs: cstruct, compiled: bool) -> None:
+    cdef = """
+    struct test {
+        uint16  a : 4;
+        uint16  b : 4;
+        char    c : 8;
+        char    d[4];
+    };
+    """
+    cs.load(cdef, compiled=compiled)
+
+    assert verify_compiled(cs.test, compiled)
+
+    buf = b"\x12\x00\xff\x69420"
+    obj = cs.test(buf)
+
+    assert obj.a == 0b10
+    assert obj.b == 0b1
+    assert obj.c == 0b11111111
+    assert obj.d == b"i420"
+
+    assert obj.dumps() == buf
+
+
+def test_bitfield_dynamic(cs: cstruct, compiled: bool) -> None:
+    cdef = """
+    enum A : uint16 {
+        A = 0x0
+    };
+
+    struct test {
+        uint16  size : 4;
+        A       b : 4;
+        char    d[size];
+    };
+    """
+
+    cs.load(cdef, compiled=compiled)
+    assert verify_compiled(cs.test, compiled)
+
+    buf = io.BytesIO(b"\x00\x00\xf4\x00help")
+    buf.seek(2)
+    obj = cs.test(buf)
+
+    assert obj.size == 4
+    assert obj.b == 0xF
+    assert obj.d == b"help"
+
+    buf.seek(2)
+    assert obj.dumps() == buf.read()
+
+
+@pytest.mark.parametrize("endian", ["<", ">", "!", "@", "="])
+def test_compiled_bits(endian: str) -> None:
+    """Test that compiled bit fields read the same values as the interpreted version."""
+    cdef = """
+    enum Kind : uint8 {
+        A = 1,
+        B = 2,
+    };
+
+    flag Mode : uint16 {
+        R = 1,
+        W = 2,
+    };
+
+    struct bits {
+        uint8   a : 3;
+        uint8   b : 5;
+        int16   c : 4;
+        int16   d : 12;
+        Kind    e : 4;
+        Kind    f : 4;
+        uint32  g;
+        Mode    h : 2;
+        uint16  i : 6;
+        uint32  j : 7;
+        uint8   l;
+    };
+
+    struct charbits {
+        char    a : 4;
+        char    b : 4;
+        uint8   c;
+    };
+    """
+    compiled = cstruct().load(cdef)
+    interpreted = cstruct().load(cdef, compiled=False)
+
+    def values(obj: object) -> list:
+        # The interpreted version returns bit fields as plain integers, so only compare the values
+        return [getattr(value, "value", value) for value in obj.__dict__.values()]
+
+    # Character bit fields are inlined, they're read and returned as the uint8 type that the last field also uses
+    lines = source_lines(compiled.charbits)
+    assert [line for line in lines if line.startswith(("_bit_buffer = ", "buf = ", "_value"))] == [
+        "_bit_buffer = _type0._read(stream, endian=endian)",
+        "_value0 = _type_call(_type0, _bit_value)",
+        "_value1 = _type_call(_type0, _bit_value)",
+        "buf = stream.read(1)",
+        "_value2 = _type_call(_type0, data[0])",
+    ]
+    assert type(compiled.charbits(b"\x12\x34").a) is compiled.uint8
+
+    for name in ("bits", "charbits"):
+        for buf in (bytes(range(1, 32)), b"\xff" * 32, bytes(32), bytes(range(200, 232))):
+            obj = compiled.resolve(name)(buf, endian=endian)
+            assert values(obj) == values(interpreted.resolve(name)(buf, endian=endian))
+
+        for size in range(len(compiled.resolve(name))):
+            with pytest.raises(EOFError, match=r"^Read \d+ bytes, but expected \d+$"):
+                compiled.resolve(name)(bytes(range(1, 32))[:size], endian=endian)
+
+
+def test_bitfield_after_dynamic_field(cs: cstruct, compiled: bool) -> None:
+    """Test that bit fields sharing a value can be defined, read and written after a dynamic field."""
+    cdef = """
+    struct test {
+        uint8  n;
+        uint8  a[n];
+        uint16 b : 4;
+        uint16 c : 12;
+        uint8  d;
+    };
+
+    struct test_types {
+        uint8  n;
+        uint8  a[n];
+        uint8  b : 4;
+        uint16 c : 4;
+        uint16 d : 4;
+        uint8  e;
+    };
+    """
+    cs.load(cdef, compiled=compiled)
+
+    buf = b"\x02\x01\x02\x34\x12\x03"
+    obj = cs.test(buf)
+
+    assert obj.a == [1, 2]
+    assert obj.b == 4
+    assert obj.c == 0x123
+    assert obj.d == 3
+    assert obj.dumps() == buf
+
+    # Different types don't share a value of the bit buffer
+    assert cs.test_types(n=1, a=[2], b=3, c=4, d=5, e=6).dumps() == b"\x01\x02\x03\x54\x00\x06"
+
+
+def test_bitfield_char_and_uint8(cs: cstruct, compiled: bool) -> None:
+    """Test that ``char`` and ``uint8`` bit fields don't share a value, even though both are read as ``uint8``."""
+    cdef = """
+    struct test {
+        char a : 4;
+        uint8 b : 4;
+        uint8 c;
+    };
+    """
+    cs.load(cdef, compiled=compiled)
+
+    assert verify_compiled(cs.test, compiled)
+    assert len(cs.test) == 3
+
+    # Different types don't share a value of the bit buffer, also if one is read as the other
+    obj = cs.test(b"\x01\x02\x03")
+    assert obj.a == 1
+    assert obj.b == 2
+    assert obj.c == 3
+
+
+def test_bitfield_in_nested_struct_write(cs: cstruct, compiled: bool) -> None:
+    """Test that a nested structure that can't be inlined is written using its own ``_write`` method."""
+    cdef = """
+    struct nested {
+        uint8   a : 4;
+        uint8   b : 4;
+        char    c;
+    };
+
+    struct test {
+        uint8   d;
+        nested  e;
+        uint16  f;
+    };
+    """
+    cs.load(cdef, compiled=compiled)
+
+    assert verify_compiled(cs.test, compiled)
+
+    fh = io.BytesIO()
+    assert cs.test(d=1, e=cs.nested(a=1, b=2, c=b"x"), f=3).write(fh) == 5
+    assert fh.getvalue() == b"\x01\x21x\x03\x00"
