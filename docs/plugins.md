@@ -118,6 +118,12 @@ If you're looking to implement a regex-based secret scan, check out
 If you want something a little more advanced, with **in-built secret verification**, check out
 `detect_secrets.plugins.stripe.StripeDetector`.
 
+If your secret spans multiple lines (e.g. PEM encoded private keys), extend
+`detect_secrets.plugins.base.MultiLinePlugin` instead. The scanner feeds these plugins a bounded
+sliding window of lines (preserving the original line numbers and offsets), so multi-line secrets
+can be reported with accurate start and end line numbers -- without ever loading the whole file
+into memory. See `detect_secrets.plugins.private_key.PrivateKeyDetector` for an example.
+
 The general workflow for adding a new plugin is as such:
 
 1. Write your tests

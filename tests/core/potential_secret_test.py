@@ -62,6 +62,43 @@ def test_load_secret_from_dict(kwargs):
     assert new_secret.secret_value is None
 
 
+def test_end_line_number_round_trip():
+    secret = potential_secret_factory(line_number=2, end_line_number=5)
+
+    data = secret.json()
+    assert data['end_line_number'] == 5
+
+    new_secret = PotentialSecret.load_secret_from_dict(data)
+    assert new_secret.end_line_number == 5
+    assert secret == new_secret
+
+
+def test_end_line_number_not_serialized_when_absent():
+    # Baselines for single-line secrets must remain byte-for-byte compatible.
+    assert 'end_line_number' not in potential_secret_factory().json()
+
+
+def test_end_line_number_does_not_affect_equality():
+    a = potential_secret_factory(end_line_number=5)
+    b = potential_secret_factory(end_line_number=9)
+
+    assert a == b
+    assert hash(a) == hash(b)
+
+
+def test_multiline_secret_hash_is_content_based():
+    # The fingerprint of a multi-line secret is the hash of its full content,
+    # so it stays stable regardless of where the secret appears in a file.
+    block = (
+        '-----BEGIN PRIVATE KEY-----\n'
+        'super secret body\n'
+        '-----END PRIVATE KEY-----'
+    )
+    secret = potential_secret_factory(secret=block, line_number=2, end_line_number=4)
+
+    assert secret.secret_hash == PotentialSecret.hash_secret(block)
+
+
 def test_stringify():
     secret = potential_secret_factory(type='secret_type', secret='blah')
     assert str(secret) == (

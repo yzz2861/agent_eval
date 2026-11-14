@@ -1,15 +1,19 @@
 import os
 import subprocess
+from collections import deque
 from typing import Any
 from typing import cast
+from typing import Deque
 from typing import Generator
 from typing import Iterable
 from typing import List
+from typing import NamedTuple
 from typing import Set
 from typing import Tuple
 from typing import Union
 
 from ..filters.allowlist import is_line_allowlisted
+from ..plugins.base import MultiLinePlugin
 from ..settings import get_filters
 from ..settings import get_plugins
 from ..settings import get_settings
@@ -24,6 +28,25 @@ from ..util.path import get_relative_path
 from .log import log
 from .plugins import Plugin
 from .potential_secret import PotentialSecret
+
+
+#: Maximum number of recent lines retained in the bounded sliding window
+#: used for filter context and multi-line plugin analysis. This bounds
+#: memory usage, so arbitrarily large files are never loaded in full.
+SCAN_WINDOW_LINES = 100
+
+#: Number of lines shared between consecutive multi-line analysis windows.
+#: Secrets spanning up to this many lines are guaranteed to appear in full
+#: within at least one window, even if they straddle a window boundary.
+SCAN_WINDOW_OVERLAP = 50
+
+
+class _WindowLine(NamedTuple):
+    """A single line tracked by the scanning window, preserving its
+    original position in the file."""
+    line_number: int
+    offset: int     # character offset of the line start, in the decoded stream
+    text: str
 
 
 def get_files_to_scan(
@@ -153,7 +176,7 @@ def scan_file(filename: str) -> Generator[PotentialSecret, None, None]:
         has_secret = False
         for lines in _get_lines_from_file(filename):
             for secret in _process_line_based_plugins(
-                lines=list(enumerate(lines, start=1)),
+                lines=enumerate(lines, start=1),
                 filename=filename,
             ):
                 has_secret = True
@@ -250,7 +273,7 @@ def _scan_for_allowlisted_secrets_in_lines(
             )
 
 
-def _get_lines_from_file(filename: str) -> Generator[List[str], None, None]:
+def _get_lines_from_file(filename: str) -> Generator[Iterable[str], None, None]:
     """
     This attempts to get lines in a given file. If no more lines are needed, the caller
     is responsible for breaking out of this loop.
@@ -263,21 +286,43 @@ def _get_lines_from_file(filename: str) -> Generator[List[str], None, None]:
 
         try:
             lines = get_transformed_file(cast(NamedIO, f))
-            if not lines:
-                lines = f.readlines()
         except UnicodeDecodeError:
-            # We flat out ignore binary files
+            # Undecodable (e.g. binary) files must not be silently treated
+            # as clean files -- surface a diagnostic instead.
+            log.warning(f'Unable to decode file as text, skipping: {filename}')
             return
 
-        yield lines
+        if lines:
+            yield lines
+        else:
+            # Stream the file line by line, so the scanning window stays
+            # bounded regardless of file size.
+            yield _read_lines_safely(cast(NamedIO, f))
 
         # If the above lines don't prove to be useful to the caller, try using eager transformers.
         f.seek(0)
-        lines = get_transformed_file(cast(NamedIO, f), use_eager_transformers=True)
+        try:
+            lines = get_transformed_file(cast(NamedIO, f), use_eager_transformers=True)
+        except UnicodeDecodeError:
+            log.warning(f'Unable to decode file as text, skipping: {filename}')
+            return
+
         if not lines:
             return
 
         yield lines
+
+
+def _read_lines_safely(file: NamedIO) -> Generator[str, None, None]:
+    """Streams lines from a file object, one at a time.
+
+    Undecodable content is reported (rather than silently treated as a
+    clean file), and iteration stops at that point.
+    """
+    try:
+        yield from file
+    except UnicodeDecodeError:
+        log.warning(f'Unable to decode file as text, skipping: {file.name}')
 
 
 def _get_lines_from_diff(diff: str) -> Generator[Tuple[str, List[Tuple[int, str]]], None, None]:
@@ -307,48 +352,206 @@ def _get_lines_from_diff(diff: str) -> Generator[Tuple[str, List[Tuple[int, str]
 
 
 def _process_line_based_plugins(
-    lines: List[Tuple[int, str]],
+    lines: Iterable[Tuple[int, str]],
     filename: str,
 ) -> Generator[PotentialSecret, None, None]:
-    line_content = [line[1] for line in lines]
+    line_plugins, multiline_plugins = _partition_plugins()
 
-    # NOTE: We iterate through lines *then* plugins, because we want to quit early if any of the
-    # filters return True.
-    for line_number, line in lines:
+    # Bounded sliding window over the most recently seen lines. It preserves
+    # the original line numbers and offsets, supplies context to filters, and
+    # feeds multi-line plugins -- all without loading the whole file into memory.
+    window: Deque[_WindowLine] = deque(maxlen=SCAN_WINDOW_LINES)
+    lines_since_multiline_scan = 0
+    seen_multiline_secrets: Set[Tuple[str, str, int]] = set()
+    offset = 0
+
+    for line_number, raw_line in lines:
         log.debug(f'Processing {filename}:{line_number}')
-        line = line.rstrip()
-        code_snippet = get_code_snippet(
-            lines=line_content,
-            line_number=line_number,
-        )
+        line = raw_line.rstrip()
+        window.append(_WindowLine(line_number=line_number, offset=offset, text=line))
+        offset += len(raw_line)
+        lines_since_multiline_scan += 1
+
+        code_snippet = _get_code_snippet_from_window(window, line_number)
 
         # We apply line-specific filters, and see whether that allows us to quit early.
-        if _is_filtered_out(
+        if not _is_filtered_out(
             required_filter_parameters=['line'],
             filename=filename,
             line=line,
             context=code_snippet,
         ):
+            yield from (
+                secret
+                for plugin in line_plugins
+                for secret in _scan_line_safely(
+                    plugin=plugin,
+                    filename=filename,
+                    line=line,
+                    line_number=line_number,
+                    context=code_snippet,
+                )
+                if not _is_filtered_out(
+                    required_filter_parameters=['context'],
+                    filename=secret.filename,
+                    secret=secret.secret_value,
+                    plugin=plugin,
+                    line=line,
+                    context=code_snippet,
+                )
+            )
+
+        if (
+            multiline_plugins
+            and lines_since_multiline_scan >= SCAN_WINDOW_LINES - SCAN_WINDOW_OVERLAP
+        ):
+            yield from _scan_multiline_window(
+                plugins=multiline_plugins,
+                filename=filename,
+                window=window,
+                seen=seen_multiline_secrets,
+                is_final=False,
+            )
+            lines_since_multiline_scan = 0
+
+    # Flush the trailing window, so secrets ending at EOF are not missed.
+    if multiline_plugins and lines_since_multiline_scan:
+        yield from _scan_multiline_window(
+            plugins=multiline_plugins,
+            filename=filename,
+            window=window,
+            seen=seen_multiline_secrets,
+            is_final=True,
+        )
+
+
+def _partition_plugins() -> Tuple[List[Plugin], List[Plugin]]:
+    """Splits the configured plugins into single-line plugins and
+    multi-line (window based) plugins."""
+    line_plugins = []
+    multiline_plugins = []
+    for plugin in get_plugins():
+        if isinstance(plugin, MultiLinePlugin):
+            multiline_plugins.append(plugin)
+        else:
+            line_plugins.append(plugin)
+
+    return line_plugins, multiline_plugins
+
+
+def _get_code_snippet_from_window(
+    window: Deque[_WindowLine],
+    line_number: int,
+) -> CodeSnippet:
+    """Builds a CodeSnippet for the given absolute line number, from the
+    lines currently held in the bounded window."""
+    start_line_number = window[0].line_number
+    target_index = min(max(line_number - start_line_number, 0), len(window) - 1)
+
+    return CodeSnippet(
+        snippet=[entry.text for entry in window],
+        start_line=start_line_number - 1,
+        target_index=target_index,
+    )
+
+
+def _scan_multiline_window(
+    plugins: List[Plugin],
+    filename: str,
+    window: Deque[_WindowLine],
+    seen: Set[Tuple[str, str, int]],
+    is_final: bool,
+) -> Generator[PotentialSecret, None, None]:
+    if not window:
+        return
+
+    lines = [entry.text for entry in window]
+    start_line_number = window[0].line_number
+    # Incomplete detections (those without an end line) this close to the
+    # trailing edge of the window may still complete in a later window, so
+    # they are deferred unless this is the final window. This prevents
+    # reporting both a partial match and the full multi-line secret.
+    defer_after_line = window[-1].line_number - SCAN_WINDOW_OVERLAP
+
+    for plugin in plugins:
+        try:
+            secrets = call_function_with_arguments(
+                plugin.analyze_multiline,
+                filename=filename,
+                lines=lines,
+                line_number=start_line_number,
+                offset=window[0].offset,
+            )
+        except Exception as e:
+            # A misbehaving plugin must not abort the scan, or mask the
+            # results of other plugins.
+            log.warning(
+                f'Plugin {plugin.__class__.__name__} failed to scan '
+                f'{filename}:{start_line_number}-{window[-1].line_number}: {e}',
+            )
             continue
 
-        yield from (
-            secret
-            for plugin in get_plugins()
-            for secret in _scan_line(
+        for secret in secrets or []:
+            if (
+                not is_final
+                and getattr(secret, 'end_line_number', None) is None
+                and secret.line_number > defer_after_line
+            ):
+                continue
+
+            # Consecutive windows overlap, so the same secret may be found
+            # more than once. Only report it the first time.
+            key = (secret.type, secret.secret_hash, secret.line_number)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            code_snippet = _get_code_snippet_from_window(window, secret.line_number)
+            if _is_filtered_out(
+                required_filter_parameters=['secret'],
+                filename=secret.filename,
+                secret=secret.secret_value,
                 plugin=plugin,
-                filename=filename,
-                line=line,
-                line_number=line_number,
-                context=code_snippet,
-            )
-            if not _is_filtered_out(
+                line=code_snippet.target_line,
+            ):
+                continue
+
+            if _is_filtered_out(
                 required_filter_parameters=['context'],
                 filename=secret.filename,
                 secret=secret.secret_value,
                 plugin=plugin,
-                line=line,
+                line=code_snippet.target_line,
                 context=code_snippet,
-            )
+            ):
+                continue
+
+            yield secret
+
+
+def _scan_line_safely(
+    plugin: Plugin,
+    filename: str,
+    line: str,
+    line_number: int,
+    context: CodeSnippet,
+    **kwargs: Any,
+) -> Generator[PotentialSecret, None, None]:
+    try:
+        yield from _scan_line(
+            plugin=plugin,
+            filename=filename,
+            line=line,
+            line_number=line_number,
+            context=context,
+            **kwargs,
+        )
+    except Exception as e:
+        # A misbehaving plugin must not abort the scan, or mask the
+        # results of other plugins.
+        log.warning(
+            f'Plugin {plugin.__class__.__name__} failed to scan '
+            f'{filename}:{line_number}: {e}',
         )
 
 

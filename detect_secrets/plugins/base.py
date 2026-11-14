@@ -13,6 +13,7 @@ from typing import Any
 from typing import Dict
 from typing import Generator
 from typing import Iterable
+from typing import List
 from typing import Pattern
 from typing import Set
 
@@ -209,3 +210,35 @@ class RegexBasedDetector(BasePlugin, metaclass=ABCMeta):
                 secret_regex=secret_regex,
             ), flags=re.IGNORECASE,
         )
+
+
+class MultiLinePlugin(BasePlugin, metaclass=ABCMeta):
+    """Parent class for detectors whose secrets may span multiple lines
+    (e.g. PEM encoded private keys).
+
+    Instead of receiving one line at a time through analyze_line, these
+    plugins are fed a bounded sliding window of lines by the scanner. The
+    window preserves the original line numbers and offsets of the file, so
+    plugins can backfill accurate locations -- without the scanner ever
+    loading the whole file into memory.
+    """
+
+    @abstractmethod
+    def analyze_multiline(
+        self,
+        filename: str,
+        lines: List[str],
+        line_number: int = 1,
+        **kwargs: Any,
+    ) -> Set[PotentialSecret]:
+        """This examines a bounded window of lines and finds all possible
+        secret values in it.
+
+        :param filename: name of the file being scanned
+        :param lines: the window of lines (without trailing newlines)
+        :param line_number: the 1-based line number of lines[0] in the
+            original file
+        :return: secrets found within the window, with absolute line
+            numbers already backfilled
+        """
+        raise NotImplementedError

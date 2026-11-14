@@ -30,6 +30,7 @@ class PotentialSecret:
         line_number: int = 0,
         is_secret: Optional[bool] = None,
         is_verified: bool = False,
+        end_line_number: Optional[int] = None,
     ) -> None:
         """
         :param type: human-readable secret type, defined by the plugin
@@ -38,12 +39,16 @@ class PotentialSecret:
         :param secret: the actual secret identified
         :param line_number: location of secret, within filename.
             Merely used as a reference for easy triage.
+        :param end_line_number: for secrets spanning multiple lines, the
+            line where the secret ends. Optional, and excluded from
+            comparisons, so existing baselines remain stable.
         :param is_secret: whether or not the secret is a true- or false- positive
         :param is_verified: whether the secret has been externally verified
         """
         self.type = type
         self.filename = filename
         self.line_number = line_number
+        self.end_line_number = end_line_number
         self.set_secret(secret)
         self.is_secret = is_secret
         self.is_verified = is_verified
@@ -83,6 +88,7 @@ class PotentialSecret:
         # Optional parameters
         for parameter in {
             'line_number',
+            'end_line_number',
             'is_secret',
             'is_verified',
         }:
@@ -106,6 +112,9 @@ class PotentialSecret:
 
         if hasattr(self, 'line_number') and self.line_number:
             attributes['line_number'] = self.line_number
+
+        if getattr(self, 'end_line_number', None):
+            attributes['end_line_number'] = self.end_line_number
 
         if hasattr(self, 'is_secret') and self.is_secret is not None:
             attributes['is_secret'] = self.is_secret
