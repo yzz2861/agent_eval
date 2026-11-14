@@ -20,23 +20,27 @@ class BaseLoader(Reader, Scanner, Parser, Composer, BaseConstructor, BaseResolve
 
 class FullLoader(Reader, Scanner, Parser, Composer, FullConstructor, Resolver):
 
-    def __init__(self, stream):
+    def __init__(self, stream, policy=None):
         Reader.__init__(self, stream)
         Scanner.__init__(self)
         Parser.__init__(self)
         Composer.__init__(self)
         FullConstructor.__init__(self)
         Resolver.__init__(self)
+        if policy is not None:
+            self.tag_policy = policy
 
 class SafeLoader(Reader, Scanner, Parser, Composer, SafeConstructor, Resolver):
 
-    def __init__(self, stream):
+    def __init__(self, stream, policy=None):
         Reader.__init__(self, stream)
         Scanner.__init__(self)
         Parser.__init__(self)
         Composer.__init__(self)
         SafeConstructor.__init__(self)
         Resolver.__init__(self)
+        if policy is not None:
+            self.tag_policy = policy
 
 class Loader(Reader, Scanner, Parser, Composer, Constructor, Resolver):
 

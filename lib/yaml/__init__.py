@@ -8,6 +8,12 @@ from .nodes import *
 from .loader import *
 from .dumper import *
 
+from .constructor import (
+    TagPolicy, TagSchema, TagBudget, TagSpec,
+    TagPolicyError, UnknownTagError, DeniedTagError, TagArityError,
+    TagBudgetError, IncludePathError, IncludeCycleError,
+)
+
 __version__ = '7.0.0.dev0'
 try:
     from .cyaml import *
@@ -387,4 +393,3 @@ class YAMLObject(metaclass=YAMLObjectMetaclass):
         """
         return dumper.represent_yaml_object(cls.yaml_tag, data, cls,
                 flow_style=cls.yaml_flow_style)
-

@@ -5,21 +5,350 @@ __all__ = [
     'FullConstructor',
     'UnsafeConstructor',
     'Constructor',
-    'ConstructorError'
+    'ConstructorError',
+    'TagPolicy',
+    'TagSchema',
+    'TagBudget',
+    'TagSpec',
+    'TagPolicyError',
+    'UnknownTagError',
+    'DeniedTagError',
+    'TagArityError',
+    'TagBudgetError',
+    'IncludePathError',
+    'IncludeCycleError',
 ]
 
 from .error import *
 from .nodes import *
 
-import collections.abc, datetime, base64, binascii, re, sys, types
+import collections.abc, datetime, base64, binascii, os, re, sys, types
 
 class ConstructorError(MarkedYAMLError):
     pass
+
+#------------------------------------------------------------------------------
+# Tag policy layer.
+#
+# The policy layer sits between tag resolution and constructor dispatch: the
+# tag of every node is identified first, then the policy decides whether a
+# constructor is allowed to run for it at all, and under which parameter
+# shape and resource budget. Policy error messages never echo document or
+# included-file content.
+#------------------------------------------------------------------------------
+
+class TagPolicyError(ConstructorError):
+    """Base class for tag policy violations."""
+
+class UnknownTagError(TagPolicyError):
+    """The tag is not known to the loader nor registered with the policy."""
+
+class DeniedTagError(TagPolicyError):
+    """The tag is on the hard-deny list and cannot be re-enabled."""
+
+class TagArityError(TagPolicyError):
+    """The node does not match the parameter shape of the registered tag."""
+
+class TagBudgetError(TagPolicyError):
+    """The node exceeds the resource budget of the registered tag."""
+
+class IncludePathError(TagPolicyError):
+    """An !include path escapes the allowed directories or cannot be read."""
+
+class IncludeCycleError(TagPolicyError):
+    """An !include chain recursively includes a file already being loaded."""
+
+class TagSchema:
+    """Expected parameter shape for a policy-registered tag.
+
+    kind restricts the node type ('scalar', 'sequence' or 'mapping');
+    min_args/max_args restrict the item count of sequence nodes.
+    """
+
+    KINDS = ('scalar', 'sequence', 'mapping')
+
+    def __init__(self, kind=None, min_args=None, max_args=None):
+        if kind is not None and kind not in self.KINDS:
+            raise ValueError("unknown schema kind %r" % (kind,))
+        self.kind = kind
+        self.min_args = min_args
+        self.max_args = max_args
+
+    @staticmethod
+    def _node_kind(node):
+        if isinstance(node, ScalarNode):
+            return 'scalar'
+        elif isinstance(node, SequenceNode):
+            return 'sequence'
+        elif isinstance(node, MappingNode):
+            return 'mapping'
+        return 'unknown'
+
+    def check(self, tag, node):
+        if self.kind is not None:
+            node_kind = self._node_kind(node)
+            if node_kind != self.kind:
+                raise TagArityError(None, None,
+                        "tag %r expects a %s parameter, but found a %s"
+                        % (tag, self.kind, node_kind))
+        if isinstance(node, SequenceNode):
+            argc = len(node.value)
+            if self.min_args is not None and argc < self.min_args:
+                raise TagArityError(None, None,
+                        "tag %r expects at least %d parameter(s), but found %d"
+                        % (tag, self.min_args, argc))
+            if self.max_args is not None and argc > self.max_args:
+                raise TagArityError(None, None,
+                        "tag %r expects at most %d parameter(s), but found %d"
+                        % (tag, self.max_args, argc))
+
+class TagBudget:
+    """Resource budget for a policy-registered tag."""
+
+    def __init__(self, max_args=None, max_items=None, max_scalar_length=None):
+        self.max_args = max_args
+        self.max_items = max_items
+        self.max_scalar_length = max_scalar_length
+
+    def check(self, tag, node):
+        if (self.max_scalar_length is not None
+                and isinstance(node, ScalarNode)
+                and len(node.value) > self.max_scalar_length):
+            raise TagBudgetError(None, None,
+                    "tag %r exceeds the scalar length budget of %d"
+                    % (tag, self.max_scalar_length))
+        if (self.max_args is not None
+                and isinstance(node, SequenceNode)
+                and len(node.value) > self.max_args):
+            raise TagBudgetError(None, None,
+                    "tag %r exceeds the argument budget of %d"
+                    % (tag, self.max_args))
+        if (self.max_items is not None
+                and isinstance(node, MappingNode)
+                and len(node.value) > self.max_items):
+            raise TagBudgetError(None, None,
+                    "tag %r exceeds the item budget of %d"
+                    % (tag, self.max_items))
+
+class TagSpec:
+    """A custom tag registered with the policy: constructor + schema + budget."""
+
+    def __init__(self, constructor, schema=None, budget=None):
+        if constructor is None:
+            raise ValueError("a constructor is required to register a tag")
+        self.constructor = constructor
+        self.schema = schema
+        self.budget = budget
+
+    def check(self, tag, node):
+        if self.schema is not None:
+            self.schema.check(tag, node)
+        if self.budget is not None:
+            self.budget.check(tag, node)
+
+def _make_include_constructor(default_policy):
+    def construct_include(loader, node):
+        policy = getattr(loader, 'tag_policy', None) or default_policy
+        raw_path = loader.construct_scalar(node)
+        if not policy.include_dirs:
+            raise IncludePathError(None, None,
+                    "tag %r has no allowed include directories configured"
+                    % node.tag)
+        if os.path.isabs(raw_path):
+            candidates = [os.path.realpath(raw_path)]
+        else:
+            candidates = [os.path.realpath(os.path.join(directory, raw_path))
+                    for directory in policy.include_dirs]
+        target = None
+        for candidate in candidates:
+            if policy.is_path_allowed(candidate) and os.path.isfile(candidate):
+                target = candidate
+                break
+        if target is None:
+            raise IncludePathError(None, None,
+                    "tag %r refers to a path outside the allowed include "
+                    "directories or to a missing file" % node.tag)
+        stack = getattr(loader, '_include_stack', None)
+        if stack is None:
+            stack = loader._include_stack = []
+        if target in stack:
+            raise IncludeCycleError(None, None,
+                    "cyclic include of %r detected for tag %r"
+                    % (target, node.tag))
+        if len(stack) >= policy.max_include_depth:
+            raise TagBudgetError(None, None,
+                    "tag %r exceeds the include depth budget of %d"
+                    % (node.tag, policy.max_include_depth))
+        try:
+            with open(target, 'r', encoding='utf-8') as include_file:
+                text = include_file.read()
+        except OSError:
+            raise IncludePathError(None, None,
+                    "cannot read the file referenced by tag %r" % node.tag)
+        stack.append(target)
+        try:
+            nested = type(loader)(text)
+            nested.tag_policy = policy
+            nested._include_stack = stack
+            try:
+                return nested.get_single_data()
+            except TagPolicyError as exc:
+                # Re-raise without marks so that no snippet of the included
+                # file leaks into the error of the including document.
+                raise type(exc)(None, None, exc.problem, None) from None
+            except YAMLError as exc:
+                raise ConstructorError(None, None,
+                        "failed to construct the document included via tag %r "
+                        "(%s)" % (node.tag, exc.__class__.__name__)) from None
+            finally:
+                nested.dispose()
+        finally:
+            stack.pop()
+    return construct_include
+
+class TagPolicy:
+    """Decides, per tag, whether a constructor may run and under which
+    parameter schema and resource budget.
+
+    The default policy allows only the standard YAML scalar/collection tags.
+    Dangerous Python object tags are hard-denied and cannot be re-enabled by
+    any per-source or per-tenant configuration. Custom tags must be
+    registered explicitly with a constructor, a parameter schema and a
+    resource budget. Use derive() to create per-source/per-tenant variants.
+    """
+
+    STANDARD_TAGS = frozenset([
+        'tag:yaml.org,2002:null',
+        'tag:yaml.org,2002:bool',
+        'tag:yaml.org,2002:int',
+        'tag:yaml.org,2002:float',
+        'tag:yaml.org,2002:binary',
+        'tag:yaml.org,2002:timestamp',
+        'tag:yaml.org,2002:omap',
+        'tag:yaml.org,2002:pairs',
+        'tag:yaml.org,2002:set',
+        'tag:yaml.org,2002:str',
+        'tag:yaml.org,2002:seq',
+        'tag:yaml.org,2002:map',
+        'tag:yaml.org,2002:merge',
+        'tag:yaml.org,2002:value',
+    ])
+
+    # Tags that instantiate or import arbitrary Python objects. These are
+    # denied before any registration is consulted, so neither a policy nor a
+    # loader-level (multi-)constructor can re-open them.
+    DENIED_TAG_PREFIXES = (
+        'tag:yaml.org,2002:python/object',
+        'tag:yaml.org,2002:python/module',
+    )
+
+    def __init__(self, standard_tags=None, include_dirs=(),
+            max_include_depth=8):
+        if standard_tags is None:
+            standard_tags = self.STANDARD_TAGS
+        self.standard_tags = frozenset(standard_tags)
+        self.custom_tags = {}
+        self.custom_prefixes = {}
+        self.include_dirs = ()
+        self.max_include_depth = max_include_depth
+        if include_dirs:
+            self.enable_include(include_dirs)
+
+    def _check_registrable(self, tag):
+        for prefix in self.DENIED_TAG_PREFIXES:
+            if tag.startswith(prefix):
+                raise ValueError(
+                        "tag %r is denied and cannot be registered" % tag)
+
+    def register_tag(self, tag, constructor, schema=None, budget=None):
+        """Register a custom tag with constructor, schema and budget."""
+        self._check_registrable(tag)
+        self.custom_tags[tag] = TagSpec(constructor, schema, budget)
+        return self
+
+    def register_prefix(self, tag_prefix, multi_constructor,
+            schema=None, budget=None):
+        """Register a custom tag prefix with constructor, schema and budget."""
+        self._check_registrable(tag_prefix)
+        self.custom_prefixes[tag_prefix] = TagSpec(
+                multi_constructor, schema, budget)
+        return self
+
+    def enable_include(self, include_dirs, tag='!include', max_depth=None):
+        """Allow !include of files below the given directories only."""
+        self.include_dirs = tuple(
+                os.path.realpath(directory) for directory in include_dirs)
+        if max_depth is not None:
+            self.max_include_depth = max_depth
+        self.register_tag(tag, _make_include_constructor(self),
+                schema=TagSchema(kind='scalar'),
+                budget=TagBudget(max_scalar_length=4096))
+        return self
+
+    def derive(self, standard_tags=None, include_dirs=None,
+            max_include_depth=None):
+        """Create a per-source/per-tenant variant of this policy."""
+        policy = self.__class__.__new__(self.__class__)
+        policy.standard_tags = (self.standard_tags if standard_tags is None
+                else frozenset(standard_tags))
+        policy.custom_tags = dict(self.custom_tags)
+        policy.custom_prefixes = dict(self.custom_prefixes)
+        policy.include_dirs = (self.include_dirs if include_dirs is None
+                else tuple(os.path.realpath(directory)
+                    for directory in include_dirs))
+        policy.max_include_depth = (self.max_include_depth
+                if max_include_depth is None else max_include_depth)
+        return policy
+
+    def is_path_allowed(self, path):
+        for directory in self.include_dirs:
+            if path == directory or path.startswith(directory + os.sep):
+                return True
+        return False
+
+    def check_node(self, loader, node):
+        tag = node.tag
+        # Hard-denied tags first: no configuration may re-open them.
+        for prefix in self.DENIED_TAG_PREFIXES:
+            if tag.startswith(prefix):
+                raise DeniedTagError(None, None,
+                        "tag %r is denied by the tag policy" % tag)
+        # Standard scalar/collection tags are always allowed.
+        if tag in self.standard_tags:
+            return None
+        # Constructors explicitly registered on the loader class are trusted
+        # (existing add_constructor/add_multi_constructor behaviour).
+        if tag in loader.yaml_constructors:
+            return None
+        for tag_prefix in loader.yaml_multi_constructors:
+            if tag_prefix is None:
+                return None
+            if tag.startswith(tag_prefix):
+                return None
+        # Policy-registered custom tags run under their schema and budget.
+        spec = self.custom_tags.get(tag)
+        tag_suffix = None
+        if spec is None:
+            for tag_prefix, candidate in self.custom_prefixes.items():
+                if tag.startswith(tag_prefix):
+                    spec = candidate
+                    tag_suffix = tag[len(tag_prefix):]
+                    break
+        if spec is None:
+            raise UnknownTagError(None, None,
+                    "tag %r is not allowed by the tag policy" % tag)
+        spec.check(tag, node)
+        return spec.constructor, tag_suffix
+
+# Shared default policy: standard tags only, no custom tags, no includes.
+DEFAULT_TAG_POLICY = TagPolicy()
 
 class BaseConstructor:
 
     yaml_constructors = {}
     yaml_multi_constructors = {}
+    # Loaders based on BaseConstructor perform no tag policy checks.
+    tag_policy = None
 
     def __init__(self):
         self.constructed_objects = {}
@@ -67,6 +396,7 @@ class BaseConstructor:
     def construct_object(self, node, deep=False):
         if node in self.constructed_objects:
             return self.constructed_objects[node]
+        policy_entry = self.check_tag_policy(node)
         if deep:
             old_deep = self.deep_construct
             self.deep_construct = True
@@ -76,7 +406,9 @@ class BaseConstructor:
         self.recursive_objects[node] = None
         constructor = None
         tag_suffix = None
-        if node.tag in self.yaml_constructors:
+        if policy_entry is not None:
+            constructor, tag_suffix = policy_entry
+        elif node.tag in self.yaml_constructors:
             constructor = self.yaml_constructors[node.tag]
         else:
             for tag_prefix in self.yaml_multi_constructors:
@@ -113,6 +445,16 @@ class BaseConstructor:
         if deep:
             self.deep_construct = old_deep
         return data
+
+    def check_tag_policy(self, node):
+        # Identify the tag before any constructor runs and let the policy
+        # decide whether construction is allowed for it. Returns the
+        # policy-registered (constructor, tag_suffix) pair, or None when the
+        # loader's own constructor registry handles the tag.
+        policy = self.tag_policy
+        if policy is not None:
+            return policy.check_node(self, node)
+        return None
 
     def construct_scalar(self, node):
         if not isinstance(node, ScalarNode):
@@ -169,6 +511,10 @@ class BaseConstructor:
         cls.yaml_multi_constructors[tag_prefix] = multi_constructor
 
 class SafeConstructor(BaseConstructor):
+
+    # Safe loaders enforce the tag policy; the default allows standard tags
+    # only. Assign a TagPolicy instance (per source/tenant) to customise.
+    tag_policy = DEFAULT_TAG_POLICY
 
     def construct_scalar(self, node):
         if isinstance(node, MappingNode):
@@ -714,6 +1060,10 @@ FullConstructor.add_multi_constructor(
     FullConstructor.construct_python_name)
 
 class UnsafeConstructor(FullConstructor):
+
+    # Unsafe loaders are documented to be unsafe on untrusted input and
+    # deliberately bypass the tag policy.
+    tag_policy = None
 
     def find_python_module(self, name, mark):
         return super(UnsafeConstructor, self).find_python_module(name, mark, unsafe=True)
