@@ -60,7 +60,11 @@ from . import _teletex_codec
 from ._errors import unwrap
 from ._ordereddict import OrderedDict
 from ._types import type_name, str_cls, byte_cls, int_types, chr_cls
-from .parser import _parse, _dump_header
+from .parser import (
+    _parse,
+    _dump_header,
+    ParseBudget,
+)
 from .util import int_to_bytes, int_from_bytes, timezone, extended_datetime, create_timezone, utc_with_dst
 
 if sys.version_info <= (3,):
@@ -112,7 +116,7 @@ _OID_RE = re.compile(r'^\d+(\.\d+)*$')
 _SETUP_CLASSES = {}
 
 
-def load(encoded_data, strict=False):
+def load(encoded_data, strict=False, budget=None):
     """
     Loads a BER/DER-encoded byte string and construct a universal object based
     on the tag value:
@@ -153,6 +157,11 @@ def load(encoded_data, strict=False):
         A boolean indicating if trailing data should be forbidden - if so, a
         ValueError will be raised when trailing data exists
 
+    :param budget:
+        A parser.ParseBudget() bounding the depth, node count, value bytes,
+        length and time used while parsing. If omitted, a default budget is
+        used.
+
     :raises:
         ValueError - when strict is True and trailing data is present
         ValueError - when the encoded value tag a tag other than listed above
@@ -163,7 +172,7 @@ def load(encoded_data, strict=False):
         An instance of the one of the universal classes
     """
 
-    return Asn1Value.load(encoded_data, strict=strict)
+    return Asn1Value.load(encoded_data, strict=strict, budget=budget)
 
 
 def unpickle_helper(asn1crypto_cls, der_bytes):
@@ -213,6 +222,23 @@ class Asn1Value(object):
     # some classes since they utilize _bytes or _unicode
     _native = None
 
+    # The ParseBudget() instance this object is being decoded under. Stored on
+    # the object so lazy re-parsing (Any.parse(), Choice.parse(),
+    # ParsableOctetString.parse()) keeps drawing from the same cumulative
+    # budget instead of starting a new, unbounded context.
+    _budget = None
+
+    def _get_budget(self):
+        """
+        Returns the ParseBudget() this object was decoded with, creating a
+        default budget only when the object was constructed outside of a
+        parsing run.
+        """
+
+        if self._budget is None:
+            self._budget = ParseBudget()
+        return self._budget
+
     @classmethod
     def load(cls, encoded_data, strict=False, **kwargs):
         """
@@ -232,11 +258,13 @@ class Asn1Value(object):
         if not isinstance(encoded_data, byte_cls):
             raise TypeError('encoded_data must be a byte string, not %s' % type_name(encoded_data))
 
+        budget = kwargs.pop('budget', None)
+
         spec = None
         if cls.tag is not None:
             spec = cls
 
-        value, _ = _parse_build(encoded_data, spec=spec, spec_params=kwargs, strict=strict)
+        value, _ = _parse_build(encoded_data, spec=spec, spec_params=kwargs, strict=strict, budget=budget)
         return value
 
     def __init__(self, explicit=None, implicit=None, no_explicit=False, tag_type=None, class_=None, tag=None,
@@ -759,7 +787,9 @@ class Constructable(object):
 
         while pointer < contents_len:
             # We pass the current class as the spec so content semantics are preserved
-            sub_value, pointer = _parse_build(self.contents, pointer, spec=self.__class__)
+            sub_value, pointer = _parse_build(
+                self.contents, pointer, spec=self.__class__, budget=self._get_budget()
+            )
             if output is None:
                 output = sub_value._merge_chunks()
             else:
@@ -970,7 +1000,8 @@ class Any(Asn1Value):
                 parsed_value, _ = _parse_build(
                     contents,
                     spec=spec,
-                    spec_params=passed_params
+                    spec_params=passed_params,
+                    budget=self._get_budget()
                 )
                 self._parsed = (parsed_value, spec, spec_params)
 
@@ -1076,7 +1107,8 @@ class Choice(Asn1Value):
         if not isinstance(encoded_data, byte_cls):
             raise TypeError('encoded_data must be a byte string, not %s' % type_name(encoded_data))
 
-        value, _ = _parse_build(encoded_data, spec=cls, spec_params=kwargs, strict=strict)
+        budget = kwargs.pop('budget', None)
+        value, _ = _parse_build(encoded_data, spec=cls, spec_params=kwargs, strict=strict, budget=budget)
         return value
 
     def _setup(self):
@@ -1221,7 +1253,9 @@ class Choice(Asn1Value):
         if self._parsed is None:
             try:
                 _, spec, params = self._alternatives[self._choice]
-                self._parsed, _ = _parse_build(self._contents, spec=spec, spec_params=params)
+                self._parsed, _ = _parse_build(
+                    self._contents, spec=spec, spec_params=params, budget=self._get_budget()
+                )
             except (ValueError, TypeError) as e:
                 args = e.args[1:]
                 e.args = (e.args[0] + '\n    while parsing %s' % type_name(self),) + args
@@ -1278,7 +1312,9 @@ class Choice(Asn1Value):
                     type_name(self)
                 ))
 
-            ((class_, _, tag, _, _, _), _) = _parse(contents, len(contents))
+            ((class_, _, tag, _, _, _), _) = _parse(
+                contents, len(contents), budget=self._get_budget()
+            )
             id_ = (class_, tag)
 
         if id_ in self._id_map:
@@ -1376,7 +1412,7 @@ class Concat(object):
     _children = None
 
     @classmethod
-    def load(cls, encoded_data, strict=False):
+    def load(cls, encoded_data, strict=False, budget=None):
         """
         Loads a BER/DER-encoded byte string using the current class as the spec
 
@@ -1391,9 +1427,9 @@ class Concat(object):
             A Concat object
         """
 
-        return cls(contents=encoded_data, strict=strict)
+        return cls(contents=encoded_data, strict=strict, budget=budget)
 
-    def __init__(self, value=None, contents=None, strict=False):
+    def __init__(self, value=None, contents=None, strict=False, budget=None):
         """
         :param value:
             A native Python datatype to initialize the object value with
@@ -1412,13 +1448,16 @@ class Concat(object):
 
         if contents is not None:
             try:
+                if budget is None:
+                    budget = ParseBudget()
+                self._budget = budget
                 contents_len = len(contents)
                 self._children = []
 
                 offset = 0
                 for spec in self._child_specs:
                     if offset < contents_len:
-                        child_value, offset = _parse_build(contents, pointer=offset, spec=spec)
+                        child_value, offset = _parse_build(contents, pointer=offset, spec=spec, budget=budget)
                     else:
                         child_value = spec()
                     self._children.append(child_value)
@@ -2804,7 +2843,9 @@ class ParsableOctetString(Constructable, Castable, Primitive):
         """
 
         if self._parsed is None or self._parsed[1:3] != (spec, spec_params):
-            parsed_value, _ = _parse_build(self.__bytes__(), spec=spec, spec_params=spec_params)
+            parsed_value, _ = _parse_build(
+                self.__bytes__(), spec=spec, spec_params=spec_params, budget=self._get_budget()
+            )
             self._parsed = (parsed_value, spec, spec_params)
         return self._parsed[0]
 
@@ -3501,7 +3542,7 @@ class Sequence(Asn1Value):
 
         child = self.children[index]
         if child.__class__ == tuple:
-            child = self.children[index] = _build(*child)
+            child = self.children[index] = _build(*child, budget=self._get_budget())
         return child
 
     def __len__(self):
@@ -3905,6 +3946,8 @@ class Sequence(Asn1Value):
             return
 
         try:
+            budget = self._get_budget()
+            budget.enter_depth()
             self.children = []
             contents_length = len(self._contents)
             child_pointer = 0
@@ -3914,7 +3957,9 @@ class Sequence(Asn1Value):
             again = child_pointer < contents_length
             while again:
                 if parts is None:
-                    parts, child_pointer = _parse(self._contents, contents_length, pointer=child_pointer)
+                    parts, child_pointer = _parse(
+                        self._contents, contents_length, pointer=child_pointer, budget=budget
+                    )
                 again = child_pointer < contents_length
 
                 if field < field_len:
@@ -3984,7 +4029,7 @@ class Sequence(Asn1Value):
                     child = parts
 
                 if recurse:
-                    child = _build(*child)
+                    child = _build(*child, budget=budget)
                     if isinstance(child, (Sequence, SequenceOf)):
                         child._parse_children(recurse=True)
 
@@ -4013,6 +4058,8 @@ class Sequence(Asn1Value):
             args = e.args[1:]
             e.args = (e.args[0] + '\n    while parsing %s' % type_name(self),) + args
             raise e
+        finally:
+            budget.leave_depth()
 
     def spec(self, field_name):
         """
@@ -4073,7 +4120,7 @@ class Sequence(Asn1Value):
                 self._native = OrderedDict()
                 for index, child in enumerate(self.children):
                     if child.__class__ == tuple:
-                        child = _build(*child)
+                        child = _build(*child, budget=self._get_budget())
                         self.children[index] = child
                     try:
                         name = self._fields[index][0]
@@ -4276,7 +4323,7 @@ class SequenceOf(Asn1Value):
 
         child = self.children[index]
         if child.__class__ == tuple:
-            child = _build(*child)
+            child = _build(*child, budget=self._get_budget())
             self.children[index] = child
         return child
 
@@ -4506,19 +4553,23 @@ class SequenceOf(Asn1Value):
         """
 
         try:
+            budget = self._get_budget()
+            budget.enter_depth()
             self.children = []
             if self._contents is None:
                 return
             contents_length = len(self._contents)
             child_pointer = 0
             while child_pointer < contents_length:
-                parts, child_pointer = _parse(self._contents, contents_length, pointer=child_pointer)
+                parts, child_pointer = _parse(
+                    self._contents, contents_length, pointer=child_pointer, budget=budget
+                )
                 if self._child_spec:
                     child = parts + (self._child_spec,)
                 else:
                     child = parts
                 if recurse:
-                    child = _build(*child)
+                    child = _build(*child, budget=budget)
                     if isinstance(child, (Sequence, SequenceOf)):
                         child._parse_children(recurse=True)
                 self.children.append(child)
@@ -4527,6 +4578,8 @@ class SequenceOf(Asn1Value):
             args = e.args[1:]
             e.args = (e.args[0] + '\n    while parsing %s' % type_name(self),) + args
             raise e
+        finally:
+            budget.leave_depth()
 
     def spec(self):
         """
@@ -4687,12 +4740,16 @@ class Set(Sequence):
             return
 
         try:
+            budget = self._get_budget()
+            budget.enter_depth()
             child_map = {}
             contents_length = len(self.contents)
             child_pointer = 0
             seen_field = 0
             while child_pointer < contents_length:
-                parts, child_pointer = _parse(self.contents, contents_length, pointer=child_pointer)
+                parts, child_pointer = _parse(
+                    self.contents, contents_length, pointer=child_pointer, budget=budget
+                )
 
                 id_ = (parts[0], parts[2])
 
@@ -4722,7 +4779,7 @@ class Set(Sequence):
                     child = parts + (field_spec, field_params)
 
                 if recurse:
-                    child = _build(*child)
+                    child = _build(*child, budget=budget)
                     if isinstance(child, (Sequence, SequenceOf)):
                         child._parse_children(recurse=True)
 
@@ -4770,6 +4827,8 @@ class Set(Sequence):
             args = e.args[1:]
             e.args = (e.args[0] + '\n    while parsing %s' % type_name(self),) + args
             raise e
+        finally:
+            budget.leave_depth()
 
     def _set_contents(self, force=False):
         """
@@ -5435,7 +5494,7 @@ _UNIVERSAL_SPECS = {
 }
 
 
-def _build(class_, method, tag, header, contents, trailer, spec=None, spec_params=None, nested_spec=None):
+def _build(class_, method, tag, header, contents, trailer, spec=None, spec_params=None, nested_spec=None, budget=None):
     """
     Builds an Asn1Value object generically, or using a spec with optional params
 
@@ -5472,6 +5531,11 @@ def _build(class_, method, tag, header, contents, trailer, spec=None, spec_param
         contents can be further parsed and interpreted as another Asn1Value.
         This parameter controls the spec for that sub-parsing.
 
+    :param budget:
+        The ParseBudget() this value is being decoded under. The same budget
+        is attached to the returned object and forwarded to any nested or
+        lazy parsing so all decoding shares one set of cumulative limits.
+
     :return:
         An object of the type spec, or if not specified, a child of Asn1Value
     """
@@ -5483,6 +5547,8 @@ def _build(class_, method, tag, header, contents, trailer, spec=None, spec_param
         return VOID
 
     header_set = False
+    if budget is None:
+        budget = ParseBudget()
 
     # If an explicit specification was passed in, make sure it matches
     if spec is not None:
@@ -5533,14 +5599,18 @@ def _build(class_, method, tag, header, contents, trailer, spec=None, spec_param
                         expected_tag,
                         parsed_tag
                     ))
-                info, _ = _parse(to_parse, len(to_parse))
+                budget.enter_depth()
+                try:
+                    info, _ = _parse(to_parse, len(to_parse), budget=budget)
+                finally:
+                    budget.leave_depth()
                 parsed_class, parsed_method, parsed_tag, parsed_header, to_parse, parsed_trailer = info
 
                 if not isinstance(value, Choice):
                     explicit_header += parsed_header
                     explicit_trailer = parsed_trailer + explicit_trailer
 
-            value = _build(*info, spec=spec, spec_params={'no_explicit': True})
+            value = _build(*info, spec=spec, spec_params={'no_explicit': True}, budget=budget)
             value._header = explicit_header
             value._trailer = explicit_trailer
             value.explicit = original_explicit
@@ -5560,6 +5630,7 @@ def _build(class_, method, tag, header, contents, trailer, spec=None, spec_param
                     # Force parsing the Choice now
                     value.contents = header + value.contents
                     header = b''
+                    value._budget = budget
                     value.parse()
                 except (ValueError, TypeError) as e:
                     args = e.args[1:]
@@ -5619,11 +5690,15 @@ def _build(class_, method, tag, header, contents, trailer, spec=None, spec_param
         explicit_header = header
         explicit_trailer = trailer or b''
         for expected_class, expected_tag in reversed(original_explicit):
-            info, _ = _parse(to_parse, len(to_parse))
+            budget.enter_depth()
+            try:
+                info, _ = _parse(to_parse, len(to_parse), budget=budget)
+            finally:
+                budget.leave_depth()
             _, _, _, parsed_header, to_parse, parsed_trailer = info
             explicit_header += parsed_header
             explicit_trailer = parsed_trailer + explicit_trailer
-        value = _build(*info, spec=spec, spec_params={'no_explicit': True})
+        value = _build(*info, spec=spec, spec_params={'no_explicit': True}, budget=budget)
         value._header = header + value._header
         value._trailer += trailer or b''
         value.explicit = original_explicit
@@ -5650,6 +5725,8 @@ def _build(class_, method, tag, header, contents, trailer, spec=None, spec_param
             value._indefinite = True
         value.method = method
 
+    value._budget = budget
+
     if not header_set:
         value._header = header
         value._trailer = trailer or b''
@@ -5668,7 +5745,7 @@ def _build(class_, method, tag, header, contents, trailer, spec=None, spec_param
     return value
 
 
-def _parse_build(encoded_data, pointer=0, spec=None, spec_params=None, strict=False):
+def _parse_build(encoded_data, pointer=0, spec=None, spec_params=None, strict=False, budget=None):
     """
     Parses a byte string generically, or using a spec with optional params
 
@@ -5692,15 +5769,22 @@ def _parse_build(encoded_data, pointer=0, spec=None, spec_params=None, strict=Fa
         A boolean indicating if trailing data should be forbidden - if so, a
         ValueError will be raised when trailing data exists
 
+    :param budget:
+        The ParseBudget() shared by this parse and every object it produces.
+        When omitted a new default budget is created for this call.
+
     :return:
         A 2-element tuple:
          - 0: An object of the type spec, or if not specified, a child of Asn1Value
          - 1: An integer indicating how many bytes were consumed
     """
 
+    if budget is None:
+        budget = ParseBudget()
+
     encoded_len = len(encoded_data)
-    info, new_pointer = _parse(encoded_data, encoded_len, pointer)
+    info, new_pointer = _parse(encoded_data, encoded_len, pointer, budget=budget)
     if strict and new_pointer != pointer + encoded_len:
         extra_bytes = pointer + encoded_len - new_pointer
         raise ValueError('Extra data - %d bytes of trailing data were provided' % extra_bytes)
-    return (_build(*info, spec=spec, spec_params=spec_params), new_pointer)
+    return (_build(*info, spec=spec, spec_params=spec_params, budget=budget), new_pointer)
