@@ -70,5 +70,20 @@ class LimitReachedError(PyPdfError):
     """Raised when a limit is reached."""
 
 
+class ActiveContentError(PyPdfError):
+    """
+    Raised when an active-content policy of ``REJECT`` encounters active
+    content in a PDF document.
+    """
+
+    def __init__(self, message: str, report: object | None = None) -> None:
+        super().__init__(message)
+        self.report = report
+
+
+class AuditBudgetExceededError(LimitReachedError):
+    """Raised when an active-content audit exceeds one of its budgets."""
+
+
 class XmpDocumentError(PyPdfError, RuntimeError):
     """Raised when the XMP XML document context is invalid or missing."""

@@ -92,6 +92,7 @@ from .xmp import XmpInformation
 
 if TYPE_CHECKING:
     from ._page import PageObject
+    from .security import ActiveContentReport, AuditBudget
 
 
 class PdfReader(PdfDocCommon):
@@ -351,6 +352,41 @@ class PdfReader(PdfDocCommon):
             return cast(XmpInformation, self.root_object.xmp_metadata)
         finally:
             self._override_encryption = False
+
+    def audit_active_content(
+        self,
+        *,
+        policy: str = "report",
+        budget: "AuditBudget | None" = None,
+    ) -> "ActiveContentReport":
+        """
+        Enumerate the active content of this document without executing it.
+
+        The audit is strictly read-only: no JavaScript is run, no action is
+        triggered, and no URI, file path or embedded file is opened. It
+        reports document and page trigger actions, JavaScript, Launch and
+        SubmitForm actions, rich media, embedded files and AcroForm field
+        actions, including object numbers, page/field locations and reference
+        chains.
+
+        Args:
+            policy: One of ``"report"`` (only return the findings),
+                ``"reject"`` (raise on any finding) or ``"purge"`` (remove
+                the findings from the mutable object graph).
+            budget: Optional explicit
+                :class:`AuditBudget<pypdf.security.AuditBudget>` bounding
+                traversal depth, object count and script size.
+
+        Returns:
+            An :class:`ActiveContentReport<pypdf.security.ActiveContentReport>`.
+        """
+        from .security import (  # noqa: PLC0415
+            ActiveContentScanner,
+            AuditBudget,
+        )
+
+        resolved_budget = budget if budget is not None else AuditBudget()
+        return ActiveContentScanner(self, policy=policy, budget=resolved_budget).scan()
 
     def _get_page_number_by_indirect(
         self, indirect_reference: int | NullObject | IndirectObject | None

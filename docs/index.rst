@@ -64,6 +64,7 @@ You can contribute to `pypdf on GitHub <https://github.com/py-pdf/pypdf>`_.
    modules/XmpInformation
    modules/actions
    modules/annotations
+    modules/security
    modules/constants
    modules/configuration
    modules/errors
