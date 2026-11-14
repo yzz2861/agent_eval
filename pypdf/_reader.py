@@ -46,9 +46,13 @@ if sys.version_info >= (3, 11):
 else:
     from typing_extensions import Self
 
-from ._configuration import apply_legacy_configuration
+from ._configuration import apply_legacy_configuration, get_configuration
 from ._doc_common import PdfDocCommon, convert_to_int
 from ._encryption import Encryption, PasswordType
+from ._stream_budget import (
+    StreamDecodingBudget,
+    create_stream_decoding_budget,
+)
 from ._utils import (
     WHITESPACES_AS_BYTES,
     StrByteType,
@@ -169,6 +173,24 @@ class PdfReader(PdfDocCommon):
 
         self._named_destinations_cache: dict[str, Destination] | None = None
         self._object_stream_resolution_stack: list[int] = []
+
+    def _initialize_stream_decoding_budget(self) -> StreamDecodingBudget:
+        """Create the budget shared by every stream decoded by this reader."""
+        budget = create_stream_decoding_budget(get_configuration())
+        self._stream_decoding_budget = budget
+        return budget
+
+    @property
+    def stream_decoding_budget(self) -> StreamDecodingBudget:
+        """The shared stream decoding budget of this reader.
+
+        Every stream of the reader draws from the same budget, while two
+        different readers always have independent budgets.
+        """
+        budget = getattr(self, "_stream_decoding_budget", None)
+        if budget is None:
+            budget = self._initialize_stream_decoding_budget()
+        return budget
 
     def _initialize_stream(self, stream: StrByteType | Path) -> None:
         if hasattr(stream, "mode") and "b" not in stream.mode:

@@ -85,6 +85,48 @@ class Configuration:
     """The maximum allowed number of filters per stream."""
     stream_decoding_work_maximum_length: int = 300_000_000
     """The maximum allowed accumulated decoding work in bytes per stream."""
+
+    stream_maximum_compressed_input_bytes: int = 100_000_000
+    """
+    The total number of compressed stream bytes that may be consumed across all streams of a single reader.
+
+    The value is clamped to an absolute ceiling of 500,000,000 bytes.
+    """
+    stream_maximum_decompressed_bytes: int = 300_000_000
+    """
+    The total number of decompressed bytes that may be produced across all streams of a single reader.
+
+    The value is clamped to an absolute ceiling of 2,000,000,000 bytes.
+    """
+    stream_maximum_filter_steps: int = 16
+    """
+    The total number of individual filter applications allowed across all streams of a single reader.
+
+    The value is clamped to an absolute ceiling of 100 steps.
+    """
+    stream_maximum_single_step_ratio: int = 2_000
+    """
+    The maximum allowed expansion ratio of a single filter step (output bytes per input byte).
+
+    Inputs of at most 1,024 bytes are exempt to allow small, highly compressible streams.
+    The value is clamped to an absolute ceiling of 100,000.
+    """
+    stream_maximum_cumulative_time_seconds: float = 30.0
+    """
+    The maximum total wall-clock time in seconds spent decoding all streams of a single reader.
+
+    The value is clamped to an absolute ceiling of 300 seconds.
+    """
+    stream_require_complete_compressed_streams: bool = False
+    """
+    Whether compressed streams without an end-of-stream marker are rejected as truncated.
+
+    Disabled by default because real-world PDFs (notably cross-reference streams) sometimes
+    omit the marker while still containing complete, usable data. Enable it in strict
+    security-sensitive pipelines to turn every incomplete stream into a
+    :class:`~pypdf.errors.PdfStreamError`.
+    """
+
     stream_parsing_work_maximum_count: int = 2_000_000
     """
     The maximum parsing budget for a content stream, including operands, operators, and elements in

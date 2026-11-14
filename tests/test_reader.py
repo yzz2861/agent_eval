@@ -10,7 +10,7 @@ from unittest import mock
 
 import pytest
 
-from pypdf import PdfReader, PdfWriter
+from pypdf import PdfReader, PdfWriter, apply_configuration
 from pypdf._crypt_providers import crypt_provider
 from pypdf._reader import convert_to_int
 from pypdf.constants import ImageAttributes
@@ -2372,6 +2372,7 @@ def test_root_object__not_a_dictionary(caplog, root_body):
     reader = PdfReader(BytesIO(_generate_pdf_with_root(root_body)))
     with pytest.raises(PdfReadError, match=r"^Cannot find Root object in pdf$"):
         _ = reader.root_object
+
     assert all(
         message in caplog.text
         for message in (
@@ -3589,3 +3590,88 @@ def test_get_object_from_stream__duplicate_offsets() -> None:
 
     with pytest.raises(PdfReadError, match=r"^Invalid offset 0 in object stream 1\.$"):
         _ = reader.root_object
+
+
+def _write_two_stream_pdf() -> bytes:
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    page = writer.pages[0]
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    font_ref = writer._add_object(font)
+    page[NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font_ref})}
+    )
+    streams = []
+    for payload in (b"BT /F1 12 Tf (one) Tj ET", b"BT /F1 12 Tf (two) Tj ET"):
+        stream = StreamObject()
+        stream[NameObject("/Filter")] = NameObject("/FlateDecode")
+        stream._data = zlib.compress(payload)
+        streams.append(writer._add_object(stream))
+    page[NameObject("/Contents")] = ArrayObject(streams)
+    buf = BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+def test_reader_stream_budget_is_shared_and_isolated() -> None:
+    pdf_bytes = _write_two_stream_pdf()
+
+    with apply_configuration(stream_maximum_decompressed_bytes=20):
+        reader = PdfReader(BytesIO(pdf_bytes))
+        with pytest.raises(LimitReachedError):
+            reader.pages[0].extract_text()
+        budget = reader.stream_decoding_budget
+        assert budget.filter_decoding_counts["/FlateDecode"] >= 1
+        assert budget.peak_buffer_bytes > 0
+
+    # A second reader gets its own budget and therefore succeeds even though
+    # the first reader exhausted its own share.
+    other_reader = PdfReader(BytesIO(pdf_bytes))
+    assert other_reader.stream_decoding_budget is not budget
+    text = other_reader.pages[0].extract_text()
+    assert "one" in text
+    assert "two" in text
+
+
+def test_reader_stream_budget_does_not_cache_failed_decoding() -> None:
+    pdf_bytes = _write_two_stream_pdf()
+
+    with apply_configuration(stream_maximum_decompressed_bytes=20):
+        reader = PdfReader(BytesIO(pdf_bytes))
+        contents = reader.pages[0][PG.CONTENTS].get_object()
+        with pytest.raises(LimitReachedError):
+            b"".join(ref.get_object().get_data() for ref in contents)
+
+        failed_streams = [
+            ref.get_object()
+            for ref in contents
+            if getattr(ref.get_object(), "_decoded_stream_cache", None) == {}
+        ]
+        assert failed_streams
+
+    with apply_configuration(stream_maximum_decompressed_bytes=50_000_000):
+        reader = PdfReader(BytesIO(pdf_bytes))
+        text = reader.pages[0].extract_text()
+        assert "one" in text
+        assert "two" in text
+        assert reader.stream_decoding_budget.filter_decoding_counts["/FlateDecode"] == 2
+
+
+def test_reader_stream_budget_covers_object_streams() -> None:
+    """Object streams (ObjStm) draw from the same per-reader budget."""
+    reader = PdfReader(RESOURCE_ROOT / "crazyones.pdf")
+    assert reader.xref_objStm
+
+    obj_ids = list(reader.xref_objStm.keys())
+    reader.get_object(obj_ids[0])
+
+    budget = reader.stream_decoding_budget
+    assert budget.filter_decoding_counts.get("/FlateDecode", 0) >= 1
+    assert budget.decompressed_bytes > 0
+    assert budget.peak_buffer_bytes >= budget.decompressed_bytes

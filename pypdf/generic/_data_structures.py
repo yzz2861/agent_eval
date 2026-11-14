@@ -1073,6 +1073,9 @@ class StreamObject(DictionaryObject):
     def __init__(self) -> None:
         self._data: bytes = b""
         self.decoded_self: DecodedStreamObject | None = None
+        # Cache of fully decoded stream data. Keys include the filter chain
+        # and the active decoding budget; failed decoding never populates it.
+        self._decoded_stream_cache: dict[tuple[Any, ...], bytes] = {}
 
     def replicate(
         self,
@@ -1257,6 +1260,7 @@ class DecodedStreamObject(StreamObject):
 class EncodedStreamObject(StreamObject):
     def __init__(self) -> None:
         self.decoded_self: DecodedStreamObject | None = None
+        self._decoded_stream_cache: dict[tuple[Any, ...], bytes] = {}
 
     # This overrides the parent method
     def get_data(self) -> bytes:

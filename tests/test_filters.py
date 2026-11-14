@@ -1,4 +1,5 @@
 """Test the pypdf.filters module."""
+import base64
 import os
 import random
 import string
@@ -18,6 +19,13 @@ import pytest
 from PIL import Image, ImageOps
 
 from pypdf import PdfReader, PdfWriter, apply_configuration
+from pypdf._codecs._codecs import LzwCodec
+from pypdf._configuration import get_configuration
+from pypdf._stream_budget import (
+    ABSOLUTE_MAXIMUM_DECOMPRESSED_BYTES,
+    ABSOLUTE_MAXIMUM_FILTER_STEPS,
+    create_stream_decoding_budget,
+)
 from pypdf.errors import DependencyError, DeprecationError, LimitReachedError, PdfReadError, PdfStreamError
 from pypdf.filters import (
     ASCII85Decode,
@@ -1625,3 +1633,264 @@ def test_decode_stream_data__data_limit() -> None:
             match=r"^Stream decoding exceeded the maximum accumulated decoding work of 300000000 bytes\.$"
     ):
         decode_stream_data(content_stream)
+
+
+def _build_stream(filter_names: str | list[str], data: bytes) -> ContentStream:
+    content_stream = ContentStream(stream=None, pdf=None)
+    content_stream.set_data(b"placeholder")
+    content_stream._data = data
+    if isinstance(filter_names, str):
+        content_stream[NameObject("/Filter")] = NameObject(filter_names)
+    else:
+        content_stream[NameObject("/Filter")] = ArrayObject(
+            [NameObject(name) for name in filter_names]
+        )
+    return content_stream
+
+
+def test_stream_budget__flate_bomb_is_rejected_while_expanding() -> None:
+    """A small flate stream expanding far beyond the budget never materializes."""
+    compressed = zlib.compress(b"A" * 5_000_000)
+    assert len(compressed) < 100_000
+    content_stream = _build_stream("/FlateDecode", compressed)
+
+    with apply_configuration(stream_maximum_decompressed_bytes=1_000_000), pytest.raises(
+        LimitReachedError, match=r"^Limit reached while decompressing\."
+    ):
+        decode_stream_data(content_stream)
+
+    # A failed decode must not leave partial content behind.
+    assert content_stream._decoded_stream_cache == {}
+
+
+def test_stream_budget__truncated_flate_stream_fails() -> None:
+    """A flate stream cut before its end marker is reported as truncated."""
+    compressed = zlib.compress(b"B" * 100_000)
+    content_stream = _build_stream("/FlateDecode", compressed[:-30])
+
+    with apply_configuration(stream_require_complete_compressed_streams=True), pytest.raises(
+        PdfStreamError, match=r"^Stream has ended unexpectedly"
+    ):
+        decode_stream_data(content_stream)
+    assert content_stream._decoded_stream_cache == {}
+
+
+def test_stream_budget__truncation_handling_default_and_empty() -> None:
+    payload = b"B" * 1_000
+    complete = zlib.compress(payload)
+
+    # By default a cut stream with usable output stays tolerated for
+    # compatibility with real-world cross-reference streams.
+    tolerant = _build_stream("/FlateDecode", complete[:-10])
+    assert decode_stream_data(tolerant).startswith(b"B" * 100)
+
+    # A stream that yields nothing at all always fails as truncated.
+    emptyish = _build_stream("/FlateDecode", complete[:2])
+    with pytest.raises(PdfStreamError, match=r"^Stream has ended unexpectedly"):
+        decode_stream_data(emptyish)
+
+
+def test_stream_budget__bad_checksum_fails() -> None:
+    """Corrupted compressed data raises a stream integrity error, not partial data."""
+    compressed = bytearray(zlib.compress(b"C" * 10_000))
+    # Corrupting the stream header cannot be recovered from.
+    compressed[2] ^= 0xFF
+    content_stream = _build_stream("/FlateDecode", bytes(compressed))
+
+    with pytest.raises(PdfStreamError, match=r"Invalid stream checksum|Unable to decompress"):
+        decode_stream_data(content_stream)
+    assert content_stream._decoded_stream_cache == {}
+
+
+def test_stream_budget__unknown_filter_fails() -> None:
+    content_stream = _build_stream("/DoesNotExist", b"data")
+    with pytest.raises(NotImplementedError, match=r"^Unsupported filter /DoesNotExist$"):
+        decode_stream_data(content_stream)
+    assert content_stream._decoded_stream_cache == {}
+
+
+def test_stream_budget__nested_chain_step_limit() -> None:
+    """Repeated filters consume the shared filter-step budget."""
+    nested = b"nested payload" * 100
+    for _ in range(4):
+        nested = zlib.compress(nested)
+    content_stream = _build_stream(["/FlateDecode"] * 4, nested)
+
+    with apply_configuration(
+        stream_maximum_filter_steps=3,
+        stream_maximum_decompressed_bytes=100_000_000,
+    ), pytest.raises(
+        LimitReachedError,
+        match=r"^Stream decoding exceeded the maximum of 3 filter steps\.$",
+    ):
+        decode_stream_data(content_stream)
+
+
+def test_stream_budget__single_step_expansion_ratio() -> None:
+    """A single filter step cannot expand its input beyond the configured ratio."""
+    encoded_rle = b"\x81A" * 50_000 + b"\x80"
+    content_stream = _build_stream("/RunLengthDecode", encoded_rle)
+
+    with apply_configuration(
+        stream_maximum_single_step_ratio=10,
+        stream_maximum_decompressed_bytes=100_000_000,
+    ), pytest.raises(LimitReachedError, match=r"single-step expansion ratio"):
+        decode_stream_data(content_stream)
+
+
+def test_stream_budget__compressed_input_budget() -> None:
+    compressed = zlib.compress(b"D" * 1_000)
+    content_stream = _build_stream("/FlateDecode", compressed)
+
+    with apply_configuration(stream_maximum_compressed_input_bytes=10), pytest.raises(
+        LimitReachedError, match=r"maximum compressed input budget"
+    ):
+        decode_stream_data(content_stream)
+
+
+def test_stream_budget__zero_remaining_output_is_rejected() -> None:
+    """An exhausted output budget is rejected explicitly (zlib treats 0 as unlimited)."""
+    second = _build_stream("/FlateDecode", zlib.compress(b"J" * 100))
+
+    # Exhaust a budget explicitly; codecs must reject this before calling zlib,
+    # because zlib treats max_length=0 as "unlimited".
+    budget = create_stream_decoding_budget(get_configuration())
+    budget.charge_output(budget.maximum_decompressed_bytes)
+    with pytest.raises(LimitReachedError, match=r"maximum decompressed output budget"):
+        budget.require_output_capacity()
+    with pytest.raises(LimitReachedError, match=r"maximum decompressed output budget"):
+        FlateDecode.decode(zlib.compress(b"I" * 100), budget=budget)
+    assert decode_stream_data(second) == b"J" * 100
+
+
+def test_stream_budget__cumulative_time_budget() -> None:
+    # Highly compressible data keeps the input small while the decompression
+    # itself takes a measurable amount of time.
+    compressed = zlib.compress(b"E" * 20_000_000)
+    content_stream = _build_stream("/FlateDecode", compressed)
+
+    with apply_configuration(
+        stream_maximum_cumulative_time_seconds=0.00001,
+        stream_maximum_decompressed_bytes=100_000_000,
+    ), pytest.raises(
+        LimitReachedError, match=r"maximum cumulative decoding time"
+    ):
+        decode_stream_data(content_stream)
+
+
+def test_stream_budget__ascii85_chain_respects_remaining_budget() -> None:
+    """ASCII85 output is bounded during decoding instead of afterwards."""
+    encoded = base64.a85encode(b"F" * 10_000, adobe=True)
+    content_stream = _build_stream("/ASCII85Decode", encoded)
+
+    with apply_configuration(stream_maximum_decompressed_bytes=1_000), pytest.raises(
+        LimitReachedError, match=r"maximum decompressed output budget"
+    ):
+        decode_stream_data(content_stream)
+
+
+def test_stream_budget__lzw_ascii85_chain_is_bounded_per_layer() -> None:
+    """Every layer of an LZW/ASCII85 chain is bounded by the remaining budget."""
+    raw = b"LZW payload " * 500
+    encoded = base64.a85encode(LzwCodec().encode(raw), adobe=True)
+    content_stream = _build_stream(["/ASCII85Decode", "/LZWDecode"], encoded)
+
+    with apply_configuration(stream_maximum_decompressed_bytes=10_000_000):
+        assert decode_stream_data(content_stream) == raw
+
+    tight = _build_stream(["/ASCII85Decode", "/LZWDecode"], encoded)
+    with apply_configuration(stream_maximum_decompressed_bytes=50), pytest.raises(
+        LimitReachedError, match=r"maximum decompressed output budget|Limit reached while decompressing"
+    ):
+        decode_stream_data(tight)
+    assert tight._decoded_stream_cache == {}
+
+
+def test_stream_budget__standalone_streams_have_independent_budgets() -> None:
+    first = _build_stream("/FlateDecode", zlib.compress(b"G" * 2_000_000))
+    second = _build_stream("/FlateDecode", zlib.compress(b"H" * 2_000_000))
+
+    # Each standalone call gets a fresh budget, so neither exhausts the other.
+    with apply_configuration(stream_maximum_decompressed_bytes=3_000_000):
+        assert decode_stream_data(first) == b"G" * 2_000_000
+        assert decode_stream_data(second) == b"H" * 2_000_000
+
+
+def test_stream_budget__cache_key_covers_data_and_filters() -> None:
+    content_stream = _build_stream("/FlateDecode", zlib.compress(b"first"))
+    with apply_configuration(stream_maximum_decompressed_bytes=100_000_000):
+        assert decode_stream_data(content_stream) == b"first"
+        first_cache_size = len(content_stream._decoded_stream_cache)
+        assert first_cache_size == 1
+
+        # Replacing the raw data changes the cache key.
+        content_stream._data = zlib.compress(b"second")
+        assert decode_stream_data(content_stream) == b"second"
+        assert len(content_stream._decoded_stream_cache) == 2
+
+
+def test_stream_budget__configuration_is_clamped_to_absolute_ceiling() -> None:
+    with apply_configuration(
+        stream_maximum_decompressed_bytes=10**12,
+        stream_maximum_filter_steps=10**6,
+    ):
+        budget = create_stream_decoding_budget(get_configuration())
+
+    assert budget.maximum_decompressed_bytes == ABSOLUTE_MAXIMUM_DECOMPRESSED_BYTES
+    assert budget.maximum_filter_steps == ABSOLUTE_MAXIMUM_FILTER_STEPS
+
+
+def test_stream_budget__reader_shares_budget_across_streams(tmp_path) -> None:
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    page = writer.pages[0]
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    font_ref = writer._add_object(font)
+    page[NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font_ref})}
+    )
+    streams = []
+    for payload in (b"BT /F1 12 Tf (one) Tj ET", b"BT /F1 12 Tf (two) Tj ET"):
+        stream = StreamObject()
+        stream[NameObject("/Filter")] = NameObject("/FlateDecode")
+        stream._data = zlib.compress(payload)
+        streams.append(writer._add_object(stream))
+    page[NameObject("/Contents")] = ArrayObject(streams)
+    output = tmp_path / "budget.pdf"
+    with output.open("wb") as fh:
+        writer.write(fh)
+
+    with apply_configuration(stream_maximum_decompressed_bytes=20):
+        reader = PdfReader(output)
+        with pytest.raises(LimitReachedError):
+            reader.pages[0].extract_text()
+        budget = reader.stream_decoding_budget
+        assert budget.filter_decoding_counts["/FlateDecode"] == 1
+        assert budget.peak_buffer_bytes > 0
+
+    # A second reader has a fully independent budget and succeeds.
+    generous_reader = PdfReader(output)
+    text = generous_reader.pages[0].extract_text()
+    assert "one" in text
+    assert "two" in text
+    assert generous_reader.stream_decoding_budget is not reader.stream_decoding_budget
+
+
+def test_stream_budget__legitimate_filter_pdf_still_decodes() -> None:
+    """Existing scanned/filter-heavy sample documents keep decoding correctly."""
+    for name in (
+        "imagemagick-ASCII85Decode.pdf",
+        "imagemagick-CCITTFaxDecode.pdf",
+        "imagemagick-lzw.pdf",
+    ):
+        reader = PdfReader(RESOURCE_ROOT / name)
+        page = reader.pages[0]
+        content = page.get_contents()
+        assert content is not None
+        assert content.get_data()

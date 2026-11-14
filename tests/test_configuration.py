@@ -9,6 +9,12 @@ from pypdf._configuration import (
     _determine_jbig2dec_binary,
     apply_legacy_configuration,
 )
+from pypdf._stream_budget import (
+    ABSOLUTE_MAXIMUM_CUMULATIVE_TIME_SECONDS,
+    ABSOLUTE_MAXIMUM_DECOMPRESSED_BYTES,
+    ABSOLUTE_MAXIMUM_FILTER_STEPS,
+    create_stream_decoding_budget,
+)
 from pypdf.errors import DeprecationError
 from tests import RESOURCE_ROOT
 
@@ -265,3 +271,34 @@ def test_determine_jbig2dec_binary__cached() -> None:
         which_mock.assert_called_once_with("jbig2dec")
     finally:
         _determine_jbig2dec_binary.cache_clear()
+
+
+def test_stream_budget_configuration_defaults_and_absolute_ceiling() -> None:
+    configuration = Configuration()
+    assert configuration.stream_maximum_compressed_input_bytes > 0
+    assert configuration.stream_maximum_decompressed_bytes > 0
+    assert configuration.stream_maximum_filter_steps > 0
+    assert configuration.stream_maximum_single_step_ratio > 0
+    assert configuration.stream_maximum_cumulative_time_seconds > 0
+
+    # Explicitly raised limits are accepted below the absolute ceiling.
+    generous = configuration.with_overwrites(
+        stream_maximum_decompressed_bytes=500_000_000,
+        stream_maximum_filter_steps=64,
+        stream_maximum_cumulative_time_seconds=120.0,
+    )
+    budget = create_stream_decoding_budget(generous)
+    assert budget.maximum_decompressed_bytes == 500_000_000
+    assert budget.maximum_filter_steps == 64
+    assert budget.maximum_cumulative_time_seconds == 120.0
+
+    # Values above the absolute ceiling are clamped, never disabled.
+    unbounded = configuration.with_overwrites(
+        stream_maximum_decompressed_bytes=10**12,
+        stream_maximum_filter_steps=10**6,
+        stream_maximum_cumulative_time_seconds=10**6,
+    )
+    clamped = create_stream_decoding_budget(unbounded)
+    assert clamped.maximum_decompressed_bytes == ABSOLUTE_MAXIMUM_DECOMPRESSED_BYTES
+    assert clamped.maximum_filter_steps == ABSOLUTE_MAXIMUM_FILTER_STEPS
+    assert clamped.maximum_cumulative_time_seconds == ABSOLUTE_MAXIMUM_CUMULATIVE_TIME_SECONDS

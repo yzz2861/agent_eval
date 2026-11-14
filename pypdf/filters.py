@@ -52,6 +52,11 @@ from typing import Any, cast
 
 from ._codecs._codecs import LzwCodec as _LzwCodec
 from ._configuration import get_configuration
+from ._stream_budget import (
+    StreamBudgetContext,
+    StreamDecodingBudget,
+    get_budget_for_stream,
+)
 from ._utils import (
     WHITESPACES_AS_BYTES,
     deprecation,
@@ -62,7 +67,7 @@ from .constants import FilterTypeAbbreviations as FTA
 from .constants import FilterTypes as FT
 from .constants import ImageAttributes, StreamAttributes
 from .constants import LzwFilterParameters as LZW
-from .errors import DependencyError, LimitReachedError, PdfReadError, PdfStreamError
+from .errors import STREAM_TRUNCATED_PREMATURELY, DependencyError, LimitReachedError, PdfReadError, PdfStreamError
 from .generic import (
     ArrayObject,
     BooleanObject,
@@ -98,6 +103,101 @@ def _decompress_with_limit(data: bytes) -> bytes:
         raise LimitReachedError(
             f"Limit reached while decompressing. {len(decompressor.unconsumed_tail)} bytes remaining."
         )
+    return result
+
+
+def _map_zlib_error(exception: zlib.error) -> PdfStreamError:
+    """Turn raw zlib failures into distinguishable stream integrity errors."""
+    message = str(exception)
+    if "incomplete" in message or "ended" in message or "truncated" in message:
+        return PdfStreamError(f"{STREAM_TRUNCATED_PREMATURELY}: {message}")
+    if "check" in message or "distance" in message or "invalid" in message:
+        return PdfStreamError(f"Invalid stream checksum or compressed data: {message}")
+    return PdfStreamError(f"Unable to decompress stream: {message}")
+
+
+def _zlib_decompress_chunks_wbits(
+    data: bytes,
+    max_output_length: int,
+    wbits: int,
+) -> tuple[bytes, bool, bool]:
+    decompressor = zlib.decompressobj(wbits)
+    output = bytearray()
+    remaining = max_output_length
+    chunk_size = 1 << 20
+    for offset in range(0, len(data), chunk_size):
+        chunk = data[offset:offset + chunk_size]
+        while chunk:
+            part = decompressor.decompress(chunk, max_length=remaining)
+            output.extend(part)
+            remaining -= len(part)
+            chunk = decompressor.unconsumed_tail
+            if not chunk:
+                break
+            if remaining <= 0:
+                raise LimitReachedError(
+                    "Limit reached while decompressing. "
+                    f"{len(decompressor.unconsumed_tail)} bytes remaining."
+                )
+        if remaining <= 0 and decompressor.unconsumed_tail:
+            raise LimitReachedError(
+                "Limit reached while decompressing. "
+                f"{len(decompressor.unconsumed_tail)} bytes remaining."
+            )
+    # `eof` only becomes True after the end-of-stream marker is processed,
+    # which can lag behind the last decompress() call. The reliable signal that
+    # the whole input belonged to this stream is non-empty `unused_data`; an
+    # empty value with `eof` False means the stream was cut short.
+    return bytes(output), decompressor.eof, bool(decompressor.unused_data)
+
+
+def decompress_with_budget(data: bytes, budget: StreamDecodingBudget) -> bytes:
+    """Decompress flate data while honoring the shared stream decoding budget.
+
+    The output limit is derived from the *remaining* budget before decoding,
+    so a compressed bomb is rejected while it is still expanding instead of
+    being materialized first. Integrity failures are reported as
+    :class:`PdfStreamError` so truncated streams and bad checksums are
+    distinguishable from budget violations.
+    """
+    configuration = get_configuration()
+    output_limit = min(
+        configuration.zlib_maximum_output_length,
+        budget.remaining_output_budget(),
+    )
+    budget.require_output_capacity()
+    result = b""
+    reached_eof = False
+    had_unused_data = False
+    try:
+        result, reached_eof, had_unused_data = _zlib_decompress_chunks_wbits(
+            data, output_limit, zlib.MAX_WBITS
+        )
+    except LimitReachedError:
+        raise
+    except zlib.error:
+        # Inside a filter chain the data is often a raw deflate stream
+        # without the zlib header (an earlier FlateDecode already removed
+        # it). Try raw deflate, then the auto-detecting window.
+        try:
+            result, reached_eof, had_unused_data = _zlib_decompress_chunks_wbits(
+                data, output_limit, -zlib.MAX_WBITS
+            )
+        except zlib.error:
+            try:
+                result, reached_eof, had_unused_data = _zlib_decompress_chunks_wbits(
+                    data, output_limit, zlib.MAX_WBITS | 32
+                )
+            except zlib.error as exception:
+                raise _map_zlib_error(exception) from exception
+    if not reached_eof and not had_unused_data and (
+        not result or get_configuration().stream_require_complete_compressed_streams
+    ):
+        # Either nothing usable was decoded, or strict integrity checks
+        # are enabled: the missing end marker means the stream was cut
+        # short. By default, complete-looking outputs without a formal
+        # marker are tolerated for backward compatibility.
+        raise PdfStreamError(STREAM_TRUNCATED_PREMATURELY)
     return result
 
 
@@ -179,6 +279,7 @@ class FlateDecode:
     def decode(
         data: bytes,
         decode_parms: DictionaryObject | IndirectObject | None = None,
+        budget: StreamDecodingBudget | None = None,
         **kwargs: Any,
     ) -> bytes:
         """
@@ -195,7 +296,10 @@ class FlateDecode:
           PdfReadError: Unsupported parameters have been found.
 
         """
-        str_data = decompress(data)
+        if budget is None:
+            str_data = decompress(data)
+        else:
+            str_data = decompress_with_budget(data, budget)
 
         if isinstance(decode_parms, dict):
             parameters = decode_parms
@@ -375,6 +479,7 @@ class ASCIIHexDecode:
     def decode(
         data: str | bytes,
         decode_parms: DictionaryObject | None = None,
+        budget: StreamDecodingBudget | None = None,
         **kwargs: Any,
     ) -> bytes:
         """
@@ -414,6 +519,9 @@ class ASCIIHexDecode:
         if len(hex_data) % 2 == 1:
             hex_data += b"0"
 
+        if budget is not None:
+            budget.check_output(budget.decompressed_bytes + len(hex_data) // 2)
+
         # The spec permits only 0-9, A-F, a-f and whitespace inside the stream.
         # Stray bytes used to surface as an uncaught binascii.Error; turn them
         # into a proper PdfStreamError instead.
@@ -441,6 +549,7 @@ class RunLengthDecode:
     def decode(
         data: bytes,
         decode_parms: DictionaryObject | None = None,
+        budget: StreamDecodingBudget | None = None,
         **kwargs: Any,
     ) -> bytes:
         """
@@ -457,11 +566,23 @@ class RunLengthDecode:
           PdfStreamError:
 
         """
-        lst = []
+        output = bytearray()
         index = 0
         data_length = len(data)
         total_length = 0
         configuration = get_configuration()
+
+        def reserve(amount: int) -> None:
+            nonlocal total_length
+            total_length += amount
+            if total_length > configuration.run_length_maximum_output_length:
+                raise LimitReachedError("Limit reached while decompressing.")
+            if budget is not None and amount > budget.remaining_output_budget():
+                raise LimitReachedError(
+                    "Stream decoding exceeded the maximum decompressed output budget "
+                    f"of {budget.maximum_decompressed_bytes} bytes."
+                )
+
         while True:
             if index >= data_length:
                 logger_warning(
@@ -489,21 +610,30 @@ class RunLengthDecode:
                 break
             if length < 128:
                 length += 1
-                lst.append(data[index : (index + length)])
+                if index + length > data_length:
+                    if budget is not None:
+                        raise PdfStreamError(STREAM_TRUNCATED_PREMATURELY)
+                    logger_warning(
+                        "Missing EOD in RunLengthDecode, check if output is OK", source=__name__
+                    )
+                    output.extend(data[index:])
+                    break
+                reserve(length)
+                output.extend(data[index : (index + length)])
                 index += length
             else:  # >128
                 if index >= data_length:
+                    if budget is not None:
+                        raise PdfStreamError(STREAM_TRUNCATED_PREMATURELY)
                     logger_warning(
                         "Missing EOD in RunLengthDecode, check if output is OK", source=__name__
                     )
                     break  # Reached end of string without the replicated byte
                 length = 257 - length
-                lst.append(bytes((data[index],)) * length)
+                reserve(length)
+                output.extend(bytes((data[index],)) * length)
                 index += 1
-            total_length += length
-            if total_length > configuration.run_length_maximum_output_length:
-                raise LimitReachedError("Limit reached while decompressing.")
-        return b"".join(lst)
+        return bytes(output)
 
 
 class LZWDecode:
@@ -522,6 +652,7 @@ class LZWDecode:
     def decode(
         data: bytes,
         decode_parms: DictionaryObject | None = None,
+        budget: StreamDecodingBudget | None = None,
         **kwargs: Any,
     ) -> bytes:
         """
@@ -536,16 +667,90 @@ class LZWDecode:
 
         """
         # decode_parms is unused here
-        return LZWDecode.Decoder(data).decode()
+        if budget is None:
+            return LZWDecode.Decoder(data).decode()
+        budget.require_output_capacity()
+        configuration = get_configuration()
+        maximum_output_length = min(
+            configuration.lzw_maximum_output_length,
+            budget.remaining_output_budget(),
+        )
+        return _LzwCodec(max_output_length=maximum_output_length).decode(data)
 
 
 class ASCII85Decode:
     """Decodes string ASCII85-encoded data into a byte format."""
 
     @staticmethod
+    def _decode_streaming(data: bytes, budget: StreamDecodingBudget | None) -> bytes:
+        """Decode ASCII85 incrementally, charging the budget per output group.
+
+        Each group of (up to) five input characters produces at most four
+        output bytes, so the remaining output budget is checked before every
+        group is materialized instead of decoding the whole stream first.
+        """
+        output = bytearray()
+        group = bytearray()
+        index = 0
+        data_length = len(data)
+        ended = False
+
+        def decode_group(group_bytes: bytes, pad: int) -> None:
+            if budget is not None and 4 - pad > budget.remaining_output_budget():
+                raise LimitReachedError(
+                    "Stream decoding exceeded the maximum decompressed output budget "
+                    f"of {budget.maximum_decompressed_bytes} bytes."
+                )
+            if group_bytes == b"z":
+                output.extend(b"\x00\x00\x00\x00")
+                return
+            value = 0
+            for char in group_bytes:
+                value = value * 85 + (char - 33)
+            if value > 0xFFFFFFFF:
+                raise ValueError("Ascii85 integer overflow")
+            chunk = value.to_bytes(4, "big")
+            output.extend(chunk[: 4 - pad] if pad else chunk)
+
+        # Skip the optional Adobe prefix "<~".
+        if data.startswith(b"<~"):
+            index = 2
+
+        while index < data_length:
+            char = data[index]
+            index += 1
+            if char in WHITESPACES_AS_BYTES:
+                continue
+            if char == ord("~"):
+                if index < data_length and data[index] == ord(">"):
+                    index += 1
+                ended = True
+                break
+            if char == ord("z") and not group:
+                decode_group(b"z", 0)
+                continue
+            if not 33 <= char <= 117:
+                raise ValueError(f"Invalid Ascii85 character {char!r}")
+            group.append(char)
+            if len(group) == 5:
+                decode_group(bytes(group), 0)
+                group = bytearray()
+
+        if group:
+            if len(group) == 1:
+                raise ValueError("Ascii85 encoded byte groups cannot consist of a single character")
+            pad = 5 - len(group)
+            group.extend(b"u" * pad)
+            decode_group(bytes(group), pad)
+        elif not ended and index < data_length:
+            raise ValueError("Ascii85 encoded byte sequences must end with b'~>'")
+        return bytes(output)
+
+    @staticmethod
     def decode(
         data: str | bytes,
         decode_parms: DictionaryObject | None = None,
+        budget: StreamDecodingBudget | None = None,
         **kwargs: Any,
     ) -> bytes:
         """
@@ -564,8 +769,16 @@ class ASCII85Decode:
         data = data.strip(WHITESPACES_AS_BYTES)
         if len(data) > 2 and data.endswith(b">"):
             data = data[:-1].rstrip(WHITESPACES_AS_BYTES) + data[-1:]
+        if budget is not None:
+            # The output is at most 4/5 of the (whitespace-free) input.
+            expected = (len(data.rstrip(b"~>")) * 4 + 4) // 5
+            budget.check_output(budget.decompressed_bytes + expected)
         try:
-            return a85decode(data, adobe=True, ignorechars=WHITESPACES_AS_BYTES)
+            if budget is None:
+                return a85decode(data, adobe=True, ignorechars=WHITESPACES_AS_BYTES)
+            if not data.endswith(b"~>"):
+                logger_warning("Ignoring missing Ascii85 end marker.", source=__name__)
+            return ASCII85Decode._decode_streaming(data, budget)
         except ValueError as error:
             if error.args[0] == "Ascii85 encoded byte sequences must end with b'~>'":
                 logger_warning("Ignoring missing Ascii85 end marker.", source=__name__)
@@ -578,6 +791,7 @@ class DCTDecode:
     def decode(
         data: bytes,
         decode_parms: DictionaryObject | None = None,
+        budget: StreamDecodingBudget | None = None,
         **kwargs: Any,
     ) -> bytes:
         """
@@ -593,6 +807,8 @@ class DCTDecode:
           decoded data.
 
         """
+        if budget is not None:
+            budget.check_output(budget.decompressed_bytes + len(data))
         return data
 
 
@@ -601,6 +817,7 @@ class JPXDecode:
     def decode(
         data: bytes,
         decode_parms: DictionaryObject | None = None,
+        budget: StreamDecodingBudget | None = None,
         **kwargs: Any,
     ) -> bytes:
         """
@@ -615,6 +832,8 @@ class JPXDecode:
           decoded data.
 
         """
+        if budget is not None:
+            budget.check_output(budget.decompressed_bytes + len(data))
         return data
 
 
@@ -630,6 +849,7 @@ class BrotliDecode:
     def decode(
         data: bytes,
         decode_parms: DictionaryObject | None = None,
+        budget: StreamDecodingBudget | None = None,
         **kwargs: Any,
     ) -> bytes:
         """
@@ -656,12 +876,16 @@ class BrotliDecode:
 
         decompressor = brotli.Decompressor()
         configuration = get_configuration()
+        maximum_output_length = configuration.brotli_maximum_output_length
+        if budget is not None:
+            budget.require_output_capacity()
+            maximum_output_length = min(maximum_output_length, budget.remaining_output_budget())
 
         # TODO: Simplify once fixed upstream.
         #       https://github.com/google/brotli/issues/1396
         #       https://github.com/google/brotli/pull/1525
         output = bytearray()
-        remaining = configuration.brotli_maximum_output_length
+        remaining = maximum_output_length
         chunk_size = 65_535
         for offset in range(0, len(data), chunk_size):
             chunk = data[offset:offset + chunk_size]
@@ -795,11 +1019,16 @@ class CCITTFaxDecode:
         data: bytes,
         decode_parms: DictionaryObject | None = None,
         height: int = 0,
+        budget: StreamDecodingBudget | None = None,
         **kwargs: Any,
     ) -> bytes:
         params = CCITTFaxDecode._get_parameters(decode_parms, height)
 
         img_size = len(data)
+        if budget is not None:
+            # The output consists of a fixed TIFF header plus the raw fax data.
+            tiff_header_size = struct.calcsize("<2sHLH" + "HHLL" * 8 + "H")
+            budget.check_output(budget.decompressed_bytes + tiff_header_size + img_size)
         # TIFF SHORT and LONG fields are unsigned (TIFF 6.0, §2); pack them with
         # unsigned codes so dimensions with the high bit set do not overflow.
         tiff_header_struct = "<2sHLH" + "HHLL" * 8 + "H"
@@ -857,11 +1086,15 @@ class JBIG2Decode:
     def decode(
         data: bytes,
         decode_parms: DictionaryObject | None = None,
+        budget: StreamDecodingBudget | None = None,
         **kwargs: Any,
     ) -> bytes:
         configuration = get_configuration()
         if configuration.jbig2dec_binary is None:
             raise DependencyError("jbig2dec binary is not available.")
+        maximum_output_length = configuration.jbig2_maximum_output_length
+        if budget is not None:
+            maximum_output_length = min(maximum_output_length, budget.remaining_output_budget())
 
         with TemporaryDirectory() as tempdir:
             directory = Path(tempdir)
@@ -888,7 +1121,7 @@ class JBIG2Decode:
                     "--embedded",
                     "--format", "png",
                     "--output", "-",
-                    "-M", str(configuration.jbig2_maximum_output_length),
+                    "-M", str(maximum_output_length),
                     *paths
                 ],
                 capture_output=True,
@@ -931,6 +1164,31 @@ def _deprecate_inline_image_filters(filter_name: str, old_name: str, new_name: s
     )
 
 
+def _stream_decoding_cache_key(
+    stream: StreamObject,
+    filters: tuple[Any, ...],
+    budget: StreamDecodingBudget,
+) -> tuple[Any, ...]:
+    """Build a cache key covering the raw data, filter chain and budget limits.
+
+    The same stream object can be decoded repeatedly (e.g. after its data was
+    replaced), so the raw data identity and length participate in the key.
+    Budget limits are part of the key because a result accepted under a large
+    budget must not be served to a caller constrained by a smaller one.
+    """
+    return (
+        id(stream),
+        len(stream._data),
+        hash(stream._data),
+        tuple(str(filter_name) for filter_name in filters),
+        budget.maximum_compressed_input_bytes,
+        budget.maximum_decompressed_bytes,
+        budget.maximum_filter_steps,
+        budget.maximum_single_step_ratio,
+        round(budget.maximum_cumulative_time_seconds, 6),
+    )
+
+
 def decode_stream_data(stream: StreamObject) -> bytes:
     """
     Decode the stream data based on the specified filters.
@@ -955,10 +1213,6 @@ def decode_stream_data(stream: StreamObject) -> bytes:
     if not isinstance(filters, ArrayObject):
         # We have a single filter instance
         filters = (filters,)
-    if (filter_count := len(filters)) > configuration.stream_filters_maximum_length:
-        raise LimitReachedError(
-            f"Maximum filter count {configuration.stream_filters_maximum_length} exceeded: {filter_count}"
-        )
 
     decode_parms = stream.get(StreamAttributes.DECODE_PARMS, (DictionaryObject(),) * len(filters))
     if not isinstance(decode_parms, (list, tuple)):
@@ -968,6 +1222,48 @@ def decode_stream_data(stream: StreamObject) -> bytes:
     if not data:
         return data
 
+    budget = get_budget_for_stream(stream, configuration)
+    cache_key = _stream_decoding_cache_key(stream, tuple(filters), budget)
+    decoded_cache = getattr(stream, "_decoded_stream_cache", None)
+    if decoded_cache is None:
+        decoded_cache = {}
+        stream._decoded_stream_cache = decoded_cache
+    cached_result = decoded_cache.get(cache_key)
+    if cached_result is not None:
+        return cached_result
+
+    # Keep the historical per-stream filter-count guard for the exact error
+    # message; the shared budget enforces the same limit across streams as well.
+    if (filter_count := len(filters)) > configuration.stream_filters_maximum_length:
+        raise LimitReachedError(
+            f"Maximum filter count {configuration.stream_filters_maximum_length} exceeded: {filter_count}"
+        )
+
+    with StreamBudgetContext(budget):
+        result = _decode_filter_chain(
+            stream=stream,
+            data=data,
+            filters=tuple(filters),
+            decode_parms=decode_parms,
+            budget=budget,
+            configuration=configuration,
+        )
+
+    # The result is cached only after the complete chain succeeded, so a failed
+    # decode never leaves partial content behind for page parsing.
+    decoded_cache[cache_key] = result
+    return result
+
+
+def _decode_filter_chain(
+    *,
+    stream: StreamObject,
+    data: bytes,
+    filters: tuple[Any, ...],
+    decode_parms: tuple[Any, ...] | list[Any],
+    budget: StreamDecodingBudget,
+    configuration: Any,
+) -> bytes:
     accumulated_decoding_work = 0
     decoding_work_maximum_length = configuration.stream_decoding_work_maximum_length
 
@@ -981,7 +1277,12 @@ def decode_stream_data(stream: StreamObject) -> bytes:
             )
 
     for filter_name, params in zip(filters, decode_parms):
-        _check_decoding_work(amount=len(data))
+        input_length = len(data)
+        # Only the original compressed bytes count against the input budget;
+        # outputs of earlier filter steps are already accounted for as output.
+        if budget.filter_steps == 0:
+            budget.charge_input(input_length)
+        _check_decoding_work(amount=input_length)
 
         params = params.get_object()
         if is_null_or_none(params):
@@ -994,42 +1295,55 @@ def decode_stream_data(stream: StreamObject) -> bytes:
                 source=__name__, value=params,
             )
             params = DictionaryObject()
-        if filter_name in (FT.ASCII_HEX_DECODE, FTA.AHx):
-            _deprecate_inline_image_filters(filter_name=filter_name, old_name=FTA.AHx, new_name=FT.ASCII_HEX_DECODE)
-            data = ASCIIHexDecode.decode(data)
-        elif filter_name in (FT.ASCII_85_DECODE, FTA.A85):
-            _deprecate_inline_image_filters(filter_name=filter_name, old_name=FTA.A85, new_name=FT.ASCII_85_DECODE)
-            data = ASCII85Decode.decode(data)
-        elif filter_name in (FT.LZW_DECODE, FTA.LZW):
-            _deprecate_inline_image_filters(filter_name=filter_name, old_name=FTA.LZW, new_name=FT.LZW_DECODE)
-            data = LZWDecode.decode(data, params)
-        elif filter_name in (FT.FLATE_DECODE, FTA.FL):
-            _deprecate_inline_image_filters(filter_name=filter_name, old_name=FTA.FL, new_name=FT.FLATE_DECODE)
-            data = FlateDecode.decode(data, params)
-        elif filter_name in (FT.RUN_LENGTH_DECODE, FTA.RL):
-            _deprecate_inline_image_filters(filter_name=filter_name, old_name=FTA.RL, new_name=FT.RUN_LENGTH_DECODE)
-            data = RunLengthDecode.decode(data)
-        elif filter_name in (FT.CCITT_FAX_DECODE, FTA.CCF):
-            _deprecate_inline_image_filters(filter_name=filter_name, old_name=FTA.CCF, new_name=FT.CCITT_FAX_DECODE)
-            height = stream.get(ImageAttributes.HEIGHT, 0)
-            data = CCITTFaxDecode.decode(data, params, height)
-        elif filter_name in (FT.DCT_DECODE, FTA.DCT):
-            _deprecate_inline_image_filters(filter_name=filter_name, old_name=FTA.DCT, new_name=FT.DCT_DECODE)
-            data = DCTDecode.decode(data)
-        elif filter_name == FT.JPX_DECODE:
-            data = JPXDecode.decode(data)
-        elif filter_name == FT.BROTLI_DECODE:
-            data = BrotliDecode.decode(data)
-        elif filter_name == FT.JBIG2_DECODE:
-            data = JBIG2Decode.decode(data, params)
-        elif filter_name == "/Crypt":
-            if "/Name" in params or "/Type" in params:
-                raise NotImplementedError(
-                    "/Crypt filter with /Name or /Type not supported yet"
-                )
-        else:
-            raise NotImplementedError(f"Unsupported filter {filter_name}")
+        budget.begin_filter_step(str(filter_name), input_length)
+        with budget.time_step():
+            if filter_name in (FT.ASCII_HEX_DECODE, FTA.AHx):
+                _deprecate_inline_image_filters(filter_name=filter_name, old_name=FTA.AHx, new_name=FT.ASCII_HEX_DECODE)
+                decoded = ASCIIHexDecode.decode(data, budget=budget)
+            elif filter_name in (FT.ASCII_85_DECODE, FTA.A85):
+                _deprecate_inline_image_filters(filter_name=filter_name, old_name=FTA.A85, new_name=FT.ASCII_85_DECODE)
+                decoded = ASCII85Decode.decode(data, budget=budget)
+            elif filter_name in (FT.LZW_DECODE, FTA.LZW):
+                _deprecate_inline_image_filters(filter_name=filter_name, old_name=FTA.LZW, new_name=FT.LZW_DECODE)
+                decoded = LZWDecode.decode(data, params, budget=budget)
+            elif filter_name in (FT.FLATE_DECODE, FTA.FL):
+                _deprecate_inline_image_filters(filter_name=filter_name, old_name=FTA.FL, new_name=FT.FLATE_DECODE)
+                decoded = FlateDecode.decode(data, params, budget=budget)
+            elif filter_name in (FT.RUN_LENGTH_DECODE, FTA.RL):
+                _deprecate_inline_image_filters(filter_name=filter_name, old_name=FTA.RL, new_name=FT.RUN_LENGTH_DECODE)
+                decoded = RunLengthDecode.decode(data, budget=budget)
+            elif filter_name in (FT.CCITT_FAX_DECODE, FTA.CCF):
+                _deprecate_inline_image_filters(filter_name=filter_name, old_name=FTA.CCF, new_name=FT.CCITT_FAX_DECODE)
+                height = stream.get(ImageAttributes.HEIGHT, 0)
+                decoded = CCITTFaxDecode.decode(data, params, height, budget=budget)
+            elif filter_name in (FT.DCT_DECODE, FTA.DCT):
+                _deprecate_inline_image_filters(filter_name=filter_name, old_name=FTA.DCT, new_name=FT.DCT_DECODE)
+                decoded = DCTDecode.decode(data, budget=budget)
+            elif filter_name == FT.JPX_DECODE:
+                decoded = JPXDecode.decode(data, budget=budget)
+            elif filter_name == FT.BROTLI_DECODE:
+                decoded = BrotliDecode.decode(data, budget=budget)
+            elif filter_name == FT.JBIG2_DECODE:
+                decoded = JBIG2Decode.decode(data, params, budget=budget)
+            elif filter_name == "/Crypt":
+                if "/Name" in params or "/Type" in params:
+                    raise NotImplementedError(
+                        "/Crypt filter with /Name or /Type not supported yet"
+                    )
+                decoded = data
+            else:
+                raise NotImplementedError(f"Unsupported filter {filter_name}")
 
-        _check_decoding_work(amount=len(data))
+        # Filters which wrap timed codecs (Flate, LZW) report their own
+        # elapsed time; the remaining steps are effectively instantaneous
+        # byte transformations bounded by the other budgets.
+        output_length = len(decoded)
+        budget.check_actual_ratio(str(filter_name), input_length, output_length)
+        # Charge the produced output against the remaining shared budget. The
+        # decoders already bounded their allocations, so this never materializes
+        # data that exceeded the budget first.
+        budget.charge_output(output_length)
+        _check_decoding_work(amount=output_length)
+        data = decoded
 
     return data
