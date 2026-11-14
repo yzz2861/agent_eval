@@ -1902,6 +1902,161 @@ MMA_vector_ko_cek = \
     '"tag":"Mz-VPPyU4RlcuYv1IwIvzw"}'
 
 
+class TestJWEHeaderHardening(unittest.TestCase):
+    """Deterministic three-layer JWE header merge and binding policy."""
+
+    def setUp(self):
+        self.key = jwk.JWK.generate(kty='oct', size=128)
+        self.payload = b'header-hardening'
+
+    def test_cross_layer_duplicate_alg_rejected(self):
+        enc = jwe.JWE(plaintext=self.payload,
+                      protected={'alg': 'dir', 'enc': 'A128GCM'})
+        with self.assertRaises(jwe.DuplicateJWEHeader) as ctx:
+            enc.add_recipient(self.key, header={'alg': 'RSA-OAEP'})
+        self.assertEqual(ctx.exception.parameter, 'alg')
+
+    def test_same_value_duplicate_still_rejected(self):
+        enc = jwe.JWE(plaintext=self.payload,
+                      protected={'alg': 'A128KW', 'enc': 'A128GCM'})
+        with self.assertRaises(jwe.DuplicateJWEHeader):
+            enc.add_recipient(self.key, header={'alg': 'A128KW'})
+
+    def test_kid_conflict_across_layers_rejected(self):
+        enc = jwe.JWE(plaintext=self.payload,
+                      protected={'alg': 'A128KW', 'enc': 'A128GCM',
+                                 'kid': 'first'})
+        with self.assertRaises(jwe.DuplicateJWEHeader) as ctx:
+            enc.add_recipient(self.key, header={'kid': 'second'})
+        self.assertEqual(ctx.exception.parameter, 'kid')
+
+    def test_alg_in_shared_unprotected_is_accepted_but_not_duplicated(self):
+        # RFC 7516 general/flattened serialization allows 'alg' (and 'kid')
+        # in the shared unprotected header; determinism comes from the single
+        # disjoint merge, not from silently overriding the protected header.
+        enc = jwe.JWE(plaintext=self.payload,
+                      protected={'enc': 'A128GCM'},
+                      unprotected={'alg': 'A128KW'})
+        enc.add_recipient(self.key)
+        dec = jwe.JWE()
+        dec.deserialize(enc.serialize(), self.key)
+        self.assertEqual(dec.payload, self.payload)
+
+        # It must never override a conflicting protected value.
+        enc = jwe.JWE(plaintext=self.payload,
+                      protected={'alg': 'dir', 'enc': 'A128GCM'},
+                      unprotected={'alg': 'A128KW'})
+        with self.assertRaises(jwe.DuplicateJWEHeader):
+            enc.add_recipient(self.key)
+
+    def test_zip_in_unprotected_layer_is_unauthenticated(self):
+        enc = jwe.JWE(plaintext=self.payload,
+                      protected={'alg': 'A128KW', 'enc': 'A128GCM'})
+        with self.assertRaises(jwe.UnauthenticatedJWEHeader) as ctx:
+            enc.add_recipient(self.key, header={'zip': 'DEF'})
+        self.assertEqual(ctx.exception.parameter, 'zip')
+
+        with self.assertRaises(jwe.UnauthenticatedJWEHeader):
+            jwe.JWE(plaintext=self.payload,
+                    protected={'alg': 'A128KW', 'enc': 'A128GCM'},
+                    unprotected={'zip': 'DEF'},
+                    recipient=self.key)
+
+    def test_crit_only_accepted_in_protected(self):
+        enc = jwe.JWE(plaintext=self.payload,
+                      protected={'alg': 'A128KW', 'enc': 'A128GCM'})
+        with self.assertRaises(jwe.UnauthenticatedJWEHeader):
+            enc.add_recipient(self.key,
+                              header={'crit': ['kid'], 'kid': 'k'})
+
+        with self.assertRaises(jwe.UnauthenticatedJWEHeader):
+            jwe.JWE(plaintext=self.payload,
+                    protected={'alg': 'A128KW', 'enc': 'A128GCM'},
+                    unprotected={'crit': ['jku'],
+                                 'jku': 'https://example.com'},
+                    recipient=self.key)
+
+    def test_unknown_critical_header_rejected(self):
+        with self.assertRaises(jwe.InvalidJWEData):
+            jwe.JWE(plaintext=self.payload,
+                    protected={'alg': 'A128KW', 'enc': 'A128GCM',
+                               'crit': ['unknown_hdr'],
+                               'unknown_hdr': 'value'},
+                    recipient=self.key)
+
+    def test_algorithm_mismatch_classification(self):
+        enc = jwe.JWE(plaintext=self.payload, algs=['A256KW'])
+        with self.assertRaises(jwe.JWEAlgorithmMismatch):
+            enc.add_recipient(self.key,
+                              header={'alg': 'A128KW', 'enc': 'A128GCM'})
+
+        enc = jwe.JWE(plaintext=self.payload)
+        with self.assertRaises(jwe.JWEAlgorithmMismatch):
+            enc.add_recipient(self.key, header={'enc': 'A128GCM'})
+
+    def test_error_classes_remain_backwards_compatible(self):
+        self.assertTrue(issubclass(jwe.DuplicateJWEHeader,
+                                   jwe.InvalidJWEData))
+        self.assertTrue(issubclass(jwe.UnauthenticatedJWEHeader,
+                                   jwe.InvalidJWEData))
+        self.assertTrue(issubclass(jwe.JWEAlgorithmMismatch,
+                                   jwe.InvalidJWEData))
+        self.assertTrue(issubclass(jwe.DuplicateJWEHeader,
+                                   InvalidJWSEHeader))
+
+    def test_deserialized_duplicate_kid_hard_fails(self):
+        enc = jwe.JWE(plaintext=self.payload,
+                      protected={'alg': 'A128KW', 'enc': 'A128GCM'})
+        enc.add_recipient(self.key, header={'kid': 'recipient-kid'})
+        token = json_decode(enc.serialize())
+        token['protected'] = base64url_encode(json_encode(
+            {'alg': 'A128KW', 'enc': 'A128GCM', 'kid': 'protected-kid'}))
+
+        dec = jwe.JWE()
+        dec.deserialize(json_encode(token))
+        with self.assertRaises(jwe.DuplicateJWEHeader):
+            dec.decrypt(self.key)
+
+    def test_merged_kid_deterministically_selects_key(self):
+        keyset = jwk.JWKSet()
+        key_a = jwk.JWK.generate(kty='oct', alg='A128KW', kid='key-a')
+        key_b = jwk.JWK.generate(kty='oct', alg='A128KW', kid='key-b')
+        keyset.add(key_a)
+        keyset.add(key_b)
+
+        enc = jwe.JWE(plaintext=self.payload,
+                      protected={'enc': 'A128GCM'})
+        enc.add_recipient(key_b, header={'alg': 'A128KW', 'kid': 'key-b'})
+
+        dec = jwe.JWE()
+        dec.deserialize(enc.serialize(), keyset)
+        self.assertEqual(dec.payload, self.payload)
+
+    def test_compact_and_general_json_remain_compatible(self):
+        enc = jwe.JWE(plaintext=self.payload,
+                      protected={'alg': 'A128KW', 'enc': 'A128GCM'})
+        enc.add_recipient(self.key)
+        compact = enc.serialize(compact=True)
+        dec = jwe.JWE()
+        dec.deserialize(compact, self.key)
+        self.assertEqual(dec.payload, self.payload)
+
+        keyset = jwk.JWKSet()
+        key_a = jwk.JWK.generate(kty='oct', alg='A128KW', kid='key-a')
+        key_b = jwk.JWK.generate(kty='oct', alg='A128KW', kid='key-b')
+        keyset.add(key_a)
+        keyset.add(key_b)
+        general = jwe.JWE(plaintext=self.payload,
+                          protected={'enc': 'A128GCM'}, flattened=False)
+        general.add_recipient(key_a,
+                              header={'alg': 'A128KW', 'kid': 'key-a'})
+        general.add_recipient(key_b,
+                              header={'alg': 'A128KW', 'kid': 'key-b'})
+        dec = jwe.JWE()
+        dec.deserialize(general.serialize(), keyset)
+        self.assertEqual(dec.payload, self.payload)
+
+
 class TestMMA(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

@@ -3,9 +3,12 @@
 import zlib
 
 from jwcrypto import common
+from jwcrypto.common import DuplicateHeaderParameter
+from jwcrypto.common import HeaderAlgorithmMismatch
 from jwcrypto.common import InvalidJWSEHeader
 from jwcrypto.common import JWKeyNotFound
 from jwcrypto.common import JWSEHeaderParameter, JWSEHeaderRegistry
+from jwcrypto.common import UnauthenticatedHeaderParameter
 from jwcrypto.common import base64url_decode, base64url_encode
 from jwcrypto.common import check_crit, merge_headers, validate_headers
 from jwcrypto.common import json_decode, json_encode
@@ -60,6 +63,62 @@ InvalidJWEData = common.InvalidJWEData
 InvalidJWEKeyLength = common.InvalidJWEKeyLength
 InvalidJWEKeyType = common.InvalidJWEKeyType
 InvalidJWEOperation = common.InvalidJWEOperation
+
+
+# The protected header is authenticated as AAD and the per-recipient header
+# is authenticated by the recipient's key wrapping operation. The shared
+# unprotected header may also carry 'alg'/'enc'/'kid' (RFC 7516 general and
+# flattened serialization, e.g. JOSE cookbook 5.11/5.12). The registry's
+# 'mustprotect' parameters ('zip' and 'crit') are rejected by merge_headers
+# in every unprotected layer, and any parameter repeated across layers is a
+# hard error, so the merged result always binds each parameter exactly once.
+
+
+class DuplicateJWEHeader(common.InvalidJWEData, DuplicateHeaderParameter):
+    """A JWE header parameter is repeated across header layers."""
+
+    def __init__(self, parameter):
+        JWException = common.JWException
+        JWException.__init__(
+            self, 'Duplicate header parameter: "%s"' % parameter)
+        self.parameter = parameter
+
+
+class UnauthenticatedJWEHeader(common.InvalidJWEData,
+                               UnauthenticatedHeaderParameter):
+    """A trusted JWE parameter appears only in an unauthenticated layer."""
+
+    def __init__(self, parameter, layer=None):
+        msg = 'Unauthenticated header parameter: "%s"' % parameter
+        if layer is not None:
+            msg += ' in %s header' % layer
+        common.JWException.__init__(self, msg)
+        self.parameter = parameter
+        self.layer = layer
+
+
+class JWEAlgorithmMismatch(common.InvalidJWEData, HeaderAlgorithmMismatch):
+    """Conflicting or disallowed JWE algorithm information."""
+
+    def __init__(self, message):
+        common.JWException.__init__(self, message)
+
+
+def _raise_jwe_header_error(exc):
+    """Re-raise header validation errors with a JWE-specific classification.
+
+    The resulting exceptions stay backwards compatible (they are all
+    :class:`InvalidJWEData` and :class:`InvalidJWSEHeader` instances) while
+    exposing the precise failure category to callers.
+    """
+    if isinstance(exc, DuplicateHeaderParameter):
+        raise DuplicateJWEHeader(exc.parameter) from exc
+    if isinstance(exc, UnauthenticatedHeaderParameter):
+        raise UnauthenticatedJWEHeader(exc.parameter,
+                                       getattr(exc, 'layer', None)) from exc
+    if isinstance(exc, HeaderAlgorithmMismatch):
+        raise JWEAlgorithmMismatch(str(exc)) from exc
+    raise common.InvalidJWEData(str(exc)) from exc
 
 
 class JWE:
@@ -122,14 +181,22 @@ class JWE:
     def _jwa_keymgmt(self, name):
         allowed = self._allowed_algs or default_allowed_algs
         if name not in allowed:
-            raise InvalidJWEOperation('Algorithm not allowed')
-        return JWA.keymgmt_alg(name)
+            raise JWEAlgorithmMismatch(
+                'Key management algorithm not allowed: %r' % name)
+        try:
+            return JWA.keymgmt_alg(name)
+        except common.InvalidJWAAlgorithm as e:
+            raise JWEAlgorithmMismatch(str(e)) from e
 
     def _jwa_enc(self, name):
         allowed = self._allowed_algs or default_allowed_algs
         if name not in allowed:
-            raise InvalidJWEOperation('Algorithm not allowed')
-        return JWA.encryption_alg(name)
+            raise JWEAlgorithmMismatch(
+                'Content encryption algorithm not allowed: %r' % name)
+        try:
+            return JWA.encryption_alg(name)
+        except common.InvalidJWAAlgorithm as e:
+            raise JWEAlgorithmMismatch(str(e)) from e
 
     @property
     def allowed_algs(self):
@@ -154,7 +221,7 @@ class JWE:
         try:
             return merge_headers(h1, h2)
         except InvalidJWSEHeader as e:
-            raise InvalidJWEData(str(e)) from e
+            _raise_jwe_header_error(e)
 
     def _get_jose_header(self, header=None):
         ph = json_decode(self.objects.get('protected', '{}'))
@@ -166,20 +233,36 @@ class JWE:
             else:
                 rh = json_decode(header)
         try:
+            # Merge the three layers into a single authoritative result.
+            # merge_headers rejects any parameter repeated across layers,
+            # even when the repeated values are identical, and rejects
+            # 'mustprotect' parameters (zip, crit) in unprotected layers.
             jh = merge_headers(ph, uh, rh, registry=self.header_registry)
             check_crit(jh, ph, registry=self.header_registry)
             return jh
         except InvalidJWSEHeader as e:
-            raise InvalidJWEData(str(e)) from e
+            _raise_jwe_header_error(e)
+
+    def _validate_jose_header(self, jh):
+        """Run registry check callbacks against an already merged header.
+
+        Kept separate from :meth:`_get_jose_header` because check callbacks
+        may inspect the JWE object (e.g. via :attr:`jose_header`), so running
+        them while merging would recurse back into this method.
+        """
+        try:
+            validate_headers(jh, registry=self.header_registry, target=self)
+        except InvalidJWSEHeader as e:
+            _raise_jwe_header_error(e)
 
     def _get_alg_enc_from_headers(self, jh):
         algname = jh.get('alg', None)
         if algname is None:
-            raise InvalidJWEData('Missing "alg" from headers')
+            raise JWEAlgorithmMismatch('Missing "alg" from headers')
         alg = self._jwa_keymgmt(algname)
         encname = jh.get('enc', None)
         if encname is None:
-            raise InvalidJWEData('Missing "enc" from headers')
+            raise JWEAlgorithmMismatch('Missing "enc" from headers')
         enc = self._jwa_enc(encname)
         return alg, enc
 
@@ -223,6 +306,7 @@ class JWE:
             header = json_encode(header)
 
         jh = self._get_jose_header(header)
+        self._validate_jose_header(jh)
         alg, enc = self._get_alg_enc_from_headers(jh)
 
         rec = {}
@@ -359,13 +443,10 @@ class JWE:
     # FIXME: allow to specify which algorithms to accept as valid
     def _decrypt(self, key, ppe, max_plaintext=default_max_plaintext_size):
 
+        # Single authoritative merge: alg/enc selection, 'kid' key lookup and
+        # AAD handling below all consume this same validated result.
         jh = self._get_jose_header(ppe.get('header', None))
-
-        # TODO: allow caller to specify list of headers it understands
-        try:
-            validate_headers(jh, registry=self.header_registry, target=self)
-        except InvalidJWSEHeader as e:
-            raise InvalidJWEData(str(e)) from e
+        self._validate_jose_header(jh)
 
         alg = self._jwa_keymgmt(jh.get('alg', None))
         enc = self._jwa_enc(jh.get('enc', None))
@@ -453,10 +534,20 @@ class JWE:
         missingkey = False
 
         if 'recipients' in self.objects:
+            # Validate the recipient count before any per-recipient header
+            # processing so structural limits are enforced independently of
+            # header policy outcomes.
             if len(self.objects['recipients']) > default_max_recipients:
                 raise InvalidJWEData(
                     'Too many recipients (%d)' %
                     len(self.objects['recipients']))
+            # Deterministic, key-independent header validation happens first
+            # for every recipient. Duplicate parameters, unauthenticated
+            # parameters and bad 'crit' are structural errors and must abort
+            # immediately instead of being retried as key failures.
+            for rec in self.objects['recipients']:
+                jh = self._get_jose_header(rec.get('header', None))
+                self._validate_jose_header(jh)
             for rec in self.objects['recipients']:
                 try:
                     self._decrypt(key, rec, max_plaintext=max_plaintext)
@@ -464,14 +555,21 @@ class JWE:
                     if self.plaintext is not None:
                         break
                 except Exception as e:  # pylint: disable=broad-except
-                    if isinstance(e, JWKeyNotFound):
+                    if isinstance(e, InvalidJWSEHeader):
+                        raise
+                    elif isinstance(e, JWKeyNotFound):
                         missingkey = True
                     self.decryptlog.append('Failed: [%s]' % repr(e))
         else:
+            # Same hard-fail semantics for the flattened/single form.
+            jh = self._get_jose_header(self.objects.get('header', None))
+            self._validate_jose_header(jh)
             try:
                 self._decrypt(key, self.objects, max_plaintext=max_plaintext)
             except Exception as e:  # pylint: disable=broad-except
-                if isinstance(e, JWKeyNotFound):
+                if isinstance(e, InvalidJWSEHeader):
+                    raise
+                elif isinstance(e, JWKeyNotFound):
                     missingkey = True
                 self.decryptlog.append('Failed: [%s]' % repr(e))
 

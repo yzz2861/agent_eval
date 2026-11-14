@@ -98,6 +98,43 @@ class InvalidJWSEHeader(JWException):
         super(InvalidJWSEHeader, self).__init__(msg)
 
 
+class DuplicateHeaderParameter(InvalidJWSEHeader):
+    """The same header parameter appears in more than one header layer.
+
+    RFC 7516 section 7.2.2 requires that the Header Parameter names used in
+    the protected, shared unprotected and per-recipient unprotected headers
+    be disjoint; even identical values must be rejected.
+    """
+
+    def __init__(self, parameter):
+        self.parameter = parameter
+        super(DuplicateHeaderParameter, self).__init__(
+            'Duplicate header parameter: "%s"' % parameter)
+
+
+class UnauthenticatedHeaderParameter(InvalidJWSEHeader):
+    """A security-sensitive parameter is only present in an unauthenticated
+    header layer where it cannot be trusted.
+    """
+
+    def __init__(self, parameter, layer=None):
+        self.parameter = parameter
+        self.layer = layer
+        msg = 'Unauthenticated header parameter: "%s"' % parameter
+        if layer is not None:
+            msg += ' in %s header' % layer
+        super(UnauthenticatedHeaderParameter, self).__init__(msg)
+
+
+class HeaderAlgorithmMismatch(InvalidJWSEHeader):
+    """Conflicting or disallowed algorithm information found while merging
+    the JWE/JWS header layers.
+    """
+
+    def __init__(self, message):
+        super(HeaderAlgorithmMismatch, self).__init__(message)
+
+
 class InvalidJWEOperation(JWException):
     """Invalid JWS Object.
 
@@ -245,20 +282,23 @@ def merge_headers(protected, *unprotected, registry=None):
     :param unprotected: One or more dicts representing unprotected headers.
     :param registry: Optional JWSEHeaderRegistry to enforce 'mustprotect'.
 
-    :raises InvalidJWSEHeader: If duplicate keys are found or an unprotected
-        header contains a parameter that must be protected.
+    :raises DuplicateHeaderParameter: If the same parameter name appears in
+        more than one header layer, even when the values are identical.
+    :raises UnauthenticatedHeaderParameter: If an unprotected header contains
+        a parameter that must be protected.
     :return: A dictionary with the merged headers.
     """
     merged = dict(protected) if protected is not None else {}
 
-    for uh in unprotected:
+    for layer, uh in enumerate(unprotected):
         if uh is None:
             continue
         for h in list(uh.keys()):
             if registry and h in registry and registry[h].mustprotect:
-                raise InvalidJWSEHeader('"%s" must be protected' % h)
+                raise UnauthenticatedHeaderParameter(
+                    h, layer='unprotected[%d]' % layer)
             if h in merged:
-                raise InvalidJWSEHeader('Duplicate header: "%s"' % h)
+                raise DuplicateHeaderParameter(h)
             merged[h] = uh[h]
 
     return merged
