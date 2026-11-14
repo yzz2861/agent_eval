@@ -28,6 +28,38 @@ functions.
 .. autofunction:: parse_one_component_value
 
 
+Stylesheet imports
+------------------
+
+.. module:: tinycss2.loader
+.. autofunction:: load_stylesheet
+.. autoclass:: ImportLoader
+   :members:
+.. autoclass:: ImportGraph
+   :members:
+.. autoclass:: ImportNode
+   :members:
+.. autoclass:: ImportEdge
+   :members:
+.. autoclass:: ImportCondition
+   :members:
+.. autoexception:: ImportLoadError
+   :show-inheritance:
+.. autoexception:: ImportParseError
+   :show-inheritance:
+.. autoexception:: UnsupportedConditionError
+   :show-inheritance:
+.. autoexception:: ImportPolicyError
+   :show-inheritance:
+.. autoexception:: ImportCycleError
+   :show-inheritance:
+.. autoexception:: ImportSizeError
+   :show-inheritance:
+.. autoexception:: ImportDepthError
+   :show-inheritance:
+.. autofunction:: default_url_policy
+
+
 Serialization
 -------------
 

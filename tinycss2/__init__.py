@@ -9,6 +9,7 @@ corresponding to these objects.
 """
 
 from .bytes import parse_stylesheet_bytes  # noqa
+from .loader import ImportLoader, load_stylesheet  # noqa
 from .parser import (  # noqa
     parse_blocks_contents, parse_declaration_list, parse_one_component_value,
     parse_one_declaration, parse_one_rule, parse_rule_list, parse_stylesheet)
