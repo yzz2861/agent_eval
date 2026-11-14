@@ -28,6 +28,32 @@ functions.
 .. autofunction:: parse_one_component_value
 
 
+Canonical declarations
+----------------------
+
+.. module:: tinycss2.canonical
+
+For use cases such as theme systems, where declarations from different
+sources need to be compared or audited, tinycss2 provides a canonical view
+of declaration lists: property names are normalized (custom properties keep
+their case), values are serialized from their tokens, ``!important`` is
+reduced to a single flag, duplicates are kept in order, and the final
+cascaded declaration of each property is computed.  Problems such as
+invalid ``!important`` markers, empty property names and bad strings are
+classified, and policies can flag unwanted declarations without changing
+the semantics of valid CSS.
+
+.. autofunction:: canonicalize_declarations
+.. autofunction:: canonical_name
+.. autoclass:: CanonicalDeclarationList
+    :members:
+.. autoclass:: CanonicalDeclaration
+    :members:
+.. autoclass:: DeclarationIssue
+.. autoclass:: DeclarationPolicy
+    :members:
+
+
 Serialization
 -------------
 

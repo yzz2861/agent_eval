@@ -7,6 +7,7 @@ import pytest
 from webencodings import Encoding, lookup
 
 from tinycss2 import (  # isort:skip
+    DeclarationPolicy, canonical_name, canonicalize_declarations,
     parse_blocks_contents, parse_component_value_list, parse_declaration_list,
     parse_one_component_value, parse_one_declaration, parse_one_rule,
     parse_rule_list, parse_stylesheet, parse_stylesheet_bytes, serialize)
@@ -725,3 +726,151 @@ def test_escape_in_function_name():
     function, = parse_component_value_list('\\dddf()')
     assert function.type == 'function'
     assert function.name == '\udddf'
+
+
+def test_canonical_declaration_important_variants():
+    # !important, ! important and !IMPORTANT are the same declaration.
+    variants = [
+        'color:red!important',
+        'color:red ! important',
+        'color:red  !  IMPORTANT  ',
+        'color:red !ImPoRtAnT',
+    ]
+    identities = []
+    for source in variants:
+        declarations = canonicalize_declarations(source)
+        declaration, = declarations.declarations
+        assert declaration.important
+        assert declaration.valid
+        assert declaration.canonical == 'color:red!important'
+        identities.append(declaration.identity)
+    assert len(set(identities)) == 1
+    normal, = canonicalize_declarations('color:red').declarations
+    assert not normal.important
+    assert normal.identity != identities[0]
+
+
+def test_canonical_declaration_name_case():
+    declarations = canonicalize_declarations('COLOR:red; Color:blue')
+    assert [d.canonical_name for d in declarations.declarations] == [
+        'color', 'color']
+    assert canonical_name('BACKGROUND-color') == 'background-color'
+    # Escaped names are unescaped before normalization.
+    escaped, = canonicalize_declarations('c\\6flor: red').declarations
+    assert escaped.canonical_name == 'color'
+
+
+def test_canonical_declaration_custom_properties():
+    # Custom properties are case sensitive: --X and --x are different.
+    declarations = canonicalize_declarations('--X: 1; --x: 2; --X: 3')
+    assert [d.canonical_name for d in declarations.declarations] == [
+        '--X', '--x', '--X']
+    final = declarations.final()
+    assert sorted(final) == ['--X', '--x']
+    assert final['--X'].value == '3'
+    assert final['--x'].value == '2'
+    assert canonical_name('--Admin-Color') == '--Admin-Color'
+
+
+def test_canonical_declaration_duplicates_and_final_cascade():
+    declarations = canonicalize_declarations(
+        'color: red; COLOR: blue ! important; color: green; color: lime')
+    # Duplicates are kept in source order.
+    assert [d.value for d in declarations.declarations] == [
+        'red', 'blue', 'green', 'lime']
+    # !important wins over later normal declarations.
+    final = declarations.final()
+    assert final['color'].canonical == 'color:blue!important'
+    assert declarations.serialize() == 'color:blue!important'
+    # Without !important, the last declaration wins.
+    declarations = canonicalize_declarations('color: red; color: green')
+    assert declarations.final()['color'].value == 'green'
+
+
+def test_canonical_declaration_invalid_important():
+    for source in (
+        'color: red !',
+        'color: red !foo',
+        'color: red ! important junk',
+        'color: red !important !important',
+    ):
+        declarations = canonicalize_declarations(source)
+        declaration, = declarations.declarations
+        kinds = [issue.kind for issue in declaration.issues]
+        assert 'invalid-important' in kinds, source
+        assert not declaration.valid
+        # Invalid declarations do not participate in the cascade.
+        assert declarations.final() == {}
+
+
+def test_canonical_declaration_empty_name():
+    declarations = canonicalize_declarations(': red; color: blue')
+    issue, = declarations.issues
+    assert issue.kind == 'empty-name'
+    assert issue.source_line == 1
+    assert issue.source_column == 1
+    # The valid declaration is unaffected.
+    declaration, = declarations.declarations
+    assert declaration.canonical == 'color:blue'
+
+
+def test_canonical_declaration_bad_string():
+    declarations = canonicalize_declarations('content: "abc')
+    declaration, = declarations.declarations
+    issue, = declaration.issues
+    assert issue.kind == 'bad-string'
+    assert not declaration.valid
+    assert declarations.final() == {}
+    # Bad strings are also found inside blocks and functions.
+    declarations = canonicalize_declarations('background: url("abc\n)')
+    declaration, = declarations.declarations
+    assert any(
+        issue.kind in ('bad-string', 'bad-url')
+        for issue in declaration.issues)
+
+
+def test_canonical_declaration_source_range():
+    declarations = canonicalize_declarations(
+        'color: red !important;\n  width: 1px')
+    first, second = declarations.declarations
+    assert (first.source_line, first.source_column) == (1, 1)
+    assert (first.end_line, first.end_column) == (1, 12)
+    assert (second.source_line, second.source_column) == (2, 3)
+    assert (second.end_line, second.end_column) == (2, 13)
+
+
+def test_canonical_declaration_policy():
+    policy = DeclarationPolicy(
+        allowed_properties={'color', '--brand-*'},
+        allow_important=False,
+        locked_variable_prefixes=('--admin-',))
+    declarations = canonicalize_declarations(
+        'color: red !important; width: 1px; --admin-color: blue; --x: 1')
+    kinds = [issue.kind for issue in policy.check(declarations)]
+    assert kinds == [
+        'forbidden-important',  # color: red !important
+        'forbidden-property',  # width is not in the allow-list
+        'forbidden-property',  # --admin-color is not in the allow-list
+        'locked-variable',  # --admin- prefix is locked
+        'forbidden-property',  # --x is not in the allow-list
+    ]
+    # The policy only reports: declarations are left untouched.
+    assert declarations.final()['color'].canonical == 'color:red!important'
+    # A fully compliant list passes all checks.
+    declarations = canonicalize_declarations('color: red')
+    assert policy.check(declarations) == []
+
+
+def test_canonical_declaration_parse_compatibility():
+    # canonicalize_declarations accepts the same input as
+    # parse_declaration_list and keeps the original declarations.
+    source = 'color: red !important; --X: 1'
+    parsed = parse_declaration_list(source, skip_whitespace=True)
+    canonical = canonicalize_declarations(source)
+    assert [d.declaration.serialize() for d in canonical.declarations] == [
+        node.serialize() for node in parsed if node.type == 'declaration']
+    assert serialize(parsed) == 'color: red !important;--X: 1;'
+    # Token iterables are accepted too.
+    tokens = parse_component_value_list(source)
+    assert canonicalize_declarations(tokens).serialize() == (
+        'color:red!important;--X:1')
