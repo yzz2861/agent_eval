@@ -1,0 +1,42 @@
+version: 2
+updates:
+
+- package-ecosystem: "pip"
+  directory: "/"
+  schedule:
+    interval: "weekly"
+  cooldown:
+    default-days: 7
+  open-pull-requests-limit: 10
+  groups:
+    build-and-release-dependencies:
+      # Python dependencies known to be critical to our build/release security
+      patterns:
+        - "build"
+        - "hatchling"
+    test-and-lint-dependencies:
+      # Python dependencies that are only pinned to ensure test reproducibility
+      patterns:
+        - "coverage"
+        - "mypy"
+        - "ruff"
+        - "tox"
+        - "zizmor"
+    dependencies:
+      # Python (developer) runtime dependencies. Also any new dependencies not
+      # caught by earlier groups
+      patterns:
+        - "*"
+
+
+- package-ecosystem: "github-actions"
+  directory: "/"
+  schedule:
+    interval: "weekly"
+  cooldown:
+    default-days: 7
+  open-pull-requests-limit: 10
+  groups:
+    action-dependencies:
+      patterns:
+        - "*"
