@@ -5,7 +5,8 @@ import base64
 import struct
 
 from ntlm_auth.constants import NegotiateFlags
-from ntlm_auth.exceptions import NoAuthContextError
+from ntlm_auth.exceptions import MicMismatchError, MicNotNegotiatedError, \
+    NoAuthContextError, NtlmMessageError
 from ntlm_auth.messages import AuthenticateMessage, ChallengeMessage, \
     NegotiateMessage
 from ntlm_auth.session_security import SessionSecurity
@@ -14,7 +15,7 @@ from ntlm_auth.session_security import SessionSecurity
 class NtlmContext(object):
 
     def __init__(self, username, password, domain=None, workstation=None,
-                 cbt_data=None, ntlm_compatibility=3):
+                 cbt_data=None, ntlm_compatibility=3, strict_mic=False):
         r"""
         Initialises a NTLM context to use when authenticating using the NTLM
         protocol.
@@ -40,6 +41,11 @@ class NtlmContext(object):
                 2 : NTLMv1 and NTLMv1 with Extended Session Security
                 3-5 : NTLMv2 Only
             Note: Values 3 to 5 are no different from a client perspective
+        :param strict_mic: (Default False) When True, an exchange that
+            negotiates a MIC is rejected if the AUTHENTICATE_MESSAGE has no
+            MIC or its MIC cannot be verified against the raw wire bytes.
+            Existing NTLMv2 exchanges without a negotiated MIC keep working
+            regardless of this value.
         """
         self.username = username
         self.password = password
@@ -48,6 +54,7 @@ class NtlmContext(object):
         self.cbt_data = cbt_data
         self._server_certificate_hash = None  # deprecated for backwards compat
         self.ntlm_compatibility = ntlm_compatibility
+        self.strict_mic = strict_mic
         self.complete = False
 
         # Setting up our flags so the challenge message returns the target info
@@ -69,6 +76,13 @@ class NtlmContext(object):
         self._challenge_message = None
         self._authenticate_message = None
         self._session_security = None
+
+        # Exact wire bytes of each message. MIC verification must bind these
+        # raw payloads; re-serialising the parsed objects would hide any
+        # tampering that the parser silently normalises away.
+        self._negotiate_data = None
+        self._challenge_data = None
+        self._authenticate_data = None
 
     @property
     def mic_present(self):
@@ -92,8 +106,10 @@ class NtlmContext(object):
             self._negotiate_message = NegotiateMessage(self.negotiate_flags,
                                                        self.domain,
                                                        self.workstation)
-            return self._negotiate_message.get_data()
+            self._negotiate_data = self._negotiate_message.get_data()
+            return self._negotiate_data
         else:
+            self._challenge_data = input_token
             self._challenge_message = ChallengeMessage(input_token)
             self._authenticate_message = AuthenticateMessage(
                 self.username, self.password, self.domain, self.workstation,
@@ -103,6 +119,7 @@ class NtlmContext(object):
             )
             self._authenticate_message.add_mic(self._negotiate_message,
                                                self._challenge_message)
+            self._authenticate_data = self._authenticate_message.get_data()
 
             flag_bytes = self._authenticate_message.negotiate_flags
             flags = struct.unpack("<I", flag_bytes)[0]
@@ -113,7 +130,78 @@ class NtlmContext(object):
                 )
 
             self.complete = True
-            return self._authenticate_message.get_data()
+            return self._authenticate_data
+
+    def verify_authenticate_mic(self, authenticate_data=None,
+                                negotiate_data=None, challenge_data=None,
+                                strict=None):
+        r"""Verify an AUTHENTICATE_MESSAGE MIC against the raw exchange.
+
+        By default the raw NEGOTIATE_MESSAGE and CHALLENGE_MESSAGE bytes
+        stored by this context are used; callers acting on messages received
+        from the wire can pass all three raw payloads explicitly. The
+        AUTHENTICATE_MESSAGE is parsed from its raw bytes and is never
+        re-serialised for the computation.
+
+        :param authenticate_data: raw AUTHENTICATE_MESSAGE bytes; defaults to
+            the bytes produced by this context
+        :param negotiate_data: raw NEGOTIATE_MESSAGE bytes; defaults to the
+            stored value
+        :param challenge_data: raw CHALLENGE_MESSAGE bytes; defaults to the
+            stored value
+        :param strict: override ``self.strict_mic`` for this call
+        :return: True when a MIC was negotiated and verified, False when a
+            MIC was not required and the message contains none
+        :raises MicNotNegotiatedError: strict verification was requested but
+            the exchange never negotiated a MIC
+        :raises MicMissingError: strict mode, MIC negotiated but absent
+        :raises MicMismatchError: MIC present but invalid, truncated, or the
+            required raw messages are unavailable
+        """
+        if strict is None:
+            strict = self.strict_mic
+
+        authenticate_data = authenticate_data \
+            if authenticate_data is not None else self._authenticate_data
+        negotiate_data = negotiate_data \
+            if negotiate_data is not None else self._negotiate_data
+        challenge_data = challenge_data \
+            if challenge_data is not None else self._challenge_data
+
+        if authenticate_data is None:
+            raise MicMismatchError(
+                "Cannot verify the NTLM MIC without a raw "
+                "AUTHENTICATE_MESSAGE")
+        if negotiate_data is None or challenge_data is None:
+            raise MicMismatchError(
+                "Cannot verify the NTLM MIC without the raw "
+                "NEGOTIATE_MESSAGE and CHALLENGE_MESSAGE bytes")
+
+        message = AuthenticateMessage.from_data(authenticate_data)
+        if not message.mic_negotiated:
+            if strict:
+                raise MicNotNegotiatedError(
+                    "Cannot verify the NTLM MIC as the exchange did not "
+                    "negotiate one (MsvAvFlags.MIC_PROVIDED was not set)")
+            return False
+
+        return message.verify_mic(
+            negotiate_data, challenge_data, authenticate_data,
+            self._get_verification_session_key(message, authenticate_data),
+            strict=strict)
+
+    def _get_verification_session_key(self, message, authenticate_data):
+        # The locally built context holds the exported session key for the
+        # exchange it generated. Peers verifying an inbound message derive
+        # the same key from the negotiated secrets and use the messages-level
+        # API directly; no password/key material is ever put in exceptions.
+        if self._authenticate_message is not None and \
+                self._authenticate_data is not None:
+            return self._authenticate_message.exported_session_key
+
+        raise NtlmMessageError(
+            "The exported session key is required to verify the NTLM MIC "
+            "but was not available on the context")
 
     def sign(self, data):
         return self._session_security.get_signature(data)
@@ -162,9 +250,10 @@ class NtlmContext(object):
 # versions
 class Ntlm(object):
 
-    def __init__(self, ntlm_compatibility=3):
+    def __init__(self, ntlm_compatibility=3, strict_mic=False):
         self._context = NtlmContext(None, None,
-                                    ntlm_compatibility=ntlm_compatibility)
+                                    ntlm_compatibility=ntlm_compatibility,
+                                    strict_mic=strict_mic)
         self._challenge_token = None
 
     @property
@@ -214,6 +303,23 @@ class Ntlm(object):
     @session_security.setter
     def session_security(self, value):
         self._context._session_security = value
+
+    @property
+    def strict_mic(self):
+        return self._context.strict_mic
+
+    @strict_mic.setter
+    def strict_mic(self, value):
+        self._context.strict_mic = value
+
+    def verify_authenticate_mic(self, authenticate_data=None,
+                                negotiate_data=None, challenge_data=None,
+                                strict=None):
+        return self._context.verify_authenticate_mic(
+            authenticate_data=authenticate_data,
+            negotiate_data=negotiate_data,
+            challenge_data=challenge_data,
+            strict=strict)
 
     def create_negotiate_message(self, domain_name=None, workstation=None):
         self._context.domain = domain_name

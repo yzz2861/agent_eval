@@ -9,6 +9,8 @@ import struct
 from ntlm_auth.compute_response import ComputeResponse
 from ntlm_auth.constants import AvId, AvFlags, MessageTypes, NegotiateFlags, \
     NTLM_SIGNATURE
+from ntlm_auth.exceptions import MicMismatchError, MicMissingError, \
+    MicNotNegotiatedError
 from ntlm_auth.rc4 import ARC4
 
 try:
@@ -453,21 +455,291 @@ class AuthenticateMessage(object):
 
         return msg3
 
+    @property
+    def mic_negotiated(self):
+        """Whether the exchange advertised a MIC via MsvAvFlags.MIC_PROVIDED."""
+        if self.target_info is None:
+            return False
+
+        av_flags = self.target_info[AvId.MSV_AV_FLAGS]
+        return av_flags == struct.pack("<L", AvFlags.MIC_PROVIDED)
+
     def add_mic(self, negotiate_message, challenge_message):
-        if self.target_info is not None:
-            av_flags = self.target_info[AvId.MSV_AV_FLAGS]
+        if not self.mic_negotiated:
+            return
 
-            if av_flags is not None and av_flags == \
-                    struct.pack("<L", AvFlags.MIC_PROVIDED):
-                self.mic = struct.pack("<IIII", 0, 0, 0, 0)
-                negotiate_data = negotiate_message.get_data()
-                challenge_data = challenge_message.get_data()
-                authenticate_data = self.get_data()
+        negotiate_data = _get_raw_message_data(negotiate_message)
+        challenge_data = _get_raw_message_data(challenge_message)
 
-                hmac_data = negotiate_data + challenge_data + authenticate_data
-                mic = hmac.new(self.exported_session_key, hmac_data,
-                               digestmod=hashlib.md5).digest()
-                self.mic = mic
+        # Build the AUTHENTICATE_MESSAGE with the 16-byte MIC field zeroed
+        # out; the final MIC value replaces these bytes after the HMAC has
+        # been computed over the exact bytes that travel on the wire.
+        self.mic = b'\x00' * 16
+        authenticate_data = self.get_data()
+        self.mic = compute_mic(negotiate_data, challenge_data,
+                               authenticate_data, self.exported_session_key)
+
+    def verify_mic(self, negotiate_data, challenge_data, authenticate_data,
+                   exported_session_key, strict=False):
+        """Verify the MIC of an AUTHENTICATE_MESSAGE against raw wire bytes.
+
+        All three messages must be supplied as the exact raw bytes that were
+        sent or received; the messages are never re-serialised.
+
+        :param negotiate_data: raw NEGOTIATE_MESSAGE bytes
+        :param challenge_data: raw CHALLENGE_MESSAGE bytes
+        :param exported_session_key: the session key negotiated for the
+            exchange, used as the HMAC key
+        :param strict: when True a negotiated-but-missing MIC is an error;
+            when False the method simply returns False for that case
+        :return: True when the MIC is present and valid
+        :raises MicNotNegotiatedError: the exchange did not negotiate a MIC
+        :raises MicMissingError: a MIC was negotiated but is absent (strict)
+        :raises MicMismatchError: the MIC is truncated, present but invalid,
+            or any of the raw messages are missing/unsuitable
+        """
+        if not self.mic_negotiated:
+            raise MicNotNegotiatedError(
+                "Cannot verify the NTLM MIC as the exchange did not "
+                "negotiate one (MsvAvFlags.MIC_PROVIDED was not set)")
+
+        if self.mic is None:
+            if strict:
+                raise MicMissingError(
+                    "A MIC was negotiated but the AUTHENTICATE_MESSAGE does "
+                    "not contain one")
+            return False
+
+        if len(self.mic) != 16:
+            raise MicMismatchError(
+                "The NTLM MIC field is truncated to %d bytes instead of 16"
+                % len(self.mic))
+
+        if negotiate_data is None or challenge_data is None or \
+                authenticate_data is None:
+            raise MicMismatchError(
+                "Cannot verify the NTLM MIC without the raw "
+                "NEGOTIATE_MESSAGE, CHALLENGE_MESSAGE and "
+                "AUTHENTICATE_MESSAGE bytes")
+
+        expected_mic = compute_mic(negotiate_data, challenge_data,
+                                   authenticate_data, exported_session_key)
+        if not hmac.compare_digest(expected_mic, self.mic):
+            raise MicMismatchError(
+                "The NTLM MIC does not match the value computed over the "
+                "raw NEGOTIATE_MESSAGE, CHALLENGE_MESSAGE and "
+                "AUTHENTICATE_MESSAGE")
+
+        return True
+
+    @classmethod
+    def from_data(cls, data):
+        """Parse a raw AUTHENTICATE_MESSAGE without re-serialising it.
+
+        The original bytes are retained on ``data`` so MIC verification is
+        always performed against the exact payload that was received. Only
+        the fields required for MIC handling are populated; this parser is
+        intentionally separate from the construction path used to build a
+        new message.
+        """
+        if not isinstance(data, bytes) or len(data) < cls.EXPECTED_BODY_LENGTH:
+            raise MicMismatchError(
+                "The AUTHENTICATE_MESSAGE is too short to contain a valid "
+                "header")
+
+        signature = data[0:8]
+        message_type = struct.unpack("<I", data[8:12])[0]
+        if signature != NTLM_SIGNATURE or \
+                message_type != MessageTypes.NTLM_AUTHENTICATE:
+            raise MicMismatchError(
+                "The data is not a valid NTLM AUTHENTICATE_MESSAGE")
+
+        lm_offset, lm_data = _read_security_buffer(data, 12)
+        nt_offset, nt_data = _read_security_buffer(data, 20)
+        domain_offset, _ = _read_security_buffer(data, 28)
+        user_offset, _ = _read_security_buffer(data, 36)
+        workstation_offset, _ = _read_security_buffer(data, 44)
+        key_offset, _ = _read_security_buffer(data, 52)
+        # The smallest payload offset reveals where the fixed header ends:
+        # 72 for a MIC-less message, 88 when a MIC field is present.
+        payload_offsets = [lm_offset, nt_offset, domain_offset, user_offset,
+                           workstation_offset, key_offset]
+        non_zero_offsets = [offset for offset in payload_offsets
+                            if offset > 0]
+        first_payload_offset = min(non_zero_offsets) if non_zero_offsets \
+            else cls.EXPECTED_BODY_LENGTH
+        negotiate_flags = struct.unpack("<I", data[60:64])[0]
+        version = data[64:72]
+
+        target_info = _extract_target_info(data, nt_data, negotiate_flags,
+                                           nt_offset)
+        mic_negotiated = target_info is not None and \
+            target_info[AvId.MSV_AV_FLAGS] == \
+            struct.pack("<L", AvFlags.MIC_PROVIDED)
+
+        if not mic_negotiated:
+            # The 16 bytes after the header are payload (or padding) in a
+            # MIC-less AUTHENTICATE_MESSAGE, never a MIC field.
+            mic = None
+        elif first_payload_offset >= cls.EXPECTED_BODY_LENGTH_WITH_MIC and \
+                len(data) >= cls.EXPECTED_BODY_LENGTH_WITH_MIC:
+            # The payload security buffers start after the 88-byte header,
+            # so bytes 72:88 are the MIC field.
+            mic = data[72:88]
+        elif first_payload_offset >= cls.EXPECTED_BODY_LENGTH_WITH_MIC and \
+                len(data) > cls.EXPECTED_BODY_LENGTH:
+            # The header was cut inside the MIC field; retain the fragment
+            # so verification reports a truncation mismatch.
+            mic = data[72:]
+        else:
+            # Payload starts before byte 88: no MIC field is present.
+            mic = None
+
+        message = cls.__new__(cls)
+        message.data = data
+        message.signature = signature
+        message.message_type = struct.pack(
+            '<L', MessageTypes.NTLM_AUTHENTICATE)
+        message.negotiate_flags = negotiate_flags
+        message.version = version
+        message.mic = mic
+        message.lm_challenge_response = lm_data
+        message.nt_challenge_response = nt_data
+        message.target_info = target_info
+        return message
+
+
+def _get_raw_message_data(message):
+    """Return the exact wire bytes of a message object or raw byte string."""
+    if message is None:
+        return None
+    if isinstance(message, bytes):
+        return message
+
+    # ChallengeMessage keeps the raw bytes in ``data`` while the other
+    # messages serialise through ``get_data``; only callers that already
+    # hold the original bytes are used for MIC verification.
+    data = getattr(message, 'data', None)
+    if data is not None:
+        return data
+    return message.get_data()
+
+
+def _read_security_buffer(data, field_offset):
+    """Parse an 8-byte NTLM security buffer and validate its boundaries."""
+    length = struct.unpack("<H", data[field_offset:field_offset + 2])[0]
+    max_length = struct.unpack(
+        "<H", data[field_offset + 2:field_offset + 4])[0]
+    offset = struct.unpack(
+        "<I", data[field_offset + 4:field_offset + 8])[0]
+
+    end = offset + length
+    if length > max_length or (length > 0 and end > len(data)):
+        raise MicMismatchError(
+            "The AUTHENTICATE_MESSAGE contains a security buffer that extends "
+            "past the end of the message")
+
+    return offset, data[offset:end]
+
+
+def _extract_target_info(data, nt_challenge_response, negotiate_flags,
+                         nt_buffer_offset):
+    """Extract the TargetInfo AV_PAIR list from an NTLMv2 response.
+
+    NTLMv1 responses have no NTLMv2_CLIENT_CHALLENGE structure, in which
+    case there is no MsvAvFlags value and a MIC was not negotiated.
+    """
+    if not negotiate_flags & NegotiateFlags.NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY:
+        return None
+
+    # The NtChallengeResponse buffer contains NtProofStr (16 bytes) followed
+    # by the NTLMv2_CLIENT_CHALLENGE. The bytes preceding its TargetInfo
+    # AV_PAIR list are the 28-byte challenge header (response types through
+    # Reserved3), i.e. 16 + 28 = 44 bytes into the whole NT response buffer.
+    fixed_prefix = 44
+    if len(nt_challenge_response) < fixed_prefix:
+        return None
+
+    target_info_start = nt_buffer_offset + fixed_prefix
+    target_info_end = nt_buffer_offset + len(nt_challenge_response)
+    # The NTLMv2 temp value ends with a 4-byte Reserved4 field after the
+    # terminating MsvAvEOL AV_PAIR; the scan stops at MsvAvEOL so the extra
+    # trailing bytes do not need to be stripped.
+    target_info_bytes = data[target_info_start:target_info_end]
+    if not target_info_bytes:
+        return None
+
+    target_info = TargetInfo()
+    try:
+        # TargetInfo is an AV_PAIR list terminated by MsvAvEOL; the
+        # NTLMv2_CLIENT_CHALLENGE structure has no explicit length field.
+        cursor = 0
+        while True:
+            if cursor + 4 > len(target_info_bytes):
+                return None
+            av_id = struct.unpack(
+                "<H", target_info_bytes[cursor:cursor + 2])[0]
+            av_length = struct.unpack(
+                "<H", target_info_bytes[cursor + 2:cursor + 4])[0]
+            cursor += 4
+            value = target_info_bytes[cursor:cursor + av_length]
+            if len(value) != av_length:
+                return None
+            if av_id == AvId.MSV_AV_EOL:
+                # The NTLMv2 temp value appends a trailing Reserved4 field
+                # after the terminating MsvAvEOL AV_PAIR; stop here.
+                break
+            target_info[av_id] = value
+            cursor += av_length
+    except (struct.error, IndexError):
+        return None
+    return target_info
+
+
+def compute_mic(negotiate_data, challenge_data, authenticate_data,
+                exported_session_key):
+    """Compute the NTLM MIC per [MS-NLMP] 3.4.4.1 from raw wire bytes.
+
+    The HMAC-MD5 input is the NEGOTIATE_MESSAGE, followed by the
+    CHALLENGE_MESSAGE, followed by the AUTHENTICATE_MESSAGE in that exact
+    order, with the 16-byte MIC field of the AUTHENTICATE_MESSAGE zero
+    filled. All inputs must be the exact bytes exchanged on the wire; the
+    messages are never re-serialised.
+    """
+    _validate_mic_input(negotiate_data, MessageTypes.NTLM_NEGOTIATE)
+    _validate_mic_input(challenge_data, MessageTypes.NTLM_CHALLENGE)
+    _validate_mic_input(authenticate_data, MessageTypes.NTLM_AUTHENTICATE)
+    if not isinstance(exported_session_key, bytes):
+        raise MicMismatchError(
+            "The NTLM MIC requires the negotiated session key")
+
+    parsed = AuthenticateMessage.from_data(authenticate_data)
+    if not parsed.mic_negotiated:
+        raise MicMismatchError(
+            "The AUTHENTICATE_MESSAGE did not negotiate a MIC and cannot "
+            "be used to compute one")
+
+    authenticate_with_zero_mic = authenticate_data[:72] + b'\x00' * 16 + \
+        authenticate_data[88:]
+    hmac_data = negotiate_data + challenge_data + authenticate_with_zero_mic
+    return hmac.new(exported_session_key, hmac_data,
+                    digestmod=hashlib.md5).digest()
+
+
+def _validate_mic_input(message_data, expected_message_type):
+    if not isinstance(message_data, bytes):
+        raise MicMismatchError(
+            "The raw NTLM message bytes are required to compute the MIC")
+    if len(message_data) < 12:
+        raise MicMismatchError(
+            "A raw NTLM message is too short to be valid")
+    if message_data[0:8] != NTLM_SIGNATURE:
+        raise MicMismatchError(
+            "A raw NTLM message does not start with the NTLMSSP signature")
+    message_type = struct.unpack("<I", message_data[8:12])[0]
+    if message_type != expected_message_type:
+        raise MicMismatchError(
+            "An NTLM message used for the MIC has the wrong message type")
 
 
 def get_version(negotiate_flags):

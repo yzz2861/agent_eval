@@ -1,6 +1,8 @@
 import base64
+import ast
 import hashlib
 import os
+import struct
 import requests
 import sys
 import warnings
@@ -10,8 +12,10 @@ import pytest
 from requests.auth import AuthBase
 
 from ntlm_auth.constants import NegotiateFlags
-from ntlm_auth.exceptions import NoAuthContextError
+from ntlm_auth.exceptions import MicMismatchError, MicMissingError, \
+    MicNotNegotiatedError, NoAuthContextError
 from ntlm_auth.gss_channel_bindings import GssChannelBindingsStruct
+from ntlm_auth.messages import AuthenticateMessage, NegotiateMessage
 from ntlm_auth.ntlm import Ntlm, NtlmContext
 from ntlm_auth.session_security import SessionSecurity
 
@@ -540,6 +544,191 @@ class TestNtlmContext(object):
             ntlm_context.unwrap(b"")
         assert str(err.value) == \
             "Cannot unwrap data as no security context has been established"
+
+
+class TestNtlmContextMic(object):
+    # These tests drive MIC verification purely from raw bytes; they do not
+    # need MD4 and so run even when the local OpenSSL build lacks the legacy
+    # provider.
+
+    @staticmethod
+    def _expected_bytes(test_name):
+        with open('tests/test_messages.py', 'rb') as test_file:
+            tree = ast.parse(test_file.read())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == test_name:
+                for sub in ast.walk(node):
+                    if isinstance(sub, ast.Assign):
+                        for target in sub.targets:
+                            if isinstance(target, ast.Name) and \
+                                    target.id == 'expected':
+                                return ast.literal_eval(sub.value)
+        raise RuntimeError("expected bytes for %s not found" % test_name)
+
+    @property
+    def MIC_AUTHENTICATE(self):
+        return self._expected_bytes('test_authenticate_message_with_mic')
+
+    @property
+    def NO_MIC_AUTHENTICATE(self):
+        return self._expected_bytes('test_authenticate_message_ntlm_v2')
+
+    @property
+    def NEGOTIATE(self):
+        return NegotiateMessage(3800728115, "Domain",
+                                "COMPUTER").get_data()
+
+    @property
+    def CHALLENGE(self):
+        return bytes.fromhex(
+            "4e544c4d535350000200000003000c003800000033828ae20123456789"
+            "abcdef00000000000000002400240044000000060070170000000f5300"
+            "6500720076006500720002000c0044006f006d00610069006e0001000c"
+            "0053006500720076006500720000000000")
+    SESSION_KEY = b"\x55" * 16
+
+    @staticmethod
+    def _strip_mic_field(raw_authenticate):
+        # Rebuild an 88-byte-header (with MIC) message as the equivalent
+        # 72-byte-header form by removing the MIC field and moving every
+        # payload security buffer back 16 bytes.
+        stripped = bytearray()
+        stripped.extend(raw_authenticate[:72])
+        for field_offset in (12, 20, 28, 36, 44, 52):
+            offset = struct.unpack(
+                '<I', raw_authenticate[field_offset + 4:field_offset + 8])[0]
+            stripped[field_offset + 4:field_offset + 8] = \
+                struct.pack('<I', offset - 16)
+        stripped.extend(raw_authenticate[88:])
+        return bytes(stripped)
+
+    def _context_with_raw_messages(self, strict_mic=False):
+        context = NtlmContext("User", "Password", strict_mic=strict_mic)
+        context._negotiate_data = self.NEGOTIATE
+        context._challenge_data = self.CHALLENGE
+        context._authenticate_data = self.MIC_AUTHENTICATE
+
+        # The context only holds a session key for messages it generated; when
+        # verifying an inbound exchange the key is supplied on a stub message.
+        parsed = AuthenticateMessage.from_data(self.MIC_AUTHENTICATE)
+        parsed.exported_session_key = self.SESSION_KEY
+        context._authenticate_message = parsed
+        return context
+
+    def test_stores_raw_negotiate_and_challenge_bytes(self):
+        context = NtlmContext("User", "Password", "Domain")
+        negotiate = context.step()
+
+        assert context._negotiate_data == negotiate
+        assert context._negotiate_message.get_data() == negotiate
+        assert context._challenge_data is None
+
+        context.step(self.CHALLENGE)
+        assert context._challenge_data == self.CHALLENGE
+        assert context._challenge_message.get_data() == self.CHALLENGE
+        assert context._authenticate_data is not None
+        assert context._authenticate_message.get_data() == \
+            context._authenticate_data
+
+    def test_verify_with_explicit_raw_bytes_succeeds(self):
+        context = self._context_with_raw_messages()
+
+        assert context.verify_authenticate_mic(
+            self.MIC_AUTHENTICATE, self.NEGOTIATE, self.CHALLENGE,
+            strict=True) is True
+
+    def test_verify_uses_stored_raw_bytes(self):
+        context = self._context_with_raw_messages()
+
+        assert context.verify_authenticate_mic(strict=True) is True
+
+    def test_missing_raw_messages_fail(self):
+        context = NtlmContext("User", "Password", strict_mic=True)
+
+        with pytest.raises(MicMismatchError):
+            context.verify_authenticate_mic()
+
+        context._negotiate_data = self.NEGOTIATE
+        with pytest.raises(MicMismatchError):
+            context.verify_authenticate_mic(self.MIC_AUTHENTICATE)
+
+    def test_tampered_authenticate_payload_fails(self):
+        context = self._context_with_raw_messages(strict_mic=True)
+        tampered = bytearray(self.MIC_AUTHENTICATE)
+        tampered[0x64] ^= 0x01
+
+        with pytest.raises(MicMismatchError):
+            context.verify_authenticate_mic(bytes(tampered), self.NEGOTIATE,
+                                            self.CHALLENGE)
+
+    def test_tampered_challenge_fails(self):
+        context = self._context_with_raw_messages(strict_mic=True)
+        tampered = bytearray(self.CHALLENGE)
+        tampered[24] ^= 0x01
+
+        with pytest.raises(MicMismatchError):
+            context.verify_authenticate_mic(self.MIC_AUTHENTICATE,
+                                            self.NEGOTIATE, bytes(tampered))
+
+    def test_swapped_messages_fail(self):
+        context = self._context_with_raw_messages(strict_mic=True)
+
+        with pytest.raises(MicMismatchError):
+            context.verify_authenticate_mic(self.MIC_AUTHENTICATE,
+                                            self.CHALLENGE, self.NEGOTIATE)
+
+    def test_strict_mode_requires_mic_when_negotiated(self):
+        context = self._context_with_raw_messages(strict_mic=True)
+        no_mic = self._strip_mic_field(self.MIC_AUTHENTICATE)
+
+        with pytest.raises(MicMissingError):
+            context.verify_authenticate_mic(no_mic, self.NEGOTIATE,
+                                            self.CHALLENGE)
+
+    def test_non_strict_mode_returns_false_when_mic_absent(self):
+        context = self._context_with_raw_messages(strict_mic=False)
+        no_mic = self._strip_mic_field(self.MIC_AUTHENTICATE)
+
+        assert context.verify_authenticate_mic(
+            no_mic, self.NEGOTIATE, self.CHALLENGE) is False
+
+    def test_not_negotiated_is_distinct_in_strict_mode(self):
+        context = NtlmContext("User", "Password", strict_mic=True)
+        context._negotiate_data = self.NEGOTIATE
+        context._challenge_data = self.CHALLENGE
+        # The NTLMv2 without-MIC vector never advertised MsvAvFlags.
+        context._authenticate_data = self.NO_MIC_AUTHENTICATE
+
+        with pytest.raises(MicNotNegotiatedError):
+            context.verify_authenticate_mic()
+
+        # Non-strict mode treats a non-negotiated MIC as not required.
+        context.strict_mic = False
+        assert context.verify_authenticate_mic() is False
+
+    def test_legacy_ntlm_wrapper_exposes_strict_flag(self):
+        wrapper = Ntlm(strict_mic=True)
+        assert wrapper.strict_mic is True
+        assert wrapper._context.strict_mic is True
+
+        wrapper.strict_mic = False
+        assert wrapper._context.strict_mic is False
+
+    def test_exception_text_does_not_leak_session_key(self):
+        context = self._context_with_raw_messages(strict_mic=True)
+        tampered = bytearray(self.MIC_AUTHENTICATE)
+        tampered[72] ^= 0xff
+
+        try:
+            context.verify_authenticate_mic(bytes(tampered), self.NEGOTIATE,
+                                           self.CHALLENGE)
+        except MicMismatchError as err:
+            message = str(err)
+        else:
+            pytest.fail("MicMismatchError was not raised")
+
+        assert self.SESSION_KEY.hex() not in message
+        assert self.SESSION_KEY not in message.encode()
 
 
 class TestNtlmFunctional(object):

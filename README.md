@@ -178,6 +178,58 @@ response_msg = response.content
 response = ntlm_context.unwrap(response_msg)
 ```
 
+#### MIC Verification
+
+The MIC (Message Integrity Code) binds the raw `NEGOTIATE_MESSAGE`,
+`CHALLENGE_MESSAGE` and `AUTHENTICATE_MESSAGE` bytes together with an
+HMAC-MD5 over the negotiated session key. The context stores the exact wire
+bytes of each message and always computes or verifies the MIC from those
+bytes (with the 16-byte MIC field zero filled); parsed messages are never
+re-serialised for the calculation, so a tampered field, changed length or
+reordered message cannot be normalised away.
+
+Three distinct outcomes are reported with dedicated exceptions in
+`ntlm_auth.exceptions`:
+
+* `MicNotNegotiatedError` - the exchange did not advertise
+  `MsvAvFlags.MIC_PROVIDED`, so no MIC is part of the protocol for this
+  exchange.
+* `MicMissingError` - a MIC was negotiated but the `AUTHENTICATE_MESSAGE`
+  contains none.
+* `MicMismatchError` - a MIC is present (or partially present) but does not
+  match the value computed over the raw messages, or the raw messages needed
+  for verification are unavailable.
+
+MIC enforcement is opt-in. Existing NTLMv2 exchanges that do not negotiate a
+MIC keep working unchanged; pass `strict_mic=True` to make a negotiated but
+missing or invalid MIC a hard failure:
+
+```python
+from ntlm_auth.ntlm import NtlmContext
+from ntlm_auth.exceptions import MicMissingError, MicMismatchError, \
+    MicNotNegotiatedError
+
+context = NtlmContext(username, password, domain, strict_mic=True)
+negotiate_message = context.step()
+authenticate_message = context.step(challenge_message)
+
+try:
+    # Uses the raw bytes stored on the context; raw payloads received from
+    # the wire can also be passed in positionally.
+    context.verify_authenticate_mic()
+except MicNotNegotiatedError:
+    # The server never asked for a MIC; allowed outside strict exchanges.
+    pass
+except (MicMissingError, MicMismatchError) as exc:
+    # Reject the exchange. Exception text never contains the session key or
+    # any password hash material.
+    raise
+```
+
+The lower level `ntlm_auth.messages.compute_mic` and
+`AuthenticateMessage.verify_mic` APIs are available for peers that hold the
+raw messages and derive the exported session key themselves.
+
 Backlog
 -------
 * Automatically get windows version if running on windows, use default if not that case
