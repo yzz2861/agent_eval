@@ -13,6 +13,7 @@ import json
 import xmltodict
 
 import Evtx.Evtx as evtx
+import Evtx.Views as e_views
 
 
 def main():
@@ -35,7 +36,7 @@ def main():
             data_dict = xmltodict.parse(record.xml())
 
             # Loop through each key,value pair of the System section of the evtx logs and extract the EventRecordID
-            for event_system_key, event_system_value in data_dict.get("Event",{}).get("System",{}).items():
+            for event_system_key, event_system_value in data_dict.get("Event", {}).get("System", {}).items():
                 if event_system_key == "EventRecordID":
                     json_subline = {}
                     firstline = {event_system_key: event_system_value}
@@ -44,7 +45,7 @@ def main():
                     json_subline.update(firstline)  # add the event ID to JSON subline
 
             # Loop through each key, value pair of the EventData section of the evtx logs
-            for event_data_key, event_data_value in data_dict.get("Event",{}).get("EventData",{}).items():
+            for event_data_key, event_data_value in data_dict.get("Event", {}).get("EventData", {}).items():
                 for values in event_data_value:
 
                     # Loop through each subvalue within the EvenData section to extract necessary information
@@ -57,9 +58,13 @@ def main():
                             # Add information to the JSON object for this specific log
                             json_subline.update({data_name: data_value})
 
+            # attach the non-ignorable, layered integrity envelope so a
+            # tampered record can never be exported as clean evidence.
+            json_subline = e_views.evtx_record_json_view(record, data=json_subline)
+
             # Print the JSON object for the specific log if not requested to output to file
             if not args.output:
-                print(json_subline)
+                print(json.dumps(json_subline))
 
             # Add specific log JSON object to the final JSON object
             if not final_json:

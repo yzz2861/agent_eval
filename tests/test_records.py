@@ -1,10 +1,25 @@
-import textwrap
 import importlib.util
+import json
+import struct
+import textwrap
 
 import pytest
 
 import Evtx.Evtx as evtx
 import Evtx.Nodes as e_nodes
+import Evtx.Views as e_views
+from Evtx.Integrity import CheckType, IntegrityStatus, StructuralIntegrityException
+
+from integrity_helpers import (
+    CHUNK_DATA_CHECKSUM_OFFSET,
+    CHUNK_NEXT_RECORD_OFFSET,
+    chunk_offset,
+    first_record_absolute_offset,
+    get_check,
+    load_evtx_bytes,
+    statuses,
+    write_tmp_evtx,
+)
 
 if importlib.util.find_spec("lxml"):
     no_lxml = False
@@ -469,8 +484,7 @@ def test_render_record(system):
     record = one(chunk.records())
 
     xml = record.xml()
-    assert xml == textwrap.dedent(
-        """\
+    assert xml == textwrap.dedent("""\
                                      <Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event"><System><Provider Name="Microsoft-Windows-Eventlog" Guid="{fc65ddd8-d6ef-4962-83d5-6e5cfe9ce148}"></Provider>
                                      <EventID Qualifiers="">105</EventID>
                                      <Version>0</Version>
@@ -491,8 +505,7 @@ def test_render_record(system):
                                      </AutoBackup>
                                      </UserData>
                                      </Event>
-                                     """
-    )
+                                     """)
 
 
 def test_render_records(system):
@@ -547,3 +560,148 @@ def test_render_records_lxml2(security):
     for i, chunk in enumerate(fh.chunks()):
         for j, record in enumerate(chunk.records()):
             assert record.lxml() is not None
+
+
+def test_record_integrity_clean_control(security):
+    """
+    every record of a legitimate file passes the layered checks and reports
+    expected/actual CRC data with a fixed scope.
+    """
+    fh = evtx.FileHeader(security, 0x0)
+    checked = 0
+    for chunk in fh.chunks():
+        if not chunk.check_magic():
+            continue
+        for record in chunk.records():
+            report = record.integrity()
+            assert report.ok(), report.failures()
+            checksum = get_check(report, CheckType.RECORD_CHECKSUM)
+            assert checksum.algorithm == "CRC32/ISO-HDLC"
+            assert checksum.scope == ((0, record.size()),)
+            assert checksum.expected == chunk.data_checksum()
+            structure = get_check(report, CheckType.RECORD_STRUCTURE)
+            assert structure.status == IntegrityStatus.OK
+            template = get_check(report, CheckType.TEMPLATE_REFERENCE)
+            assert template.status == IntegrityStatus.OK
+            checked += 1
+    assert checked > 0
+
+
+def test_flipped_record_byte_is_localized_and_marked(data_path, tmp_path):
+    """
+    a single flipped byte inside record one must be localized to that chunk
+    and record via a recoverable checksum result that reaches both the XML
+    and JSON views as a non-ignorable marker.
+    """
+    data = load_evtx_bytes(data_path, "security.evtx")
+    record_offset = first_record_absolute_offset(data)
+    data[record_offset + 0x40] ^= 0xFF
+    path = write_tmp_evtx(tmp_path, data, "flipped_record.evtx")
+
+    with evtx.Evtx(path) as log:
+        chunk = next(log.get_file_header().chunks())
+        record = next(chunk.records())
+        report = record.integrity()
+
+        assert report.status() == IntegrityStatus.RECOVERABLE
+        assert statuses(report)[CheckType.RECORD_CHECKSUM.value] == "recoverable"
+        assert statuses(report)[CheckType.CHUNK_DATA_CHECKSUM.value] == "recoverable"
+        record_check = get_check(report, CheckType.RECORD_CHECKSUM)
+        assert record_check.expected == chunk.data_checksum()
+        assert record.chunk_index() == 0
+        assert record.record_num() == 1
+
+        marked_xml = e_views.evtx_record_xml_view_marked(record)
+        assert "EVTX-INTEGRITY: status=recoverable" in marked_xml
+        assert 'integrity:status="recoverable"' in marked_xml
+        assert "chunk=0" in marked_xml and "record=1" in marked_xml
+        assert "<Event " in marked_xml and "</Event>" in marked_xml
+
+        json_view = e_views.evtx_record_json_view(record)
+        envelope = json_view["_integrity"]
+        assert envelope["status"] == "recoverable"
+        assert envelope["chunk"] == 0
+        assert envelope["record_number"] == 1
+        json.dumps(json_view)
+        names = {check["check"] for check in envelope["checks"]}
+        assert "record_checksum" in names and "chunk_data_checksum" in names
+
+
+def test_clean_record_xml_and_json_markers(security):
+    """
+    even verified records carry an explicit marker, and each check exposes
+    algorithm, scope and expected/actual values to the JSON view.
+    """
+    fh = evtx.FileHeader(security, 0x0)
+    record = next(next(fh.chunks()).records())
+
+    marked_xml = e_views.evtx_record_xml_view_marked(record)
+    assert marked_xml.startswith("<!-- EVTX-INTEGRITY: status=ok ")
+    assert "integrity:status" not in marked_xml
+    assert record.xml() in marked_xml
+
+    json_view = e_views.evtx_record_json_view(record)
+    assert json_view["_integrity"]["status"] == "ok"
+    for check in json_view["_integrity"]["checks"]:
+        assert check["status"] == "ok"
+        assert check["algorithm"] in ("CRC32/ISO-HDLC", "structural")
+        assert isinstance(check["scope"], list)
+
+
+def test_partial_record_checksum_coverage_is_structural(data_path, tmp_path):
+    """
+    shrinking next_record_offset makes the last record only partially
+    covered by the fixed CRC range; this is structural damage and the
+    affected record is identified by number.
+    """
+    data = load_evtx_bytes(data_path, "security.evtx")
+    target = chunk_offset(0)
+    nro = struct.unpack_from("<I", data, target + CHUNK_NEXT_RECORD_OFFSET)[0]
+    struct.pack_into("<I", data, target + CHUNK_NEXT_RECORD_OFFSET, nro - 8)
+    path = write_tmp_evtx(tmp_path, data, "partial_coverage.evtx")
+
+    with evtx.Evtx(path) as log:
+        chunk = next(log.get_file_header().chunks())
+        last_record = list(chunk.records())[-1]
+        report = last_record.integrity()
+        assert report.status() == IntegrityStatus.STRUCTURAL
+        structure = get_check(report, CheckType.RECORD_STRUCTURE)
+        assert "beyond data checksum end" in structure.detail
+        assert last_record.record_num() == chunk.log_last_record_number()
+
+        marked_xml = e_views.evtx_record_xml_view_marked(last_record)
+        assert "EVTX-INTEGRITY: status=structural" in marked_xml
+        assert 'integrity:status="structural"' in marked_xml
+
+    with pytest.raises(StructuralIntegrityException):
+        with evtx.Evtx(path, recover=False) as log:
+            chunk = next(log.get_file_header().chunks())
+            list(chunk.records())[-1].integrity()
+
+
+def test_recomputed_checksum_still_flags_tampered_evidence(data_path, tmp_path):
+    """
+    an attacker who flips a byte and recomputes the data CRC cannot produce
+    clean evidence: the chunk header checksum fails and the record view stays
+    marked as recoverable.
+    """
+    import binascii
+
+    data = load_evtx_bytes(data_path, "security.evtx")
+    target = chunk_offset(0)
+    record_offset = first_record_absolute_offset(data)
+    data[record_offset + 0x40] ^= 0xFF
+    nro = struct.unpack_from("<I", data, target + CHUNK_NEXT_RECORD_OFFSET)[0]
+    recomputed = binascii.crc32(bytes(data[target + 0x200 : target + nro])) & 0xFFFFFFFF
+    struct.pack_into("<I", data, target + CHUNK_DATA_CHECKSUM_OFFSET, recomputed)
+    path = write_tmp_evtx(tmp_path, data, "recomputed_checksum.evtx")
+
+    with evtx.Evtx(path) as log:
+        chunk = next(log.get_file_header().chunks())
+        report = chunk.integrity()
+        data_check = get_check(report, CheckType.CHUNK_DATA_CHECKSUM)
+        assert data_check.status == IntegrityStatus.OK
+        assert report.status() == IntegrityStatus.RECOVERABLE
+        record = next(chunk.records())
+        assert record.integrity_status() == IntegrityStatus.RECOVERABLE
+        assert "status=recoverable" in e_views.evtx_record_xml_view_marked(record)

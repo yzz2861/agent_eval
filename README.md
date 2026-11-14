@@ -41,6 +41,17 @@ Note the length of the `evtx_dump.py` script: its only 20 lines.  Now, review th
 
 Working with python-evtx is really easy!
 
+Integrity verification
+----------------------
+The parser performs layered integrity verification instead of silently accepting bad checksums.  `Evtx.Integrity` defines the fixed CRC32 algorithm and byte ranges (the analyzed file cannot choose an algorithm or alter the scope):
+
+- file header checksum: CRC32 over bytes `0x0-0x78`;
+- chunk header checksum: CRC32 over bytes `0x0-0x78` and `0x80-0x200`;
+- chunk data (event record) checksum: CRC32 over bytes `0x200` through `next_record_offset`, covering the concatenated record bytes;
+- record framing and template-reference resolution through the chunk template table.
+
+Each layer returns an `IntegrityReport` of `CheckResult` objects with `expected`/`actual` values, the algorithm and the fixed byte scope.  Two failure states are distinguished: `recoverable` (a checksum failed but the structure still parses) and `structural` (broken magic, sizes, offsets or pointers).  By default recovery mode keeps parsing and `Evtx.Views.evtx_record_xml_view_marked` / `evtx_record_json_view` attach a non-ignorable `EVTX-INTEGRITY` marker to every rendered object; open the log with `Evtx(path, recover=False)` to raise `RecoverableIntegrityException` or `StructuralIntegrityException` on the first failure.
+
 
 Installation
 ------------
@@ -71,4 +82,3 @@ Or use [just](https://github.com/casey/just) to run the linters:
 License
 -------
 python-evtx is licensed under the Apache License, Version 2.0.  This means it is freely available for use and modification in a personal and professional capacity.  
-

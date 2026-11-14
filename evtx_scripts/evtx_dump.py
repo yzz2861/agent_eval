@@ -31,8 +31,8 @@ def main():
     with evtx.Evtx(args.evtx) as log:
         print(e_views.XML_HEADER)
         print("<Events>")
-        for record in log.records():
-            print(record.xml())
+        for record_xml, record in e_views.evtx_file_xml_view(log.get_file_header()):
+            print(record_xml)
         print("</Events>")
 
 

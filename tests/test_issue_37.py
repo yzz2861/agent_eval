@@ -3,6 +3,8 @@ import os
 import pytest
 
 import Evtx.Evtx as evtx
+import Evtx.Views as e_views
+from Evtx.Integrity import IntegrityStatus
 
 
 def test_corrupt_ascii_example(data_path):
@@ -55,3 +57,39 @@ def test_continue_parsing_after_corrupt_ascii(data_path):
     # however the remaining four have corrupted ASCII strings,
     # which we are unable to decode.
     assert failed == 4
+
+
+def test_recovery_mode_keeps_integrity_markers(data_path):
+    """
+    recovery mode never hides verification state behind clean XML: every
+    record reachable through the marked file view carries an explicit
+    EVTX-INTEGRITY comment, and records whose integrity layer fails also get
+    an integrity attribute on the rendered element.
+    """
+    rendered = 0
+    with evtx.Evtx(os.path.join(data_path, "dns_log_malformed.evtx")) as log:
+        for chunk in log.chunks():
+            for record in chunk.records():
+                report = record.integrity()
+                record_xml = e_views.evtx_record_xml_view_marked(record)
+                assert record_xml.startswith("<!-- EVTX-INTEGRITY:")
+                if report.ok():
+                    assert "status=ok" in record_xml
+                else:
+                    assert report.status() in (IntegrityStatus.RECOVERABLE, IntegrityStatus.STRUCTURAL)
+                    assert "status={}".format(report.status().value) in record_xml
+                rendered += 1
+    assert rendered == 5
+
+
+def test_integrity_report_is_json_serializable(data_path):
+    import json
+
+    with evtx.Evtx(os.path.join(data_path, "dns_log_malformed.evtx")) as log:
+        for record in log.records():
+            # the JSON envelope must exist even when the payload XML cannot be
+            # rendered due to the malformed ASCII bytes (issue 37).
+            view = e_views.evtx_record_integrity_dict(record)
+            encoded = json.dumps(view)
+            assert "_integrity" in encoded
+            assert view["_integrity"]["status"] in ("ok", "recoverable", "structural")
