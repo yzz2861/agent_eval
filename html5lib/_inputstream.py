@@ -48,6 +48,57 @@ ascii_punctuation_re = re.compile("[\u0009-\u000D\u0020-\u002F\u003A-\u0040\u005
 charsUntilRegEx = {}
 
 
+class EncodingError(ValueError):
+    """Raised when an encoding declaration cannot be honoured.
+
+    In non-strict mode unknown or illegal encoding labels are ignored and
+    the sniffing algorithm falls back to the next candidate.  In strict
+    mode this error is raised instead of silently falling back, so callers
+    never see a low-level LookupError from the codec machinery.
+    """
+
+
+class EncodingCandidate(object):
+    """A single encoding candidate considered while sniffing a stream.
+
+    The encoding decision is observable: every declaration that is
+    evaluated is recorded as a candidate on
+    ``HTMLBinaryInputStream.encodingCandidates`` and the winning one has
+    ``selected`` set to True.
+    """
+
+    def __init__(self, source, label, encoding, confidence, sampled=0):
+        # Where the declaration came from: "bom", "override", "transport",
+        # "meta", "parent", "likely", "chardet", "default" or "fallback"
+        self.source = source
+        # The raw label as declared (may be bytes), None for the BOM
+        self.label = label
+        # The resolved webencodings.Encoding, or None for invalid labels
+        self.encoding = encoding
+        # "certain" or "tentative"
+        self.confidence = confidence
+        # Number of bytes read from the stream to evaluate this candidate
+        self.sampled = sampled
+        # Whether this candidate won the fixed-priority decision
+        self.selected = False
+
+    @property
+    def name(self):
+        """The canonical encoding name, or None if the label was invalid."""
+        return self.encoding.name if self.encoding is not None else None
+
+    @property
+    def valid(self):
+        """False when the declared label is unknown or illegal."""
+        return self.encoding is not None
+
+    def __repr__(self):
+        return ("EncodingCandidate(source=%r, label=%r, name=%r, "
+                "confidence=%r, sampled=%r, selected=%r)" %
+                (self.source, self.label, self.name, self.confidence,
+                 self.sampled, self.selected))
+
+
 class BufferedStream(object):
     """Buffering for streams that do not have buffering of their own
 
@@ -385,7 +436,8 @@ class HTMLBinaryInputStream(HTMLUnicodeInputStream):
 
     def __init__(self, source, override_encoding=None, transport_encoding=None,
                  same_origin_parent_encoding=None, likely_encoding=None,
-                 default_encoding="windows-1252", useChardet=True):
+                 default_encoding="windows-1252", useChardet=True,
+                 strict=False, prescan_bytes=None, max_chardet_bytes=None):
         """Initialises the HTMLInputStream.
 
         HTMLInputStream(source, [encoding]) -> Normalized stream from source
@@ -398,6 +450,20 @@ class HTMLBinaryInputStream(HTMLUnicodeInputStream):
         regardless of any BOM or later declaration (such as in a meta
         element)
 
+        The encoding decision is made in observable, bounded steps: the
+        BOM is checked first, then the override and transport layer
+        charsets, then a meta prescan of at most ``prescan_bytes`` bytes
+        (default 1024), then the parent, likely and chardet guesses (the
+        chardet sample is capped at ``max_chardet_bytes`` bytes in total)
+        and finally the default encoding.  No step ever reads the whole
+        stream into memory.  Every candidate that is evaluated is recorded
+        on ``self.encodingCandidates`` and the number of bytes consumed
+        while sniffing is available as ``self.bytesRead``.
+
+        Unknown or illegal encoding labels are ignored (falling back to
+        the next candidate) unless ``strict`` is true, in which case an
+        ``EncodingError`` is raised instead of silently falling back.
+
         """
         # Raw Stream - for unicode objects this will encode to utf-8 and set
         #              self.charEncoding as appropriate
@@ -408,9 +474,26 @@ class HTMLBinaryInputStream(HTMLUnicodeInputStream):
         # Encoding Information
         # Number of bytes to use when looking for a meta element with
         # encoding information
-        self.numBytesMeta = 1024
-        # Number of bytes to use when using detecting encoding using chardet
+        self.numBytesMeta = prescan_bytes if prescan_bytes is not None else 1024
+        # Number of bytes to read per chunk when detecting the encoding
+        # using chardet
         self.numBytesChardet = 100
+        # Total number of bytes chardet may consume: guessing must not
+        # pull the whole stream into memory
+        if max_chardet_bytes is not None:
+            self.numBytesChardetTotal = max_chardet_bytes
+        else:
+            self.numBytesChardetTotal = 16 * 1024
+        # Strict mode: reject unknown/illegal declarations with an
+        # EncodingError instead of silently falling back
+        self.strict = strict
+        # Observability of the encoding decision
+        self.bytesRead = 0
+        self.encodingCandidates = []
+        self.encodingDecision = None
+        self.metaLabels = []
+        self.invalidMetaLabels = []
+        self.metaEncodingLabel = None
         # Things from args
         self.override_encoding = override_encoding
         self.transport_encoding = transport_encoding
@@ -448,37 +531,90 @@ class HTMLBinaryInputStream(HTMLUnicodeInputStream):
 
         return stream
 
+    def _readSample(self, size):
+        """Read at most ``size`` bytes from the raw stream for sniffing.
+
+        Every sample goes through here so the total number of bytes
+        consumed while deciding the encoding is observable via
+        ``self.bytesRead`` and each read has an explicit upper bound.
+        """
+        data = self.rawStream.read(size)
+        self.bytesRead += len(data)
+        return data
+
+    def _recordCandidate(self, source, label, encoding, confidence, sampled=0):
+        candidate = EncodingCandidate(source, label, encoding, confidence,
+                                      sampled)
+        self.encodingCandidates.append(candidate)
+        return candidate
+
+    def _select(self, candidate):
+        """Mark a candidate as the winner of the encoding decision."""
+        candidate.selected = True
+        self.encodingDecision = candidate
+        return candidate.encoding, candidate.confidence
+
+    def _lookupDeclared(self, source, label, confidence, sampled=0):
+        """Resolve a declared encoding label, recording the candidate.
+
+        Returns the resolved encoding or None.  Unknown/illegal labels
+        never raise a LookupError: they are ignored, or rejected with an
+        EncodingError in strict mode.
+        """
+        if label is None:
+            return None
+        encoding = lookupEncoding(label)
+        self._recordCandidate(source, label, encoding, confidence, sampled)
+        if encoding is None and self.strict:
+            raise EncodingError(
+                "%s declared an unknown encoding: %r" % (source, label))
+        return encoding
+
     def determineEncoding(self, chardet=True):
         # BOMs take precedence over everything
         # This will also read past the BOM if present
-        charEncoding = self.detectBOM(), "certain"
-        if charEncoding[0] is not None:
-            return charEncoding
+        bytesBefore = self.bytesRead
+        charEncoding = self.detectBOM()
+        if charEncoding is not None:
+            candidate = self._recordCandidate("bom", charEncoding.name,
+                                              charEncoding, "certain",
+                                              self.bytesRead - bytesBefore)
+            return self._select(candidate)
 
         # If we've been overridden, we've been overridden
-        charEncoding = lookupEncoding(self.override_encoding), "certain"
-        if charEncoding[0] is not None:
-            return charEncoding
+        charEncoding = self._lookupDeclared("override",
+                                            self.override_encoding, "certain")
+        if charEncoding is not None:
+            return self._select(self.encodingCandidates[-1])
 
         # Now check the transport layer
-        charEncoding = lookupEncoding(self.transport_encoding), "certain"
-        if charEncoding[0] is not None:
-            return charEncoding
+        charEncoding = self._lookupDeclared("transport",
+                                            self.transport_encoding, "certain")
+        if charEncoding is not None:
+            return self._select(self.encodingCandidates[-1])
 
         # Look for meta elements with encoding information
-        charEncoding = self.detectEncodingMeta(), "tentative"
-        if charEncoding[0] is not None:
-            return charEncoding
+        bytesBefore = self.bytesRead
+        charEncoding = self.detectEncodingMeta()
+        if charEncoding is not None:
+            candidate = self._recordCandidate("meta", self.metaEncodingLabel,
+                                              charEncoding, "tentative",
+                                              self.bytesRead - bytesBefore)
+            return self._select(candidate)
 
         # Parent document encoding
-        charEncoding = lookupEncoding(self.same_origin_parent_encoding), "tentative"
-        if charEncoding[0] is not None and not charEncoding[0].name.startswith("utf-16"):
-            return charEncoding
+        charEncoding = self._lookupDeclared("parent",
+                                            self.same_origin_parent_encoding,
+                                            "tentative")
+        if (charEncoding is not None and
+                not charEncoding.name.startswith("utf-16")):
+            return self._select(self.encodingCandidates[-1])
 
         # "likely" encoding
-        charEncoding = lookupEncoding(self.likely_encoding), "tentative"
-        if charEncoding[0] is not None:
-            return charEncoding
+        charEncoding = self._lookupDeclared("likely", self.likely_encoding,
+                                            "tentative")
+        if charEncoding is not None:
+            return self._select(self.encodingCandidates[-1])
 
         # Guess with chardet, if available
         if chardet:
@@ -487,42 +623,64 @@ class HTMLBinaryInputStream(HTMLUnicodeInputStream):
             except ImportError:
                 pass
             else:
-                buffers = []
                 detector = UniversalDetector()
-                while not detector.done:
-                    buffer = self.rawStream.read(self.numBytesChardet)
+                sampled = 0
+                while not detector.done and sampled < self.numBytesChardetTotal:
+                    toRead = min(self.numBytesChardet,
+                                 self.numBytesChardetTotal - sampled)
+                    buffer = self._readSample(toRead)
                     assert isinstance(buffer, bytes)
                     if not buffer:
                         break
-                    buffers.append(buffer)
+                    sampled += len(buffer)
                     detector.feed(buffer)
                 detector.close()
                 encoding = lookupEncoding(detector.result['encoding'])
                 self.rawStream.seek(0)
                 if encoding is not None:
-                    return encoding, "tentative"
+                    candidate = self._recordCandidate(
+                        "chardet", detector.result['encoding'], encoding,
+                        "tentative", sampled)
+                    return self._select(candidate)
 
         # Try the default encoding
-        charEncoding = lookupEncoding(self.default_encoding), "tentative"
-        if charEncoding[0] is not None:
-            return charEncoding
+        charEncoding = self._lookupDeclared("default", self.default_encoding,
+                                            "tentative")
+        if charEncoding is not None:
+            return self._select(self.encodingCandidates[-1])
 
         # Fallback to html5lib's default if even that hasn't worked
-        return lookupEncoding("windows-1252"), "tentative"
+        if self.strict:
+            raise EncodingError(
+                "unable to determine the encoding without falling back to "
+                "the built-in default")
+        candidate = self._recordCandidate("fallback", "windows-1252",
+                                          lookupEncoding("windows-1252"),
+                                          "tentative")
+        return self._select(candidate)
 
     def changeEncoding(self, newEncoding):
         assert self.charEncoding[1] != "certain"
+        label = newEncoding
         newEncoding = lookupEncoding(newEncoding)
         if newEncoding is None:
+            if self.strict:
+                raise EncodingError(
+                    "meta element declared an unknown encoding: %r" % (label,))
             return
         if newEncoding.name in ("utf-16be", "utf-16le"):
             newEncoding = lookupEncoding("utf-8")
             assert newEncoding is not None
+            self._recordCandidate("meta", label, newEncoding, "certain")
         elif newEncoding == self.charEncoding[0]:
+            self._select(self._recordCandidate("meta", label, newEncoding,
+                                               "certain"))
             self.charEncoding = (self.charEncoding[0], "certain")
         else:
             self.rawStream.seek(0)
             self.charEncoding = (newEncoding, "certain")
+            self._select(self._recordCandidate("meta", label, newEncoding,
+                                               "certain"))
             self.reset()
             raise _ReparseException("Encoding changed from %s to %s" % (self.charEncoding[0], newEncoding))
 
@@ -537,7 +695,7 @@ class HTMLBinaryInputStream(HTMLUnicodeInputStream):
         }
 
         # Go to beginning of file and read in 4 bytes
-        string = self.rawStream.read(4)
+        string = self._readSample(4)
         assert isinstance(string, bytes)
 
         # Try detecting the BOM using bytes from the string
@@ -563,11 +721,21 @@ class HTMLBinaryInputStream(HTMLUnicodeInputStream):
     def detectEncodingMeta(self):
         """Report the encoding declared by the meta element
         """
-        buffer = self.rawStream.read(self.numBytesMeta)
+        buffer = self._readSample(self.numBytesMeta)
         assert isinstance(buffer, bytes)
         parser = EncodingParser(buffer)
         self.rawStream.seek(0)
         encoding = parser.getEncoding()
+
+        # Make the declarations found in the prescan window observable
+        self.metaLabels = parser.labels
+        self.invalidMetaLabels = parser.invalidLabels
+        self.metaEncodingLabel = parser.encodingLabel
+
+        if self.invalidMetaLabels and self.strict:
+            raise EncodingError(
+                "meta element declared unknown encoding(s): %r" %
+                (self.invalidMetaLabels,))
 
         if encoding is not None and encoding.name in ("utf-16be", "utf-16le"):
             encoding = lookupEncoding("utf-8")
@@ -680,6 +848,20 @@ class EncodingParser(object):
         """string - the data to work on for encoding detection"""
         self.data = EncodingBytes(data)
         self.encoding = None
+        # The raw label of the declaration that won, if any
+        self.encodingLabel = None
+        # All labels declared in the window, in document order; the first
+        # valid one wins, duplicates never override it
+        self.labels = []
+        self.invalidLabels = []
+
+    def _lookupLabel(self, label):
+        """Record a declared label and resolve it, or None if invalid."""
+        self.labels.append(label)
+        codec = lookupEncoding(label)
+        if codec is None:
+            self.invalidLabels.append(label)
+        return codec
 
     def getEncoding(self):
         if b"<meta" not in self.data:
@@ -722,6 +904,7 @@ class EncodingParser(object):
         # We have a valid meta element we want to search for attributes
         hasPragma = False
         pendingEncoding = None
+        pendingLabel = None
         while True:
             # Try to find the next attribute after the current position
             attr = self.getAttribute()
@@ -732,24 +915,28 @@ class EncodingParser(object):
                     hasPragma = attr[1] == b"content-type"
                     if hasPragma and pendingEncoding is not None:
                         self.encoding = pendingEncoding
+                        self.encodingLabel = pendingLabel
                         return False
                 elif attr[0] == b"charset":
                     tentativeEncoding = attr[1]
-                    codec = lookupEncoding(tentativeEncoding)
+                    codec = self._lookupLabel(tentativeEncoding)
                     if codec is not None:
                         self.encoding = codec
+                        self.encodingLabel = tentativeEncoding
                         return False
                 elif attr[0] == b"content":
                     contentParser = ContentAttrParser(EncodingBytes(attr[1]))
                     tentativeEncoding = contentParser.parse()
                     if tentativeEncoding is not None:
-                        codec = lookupEncoding(tentativeEncoding)
+                        codec = self._lookupLabel(tentativeEncoding)
                         if codec is not None:
                             if hasPragma:
                                 self.encoding = codec
+                                self.encodingLabel = tentativeEncoding
                                 return False
                             else:
                                 pendingEncoding = codec
+                                pendingLabel = tentativeEncoding
 
     def handlePossibleStartTag(self):
         return self.handlePossibleTag(False)

@@ -21,6 +21,16 @@ Bug fixes:
 * The sanitizer now permits ``<summary>`` tags. It used to allow ``<details>``
   already. (#423)
 
+* Encoding detection in ``HTMLBinaryInputStream`` is now observable and
+  bounded: every sniffing step reads at most a fixed number of bytes
+  (``prescan_bytes`` for the meta prescan, ``max_chardet_bytes`` in total
+  for chardet), the candidates considered are recorded on
+  ``encodingCandidates``/``encodingDecision`` with a fixed
+  BOM > override > transport > meta > parent > likely > chardet > default
+  priority, and unknown or illegal encoding labels fall back to the next
+  candidate (or raise ``html5lib._inputstream.EncodingError`` when
+  ``strict=True``) instead of propagating a low-level ``LookupError``.
+
 1.1
 ~~~
 
