@@ -28,10 +28,82 @@ from functools import wraps
 
 import Evtx.Views as e_views
 
-from .Nodes import RootNode, TemplateNode, NameStringNode
+from .Nodes import (
+    RootNode,
+    TemplateNode,
+    NameStringNode,
+    TemplateException,
+    DuplicateTemplateException,
+    UndefinedTemplateException,
+    TemplateConflictException,
+)
 from .BinaryParser import Block, ParseException
 
 logger = logging.getLogger(__name__)
+
+
+class TemplateRegistry(object):
+    """
+    File-wide registry of template definitions.
+
+    Each chunk owns its own template cache (keyed by chunk + offset + id),
+    while this registry records every structural fingerprint (a checksum of
+    the definition bytes) seen for a template id across the whole file.
+
+    Template ids are content hashes rather than globally unique keys, so real
+    logs routinely reuse an id for structurally different definitions in
+    different chunks; such differences are therefore tracked but not rejected
+    by default.  Strict mode (used when a caller explicitly wants the secure
+    graph policy, including the synthetic attack cases) turns a cross-chunk
+    id collision with a different definition into a
+    `TemplateConflictException`.
+    """
+
+    def __init__(self, strict=False):
+        self._strict = strict
+        # template_id -> (fingerprint, chunk offset, chunk-relative offset)
+        self._definitions = {}
+        # template_id -> set of distinct fingerprints observed
+        self._fingerprints = {}
+
+    def register(self, template_node):
+        template_id = template_node.template_id()
+        fingerprint = self._fingerprint(template_node)
+        existing = self._definitions.get(template_id)
+        observed = self._fingerprints.setdefault(template_id, set())
+        if fingerprint not in observed:
+            if existing is not None and self._strict:
+                raise TemplateConflictException(
+                    "template id {} is defined with conflicting structures in chunks at offsets {} and {}".format(
+                        hex(template_id), hex(existing[1]), hex(template_node._chunk.offset())
+                    )
+                )
+            observed.add(fingerprint)
+        if existing is None:
+            self._definitions[template_id] = (
+                fingerprint,
+                template_node._chunk.offset(),
+                template_node.offset() - template_node._chunk.offset(),
+            )
+
+    @staticmethod
+    def _fingerprint(template_node):
+        start = template_node.offset()
+        length = template_node.length()
+        return binascii.crc32(bytes(template_node._buf[start : start + length])) & 0xFFFFFFFF
+
+    def __contains__(self, template_id):
+        return template_id in self._definitions
+
+    def definitions(self):
+        return dict(self._definitions)
+
+    def has_conflict(self, template_id):
+        """
+        @return True when the given id has been used by structurally
+          different template definitions in more than one chunk.
+        """
+        return len(self._fingerprints.get(template_id, ())) > 1
 
 
 class InvalidRecordException(ParseException):
@@ -130,9 +202,11 @@ class Evtx(object):
 
 
 class FileHeader(Block):
-    def __init__(self, buf, offset):
+    def __init__(self, buf, offset, strict_templates=False):
         logger.debug("FILE HEADER at {}.".format(hex(offset)))
         super(FileHeader, self).__init__(buf, offset)
+        self._strict_templates = strict_templates
+        self._template_registry = TemplateRegistry(strict=strict_templates)
         self.declare_field("string", "magic", 0x0, length=8)
         self.declare_field("qword", "oldest_chunk")
         self.declare_field("qword", "current_chunk_number")
@@ -237,7 +311,12 @@ class FileHeader(Block):
         i = 0
         ofs = self._offset + self.header_chunk_size()
         while ofs + 0x10000 <= len(self._buf) and i < chunk_count:
-            yield ChunkHeader(self._buf, ofs)
+            yield ChunkHeader(
+                self._buf,
+                ofs,
+                template_registry=self._template_registry,
+                strict_templates=self._strict_templates,
+            )
             ofs += 0x10000
             i += 1
 
@@ -292,11 +371,18 @@ class Template(object):
 
 
 class ChunkHeader(Block):
-    def __init__(self, buf, offset):
+    def __init__(self, buf, offset, template_registry=None, strict_templates=False):
         logger.debug("CHUNK HEADER at {}.".format(hex(offset)))
         super(ChunkHeader, self).__init__(buf, offset)
         self._strings = None
         self._templates = None
+        # chunk-relative template offset -> template id, so the cache key
+        # carries the chunk, the offset and the template id rather than the
+        # id alone.
+        self._template_ids = {}
+        self._template_registry = template_registry
+        self._strict_templates = strict_templates
+        self._template_cache_hits = 0
 
         self.declare_field("string", "magic", 0x0, length=8)
         self.declare_field("qword", "file_first_record_number")
@@ -393,33 +479,132 @@ class ChunkHeader(Block):
         if self._templates is None:
             self._templates = {}
         for i in range(32):
-            ofs = self.unpack_dword(0x180 + (i * 4))
+            try:
+                ofs = self.unpack_dword(0x180 + (i * 4))
+            except ParseException:
+                logger.warning("Unable to read template table entry %d", i)
+                continue
             while ofs > 0:
-                # unclear why these are found before the offset
-                # this is a direct port from A.S.'s code
-                token = self.unpack_byte(ofs - 10)
-                pointer = self.unpack_dword(ofs - 4)
-                if token != 0x0C or pointer != ofs:
-                    logger.warning("Unexpected token encountered")
-                    ofs = 0
-                    continue
-                template = self.add_template(ofs)
-                ofs = template.next_offset()
+                try:
+                    # unclear why these are found before the offset
+                    # this is a direct port from A.S.'s code
+                    token = self.unpack_byte(ofs - 10)
+                    pointer = self.unpack_dword(ofs - 4)
+                    if token != 0x0C or pointer != ofs:
+                        logger.warning("Unexpected token encountered")
+                        ofs = 0
+                        continue
+                    template = self.add_template(ofs)
+                    ofs = template.next_offset()
+                except TemplateException as exc:
+                    # one bad template definition must not make every other
+                    # record in this chunk unreadable.
+                    logger.warning("Skipping invalid template at chunk offset %s: %s", hex(ofs), exc)
+                    break
 
-    def add_template(self, offset, parent=None):
+    def add_template(self, offset, parent=None, expected_template_id=None):
         """
         @param offset An integer which contains the chunk-relative offset
            to a template to load into this Chunk.
         @param parent (Optional) The parent of the newly created
            TemplateNode instance. (Default: this chunk).
+        @param expected_template_id (Optional) The template id carried by the
+           template instance that caused this definition to be loaded.  When
+           provided it must match the definition's own template id.
         @return Newly added TemplateNode instance.
         """
         if self._templates is None:
             self._load_templates()
 
+        cached = self._templates.get(offset)
+        if cached is not None:
+            self._template_cache_hits += 1
+            if expected_template_id is not None and cached.template_id() != expected_template_id:
+                raise UndefinedTemplateException(
+                    "template instance id {} does not match cached definition id {} at offset {}".format(
+                        hex(expected_template_id), hex(cached.template_id()), hex(offset)
+                    )
+                )
+            return cached
+
+        if offset <= 0 or offset >= 0x10000:
+            raise UndefinedTemplateException(
+                "template offset {} is outside the chunk data area".format(hex(offset))
+            )
+
         node = TemplateNode(self._buf, self._offset + offset, self, parent or self)
+        try:
+            node_length = node.length()
+        except ParseException as exc:
+            raise UndefinedTemplateException("unable to measure template at offset {}".format(hex(offset))) from exc
+        if offset + node_length > 0x10000:
+            raise UndefinedTemplateException(
+                "template at offset {} extends beyond the chunk boundary".format(hex(offset))
+            )
+
+        template_id = node.template_id()
+        if expected_template_id is not None and template_id != expected_template_id:
+            raise UndefinedTemplateException(
+                "template instance id {} does not match definition id {} at offset {}".format(
+                    hex(expected_template_id), hex(template_id), hex(offset)
+                )
+            )
+
+        existing_offset = self._template_ids.get(template_id)
+        if existing_offset is not None and existing_offset != offset:
+            existing = self._templates[existing_offset]
+            different_definition = TemplateRegistry._fingerprint(existing) != TemplateRegistry._fingerprint(node)
+            if different_definition:
+                raise DuplicateTemplateException(
+                    "duplicate template id {} at chunk offsets {} and {}".format(
+                        hex(template_id), hex(existing_offset), hex(offset)
+                    )
+                )
+            # identical definition re-encountered at another offset: keep the
+            # first authoritative entry and treat this as a cache hit.
+            self._template_cache_hits += 1
+            return existing
+
         self._templates[offset] = node
+        self._template_ids[template_id] = offset
+        if self._template_registry is not None:
+            # In strict mode register() raises a descriptive
+            # TemplateConflictException for cross-chunk id collisions; in the
+            # default mode all distinct definitions are merely recorded.
+            self._template_registry.register(node)
         return node
+
+    def get_template(self, offset, parent=None, expected_template_id=None):
+        """
+        Resolve a template definition by chunk-relative offset, loading it on
+        demand when it is referenced by a non-resident template instance.
+
+        Every resolution goes through this method (or `add_template`) so the
+        cache key always includes the chunk and the offset, and so undefined,
+        duplicate or conflicting references fail explicitly.
+        """
+        if offset <= 0 or offset >= 0x10000:
+            raise UndefinedTemplateException(
+                "template offset {} is outside the chunk data area".format(hex(offset))
+            )
+        cached = self.templates().get(offset)
+        if cached is None:
+            return self.add_template(offset, parent=parent, expected_template_id=expected_template_id)
+        self._template_cache_hits += 1
+        if expected_template_id is not None and cached.template_id() != expected_template_id:
+            raise UndefinedTemplateException(
+                "template instance id {} does not match cached definition id {} at offset {}".format(
+                    hex(expected_template_id), hex(cached.template_id()), hex(offset)
+                )
+            )
+        return cached
+
+    def template_cache_hits(self):
+        """
+        @return The number of times a template definition was served from the
+          chunk's cache rather than freshly parsed.
+        """
+        return self._template_cache_hits
 
     def templates(self):
         """

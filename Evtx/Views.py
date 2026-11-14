@@ -18,9 +18,13 @@
 from __future__ import absolute_import
 
 import re
+import logging
 import xml.sax.saxutils
 
 import Evtx.Nodes as e_nodes
+from Evtx.BinaryParser import ParseException
+
+logger = logging.getLogger(__name__)
 
 XML_HEADER = '<?xml version="1.1" encoding="utf-8" standalone="yes" ?>\n'
 
@@ -202,6 +206,19 @@ def evtx_record_xml_view(record, cache=None):
     return render_root_node(record.root())
 
 
+def _safe_record_xml(record):
+    """
+    Render a record, returning None when the record's binary XML cannot be
+    parsed.  Template graph and substitution failures describe a single bad
+    record, so the caller skips it and keeps the remaining records readable.
+    """
+    try:
+        return evtx_record_xml_view(record)
+    except ParseException as exc:
+        logger.warning("Skipping unreadable record %s: %s", record.record_num(), exc)
+        return None
+
+
 def evtx_chunk_xml_view(chunk):
     """
     Generate XML representations of the records in an EVTX chunk.
@@ -216,8 +233,9 @@ def evtx_chunk_xml_view(chunk):
       tuple[str, Evtx.Record]: the rendered XML document and the raw record.
     """
     for record in chunk.records():
-        record_str = evtx_record_xml_view(record)
-        yield record_str, record
+        record_str = _safe_record_xml(record)
+        if record_str is not None:
+            yield record_str, record
 
 
 def evtx_file_xml_view(file_header):
@@ -235,8 +253,9 @@ def evtx_file_xml_view(file_header):
     """
     for chunk in file_header.chunks():
         for record in chunk.records():
-            record_str = evtx_record_xml_view(record)
-            yield record_str, record
+            record_str = _safe_record_xml(record)
+            if record_str is not None:
+                yield record_str, record
 
 
 def evtx_template_readable_view(root_node, cache=None):

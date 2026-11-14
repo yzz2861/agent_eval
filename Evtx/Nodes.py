@@ -20,10 +20,160 @@ from __future__ import absolute_import
 import re
 import base64
 import itertools
+import contextvars
 
 import hexdump
 
 from .BinaryParser import Block, ParseException, memoize
+
+
+# Limits applied while a binary XML template graph is expanded.  These keep
+# malicious or corrupted records from exhausting the stack or memory through
+# template-instance recursion, oversized substitution tables or reference
+# storms.  They are generous enough that legitimate event records remain well
+# below the thresholds.
+MAX_TEMPLATE_EXPANSION_DEPTH = 64
+MAX_TEMPLATE_EXPANSION_NODES = 100000
+MAX_SUBSTITUTIONS = 4096
+MAX_SUBSTITUTION_SIZE = 0x10000
+
+
+class TemplateException(ParseException):
+    """
+    Base class for failures detected while resolving the binary XML template
+    graph.  All such failures describe a single malformed record (or chunk),
+    rather than the whole file, and may therefore be skipped by callers.
+    """
+
+
+class DuplicateTemplateException(TemplateException):
+    """
+    Thrown when two different template definitions inside one chunk claim the
+    same template id.
+    """
+
+
+class UndefinedTemplateException(TemplateException):
+    """
+    Thrown when a template instance points at an offset that does not hold a
+    resolvable template definition, or at a definition whose id does not match
+    the instance's id.
+    """
+
+
+class TemplateConflictException(TemplateException):
+    """
+    Thrown when the same template id is used by structurally different
+    template definitions in different chunks.
+    """
+
+
+class TemplateCycleException(TemplateException):
+    """
+    Thrown when expanding template instances reaches a template that is still
+    being expanded (a self reference or an A->B->...->A cycle).
+    """
+
+
+class TemplateDepthExceededException(TemplateException):
+    """
+    Thrown when nested template instances exceed
+    `MAX_TEMPLATE_EXPANSION_DEPTH`.
+    """
+
+
+class TemplateNodeBudgetExceededException(TemplateException):
+    """
+    Thrown when expanding a template graph produces more than
+    `MAX_TEMPLATE_EXPANSION_NODES` binary XML nodes.
+    """
+
+
+class InvalidSubstitutionException(TemplateException):
+    """
+    Thrown when a root node's substitution array is truncated, oversized,
+    references an unknown variant type or contains substitution tokens that
+    point outside the declared substitution array.
+    """
+
+
+class _ExpansionState(object):
+    """
+    Bookkeeping for one template graph expansion.
+
+    The state tracks nested template-instance expansion so cycles and depth
+    limits are detected before Python's recursion limit is reached, while a
+    node counter bounds the total amount of work a single expansion can do.
+    """
+
+    def __init__(self):
+        self.depth = 0
+        self.node_count = 0
+        # keys are (chunk offset, chunk-relative template offset) pairs for
+        # templates currently on the expansion stack.
+        self.active_templates = set()
+
+
+_expansion_state = contextvars.ContextVar("evtx_template_expansion_state", default=None)
+
+
+class expansion_context(object):
+    """
+    Establish the `_ExpansionState` used while one record root is expanded.
+    Re-entrant: an expansion nested inside an existing one reuses the outer
+    state (this happens for BXml substitution values).
+    """
+
+    def __enter__(self):
+        self._token = None
+        if _expansion_state.get() is None:
+            self._token = _expansion_state.set(_ExpansionState())
+        return _expansion_state.get()
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self._token is not None:
+            _expansion_state.reset(self._token)
+
+
+def _get_expansion_state():
+    state = _expansion_state.get()
+    if state is None:
+        # Direct, ad-hoc traversal of nodes without a root-level context still
+        # needs the graph protections in place.
+        state = _ExpansionState()
+        _expansion_state.set(state)
+    return state
+
+
+def _count_expanded_node():
+    state = _get_expansion_state()
+    state.node_count += 1
+    if state.node_count > MAX_TEMPLATE_EXPANSION_NODES:
+        raise TemplateNodeBudgetExceededException(
+            "template expansion exceeded {} binary XML nodes".format(MAX_TEMPLATE_EXPANSION_NODES)
+        )
+
+
+def _enter_template(template_node):
+    state = _get_expansion_state()
+    key = (template_node._chunk.offset(), template_node.offset() - template_node._chunk.offset())
+    if key in state.active_templates:
+        raise TemplateCycleException(
+            "template cycle detected while expanding template at chunk offset {}".format(hex(key[1]))
+        )
+    state.depth += 1
+    if state.depth > MAX_TEMPLATE_EXPANSION_DEPTH:
+        raise TemplateDepthExceededException(
+            "template expansion exceeded maximum depth of {}".format(MAX_TEMPLATE_EXPANSION_DEPTH)
+        )
+    state.active_templates.add(key)
+    return key
+
+
+def _leave_template(key):
+    state = _get_expansion_state()
+    state.active_templates.discard(key)
+    state.depth -= 1
 
 
 class SYSTEM_TOKENS:
@@ -151,6 +301,7 @@ class BXmlNode(Block):
                 child = HandlerNodeClass(self._buf, self.offset() + ofs, self._chunk, self)
             except IndexError:
                 raise ParseException("Unexpected token {:02X} at {}".format(token, self.absolute_offset(0x0) + ofs))
+            _count_expanded_node()
             ret.append(child)
             ofs += child.length()
             if token in end_tokens:
@@ -233,6 +384,22 @@ class TemplateNode(BXmlNode):
 
     def length(self):
         return self.tag_length() + self.data_length()
+
+    @memoize
+    def children(self):
+        """
+        Parse the template definition's binary XML body.
+
+        Entering the template registers it on the active expansion stack so
+        self references and template cycles raise `TemplateCycleException`
+        before the recursion can overflow the Python stack.  Depth and node
+        budgets are enforced for the whole expansion via `_ExpansionState`.
+        """
+        key = _enter_template(self)
+        try:
+            return self._children()
+        finally:
+            _leave_template(key)
 
 
 class EndOfStreamNode(BXmlNode):
@@ -436,10 +603,10 @@ class CloseElementNode(BXmlNode):
         return self.flags() & 0x0F == 0 and self.opcode() & 0x0F == 0x04
 
 
-def get_variant_value(buf, offset, chunk, parent, type_, length=None):
+def get_variant_value_types():
     """
-    @return A VariantType subclass instance found in the given
-      buffer and offset.
+    @return A set of all variant type identifiers supported by this parser.
+      This includes the fixed-width array variant types.
     """
     types = {
         NODE_TYPES.NULL: NullTypeNode,
@@ -468,6 +635,15 @@ def get_variant_value(buf, offset, chunk, parent, type_, length=None):
         NODE_TYPES.WSTRINGARRAY: WstringArrayTypeNode,
     }
     types.update(ARRAY_TYPES)
+    return types
+
+
+def get_variant_value(buf, offset, chunk, parent, type_, length=None):
+    """
+    @return A VariantType subclass instance found in the given
+      buffer and offset.
+    """
+    types = get_variant_value_types()
     try:
         TypeClass = types[type_]
     except KeyError:
@@ -787,7 +963,9 @@ class TemplateInstanceNode(BXmlNode):
         self._data_length = 0
 
         if self.is_resident_template():
-            new_template = self._chunk.add_template(self.template_offset(), parent=self)
+            new_template = self._chunk.add_template(
+                self.template_offset(), parent=self, expected_template_id=self.template_id()
+            )
             self._data_length += new_template.length()
 
     def __repr__(self):
@@ -813,7 +991,16 @@ class TemplateInstanceNode(BXmlNode):
         return self.tag_length() + self._data_length
 
     def template(self):
-        return self._chunk.templates()[self.template_offset()]
+        """
+        Resolve the template definition referenced by this instance.
+
+        The definition is fetched through the chunk's template graph, which
+        guarantees the offset is in range, the template id matches this
+        instance and duplicate / conflicting definitions are rejected.
+        """
+        return self._chunk.get_template(
+            self.template_offset(), parent=self, expected_template_id=self.template_id()
+        )
 
     def children(self):
         return []
@@ -947,6 +1134,78 @@ class StreamStartNode(BXmlNode):
         return []
 
 
+def _validate_root_substitution_references(root_node, descriptors):
+    """
+    Validate substitution token references against the descriptor table of
+    the given root node.
+
+    BXml substitution values contain their own nested root nodes and
+    therefore their own descriptor tables; such nested roots are validated
+    recursively with the correct table.  The enclosing expansion context
+    bounds recursion and detects template cycles.
+    """
+    sub_count = len(descriptors)
+
+    def check(node):
+        if isinstance(node, (NormalSubstitutionNode, ConditionalSubstitutionNode)):
+            try:
+                index = node.index()
+            except (ParseException, IndexError, OverflowError):
+                raise InvalidSubstitutionException("unable to read substitution token index")
+            if index >= sub_count or index < 0:
+                raise InvalidSubstitutionException(
+                    "substitution token references index {} but only {} substitutions are declared".format(
+                        index, sub_count
+                    )
+                )
+            declared_type = descriptors[index][1]
+            expected_type = node.type()
+            type_mismatch = declared_type != expected_type
+            # extended/array variant tokens (high bit set) describe a token
+            # family while the descriptor carries the concrete width.
+            extended_token = bool(expected_type & 0x80)
+            # real logs reuse fixed-width numeric families (a SIZE token is
+            # commonly backed by a HEX64 descriptor), and conditional
+            # substitutions routinely carry relaxed/null typing.  Only normal
+            # substitutions with an incompatible, non-family mismatch fail.
+            numeric_width_family = {
+                frozenset((NODE_TYPES.SIZE, NODE_TYPES.HEX64)),
+                frozenset((NODE_TYPES.HEX32, NODE_TYPES.UNSIGNED_DWORD)),
+            }
+            width_compatible = any({declared_type, expected_type} <= family for family in numeric_width_family)
+            if (
+                type_mismatch
+                and isinstance(node, NormalSubstitutionNode)
+                and not extended_token
+                and not width_compatible
+            ):
+                raise InvalidSubstitutionException(
+                    "substitution index {} has declared type 0x{:02X} but token expects type 0x{:02X}".format(
+                        index, declared_type, expected_type
+                    )
+                )
+            if declared_type == NODE_TYPES.BXML:
+                # BXml substitution values carry their own nested root and
+                # descriptor table and are validated separately when the
+                # parent's substitution values are instantiated.
+                pass
+            return
+        if isinstance(node, TemplateInstanceNode):
+            for child in node.template().children():
+                check(child)
+            return
+        if isinstance(node, RootNode):
+            if node is not root_node:
+                # nested roots are validated independently via their own
+                # BXml substitution value, so do not walk them here.
+                return
+        for child in node.children():
+            check(child)
+
+    for top_child in root_node.children():
+        check(top_child)
+
+
 class RootNode(BXmlNode):
     """
     The binary XML node for the Root node.
@@ -971,7 +1230,8 @@ class RootNode(BXmlNode):
         """
         @return The template instances which make up this node.
         """
-        return self._children(end_tokens=[SYSTEM_TOKENS.EndOfStreamToken])
+        with expansion_context():
+            return self._children(end_tokens=[SYSTEM_TOKENS.EndOfStreamToken])
 
     def tag_and_children_length(self):
         """
@@ -1007,10 +1267,61 @@ class RootNode(BXmlNode):
         Returns:
           TemplateNode: the template.
         """
-        instance = self.template_instance()
-        offset = self._chunk.offset() + instance.template_offset()
-        node = TemplateNode(self._buf, offset, self._chunk, instance)
-        return node
+        return self.template_instance().template()
+
+    def _substitution_descriptors(self):
+        """
+        Read the substitution count and the (size, type) descriptor table
+        following the root node's binary XML stream.
+
+        Raises `InvalidSubstitutionException` if the descriptor table is
+        truncated, claims too many substitutions or references a variant type
+        this parser does not understand.
+        """
+        ofs = self.tag_and_children_length()
+        try:
+            sub_count = self.unpack_dword(ofs)
+        except ParseException:
+            raise InvalidSubstitutionException("unable to read substitution count")
+        if sub_count > MAX_SUBSTITUTIONS:
+            raise InvalidSubstitutionException(
+                "substitution count {} exceeds maximum of {}".format(sub_count, MAX_SUBSTITUTIONS)
+            )
+        ofs += 4
+
+        descriptors = []
+        for index in range(sub_count):
+            try:
+                size = self.unpack_word(ofs)
+                type_ = self.unpack_byte(ofs + 0x2)
+            except ParseException:
+                raise InvalidSubstitutionException(
+                    "truncated substitution descriptor {} of {}".format(index, sub_count)
+                )
+            if size > MAX_SUBSTITUTION_SIZE:
+                raise InvalidSubstitutionException(
+                    "substitution {} size {} exceeds maximum of {}".format(index, size, MAX_SUBSTITUTION_SIZE)
+                )
+            if type_ not in get_variant_value_types():
+                raise InvalidSubstitutionException(
+                    "substitution {} has unknown variant type 0x{:02X}".format(index, type_)
+                )
+            descriptors.append((size, type_))
+            ofs += 4
+        return descriptors, ofs
+
+    def _validate_substitution_references(self, descriptors):
+        """
+        Walk the explicit template graph referenced by this root and ensure
+        every substitution token addresses an in-range substitution whose
+        declared variant type matches the token's expected type.
+
+        The walk is bounded by the same expansion context as normal parsing,
+        so cyclic templates fail here with a cycle error instead of overflowing
+        the stack.
+        """
+        with expansion_context():
+            _validate_root_substitution_references(self, descriptors)
 
     @memoize
     def substitutions(self):
@@ -1018,41 +1329,41 @@ class RootNode(BXmlNode):
         @return A list of VariantTypeNode subclass instances that
           contain the substitutions for this root node.
         """
-        sub_decl = []
         sub_def = []
-        ofs = self.tag_and_children_length()
-        sub_count = self.unpack_dword(ofs)
-        ofs += 4
-        for _ in range(sub_count):
-            size = self.unpack_word(ofs)
-            type_ = self.unpack_byte(ofs + 0x2)
-            sub_decl.append((size, type_))
-            ofs += 4
-        for size, type_ in sub_decl:
-            val = get_variant_value(self._buf, self.offset() + ofs, self._chunk, self, type_, length=size)
-            if abs(size - val.length()) > 4:
-                # TODO(wb): This is a hack, so I'm sorry.
-                #   But, we are not passing around a 'length' field,
-                #   so we have to depend on the structure of each
-                #   variant type.  It seems some BXmlTypeNode sizes
-                #   are not exact.  Hopefully, this is just alignment.
-                #   So, that's what we compensate for here.
-                raise ParseException("Invalid substitution value size")
-            sub_def.append(val)
-            ofs += size
-        return sub_def
+        with expansion_context():
+            sub_decl, ofs = self._substitution_descriptors()
+            self._validate_substitution_references(sub_decl)
+            for index, (size, type_) in enumerate(sub_decl):
+                try:
+                    val = get_variant_value(self._buf, self.offset() + ofs, self._chunk, self, type_, length=size)
+                except ParseException:
+                    raise
+                except NotImplementedError as exc:
+                    raise InvalidSubstitutionException(str(exc))
+                if abs(size - val.length()) > 4:
+                    # TODO(wb): This is a hack, so I'm sorry.
+                    #   But, we are not passing around a 'length' field,
+                    #   so we have to depend on the structure of each
+                    #   variant type.  It seems some BXmlTypeNode sizes
+                    #   are not exact.  Hopefully, this is just alignment.
+                    #   So, that's what we compensate for here.
+                    raise InvalidSubstitutionException("Invalid substitution value size")
+                if isinstance(val, BXmlTypeNode):
+                    nested_root = val.root()
+                    nested_descriptors, _ = nested_root._substitution_descriptors()
+                    _validate_root_substitution_references(nested_root, nested_descriptors)
+                sub_def.append(val)
+                ofs += size
+            return sub_def
 
     @memoize
     def length(self):
-        ofs = self.tag_and_children_length()
-        sub_count = self.unpack_dword(ofs)
-        ofs += 4
-        ret = ofs
-        for _ in range(sub_count):
-            size = self.unpack_word(ofs)
-            ret += size + 4
-            ofs += 4
-        return ret
+        with expansion_context():
+            sub_decl, ofs = self._substitution_descriptors()
+            ret = ofs
+            for size, _ in sub_decl:
+                ret += size
+            return ret
 
 
 class VariantTypeNode(BXmlNode):

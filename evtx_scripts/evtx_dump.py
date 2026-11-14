@@ -19,6 +19,7 @@
 #   Version v0.1.1
 import Evtx.Evtx as evtx
 import Evtx.Views as e_views
+from Evtx.BinaryParser import ParseException
 
 
 def main():
@@ -32,7 +33,10 @@ def main():
         print(e_views.XML_HEADER)
         print("<Events>")
         for record in log.records():
-            print(record.xml())
+            try:
+                print(record.xml())
+            except ParseException as exc:
+                print("<!-- skipped unreadable record {}: {} -->".format(record.record_num(), exc))
         print("</Events>")
 
 
