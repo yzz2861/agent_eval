@@ -9,6 +9,7 @@ import re
 
 from sqlparse import sql
 from sqlparse import tokens as T
+from sqlparse.lexer import Lexer
 from sqlparse.utils import split_unquoted_newlines
 
 
@@ -168,6 +169,180 @@ class StripTrailingSemicolonFilter:
                                or stmt.tokens[-1].value == ';'):
             stmt.tokens.pop()
         return stmt
+
+
+# ---------------------------
+# normalization for security rule matching
+
+#: Dialects known to normalize_for_matching().
+_DIALECTS = ('ansi', 'mysql', 'postgres')
+
+# MySQL executes the body of /*! ... */ comments; the digits right
+# after the opener are an optional version number, not SQL.
+_MYSQL_EXECUTABLE_COMMENT = re.compile(r'/\*!\d{0,6}(.*)\*/$', re.DOTALL)
+
+
+def _nested_comment_end(text, start):
+    """Return the offset behind the block comment opening at `start`,
+    honoring nested /* ... */ pairs (PostgreSQL style).
+
+    Returns len(text) if the comment is never closed. String literals
+    inside comments are not recognized, just like PostgreSQL does.
+    """
+    depth = 0
+    pos = start
+    last = len(text) - 1
+    while pos < last:
+        pair = text[pos:pos + 2]
+        if pair == '/*':
+            depth += 1
+            pos += 2
+        elif pair == '*/':
+            depth -= 1
+            pos += 2
+            if depth == 0:
+                return pos
+        else:
+            pos += 1
+    return len(text)
+
+
+def _normalize_once(text, dialect):
+    """Single normalization pass over `text`, see
+    normalize_for_matching() for the rules."""
+    lexer_ = Lexer.get_default_instance()
+    items = list(lexer_.get_tokens_with_offsets(text))
+
+    # [normalized chunk, original start, original end]
+    pieces = []
+
+    def emit(chunk, ostart, oend):
+        if not chunk:
+            return
+        if chunk == ' ' and pieces and pieces[-1][0].endswith(' '):
+            return  # collapse a run of whitespace into a single space
+        pieces.append((chunk, ostart, oend))
+
+    idx = 0
+    count = len(items)
+    while idx < count:
+        ttype, value, start, end = items[idx]
+        idx += 1
+
+        if ttype in T.Comment:
+            if ttype in T.Comment.Multiline:
+                if dialect == 'mysql':
+                    m = _MYSQL_EXECUTABLE_COMMENT.match(value)
+                    if m is not None:
+                        # MySQL runs the body of /*! ... */ comments,
+                        # so it has to stay visible to rule matching.
+                        inner = m.group(1)
+                        base = start + m.start(1)
+                        sub = _normalize_for_matching(inner, dialect)
+                        for ns, ne, os_, oe in sub.spans:
+                            emit(sub.text[ns:ne], base + os_, base + oe)
+                        continue
+                if dialect == 'postgres':
+                    # Nested comments may reach beyond the token the
+                    # lexer produced; skip everything they cover.
+                    stop = _nested_comment_end(text, start)
+                    while idx < count and items[idx][2] < stop:
+                        idx += 1
+                # A block comment glues its neighbors together:
+                # UN/**/ION is matched as UNION.
+            else:
+                # A line comment swallows the line break, so it
+                # separates tokens like whitespace does.
+                emit(' ', start, start + 1)
+        elif dialect == 'mysql' and text[start] == '#':
+            # MySQL comments to the end of the line; the lexer only
+            # knows the '# ' variant, so catch '#' at a token start.
+            stop = text.find('\n', start)
+            stop = len(text) if stop == -1 else stop + 1
+            while idx < count and items[idx][2] < stop:
+                idx += 1
+            emit(' ', start, start + 1)
+        elif text[start:start + 2] == '/*':
+            # An unclosed block comment (the lexer could not pair it)
+            # swallows the rest of the input.
+            idx = count
+        elif ttype in T.Whitespace:
+            emit(' ', start, start + 1)
+        elif ttype in T.Keyword:
+            emit(re.sub(r'\s+', ' ', value).upper(), start, end)
+        else:
+            # Strings, quoted identifiers, dollar-quoted literals and
+            # everything else is kept verbatim.
+            emit(value, start, end)
+
+    if pieces and pieces[0][0] == ' ':
+        pieces.pop(0)
+    if pieces and pieces[-1][0] == ' ':
+        pieces.pop()
+
+    normalized = ''.join(chunk for chunk, _, _ in pieces)
+    spans = []
+    pos = 0
+    for chunk, ostart, oend in pieces:
+        spans.append((pos, pos + len(chunk), ostart, oend))
+        pos += len(chunk)
+    return sql.NormalizedView(normalized, spans)
+
+
+def _normalize_for_matching(text, dialect):
+    """Normalize until a fixed point is reached.
+
+    Removing a comment can join characters into a new keyword
+    (sel/**/ect) or even a new comment; every pass either shortens
+    the text or only folds keyword case, so this terminates quickly.
+    Spans are composed along the way and always refer to `text`.
+    """
+    view = _normalize_once(text, dialect)
+    while True:
+        again = _normalize_once(view.text, dialect)
+        if again.text == view.text:
+            return view
+        composed = []
+        for ns, ne, os_, oe in again.spans:
+            orig = view.original_span(os_, oe)
+            composed.append((ns, ne, orig[0], orig[1]))
+        view = sql.NormalizedView(again.text, composed)
+
+
+def normalize_for_matching(sql_text, dialect=None):
+    """Build a normalized view of `sql_text` for security rule matching.
+
+    Returns a :class:`sqlparse.sql.NormalizedView` whose ``text`` has
+    executable comments removed, whitespace collapsed to single spaces
+    and keywords folded to upper case. String literals, quoted
+    identifiers and dollar-quoted literals are kept verbatim, so
+    ``SELECT 'a--b'`` keeps its string contents and no rule fires on
+    them. Every chunk of the normalized text maps back to the original
+    source offsets, see :meth:`sqlparse.sql.NormalizedView.original_span`.
+
+    `dialect` selects comment and string quirks:
+
+    - ``'ansi'`` (the default): ``--`` and /* ... */ comments.
+    - ``'mysql'``: additionally ``#`` line comments, and the body of
+      executable /*! ... */ comments is normalized instead of removed.
+    - ``'postgres'`` (alias ``'postgresql'``): block comments nest.
+
+    Unclosed block comments swallow the rest of the input. Normalizing
+    is idempotent: normalizing the view's text again yields the same
+    text. `sql_text` may also be a (parsed) statement; its string
+    representation is normalized then.
+    """
+    if dialect is None:
+        dialect = 'ansi'
+    dialect = dialect.lower()
+    if dialect == 'postgresql':
+        dialect = 'postgres'
+    if dialect not in _DIALECTS:
+        raise ValueError(f'Unsupported dialect: {dialect!r}')
+
+    if not isinstance(sql_text, str):
+        sql_text = str(sql_text)
+    return _normalize_for_matching(sql_text, dialect)
 
 
 # ---------------------------

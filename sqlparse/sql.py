@@ -447,6 +447,19 @@ class Statement(TokenList):
         # Hmm, probably invalid syntax, so return unknown.
         return 'UNKNOWN'
 
+    def get_normalized_view(self, dialect=None):
+        """Returns a :class:`NormalizedView` of this statement.
+
+        The view is meant for security rule matching: executable
+        comments are removed, whitespace is collapsed and keywords are
+        folded to upper case, while string literals, quoted identifiers
+        and dollar-quoted literals are kept verbatim. `dialect` selects
+        comment quirks, see
+        :func:`sqlparse.filters.others.normalize_for_matching`.
+        """
+        from sqlparse.filters.others import normalize_for_matching
+        return normalize_for_matching(str(self), dialect=dialect)
+
 
 class Identifier(NameAliasMixin, TokenList):
     """Represents an identifier.
@@ -662,3 +675,86 @@ class Values(TokenList):
 
 class Command(TokenList):
     """Grouping of CLI commands."""
+
+
+class NormalizedView:
+    """A normalized rendering of SQL text for security rule matching.
+
+    Instances are created by
+    :func:`sqlparse.filters.others.normalize_for_matching`, see its
+    documentation for the normalization rules.
+
+    ``text`` is the normalized SQL: executable comments are removed,
+    whitespace is collapsed to single spaces and keywords are folded
+    to upper case. String literals, quoted identifiers and
+    dollar-quoted literals are kept verbatim, so a rule matching the
+    normalized text never fires on their contents.
+
+    ``spans`` is a tuple of ``(norm_start, norm_end, orig_start,
+    orig_end)`` items, one per emitted chunk, that maps the normalized
+    text back to the original source. Use :meth:`original_span` to
+    translate a match in the normalized text to the offsets it came
+    from, e.g. to report where ``UN/**/ION`` was hit.
+    """
+
+    __slots__ = ('spans', 'text')
+
+    def __init__(self, text, spans):
+        self.text = text
+        self.spans = tuple(spans)
+
+    def __str__(self):
+        return self.text
+
+    def __repr__(self):
+        return f'<NormalizedView {self.text!r}>'
+
+    def __eq__(self, other):
+        if isinstance(other, NormalizedView):
+            return self.text == other.text and self.spans == other.spans
+        if isinstance(other, str):
+            return self.text == other
+        return NotImplemented
+
+    def __hash__(self):
+        return hash((self.text, self.spans))
+
+    def __contains__(self, needle):
+        return needle in self.text
+
+    def original_span(self, start, end=None):
+        """Map a normalized range back to the original source.
+
+        Returns the ``(start, end)`` character offsets in the original
+        SQL that produced the normalized range ``[start, end)``, or
+        ``None`` if the range does not overlap any known chunk. If
+        `end` is omitted, a single normalized character is mapped.
+        """
+        if end is None:
+            end = start + 1
+        start = max(0, start)
+        end = min(len(self.text), end)
+        overlapping = [
+            span for span in self.spans
+            if span[0] < end and span[1] > start
+        ]
+        if not overlapping:
+            return None
+        return (min(span[2] for span in overlapping),
+                max(span[3] for span in overlapping))
+
+    def find_all(self, needle):
+        """Yield original ``(start, end)`` offsets for each
+        non-overlapping occurrence of `needle` in the normalized text.
+        """
+        if not needle:
+            return
+        pos = 0
+        while True:
+            idx = self.text.find(needle, pos)
+            if idx == -1:
+                return
+            span = self.original_span(idx, idx + len(needle))
+            if span is not None:
+                yield span
+            pos = idx + len(needle)

@@ -164,6 +164,20 @@ class Lexer:
             else:
                 yield tokens.Error, char
 
+    def get_tokens_with_offsets(self, text, encoding=None):
+        """Yield (tokentype, value, start, end) for each token.
+
+        Same tokenization as :meth:`get_tokens`, but each item is
+        extended with the absolute character offsets of the token in the
+        decoded input text. `end` is exclusive. Tokens are contiguous,
+        so the `end` of one token is the `start` of the next one.
+        """
+        pos = 0
+        for ttype, value in self.get_tokens(text, encoding):
+            end = pos + len(value)
+            yield ttype, value, pos, end
+            pos = end
+
 
 def tokenize(sql, encoding=None):
     """Tokenize sql.
@@ -172,3 +186,14 @@ def tokenize(sql, encoding=None):
     of ``(token type, value)`` items.
     """
     return Lexer.get_default_instance().get_tokens(sql, encoding)
+
+
+def tokenize_with_offsets(sql, encoding=None):
+    """Tokenize sql, keeping track of source positions.
+
+    Tokenize *sql* using the :class:`Lexer` and return a stream of
+    (token type, value, start, end) items, where `start` and `end` are
+    the character offsets of the token in the input.
+    """
+    return Lexer.get_default_instance().get_tokens_with_offsets(
+        sql, encoding)
