@@ -13,6 +13,9 @@ import pytest
 
 from jose import jws, jwt
 from jose.exceptions import JWTError
+from jose.exceptions import JWTClaimsError
+from jose.jwt import _nested_token_digest
+from tests.test_jws import rsa_private_key, rsa_public_key
 
 
 @pytest.fixture
@@ -531,3 +534,329 @@ class TestJWT:
         new_claims[claim] = value
         token = jwt.encode(new_claims, key)
         jwt.decode(token, key, options=options, audience=str(value))
+
+
+def _nest(payload, key, algorithm="HS256", cty="JWT", headers=None):
+    extra = {}
+    if cty is not None:
+        extra["cty"] = cty
+    if headers:
+        extra.update(headers)
+    if isinstance(payload, str):
+        payload = payload.encode("utf-8")
+    return jws.sign(payload, key, headers=extra, algorithm=algorithm)
+
+
+def _build_nested(depth, keys, claims, algorithm="HS256"):
+    token = jwt.encode(claims, keys[depth - 1], algorithm=algorithm)
+    for i in range(depth - 2, -1, -1):
+        token = _nest(token, keys[i], algorithm=algorithm)
+    return token
+
+
+class TestNestedJWT:
+    @pytest.fixture
+    def claims(self):
+        return {"sub": "alice", "aud": "message-bus", "iss": "issuer"}
+
+    def test_depths_1_to_5(self, claims):
+        for depth in range(1, 6):
+            keys = ["secret-%d" % i for i in range(depth)]
+            token = _build_nested(depth, keys, claims)
+            result = jwt.decode_nested(
+                token,
+                keys,
+                algorithms=["HS256"],
+                audience="message-bus",
+                issuer="issuer",
+                max_depth=5,
+            )
+            assert result["depth"] == depth
+            assert result["claims"] == claims
+            assert [layer["algorithm"] for layer in result["layers"]] == ["HS256"] * depth
+            assert [layer["index"] for layer in result["layers"]] == list(range(depth))
+            assert result["layers"][-1]["claims"] == claims
+            assert result["layers"][-1]["nested"] is False
+            for layer in result["layers"][:-1]:
+                assert layer["nested"] is True
+                assert layer["claims"] is None
+                assert layer["header"]["cty"] == "JWT"
+                assert layer["header"]["alg"] == "HS256"
+
+    def test_verification_count_matches_depth(self, claims, monkeypatch):
+        keys = ["k0", "k1", "k2", "k3"]
+        token = _build_nested(4, keys, claims)
+        calls = []
+        original_verify = jws.verify
+
+        def counting_verify(token, key, algorithms, verify=True):
+            calls.append(token)
+            return original_verify(token, key, algorithms, verify=verify)
+
+        monkeypatch.setattr(jws, "verify", counting_verify)
+        jwt.decode_nested(token, keys, algorithms=["HS256"], audience="message-bus", issuer="issuer")
+        assert len(calls) == 4
+
+    def test_single_layer_matches_decode(self, claims):
+        token = jwt.encode(claims, "secret", algorithm="HS256")
+        expected = jwt.decode(token, "secret", algorithms=["HS256"], audience="message-bus", issuer="issuer")
+        result = jwt.decode_nested(
+            token,
+            "secret",
+            algorithms=["HS256"],
+            audience="message-bus",
+            issuer="issuer",
+        )
+        assert result["claims"] == expected
+        assert result["depth"] == 1
+        assert result["layers"][0]["nested"] is False
+
+    def test_missing_cty_treated_as_terminal(self, claims):
+        inner = jwt.encode(claims, "k1")
+        outer = _nest(inner, "k0", cty=None)
+        with pytest.raises(JWTError, match="Invalid payload string"):
+            jwt.decode_nested(outer, ["k0", "k1"], algorithms=["HS256"])
+
+    @pytest.mark.parametrize("cty", ["JWE", "json", "JWT2", "JWT JWT", 123, ["JWT"]])
+    def test_wrong_cty_rejected(self, claims, cty):
+        inner = jwt.encode(claims, "k1")
+        outer = _nest(inner, "k0", cty=cty)
+        with pytest.raises(JWTError, match="cty"):
+            jwt.decode_nested(outer, ["k0", "k1"], algorithms=["HS256"])
+
+    @pytest.mark.parametrize("cty", ["JWT", "jwt", "Jwt", "application/jwt", "Application/JWT", " JWT "])
+    def test_cty_value_forms_accepted(self, claims, cty):
+        inner = jwt.encode(claims, "k1")
+        outer = _nest(inner, "k0", cty=cty)
+        result = jwt.decode_nested(
+            outer,
+            ["k0", "k1"],
+            algorithms=["HS256"],
+            audience="message-bus",
+            issuer="issuer",
+        )
+        assert result["claims"] == claims
+        assert result["depth"] == 2
+
+    def test_max_depth_exceeded(self, claims):
+        keys = ["k0", "k1", "k2"]
+        token = _build_nested(3, keys, claims)
+        with pytest.raises(JWTError, match="maximum depth"):
+            jwt.decode_nested(token, keys, algorithms=["HS256"], max_depth=2)
+
+    @pytest.mark.parametrize("max_depth", [0, -1])
+    def test_invalid_max_depth(self, claims, max_depth):
+        token = jwt.encode(claims, "k")
+        with pytest.raises(JWTError, match="max_depth"):
+            jwt.decode_nested(token, "k", max_depth=max_depth)
+
+    def test_self_cycle_detected(self, claims, monkeypatch):
+        token = _nest(jwt.encode(claims, "k1"), "k0")
+
+        def looping_verify(token_arg, key, algorithms, verify=True):
+            return token.encode("utf-8")
+
+        monkeypatch.setattr(jws, "verify", looping_verify)
+        with pytest.raises(JWTError, match="cycle"):
+            jwt.decode_nested(token, "k0", algorithms=["HS256"], max_depth=100)
+
+    def test_two_token_cycle_detected(self, claims, monkeypatch):
+        b = _nest(jwt.encode(claims, "k1"), "k1")
+        a = _nest(b, "k0")
+        payloads = {a: b.encode("utf-8"), b: a.encode("utf-8")}
+        monkeypatch.setattr(jws, "verify", lambda t, k, alg, verify=True: payloads[t])
+        with pytest.raises(JWTError, match="cycle"):
+            jwt.decode_nested(a, "k0", algorithms=["HS256"], max_depth=100)
+
+    def test_alg_downgrade_rejected(self, claims, monkeypatch):
+        # Attacker downgrades the inner layer from RS256 to HS256; the
+        # per-layer algorithm policy must reject it even though the inner
+        # signature itself verifies against the presented key.
+        inner = jwt.encode(claims, "hmac-secret", algorithm="HS256")
+        outer = _nest(inner, rsa_private_key, algorithm="RS256")
+        calls = []
+        original_verify = jws.verify
+
+        def counting_verify(token, key, algorithms, verify=True):
+            calls.append(token)
+            return original_verify(token, key, algorithms, verify=verify)
+
+        monkeypatch.setattr(jws, "verify", counting_verify)
+        with pytest.raises(JWTError, match="alg value is not allowed"):
+            jwt.decode_nested(
+                outer,
+                [rsa_public_key, "hmac-secret"],
+                layer_algorithms={0: ["RS256"], 1: ["RS256"]},
+            )
+        assert len(calls) == 2
+
+    def test_mixed_algorithms_per_layer(self, claims):
+        inner = jwt.encode(claims, "inner-secret", algorithm="HS256")
+        outer = _nest(inner, rsa_private_key, algorithm="RS256")
+        result = jwt.decode_nested(
+            outer,
+            [rsa_public_key, "inner-secret"],
+            layer_algorithms={0: ["RS256"], 1: ["HS256"]},
+            audience="message-bus",
+            issuer="issuer",
+        )
+        assert [layer["algorithm"] for layer in result["layers"]] == ["RS256", "HS256"]
+        assert result["claims"] == claims
+
+    def test_outer_key_not_trusted_for_inner_layer(self, claims):
+        inner = jwt.encode(claims, "inner-secret")
+        outer = _nest(inner, "outer-secret")
+        with pytest.raises(JWTError, match="Signature verification failed"):
+            jwt.decode_nested(outer, "outer-secret", algorithms=["HS256"])
+        result = jwt.decode_nested(
+            outer,
+            ["outer-secret", "inner-secret"],
+            algorithms=["HS256"],
+            audience="message-bus",
+            issuer="issuer",
+        )
+        assert result["claims"] == claims
+
+    def test_callable_key_resolver(self, claims):
+        keys = ["k0", "k1"]
+        token = _build_nested(2, keys, claims)
+        seen = []
+
+        def resolver(index, header):
+            seen.append((index, header["alg"]))
+            return keys[index]
+
+        result = jwt.decode_nested(
+            token,
+            resolver,
+            algorithms=["HS256"],
+            audience="message-bus",
+            issuer="issuer",
+        )
+        assert result["claims"] == claims
+        assert seen == [(0, "HS256"), (1, "HS256")]
+
+    def test_missing_layer_key(self, claims):
+        token = _build_nested(3, ["k0", "k1", "k2"], claims)
+        with pytest.raises(JWTError, match="No key configured"):
+            jwt.decode_nested(token, ["k0"], algorithms=["HS256"], max_depth=3)
+
+    def test_audience_and_issuer_enforced(self, claims):
+        token = _build_nested(2, ["k0", "k1"], claims)
+        with pytest.raises(JWTClaimsError):
+            jwt.decode_nested(token, ["k0", "k1"], algorithms=["HS256"], audience="someone-else")
+        with pytest.raises(JWTClaimsError):
+            jwt.decode_nested(token, ["k0", "k1"], algorithms=["HS256"], issuer="other-issuer")
+
+    def test_aud_iss_cannot_be_disabled_via_options(self, claims):
+        token = _build_nested(2, ["k0", "k1"], claims)
+        with pytest.raises(JWTClaimsError):
+            jwt.decode_nested(
+                token,
+                ["k0", "k1"],
+                algorithms=["HS256"],
+                audience="someone-else",
+                options={"verify_aud": False},
+            )
+        with pytest.raises(JWTClaimsError):
+            jwt.decode_nested(
+                token,
+                ["k0", "k1"],
+                algorithms=["HS256"],
+                issuer="other-issuer",
+                options={"verify_iss": False},
+            )
+
+    @pytest.mark.parametrize(
+        "header",
+        [
+            {"jku": "https://evil.example/jwks.json"},
+            {"x5u": "https://evil.example/cert.pem"},
+        ],
+    )
+    def test_inner_jku_x5u_rejected(self, claims, header):
+        inner = jwt.encode(claims, "k1", headers=header)
+        outer = _nest(inner, "k0")
+        with pytest.raises(JWTError, match="never fetched"):
+            jwt.decode_nested(outer, ["k0", "k1"], algorithms=["HS256"])
+
+    def test_byte_budget_single_layer(self):
+        claims = {"data": "x" * 4096}
+        token = jwt.encode(claims, "k")
+        with pytest.raises(JWTError, match="byte budget"):
+            jwt.decode_nested(token, "k", algorithms=["HS256"], max_bytes=1024)
+        result = jwt.decode_nested(token, "k", algorithms=["HS256"], max_bytes=len(token))
+        assert result["claims"] == claims
+
+    def test_byte_budget_accumulates_across_layers(self):
+        claims = {"data": "x" * 1024}
+        t1 = jwt.encode(claims, "k2")
+        t2 = _nest(t1, "k1")
+        t3 = _nest(t2, "k0")
+        budget = len(t1) + len(t2) + len(t3)
+        with pytest.raises(JWTError, match="byte budget"):
+            jwt.decode_nested(t3, ["k0", "k1", "k2"], algorithms=["HS256"], max_depth=3, max_bytes=budget - 1)
+        result = jwt.decode_nested(t3, ["k0", "k1", "k2"], algorithms=["HS256"], max_depth=3, max_bytes=budget)
+        assert result["depth"] == 3
+
+    @pytest.mark.parametrize("max_bytes", [0, -1])
+    def test_invalid_max_bytes(self, claims, max_bytes):
+        token = jwt.encode(claims, "k")
+        with pytest.raises(JWTError, match="max_bytes"):
+            jwt.decode_nested(token, "k", max_bytes=max_bytes)
+
+    def test_base64_reencoded_token_stable_error(self, claims):
+        token = jwt.encode(claims, "secret")
+        header_segment, payload_segment, signature_segment = token.split(".")
+        header = json.loads(base64.urlsafe_b64decode(header_segment + "==").decode("utf-8"))
+        # Re-serializing the header changes the signing input: the token is
+        # rejected deterministically by both decode() and decode_nested().
+        reencoded_header = base64.urlsafe_b64encode(json.dumps(header, indent=2).encode("utf-8"))
+        reencoded_header = reencoded_header.rstrip(b"=").decode("utf-8")
+        reencoded = ".".join([reencoded_header, payload_segment, signature_segment])
+        with pytest.raises(JWTError):
+            jwt.decode(reencoded, "secret", algorithms=["HS256"])
+        with pytest.raises(JWTError):
+            jwt.decode_nested(reencoded, "secret", algorithms=["HS256"])
+        padded = ".".join([header_segment + "=", payload_segment, signature_segment])
+        with pytest.raises(JWTError):
+            jwt.decode_nested(padded, "secret", algorithms=["HS256"])
+
+    def test_nested_token_digest_canonical(self):
+        token = jwt.encode({"a": "b"}, "secret")
+        padded = ".".join(segment + "=" * (-len(segment) % 4) for segment in token.split("."))
+        assert _nested_token_digest(token.encode("utf-8")) == _nested_token_digest(padded.encode("utf-8"))
+        other = jwt.encode({"a": "c"}, "secret")
+        assert _nested_token_digest(token.encode("utf-8")) != _nested_token_digest(other.encode("utf-8"))
+
+    def test_deep_nesting_is_iterative(self, monkeypatch):
+        depth = 2000
+        tokens = [
+            "{0}.{1}.{2}".format(
+                base64.urlsafe_b64encode(b'{"alg": "HS256"}').rstrip(b"=").decode("ascii"),
+                base64.urlsafe_b64encode(str(i).encode("utf-8")).rstrip(b"=").decode("ascii"),
+                base64.urlsafe_b64encode(b"sig" + str(i).encode("utf-8")).rstrip(b"=").decode("ascii"),
+            )
+            for i in range(depth)
+        ]
+        headers = {}
+        payloads = {}
+        for i, token in enumerate(tokens):
+            headers[token] = {"alg": "HS256", "typ": "JWT"}
+            if i < depth - 1:
+                headers[token]["cty"] = "JWT"
+                payloads[token] = tokens[i + 1].encode("utf-8")
+            else:
+                payloads[token] = b'{"a": "b"}'
+        calls = []
+
+        def fake_verify(token, key, algorithms, verify=True):
+            calls.append(token)
+            return payloads[token]
+
+        monkeypatch.setattr(jws, "verify", fake_verify)
+        monkeypatch.setattr(jws, "get_unverified_headers", lambda token: headers[token])
+        result = jwt.decode_nested(tokens[0], "k", algorithms=["HS256"], max_depth=depth, max_bytes=10**6)
+        assert result["depth"] == depth
+        assert result["claims"] == {"a": "b"}
+        assert len(calls) == depth

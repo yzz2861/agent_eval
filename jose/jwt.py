@@ -1,3 +1,4 @@
+import hashlib
 import json
 from calendar import timegm
 from datetime import datetime, timedelta
@@ -18,7 +19,17 @@ from jose import jws
 
 from .constants import ALGORITHMS
 from .exceptions import ExpiredSignatureError, JWSError, JWTClaimsError, JWTError
-from .utils import calculate_at_hash, timedelta_total_seconds
+from .utils import base64url_decode, calculate_at_hash, timedelta_total_seconds
+
+#: Default maximum number of nesting layers accepted by decode_nested().
+DEFAULT_NESTED_MAX_DEPTH = 4
+
+#: Default total byte budget (summed over all layers) for decode_nested().
+DEFAULT_NESTED_MAX_BYTES = 64 * 1024
+
+#: 'cty' header values that mark the payload as a nested JWT (compared
+#: case-insensitively), per RFC 7519 section 5.2.
+_NESTED_CTY_VALUES = frozenset({"jwt", "application/jwt"})
 
 
 def encode(claims, key, algorithm=ALGORITHMS.HS256, headers=None, access_token=None):
@@ -182,6 +193,246 @@ def decode(token, key, algorithms=None, options=None, audience=None, issuer=None
     )
 
     return claims
+
+
+def decode_nested(
+    token,
+    keys,
+    algorithms=None,
+    options=None,
+    audience=None,
+    issuer=None,
+    subject=None,
+    access_token=None,
+    max_depth=DEFAULT_NESTED_MAX_DEPTH,
+    max_bytes=DEFAULT_NESTED_MAX_BYTES,
+    layer_algorithms=None,
+):
+    """Verifies and decodes a nested JWT (a JWT whose payload is another JWT).
+
+    A layer is only treated as a nested JWT when its 'cty' header is
+    explicitly set to 'JWT' (or 'application/jwt'). Every layer is verified
+    independently: signature verification, audience and issuer validation are
+    never skipped for any layer, and key material trusted for an outer layer
+    is never implicitly trusted for an inner one. Inner layer 'jku'/'x5u'
+    headers are rejected and never fetched.
+
+    The decoding loop is iterative, so nesting depth is bounded by
+    'max_depth' rather than by the Python recursion limit.
+
+    Args:
+        token (str): The outermost signed JWS to be verified.
+        keys: Key material used to verify each layer independently. May be:
+
+            * a single key (str, bytes, dict, JWK set or Key instance), in
+              which case the same material is presented to every layer, or
+            * a list/tuple of keys indexed by layer (layer 0 is the
+              outermost token), or
+            * a callable (layer_index, header) -> key.
+
+            Every layer is verified on its own; a key that successfully
+            verified an outer layer is never reused to skip verification of
+            an inner layer.
+        algorithms (str or list): Valid algorithms for every layer, unless
+            overridden per layer via 'layer_algorithms'.
+        layer_algorithms (optional): Per-layer algorithm allow lists. Either
+            a sequence indexed by layer or a mapping of layer_index ->
+            algorithms. Layers without an entry fall back to 'algorithms'.
+        max_depth (int): Maximum number of layers accepted, including the
+            outermost token. Defaults to DEFAULT_NESTED_MAX_DEPTH.
+        max_bytes (int): Total byte budget summed over the compact
+            serialization of every layer. Defaults to
+            DEFAULT_NESTED_MAX_BYTES.
+        options (dict): A dictionary of validation options, as in decode().
+            Note that 'verify_signature', 'verify_aud' and 'verify_iss' are
+            always forced on for nested decoding.
+        audience (str): The intended audience of the terminal claims.
+        issuer (str or iterable): Acceptable value(s) for the issuer of the
+            terminal claims.
+        subject (str): The subject of the terminal claims.
+        access_token (str): An access token string to match against an
+            'at_hash' claim in the terminal claims.
+
+    Returns:
+        dict: A dictionary with the terminal 'claims', the decoded 'depth',
+            and a 'layers' list with one audit snapshot per layer containing
+            its index, algorithm, verified header, claims (terminal layer
+            only) and whether its payload was a nested JWT.
+
+    Raises:
+        JWTError: If any layer's signature is invalid, the nesting depth or
+            byte budget is exceeded, a cycle is detected, a nested layer is
+            not marked with a 'cty' of 'JWT', an inner header carries
+            'jku'/'x5u', or a layer's algorithm is not allowed.
+        ExpiredSignatureError: If the terminal signature has expired.
+        JWTClaimsError: If any terminal claim is invalid in any way.
+    """
+
+    if not isinstance(max_depth, int) or isinstance(max_depth, bool) or max_depth < 1:
+        raise JWTError("max_depth must be a positive integer")
+    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes < 1:
+        raise JWTError("max_bytes must be a positive integer")
+
+    defaults = {
+        "verify_signature": True,
+        "verify_aud": True,
+        "verify_iat": True,
+        "verify_exp": True,
+        "verify_nbf": True,
+        "verify_iss": True,
+        "verify_sub": True,
+        "verify_jti": True,
+        "verify_at_hash": True,
+        "require_aud": False,
+        "require_iat": False,
+        "require_exp": False,
+        "require_nbf": False,
+        "require_iss": False,
+        "require_sub": False,
+        "require_jti": False,
+        "require_at_hash": False,
+        "leeway": 0,
+    }
+
+    if options:
+        defaults.update(options)
+
+    # Nested decoding always verifies each layer independently; signature,
+    # audience and issuer checks may not be disabled for any layer.
+    defaults["verify_signature"] = True
+    defaults["verify_aud"] = True
+    defaults["verify_iss"] = True
+
+    layers = []
+    seen_tokens = set()
+    total_bytes = 0
+    current = token
+    index = 0
+
+    while True:
+        if index >= max_depth:
+            raise JWTError("Nested JWT exceeds the maximum depth of %d" % max_depth)
+
+        token_bytes = current.encode("utf-8") if isinstance(current, str) else bytes(current)
+        total_bytes += len(token_bytes)
+        if total_bytes > max_bytes:
+            raise JWTError("Nested JWT exceeds the maximum byte budget of %d" % max_bytes)
+
+        digest = _nested_token_digest(token_bytes)
+        if digest in seen_tokens:
+            raise JWTError("Nested JWT cycle detected")
+        seen_tokens.add(digest)
+
+        header = get_unverified_header(current)
+
+        if index > 0 and ("jku" in header or "x5u" in header):
+            raise JWTError("Inner JWT header must not contain 'jku' or 'x5u'; they are never fetched")
+
+        key = _resolve_layer_key(keys, index, header)
+        allowed_algorithms = _resolve_layer_algorithms(layer_algorithms, index, algorithms)
+
+        try:
+            payload = jws.verify(current, key, allowed_algorithms, verify=True)
+        except JWSError as e:
+            raise JWTError(e)
+
+        algorithm = header.get("alg")
+
+        cty = header.get("cty")
+        if cty is None:
+            nested = False
+        elif isinstance(cty, str) and cty.strip().lower() in _NESTED_CTY_VALUES:
+            nested = True
+        else:
+            raise JWTError("Unsupported 'cty' header value for nested JWT: %r" % (cty,))
+
+        if nested:
+            try:
+                current = payload.decode("utf-8") if isinstance(payload, bytes) else payload
+            except UnicodeDecodeError as e:
+                raise JWTError("Invalid nested JWT payload: %s" % e)
+            if not isinstance(current, str):
+                raise JWTError("Invalid nested JWT payload: must be a text token")
+            layers.append(
+                {
+                    "index": index,
+                    "algorithm": algorithm,
+                    "header": dict(header),
+                    "claims": None,
+                    "nested": True,
+                }
+            )
+            index += 1
+            continue
+
+        try:
+            claims = json.loads(payload.decode("utf-8"))
+        except ValueError as e:
+            raise JWTError("Invalid payload string: %s" % e)
+
+        if not isinstance(claims, Mapping):
+            raise JWTError("Invalid payload string: must be a json object")
+
+        _validate_claims(
+            claims,
+            audience=audience,
+            issuer=issuer,
+            subject=subject,
+            algorithm=algorithm,
+            access_token=access_token,
+            options=defaults,
+        )
+
+        layers.append(
+            {
+                "index": index,
+                "algorithm": algorithm,
+                "header": dict(header),
+                "claims": dict(claims),
+                "nested": False,
+            }
+        )
+
+        return {"claims": claims, "layers": layers, "depth": len(layers)}
+
+
+def _nested_token_digest(token_bytes):
+    """Returns a cycle-detection digest for a compact JWS serialization.
+
+    The digest is computed over the decoded segments so that a token that
+    has merely been base64 re-encoded still hashes identically.
+    """
+    try:
+        segments = token_bytes.split(b".")
+        if len(segments) != 3:
+            raise ValueError("Not enough segments")
+        canonical = b".".join(base64url_decode(segment) for segment in segments)
+    except Exception:
+        canonical = token_bytes
+    return hashlib.sha256(canonical).digest()
+
+
+def _resolve_layer_key(keys, index, header):
+    if callable(keys):
+        return keys(index, header)
+    if isinstance(keys, Mapping):
+        # JWK, JWK set or firebase-style mapping: same material for every layer.
+        return keys
+    if isinstance(keys, (list, tuple)):
+        if index < len(keys):
+            return keys[index]
+        raise JWTError("No key configured for nested JWT layer %d" % index)
+    return keys
+
+
+def _resolve_layer_algorithms(layer_algorithms, index, algorithms):
+    if layer_algorithms is None:
+        return algorithms
+    if isinstance(layer_algorithms, Mapping):
+        return layer_algorithms.get(index, algorithms)
+    if index < len(layer_algorithms):
+        return layer_algorithms[index]
+    return algorithms
 
 
 def get_unverified_header(token):
