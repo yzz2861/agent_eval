@@ -29,15 +29,24 @@ from .android import AndroidSafetynetAttestation  # noqa: F401
 from .apple import AppleAttestation  # noqa: F401
 from .base import (  # noqa: F401
     Attestation,
+    AttestationDecision,
+    AttestationFailureStage,
+    AttestationOutcome,
+    AttestationPolicy,
+    AttestationPolicyError,
     AttestationResult,
     AttestationType,
     AttestationVerifier,
     InvalidData,
     InvalidSignature,
     NoneAttestation,
+    PolicyAttestationVerifier,
     UnsupportedAttestation,
     UnsupportedType,
     UntrustedAttestation,
+    verify_certificate_validity,
+    verify_leaf_key_usage,
+    verify_leaf_san_rp_id,
     verify_x509_chain,
 )
 from .packed import PackedAttestation  # noqa: F401

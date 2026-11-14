@@ -34,6 +34,11 @@ from typing import Any, Callable, Mapping, Sequence
 from cryptography.exceptions import InvalidSignature as _InvalidSignature
 from cryptography.hazmat.primitives import constant_time
 
+from .attestation import (
+    AttestationDecision,
+    AttestationPolicy,
+    PolicyAttestationVerifier,
+)
 from .cose import CoseKey
 from .rpid import verify_rp_id
 from .utils import websafe_decode, websafe_encode
@@ -132,6 +137,13 @@ class Fido2Server:
         invoked with attestation_object and client_data_hash. It should return nothing
         and raise an exception on failure. By default, attestation is ignored.
         Attestation is also ignored if `attestation` is set to `none`.
+    :param attestation_policy: (optional) AttestationPolicy to enforce on
+        registrations. When set, a PolicyAttestationVerifier is used to
+        verify attestation in layered stages (format, statement, chain to the
+        trust store, certificate usage/validity, AAGUID whitelist), and the
+        resulting AttestationDecision is recorded in
+        last_attestation_decision. Cannot be combined with
+        verify_attestation.
     """
 
     def __init__(
@@ -140,6 +152,7 @@ class Fido2Server:
         attestation: AttestationConveyancePreference | None = None,
         verify_origin: VerifyOrigin | None = None,
         verify_attestation: VerifyAttestation | None = None,
+        attestation_policy: AttestationPolicy | None = None,
     ):
         self.rp = PublicKeyCredentialRpEntity.from_dict(rp)
         assert self.rp.id is not None  # noqa: S101
@@ -152,7 +165,16 @@ class Fido2Server:
             )
             for alg in CoseKey.supported_algorithms()
         ]
+        if attestation_policy is not None:
+            if verify_attestation is not None:
+                raise ValueError(
+                    "attestation_policy cannot be combined with verify_attestation"
+                )
+            verify_attestation = PolicyAttestationVerifier(
+                attestation_policy, rp_id=self.rp.id
+            )
         self._verify_attestation = verify_attestation or _ignore_attestation
+        self.last_attestation_decision: AttestationDecision | None = None
         logger.debug(f"Fido2Server initialized for RP: {self.rp}")
 
     def register_begin(
@@ -263,9 +285,15 @@ class Fido2Server:
                 "User verification required, but User Verified flag not set."
             )
 
-        if self.attestation not in (None, AttestationConveyancePreference.NONE):
+        if self.attestation not in (
+            None,
+            AttestationConveyancePreference.NONE,
+        ) or isinstance(self._verify_attestation, PolicyAttestationVerifier):
             logger.debug(f"Verifying attestation of type {attestation_object.fmt}")
             self._verify_attestation(attestation_object, client_data.hash)
+            self.last_attestation_decision = getattr(
+                self._verify_attestation, "last_decision", None
+            )
         # We simply ignore attestation if self.attestation == 'none', as not all
         # clients strip the attestation.
 

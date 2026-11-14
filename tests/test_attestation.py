@@ -25,6 +25,7 @@
 # ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
+import hashlib
 import unittest
 from datetime import datetime, timedelta
 from importlib.metadata import version
@@ -35,24 +36,33 @@ from cryptography import x509
 from cryptography.exceptions import UnsupportedAlgorithm, _Reasons
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, ed448, rsa
+from cryptography.x509.oid import ObjectIdentifier
 from fido2 import cbor
 from fido2.attestation import (
     AndroidSafetynetAttestation,
     AppleAttestation,
     Attestation,
+    AttestationFailureStage,
+    AttestationOutcome,
+    AttestationPolicy,
+    AttestationPolicyError,
+    AttestationResult,
     AttestationType,
     FidoU2FAttestation,
     InvalidData,
     InvalidSignature,
     NoneAttestation,
     PackedAttestation,
+    PolicyAttestationVerifier,
     TpmAttestation,
     UnsupportedAttestation,
     UnsupportedType,
     verify_x509_chain,
 )
 from fido2.ctap2.base import AttestationResponse
-from fido2.webauthn import AuthenticatorData
+from fido2.webauthn import Aaguid, AttestationObject, AuthenticatorData
+
+from .test_ctap2 import _ATT_CRED_DATA
 
 
 class _LegacyCertificate:
@@ -469,3 +479,360 @@ def test_mldsa87_attestation():
     packed = PackedAttestation()
 
     packed.verify(att_resp.att_stmt, att_resp.auth_data, client_data_hash)
+
+
+# --- Layered attestation policy tests ---
+
+_POLICY_AAGUID = Aaguid(_ATT_CRED_DATA[:16])
+_POLICY_AUTH_DATA = AuthenticatorData(
+    hashlib.sha256(b"example.com").digest() + b"\x41" + b"\0\0\0\1" + _ATT_CRED_DATA
+)
+
+
+def _issue_cert(
+    subject_cn,
+    issuer_name,
+    subject_key,
+    issuer_key,
+    serial,
+    is_ca=False,
+    digital_signature=True,
+    eku_oids=None,
+    san_dns=None,
+    not_before=datetime(2020, 1, 1),
+    not_after=datetime(2030, 1, 1),
+):
+    name = x509.Name([x509.NameAttribute(x509.NameOID.COMMON_NAME, subject_cn)])
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(issuer_name or name)
+        .public_key(subject_key.public_key())
+        .serial_number(serial)
+        .not_valid_before(not_before)
+        .not_valid_after(not_after)
+        .add_extension(x509.BasicConstraints(ca=is_ca, path_length=None), True)
+    )
+    if is_ca:
+        key_usage = x509.KeyUsage(
+            digital_signature=False,
+            content_commitment=False,
+            key_encipherment=False,
+            data_encipherment=False,
+            key_agreement=False,
+            key_cert_sign=True,
+            crl_sign=True,
+            encipher_only=None,
+            decipher_only=None,
+        )
+    else:
+        key_usage = x509.KeyUsage(
+            digital_signature=digital_signature,
+            content_commitment=False,
+            key_encipherment=False,
+            data_encipherment=False,
+            key_agreement=False,
+            key_cert_sign=False,
+            crl_sign=False,
+            encipher_only=None,
+            decipher_only=None,
+        )
+    builder = builder.add_extension(key_usage, True)
+    if eku_oids:
+        builder = builder.add_extension(
+            x509.ExtendedKeyUsage([ObjectIdentifier(oid) for oid in eku_oids]), False
+        )
+    if san_dns:
+        builder = builder.add_extension(
+            x509.SubjectAlternativeName([x509.DNSName(n) for n in san_dns]), False
+        )
+    return builder.sign(issuer_key, hashes.SHA256())
+
+
+def _der(cert):
+    return cert.public_bytes(serialization.Encoding.DER)
+
+
+def _vendor_chain(inter_count=1, inter_not_after=datetime(2030, 1, 1), **leaf_kwargs):
+    """Builds a vendor chain, returning (trust_path, root_der)."""
+    root_key = ec.generate_private_key(ec.SECP256R1())
+    root = _issue_cert("Vendor Root CA", None, root_key, root_key, 1, is_ca=True)
+    issuer_name, issuer_key = root.subject, root_key
+    intermediates = []
+    for i in range(inter_count):
+        key = ec.generate_private_key(ec.SECP256R1())
+        cert = _issue_cert(
+            f"Vendor Intermediate CA {i}",
+            issuer_name,
+            key,
+            issuer_key,
+            100 + i,
+            is_ca=True,
+            not_after=inter_not_after,
+        )
+        intermediates.append(cert)
+        issuer_name, issuer_key = cert.subject, key
+    leaf_key = ec.generate_private_key(ec.SECP256R1())
+    leaf = _issue_cert(
+        "Vendor Authenticator", issuer_name, leaf_key, issuer_key, 200, **leaf_kwargs
+    )
+    trust_path = [_der(leaf)] + [_der(c) for c in reversed(intermediates)]
+    return trust_path, _der(root)
+
+
+def _self_signed_der(cn="Rogue Authenticator"):
+    key = ec.generate_private_key(ec.SECP256R1())
+    return _der(_issue_cert(cn, None, key, key, 1))
+
+
+class _FakeAttestation(Attestation):
+    FORMAT = "_test"
+
+    def __init__(self, result=None):
+        self._result = result
+
+    def verify(self, statement, auth_data, client_data_hash):
+        return self._result
+
+
+def _policy_attestation_object(fmt="_test", att_stmt=None):
+    return AttestationObject.create(fmt, _POLICY_AUTH_DATA, att_stmt or {})
+
+
+def _policy_verifier(policy, result=None):
+    if result is None:
+        return PolicyAttestationVerifier(policy)
+    return PolicyAttestationVerifier(
+        policy, attestation_types=[_FakeAttestation(result)]
+    )
+
+
+def _basic_result(trust_path):
+    return AttestationResult(AttestationType.BASIC, trust_path)
+
+
+def test_policy_accepts_valid_vendor_chain():
+    trust_path, root = _vendor_chain()
+    policy = AttestationPolicy(
+        trust_store=[root], allowed_aaguids={_POLICY_AAGUID}, rp_id="example.com"
+    )
+    verifier = _policy_verifier(policy, _basic_result(trust_path))
+    decision = verifier.verify_attestation(_policy_attestation_object(), b"\0" * 32)
+    assert decision.outcome == AttestationOutcome.ACCEPTED
+    assert decision.attestation_type == AttestationType.BASIC
+    assert decision.aaguid == _POLICY_AAGUID
+    assert decision.chain_length == 3
+    assert decision.leaf_fingerprint == hashlib.sha256(trust_path[0]).hexdigest()
+    assert decision.trust_anchor_fingerprint == hashlib.sha256(root).hexdigest()
+    assert verifier.last_decision == decision
+    assert verifier.last_verification_count == 2
+
+
+def test_policy_accepts_chain_terminating_in_anchor():
+    trust_path, root = _vendor_chain()
+    policy = AttestationPolicy(trust_store=[root])
+    verifier = _policy_verifier(policy, _basic_result(trust_path + [root]))
+    decision = verifier.verify_attestation(_policy_attestation_object(), b"\0" * 32)
+    assert decision.outcome == AttestationOutcome.ACCEPTED
+    assert decision.chain_length == 3
+    assert verifier.last_verification_count == 2
+
+
+def test_policy_rejects_expired_intermediate():
+    trust_path, root = _vendor_chain(inter_not_after=datetime(2025, 1, 1))
+    policy = AttestationPolicy(trust_store=[root])
+    verifier = _policy_verifier(policy, _basic_result(trust_path))
+    with pytest.raises(AttestationPolicyError) as ctx:
+        verifier.verify_attestation(_policy_attestation_object(), b"\0" * 32)
+    assert ctx.value.stage == AttestationFailureStage.VALIDITY
+    assert verifier.last_verification_count == 2
+    assert trust_path[1].hex() not in str(ctx.value)
+
+
+def test_policy_rejects_wrong_aaguid():
+    trust_path, root = _vendor_chain()
+    policy = AttestationPolicy(trust_store=[root], allowed_aaguids={b"\x01" * 16})
+    verifier = _policy_verifier(policy, _basic_result(trust_path))
+    with pytest.raises(AttestationPolicyError) as ctx:
+        verifier.verify_attestation(_policy_attestation_object(), b"\0" * 32)
+    assert ctx.value.stage == AttestationFailureStage.AAGUID
+    assert verifier.last_verification_count == 2
+
+
+def test_policy_rejects_self_signed_leaf():
+    policy = AttestationPolicy(trust_store=[])
+    verifier = _policy_verifier(policy, _basic_result([_self_signed_der()]))
+    with pytest.raises(AttestationPolicyError) as ctx:
+        verifier.verify_attestation(_policy_attestation_object(), b"\0" * 32)
+    assert ctx.value.stage == AttestationFailureStage.TRUST_ANCHOR
+    assert verifier.last_verification_count == 0
+
+
+def test_policy_rejects_self_signed_leaf_in_trust_store():
+    der = _self_signed_der()
+    policy = AttestationPolicy(trust_store=[der])
+    verifier = _policy_verifier(policy, _basic_result([der]))
+    with pytest.raises(AttestationPolicyError) as ctx:
+        verifier.verify_attestation(_policy_attestation_object(), b"\0" * 32)
+    assert ctx.value.stage == AttestationFailureStage.CHAIN
+    assert verifier.last_verification_count == 0
+
+
+def test_policy_rejects_duplicate_certificates():
+    trust_path, root = _vendor_chain()
+    policy = AttestationPolicy(trust_store=[root])
+    verifier = _policy_verifier(policy, _basic_result(trust_path + [trust_path[-1]]))
+    with pytest.raises(AttestationPolicyError) as ctx:
+        verifier.verify_attestation(_policy_attestation_object(), b"\0" * 32)
+    assert ctx.value.stage == AttestationFailureStage.CHAIN
+    assert verifier.last_verification_count == 0
+
+
+def test_policy_rejects_reordered_chain():
+    trust_path, root = _vendor_chain()
+    policy = AttestationPolicy(trust_store=[root])
+    verifier = _policy_verifier(policy, _basic_result(list(reversed(trust_path))))
+    with pytest.raises(AttestationPolicyError) as ctx:
+        verifier.verify_attestation(_policy_attestation_object(), b"\0" * 32)
+    assert ctx.value.stage == AttestationFailureStage.TRUST_ANCHOR
+    assert verifier.last_verification_count == 0
+
+
+def test_policy_rejects_overly_deep_chain():
+    trust_path, root = _vendor_chain(inter_count=5)
+    policy = AttestationPolicy(trust_store=[root])
+    verifier = _policy_verifier(policy, _basic_result(trust_path))
+    with pytest.raises(AttestationPolicyError) as ctx:
+        verifier.verify_attestation(_policy_attestation_object(), b"\0" * 32)
+    assert ctx.value.stage == AttestationFailureStage.CHAIN
+    assert verifier.last_verification_count == 0
+
+
+def test_policy_rejects_bad_leaf_key_usage():
+    trust_path, root = _vendor_chain(digital_signature=False)
+    policy = AttestationPolicy(trust_store=[root])
+    verifier = _policy_verifier(policy, _basic_result(trust_path))
+    with pytest.raises(AttestationPolicyError) as ctx:
+        verifier.verify_attestation(_policy_attestation_object(), b"\0" * 32)
+    assert ctx.value.stage == AttestationFailureStage.KEY_USAGE
+
+
+def test_policy_enforces_required_eku():
+    trust_path, root = _vendor_chain(eku_oids=["1.3.6.1.4.1.99999.1"])
+    policy = AttestationPolicy(
+        trust_store=[root], required_eku_oids=["1.3.6.1.4.1.99999.2"]
+    )
+    verifier = _policy_verifier(policy, _basic_result(trust_path))
+    with pytest.raises(AttestationPolicyError) as ctx:
+        verifier.verify_attestation(_policy_attestation_object(), b"\0" * 32)
+    assert ctx.value.stage == AttestationFailureStage.KEY_USAGE
+
+    policy = AttestationPolicy(
+        trust_store=[root], required_eku_oids=["1.3.6.1.4.1.99999.1"]
+    )
+    verifier = _policy_verifier(policy, _basic_result(trust_path))
+    decision = verifier.verify_attestation(_policy_attestation_object(), b"\0" * 32)
+    assert decision.outcome == AttestationOutcome.ACCEPTED
+
+
+def test_policy_rejects_unrelated_san():
+    trust_path, root = _vendor_chain(san_dns=["attacker.example.org"])
+    policy = AttestationPolicy(trust_store=[root], rp_id="example.com")
+    verifier = _policy_verifier(policy, _basic_result(trust_path))
+    with pytest.raises(AttestationPolicyError) as ctx:
+        verifier.verify_attestation(_policy_attestation_object(), b"\0" * 32)
+    assert ctx.value.stage == AttestationFailureStage.POLICY
+
+
+def test_policy_accepts_related_san():
+    trust_path, root = _vendor_chain(san_dns=["device.example.com"])
+    policy = AttestationPolicy(trust_store=[root], rp_id="example.com")
+    verifier = _policy_verifier(policy, _basic_result(trust_path))
+    decision = verifier.verify_attestation(_policy_attestation_object(), b"\0" * 32)
+    assert decision.outcome == AttestationOutcome.ACCEPTED
+
+
+def test_policy_rejects_unknown_format():
+    policy = AttestationPolicy(trust_store=[])
+    verifier = _policy_verifier(policy)
+    attestation_object = _policy_attestation_object(fmt="_unknown")
+    with pytest.raises(AttestationPolicyError) as ctx:
+        verifier.verify_attestation(attestation_object, b"\0" * 32)
+    assert ctx.value.stage == AttestationFailureStage.FORMAT
+    assert verifier.last_verification_count == 0
+
+
+def test_policy_rejects_empty_trust_path():
+    policy = AttestationPolicy(trust_store=[])
+    verifier = _policy_verifier(policy, _basic_result([]))
+    with pytest.raises(AttestationPolicyError) as ctx:
+        verifier.verify_attestation(_policy_attestation_object(), b"\0" * 32)
+    assert ctx.value.stage == AttestationFailureStage.CHAIN
+    assert verifier.last_verification_count == 0
+
+
+def test_policy_rejects_self_attestation_by_default():
+    policy = AttestationPolicy(trust_store=[])
+    verifier = _policy_verifier(policy, AttestationResult(AttestationType.SELF, []))
+    with pytest.raises(AttestationPolicyError) as ctx:
+        verifier.verify_attestation(_policy_attestation_object(), b"\0" * 32)
+    assert ctx.value.stage == AttestationFailureStage.POLICY
+
+
+def test_policy_self_attestation_is_unattested_when_allowed():
+    policy = AttestationPolicy(trust_store=[], allow_self=True)
+    verifier = _policy_verifier(policy, AttestationResult(AttestationType.SELF, []))
+    decision = verifier.verify_attestation(_policy_attestation_object(), b"\0" * 32)
+    assert decision.outcome == AttestationOutcome.UNATTESTED
+    assert decision.attestation_type == AttestationType.SELF
+    assert verifier.last_verification_count == 0
+
+
+def test_policy_none_attestation_is_unattested_when_allowed():
+    policy = AttestationPolicy(trust_store=[], allow_none=True)
+    verifier = _policy_verifier(policy)
+    attestation_object = _policy_attestation_object(fmt="none")
+    decision = verifier.verify_attestation(attestation_object, b"\0" * 32)
+    assert decision.outcome == AttestationOutcome.UNATTESTED
+    assert decision.attestation_type == AttestationType.NONE
+    assert decision.chain_length == 0
+    assert verifier.last_verification_count == 0
+
+
+def test_policy_rejects_none_attestation_by_default():
+    policy = AttestationPolicy(trust_store=[])
+    verifier = _policy_verifier(policy)
+    attestation_object = _policy_attestation_object(fmt="none")
+    with pytest.raises(AttestationPolicyError) as ctx:
+        verifier.verify_attestation(attestation_object, b"\0" * 32)
+    assert ctx.value.stage == AttestationFailureStage.POLICY
+
+
+def test_policy_error_does_not_leak_certificates():
+    trust_path, root = _vendor_chain(inter_not_after=datetime(2025, 1, 1))
+    policy = AttestationPolicy(trust_store=[root])
+    verifier = _policy_verifier(policy, _basic_result(trust_path))
+    with pytest.raises(AttestationPolicyError) as ctx:
+        verifier.verify_attestation(_policy_attestation_object(), b"\0" * 32)
+    message = str(ctx.value)
+    for der in trust_path + [root]:
+        assert der.hex() not in message
+
+
+def test_verify_x509_chain_structural_limits():
+    trust_path, root = _vendor_chain()
+    chain = trust_path + [root]
+    assert verify_x509_chain(chain) == 2
+
+    with pytest.raises(InvalidData):
+        verify_x509_chain([])
+    with pytest.raises(InvalidData):
+        verify_x509_chain([chain[0]])
+    with pytest.raises(InvalidData):
+        verify_x509_chain(chain + [chain[-1]])
+    with pytest.raises(InvalidData):
+        verify_x509_chain(chain, max_certificates=2)
+    with pytest.raises(InvalidData):
+        verify_x509_chain(chain, max_depth=1)
+    with pytest.raises(InvalidData):
+        verify_x509_chain(chain, max_bytes=10)

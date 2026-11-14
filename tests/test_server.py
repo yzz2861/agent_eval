@@ -1,14 +1,26 @@
 import unittest
 
+import pytest
+
+from fido2.attestation import (
+    AttestationFailureStage,
+    AttestationOutcome,
+    AttestationPolicy,
+    AttestationPolicyError,
+)
 from fido2.server import Fido2Server
 from fido2.utils import websafe_encode
 from fido2.webauthn import (
+    AttestationConveyancePreference,
+    AttestationObject,
     AttestedCredentialData,
     AuthenticationResponse,
     AuthenticatorAssertionResponse,
+    AuthenticatorAttestationResponse,
     AuthenticatorData,
     CollectedClientData,
     PublicKeyCredentialRpEntity,
+    RegistrationResponse,
     UserVerificationRequirement,
 )
 
@@ -87,3 +99,63 @@ class TestFido2Server(unittest.TestCase):
                 [AttestedCredentialData(_ATT_CRED_DATA)],
                 response,
             )
+
+
+def _registration_state_and_response(rp, fmt, att_stmt):
+    challenge = b"0123456789abcdef"
+    state = {
+        "challenge": websafe_encode(challenge),
+        "user_verification": None,
+    }
+    client_data = CollectedClientData.create(
+        CollectedClientData.TYPE.CREATE, challenge, "https://example.com"
+    )
+    auth_data = AuthenticatorData(
+        (rp.id_hash or b"") + b"\x41" + b"\0\0\0\1" + _ATT_CRED_DATA
+    )
+    attestation_object = AttestationObject.create(fmt, auth_data, att_stmt)
+    response = RegistrationResponse(
+        raw_id=_CRED_ID,
+        response=AuthenticatorAttestationResponse(
+            client_data=client_data,
+            attestation_object=attestation_object,
+        ),
+    )
+    return state, response
+
+
+class TestFido2ServerAttestationPolicy(unittest.TestCase):
+    def test_policy_and_verify_attestation_are_mutually_exclusive(self):
+        rp = PublicKeyCredentialRpEntity(name="Example", id="example.com")
+        with pytest.raises(ValueError):
+            Fido2Server(
+                rp,
+                verify_attestation=lambda *args: None,
+                attestation_policy=AttestationPolicy(),
+            )
+
+    def test_none_attestation_is_unattested_when_allowed(self):
+        rp = PublicKeyCredentialRpEntity(name="Example", id="example.com")
+        server = Fido2Server(
+            rp,
+            attestation=AttestationConveyancePreference.NONE,
+            attestation_policy=AttestationPolicy(allow_none=True),
+        )
+        state, response = _registration_state_and_response(rp, "none", {})
+        auth_data = server.register_complete(state, response)
+        self.assertIsNotNone(auth_data.credential_data)
+        decision = server.last_attestation_decision
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.outcome, AttestationOutcome.UNATTESTED)
+
+    def test_none_attestation_rejected_by_default_policy(self):
+        rp = PublicKeyCredentialRpEntity(name="Example", id="example.com")
+        server = Fido2Server(
+            rp,
+            attestation_policy=AttestationPolicy(),
+        )
+        state, response = _registration_state_and_response(rp, "none", {})
+        with pytest.raises(AttestationPolicyError) as ctx:
+            server.register_complete(state, response)
+        self.assertEqual(ctx.value.stage, AttestationFailureStage.POLICY)
+        self.assertIsNone(server.last_attestation_decision)
