@@ -800,6 +800,108 @@ class TestJWK(unittest.TestCase):
             "urn:ietf:params:oauth:jwk-thumbprint:sha-256:{}".format(
                 PublicKeys['thumbprints'][1]))
 
+    def test_thumbprint_private_matches_public(self):
+        # Private parameters must not affect the thumbprint
+        for i in range(0, len(PublicKeys['keys'])):
+            pri = jwk.JWK(**PrivateKeys['keys'][i])
+            pub = jwk.JWK(**PublicKeys['keys'][i])
+            self.assertEqual(pri.thumbprint(), pub.thumbprint())
+            self.assertEqual(pri.thumbprint(), PublicKeys['thumbprints'][i])
+        pri = jwk.JWK(**PrivateKeys_EdDsa['keys'][0])
+        pub = jwk.JWK(**PublicKeys_EdDsa['keys'][0])
+        self.assertEqual(pri.thumbprint(), pub.thumbprint())
+        self.assertEqual(pri.thumbprint(),
+                         PublicKeys_EdDsa['thumbprints'][0])
+
+    def test_thumbprint_ignores_metadata(self):
+        # kid/use/key_ops/x5c and unknown members must not affect
+        # the thumbprint
+        k = jwk.JWK(**PublicKeys['keys'][0])
+        t = k.thumbprint()
+        k['use'] = 'sig'
+        k['kid'] = 'something-else'
+        k['x5c'] = ['dGVzdA']
+        k['unknown'] = 'unrelated'
+        self.assertEqual(k.thumbprint(), t)
+        k2 = jwk.JWK(**PublicKeys['keys'][1])
+        t2 = k2.thumbprint()
+        k2['use'] = 'sig'
+        k2['key_ops'] = ['verify']
+        self.assertEqual(k2.thumbprint(), t2)
+        self.assertEqual(k2.thumbprint_uri(),
+                         'urn:ietf:params:oauth:jwk-thumbprint:'
+                         'sha-256:{}'.format(t2))
+
+    def test_thumbprint_unicode_metadata(self):
+        k = jwk.JWK(**PublicKeys['keys'][0])
+        t = k.thumbprint()
+        k['kid'] = 'cl\u00e9-\u2603'
+        k['comment'] = '\u4f60\u597d'
+        self.assertEqual(k.thumbprint(), t)
+
+    def test_thumbprint_member_order(self):
+        a = jwk.JWK(**PublicKeys['keys'][1])
+        exported = json_decode(a.export(private_key=False))
+        reordered = json_encode(dict(reversed(list(exported.items()))))
+        b = jwk.JWK.from_json(reordered)
+        self.assertEqual(a.thumbprint(), b.thumbprint())
+        self.assertEqual(a.thumbprint(), PublicKeys['thumbprints'][1])
+
+    def test_thumbprint_duplicate_members_last_wins(self):
+        # Deterministic policy: the JSON parser keeps the last value
+        # of a duplicated member before canonicalization
+        ec_key = PublicKeys['keys'][0]
+        dup = ('{"kty": "EC", "crv": "P-256",'
+               ' "x": "%(y)s", "x": "%(x)s", "y": "%(y)s"}' % ec_key)
+        k = jwk.JWK.from_json(dup)
+        self.assertEqual(k.thumbprint(), PublicKeys['thumbprints'][0])
+
+    def test_thumbprint_case_sensitive_members(self):
+        # Deterministic policy: member names are case-sensitive, so
+        # wrongly-cased required members are treated as missing
+        with self.assertRaises(jwk.InvalidJWKValue):
+            jwk.JWK(kty='EC', crv='P-256',
+                    X=PublicKeys['keys'][0]['x'],
+                    Y=PublicKeys['keys'][0]['y'])
+
+    def test_thumbprint_noncanonical_base64url(self):
+        # Deterministic policy: invalid base64url is rejected at
+        # import time, valid values are used verbatim
+        rsa_key = dict(PublicKeys['keys'][1])
+        rsa_key['e'] = 'AQAB='
+        with self.assertRaises(jwk.InvalidJWKValue):
+            jwk.JWK(**rsa_key)
+
+    def test_thumbprint_invalid_key_typeerror(self):
+        with self.assertRaises(TypeError):
+            jwk.JWK().thumbprint()
+        k = jwk.JWK()
+        k['kty'] = 'EC'
+        with self.assertRaises(TypeError):
+            k.thumbprint()
+        k2 = jwk.JWK()
+        dict.__setitem__(k2, 'kty', 'future')
+        with self.assertRaises(TypeError):
+            k2.thumbprint()
+
+    def test_keyset_thumbprint_explicit_selection(self):
+        ks = jwk.JWKSet()
+        ks.add(jwk.JWK(**PublicKeys['keys'][0]))
+        ks.add(jwk.JWK(**PublicKeys['keys'][1]))
+        self.assertEqual(ks.thumbprint('1'), PublicKeys['thumbprints'][0])
+        self.assertEqual(ks.thumbprint('2011-04-29'),
+                         PublicKeys['thumbprints'][1])
+        with self.assertRaises(jwk.InvalidJWKValue):
+            ks.thumbprint('no-such-kid')
+        # Ambiguous kid must raise, never silently pick the first key
+        ks2 = jwk.JWKSet()
+        ks2.add(jwk.JWK(**PublicKeys['keys'][0]))
+        other = jwk.JWK(**PublicKeys['keys'][1])
+        other['kid'] = '1'
+        ks2.add(other)
+        with self.assertRaises(jwk.InvalidJWKValue):
+            ks2.thumbprint('1')
+
     def test_unsafe_rsa(self):
         key = jwk.JWK()
         key.unsafe_skip_rsa_key_validation = True

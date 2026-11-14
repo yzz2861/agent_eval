@@ -1,5 +1,6 @@
 # Copyright (C) 2015  JWCrypto Project Contributors - see LICENSE file
 
+import json
 import os
 from binascii import hexlify, unhexlify
 from collections import namedtuple
@@ -1218,8 +1219,65 @@ class JWK(dict):
         obj.import_from_pem(data, password)
         return obj
 
+    def _canonical_thumbprint_json(self):
+        """Returns the canonical JSON used as the thumbprint input.
+
+        This is the single canonicalization path for key thumbprints:
+        only the required public members defined by RFC 7638 (and the
+        'alg' member for AKP keys per RFC 9964 Section 6) are selected.
+        Private parameters ('d', 'p', 'q', 'dp', 'dq', 'qi', 'oth',
+        'priv', ...) and metadata ('kid', 'use', 'key_ops', 'x5c',
+        'alg' for non-AKP keys, unknown members, ...) are always
+        excluded. The selected members are serialized as UTF-8 JSON
+        with members in lexicographic (dictionary) order and no
+        whitespace, as required by RFC 7638 Section 3.
+
+        Deterministic policies for non-canonical inputs:
+         * Member names are case-sensitive; wrongly-cased members are
+           treated as unknown members and excluded.
+         * Duplicate members in a JSON serialization are resolved by
+           the JSON parser on import (last value wins) before the
+           canonical form is built.
+         * Member values are used verbatim, exactly as present in the
+           key; base64url values are never re-encoded.
+
+        :return: The canonical JSON representation of the key
+        :rtype: `str`
+
+        :raises TypeError: if the key type is missing or unsupported,
+            or a required member is missing.
+        """
+
+        kty = self.get('kty')
+        if kty is None:
+            raise TypeError('Missing "kty" member')
+        if kty not in JWKValuesRegistry:
+            raise TypeError('Unsupported key type: "%s"' % kty)
+        t = {'kty': kty}
+        for name, val in JWKValuesRegistry[kty].items():
+            if val.required:
+                member = self.get(name)
+                if member is None:
+                    raise TypeError(
+                        'Missing required member "%s" for "%s" key'
+                        '' % (name, kty))
+                t[name] = member
+        # RFC 9964 Section 6: AKP thumbprint includes 'alg'
+        if kty == 'AKP':
+            alg = self.get('alg')
+            if alg is None:
+                raise TypeError('Missing required member "alg" for'
+                                ' "AKP" key')
+            t['alg'] = alg
+        return json.dumps(t, sort_keys=True, separators=(',', ':'),
+                          ensure_ascii=False)
+
     def thumbprint(self, hashalg=hashes.SHA256()):
         """Returns the key thumbprint as specified by RFC 7638.
+
+        The thumbprint is computed over the canonical JSON returned by
+        :meth:`_canonical_thumbprint_json`, so keys that differ only in
+        private parameters or metadata have the same thumbprint.
 
         :param hashalg: A hash function (defaults to SHA256)
 
@@ -1227,15 +1285,8 @@ class JWK(dict):
         :rtype: `str`
         """
 
-        t = {'kty': self.get('kty')}
-        for name, val in JWKValuesRegistry[t['kty']].items():
-            if val.required:
-                t[name] = self.get(name)
-        # RFC 9964 Section 6: AKP thumbprint includes 'alg'
-        if t['kty'] == 'AKP':
-            t['alg'] = self.get('alg')
         digest = hashes.Hash(hashalg, backend=default_backend())
-        digest.update(bytes(json_encode(t).encode('utf8')))
+        digest.update(self._canonical_thumbprint_json().encode('utf-8'))
         return base64url_encode(digest.finalize())
 
     def thumbprint_uri(self, hname='sha-256'):
@@ -1550,6 +1601,29 @@ class JWKSet(dict):
         :rtype: `list`
         """
         return {key for key in self['keys'] if key.get('kid') == kid}
+
+    def thumbprint(self, kid, hashalg=hashes.SHA256()):
+        """Returns the RFC 7638 thumbprint of a specific key in the set.
+
+        The key to thumbprint must be explicitly selected by its 'kid';
+        a key is never picked implicitly (e.g. the first one in the
+        set), so that thumbprints computed on either side of a key
+        exchange always refer to the same key material.
+
+        :param kid: the 'kid' key identifier of the key to thumbprint.
+        :param hashalg: A hash function (defaults to SHA256)
+
+        :return: A base64url encoded digest of the key
+        :rtype: `str`
+
+        :raises InvalidJWKValue: if no key matches the requested 'kid',
+            or more than one key does.
+        """
+        key = self.get_key(kid)
+        if key is None:
+            raise InvalidJWKValue(
+                'No key found with requested kid: {}'.format(kid))
+        return key.thumbprint(hashalg)
 
     def __repr__(self):
         repr_dict = {}
