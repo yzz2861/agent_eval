@@ -45,13 +45,15 @@ class ValidationContext():
     # the validated issuer of the CRL.
     _crl_issuer_map = None
 
-    # A dict with keys being an asn1crypto.x509.Certificate.issuer_serial byte
-    # string of the certificate the CRLs are for. Each value is a list
-    # asn1crypto.crl.CertificateList objects.
+    # A dict with keys being a byte string of the SHA-256 hash of the issuer
+    # Name of the certificates the CRLs are for. Each value is a list of
+    # asn1crypto.crl.CertificateList objects. Keying on the issuer name rather
+    # than issuer_serial keeps CRLs issued by different CAs separated while
+    # still allowing every certificate from the same issuer to share a cache.
     _fetched_crls = None
 
-    # A dict with keys being an asn1crypto.x509.Certificate.issuer_serial byte
-    # string of the certificate the responses are for. Each value is a list
+    # A dict with keys being a byte string of the SHA-256 hash of the issuer
+    # Name of the certificates the responses are for. Each value is a list of
     # asn1crypto.ocsp.OCSPResponse objects.
     _fetched_ocsps = None
 
@@ -445,13 +447,15 @@ class ValidationContext():
         if not self._allow_fetching:
             return self._crls
 
-        if cert.issuer_serial not in self._fetched_crls:
+        issuer_key = cert.issuer.sha256
+
+        if issuer_key not in self._fetched_crls:
             try:
                 crls = crl_client.fetch(
                     cert,
                     **self._crl_fetch_params
                 )
-                self._fetched_crls[cert.issuer_serial] = crls
+                self._fetched_crls[issuer_key] = crls
                 for crl_ in crls:
                     try:
                         certs = crl_client.fetch_certs(
@@ -465,14 +469,14 @@ class ValidationContext():
                     except (URLError, socket.error):
                         pass
             except (URLError, socket.error) as e:
-                self._fetched_crls[cert.issuer_serial] = []
+                self._fetched_crls[issuer_key] = []
                 if self._revocation_mode == "soft-fail":
                     self._soft_fail_exceptions.append(e)
                     raise SoftFailError()
                 else:
                     raise
 
-        return self._fetched_crls[cert.issuer_serial]
+        return self._fetched_crls[issuer_key]
 
     def retrieve_ocsps(self, cert, issuer):
         """
@@ -489,7 +493,9 @@ class ValidationContext():
         if not self._allow_fetching:
             return self._ocsps
 
-        if cert.issuer_serial not in self._fetched_ocsps:
+        issuer_key = cert.issuer.sha256
+
+        if issuer_key not in self._fetched_ocsps:
             try:
                 ocsp_response = ocsp_client.fetch(
                     cert,
@@ -497,21 +503,21 @@ class ValidationContext():
                     **self._ocsp_fetch_params
                 )
 
-                self._fetched_ocsps[cert.issuer_serial] = [ocsp_response]
+                self._fetched_ocsps[issuer_key] = [ocsp_response]
 
                 # Responses can contain certificates that are useful in validating the
                 # response itself. We can use these since they will be validated using
                 # the local trust roots.
                 self._extract_ocsp_certs(ocsp_response)
             except (URLError, socket.error) as e:
-                self._fetched_ocsps[cert.issuer_serial] = []
+                self._fetched_ocsps[issuer_key] = []
                 if self._revocation_mode == "soft-fail":
                     self._soft_fail_exceptions.append(e)
                     raise SoftFailError()
                 else:
                     raise
 
-        return self._fetched_ocsps[cert.issuer_serial]
+        return self._fetched_ocsps[issuer_key]
 
     def _extract_ocsp_certs(self, ocsp_response):
         """
