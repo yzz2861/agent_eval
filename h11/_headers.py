@@ -1,7 +1,17 @@
 import re
-from typing import AnyStr, cast, List, overload, Sequence, Tuple, TYPE_CHECKING, Union
+from typing import (
+    AnyStr,
+    cast,
+    List,
+    NoReturn,
+    Optional,
+    overload,
+    Sequence,
+    Tuple,
+    TYPE_CHECKING,
+    Union,
+)
 
-from ._abnf import field_name, field_value
 from ._util import bytesify, LocalProtocolError, validate
 
 if TYPE_CHECKING:
@@ -70,8 +80,118 @@ CONTENT_LENGTH_MAX_DIGITS = 20  # allow up to 1 billion TB - 1
 # Maybe a dict-of-lists would be better?
 
 _content_length_re = re.compile(rb"[0-9]+")
-_field_name_re = re.compile(field_name.encode("ascii"))
-_field_value_re = re.compile(field_value.encode("ascii"))
+
+MAX_HEADER_LINE_SIZE = 8 * 1024
+MAX_HEADER_BLOCK_SIZE = 16 * 1024
+MAX_HEADER_FOLD_DEPTH = 5
+_MAX_ERROR_PREVIEW_SIZE = 32
+
+_token_bytes = frozenset(
+    b"!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+)
+_utf8_re = re.compile(
+    rb"\A(?:"
+    rb"[\x00-\x7f]"
+    rb"|[\xc2-\xdf][\x80-\xbf]"
+    rb"|\xe0[\xa0-\xbf][\x80-\xbf]"
+    rb"|[\xe1-\xec][\x80-\xbf]{2}"
+    rb"|\xed[\x80-\x9f][\x80-\xbf]"
+    rb"|[\xee-\xef][\x80-\xbf]{2}"
+    rb"|\xf0[\x90-\xbf][\x80-\xbf]{2}"
+    rb"|[\xf1-\xf3][\x80-\xbf]{3}"
+    rb"|\xf4[\x80-\x8f][\x80-\xbf]{2}"
+    rb")*\Z"
+)
+
+
+def _safe_header_preview(data: bytes) -> bytes:
+    preview = data[:_MAX_ERROR_PREVIEW_SIZE]
+    if len(data) > len(preview):
+        while preview and preview[-1:] >= b"\x80" and preview[-1:] <= b"\xbf":
+            preview = preview[:-1]
+    return preview
+
+
+def _header_error(message: str, data: bytes = b"") -> NoReturn:
+    if data:
+        preview = _safe_header_preview(data)
+        message = (
+            f"{message} (safe preview ends at byte {len(preview)} "
+            f"of {len(data)}-byte field)"
+        )
+    raise LocalProtocolError(message)
+
+
+def validate_header_name(name: bytes) -> None:
+    if not name or any(byte not in _token_bytes for byte in name):
+        _header_error("illegal header name", name)
+
+
+def validate_header_value(value: bytes) -> None:
+    if any(byte < 0x20 or byte == 0x7F for byte in value):
+        _header_error("illegal control character in header value", value)
+    if not _utf8_re.fullmatch(value):
+        _header_error("illegal non-UTF-8 header value", value)
+
+
+def parse_header_lines(
+    lines: Sequence[bytes],
+    *,
+    max_line_size: int = MAX_HEADER_LINE_SIZE,
+    max_block_size: int = MAX_HEADER_BLOCK_SIZE,
+    max_fold_depth: int = MAX_HEADER_FOLD_DEPTH,
+) -> List[Tuple[bytes, bytes]]:
+    headers: List[Tuple[bytes, bytes]] = []
+    current: Optional[bytearray] = None
+    block_size = 0
+    fold_depth = 0
+
+    for line in lines:
+        if len(line) > max_line_size:
+            raise LocalProtocolError("header line too long")
+        if block_size + len(line) > max_block_size:
+            raise LocalProtocolError("header block too long", error_status_hint=431)
+
+        if not line:
+            raise LocalProtocolError("empty header line")
+
+        is_continuation = line[0] in (0x20, 0x09)
+        if is_continuation:
+            if current is None:
+                raise LocalProtocolError("continuation line at start of headers")
+            fold_depth += 1
+            if fold_depth > max_fold_depth:
+                raise LocalProtocolError("header folding too deep")
+            current.extend(b" ")
+            current.extend(line.lstrip(b" \t"))
+            if len(current) > max_line_size:
+                raise LocalProtocolError("header line too long")
+        else:
+            if current is not None:
+                name, value = _parse_header_line(bytes(current))
+                headers.append((name, value))
+            current = bytearray(line)
+            fold_depth = 0
+
+        block_size += len(line)
+
+    if current is not None:
+        name, value = _parse_header_line(bytes(current))
+        headers.append((name, value))
+
+    return headers
+
+
+def _parse_header_line(line: bytes) -> Tuple[bytes, bytes]:
+    colon = line.find(b":")
+    if colon <= 0:
+        _header_error("illegal header line", line)
+
+    name = line[:colon]
+    value = line[colon + 1 :].strip(b" \t")
+    validate_header_name(name)
+    validate_header_value(value)
+    return name, value
 
 
 class Headers(Sequence[Tuple[bytes, bytes]]):
@@ -162,8 +282,8 @@ def normalize_and_validate(
         if not _parsed:
             name = bytesify(name)
             value = bytesify(value)
-            validate(_field_name_re, name, "Illegal header name {!r}", name)
-            validate(_field_value_re, value, "Illegal header value {!r}", value)
+            validate_header_name(name)
+            validate_header_value(value)
         assert isinstance(name, bytes)
         assert isinstance(value, bytes)
 

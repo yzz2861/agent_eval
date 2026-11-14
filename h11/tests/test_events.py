@@ -55,7 +55,7 @@ def test_events() -> None:
         )
 
     # Header values are validated
-    for bad_char in "\x00\r\n\f\v":
+    for bad_char in "\x00\x01\x07\r\n\f\v\x7f":
         with pytest.raises(LocalProtocolError):
             req = Request(
                 method="GET",
@@ -64,14 +64,23 @@ def test_events() -> None:
                 http_version="1.0",
             )
 
-    # But for compatibility we allow non-whitespace control characters, even
-    # though they're forbidden by the spec.
-    Request(
+    # Opaque octets remain valid when they form legal UTF-8 text.
+    utf8_value = "☃".encode("utf-8")
+    req = Request(
         method="GET",
         target="/",
-        headers=[("Host", "a"), ("Foo", "asd\x01\x02\x7f")],
+        headers=[("Host", "a"), ("Foo", utf8_value)],
         http_version="1.0",
     )
+    assert req.headers == [(b"host", b"a"), (b"foo", utf8_value)]
+
+    with pytest.raises(LocalProtocolError):
+        Request(
+            method="GET",
+            target="/",
+            headers=[("Host", "a"), ("Foo", b"\xff")],
+            http_version="1.0",
+        )
 
     # Request target is validated
     for bad_byte in b"\x00\x20\x7f\xee":
@@ -108,10 +117,14 @@ def test_events() -> None:
         resp = Response(status_code=100, headers=[], http_version="1.0")
 
     with pytest.raises(LocalProtocolError):
-        Response(status_code="100", headers=[], http_version="1.0")  # type: ignore[arg-type]
+        Response(
+            status_code="100", headers=[], http_version="1.0"
+        )  # type: ignore[arg-type]
 
     with pytest.raises(LocalProtocolError):
-        InformationalResponse(status_code=b"100", headers=[], http_version="1.0")  # type: ignore[arg-type]
+        InformationalResponse(
+            status_code=b"100", headers=[], http_version="1.0"
+        )  # type: ignore[arg-type]
 
     d = Data(data=b"asdf")
     assert d.data == b"asdf"

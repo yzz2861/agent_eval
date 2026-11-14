@@ -12,7 +12,6 @@ from .._events import (
 )
 from .._headers import Headers, normalize_and_validate
 from .._readers import (
-    _obsolete_line_fold,
     ChunkedReader,
     ContentLengthReader,
     Http10Reader,
@@ -223,42 +222,14 @@ def test_readers_unusual() -> None:
         ),
     )
 
-    # Tolerate headers line endings (\r\n and \n)
-    #    \n\r\b between headers and body
-    tr(
-        READERS[SERVER, SEND_RESPONSE],
+    for message in [
         b"HTTP/1.1 200 OK\r\nSomeHeader: val\n\r\n",
-        Response(
-            status_code=200,
-            headers=[("SomeHeader", "val")],
-            http_version="1.1",
-            reason="OK",
-        ),
-    )
-
-    #   delimited only with \n
-    tr(
-        READERS[SERVER, SEND_RESPONSE],
         b"HTTP/1.1 200 OK\nSomeHeader1: val1\nSomeHeader2: val2\n\n",
-        Response(
-            status_code=200,
-            headers=[("SomeHeader1", "val1"), ("SomeHeader2", "val2")],
-            http_version="1.1",
-            reason="OK",
-        ),
-    )
-
-    #   mixed \r\n and \n
-    tr(
-        READERS[SERVER, SEND_RESPONSE],
         b"HTTP/1.1 200 OK\r\nSomeHeader1: val1\nSomeHeader2: val2\n\r\n",
-        Response(
-            status_code=200,
-            headers=[("SomeHeader1", "val1"), ("SomeHeader2", "val2")],
-            http_version="1.1",
-            reason="OK",
-        ),
-    )
+        b"HTTP/1.1 200 OK\r\nSomeHeader: val\rbad\r\n\r\n",
+    ]:
+        with pytest.raises(LocalProtocolError):
+            tr(READERS[SERVER, SEND_RESPONSE], message, None)
 
     # obsolete line folding
     tr(
@@ -313,17 +284,31 @@ def test_readers_unusual() -> None:
         tr(READERS[CLIENT, IDLE], b"HEAD /foo HTTP/1.1\r\n" b": line\r\n\r\n", None)
 
 
-def test__obsolete_line_fold_bytes() -> None:
-    # _obsolete_line_fold has a defensive cast to bytearray, which is
-    # necessary to protect against O(n^2) behavior in case anyone ever passes
-    # in regular bytestrings... but right now we never pass in regular
-    # bytestrings. so this test just exists to get some coverage on that
-    # defensive cast.
-    assert list(_obsolete_line_fold([b"aaa", b"bbb", b"  ccc", b"ddd"])) == [
-        b"aaa",
-        bytearray(b"bbb ccc"),
-        b"ddd",
+def test_strict_header_line_extraction() -> None:
+    buf = ReceiveBuffer()
+    buf += b"HTTP/1.1 200 OK\r\nFoo: bar\r\n\r\ntrailing"
+    assert buf.maybe_extract_strict_header_lines() == [
+        bytearray(b"HTTP/1.1 200 OK"),
+        bytearray(b"Foo: bar"),
     ]
+    assert bytes(buf) == b"trailing"
+
+    for data in [
+        b"HTTP/1.1 200 OK\nFoo: bar\r\n\r\n",
+        b"HTTP/1.1 200 OK\r\nFoo: bar\n\r\n",
+        b"HTTP/1.1 200 OK\r\nFoo: bar\rbaz\r\n\r\n",
+    ]:
+        buf = ReceiveBuffer()
+        buf += data
+        with pytest.raises(LocalProtocolError):
+            buf.maybe_extract_strict_header_lines()
+
+    buf = ReceiveBuffer()
+    buf += b"HTTP/1.1 200 OK\r\nFoo: bar\r"
+    assert buf.maybe_extract_strict_header_lines() is None
+    buf += b"baz\r\n\r\n"
+    with pytest.raises(LocalProtocolError):
+        buf.maybe_extract_strict_header_lines()
 
 
 def _run_reader_iter(
@@ -556,20 +541,31 @@ def test_reject_non_vchar_in_path() -> None:
             tr(READERS[CLIENT, IDLE], message, None)
 
 
-# https://github.com/python-hyper/h11/issues/57
-def test_allow_some_garbage_in_cookies() -> None:
+def test_reject_control_characters_in_cookies() -> None:
+    with pytest.raises(LocalProtocolError):
+        tr(
+            READERS[CLIENT, IDLE],
+            b"HEAD /foo HTTP/1.1\r\n"
+            b"Host: foo\r\n"
+            b"Set-Cookie: ___utmvafIumyLc=kUd\x01UpAt; path=/; Max-Age=900\r\n"
+            b"\r\n",
+            None,
+        )
+
+
+def test_allow_utf8_in_cookies() -> None:
     tr(
         READERS[CLIENT, IDLE],
         b"HEAD /foo HTTP/1.1\r\n"
         b"Host: foo\r\n"
-        b"Set-Cookie: ___utmvafIumyLc=kUd\x01UpAt; path=/; Max-Age=900\r\n"
+        b"Set-Cookie: " + "☃".encode("utf-8") + b"; path=/; Max-Age=900\r\n"
         b"\r\n",
         Request(
             method="HEAD",
             target="/foo",
             headers=[
                 ("Host", "foo"),
-                ("Set-Cookie", "___utmvafIumyLc=kUd\x01UpAt; path=/; Max-Age=900"),
+                ("Set-Cookie", "☃".encode("utf-8") + b"; path=/; Max-Age=900"),
             ],
         ),
     )

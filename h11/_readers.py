@@ -17,10 +17,21 @@
 # - or, for body readers, a dict of per-framing reader factories
 
 import re
-from typing import Any, Callable, Dict, Iterable, NoReturn, Optional, Tuple, Type, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    NoReturn,
+    Optional,
+    Tuple,
+    Type,
+    Union,
+)
 
-from ._abnf import chunk_header, header_field, request_line, status_line
+from ._abnf import chunk_header, request_line, status_line
 from ._events import Data, EndOfMessage, InformationalResponse, Request, Response
+from ._headers import MAX_HEADER_BLOCK_SIZE, parse_header_lines
 from ._receivebuffer import ReceiveBuffer
 from ._state import (
     CLIENT,
@@ -36,44 +47,18 @@ from ._util import LocalProtocolError, RemoteProtocolError, Sentinel, validate
 
 __all__ = ["READERS"]
 
-header_field_re = re.compile(header_field.encode("ascii"))
-obs_fold_re = re.compile(rb"[ \t]+")
-
-
-def _obsolete_line_fold(lines: Iterable[bytes]) -> Iterable[bytes]:
-    it = iter(lines)
-    last: Optional[bytes] = None
-    for line in it:
-        match = obs_fold_re.match(line)
-        if match:
-            if last is None:
-                raise LocalProtocolError("continuation line at start of headers")
-            if not isinstance(last, bytearray):
-                # Cast to a mutable type, avoiding copy on append to ensure O(n) time
-                last = bytearray(last)
-            last += b" "
-            last += line[match.end() :]
-        else:
-            if last is not None:
-                yield last
-            last = line
-    if last is not None:
-        yield last
+request_line_re = re.compile(request_line.encode("ascii"))
 
 
 def _decode_header_lines(
     lines: Iterable[bytes],
+    max_block_size: int = MAX_HEADER_BLOCK_SIZE,
 ) -> Iterable[Tuple[bytes, bytes]]:
-    for line in _obsolete_line_fold(lines):
-        matches = validate(header_field_re, line, "illegal header line: {!r}", line)
-        yield (matches["field_name"], matches["field_value"])
-
-
-request_line_re = re.compile(request_line.encode("ascii"))
+    return parse_header_lines(list(lines), max_block_size=max_block_size)
 
 
 def maybe_read_from_IDLE_client(buf: ReceiveBuffer) -> Optional[Request]:
-    lines = buf.maybe_extract_lines()
+    lines = buf.maybe_extract_strict_header_lines()
     if lines is None:
         if buf.is_next_line_obviously_invalid_request_line():
             raise LocalProtocolError("illegal request line")
@@ -84,7 +69,9 @@ def maybe_read_from_IDLE_client(buf: ReceiveBuffer) -> Optional[Request]:
         request_line_re, lines[0], "illegal request line: {!r}", lines[0]
     )
     return Request(
-        headers=list(_decode_header_lines(lines[1:])), _parsed=True, **matches
+        headers=list(_decode_header_lines(lines[1:])),
+        _parsed=True,
+        **matches,
     )
 
 
@@ -94,7 +81,7 @@ status_line_re = re.compile(status_line.encode("ascii"))
 def maybe_read_from_SEND_RESPONSE_server(
     buf: ReceiveBuffer,
 ) -> Union[InformationalResponse, Response, None]:
-    lines = buf.maybe_extract_lines()
+    lines = buf.maybe_extract_strict_header_lines()
     if lines is None:
         if buf.is_next_line_obviously_invalid_request_line():
             raise LocalProtocolError("illegal request line")
@@ -155,17 +142,20 @@ class ChunkedReader:
 
     def __call__(self, buf: ReceiveBuffer) -> Union[Data, EndOfMessage, None]:
         if self._reading_trailer:
-            lines = buf.maybe_extract_lines()
+            lines = buf.maybe_extract_strict_lines()
             if lines is None:
                 return None
-            return EndOfMessage(headers=list(_decode_header_lines(lines)))
+            return EndOfMessage(
+                headers=list(_decode_header_lines(lines))
+            )
         if self._bytes_to_discard:
             data = buf.maybe_extract_at_most(len(self._bytes_to_discard))
             if data is None:
                 return None
             if data != self._bytes_to_discard[: len(data)]:
                 raise LocalProtocolError(
-                    f"malformed chunk footer: {data!r} (expected {self._bytes_to_discard!r})"
+                    f"malformed chunk footer: {data!r} "
+                    f"(expected {self._bytes_to_discard!r})"
                 )
             self._bytes_to_discard = self._bytes_to_discard[len(data) :]
             if self._bytes_to_discard:

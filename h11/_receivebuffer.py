@@ -2,6 +2,9 @@ import re
 import sys
 from typing import List, Optional, Union
 
+from ._headers import MAX_HEADER_LINE_SIZE
+from ._util import LocalProtocolError
+
 __all__ = ["ReceiveBuffer"]
 
 
@@ -49,6 +52,8 @@ class ReceiveBuffer:
         self._data = bytearray()
         self._next_line_search = 0
         self._multiple_lines_search = 0
+        self._strict_header_search = 0
+        self._strict_first_line_end: Optional[int] = None
 
     def __iadd__(self, byteslike: Union[bytes, bytearray]) -> "ReceiveBuffer":
         self._data += byteslike
@@ -71,6 +76,8 @@ class ReceiveBuffer:
 
         self._next_line_search = 0
         self._multiple_lines_search = 0
+        self._strict_header_search = 0
+        self._strict_first_line_end = None
 
         return out
 
@@ -134,6 +141,56 @@ class ReceiveBuffer:
         del lines[-2:]
 
         return lines
+
+    def maybe_extract_strict_header_lines(
+        self, max_line_size: int = MAX_HEADER_LINE_SIZE
+    ) -> Optional[List[bytearray]]:
+        if self._strict_first_line_end is None:
+            first_line_end = self._data.find(b"\r\n")
+            first_cr = self._data.find(b"\r")
+            first_lf = self._data.find(b"\n")
+            if first_lf != -1 and (
+                first_cr == -1
+                or first_lf != first_cr + 1
+                or (first_line_end != -1 and first_lf < first_line_end)
+            ):
+                raise LocalProtocolError("illegal header line")
+            if first_line_end == -1:
+                return None
+            self._strict_first_line_end = first_line_end + 2
+
+        return self._maybe_extract_strict_lines(
+            max_line_size, self._strict_first_line_end
+        )
+
+    def maybe_extract_strict_lines(
+        self, max_line_size: int = MAX_HEADER_LINE_SIZE
+    ) -> Optional[List[bytearray]]:
+        return self._maybe_extract_strict_lines(max_line_size, 0)
+
+    def _maybe_extract_strict_lines(
+        self, max_line_size: int, initial_search_start: int
+    ) -> Optional[List[bytearray]]:
+        search_start = max(self._strict_header_search, initial_search_start)
+        while True:
+            line_end = self._data.find(b"\r\n", search_start)
+            next_lf = self._data.find(b"\n", search_start)
+            if next_lf != -1 and (line_end == -1 or next_lf != line_end + 1):
+                raise LocalProtocolError("illegal header line")
+            if line_end == -1:
+                partial_line = self._data[search_start:]
+                if len(partial_line) > max_line_size:
+                    raise LocalProtocolError("illegal header line")
+                self._strict_header_search = search_start
+                return None
+
+            line = self._data[search_start:line_end]
+            if b"\r" in line or b"\n" in line or len(line) > max_line_size:
+                raise LocalProtocolError("illegal header line")
+            if not line:
+                out = self._extract(line_end + 2)
+                return out.split(b"\r\n")[:-2]
+            search_start = line_end + 2
 
     # In theory we should wait until `\r\n` before starting to validate
     # incoming data. However it's interesting to detect (very) invalid data
