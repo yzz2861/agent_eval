@@ -10,6 +10,7 @@ import datetime
 
 from ..parser import EXTENSION_MARKER
 from . import BaseType, format_bytes, DecodeError, ErrorWithLocation
+from . import Error
 from . import EncodeError
 from . import DecodeError
 from . import format_or
@@ -174,6 +175,31 @@ class DecodeTagError(DecodeError):
             'tags {}'.format(tag) if isinstance(tag, list) else "tag '{}'".format(tag),
             self.actual_tag)
         super(DecodeTagError, self).__init__(message, offset=offset, location=location)
+
+
+class AmbiguousChoiceError(DecodeError):
+    """
+    Error for when a CHOICE tag matches multiple member alternatives and
+    the correct member cannot be determined unambiguously.
+    """
+
+    def __init__(self, choice, tag, members, offset):
+        """
+        :param Choice choice: The CHOICE type with ambiguous members
+        :param bytes tag: The ambiguous tag
+        :param list members: The member candidates matching the tag
+        :param int offset: Data offset at which the tag was found
+        """
+        self.members = members
+        message = (
+            "Ambiguous tag '{}' for {}: matches members {}. "
+            "Explicitly select the member to decode with select().".format(
+                format_bytes(tag),
+                choice.type_label(),
+                format_or(sorted(member.name for member in members))))
+        super(AmbiguousChoiceError, self).__init__(message,
+                                                   offset=offset,
+                                                   location=choice)
 
 
 class NoEndOfContentsTagError(DecodeError):
@@ -1156,6 +1182,8 @@ class Choice(Type):
         self.members = members
         self.name_to_member = {member.name: member for member in self.members}
         self.tag_to_member = {}
+        self.ambiguous_tag_to_members = {}
+        self.selected_member = None
         self.add_tags(self.members)
 
     def add_tags(self, members):
@@ -1163,7 +1191,42 @@ class Choice(Type):
             tags = self.get_member_tags(member)
 
             for tag in tags:
-                self.tag_to_member[tag] = member
+                self.add_tag(tag, member)
+
+    def add_tag(self, tag, member):
+        if tag in self.ambiguous_tag_to_members:
+            members = self.ambiguous_tag_to_members[tag]
+
+            if member not in members:
+                members.append(member)
+        elif tag in self.tag_to_member:
+            if self.tag_to_member[tag] is not member:
+                self.ambiguous_tag_to_members[tag] = [
+                    self.tag_to_member.pop(tag),
+                    member
+                ]
+        else:
+            self.tag_to_member[tag] = member
+
+    @property
+    def has_ambiguous_tags(self):
+        return bool(self.ambiguous_tag_to_members)
+
+    def select(self, member_name):
+        """Explicitly select the member to decode when a tag is ambiguous,
+        that is, when multiple members share the same tag. Give
+        'member_name' as None to clear the selection and restore
+        ambiguity-aware decoding.
+
+        """
+
+        if member_name is not None and member_name not in self.name_to_member:
+            raise Error(
+                "Expected member {}, but got '{}'.".format(
+                    self.format_names(),
+                    member_name))
+
+        self.selected_member = member_name
 
     def get_member_tags(self, member):
         tags = []
@@ -1192,7 +1255,9 @@ class Choice(Type):
         return tags
 
     def format_tag(self):
-        return [format_bytes(tag) for tag in self.tag_to_member]
+        tags = list(self.tag_to_member) + list(self.ambiguous_tag_to_members)
+
+        return [format_bytes(tag) for tag in tags]
 
     def format_names(self):
         return format_or(sorted([member.name for member in self.members]))
@@ -1217,6 +1282,8 @@ class Choice(Type):
 
         if tag in self.tag_to_member:
             member = self.tag_to_member[tag]
+        elif tag in self.ambiguous_tag_to_members:
+            return self.decode_ambiguous(tag, data, offset)
         elif self.has_extension_marker:
             offset = skip_tag_length_contents(data, offset)
 
@@ -1229,6 +1296,78 @@ class Choice(Type):
             # Add member location
             e.add_location(member)
             raise e
+
+        return (member.name, decoded), offset
+
+    def decode_ambiguous(self, tag, data, offset):
+        members = self.ambiguous_tag_to_members[tag]
+
+        if self.selected_member is not None:
+            return self.decode_selected(tag, data, offset)
+
+        decoded_members = []
+        errors = []
+
+        for member in members:
+            try:
+                decoded, member_offset = member.decode(data, offset)
+            except AmbiguousChoiceError:
+                # Ambiguity in a nested choice is the most precise error.
+                raise
+            except ErrorWithLocation as e:
+                errors.append((member, e))
+            else:
+                if decoded == TAG_MISMATCH:
+                    continue
+
+                decoded_members.append((member, decoded, member_offset))
+
+        if len(decoded_members) == 1:
+            member, decoded, member_offset = decoded_members[0]
+
+            return (member.name, decoded), member_offset
+
+        if len(decoded_members) > 1:
+            raise AmbiguousChoiceError(self,
+                                       tag,
+                                       [member for member, _, _ in decoded_members],
+                                       offset)
+
+        # The tag matched the choice, but no member could decode the
+        # contents. This is a parse failure, not a missing field.
+        details = ['{}: {}'.format(member.name, e) for member, e in errors]
+
+        raise DecodeError(
+            "Could not decode tag '{}' as any member of {}: {}".format(
+                format_bytes(tag),
+                self.type_label(),
+                '; '.join(details)),
+            offset=offset,
+            location=self)
+
+    def decode_selected(self, tag, data, offset):
+        member = self.name_to_member[self.selected_member]
+        candidates = self.ambiguous_tag_to_members[tag]
+
+        if member not in candidates:
+            raise DecodeError(
+                "Selected member '{}' does not match tag '{}' of {}.".format(
+                    member.name,
+                    format_bytes(tag),
+                    self.type_label()),
+                offset=offset,
+                location=self)
+
+        start_offset = offset
+
+        try:
+            decoded, offset = member.decode(data, start_offset)
+        except ErrorWithLocation as e:
+            # Add member location
+            e.add_location(member)
+            raise e
+
+        check_decode_error(member, decoded, data, start_offset)
 
         return (member.name, decoded), offset
 

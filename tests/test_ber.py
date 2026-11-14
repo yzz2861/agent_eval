@@ -981,6 +981,187 @@ class Asn1ToolsBerTest(Asn1ToolsBaseTest):
         with self.assertRaises(asn1tools.DecodeError) as cm:
             foo.decode('N', b'\xa1\x01\x05')
 
+    def test_choice_ambiguous_tags(self):
+        foo = asn1tools.compile_string(
+            "Foo DEFINITIONS ::= "
+            "BEGIN "
+            "A ::= CHOICE { "
+            "  a NULL, "
+            "  b NULL, "
+            "  c BOOLEAN "
+            "} "
+            "B ::= CHOICE { "
+            "  a [0] INTEGER, "
+            "  b [0] OCTET STRING "
+            "} "
+            "C ::= CHOICE { "
+            "  a CHOICE { "
+            "    x NULL "
+            "  }, "
+            "  b NULL "
+            "} "
+            "D ::= CHOICE { "
+            "  a CHOICE { "
+            "    x NULL, "
+            "    y NULL "
+            "  } "
+            "} "
+            "S ::= SEQUENCE { "
+            "  x INTEGER, "
+            "  y A OPTIONAL "
+            "} "
+            "T ::= SEQUENCE { "
+            "  x INTEGER, "
+            "  y B OPTIONAL "
+            "} "
+            "END")
+
+        # Ambiguity is detected at compile time.
+        for type_name in ['A', 'B', 'C']:
+            self.assertTrue(foo.types[type_name].type.has_ambiguous_tags)
+
+        self.assertFalse(foo.types['D'].type.has_ambiguous_tags)
+
+        # Unique tags decode exactly as before, and encoding an
+        # ambiguous choice is explicit by member name.
+        self.assertEqual(foo.decode('A', b'\x01\x01\xff'), ('c', True))
+        self.assertEqual(foo.encode('A', ('a', None)), b'\x05\x00')
+        self.assertEqual(foo.encode('A', ('b', None)), b'\x05\x00')
+
+        # Same tag for two NULL members: decoding must not silently
+        # pick one and drop the other.
+        with self.assertRaises(asn1tools.DecodeError) as cm:
+            foo.decode('A', b'\x05\x00')
+
+        self.assertEqual(
+            str(cm.exception),
+            "A: Ambiguous tag '05' for CHOICE(A): matches members 'a' or "
+            "'b'. Explicitly select the member to decode with select(). "
+            "(At offset: 0)")
+
+        # Same tag, but the schema disambiguates: only one member can
+        # decode the contents.
+        self.assertEqual(foo.decode('B', b'\xa0\x03\x02\x01\x05'), ('a', 5))
+        self.assertEqual(foo.decode('B', b'\xa0\x03\x04\x01\xab'), ('b', b'\xab'))
+
+        # Same tag, contents no member can decode: a parse failure,
+        # not a missing field.
+        with self.assertRaises(asn1tools.DecodeError) as cm:
+            foo.decode('B', b'\xa0\x03\x0c\x01\x41')
+
+        self.assertEqual(
+            str(cm.exception),
+            "B: Could not decode tag 'a0' as any member of CHOICE(B): "
+            "a: a: Expected INTEGER(a) with tag '02', but got '0c'. "
+            "(At offset: 2); "
+            "b: b: Expected OCTET STRING(b) with tag '04', but got '0c'. "
+            "(At offset: 2) (At offset: 0)")
+
+        # Nested choice with a member sharing the nested member's tag.
+        with self.assertRaises(asn1tools.DecodeError) as cm:
+            foo.decode('C', b'\x05\x00')
+
+        self.assertEqual(
+            str(cm.exception),
+            "C: Ambiguous tag '05' for CHOICE(C): matches members 'a' or "
+            "'b'. Explicitly select the member to decode with select(). "
+            "(At offset: 0)")
+
+        # Ambiguity inside a nested choice is located at the inner
+        # choice and its members.
+        with self.assertRaises(asn1tools.DecodeError) as cm:
+            foo.decode('D', b'\x05\x00')
+
+        self.assertEqual(
+            str(cm.exception),
+            "D.a: Ambiguous tag '05' for CHOICE(a): matches members 'x' "
+            "or 'y'. Explicitly select the member to decode with "
+            "select(). (At offset: 0)")
+
+        # An optional choice member absent from the data is not an
+        # error.
+        self.assertEqual(foo.decode('S', b'0\x03\x02\x01\x01'), {'x': 1})
+
+        # An optional choice member present in the data, but not
+        # unambiguously decodable, is a parse failure.
+        with self.assertRaises(asn1tools.DecodeError) as cm:
+            foo.decode('S', b'0\x05\x02\x01\x01\x05\x00')
+
+        self.assertEqual(
+            str(cm.exception),
+            "S.y: Ambiguous tag '05' for A(y): matches members 'a' or "
+            "'b'. Explicitly select the member to decode with select(). "
+            "(At offset: 5)")
+
+        with self.assertRaises(asn1tools.DecodeError) as cm:
+            foo.decode('T', b'0\x08\x02\x01\x01\xa0\x03\x0c\x01\x41')
+
+        self.assertEqual(
+            str(cm.exception),
+            "T.y: Could not decode tag 'a0' as any member of B(y): "
+            "a: a: Expected INTEGER(a) with tag '02', but got '0c'. "
+            "(At offset: 7); "
+            "b: b: Expected OCTET STRING(b) with tag '04', but got '0c'. "
+            "(At offset: 7) (At offset: 5)")
+
+        # Explicit selection strategy: the user selects the member to
+        # decode for ambiguous tags.
+        choice = foo.types['A'].type
+
+        choice.select('b')
+        self.assertEqual(foo.decode('A', b'\x05\x00'), ('b', None))
+
+        choice.select('a')
+        self.assertEqual(foo.decode('A', b'\x05\x00'), ('a', None))
+
+        # Unique tags are unaffected by the selection.
+        self.assertEqual(foo.decode('A', b'\x01\x01\xff'), ('c', True))
+
+        # The selected member must match the actual tag.
+        choice.select('c')
+
+        with self.assertRaises(asn1tools.DecodeError) as cm:
+            foo.decode('A', b'\x05\x00')
+
+        self.assertEqual(
+            str(cm.exception),
+            "A: Selected member 'c' does not match tag '05' of "
+            "CHOICE(A). (At offset: 0)")
+
+        # Selecting an unknown member is an error.
+        with self.assertRaises(asn1tools.Error) as cm:
+            choice.select('zz')
+
+        self.assertEqual(
+            str(cm.exception),
+            "Expected member 'a', 'b' or 'c', but got 'zz'.")
+
+        # Clearing the selection restores ambiguity-aware decoding.
+        choice.select(None)
+
+        with self.assertRaises(asn1tools.DecodeError):
+            foo.decode('A', b'\x05\x00')
+
+        # DER shares the BER choice implementation.
+        foo_der = asn1tools.compile_string(
+            "Foo DEFINITIONS ::= "
+            "BEGIN "
+            "A ::= CHOICE { "
+            "  a NULL, "
+            "  b NULL "
+            "} "
+            "END",
+            'der')
+
+        with self.assertRaises(asn1tools.DecodeError) as cm:
+            foo_der.decode('A', b'\x05\x00')
+
+        self.assertEqual(
+            str(cm.exception),
+            "A: Ambiguous tag '05' for CHOICE(A): matches members 'a' or "
+            "'b'. Explicitly select the member to decode with select(). "
+            "(At offset: 0)")
+
     def test_utf8_string(self):
         foo = asn1tools.compile_string(
             "Foo DEFINITIONS AUTOMATIC TAGS ::= "
