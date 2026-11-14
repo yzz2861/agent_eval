@@ -7,6 +7,7 @@ from .nodes import *
 
 from .loader import *
 from .dumper import *
+from .merge import *
 
 __version__ = '7.0.0.dev0'
 try:
@@ -94,6 +95,16 @@ def load_all(stream, Loader):
     finally:
         loader.dispose()
 
+def _configure_merge_loader(loader, merge_budget, merge_policy,
+        merge_strict, audit):
+    if merge_budget is not None:
+        loader.merge_budget = merge_budget
+    if merge_policy is not None:
+        loader.merge_policy = merge_policy
+    loader.merge_strict = merge_strict
+    loader.merge_audit_enabled = audit
+    return loader
+
 def full_load(stream):
     """
     Parse the first YAML document in a stream
@@ -114,17 +125,33 @@ def full_load_all(stream):
     """
     return load_all(stream, FullLoader)
 
-def safe_load(stream):
+def safe_load(stream, merge_budget=None, merge_policy=None,
+        merge_strict=False, audit=False):
     """
     Parse the first YAML document in a stream
     and produce the corresponding Python object.
 
     Resolve only basic YAML tags. This is known
     to be safe for untrusted input.
+    When ``merge_budget`` is supplied, ``<<`` merge expansion is planned
+    against the given :class:`MergeBudget`; ``merge_strict`` rejects repeated
+    merge sources and cyclic references are always rejected. Protected keys
+    are controlled by ``merge_policy``. With ``audit=True`` the function
+    returns a ``(data, merge_audit)`` tuple; provenance never changes the
+    constructed values.
     """
-    return load(stream, SafeLoader)
+    loader = _configure_merge_loader(SafeLoader(stream), merge_budget,
+            merge_policy, merge_strict, audit)
+    try:
+        data = loader.get_single_data()
+        if audit:
+            return data, loader.get_merge_audit()
+        return data
+    finally:
+        loader.dispose()
 
-def safe_load_all(stream):
+def safe_load_all(stream, merge_budget=None, merge_policy=None,
+        merge_strict=False, audit=False):
     """
     Parse all YAML documents in a stream
     and produce corresponding Python objects.
@@ -132,7 +159,17 @@ def safe_load_all(stream):
     Resolve only basic YAML tags. This is known
     to be safe for untrusted input.
     """
-    return load_all(stream, SafeLoader)
+    loader = _configure_merge_loader(SafeLoader(stream), merge_budget,
+            merge_policy, merge_strict, audit)
+    try:
+        while loader.check_data():
+            data = loader.get_data()
+            if audit:
+                yield data, loader.get_merge_audit()
+            else:
+                yield data
+    finally:
+        loader.dispose()
 
 def unsafe_load(stream):
     """
@@ -387,4 +424,3 @@ class YAMLObject(metaclass=YAMLObjectMetaclass):
         """
         return dumper.represent_yaml_object(cls.yaml_tag, data, cls,
                 flow_style=cls.yaml_flow_style)
-

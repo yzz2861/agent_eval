@@ -772,6 +772,7 @@ cdef class CParser:
         node = ScalarNode(tag, value, start_mark, end_mark, style)
         if anchor is not None:
             self.anchors[anchor] = node
+            node.anchor = anchor
         yaml_event_delete(&self.parsed_event)
         return node
 
@@ -800,6 +801,7 @@ cdef class CParser:
         node = SequenceNode(tag, value, start_mark, None, flow_style)
         if anchor is not None:
             self.anchors[anchor] = node
+            node.anchor = anchor
         yaml_event_delete(&self.parsed_event)
         index = 0
         self._parse_next_event()
@@ -839,6 +841,7 @@ cdef class CParser:
         node = MappingNode(tag, value, start_mark, None, flow_style)
         if anchor is not None:
             self.anchors[anchor] = node
+            node.anchor = anchor
         yaml_event_delete(&self.parsed_event)
         self._parse_next_event()
         while self.parsed_event.type != YAML_MAPPING_END_EVENT:
@@ -1394,4 +1397,3 @@ cdef int output_handler(void *data, unsigned char *bufferu, size_t size) except 
         value = PyUnicode_DecodeUTF8(buffer, size, 'strict')
     emitter.stream.write(value)
     return 1
-

@@ -1,10 +1,11 @@
 
 class Node(object):
-    def __init__(self, tag, value, start_mark, end_mark):
+    def __init__(self, tag, value, start_mark, end_mark, anchor=None):
         self.tag = tag
         self.value = value
         self.start_mark = start_mark
         self.end_mark = end_mark
+        self.anchor = anchor
     def __repr__(self):
         value = self.value
         #if isinstance(value, list):
@@ -31,6 +32,7 @@ class ScalarNode(Node):
         self.start_mark = start_mark
         self.end_mark = end_mark
         self.style = style
+        self.anchor = None
 
 class CollectionNode(Node):
     def __init__(self, tag, value,
@@ -40,10 +42,10 @@ class CollectionNode(Node):
         self.start_mark = start_mark
         self.end_mark = end_mark
         self.flow_style = flow_style
+        self.anchor = None
 
 class SequenceNode(CollectionNode):
     id = 'sequence'
 
 class MappingNode(CollectionNode):
     id = 'mapping'
-

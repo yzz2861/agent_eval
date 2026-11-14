@@ -5,11 +5,23 @@ __all__ = [
     'FullConstructor',
     'UnsafeConstructor',
     'Constructor',
-    'ConstructorError'
+    'ConstructorError',
+    'MergeError',
+    'MergeBudgetExceededError',
+    'MergeCycleError',
+    'MergeDuplicateSourceError',
+    'MergeProtectedKeyError',
+    'MergeBudget',
+    'MergePolicy',
+    'MergeOrigin',
+    'MergeAudit',
+    'MergePlanner',
+    'DEFAULT_MERGE_BUDGET'
 ]
 
 from .error import *
 from .nodes import *
+from .merge import *
 
 import collections.abc, datetime, base64, binascii, re, sys, types
 
@@ -26,6 +38,12 @@ class BaseConstructor:
         self.recursive_objects = {}
         self.state_generators = []
         self.deep_construct = False
+        self.merge_budget = None
+        self.merge_policy = None
+        self.merge_strict = False
+        self.merge_audit_enabled = False
+        self.merge_planner = None
+        self.merge_audit = None
 
     def check_data(self):
         # If there are more documents available?
@@ -52,6 +70,9 @@ class BaseConstructor:
         return None
 
     def construct_document(self, node):
+        planner = self.get_merge_planner()
+        planner.reset_document_state()
+        planner.plan_document(node)
         data = self.construct_object(node)
         while self.state_generators:
             state_generators = self.state_generators
@@ -59,10 +80,61 @@ class BaseConstructor:
             for generator in state_generators:
                 for dummy in generator:
                     pass
+        if self.merge_audit_enabled:
+            self.merge_audit = self._build_merge_audit(node, planner)
         self.constructed_objects = {}
         self.recursive_objects = {}
         self.deep_construct = False
         return data
+
+    def get_merge_planner(self):
+        if self.merge_planner is None:
+            self.merge_planner = MergePlanner(
+                    self,
+                    budget=self.merge_budget,
+                    policy=self.merge_policy or MergePolicy(),
+                    strict=self.merge_strict,
+                    anchors=getattr(self, 'anchors', None))
+        return self.merge_planner
+
+    def _build_merge_audit(self, node, planner=None):
+        if planner is None:
+            planner = self.get_merge_planner()
+        visited = set()
+
+        def walk(current, path):
+            if id(current) in visited:
+                return
+            visited.add(id(current))
+            if isinstance(current, MappingNode):
+                origins = getattr(current, MergePlanner.ORIGIN_ATTR, None)
+                if origins:
+                    for key_node, value_node in current.value:
+                        origin = origins.get(id(key_node))
+                        if origin is None:
+                            continue
+                        key_path = path + [origin.key]
+                        planner.audit.record(key_path, origin)
+                        walk(value_node, key_path)
+                else:
+                    for key_node, value_node in current.value:
+                        try:
+                            key = self.construct_object(key_node, deep=True)
+                        except Exception:
+                            continue
+                        if not isinstance(key, collections.abc.Hashable):
+                            continue
+                        walk(value_node, path + [key])
+            elif isinstance(current, SequenceNode):
+                for index, child in enumerate(current.value):
+                    walk(child, path + [index])
+
+        walk(node, [])
+        return planner.audit
+
+    def get_merge_audit(self):
+        """Return the provenance audit collected for the last document."""
+        return self.merge_audit
 
     def construct_object(self, node, deep=False):
         if node in self.constructed_objects:
@@ -178,42 +250,7 @@ class SafeConstructor(BaseConstructor):
         return super().construct_scalar(node)
 
     def flatten_mapping(self, node):
-        merge = []
-        merge_key_ids = set()  # anchor referent node objects should have reference equality here
-        index = 0
-        while index < len(node.value):
-            key_node, value_node = node.value[index]
-            if key_node.tag == 'tag:yaml.org,2002:merge':
-                del node.value[index]
-                if isinstance(value_node, MappingNode):
-                    self.flatten_mapping(value_node)
-                    for pair in value_node.value:
-                        if (key_id := id(pair[0].value)) not in merge_key_ids:
-                            merge_key_ids.add(key_id)
-                            merge.append(pair)
-                elif isinstance(value_node, SequenceNode):
-                    for subnode in value_node.value:
-                        if not isinstance(subnode, MappingNode):
-                            raise ConstructorError("while constructing a mapping",
-                                    node.start_mark,
-                                    "expected a mapping for merging, but found %s"
-                                    % subnode.id, subnode.start_mark)
-                        self.flatten_mapping(subnode)
-                        for pair in subnode.value:
-                            if (key_id := id(pair[0].value)) not in merge_key_ids:
-                                merge_key_ids.add(key_id)
-                                merge.append(pair)
-                else:
-                    raise ConstructorError("while constructing a mapping", node.start_mark,
-                            "expected a mapping or list of mappings for merging, but found %s"
-                            % value_node.id, value_node.start_mark)
-            elif key_node.tag == 'tag:yaml.org,2002:value':
-                key_node.tag = 'tag:yaml.org,2002:str'
-                index += 1
-            else:
-                index += 1
-        if merge:
-            node.value = merge + node.value
+        self.get_merge_planner().flatten_mapping(node)
 
     def construct_mapping(self, node, deep=False):
         if isinstance(node, MappingNode):

@@ -94,6 +94,7 @@ class Composer:
                 event.start_mark, event.end_mark, style=event.style)
         if anchor is not None:
             self.anchors[anchor] = node
+            node.anchor = anchor
         return node
 
     def compose_sequence_node(self, anchor):
@@ -106,6 +107,7 @@ class Composer:
                 flow_style=start_event.flow_style)
         if anchor is not None:
             self.anchors[anchor] = node
+            node.anchor = anchor
         index = 0
         while not self.check_event(SequenceEndEvent):
             node.value.append(self.compose_node(node, index))
@@ -124,6 +126,7 @@ class Composer:
                 flow_style=start_event.flow_style)
         if anchor is not None:
             self.anchors[anchor] = node
+            node.anchor = anchor
         while not self.check_event(MappingEndEvent):
             #key_event = self.peek_event()
             item_key = self.compose_node(node, None)
@@ -136,4 +139,3 @@ class Composer:
         end_event = self.get_event()
         node.end_mark = end_event.end_mark
         return node
-
