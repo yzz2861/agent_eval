@@ -9,6 +9,7 @@ A handler can be bound to other types by calling
 """
 
 import array
+import collections
 import copy
 import datetime
 import inspect
@@ -36,31 +37,269 @@ HandlerReturn: TypeAlias = dict[str, Any] | str | None
 DateTime: TypeAlias = datetime.date | datetime.time
 
 
-class Registry:
-    def __init__(self) -> None:
-        self._handlers = {}
-        self._base_handlers = {}
+DIRECTION_ENCODE = "encode"
+DIRECTION_DECODE = "decode"
+DIRECTION_BOTH = "both"
+_VALID_DIRECTIONS = (DIRECTION_ENCODE, DIRECTION_DECODE, DIRECTION_BOTH)
 
-    def get(self, cls_or_name: type, default: Any | None = None) -> Any:
+SOURCE_BUILTIN = "builtin"
+SOURCE_USER = "user"
+
+DEFAULT_PRIORITY = 0
+
+
+class HandlerConflictError(Exception):
+    """Two different handlers tie for the same type, direction and priority.
+
+    Handler selection is deterministic: the highest priority wins and ties
+    between *different* handlers are never resolved by registration order.
+    Register one of the conflicting handlers with an explicit higher
+    priority (or unregister the other one) to resolve the conflict.
+    """
+
+
+def _handler_key(handler: Any) -> type:
+    """Identity used to tell whether two registrations are the same handler.
+
+    Handler classes identify themselves; handler instances identify with
+    their class, so re-registering a fresh instance of the same handler
+    class is an idempotent update rather than a conflict.
+    """
+    return handler if util._is_type(handler) else type(handler)
+
+
+def _handler_name(handler: Any) -> str:
+    """Human-readable handler name; never includes object contents."""
+    return util.importable_name(_handler_key(handler))
+
+
+def _directions_overlap(first: str, second: str) -> bool:
+    return first == DIRECTION_BOTH or second == DIRECTION_BOTH or first == second
+
+
+class HandlerRegistration:
+    """A single deterministic handler registration."""
+
+    __slots__ = (
+        "cls",
+        "handler",
+        "priority",
+        "direction",
+        "source",
+        "base",
+        "sequence",
+    )
+
+    def __init__(
+        self,
+        cls: type,
+        handler: Any,
+        priority: float,
+        direction: str,
+        source: str,
+        base: bool,
+        sequence: int,
+    ) -> None:
+        self.cls = cls
+        self.handler = handler
+        self.priority = priority
+        self.direction = direction
+        self.source = source
+        self.base = base
+        self.sequence = sequence
+
+    @property
+    def name(self) -> str:
+        return _handler_name(self.handler)
+
+    def __repr__(self) -> str:
+        return (
+            f"HandlerRegistration(type={util.importable_name(self.cls)}, "
+            f"handler={self.name}, priority={self.priority}, "
+            f"direction={self.direction}, source={self.source}, base={self.base})"
+        )
+
+
+class HandlerSelection:
+    """Audit record describing the outcome of one handler selection."""
+
+    __slots__ = ("key", "direction", "match", "handler", "priority", "source")
+
+    def __init__(
+        self,
+        key: str,
+        direction: str | None,
+        match: str,
+        handler: str | None,
+        priority: float | None,
+        source: str | None,
+    ) -> None:
+        self.key = key
+        self.direction = direction
+        self.match = match
+        self.handler = handler
+        self.priority = priority
+        self.source = source
+
+    def __repr__(self) -> str:
+        return (
+            f"HandlerSelection(key={self.key}, direction={self.direction}, "
+            f"match={self.match}, handler={self.handler}, "
+            f"priority={self.priority}, source={self.source})"
+        )
+
+
+class Registry:
+    """Deterministic handler registry.
+
+    Every registration carries a priority, a direction ("encode", "decode"
+    or "both") and a source (e.g. "builtin" or "user").  Selection depends
+    only on those attributes -- never on registration order -- so the same
+    set of registrations produces the same result on every machine.  All
+    mutations are atomic and guarded by a lock, so a failed registration
+    never leaves partial state behind and concurrent registrations from
+    multiple threads cannot lose handlers or reorder priorities.
+    """
+
+    def __init__(self, audit_limit: int = 4096) -> None:
+        self._lock = threading.RLock()
+        self._exact: dict = {}
+        self._base: dict = {}
+        self._names: dict = {}
+        self._sequence = 0
+        self._audit: collections.deque = collections.deque(maxlen=audit_limit)
+
+    def get(
+        self,
+        cls_or_name: "type | str",
+        default: Any | None = None,
+        *,
+        direction: "str | None" = None,
+    ) -> Any:
         """
         :param cls_or_name: the type or its fully qualified name
         :param default: default value, if a matching handler is not found
+        :param direction: optional "encode" or "decode"; only handlers
+            registered for that direction (or "both") are eligible
 
         Looks up a handler by type reference or its fully
         qualified name. If a direct match
         is not found, the search is performed over all
         handlers registered with base=True.
+
+        Every lookup is recorded in the audit log; see :meth:`audit`.
         """
-        handler = self._handlers.get(cls_or_name)
-        # attempt to find a base class
-        if handler is None and util._is_type(cls_or_name):
-            for cls, base_handler in self._base_handlers.items():
-                if issubclass(cls_or_name, cls):
-                    return base_handler
-        return default if handler is None else handler
+        _record, registration = self._resolve(cls_or_name, direction, audit=True)
+        return default if registration is None else registration.handler
+
+    def explain(
+        self, cls_or_name: "type | str", *, direction: "str | None" = None
+    ) -> HandlerSelection:
+        """Return the selection record for a lookup without recording it."""
+        record, _registration = self._resolve(cls_or_name, direction, audit=False)
+        return record
+
+    def audit(self) -> list:
+        """Return a snapshot of the recorded handler selections."""
+        with self._lock:
+            return list(self._audit)
+
+    def clear_audit(self) -> None:
+        """Drop all recorded handler selections."""
+        with self._lock:
+            self._audit.clear()
+
+    def _resolve(
+        self, cls_or_name: "type | str", direction: "str | None", audit: bool
+    ) -> tuple:
+        if direction is not None and direction not in (
+            DIRECTION_ENCODE,
+            DIRECTION_DECODE,
+        ):
+            raise ValueError(
+                f"direction must be 'encode' or 'decode', got {direction!r}"
+            )
+        with self._lock:
+            if util._is_type(cls_or_name):
+                cls = cls_or_name
+                key = util.importable_name(cls)
+            elif isinstance(cls_or_name, str):
+                cls = self._names.get(cls_or_name)
+                key = cls_or_name
+            else:
+                cls = None
+                key = type(cls_or_name).__name__
+
+            registration = None
+            match = "none"
+            if cls is not None:
+                # registrations attached to this exact class (with or without
+                # base=True) always win over registrations inherited from
+                # base classes
+                exact_candidates = list(self._exact.get(cls, ()))
+                exact_candidates.extend(self._base.get(cls, ()))
+                registration = self._best(exact_candidates, direction, key)
+                if registration is not None:
+                    match = "exact"
+                else:
+                    candidates = []
+                    for base_cls, registrations in self._base.items():
+                        if base_cls is not cls and issubclass(cls, base_cls):
+                            candidates.extend(registrations)
+                    registration = self._best(candidates, direction, key)
+                    if registration is not None:
+                        match = "base"
+
+            record = HandlerSelection(
+                key=key,
+                direction=direction,
+                match=match,
+                handler=None if registration is None else registration.name,
+                priority=None if registration is None else registration.priority,
+                source=None if registration is None else registration.source,
+            )
+            if audit:
+                self._audit.append(record)
+            return record, registration
+
+    @staticmethod
+    def _best(candidates: Any, direction: "str | None", key: str) -> Any:
+        eligible = [
+            registration
+            for registration in candidates
+            if direction is None
+            or registration.direction == DIRECTION_BOTH
+            or registration.direction == direction
+        ]
+        if not eligible:
+            return None
+        best_priority = max(registration.priority for registration in eligible)
+        winners = [
+            registration
+            for registration in eligible
+            if registration.priority == best_priority
+        ]
+        identities = {_handler_key(registration.handler) for registration in winners}
+        if len(identities) > 1:
+            names = sorted(
+                _handler_name(registration.handler) for registration in winners
+            )
+            raise HandlerConflictError(
+                f"handler conflict for type {key} "
+                f"(direction={direction or 'any'}, priority={best_priority}): "
+                + " vs ".join(names)
+            )
+        return winners[0]
 
     def register(
-        self, cls: type, handler: KeyType | None = None, base: bool = False
+        self,
+        cls: type,
+        handler: "KeyType | None" = None,
+        base: bool = False,
+        *,
+        priority: float = DEFAULT_PRIORITY,
+        direction: str = DIRECTION_BOTH,
+        source: str = SOURCE_USER,
     ) -> Callable[[HandlerType], HandlerType] | None:
         """Register the a custom handler for a class
 
@@ -69,6 +308,13 @@ class Registry:
             None, a decorator wrapper is returned)
         :param base: Indicates whether the handler should
             be registered for all subclasses
+        :param priority: Selection priority; the highest priority handler
+            wins. A tie between different handlers raises
+            :class:`HandlerConflictError` instead of picking the first one.
+        :param direction: "encode", "decode" or "both" (the default);
+            restricts which direction the handler is eligible for.
+        :param source: Free-form origin label (e.g. "builtin" or "user"),
+            recorded in registrations and the audit log.
 
         This function can be also used as a decorator
         by omitting the `handler` argument::
@@ -77,33 +323,99 @@ class Registry:
             class FooHandler(jsonpickle.handlers.BaseHandler):
                 pass
 
+        Registration is atomic: the registry is validated first and mutated
+        afterwards, so a failing registration never leaves partial state.
         """
         if handler is None:
 
             def _register(handler_cls: HandlerType) -> HandlerType:
-                self.register(cls, handler=handler_cls, base=base)
+                self.register(
+                    cls,
+                    handler=handler_cls,
+                    base=base,
+                    priority=priority,
+                    direction=direction,
+                    source=source,
+                )
                 return handler_cls
 
             return _register
         if not util._is_type(cls):
-            raise TypeError(f"{cls!r} is not a class/type")
-        # store both the name and the actual type for the ugly cases like
-        # _sre.SRE_Pattern that cannot be loaded back directly
-        self._handlers[util.importable_name(cls)] = self._handlers[cls] = handler
-        if base:
-            # only store the actual type for subclass checking
-            self._base_handlers[cls] = handler
+            raise TypeError(f"expected a class/type, got {type(cls).__name__}")
+        if direction not in _VALID_DIRECTIONS:
+            raise ValueError(
+                f"direction must be one of {_VALID_DIRECTIONS}, got {direction!r}"
+            )
+        if isinstance(priority, bool) or not isinstance(priority, (int, float)):
+            raise TypeError(f"priority must be a number, got {type(priority).__name__}")
+        if not callable(handler):
+            raise TypeError(
+                f"handler for {util.importable_name(cls)} must be callable, "
+                f"got {type(handler).__name__}"
+            )
+        if not isinstance(source, str):
+            raise TypeError(f"source must be a string, got {type(source).__name__}")
+        with self._lock:
+            collection = self._base if base else self._exact
+            new_key = _handler_key(handler)
+            # conflict detection spans both collections: exact and base
+            # registrations for the same class share one selection pool
+            for existing in list(self._exact.get(cls, ())) + list(
+                self._base.get(cls, ())
+            ):
+                if (
+                    _handler_key(existing.handler) is not new_key
+                    and existing.priority == priority
+                    and _directions_overlap(existing.direction, direction)
+                ):
+                    raise HandlerConflictError(
+                        f"handler conflict for type {util.importable_name(cls)} "
+                        f"(direction={direction}, priority={priority}): "
+                        f"{existing.name} vs {_handler_name(handler)}"
+                    )
+            kept = []
+            for existing in collection.get(cls, ()):
+                if (
+                    _handler_key(existing.handler) is new_key
+                    and existing.direction == direction
+                ):
+                    # idempotent update of an existing registration
+                    continue
+                kept.append(existing)
+            self._sequence += 1
+            kept.append(
+                HandlerRegistration(
+                    cls=cls,
+                    handler=handler,
+                    priority=priority,
+                    direction=direction,
+                    source=source,
+                    base=base,
+                    sequence=self._sequence,
+                )
+            )
+            collection[cls] = kept
+            # store the fully qualified name for the ugly cases like
+            # _sre.SRE_Pattern that cannot be loaded back directly
+            self._names[util.importable_name(cls)] = cls
+        return None
 
     def unregister(self, cls: type) -> None:
-        self._handlers.pop(cls, None)
-        self._handlers.pop(util.importable_name(cls), None)
-        self._base_handlers.pop(cls, None)
+        """Remove every registration for the given class (atomically)."""
+        with self._lock:
+            self._exact.pop(cls, None)
+            self._base.pop(cls, None)
+            if util._is_type(cls):
+                self._names.pop(util.importable_name(cls), None)
 
 
 registry = Registry()
 register = registry.register
 unregister = registry.unregister
 get = registry.get
+audit = registry.audit
+clear_audit = registry.clear_audit
+explain = registry.explain
 
 
 def handler_accepts_handler_context(fn: Callable[..., Any]) -> bool:
@@ -195,7 +507,7 @@ class ArrayHandler(BaseHandler):
         return array.array(typecode, values)
 
 
-ArrayHandler.handles(array.array)
+register(array.array, ArrayHandler, source=SOURCE_BUILTIN)
 
 
 class DatetimeHandler(BaseHandler):
@@ -232,9 +544,9 @@ class DatetimeHandler(BaseHandler):
         return cls.__new__(cls, *params)
 
 
-DatetimeHandler.handles(datetime.datetime)
-DatetimeHandler.handles(datetime.date)
-DatetimeHandler.handles(datetime.time)
+register(datetime.datetime, DatetimeHandler, source=SOURCE_BUILTIN)
+register(datetime.date, DatetimeHandler, source=SOURCE_BUILTIN)
+register(datetime.time, DatetimeHandler, source=SOURCE_BUILTIN)
 
 
 class RegexHandler(BaseHandler):
@@ -258,7 +570,7 @@ class RegexHandler(BaseHandler):
         return re.compile(pattern, data.get("flags", 0))
 
 
-RegexHandler.handles(type(re.compile("")))
+register(type(re.compile("")), RegexHandler, source=SOURCE_BUILTIN)
 
 
 class QueueHandler(BaseHandler):
@@ -276,7 +588,7 @@ class QueueHandler(BaseHandler):
         return queue.Queue()
 
 
-QueueHandler.handles(queue.Queue)
+register(queue.Queue, QueueHandler, source=SOURCE_BUILTIN)
 
 
 class CloneFactory:
@@ -304,7 +616,7 @@ class UUIDHandler(BaseHandler):
         return uuid.UUID(data["hex"])
 
 
-UUIDHandler.handles(uuid.UUID)
+register(uuid.UUID, UUIDHandler, source=SOURCE_BUILTIN)
 
 
 class LockHandler(BaseHandler):
@@ -322,7 +634,7 @@ class LockHandler(BaseHandler):
 
 
 _lock = threading.Lock()
-LockHandler.handles(_lock.__class__)
+register(_lock.__class__, LockHandler, source=SOURCE_BUILTIN)
 
 
 class TextIOHandler(BaseHandler):
@@ -336,7 +648,7 @@ class TextIOHandler(BaseHandler):
         raise AssertionError("Restoring IO.TextIOHandler is not supported")
 
 
-TextIOHandler.handles(io.TextIOWrapper)
+register(io.TextIOWrapper, TextIOHandler, source=SOURCE_BUILTIN)
 
 
 class PassthroughHandler(BaseHandler):

@@ -596,7 +596,7 @@ class Pickler:
 
         # Check for a custom handler
         class_name = util.importable_name(cls)
-        handler = handlers.get(cls, handlers.get(class_name))  # type: ignore[arg-type]
+        handler = handlers.get(cls, direction="encode")
         if handler is not None:
             if self.unpicklable:
                 data[tags.OBJECT] = class_name

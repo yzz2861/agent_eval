@@ -826,7 +826,7 @@ class Unpickler:
     def _restore_object(self, obj: dict[str, Any]) -> Any:
         class_name = obj[tags.OBJECT]
         cls = util.loadclass(class_name, classes=self._classes)
-        handler = handlers.get(cls, handlers.get(class_name))  # type: ignore[arg-type]
+        handler = handlers.get(cls if cls is not None else class_name, direction="decode")
         if handler is not None:  # custom handler
             proxy = _Proxy()
             self._mkref(proxy)

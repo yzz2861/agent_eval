@@ -511,7 +511,12 @@ def register_handlers(
     :param ndarray_abc_xyz: Forward constructor arguments to NumpyNDArrayHandlerView.
         Options with an 'ndarray_' prefix correspond to the same-named
         NumpyNDArrayHandlerView constructor options, sans the 'ndarray_' prefix.
+
+    Any previously registered numpy handlers are removed first, so calling
+    this function twice (or after registering custom numpy handlers) is a
+    well-defined reset rather than a silent overwrite.
     """
+    unregister_handlers()
     ndarray_handler = NumpyNDArrayHandlerView(
         mode=ndarray_mode,
         size_threshold=ndarray_size_threshold,
@@ -535,6 +540,7 @@ def unregister_handlers() -> None:
     unregister(np.dtype)
     unregister(np.generic)
     unregister(np.ndarray)
+    unregister(np.datetime64)
     # Numpy 1.20 dtypes
     unregister(np.dtype(np.void).__class__)
     unregister(np.dtype(np.float32).__class__)
