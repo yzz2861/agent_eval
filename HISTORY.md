@@ -5,6 +5,14 @@ dev
 ---
 
 - \[Short description of non-trivial change.\]
+- Added `SessionCookiePolicy` as the default policy for `RequestsCookieJar`:
+  session cookies are now matched by request host, path, `secure` flag and
+  port using one IDNA-aware host normalization; `Domain` attributes naming a
+  public suffix are rejected; parent-domain cookies are no longer shared
+  with sibling subdomains unless the domain is explicitly authorized via
+  `allowed_shared_domains`; `SameSite=None` cookies without `Secure` are
+  rejected; and cookie selection, merging and expiry cleanup are
+  deterministic.
 
 
 2.34.2 (2026-05-14)

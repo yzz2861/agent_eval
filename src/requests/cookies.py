@@ -13,7 +13,7 @@ import calendar
 import copy
 import time
 from collections.abc import Iterator, MutableMapping
-from http.cookiejar import Cookie, CookieJar, CookiePolicy
+from http.cookiejar import Cookie, CookieJar, CookiePolicy, DefaultCookiePolicy
 from typing import TYPE_CHECKING, Any, TypeVar, overload
 
 from ._internal_utils import to_native_string
@@ -26,6 +26,316 @@ if TYPE_CHECKING:
     from .models import PreparedRequest
 
 import threading
+
+
+def normalize_cookie_host(host: str | None) -> str:
+    """Return the canonical form of a host used for all cookie scoping.
+
+    The exact same normalization is applied on the extract (set) path, the
+    send (return) path, and for redirect/proxy/IDNA edge cases, so that
+    same-origin checks always compare like with like: the host is
+    lowercased, any trailing dot is removed, IPv6 literals keep their
+    brackets, and internationalized names are IDNA-encoded.
+    """
+    if not host:
+        return ""
+    normalized = host.strip().lower().rstrip(".")
+    if normalized.startswith("[") and normalized.endswith("]"):
+        # IPv6 literal: unambiguous once lowercased.
+        return normalized
+    try:
+        return normalized.encode("idna").decode("ascii")
+    except UnicodeError:
+        return normalized
+
+
+# Minimal built-in public suffix list. Cookies must never be scoped to one
+# of these (e.g. Domain=.com or Domain=co.uk), because that would share
+# them across unrelated tenants of the same suffix. Deployments can supply
+# their own list via SessionCookiePolicy(public_suffixes=...).
+_DEFAULT_PUBLIC_SUFFIXES = frozenset(
+    {
+        "ac.uk",
+        "aero",
+        "ai",
+        "app",
+        "biz",
+        "cc",
+        "club",
+        "co",
+        "co.il",
+        "co.in",
+        "co.jp",
+        "co.kr",
+        "co.nz",
+        "co.uk",
+        "co.za",
+        "com",
+        "com.au",
+        "com.br",
+        "com.cn",
+        "com.hk",
+        "com.mx",
+        "com.tw",
+        "coop",
+        "dev",
+        "edu",
+        "eu",
+        "gov",
+        "gov.cn",
+        "gov.uk",
+        "info",
+        "int",
+        "io",
+        "me",
+        "mil",
+        "museum",
+        "name",
+        "net",
+        "net.au",
+        "net.cn",
+        "online",
+        "org",
+        "org.au",
+        "org.cn",
+        "org.uk",
+        "pro",
+        "shop",
+        "site",
+        "su",
+        "tech",
+        "top",
+        "tv",
+        "xyz",
+        # Single-label TLDs and well-known public-suffix second levels.
+        "ac.jp",
+        "ae",
+        "ar",
+        "at",
+        "au",
+        "be",
+        "br",
+        "ca",
+        "ch",
+        "cl",
+        "cn",
+        "de",
+        "dk",
+        "eg",
+        "es",
+        "fi",
+        "fr",
+        "hk",
+        "id",
+        "ie",
+        "il",
+        "in",
+        "it",
+        "jp",
+        "ke",
+        "kr",
+        "mx",
+        "my",
+        "ne.jp",
+        "ng",
+        "nl",
+        "no",
+        "nz",
+        "or.jp",
+        "ph",
+        "pl",
+        "ru",
+        "sa",
+        "se",
+        "sg",
+        "th",
+        "tr",
+        "tw",
+        "uk",
+        "us",
+        "vn",
+        "za",
+    }
+)
+
+
+def _normalized_request_host(request: Any) -> str:
+    """Canonical host of an outgoing request (URL or Host-header override)."""
+    url = request.get_full_url()
+    return normalize_cookie_host(urlparse(url).hostname)
+
+
+def _effective_request_port(request: Any) -> int | None:
+    """Port the request will be sent to, defaulting from the URL scheme."""
+    parsed = urlparse(request.get_full_url())
+    try:
+        if parsed.port is not None:
+            return parsed.port
+    except ValueError:
+        return None
+    scheme = (parsed.scheme or "").lower()
+    if scheme in ("https", "wss"):
+        return 443
+    if scheme in ("http", "ws"):
+        return 80
+    return None
+
+
+def _is_insecure_samesite_none(cookie: Cookie) -> bool:
+    """True for SameSite=None cookies missing the Secure attribute."""
+    if cookie.secure:
+        return False
+    rest = getattr(cookie, "_rest", None) or {}
+    for key, value in rest.items():
+        if (
+            key.lower() == "samesite"
+            and isinstance(value, str)
+            and value.lower() == "none"
+        ):
+            return True
+    return False
+
+
+def _cookie_sort_key(cookie: Cookie) -> tuple[int, str, str, str]:
+    """Deterministic send order: longest (most specific) path first."""
+    path = cookie.path or ""
+    return (-len(path), cookie.domain or "", path, cookie.name or "")
+
+
+def _iter_jar_cookies_sorted(jar: CookieJar) -> list[Cookie]:
+    """Iterate a jar in a deterministic (domain, path, name) order."""
+    return sorted(jar, key=lambda c: (c.domain or "", c.path or "", c.name or ""))
+
+
+class SessionCookiePolicy(DefaultCookiePolicy):
+    """Scoping and attribute policy for session-level cookie jars.
+
+    This policy tightens http.cookiejar.DefaultCookiePolicy so that a jar
+    shared across tenants cannot leak cookies:
+
+    * Cookies are matched against the request host, path, secure flag and
+      port. Host comparison always goes through normalize_cookie_host,
+      giving one canonical form for direct requests, redirects, proxies
+      and IDNA names.
+    * A Domain attribute naming a public suffix (e.g. .com or co.uk) is
+      rejected when the cookie is set.
+    * A cookie scoped to a parent domain (e.g. Domain=.example.com) is
+      only returned to that exact host. Sending it to subdomains (sibling
+      tenants such as evil.example.com) requires the domain to be listed
+      in allowed_shared_domains.
+    * Host-only cookies (no Domain attribute) are only returned to the
+      exact host that set them, never to subdomains.
+    * secure cookies are only sent over HTTPS (inherited from
+      DefaultCookiePolicy.secure_protocols).
+    * SameSite=None cookies without Secure are rejected when set, unless
+      reject_insecure_samesite_none is disabled.
+    * HttpOnly is preserved as cookie metadata (cookie._rest) only;
+      requests is not a browser and does not emulate script-access rules.
+
+    Cookies created from the dict API (cookiejar_from_dict) have no
+    domain and keep their historical supercookie behavior of being sent
+    to every host.
+    """
+
+    def __init__(
+        self,
+        allowed_shared_domains: Any = (),
+        *,
+        public_suffixes: Any = None,
+        reject_insecure_samesite_none: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.allowed_shared_domains = frozenset(
+            normalized
+            for d in allowed_shared_domains
+            if (normalized := normalize_cookie_host(str(d)).lstrip("."))
+        )
+        self.public_suffixes = (
+            _DEFAULT_PUBLIC_SUFFIXES
+            if public_suffixes is None
+            else frozenset(
+                normalize_cookie_host(str(s)).lstrip(".") for s in public_suffixes
+            )
+        )
+        self.reject_insecure_samesite_none = reject_insecure_samesite_none
+
+    # -- extract (set) path ------------------------------------------------
+
+    def set_ok(self, cookie: Cookie, request: Any) -> bool:
+        self._normalize_cookie_domain(cookie)
+        if not super().set_ok(cookie, request):
+            return False
+        if cookie.domain_specified and self._is_public_suffix(cookie.domain):
+            return False
+        if self.reject_insecure_samesite_none and _is_insecure_samesite_none(cookie):
+            return False
+        return True
+
+    @staticmethod
+    def _normalize_cookie_domain(cookie: Cookie) -> None:
+        domain = cookie.domain or ""
+        initial_dot = domain.startswith(".")
+        normalized = normalize_cookie_host(domain.lstrip("."))
+        if initial_dot and normalized:
+            normalized = f".{normalized}"
+        cookie.domain = normalized
+
+    def _is_public_suffix(self, domain: str) -> bool:
+        candidate = normalize_cookie_host(domain).lstrip(".")
+        if not candidate or "." not in candidate:
+            # Single-label domains are treated as public suffixes.
+            return True
+        return candidate in self.public_suffixes
+
+    # -- send (return) path ------------------------------------------------
+
+    def _is_sharing_authorized(self, domain: str) -> bool:
+        return any(
+            domain == allowed or domain.endswith(f".{allowed}")
+            for allowed in self.allowed_shared_domains
+        )
+
+    def domain_return_ok(self, domain: str, request: Any) -> bool:
+        normalized = normalize_cookie_host(domain).lstrip(".")
+        if not normalized:
+            # Domain-less supercookie from the dict API: legacy behavior.
+            return True
+        req_host = _normalized_request_host(request)
+        if not req_host:
+            return False
+        if not (req_host == normalized or req_host.endswith(f".{normalized}")):
+            return False
+        if self.is_blocked(domain):
+            return False
+        if self.is_not_allowed(domain):
+            return False
+        return True
+
+    def return_ok_domain(self, cookie: Cookie, request: Any) -> bool:
+        domain = normalize_cookie_host(cookie.domain).lstrip(".")
+        if not domain:
+            # Domain-less supercookie from the dict API: legacy behavior.
+            return True
+        req_host = _normalized_request_host(request)
+        if not req_host:
+            return False
+        if req_host == domain:
+            return True
+        if cookie.domain_specified and self._is_sharing_authorized(domain):
+            return req_host.endswith(f".{domain}")
+        # Host-only cookies, and domain cookies whose sharing across
+        # subdomains was not explicitly authorized, stay with their host.
+        return False
+
+    def return_ok_port(self, cookie: Cookie, request: Any) -> bool:
+        if not cookie.port_specified or not cookie.port:
+            return True
+        req_port = _effective_request_port(request)
+        if req_port is None:
+            return False
+        allowed_ports = [p.strip() for p in cookie.port.split(",")]
+        return str(req_port) in allowed_ports
 
 
 class MockRequest:
@@ -207,6 +517,24 @@ class RequestsCookieJar(CookieJar, MutableMapping[str, str | None]):  # type: ig
     """
 
     _policy: CookiePolicy
+
+    def __init__(self, policy: CookiePolicy | None = None) -> None:
+        # Session jars default to the scoped SessionCookiePolicy; callers
+        # may still pass any cookielib-compatible policy explicitly.
+        super().__init__(policy if policy is not None else SessionCookiePolicy())
+
+    def _cookies_for_request(self, request: Any) -> list[Cookie]:
+        """Return the cookies for a request in a deterministic order.
+
+        Expired cookies are purged first; the survivors are ordered by
+        longest (most specific) path first, then domain, path and name,
+        so that same-name cookies from different scopes always serialize
+        into the Cookie header in a stable, predictable order.
+        """
+        self.clear_expired_cookies()
+        cookies = super()._cookies_for_request(request)
+        cookies.sort(key=_cookie_sort_key)
+        return cookies
 
     def get(  # type: ignore[override]
         self,
@@ -391,10 +719,15 @@ class RequestsCookieJar(CookieJar, MutableMapping[str, str | None]):  # type: ig
     def update(  # type: ignore[override]
         self, other: CookieJar | SupportsKeysAndGetItem[str, str]
     ) -> None:
-        """Updates this jar with cookies from another CookieJar or dict-like"""
+        """Updates this jar with cookies from another CookieJar or dict-like.
+
+        Cookies coming from another jar are merged in a deterministic
+        (domain, path, name) order, and expired cookies are skipped.
+        """
         if isinstance(other, cookielib.CookieJar):
-            for cookie in other:
-                self.set_cookie(copy.copy(cookie))
+            for cookie in _iter_jar_cookies_sorted(other):
+                if not cookie.is_expired():
+                    self.set_cookie(copy.copy(cookie))
         else:
             super().update(other)
 
@@ -619,7 +952,12 @@ def merge_cookies(
         if update_method := getattr(cookiejar, "update", None):
             update_method(cookies)
         else:
-            for cookie_in_jar in cookies:
-                cookiejar.set_cookie(cookie_in_jar)
+            for cookie_in_jar in _iter_jar_cookies_sorted(cookies):
+                if not cookie_in_jar.is_expired():
+                    cookiejar.set_cookie(cookie_in_jar)
+
+    # Deterministic expiry cleanup: merging never resurrects or keeps
+    # cookies whose lifetime has already ended.
+    cookiejar.clear_expired_cookies()
 
     return cookiejar

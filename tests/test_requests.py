@@ -2,6 +2,7 @@
 
 import collections
 import contextlib
+import email.message
 import io
 import json
 import os
@@ -29,7 +30,18 @@ from requests.compat import (
     is_urllib3_1,
     urlparse,
 )
-from requests.cookies import cookiejar_from_dict, morsel_to_cookie
+from requests.cookies import (
+    MockRequest,
+    MockResponse,
+    RequestsCookieJar,
+    SessionCookiePolicy,
+    cookiejar_from_dict,
+    create_cookie,
+    get_cookie_header,
+    merge_cookies,
+    morsel_to_cookie,
+    normalize_cookie_host,
+)
 from requests.exceptions import (
     ChunkedEncodingError,
     ConnectionError,
@@ -3092,3 +3104,178 @@ def test_json_decode_errors_are_serializable_deserializable():
     )
     deserialized_error = pickle.loads(pickle.dumps(json_decode_error))
     assert repr(json_decode_error) == repr(deserialized_error)
+
+
+def _prepared(url):
+    return requests.Request("GET", url).prepare()
+
+
+def _cookie_header(jar, url):
+    """The final Cookie header a request to url would carry, or None."""
+    return get_cookie_header(jar, _prepared(url))
+
+
+def _extract_set_cookie(jar, url, *set_cookie_headers):
+    """Feed Set-Cookie response headers through the jar's extract path."""
+    msg = email.message.Message()
+    for header in set_cookie_headers:
+        msg.add_header("Set-Cookie", header)
+    jar.extract_cookies(MockResponse(msg), MockRequest(_prepared(url)))
+
+
+class TestSessionCookiePolicy:
+    """Scoping and attribute policy for session-level cookie jars."""
+
+    def test_cookie_domain_not_shared_with_sibling_subdomain(self):
+        jar = RequestsCookieJar()
+        _extract_set_cookie(
+            jar, "https://example.com/", "sid=secret; Domain=.example.com; Path=/"
+        )
+        # The exact host the cookie was scoped to still receives it.
+        assert _cookie_header(jar, "https://example.com/") == "sid=secret"
+        # Sibling/child tenants do not, unless explicitly authorized.
+        assert _cookie_header(jar, "https://evil.example.com/") is None
+        assert _cookie_header(jar, "https://app.example.com/") is None
+
+    def test_cookie_subdomain_sharing_requires_explicit_authorization(self):
+        policy = SessionCookiePolicy(allowed_shared_domains={"example.com"})
+        jar = RequestsCookieJar(policy)
+        _extract_set_cookie(
+            jar, "https://example.com/", "sid=secret; Domain=.example.com; Path=/"
+        )
+        assert _cookie_header(jar, "https://app.example.com/") == "sid=secret"
+        assert _cookie_header(jar, "https://evil.example.com/") == "sid=secret"
+        # Authorization does not extend to unrelated domains.
+        assert _cookie_header(jar, "https://example.net/") is None
+
+    def test_cookie_host_only_not_sent_to_subdomain(self):
+        jar = RequestsCookieJar()
+        _extract_set_cookie(jar, "https://app.example.com/", "h=1; Path=/")
+        assert _cookie_header(jar, "https://app.example.com/") == "h=1"
+        assert _cookie_header(jar, "https://sub.app.example.com/") is None
+        assert _cookie_header(jar, "https://example.com/") is None
+
+    @pytest.mark.parametrize("suffix", ["co.uk", ".co.uk", "com", ".com"])
+    def test_cookie_public_suffix_domain_rejected(self, suffix):
+        jar = RequestsCookieJar()
+        _extract_set_cookie(
+            jar, "https://www.example.co.uk/", f"a=b; Domain={suffix}; Path=/"
+        )
+        assert len(jar) == 0
+
+    def test_cookie_registrable_domain_still_accepted(self):
+        jar = RequestsCookieJar()
+        _extract_set_cookie(
+            jar,
+            "https://www.example.co.uk/",
+            "a=b; Domain=.example.co.uk; Path=/",
+        )
+        assert len(jar) == 1
+
+    def test_cookie_secure_only_sent_over_https(self):
+        jar = RequestsCookieJar()
+        jar.set_cookie(create_cookie("sid", "s", domain="example.com", secure=True))
+        assert _cookie_header(jar, "https://example.com/") == "sid=s"
+        assert _cookie_header(jar, "http://example.com/") is None
+
+    def test_cookie_samesite_none_without_secure_rejected(self):
+        jar = RequestsCookieJar()
+        _extract_set_cookie(jar, "https://example.com/", "a=b; Path=/; SameSite=None")
+        assert len(jar) == 0
+
+    def test_cookie_samesite_none_with_secure_accepted(self):
+        jar = RequestsCookieJar()
+        _extract_set_cookie(
+            jar, "https://example.com/", "a=b; Path=/; SameSite=None; Secure"
+        )
+        assert len(jar) == 1
+        assert _cookie_header(jar, "https://example.com/") == "a=b"
+
+    def test_cookie_samesite_none_rejection_is_configurable(self):
+        jar = RequestsCookieJar(
+            SessionCookiePolicy(reject_insecure_samesite_none=False)
+        )
+        _extract_set_cookie(jar, "https://example.com/", "a=b; Path=/; SameSite=None")
+        assert len(jar) == 1
+
+    def test_cookie_httponly_kept_as_metadata_only(self):
+        jar = RequestsCookieJar()
+        _extract_set_cookie(jar, "https://example.com/", "a=b; Path=/; HttpOnly")
+        cookie = list(jar)[0]
+        # HttpOnly is retained as metadata...
+        assert cookie.has_nonstandard_attr("HttpOnly")
+        # ...but requests is not a browser: sending behavior is unchanged.
+        assert _cookie_header(jar, "https://example.com/") == "a=b"
+
+    def test_cookie_expired_purged_before_sending(self):
+        jar = RequestsCookieJar()
+        jar.set_cookie(create_cookie("old", "x", expires=1))
+        assert _cookie_header(jar, "http://example.com/") is None
+        assert len(jar) == 0
+
+    def test_cookie_same_name_deterministic_order(self):
+        jar = RequestsCookieJar()
+        jar.set_cookie(create_cookie("sid", "root", path="/"))
+        jar.set_cookie(create_cookie("sid", "deep", path="/api"))
+        # Most specific (longest) path first, stable across calls.
+        assert _cookie_header(jar, "http://example.com/api/") == "sid=deep; sid=root"
+        assert _cookie_header(jar, "http://example.com/api/") == "sid=deep; sid=root"
+        assert _cookie_header(jar, "http://example.com/") == "sid=root"
+
+    def test_cookie_port_must_match(self):
+        jar = RequestsCookieJar()
+        jar.set_cookie(create_cookie("p", "1", domain="example.com", port="8080"))
+        assert _cookie_header(jar, "http://example.com:8080/") == "p=1"
+        assert _cookie_header(jar, "http://example.com:9090/") is None
+        # The scheme-default port does not match an explicit cookie port.
+        assert _cookie_header(jar, "http://example.com/") is None
+
+    def test_cookie_idna_host_normalized(self):
+        jar = RequestsCookieJar()
+        jar.set_cookie(create_cookie("i", "1", domain="bücher.example"))
+        assert _cookie_header(jar, "https://xn--bcher-kva.example/") == "i=1"
+
+    def test_cookie_trailing_dot_host_normalized(self):
+        jar = RequestsCookieJar()
+        jar.set_cookie(create_cookie("t", "2", domain="example.com"))
+        assert _cookie_header(jar, "http://example.com./") == "t=2"
+
+    def test_cookie_normalize_host_helper(self):
+        assert normalize_cookie_host("EXAMPLE.com.") == "example.com"
+        assert normalize_cookie_host("bücher.example") == "xn--bcher-kva.example"
+        assert normalize_cookie_host(None) == ""
+
+    def test_cookie_merge_skips_expired_and_is_deterministic(self):
+        target = RequestsCookieJar()
+        target.set_cookie(create_cookie("expired", "x", expires=1))
+        source = RequestsCookieJar()
+        source.set_cookie(create_cookie("keep", "1"))
+        source.set_cookie(create_cookie("gone", "2", expires=1))
+        merged = merge_cookies(target, source)
+        names = [cookie.name for cookie in merged]
+        assert "keep" in names
+        assert "gone" not in names
+        assert "expired" not in names
+
+    def test_cookie_dict_supercookies_still_sent_everywhere(self):
+        # Backwards compatibility for the personal RequestsCookieJar API:
+        # cookies set through the dict interface have no domain scope.
+        jar = cookiejar_from_dict({"foo": "bar"})
+        assert _cookie_header(jar, "http://example.com/") == "foo=bar"
+        assert _cookie_header(jar, "http://sub.example.net/") == "foo=bar"
+
+    def test_cookie_session_prepare_request_applies_scope(self):
+        # End to end through the Session merge/prepare path: a session
+        # cookie scoped to one tenant host is not attached to another.
+        session = requests.Session()
+        session.cookies.set("sid", "secret", domain="example.com", path="/")
+
+        allowed = session.prepare_request(
+            requests.Request("GET", "https://example.com/")
+        )
+        assert allowed.headers["Cookie"] == "sid=secret"
+
+        denied = session.prepare_request(
+            requests.Request("GET", "https://evil.example.com/")
+        )
+        assert "Cookie" not in denied.headers
