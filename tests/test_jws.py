@@ -51,6 +51,166 @@ class TestJWS:
         with pytest.raises(JWSError):
             jws.verify(token, "secret", ["HS256"])
 
+
+def _b64u(raw):
+    import base64
+
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ASCII")
+
+
+@pytest.mark.skipif(
+    RSAKey is None or CryptographyRSAKey is None, reason="cryptography RSA backend unavailable"
+)
+class TestAlgorithmAwareKeySelection:
+    @pytest.fixture
+    def rsa_jwk(self):
+        from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+        private = load_pem_private_key(rsa_private_key.encode("utf-8"), password=None)
+        numbers = private.public_key().public_numbers()
+        return {
+            "kty": "RSA",
+            "kid": "rsa-key",
+            "use": "sig",
+            "alg": "RS256",
+            "n": _b64u(numbers.n.to_bytes((numbers.n.bit_length() + 7) // 8, "big")),
+            "e": _b64u(numbers.e.to_bytes((numbers.e.bit_length() + 7) // 8, "big")),
+        }
+
+    @pytest.fixture
+    def oct_jwk(self):
+        secret = b"0123456789abcdef0123456789abcdef"
+        return {
+            "kty": "oct",
+            "kid": "oct-key",
+            "use": "sig",
+            "alg": "HS256",
+            "k": _b64u(secret),
+        }
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        jwk.clear_jwk_cache()
+        yield
+        jwk.clear_jwk_cache()
+
+    def test_rs256_with_kid_pointing_at_oct_key_is_rejected(self, oct_jwk):
+        token = jws.sign(b"payload", rsa_private_key, algorithm="RS256", headers={"kid": oct_jwk["kid"]})
+        with pytest.raises(JWSError):
+            jws.verify(token, {"keys": [oct_jwk]}, ["RS256"])
+
+    def test_hs256_with_rsa_jwk_is_rejected(self, rsa_jwk):
+        secret = b"0123456789abcdef0123456789abcdef"
+        token = jws.sign(b"payload", secret, algorithm="HS256", headers={"kid": rsa_jwk["kid"]})
+        with pytest.raises(JWSError):
+            jws.verify(token, {"keys": [rsa_jwk]}, ["HS256"])
+
+    def test_pem_public_key_cannot_be_hmac_secret(self):
+        secret = b"0123456789abcdef0123456789abcdef"
+        token = jws.sign(b"payload", secret, algorithm="HS256")
+        with pytest.raises(JWSError):
+            jws.verify(token, rsa_public_key, ["HS256"])
+
+    def test_duplicate_kid_selects_matching_family(self, rsa_jwk, oct_jwk):
+        shared_kid = "shared"
+        rsa_entry = dict(rsa_jwk, kid=shared_kid)
+        oct_entry = dict(oct_jwk, kid=shared_kid)
+        key_set = {"keys": [oct_entry, rsa_entry]}
+
+        rsa_token = jws.sign(b"payload", rsa_private_key, algorithm="RS256", headers={"kid": shared_kid})
+        assert jws.verify(rsa_token, key_set, ["RS256"]) == b"payload"
+
+        secret = b"0123456789abcdef0123456789abcdef"
+        hs_token = jws.sign(b"payload", secret, algorithm="HS256", headers={"kid": shared_kid})
+        assert jws.verify(hs_token, key_set, ["HS256"]) == b"payload"
+
+    def test_first_key_of_other_family_is_never_constructed(self, rsa_jwk, oct_jwk, monkeypatch):
+        constructed = []
+        original_construct = jwk.construct
+
+        def tracking_construct(key_data, algorithm=None):
+            if isinstance(key_data, dict):
+                constructed.append((key_data.get("kty"), algorithm))
+            return original_construct(key_data, algorithm)
+
+        monkeypatch.setattr(jwk, "construct", tracking_construct)
+        token = jws.sign(b"payload", rsa_private_key, algorithm="RS256", headers={"kid": "rsa-key"})
+        jws.verify(token, {"keys": [oct_jwk, rsa_jwk]}, ["RS256"])
+        assert constructed == [("RSA", "RS256")]
+
+    def test_unknown_kid_is_rejected(self, rsa_jwk):
+        token = jws.sign(b"payload", rsa_private_key, algorithm="RS256", headers={"kid": "unknown"})
+        with pytest.raises(JWSError):
+            jws.verify(token, {"keys": [rsa_jwk]}, ["RS256"])
+
+    def test_missing_alg_is_rejected(self, rsa_jwk):
+        token = jws.sign(b"payload", rsa_private_key, algorithm="RS256")
+        header, _, signing_input, signature = jws._load(token)
+        del header["alg"]
+        with pytest.raises(JWSError):
+            jws._verify_signature(signing_input, header, signature, {"keys": [rsa_jwk]}, ["RS256"])
+
+    def test_wrong_key_ops_rejected(self, rsa_jwk):
+        sign_only = dict(rsa_jwk, key_ops=["sign"])
+        token = jws.sign(b"payload", rsa_private_key, algorithm="RS256", headers={"kid": rsa_jwk["kid"]})
+        with pytest.raises(JWSError):
+            jws.verify(token, {"keys": [sign_only]}, ["RS256"])
+
+    def test_sign_requires_sign_key_op(self, rsa_jwk):
+        verify_only = dict(rsa_jwk, key_ops=["verify"])
+        with pytest.raises(JWSError):
+            jws.sign(b"payload", verify_only, algorithm="RS256")
+
+    def test_sign_with_oct_jwk_round_trip(self, oct_jwk):
+        secret = b"0123456789abcdef0123456789abcdef"
+        token = jws.sign(b"payload", oct_jwk, algorithm="HS256")
+        assert jws.verify(token, {"keys": [oct_jwk]}, ["HS256"]) == b"payload"
+        assert jws.verify(token, secret, ["HS256"]) == b"payload"
+
+    def test_short_oct_jwk_rejected(self, oct_jwk):
+        short_entry = dict(oct_jwk, k=_b64u(b"short"))
+        token = jws.sign(b"payload", b"x" * 32, algorithm="HS256", headers={"kid": oct_jwk["kid"]})
+        with pytest.raises(JWSError):
+            jws.verify(token, {"keys": [short_entry]}, ["HS256"])
+
+    def test_rsa_jwk_verifies_through_backend(self, rsa_jwk):
+        token = jws.sign(b"payload", rsa_private_key, algorithm="RS256", headers={"kid": rsa_jwk["kid"]})
+        assert jws.verify(token, {"keys": [rsa_jwk]}, ["RS256"]) == b"payload"
+
+    def test_jwk_set_as_json_string(self, rsa_jwk):
+        token = jws.sign(b"payload", rsa_private_key, algorithm="RS256", headers={"kid": rsa_jwk["kid"]})
+        assert jws.verify(token, json.dumps({"keys": [rsa_jwk]}), ["RS256"]) == b"payload"
+
+    def test_individual_jwk(self, rsa_jwk):
+        token = jws.sign(b"payload", rsa_private_key, algorithm="RS256", headers={"kid": rsa_jwk["kid"]})
+        assert jws.verify(token, rsa_jwk, ["RS256"]) == b"payload"
+
+    def test_firebase_style_kid_mapping_still_supported(self):
+        token = jws.sign(b"payload", rsa_private_key, algorithm="RS256", headers={"kid": "cert-1"})
+        certs = {"cert-1": rsa_public_key}
+        assert jws.verify(token, certs, ["RS256"]) == b"payload"
+
+    def test_cache_key_includes_family_and_kid(self, rsa_jwk, oct_jwk):
+        rsa_token = jws.sign(b"payload", rsa_private_key, algorithm="RS256", headers={"kid": rsa_jwk["kid"]})
+        secret = b"0123456789abcdef0123456789abcdef"
+        hs_token = jws.sign(b"payload", secret, algorithm="HS256", headers={"kid": oct_jwk["kid"]})
+
+        jws.verify(rsa_token, {"keys": [rsa_jwk]}, ["RS256"])
+        jws.verify(hs_token, {"keys": [oct_jwk]}, ["HS256"])
+
+        assert ("RSA", rsa_jwk["kid"], "RS256") in jwk._jwk_cache
+        assert ("oct", oct_jwk["kid"], "HS256") in jwk._jwk_cache
+
+    def test_errors_do_not_leak_key_material(self, rsa_jwk):
+        token = jws.sign(b"payload", rsa_private_key, algorithm="RS256", headers={"kid": "unknown"})
+        try:
+            jws.verify(token, {"keys": [rsa_jwk]}, ["RS256"])
+        except JWSError as exc:
+            assert rsa_jwk["n"] not in str(exc)
+        else:
+            pytest.fail("unknown kid was accepted")
+
+
     def test_header_invalid_padding(self):
         token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9A.eyJhIjoiYiJ9.jiMyrsmD8AoHWeQgmxZ5yq8z0lXS67_QGs52AzC8Ru8"
         with pytest.raises(JWSError):

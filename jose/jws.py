@@ -9,7 +9,7 @@ except ImportError:
 from jose import jwk
 from jose.backends.base import Key
 from jose.constants import ALGORITHMS
-from jose.exceptions import JWSError, JWSSignatureError
+from jose.exceptions import JWKError, JWSError
 from jose.utils import base64url_decode, base64url_encode
 
 
@@ -161,8 +161,13 @@ def _sign_header_and_claims(encoded_header, encoded_claims, algorithm, key):
     signing_input = b".".join([encoded_header, encoded_claims])
     try:
         if not isinstance(key, Key):
-            key = jwk.construct(key, algorithm)
+            if isinstance(key, Mapping):
+                key = jwk.construct_from_jwk(key, algorithm, operation="sign")
+            else:
+                key = jwk.construct(key, algorithm)
         signature = key.sign(signing_input)
+    except JWKError as e:
+        raise JWSError("Key cannot be used for %s: %s" % (algorithm, e))
     except Exception as e:
         raise JWSError(e)
 
@@ -209,13 +214,25 @@ def _load(jwt):
 def _sig_matches_keys(keys, signing_input, signature, alg):
     for key in keys:
         if not isinstance(key, Key):
-            key = jwk.construct(key, alg)
+            key = _construct_verification_key(key, alg)
         try:
             if key.verify(signing_input, signature):
                 return True
         except Exception:
             pass
     return False
+
+
+def _construct_verification_key(key, alg):
+    if isinstance(key, Mapping):
+        try:
+            return jwk.construct_from_jwk(key, alg, operation="verify")
+        except JWKError as e:
+            raise JWSError("Key cannot be used for %s: %s" % (alg, e))
+    try:
+        return jwk.construct(key, alg)
+    except JWKError as e:
+        raise JWSError("Key cannot be used for %s: %s" % (alg, e))
 
 
 def _get_keys(key):
@@ -250,6 +267,88 @@ def _get_keys(key):
         return (key,)
 
 
+def _is_jwk_mapping(candidate):
+    return isinstance(candidate, Mapping) and "kty" in candidate
+
+
+def _jwk_matches_kid(candidate, kid):
+    return kid is not None and isinstance(candidate, Mapping) and candidate.get("kid") == kid
+
+
+def _collect_candidates(key, kid):
+    """Flatten accepted key inputs, applying kid filtering where possible.
+
+    JWK sets and JWK objects are filtered on the header ``kid`` so keys of
+    other algorithm families are never tried. Non-JWK inputs (scalars, PEM
+    text, plain lists) keep their historical, order-based behaviour.
+    """
+    if isinstance(key, Key):
+        return (key,)
+
+    parsed = key
+    if isinstance(key, str):
+        try:
+            parsed = json.loads(key, parse_int=str, parse_float=str)
+        except ValueError:
+            parsed = key
+
+    if isinstance(parsed, Mapping):
+        if "keys" in parsed:
+            jwk_set = parsed["keys"]
+            if kid is None:
+                return tuple(jwk_set)
+            matches = [candidate for candidate in jwk_set if _jwk_matches_kid(candidate, kid)]
+            if not matches:
+                raise JWSError("No key found with the requested kid")
+            return tuple(matches)
+
+        if "kty" in parsed:
+            if kid is not None and parsed.get("kid") is not None and parsed.get("kid") != kid:
+                raise JWSError("No key found with the requested kid")
+            return (parsed,)
+
+        # Some other mapping. Firebase uses a dict of kid, cert pairs.
+        if kid is None:
+            return tuple(parsed.values()) if parsed else (parsed,)
+        if kid not in parsed:
+            raise JWSError("No key found with the requested kid")
+        return (parsed[kid],)
+
+    if isinstance(parsed, Iterable) and not isinstance(parsed, (str, bytes)):
+        return tuple(parsed)
+
+    return (parsed,)
+
+
+def _select_keys(key, alg, kid):
+    """Return keys eligible to verify a token signed with ``alg``.
+
+    Selection is algorithm-aware: JWK ``kty``/``alg``/``use``/``key_ops`` and
+    the header ``kid`` are checked before any key is constructed, so the first
+    key of an unrelated family is never tried.
+    """
+    candidates = _collect_candidates(key, kid)
+
+    selected = []
+    family_mismatch = False
+    for candidate in candidates:
+        if isinstance(candidate, Key):
+            selected.append(candidate)
+            continue
+        if _is_jwk_mapping(candidate):
+            expected_kty = jwk.get_algorithm_family(alg)
+            if candidate.get("kty") != expected_kty:
+                family_mismatch = True
+                continue
+            selected.append(_construct_verification_key(candidate, alg))
+        else:
+            selected.append(candidate)
+
+    if family_mismatch and not selected:
+        raise JWSError("Key cannot be used for %s: JWK key type does not match algorithm" % alg)
+    return tuple(selected)
+
+
 def _verify_signature(signing_input, header, signature, key="", algorithms=None):
     alg = header.get("alg")
     if not alg:
@@ -258,11 +357,7 @@ def _verify_signature(signing_input, header, signature, key="", algorithms=None)
     if algorithms is not None and alg not in algorithms:
         raise JWSError("The specified alg value is not allowed")
 
-    keys = _get_keys(key)
-    try:
-        if not _sig_matches_keys(keys, signing_input, signature, alg):
-            raise JWSSignatureError()
-    except JWSSignatureError:
+    kid = header.get("kid")
+    keys = _select_keys(key, alg, kid)
+    if not _sig_matches_keys(keys, signing_input, signature, alg):
         raise JWSError("Signature verification failed.")
-    except JWSError:
-        raise JWSError("Invalid or unsupported algorithm: %s" % alg)

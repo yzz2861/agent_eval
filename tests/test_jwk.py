@@ -137,3 +137,142 @@ class TestJWK:
 
         with pytest.raises(TypeError):
             assert jwk.register_key("ALG", object)
+
+
+def _b64u(raw):
+    import base64
+
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ASCII")
+
+
+@pytest.mark.skipif(RSAKey is None, reason="RSA is not available")
+class TestAlgorithmAwareJWK:
+    def test_family_mapping(self):
+        assert jwk.get_algorithm_family("HS256") == "oct"
+        assert jwk.get_algorithm_family("RS256") == "RSA"
+        assert jwk.get_algorithm_family("ES256") == "EC"
+        assert jwk.get_algorithm_family("NONEXISTENT") is None
+
+    def test_kty_must_match_algorithm(self):
+        with pytest.raises(JWKError):
+            jwk.validate_jwk(rsa_key, "HS256")
+        with pytest.raises(JWKError):
+            jwk.validate_jwk(hmac_key, "RS256")
+        with pytest.raises(JWKError):
+            jwk.validate_jwk(ec_key, "RS256")
+
+    def test_unknown_kty_rejected(self):
+        unknown = dict(hmac_key, kty="OKP")
+        with pytest.raises(JWKError):
+            jwk.validate_jwk(unknown, "HS256")
+
+    def test_jwk_alg_must_match(self):
+        mismatched = dict(hmac_key, alg="HS512")
+        with pytest.raises(JWKError):
+            jwk.validate_jwk(mismatched, "HS256")
+
+        # An absent alg member is allowed; the header alg drives selection.
+        jwk.validate_jwk(dict(hmac_key, alg=None), "HS256")
+
+    def test_use_enc_rejected_for_signing(self):
+        with pytest.raises(JWKError):
+            jwk.validate_jwk(dict(hmac_key, use="enc"), "HS256")
+
+    def test_key_ops_must_permit_operation(self):
+        sign_only = dict(hmac_key, key_ops=["sign"])
+        with pytest.raises(JWKError):
+            jwk.validate_jwk(sign_only, "HS256", operation="verify")
+
+        verify_only = dict(hmac_key, key_ops=["verify"])
+        with pytest.raises(JWKError):
+            jwk.validate_jwk(verify_only, "HS256", operation="sign")
+
+        jwk.validate_jwk(dict(hmac_key, key_ops=["sign", "verify"]), "HS256", operation="verify")
+
+    def test_invalid_key_ops_rejected(self):
+        with pytest.raises(JWKError):
+            jwk.validate_jwk(dict(hmac_key, key_ops=[]), "HS256")
+
+    def test_short_oct_key_rejected(self):
+        short_key = dict(hmac_key, k=_b64u(b"short"))
+        with pytest.raises(JWKError):
+            jwk.validate_jwk(short_key, "HS256")
+
+    def test_oct_min_size_per_algorithm(self):
+        key_256 = dict(hmac_key, alg=None, k=_b64u(b"a" * 32))
+        jwk.validate_jwk(key_256, "HS256")
+        with pytest.raises(JWKError):
+            jwk.validate_jwk(key_256, "HS384")
+
+        key_384 = dict(hmac_key, alg=None, k=_b64u(b"a" * 48))
+        jwk.validate_jwk(key_384, "HS384")
+        with pytest.raises(JWKError):
+            jwk.validate_jwk(key_384, "HS512")
+
+        key_512 = dict(hmac_key, alg=None, k=_b64u(b"a" * 64))
+        jwk.validate_jwk(key_512, "HS512")
+
+    def test_invalid_oct_member_rejected(self):
+        with pytest.raises(JWKError):
+            jwk.validate_jwk(dict(hmac_key, k=1234), "HS256")
+        with pytest.raises(JWKError):
+            jwk.validate_jwk(dict(hmac_key, k="***"), "HS256")
+
+    def test_short_rsa_modulus_rejected(self):
+        from cryptography.hazmat.primitives.asymmetric import rsa as rsa_module
+
+        small = rsa_module.generate_private_key(public_exponent=65537, key_size=1024).public_key().public_numbers()
+        small_jwk = {
+            "kty": "RSA",
+            "kid": "small",
+            "n": _b64u(small.n.to_bytes((small.n.bit_length() + 7) // 8, "big")),
+            "e": _b64u(small.e.to_bytes((small.e.bit_length() + 7) // 8, "big")),
+        }
+        with pytest.raises(JWKError):
+            jwk.validate_jwk(small_jwk, "RS256")
+
+    def test_ec_curve_must_match_algorithm(self):
+        with pytest.raises(JWKError):
+            jwk.validate_jwk(dict(ec_key, crv="P-256"), "ES512")
+        with pytest.raises(JWKError):
+            jwk.validate_jwk(dict(ec_key, crv="P-384"), "ES256")
+
+    def test_ec_missing_coordinates_rejected(self):
+        with pytest.raises(JWKError):
+            jwk.validate_jwk({"kty": "EC", "crv": "P-256", "x": "AAAA"}, "ES256")
+
+    def test_construct_from_jwk_caches_by_family_and_kid(self):
+        jwk.clear_jwk_cache()
+        first = jwk.construct_from_jwk(hmac_key, "HS256")
+        second = jwk.construct_from_jwk(hmac_key, "HS256")
+        assert first is second
+
+        cache_keys = list(jwk._jwk_cache)
+        assert cache_keys == [("oct", hmac_key["kid"], "HS256")]
+
+        # Same kid, different family uses a distinct cache entry.
+        rsa_with_same_kid = dict(rsa_key, kid=hmac_key["kid"], alg="RS256")
+        rsa_constructed = jwk.construct_from_jwk(rsa_with_same_kid, "RS256")
+        assert ("RSA", hmac_key["kid"], "RS256") in jwk._jwk_cache
+        assert rsa_constructed is not first
+        jwk.clear_jwk_cache()
+
+    def test_cache_key_never_holds_key_material(self):
+        jwk.clear_jwk_cache()
+        jwk.construct_from_jwk(hmac_key, "HS256")
+        cache_key = next(iter(jwk._jwk_cache))
+        assert hmac_key["k"] not in cache_key
+        jwk.clear_jwk_cache()
+
+    def test_jwk_without_kid_is_not_cached(self):
+        jwk.clear_jwk_cache()
+        kidless = dict(hmac_key, kid=None)
+        first = jwk.construct_from_jwk(kidless, "HS256")
+        second = jwk.construct_from_jwk(kidless, "HS256")
+        assert first is not second
+        assert jwk._jwk_cache == {}
+        jwk.clear_jwk_cache()
+
+    def test_non_dict_jwk_rejected(self):
+        with pytest.raises(JWKError):
+            jwk.validate_jwk("not-a-jwk", "HS256")
