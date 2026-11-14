@@ -55,6 +55,10 @@ class Frame:
     stream_association: str | None = None
 
     def __init__(self, stream_id: int, flags: Iterable[str] = ()) -> None:
+        if not isinstance(stream_id, int) or not 0 <= stream_id <= 0x7FFFFFFF:
+            msg = f"Invalid stream ID: {stream_id!r}. Must be an integer between 0 and 2^31-1."
+            raise InvalidDataError(msg)
+
         #: The stream identifier for the stream this frame was received on.
         #: Set to 0 for frames sent on the connection (stream-id 0).
         self.stream_id = stream_id
@@ -101,6 +105,59 @@ class Frame:
         frame.parse_body(data[9:9 + length])
         print(frame)  # noqa: T201
         return frame, length
+
+    @staticmethod
+    def parse_frames(data: memoryview, strict: bool = False) -> list[Frame]:
+        """
+        Takes a bytestring containing zero or more concatenated frames and
+        parses all of them, returning them as a list.
+
+        Frames are validated as they are parsed: in particular, the priority
+        dependencies declared by PRIORITY frames and HEADERS frames carrying
+        priority information are tracked, and circular dependencies are
+        rejected. If any frame fails to parse, an exception is raised whose
+        message identifies the index of the offending frame, and no
+        partially-populated frame objects are returned.
+
+        :param data: A memoryview object containing the raw data of zero or
+                     more complete frames (headers and bodies).
+
+        :param strict: Whether to raise an exception when encountering a frame
+            not defined by spec and implemented by hyperframe.
+
+        .. versionadded:: 6.2.0
+        """
+        frames: list[Frame] = []
+        dependency_tree: dict[int, int] = {}
+        offset = 0
+        index = 0
+
+        while offset < len(data):
+            try:
+                if len(data) - offset < 9:
+                    msg = f"Truncated frame header: {len(data) - offset} bytes remaining."
+                    raise InvalidFrameError(msg)
+
+                frame, length = Frame.parse_frame_header(data[offset:offset + 9], strict=strict)
+
+                if len(data) - offset - 9 < length:
+                    msg = (
+                        f"Truncated frame body: expected {length} bytes, "
+                        f"got {len(data) - offset - 9}."
+                    )
+                    raise InvalidFrameError(msg)
+
+                frame.parse_body(data[offset + 9:offset + 9 + length])
+                _update_dependency_tree(dependency_tree, frame)
+            except (InvalidFrameError, InvalidDataError, InvalidPaddingError) as err:
+                msg = f"Invalid frame at index {index}: {err}"
+                raise type(err)(msg) from err
+
+            frames.append(frame)
+            offset += 9 + length
+            index += 1
+
+        return frames
 
     @staticmethod
     def parse_frame_header(header: memoryview, strict: bool = False) -> tuple[Frame, int]:
@@ -221,6 +278,31 @@ class Padding:
             return 1
         return 0
 
+    def _validate_padding(self, data: memoryview, max_pad_length: int) -> tuple[int, int]:
+        """
+        Validate the padding of a frame body without mutating the frame.
+
+        Returns a tuple of the number of bytes consumed by the padding length
+        field and the declared padding length. Raises before any state is
+        modified if the PADDED flag is set but no padding length byte is
+        present, or if the declared padding does not fit within the frame
+        body alongside the other mandatory fields.
+        """
+        if "PADDED" not in self.flags:  # type: ignore
+            return 0, 0
+
+        try:
+            pad_length = struct.unpack("!B", data[:1])[0]
+        except struct.error as err:
+            msg = "Invalid Padding data"
+            raise InvalidFrameError(msg) from err
+
+        if pad_length and pad_length > max_pad_length:
+            msg = "Padding is too long."
+            raise InvalidPaddingError(msg)
+
+        return 1, pad_length
+
     #: .. deprecated:: 5.2.1
     #:    Use self.pad_length instead.
     @property
@@ -248,6 +330,16 @@ class Priority:
                  **kwargs: Any) -> None:
         super().__init__(stream_id, **kwargs)  # type: ignore
 
+        if depends_on == stream_id:
+            msg = f"Stream {stream_id} cannot depend on itself."
+            raise InvalidDataError(msg)
+        if not 0 <= depends_on <= 0x7FFFFFFF:
+            msg = f"Invalid depends_on: {depends_on}. Must be between 0 and 2^31-1."
+            raise InvalidDataError(msg)
+        if not 0 <= stream_weight <= 0xFF:
+            msg = f"Invalid stream weight: {stream_weight}. Must be between 0 and 255."
+            raise InvalidDataError(msg)
+
         #: The stream ID of the stream on which this stream depends.
         self.depends_on = depends_on
 
@@ -258,6 +350,12 @@ class Priority:
         self.exclusive = exclusive
 
     def serialize_priority_data(self) -> bytes:
+        if not 0 <= self.depends_on <= 0x7FFFFFFF:
+            msg = f"Invalid depends_on: {self.depends_on}. Must be between 0 and 2^31-1."
+            raise InvalidDataError(msg)
+        if not 0 <= self.stream_weight <= 0xFF:
+            msg = f"Invalid stream weight: {self.stream_weight}. Must be between 0 and 255."
+            raise InvalidDataError(msg)
         return _STRUCT_LB.pack(
             self.depends_on + (0x80000000 if self.exclusive else 0),
             self.stream_weight,
@@ -265,13 +363,23 @@ class Priority:
 
     def parse_priority_data(self, data: memoryview) -> int:
         try:
-            self.depends_on, self.stream_weight = _STRUCT_LB.unpack(data[:5])
+            depends_on, stream_weight = _STRUCT_LB.unpack(data[:5])
         except struct.error as err:
             msg = "Invalid Priority data"
             raise InvalidFrameError(msg) from err
 
-        self.exclusive = bool(self.depends_on >> 31)
-        self.depends_on &= 0x7FFFFFFF  # mask off the exclusive bit, RFC 9113, Section 6.3
+        exclusive = bool(depends_on >> 31)
+        depends_on &= 0x7FFFFFFF  # mask off the exclusive bit, RFC 9113, Section 6.3
+
+        # A stream cannot depend on itself, RFC 9113, Section 5.3.1. Reject
+        # before mutating any state.
+        if depends_on == self.stream_id:
+            msg = f"Stream {self.stream_id} cannot depend on itself."
+            raise InvalidDataError(msg)
+
+        self.depends_on = depends_on
+        self.stream_weight = stream_weight
+        self.exclusive = exclusive
         return 5
 
 
@@ -307,15 +415,15 @@ class DataFrame(Padding, Frame):
         return b"".join([padding_data, self.data, padding])
 
     def parse_body(self, data: memoryview) -> None:
-        padding_data_length = self.parse_padding_data(data)
+        # Validate the padding before slicing or mutating any state: the
+        # padding must leave room for the padding length byte itself.
+        padding_data_length, pad_length = self._validate_padding(data, len(data) - 1)
+
+        self.pad_length = pad_length
         self.data = (
-            data[padding_data_length:len(data)-self.pad_length].tobytes()
+            data[padding_data_length:len(data)-pad_length].tobytes()
         )
         self.body_len = len(data)
-
-        if self.pad_length and self.pad_length >= self.body_len:
-            msg = "Padding is too long."
-            raise InvalidPaddingError(msg)
 
     @property
     def flow_controlled_length(self) -> int:
@@ -519,28 +627,29 @@ class PushPromiseFrame(Padding, Frame):
         return b"".join([padding_data, data, self.data, padding])
 
     def parse_body(self, data: memoryview) -> None:
-        padding_data_length = self.parse_padding_data(data)
+        # Validate the padding before slicing or mutating any state: the
+        # padding must leave room for the padding length byte and the
+        # promised stream ID.
+        padding_data_length, pad_length = self._validate_padding(data, len(data) - 5)
 
         try:
-            self.promised_stream_id = _STRUCT_L.unpack(
+            promised_stream_id = _STRUCT_L.unpack(
                 data[padding_data_length:padding_data_length + 4],
             )[0]
         except struct.error as err:
             msg = "Invalid PUSH_PROMISE body"
             raise InvalidFrameError(msg) from err
 
-        self.data = (
-            data[padding_data_length + 4:len(data)-self.pad_length].tobytes()
-        )
-        self.body_len = len(data)
-
-        if self.promised_stream_id == 0 or self.promised_stream_id % 2 != 0:
-            msg = f"Invalid PUSH_PROMISE promised stream id: {self.promised_stream_id}"
+        if promised_stream_id == 0 or promised_stream_id % 2 != 0:
+            msg = f"Invalid PUSH_PROMISE promised stream id: {promised_stream_id}"
             raise InvalidDataError(msg)
 
-        if self.pad_length and self.pad_length >= self.body_len:
-            msg = "Padding is too long."
-            raise InvalidPaddingError(msg)
+        self.pad_length = pad_length
+        self.promised_stream_id = promised_stream_id
+        self.data = (
+            data[padding_data_length + 4:len(data)-pad_length].tobytes()
+        )
+        self.body_len = len(data)
 
 
 class PingFrame(Frame):
@@ -751,22 +860,25 @@ class HeadersFrame(Padding, Priority, Frame):
         return b"".join([padding_data, priority_data, self.data, padding])
 
     def parse_body(self, data: memoryview) -> None:
-        padding_data_length = self.parse_padding_data(data)
-        data = data[padding_data_length:]
+        # Validate the combination of flags, priority data and padding before
+        # slicing or mutating any state: the padding must leave room for the
+        # padding length byte and, when the PRIORITY flag is set, the
+        # five bytes of priority data.
+        has_priority = "PRIORITY" in self.flags
+        priority_data_length = 5 if has_priority else 0
+        body_len = len(data) - (1 if "PADDED" in self.flags else 0)
+        max_pad_length = body_len - (priority_data_length if has_priority else 1)
 
-        if "PRIORITY" in self.flags:
-            priority_data_length = self.parse_priority_data(data)
-        else:
-            priority_data_length = 0
+        padding_data_length, pad_length = self._validate_padding(data, max_pad_length)
 
-        self.body_len = len(data)
+        if has_priority:
+            self.parse_priority_data(data[padding_data_length:])
+
+        self.pad_length = pad_length
+        self.body_len = body_len
         self.data = (
-            data[priority_data_length:len(data)-self.pad_length].tobytes()
+            data[padding_data_length + priority_data_length:len(data)-pad_length].tobytes()
         )
-
-        if self.pad_length and self.pad_length >= self.body_len:
-            msg = "Padding is too long."
-            raise InvalidPaddingError(msg)
 
 
 class ContinuationFrame(Frame):
@@ -927,6 +1039,37 @@ def _raw_data_repr(data: bytes | None) -> str:
     if len(r) > 20:
         r = r[:20] + "..."
     return "<hex:" + r + ">"
+
+
+def _update_dependency_tree(dependency_tree: dict[int, int], frame: Frame) -> None:
+    """
+    Track the priority dependency declared by a single frame and reject
+    circular dependencies, RFC 9113, Section 5.3.1.
+
+    Self-dependencies are rejected while parsing the frame body; this catches
+    cycles that span multiple frames, such as stream 1 depending on stream 2
+    while stream 2 depends on stream 1.
+    """
+    carries_priority = isinstance(frame, PriorityFrame) or (
+        isinstance(frame, HeadersFrame) and "PRIORITY" in frame.flags
+    )
+    if not carries_priority:
+        return
+
+    stream_id = frame.stream_id
+    depends_on = frame.depends_on
+
+    parent = depends_on
+    while parent:
+        if parent == stream_id:
+            msg = (
+                f"Circular dependency detected: stream {stream_id} "
+                f"depends on itself via stream {depends_on}."
+            )
+            raise InvalidDataError(msg)
+        parent = dependency_tree.get(parent, 0)
+
+    dependency_tree[stream_id] = depends_on
 
 
 _FRAME_CLASSES: list[type[Frame]] = [

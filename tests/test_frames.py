@@ -995,3 +995,187 @@ class TestExtensionFrame:
     def test_repr(self):
         f = ExtensionFrame(0xFF, 1, 42, b'hello')
         assert repr(f).endswith("type=255, flag_byte=42, body=<hex:68656c6c6f>")
+
+
+class TestFrameValidationHardening:
+    def test_invalid_stream_ids_are_rejected(self):
+        with pytest.raises(InvalidDataError):
+            Frame(-1)
+        with pytest.raises(InvalidDataError):
+            Frame(2**31)
+        with pytest.raises(InvalidDataError):
+            PriorityFrame(2**31)
+
+    def test_priority_frame_cannot_depend_on_itself(self):
+        with pytest.raises(InvalidDataError):
+            PriorityFrame(1, depends_on=1)
+        with pytest.raises(InvalidDataError):
+            HeadersFrame(3, depends_on=3)
+
+    def test_priority_frame_self_dependency_fails_to_parse(self):
+        data = b'\x00\x00\x05\x02\x00\x00\x00\x00\x01\x00\x00\x00\x01\x10'
+        with pytest.raises(InvalidDataError):
+            decode_frame(data)
+
+    def test_headers_frame_self_dependency_fails_to_parse(self):
+        data = (
+            b'\x00\x00\x05\x01\x20\x00\x00\x00\x01' +
+            b'\x00\x00\x00\x01\x40'
+        )
+        with pytest.raises(InvalidDataError):
+            decode_frame(data)
+
+    def test_priority_frame_invalid_weight_is_rejected(self):
+        with pytest.raises(InvalidDataError):
+            PriorityFrame(1, stream_weight=256)
+        with pytest.raises(InvalidDataError):
+            PriorityFrame(1, stream_weight=-1)
+
+        f = PriorityFrame(1)
+        f.stream_weight = 300
+        with pytest.raises(InvalidDataError):
+            f.serialize()
+
+    def test_priority_frame_invalid_depends_on_is_rejected(self):
+        with pytest.raises(InvalidDataError):
+            PriorityFrame(1, depends_on=2**31)
+
+        f = PriorityFrame(1)
+        f.depends_on = 2**31
+        with pytest.raises(InvalidDataError):
+            f.serialize()
+
+    def test_data_frame_with_maximum_padding_parses(self):
+        # The padding fills the entire body after the padding length byte.
+        data = b'\x00\x00\x03\x00\x08\x00\x00\x00\x01\x02\x00\x00'
+        f = decode_frame(data)
+
+        assert f.data == b''
+        assert f.pad_length == 2
+        assert f.body_len == 3
+
+    def test_data_frame_with_excessive_padding_fails_to_parse(self):
+        # A padding length of 3 in a 3-byte body leaves no room for the
+        # padding length byte itself.
+        data = b'\x00\x00\x03\x00\x08\x00\x00\x00\x01\x03\x00\x00'
+        with pytest.raises(InvalidPaddingError):
+            decode_frame(data)
+
+    def test_headers_frame_with_padding_and_priority_parses_properly(self):
+        data = (
+            b'\x00\x00\x0b\x01\x28\x00\x00\x00\x01' +
+            b'\x03\x00\x00\x00\x04\x40' +
+            b'hi' +
+            b'\x00\x00\x00'
+        )
+        f = decode_frame(data)
+
+        assert isinstance(f, HeadersFrame)
+        assert f.flags == set(['PADDED', 'PRIORITY'])
+        assert f.depends_on == 4
+        assert f.stream_weight == 64
+        assert f.data == b'hi'
+        assert f.pad_length == 3
+        assert f.body_len == 10
+
+    def test_headers_frame_with_padding_overlapping_priority_fails_to_parse(self):
+        # The declared padding would consume the priority data.
+        data = (
+            b'\x00\x00\x0b\x01\x28\x00\x00\x00\x01' +
+            b'\x06\x00\x00\x00\x04\x40' +
+            b'hi' +
+            b'\x00\x00\x00'
+        )
+        with pytest.raises(InvalidPaddingError):
+            decode_frame(data)
+
+    def test_data_frame_padded_flag_with_empty_body_fails_to_parse(self):
+        data = b'\x00\x00\x00\x00\x08\x00\x00\x00\x01'
+        with pytest.raises(InvalidFrameError):
+            decode_frame(data)
+
+    def test_headers_frame_priority_flag_with_short_body_fails_to_parse(self):
+        data = b'\x00\x00\x03\x01\x20\x00\x00\x00\x01\x00\x00\x00'
+        with pytest.raises(InvalidFrameError):
+            decode_frame(data)
+
+    def test_failed_padding_parse_does_not_mutate_frame(self):
+        f = DataFrame(1)
+        f.flags.add("PADDED")
+        with pytest.raises(InvalidPaddingError):
+            f.parse_body(memoryview(b"\x06\x54\x65\x73\x74"))
+
+        assert f.pad_length == 0
+        assert f.data == b""
+        assert f.body_len == 0
+
+    def test_failed_priority_parse_does_not_mutate_frame(self):
+        f = PriorityFrame(1)
+        with pytest.raises(InvalidDataError):
+            f.parse_body(memoryview(b"\x00\x00\x00\x01\x10"))
+
+        assert f.depends_on == 0
+        assert f.stream_weight == 0
+        assert f.exclusive is False
+
+
+class TestParseFrames:
+    def test_parse_multiple_frames(self):
+        data = (
+            b'\x00\x00\x08\x00\x01\x00\x00\x00\x01testdata'
+            b'\x00\x00\x05\x02\x00\x00\x00\x00\x01\x80\x00\x00\x04\x40'
+        )
+        frames = Frame.parse_frames(memoryview(data))
+
+        assert len(frames) == 2
+        assert isinstance(frames[0], DataFrame)
+        assert frames[0].data == b'testdata'
+        assert isinstance(frames[1], PriorityFrame)
+        assert frames[1].depends_on == 4
+        assert frames[1].exclusive is True
+
+        # Valid frames round-trip with their original field order.
+        assert b"".join(f.serialize() for f in frames) == data
+
+    def test_parse_empty_input(self):
+        assert Frame.parse_frames(memoryview(b"")) == []
+
+    def test_parse_frames_reports_frame_index_for_padding(self):
+        data = (
+            b'\x00\x00\x08\x00\x01\x00\x00\x00\x01testdata'
+            b'\x00\x00\x05\x00\x0b\x00\x00\x00\x01\x06\x54\x65\x73\x74'
+        )
+        with pytest.raises(InvalidPaddingError, match="index 1"):
+            Frame.parse_frames(memoryview(data))
+
+    def test_parse_frames_reports_frame_index_for_self_dependency(self):
+        data = (
+            b'\x00\x00\x05\x02\x00\x00\x00\x00\x03\x00\x00\x00\x01\x10'
+            b'\x00\x00\x05\x02\x00\x00\x00\x00\x01\x00\x00\x00\x01\x10'
+        )
+        with pytest.raises(InvalidDataError, match="index 1"):
+            Frame.parse_frames(memoryview(data))
+
+    def test_parse_frames_rejects_circular_dependency(self):
+        data = (
+            b'\x00\x00\x05\x02\x00\x00\x00\x00\x01\x00\x00\x00\x02\x10'
+            b'\x00\x00\x05\x02\x00\x00\x00\x00\x02\x00\x00\x00\x01\x10'
+        )
+        with pytest.raises(InvalidDataError, match="Circular dependency"):
+            Frame.parse_frames(memoryview(data))
+
+    def test_parse_frames_rejects_circular_dependency_via_headers(self):
+        data = (
+            b'\x00\x00\x05\x01\x20\x00\x00\x00\x01\x00\x00\x00\x02\x40'
+            b'\x00\x00\x05\x02\x00\x00\x00\x00\x02\x00\x00\x00\x01\x10'
+        )
+        with pytest.raises(InvalidDataError, match="Circular dependency"):
+            Frame.parse_frames(memoryview(data))
+
+    def test_parse_frames_reports_frame_index_for_truncated_body(self):
+        data = (
+            b'\x00\x00\x08\x00\x01\x00\x00\x00\x01testdata'
+            b'\x00\x00\x08\x00\x01\x00\x00\x00\x01test'
+        )
+        with pytest.raises(InvalidFrameError, match="index 1"):
+            Frame.parse_frames(memoryview(data))
