@@ -2,6 +2,7 @@ from typing import Any, Callable, Generator, List
 
 import pytest
 
+from .._connection import Connection, NEED_DATA, PAUSED
 from .._events import (
     Data,
     EndOfMessage,
@@ -20,7 +21,7 @@ from .._readers import (
 )
 from .._receivebuffer import ReceiveBuffer
 from .._state import CLIENT, IDLE, SEND_RESPONSE, SERVER
-from .._util import LocalProtocolError
+from .._util import LocalProtocolError, RemoteProtocolError
 from .._writers import (
     ChunkedWriter,
     ContentLengthWriter,
@@ -581,3 +582,131 @@ def test_host_comes_first() -> None:
         normalize_and_validate([("foo", "bar"), ("Host", "example.com")]),
         b"Host: example.com\r\nfoo: bar\r\n\r\n",
     )
+
+
+def _drain_next_event_until_need_data(conn: Connection) -> List[Event]:
+    events: List[Event] = []
+    while True:
+        event = conn.next_event()
+        if event in (NEED_DATA, PAUSED):
+            break
+        events.append(event)  # type: ignore[arg-type]
+    return events
+
+
+def test_connection_reassembles_many_tiny_fragments() -> None:
+    # Feeding a whole request + body one byte at a time must still produce
+    # the same events as sending it in one shot, and never spin on partial
+    # frames (each partial frame is reported as NEED_DATA, not an error).
+    wire = (
+        b"POST / HTTP/1.1\r\n"
+        b"Host: example.com\r\n"
+        b"Content-Length: 5\r\n\r\n"
+        b"12345"
+    )
+    expected = [
+        Request(
+            method="POST",
+            target="/",
+            headers=[("Host", "example.com"), ("Content-Length", "5")],
+        ),
+        Data(data=b"12345"),
+        EndOfMessage(),
+    ]
+
+    conn = Connection(SERVER)
+    collected: List[Event] = []
+    for ch in wire:
+        # While the frame is incomplete this returns NEED_DATA rather than
+        # raising; this is "need more data", not a protocol error. Events may
+        # also appear mid-stream as soon as a complete frame is buffered.
+        event = conn.next_event()
+        assert event is NEED_DATA or isinstance(event, (Request, Data, EndOfMessage))
+        if event is not NEED_DATA:
+            collected.append(event)  # type: ignore[arg-type]
+        conn.receive_data(bytes([ch]))
+    collected += _drain_next_event_until_need_data(conn)
+    assert normalize_data_events(collected) == expected
+
+
+def test_connection_half_frame_needs_more_data_but_close_is_an_error() -> None:
+    conn = Connection(SERVER)
+    conn.receive_data(b"GET / HTTP/1.1\r\nHost: example.com\r\n")
+    # No blank line yet: genuinely incomplete, so this is NEED_DATA.
+    assert conn.next_event() is NEED_DATA
+
+    # Reaching EOF while the frame is incomplete is a protocol error rather
+    # than an indefinite wait.
+    conn.receive_data(b"")
+    with pytest.raises(RemoteProtocolError):
+        conn.next_event()
+
+
+def test_connection_invalid_request_line_is_protocol_error() -> None:
+    # A printable-but-malformed line is distinguished from "need more data":
+    # as soon as the line completes it is a RemoteProtocolError.
+    conn = Connection(SERVER)
+    conn.receive_data(b"GET <bad> HTTP/1.1\r\n\r\n")
+    with pytest.raises(RemoteProtocolError):
+        conn.next_event()
+
+    # Non-printable garbage is rejected eagerly even before the line ends.
+    conn = Connection(SERVER)
+    conn.receive_data(b"\x16\x03\x01")
+    with pytest.raises(RemoteProtocolError):
+        conn.next_event()
+
+
+def test_connection_oversize_incomplete_event_is_diagnostic() -> None:
+    limit = 100
+    conn = Connection(SERVER, max_incomplete_event_size=limit)
+    conn.receive_data(b"GET / HTTP/1.1\r\nEndless: ")
+    conn.receive_data(b"a" * (limit + 10))
+    with pytest.raises(RemoteProtocolError) as excinfo:
+        conn.next_event()
+    # The failure is immediate and diagnostic instead of waiting forever,
+    # and maps to the "header fields too large" status hint.
+    error = excinfo.value
+    assert error.error_status_hint == 431
+    assert str(limit) in str(error)
+
+
+def test_connection_pipelined_half_frame_is_retained_until_complete() -> None:
+    # Two full pipelined requests followed by a third half-frame. The third
+    # frame stays buffered while the first two cycles are processed and the
+    # connection is paused/reused.
+    first = b"GET /1 HTTP/1.1\r\nHost: a\r\n\r\n"
+    second = b"GET /2 HTTP/1.1\r\nHost: b\r\n\r\n"
+    third_half = b"GET /3 HTTP/1.1\r\nHost: "
+    conn = Connection(SERVER)
+    conn.receive_data(first + second + third_half)
+
+    assert _drain_next_event_until_need_data(conn) == [
+        Request(method="GET", target="/1", headers=[("host", "a")]),
+        EndOfMessage(),
+    ]
+    # The second request plus the half-frame are still held in the buffer.
+    pending, _ = conn.trailing_data
+    assert pending.startswith(second)
+    assert pending.endswith(third_half)
+
+    conn.send(Response(status_code=200, headers=[]))
+    conn.send(EndOfMessage())
+    conn.start_next_cycle()
+    assert _drain_next_event_until_need_data(conn) == [
+        Request(method="GET", target="/2", headers=[("host", "b")]),
+        EndOfMessage(),
+    ]
+
+    # The half-frame remains complete-pending and can still be finished.
+    pending, _ = conn.trailing_data
+    assert pending == third_half
+    conn.send(Response(status_code=200, headers=[]))
+    conn.send(EndOfMessage())
+    conn.start_next_cycle()
+    assert conn.next_event() is NEED_DATA
+    conn.receive_data(b"c\r\n\r\n")
+    assert _drain_next_event_until_need_data(conn) == [
+        Request(method="GET", target="/3", headers=[("host", "c")]),
+        EndOfMessage(),
+    ]

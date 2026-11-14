@@ -486,7 +486,11 @@ class Connection:
                     # 431 is "Request header fields too large" which is pretty
                     # much the only situation where we can get here
                     raise RemoteProtocolError(
-                        "Receive buffer too long", error_status_hint=431
+                        "too much data for an incomplete event: "
+                        f"{len(self._receive_buffer)} bytes buffered exceeds "
+                        f"max_incomplete_event_size="
+                        f"{self._max_incomplete_event_size} bytes",
+                        error_status_hint=431,
                     )
                 if self._receive_buffer_closed:
                     # We're still trying to complete some event, but that's
