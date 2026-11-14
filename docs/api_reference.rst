@@ -36,6 +36,7 @@ serialization-related functions are available:
 
 .. autofunction:: serialize
 .. autofunction:: serialize_identifier
+.. autoclass:: UnsafeURLError
 
 
 Color Level 3

@@ -8,7 +8,7 @@ from .ast import (  # isort: skip
     HashToken, IdentToken, LiteralToken, NumberToken, ParenthesesBlock, ParseError,
     PercentageToken, SquareBracketsBlock, StringToken, UnicodeRangeToken, URLToken,
     WhitespaceToken)
-from .serializer import serialize_string_value, serialize_url
+from .serializer import UnsafeURLError, safe_serialize_url, serialize_string_value
 
 _NUMBER_RE = re.compile(r'[-+]?([0-9]*\.)?[0-9]+([eE][+-]?[0-9]+)?')
 _HEX_ESCAPE_RE = re.compile(r'([0-9A-Fa-f]{1,6})[ \n\t]?')
@@ -81,7 +81,11 @@ def parse_component_value_list(css, skip_comments=False):
                 if url_pos >= length or css[url_pos] not in ('"', "'"):
                     value, pos, error = _consume_url(css, pos)
                     if value is not None:
-                        repr = f'url({serialize_url(value)})'
+                        try:
+                            repr = safe_serialize_url(value)
+                        except UnsafeURLError as safe_error:
+                            raise UnsafeURLError(
+                                str(safe_error), line, column) from safe_error
                         if error is not None:
                             error_key = error[0]
                             if error_key == 'eof-in-string':
@@ -352,6 +356,13 @@ def _consume_url(css, pos):
                 c, pos = _consume_escape(css, pos + 1)
                 chunks.append(c)
                 start_pos = pos
+            elif css.startswith('\\\n', pos):
+                chunks.append(css[start_pos:pos])
+                pos += 2
+                start_pos = pos
+            elif css.startswith('/*', pos):
+                value = None  # Comments are not valid in unquoted URLs
+                break
             elif (c in
                   '"\'('
                   # https://drafts.csswg.org/css-syntax/#non-printable-character

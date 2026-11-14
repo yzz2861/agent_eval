@@ -7,6 +7,7 @@ import pytest
 from webencodings import Encoding, lookup
 
 from tinycss2 import (  # isort:skip
+    UnsafeURLError,
     parse_blocks_contents, parse_component_value_list, parse_declaration_list,
     parse_one_component_value, parse_one_declaration, parse_one_rule,
     parse_rule_list, parse_stylesheet, parse_stylesheet_bytes, serialize)
@@ -725,3 +726,100 @@ def test_escape_in_function_name():
     function, = parse_component_value_list('\\dddf()')
     assert function.type == 'function'
     assert function.name == '\udddf'
+
+
+@pytest.mark.parametrize(('source', 'expected'), [
+    ('url(data:image/png;base64,AAAA)',
+     'url(data:image/png;base64,AAAA)'),
+    ('url(relative/path.png)', 'url(relative/path.png)'),
+    ('url(#fragment)', 'url(#fragment)'),
+    ('url("my file.png")', 'url("my file.png")'),
+    (r'url(my\ file.png)', 'url(my\\ file.png)'),
+    ('url(HTTPS://example.test/image.png)',
+     'url(HTTPS://example.test/image.png)'),
+])
+def test_safe_url_serialization(source, expected):
+    nodes = parse_component_value_list(source)
+    output = serialize(nodes)
+    assert output == expected
+    assert serialize(parse_component_value_list(output)) == output
+
+
+def test_safe_url_eof_serialization_remains_compatible():
+    source = 'url(relative.png'
+    nodes = parse_component_value_list(source)
+    assert [node.type for node in nodes] == ['url', 'error']
+    assert serialize(nodes) == source
+
+    quoted_source = 'url("relative.png'
+    quoted_nodes = parse_component_value_list(quoted_source)
+    assert serialize(quoted_nodes) == quoted_source
+
+    with pytest.raises(UnsafeURLError, match='scheme'):
+        serialize(parse_component_value_list('url("javascript:alert:'))
+
+
+@pytest.mark.parametrize('source', [
+    r'url(\6a avascript:alert)',
+    'url("\\6a avascript:alert")',
+    'url(vbscript:alert)',
+    'url(data:text/html,alert)',
+    'url(data:image/svg+xml,<svg/>)',
+    r'url("\00javascript:alert")',
+])
+def test_unsafe_url_scheme_is_rejected(source):
+    with pytest.raises(UnsafeURLError) as exc_info:
+        serialize(parse_component_value_list(source))
+    error = exc_info.value
+    assert error.source_line == 1
+    assert error.source_column == 1
+    assert 'alert' not in str(error)
+    assert 'javascript' not in str(error)
+
+
+def test_url_comments_are_rejected():
+    nodes = parse_component_value_list('url(/* comment */relative.png)')
+    assert [node.type for node in nodes] == ['error']
+
+    nodes = parse_component_value_list('url("relative.png"/* comment */)')
+    with pytest.raises(UnsafeURLError, match='comments'):
+        serialize(nodes)
+
+
+def test_escaped_function_name_is_not_reassembled_as_url():
+    source = r'ur\61("javascript:alert")'
+    output = serialize(parse_component_value_list(source))
+    assert output == 'ura("javascript:alert")'
+    assert not output.lower().startswith('url(')
+
+
+def test_crlf_line_continuation_is_decoded_before_validation():
+    unsafe = parse_component_value_list(
+        'url("j\\\r\navascript:relative.png")')
+    assert unsafe[0].arguments[0].value == 'javascript:relative.png'
+    with pytest.raises(UnsafeURLError, match='scheme'):
+        serialize(unsafe)
+
+    safe = parse_component_value_list('url("safe\\\r\n name.png")')
+    assert safe[0].arguments[0].value == 'safe name.png'
+    assert serialize(safe) == 'url("safe name.png")'
+
+    unquoted = parse_component_value_list('url(safe\\\r\nname.png)')
+    assert unquoted[0].value == 'safename.png'
+    assert serialize(unquoted) == 'url(safename.png)'
+
+    with pytest.raises(UnsafeURLError, match='scheme'):
+        parse_component_value_list('url(j\\\r\navascript:relative.png)')
+
+
+def test_unsafe_url_control_characters_and_backslashes_are_rejected():
+    for source, is_quoted in [
+        (r'url("\0d\0arelative.png")', True),
+        (r'url(relative\\path.png)', False),
+        (r'url("\00relative.png")', True),
+    ]:
+        with pytest.raises(UnsafeURLError):
+            if is_quoted:
+                serialize(parse_component_value_list(source))
+            else:
+                parse_component_value_list(source)

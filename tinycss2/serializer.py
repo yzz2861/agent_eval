@@ -1,4 +1,24 @@
 import re
+import unicodedata
+
+
+class UnsafeURLError(ValueError):
+    """A URL cannot safely be serialized in CSS."""
+
+    def __init__(self, message, source_line=None, source_column=None):
+        super().__init__(message)
+        self.source_line = source_line
+        self.source_column = source_column
+
+
+_SAFE_URL_SCHEMES = frozenset({'data', 'http', 'https'})
+_SAFE_DATA_MEDIA_TYPES = frozenset({
+    'image/gif',
+    'image/jpeg',
+    'image/png',
+    'image/webp',
+})
+_SCHEME_RE = re.compile(r'[A-Za-z][A-Za-z0-9+.-]*\Z')
 
 
 def serialize(nodes):
@@ -99,6 +119,73 @@ def serialize_url(value):
         c
         for c in value
     )
+
+
+def safe_serialize_url(value, quoted=False):
+    """Validate a decoded URL and serialize it for a CSS URL context."""
+    _validate_safe_url(value)
+    return f'url({_serialize_safe_url(value, quoted)})'
+
+
+def _serialize_safe_url(value, quoted=False):
+    if quoted:
+        return f'"{serialize_string_value(value)}"'
+    return serialize_url(value)
+
+
+def safe_url_function_arguments(arguments):
+    """Return the decoded URL represented by ``url()`` function arguments."""
+    significant = []
+    for node in arguments:
+        if node.type == 'comment':
+            raise UnsafeURLError('Unsafe URL: comments are not allowed')
+        if node.type != 'whitespace':
+            significant.append(node)
+
+    if not significant:
+        return '', False
+    if len(significant) == 1 and significant[0].type == 'string':
+        return significant[0].value, True
+    if (len(significant) == 2 and significant[0].type == 'string' and
+            significant[1].type == 'error' and
+            significant[1].kind == 'eof-in-string'):
+        return significant[0].value, True
+    raise UnsafeURLError('Unsafe URL: unsupported url() argument')
+
+
+def _validate_safe_url(value):
+    if '\ufffd' in value:
+        raise UnsafeURLError(
+            'Unsafe URL: replacement characters are not allowed')
+    if any(unicodedata.category(char) == 'Cc' or char == '\x7f'
+           for char in value):
+        raise UnsafeURLError('Unsafe URL: control characters are not allowed')
+    if '\\' in value:
+        raise UnsafeURLError('Unsafe URL: backslashes are not allowed')
+
+    scheme_end = value.find(':')
+    if scheme_end == -1 or not _SCHEME_RE.fullmatch(value[:scheme_end]):
+        return
+
+    scheme = value[:scheme_end].lower()
+    if scheme not in _SAFE_URL_SCHEMES:
+        raise UnsafeURLError('Unsafe URL: scheme is not allowed')
+    if scheme == 'data':
+        _validate_data_url(value[scheme_end + 1:])
+
+
+def _validate_data_url(value):
+    comma_position = value.find(',')
+    if comma_position == -1:
+        raise UnsafeURLError('Unsafe URL: malformed data URL')
+
+    prefix = value[:comma_position]
+    parts = prefix.split(';')
+    media_type = parts[0].lower()
+    if media_type not in _SAFE_DATA_MEDIA_TYPES:
+        raise UnsafeURLError('Unsafe URL: data URL media type is not allowed')
+    if len(parts) > 2 or (len(parts) == 2 and parts[1].lower() != 'base64'):
+        raise UnsafeURLError('Unsafe URL: data URL parameters are not allowed')
 
 
 # https://drafts.csswg.org/css-syntax/#serialization-tables

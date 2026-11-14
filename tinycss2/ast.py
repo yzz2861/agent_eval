@@ -7,7 +7,16 @@ Data structures for the CSS abstract syntax tree.
 
 from webencodings import ascii_lower
 
-from .serializer import _serialize_to, serialize_identifier, serialize_name
+from .serializer import (
+    UnsafeURLError,
+    _serialize_safe_url,
+    _serialize_to,
+    _validate_safe_url,
+    safe_serialize_url,
+    safe_url_function_arguments,
+    serialize_identifier,
+    serialize_name,
+)
 
 
 class Node:
@@ -380,7 +389,18 @@ class URLToken(Node):
         self.representation = representation
 
     def _serialize_to(self, write):
-        write(self.representation)
+        try:
+            serialized = safe_serialize_url(self.value)
+        except UnsafeURLError as error:
+            raise UnsafeURLError(
+                str(error), self.source_line, self.source_column
+            ) from error
+        if self.representation.endswith(')'):
+            write(serialized)
+        elif self.representation.startswith('url("'):
+            write(serialized[:-2])
+        else:
+            write(serialized[:-1])
 
 
 class UnicodeRangeToken(Node):
@@ -705,6 +725,25 @@ class FunctionBlock(Node):
     def _serialize_to(self, write):
         write(serialize_identifier(self.name))
         write('(')
+        if self.lower_name == 'url':
+            try:
+                value, quoted = safe_url_function_arguments(self.arguments)
+                _validate_safe_url(value)
+                serialized = _serialize_safe_url(value, quoted=quoted)
+            except UnsafeURLError as error:
+                raise UnsafeURLError(
+                    str(error), self.source_line, self.source_column
+                ) from error
+            eof_in_string = (
+                bool(self.arguments) and
+                self.arguments[-1].type == 'error' and
+                self.arguments[-1].kind == 'eof-in-string')
+            if eof_in_string:
+                write(serialized[:-1] if quoted else serialized)
+                return
+            write(serialized)
+            write(')')
+            return
         _serialize_to(self.arguments, write)
         function = self
         while isinstance(function, FunctionBlock) and function.arguments:
