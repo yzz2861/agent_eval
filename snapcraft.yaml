@@ -1,0 +1,34 @@
+name: ssh-audit
+title: ssh-audit
+summary: ssh-audit
+version: ""  # Set at run-time by build_snap.sh.
+license: 'MIT'
+description: |
+  SSH server and client security configuration auditor.  Official repository: <https://github.com/jtesta/ssh-audit>
+contact:
+  - https://github.com/jtesta/ssh-audit/issues
+issues:
+  - https://github.com/jtesta/ssh-audit/issues
+source-code:
+  - https://github.com/jtesta/ssh-audit
+website:
+  - https://github.com/jtesta/ssh-audit
+#base: core26
+base: core24
+grade: stable
+confinement: strict
+platforms:
+  multi:
+    build-on: [amd64]
+    build-for: [all]
+
+apps:
+  ssh-audit:
+    command: bin/ssh-audit
+    plugs: [network, network-bind, home]
+
+parts:
+  ssh-audit:
+    plugin: python
+    #stage-packages: [python3.14, python3.14-venv]
+    source: .
