@@ -14,7 +14,13 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Iterable  # pragma: no cover
 
-from .exceptions import InvalidDataError, InvalidFrameError, InvalidPaddingError, UnknownFrameError
+from .exceptions import (
+    FrameSizeError,
+    InvalidDataError,
+    InvalidFrameError,
+    InvalidPaddingError,
+    UnknownFrameError,
+)
 from .flags import Flag, Flags
 
 # The maximum initial length of a frame. Some frames have shorter maximum
@@ -23,6 +29,11 @@ FRAME_MAX_LEN = (2 ** 14)
 
 # The maximum allowed length of a frame.
 FRAME_MAX_ALLOWED_LEN = (2 ** 24) - 1
+
+# The maximum body length hyperframe will skip over for a frame of unknown
+# type. Unknown frames beyond this budget must be rejected rather than
+# buffered, keeping the lenient extension path bounded and auditable.
+EXTENSION_FRAME_MAX_LEN = FRAME_MAX_LEN
 
 # Stream association enumerations.
 _STREAM_ASSOC_HAS_STREAM = "has-stream"
@@ -139,10 +150,68 @@ class Frame:
         except KeyError as err:
             if strict:
                 raise UnknownFrameError(typ_e, length) from err
-            frame = ExtensionFrame(type=typ_e, stream_id=stream_id)
+            frame = Frame.skip_unknown_frame(
+                frame_type=typ_e,
+                flag_byte=flags,
+                stream_id=stream_id,
+                length=length,
+            )
 
         frame.parse_flags(flags)
         return (frame, length)
+
+    @staticmethod
+    def skip_unknown_frame(
+        frame_type: int,
+        flag_byte: int,
+        stream_id: int,
+        length: int,
+    ) -> ExtensionFrame:
+        """
+        Build a bounded, auditable placeholder for a frame of unknown type.
+
+        Registered frame types must not use this lenient path: their bodies
+        have spec-defined layouts and are parsed by their dedicated classes.
+
+        The frame's type and raw flag byte are retained for auditing, but its
+        payload is never parsed or buffered. Frames whose declared length
+        exceeds :data:`EXTENSION_FRAME_MAX_LEN`, or whose stream identifier is
+        outside the 31-bit stream identifier space, are rejected.
+
+        :raises hyperframe.exceptions.InvalidDataError: If ``frame_type`` is
+            a registered frame type or ``stream_id`` is out of range.
+        :raises hyperframe.exceptions.FrameSizeError: If ``length`` exceeds
+            the bounded extension frame budget.
+        """
+        if frame_type in FRAMES:
+            msg = (
+                f"Registered frame type 0x{frame_type:X} cannot use the "
+                "unknown-frame skip path"
+            )
+            raise InvalidDataError(msg)
+
+        if not 0 <= stream_id <= 0x7FFFFFFF:
+            msg = (
+                f"Stream identifier {stream_id} is outside the 31-bit "
+                "stream identifier space"
+            )
+            raise InvalidDataError(msg)
+
+        if length > EXTENSION_FRAME_MAX_LEN:
+            raise FrameSizeError(
+                frame_type=frame_type,
+                declared_length=length,
+                allowed_length=EXTENSION_FRAME_MAX_LEN,
+            )
+
+        frame = ExtensionFrame(
+            type=frame_type,
+            stream_id=stream_id,
+            flag_byte=flag_byte,
+        )
+        frame.declared_length = length
+        frame.payload_skipped = True
+        return frame
 
     def parse_flags(self, flag_byte: int) -> Flags:
         for flag, flag_bit in self.defined_flags:
@@ -874,7 +943,19 @@ class ExtensionFrame(Frame):
     encountered, wraps it in a generic frame to be properly acted upon by
     upstream consumers which might have additional context on how to use it.
 
+    Frames produced by the parser go through the bounded unknown-frame skip
+    path in :meth:`Frame.skip_unknown_frame`: the frame type and raw flag byte
+    are retained for auditing, while the payload is skipped without being
+    parsed or buffered. Only the declared payload length is kept, and frames
+    exceeding :data:`EXTENSION_FRAME_MAX_LEN` are rejected. Extension frames
+    constructed directly by user code still accept an explicit ``body``.
+
     .. versionadded:: 5.0.0
+
+    .. versionchanged:: 6.2.0
+        Parsed unknown frames no longer retain their payload bytes. The skip
+        path is now bounded by :data:`EXTENSION_FRAME_MAX_LEN` and rejects
+        registered frame types, over-budget frames and length mismatches.
     """
 
     stream_association = _STREAM_ASSOC_EITHER
@@ -884,8 +965,20 @@ class ExtensionFrame(Frame):
         self.type = type
         self.flag_byte = flag_byte
         self.body = body
+        #: The body length advertised by the frame header. For frames
+        #: produced by the unknown-frame skip path this is the only payload
+        #: information retained: the raw payload bytes themselves are not
+        #: buffered.
+        self.declared_length: int = len(body)
+        #: Whether the payload was skipped rather than retained.
+        self.payload_skipped: bool = False
 
     def _body_repr(self) -> str:
+        if self.payload_skipped:
+            return (
+                f"type={self.type}, flag_byte={self.flag_byte}, "
+                f"declared_length={self.declared_length}, payload skipped"
+            )
         return f"type={self.type}, flag_byte={self.flag_byte}, body={_raw_data_repr(self.body)}"
 
     def parse_flags(self, flag_byte: int) -> None:  # type: ignore
@@ -895,8 +988,29 @@ class ExtensionFrame(Frame):
         self.flag_byte = flag_byte
 
     def parse_body(self, data: memoryview) -> None:
-        self.body = data.tobytes()
-        self.body_len = len(data)
+        # The lenient unknown-frame path must remain bounded: verify that the
+        # delivered payload matches the length advertised by the header and
+        # then skip over it without retaining the raw bytes. Only numeric
+        # metadata is kept so error and frame objects stay auditable.
+        actual_length = len(data)
+        if actual_length != self.declared_length:
+            raise FrameSizeError(
+                frame_type=self.type,
+                declared_length=self.declared_length,
+                allowed_length=EXTENSION_FRAME_MAX_LEN,
+                actual_length=actual_length,
+            )
+
+        if actual_length > EXTENSION_FRAME_MAX_LEN:
+            raise FrameSizeError(
+                frame_type=self.type,
+                declared_length=actual_length,
+                allowed_length=EXTENSION_FRAME_MAX_LEN,
+            )
+
+        self.body = b""
+        self.body_len = actual_length
+        self.payload_skipped = True
 
     def serialize(self) -> bytes:
         """
@@ -905,6 +1019,13 @@ class ExtensionFrame(Frame):
         user code: it exists only as a helper method if frames need to be
         reconstituted.
         """
+        if self.payload_skipped and not self.body:
+            msg = (
+                "Cannot serialize an extension frame whose payload was "
+                "skipped; reconstruct it with the original body bytes"
+            )
+            raise InvalidDataError(msg)
+
         # Build the frame header.
         # First, get the flags.
         flags = self.flag_byte

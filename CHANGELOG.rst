@@ -16,6 +16,16 @@ dev
 
 - Support for PyPy 3.9 has been removed.
 - Support for Python 3.9 has been removed.
+- Unknown frame types are now handled through a single bounded skip path
+  (``Frame.skip_unknown_frame``). The frame type and raw flag byte are still
+  retained, but the payload is no longer parsed or buffered: only the declared
+  body length is kept. Frames declaring more than
+  ``EXTENSION_FRAME_MAX_LEN`` (defaulting to ``FRAME_MAX_LEN``) bytes, frames
+  whose delivered body does not match the declared length, and out-of-range
+  stream identifiers are rejected with the new ``FrameSizeError`` /
+  ``InvalidDataError`` exceptions. Registered frame types can no longer take
+  the lenient extension path. Error objects carry numeric metadata only and
+  never include raw frame bytes.
 
 **Bugfixes**
 

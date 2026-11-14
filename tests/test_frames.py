@@ -4,8 +4,10 @@ from hyperframe.frame import (
     ContinuationFrame, AltSvcFrame, ExtensionFrame
 )
 from hyperframe.exceptions import (
-    UnknownFrameError, InvalidPaddingError, InvalidFrameError, InvalidDataError
+    UnknownFrameError, InvalidPaddingError, InvalidFrameError, InvalidDataError,
+    FrameSizeError,
 )
+from hyperframe.frame import FRAME_MAX_LEN, EXTENSION_FRAME_MAX_LEN
 import pytest
 
 
@@ -71,18 +73,162 @@ class TestGeneralFrameBehaviour:
         assert length == 0x59
         assert frame.flag_byte == 0x09
 
-    def test_parse_body_unknown_type(self):
+    def test_parse_body_unknown_type_skips_payload(self):
         frame = decode_frame(
             b'\x00\x00\x0C\xFF\x00\x00\x00\x00\x01hello world!'
         )
-        assert frame.body == b'hello world!'
+        assert frame.body == b''
         assert frame.body_len == 12
+        assert frame.declared_length == 12
+        assert frame.payload_skipped is True
         assert frame.stream_id == 1
 
-    def test_can_round_trip_unknown_frames(self):
+    def test_skipped_unknown_frame_cannot_round_trip(self):
         frame_data = b'\x00\x00\x0C\xFF\x00\x00\x00\x00\x01hello world!'
         f = decode_frame(frame_data)
+        with pytest.raises(InvalidDataError):
+            f.serialize()
+
+    def test_manually_built_extension_frame_round_trips(self):
+        frame_data = b'\x00\x00\x0C\xFF\x00\x00\x00\x00\x01hello world!'
+        f = ExtensionFrame(0xFF, 1, 0x0, b'hello world!')
+        f.body_len = len(f.body)
+        assert f.payload_skipped is False
         assert f.serialize() == frame_data
+        decoded = decode_frame(frame_data)
+        assert decoded.payload_skipped is True
+        assert decoded.body == b''
+
+    def test_unknown_frame_within_budget_is_accepted(self):
+        payload = b'a' * FRAME_MAX_LEN
+        wire = (
+            FRAME_MAX_LEN.to_bytes(3, 'big')
+            + b'\x42\x00\x00\x00\x00\x01'
+            + payload
+        )
+        frame = decode_frame(wire)
+        assert frame.type == 0x42
+        assert frame.body_len == FRAME_MAX_LEN
+        assert frame.declared_length == FRAME_MAX_LEN
+        assert frame.body == b''
+        assert frame.payload_skipped is True
+
+    def test_unknown_frame_over_budget_rejected_at_header(self):
+        oversized = EXTENSION_FRAME_MAX_LEN + 1
+        header = (
+            oversized.to_bytes(3, 'big')
+            + b'\x42\x00\x00\x00\x00\x01'
+        )
+        with pytest.raises(FrameSizeError) as excinfo:
+            Frame.parse_frame_header(memoryview(header))
+        err = excinfo.value
+        assert err.frame_type == 0x42
+        assert err.declared_length == oversized
+        assert err.allowed_length == EXTENSION_FRAME_MAX_LEN
+        assert err.actual_length is None
+        assert 'payload' not in str(err).lower()
+        assert all(
+            isinstance(getattr(err, name), int)
+            for name in ('frame_type', 'declared_length', 'allowed_length')
+        )
+
+    def test_unknown_frame_over_budget_rejected_at_body(self):
+        frame = ExtensionFrame(type=0x42, stream_id=1)
+        frame.declared_length = EXTENSION_FRAME_MAX_LEN + 1
+        frame.payload_skipped = True
+        with pytest.raises(FrameSizeError):
+            frame.parse_body(memoryview(b'a' * (EXTENSION_FRAME_MAX_LEN + 1)))
+
+    def test_unknown_frame_body_length_mismatch_rejected(self):
+        header = b'\x00\x00\x0C\xFF\x00\x00\x00\x00\x01'
+        frame, length = Frame.parse_frame_header(memoryview(header))
+        assert length == 12
+        with pytest.raises(FrameSizeError) as excinfo:
+            frame.parse_body(memoryview(b'short'))
+        err = excinfo.value
+        assert err.frame_type == 0xFF
+        assert err.declared_length == 12
+        assert err.actual_length == 5
+        assert '12 bytes but received 5 bytes' in str(err)
+
+    def test_unknown_frame_with_unregistered_flags_is_retained(self):
+        # All flag bits, including unregistered/high bits, are retained
+        # on the extension frame without being interpreted.
+        frame, length = Frame.parse_frame_header(
+            b'\x00\x00\x05\xFE\xFF\x00\x00\x00\x03'
+        )
+        assert frame.type == 0xFE
+        assert frame.flag_byte == 0xFF
+        assert frame.stream_id == 3
+        assert len(frame.flags) == 0
+        frame.parse_body(memoryview(b'abcde'))
+        assert frame.flag_byte == 0xFF
+        assert frame.body == b''
+        assert frame.body_len == 5
+
+    def test_registered_frame_type_cannot_use_skip_path(self):
+        for registered_type in (0x0, 0x01, 0x04, 0x09, 0x0A):
+            with pytest.raises(InvalidDataError):
+                Frame.skip_unknown_frame(
+                    frame_type=registered_type,
+                    flag_byte=0x0,
+                    stream_id=1,
+                    length=0,
+                )
+
+    def test_skip_path_rejects_out_of_range_stream_id(self):
+        with pytest.raises(InvalidDataError):
+            Frame.skip_unknown_frame(
+                frame_type=0x42,
+                flag_byte=0x0,
+                stream_id=0x80000000,
+                length=0,
+            )
+
+    def test_mixed_known_and_unknown_frames(self):
+        # A registered frame keeps its strict parsing path even when
+        # adjacent to unknown frames carrying high flag bits.
+        settings = SettingsFrame(0)
+        settings.settings[SettingsFrame.HEADER_TABLE_SIZE] = 4096
+        wire = settings.serialize()
+        wire += (
+            b'\x00\x00\x03\xFF\x80\x00\x00\x00\x01' + b'abc'
+        )
+        wire += PingFrame(0, b'12345678').serialize()
+
+        offset = 0
+        known_one, length = Frame.parse_frame_header(memoryview(wire[offset:offset + 9]))
+        known_one.parse_body(memoryview(wire[offset + 9:offset + 9 + length]))
+        offset += 9 + length
+        assert isinstance(known_one, SettingsFrame)
+        assert known_one.settings == {0x01: 4096}
+
+        unknown, length = Frame.parse_frame_header(memoryview(wire[offset:offset + 9]))
+        unknown.parse_body(memoryview(wire[offset + 9:offset + 9 + length]))
+        offset += 9 + length
+        assert isinstance(unknown, ExtensionFrame)
+        assert unknown.type == 0xFF
+        assert unknown.flag_byte == 0x80
+        assert unknown.body == b''
+        assert unknown.body_len == 3
+
+        known_two, length = Frame.parse_frame_header(memoryview(wire[offset:offset + 9]))
+        known_two.parse_body(memoryview(wire[offset + 9:offset + 9 + length]))
+        offset += 9 + length
+        assert isinstance(known_two, PingFrame)
+        assert known_two.opaque_data == b'12345678'
+        assert offset == len(wire)
+
+    def test_known_frame_drops_unregistered_flags(self):
+        # DATA (type 0x0) only defines END_STREAM(0x01) and PADDED(0x08);
+        # unknown high flag bits must not leak into the parsed Flags object.
+        frame, _ = Frame.parse_frame_header(
+            b'\x00\x00\x00\x00\xFF\x00\x00\x00\x01'
+        )
+        assert isinstance(frame, DataFrame)
+        assert 'END_STREAM' in frame.flags
+        assert 'PADDED' in frame.flags
+        assert len(frame.flags) == 2
 
     def test_repr(self, monkeypatch):
         f = Frame(0)
