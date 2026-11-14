@@ -20,6 +20,7 @@
 
 """Unit tests for matching against authorized_keys file"""
 
+import binascii
 import unittest
 
 import asyncssh
@@ -222,3 +223,26 @@ class _TestAuthorizedKeys(TempDirTestCase):
             with self.subTest(msg):
                 with self.assertRaises(ValueError):
                     asyncssh.import_authorized_keys(data)
+
+    def test_bad_certificate(self):
+        """Test that malformed certificates are rejected cleanly"""
+
+        key = get_test_key('ssh-rsa')
+        cert = key.generate_user_certificate(key, 'name')
+        alg, blob = cert.export_certificate().decode('ascii').split()
+
+        raw = binascii.a2b_base64(blob)
+        trailing = binascii.b2a_base64(raw + b'\xff').decode('ascii')
+
+        for bad_cert in (alg + ' ' + blob[:len(blob)//2] + '\n',
+                         alg + ' ' + trailing):
+            with self.subTest('Malformed certificate is skipped'):
+                with self.assertRaises(ValueError):
+                    asyncssh.import_authorized_keys(bad_cert)
+
+            auth_keys = asyncssh.import_authorized_keys(
+                bad_cert + key.export_public_key().decode('ascii'))
+
+            self.assertIsNotNone(
+                auth_keys.validate(key.convert_to_public(),
+                                   '1.2.3.4', '1.2.3.4'))

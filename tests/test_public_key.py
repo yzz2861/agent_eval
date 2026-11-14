@@ -1811,6 +1811,35 @@ class _TestPublicKey(TempDirTestCase):
                 asyncssh.import_certificate(
                     b'xxx ' + binascii.b2a_base64(b'\x00'))
 
+        with self.subTest('Empty certificate'):
+            with self.assertRaises(asyncssh.CertificateError):
+                cert = self.make_certificate(cert_type, self.pubkey,
+                                             self.privca, ('name',))
+                alg, _ = cert.split(None, 1)
+                asyncssh.import_certificate(alg + b' ' +
+                                            binascii.b2a_base64(b''))
+
+        with self.subTest('Certificate field length out of bounds'):
+            with self.assertRaises(asyncssh.CertificateError):
+                cert = self.make_certificate(cert_type, self.pubkey,
+                                             self.privca, ('name',))
+                alg, blob = cert.split()
+                blob = bytearray(binascii.a2b_base64(blob))
+                nonce_len_offset = 4 + int.from_bytes(blob[:4], 'big')
+                blob[nonce_len_offset:nonce_len_offset+4] = \
+                    b'\x7f\xff\xff\xff'
+                asyncssh.import_certificate(
+                    alg + b' ' + binascii.b2a_base64(bytes(blob)))
+
+        with self.subTest('Trailing data at end of certificate'):
+            with self.assertRaises(asyncssh.CertificateError):
+                cert = self.make_certificate(cert_type, self.pubkey,
+                                             self.privca, ('name',))
+                alg, blob = cert.split()
+                blob = binascii.a2b_base64(blob) + b'\xff'
+                asyncssh.import_certificate(alg + b' ' +
+                                            binascii.b2a_base64(blob))
+
         with self.subTest('Invalid certificate algorithm'):
             with self.assertRaises(asyncssh.KeyImportError):
                 asyncssh.import_certificate(
@@ -2270,6 +2299,21 @@ class _TestPublicKeyTopLevel(TempDirTestCase):
         with self.assertRaises(asyncssh.KeyEncryptionError):
             pkcs1_decrypt(b'', b'AES-128-CBC', os.urandom(16), 'x')
 
+    def test_certificate_error(self):
+        """Test that certificate errors are distinguishable import errors"""
+
+        self.assertTrue(issubclass(asyncssh.CertificateError,
+                                   asyncssh.KeyImportError))
+
+        with self.assertRaises(asyncssh.CertificateError):
+            asyncssh.import_certificate(b'')
+
+    def test_certificate_der_invalid_utf8(self):
+        """Test that invalid UTF-8 in DER data doesn't leak a low-level error"""
+
+        with self.assertRaises(asyncssh.CertificateError):
+            asyncssh.import_certificate(bytes.fromhex('30040c02fffe'))
+
     def test_ec_explicit(self):
         """Test EC certificate with explicit parameters"""
 
@@ -2340,6 +2384,8 @@ class _TestPublicKeyTopLevel(TempDirTestCase):
 
         with self.assertRaises(asyncssh.KeyGenerationError):
             privca.generate_x509_user_certificate(pubkey, 'OU=user')
+
+        del privca.x509_algorithms
 
     def test_rsa_encrypt_error(self):
         """Test RSA encryption error"""

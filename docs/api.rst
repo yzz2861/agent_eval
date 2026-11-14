@@ -2065,6 +2065,7 @@ Exceptions
 .. autoexception:: SFTPGroupInvalid
 .. autoexception:: SFTPNoMatchingByteRangeLock
 .. autoexception:: KeyImportError
+.. autoexception:: CertificateError
 .. autoexception:: KeyExportError
 .. autoexception:: KeyEncryptionError
 .. autoexception:: KeyGenerationError

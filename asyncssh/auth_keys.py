@@ -70,13 +70,14 @@ class _SSHAuthorizedKeyEntry(OptionsParser):
             pass
 
         try:
-            self.cert = cast(SSHX509Certificate, import_certificate(line))
+            cert = cast(SSHX509Certificate, import_certificate(line))
 
             if ('cert-authority' in self.options and
-                    self.cert.subject != self.cert.issuer):
+                    cert.subject != cert.issuer):
                 raise ValueError('X.509 cert-authority entries must '
                                  'contain a root CA certificate')
 
+            self.cert = cert
             return
         except KeyImportError:
             pass

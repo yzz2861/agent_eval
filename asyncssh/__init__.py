@@ -79,6 +79,7 @@ from .process import DEVNULL, PIPE, STDOUT
 
 from .public_key import SSHKey, SSHKeyPair, SSHCertificate
 from .public_key import KeyGenerationError, KeyImportError, KeyExportError
+from .public_key import CertificateError
 from .public_key import generate_private_key, import_private_key
 from .public_key import import_public_key, import_certificate
 from .public_key import read_private_key, read_public_key, read_certificate
@@ -128,6 +129,7 @@ from . import sk_eddsa, sk_ecdsa, eddsa, ecdsa, rsa, dsa, kex_dh, kex_rsa
 __all__ = [
     '__author__', '__author_email__', '__url__', '__version__',
     'BreakReceived', 'BytesOrStr', 'ChannelListenError',
+    'CertificateError',
     'ChannelOpenError', 'CompressionError', 'ConfigParseError',
     'ConnectionLost', 'DEVNULL', 'DataType', 'DisconnectError', 'Error',
     'HostKeyNotVerifiable', 'IllegalUserName', 'KeyEncryptionError',

@@ -349,7 +349,10 @@ class _UTF8String(DERType):
         if constructed:
             raise ASN1DecodeError('UTF8 STRING should not be constructed')
 
-        return content.decode('utf-8')
+        try:
+            return content.decode('utf-8')
+        except UnicodeDecodeError:
+            raise ASN1DecodeError('Invalid UTF-8 string') from None
 
 
 @DERTag(SEQUENCE, (list, tuple), constructed=True)
@@ -727,6 +730,10 @@ def der_decode_partial(data: bytes) -> Tuple[object, int]:
     offset += 1
     if length > 0x80:
         len_size = length & 0x7f
+
+        if offset + len_size > len(data):
+            raise ASN1DecodeError('Incomplete data')
+
         length = int.from_bytes(data[offset:offset+len_size], 'big')
         offset += len_size
     elif length == 0x80:

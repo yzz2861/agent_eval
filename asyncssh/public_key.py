@@ -217,6 +217,19 @@ class KeyImportError(ValueError):
        This exception is raised by key import functions when the
        data provided cannot be imported as a valid key.
 
+   """
+
+
+class CertificateError(KeyImportError):
+    """Certificate import error
+
+       This exception is raised by certificate import functions when
+       the data provided cannot be imported as a valid certificate.
+       It is a subclass of :class:`KeyImportError`, so existing code
+       which catches that exception will continue to work, but
+       callers can distinguish certificate decoding failures from
+       other key import errors.
+
     """
 
 
@@ -1627,7 +1640,7 @@ class SSHOpenSSHCertificate(SSHCertificate):
         packet.check_end()
 
         if not signing_key.verify(data, signature):
-            raise KeyImportError('Invalid certificate signature')
+            raise CertificateError('Invalid certificate signature')
 
         key = key_handler.make_public(key_params)
         data = packet.get_consumed_payload()
@@ -1635,7 +1648,7 @@ class SSHOpenSSHCertificate(SSHCertificate):
         try:
             key_id_bytes = key_id.decode('utf-8')
         except UnicodeDecodeError:
-            raise KeyImportError('Invalid characters in key ID') from None
+            raise CertificateError('Invalid characters in key ID') from None
 
         packet = SSHPacket(principals)
         principals: List[str] = []
@@ -1644,8 +1657,8 @@ class SSHOpenSSHCertificate(SSHCertificate):
             try:
                 principal = packet.get_string().decode('utf-8')
             except UnicodeDecodeError:
-                raise KeyImportError('Invalid characters in principal '
-                                     'name') from None
+                raise CertificateError('Invalid characters in principal '
+                                       'name') from None
 
             principals.append(principal)
 
@@ -1660,7 +1673,7 @@ class SSHOpenSSHCertificate(SSHCertificate):
             cert_options.update(cls._decode_options(
                 extensions, cls._host_extension_decoders, False))
         else:
-            raise KeyImportError('Unknown certificate type')
+            raise CertificateError('Unknown certificate type')
 
         return cls(algorithm, key, data, principals, cert_options, signing_key,
                    serial, cert_type, key_id_bytes, valid_after, valid_before,
@@ -1728,7 +1741,7 @@ class SSHOpenSSHCertificate(SSHCertificate):
         try:
             return packet.get_string().decode('utf-8')
         except UnicodeDecodeError:
-            raise KeyImportError('Invalid characters in command') from None
+            raise CertificateError('Invalid characters in command') from None
 
     @staticmethod
     def _decode_source_addr(packet: SSHPacket) -> Sequence[IPNetwork]:
@@ -1738,7 +1751,7 @@ class SSHOpenSSHCertificate(SSHCertificate):
             return [ip_network(addr.decode('ascii'))
                     for addr in packet.get_namelist()]
         except (UnicodeDecodeError, ValueError):
-            raise KeyImportError('Invalid source address') from None
+            raise CertificateError('Invalid source address') from None
 
     @staticmethod
     def _decode_options(options: bytes, decoders: _OpenSSHCertDecoders,
@@ -1757,8 +1770,8 @@ class SSHOpenSSHCertificate(SSHCertificate):
                 result[name.decode('ascii')] = decoder(data_packet)
                 data_packet.check_end()
             elif critical:
-                raise KeyImportError('Unrecognized critical option: ' +
-                                     name.decode('ascii', errors='replace'))
+                raise CertificateError('Unrecognized critical option: ' +
+                                       name.decode('ascii', errors='replace'))
 
         return result
 
@@ -1925,7 +1938,7 @@ class SSHX509Certificate(SSHCertificate):
             x509_cert = import_x509_certificate(data)
             key = import_public_key(x509_cert.key_data)
         except ValueError as exc:
-            raise KeyImportError(str(exc)) from None
+            raise CertificateError(str(exc)) from None
 
         return cls(key, x509_cert, comment)
 
@@ -1999,7 +2012,7 @@ class SSHX509CertificateChain(SSHCertificate):
         packet.check_end()
 
         if not certs:
-            raise KeyImportError('No certificates present')
+            raise CertificateError('No certificates present')
 
         return cls(algorithm, certs, ocsp_responses, comment)
 
@@ -2777,9 +2790,9 @@ def _decode_pem_certificate(pem_name: bytes, data: bytes) -> SSHCertificate:
             _, end = der_decode_partial(data)
             data = data[:end]
         except ASN1DecodeError:
-            raise KeyImportError('Invalid PEM trusted certificate') from None
+            raise CertificateError('Invalid PEM trusted certificate') from None
     elif pem_name:
-        raise KeyImportError('Invalid PEM certificate')
+        raise CertificateError('Invalid PEM certificate')
 
     return SSHX509Certificate.construct_from_der(data)
 
@@ -3056,10 +3069,12 @@ def decode_ssh_certificate(data: bytes,
         if cert_handler:
             return cert_handler.construct(packet, alg, key_handler, comment)
         else:
-            raise KeyImportError('Unknown certificate algorithm: ' +
-                                 alg.decode('ascii', errors='replace'))
+            raise CertificateError('Unknown certificate algorithm: ' +
+                                   alg.decode('ascii', errors='replace'))
+    except CertificateError:
+        raise
     except (PacketDecodeError, ValueError):
-        raise KeyImportError('Invalid OpenSSH certificate') from None
+        raise CertificateError('Invalid OpenSSH certificate') from None
 
 
 def generate_private_key(alg_name: str, comment: _Comment = None,
@@ -3254,7 +3269,7 @@ def import_certificate(data: BytesOrStr) -> SSHCertificate:
     if cert:
         return cert
     else:
-        raise KeyImportError('Invalid certificate')
+        raise CertificateError('Invalid certificate')
 
 
 def import_certificate_chain(data: bytes) -> Optional[SSHX509CertificateChain]:
