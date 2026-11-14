@@ -584,5 +584,174 @@ class Asn1ToolsDerTest(Asn1ToolsBaseTest):
         self.assert_encode_decode(rfc5280, 'Certificate', decoded, encoded)
 
 
+class Asn1ToolsDerStrictTest(Asn1ToolsBaseTest):
+
+    maxDiff = None
+
+    def setUp(self):
+        self.foo = asn1tools.compile_string(
+            "Foo DEFINITIONS ::= BEGIN "
+            "A ::= INTEGER "
+            "B ::= SEQUENCE { a INTEGER } "
+            "C ::= SEQUENCE OF INTEGER "
+            "E ::= ENUMERATED { x(0), y(1) } "
+            "X ::= [5] EXPLICIT INTEGER "
+            "END",
+            'der')
+
+    def assert_decode_error(self, type_name, encoded):
+        with self.assertRaises(asn1tools.DecodeError) as cm:
+            self.foo.decode(type_name, encoded)
+
+        # Error messages must only report structural information, never the
+        # full encoded contents (which may contain key material).
+        self.assertNotIn(encoded.hex(), str(cm.exception))
+
+        return cm.exception
+
+    def test_minimal_length_short_form_boundaries(self):
+        # 0 and 127 use the one-octet short form.
+        self.assertEqual(self.foo.decode('A', b'\x02\x01\x00'), 0)
+        self.assertEqual(self.foo.decode('A', b'\x02\x01\x7f'), 127)
+
+        # 128 requires the long form with two length octets.
+        big_integer = b'\x01' + 127 * b'\x00'
+        encoded = b'\x02\x81\x80' + big_integer
+        self.assertEqual(self.foo.decode('A', encoded),
+                         int.from_bytes(big_integer, 'big'))
+
+        # A length of 127 encoded with the long form is non-minimal.
+        error = self.assert_decode_error(
+            'A', b'\x02\x81\x7f' + 127 * b'\x00')
+        self.assertIn('Non-minimal DER length', str(error))
+        self.assertEqual(error.offset, 1)
+
+        # A length of 1 with a leading zero length octet is non-minimal.
+        error = self.assert_decode_error('A', b'\x02\x82\x00\x01\x01')
+        self.assertIn('Non-minimal DER length', str(error))
+        self.assertEqual(error.offset, 1)
+
+    def test_truncated_contents_rejected(self):
+        # The length promises five contents octets, but only one is present.
+        error = self.assert_decode_error('A', b'\x02\x05\x01')
+        self.assertIn('Expected at least 5 contents byte(s)', str(error))
+
+        # Truncated long-form length octets are reported as missing data.
+        error = self.assert_decode_error('A', b'\x02\x82\x01')
+        self.assertIsInstance(error, asn1tools.DecodeError)
+
+    def test_indefinite_length_rejected(self):
+        # Indefinite length is a BER construct and must be rejected by DER.
+        error = self.assert_decode_error(
+            'B', b'\x30\x80\x02\x01\x01\x00\x00')
+        self.assertIn('indefinite', str(error))
+        self.assertEqual(error.offset, 1)
+
+    def test_minimal_integer_encoding(self):
+        canonical = [
+            (0, b'\x02\x01\x00'),
+            (1, b'\x02\x01\x01'),
+            (127, b'\x02\x01\x7f'),
+            (128, b'\x02\x02\x00\x80'),
+            (255, b'\x02\x02\x00\xff'),
+            (-1, b'\x02\x01\xff'),
+            (-128, b'\x02\x01\x80'),
+            (-129, b'\x02\x02\xff\x7f'),
+        ]
+
+        for value, encoded in canonical:
+            self.assertEqual(self.foo.decode('A', encoded), value)
+
+        # Redundant leading 0x00 on a positive integer.
+        error = self.assert_decode_error('A', b'\x02\x02\x00\x01')
+        self.assertIn('redundant leading 0x00', str(error))
+
+        # Redundant leading 0xff on a negative integer.
+        error = self.assert_decode_error('A', b'\x02\x02\xff\xff')
+        self.assertIn('redundant leading 0xff', str(error))
+
+        # Empty integer contents are not a valid DER integer.
+        error = self.assert_decode_error('A', b'\x02\x00')
+        self.assertIn('non-empty integer', str(error))
+
+    def test_enumerated_uses_minimal_integer_encoding(self):
+        self.assertEqual(self.foo.decode('E', b'\x0a\x01\x01'), 'y')
+
+        error = self.assert_decode_error('E', b'\x0a\x02\x00\x01')
+        self.assertIn('redundant leading 0x00', str(error))
+
+    def test_nested_constructed_contents_stay_within_parent(self):
+        # The child INTEGER declares five contents octets but the enclosing
+        # SEQUENCE only provides three.
+        error = self.assert_decode_error(
+            'B', b'\x30\x03\x02\x05\x01\x02\x03\x04\x05')
+        self.assertIsInstance(error, asn1tools.DecodeError)
+
+        # The child is shorter than the enclosing SEQUENCE, leaving stray
+        # octets inside the constructed contents.
+        error = self.assert_decode_error(
+            'B', b'\x30\x05\x02\x01\x01\x00\x00')
+        self.assertIn('Constructed SEQUENCE contents end at offset',
+                      str(error))
+
+        # SEQUENCE OF elements must fill the constructed contents as well.
+        error = self.assert_decode_error(
+            'C', b'\x30\x05\x02\x01\x01\x00\x00')
+        self.assertIsInstance(error, asn1tools.DecodeError)
+
+        # A well-formed nested structure still decodes unchanged.
+        self.assertEqual(
+            self.foo.decode('B', b'\x30\x03\x02\x01\x01'),
+            {'a': 1})
+        self.assertEqual(
+            self.foo.decode('C', b'\x30\x03\x02\x01\x01'),
+            [1])
+
+    def test_explicit_tag_contents_are_bounded(self):
+        self.assertEqual(
+            self.foo.decode('X', b'\xa5\x03\x02\x01\x01'), 1)
+
+        # Non-minimal length on either the wrapper or its inner value.
+        error = self.assert_decode_error(
+            'X', b'\xa5\x81\x03\x02\x01\x01')
+        self.assertIn('Non-minimal DER length', str(error))
+
+        error = self.assert_decode_error(
+            'X', b'\xa5\x04\x02\x81\x01\x01\x00')
+        self.assertIn('Non-minimal DER length', str(error))
+
+    def test_trailing_bytes_rejected(self):
+        error = self.assert_decode_error('A', b'\x02\x01\x01\x00')
+        self.assertIn('Trailing data', str(error))
+        self.assertEqual(error.offset, 3)
+
+        # Trailing bytes after a constructed value are also rejected.
+        error = self.assert_decode_error(
+            'B', b'\x30\x03\x02\x01\x01\xaa')
+        self.assertIn('Trailing data', str(error))
+
+    def test_decode_with_length_rejects_trailing_bytes(self):
+        decoded, length = self.foo.decode_with_length(
+            'A', b'\x02\x01\x01')
+        self.assertEqual(decoded, 1)
+        self.assertEqual(length, 3)
+
+        with self.assertRaises(asn1tools.DecodeError):
+            self.foo.decode_with_length('A', b'\x02\x01\x01\x00')
+
+    def test_ber_still_accepts_relaxed_encodings(self):
+        ber_foo = asn1tools.compile_string(
+            "Foo DEFINITIONS ::= BEGIN A ::= INTEGER "
+            "B ::= SEQUENCE { a INTEGER } END",
+            'ber')
+
+        # The same malformed DER encodings remain valid BER inputs.
+        self.assertEqual(ber_foo.decode('A', b'\x02\x81\x01\x01'), 1)
+        self.assertEqual(ber_foo.decode('A', b'\x02\x02\x00\x01'), 1)
+        self.assertEqual(
+            ber_foo.decode('B', b'\x30\x80\x02\x01\x01\x00\x00'),
+            {'a': 1})
+
+
 if __name__ == '__main__':
     unittest.main()
