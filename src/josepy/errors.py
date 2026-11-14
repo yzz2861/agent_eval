@@ -1,6 +1,6 @@
 """JOSE errors."""
 
-from typing import Any
+from typing import Any, Optional
 
 
 class Error(Exception):
@@ -16,6 +16,34 @@ class DeserializationError(Error):
 
 class SerializationError(Error):
     """JSON serialization error."""
+
+
+class IdentifierError(Error):
+    """Invalid ACME identifier error.
+
+    The error message deliberately contains only the identifier type,
+    its position in the request and a short reason. The offending value
+    (and never the full CSR) is not echoed back.
+
+    :ivar str identifier_type: Type of the identifier, e.g. 'dns' or 'ip'.
+    :ivar str reason: Short human readable reason for the failure.
+    :ivar int position: Position of the identifier in the request,
+        or None if not applicable.
+
+    """
+
+    def __init__(self, identifier_type: str, reason: str, position: Optional[int] = None) -> None:
+        self.identifier_type = identifier_type
+        self.reason = reason
+        self.position = position
+        super().__init__(str(self))
+
+    def __str__(self) -> str:
+        if self.position is not None:
+            return "Invalid {0} identifier at position {1}: {2}".format(
+                self.identifier_type, self.position, self.reason
+            )
+        return "Invalid {0} identifier: {1}".format(self.identifier_type, self.reason)
 
 
 class UnrecognizedTypeError(DeserializationError):

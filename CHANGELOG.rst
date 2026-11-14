@@ -4,6 +4,11 @@ Changelog
 2.4.0 (main)
 ------------
 * Dropped support for Python 3.10.
+* Added josepy.identifiers with canonical validation for ACME
+  identifiers and subjectAltNames: DNS names are normalized to
+  lowercase A-labels without a trailing dot, wildcards are restricted
+  to a single leftmost label, and empty labels, IP addresses in DNS
+  identifiers, paths, ports and other illegal characters are rejected.
 
 2.3.0 (2026-11-10)
 ------------------

@@ -31,8 +31,20 @@ from josepy.b64 import b64decode, b64encode
 from josepy.errors import (
     DeserializationError,
     Error,
+    IdentifierError,
     SerializationError,
     UnrecognizedTypeError,
+)
+from josepy.identifiers import (
+    DNSIdentifier,
+    Identifier,
+    IPIdentifier,
+    canonicalize_dns_name,
+    decode_identifier,
+    dns_identifiers,
+    encode_identifier,
+    identifier_from_x509,
+    identifiers_from_csr,
 )
 from josepy.interfaces import JSONDeSerializable
 from josepy.json_util import (
