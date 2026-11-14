@@ -79,6 +79,12 @@ def decode_huffman(huffman_string: bytes | bytearray | memoryview | None) -> byt
     """
     Given a bytestring of Huffman-encoded data for HPACK, returns a bytestring
     of the decompressed data.
+
+    The validation is strict, as required by RFC 7541 Section 5.2: the EOS
+    symbol must never appear in the encoded data, and any terminal padding
+    must be a prefix of the EOS symbol, i.e. at most 7 bits, all set to 1.
+    Any violation raises HPACKDecodingError pointing at the offending input
+    offset, and no partially decoded output is produced.
     """
     if not huffman_string:
         return b""
@@ -96,12 +102,15 @@ def decode_huffman(huffman_string: bytes | bytearray | memoryview | None) -> byt
     # This loop is unrolled somewhat. Because we use a nibble, not a byte, we
     # need to handle each nibble twice. We unroll that: it makes the loop body
     # a bit longer, but that's ok.
-    for input_byte in huffman_string:
+    for offset, input_byte in enumerate(huffman_string):
         index = (state * 16) + (input_byte >> 4)
         state, flags, output_byte = HUFFMAN_TABLE[index]
 
         if flags & HUFFMAN_FAIL:
-            msg = "Invalid Huffman string"
+            # The HPACK Huffman code space is complete: the only bit pattern
+            # that cannot be decoded is the 30-bit EOS symbol, which must not
+            # appear in encoded header strings (RFC 7541 Section 5.2).
+            msg = f"Invalid Huffman string: EOS symbol is not allowed (byte offset {offset})"
             raise HPACKDecodingError(msg)
 
         if flags & HUFFMAN_EMIT_SYMBOL:
@@ -111,14 +120,17 @@ def decode_huffman(huffman_string: bytes | bytearray | memoryview | None) -> byt
         state, flags, output_byte = HUFFMAN_TABLE[index]
 
         if flags & HUFFMAN_FAIL:
-            msg = "Invalid Huffman string"
+            msg = f"Invalid Huffman string: EOS symbol is not allowed (byte offset {offset})"
             raise HPACKDecodingError(msg)
 
         if flags & HUFFMAN_EMIT_SYMBOL:
             decoded_bytes.append(output_byte)
 
     if not (flags & HUFFMAN_COMPLETE):
-        msg = "Incomplete Huffman string"
+        msg = (
+            "Incomplete Huffman string: terminal padding must be all 1 bits "
+            "and at most 7 bits long"
+        )
         raise HPACKDecodingError(msg)
 
     return bytes(decoded_bytes)

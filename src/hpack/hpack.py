@@ -116,11 +116,17 @@ def decode_integer(data: bytes | memoryview, prefix_bits: int) -> tuple[int, int
                     #   > values, which can waste octets and could be used to overflow integer
                     #   > values.  Integer encodings that exceed implementation limits -- in
                     #   > value or octet length -- MUST be treated as decoding errors.
-                    msg = f"Variable integer representation is too long: {data!r}"
+                    msg = (
+                        "Variable integer representation is too long: "
+                        f"exceeds {VARINT_MAX_LENGTH} octets at input offset {index - 1}"
+                    )
                     raise HPACKDecodingError(msg)
 
     except IndexError as err:
-        msg = f"Unable to decode HPACK integer representation from {data!r}"
+        msg = (
+            "Unable to decode HPACK integer representation: "
+            f"input truncated at offset {index}"
+        )
         raise HPACKDecodingError(msg) from err
 
     log.debug("Decoded %d, consumed %d bytes", number, index)
@@ -513,30 +519,41 @@ class Decoder:
             # update.
             encoding_update = bool(current & 0x20)
 
-            if indexed:
-                header, consumed = self._decode_indexed(
-                    data_mem[current_index:],
-                )
-            elif literal_index:
-                # It's a literal header that does affect the header table.
-                header, consumed = self._decode_literal_index(
-                    data_mem[current_index:],
-                )
-            elif encoding_update:
-                # It's an update to the encoding context. These are forbidden
-                # in a header block after any actual header.
-                if headers:
-                    msg = "Table size update not at the start of the block"
-                    raise HPACKDecodingError(msg)
-                consumed = self._update_encoding_context(
-                    data_mem[current_index:],
-                )
-                header = None
-            else:
-                # It's a literal header that does not affect the header table.
-                header, consumed = self._decode_literal_no_index(
-                    data_mem[current_index:],
-                )
+            # Any decoding failure must abort the whole block: no partially
+            # decoded header list may be returned. Errors are re-raised with
+            # the offset into the input block at which decoding failed.
+            # Subclasses of HPACKDecodingError (e.g. InvalidTableIndexError)
+            # already carry enough context and are propagated unchanged.
+            try:
+                if indexed:
+                    header, consumed = self._decode_indexed(
+                        data_mem[current_index:],
+                    )
+                elif literal_index:
+                    # It's a literal header that does affect the header table.
+                    header, consumed = self._decode_literal_index(
+                        data_mem[current_index:],
+                    )
+                elif encoding_update:
+                    # It's an update to the encoding context. These are forbidden
+                    # in a header block after any actual header.
+                    if headers:
+                        msg = "Table size update not at the start of the block"
+                        raise HPACKDecodingError(msg)
+                    consumed = self._update_encoding_context(
+                        data_mem[current_index:],
+                    )
+                    header = None
+                else:
+                    # It's a literal header that does not affect the header table.
+                    header, consumed = self._decode_literal_no_index(
+                        data_mem[current_index:],
+                    )
+            except HPACKDecodingError as err:
+                if type(err) is not HPACKDecodingError:
+                    raise
+                msg = f"Invalid header block at offset {current_index}: {err}"
+                raise HPACKDecodingError(msg) from err
 
             if header:
                 headers.append(header)
