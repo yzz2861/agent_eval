@@ -222,3 +222,189 @@ def test_fido_canonical_key_order(value, expected):
 def test_bytes_like_encoding(value, expected):
     """Test that bytearray and memoryview are encoded as bytes."""
     assert cbor2hex(value) == expected
+
+
+# Strict-mode decoding tests
+
+
+@pytest.mark.parametrize("data,value", _TEST_VECTORS)
+def test_strict_test_vectors(data, value):
+    """All canonical test vectors must also decode in strict mode."""
+    assert cbor.decode(bytes.fromhex(data), strict=True) == value
+
+
+def test_strict_distinct_key_types():
+    """Integer 1 and text "1" are different keys and must both survive."""
+    # {1: 0, "1": 1}
+    data = bytes.fromhex("a20100613101")
+    assert cbor.decode(data, strict=True) == {1: 0, "1": 1}
+    assert cbor.decode(data) == {1: 0, "1": 1}
+
+
+def test_strict_distinct_int_and_bool_keys():
+    """Boolean true and integer 1 are different keys in CBOR."""
+    # {true: 0, 1: 1} is not a duplicate key situation
+    data = bytes.fromhex("a2f5000101")
+    cbor.decode(data, strict=True)  # Must not raise
+
+
+def test_duplicate_key_non_strict_last_wins():
+    """Non-strict mode keeps existing behavior: last value wins."""
+    data = bytes.fromhex("a2010001 01".replace(" ", ""))
+    assert cbor.decode(data) == {1: 1}
+
+
+def test_strict_duplicate_int_key():
+    data = bytes.fromhex("a201000101")
+    with pytest.raises(ValueError, match="Duplicate map key"):
+        cbor.decode(data, strict=True)
+
+
+def test_strict_duplicate_text_key():
+    # {"a": 0, "a": 1}
+    data = bytes.fromhex("a2616100616101")
+    with pytest.raises(ValueError, match="Duplicate map key"):
+        cbor.decode(data, strict=True)
+
+
+def test_strict_duplicate_key_error_message():
+    """Errors indicate the path and key type, without echoing payload data."""
+    # {1: 0, 1: h'deadbeef'}
+    data = bytes.fromhex("a201000144deadbeef")
+    with pytest.raises(ValueError) as excinfo:
+        cbor.decode(data, strict=True)
+    message = str(excinfo.value)
+    assert "Duplicate map key" in message
+    assert "'int'" in message
+    assert "$" in message
+    assert "deadbeef" not in message
+
+
+def test_strict_duplicate_key_nested():
+    """Duplicate keys are detected in nested maps, with a path."""
+    # {"a": {1: 0, 1: 1}}
+    data = bytes.fromhex("a16161a201000101")
+    with pytest.raises(ValueError) as excinfo:
+        cbor.decode(data, strict=True)
+    message = str(excinfo.value)
+    assert "Duplicate map key" in message
+    assert "$['a']" in message
+    # Non-strict mode still accepts it
+    assert cbor.decode(data) == {"a": {1: 1}}
+
+
+def test_strict_duplicate_key_canonical_collision():
+    """0 encoded as 0x00 and non-canonically as 0x1800 is the same key."""
+    # {0: 0, 0(non-canonical): 1}
+    data = bytes.fromhex("a20000180001")
+    with pytest.raises(ValueError):
+        cbor.decode(data, strict=True)
+    # Non-strict mode accepts and collapses to a single key
+    assert cbor.decode(data) == {0: 1}
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        "1800",  # 0 encoded with 1 byte
+        "190017",  # 23 encoded with 2 bytes
+        "1a0000ffff",  # 65535 encoded with 4 bytes
+        "1b00000000ffffffff",  # 2**32-1 encoded with 8 bytes
+        "3800",  # -1 encoded with 1 byte
+    ],
+)
+def test_strict_noncanonical_integers(data):
+    value = bytes.fromhex(data)
+    with pytest.raises(ValueError, match="Non-canonical integer"):
+        cbor.decode(value, strict=True)
+    # Non-strict mode decodes them as before
+    cbor.decode(value)
+
+
+def test_depth_limit():
+    """Deeply nested arrays are rejected in both modes."""
+    bomb = b"\x81" * 1000 + b"\x00"
+    for strict in (False, True):
+        with pytest.raises(ValueError, match="nesting depth"):
+            cbor.decode(bomb, strict=strict)
+    # A legitimately nested structure still decodes
+    ok = b"\x81" * 50 + b"\x00"
+    value = cbor.decode(ok)
+    for _ in range(50):
+        value = value[0]
+    assert value == 0
+
+
+def test_strict_string_length_limit():
+    data = b"\x58\x40" + b"\x00" * 64  # 64-byte byte string
+    with pytest.raises(ValueError, match="exceeds maximum"):
+        cbor.decode(data, strict=True, max_string_length=32)
+    # Limit is not enforced in non-strict mode
+    assert cbor.decode(data, max_string_length=32) == b"\x00" * 64
+    # Default limit is generous enough for real-world data
+    assert cbor.decode(data, strict=True) == b"\x00" * 64
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"",  # Empty input
+        b"\x18",  # Truncated 1-byte integer
+        b"\x19\x01",  # Truncated 2-byte integer
+        b"\x1b\x00\x00",  # Truncated 8-byte integer
+        b"\x44\x01\x02",  # Truncated byte string
+        b"\x61",  # Truncated text string
+        b"\x82\x01",  # Truncated array
+        b"\xa1\x01",  # Truncated map (missing value)
+        b"\xa1",  # Truncated map (missing key)
+        b"\x9b\xff\xff\xff\xff\xff\xff\xff\xff",  # Huge array, no elements
+    ],
+)
+def test_truncated_data(data):
+    """Truncated input raises a clean ValueError in both modes."""
+    for strict in (False, True):
+        with pytest.raises(ValueError, match="Truncated"):
+            cbor.decode(data, strict=strict)
+
+
+def test_strict_invalid_map_key_type():
+    """Arrays and maps are not valid map keys in strict mode."""
+    data = bytes.fromhex("a18000")  # {[]: 0}
+    with pytest.raises(ValueError, match="Invalid map key"):
+        cbor.decode(data, strict=True)
+
+
+@pytest.mark.parametrize("data", ["f6", "f7", "f8ff", "f98000", "fb3ff199999999999a"])
+def test_strict_rejects_simple_and_float_values(data):
+    """Only booleans are supported simple values in strict mode.
+
+    This includes 0xf98000, the floating point value -0.0, which must not be
+    confused with the integer 0.
+    """
+    with pytest.raises(ValueError, match="simple or floating point"):
+        cbor.decode(bytes.fromhex(data), strict=True)
+
+
+def test_unsupported_major_type():
+    """Tags (major type 6) are rejected with a clean error."""
+    for strict in (False, True):
+        with pytest.raises(ValueError, match="major type"):
+            cbor.decode(bytes.fromhex("c000"), strict=strict)
+
+
+def test_strict_decode_from_returns_rest():
+    data = bytes.fromhex("a201000301") + b"trailing"
+    value, rest = cbor.decode_from(data, strict=True)
+    assert value == {1: 0, 3: 1}
+    assert rest == b"trailing"
+
+
+def test_strict_decode_deterministic():
+    """The same malformed input always produces the same error."""
+    data = bytes.fromhex("a16161a201000101")
+    results = set()
+    for _ in range(3):
+        with pytest.raises(ValueError) as excinfo:
+            cbor.decode(data, strict=True)
+        results.add(str(excinfo.value))
+    assert len(results) == 1

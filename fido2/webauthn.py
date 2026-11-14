@@ -117,7 +117,7 @@ class AttestedCredentialData(bytes):
         reader = ByteBuffer(data)
         aaguid = Aaguid(reader.read(16))
         cred_id = reader.read(reader.unpack(">H"))
-        pub_key, rest = cbor.decode_from(reader.read())
+        pub_key, rest = cbor.decode_from(reader.read(), strict=True)
         return aaguid, cred_id, CoseKey.parse(pub_key), rest
 
     @classmethod
@@ -221,7 +221,7 @@ class AuthenticatorData(bytes):
         object.__setattr__(self, "credential_data", credential_data)
 
         if self.flags & AuthenticatorData.FLAG.ED:
-            extensions, rest = cbor.decode_from(rest)
+            extensions, rest = cbor.decode_from(rest, strict=True)
         else:
             extensions = None
         object.__setattr__(self, "extensions", extensions)
@@ -300,7 +300,7 @@ class AttestationObject(bytes):  # , Mapping[str, Any]):
     def __init__(self, _: bytes):
         super().__init__()
 
-        data = cast(Mapping[str, Any], cbor.decode(bytes(self)))
+        data = cast(Mapping[str, Any], cbor.decode(bytes(self), strict=True))
         object.__setattr__(self, "fmt", data["fmt"])
         object.__setattr__(self, "auth_data", AuthenticatorData(data["authData"]))
         object.__setattr__(self, "att_stmt", data["attStmt"])

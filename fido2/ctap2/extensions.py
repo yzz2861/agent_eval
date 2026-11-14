@@ -750,7 +750,7 @@ class PreviewSignExtension(Ctap2Extension):
                     PreviewSignExtension.NAME
                 ][7]
                 att_resp = AttestationResponse.from_dict(
-                    cast(Mapping, cbor.decode(att_obj_bytes))
+                    cast(Mapping, cbor.decode(att_obj_bytes, strict=True))
                 )
                 att_obj = AttestationObject.create(
                     att_resp.fmt, att_resp.auth_data, att_resp.att_stmt

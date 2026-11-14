@@ -289,14 +289,16 @@ class Ctap2:
         enc = response[1:]
         if not enc:
             return {}
-        decoded = cbor.decode(enc)
         if self._strict_cbor:
+            decoded = cbor.decode(enc, strict=True)
             expected = cbor.encode(decoded)
             if expected != enc:
                 raise ValueError(
                     "Non-canonical CBOR from Authenticator.\n"
                     f"Got: {enc.hex()}\nExpected: {expected.hex()}"
                 )
+        else:
+            decoded = cbor.decode(enc)
         if isinstance(decoded, Mapping):
             return cast(Mapping[int, Any], decoded)
         raise TypeError("Decoded value of wrong type")

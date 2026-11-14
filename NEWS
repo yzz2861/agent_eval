@@ -1,6 +1,10 @@
 * Version 2.2.2 (unreleased)
+ ** CBOR: Add strict decoding mode (cbor.decode/decode_from with strict=True),
+   rejecting duplicate map keys, non-canonical integers, non-boolean simple
+   values, and enforcing nesting depth and string length bounds. Attestation
+   and assertion parsing now uses strict mode by default.
  ** Attestation: Use cryptography's certificate issuer verification when available,
-    supporting additional signature algorithms while retaining the legacy fallback.
+   supporting additional signature algorithms while retaining the legacy fallback.
  ** MDS: Allow omitted userVerificationDetails and attachmentHint fields, as
     specified in Metadata Statement 3.1.1.
 

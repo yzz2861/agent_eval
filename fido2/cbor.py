@@ -45,6 +45,21 @@ CborType: TypeAlias = int | bool | str | bytes | Sequence[Any] | Mapping[Any, An
 # TODO: Requires Python 3.12, replace with collections.abc.Buffer
 Buffer: TypeAlias = bytes | bytearray | memoryview
 
+# Bounds applied when decoding CBOR data. The nesting depth of arrays and maps
+# is always limited (to prevent stack exhaustion from deeply nested inputs),
+# while the string length limit is enforced in strict mode only.
+MAX_DEPTH = 100
+MAX_STRING_LENGTH = 2**20  # 1 MiB
+
+
+class CborError(ValueError):
+    """Error raised when decoding invalid or non-canonical CBOR data.
+
+    The error message indicates the path to the offending value and, where
+    relevant, the CBOR data type involved. It never echoes back the decoded
+    payload itself.
+    """
+
 
 def _dump_int(data: int, mt: int = 0) -> bytes:
     if data < 0:
@@ -105,67 +120,155 @@ _SERIALIZERS: Sequence[tuple[type | UnionType, Callable[[Any], bytes]]] = [
 ]
 
 
-def _load_int(ai: int, data: bytes) -> tuple[int, bytes]:
-    if ai < 24:
-        return ai, data
-    elif ai == 24:
-        return data[0], data[1:]
-    elif ai == 25:
-        return struct.unpack_from(">H", data)[0], data[2:]
-    elif ai == 26:
-        return struct.unpack_from(">I", data)[0], data[4:]
-    elif ai == 27:
-        return struct.unpack_from(">Q", data)[0], data[8:]
-    raise ValueError("Invalid additional information")
+def _key_identity(key: Any, path: str) -> tuple[str, Any]:
+    """Identity of a map key, based on its CBOR data type and value.
+
+    This ensures that values of different CBOR types are never considered
+    the same key, eg. the integer 1 and the text string "1", or the
+    boolean True and the integer 1.
+    """
+    if isinstance(key, bool):
+        return ("simple", key)
+    if isinstance(key, int):
+        return ("int", key)
+    if isinstance(key, str):
+        return ("text", key)
+    if isinstance(key, (bytes, bytearray, memoryview)):
+        return ("bytes", bytes(key))
+    raise CborError(f"Invalid map key of type {type(key).__name__!r} at {path}")
 
 
-def _load_nint(ai: int, data: bytes) -> tuple[int, bytes]:
-    val, rest = _load_int(ai, data)
-    return -1 - val, rest
+def _key_label(key: Any, index: int) -> str:
+    """Label identifying a map entry in an error path.
+
+    Integers, booleans and (truncated) short text strings are shown
+    directly; other types are identified by type and position only, to
+    avoid echoing back potentially sensitive binary data.
+    """
+    if isinstance(key, bool):
+        return repr(key)
+    if isinstance(key, int):
+        return str(key)
+    if isinstance(key, str):
+        return repr(key[:16] + ("..." if len(key) > 16 else ""))
+    return f"<{type(key).__name__} #{index}>"
 
 
-def _load_bool(ai: int, data: bytes) -> tuple[bool, bytes]:
-    return ai == 21, data
+class _Decoder:
+    """CBOR decoder with configurable strictness and resource bounds."""
 
+    def __init__(self, strict: bool, max_depth: int, max_string_length: int):
+        self._strict = strict
+        self._max_depth = max_depth
+        self._max_string_length = max_string_length
+        self._handlers: Mapping[int, Callable] = {
+            0: self._load_uint,
+            1: self._load_nint,
+            2: self._load_bytes,
+            3: self._load_text,
+            4: self._load_array,
+            5: self._load_map,
+            7: self._load_bool,
+        }
 
-def _load_bytes(ai: int, data: bytes) -> tuple[bytes, bytes]:
-    ln, data = _load_int(ai, data)
-    return data[:ln], data[ln:]
+    def decode(self, data: bytes, path: str, depth: int) -> tuple[Any, bytes]:
+        if depth > self._max_depth:
+            raise CborError(
+                f"Maximum CBOR nesting depth ({self._max_depth}) exceeded at {path}"
+            )
+        if not data:
+            raise CborError(f"Truncated CBOR data at {path}")
+        fb = data[0]
+        handler = self._handlers.get(fb >> 5)
+        if handler is None:
+            raise CborError(f"Unsupported CBOR major type {fb >> 5} at {path}")
+        return handler(fb & 0b11111, data[1:], path, depth)
 
+    def _load_int(self, ai: int, data: bytes, path: str) -> tuple[int, bytes]:
+        if ai < 24:
+            return ai, data
+        sizes = {24: 1, 25: 2, 26: 4, 27: 8}
+        size = sizes.get(ai)
+        if size is None:
+            raise CborError(f"Invalid additional information {ai} at {path}")
+        if len(data) < size:
+            raise CborError(f"Truncated CBOR data at {path}")
+        value = int.from_bytes(data[:size], "big")
+        if self._strict:
+            # Canonical form requires the shortest possible encoding.
+            minimum = {1: 24, 2: 0x100, 4: 0x10000, 8: 0x100000000}[size]
+            if value < minimum:
+                raise CborError(f"Non-canonical integer encoding at {path}")
+        return value, data[size:]
 
-def _load_text(ai: int, data: bytes) -> tuple[str, bytes]:
-    enc, rest = _load_bytes(ai, data)
-    return enc.decode("utf8"), rest
+    def _load_uint(
+        self, ai: int, data: bytes, path: str, depth: int
+    ) -> tuple[int, bytes]:
+        return self._load_int(ai, data, path)
 
+    def _load_nint(
+        self, ai: int, data: bytes, path: str, depth: int
+    ) -> tuple[int, bytes]:
+        val, rest = self._load_int(ai, data, path)
+        return -1 - val, rest
 
-def _load_array(ai: int, data: bytes) -> tuple[Sequence[CborType], bytes]:
-    ln, data = _load_int(ai, data)
-    values = []
-    for i in range(ln):
-        val, data = decode_from(data)
-        values.append(val)
-    return values, data
+    def _load_bool(
+        self, ai: int, data: bytes, path: str, depth: int
+    ) -> tuple[bool, bytes]:
+        if self._strict and ai not in (20, 21):
+            raise CborError(f"Unsupported simple or floating point value at {path}")
+        return ai == 21, data
 
+    def _load_bytes(
+        self, ai: int, data: bytes, path: str, depth: int
+    ) -> tuple[bytes, bytes]:
+        ln, data = self._load_int(ai, data, path)
+        if self._strict and ln > self._max_string_length:
+            raise CborError(
+                f"String of length {ln} exceeds maximum "
+                f"({self._max_string_length}) at {path}"
+            )
+        if len(data) < ln:
+            raise CborError(f"Truncated CBOR data at {path}")
+        return data[:ln], data[ln:]
 
-def _load_map(ai: int, data: bytes) -> tuple[Mapping[CborType, CborType], bytes]:
-    ln, data = _load_int(ai, data)
-    values = {}
-    for i in range(ln):
-        k, data = decode_from(data)
-        v, data = decode_from(data)
-        values[k] = v
-    return values, data
+    def _load_text(
+        self, ai: int, data: bytes, path: str, depth: int
+    ) -> tuple[str, bytes]:
+        enc, rest = self._load_bytes(ai, data, path, depth)
+        try:
+            return enc.decode("utf8"), rest
+        except UnicodeDecodeError:
+            raise CborError(f"Invalid UTF-8 text string at {path}") from None
 
+    def _load_array(
+        self, ai: int, data: bytes, path: str, depth: int
+    ) -> tuple[Sequence[CborType], bytes]:
+        ln, data = self._load_int(ai, data, path)
+        values = []
+        for i in range(ln):
+            val, data = self.decode(data, f"{path}[{i}]", depth + 1)
+            values.append(val)
+        return values, data
 
-_DESERIALIZERS = {
-    0: _load_int,
-    1: _load_nint,
-    2: _load_bytes,
-    3: _load_text,
-    4: _load_array,
-    5: _load_map,
-    7: _load_bool,
-}
+    def _load_map(
+        self, ai: int, data: bytes, path: str, depth: int
+    ) -> tuple[Mapping[CborType, CborType], bytes]:
+        ln, data = self._load_int(ai, data, path)
+        values = {}
+        seen = set()
+        for i in range(ln):
+            k, data = self.decode(data, f"{path}[{i}]", depth + 1)
+            if self._strict:
+                identity = _key_identity(k, path)
+                if identity in seen:
+                    raise CborError(
+                        f"Duplicate map key of type {identity[0]!r} at {path}"
+                    )
+                seen.add(identity)
+            v, data = self.decode(data, f"{path}[{_key_label(k, i)}]", depth + 1)
+            values[k] = v
+        return values, data
 
 
 def encode(data: CborType) -> bytes:
@@ -176,22 +279,54 @@ def encode(data: CborType) -> bytes:
     raise ValueError(f"Unsupported value: {data!r}")
 
 
-def decode_from(data: bytes) -> tuple[Any, bytes]:
+def decode_from(
+    data: bytes,
+    *,
+    strict: bool = False,
+    max_depth: int = MAX_DEPTH,
+    max_string_length: int = MAX_STRING_LENGTH,
+) -> tuple[Any, bytes]:
     """Decodes a CBOR-encoded value from the start of a byte string.
 
     Additional data after a valid CBOR object is returned as well.
 
+    :param data: The CBOR-encoded data to decode.
+    :param strict: When True, reject non-canonical input: duplicate map
+        keys, non-minimal integer encodings, non-boolean simple values,
+        and byte/text strings exceeding max_string_length.
+    :param max_depth: Maximum nesting depth of arrays and maps.
+    :param max_string_length: Maximum length of byte and text strings,
+        enforced in strict mode only.
     :return: The decoded object, and any remaining data."""
-    fb = data[0]
-    return _DESERIALIZERS[fb >> 5](fb & 0b11111, data[1:])
+    decoder = _Decoder(strict, max_depth, max_string_length)
+    return decoder.decode(data, "$", 0)
 
 
-def decode(data) -> CborType:
+def decode(
+    data: bytes,
+    *,
+    strict: bool = False,
+    max_depth: int = MAX_DEPTH,
+    max_string_length: int = MAX_STRING_LENGTH,
+) -> CborType:
     """Decodes data from a CBOR-encoded byte string.
 
     Also validates that no extra data follows the encoded object.
+
+    :param data: The CBOR-encoded data to decode.
+    :param strict: When True, reject non-canonical input: duplicate map
+        keys, non-minimal integer encodings, non-boolean simple values,
+        and byte/text strings exceeding max_string_length.
+    :param max_depth: Maximum nesting depth of arrays and maps.
+    :param max_string_length: Maximum length of byte and text strings,
+        enforced in strict mode only.
     """
-    value, rest = decode_from(data)
+    value, rest = decode_from(
+        data,
+        strict=strict,
+        max_depth=max_depth,
+        max_string_length=max_string_length,
+    )
     if rest != b"":
         raise ValueError("Extraneous data")
     return value
