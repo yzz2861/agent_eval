@@ -1,0 +1,8 @@
+syntax: glob
+
+*.pyc
+__pycache__/
+*.egg-info/
+dev/
+build/
+dist/
