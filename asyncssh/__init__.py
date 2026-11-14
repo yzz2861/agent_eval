@@ -112,7 +112,9 @@ from .sftp import SFTPConnectionLost, SFTPOpUnsupported
 from .sftp import SFTPAttrs, SFTPVFSAttrs, SFTPName, SFTPLimits
 from .sftp import SEEK_SET, SEEK_CUR, SEEK_END
 
-from .sshsig import SSHAllowedSigners
+from .sshsig import SSHAllowedSigners, SSHSIGPolicy
+from .sshsig import SSHSIGError, SSHSIGParseError, SSHSIGSignatureError
+from .sshsig import SSHSIGPolicyError
 from .sshsig import import_allowed_signers, read_allowed_signers
 from .sshsig import create_sshsig, validate_sshsig
 
@@ -157,6 +159,8 @@ __all__ = [
     'SSHServerConnectionOptions', 'SSHServerProcess',
     'SSHServerProcessFactory', 'SSHServerSession',
     'SSHServerSessionFactory', 'SSHSocketSessionFactory',
+    'SSHSIGError', 'SSHSIGParseError', 'SSHSIGPolicy',
+    'SSHSIGPolicyError', 'SSHSIGSignatureError',
     'SSHSubprocessProtocol', 'SSHSubprocessReadPipe',
     'SSHSubprocessTransport', 'SSHSubprocessWritePipe', 'SSHTCPChannel',
     'SSHTCPSession', 'SSHTunTapChannel', 'SSHTunTapSession',

@@ -26,13 +26,13 @@ import time
 
 from hashlib import sha256, sha512
 from pathlib import PurePath
-from typing import List, Optional, Sequence, Union, cast
+from typing import List, Optional, Sequence, Tuple, Union, cast
 
 from .misc import BytesOrFilePath, FilePath, OptionsParser
 from .misc import open_file, read_file, match_base64, wrap_base64, parse_time
 from .packet import String, UInt32, PacketDecodeError, SSHPacket
 from .pattern import WildcardPatternList
-from .public_key import CERT_TYPE_ANY, KeyImportError, KeyPairListArg
+from .public_key import KeyImportError, KeyPairListArg
 from .public_key import SSHKey, SSHOpenSSHCertificate
 from .public_key import decode_ssh_public_key, decode_ssh_certificate
 from .public_key import import_public_key, load_keypairs
@@ -44,6 +44,103 @@ _SSHSIG_VERSION = 1
 SSHAllowedSignersArg = Union[bytes, str, Sequence[str], 'SSHAllowedSigners']
 
 _hashes = {b'sha256': sha256, b'sha512': sha512}
+
+
+class SSHSIGError(ValueError):
+    """SSHSIG validation error
+
+       This is the base class for all errors raised while validating
+       an SSHSIG signature. It is a subclass of :exc:`ValueError`.
+
+    """
+
+
+class SSHSIGParseError(SSHSIGError):
+    """SSHSIG parsing error
+
+       This exception is raised when an SSHSIG signature cannot be
+       parsed, including malformed armored data, an invalid magic or
+       version, an unparseable public key, an invalid namespace or
+       hash algorithm, or a truncated signature blob.
+
+    """
+
+
+class SSHSIGSignatureError(SSHSIGError):
+    """SSHSIG cryptographic signature error
+
+       This exception is raised when an SSHSIG signature is well-formed
+       but the cryptographic signature does not verify against the
+       data being validated.
+
+    """
+
+
+class SSHSIGPolicyError(SSHSIGError):
+    """SSHSIG policy rejection error
+
+       This exception is raised when a cryptographically valid SSHSIG
+       signature is rejected by the active :class:`SSHSIGPolicy`,
+       including namespace, principal, hash algorithm, or validity
+       period mismatches.
+
+    """
+
+
+class SSHSIGPolicy:
+    """Explicit validation policy for SSHSIG signatures
+
+       This class holds the policy used by :func:`validate_sshsig` to
+       decide whether a cryptographically valid signature may be trusted.
+       Every check is enabled by default and must be explicitly disabled
+       by the caller; no check is skipped implicitly.
+
+       The namespace, principal, hash algorithm, validity period, and
+       signed data are all bound together by this policy so that a
+       signature cannot be replayed across namespaces or principals.
+
+       :param check_namespace: (optional)
+           Whether the namespace embedded in the signature must match
+           the `namespace` argument, defaulting to `True`.
+       :param check_principal: (optional)
+           Whether the principal argument must be a non-empty string
+           and match an entry in the allowed signers list, defaulting
+           to `True`.
+       :param check_hash_algorithm: (optional)
+           Whether the hash algorithm embedded in the signature must
+           be one of the `allowed_hashes`, defaulting to `True`.
+       :param check_validity: (optional)
+           Whether the ``valid-after`` and ``valid-before`` options on
+           the matching allowed signers entry and the validity period
+           of any signing certificate are enforced, defaulting to
+           `True`.
+       :param check_signed_data: (optional)
+           Whether the cryptographic signature over the signed data is
+           verified, defaulting to `True`.
+       :param namespace: (optional)
+           The namespace the signature is expected to be bound to,
+           defaulting to ``'file'``.
+       :param allowed_hashes: (optional)
+           The hash algorithm names accepted by this policy, defaulting
+           to ``('sha256', 'sha512')``.
+
+    """
+
+    def __init__(self, *, check_namespace: bool = True,
+                 check_principal: bool = True,
+                 check_hash_algorithm: bool = True,
+                 check_validity: bool = True,
+                 check_signed_data: bool = True,
+                 namespace: str = 'file',
+                 allowed_hashes: Sequence[str] = ('sha256', 'sha512')):
+        self.check_namespace = check_namespace
+        self.check_principal = check_principal
+        self.check_hash_algorithm = check_hash_algorithm
+        self.check_validity = check_validity
+        self.check_signed_data = check_signed_data
+        self.namespace = namespace
+        self.allowed_hashes = tuple(
+            hash_name.encode('utf-8') for hash_name in allowed_hashes)
 
 
 class SSHAllowedSignersEntry(OptionsParser):
@@ -84,10 +181,12 @@ class SSHAllowedSignersEntry(OptionsParser):
         'valid-before': _set_time
     }
 
-    def match_options(self, principal: str, namespace: str):
+    def match_options(self, principal: str, namespace: str,
+                      check_principal: bool = True,
+                      check_validity: bool = True):
         """Match options in entry"""
 
-        if not self.principals.matches(principal):
+        if check_principal and not self.principals.matches(principal):
             return False
 
         namespaces = cast(Optional[WildcardPatternList],
@@ -96,15 +195,17 @@ class SSHAllowedSignersEntry(OptionsParser):
         if namespaces is not None and not namespaces.matches(namespace):
             return False
 
-        now = time.time()
+        if check_validity:
+            now = time.time()
 
-        valid_after = cast(Optional[int], self.options.get('valid-after'))
-        if valid_after is not None and now < valid_after:
-            return False
+            valid_after = cast(Optional[int], self.options.get('valid-after'))
+            if valid_after is not None and now < valid_after:
+                return False
 
-        valid_before = cast(Optional[int], self.options.get('valid-before'))
-        if valid_before is not None and now >= valid_before:
-            return False
+            valid_before = cast(Optional[int],
+                                self.options.get('valid-before'))
+            if valid_before is not None and now >= valid_before:
+                return False
 
         return True
 
@@ -143,11 +244,14 @@ class SSHAllowedSigners:
                              'allowed_signers')
 
     def validate(self, key: SSHKey, principal: str, namespace: str,
-                 ca: bool = False) -> bool:
+                 ca: bool = False, check_principal: bool = True,
+                 check_validity: bool = True) -> bool:
         """Return whether a public key or CA is valid for SSHSIG signing"""
 
         for entry in self._cert_entries if ca else self._key_entries:
-            if entry.key == key and entry.match_options(principal, namespace):
+            if entry.key == key and entry.match_options(
+                    principal, namespace, check_principal,
+                    check_validity):
                 return True
 
         return False
@@ -295,20 +399,139 @@ def create_sshsig(key: KeyPairListArg, data: BytesOrFilePath, *,
     return sig
 
 
+def _load_allowed_signers(
+        allowed_signers: SSHAllowedSignersArg) -> SSHAllowedSigners:
+    """Load an allowed signers list from the supported argument types"""
+
+    if isinstance(allowed_signers, bytes):
+        return import_allowed_signers(allowed_signers.decode())
+    elif isinstance(allowed_signers, SSHAllowedSigners):
+        return allowed_signers
+    else:
+        return read_allowed_signers(allowed_signers)
+
+
+def _parse_sshsig(sig: bytes) -> \
+        Tuple[SSHKey, Optional[SSHOpenSSHCertificate], str, bytes, bytes]:
+    """Parse an armored or raw SSHSIG signature blob"""
+
+    if sig[:1] == b'-':
+        end = sig.find(b'\n') + 1
+
+        if not end:
+            raise SSHSIGParseError('Incomplete SSH signature header')
+
+        line = sig[:end].rstrip()
+
+        if line != b'-----BEGIN SSH SIGNATURE-----':
+            raise SSHSIGParseError('Invalid SSH signature header')
+
+        try:
+            sig, _end = match_base64(sig[end:], 0, line)
+            sig = binascii.a2b_base64(sig)
+        except (ValueError, binascii.Error) as exc:
+            raise SSHSIGParseError('Invalid base64 SSH signature data') \
+                from exc
+
+    try:
+        packet = SSHPacket(sig)
+        magic = packet.get_bytes(6)
+        version = packet.get_uint32()
+        pubdata = packet.get_string()
+        namespace_raw = packet.get_string()
+        reserved = packet.get_string()
+        hash_name = packet.get_string()
+        sig = packet.get_string()
+        packet.check_end()
+    except PacketDecodeError as exc:
+        raise SSHSIGParseError('Truncated or malformed SSH signature') \
+            from exc
+
+    if magic != _SSHSIG_MAGIC or version != _SSHSIG_VERSION:
+        raise SSHSIGParseError('Invalid SSHSIG magic or version')
+
+    try:
+        cert = decode_ssh_certificate(pubdata)
+    except KeyImportError:
+        cert = None
+    else:
+        if cert.is_x509: # pragma: no cover
+            raise SSHSIGParseError('X.509 certificates not supported')
+
+        cert = cast(SSHOpenSSHCertificate, cert)
+
+    if cert is not None:
+        key = cert.key
+    else:
+        try:
+            key = decode_ssh_public_key(pubdata)
+        except KeyImportError as exc:
+            raise SSHSIGParseError(
+                'Invalid public key in SSH signature') from exc
+
+    try:
+        namespace = namespace_raw.decode('utf-8')
+    except UnicodeDecodeError as exc:
+        raise SSHSIGParseError(
+            'Invalid namespace in SSH signature') from exc
+
+    if not namespace:
+        raise SSHSIGParseError(
+            'Namespace in SSH signature must be a non-empty string')
+
+    if reserved:
+        raise SSHSIGParseError('Unexpected data in reserved field')
+
+    if hash_name not in _hashes:
+        raise SSHSIGParseError('Unsupported hash algorithm')
+
+    return key, cert, namespace, hash_name, sig
+
+
+def _validate_certificate(cert: SSHOpenSSHCertificate, principal: str,
+                          check_principal: bool,
+                          check_validity: bool) -> None:
+    """Validate an SSH certificate against the active policy checks"""
+
+    if check_validity:
+        now = time.time()
+
+        if now < cert._valid_after:
+            raise SSHSIGPolicyError('Certificate not yet valid')
+
+        if now >= cert._valid_before:
+            raise SSHSIGPolicyError('Certificate expired')
+
+    if check_principal and cert.principals and \
+            principal not in cert.principals:
+        raise SSHSIGPolicyError('Certificate principal mismatch')
+
+
 def validate_sshsig(data: BytesOrFilePath, sig: BytesOrFilePath,
                     principal: str, allowed_signers: SSHAllowedSignersArg, *,
-                    is_hashed: bool = False) -> bool:
+                    is_hashed: bool = False,
+                    policy: Optional[SSHSIGPolicy] = None) -> bool:
     """Validate an SSHSIG signature
 
-       This function validates whether an SSHSIG signature on a block of
-       data is valid and that the signing key used matches an entry in the
-       allowed signers associated with the requested principal. If present,
-       namespace and validity period restrictions on the allowed signers
-       entry are also enforced.
+       This function validates an SSHSIG signature against an explicit
+       :class:`SSHSIGPolicy`. The namespace embedded in the signature,
+       the requested principal, the hash algorithm, the validity period,
+       and the cryptographic signature over the signed data are all
+       checked together. A separate check in :class:`SSHSIGPolicy` may
+       be disabled by the caller, but all checks are enabled by default,
+       so a signature is never accepted implicitly.
 
-       In the case where an SSH certificate is used to sign the block, the
-       specified principal must also match the certificate principals and
-       the validity period of the certificate is also enforced.
+       Because the namespace is cryptographically bound to the signed
+       data and is checked against the policy, a signature cannot be
+       replayed in a different namespace. Likewise, the principal must
+       be non-empty and must match an allowed signers entry, so a
+       signature cannot be replayed for a different user unless the
+       principal check is explicitly disabled.
+
+       In the case where an SSH certificate is used to sign the block,
+       the specified principal must also match the certificate
+       principals and the validity period of the certificate is also
+       enforced, unless the corresponding policy checks are disabled.
 
        The `allowed_signers` argument can be any of the following:
 
@@ -335,94 +558,80 @@ def validate_sshsig(data: BytesOrFilePath, sig: BytesOrFilePath,
            `True`, the `data` argument must be a byte string of the length
            required by the specified `hash_name`. This defaults to `False`,
            meaning that hashing will be performed on the data before signing.
+       :param policy: (optional)
+           The :class:`SSHSIGPolicy` to enforce. This defaults to a policy
+           with every check enabled and an expected namespace of
+           ``'file'``.
        :type data: `PurePath`, `str`, or `bytes`
        :type sig: `PurePath`, `str`, or `bytes`
        :type principal: `str`
        :type allowed_signers: *see* :ref:`SpecifyingAllowedSigners`
        :type is_hashed: `bool`
+       :type policy: :class:`SSHSIGPolicy`
 
-       :returns: `bool`
+       :returns: `True` if the signature is valid and satisfies the policy
+
+       :raises SSHSIGParseError: The signature or its contents could not
+           be parsed.
+       :raises SSHSIGSignatureError: The cryptographic signature does not
+           verify against the signed data.
+       :raises SSHSIGPolicyError: A check in the active policy rejected
+           the signature.
 
     """
 
     if isinstance(sig, (PurePath, str)):
         sig = read_file(sig)
 
-    if sig[:1] == b'-':
-        end = sig.find(b'\n') + 1
+    if policy is None:
+        policy = SSHSIGPolicy()
 
-        if not end:
-            return False
-
-        line = sig[:end].rstrip()
-
-        if line != b'-----BEGIN SSH SIGNATURE-----':
-            return False
-
-        try:
-            sig, end = match_base64(sig[end:], 0, line)
-            sig = binascii.a2b_base64(sig)
-        except ValueError:
-            return False
+    key, cert, namespace, hash_name, sig = _parse_sshsig(sig)
 
     try:
-        packet = SSHPacket(sig)
+        data_to_verify = _signed_data(data, is_hashed, hash_name, namespace)
+    except ValueError as exc:
+        raise SSHSIGParseError(str(exc)) from exc
 
-        if (packet.get_bytes(6) != _SSHSIG_MAGIC or
-                packet.get_uint32() != _SSHSIG_VERSION):
-            return False
+    if policy.check_signed_data and not key.verify(data_to_verify, sig):
+        raise SSHSIGSignatureError(
+            'SSHSIG signature does not match the signed data')
 
-        pubdata = packet.get_string()
+    if policy.check_namespace and namespace != policy.namespace:
+        raise SSHSIGPolicyError(
+            'SSHSIG namespace mismatch: expected %r, got %r' %
+            (policy.namespace, namespace))
 
-        try:
-            cert = decode_ssh_certificate(pubdata)
+    if policy.check_hash_algorithm and \
+            hash_name not in policy.allowed_hashes:
+        raise SSHSIGPolicyError(
+            'SSHSIG hash algorithm %r not allowed by policy' %
+            hash_name.decode('utf-8'))
 
-            if cert.is_x509: # pragma: no cover
-                raise ValueError('X.509 certificates not supported')
+    if policy.check_principal and not principal:
+        raise SSHSIGPolicyError(
+            'SSHSIG principal must be a non-empty string')
 
-            cert = cast(SSHOpenSSHCertificate, cert)
-            key = cert.key
-        except KeyImportError:
-            try:
-                cert = None
-                key = decode_ssh_public_key(pubdata)
-            except KeyImportError:
-                return False
+    signers = _load_allowed_signers(allowed_signers)
 
-        try:
-            namespace = packet.get_string().decode('utf-8')
-        except UnicodeDecodeError:
-            return False
-
-        _ = packet.get_string()             # reserved
-        hash_name = packet.get_string()
-        sig = packet.get_string()
-        packet.check_end()
-    except PacketDecodeError:
-        return False
-
-    data_to_verify = _signed_data(data, is_hashed, hash_name, namespace)
-
-    if not key.verify(data_to_verify, sig):
-        return False
-
-    if isinstance(allowed_signers, bytes):
-        allowed_signers = import_allowed_signers(allowed_signers.decode())
-    elif not isinstance(allowed_signers, SSHAllowedSigners):
-        allowed_signers = read_allowed_signers(allowed_signers)
-
-    allowed_signers: SSHAllowedSigners
-
-    result = allowed_signers.validate(key, principal, namespace)
+    result = signers.validate(key, principal, namespace,
+                              check_principal=policy.check_principal,
+                              check_validity=policy.check_validity)
 
     if cert and not result:
-        result = allowed_signers.validate(cert.signing_key, principal,
-                                          namespace, ca=True)
+        result = signers.validate(cert.signing_key, principal, namespace,
+                                  ca=True,
+                                  check_principal=policy.check_principal,
+                                  check_validity=policy.check_validity)
 
         if result:
-            try:
-                cert.validate(CERT_TYPE_ANY, principal)
-            except ValueError:
-                return False
+            _validate_certificate(cert, principal,
+                                  policy.check_principal,
+                                  policy.check_validity)
 
-    return result
+    if not result:
+        raise SSHSIGPolicyError(
+            'SSHSIG signer not allowed for principal %r in namespace %r' %
+            (principal, namespace))
+
+    return True

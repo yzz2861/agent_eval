@@ -203,26 +203,55 @@ class _TestSSHSIG(TempDirTestCase):
         """Test SSHSIG signature errors"""
 
         tests = (
-            ('No signature header', b'xxx'),
-            ('Incomplete signature header', b'-'),
-            ('Bad signature header', b'-----BEGIN XXX-----\n'),
-            ('Missing signature footer', b'-----BEGIN SSH SIGNATURE-----\n'),
-            ('Bad base64 data', b'-----BEGIN SSH SIGNATURE-----\nXXX\n'
-                                b'-----END SSH SIGNATURE-----\n'),
-            ('Bad SSHSIG magic', b'XXXSIG'),
-            ('Missing SSHSIG version', b'SSHSIG'),
-            ('Bad SSHSIG version', b'SSHSIG' + UInt32(2)),
-            ('Bad public key', b'SSHSIG' + UInt32(1) + String(b'xxx')),
-            ('Bad namespace', b'SSHSIG' + UInt32(1) +
-                 String(self._rsa_keypair.public_data) + String(b'\xff')),
-            ('Bad signature', b'SSHSIG' + UInt32(1) +
-                 String(self._rsa_keypair.public_data) + String('file') +
-                 String(b'') + String(b'sha256') + String(b'')),
+            ('No signature header', b'xxx', asyncssh.SSHSIGParseError),
+            ('Incomplete signature header', b'-',
+             asyncssh.SSHSIGParseError),
+            ('Bad signature header', b'-----BEGIN XXX-----\n',
+             asyncssh.SSHSIGParseError),
+            ('Missing signature footer',
+             b'-----BEGIN SSH SIGNATURE-----\n',
+             asyncssh.SSHSIGParseError),
+            ('Bad base64 data',
+             b'-----BEGIN SSH SIGNATURE-----\nXXX\n'
+             b'-----END SSH SIGNATURE-----\n',
+             asyncssh.SSHSIGParseError),
+            ('Bad SSHSIG magic', b'XXXSIG', asyncssh.SSHSIGParseError),
+            ('Missing SSHSIG version', b'SSHSIG',
+             asyncssh.SSHSIGParseError),
+            ('Bad SSHSIG version', b'SSHSIG' + UInt32(2),
+             asyncssh.SSHSIGParseError),
+            ('Bad public key',
+             b'SSHSIG' + UInt32(1) + String(b'xxx'),
+             asyncssh.SSHSIGParseError),
+            ('Bad namespace',
+             b'SSHSIG' + UInt32(1) +
+             String(self._rsa_keypair.public_data) + String(b'\xff'),
+             asyncssh.SSHSIGParseError),
+            ('Empty namespace',
+             b'SSHSIG' + UInt32(1) +
+             String(self._rsa_keypair.public_data) + String('') +
+             String(b'') + String(b'sha256') + String(b''),
+             asyncssh.SSHSIGParseError),
+            ('Unknown hash algorithm',
+             b'SSHSIG' + UInt32(1) +
+             String(self._rsa_keypair.public_data) + String('file') +
+             String(b'') + String(b'xxx') + String(b''),
+             asyncssh.SSHSIGParseError),
+            ('Truncated signature',
+             b'SSHSIG' + UInt32(1) +
+             String(self._rsa_keypair.public_data) + String('file'),
+             asyncssh.SSHSIGParseError),
+            ('Bad signature',
+             b'SSHSIG' + UInt32(1) +
+             String(self._rsa_keypair.public_data) + String('file') +
+             String(b'') + String(b'sha256') + String(b''),
+             asyncssh.SSHSIGSignatureError),
         )
 
-        for msg, sig in tests:
+        for msg, sig, error in tests:
             with self.subTest(msg):
-                self.assertFalse(asyncssh.validate_sshsig(b'', sig, '', b''))
+                with self.assertRaises(error):
+                    asyncssh.validate_sshsig(b'', sig, 'principal', b'')
 
     def test_sshsig_validate_errors(self):
         """Test SSHSIG validate errors"""
@@ -242,8 +271,9 @@ class _TestSSHSIG(TempDirTestCase):
         for msg, principal, keypair in tests:
             with self.subTest(msg):
                 sig = asyncssh.create_sshsig(keypair, data)
-                self.assertFalse(asyncssh.validate_sshsig(
-                    data, sig, principal, allowed_signers.encode()))
+                with self.assertRaises(asyncssh.SSHSIGPolicyError):
+                    asyncssh.validate_sshsig(
+                        data, sig, principal, allowed_signers.encode())
 
     def test_sshsig(self):
         """Test creating and verifying SSHSIG signatures"""
@@ -259,3 +289,213 @@ class _TestSSHSIG(TempDirTestCase):
         self._check_sshsig(self._rsa_keypair, sig_file=True)
         self._check_sshsig(self._rsa_keypair, signers_type='list')
         self._check_sshsig(self._rsa_keypair, signers_type='object')
+
+    def test_sshsig_policy(self):
+        """Test explicit SSHSIG validation policy"""
+
+        data = os.urandom(256)
+        sig = asyncssh.create_sshsig(self._rsa_keypair, data)
+
+        signers = self._build_signers(
+            (('principal', None, self._rsa_keypair),)).encode()
+
+        self.assertTrue(asyncssh.validate_sshsig(
+            data, sig, 'principal', signers))
+
+        with self.assertRaises(asyncssh.SSHSIGPolicyError):
+            asyncssh.validate_sshsig(data, sig, '', signers)
+
+        relaxed = asyncssh.SSHSIGPolicy(check_principal=False)
+
+        self.assertTrue(asyncssh.validate_sshsig(
+            data, sig, '', signers, policy=relaxed))
+
+        default_policy = asyncssh.SSHSIGPolicy()
+        self.assertTrue(default_policy.check_namespace)
+        self.assertTrue(default_policy.check_principal)
+        self.assertTrue(default_policy.check_hash_algorithm)
+        self.assertTrue(default_policy.check_validity)
+        self.assertTrue(default_policy.check_signed_data)
+
+    def test_sshsig_namespace_binding(self):
+        """Test that signatures can't be reused across namespaces"""
+
+        data = os.urandom(256)
+        sig = asyncssh.create_sshsig(self._rsa_keypair, data,
+                                      namespace='file')
+
+        signers = self._build_signers(
+            (('principal', 'namespaces="*"', self._rsa_keypair),)).encode()
+
+        self.assertTrue(asyncssh.validate_sshsig(
+            data, sig, 'principal', signers))
+
+        with self.assertRaises(asyncssh.SSHSIGPolicyError):
+            asyncssh.validate_sshsig(
+                data, sig, 'principal', signers,
+                policy=asyncssh.SSHSIGPolicy(namespace='git'))
+
+        git_sig = asyncssh.create_sshsig(self._rsa_keypair, data,
+                                         namespace='git')
+
+        with self.assertRaises(asyncssh.SSHSIGPolicyError):
+            asyncssh.validate_sshsig(
+                data, git_sig, 'principal', signers,
+                policy=asyncssh.SSHSIGPolicy(namespace='file'))
+
+        relaxed = asyncssh.SSHSIGPolicy(namespace='git',
+                                        check_namespace=False)
+
+        self.assertTrue(asyncssh.validate_sshsig(
+            data, sig, 'principal', signers, policy=relaxed))
+
+    def test_sshsig_principal_binding(self):
+        """Test that signatures can't be reused across principals"""
+
+        data = os.urandom(256)
+        sig = asyncssh.create_sshsig(self._rsa_keypair, data)
+
+        signers = self._build_signers(
+            (('alice', None, self._rsa_keypair),)).encode()
+
+        self.assertTrue(asyncssh.validate_sshsig(
+            data, sig, 'alice', signers))
+
+        with self.assertRaises(asyncssh.SSHSIGPolicyError):
+            asyncssh.validate_sshsig(data, sig, 'bob', signers)
+
+        with self.assertRaises(asyncssh.SSHSIGPolicyError):
+            asyncssh.validate_sshsig(data, sig, '', signers)
+
+        relaxed = asyncssh.SSHSIGPolicy(check_principal=False)
+
+        self.assertTrue(asyncssh.validate_sshsig(
+            data, sig, 'bob', signers, policy=relaxed))
+
+    def test_sshsig_hash_algorithm_policy(self):
+        """Test hash algorithm policy enforcement"""
+
+        data = os.urandom(256)
+        sig = asyncssh.create_sshsig(self._rsa_keypair, data,
+                                     hash_name='sha512')
+
+        signers = self._build_signers(
+            (('principal', None, self._rsa_keypair),)).encode()
+
+        with self.assertRaises(asyncssh.SSHSIGPolicyError):
+            asyncssh.validate_sshsig(
+                data, sig, 'principal', signers,
+                policy=asyncssh.SSHSIGPolicy(allowed_hashes=('sha256',)))
+
+        relaxed = asyncssh.SSHSIGPolicy(check_hash_algorithm=False,
+                                        allowed_hashes=('sha256',))
+
+        self.assertTrue(asyncssh.validate_sshsig(
+            data, sig, 'principal', signers, policy=relaxed))
+
+    def test_sshsig_truncated_and_tampered(self):
+        """Test truncated signatures and tampered data"""
+
+        data = os.urandom(256)
+        raw_sig = asyncssh.create_sshsig(self._rsa_keypair, data, raw=True)
+        armored_sig = asyncssh.create_sshsig(self._rsa_keypair, data)
+
+        signers = self._build_signers(
+            (('principal', None, self._rsa_keypair),)).encode()
+
+        for sig in (raw_sig[:-1], raw_sig[:20], armored_sig[:40]):
+            with self.subTest('truncated'):
+                with self.assertRaises(asyncssh.SSHSIGParseError):
+                    asyncssh.validate_sshsig(data, sig, 'principal',
+                                             signers)
+
+        with self.assertRaises(asyncssh.SSHSIGSignatureError):
+            asyncssh.validate_sshsig(data + b'x', armored_sig, 'principal',
+                                     signers)
+
+        relaxed = asyncssh.SSHSIGPolicy(check_signed_data=False)
+
+        self.assertTrue(asyncssh.validate_sshsig(
+            data + b'x', armored_sig, 'principal', signers,
+            policy=relaxed))
+
+    def test_sshsig_validity_policy(self):
+        """Test allowed signers validity period policy"""
+
+        data = os.urandom(256)
+        sig = asyncssh.create_sshsig(self._rsa_keypair, data)
+
+        expired = self._build_signers(
+            (('principal', 'valid-before=19700101Z',
+              self._rsa_keypair),)).encode()
+
+        with self.assertRaises(asyncssh.SSHSIGPolicyError):
+            asyncssh.validate_sshsig(data, sig, 'principal', expired)
+
+        relaxed = asyncssh.SSHSIGPolicy(check_validity=False)
+
+        self.assertTrue(asyncssh.validate_sshsig(
+            data, sig, 'principal', expired, policy=relaxed))
+
+    def test_sshsig_certificate_policy(self):
+        """Test certificate principal and validity policy"""
+
+        data = os.urandom(256)
+        signers = self._build_signers(
+            (('principal', 'cert-authority',
+              self._good_cert_keypair),)).encode()
+
+        good_sig = asyncssh.create_sshsig(self._good_cert_keypair, data)
+
+        self.assertTrue(asyncssh.validate_sshsig(
+            data, good_sig, 'principal', signers))
+
+        with self.assertRaises(asyncssh.SSHSIGPolicyError):
+            asyncssh.validate_sshsig(data, good_sig, 'other', signers)
+
+        relaxed_principal = asyncssh.SSHSIGPolicy(check_principal=False)
+
+        self.assertTrue(asyncssh.validate_sshsig(
+            data, good_sig, 'other', signers,
+            policy=relaxed_principal))
+
+        bad_sig = asyncssh.create_sshsig(self._bad_cert_keypair, data)
+
+        with self.assertRaises(asyncssh.SSHSIGPolicyError):
+            asyncssh.validate_sshsig(data, bad_sig, 'principal', signers)
+
+        relaxed_validity = asyncssh.SSHSIGPolicy(check_validity=False)
+
+        self.assertTrue(asyncssh.validate_sshsig(
+            data, bad_sig, 'principal', signers,
+            policy=relaxed_validity))
+
+    def test_sshsig_error_types(self):
+        """Test that parse, signature and policy errors are distinct"""
+
+        data = os.urandom(256)
+        sig = asyncssh.create_sshsig(self._rsa_keypair, data)
+
+        signers = self._build_signers(
+            (('principal', None, self._rsa_keypair),)).encode()
+
+        for error_type, func in (
+            (asyncssh.SSHSIGParseError,
+             lambda: asyncssh.validate_sshsig(
+                 data, b'not a signature', 'principal', signers)),
+            (asyncssh.SSHSIGSignatureError,
+             lambda: asyncssh.validate_sshsig(
+                 b'different data', sig, 'principal', signers)),
+            (asyncssh.SSHSIGPolicyError,
+             lambda: asyncssh.validate_sshsig(data, sig, '', signers)),
+        ):
+            with self.subTest(error_type.__name__):
+                with self.assertRaises(error_type) as cm:
+                    func()
+
+                self.assertIsInstance(cm.exception, asyncssh.SSHSIGError)
+
+        self.assertFalse(issubclass(asyncssh.SSHSIGParseError,
+                                   asyncssh.SSHSIGSignatureError))
+        self.assertFalse(issubclass(asyncssh.SSHSIGSignatureError,
+                                   asyncssh.SSHSIGPolicyError))

@@ -1924,6 +1924,24 @@ When using SSH certificates in allowed signers, the principal is also
 matched against the principals listed in the certificate and the
 certificate's validity period is also enforced.
 
+Validation of a signature follows an explicit :class:`SSHSIGPolicy`.
+The namespace, principal, hash algorithm, validity period, and the
+cryptographic signature over the signed data are all verified together,
+with each check enabled by default. A caller may disable an individual
+check by constructing a policy with the corresponding argument set to
+``False``, but no check is ever skipped implicitly. Because the namespace
+is cryptographically bound to the signed data and the principal must
+match an allowed signers entry, a signature can't be replayed across
+namespaces or principals unless the relevant checks are explicitly
+disabled.
+
+Validation failures raise distinct exceptions: :class:`SSHSIGParseError`
+for signatures that can't be parsed, :class:`SSHSIGSignatureError` for
+signatures that fail cryptographic verification, and
+:class:`SSHSIGPolicyError` for signatures rejected by the active policy.
+All three are subclasses of :class:`SSHSIGError`, which itself is a
+subclass of :exc:`ValueError`.
+
 .. index:: Specifying allowed signers
 .. _SpecifyingAllowedSigners:
 
@@ -1971,7 +1989,14 @@ Supported options are:
 SSHSIG classes/functions
 ------------------------
 
+.. autoclass:: SSHSIGPolicy()
+
 .. autoclass:: SSHAllowedSigners()
+
+.. autoexception:: SSHSIGError
+.. autoexception:: SSHSIGParseError
+.. autoexception:: SSHSIGSignatureError
+.. autoexception:: SSHSIGPolicyError
 
 .. autofunction:: import_allowed_signers
 .. autofunction:: read_allowed_signers
