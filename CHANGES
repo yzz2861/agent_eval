@@ -5,7 +5,15 @@ For a complete changelog, see:
 
 7.0.0.dev0 (TBD)
 
-* TBD
+* Add configurable resource budgets (`yaml.ResourceLimits`) to the pure
+  Python loaders, enforced incrementally in the reader, scanner, composer and
+  constructor. `SafeLoader`/`FullLoader` now default to bounded input bytes,
+  scalar length, node count, alias expansions, nesting depth and per-anchor
+  reference width, raising `yaml.ResourceBudgetExceeded` before the object
+  tree is built. The historical unbounded behaviour is only available through
+  the explicitly named `yaml.UnsafeUnlimitedSafeLoader`,
+  `yaml.unsafe_load_unlimited` and `yaml.unsafe_load_all_unlimited` entry
+  points.
 
 6.0.2 (2024-08-06)
 
@@ -275,4 +283,3 @@ For a complete changelog, see:
 * Initial release.  The version number reflects the codename
   of the project (PyYAML 3000) and differentiates it from
   the abandoned PyYaml module.
-

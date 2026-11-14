@@ -7,6 +7,7 @@ from .nodes import *
 
 from .loader import *
 from .dumper import *
+from .limits import *
 
 __version__ = '7.0.0.dev0'
 try:
@@ -17,6 +18,15 @@ except ImportError:
 
 import io
 
+
+def _make_loader(Loader, stream, resource_limits):
+    # Only forward the budget when one was explicitly requested, so custom
+    # Loader subclasses using the historical single-argument constructor
+    # keep working unchanged.
+    if resource_limits is None:
+        return Loader(stream)
+    return Loader(stream, resource_limits)
+
 #------------------------------------------------------------------------------
 # XXX "Warnings control" is now deprecated. Leaving in the API function to not
 # break code that uses it.
@@ -26,68 +36,68 @@ def warnings(settings=None):
         return {}
 
 #------------------------------------------------------------------------------
-def scan(stream, Loader=Loader):
+def scan(stream, Loader=Loader, resource_limits=None):
     """
     Scan a YAML stream and produce scanning tokens.
     """
-    loader = Loader(stream)
+    loader = _make_loader(Loader, stream, resource_limits)
     try:
         while loader.check_token():
             yield loader.get_token()
     finally:
         loader.dispose()
 
-def parse(stream, Loader=Loader):
+def parse(stream, Loader=Loader, resource_limits=None):
     """
     Parse a YAML stream and produce parsing events.
     """
-    loader = Loader(stream)
+    loader = _make_loader(Loader, stream, resource_limits)
     try:
         while loader.check_event():
             yield loader.get_event()
     finally:
         loader.dispose()
 
-def compose(stream, Loader=Loader):
+def compose(stream, Loader=Loader, resource_limits=None):
     """
     Parse the first YAML document in a stream
     and produce the corresponding representation tree.
     """
-    loader = Loader(stream)
+    loader = _make_loader(Loader, stream, resource_limits)
     try:
         return loader.get_single_node()
     finally:
         loader.dispose()
 
-def compose_all(stream, Loader=Loader):
+def compose_all(stream, Loader=Loader, resource_limits=None):
     """
     Parse all YAML documents in a stream
     and produce corresponding representation trees.
     """
-    loader = Loader(stream)
+    loader = _make_loader(Loader, stream, resource_limits)
     try:
         while loader.check_node():
             yield loader.get_node()
     finally:
         loader.dispose()
 
-def load(stream, Loader):
+def load(stream, Loader, resource_limits=None):
     """
     Parse the first YAML document in a stream
     and produce the corresponding Python object.
     """
-    loader = Loader(stream)
+    loader = _make_loader(Loader, stream, resource_limits)
     try:
         return loader.get_single_data()
     finally:
         loader.dispose()
 
-def load_all(stream, Loader):
+def load_all(stream, Loader, resource_limits=None):
     """
     Parse all YAML documents in a stream
     and produce corresponding Python objects.
     """
-    loader = Loader(stream)
+    loader = _make_loader(Loader, stream, resource_limits)
     try:
         while loader.check_data():
             yield loader.get_data()
@@ -114,7 +124,7 @@ def full_load_all(stream):
     """
     return load_all(stream, FullLoader)
 
-def safe_load(stream):
+def safe_load(stream, resource_limits=None):
     """
     Parse the first YAML document in a stream
     and produce the corresponding Python object.
@@ -122,9 +132,9 @@ def safe_load(stream):
     Resolve only basic YAML tags. This is known
     to be safe for untrusted input.
     """
-    return load(stream, SafeLoader)
+    return load(stream, SafeLoader, resource_limits)
 
-def safe_load_all(stream):
+def safe_load_all(stream, resource_limits=None):
     """
     Parse all YAML documents in a stream
     and produce corresponding Python objects.
@@ -132,7 +142,23 @@ def safe_load_all(stream):
     Resolve only basic YAML tags. This is known
     to be safe for untrusted input.
     """
-    return load_all(stream, SafeLoader)
+    return load_all(stream, SafeLoader, resource_limits)
+
+def unsafe_load_unlimited(stream):
+    """Parse the first document with every resource budget disabled.
+
+    This is the explicitly unsafe, unbounded entry point: it accepts streams
+    of arbitrary size and alias expansion and must only be used with trusted
+    input. Prefer :func:`safe_load` with a tuned :class:`ResourceLimits`.
+    """
+    return load(stream, UnsafeUnlimitedSafeLoader)
+
+def unsafe_load_all_unlimited(stream):
+    """Parse all documents with every resource budget disabled.
+
+    See :func:`unsafe_load_unlimited` for the security implications.
+    """
+    return load_all(stream, UnsafeUnlimitedSafeLoader)
 
 def unsafe_load(stream):
     """
@@ -387,4 +413,3 @@ class YAMLObject(metaclass=YAMLObjectMetaclass):
         """
         return dumper.represent_yaml_object(cls.yaml_tag, data, cls,
                 flow_style=cls.yaml_flow_style)
-

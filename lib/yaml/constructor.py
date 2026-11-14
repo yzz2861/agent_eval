@@ -9,6 +9,7 @@ __all__ = [
 ]
 
 from .error import *
+from .limits import ResourceLimits
 from .nodes import *
 
 import collections.abc, datetime, base64, binascii, re, sys, types
@@ -21,11 +22,14 @@ class BaseConstructor:
     yaml_constructors = {}
     yaml_multi_constructors = {}
 
-    def __init__(self):
+    def __init__(self, resource_limits=None):
         self.constructed_objects = {}
         self.recursive_objects = {}
         self.state_generators = []
         self.deep_construct = False
+        if resource_limits is None:
+            resource_limits = ResourceLimits()
+        self.resource_limits = resource_limits
 
     def check_data(self):
         # If there are more documents available?
@@ -66,6 +70,13 @@ class BaseConstructor:
 
     def construct_object(self, node, deep=False):
         if node in self.constructed_objects:
+            # The node is reached again through an alias: every expansion
+            # materialises another object from the shared representation
+            # node, so charge it before allocating anything. This is what
+            # stops an anchor bomb whose composer tree is still small.
+            anchor = self._node_anchor(node)
+            self.resource_limits.charge_alias(
+                    anchor, node.start_mark)
             return self.constructed_objects[node]
         if deep:
             old_deep = self.deep_construct
@@ -113,6 +124,12 @@ class BaseConstructor:
         if deep:
             self.deep_construct = old_deep
         return data
+
+    def _node_anchor(self, node):
+        anchor = self.node_anchors.get(id(node))
+        if anchor is not None:
+            return anchor
+        return '<anonymous>'
 
     def construct_scalar(self, node):
         if not isinstance(node, ScalarNode):
@@ -180,6 +197,12 @@ class SafeConstructor(BaseConstructor):
     def flatten_mapping(self, node):
         merge = []
         merge_key_ids = set()  # anchor referent node objects should have reference equality here
+        def charge_merge_pair(pair):
+            # Each merged pair becomes a real key/value pair of this mapping;
+            # charge before appending so an exponential merge fan-out is
+            # rejected while the mapping is still small.
+            self.resource_limits.charge_node(pair[0].start_mark)
+            self.resource_limits.charge_node(pair[1].start_mark)
         index = 0
         while index < len(node.value):
             key_node, value_node = node.value[index]
@@ -190,6 +213,7 @@ class SafeConstructor(BaseConstructor):
                     for pair in value_node.value:
                         if (key_id := id(pair[0].value)) not in merge_key_ids:
                             merge_key_ids.add(key_id)
+                            charge_merge_pair(pair)
                             merge.append(pair)
                 elif isinstance(value_node, SequenceNode):
                     for subnode in value_node.value:
@@ -202,6 +226,7 @@ class SafeConstructor(BaseConstructor):
                         for pair in subnode.value:
                             if (key_id := id(pair[0].value)) not in merge_key_ids:
                                 merge_key_ids.add(key_id)
+                                charge_merge_pair(pair)
                                 merge.append(pair)
                 else:
                     raise ConstructorError("while constructing a mapping", node.start_mark,

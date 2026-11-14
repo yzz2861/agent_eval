@@ -18,6 +18,7 @@
 __all__ = ['Reader', 'ReaderError']
 
 from .error import YAMLError, Mark
+from .limits import ResourceLimits
 
 import codecs, re
 
@@ -56,7 +57,7 @@ class Reader(object):
 
     # Yeah, it's ugly and slow.
 
-    def __init__(self, stream):
+    def __init__(self, stream, resource_limits=None):
         self.name = None
         self.stream = None
         self.stream_pointer = 0
@@ -69,12 +70,19 @@ class Reader(object):
         self.index = 0
         self.line = 0
         self.column = 0
+        if resource_limits is None:
+            resource_limits = ResourceLimits()
+        self.resource_limits = resource_limits
         if isinstance(stream, str):
             self.name = "<unicode string>"
             self.check_printable(stream)
+            self.resource_limits.charge_bytes(
+                    len(stream), self.get_mark())
             self.buffer = stream+'\0'
         elif isinstance(stream, bytes):
             self.name = "<byte string>"
+            self.resource_limits.charge_bytes(
+                    len(stream), self.get_mark())
             self.raw_buffer = stream
             self.determine_encoding()
         else:
@@ -176,6 +184,9 @@ class Reader(object):
 
     def update_raw(self, size=4096):
         data = self.stream.read(size)
+        if data:
+            self.resource_limits.charge_bytes(
+                    len(data), self.get_mark())
         if self.raw_buffer is None:
             self.raw_buffer = data
         else:

@@ -3,6 +3,7 @@ __all__ = ['Composer', 'ComposerError']
 
 from .error import MarkedYAMLError
 from .events import *
+from .limits import ResourceLimits
 from .nodes import *
 
 class ComposerError(MarkedYAMLError):
@@ -10,8 +11,12 @@ class ComposerError(MarkedYAMLError):
 
 class Composer:
 
-    def __init__(self):
+    def __init__(self, resource_limits=None):
         self.anchors = {}
+        self.node_anchors = {}
+        if resource_limits is None:
+            resource_limits = ResourceLimits()
+        self.resource_limits = resource_limits
 
     def check_node(self):
         # Drop the STREAM-START event.
@@ -58,7 +63,12 @@ class Composer:
         self.get_event()
 
         self.anchors = {}
+        self.node_anchors = {}
         return node
+
+    def register_anchor(self, anchor, node):
+        self.anchors[anchor] = node
+        self.node_anchors[id(node)] = anchor
 
     def compose_node(self, parent, index):
         if self.check_event(AliasEvent):
@@ -67,6 +77,13 @@ class Composer:
             if anchor not in self.anchors:
                 raise ComposerError(None, None, "found undefined alias %r"
                         % anchor, event.start_mark)
+            # Charge before handing the shared node back: a long scalar or a
+            # large collection is re-counted every time it is referenced.
+            self.resource_limits.charge_alias(anchor, event.start_mark)
+            referenced = self.anchors[anchor]
+            if isinstance(referenced, ScalarNode):
+                self.resource_limits.charge_scalar(
+                        len(referenced.value), event.start_mark)
             return self.anchors[anchor]
         event = self.peek_event()
         anchor = event.anchor
@@ -75,6 +92,7 @@ class Composer:
                 raise ComposerError("found duplicate anchor %r; first occurrence"
                         % anchor, self.anchors[anchor].start_mark,
                         "second occurrence", event.start_mark)
+        self.resource_limits.charge_node(event.start_mark)
         self.descend_resolver(parent, index)
         if self.check_event(ScalarEvent):
             node = self.compose_scalar_node(anchor)
@@ -90,10 +108,12 @@ class Composer:
         tag = event.tag
         if tag is None or tag == '!':
             tag = self.resolve(ScalarNode, event.value, event.implicit)
+        self.resource_limits.charge_scalar(
+                len(event.value), event.start_mark)
         node = ScalarNode(tag, event.value,
                 event.start_mark, event.end_mark, style=event.style)
         if anchor is not None:
-            self.anchors[anchor] = node
+            self.register_anchor(anchor, node)
         return node
 
     def compose_sequence_node(self, anchor):
@@ -101,17 +121,21 @@ class Composer:
         tag = start_event.tag
         if tag is None or tag == '!':
             tag = self.resolve(SequenceNode, None, start_event.implicit)
+        if not start_event.flow_style:
+            self.resource_limits.enter_collection(start_event.start_mark)
         node = SequenceNode(tag, [],
                 start_event.start_mark, None,
                 flow_style=start_event.flow_style)
         if anchor is not None:
-            self.anchors[anchor] = node
+            self.register_anchor(anchor, node)
         index = 0
         while not self.check_event(SequenceEndEvent):
             node.value.append(self.compose_node(node, index))
             index += 1
         end_event = self.get_event()
         node.end_mark = end_event.end_mark
+        if not start_event.flow_style:
+            self.resource_limits.leave_collection()
         return node
 
     def compose_mapping_node(self, anchor):
@@ -119,11 +143,13 @@ class Composer:
         tag = start_event.tag
         if tag is None or tag == '!':
             tag = self.resolve(MappingNode, None, start_event.implicit)
+        if not start_event.flow_style:
+            self.resource_limits.enter_collection(start_event.start_mark)
         node = MappingNode(tag, [],
                 start_event.start_mark, None,
                 flow_style=start_event.flow_style)
         if anchor is not None:
-            self.anchors[anchor] = node
+            self.register_anchor(anchor, node)
         while not self.check_event(MappingEndEvent):
             #key_event = self.peek_event()
             item_key = self.compose_node(node, None)
@@ -135,5 +161,6 @@ class Composer:
             node.value.append((item_key, item_value))
         end_event = self.get_event()
         node.end_mark = end_event.end_mark
+        if not start_event.flow_style:
+            self.resource_limits.leave_collection()
         return node
-

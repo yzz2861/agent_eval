@@ -27,6 +27,7 @@
 __all__ = ['Scanner', 'ScannerError']
 
 from .error import MarkedYAMLError
+from .limits import ResourceLimits
 from .tokens import *
 
 class ScannerError(MarkedYAMLError):
@@ -45,8 +46,11 @@ class SimpleKey:
 
 class Scanner:
 
-    def __init__(self):
+    def __init__(self, resource_limits=None):
         """Initialize the scanner."""
+        if resource_limits is None:
+            resource_limits = ResourceLimits()
+        self.resource_limits = resource_limits
         # It is assumed that Scanner and Reader will have a common descendant.
         # Reader do the dirty work of checking for BOM and converting the
         # input data to Unicode. It also adds NUL to the end.
@@ -434,6 +438,11 @@ class Scanner:
 
         # Increase the flow level.
         self.flow_level += 1
+        # Flow collections are scanned iteratively, so enforce the nesting
+        # budget here, before the recursive parser/composer ever sees the
+        # tokens: this rejects pathological flow nesting while the call stack
+        # is still shallow.
+        self.resource_limits.enter_collection(self.get_mark())
 
         # Simple keys are allowed after '[' and '{'.
         self.allow_simple_key = True
@@ -457,6 +466,7 @@ class Scanner:
 
         # Decrease the flow level.
         self.flow_level -= 1
+        self.resource_limits.leave_collection()
 
         # No simple keys after ']' or '}'.
         self.allow_simple_key = False
