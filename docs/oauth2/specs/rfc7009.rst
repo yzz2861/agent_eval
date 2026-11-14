@@ -40,7 +40,7 @@ implemented. This example uses the Flask-SQLAlchemy token model:
         def revoke_token(self, token, request):
             now = int(time.time())
             token.access_token_revoked_at = now
-            if request.form['token'] != token.access_token:
+            if request.form['token'] == token.refresh_token:
                 token.refresh_token_revoked_at = now
             db.session.add(token)
             db.session.commit()
@@ -60,6 +60,10 @@ After the registration, you can create a response with:
 one. If no token is found with the hint, the endpoint calls ``query_token``
 again with ``None``. Per :rfc:`RFC 7009 §2.1 <7009#section-2.1>`, the hint may be wrong, so
 ``revoke_token`` must not trust it to know which token was presented.
+It must also check that the token belongs to ``request.client`` and persist
+that check together with the revocation, so another client's token is never
+modified. The endpoint responds the same way to an unknown token, an already
+revoked token, and a token issued to another client.
 
 
 API Reference

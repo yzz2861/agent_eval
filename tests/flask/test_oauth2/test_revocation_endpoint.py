@@ -130,6 +130,8 @@ def test_revoke_refresh_token_without_hint(test_client, token):
     assert rv.status_code == 200
     assert token.is_revoked()
     assert not token.is_refresh_token_active()
+    assert token.access_token_revoked_at
+    assert token.refresh_token_revoked_at
 
 
 def test_revoke_token_bound_to_client(test_client, token):
@@ -155,9 +157,62 @@ def test_revoke_token_bound_to_client(test_client, token):
         },
         headers=headers,
     )
-    assert rv.status_code == 400
-    resp = json.loads(rv.data)
-    assert resp["error"] == "invalid_grant"
+    assert rv.status_code == 200
+    assert json.loads(rv.data) == {}
+    assert not token.is_revoked()
+    assert token.is_refresh_token_active()
+
+
+def test_revoke_token_same_response(test_client, token):
+    """Unknown, repeated, and other-client tokens are indistinguishable."""
+    headers = create_basic_header("client-id", "client-secret")
+
+    rv = test_client.post(
+        "/oauth/revoke",
+        data={"token": "unknown-token"},
+        headers=headers,
+    )
+    unknown_response = (rv.status_code, rv.data)
+
+    rv = test_client.post(
+        "/oauth/revoke",
+        data={"token": token.access_token},
+        headers=headers,
+    )
+    first_revoke_response = (rv.status_code, rv.data)
+    rv = test_client.post(
+        "/oauth/revoke",
+        data={"token": token.access_token},
+        headers=headers,
+    )
+    repeated_response = (rv.status_code, rv.data)
+
+    client2 = Client(
+        user_id=1,
+        client_id="client-id-2",
+        client_secret="client-secret-2",
+    )
+    client2.set_client_metadata(
+        {
+            "scope": "profile",
+            "redirect_uris": ["https://client.test/authorized"],
+        }
+    )
+    db.session.add(client2)
+    db.session.commit()
+
+    headers = create_basic_header("client-id-2", "client-secret-2")
+    rv = test_client.post(
+        "/oauth/revoke",
+        data={"token": token.refresh_token},
+        headers=headers,
+    )
+    other_client_response = (rv.status_code, rv.data)
+
+    assert unknown_response == first_revoke_response
+    assert unknown_response == repeated_response
+    assert unknown_response == other_client_response
+    assert unknown_response == (200, b"{}")
 
 
 def test_insecure_transport(test_client, monkeypatch):
@@ -190,3 +245,18 @@ def test_revoke_with_wrong_hint(test_client, token):
     )
     assert rv.status_code == 200
     assert not token.is_refresh_token_active()
+    assert token.access_token_revoked_at
+    assert token.refresh_token_revoked_at
+
+
+def test_revoke_refresh_token_with_unknown_hint(test_client, token):
+    """An unknown hint still falls back to searching all token types."""
+    headers = create_basic_header("client-id", "client-secret")
+    rv = test_client.post(
+        "/oauth/revoke",
+        data={"token": token.refresh_token, "token_type_hint": "unknown"},
+        headers=headers,
+    )
+    assert rv.status_code == 200
+    assert token.access_token_revoked_at
+    assert token.refresh_token_revoked_at

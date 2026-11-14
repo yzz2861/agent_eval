@@ -77,14 +77,36 @@ def create_revocation_endpoint(session, token_model):
 
         def revoke_token(self, token, request):
             now = int(time.time())
-            token.access_token_revoked_at = now
+            token_string = request.form["token"]
             # Per RFC 7009 §2.1, revoking a refresh token also invalidates
             # the access token.
-            if request.form["token"] != token.access_token:
-                token.refresh_token_revoked_at = now
+            is_refresh_token = (
+                token.refresh_token and token_string == token.refresh_token
+            )
+            values = {"access_token_revoked_at": now}
+            if is_refresh_token:
+                values["refresh_token_revoked_at"] = now
 
-            session.add(token)
-            session.commit()
+            # Check ownership and write in the same atomic statement. A token
+            # issued to another client, or removed concurrently, is left
+            # untouched.
+            token_column = (
+                token_model.refresh_token
+                if is_refresh_token
+                else token_model.access_token
+            )
+            updated = (
+                session.query(token_model)
+                .filter(
+                    token_column == token_string,
+                    token_model.client_id == request.client.get_client_id(),
+                )
+                .update(values, synchronize_session="fetch")
+            )
+            if updated:
+                session.commit()
+            else:
+                session.rollback()
 
     return _RevocationEndpoint
 

@@ -1,4 +1,3 @@
-from ..rfc6749 import InvalidGrantError
 from ..rfc6749 import InvalidRequestError
 from ..rfc6749 import JsonResponse
 from ..rfc6749 import TokenEndpoint
@@ -36,8 +35,11 @@ class RevocationEndpoint(TokenEndpoint):
         if not token and hint is not None:
             token = self.query_token(request.form["token"], None)
 
-        if token and not token.check_client(client):
-            raise InvalidGrantError()
+        # Per RFC 7009 §2.1, an unknown token and a token issued to another
+        # client get the same successful response. Do not reveal which one it
+        # is through an error response.
+        if token is not None and not token.check_client(client):
+            return None
         return token
 
     def check_params(self, request, client):
@@ -113,5 +115,11 @@ class RevocationEndpoint(TokenEndpoint):
         Per :rfc:`7009#section-2.1`, revoking a refresh token should also
         invalidate the access token. The hint may not match the presented
         token, so check the presented token instead of the hint.
+
+        Implementations should verify that the token belongs to
+        ``request.client`` and persist the revocation in the same atomic
+        operation. The endpoint treats a token issued to another client like
+        an unknown token, so a failed ownership check must not write
+        anything.
         """
         raise NotImplementedError()
