@@ -867,6 +867,9 @@ class _EcdhEs(_RawKeyMgmt, JWAAlgorithm):
             alg = headers['alg']
 
         epk = JWK(**headers['epk'])
+        if epk['kty'] != key['kty'] or epk.get('crv') != key.get('crv'):
+            raise InvalidJWEData(
+                'ECDH-ES "epk" curve/type does not match recipient key')
         dk = self._derive(key.get_op_key('unwrapKey'),
                           epk.get_op_key('wrapKey'),
                           alg, dk_size, headers)

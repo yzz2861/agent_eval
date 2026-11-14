@@ -42,6 +42,27 @@ def json_decode(string):
     return json.loads(string)
 
 
+def _reject_duplicate_keys(pairs):
+    """object_pairs_hook that rejects JSON objects with duplicate keys."""
+    result = {}
+    for name, value in pairs:
+        if name in result:
+            raise ValueError('Duplicate JSON member: "%s"' % name)
+        result[name] = value
+    return result
+
+
+def json_decode_strict(string):
+    """Decodes a JSON document rejecting objects with duplicate keys.
+
+    :raises ValueError: if the document is invalid or contains a JSON
+        object with duplicated member names.
+    """
+    if isinstance(string, bytes):
+        string = string.decode('utf-8')
+    return json.loads(string, object_pairs_hook=_reject_duplicate_keys)
+
+
 class JWException(Exception):
     pass
 

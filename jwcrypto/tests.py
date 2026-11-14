@@ -1642,14 +1642,29 @@ class TestJWE(unittest.TestCase):
         ks.add(key2)
         e1 = jwe.JWE(plaintext=b'secret')
         e1.add_recipient(key1, '{"alg":"A128KW","enc":"A128GCM"}')
+        # No kid and two structurally compatible oct keys: selection must
+        # fail instead of trying keys until one happens to work.
         e2 = jwe.JWE()
-        e2.deserialize(e1.serialize(), ks)
-        self.assertEqual(e2.payload, b'secret')
+        e2.deserialize(e1.serialize())
+        with self.assertRaises(jwe.InvalidJWEData):
+            e2.decrypt(ks)
+        self.assertEqual(e2.key_attempts, 0)
+
+        # An explicit selector resolves the ambiguity deterministically.
+        e2b = jwe.JWE()
+        identity = e2b.deserialize(
+            e1.serialize(), ks,
+            selector=lambda candidates, header: next(
+                k for k in candidates if k.get('kid') == 'key1'))
+        self.assertEqual(e2b.payload, b'secret')
+        self.assertEqual(e2b.key_attempts, 1)
+        self.assertEqual(identity['key_thumbprint'], key1.thumbprint())
+        self.assertEqual(identity['recipient_index'], 0)
 
         e3 = jwe.JWE(plaintext=b'secret')
         e3.add_recipient(key3, '{"alg":"A256KW","enc":"A256GCM"}')
         e4 = jwe.JWE()
-        with self.assertRaises(JWKeyNotFound):
+        with self.assertRaises(jwe.InvalidJWEData):
             e4.deserialize(e3.serialize(), ks)
 
     def test_multiple_recipients_keyset(self):
@@ -1673,6 +1688,10 @@ class TestJWE(unittest.TestCase):
         e2 = jwe.JWE()
         e2.deserialize(serialized, ks)
         self.assertEqual(e2.payload, payload)
+        self.assertEqual(e2.key_attempts, 1)
+        self.assertEqual(e2.decrypted_recipient['key_thumbprint'],
+                         key1.thumbprint())
+        self.assertEqual(e2.decrypted_recipient['recipient_index'], 0)
         self.assertEqual(
             e2.jose_header,
             [
@@ -1691,7 +1710,7 @@ class TestJWE(unittest.TestCase):
         ks_swapped.add(jwk.JWK(**key2_dict))
 
         e3 = jwe.JWE()
-        with self.assertRaises(JWKeyNotFound):
+        with self.assertRaises(jwe.InvalidJWEData):
             e3.deserialize(serialized, ks_swapped)
 
     def test_serialize_not_flattened(self):
@@ -1996,6 +2015,249 @@ A2_token = \
     "AVO9iT5AV4CzvDJCdhSFlQ"
 
 
+class TestJWERecipientSelection(unittest.TestCase):
+    """Security drills for multi recipient JWE key selection."""
+
+    def _ecdh_token(self, keys, curves=None, algs='ECDH-ES+A128KW'):
+        curves = curves or ['P-256'] * len(keys)
+        enc = jwe.JWE(plaintext=b'tenant-secret',
+                      protected={'enc': 'A128GCM'},
+                      flattened=False)
+        for key, crv in zip(keys, curves):
+            enc.add_recipient(
+                key, header={'alg': algs, 'kid': key.get('kid')})
+        return enc.serialize()
+
+    def test_duplicate_kid_different_curve_uses_curve(self):
+        # Two teams share a kid but use different curves.
+        p256 = jwk.JWK.generate(kty='EC', crv='P-256', kid='shared')
+        p384 = jwk.JWK.generate(kty='EC', crv='P-384', kid='shared')
+        ks = jwk.JWKSet()
+        ks.add(p256)
+        ks.add(p384)
+
+        token = self._ecdh_token([p384], ['P-384'])
+        token_obj = jwe.JWE()
+        identity = token_obj.deserialize(token, ks)
+
+        # The P-384 key is selected by curve; the P-256 key is never tried.
+        self.assertEqual(token_obj.payload, b'tenant-secret')
+        self.assertEqual(token_obj.key_attempts, 1)
+        self.assertEqual(identity['key_crv'], 'P-384')
+        self.assertEqual(identity['key_thumbprint'], p384.thumbprint())
+
+    def test_duplicate_kid_wrong_curve_key_is_never_attempted(self):
+        p256 = jwk.JWK.generate(kty='EC', crv='P-256', kid='shared')
+        p384 = jwk.JWK.generate(kty='EC', crv='P-384', kid='shared')
+        ks = jwk.JWKSet()
+        ks.add(p256)
+        ks.add(p384)
+
+        # Token for a third P-384 key not present in the key set.
+        foreign = jwk.JWK.generate(kty='EC', crv='P-384', kid='shared')
+        token = self._ecdh_token([foreign], ['P-384'])
+        check = jwe.JWE()
+        check.deserialize(token)
+        with self.assertRaises(jwe.InvalidJWEData):
+            check.decrypt(ks)
+        # Only the structurally matching P-384 key may be attempted;
+        # the P-256 key with the same kid must never be touched.
+        self.assertEqual(check.key_attempts, 1)
+        self.assertIsNone(check.decrypted_recipient)
+
+    def test_duplicate_epk_in_recipient_header_rejected(self):
+        key = jwk.JWK.generate(kty='EC', crv='P-256', kid='k')
+        token = self._ecdh_token([key], ['P-256'])
+        # Inject a second epk member into the recipient header JSON.
+        doc = json_decode(token)
+        header_json = json_encode(doc['recipients'][0]['header'])
+        duplicated = header_json.replace(
+            '"epk":', '"epk":{"kty":"EC","crv":"P-256",'
+                       '"x":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",'
+                       '"y":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},'
+                       '"epk":', 1)
+        doc['recipients'][0]['header'] = duplicated
+        raw = json_encode(doc)
+        check = jwe.JWE()
+        with self.assertRaises(jwe.InvalidJWEData):
+            check.deserialize(raw)
+
+    def test_duplicate_epk_in_protected_header_rejected(self):
+        key = jwk.JWK.generate(kty='EC', crv='P-256')
+        enc = jwe.JWE(b'plain',
+                      {'alg': 'ECDH-ES', 'enc': 'A128GCM'})
+        enc.add_recipient(key)
+        compact = enc.serialize(compact=True)
+        protected = base64url_decode(compact.split('.')[0]).decode()
+        tampered = protected.replace(
+            '"epk":', '"epk":{"kty":"EC","crv":"P-256",'
+                       '"x":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",'
+                       '"y":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},'
+                       '"epk":', 1)
+        parts = compact.split('.')
+        parts[0] = base64url_encode(tampered)
+        check = jwe.JWE()
+        with self.assertRaises(jwe.InvalidJWEData):
+            check.deserialize('.'.join(parts))
+
+    def test_duplicate_epk_across_headers_rejected(self):
+        key = jwk.JWK.generate(kty='EC', crv='P-256', kid='k')
+        enc = jwe.JWE(plaintext=b'tenant-secret',
+                      protected={'enc': 'A128GCM'}, flattened=False)
+        enc.add_recipient(key,
+                          header={'alg': 'ECDH-ES+A128KW', 'kid': 'k'})
+        doc = json_decode(enc.serialize())
+        # A second, unauthenticated epk injected via the shared header.
+        doc['unprotected'] = {
+            'epk': doc['recipients'][0]['header']['epk']}
+        check = jwe.JWE()
+        check.deserialize(json_encode(doc))
+        with self.assertRaises(jwe.InvalidJWEData):
+            check.decrypt(key)
+        self.assertEqual(check.key_attempts, 0)
+
+    def test_epk_disallowed_curve_rejected(self):
+        key = jwk.JWK.generate(kty='EC', crv='P-256', kid='k')
+        token = self._ecdh_token([key], ['P-256'])
+        doc = json_decode(token)
+        doc['recipients'][0]['header']['epk']['crv'] = 'P-999'
+        check = jwe.JWE()
+        check.deserialize(json_encode(doc))
+        with self.assertRaises(jwe.InvalidJWEData):
+            check.decrypt(key)
+        self.assertEqual(check.key_attempts, 0)
+
+    def test_epk_curve_mismatch_rejected(self):
+        key = jwk.JWK.generate(kty='EC', crv='P-256', kid='k')
+        other = jwk.JWK.generate(kty='EC', crv='P-384')
+        token = self._ecdh_token([key], ['P-256'])
+        doc = json_decode(token)
+        # Claim an epk on a different curve than the recipient key.
+        doc['recipients'][0]['header']['epk'] = json_decode(
+            other.export_public())
+        check = jwe.JWE()
+        check.deserialize(json_encode(doc))
+        with self.assertRaises(jwe.InvalidJWEData):
+            check.decrypt(key)
+        self.assertEqual(check.key_attempts, 0)
+
+    def test_epk_must_be_public_and_present(self):
+        key = jwk.JWK.generate(kty='EC', crv='P-256', kid='k')
+        token = self._ecdh_token([key], ['P-256'])
+
+        # An epk carrying private key material is rejected.
+        doc = json_decode(token)
+        doc['recipients'][0]['header']['epk']['d'] = \
+            key.export_private(as_dict=True)['d']
+        check = jwe.JWE()
+        check.deserialize(json_encode(doc))
+        with self.assertRaises(jwe.InvalidJWEData):
+            check.decrypt(key)
+        self.assertEqual(check.key_attempts, 0)
+
+        # A missing epk is rejected before any key operation.
+        doc = json_decode(token)
+        del doc['recipients'][0]['header']['epk']
+        check = jwe.JWE()
+        check.deserialize(json_encode(doc))
+        with self.assertRaises(jwe.InvalidJWEData):
+            check.decrypt(key)
+        self.assertEqual(check.key_attempts, 0)
+
+    def test_cross_tenant_aad_selector_pins_recipient(self):
+        tenant_a = jwk.JWK.generate(kty='EC', crv='P-256', kid='team')
+        tenant_b = jwk.JWK.generate(kty='EC', crv='P-256', kid='team')
+        enc = jwe.JWE(plaintext=b'cross-tenant',
+                      protected={'enc': 'A128GCM'},
+                      aad=b'tenant-a-context', flattened=False)
+        enc.add_recipient(tenant_a,
+                          header={'alg': 'ECDH-ES+A128KW', 'kid': 'team'})
+        enc.add_recipient(tenant_b,
+                          header={'alg': 'ECDH-ES+A128KW', 'kid': 'team'})
+        token = enc.serialize()
+
+        ks = jwk.JWKSet()
+        ks.add(tenant_a)
+        ks.add(tenant_b)
+
+        # Same kid and curve: ambiguous without an explicit choice.
+        check = jwe.JWE()
+        check.deserialize(token)
+        with self.assertRaises(jwe.InvalidJWEData):
+            check.decrypt(ks)
+        self.assertEqual(check.key_attempts, 0)
+
+        # A selector pins tenant A; the other tenant key is never touched.
+        pinned = jwe.JWE()
+        identity = pinned.deserialize(
+            token, ks,
+            selector=lambda candidates, header: next(
+                k for k in candidates
+                if k.thumbprint() == tenant_a.thumbprint()))
+        self.assertEqual(pinned.payload, b'cross-tenant')
+        self.assertEqual(pinned.key_attempts, 1)
+        self.assertEqual(identity['key_thumbprint'], tenant_a.thumbprint())
+        self.assertEqual(identity['recipient_index'], 0)
+
+        # Tampering with the AAD invalidates the selected recipient without
+        # leaking another recipient's plaintext.
+        broken = json_decode(token)
+        broken['aad'] = base64url_encode(b'tenant-b-context')
+        tampered = jwe.JWE()
+        tampered.deserialize(json_encode(broken))
+        with self.assertRaises(jwe.InvalidJWEData):
+            tampered.decrypt(
+                ks,
+                selector=lambda candidates, header: next(
+                    k for k in candidates
+                    if k.thumbprint() == tenant_a.thumbprint()))
+        self.assertIsNone(tampered.plaintext)
+
+    def test_multiple_matches_without_selector_fails(self):
+        key1 = jwk.JWK.generate(kty='oct', size=128, kid='shared')
+        key2 = jwk.JWK.generate(kty='oct', size=128, kid='shared')
+        ks = jwk.JWKSet()
+        ks.add(key1)
+        ks.add(key2)
+        enc = jwe.JWE(plaintext=b'x',
+                      protected={'enc': 'A128GCM'},
+                      flattened=False)
+        enc.add_recipient(key1, header={'alg': 'A128KW', 'kid': 'shared'})
+        check = jwe.JWE()
+        check.deserialize(enc.serialize())
+        with self.assertRaisesRegex(jwe.InvalidJWEData,
+                                    'Ambiguous recipient'):
+            check.decrypt(ks)
+        self.assertEqual(check.key_attempts, 0)
+
+    def test_algorithm_allowlist_enforced_before_selection(self):
+        key = jwk.JWK.generate(kty='oct', size=128, kid='k')
+        enc = jwe.JWE(plaintext=b'x',
+                      protected={'alg': 'A128KW', 'enc': 'A128GCM'})
+        enc.add_recipient(key)
+        check = jwe.JWE(algs=['A256KW'])
+        check.deserialize(enc.serialize())
+        with self.assertRaises(jwe.InvalidJWEData):
+            check.decrypt(key)
+        self.assertEqual(check.key_attempts, 0)
+
+    def test_selector_must_return_matching_key(self):
+        key1 = jwk.JWK.generate(kty='oct', size=128, kid='shared')
+        key2 = jwk.JWK.generate(kty='oct', size=128, kid='shared')
+        ks = jwk.JWKSet()
+        ks.add(key1)
+        ks.add(key2)
+        enc = jwe.JWE(plaintext=b'x',
+                      protected={'enc': 'A128GCM'},
+                      flattened=False)
+        enc.add_recipient(key1, header={'alg': 'A128KW', 'kid': 'shared'})
+        foreign = jwk.JWK.generate(kty='oct', size=128)
+        check = jwe.JWE()
+        check.deserialize(enc.serialize())
+        with self.assertRaises(jwe.InvalidJWEData):
+            check.decrypt(ks, selector=lambda candidates, header: foreign)
+        self.assertEqual(check.key_attempts, 0)
+
 class TestJWT(unittest.TestCase):
 
     def test_A1(self):
@@ -2058,17 +2320,28 @@ class TestJWT(unittest.TestCase):
                           algs=jwe_algs_and_rsa1_5)
 
         keyset = jwk.JWKSet.from_json(json_encode(PrivateKeys))
-        # encrypt a new JWT with no kid
+        # A recipient without kid and several structurally compatible RSA
+        # keys is ambiguous and must fail instead of trying every key.
         header = copy.copy(A1_header)
         t = jwt.JWT(header, A1_claims, algs=jwe_algs_and_rsa1_5)
         t.make_encrypted_token(key)
         token = t.serialize()
-        # try to decrypt without a matching key
-        self.assertRaises(jwt.JWTMissingKey, jwt.JWT, jwt=token, key=keyset,
-                          algs=jwe_algs_and_rsa1_5,
-                          check_claims={'exp': 1300819380})
-        # now decrypt with key
+        with self.assertRaises(jwe.InvalidJWEData):
+            jwt.JWT(jwt=token, key=keyset, algs=jwe_algs_and_rsa1_5,
+                    check_claims={'exp': 1300819380})
+        # Adding the key still leaves two compatible RSA keys, so the
+        # caller must disambiguate explicitly via a kid.
         keyset.add(key)
+        with self.assertRaises(jwe.InvalidJWEData):
+            jwt.JWT(jwt=token, key=keyset, algs=jwe_algs_and_rsa1_5,
+                    check_claims={'exp': 1300819380})
+
+        # With a kid the correct RSA key is selected deterministically.
+        header = copy.copy(A1_header)
+        header['kid'] = 'testkey'
+        t = jwt.JWT(header, A1_claims, algs=jwe_algs_and_rsa1_5)
+        t.make_encrypted_token(key)
+        token = t.serialize()
         jwt.JWT(jwt=token, key=keyset, algs=jwe_algs_and_rsa1_5,
                 check_claims={'exp': 1300819380})
 

@@ -8,9 +8,9 @@ from jwcrypto.common import JWKeyNotFound
 from jwcrypto.common import JWSEHeaderParameter, JWSEHeaderRegistry
 from jwcrypto.common import base64url_decode, base64url_encode
 from jwcrypto.common import check_crit, merge_headers, validate_headers
-from jwcrypto.common import json_decode, json_encode
+from jwcrypto.common import json_decode_strict, json_encode
 from jwcrypto.jwa import JWA
-from jwcrypto.jwk import JWKSet
+from jwcrypto.jwk import JWK, JWKSet
 
 # Limit the amount of data we are willing to decompress by default.
 default_max_compressed_size = 256 * 1024
@@ -18,6 +18,34 @@ default_max_compressed_size = 256 * 1024
 default_max_plaintext_size = 100 * 1024 * 1024
 # Limit the number of recipients accepted in one decrypt() call.
 default_max_recipients = 10
+
+# RFC 7518 Section 6.4 / RFC 8037: curves allowed for the ECDH-ES "epk".
+allowed_ecdh_epk_curves = {
+    'EC': ('P-256', 'P-384', 'P-521', 'secp256k1'),
+    'OKP': ('X25519', 'X448'),
+}
+"""Curves permitted for an ECDH-ES ephemeral public key per key type"""
+
+# Key types accepted by each key management algorithm family.
+_keymgmt_key_types = {
+    'RSA1_5': ('RSA',),
+    'RSA-OAEP': ('RSA',),
+    'RSA-OAEP-256': ('RSA',),
+    'A128KW': ('oct',),
+    'A192KW': ('oct',),
+    'A256KW': ('oct',),
+    'dir': ('oct',),
+    'ECDH-ES': ('EC', 'OKP'),
+    'ECDH-ES+A128KW': ('EC', 'OKP'),
+    'ECDH-ES+A192KW': ('EC', 'OKP'),
+    'ECDH-ES+A256KW': ('EC', 'OKP'),
+    'A128GCMKW': ('oct',),
+    'A192GCMKW': ('oct',),
+    'A256GCMKW': ('oct',),
+    'PBES2-HS256+A128KW': ('oct',),
+    'PBES2-HS384+A192KW': ('oct',),
+    'PBES2-HS512+A256KW': ('oct',),
+}
 
 # RFC 7516 - 4.1
 # name: (description, supported?)
@@ -97,19 +125,21 @@ class JWE:
                 self.plaintext = plaintext.encode('utf-8')
         self.cek = None
         self.decryptlog = None
+        self.decrypted_recipient = None
+        self.key_attempts = 0
         if aad:
             self.objects['aad'] = aad
         if protected:
             if isinstance(protected, dict):
                 protected = json_encode(protected)
             else:
-                json_decode(protected)  # check header encoding
+                json_decode_strict(protected)  # check header encoding
             self.objects['protected'] = protected
         if unprotected:
             if isinstance(unprotected, dict):
                 unprotected = json_encode(unprotected)
             else:
-                json_decode(unprotected)  # check header encoding
+                json_decode_strict(unprotected)  # check header encoding
             self.objects['unprotected'] = unprotected
         if algs:
             self._allowed_algs = algs
@@ -156,15 +186,24 @@ class JWE:
         except InvalidJWSEHeader as e:
             raise InvalidJWEData(str(e)) from e
 
+    @staticmethod
+    def _encode_header(header):
+        # Headers may arrive as dicts or as raw JSON strings; strings are
+        # parsed strictly so duplicate members are rejected, then encoded
+        # back into the canonical internal representation.
+        if isinstance(header, str):
+            header = json_decode_strict(header)
+        return json_encode(header)
+
     def _get_jose_header(self, header=None):
-        ph = json_decode(self.objects.get('protected', '{}'))
-        uh = json_decode(self.objects.get('unprotected', '{}'))
+        ph = json_decode_strict(self.objects.get('protected', '{}'))
+        uh = json_decode_strict(self.objects.get('unprotected', '{}'))
         rh = None
         if header:
             if isinstance(header, dict):
                 rh = header
             else:
-                rh = json_decode(header)
+                rh = json_decode_strict(header)
         try:
             jh = merge_headers(ph, uh, rh, registry=self.header_registry)
             check_crit(jh, ph, registry=self.header_registry)
@@ -236,7 +275,7 @@ class JWE:
             rec['encrypted_key'] = wrapped['ek']
 
         if 'header' in wrapped:
-            h = json_decode(rec.get('header', '{}'))
+            h = json_decode_strict(rec.get('header', '{}'))
             nh = self._merge_headers(h, wrapped['header'])
             rec['header'] = json_encode(nh)
 
@@ -288,7 +327,7 @@ class JWE:
                 raise InvalidJWEOperation(
                     "Can't use compact encoding without protected headers")
             else:
-                ph = json_decode(self.objects['protected'])
+                ph = json_decode_strict(self.objects['protected'])
                 for required in 'alg', 'enc':
                     if required not in ph:
                         raise InvalidJWEOperation(
@@ -305,8 +344,8 @@ class JWE:
                 # per-recipient unprotected header by default. Move it to the
                 # protected header and re-encrypt the payload, as the protected
                 # header is used as additional authenticated data.
-                h = json_decode(rec['header'])
-                ph = json_decode(self.objects['protected'])
+                h = json_decode_strict(rec['header'])
+                ph = json_decode_strict(self.objects['protected'])
                 nph = self._merge_headers(h, ph)
                 self.objects['protected'] = json_encode(nph)
                 jh = self._get_jose_header()
@@ -327,7 +366,7 @@ class JWE:
             if 'protected' in obj:
                 enc['protected'] = base64url_encode(obj['protected'])
             if 'unprotected' in obj:
-                enc['unprotected'] = json_decode(obj['unprotected'])
+                enc['unprotected'] = json_decode_strict(obj['unprotected'])
             if 'aad' in obj:
                 enc['aad'] = base64url_encode(obj['aad'])
             if 'recipients' in obj:
@@ -338,37 +377,181 @@ class JWE:
                         e['encrypted_key'] = \
                             base64url_encode(rec['encrypted_key'])
                     if 'header' in rec:
-                        e['header'] = json_decode(rec['header'])
+                        e['header'] = json_decode_strict(rec['header'])
                     enc['recipients'].append(e)
             else:
                 if 'encrypted_key' in obj:
                     enc['encrypted_key'] = \
                         base64url_encode(obj['encrypted_key'])
                 if 'header' in obj:
-                    enc['header'] = json_decode(obj['header'])
+                    enc['header'] = json_decode_strict(obj['header'])
             return json_encode(enc)
 
     def _unwrap_decrypt(self, alg, enc, key, enckey, header,
                         aad, iv, ciphertext, tag):
         cek = alg.unwrap(key, enc.wrap_key_size, enckey, header)
         data = enc.decrypt(cek, aad, iv, ciphertext, tag)
-        self.decryptlog.append('Success')
         self.cek = cek
         return data
 
-    # FIXME: allow to specify which algorithms to accept as valid
-    def _decrypt(self, key, ppe, max_plaintext=default_max_plaintext_size):
+    def _validate_ecdh_epk(self, jh):
+        epk_data = jh.get('epk')
+        if not isinstance(epk_data, dict):
+            raise InvalidJWEData(
+                'Invalid ECDH-ES epk: must be a JWK object')
+        try:
+            epk = JWK(**epk_data)
+        except Exception as e:  # pylint: disable=broad-except
+            raise InvalidJWEData(
+                'Invalid ECDH-ES epk' + repr(e)) from e
 
+        kty = epk.get('kty')
+        if kty not in allowed_ecdh_epk_curves:
+            raise InvalidJWEData(
+                'Invalid ECDH-ES epk key type: ' + repr(kty))
+        crv = epk.get('crv')
+        if crv not in allowed_ecdh_epk_curves[kty]:
+            raise InvalidJWEData(
+                'Disallowed ECDH-ES epk curve: ' + repr(crv))
+        if kty == 'EC':
+            if not epk.get('x') or not epk.get('y') or epk.get('d'):
+                raise InvalidJWEData(
+                    'Invalid ECDH-ES epk: not a valid EC public key')
+        else:
+            if not epk.get('x') or epk.get('d'):
+                raise InvalidJWEData(
+                    'Invalid ECDH-ES epk: not a valid OKP public key')
+        try:
+            epk.get_op_key('wrapKey')
+        except Exception as e:  # pylint: disable=broad-except
+            raise InvalidJWEData(
+                'Invalid ECDH-ES epk' + repr(e)) from e
+        return epk
+
+    def _prepare_recipient(self, ppe):
         jh = self._get_jose_header(ppe.get('header', None))
-
-        # TODO: allow caller to specify list of headers it understands
         try:
             validate_headers(jh, registry=self.header_registry, target=self)
         except InvalidJWSEHeader as e:
             raise InvalidJWEData(str(e)) from e
 
+        # The algorithm allow list is enforced before key selection.
         alg = self._jwa_keymgmt(jh.get('alg', None))
         enc = self._jwa_enc(jh.get('enc', None))
+
+        if jh.get('alg', '').startswith('ECDH-ES'):
+            self._validate_ecdh_epk(jh)
+
+        return jh, alg, enc
+
+    @staticmethod
+    def _key_is_compatible(key, algname, jh):
+        # Backwards compatibility: PBES2 algorithms accept a raw
+        # string/bytes password instead of a JWK.
+        if isinstance(key, (str, bytes)):
+            return algname.startswith('PBES2')
+        if not isinstance(key, JWK):
+            return False
+        expected_kty = _keymgmt_key_types.get(algname)
+        if expected_kty is None or key.get('kty') not in expected_kty:
+            return False
+        if algname.startswith('ECDH-ES'):
+            epk = jh.get('epk') or {}
+            if key.get('crv') != epk.get('crv'):
+                return False
+        return True
+
+    def _select_key(self, keyset, jh, selector):
+        algname = jh.get('alg')
+        candidates = [k for k in keyset['keys']
+                      if self._key_is_compatible(k, algname, jh)]
+
+        if 'kid' in jh:
+            kid = jh['kid']
+            kid_matches = [k for k in candidates if k.get('kid') == kid]
+            if not kid_matches:
+                raise JWKeyNotFound(
+                    'Key ID ' + repr(kid) +
+                    ' not found among compatible keys')
+            candidates = kid_matches
+
+        if not candidates:
+            raise JWKeyNotFound('No compatible key found in key set')
+
+        for thumb_header in ('x5t#S256', 'x5t'):
+            if thumb_header in jh and len(candidates) > 1:
+                thumb = jh[thumb_header]
+                narrowed = [k for k in candidates
+                            if k.thumbprint() == thumb or
+                            k.get(thumb_header) == thumb]
+                if narrowed:
+                    candidates = narrowed
+
+        if len(candidates) == 1:
+            return candidates[0]
+
+        if selector is not None:
+            chosen = selector(list(candidates), dict(jh))
+            if not isinstance(chosen, JWK) or chosen not in candidates:
+                raise InvalidJWEData(
+                    'Recipient selector did not return a matching key')
+            return chosen
+
+        raise InvalidJWEData(
+            'Ambiguous recipient: %d keys match kid/alg/curve; provide an '
+            'explicit selector' % len(candidates))
+
+    def _recipient_identity(self, index, jh, key):
+        if isinstance(key, JWK):
+            thumbprint = key.thumbprint()
+            key_kid = key.get('kid')
+            key_kty = key.get('kty')
+            key_crv = key.get('crv')
+        else:
+            # Deprecated raw password interface: no stable JWK identity.
+            thumbprint = None
+            key_kid = None
+            key_kty = type(key).__name__
+            key_crv = None
+        return {
+            'recipient_index': index,
+            'kid': jh.get('kid'),
+            'alg': jh.get('alg'),
+            'enc': jh.get('enc'),
+            'key_kid': key_kid,
+            'key_thumbprint': thumbprint,
+            'key_kty': key_kty,
+            'key_crv': key_crv,
+            'header': jh,
+        }
+
+    def _attempt_key(self, alg, enc, key, enckey, jh, aad,
+                     log_prefix=None):
+        self.key_attempts += 1
+        try:
+            data = self._unwrap_decrypt(alg, enc, key, enckey, jh, aad,
+                                        self.objects['iv'],
+                                        self.objects['ciphertext'],
+                                        self.objects['tag'])
+        except Exception as e:  # pylint: disable=broad-except
+            if log_prefix is None:
+                if isinstance(key, JWK):
+                    keyid = key.get('kid', key.thumbprint())
+                else:
+                    keyid = type(key).__name__
+                self.decryptlog.append('Key [%s] failed: [%s]' %
+                                       (keyid, repr(e)))
+            else:
+                self.decryptlog.append('%s[%s]' % (log_prefix, repr(e)))
+            raise
+        self.decryptlog.append('Success')
+        return data
+
+    # FIXME: allow to specify which algorithms to accept as valid
+    def _decrypt(self, key, ppe, max_plaintext=default_max_plaintext_size,
+                 selector=None, recipient_index=None):
+
+        jh, alg, enc = self._prepare_recipient(ppe)
 
         aad = base64url_encode(self.objects.get('protected', ''))
         if 'aad' in self.objects:
@@ -376,36 +559,22 @@ class JWE:
         aad = aad.encode('utf-8')
 
         if isinstance(key, JWKSet):
-            keys = key
-            if 'kid' in jh:
-                kid_keys = key.get_keys(jh['kid'])
-                if not kid_keys:
-                    raise JWKeyNotFound('Key ID {} not in key set'.format(
-                                        jh['kid']))
-                keys = kid_keys
-
-            for k in keys:
-                try:
-                    data = self._unwrap_decrypt(alg, enc, k,
-                                                ppe.get('encrypted_key', b''),
-                                                jh, aad, self.objects['iv'],
-                                                self.objects['ciphertext'],
-                                                self.objects['tag'])
-                    self.decryptlog.append("Success")
-                    break
-                except Exception as e:  # pylint: disable=broad-except
-                    keyid = k.get('kid', k.thumbprint())
-                    self.decryptlog.append('Key [{}] failed: [{}]'.format(
-                                           keyid, repr(e)))
-
-            if "Success" not in self.decryptlog:
-                raise JWKeyNotFound('No working key found in key set')
+            selected = self._select_key(key, jh, selector)
+            data = self._attempt_key(alg, enc, selected,
+                                     ppe.get('encrypted_key', b''),
+                                     jh, aad)
         else:
-            data = self._unwrap_decrypt(alg, enc, key,
-                                        ppe.get('encrypted_key', b''),
-                                        jh, aad, self.objects['iv'],
-                                        self.objects['ciphertext'],
-                                        self.objects['tag'])
+            if not self._key_is_compatible(key, jh.get('alg'), jh):
+                raise InvalidJWEData(
+                    'Provided key is not compatible with recipient alg ' +
+                    repr(jh.get('alg')))
+            selected = key
+            data = self._attempt_key(alg, enc, key,
+                                     ppe.get('encrypted_key', b''),
+                                     jh, aad, log_prefix='Failed: ')
+
+        self.decrypted_recipient = self._recipient_identity(
+            recipient_index, jh, selected)
 
         compress = jh.get('zip', None)
         if compress == 'DEF':
@@ -425,25 +594,36 @@ class JWE:
         else:
             raise ValueError('Unknown compression')
 
-    def decrypt(self, key, max_plaintext=0):
+    def decrypt(self, key, max_plaintext=0, selector=None):
         """Decrypt a JWE token.
 
-        :param key: The (:class:`jwcrypto.jwk.JWK`) decryption key.
-        :param key: A (:class:`jwcrypto.jwk.JWK`) decryption key,
-         or a (:class:`jwcrypto.jwk.JWKSet`) that contains a key indexed
-         by the 'kid' header or (deprecated) a string containing a password.
+        :param key: A (:class:`jwcrypto.jwk.JWK`) decryption key, or a
+         (:class:`jwcrypto.jwk.JWKSet`) containing candidate keys.
         :param max_plaintext: Maximum plaintext size allowed, 0 means
          the library default applies. Application writers are recommended
          to set a limit here if they know what is the max plaintext size
          for their application.
+        :param selector: An optional callable used to disambiguate a
+         recipient for which several keys still match after 'kid',
+         algorithm and curve filtering. It is called as
+         ``selector(candidate_keys, merged_header)`` and must return the
+         single :class:`jwcrypto.jwk.JWK` to use. When several keys match
+         and no selector is provided decryption fails instead of guessing.
 
-        :raises InvalidJWEOperation: if the key is not a JWK object.
-        :raises InvalidJWEData: if the ciphertext can't be decrypted or
-         the object is otherwise malformed.
-        :raises JWKeyNotFound: if key is a JWKSet and the key is not found.
+        :raises InvalidJWEOperation: if no ciphertext is available.
+        :raises InvalidJWEData: if a recipient header is self-inconsistent,
+         the algorithm is not allowed, an ECDH-ES 'epk' is invalid, the
+         recipient is ambiguous, or the ciphertext can't be decrypted.
+        :raises JWKeyNotFound: if no provided key matches a recipient.
+
+        :return: A dict describing the recipient and key actually used,
+         also available as :attr:`decrypted_recipient`.
         """
 
         self.plaintext = None
+        self.cek = None
+        self.decrypted_recipient = None
+        self.key_attempts = 0
         if max_plaintext == 0:
             max_plaintext = default_max_plaintext_size
 
@@ -457,23 +637,31 @@ class JWE:
                 raise InvalidJWEData(
                     'Too many recipients (%d)' %
                     len(self.objects['recipients']))
-            for rec in self.objects['recipients']:
+            for idx, rec in enumerate(self.objects['recipients']):
+                log_start = len(self.decryptlog)
                 try:
-                    self._decrypt(key, rec, max_plaintext=max_plaintext)
-                    # Stop after the first successful recipient.
+                    self._decrypt(key, rec, max_plaintext=max_plaintext,
+                                  selector=selector, recipient_index=idx)
+                    # Stop after the first successful recipient so that no
+                    # other recipient key is ever attempted.
                     if self.plaintext is not None:
                         break
                 except Exception as e:  # pylint: disable=broad-except
                     if isinstance(e, JWKeyNotFound):
                         missingkey = True
-                    self.decryptlog.append('Failed: [%s]' % repr(e))
+                    if len(self.decryptlog) == log_start:
+                        self.decryptlog.append('Failed: [%s]' % repr(e))
         else:
+            log_start = len(self.decryptlog)
             try:
-                self._decrypt(key, self.objects, max_plaintext=max_plaintext)
+                self._decrypt(key, self.objects,
+                              max_plaintext=max_plaintext,
+                              selector=selector, recipient_index=0)
             except Exception as e:  # pylint: disable=broad-except
                 if isinstance(e, JWKeyNotFound):
                     missingkey = True
-                self.decryptlog.append('Failed: [%s]' % repr(e))
+                if len(self.decryptlog) == log_start:
+                    self.decryptlog.append('Failed: [%s]' % repr(e))
 
         if not self.plaintext:
             if missingkey:
@@ -481,7 +669,9 @@ class JWE:
             raise InvalidJWEData('No recipient matched the provided '
                                  'key' + repr(self.decryptlog))
 
-    def deserialize(self, raw_jwe, key=None):
+        return self.decrypted_recipient
+
+    def deserialize(self, raw_jwe, key=None, selector=None):
         """Deserialize a JWE token.
 
         NOTE: Destroys any current status and tries to import the raw
@@ -497,24 +687,29 @@ class JWE:
          by the 'kid' header or (deprecated) a string containing a password
          (optional).
 
-        :raises InvalidJWEData: if the raw object is an invalid JWE token.
+        :raises InvalidJWEData: if the raw object is an invalid JWE token,
+         including JSON headers with duplicate member names.
         :raises InvalidJWEOperation: if the decryption fails.
         """
 
         self.objects = {}
         self.plaintext = None
         self.cek = None
+        self.decrypted_recipient = None
+        self.key_attempts = 0
 
         o = {}
         try:
             try:
-                djwe = json_decode(raw_jwe)
+                djwe = json_decode_strict(raw_jwe)
                 o['iv'] = base64url_decode(djwe['iv'])
                 o['ciphertext'] = base64url_decode(djwe['ciphertext'])
                 o['tag'] = base64url_decode(djwe['tag'])
                 if 'protected' in djwe:
                     p = base64url_decode(djwe['protected'])
-                    o['protected'] = p.decode('utf-8')
+                    protected = p.decode('utf-8')
+                    json_decode_strict(protected)
+                    o['protected'] = protected
                 if 'unprotected' in djwe:
                     o['unprotected'] = json_encode(djwe['unprotected'])
                 if 'aad' in djwe:
@@ -527,14 +722,14 @@ class JWE:
                             e['encrypted_key'] = \
                                 base64url_decode(rec['encrypted_key'])
                         if 'header' in rec:
-                            e['header'] = json_encode(rec['header'])
+                            e['header'] = self._encode_header(rec['header'])
                         o['recipients'].append(e)
                 else:
                     if 'encrypted_key' in djwe:
                         o['encrypted_key'] = \
                             base64url_decode(djwe['encrypted_key'])
                     if 'header' in djwe:
-                        o['header'] = json_encode(djwe['header'])
+                        o['header'] = self._encode_header(djwe['header'])
 
             except ValueError as e:
                 # process up to 5 dots, if we have 5+ dots we get more than 5
@@ -543,7 +738,9 @@ class JWE:
                 if len(data) != 5:
                     raise InvalidJWEData() from e
                 p = base64url_decode(data[0])
-                o['protected'] = p.decode('utf-8')
+                protected = p.decode('utf-8')
+                json_decode_strict(protected)
+                o['protected'] = protected
                 ekey = base64url_decode(data[1])
                 if ekey != b'':
                     o['encrypted_key'] = base64url_decode(data[1])
@@ -557,7 +754,8 @@ class JWE:
             raise InvalidJWEData('Invalid format', repr(e)) from e
 
         if key:
-            self.decrypt(key)
+            return self.decrypt(key, selector=selector)
+        return None
 
     @property
     def payload(self):
