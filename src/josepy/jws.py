@@ -4,6 +4,7 @@ import argparse
 import base64
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import (
     Any,
     Dict,
@@ -22,6 +23,18 @@ from cryptography.hazmat.primitives.serialization import Encoding
 import josepy
 from josepy import b64, errors, json_util, jwa
 from josepy import jwk as jwk_mod
+from josepy.util import frozendict
+
+#: Key used for verification was supplied by the caller.
+KEY_SOURCE_EXTERNAL = "external"
+#: Key used for verification was taken from the ``jwk`` header parameter.
+KEY_SOURCE_JWK = "jwk"
+#: Key used for verification was selected through the ``kid`` header parameter.
+KEY_SOURCE_KID = "kid"
+
+#: Header parameters that RFC 8555 (section 6.2) requires to be carried in
+#: the JWS Protected Header rather than the JWS Unprotected Header.
+ACME_PROTECTED_PARAMETERS: FrozenSet[str] = frozenset(("alg", "kid", "jwk", "crit", "nonce", "url"))
 
 
 class MediaType:
@@ -61,10 +74,10 @@ class Header(json_util.JSONObjectWithFields):
         appropriately.
 
     .. warning:: This class does not support any extensions through
-        the "crit" (Critical) Header Parameter (4.1.11) and as a
-        conforming implementation, :meth:`from_json` treats its
-        occurrence as an error. Please subclass if you seek for
-        a different behaviour.
+        the "crit" (Critical) Header Parameter (4.1.11) by default and as a
+        conforming implementation, :meth:`from_json` treats the occurrence of
+        an unregistered "crit" entry as an error. Subclasses may extend
+        :attr:`supported_crit` to opt into additional critical extensions.
 
     :ivar x5tS256: "x5t#S256"
     :ivar str typ: MIME Media Type, inc. :const:`MediaType.PREFIX`.
@@ -73,13 +86,15 @@ class Header(json_util.JSONObjectWithFields):
     """
 
     alg: Optional[jwa.JWASignature] = json_util.field(
-        "alg", decoder=jwa.JWASignature.from_json, omitempty=True
+        "alg", decoder=lambda value: Header._decode_alg(value), omitempty=True
     )
     jku: Optional[bytes] = json_util.field("jku", omitempty=True)
     jwk: Optional[jwk_mod.JWK] = json_util.field(
         "jwk", decoder=jwk_mod.JWK.from_json, omitempty=True
     )
     kid: Optional[str] = json_util.field("kid", omitempty=True)
+    nonce: Optional[str] = json_util.field("nonce", omitempty=True)
+    url: Optional[str] = json_util.field("url", omitempty=True)
     x5u: Optional[bytes] = json_util.field("x5u", omitempty=True)
     x5c: Tuple[x509.Certificate, ...] = json_util.field("x5c", omitempty=True, default=())
     x5t: Optional[bytes] = json_util.field("x5t", decoder=json_util.decode_b64jose, omitempty=True)
@@ -94,6 +109,19 @@ class Header(json_util.JSONObjectWithFields):
     )
     crit: Tuple[Any, ...] = json_util.field("crit", omitempty=True, default=())
     _fields: Dict[str, json_util.Field]
+
+    #: Names listed in "crit" that this implementation understands. Empty by
+    #: default, which means every "crit" occurrence fails deserialization
+    #: until a subclass registers the extension it actually implements.
+    supported_crit: FrozenSet[str] = frozenset()
+
+    @classmethod
+    def from_json(cls, jobj: Mapping[str, Any]) -> "Header":
+        if not isinstance(jobj, Mapping):
+            raise errors.DeserializationError("JWS header must be a JSON object")
+        header = cast("Header", super().from_json(jobj))
+        header.validate_crit()
+        return header
 
     def not_omitted(self) -> Dict[str, json_util.Field]:
         """Fields that would not be omitted in the JSON object."""
@@ -110,11 +138,114 @@ class Header(json_util.JSONObjectWithFields):
         not_omitted_self = self.not_omitted()
         not_omitted_other = other.not_omitted()
 
-        if set(not_omitted_self).intersection(not_omitted_other):
-            raise TypeError("Addition of overlapping headers not defined")
+        overlapping = set(not_omitted_self).intersection(not_omitted_other)
+        if overlapping:
+            # Reject even identical values: merging would hide which layer
+            # provided the parameter and enable cross-layer header injection.
+            raise errors.HeaderConflictError(
+                "Header parameters appear in both the protected and the"
+                " unprotected header: {0}".format(",".join(sorted(overlapping)))
+            )
 
         not_omitted_self.update(not_omitted_other)
         return type(self)(**not_omitted_self)
+
+    @classmethod
+    def merge(
+        cls, protected: Optional["Header"], unprotected: Optional["Header"]
+    ) -> Tuple["Header", Dict[str, str]]:
+        """Merge the protected and unprotected header layers deterministically.
+
+        Each Header Parameter Name may occur in at most one of the two
+        layers; a duplicate (including a duplicate carrying the same value)
+        raises :class:`~josepy.errors.HeaderConflictError`.
+
+        :returns: The combined header and a mapping of every present
+            parameter name to ``"protected"`` or ``"unprotected"``, making
+            the origin of every merged parameter explicit.
+
+        """
+        protected = cls() if protected is None else protected
+        unprotected = cls() if unprotected is None else unprotected
+
+        protected_names = set(protected.not_omitted())
+        unprotected_names = set(unprotected.not_omitted())
+        duplicates = protected_names.intersection(unprotected_names)
+        if duplicates:
+            raise errors.HeaderConflictError(
+                "Header parameters appear in both the protected and the"
+                " unprotected header: {0}".format(",".join(sorted(duplicates)))
+            )
+
+        origins = {name: "protected" for name in protected_names}
+        origins.update({name: "unprotected" for name in unprotected_names})
+        return protected + unprotected, origins
+
+    def validate_crit(self) -> None:
+        """Validate the "crit" header parameter against the registry.
+
+        Per RFC 7515 section 4.1.11, "crit" must be a non-empty array of
+        unique header parameter names, every listed parameter must be present
+        in the JOSE header, and every listed extension must be understood by
+        the recipient. This runs before signature verification.
+
+        """
+        if not self.crit:
+            return
+
+        names = list(self.crit)
+        if not all(isinstance(name, str) for name in names):
+            raise errors.CriticalHeaderError('"crit" must contain header parameter names only')
+        if len(set(names)) != len(names):
+            raise errors.CriticalHeaderError('"crit" contains duplicate entries')
+
+        present = set(self.not_omitted())
+        missing = [name for name in names if name not in present]
+        if missing:
+            raise errors.CriticalHeaderError(
+                '"crit" lists header parameters that are not present: {0}'.format(
+                    ",".join(sorted(missing))
+                )
+            )
+
+        unsupported = [name for name in names if name not in type(self).supported_crit]
+        if unsupported:
+            raise errors.CriticalHeaderError(
+                "Unsupported critical header parameter(s): {0}".format(
+                    ",".join(sorted(unsupported))
+                )
+            )
+
+    def validate_key_selection(self) -> None:
+        """Enforce that "jwk" and "kid" are mutually exclusive."""
+        if self.jwk is not None and self.kid is not None:
+            raise errors.KeySelectorError(
+                'The "jwk" and "kid" header parameters are mutually exclusive'
+            )
+
+    def validate_acme_sources(self, origins: Mapping[str, str]) -> None:
+        """Validate the ACME (RFC 8555 section 6.2) header source constraints.
+
+        The "alg", "kid", "jwk", "crit", "nonce" and "url" parameters must
+        be carried by the JWS Protected Header, and exactly one of "jwk" and
+        "kid" identifies the account key.
+
+        """
+        misplaced = sorted(
+            name for name in ACME_PROTECTED_PARAMETERS if origins.get(name) == "unprotected"
+        )
+        if misplaced:
+            raise errors.HeaderSourceError(
+                "ACME header parameters must be protected, found in the"
+                " unprotected header: {0}".format(",".join(misplaced))
+            )
+
+        self.validate_key_selection()
+        if self.jwk is None and self.kid is None:
+            raise errors.KeySelectorError(
+                'Exactly one of the "jwk" and "kid" header parameters is required'
+            )
+        self.validate_crit()
 
     def find_key(self) -> josepy.JWK:
         """Find key based on header.
@@ -131,9 +262,31 @@ class Header(json_util.JSONObjectWithFields):
             raise errors.Error("No key found")
         return self.jwk
 
+    @staticmethod
+    def _decode_alg(value: Any) -> jwa.JWASignature:
+        if not isinstance(value, str) or not value:
+            # Do not echo the value: header material must not leak through
+            # error messages.
+            raise errors.AlgorithmError('The "alg" header parameter must be a non-empty string')
+        try:
+            return jwa.JWASignature.from_json(value)
+        except KeyError:
+            # The JWA registry is matched case-sensitively, so casing
+            # variants never silently select a different algorithm.
+            raise errors.AlgorithmError("Unsupported signature algorithm")
+
     @crit.decoder  # type: ignore
-    def crit(unused_value: Any) -> Any:
-        raise errors.DeserializationError('"crit" is not supported, please subclass')
+    def crit(value: Any) -> Tuple[Any, ...]:
+        if not isinstance(value, list) or not value:
+            raise errors.CriticalHeaderError(
+                '"crit" must be a non-empty array of header parameter names'
+            )
+        decoded = tuple(json_util.Field.default_decoder(value))
+        if not all(isinstance(name, str) for name in decoded):
+            raise errors.CriticalHeaderError('"crit" must contain header parameter names only')
+        if len(set(decoded)) != len(decoded):
+            raise errors.CriticalHeaderError('"crit" contains duplicate entries')
+        return decoded
 
     # x5c does NOT use JOSE Base64 (4.1.6)
 
@@ -161,6 +314,29 @@ class Header(json_util.JSONObjectWithFields):
             raise errors.DeserializationError(error)
 
 
+@dataclass(frozen=True)
+class VerificationResult:
+    """Outcome of a signature verification.
+
+    Instances are truthy when the signature is valid, so they remain a drop-in
+    replacement for the boolean returned by :meth:`Signature.verify`.
+
+    :ivar bool valid: Whether the signature verified successfully.
+    :ivar JWASignature alg: The algorithm actually used for verification,
+        taken from the merged header rather than any unprotected input.
+    :ivar str key_source: One of :data:`KEY_SOURCE_EXTERNAL`,
+        :data:`KEY_SOURCE_JWK` and :data:`KEY_SOURCE_KID`.
+
+    """
+
+    valid: bool
+    alg: jwa.JWASignature
+    key_source: str
+
+    def __bool__(self) -> bool:
+        return self.valid
+
+
 class Signature(json_util.JSONObjectWithFields):
     """JWS Signature.
 
@@ -174,8 +350,9 @@ class Signature(json_util.JSONObjectWithFields):
 
     header_cls = Header
     combined: Header
+    header_origins: frozendict
 
-    __slots__ = ("combined",)
+    __slots__ = ("combined", "header_origins")
     protected: str = json_util.field("protected", omitempty=True, default="")
     header: Header = json_util.field(
         "header", omitempty=True, default=header_cls(), decoder=header_cls.from_json
@@ -196,8 +373,13 @@ class Signature(json_util.JSONObjectWithFields):
     def __init__(self, **kwargs: Any) -> None:
         if "combined" not in kwargs:
             kwargs = self._with_combined(kwargs)
+        elif "header_origins" not in kwargs:
+            kwargs["header_origins"] = frozendict()
         super().__init__(**kwargs)
-        assert self.combined.alg is not None
+        if self.combined.alg is None:
+            raise errors.AlgorithmError('The "alg" header parameter is required')
+        self.combined.validate_crit()
+        self.combined.validate_key_selection()
 
     @classmethod
     def _with_combined(cls, kwargs: Any) -> Dict[str, Any]:
@@ -206,11 +388,14 @@ class Signature(json_util.JSONObjectWithFields):
         protected = kwargs.get("protected", cls._fields["protected"].default)
 
         if protected:
-            combined = header + cls.header_cls.json_loads(protected)
+            protected_header = cls.header_cls.json_loads(protected)
+            combined, origins = cls.header_cls.merge(protected_header, header)
         else:
             combined = header
+            origins = {name: "unprotected" for name in header.not_omitted()}
 
         kwargs["combined"] = combined
+        kwargs["header_origins"] = frozendict(origins)
         return kwargs
 
     @classmethod
@@ -224,12 +409,51 @@ class Signature(json_util.JSONObjectWithFields):
         :param JWK key: Key used for verification.
 
         """
-        actual_key: josepy.JWK = self.combined.find_key() if key is None else key
-        if not self.combined.alg:
-            raise josepy.Error("Not signature algorithm defined.")
-        return self.combined.alg.verify(
+        return bool(self.verify_detailed(payload, key).valid)
+
+    def verify_detailed(
+        self,
+        payload: bytes,
+        key: Optional[josepy.JWK] = None,
+        acme: bool = False,
+    ) -> VerificationResult:
+        """Verify and report the algorithm and key source that were used.
+
+        :param bytes payload: Payload to verify.
+        :param JWK key: Optional externally supplied key. When omitted the key
+            is taken from the ``jwk`` header parameter; a ``kid`` based key
+            lookup is not implemented and must be supplied by the caller.
+        :param bool acme: When True, enforce the RFC 8555 header source
+            constraints before touching any signature primitive.
+
+        """
+        if acme:
+            self.combined.validate_acme_sources(self.header_origins)
+        self.combined.validate_crit()
+
+        alg = self.combined.alg
+        if alg is None:
+            raise errors.AlgorithmError('The "alg" header parameter is required')
+
+        if key is not None:
+            actual_key = key
+            key_source = KEY_SOURCE_KID if self.combined.kid is not None else KEY_SOURCE_EXTERNAL
+        elif self.combined.jwk is not None:
+            actual_key = self.combined.find_key()
+            key_source = KEY_SOURCE_JWK
+        elif self.combined.kid is not None:
+            raise errors.KeySelectorError(
+                'A "kid" header parameter requires an externally supplied key'
+            )
+        else:
+            raise errors.KeySelectorError(
+                'No key available: supply a key or include a "jwk" header parameter'
+            )
+
+        valid = alg.verify(
             key=actual_key.key, sig=self.signature, msg=self._msg(self.protected, payload)
         )
+        return VerificationResult(valid=valid, alg=alg, key_source=key_source)
 
     @classmethod
     def sign(
@@ -285,7 +509,7 @@ class Signature(json_util.JSONObjectWithFields):
         fields = super().fields_from_json(jobj)
         fields_with_combined = cls._with_combined(fields)
         if "alg" not in fields_with_combined["combined"].not_omitted():
-            raise errors.DeserializationError("alg not present")
+            raise errors.AlgorithmError('The "alg" header parameter is required')
         return fields_with_combined
 
 
@@ -306,6 +530,19 @@ class JWS(json_util.JSONObjectWithFields):
     def verify(self, key: Optional[josepy.JWK] = None) -> bool:
         """Verify."""
         return all(sig.verify(self.payload, key) for sig in self.signatures)
+
+    def verify_detailed(
+        self,
+        key: Optional[josepy.JWK] = None,
+        acme: bool = False,
+    ) -> Tuple[VerificationResult, ...]:
+        """Verify every signature and return the per-signature results.
+
+        Each result reports the algorithm actually used (from the merged
+        header) and the key source (``external``, ``jwk`` or ``kid``).
+
+        """
+        return tuple(sig.verify_detailed(self.payload, key, acme=acme) for sig in self.signatures)
 
     @classmethod
     def sign(cls, payload: bytes, **kwargs: Any) -> "JWS":

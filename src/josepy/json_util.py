@@ -364,6 +364,10 @@ class JSONObjectWithFields(
                 try:
                     fields[slot] = field.decode(value)
                 except errors.DeserializationError as error:
+                    if type(error) is not errors.DeserializationError:
+                        # Preserve classified error subclasses (e.g. JWS
+                        # header errors) so callers can distinguish attacks.
+                        raise
                     raise errors.DeserializationError(
                         "Could not decode {0!r} ({1!r}): {2}".format(slot, value, error)
                     )

@@ -4,6 +4,14 @@ Changelog
 2.4.0 (main)
 ------------
 * Dropped support for Python 3.10.
+* Hardened JWS header handling against cross-layer header injection and
+  algorithm confusion: a parameter present in both the JWS Protected Header
+  and the JWS Unprotected Header is now rejected (even with identical
+  values), ``jwk`` and ``kid`` are mutually exclusive, and ``crit`` entries
+  must be registered before verification. ``Signature.verify_detailed`` and
+  ``JWS.verify_detailed`` report the algorithm and key source actually used,
+  and ACME (RFC 8555) protected-header source constraints can be enforced
+  via ``acme=True``.
 
 2.3.0 (2026-11-10)
 ------------------
