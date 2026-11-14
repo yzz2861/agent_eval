@@ -21,6 +21,17 @@ from .constants import (
 )
 
 
+def _recordRelocation(tree, reason, node):
+    """Record that the parser moved or implicitly created a node.
+
+    The log is consumed after parsing by tree-level policies (e.g. the
+    tree sanitizer) which need to know the final position of nodes.
+    """
+    relocations = getattr(tree, "relocations", None)
+    if relocations is not None:
+        relocations.append((reason, node))
+
+
 def parse(doc, treebuilder="etree", namespaceHTMLElements=True, **kwargs):
     """Parse an HTML document as a string or file-like object into a tree
 
@@ -878,12 +889,17 @@ class AfterHeadPhase(Phase):
     def startTagFromHead(self, token):
         self.parser.parseError("unexpected-start-tag-out-of-my-head",
                                {"name": token["name"]})
+        head = self.tree.headPointer
+        childrenBefore = len(head.childNodes)
         self.tree.openElements.append(self.tree.headPointer)
         self.parser.phases["inHead"].processStartTag(token)
         for node in self.tree.openElements[::-1]:
             if node.name == "head":
                 self.tree.openElements.remove(node)
                 break
+        if len(head.childNodes) > childrenBefore:
+            _recordRelocation(self.tree, "relocated-to-head",
+                              head.childNodes[-1])
 
     def startTagHead(self, token):
         self.parser.parseError("unexpected-start-tag", {"name": token["name"]})
@@ -1524,6 +1540,7 @@ class InBodyPhase(Phase):
             if commonAncestor.name in frozenset(("table", "tbody", "tfoot", "thead", "tr")):
                 parent, insertBefore = self.tree.getTableMisnestedNodePosition()
                 parent.insertBefore(lastNode, insertBefore)
+                _recordRelocation(self.tree, "foster-parented", lastNode)
             else:
                 commonAncestor.appendChild(lastNode)
 
@@ -1731,6 +1748,8 @@ class InTablePhase(Phase):
 
     def startTagCol(self, token):
         self.startTagColgroup(impliedTagToken("colgroup", "StartTag"))
+        _recordRelocation(self.tree, "implicit-colgroup",
+                          self.tree.openElements[-1])
         return token
 
     def startTagRowGroup(self, token):
@@ -1740,6 +1759,8 @@ class InTablePhase(Phase):
 
     def startTagImplyTbody(self, token):
         self.startTagRowGroup(impliedTagToken("tbody", "StartTag"))
+        _recordRelocation(self.tree, "implicit-tbody",
+                          self.tree.openElements[-1])
         return token
 
     def startTagTable(self, token):
@@ -2041,6 +2062,8 @@ class InTableBodyPhase(Phase):
         self.parser.parseError("unexpected-cell-in-table-body",
                                {"name": token["name"]})
         self.startTagTr(impliedTagToken("tr", "StartTag"))
+        _recordRelocation(self.tree, "implicit-tr",
+                          self.tree.openElements[-1])
         return token
 
     def startTagTableOther(self, token):

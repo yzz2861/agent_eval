@@ -192,6 +192,12 @@ class TreeBuilder(object):
 
         self.insertFromTable = False
 
+        # Log of (reason, node) pairs describing nodes the parser had to
+        # move or create implicitly (foster parenting, implied table
+        # structure, head/body relocation). Post-parse consumers such as
+        # the tree sanitizer use this to understand the final tree.
+        self.relocations = []
+
         self.document = self.documentClass()
 
     def elementInScope(self, target, variant=None):
@@ -345,6 +351,7 @@ class TreeBuilder(object):
             else:
                 parent.insertBefore(element, insertBefore)
             self.openElements.append(element)
+            self.relocations.append(("foster-parented", element))
         return element
 
     def insertText(self, data, parent=None):
@@ -361,6 +368,7 @@ class TreeBuilder(object):
             # special magic element rearranging
             parent, insertBefore = self.getTableMisnestedNodePosition()
             parent.insertText(data, insertBefore)
+            self.relocations.append(("foster-parented-text", parent))
 
     def getTableMisnestedNodePosition(self):
         """Get the foster parent element, and sibling to insert before

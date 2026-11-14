@@ -12,12 +12,14 @@ import re
 import warnings
 from xml.sax.saxutils import escape, unescape
 
+from six import text_type
 from six.moves import urllib_parse as urlparse
 
 from . import base
 from ..constants import namespaces, prefixes
 
-__all__ = ["Filter"]
+__all__ = ["Filter", "TreeSanitizer", "Diagnostic", "sanitize_tree",
+           "executable_elements"]
 
 
 _deprecation_msg = (
@@ -715,6 +717,69 @@ allowed_content_types = frozenset((
 ))
 
 
+#: Elements that are active content: if they end up in an executable
+#: context in the final tree they must be removed outright. Escaping them
+#: on the token stream is not enough, because the parser may have moved
+#: them (foster parenting, head/body relocation, foreign content) to a
+#: position the token-level policy never saw.
+executable_elements = frozenset((
+    (namespaces['html'], 'script'),
+    (namespaces['html'], 'style'),
+    (namespaces['html'], 'iframe'),
+    (namespaces['html'], 'object'),
+    (namespaces['html'], 'embed'),
+    (namespaces['html'], 'applet'),
+    (namespaces['html'], 'base'),
+    (namespaces['html'], 'meta'),
+    (namespaces['html'], 'link'),
+    (namespaces['html'], 'frame'),
+    (namespaces['html'], 'frameset'),
+    (namespaces['html'], 'noscript'),
+    (namespaces['svg'], 'script'),
+    (namespaces['svg'], 'style'),
+))
+
+#: Elements that establish table scope; content found directly in these
+#: (not inside a cell or caption) is subject to foster parenting.
+table_scope_elements = frozenset((
+    'table',
+    'tbody',
+    'thead',
+    'tfoot',
+    'tr',
+))
+
+#: Table elements inside which normal flow content (and the normal
+#: policy) applies.
+table_cell_elements = frozenset((
+    'td',
+    'th',
+    'caption',
+))
+
+#: Relocation reasons recorded by the parser that move an existing node.
+moved_reasons = frozenset((
+    'foster-parented',
+    'foster-parented-text',
+    'relocated-to-head',
+))
+
+#: Relocation reasons recorded by the parser for implicitly created
+#: table structure.
+inserted_reasons = frozenset((
+    'implicit-tbody',
+    'implicit-tr',
+    'implicit-colgroup',
+))
+
+#: Tag names of container roots that are not real elements and should
+#: not appear in diagnostic paths.
+container_tags = frozenset((
+    'DOCUMENT_FRAGMENT',
+    'DOCUMENT_ROOT',
+))
+
+
 data_content_type = re.compile(r'''
                                 ^
                                 # Match a content type <application>/<type>
@@ -922,3 +987,258 @@ class Filter(base.Filter):
                 clean.append(prop + ': ' + value + ';')
 
         return ' '.join(clean)
+
+
+def _split_tag(tag):
+    """Split an ElementTree tag into a (namespace, local name) pair."""
+    if tag.startswith("{"):
+        namespace, _, name = tag[1:].partition("}")
+        return namespace, name
+    return None, tag
+
+
+def _unwrap_node(node):
+    """Get the underlying DOM/ElementTree node from a treebuilder node."""
+    for attribute in ("_element", "element"):
+        element = getattr(node, attribute, None)
+        if element is not None:
+            return element
+    return None
+
+
+class Diagnostic(object):
+    """A single, content-free record of a sanitizer or parser action.
+
+    Diagnostics deliberately contain only tag names, namespaces, machine
+    readable reasons and structural paths: never text content or
+    attribute values, so reporting them cannot leak payload data (e.g.
+    the body of a removed script element).
+    """
+
+    __slots__ = ("action", "reason", "name", "namespace", "path")
+
+    def __init__(self, action, reason, name, namespace, path):
+        self.action = action
+        self.reason = reason
+        self.name = name
+        self.namespace = namespace
+        self.path = tuple(path)
+
+    def __repr__(self):
+        return ("Diagnostic(action=%r, reason=%r, name=%r, namespace=%r, "
+                "path=%r)" % (self.action, self.reason, self.name,
+                              self.namespace, self.path))
+
+    def __eq__(self, other):
+        if not isinstance(other, Diagnostic):
+            return NotImplemented
+        return (self.action == other.action and
+                self.reason == other.reason and
+                self.name == other.name and
+                self.namespace == other.namespace and
+                self.path == other.path)
+
+    def __ne__(self, other):
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+    def as_dict(self):
+        return {"action": self.action,
+                "reason": self.reason,
+                "name": self.name,
+                "namespace": self.namespace,
+                "path": list(self.path)}
+
+
+class TreeSanitizer(object):
+    """Post-parse sanitizer that judges nodes by their final position.
+
+    The token-level Filter runs on the serialization stream and cannot
+    see where the parser finally placed a node: foster parenting moves
+    content out of tables, tbody/tr elements are created implicitly,
+    content is relocated between head and body, and foreign content
+    (SVG/MathML) switches namespaces. This pass walks the fully built
+    tree and removes active-content elements (see executable_elements)
+    that ended up in an executable context, unless the policy explicitly
+    allows them.
+
+    Everything else is left in place for the streaming token filter, so
+    legitimate table structure and explicitly allowed (scoped) styles
+    are preserved.
+    """
+
+    def __init__(self,
+                 allowed_elements=allowed_elements,
+                 executable_elements=executable_elements):
+        """Creates a TreeSanitizer
+
+        :arg allowed_elements: elements the policy allows; allowed
+            elements are never removed by this pass
+
+        :arg executable_elements: elements considered active content
+
+        """
+        self.allowed_elements = allowed_elements
+        self.executable_elements = executable_elements
+
+    def sanitize_tree(self, tree, relocations=None):
+        """Sanitize a fully parsed ElementTree in place.
+
+        :arg tree: the root Element of a parsed document or fragment
+
+        :arg relocations: optional parser relocation log (a list of
+            (reason, node) pairs, see TreeBuilder.relocations) used to
+            explain why nodes ended up where they did
+
+        :returns: a list of Diagnostic records describing every removal
+            and every parser relocation that affected the tree
+
+        """
+        relocated = {}
+        if relocations:
+            for reason, node in relocations:
+                element = _unwrap_node(node)
+                if element is not None:
+                    relocated.setdefault(id(element), []).append(reason)
+
+        paths = {}
+        removals = []
+        removed_ids = set()
+
+        # Document-order walk; removals are applied afterwards so the
+        # walk itself is not disturbed. Each stack entry is
+        # (element, parent, ancestor names, ancestor ids).
+        stack = [(tree, None, (), ())]
+        while stack:
+            element, parent, ancestor_names, ancestor_ids = stack.pop()
+            tag = element.tag
+            if not isinstance(tag, text_type):
+                # Comments and similar non-element nodes carry no tag.
+                continue
+            namespace, name = _split_tag(tag)
+            if namespace is None:
+                namespace = namespaces["html"]
+            paths[id(element)] = tuple(
+                ancestor for ancestor in ancestor_names
+                if ancestor not in container_tags)
+            child_names = ancestor_names + (name,)
+            child_ids = ancestor_ids + (id(element),)
+            for child in reversed(list(element)):
+                stack.append((child, element, child_names, child_ids))
+
+            # Ancestors are always visited before their descendants, so
+            # this also covers nodes inside an already removed subtree.
+            gone = any(ancestor_id in removed_ids
+                       for ancestor_id in ancestor_ids)
+
+            if (parent is None or gone or
+                    (namespace, name) not in self.executable_elements or
+                    (namespace, name) in self.allowed_elements):
+                continue
+
+            reason = self._removal_reason(element, namespace, name,
+                                          ancestor_names, ancestor_ids,
+                                          relocated)
+            removals.append((element, parent,
+                             Diagnostic("removed", reason, name, namespace,
+                                        paths[id(element)])))
+            removed_ids.add(id(element))
+
+        diagnostics = []
+        for element, parent, diagnostic in removals:
+            if any(child is element for child in parent):
+                self._remove_element(parent, element)
+                diagnostics.append(diagnostic)
+
+        if relocations:
+            diagnostics.extend(
+                self._relocation_diagnostics(relocations, paths, removed_ids))
+
+        return diagnostics
+
+    def _removal_reason(self, element, namespace, name, ancestor_names,
+                        ancestor_ids, relocated):
+        for node_id in (id(element),) + ancestor_ids:
+            node_reasons = relocated.get(node_id, ())
+            if "foster-parented" in node_reasons:
+                return "foster-parented-into-executable-context"
+            if "relocated-to-head" in node_reasons:
+                return "relocated-to-head-executable-content"
+        context = self._context(namespace, ancestor_names)
+        return {
+            "table-scope": "executable-content-in-table-scope",
+            "head": "executable-content-in-head",
+            "foreign-content": "executable-content-in-foreign-content",
+            "body": "executable-content-in-body",
+        }[context]
+
+    def _context(self, namespace, ancestor_names):
+        if namespace != namespaces["html"]:
+            return "foreign-content"
+        for ancestor in reversed(ancestor_names):
+            if ancestor in table_cell_elements:
+                break
+            if ancestor in table_scope_elements:
+                return "table-scope"
+            if ancestor == "head":
+                return "head"
+        return "body"
+
+    def _remove_element(self, parent, element):
+        # Preserve the tail text so legitimate content after the removed
+        # element is not lost; the element's own subtree (which may hold
+        # payload content) is dropped entirely.
+        tail = element.tail
+        if tail:
+            siblings = list(parent)
+            index = siblings.index(element)
+            if index > 0:
+                previous = siblings[index - 1]
+                previous.tail = (previous.tail or "") + tail
+            else:
+                parent.text = (parent.text or "") + tail
+        parent.remove(element)
+
+    def _relocation_diagnostics(self, relocations, paths, removed_ids):
+        diagnostics = []
+        seen = set()
+        for reason, node in relocations:
+            element = _unwrap_node(node)
+            if element is None or id(element) in removed_ids:
+                continue
+            path = paths.get(id(element))
+            if path is None:
+                if reason != "foster-parented-text":
+                    continue
+                # The foster parent of misnested table text can be the
+                # fragment context element, which is replaced by the
+                # final fragment root; the move still happened.
+                path = ()
+            if reason == "foster-parented-text":
+                name, namespace = "#text", None
+            else:
+                namespace, name = _split_tag(element.tag)
+            action = "moved" if reason in moved_reasons else "inserted"
+            key = (action, reason, name, id(element))
+            if key in seen:
+                continue
+            seen.add(key)
+            diagnostics.append(Diagnostic(action, reason, name, namespace,
+                                          path))
+        return diagnostics
+
+
+def sanitize_tree(tree, relocations=None,
+                  allowed_elements=allowed_elements,
+                  executable_elements=executable_elements):
+    """Sanitize a fully parsed tree by final node positions.
+
+    Convenience wrapper around TreeSanitizer; returns the list of
+    Diagnostic records. See TreeSanitizer.sanitize_tree for details.
+    """
+    return TreeSanitizer(
+        allowed_elements=allowed_elements,
+        executable_elements=executable_elements).sanitize_tree(
+            tree, relocations=relocations)
