@@ -82,6 +82,49 @@ Any other string
   Any other string will be treated as a key for the ``request.META`` object,
   e.g. ``RATELIMIT_IP_META_KEY = 'HTTP_X_REAL_IP'``
 
+``RATELIMIT_TRUSTED_PROXIES``
+-----------------------------
+
+An explicit opt-in list of reverse proxy IP addresses or CIDR networks that
+are allowed to provide the client IP address. A single address or network may
+be given as a string; multiple values must be given as a list or tuple of
+strings, e.g. ``["10.0.0.1", "10.0.0.0/24"]``. Defaults to ``None``.
+
+This setting only takes effect together with
+``RATELIMIT_CLIENT_IP_HEADER``. When either is unset, the legacy
+``RATELIMIT_IP_META_KEY``/``REMOTE_ADDR`` behavior is preserved unchanged.
+When both are set, they take precedence over ``RATELIMIT_IP_META_KEY``.
+
+The immediate peer (``REMOTE_ADDR``) must belong to this set before the
+configured header is read. Headers sent by a direct or untrusted connection
+are ignored, so they cannot be used to spoof the rate limit bucket.
+
+``RATELIMIT_CLIENT_IP_HEADER``
+------------------------------
+
+The ``request.META`` key holding the client IP supplied by a trusted proxy.
+Defaults to ``None``. Use a single-value header key such as
+``"HTTP_X_REAL_IP"``, or ``"HTTP_X_FORWARDED_FOR"`` for a forwarding
+chain. Only consulted when ``REMOTE_ADDR`` matches
+``RATELIMIT_TRUSTED_PROXIES``.
+
+For a single-value header, a value containing a comma or the simultaneous
+presence of an ``X-Forwarded-For`` header is treated as ambiguous: the request
+fails closed instead of silently choosing one address.
+
+For ``HTTP_X_FORWARDED_FOR``, the chain is parsed from right to left, skipping
+addresses that belong to ``RATELIMIT_TRUSTED_PROXIES``, and the first
+untrusted address is used as the client IP. The leftmost value is never
+trusted on its own.
+
+Empty segments, embedded ports, IPv6 zone identifiers, control characters,
+unparseable addresses or chains longer than 64 hops make the client IP
+unavailable. In that case rate limiting fails closed (``should_limit=True``)
+rather than falling back to an attacker-controlled bucket; this is independent
+of ``RATELIMIT_FAIL_OPEN``, which only applies to cache failures. Resolved
+addresses are normalized, including IPv6 case/compression and IPv4-mapped
+IPv6 addresses, before the configured IPv4/IPv6 masks are applied.
+
 ``RATELIMIT_IPV4_MASK``
 -----------------------
 

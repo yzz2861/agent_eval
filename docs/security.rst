@@ -77,6 +77,22 @@ Then the ``@ratelimit`` decorator can be used with the ``ip`` key::
 
     @ratelimit(key='ip', rate='10/s')
 
+Trusted proxy headers
+^^^^^^^^^^^^^^^^^^^^
+
+When every request reaches Django through a known set of reverse proxies, the
+explicit ``RATELIMIT_TRUSTED_PROXIES`` and
+``RATELIMIT_CLIENT_IP_HEADER`` settings provide a safe way to read the client
+IP from a proxy header without trusting arbitrary clients.
+
+The header is only read when the immediate peer (``REMOTE_ADDR``) is part of
+the trusted set. With ``X-Forwarded-For``, addresses are walked right-to-left
+and trusted proxies are skipped until the first untrusted address, so an
+attacker cannot rotate the leftmost value to obtain a fresh bucket. With a
+single-value header such as ``X-Real-IP``, commas or a competing
+``X-Forwarded-For`` header are rejected as ambiguous. Malformed or
+unverifiable chains fail closed instead of selecting a spoofed bucket.
+
 Ratelimit keys
 ^^^^^^^^^^^^^^
 

@@ -7,10 +7,11 @@ from django.test.utils import override_settings
 from django.utils.decorators import method_decorator
 from django.views.generic import View
 
+from django_ratelimit import ALL
 from django_ratelimit.decorators import ratelimit
 from django_ratelimit.exceptions import Ratelimited
 from django_ratelimit.core import (get_usage, is_ratelimited,
-                                   _split_rate, _get_ip)
+                                   _split_rate, _get_ip, UnavailableClientIP)
 
 
 rf = RequestFactory()
@@ -670,3 +671,336 @@ class IpMetaTests(TestCase):
 
         with self.assertRaises(ImproperlyConfigured):
             _get_ip(req)
+
+
+TRUSTED_PROXIES = ["10.0.0.1", "10.0.0.0/24", "2001:db8:1::/48"]
+TRUSTED_PEER = "10.0.0.1"
+UNTRUSTED_PEER = "203.0.113.9"
+REAL_CLIENT = "198.51.100.7"
+
+
+def _req(remote_addr=TRUSTED_PEER, meta=None):
+    request = rf.get("/")
+    request.META["REMOTE_ADDR"] = remote_addr
+    if meta:
+        request.META.update(meta)
+    return request
+
+
+class TrustedProxyClientIPTests(TestCase):
+    def setUp(self):
+        cache.clear()
+
+    def _assert_fail_closed(self, request, **settings_overrides):
+        overrides = dict(
+            RATELIMIT_TRUSTED_PROXIES=TRUSTED_PROXIES,
+            RATELIMIT_CLIENT_IP_HEADER="HTTP_X_FORWARDED_FOR",
+        )
+        overrides.update(settings_overrides)
+        with self.settings(**overrides):
+            with self.assertRaises(UnavailableClientIP):
+                _get_ip(request)
+            usage = get_usage(
+                request, group="proxy", key="ip", rate="10/m",
+                method=ALL, increment=True)
+            self.assertTrue(usage["should_limit"])
+            self.assertEqual(usage["count"], 0)
+            self.assertEqual(usage["limit"], 0)
+
+    def test_direct_connection_ignores_spoofed_forwarded_for(self):
+        request = _req(
+            UNTRUSTED_PEER,
+            {"HTTP_X_FORWARDED_FOR": "1.2.3.4, 5.6.7.8"})
+        with self.settings(
+                RATELIMIT_TRUSTED_PROXIES=TRUSTED_PROXIES,
+                RATELIMIT_CLIENT_IP_HEADER="HTTP_X_FORWARDED_FOR"):
+            self.assertEqual(_get_ip(request), UNTRUSTED_PEER)
+
+    def test_direct_connection_ignores_spoofed_real_ip(self):
+        request = _req(
+            UNTRUSTED_PEER,
+            {"HTTP_X_REAL_IP": "1.2.3.4"})
+        with self.settings(
+                RATELIMIT_TRUSTED_PROXIES=TRUSTED_PROXIES,
+                RATELIMIT_CLIENT_IP_HEADER="HTTP_X_REAL_IP"):
+            self.assertEqual(_get_ip(request), UNTRUSTED_PEER)
+
+    def test_trusted_proxy_single_real_ip(self):
+        request = _req(meta={"HTTP_X_REAL_IP": REAL_CLIENT})
+        with self.settings(
+                RATELIMIT_TRUSTED_PROXIES=TRUSTED_PROXIES,
+                RATELIMIT_CLIENT_IP_HEADER="HTTP_X_REAL_IP"):
+            self.assertEqual(_get_ip(request), REAL_CLIENT)
+
+    def test_trusted_proxy_multi_hop_walks_right_to_left(self):
+        request = _req(meta={
+            "HTTP_X_FORWARDED_FOR":
+                "198.51.100.7, 10.0.0.5, 10.0.0.1",
+        })
+        with self.settings(
+                RATELIMIT_TRUSTED_PROXIES=TRUSTED_PROXIES,
+                RATELIMIT_CLIENT_IP_HEADER="HTTP_X_FORWARDED_FOR"):
+            self.assertEqual(_get_ip(request), REAL_CLIENT)
+
+    def test_forwarded_for_does_not_use_leftmost_value(self):
+        request = _req(meta={
+            "HTTP_X_FORWARDED_FOR":
+                "1.2.3.4, 198.51.100.7, 10.0.0.1",
+        })
+        with self.settings(
+                RATELIMIT_TRUSTED_PROXIES=TRUSTED_PROXIES,
+                RATELIMIT_CLIENT_IP_HEADER="HTTP_X_FORWARDED_FOR"):
+            self.assertEqual(_get_ip(request), REAL_CLIENT)
+
+    def test_untrusted_hop_stops_the_walk(self):
+        request = _req(meta={
+            "HTTP_X_FORWARDED_FOR":
+                "198.51.100.7, 203.0.113.50, 10.0.0.1",
+        })
+        with self.settings(
+                RATELIMIT_TRUSTED_PROXIES=TRUSTED_PROXIES,
+                RATELIMIT_CLIENT_IP_HEADER="HTTP_X_FORWARDED_FOR"):
+            self.assertEqual(_get_ip(request), "203.0.113.50")
+
+    def test_trusted_peer_without_header_uses_peer(self):
+        request = _req()
+        with self.settings(
+                RATELIMIT_TRUSTED_PROXIES=TRUSTED_PROXIES,
+                RATELIMIT_CLIENT_IP_HEADER="HTTP_X_REAL_IP"):
+            self.assertEqual(_get_ip(request), TRUSTED_PEER)
+
+    def test_single_value_header_with_comma_is_ambiguous(self):
+        request = _req(meta={"HTTP_X_REAL_IP": "1.2.3.4, 5.6.7.8"})
+        self._assert_fail_closed(
+            request, RATELIMIT_CLIENT_IP_HEADER="HTTP_X_REAL_IP")
+
+    def test_single_value_header_conflicts_with_forwarded_for(self):
+        request = _req(meta={
+            "HTTP_X_REAL_IP": REAL_CLIENT,
+            "HTTP_X_FORWARDED_FOR": REAL_CLIENT,
+        })
+        self._assert_fail_closed(
+            request, RATELIMIT_CLIENT_IP_HEADER="HTTP_X_REAL_IP")
+
+    def test_ipv4_mapped_ipv6_normalizes_to_ipv4_key(self):
+        mapped = _req(meta={
+            "HTTP_X_REAL_IP": "::ffff:198.51.100.7",
+        })
+        native = _req(meta={"HTTP_X_REAL_IP": "198.51.100.7"})
+        with self.settings(
+                RATELIMIT_TRUSTED_PROXIES=TRUSTED_PROXIES,
+                RATELIMIT_CLIENT_IP_HEADER="HTTP_X_REAL_IP"):
+            self.assertEqual(_get_ip(mapped), _get_ip(native))
+            self.assertEqual(_get_ip(mapped), REAL_CLIENT)
+
+    def test_ipv6_case_and_compression_normalize_to_same_key(self):
+        upper = _req(meta={
+            "HTTP_X_REAL_IP": "2001:DB8:0:0:0:0:0:1",
+        })
+        compressed = _req(meta={"HTTP_X_REAL_IP": "2001:db8::1"})
+        with self.settings(
+                RATELIMIT_TRUSTED_PROXIES=TRUSTED_PROXIES,
+                RATELIMIT_CLIENT_IP_HEADER="HTTP_X_REAL_IP",
+                RATELIMIT_IPV6_MASK=128):
+            self.assertEqual(_get_ip(upper), _get_ip(compressed))
+            self.assertEqual(_get_ip(upper), "2001:db8::1")
+
+    def test_empty_segment_in_forwarded_for_fails_closed(self):
+        request = _req(meta={
+            "HTTP_X_FORWARDED_FOR": "198.51.100.7, , 10.0.0.1",
+        })
+        self._assert_fail_closed(request)
+
+    def test_trailing_empty_segment_fails_closed(self):
+        request = _req(meta={
+            "HTTP_X_FORWARDED_FOR": "198.51.100.7, 10.0.0.1,",
+        })
+        self._assert_fail_closed(request)
+
+    def test_port_in_header_fails_closed(self):
+        request = _req(meta={
+            "HTTP_X_FORWARDED_FOR": "198.51.100.7:443, 10.0.0.1",
+        })
+        self._assert_fail_closed(request)
+
+    def test_bracketed_ipv6_port_fails_closed(self):
+        request = _req(meta={
+            "HTTP_X_REAL_IP": "[2001:db8::1]:443",
+        })
+        self._assert_fail_closed(
+            request, RATELIMIT_CLIENT_IP_HEADER="HTTP_X_REAL_IP")
+
+    def test_ipv6_zone_fails_closed(self):
+        request = _req(meta={
+            "HTTP_X_REAL_IP": "fe80::1%eth0",
+        })
+        self._assert_fail_closed(
+            request, RATELIMIT_CLIENT_IP_HEADER="HTTP_X_REAL_IP")
+
+    def test_control_character_fails_closed(self):
+        request = _req(meta={
+            "HTTP_X_FORWARDED_FOR": "198.51.100.7\n, 10.0.0.1",
+        })
+        self._assert_fail_closed(request)
+
+    def test_unparseable_address_fails_closed(self):
+        request = _req(meta={
+            "HTTP_X_FORWARDED_FOR": "not-an-ip, 10.0.0.1",
+        })
+        self._assert_fail_closed(request)
+
+    def test_all_trusted_chain_fails_closed(self):
+        request = _req(meta={
+            "HTTP_X_FORWARDED_FOR": "10.0.0.2, 10.0.0.1",
+        })
+        self._assert_fail_closed(request)
+
+    def test_chain_length_limit_fails_closed(self):
+        hops = ["10.0.0.1"] * 65
+        request = _req(meta={
+            "HTTP_X_FORWARDED_FOR": ", ".join(hops),
+        })
+        self._assert_fail_closed(request)
+
+    def test_long_chain_at_limit_is_accepted(self):
+        hops = ["10.0.0.1"] * 63 + [REAL_CLIENT]
+        request = _req(meta={
+            "HTTP_X_FORWARDED_FOR": ", ".join(hops),
+        })
+        with self.settings(
+                RATELIMIT_TRUSTED_PROXIES=TRUSTED_PROXIES,
+                RATELIMIT_CLIENT_IP_HEADER="HTTP_X_FORWARDED_FOR"):
+            self.assertEqual(_get_ip(request), REAL_CLIENT)
+
+    def test_fail_open_does_not_allow_invalid_chain(self):
+        request = _req(meta={
+            "HTTP_X_FORWARDED_FOR": "198.51.100.7, , 10.0.0.1",
+        })
+        self._assert_fail_closed(request, RATELIMIT_FAIL_OPEN=True)
+
+    @override_settings(RATELIMIT_USE_CACHE="connection-errors")
+    def test_cache_failure_still_fails_closed_independently(self):
+        @ratelimit(key="ip", rate="1/m", block=False)
+        def view(request):
+            return request.limited
+
+        request = _req(meta={
+            "HTTP_X_FORWARDED_FOR": "198.51.100.7, , 10.0.0.1",
+        })
+        with self.settings(
+                RATELIMIT_TRUSTED_PROXIES=TRUSTED_PROXIES,
+                RATELIMIT_CLIENT_IP_HEADER="HTTP_X_FORWARDED_FOR",
+                RATELIMIT_FAIL_OPEN=True):
+            self.assertTrue(view(request))
+
+    def test_invalid_chain_raises_ratelimited_not_500(self):
+        @ratelimit(key="ip", rate="10/m", block=True)
+        def view(request):
+            return True
+
+        request = _req(meta={
+            "HTTP_X_FORWARDED_FOR": "198.51.100.7, , 10.0.0.1",
+        })
+        with self.settings(
+                RATELIMIT_TRUSTED_PROXIES=TRUSTED_PROXIES,
+                RATELIMIT_CLIENT_IP_HEADER="HTTP_X_FORWARDED_FOR"):
+            with self.assertRaises(Ratelimited):
+                view(request)
+
+    def test_spoofed_leftmost_values_cannot_escape_bucket(self):
+        @ratelimit(key="ip", rate="1/m", block=False)
+        def view(request):
+            return request.limited
+
+        with self.settings(
+                RATELIMIT_TRUSTED_PROXIES=TRUSTED_PROXIES,
+                RATELIMIT_CLIENT_IP_HEADER="HTTP_X_FORWARDED_FOR"):
+            first = _req(meta={
+                "HTTP_X_FORWARDED_FOR":
+                    "1.1.1.1, 198.51.100.7, 10.0.0.1",
+            })
+            second = _req(meta={
+                "HTTP_X_FORWARDED_FOR":
+                    "2.2.2.2, 198.51.100.7, 10.0.0.1",
+            })
+            self.assertFalse(view(first))
+            self.assertTrue(view(second))
+
+    def test_ipv4_mask_still_applies_to_resolved_client(self):
+        first = _req(meta={"HTTP_X_REAL_IP": "10.1.1.1"})
+        second = _req(meta={"HTTP_X_REAL_IP": "10.1.2.2"})
+        with self.settings(
+                RATELIMIT_TRUSTED_PROXIES=TRUSTED_PROXIES,
+                RATELIMIT_CLIENT_IP_HEADER="HTTP_X_REAL_IP",
+                RATELIMIT_IPV4_MASK=16):
+            self.assertEqual(_get_ip(first), _get_ip(second))
+            self.assertEqual(_get_ip(first), "10.1.0.0")
+
+    def test_ipv6_mask_still_applies_to_resolved_client(self):
+        first = _req(meta={"HTTP_X_REAL_IP": "2001:db8::1000"})
+        second = _req(meta={"HTTP_X_REAL_IP": "2001:db8::1001"})
+        with self.settings(
+                RATELIMIT_TRUSTED_PROXIES=TRUSTED_PROXIES,
+                RATELIMIT_CLIENT_IP_HEADER="HTTP_X_REAL_IP",
+                RATELIMIT_IPV6_MASK=64):
+            self.assertEqual(_get_ip(first), _get_ip(second))
+
+    def test_new_settings_take_precedence_over_meta_key(self):
+        request = _req(meta={
+            "HTTP_X_REAL_IP": REAL_CLIENT,
+            "MY_THING": "5.6.7.8",
+        })
+        with self.settings(
+                RATELIMIT_TRUSTED_PROXIES=TRUSTED_PROXIES,
+                RATELIMIT_CLIENT_IP_HEADER="HTTP_X_REAL_IP",
+                RATELIMIT_IP_META_KEY="MY_THING"):
+            self.assertEqual(_get_ip(request), REAL_CLIENT)
+
+    def test_legacy_meta_key_unchanged_when_new_settings_absent(self):
+        request = _req(meta={"MY_THING": "5.6.7.8"})
+        with self.settings(RATELIMIT_IP_META_KEY="MY_THING"):
+            self.assertEqual(_get_ip(request), "5.6.7.8")
+
+    def test_single_new_setting_does_not_enable_explicit_resolution(self):
+        request = _req(
+            UNTRUSTED_PEER,
+            {"HTTP_X_FORWARDED_FOR": "1.2.3.4"})
+        with self.settings(RATELIMIT_TRUSTED_PROXIES=TRUSTED_PROXIES):
+            self.assertEqual(_get_ip(request), UNTRUSTED_PEER)
+
+    def test_trusted_proxies_accepts_single_string(self):
+        request = _req(meta={"HTTP_X_REAL_IP": REAL_CLIENT})
+        with self.settings(
+                RATELIMIT_TRUSTED_PROXIES="10.0.0.0/24",
+                RATELIMIT_CLIENT_IP_HEADER="HTTP_X_REAL_IP"):
+            self.assertEqual(_get_ip(request), REAL_CLIENT)
+
+
+    def test_ipv6_trusted_proxy_resolves_forwarded_for(self):
+        request = _req(
+            remote_addr="2001:db8:1::5",
+            meta={
+                "HTTP_X_FORWARDED_FOR":
+                    "198.51.100.7, 2001:db8:1::5",
+            })
+        with self.settings(
+                RATELIMIT_TRUSTED_PROXIES=TRUSTED_PROXIES,
+                RATELIMIT_CLIENT_IP_HEADER="HTTP_X_FORWARDED_FOR"):
+            self.assertEqual(_get_ip(request), REAL_CLIENT)
+
+    def test_mapped_peer_matches_ipv4_trusted_network(self):
+        request = _req(
+            remote_addr="::ffff:10.0.0.1",
+            meta={"HTTP_X_REAL_IP": REAL_CLIENT})
+        with self.settings(
+                RATELIMIT_TRUSTED_PROXIES=TRUSTED_PROXIES,
+                RATELIMIT_CLIENT_IP_HEADER="HTTP_X_REAL_IP"):
+            self.assertEqual(_get_ip(request), REAL_CLIENT)
+
+    def test_invalid_trusted_proxy_configuration(self):
+        request = _req()
+        with self.settings(
+                RATELIMIT_TRUSTED_PROXIES=["not-a-network"],
+                RATELIMIT_CLIENT_IP_HEADER="HTTP_X_REAL_IP"):
+            with self.assertRaises(ImproperlyConfigured):
+                _get_ip(request)

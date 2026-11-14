@@ -5,6 +5,22 @@ Change Log
 UNRELEASED
 ==========
 
+Additions:
+----------
+
+- Add explicit, opt-in client IP resolution behind trusted proxies via the
+  ``RATELIMIT_TRUSTED_PROXIES`` and ``RATELIMIT_CLIENT_IP_HEADER`` settings.
+  Only requests whose ``REMOTE_ADDR`` is a trusted proxy may supply the client
+  IP; ``X-Forwarded-For`` is walked right-to-left past trusted proxies,
+  single-value headers reject commas or a competing ``X-Forwarded-For`` as
+  ambiguous, and malformed proxy chains (empty segments, ports, IPv6 zones,
+  control characters, unparseable addresses, overlong chains) fail closed in
+  ``get_usage`` instead of trusting a spoofed bucket. Addresses are normalized
+  (IPv6 case/compression and IPv4-mapped IPv6) before the existing IPv4/IPv6
+  masks are applied. Legacy ``REMOTE_ADDR``/``RATELIMIT_IP_META_KEY`` behavior
+  is unchanged when the new settings are not both set, and
+  ``RATELIMIT_FAIL_OPEN`` remains limited to cache failures.
+
 v4.1
 ====
 
