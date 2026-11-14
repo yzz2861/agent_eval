@@ -4,7 +4,13 @@ Changes
 9.1 (unreleased)
 ----------------
 
-- Nothing changed yet.
+- Add ``RestrictedPython.AttributePolicy``: a per-tenant attribute
+  capability policy distinguishing read, call, iterate and write
+  operations.  It denies dunder attributes and frame, code object and
+  generator internals by default, allows explicit whitelists for
+  legitimate business objects and raises ``AttributePolicyError`` with
+  stable, auditable error codes which never echo an object ``repr`` or
+  memory address back into the restricted script.
 
 
 9.0 (2026-11-04)
