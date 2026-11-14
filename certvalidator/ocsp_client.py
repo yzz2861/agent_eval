@@ -6,12 +6,14 @@ import os
 from asn1crypto import core, ocsp, x509, algos
 
 from . import errors
+from . import http_policy as _http_policy
 from ._types import str_cls, type_name
+from .errors import OCSPFetchError, FetchPolicyError
 from .version import __version__
 from ._urllib import Request, urlopen, URLError
 
 
-def fetch(cert, issuer, hash_algo='sha1', nonce=True, user_agent=None, timeout=10):
+def fetch(cert, issuer, hash_algo='sha1', nonce=True, user_agent=None, timeout=10, http_policy=None, fetcher=None):
     """
     Fetches an OCSP response for a certificate
 
@@ -35,9 +37,24 @@ def fetch(cert, issuer, hash_algo='sha1', nonce=True, user_agent=None, timeout=1
     :param timeout:
         The number of seconds after which an HTTP request should timeout
 
+    :param http_policy:
+        None or a certvalidator.http_policy.FetchPolicy object constraining
+        how the OCSP response may be fetched (allowed schemes/hosts/ports,
+        blocked IP ranges, redirect, size and timeout limits). If None, the
+        historical behavior of opening the URL directly is used.
+
+    :param fetcher:
+        None or a callable with the signature of urllib.request.urlopen(),
+        accepting (request, data, timeout) and returning a response object.
+        Allows callers to customize how HTTP requests are performed. When
+        combined with http_policy, the fetcher must surface redirects as
+        urllib.error.HTTPError instead of following them.
+
     :raises:
         urllib.error.URLError/urllib2.URLError - when a URL/HTTP error occurs
         socket.error - when a socket error occurs
+        certvalidator.errors.OCSPFetchError - when the HTTP fetch policy
+        rejects the request or response
 
     :return:
         An asn1crypto.ocsp.OCSPResponse object
@@ -59,6 +76,14 @@ def fetch(cert, issuer, hash_algo='sha1', nonce=True, user_agent=None, timeout=1
         user_agent = 'certvalidator %s' % __version__
     elif not isinstance(user_agent, str_cls):
         raise TypeError('user_agent must be a unicode string, not %s' % type_name(user_agent))
+
+    if http_policy is not None and not isinstance(http_policy, _http_policy.FetchPolicy):
+        raise TypeError(
+            'http_policy must be a certvalidator.http_policy.FetchPolicy object, not %s' % type_name(http_policy)
+        )
+
+    if fetcher is not None and not callable(fetcher):
+        raise TypeError('fetcher must be None or a callable, not %s' % type_name(fetcher))
 
     cert_id = ocsp.CertId({
         'hash_algorithm': algos.DigestAlgorithm({'algorithm': hash_algo}),
@@ -89,12 +114,32 @@ def fetch(cert, issuer, hash_algo='sha1', nonce=True, user_agent=None, timeout=1
     last_e = None
     for ocsp_url in cert.ocsp_urls:
         try:
-            request = Request(ocsp_url)
-            request.add_header('Accept', 'application/ocsp-response')
-            request.add_header('Content-Type', 'application/ocsp-request')
-            request.add_header('User-Agent', user_agent)
-            response = urlopen(request, ocsp_request.dump(), timeout)
-            ocsp_response = ocsp.OCSPResponse.load(response.read())
+            headers = {
+                'Accept': 'application/ocsp-response',
+                'Content-Type': 'application/ocsp-request',
+                'User-Agent': user_agent,
+            }
+            if http_policy is not None:
+                try:
+                    result = _http_policy.fetch_url(
+                        ocsp_url,
+                        headers=headers,
+                        data=ocsp_request.dump(),
+                        timeout=timeout,
+                        policy=http_policy,
+                        opener=fetcher
+                    )
+                except FetchPolicyError as e:
+                    raise OCSPFetchError(str_cls(e), reason=e.reason)
+                response_data = result.body
+            else:
+                request = Request(ocsp_url)
+                for name, value in headers.items():
+                    request.add_header(name, value)
+                opener = fetcher or urlopen
+                response = opener(request, ocsp_request.dump(), timeout)
+                response_data = response.read()
+            ocsp_response = ocsp.OCSPResponse.load(response_data)
             request_nonce = ocsp_request.nonce_value
             response_nonce = ocsp_response.nonce_value
             if request_nonce and response_nonce and request_nonce.native != response_nonce.native:
@@ -103,7 +148,7 @@ def fetch(cert, issuer, hash_algo='sha1', nonce=True, user_agent=None, timeout=1
                 )
             return ocsp_response
 
-        except (URLError) as e:
+        except (URLError, OCSPFetchError) as e:
             last_e = e
 
     raise last_e

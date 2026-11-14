@@ -1,5 +1,21 @@
 # changelog
 
+## 0.11.2
+
+ - Added an injectable HTTP fetch policy for CRL and OCSP retrieval:
+   `certvalidator.http_policy.FetchPolicy` restricts URLs to explicit
+   scheme/host/port allowlists, rejects loopback and link-local addresses
+   (including DNS results, re-checked on every redirect hop), refuses
+   cross-origin redirects, and caps response size and request timeout
+ - `crl_client.fetch()`, `crl_client.fetch_certs()` and
+   `ocsp_client.fetch()` now accept `http_policy` and `fetcher` keyword
+   parameters, also passable via `crl_fetch_params`/`ocsp_fetch_params`
+ - Policy rejections raise `certvalidator.errors.CRLFetchError` or
+   `certvalidator.errors.OCSPFetchError`, subclasses of
+   `CRLValidationIndeterminateError`/`OCSPValidationIndeterminateError`
+   with a machine-readable `reason` attribute; logs and error messages
+   contain only the URL origin, never a full URL or request body
+
 ## 0.11.1
 
  - Updated [asn1crypto](https://github.com/wbond/asn1crypto) dependency to

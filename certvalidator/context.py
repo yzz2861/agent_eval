@@ -457,7 +457,9 @@ class ValidationContext():
                         certs = crl_client.fetch_certs(
                             crl_,
                             user_agent=self._crl_fetch_params.get('user_agent'),
-                            timeout=self._crl_fetch_params.get('timeout')
+                            timeout=self._crl_fetch_params.get('timeout'),
+                            http_policy=self._crl_fetch_params.get('http_policy'),
+                            fetcher=self._crl_fetch_params.get('fetcher')
                         )
                         for cert_ in certs:
                             if self.certificate_registry.add_other_cert(cert_):

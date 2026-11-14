@@ -237,6 +237,46 @@ certificate in question, it will not be used.*
 If there is the desire to customize the timeout or user agent for the fetchers,
 please use the `crl_fetch_params` and `ocsp_fetch_params` keyword parameters.
 
+#### Constraining HTTP Fetching
+
+For services that need a network boundary around revocation fetching, an
+injectable HTTP policy is available via `certvalidator.http_policy.FetchPolicy`.
+The policy restricts URLs to explicit scheme/host/port allowlists, rejects
+loopback and link-local addresses (both as URL literals and as DNS results,
+re-checked on every redirect hop), refuses cross-origin redirects, and caps
+the response size and request timeout. Policy rejections raise
+`certvalidator.errors.CRLFetchError` or
+`certvalidator.errors.OCSPFetchError`, which are subclasses of
+`CRLValidationIndeterminateError` and `OCSPValidationIndeterminateError`
+carrying a machine-readable `reason` attribute. Error messages and log
+records only ever contain the origin (`scheme://host[:port]`), never a full
+URL or request body.
+
+```python
+from certvalidator import CertificateValidator, ValidationContext
+from certvalidator.http_policy import FetchPolicy
+
+policy = FetchPolicy(
+    allowed_schemes=('http',),
+    allowed_hosts=['crl.example.com', 'ocsp.example.com'],
+    allowed_ports=[80],
+    max_response_size=4 * 1024 * 1024,
+    max_timeout=5
+)
+
+context = ValidationContext(
+    allow_fetching=True,
+    crl_fetch_params={'http_policy': policy},
+    ocsp_fetch_params={'http_policy': policy}
+)
+validator = CertificateValidator(end_entity_cert, validation_context=context)
+```
+
+A custom `fetcher` callable (with the signature of
+`urllib.request.urlopen()`) may also be passed via `crl_fetch_params` and
+`ocsp_fetch_params` to customize how HTTP requests are performed, with or
+without a policy.
+
 #### Out-of-Band Sources
 
 If CRLs or OCSP responses are fetched via another mechanism, they can be
