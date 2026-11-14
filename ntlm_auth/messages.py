@@ -9,12 +9,143 @@ import struct
 from ntlm_auth.compute_response import ComputeResponse
 from ntlm_auth.constants import AvId, AvFlags, MessageTypes, NegotiateFlags, \
     NTLM_SIGNATURE
+from ntlm_auth.exceptions import MalformedMessageError
 from ntlm_auth.rc4 import ARC4
 
 try:
     from collections import OrderedDict
 except ImportError:  # pragma: no cover
     from ordereddict import OrderedDict
+
+
+# The largest value that can be represented by a 32-bit unsigned integer.
+_UINT32_MAX = 0xFFFFFFFF
+
+
+class _BoundedCursor(object):
+    """A bounded cursor over a single raw NTLM message.
+
+    Every read is validated against the actual size of the backing buffer so
+    an attacker controlled length or offset can never cause an integer wrap
+    or a read past the end of the message. Payload slices additionally share
+    a budget of disjoint byte ranges which makes overlapping payloads a
+    deterministic error in strict mode.
+
+    The cursor never copies payload data into an exception; error messages
+    only reference the message type, field name and numeric bounds.
+    """
+
+    def __init__(self, data, message_type, strict=False):
+        self.data = data
+        self.message_type = message_type
+        self.strict = strict
+        self.message_size = len(data)
+        # Each entry is the exclusive (start, end) byte range of a payload
+        # field that has already been consumed from the shared message buffer.
+        self._claimed_ranges = []
+
+    def fail(self, field_name, reason, *format_args):
+        if format_args:
+            reason = reason % format_args
+        raise MalformedMessageError(
+            "Invalid NTLM message type %d: %s - %s"
+            % (self.message_type, field_name, reason))
+
+    def require_header(self, end, field_name):
+        # end is exclusive. A negative end can never be <= a non-negative
+        # message size, so truncated/negative inputs fail deterministically.
+        if end < 0 or end > self.message_size:
+            self.fail(field_name,
+                      "needs %d bytes but the message is only %d bytes long",
+                      end, self.message_size)
+
+    def read_fixed(self, start, size, field_name):
+        end = start + size
+        self.require_header(end, field_name)
+        return self.data[start:end]
+
+    def read_uint16(self, offset, field_name):
+        raw_value = self.read_fixed(offset, 2, field_name)
+        return struct.unpack("<H", raw_value)[0]
+
+    def read_uint32(self, offset, field_name):
+        raw_value = self.read_fixed(offset, 4, field_name)
+        return struct.unpack("<I", raw_value)[0]
+
+    def read_security_buffer(self, fields_offset, field_name, header_end):
+        """Reads a SECURITY_BUFFER (length, maximum length, offset) and the
+        payload it points at, validating every bound before touching data."""
+        length = self.read_uint16(fields_offset, field_name + ".length")
+        declared_max_length = self.read_uint16(
+            fields_offset + 2, field_name + ".maximum_length")
+        buffer_offset = self.read_uint32(
+            fields_offset + 4, field_name + ".buffer_offset")
+
+        if self.strict and declared_max_length < length:
+            self.fail(field_name,
+                      "maximum_length %d is smaller than length %d",
+                      declared_max_length, length)
+
+        # A zero length field carries no payload. The offset is not
+        # dereferenced so any value is accepted for backwards compatibility.
+        if length == 0:
+            return b""
+
+        # Check the 32-bit addition explicitly so a wrap around cannot turn
+        # into a small valid-looking range on any platform.
+        if buffer_offset > _UINT32_MAX - length:
+            self.fail(field_name,
+                      "offset %d plus length %d wraps past the 32-bit limit",
+                      buffer_offset, length)
+
+        buffer_end = buffer_offset + length
+        if buffer_end > self.message_size:
+            self.fail(field_name,
+                      "payload range [%d:%d] exceeds the message size %d",
+                      buffer_offset, buffer_end, self.message_size)
+
+        if buffer_end <= header_end:
+            # Payload fields must live in the variable payload section, never
+            # inside the fixed header that describes them.
+            self.fail(field_name,
+                      "payload range [%d:%d] overlaps the fixed header",
+                      buffer_offset, buffer_end)
+
+        new_range = (buffer_offset, buffer_end)
+        for claimed_start, claimed_end in self._claimed_ranges:
+            if buffer_offset < claimed_end and claimed_start < buffer_end:
+                if self.strict:
+                    self.fail(field_name,
+                              "payload range [%d:%d] overlaps another field "
+                              "[%d:%d]", buffer_offset, buffer_end,
+                              claimed_start, claimed_end)
+
+        self._claimed_ranges.append(new_range)
+        return self.data[buffer_offset:buffer_end]
+
+    def check_no_trailing_data(self, field_name, expected_end):
+        if self.message_size > expected_end:
+            self.fail(field_name,
+                      "%d trailing byte(s) after the end of the structured "
+                      "message", self.message_size - expected_end)
+
+    def claimed_end(self):
+        """Returns the furthest byte claimed by any payload field."""
+        if not self._claimed_ranges:
+            return 0
+        return max(claimed_end for _, claimed_end in self._claimed_ranges)
+
+
+def _check_message_header(cursor, expected_type):
+    signature = cursor.read_fixed(0, len(NTLM_SIGNATURE), "signature")
+    if signature != NTLM_SIGNATURE:
+        cursor.fail("signature", "does not match the NTLMSSP signature")
+
+    message_type = cursor.read_uint32(8, "message_type")
+    if message_type != expected_type:
+        cursor.fail("message_type", "expected %d but got %d",
+                    expected_type, message_type)
+    return message_type
 
 
 class TargetInfo(object):
@@ -44,13 +175,40 @@ class TargetInfo(object):
         data += struct.pack('<HH', AvId.MSV_AV_EOL, 0)
         return data
 
-    def unpack(self, data):
+    def unpack(self, data, strict=False):
+        """Parses a sequence of AV_PAIR structures from ``data``.
+
+        All reads go through a bounded cursor so a truncated pair, a length
+        that runs past the buffer or an integer wrap produces a deterministic
+        MalformedMessageError instead of platform specific struct behaviour.
+        """
+        cursor = _BoundedCursor(data, MessageTypes.NTLM_CHALLENGE, strict)
+
+        offset = 0
         attribute_type = None
         while attribute_type != AvId.MSV_AV_EOL:
-            attribute_type = struct.unpack("<H", data[:2])[0]
-            attribute_length = struct.unpack("<H", data[2:4])[0]
-            self[attribute_type] = data[4:attribute_length + 4]
-            data = data[4 + attribute_length:]
+            if offset >= cursor.message_size:
+                # Reaching the end of the buffer without an MSV_AV_EOL pair
+                # is only valid for an empty AV_PAIR sequence.
+                if offset == 0:
+                    break
+                cursor.fail("target_info",
+                            "missing MSV_AV_EOL terminator at offset %d",
+                            offset)
+            # The bounded cursor raises deterministically if these 4 header
+            # bytes or the declared value do not fit in the buffer.
+            attribute_type = cursor.read_uint16(
+                offset, "target_info.av_id")
+            attribute_length = cursor.read_uint16(
+                offset + 2, "target_info.av_length")
+            value_start = offset + 4
+            value_end = value_start + attribute_length
+            cursor.require_header(value_end, "target_info.av_value")
+            self[attribute_type] = data[value_start:value_end]
+            offset = value_end
+
+        if strict:
+            cursor.check_no_trailing_data("target_info", offset)
 
 
 class NegotiateMessage(object):
@@ -164,7 +322,10 @@ class NegotiateMessage(object):
 
 class ChallengeMessage(object):
 
-    def __init__(self, msg2):
+    # The fixed CHALLENGE_MESSAGE header (including the TargetInfoFields).
+    FIXED_HEADER_LENGTH = 48
+
+    def __init__(self, msg2, strict=False):
         """
         [MS-NLMP] v28.0 2016-07-14
 
@@ -178,6 +339,12 @@ class ChallengeMessage(object):
         :param msg2: The CHALLENGE_MESSAGE received from the server after
             sending our NEGOTIATE_MESSAGE. This has been decoded from a base64
             string
+        :param strict: When True, reject messages that can be partially parsed
+            but are structurally incomplete or ambiguous (overlapping payload
+            slices, payloads inside the fixed header, a smaller
+            maximum_length or trailing bytes). The default of False keeps the
+            historical lenient behaviour while still rejecting anything that
+            cannot be bounded safely.
 
         Attributes
             signature: An 8-byte character array that MUST contain the ASCII
@@ -202,48 +369,53 @@ class ChallengeMessage(object):
         """
 
         self.data = msg2
-        # Setting the object values from the raw_challenge_message
-        self.signature = msg2[0:8]
-        self.message_type = struct.unpack("<I", msg2[8:12])[0]
-        self.negotiate_flags = struct.unpack("<I", msg2[20:24])[0]
-        self.server_challenge = msg2[24:32]
-        self.reserved = msg2[32:40]
+        self.strict = strict
+        # All parsing goes through one bounded cursor that shares the byte
+        # budget of this message between every variable length field.
+        cursor = _BoundedCursor(msg2, MessageTypes.NTLM_CHALLENGE, strict)
+
+        # The fixed header is required before any field can be interpreted.
+        cursor.require_header(self.FIXED_HEADER_LENGTH, "fixed_header")
+        self.message_type = _check_message_header(
+            cursor, MessageTypes.NTLM_CHALLENGE)
+        self.signature = NTLM_SIGNATURE
+        self.negotiate_flags = cursor.read_uint32(20, "negotiate_flags")
+        self.server_challenge = cursor.read_fixed(
+            24, 8, "server_challenge")
+        self.reserved = cursor.read_fixed(32, 8, "reserved")
+
+        if self.negotiate_flags & NegotiateFlags.NTLMSSP_REQUEST_TARGET:
+            self.target_name = cursor.read_security_buffer(
+                12, "target_name", self.FIXED_HEADER_LENGTH)
+        else:
+            self.target_name = None
+
+        if self.negotiate_flags & NegotiateFlags.NTLMSSP_NEGOTIATE_TARGET_INFO:
+            target_info_raw = cursor.read_security_buffer(
+                40, "target_info", self.FIXED_HEADER_LENGTH)
+            self.target_info = TargetInfo()
+            self.target_info.unpack(target_info_raw, strict=strict)
+        else:
+            self.target_info = None
 
         if self.negotiate_flags & \
                 NegotiateFlags.NTLMSSP_NEGOTIATE_VERSION and \
                 self.negotiate_flags & \
                 NegotiateFlags.NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY and \
-                len(msg2) > 48:
-            self.version = struct.unpack("<q", msg2[48:56])[0]
+                len(msg2) > self.FIXED_HEADER_LENGTH:
+            self.version = struct.unpack(
+                "<q", cursor.read_fixed(48, 8, "version"))[0]
         else:
             self.version = None
 
-        if self.negotiate_flags & NegotiateFlags.NTLMSSP_REQUEST_TARGET:
-            target_name_len = struct.unpack("<H", msg2[12:14])[0]
-            target_name_max_len = struct.unpack("<H", msg2[14:16])[0]
-            target_name_offset_mix = struct.unpack("<I", msg2[16:20])[0]
-            target_offset_max = target_name_offset_mix + target_name_len
-            self.target_name = msg2[target_name_offset_mix:target_offset_max]
-        else:
-            self.target_name = None
-
-        if self.negotiate_flags & NegotiateFlags.NTLMSSP_NEGOTIATE_TARGET_INFO:
-            target_info_len = struct.unpack("<H", msg2[40:42])[0]
-            target_info_max_len = struct.unpack("<H", msg2[42:44])[0]
-            target_info_offset_min = struct.unpack("<I", msg2[44:48])[0]
-            target_info_offset_max = target_info_offset_min + target_info_len
-
-            target_info_raw = \
-                msg2[target_info_offset_min:target_info_offset_max]
-            self.target_info = TargetInfo()
-            self.target_info.unpack(target_info_raw)
-        else:
-            self.target_info = None
-
-        # Verify initial integrity of the message, it matches what should be
-        # there
-        assert self.signature == NTLM_SIGNATURE
-        assert self.message_type == MessageTypes.NTLM_CHALLENGE
+        if strict:
+            # The structured message ends at the furthest byte claimed by a
+            # payload field or the fixed header/version when no payload exists.
+            expected_end = self.FIXED_HEADER_LENGTH
+            if self.version is not None:
+                expected_end = max(expected_end, 56)
+            expected_end = max(expected_end, cursor.claimed_end())
+            cursor.check_no_trailing_data("payload", expected_end)
 
     def get_data(self):
         return self.data

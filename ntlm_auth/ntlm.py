@@ -14,7 +14,7 @@ from ntlm_auth.session_security import SessionSecurity
 class NtlmContext(object):
 
     def __init__(self, username, password, domain=None, workstation=None,
-                 cbt_data=None, ntlm_compatibility=3):
+                 cbt_data=None, ntlm_compatibility=3, strict=False):
         r"""
         Initialises a NTLM context to use when authenticating using the NTLM
         protocol.
@@ -40,6 +40,10 @@ class NtlmContext(object):
                 2 : NTLMv1 and NTLMv1 with Extended Session Security
                 3-5 : NTLMv2 Only
             Note: Values 3 to 5 are no different from a client perspective
+        :param strict: (Default False) Use strict parsing of the challenge
+            message and reject messages that are parseable but structurally
+            incomplete or ambiguous. Lenient parsing still rejects any message
+            whose variable fields cannot be bounded to the actual buffer.
         """
         self.username = username
         self.password = password
@@ -48,6 +52,7 @@ class NtlmContext(object):
         self.cbt_data = cbt_data
         self._server_certificate_hash = None  # deprecated for backwards compat
         self.ntlm_compatibility = ntlm_compatibility
+        self.strict = strict
         self.complete = False
 
         # Setting up our flags so the challenge message returns the target info
@@ -94,7 +99,8 @@ class NtlmContext(object):
                                                        self.workstation)
             return self._negotiate_message.get_data()
         else:
-            self._challenge_message = ChallengeMessage(input_token)
+            self._challenge_message = ChallengeMessage(
+                input_token, strict=self.strict)
             self._authenticate_message = AuthenticateMessage(
                 self.username, self.password, self.domain, self.workstation,
                 self._challenge_message, self.ntlm_compatibility,
@@ -162,9 +168,10 @@ class NtlmContext(object):
 # versions
 class Ntlm(object):
 
-    def __init__(self, ntlm_compatibility=3):
+    def __init__(self, ntlm_compatibility=3, strict=False):
         self._context = NtlmContext(None, None,
-                                    ntlm_compatibility=ntlm_compatibility)
+                                    ntlm_compatibility=ntlm_compatibility,
+                                    strict=strict)
         self._challenge_token = None
 
     @property

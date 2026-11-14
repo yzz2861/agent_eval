@@ -1,5 +1,12 @@
 # Changes
 
+## Unreleased
+
+* Hardened `ChallengeMessage` and `TargetInfo` parsing with a single bounded cursor that validates every security buffer length, offset and payload against the actual message size before reading it
+* Integer wrap arounds in offset/length additions, truncated fixed headers and truncated or unterminated AV_PAIR sequences now raise `ntlm_auth.exceptions.MalformedMessageError` deterministically instead of relying on platform specific `struct` behaviour or assertions
+* Added a `strict` option to `ChallengeMessage`, `NtlmContext` and `Ntlm` that additionally rejects structurally incomplete or ambiguous messages (overlapping payload slices, payloads inside the fixed header, a smaller maximum length or trailing bytes)
+* Malformed message errors identify the message type and offending field name but never include payload data such as user names, domain names or the server challenge
+
 ## 1.5.0 (Jun 16, 2020)
 
 * Added the `mic_present` property to the `NtlmContext` class to determine if a MIC has been added to the authentication message.

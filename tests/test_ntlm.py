@@ -2,6 +2,7 @@ import base64
 import hashlib
 import os
 import requests
+import struct
 import sys
 import warnings
 
@@ -10,7 +11,7 @@ import pytest
 from requests.auth import AuthBase
 
 from ntlm_auth.constants import NegotiateFlags
-from ntlm_auth.exceptions import NoAuthContextError
+from ntlm_auth.exceptions import MalformedMessageError, NoAuthContextError
 from ntlm_auth.gss_channel_bindings import GssChannelBindingsStruct
 from ntlm_auth.ntlm import Ntlm, NtlmContext
 from ntlm_auth.session_security import SessionSecurity
@@ -540,6 +541,55 @@ class TestNtlmContext(object):
             ntlm_context.unwrap(b"")
         assert str(err.value) == \
             "Cannot unwrap data as no security context has been established"
+
+
+class TestStrictParsing(object):
+
+    def _malformed_challenge(self):
+        # REQUEST_TARGET set but the target name length/offset runs past the
+        # end of the message and would wrap on a 32-bit addition.
+        challenge = b"NTLMSSP\x00"
+        challenge += struct.pack("<I", 2)
+        challenge += struct.pack("<HHI", 0x20, 0x20, 0xFFFFFFF0)
+        challenge += struct.pack("<I", NegotiateFlags.NTLMSSP_REQUEST_TARGET)
+        challenge += b"\x01\x23\x45\x67\x89\xab\xcd\xef"
+        challenge += b"\x00" * 8
+        challenge += struct.pack("<HHI", 0, 0, 0)
+        return challenge
+
+    def test_context_strict_flag_is_stored(self):
+        context = NtlmContext("user", "pass", strict=True)
+        assert context.strict is True
+        assert Ntlm(strict=True)._context.strict is True
+
+    def test_context_lenient_still_rejects_unbounded_field(self):
+        context = NtlmContext("user", "pass")
+        context.step()
+        with pytest.raises(MalformedMessageError) as err:
+            context.step(self._malformed_challenge())
+        assert "target_name" in str(err.value)
+
+    def test_context_passes_strict_flag_to_challenge(self, monkeypatch):
+        seen = {}
+
+        def fake_challenge(token, strict=False):
+            seen["strict"] = strict
+            raise MalformedMessageError("stop after parse")
+
+        monkeypatch.setattr("ntlm_auth.ntlm.ChallengeMessage",
+                            fake_challenge)
+        context = NtlmContext("user", "pass", strict=True)
+        context.step()
+        with pytest.raises(MalformedMessageError):
+            context.step(b"dummy challenge")
+        assert seen["strict"] is True
+
+        seen.clear()
+        lenient = NtlmContext("user", "pass")
+        lenient.step()
+        with pytest.raises(MalformedMessageError):
+            lenient.step(b"dummy challenge")
+        assert seen["strict"] is False
 
 
 class TestNtlmFunctional(object):
