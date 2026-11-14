@@ -6,6 +6,17 @@ from cpe.cpe import CPE
 from cpe.cpe2_2 import CPE2_2
 from cpe.comp.cpecomp import CPEComponent
 from cpe.comp.cpecomp2_2 import CPEComponent2_2
+from cpe.normalize import (
+    CanonicalName,
+    ConversionResult,
+    InformationLoss,
+    InvalidCPEError,
+    UnrepresentableValueError,
+    convert_2_2_to_2_3,
+    convert_2_3_to_2_2,
+    convert_batch,
+    parse,
+)
 
 
 #
@@ -182,3 +193,211 @@ def test_str():
     current = str(CPE2_2('cpe:/a:acme:product:1.0:update2:-:en-us'))
     expected = "CPE v2.2: cpe:/a:acme:product:1.0:update2:-:en-us"
     assert current == expected
+
+
+# ---------------------------------------------------------------------------
+# Canonical, reversible 2.2 <-> 2.3 conversion
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize('uri', [
+    'cpe:/',
+    'cpe:/a:mozilla',
+    'cpe:/a:mozilla:firefox:2.0.0.6::osx:zh-tw',
+    'cpe:/a:acme:product:1.0:update2::en-us',
+    'cpe:/a:foo:bar:1.0:::zh-tw',
+    'cpe:/o:microsoft:windows_xp::sp2:pro',
+    'cpe:/h:cisco:router:3825',
+])
+def test_canonical_2_2_uri_round_trip(uri):
+    """A 2.2 URI survives a round trip through the 2.3 URI binding."""
+
+    source = CanonicalName.from_cpe_2_2(uri)
+    rendered_2_3 = source.as_cpe_2_3_uri()
+    target = CanonicalName.from_cpe_2_3_uri(rendered_2_3)
+
+    assert source == target
+    rendered_2_2, losses = target.as_cpe_2_2()
+    assert rendered_2_2 == uri
+    assert losses == []
+
+
+def test_canonical_field_order_is_stable():
+    """Rendered names always follow the fixed specification attribute order."""
+
+    canonical = CanonicalName.from_cpe_2_2(
+        'cpe:/a:mozilla:firefox:2.0.0.6::osx:zh-tw')
+
+    assert canonical.as_cpe_2_3_fs() == (
+        'cpe:2.3:a:mozilla:firefox:2.0.0.6:*:osx:zh-tw:*:*:*:*')
+    assert canonical.as_cpe_2_3_wfn() == (
+        'wfn:[part="a", vendor="mozilla", product="firefox", '
+        'version="2\\.0\\.0\\.6", edition="osx", '
+        'language="zh\\-tw"]')
+    assert list(canonical.attributes.keys()) == list(
+        CPEComponent.CPE_COMP_KEYS_EXTENDED)
+
+
+def test_hyphen_is_literal_in_2_2_but_na_in_2_3():
+    """The hyphen ambiguity must be marked, not guessed."""
+
+    uri = 'cpe:/a:acme:product:1.0:update2:-:en-us'
+    c22 = CanonicalName.from_cpe_2_2(uri)
+    c23 = CanonicalName.from_cpe_2_3_uri(uri)
+
+    assert c22.get(CPEComponent.ATT_EDITION) == '\\-'
+    assert c23.get(CPEComponent.ATT_EDITION) == 'NA'
+    assert any(
+        loss.reason == 'hyphen_literal_in_2_2' and
+        loss.attribute == CPEComponent.ATT_EDITION
+        for loss in c22.losses)
+
+
+def test_na_cannot_be_downgraded_silently():
+    """NA has no 2.2 representation: strict mode fails, lenient mode marks it."""
+
+    canonical = parse(
+        'cpe:2.3:a:acme:product:1.0:update2:-:en-us:*:*:*:*',
+        version='fs')
+
+    with pytest.raises(UnrepresentableValueError) as excinfo:
+        canonical.as_cpe_2_2(strict=True)
+    loss = excinfo.value.loss
+    assert loss.attribute == CPEComponent.ATT_EDITION
+    assert loss.reason == 'na_not_defined_in_2_2'
+
+    rendered, losses = canonical.as_cpe_2_2(strict=False)
+    assert rendered == 'cpe:/a:acme:product:1.0:update2::en-us'
+    assert len(losses) == 1
+    assert losses[0].reason == 'na_not_defined_in_2_2'
+
+
+def test_packed_edition_round_trip_keeps_extended_attributes():
+    """The tilde packed edition preserves the four extended 2.3 fields."""
+
+    uri = 'cpe:/a:hp:diag:7.4::~~online~win2003~x64~'
+    canonical = CanonicalName.from_cpe_2_3_uri(uri)
+
+    assert canonical.get(CPEComponent.ATT_SW_EDITION) == 'online'
+    assert canonical.get(CPEComponent.ATT_TARGET_SW) == 'win2003'
+    assert canonical.get(CPEComponent.ATT_TARGET_HW) == 'x64'
+    assert canonical.as_cpe_2_3_uri() == uri
+
+    rendered_2_2, losses = canonical.as_cpe_2_2()
+    assert rendered_2_2 == uri
+    assert losses == []
+
+
+@pytest.mark.parametrize('uri,expected', [
+    ('cpe:/a:foo:bar%zz', 'bar\\%zz'),
+    ('cpe:/a:foo:bar%2', 'bar\\%2'),
+])
+def test_stray_percent_is_literal_in_2_2(uri, expected):
+    """In 2.2 a stray percent is data; it must survive the canonical model."""
+
+    canonical = CanonicalName.from_cpe_2_2(uri)
+    assert canonical.get(CPEComponent.ATT_PRODUCT) == expected
+
+
+@pytest.mark.parametrize('uri', [
+    'cpe:/a:foo:bar%zz',
+    'cpe:/a:foo:bar%2',
+    'cpe:/a:foo:bar%7',
+])
+def test_invalid_percent_encoding_rejected_in_2_3(uri):
+    """The same sequences are invalid percent encodings in a 2.3 URI."""
+
+    with pytest.raises(InvalidCPEError):
+        CanonicalName.from_cpe_2_3_uri(uri)
+
+
+def test_percent_encoding_round_trip_between_bindings():
+    canonical = CanonicalName.from_cpe_2_2('cpe:/a:foo:bar%zz:1.0')
+
+    assert canonical.as_cpe_2_3_uri() == 'cpe:/a:foo:bar%25zz:1.0'
+    assert canonical.as_cpe_2_3_fs() == (
+        'cpe:2.3:a:foo:bar\\%zz:1.0:*:*:*:*:*:*:*')
+
+    reparsed = CanonicalName.from_cpe_2_3_uri(canonical.as_cpe_2_3_uri())
+    assert reparsed == canonical
+
+
+@pytest.mark.parametrize('tag', [
+    'en', 'en-us', 'zh-tw', 'es-es', 'es-419', 'de-de',
+])
+def test_valid_language_tags_accepted(tag):
+    canonical = CanonicalName.from_cpe_2_2(
+        'cpe:/a:foo:bar:1.0:::{0}'.format(tag))
+    assert canonical.get(CPEComponent.ATT_LANGUAGE).replace('\\', '') == tag
+
+
+@pytest.mark.parametrize('tag', ['xxxx', 'en-usa', 'en-us-x', '12-us'])
+def test_invalid_language_tags_rejected(tag):
+    with pytest.raises(InvalidCPEError):
+        CanonicalName.from_cpe_2_2('cpe:/a:foo:bar:1.0:::{0}'.format(tag))
+
+
+def test_special_characters_round_trip_through_all_bindings():
+    uri = r'cpe:/a:intel:proset\/wireless_wifi'
+    canonical = CanonicalName.from_cpe_2_2(uri)
+
+    assert canonical.as_cpe_2_3_uri() == \
+        'cpe:/a:intel:proset%2fwireless_wifi'
+    assert canonical.as_cpe_2_3_fs() == \
+        r'cpe:2.3:a:intel:proset\/wireless_wifi:*:*:*:*:*:*:*:*'
+    assert canonical.as_cpe_2_3_wfn() == \
+        r'wfn:[part="a", vendor="intel", product="proset\/wireless_wifi"]'
+
+    assert CanonicalName.from_cpe_2_3_fs(canonical.as_cpe_2_3_fs()) == \
+        canonical
+    assert CanonicalName.from_cpe_2_3_wfn(canonical.as_cpe_2_3_wfn()) == \
+        canonical
+
+
+def test_convert_helpers_return_loss_information():
+    rendered, canonical, losses = convert_2_2_to_2_3(
+        'cpe:/a:acme:product:1.0:update2:-:en-us')
+
+    assert rendered == 'cpe:/a:acme:product:1.0:update2:-:en-us'
+    assert isinstance(canonical, CanonicalName)
+    assert losses and losses[0].reason == 'hyphen_literal_in_2_2'
+
+    uri, _, losses = convert_2_3_to_2_2(
+        'cpe:2.3:a:acme:product:1.0:update2:-:en-us:*:*:*:*',
+        version='fs', strict=False)
+    assert uri == 'cpe:/a:acme:product:1.0:update2::en-us'
+    assert losses[0].reason == 'na_not_defined_in_2_2'
+
+
+def test_batch_conversion_reports_partial_success_with_index():
+    names = [
+        'cpe:/a:ok:name',
+        'baduri',
+        'cpe:/a:foo:bar:1.0:::en-us',
+        'cpe:/a:foo:bar%zz',
+    ]
+    report = convert_batch(names, source_version='2.2',
+                           target_binding='2.3-fs')
+
+    assert len(report) == 4
+    assert report.output_names == [
+        'cpe:2.3:a:ok:name:*:*:*:*:*:*:*:*',
+        'cpe:2.3:a:foo:bar:1.0:*:*:en-us:*:*:*:*',
+        'cpe:2.3:a:foo:bar\\%zz:*:*:*:*:*:*:*:*',
+    ]
+    failure = report.failures[0]
+    assert isinstance(failure, ConversionResult)
+    assert failure.index == 1
+    assert failure.source == 'baduri'
+    assert isinstance(failure.error, InvalidCPEError)
+
+
+def test_batch_strict_mode_locates_unrepresentable_item():
+    report = convert_batch(
+        ['cpe:2.3:a:ok:name:*:*:*:*:*:*:*:*',
+         'cpe:2.3:a:no:name:*:-:*:*:*:*:*:*'],
+        source_version='fs', target_binding='2.2', strict=True)
+
+    assert len(report.successes) == 1
+    failure = report.failures[0]
+    assert failure.index == 1
+    assert isinstance(failure.error, UnrepresentableValueError)
