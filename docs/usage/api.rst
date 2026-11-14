@@ -131,9 +131,15 @@ RestrictingNodeTransformer
 
 It is a subclass of a ``NodeTransformer`` which has a set of ``visit_<AST_Elem>`` methods and a ``generic_visit`` method.
 
-``generic_visit`` is a predefined method of any ``NodeVisitor`` which sequentially visits all sub nodes. In RestrictedPython this behaviour is overwritten to always call a new internal method ``not_allowed(node)``.
-This results in an implicit blacklisting of all not allowed AST elements.
+Node admission is controlled by an explicit policy instead of an implicit blacklist:
+
+* ``ALLOWED_NODE_TYPES`` lists every node type which passed the security review and is allowed without an additional switch.
+* ``NODE_CAPABILITIES`` maps reviewed node types to a capability name; such a node is only admitted when the policy subclass lists that capability in ``enabled_capabilities``.
+* ``DENIED_NODE_TYPES`` lists node types which can never be enabled.
+
+``generic_visit`` is the default-deny entry point for node types without a dedicated ``visit_`` method (including nodes introduced by a newer Python version). It records an error through ``check_node_admission`` which contains the source line, the column and the ``policy_name``.
+The internal helper ``not_allowed(node)`` is kept as a hook for explicit ``visit_`` methods which deny a node type.
 
 Any possibly new introduced AST element in Python (new language element) will implicitly be blocked and not allowed in RestrictedPython.
 
-So, if new elements should be introduced, an explicit ``visit_<new AST elem>`` is necessary.
+So, if new elements should be introduced, they have to be added to one of the explicit node collections together with an explicit ``visit_<new AST elem>`` method.

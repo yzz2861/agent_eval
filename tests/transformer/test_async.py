@@ -19,7 +19,9 @@ loop.close()
 def test_async_def():
     result = compile_restricted_exec(ASYNC_DEF_EXMAPLE)
     assert result.errors == (
-        'Line 4: AsyncFunctionDef statements are not allowed.',
+        'Line 4, col 0: policy "RestrictingNodeTransformer" rejected node '
+        'AsyncFunctionDef: this node type is explicitly forbidden and '
+        'cannot be enabled',
     )
     assert result.code is None
 
@@ -60,7 +62,10 @@ def test_await():
     result = compile_restricted_exec(
         AWAIT_EXAMPLE,
         policy=RestrictingAsyncNodeTransformer)
-    assert result.errors == ('Line 11: Await statements are not allowed.',)
+    assert result.errors == (
+        'Line 11, col 8: policy "RestrictingNodeTransformer" rejected node '
+        'Await: this node type is explicitly forbidden and cannot be '
+        'enabled',)
     assert result.code is None
 
 
@@ -76,7 +81,10 @@ def test_async_with():
     result = compile_restricted_exec(
         ASYNC_WITH_EXAMPLE,
         policy=RestrictingAsyncNodeTransformer)
-    assert result.errors == ('Line 3: AsyncWith statements are not allowed.',)
+    assert result.errors == (
+        'Line 3, col 4: policy "RestrictingNodeTransformer" rejected node '
+        'AsyncWith: this node type is explicitly forbidden and cannot be '
+        'enabled',)
     assert result.code is None
 
 
@@ -92,5 +100,8 @@ def test_async_for():
     result = compile_restricted_exec(
         ASYNC_FOR_EXAMPLE,
         policy=RestrictingAsyncNodeTransformer)
-    assert result.errors == ('Line 3: AsyncFor statements are not allowed.',)
+    assert result.errors == (
+        'Line 3, col 4: policy "RestrictingNodeTransformer" rejected node '
+        'AsyncFor: this node type is explicitly forbidden and cannot be '
+        'enabled',)
     assert result.code is None

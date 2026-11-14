@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import collections.abc
 import os
+import re
 import types
 import typing
 import warnings
@@ -33,9 +34,66 @@ NOT_CPYTHON_WARNING = (
     'implementations may create security issues.'
 )
 
+# Matches the position prefix of node admission policy errors, e.g.
+# 'Line 3, col 4: policy "RestrictingNodeTransformer" rejected node ...'.
+_POLICY_ERROR_RE = re.compile(
+    r'^Line (?P<lineno>[0-9]+|None), col (?P<col>[0-9]+|None): '
+    r'policy "(?P<policy>.+?)" rejected node '
+    r'(?P<node>[A-Za-z_][A-Za-z0-9_]*): .*$')
+
 _T_ast_compilable: typing.TypeAlias = (
     ast.Module | ast.Expression | ast.Interactive)
 _T_source: typing.TypeAlias = str | ReadableBuffer | _T_ast_compilable
+
+
+def _instantiate_policy(
+        policy: type[RestrictingNodeTransformer],
+        collected_errors: list[str],
+        collected_warnings: list[str],
+        used_names: dict[str, bool]) -> RestrictingNodeTransformer:
+    """Create the policy instance used to transform a source unit.
+
+    The policy class is supplied by the caller.  It is instantiated with the
+    shared error/warning/used-name containers so that every node admission
+    violation is reported back through the :class:`CompileResult` instead of
+    raising an exception while the AST is still being visited.
+    """
+    return policy(collected_errors, collected_warnings, used_names)
+
+
+def _build_syntax_error(
+        errors: collections.abc.Sequence[str],
+        filename: str | bytes | os.PathLike[typing.Any]) -> SyntaxError:
+    """Build a SyntaxError from collected restriction errors.
+
+    The complete error tuple stays available through ``args`` so existing
+    string based error handling keeps working.  For node admission policy
+    errors the source line, column and policy name are additionally exposed
+    through the standard SyntaxError attributes (and dedicated attributes),
+    instead of raising a generic syntax error without location data.
+    """
+    first_error = errors[0]
+    lineno: int | None = None
+    offset: int | None = None
+    policy_name: str | None = None
+    node_name: str | None = None
+    match = _POLICY_ERROR_RE.match(first_error)
+    if match is not None:
+        if match.group('lineno') != 'None':
+            lineno = int(match.group('lineno'))
+        if match.group('col') != 'None':
+            # Python offsets are 1-based while AST columns are 0-based.
+            offset = int(match.group('col')) + 1
+        policy_name = match.group('policy')
+        node_name = match.group('node')
+    syntax_error = SyntaxError(errors)
+    syntax_error.filename = os.fspath(filename)
+    syntax_error.lineno = lineno
+    syntax_error.offset = offset
+    syntax_error.msg = first_error
+    syntax_error.policy = policy_name  # type: ignore[attr-defined]
+    syntax_error.node = node_name  # type: ignore[attr-defined]
+    return syntax_error
 
 
 def _compile_restricted_mode(
@@ -87,8 +145,9 @@ def _compile_restricted_mode(
                     statement=v.text.strip() if v.text else None
                 ))
         if c_ast:
-            policy_instance = policy(
-                collected_errors, collected_warnings, used_names)
+            policy_instance = _instantiate_policy(
+                policy, collected_errors, collected_warnings,
+                used_names)
             policy_instance.visit(c_ast)
             if not collected_errors:
                 byte_code = compile(c_ast, filename, mode=mode  # ,
@@ -249,5 +308,5 @@ def compile_restricted(
             SyntaxWarning
         )
     if result.errors:
-        raise SyntaxError(result.errors)
+        raise _build_syntax_error(result.errors, filename)
     return cast_not_none(result.code)

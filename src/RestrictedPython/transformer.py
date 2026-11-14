@@ -65,6 +65,152 @@ FORBIDDEN_FUNC_NAMES = frozenset([
     'breakpoint',
 ])
 
+# Name of the default node admission policy.  It is reported in every error
+# caused by this policy so that callers can distinguish policy violations
+# from other restriction errors.
+DEFAULT_POLICY_NAME = 'RestrictingNodeTransformer'
+
+# Capability switches understood by the default policy.  A capability has to
+# be enabled explicitly by the calling application (see
+# ``RestrictingNodeTransformer.enabled_capabilities``); node types which are
+# not part of either ``ALLOWED_NODE_TYPES`` or ``NODE_CAPABILITIES`` are
+# rejected by ``generic_visit``.
+CAPABILITY_WITH_STATEMENTS = 'with_statements'
+
+# Nodes only present in newer Python versions.  They are referenced
+# conditionally so that this module keeps loading on older interpreters and
+# still treats them as reviewed once the interpreter gains them.
+_OPTIONAL_ALLOWED_NODE_TYPES = frozenset(
+    node for node in (
+        getattr(ast, 'TemplateStr', None),
+        getattr(ast, 'Interpolation', None),
+    ) if node is not None)
+
+#: Node types which passed the security review and are allowed without an
+#: additional capability switch.  Every node type not listed here (and not
+#: listed in ``NODE_CAPABILITIES``) is rejected when it is encountered, so
+#: nodes introduced by newer Python versions fail closed.
+ALLOWED_NODE_TYPES: typing.Final[frozenset[type[ast.AST]]] = frozenset([
+    # Top level nodes
+    ast.Module,
+    ast.Expression,
+    ast.Interactive,
+    # Literals
+    ast.Constant,
+    ast.List,
+    ast.Tuple,
+    ast.Set,
+    ast.Dict,
+    ast.JoinedStr,
+    ast.FormattedValue,
+    # Variables
+    ast.Name,
+    ast.Load,
+    ast.Store,
+    ast.Del,
+    ast.Starred,
+    # Expressions
+    ast.Expr,
+    ast.UnaryOp,
+    ast.UAdd,
+    ast.USub,
+    ast.Not,
+    ast.Invert,
+    ast.BinOp,
+    ast.Add,
+    ast.Sub,
+    ast.Mult,
+    ast.Div,
+    ast.FloorDiv,
+    ast.Mod,
+    ast.Pow,
+    ast.LShift,
+    ast.RShift,
+    ast.BitOr,
+    ast.BitXor,
+    ast.BitAnd,
+    ast.MatMult,
+    ast.BoolOp,
+    ast.And,
+    ast.Or,
+    ast.Compare,
+    ast.Eq,
+    ast.NotEq,
+    ast.Lt,
+    ast.LtE,
+    ast.Gt,
+    ast.GtE,
+    ast.Is,
+    ast.IsNot,
+    ast.In,
+    ast.NotIn,
+    ast.Call,
+    ast.keyword,
+    ast.IfExp,
+    ast.Attribute,
+    ast.Subscript,
+    ast.Slice,
+    # Comprehensions
+    ast.ListComp,
+    ast.SetComp,
+    ast.GeneratorExp,
+    ast.DictComp,
+    ast.comprehension,
+    # Statements
+    ast.Assign,
+    ast.AugAssign,
+    ast.Raise,
+    ast.Assert,
+    ast.Delete,
+    ast.Pass,
+    # Imports
+    ast.Import,
+    ast.ImportFrom,
+    ast.alias,
+    # Control flow
+    ast.If,
+    ast.For,
+    ast.While,
+    ast.Break,
+    ast.Continue,
+    ast.Try,
+    ast.ExceptHandler,
+    # Function and class definitions
+    ast.FunctionDef,
+    ast.Lambda,
+    ast.arguments,
+    ast.arg,
+    ast.Return,
+    ast.Yield,
+    ast.YieldFrom,
+    ast.Global,
+    ast.ClassDef,
+    # Assignment expressions (walrus operator)
+    ast.NamedExpr,
+]) | _OPTIONAL_ALLOWED_NODE_TYPES
+
+# Node types which passed the security review but must be enabled explicitly
+# by the calling application through a capability switch.  Mapping:
+# node type -> capability name.
+NODE_CAPABILITIES: typing.Final[dict[type[ast.AST], str]] = {
+    ast.With: CAPABILITY_WITH_STATEMENTS,
+    ast.withitem: CAPABILITY_WITH_STATEMENTS,
+}
+
+# Node types which are explicitly denied and can never be enabled.  They get
+# a dedicated error message instead of the generic "unknown node" one.
+DENIED_NODE_TYPES: typing.Final[frozenset[type[ast.AST]]] = frozenset([
+    # ``try/except*`` (PEP 654) may leak exceptions out of the sandbox.
+    ast.TryStar,
+    # Asynchronous constructs are not supported inside the sandbox.
+    ast.AsyncFunctionDef,
+    ast.Await,
+    ast.AsyncFor,
+    ast.AsyncWith,
+    # ``nonlocal`` crosses the sandbox boundary.
+    ast.Nonlocal,
+])
+
 # Attributes documented in the `inspect` module, but defined on the listed
 # objects. See also https://docs.python.org/3/library/inspect.html
 INSPECT_ATTRIBUTES = frozenset([
@@ -172,6 +318,17 @@ class RestrictingNodeTransformer(ast.NodeTransformer):
     warnings: list[str]
     used_names: dict[str, bool]
 
+    #: Name of this policy, reported in node admission errors.  Subclasses
+    #: should override it so that their error messages identify the policy
+    #: which rejected a node.
+    policy_name: typing.ClassVar[str] = DEFAULT_POLICY_NAME
+
+    #: Capability switches enabled by this policy.  Node types listed in
+    #: ``NODE_CAPABILITIES`` are only admitted if their capability is part of
+    #: this collection.  The default policy enables no capability at all, so
+    #: every node behind a switch fails closed unless a subclass opts in.
+    enabled_capabilities: typing.ClassVar[frozenset[str]] = frozenset()
+
     def __init__(self,
                  errors: list[str] | None = None,
                  warnings: list[str] | None = None,
@@ -210,6 +367,69 @@ class RestrictingNodeTransformer(ast.NodeTransformer):
         lineno = getattr(node, 'lineno', None)
         self.warnings.append(
             f'Line {lineno}: {info}')
+
+    def _node_position(self, node: ast.AST) -> str:
+        """Return the source position (line and column) of a node.
+
+        Synthetic nodes created during transformation may lack location
+        information; those are reported as ``Line None, col None`` instead of
+        raising an :class:`AttributeError`.
+        """
+        lineno = getattr(node, 'lineno', None)
+        col_offset = getattr(node, 'col_offset', None)
+        return f'Line {lineno}, col {col_offset}'
+
+    def policy_error(
+            self,
+            node: ast.AST,
+            reason: str,
+            capability: str | None = None) -> None:
+        """Record a node admission policy violation.
+
+        The error always contains the source line and column of the offending
+        node and the name of the policy which rejected it.  When the node was
+        rejected because a capability was not enabled, the name of that
+        capability is reported as well.
+        """
+        message = (
+            f'{self._node_position(node)}: policy "{self.policy_name}" '
+            f'rejected node {node.__class__.__name__}: {reason}')
+        if capability is not None:
+            message += f' (required capability: "{capability}")'
+        self.errors.append(message)
+
+    def check_node_admission(self, node: ast.AST) -> bool:
+        """Apply the explicit admission policy to a single node.
+
+        Returns ``True`` if the node may be processed and records a policy
+        error (and returns ``False``) otherwise.  Explicitly denied node
+        types get a reason explaining that they can not be enabled; unknown
+        node types are reported as not reviewed.
+        """
+        node_type = type(node)
+        if node_type in ALLOWED_NODE_TYPES:
+            return True
+        capability = NODE_CAPABILITIES.get(node_type)
+        if capability is not None:
+            if capability in self.enabled_capabilities:
+                return True
+            self.policy_error(
+                node,
+                'the capability for this node type is not enabled by the '
+                'caller',
+                capability=capability)
+            return False
+        if node_type in DENIED_NODE_TYPES:
+            self.policy_error(
+                node,
+                'this node type is explicitly forbidden and cannot be '
+                'enabled')
+            return False
+        self.policy_error(
+            node,
+            'this node type is not known to RestrictedPython and has not '
+            'passed a security review')
+        return False
 
     def guard_iter(self, node: ast.For | ast.comprehension) -> _T_visit_return:
         """
@@ -499,24 +719,32 @@ class RestrictingNodeTransformer(ast.NodeTransformer):
 
     def generic_visit(self,  # type: ignore[override]
                       node: ast.AST) -> _T_visit_return:
-        """Reject ast nodes which do not have a corresponding `visit_` method.
+        """Reject nodes which are not admitted by the explicit policy.
 
-        This is needed to prevent new ast nodes from new Python versions to be
-        trusted before any security review.
+        This is the default-deny entry point: it is used for node types which
+        do not have a dedicated ``visit_`` method (typically nodes introduced
+        by a newer Python version) and makes sure they fail closed before any
+        security review.  Nodes which are allowed or behind a capability
+        switch always have an explicit ``visit_`` method and are checked in
+        ``check_node_admission``.
 
-        To access `generic_visit` on the super class use `node_contents_visit`.
+        To access `generic_visit` on the super class use
+        `node_contents_visit`.
         """
-        self.warn(
-            node,
-            '{0.__class__.__name__}'
-            ' statement is not known to RestrictedPython'.format(node)
-        )
-        self.not_allowed(node)
+        lineno = getattr(node, 'lineno', None)
+        col_offset = getattr(node, 'col_offset', None)
+        self.warnings.append(
+            f'Line {lineno}, col {col_offset}: {node.__class__.__name__} '
+            f'statement is not known to policy "{self.policy_name}"')
+        self.check_node_admission(node)
+        # The node was rejected: do not visit its children, as they could
+        # contain reviewed node types which must not be treated as trusted
+        # merely because their parent failed the admission policy.
+        return node
 
     def not_allowed(self, node: ast.AST) -> None:
-        self.error(
-            node,
-            f'{node.__class__.__name__} statements are not allowed.')
+        """Record an explicit denial through the node admission policy."""
+        self.check_node_admission(node)
 
     def node_contents_visit(self, node: _T) -> _T:
         """Visit the contents of a node."""
@@ -1172,12 +1400,17 @@ class RestrictingNodeTransformer(ast.NodeTransformer):
         return self.node_contents_visit(node)
 
     def visit_TryStar(self, node: ast.AST) -> _T_visit_return:
-        """Disallow `ExceptionGroup` due to a potential sandbox escape.
+        """Disallow ``try/except*`` (PEP 654).
+
+        Exception groups may propagate exceptions out of the sandbox, so the
+        node is explicitly denied by the admission policy and cannot be
+        enabled through a capability switch.
 
         TODO: Change Type Annotation to ast.TryStar when
               Support for Python 3.10 is dropped.
         """
-        self.not_allowed(node)
+        self.check_node_admission(node)
+        return node
 
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> _T_visit_return:
         """Protect exception handlers."""
@@ -1186,7 +1419,15 @@ class RestrictingNodeTransformer(ast.NodeTransformer):
         return node
 
     def visit_With(self, node: ast.With) -> _T_visit_return:
-        """Protect tuple unpacking on with statements."""
+        """Handle ``with`` statements behind a capability switch.
+
+        Context managers may enter arbitrary host resources, so the node is
+        only admitted when the caller enabled the
+        ``with_statements`` capability.  When admitted, tuple unpacking in
+        the ``as`` clause is protected like every other unpacking.
+        """
+        if not self.check_node_admission(node):
+            return node
         node = self.node_contents_visit(node)
 
         for item in reversed(node.items):
@@ -1201,7 +1442,9 @@ class RestrictingNodeTransformer(ast.NodeTransformer):
         return node
 
     def visit_withitem(self, node: ast.withitem) -> _T_visit_return:
-        """Allow `with` statements (context managers) without restrictions."""
+        """Admit context manager items when the ``with`` capability is on."""
+        if not self.check_node_admission(node):
+            return node
         return self.node_contents_visit(node)
 
     # Function and class definitions
@@ -1250,8 +1493,9 @@ class RestrictingNodeTransformer(ast.NodeTransformer):
         return self.node_contents_visit(node)
 
     def visit_Nonlocal(self, node: ast.Nonlocal) -> _T_visit_return:
-        """Deny `nonlocal` statements."""
-        self.not_allowed(node)
+        """Deny ``nonlocal`` statements through the admission policy."""
+        self.check_node_admission(node)
+        return node
 
     def visit_ClassDef(self, node: ast.ClassDef) -> _T_visit_return:
         """Check the name of a class definition."""
@@ -1291,20 +1535,24 @@ class RestrictingNodeTransformer(ast.NodeTransformer):
 
     def visit_AsyncFunctionDef(
             self, node: ast.AsyncFunctionDef) -> _T_visit_return:
-        """Deny async functions."""
-        self.not_allowed(node)
+        """Deny async functions through the explicit admission policy."""
+        self.check_node_admission(node)
+        return node
 
     def visit_Await(self, node: ast.Await) -> _T_visit_return:
-        """Deny async functionality."""
-        self.not_allowed(node)
+        """Deny ``await`` through the explicit admission policy."""
+        self.check_node_admission(node)
+        return node
 
     def visit_AsyncFor(self, node: ast.AsyncFor) -> _T_visit_return:
-        """Deny async functionality."""
-        self.not_allowed(node)
+        """Deny ``async for`` through the explicit admission policy."""
+        self.check_node_admission(node)
+        return node
 
     def visit_AsyncWith(self, node: ast.AsyncWith) -> _T_visit_return:
-        """Deny async functionality."""
-        self.not_allowed(node)
+        """Deny ``async with`` through the explicit admission policy."""
+        self.check_node_admission(node)
+        return node
 
     # Assignment expressions (walrus operator ``:=``)
     # New in 3.8

@@ -84,3 +84,41 @@ That special case would be written as:
         policy=None # Null-Policy -> unrestricted
     )
     exec(byte_code, globals(), None)
+
+Node admission policy and capability switches
++++++++++++++++++++++++++++++++++++++++++++++
+
+The default policy does not trust a node type just because the installed
+Python version knows it.  Every admitted node type is listed explicitly in
+``RestrictedPython.transformer.ALLOWED_NODE_TYPES``.  A node type which is
+not listed is rejected *by default*: this makes sure that nodes introduced by
+a newer Python version fail closed before they have been reviewed.
+
+Some reviewed node types are additionally guarded by a capability switch in
+``NODE_CAPABILITIES``.  The calling application has to opt into such a node
+type by providing a policy subclass which enables the capability.  For
+example the ``with`` statement is only available after enabling the
+``with_statements`` capability:
+
+.. code-block:: python
+
+    from RestrictedPython import compile_restricted_exec
+    from RestrictedPython.transformer import (
+        CAPABILITY_WITH_STATEMENTS,
+        RestrictingNodeTransformer,
+    )
+
+    class PlatformPolicy(RestrictingNodeTransformer):
+        policy_name = 'PlatformPolicy'
+        enabled_capabilities = frozenset({CAPABILITY_WITH_STATEMENTS})
+
+    result = compile_restricted_exec(source, policy=PlatformPolicy)
+
+Node types which must never be available are listed in
+``DENIED_NODE_TYPES`` (for example ``try/except*`` and the asynchronous
+nodes); they cannot be enabled through a capability.
+
+Every rejection reports the source line and column together with the
+``policy_name`` of the rejecting policy, both in the ``CompileResult.errors``
+strings and, when using ``compile_restricted``, on the raised
+``SyntaxError`` (``lineno``, ``offset``, ``policy`` and ``node``).

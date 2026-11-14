@@ -65,7 +65,9 @@ def test_RestrictingNodeTransformer__visit_TryStar__1():
     """It denies try-except* PEP 654 statements."""
     result = compile_restricted_exec(TRY_EXCEPT_STAR)
     assert result.errors == (
-        'Line 3: TryStar statements are not allowed.',
+        'Line 3, col 4: policy "RestrictingNodeTransformer" rejected node '
+        'TryStar: this node type is explicitly forbidden and cannot be '
+        'enabled',
     )
     assert result.code is None
 

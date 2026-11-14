@@ -71,6 +71,8 @@ def test_async_yield_from():
     """`yield from` statement should be allowed."""
     result = compile_restricted_exec(ASYNC_YIELD_FORM_EXAMPLE)
     assert result.errors == (
-        'Line 4: AsyncFunctionDef statements are not allowed.',
+        'Line 4, col 0: policy "RestrictingNodeTransformer" rejected node '
+        'AsyncFunctionDef: this node type is explicitly forbidden and '
+        'cannot be enabled',
     )
     assert result.code is None

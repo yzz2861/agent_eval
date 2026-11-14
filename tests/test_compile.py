@@ -7,7 +7,10 @@ from RestrictedPython import CompileResult
 from RestrictedPython import compile_restricted
 from RestrictedPython import compile_restricted_eval
 from RestrictedPython import compile_restricted_exec
+from RestrictedPython import compile_restricted_function
 from RestrictedPython import compile_restricted_single
+from RestrictedPython.transformer import CAPABILITY_WITH_STATEMENTS
+from RestrictedPython.transformer import RestrictingNodeTransformer
 from tests.helper import restricted_eval
 
 
@@ -224,3 +227,73 @@ def test_compile_CPython_warning(recwarn, mocker):  # pragma: no cover
         'RestrictedPython is only supported on CPython: use on other Python '
         'implementations may create security issues.'
     )
+
+
+class WithStatementsPolicy(RestrictingNodeTransformer):
+    """Policy enabling the reviewed ``with`` capability."""
+
+    policy_name = 'WithStatementsPolicy'
+    enabled_capabilities = frozenset({CAPABILITY_WITH_STATEMENTS})
+
+
+WITH_SOURCE = (
+    'def use_context(ctx):\n'
+    '    with ctx() as value:\n'
+    '        return value\n'
+)
+
+
+def test_compile__policy_violation_carries_location_and_policy():
+    """SyntaxErrors from policy violations expose line, column and policy."""
+    with pytest.raises(SyntaxError) as err:
+        compile_restricted(
+            WITH_SOURCE,
+            filename='submitted_snippet')
+    syntax_error = err.value
+    assert syntax_error.filename == 'submitted_snippet'
+    assert syntax_error.lineno == 2
+    assert syntax_error.offset == 5
+    assert syntax_error.policy == 'RestrictingNodeTransformer'
+    assert syntax_error.node == 'With'
+    assert 'with_statements' in syntax_error.msg
+
+
+def test_compile__policy_violation_keeps_error_tuple():
+    """The collected error strings stay available through ``args``."""
+    with pytest.raises(SyntaxError) as err:
+        compile_restricted(WITH_SOURCE)
+    assert err.value.args[0] == (
+        'Line 2, col 4: policy "RestrictingNodeTransformer" rejected node '
+        'With: the capability for this node type is not enabled by the '
+        'caller (required capability: "with_statements")',
+    )
+
+
+def test_compile__non_policy_syntax_error_has_no_policy_metadata():
+    """Plain syntax errors keep their previous handling."""
+    with pytest.raises(SyntaxError) as err:
+        compile_restricted(INVALID_ASSINGMENT)
+    assert err.value.policy is None
+    assert err.value.node is None
+    assert "SyntaxError: cannot assign to literal here." in str(err.value)
+
+
+def test_compile__function_uses_node_admission_policy():
+    """compile_restricted_function applies the same default-deny policy."""
+    result = compile_restricted_function(
+        '',
+        'with ctx() as value:\n    return value\n',
+        'use_context')
+    assert result.code is None
+    assert result.errors == (
+        'Line 1, col 0: policy "RestrictingNodeTransformer" rejected node '
+        'With: the capability for this node type is not enabled by the '
+        'caller (required capability: "with_statements")',
+    )
+    allowed = compile_restricted_function(
+        '',
+        'return 1 + 1\n',
+        'add_two',
+        policy=WithStatementsPolicy)
+    assert allowed.errors == ()
+    assert allowed.code is not None

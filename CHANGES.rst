@@ -4,7 +4,26 @@ Changes
 9.1 (unreleased)
 ----------------
 
-- Nothing changed yet.
+- Turn the node handling of ``RestrictingNodeTransformer`` into an explicit
+  node admission policy:
+
+  - Reviewed node types are listed explicitly in ``ALLOWED_NODE_TYPES``.
+    Any node type which is not listed (including nodes introduced by a newer
+    Python version) is rejected by default with its source line, column and
+    the policy name instead of a generic ``SyntaxError``.
+
+  - Node types which passed a review but require an explicit opt-in are
+    listed in ``NODE_CAPABILITIES``.  The ``with`` statement is the first
+    such node: it is only admitted when a policy subclass enables the
+    ``with_statements`` capability.
+
+  - ``try/except*`` (``TryStar``), asynchronous nodes and ``nonlocal`` are
+    listed in ``DENIED_NODE_TYPES`` and can never be enabled.
+
+  - ``compile_restricted`` now raises a ``SyntaxError`` which exposes the
+    source line, column, policy name and node type through dedicated
+    attributes while keeping the collected error strings in ``args``, so
+    existing error handling keeps working.
 
 
 9.0 (2026-11-04)

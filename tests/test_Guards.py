@@ -501,3 +501,20 @@ def test_safer_getattr__underscore_name():
     assert (
         '"__class__" is an invalid attribute name because it starts with "_"'
         == str(err.value))
+
+
+def test_missing_guard_variables_keep_runtime_name_error():
+    """Missing guards are compile-clean and fail at run time as before."""
+    result = compile_restricted_exec(
+        'for item in (1, 2, 3):\n    value = item\n')
+    assert result.errors == ()
+    assert result.warnings == []
+    # No ``_getiter_`` guard is supplied: the failure happens at execution
+    # time with the original NameError, not during compilation.
+    with pytest.raises(NameError, match='_getiter_'):
+        exec(result.code, {})
+
+    attribute_result = compile_restricted_exec('result = value.attr\n')
+    assert attribute_result.errors == ()
+    with pytest.raises(NameError, match='_getattr_'):
+        exec(attribute_result.code, {})

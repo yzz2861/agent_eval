@@ -33,5 +33,8 @@ outside()
 
 def test_Nonlocal():
     result = compile_restricted_exec(NONLOCAL_EXAMPLE)
-    assert result.errors == ('Line 5: Nonlocal statements are not allowed.',)
+    assert result.errors == (
+        'Line 5, col 8: policy "RestrictingNodeTransformer" rejected node '
+        'Nonlocal: this node type is explicitly forbidden and cannot be '
+        'enabled',)
     assert result.code is None

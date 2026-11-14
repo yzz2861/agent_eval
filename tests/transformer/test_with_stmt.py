@@ -2,7 +2,52 @@ import contextlib
 
 from RestrictedPython import compile_restricted_exec
 from RestrictedPython.Guards import guarded_unpack_sequence
-from tests.helper import restricted_exec
+from RestrictedPython.transformer import CAPABILITY_WITH_STATEMENTS
+from RestrictedPython.transformer import RestrictingNodeTransformer
+
+
+class WithStatementsPolicy(RestrictingNodeTransformer):
+    """Policy which explicitly enables the ``with`` capability."""
+
+    policy_name = 'WithStatementsPolicy'
+    enabled_capabilities = frozenset({CAPABILITY_WITH_STATEMENTS})
+
+
+def _restricted_exec_with_policy(source, glb=None):
+    result = compile_restricted_exec(source, policy=WithStatementsPolicy)
+    assert result.errors == (), result.errors
+    assert result.code is not None
+    if glb is None:
+        glb = {}
+    exec(result.code, glb)
+    return glb
+
+
+WITH_STMT_DEFAULT_DENIED = """
+def call(ctx):
+    with ctx() as value:
+        return value
+"""
+
+
+def test_with_stmt_default_denied():
+    """The default policy rejects ``with`` without an enabled capability."""
+    result = compile_restricted_exec(WITH_STMT_DEFAULT_DENIED)
+    assert result.code is None
+    assert result.errors == (
+        'Line 3, col 4: policy "RestrictingNodeTransformer" rejected node '
+        'With: the capability for this node type is not enabled by the '
+        'caller (required capability: "with_statements")',
+    )
+
+
+def test_with_stmt_allowed_with_capability():
+    """Enabling the capability admits the ``with`` node."""
+    result = compile_restricted_exec(
+        WITH_STMT_DEFAULT_DENIED, policy=WithStatementsPolicy)
+    assert result.errors == ()
+    assert result.warnings == []
+    assert result.code is not None
 
 
 WITH_STMT_WITH_UNPACK_SEQUENCE = """
@@ -25,7 +70,7 @@ def test_with_stmt_unpack_sequence(mocker):
         '_unpack_sequence_': guarded_unpack_sequence
     }
 
-    restricted_exec(WITH_STMT_WITH_UNPACK_SEQUENCE, glb)
+    _restricted_exec_with_policy(WITH_STMT_WITH_UNPACK_SEQUENCE, glb)
 
     ret = glb['call'](ctx)
 
@@ -44,6 +89,11 @@ def call(ctx1, ctx2):
 
 def test_with_stmt_multi_ctx_unpack_sequence(mocker):
     result = compile_restricted_exec(WITH_STMT_MULTI_CTX_WITH_UNPACK_SEQUENCE)
+    # The default policy rejects ``with``; the capability has to be opted in.
+    assert result.errors
+    result = compile_restricted_exec(
+        WITH_STMT_MULTI_CTX_WITH_UNPACK_SEQUENCE,
+        policy=WithStatementsPolicy)
     assert result.errors == ()
 
     @contextlib.contextmanager
@@ -100,7 +150,7 @@ def test_with_stmt_attribute_access(mocker):
     _write_.side_effect = lambda ob: ob
 
     glb = {'_getattr_': _getattr_, '_write_': _write_}
-    restricted_exec(WITH_STMT_ATTRIBUTE_ACCESS, glb)
+    _restricted_exec_with_policy(WITH_STMT_ATTRIBUTE_ACCESS, glb)
 
     # Test simple
     ctx = mocker.MagicMock(y=1)
@@ -158,7 +208,7 @@ def test_with_stmt_subscript(mocker):
     _write_.side_effect = lambda ob: ob
 
     glb = {'_write_': _write_}
-    restricted_exec(WITH_STMT_SUBSCRIPT, glb)
+    _restricted_exec_with_policy(WITH_STMT_SUBSCRIPT, glb)
 
     # Test single_key
     ctx = mocker.MagicMock()

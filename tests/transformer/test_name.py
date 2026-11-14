@@ -1,5 +1,11 @@
 from RestrictedPython import compile_restricted_exec
+from RestrictedPython.transformer import CAPABILITY_WITH_STATEMENTS
+from RestrictedPython.transformer import RestrictingNodeTransformer
 from tests.helper import restricted_exec
+
+
+class _WithStatementsPolicy(RestrictingNodeTransformer):
+    enabled_capabilities = frozenset({CAPABILITY_WITH_STATEMENTS})
 
 
 BAD_NAME_STARTING_WITH_UNDERSCORE = """\
@@ -75,7 +81,8 @@ def with_as_bad_name():
 
 def test_RestrictingNodeTransformer__visit_Name__4_4():
     """It denies a variable name in with starting in `_`."""
-    result = compile_restricted_exec(BAD_NAME_IN_WITH)
+    result = compile_restricted_exec(
+        BAD_NAME_IN_WITH, policy=_WithStatementsPolicy)
     assert result.errors == (
         'Line 2: "_leading_underscore" is an invalid variable name because '
         'it starts with "_"',)
@@ -90,7 +97,8 @@ def compound_with_bad_name():
 
 def test_RestrictingNodeTransformer__visit_Name__4_5():
     """It denies a variable name in with starting in `_`."""
-    result = compile_restricted_exec(BAD_NAME_IN_COMPOUND_WITH)
+    result = compile_restricted_exec(
+        BAD_NAME_IN_COMPOUND_WITH, policy=_WithStatementsPolicy)
     assert result.errors == (
         'Line 2: "_restricted_name" is an invalid variable name because '
         'it starts with "_"',)
