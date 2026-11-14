@@ -1,0 +1,10 @@
+Bytes received after a ``Connection: close`` message (or while the peer is
+otherwise in a body-forbidden closing state) are now rejected with a
+:exc:`RemoteProtocolError` instead of being buffered and potentially parsed
+as a new request when the connection is reused. This prevents HTTP request
+smuggling through a proxy that kept feeding post-close bytes into h11.
+The connection now also records an explicit close reason (the new
+``CLOSE_REASON_*`` sentinels, exposed via ``Connection.our_close_reason`` and
+``Connection.their_close_reason``) that is preserved across the transition
+to :data:`ERROR`, making orderly EOF, half-close, and protocol violations
+distinguishable.

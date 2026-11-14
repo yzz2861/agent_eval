@@ -12,6 +12,11 @@ from .._events import (
     Response,
 )
 from .._state import (
+    CLOSE_REASON_LOCAL_CLOSE,
+    CLOSE_REASON_PROTOCOL_ERROR,
+    CLOSE_REASON_REMOTE_CLOSE,
+    CLOSE_REASON_REMOTE_SHUTDOWN,
+    CLOSE_REASON_UNEXPECTED_PEER_CLOSE,
     CLIENT,
     CLOSED,
     DONE,
@@ -1118,3 +1123,259 @@ def test_special_exceptions_for_lost_connection_in_message_body() -> None:
     with pytest.raises(RemoteProtocolError) as excinfo:
         c.next_event()
     assert "incomplete chunked read" in str(excinfo.value)
+
+
+# Regression tests for request smuggling via bytes that arrive after a
+# "Connection: close" message. Such bytes must be rejected as a protocol
+# violation rather than being buffered and re-interpreted as a new request
+# when the connection is reused.
+
+
+def test_data_after_connection_close_is_rejected_server() -> None:
+    c = Connection(SERVER)
+    c.receive_data(
+        b"GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"
+        b"GET /smuggled HTTP/1.1\r\nHost: example.com\r\n\r\n"
+    )
+    # The first request is delivered normally...
+    assert type(c.next_event()) is Request
+    assert type(c.next_event()) is EndOfMessage
+    # ...but the trailing request is refused, not parsed.
+    with pytest.raises(RemoteProtocolError):
+        c.next_event()
+    assert c.their_state is ERROR
+    # The offending bytes stay available for inspection/logging.
+    assert c.trailing_data[0].startswith(b"GET /smuggled")
+    # And the original close reason is retained rather than overwritten.
+    assert c.their_close_reason is CLOSE_REASON_REMOTE_CLOSE
+
+
+def test_data_after_connection_close_is_rejected_client() -> None:
+    c = Connection(CLIENT)
+    c.send(Request(method="GET", target="/", headers=[("Host", "example.com")]))
+    c.receive_data(
+        b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 5\r\n\r\nhello"
+        b"GET /smuggled HTTP/1.1\r\nHost: example.com\r\n\r\n"
+    )
+    assert type(c.next_event()) is Response
+    assert c.next_event() == Data(data=b"hello")
+    assert type(c.next_event()) is EndOfMessage
+    with pytest.raises(RemoteProtocolError):
+        c.next_event()
+    assert c.their_state is ERROR
+    assert c.their_close_reason is CLOSE_REASON_REMOTE_CLOSE
+
+
+def test_close_request_with_split_body_then_smuggled_data() -> None:
+    # The body and the smuggled bytes need not arrive in the same segment.
+    c = Connection(SERVER)
+    c.receive_data(
+        b"POST / HTTP/1.1\r\n"
+        b"Host: example.com\r\n"
+        b"Connection: close\r\n"
+        b"Content-Length: 5\r\n\r\nhel"
+    )
+    assert type(c.next_event()) is Request
+    assert c.next_event() == Data(data=b"hel")
+    assert c.next_event() is NEED_DATA
+
+    c.receive_data(b"lo" + b"GET /smuggled HTTP/1.1\r\nHost: x\r\n\r\n")
+    assert c.next_event() == Data(data=b"lo")
+    assert type(c.next_event()) is EndOfMessage
+    with pytest.raises(RemoteProtocolError):
+        c.next_event()
+    assert c.their_state is ERROR
+    assert c.trailing_data[0].startswith(b"GET /smuggled")
+
+
+def test_clean_eof_after_connection_close_is_not_an_error() -> None:
+    # An orderly shutdown after a close message must yield ConnectionClosed,
+    # not a protocol error.
+    for role, peer_event in [
+        (
+            SERVER,
+            b"GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n",
+        ),
+    ]:
+        c = Connection(role)
+        c.receive_data(peer_event)
+        get_all_events(c)
+        c.receive_data(b"")
+        assert c.next_event() == ConnectionClosed()
+        # Idempotent: further calls keep returning ConnectionClosed.
+        assert c.next_event() == ConnectionClosed()
+        assert c.their_state is CLOSED
+
+
+def test_close_during_body_records_unexpected_peer_close() -> None:
+    # EOF cutting a framed body short is distinguishable from both a clean
+    # EOF and a framing-level protocol violation.
+    c = Connection(SERVER)
+    c.receive_data(
+        b"POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 10\r\n\r\nabc"
+    )
+    assert type(c.next_event()) is Request
+    assert c.next_event() == Data(data=b"abc")
+    c.receive_data(b"")
+    with pytest.raises(RemoteProtocolError):
+        c.next_event()
+    assert c.their_state is ERROR
+    assert c.their_close_reason is CLOSE_REASON_UNEXPECTED_PEER_CLOSE
+
+
+def test_pure_protocol_error_reason_without_eof() -> None:
+    c = Connection(SERVER)
+    c.receive_data(b"gibberish\r\n\r\n")
+    with pytest.raises(RemoteProtocolError):
+        c.next_event()
+    assert c.their_state is ERROR
+    assert c.their_close_reason is CLOSE_REASON_PROTOCOL_ERROR
+
+
+def test_half_close_in_idle_state_is_remote_shutdown() -> None:
+    c = Connection(SERVER)
+    c.receive_data(b"")
+    assert c.next_event() == ConnectionClosed()
+    assert c.their_state is CLOSED
+    assert c.their_close_reason is CLOSE_REASON_REMOTE_SHUTDOWN
+
+
+def test_local_connection_closed_records_local_reason() -> None:
+    c = Connection(SERVER)
+    c.send(ConnectionClosed())
+    assert c.our_state is CLOSED
+    assert c.our_close_reason is CLOSE_REASON_LOCAL_CLOSE
+    assert c.their_close_reason is None
+
+
+def test_send_failed_records_local_shutdown_reason() -> None:
+    c = Connection(SERVER)
+    c.send_failed()
+    assert c.our_state is ERROR
+    # The local transport shutdown reason survives the ERROR transition.
+    from .._state import CLOSE_REASON_LOCAL_SHUTDOWN
+
+    assert c.our_close_reason is CLOSE_REASON_LOCAL_SHUTDOWN
+
+
+def test_close_reasons_for_negotiated_connection_close() -> None:
+    # Both roles observe the same Connection: close request, but from their
+    # own perspective it is respectively a local and a remote reason.
+    p = ConnectionPair()
+    p.send(
+        CLIENT,
+        [
+            Request(
+                method="GET",
+                target="/",
+                headers=[("Host", "x"), ("Connection", "close")],
+            ),
+            EndOfMessage(),
+        ],
+    )
+    # The client chose to close: local reason on its own connection object.
+    assert p.conn[CLIENT].our_close_reason is CLOSE_REASON_LOCAL_CLOSE
+    # The server was told by its peer: remote reason.
+    assert p.conn[SERVER].their_close_reason is CLOSE_REASON_REMOTE_CLOSE
+
+
+def test_remote_eof_distinguishes_orderly_shutdown_from_protocol_error() -> None:
+    # A bare EOF on a fresh connection is an orderly remote shutdown...
+    c = Connection(SERVER)
+    c.receive_data(b"")
+    assert c.next_event() == ConnectionClosed()
+    assert c.their_close_reason is CLOSE_REASON_REMOTE_SHUTDOWN
+
+    # ...whereas EOF arriving mid-message is an unexpected peer close and
+    # still surfaces as a RemoteProtocolError.
+    c = Connection(SERVER)
+    c.receive_data(b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\nab")
+    assert type(c.next_event()) is Request
+    assert c.next_event() == Data(data=b"ab")
+    c.receive_data(b"")
+    with pytest.raises(RemoteProtocolError):
+        c.next_event()
+    assert c.their_close_reason is CLOSE_REASON_UNEXPECTED_PEER_CLOSE
+
+
+def test_pipelining_with_close_request_rejects_later_request() -> None:
+    # Legal keep-alive pipelining still works; only the close-marked request
+    # poisons the pipeline.
+    c = Connection(SERVER)
+    c.receive_data(
+        b"GET /1 HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"
+        b"GET /2 HTTP/1.1\r\nHost: a\r\n\r\n"
+    )
+    assert type(c.next_event()) is Request
+    assert type(c.next_event()) is EndOfMessage
+    with pytest.raises(RemoteProtocolError):
+        c.next_event()
+    assert c.their_state is ERROR
+    # The connection cannot be cycled onto the buffered request.
+    with pytest.raises(LocalProtocolError):
+        c.start_next_cycle()
+
+
+def test_legal_keepalive_pipelining_still_accepted() -> None:
+    # Control case: without Connection: close, pipelined requests keep working.
+    c = Connection(SERVER)
+    c.receive_data(
+        b"GET /1 HTTP/1.1\r\nHost: a\r\n\r\n"
+        b"GET /2 HTTP/1.1\r\nHost: a\r\n\r\n"
+    )
+    assert get_all_events(c) == [
+        Request(method="GET", target="/1", headers=[("host", "a")]),
+        EndOfMessage(),
+    ]
+    assert c.next_event() is PAUSED
+    c.send(Response(status_code=200, headers=[]))
+    c.send(EndOfMessage())
+    c.start_next_cycle()
+    assert get_all_events(c) == [
+        Request(method="GET", target="/2", headers=[("host", "a")]),
+        EndOfMessage(),
+    ]
+
+
+def test_upgrade_request_pauses_and_preserves_trailing_bytes() -> None:
+    # An upgrade hand-off must pause parsing and leave subsequent bytes alone.
+    c = Connection(SERVER)
+    c.receive_data(
+        b"GET / HTTP/1.1\r\n"
+        b"Host: example.com\r\n"
+        b"Upgrade: websocket\r\n"
+        b"Connection: Upgrade\r\n\r\n"
+        b"raw tunnel bytes"
+    )
+    assert get_all_events(c) == [
+        Request(
+            method="GET",
+            target="/",
+            headers=[
+                ("host", "example.com"),
+                ("upgrade", "websocket"),
+                ("connection", "Upgrade"),
+            ],
+        ),
+        EndOfMessage(),
+    ]
+    assert c.next_event() is PAUSED
+    assert c.their_state is MIGHT_SWITCH_PROTOCOL
+    assert c.trailing_data == (b"raw tunnel bytes", False)
+
+
+def test_connect_switch_accepted_keeps_tunnel_bytes() -> None:
+    c = Connection(SERVER)
+    c.receive_data(
+        b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"
+        b"\x16\x03\x01 tunnel"
+    )
+    assert type(c.next_event()) is Request
+    assert type(c.next_event()) is EndOfMessage
+    assert c.next_event() is PAUSED
+    c.send(Response(status_code=200, headers=[]))
+    assert c.their_state is SWITCHED_PROTOCOL
+    assert c.trailing_data[0] == b"\x16\x03\x01 tunnel"
+    # Once switched, further data never goes through the HTTP state machine.
+    c.receive_data(b"more tunnel data")
+    assert c.next_event() is PAUSED

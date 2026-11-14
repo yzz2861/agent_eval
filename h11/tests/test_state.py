@@ -10,12 +10,16 @@ from .._events import (
     Response,
 )
 from .._state import (
+    CLOSE_REASON_LOCAL_CLOSE,
+    CLOSE_REASON_PROTOCOL_ERROR,
+    CLOSE_REASON_REMOTE_CLOSE,
     _SWITCH_CONNECT,
     _SWITCH_UPGRADE,
     CLIENT,
     CLOSED,
     ConnectionState,
     DONE,
+    ERROR,
     IDLE,
     MIGHT_SWITCH_PROTOCOL,
     MUST_CLOSE,
@@ -269,3 +273,72 @@ def test_server_request_is_illegal() -> None:
     cs = ConnectionState()
     with pytest.raises(LocalProtocolError):
         cs.process_event(SERVER, Request)
+
+
+def test_ConnectionState_close_reason_defaults() -> None:
+    cs = ConnectionState()
+    assert cs.get_close_reason(CLIENT) is None
+    assert cs.get_close_reason(SERVER) is None
+
+
+def test_ConnectionState_close_reason_records_and_persists() -> None:
+    cs = ConnectionState()
+    # An orderly local close is recorded when ConnectionClosed is processed.
+    cs.process_event(CLIENT, ConnectionClosed)
+    assert cs.get_close_reason(CLIENT) is CLOSE_REASON_LOCAL_CLOSE
+
+    # Moving into ERROR afterwards must not erase the original close reason.
+    cs.process_error(CLIENT)
+    assert cs.states[CLIENT] is ERROR
+    assert cs.get_close_reason(CLIENT) is CLOSE_REASON_LOCAL_CLOSE
+
+
+def test_ConnectionState_close_reason_first_reason_wins() -> None:
+    cs = ConnectionState()
+    cs.set_close_reason(SERVER, CLOSE_REASON_REMOTE_CLOSE)
+    cs.set_close_reason(SERVER, CLOSE_REASON_PROTOCOL_ERROR)
+    assert cs.get_close_reason(SERVER) is CLOSE_REASON_REMOTE_CLOSE
+
+
+def test_ConnectionState_error_without_reason_gets_protocol_error() -> None:
+    cs = ConnectionState()
+    cs.process_error(SERVER)
+    assert cs.get_close_reason(SERVER) is CLOSE_REASON_PROTOCOL_ERROR
+
+
+def test_ConnectionState_keep_alive_disabled_records_reason() -> None:
+    cs = ConnectionState()
+    cs.process_keep_alive_disabled_with_reason(CLIENT, CLOSE_REASON_LOCAL_CLOSE)
+    assert cs.keep_alive is False
+    assert cs.get_close_reason(CLIENT) is CLOSE_REASON_LOCAL_CLOSE
+
+
+def test_ConnectionState_body_events_rejected_in_close_states() -> None:
+    # Data/EndOfMessage may only be emitted from SEND_BODY. Every body-
+    # forbidden state must reject them, for both roles, so bytes arriving
+    # after a close can never be accepted by the state machine.
+    from .._state import EVENT_TRIGGERED_TRANSITIONS
+
+    body_events = (Data, EndOfMessage)
+    body_forbidden = (DONE, MUST_CLOSE, CLOSED, ERROR)
+    for role, table in EVENT_TRIGGERED_TRANSITIONS.items():
+        for state, events in table.items():
+            if state in body_forbidden:
+                for event_type in body_events:
+                    assert event_type not in events
+            if state in (MIGHT_SWITCH_PROTOCOL, SWITCHED_PROTOCOL):
+                # Protocol-switch states accept no message events at all.
+                assert events == {}
+
+
+def test_ConnectionState_roles_have_independent_tables() -> None:
+    # Regression guard: the client and server must not share a default
+    # transition table. Only the CLIENT waits in MIGHT_SWITCH_PROTOCOL, and
+    # only the SERVER has SEND_RESPONSE and the (Request, CLIENT) special
+    # case.
+    from .._state import EVENT_TRIGGERED_TRANSITIONS
+
+    assert MIGHT_SWITCH_PROTOCOL in EVENT_TRIGGERED_TRANSITIONS[CLIENT]
+    assert MIGHT_SWITCH_PROTOCOL not in EVENT_TRIGGERED_TRANSITIONS[SERVER]
+    assert SEND_RESPONSE in EVENT_TRIGGERED_TRANSITIONS[SERVER]
+    assert SEND_RESPONSE not in EVENT_TRIGGERED_TRANSITIONS[CLIENT]

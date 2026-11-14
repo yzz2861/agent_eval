@@ -128,6 +128,12 @@ __all__ = [
     "MIGHT_SWITCH_PROTOCOL",
     "SWITCHED_PROTOCOL",
     "ERROR",
+    "CLOSE_REASON_LOCAL_CLOSE",
+    "CLOSE_REASON_REMOTE_CLOSE",
+    "CLOSE_REASON_LOCAL_SHUTDOWN",
+    "CLOSE_REASON_REMOTE_SHUTDOWN",
+    "CLOSE_REASON_PROTOCOL_ERROR",
+    "CLOSE_REASON_UNEXPECTED_PEER_CLOSE",
 ]
 
 
@@ -185,6 +191,42 @@ class _SWITCH_CONNECT(Sentinel, metaclass=Sentinel):
     pass
 
 
+# Close reasons
+# -----------
+# These document *why* a connection is being driven towards CLOSED. They are
+# recorded on the ConnectionState as soon as the relevant event is observed,
+# so that the reason survives even if a later protocol violation (e.g. data
+# arriving after a "Connection: close" message) moves the peer into ERROR.
+#
+# The two flavours track which direction of the TCP connection went away:
+# - *_CLOSE      -> a full close was requested through the HTTP state machine
+#                   (a ConnectionClosed event / Connection: close negotiation)
+# - *_SHUTDOWN   -> the transport half carrying this role was shut down at
+#                   the TCP level (an EOF observed on the receive side)
+class CLOSE_REASON_LOCAL_CLOSE(Sentinel, metaclass=Sentinel):
+    pass
+
+
+class CLOSE_REASON_REMOTE_CLOSE(Sentinel, metaclass=Sentinel):
+    pass
+
+
+class CLOSE_REASON_LOCAL_SHUTDOWN(Sentinel, metaclass=Sentinel):
+    pass
+
+
+class CLOSE_REASON_REMOTE_SHUTDOWN(Sentinel, metaclass=Sentinel):
+    pass
+
+
+class CLOSE_REASON_PROTOCOL_ERROR(Sentinel, metaclass=Sentinel):
+    pass
+
+
+class CLOSE_REASON_UNEXPECTED_PEER_CLOSE(Sentinel, metaclass=Sentinel):
+    pass
+
+
 EventTransitionType = Dict[
     Type[Sentinel],
     Dict[
@@ -193,15 +235,62 @@ EventTransitionType = Dict[
     ],
 ]
 
+# Explicit event-triggered transition tables.
+#
+# Each inner dict maps an event to the state that role moves into. A state
+# with no entry for an event (an empty dict, or simply a missing key) means
+# that the event is a protocol violation in that state -- most importantly,
+# Data/EndOfMessage only appear in SEND_BODY, so any body bytes that arrive
+# in a body-forbidden state (DONE / MUST_CLOSE / CLOSED / ERROR / the
+# protocol-switch states) are rejected rather than being silently accepted.
+#
+# Connection lifecycle events covered explicitly below:
+#
+# * Full close: ConnectionClosed is accepted from IDLE / DONE / MUST_CLOSE /
+#   CLOSED and always lands in CLOSED (it is idempotent once CLOSED). It is
+#   deliberately absent from SEND_BODY -- you cannot close while a message
+#   body is still in flight; an EOF there is a truncated-body error instead.
+#
+# * Half close: a transport-level EOF observed while a role is IDLE is turned
+#   into a ConnectionClosed event, so it follows the same IDLE -> CLOSED row.
+#   A half close that interrupts a body never reaches this table: the body
+#   reader raises first and the role goes to ERROR.
+#
+# * Upgrade: an Upgrade proposal puts the CLIENT into
+#   MIGHT_SWITCH_PROTOCOL once its message ends, and a matching 101
+#   InformationalResponse moves the SERVER straight to SWITCHED_PROTOCOL.
+#
+# * CONNECT: a CONNECT proposal uses the same MIGHT_SWITCH_PROTOCOL wait
+#   state, and a successful 2xx Response moves the SERVER to
+#   SWITCHED_PROTOCOL.
+#
+# The CLIENT and SERVER tables are intentionally *not* shared: only the
+# CLIENT ever waits in MIGHT_SWITCH_PROTOCOL, only the SERVER has the
+# SEND_RESPONSE state and sees the peer's Request events, and the events
+# that drive each role differ. Giving each role its own table guarantees
+# that neither inherits an incorrect default from the other.
+
 EVENT_TRIGGERED_TRANSITIONS: EventTransitionType = {
     CLIENT: {
+        # IDLE: either start a new request, or close the connection.
         IDLE: {Request: SEND_BODY, ConnectionClosed: CLOSED},
+        # SEND_BODY: the only state in which body events are legal.
         SEND_BODY: {Data: SEND_BODY, EndOfMessage: DONE},
+        # DONE: a finished message can only be followed by a full close.
+        # Keep-alive reuse goes through start_next_cycle(), not an event.
         DONE: {ConnectionClosed: CLOSED},
+        # MUST_CLOSE: keep-alive was disabled; the only legal next event is
+        # the close itself. Any other data is a protocol violation.
         MUST_CLOSE: {ConnectionClosed: CLOSED},
+        # CLOSED is terminal: ConnectionClosed stays idempotent.
         CLOSED: {ConnectionClosed: CLOSED},
+        # Waiting for the server to answer an Upgrade/CONNECT proposal. No
+        # events are accepted here -- the role pauses until the SERVER's
+        # decision drives a state-triggered transition.
         MIGHT_SWITCH_PROTOCOL: {},
+        # A protocol switch was completed; h11 no longer owns the bytes.
         SWITCHED_PROTOCOL: {},
+        # Something went wrong; only process_error() touches this state.
         ERROR: {},
     },
     SERVER: {
@@ -212,15 +301,22 @@ EVENT_TRIGGERED_TRANSITIONS: EventTransitionType = {
             (Request, CLIENT): SEND_RESPONSE,
         },
         SEND_RESPONSE: {
+            # Zero or more 1xx responses, then the final response.
             InformationalResponse: SEND_RESPONSE,
             Response: SEND_BODY,
+            # Upgrade accepted: a matching 101 switches immediately.
             (InformationalResponse, _SWITCH_UPGRADE): SWITCHED_PROTOCOL,
+            # CONNECT accepted: a 2xx response switches immediately.
             (Response, _SWITCH_CONNECT): SWITCHED_PROTOCOL,
         },
+        # SEND_BODY: the only state in which the server may emit body events.
         SEND_BODY: {Data: SEND_BODY, EndOfMessage: DONE},
+        # DONE / MUST_CLOSE / CLOSED mirror the client side: only a full
+        # close remains legal, and CLOSED treats the event as idempotent.
         DONE: {ConnectionClosed: CLOSED},
         MUST_CLOSE: {ConnectionClosed: CLOSED},
         CLOSED: {ConnectionClosed: CLOSED},
+        # The server never waits on a switch proposal and ERROR is terminal.
         SWITCHED_PROTOCOL: {},
         ERROR: {},
     },
@@ -232,6 +328,16 @@ StateTransitionType = Dict[
 
 # NB: there are also some special-case state-triggered transitions hard-coded
 # into _fire_state_triggered_transitions below.
+#
+# These joint (CLIENT, SERVER) states encode the cross-role effects of close
+# and half-close, plus the final Upgrade/CONNECT hand-off:
+#
+# * (MIGHT_SWITCH_PROTOCOL, SWITCHED_PROTOCOL): the client proposed a switch
+#   and the server accepted it, so the client also moves to SWITCHED_PROTOCOL.
+# * (CLOSED, DONE/IDLE) and (ERROR, DONE): once the client side is gone, a
+#   server that has nothing left to send is forced to MUST_CLOSE (and vice
+#   versa for the mirror-image rows). IDLE is the half-close case: the peer
+#   shut down before starting any message.
 STATE_TRIGGERED_TRANSITIONS: StateTransitionType = {
     # (Client state, Server state) -> new states
     # Protocol negotiation
@@ -260,13 +366,45 @@ class ConnectionState:
 
         self.states: Dict[Type[Sentinel], Type[Sentinel]] = {CLIENT: IDLE, SERVER: IDLE}
 
+        # The reason each role is being closed, or None while the role is
+        # still healthy. Keyed by role so that a local send-side failure and
+        # a remote receive-side violation can coexist. The first reason
+        # recorded for a role always wins, so the reason survives any later
+        # transition (including into ERROR).
+        self.close_reasons: Dict[Type[Sentinel], Optional[Type[Sentinel]]] = {
+            CLIENT: None,
+            SERVER: None,
+        }
+
+    def set_close_reason(self, role: Type[Sentinel], reason: Type[Sentinel]) -> None:
+        # Record why a role is heading towards CLOSED. An existing reason is
+        # deliberately preserved: e.g. data arriving after "Connection:
+        # close" moves the peer to ERROR, but the original
+        # CLOSE_REASON_*_CLOSE must not be overwritten.
+        if self.close_reasons[role] is None:
+            self.close_reasons[role] = reason
+
+    def get_close_reason(self, role: Type[Sentinel]) -> Optional[Type[Sentinel]]:
+        return self.close_reasons[role]
+
     def process_error(self, role: Type[Sentinel]) -> None:
+        if self.close_reasons[role] is None:
+            self.close_reasons[role] = CLOSE_REASON_PROTOCOL_ERROR
         self.states[role] = ERROR
         self._fire_state_triggered_transitions()
 
     def process_keep_alive_disabled(self) -> None:
         self.keep_alive = False
         self._fire_state_triggered_transitions()
+
+    def process_keep_alive_disabled_with_reason(
+        self, role: Type[Sentinel], reason: Type[Sentinel]
+    ) -> None:
+        # Keep-alive was disabled by an explicit negotiation (Connection:
+        # close or an HTTP/1.0 peer). Record which side asked for it so that
+        # the reason survives any later ERROR transition.
+        self.set_close_reason(role, reason)
+        self.process_keep_alive_disabled()
 
     def process_client_switch_proposal(self, switch_event: Type[Sentinel]) -> None:
         self.pending_switch_proposals.add(switch_event)
@@ -288,6 +426,10 @@ class ConnectionState:
             _event_type = (event_type, server_switch_event)
         if server_switch_event is None and _event_type is Response:
             self.pending_switch_proposals = set()
+        if _event_type is ConnectionClosed:
+            # Default to an orderly local close; the Connection layer
+            # overrides this with the remote reason for a peer-emitted close.
+            self.set_close_reason(role, CLOSE_REASON_LOCAL_CLOSE)
         self._fire_event_triggered_transitions(role, _event_type)
         # Special case: the server state does get to see Request
         # events.

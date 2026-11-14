@@ -29,16 +29,25 @@ from ._state import (
     _SWITCH_CONNECT,
     _SWITCH_UPGRADE,
     CLIENT,
+    CLOSE_REASON_LOCAL_CLOSE,
+    CLOSE_REASON_LOCAL_SHUTDOWN,
+    CLOSE_REASON_PROTOCOL_ERROR,
+    CLOSE_REASON_REMOTE_CLOSE,
+    CLOSE_REASON_REMOTE_SHUTDOWN,
+    CLOSE_REASON_UNEXPECTED_PEER_CLOSE,
     ConnectionState,
+    CLOSED,
     DONE,
     ERROR,
     MIGHT_SWITCH_PROTOCOL,
+    MUST_CLOSE,
     SEND_BODY,
     SERVER,
     SWITCHED_PROTOCOL,
 )
 from ._util import (  # Import the internal things we need
     LocalProtocolError,
+    ProtocolError,
     RemoteProtocolError,
     Sentinel,
 )
@@ -229,6 +238,24 @@ class Connection:
         return self._cstate.states[self.their_role]
 
     @property
+    def our_close_reason(self) -> Optional[Type[Sentinel]]:
+        """The recorded reason our side of the connection is closing, or
+        ``None`` if it is still healthy.
+
+        The value is one of the ``CLOSE_REASON_*`` sentinels. The first
+        reason recorded is retained, so a later protocol violation (which
+        moves :attr:`our_state` to :data:`ERROR`) does not erase it.
+        """
+        return self._cstate.get_close_reason(self.our_role)
+
+    @property
+    def their_close_reason(self) -> Optional[Type[Sentinel]]:
+        """The recorded reason the peer's side of the connection is closing,
+        or ``None`` if it is still healthy. See :attr:`our_close_reason`.
+        """
+        return self._cstate.get_close_reason(self.their_role)
+
+    @property
     def they_are_waiting_for_100_continue(self) -> bool:
         return self.their_role is CLIENT and self.client_is_waiting_for_100_continue
 
@@ -273,6 +300,13 @@ class Connection:
         # First, pass the event through the state machine to make sure it
         # succeeds.
         old_states = dict(self._cstate.states)
+        if type(event) is ConnectionClosed:
+            # A locally generated close is an orderly local shutdown; a
+            # close parsed from the peer's bytes is a remote one. The state
+            # machine itself records CLOSE_REASON_LOCAL_CLOSE, so fix the
+            # reason for the receive-side role before that happens.
+            if role is self.their_role:
+                self._cstate.set_close_reason(role, CLOSE_REASON_REMOTE_CLOSE)
         if role is CLIENT and type(event) is Request:
             if event.method == b"CONNECT":
                 self._cstate.process_client_switch_proposal(_SWITCH_CONNECT)
@@ -305,7 +339,13 @@ class Connection:
         if type(event) in (Request, Response) and not _keep_alive(
             cast(Union[Request, Response], event)
         ):
-            self._cstate.process_keep_alive_disabled()
+            if role is self.their_role:
+                # The peer asked for (or can only do) a close.
+                reason = CLOSE_REASON_REMOTE_CLOSE
+            else:
+                # We are committing to closing our own side.
+                reason = CLOSE_REASON_LOCAL_CLOSE
+            self._cstate.process_keep_alive_disabled_with_reason(role, reason)
 
         # 100-continue
         if type(event) is Request and has_expect_100_continue(event):
@@ -419,6 +459,45 @@ class Connection:
             return PAUSED
         if state is MIGHT_SWITCH_PROTOCOL or state is SWITCHED_PROTOCOL:
             return PAUSED
+        # Body-forbidden close states. MUST_CLOSE means keep-alive was
+        # disabled (Connection: close / HTTP/1.0): the peer promised to shut
+        # down, so any actual bytes here are a protocol violation -- they
+        # must never be buffered and later re-interpreted as a new request.
+        # An empty buffer with EOF is the orderly shutdown we were waiting
+        # for, and an empty buffer without EOF means we're still waiting.
+        if state is MUST_CLOSE:
+            if self._receive_buffer:
+                # Keep the reason that put us in MUST_CLOSE (an orderly close
+                # was already negotiated); only fall back to a generic
+                # protocol error if somehow none was recorded.
+                self._cstate.set_close_reason(
+                    self.their_role, CLOSE_REASON_PROTOCOL_ERROR
+                )
+                raise LocalProtocolError(
+                    "received data {} byte(s) after Connection: close; the "
+                    "connection must be closed, not reused".format(
+                        len(self._receive_buffer)
+                    )
+                )
+            if self._receive_buffer_closed:
+                self._cstate.set_close_reason(
+                    self.their_role, CLOSE_REASON_REMOTE_SHUTDOWN
+                )
+                return ConnectionClosed()
+            return NEED_DATA
+        # CLOSED is terminal. With no buffered bytes, repeated EOF keeps
+        # yielding ConnectionClosed() to match the documented idempotent
+        # behaviour; bytes here can only be a post-close protocol violation.
+        if state is CLOSED:
+            if self._receive_buffer:
+                self._cstate.set_close_reason(
+                    self.their_role, CLOSE_REASON_PROTOCOL_ERROR
+                )
+                raise LocalProtocolError(
+                    "received data {} byte(s) after the connection was "
+                    "closed".format(len(self._receive_buffer))
+                )
+            return ConnectionClosed()
         assert self._reader is not None
         event = self._reader(self._receive_buffer)
         if event is None:
@@ -430,6 +509,11 @@ class Connection:
                 if hasattr(self._reader, "read_eof"):
                     event = self._reader.read_eof()
                 else:
+                    # A clean transport-level half-close with nothing left to
+                    # parse: this is an orderly remote shutdown, not an error.
+                    self._cstate.set_close_reason(
+                        self.their_role, CLOSE_REASON_REMOTE_SHUTDOWN
+                    )
                     event = ConnectionClosed()
         if event is None:
             event = NEED_DATA
@@ -491,9 +575,22 @@ class Connection:
                 if self._receive_buffer_closed:
                     # We're still trying to complete some event, but that's
                     # never going to happen because no more data is coming
+                    self._cstate.set_close_reason(
+                        self.their_role, CLOSE_REASON_UNEXPECTED_PEER_CLOSE
+                    )
                     raise RemoteProtocolError("peer unexpectedly closed connection")
             return event
         except BaseException as exc:
+            # EOF-driven failures (a body cut off by the peer shutting down,
+            # or an incomplete event when no more bytes are coming) are
+            # distinct from a pure framing violation: record the unexpected
+            # peer close so callers can tell the two apart. The reason is
+            # only filled in when nothing more specific was recorded, and it
+            # is preserved by the first-reason-wins rule in process_error.
+            if self._receive_buffer_closed and isinstance(exc, ProtocolError):
+                self._cstate.set_close_reason(
+                    self.their_role, CLOSE_REASON_UNEXPECTED_PEER_CLOSE
+                )
             self._process_error(self.their_role)
             if isinstance(exc, LocalProtocolError):
                 exc._reraise_as_remote_protocol_error()
@@ -582,6 +679,12 @@ class Connection:
         :data:`ERROR` -- see :ref:`error-handling` for discussion.
 
         """
+        # A failed write means our local transport half is shutting down.
+        # Record this before process_error() so it is not labelled as a
+        # generic protocol violation.
+        self._cstate.set_close_reason(
+            self.our_role, CLOSE_REASON_LOCAL_SHUTDOWN
+        )
         self._process_error(self.our_role)
 
     # When sending a Response, we take responsibility for a few things:

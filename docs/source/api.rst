@@ -16,18 +16,24 @@ directly at the top level:
 
    @verbatim
    In [3]: h11.<TAB>
-   h11.CLIENT                 h11.MUST_CLOSE
-   h11.CLOSED                 h11.NEED_DATA
-   h11.Connection             h11.PAUSED
-   h11.ConnectionClosed       h11.PRODUCT_ID
-   h11.Data                   h11.ProtocolError
-   h11.DONE                   h11.RemoteProtocolError
-   h11.EndOfMessage           h11.Request
-   h11.ERROR                  h11.Response
-   h11.IDLE                   h11.SEND_BODY
-   h11.InformationalResponse  h11.SEND_RESPONSE
-   h11.LocalProtocolError     h11.SERVER
-   h11.MIGHT_SWITCH_PROTOCOL  h11.SWITCHED_PROTOCOL
+   h11.CLIENT                              h11.MUST_CLOSE
+   h11.CLOSED                              h11.NEED_DATA
+   h11.CLOSE_REASON_LOCAL_CLOSE            h11.PAUSED
+   h11.CLOSE_REASON_LOCAL_SHUTDOWN         h11.PRODUCT_ID
+   h11.CLOSE_REASON_PROTOCOL_ERROR         h11.ProtocolError
+   h11.CLOSE_REASON_REMOTE_CLOSE           h11.RemoteProtocolError
+   h11.CLOSE_REASON_REMOTE_SHUTDOWN        h11.Request
+   h11.CLOSE_REASON_UNEXPECTED_PEER_CLOSE  h11.Response
+   h11.Connection                          h11.SEND_BODY
+   h11.ConnectionClosed                    h11.SEND_RESPONSE
+   h11.Data                                h11.SERVER
+   h11.DONE                                h11.SWITCHED_PROTOCOL
+   h11.EndOfMessage
+   h11.ERROR
+   h11.IDLE
+   h11.InformationalResponse
+   h11.LocalProtocolError
+   h11.MIGHT_SWITCH_PROTOCOL
 
 These symbols fall into three main categories: event classes, special
 constants used to track different connection states, and the
@@ -413,6 +419,8 @@ The Connection object
    .. autoattribute:: states
    .. autoattribute:: our_state
    .. autoattribute:: their_state
+   .. autoattribute:: our_close_reason
+   .. autoattribute:: their_close_reason
 
    .. attribute:: their_http_version
 
