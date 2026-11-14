@@ -168,6 +168,27 @@ class SetOfTest(core.SetOf):
     _child_spec = core.Integer
 
 
+class UniqueSetOfTest(core.SetOf):
+    _child_spec = core.Integer
+    _unique = True
+
+
+class SetOfOctetStrings(core.SetOf):
+    _child_spec = core.OctetString
+
+
+class NestedSetOfSequence(core.Sequence):
+    _fields = [
+        ('values', SetOfTest),
+    ]
+
+
+class NestedSetSequence(core.Sequence):
+    _fields = [
+        ('value', SetTest),
+    ]
+
+
 class RecursiveSequence(core.Sequence):
     _set_contents_calls = 0
 
@@ -1066,6 +1087,215 @@ class CoreTests(unittest.TestCase):
         value.append(1)
         self.assertEqual(b'1\x09\x02\x01\x01\x02\x01\x02\x02\x01\x03', value.dump())
         self.assertFalse(value._mutated)
+
+    def test_der_dump_set_of_sorts_full_encoding(self):
+        canonical = b'1\x09\x02\x01\x01\x02\x01\x02\x02\x01\x03'
+        value = SetOfTest([3, 1, 2])
+        self.assertEqual(canonical, value.dump(der=True))
+
+    def test_der_dump_set_of_restores_ber_order(self):
+        # BER may carry a SET OF in any order; the default dump preserves the
+        # original bytes, while dump(der=True) restores canonical order.
+        ber_encoding = b'1\x09' + b''.join(
+            core.Integer(num).dump() for num in [3, 1, 2]
+        )
+        canonical = b'1\x09\x02\x01\x01\x02\x01\x02\x02\x01\x03'
+
+        loaded = SetOfTest.load(ber_encoding)
+        self.assertEqual(ber_encoding, loaded.dump())
+        self.assertEqual(canonical, loaded.dump(der=True))
+
+    def test_der_dump_set_of_orders_by_tag_length_contents(self):
+        # Equal tag and length order by contents; equal tag orders by length.
+        value = SetOfOctetStrings([b'ab', b'aa', b'abcd'])
+        expected = b'1\x0e' + (
+            core.OctetString(b'aa').dump() +
+            core.OctetString(b'ab').dump() +
+            core.OctetString(b'abcd').dump()
+        )
+        self.assertEqual(expected, value.dump(der=True))
+
+    def test_der_dump_set_of_same_prefix_vectors(self):
+        # The elements share a tag and length prefix, so a tag-only sort can
+        # not distinguish them; the full DER encoding byte order must.
+        value = SetOfOctetStrings([b'ba', b'aa', b'ab'])
+        expected = b'1\x0c' + b''.join(
+            core.OctetString(blob).dump() for blob in [b'aa', b'ab', b'ba']
+        )
+        self.assertEqual(expected, value.dump(der=True))
+
+    def test_der_dump_set_of_allows_duplicates_by_default(self):
+        value = SetOfTest([2, 1, 1])
+        expected = b'1\x09' + b''.join(
+            core.Integer(num).dump() for num in [1, 1, 2]
+        )
+        self.assertEqual(expected, value.dump(der=True))
+
+    def test_der_dump_unique_set_of_rejects_duplicates(self):
+        value = UniqueSetOfTest([2, 1, 1])
+        # The cardinality check only applies to explicit DER output; the
+        # regular BER-compatible dump keeps working.
+        value.dump()
+        with self.assertRaises(ValueError) as ctx:
+            value.dump(der=True)
+        message = str(ctx.exception)
+        self.assertIn('Duplicate element 3', message)
+        self.assertIn('UniqueSetOfTest', message)
+        # Element contents must never be embedded in the error message.
+        self.assertNotIn(b'\x02\x01\x01', message.encode('utf-8'))
+
+    def test_der_dump_set_uses_canonical_order(self):
+        value = SetTest({'two': 2, 'one': 1})
+        canonical = b'1\x06\x81\x01\x01\x82\x01\x02'
+        self.assertEqual(canonical, value.dump())
+        self.assertEqual(canonical, value.dump(der=True))
+
+    def test_der_dump_set_handles_lazy_tuple_children(self):
+        loaded = SetTest.load(b'1\x06\x81\x01\x01\x82\x01\x02')
+        # Touch only one field so the other remains a lazy tuple encoding
+        self.assertEqual(2, loaded['two'].native)
+        self.assertEqual('tuple', loaded.children[1].__class__.__name__)
+        canonical = b'1\x06\x81\x01\x01\x82\x01\x02'
+        self.assertEqual(canonical, loaded.dump(force=True, der=False))
+        self.assertEqual(canonical, loaded.dump(der=True))
+
+    def test_der_dump_set_rejects_duplicate_fields(self):
+        ber_encoding = (
+            b'1\x09' +
+            b'\x81\x01\x01' +
+            b'\x82\x01\x02' +
+            b'\x82\x01\x02'
+        )
+        loaded = SetTest.load(ber_encoding)
+        # Trigger lazy child parsing so the duplicate records are populated
+        self.assertEqual(2, loaded['two'].native)
+        # BER parsing remains permissive and remembers the duplicate.
+        self.assertEqual({0: [2]}, loaded._duplicate_fields)
+        # The default dump preserves the original BER bytes, including the
+        # duplicated element, so regular parsing stays backward compatible.
+        self.assertEqual(ber_encoding, loaded.dump())
+        # Accessing a field and dumping again still keeps the BER bytes.
+        self.assertEqual(ber_encoding, loaded.dump())
+        with self.assertRaises(ValueError) as ctx:
+            loaded.dump(der=True)
+        message = str(ctx.exception)
+        self.assertIn('Duplicate element 3', message)
+        self.assertIn('field "two"', message)
+        self.assertIn('SetTest', message)
+
+    def test_der_dump_nested_set_of_canonicalizes(self):
+        inner_ber = b'1\x09' + b''.join(
+            core.Integer(num).dump() for num in [3, 1, 2]
+        )
+        raw = b'\x30\x0b' + inner_ber
+        loaded = NestedSetOfSequence.load(raw)
+        self.assertEqual(raw, loaded.dump())
+
+        canonical_inner = b'1\x09\x02\x01\x01\x02\x01\x02\x02\x01\x03'
+        self.assertEqual(
+            b'\x30\x0b' + canonical_inner,
+            loaded.dump(der=True)
+        )
+
+    def test_der_dump_nested_unique_set_of_surfaces_duplicate(self):
+
+        class NestedUnique(core.Sequence):
+            _fields = [
+                ('values', UniqueSetOfTest),
+            ]
+
+        value = NestedUnique({'values': [1, 1, 2]})
+        with self.assertRaises(ValueError) as ctx:
+            value.dump(der=True)
+        self.assertIn('Duplicate element 2', str(ctx.exception))
+
+    def test_der_dump_nested_set_surfaces_duplicate(self):
+        ber_set = (
+            b'1\x09' +
+            b'\x81\x01\x01' +
+            b'\x82\x01\x02' +
+            b'\x82\x01\x02'
+        )
+        loaded = NestedSetSequence.load(b'\x30\x0b' + ber_set)
+        with self.assertRaises(ValueError) as ctx:
+            loaded.dump(der=True)
+        self.assertIn('field "two"', str(ctx.exception))
+
+    def test_der_dump_does_not_change_default_output(self):
+        value = SetOfTest([3, 1, 2])
+        default_output = value.dump()
+        self.assertEqual(default_output, value.dump())
+        self.assertEqual(default_output, value.dump(force=False))
+
+    def test_der_dump_implies_force_reencoding(self):
+        ber_encoding = b'1\x09' + b''.join(
+            core.Integer(num).dump() for num in [3, 1, 2]
+        )
+        canonical = b'1\x09\x02\x01\x01\x02\x01\x02\x02\x01\x03'
+        loaded = SetOfTest.load(ber_encoding)
+        # force alone re-encodes but preserves BER semantics; der canonicalizes
+        self.assertEqual(canonical, loaded.dump(force=True, der=True))
+        # A plain force without der keeps the previously cached/canonical
+        # ordering once a der dump has happened
+        loaded2 = SetOfTest.load(ber_encoding)
+        self.assertEqual(canonical, loaded2.dump(der=True))
+
+    def test_der_dump_set_pickle_roundtrip(self):
+        ber_set_dup = (
+            b'1\x09' +
+            b'\x81\x01\x01' +
+            b'\x82\x01\x02' +
+            b'\x82\x01\x02'
+        )
+        loaded = SetTest.load(ber_set_dup)
+        restored = pickle.loads(pickle.dumps(loaded))
+        # Pickling uses the regular dump, which preserves BER bytes; the
+        # restored structure remembers the duplicate and only strict DER
+        # output rejects it.
+        self.assertEqual(2, restored['two'].native)
+        self.assertEqual({0: [2]}, restored._duplicate_fields)
+        with self.assertRaises(ValueError):
+            restored.dump(der=True)
+
+    def test_der_tlv_sort_key(self):
+        encoding = core.Integer(12345).dump()
+        identifier, length, contents = core._der_tlv_sort_key(encoding)
+        self.assertEqual(b'\x02', identifier)
+        self.assertEqual(b'\x02', length)
+        self.assertEqual(contents, encoding[2:])
+        self.assertEqual(encoding, b''.join((identifier, length, contents)))
+
+    def test_der_tlv_sort_key_high_tag_number(self):
+        # Tag 36 uses the multi-byte identifier form; explicit tagging makes
+        # it a context-class constructed identifier 0xbf 0x24
+        encoding = core.Integer(1, explicit=36).dump()
+        identifier, length, contents = core._der_tlv_sort_key(encoding)
+        self.assertEqual(b'\xbf\x24', identifier)
+        self.assertEqual(encoding, b''.join((identifier, length, contents)))
+
+    def test_der_tlv_sort_key_matches_raw_byte_order(self):
+        elements = [
+            core.Integer(1).dump(),
+            core.Integer(200).dump(),
+            core.OctetString(b'').dump(),
+            core.OctetString(b'x').dump(),
+            core.OctetString(b'a' * 200).dump(),
+            core.Integer(1, explicit=36).dump(),
+        ]
+        self.assertEqual(
+            sorted(elements),
+            sorted(elements, key=core._der_tlv_sort_key)
+        )
+
+    def test_der_tlv_sort_key_rejects_malformed_encoding(self):
+        with self.assertRaises(ValueError):
+            core._der_tlv_sort_key(b'')
+        with self.assertRaises(ValueError):
+            # Indefinite length is BER, not DER
+            core._der_tlv_sort_key(b'\x30\x80\x00\x00')
+        with self.assertRaises(ValueError):
+            # Declared length exceeds the available contents
+            core._der_tlv_sort_key(b'\x02\x02\x01')
 
     def test_force_dump_clears_mutation_state(self):
         value = SequenceOfInts([1, 2])

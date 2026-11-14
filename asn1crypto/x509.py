@@ -1163,22 +1163,22 @@ class Name(Choice):
     def sha1(self):
         """
         :return:
-            The SHA1 hash of the DER-encoded bytes of this name
+            The SHA1 hash of the canonical DER-encoded bytes of this name
         """
 
         if self._sha1 is None:
-            self._sha1 = hashlib.sha1(self.dump()).digest()
+            self._sha1 = hashlib.sha1(self.dump(der=True)).digest()
         return self._sha1
 
     @property
     def sha256(self):
         """
         :return:
-            The SHA-256 hash of the DER-encoded bytes of this name
+            The SHA-256 hash of the canonical DER-encoded bytes of this name
         """
 
         if self._sha256 is None:
-            self._sha256 = hashlib.sha256(self.dump()).digest()
+            self._sha256 = hashlib.sha256(self.dump(der=True)).digest()
         return self._sha256
 
 
@@ -2852,11 +2852,12 @@ class Certificate(Sequence):
     def sha1(self):
         """
         :return:
-            The SHA-1 hash of the DER-encoded bytes of this complete certificate
+            The SHA-1 hash of the canonical DER-encoded bytes of this
+            complete certificate
         """
 
         if self._sha1 is None:
-            self._sha1 = hashlib.sha1(self.dump()).digest()
+            self._sha1 = hashlib.sha1(self.dump(der=True)).digest()
         return self._sha1
 
     @property
@@ -2873,12 +2874,12 @@ class Certificate(Sequence):
     def sha256(self):
         """
         :return:
-            The SHA-256 hash of the DER-encoded bytes of this complete
-            certificate
+            The SHA-256 hash of the canonical DER-encoded bytes of this
+            complete certificate
         """
 
         if self._sha256 is None:
-            self._sha256 = hashlib.sha256(self.dump()).digest()
+            self._sha256 = hashlib.sha256(self.dump(der=True)).digest()
         return self._sha256
 
     @property

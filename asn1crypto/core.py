@@ -629,13 +629,20 @@ class Asn1Value(object):
             else:
                 print('%s    Native: %s' % (prefix, self.native))
 
-    def dump(self, force=False):
+    def dump(self, force=False, der=False):
         """
         Encodes the value using DER
 
         :param force:
             If the encoded contents already exist, clear them and regenerate
             to ensure they are in DER format instead of BER format
+
+        :param der:
+            If True, re-encode the value and enforce strict DER canonical
+            encoding rules, including the canonical ordering and
+            cardinality checks for SET and SET OF contents. Defaults to
+            False, in which case any existing BER-compatible encoding is
+            preserved round-trip.
 
         :return:
             A byte string of the DER-encoded value
@@ -854,13 +861,16 @@ class Void(Asn1Value):
 
         return None
 
-    def dump(self, force=False):
+    def dump(self, force=False, der=False):
         """
         Encodes the value using DER
 
         :param force:
             If the encoded contents already exist, clear them and regenerate
             to ensure they are in DER format instead of BER format
+
+        :param der:
+            Enforce strict DER canonical encoding rules when re-encoding
 
         :return:
             A byte string of the DER-encoded value
@@ -1004,13 +1014,16 @@ class Any(Asn1Value):
         super(Any, self)._copy(other, copy_func)
         self._parsed = copy_func(other._parsed)
 
-    def dump(self, force=False):
+    def dump(self, force=False, der=False):
         """
         Encodes the value using DER
 
         :param force:
             If the encoded contents already exist, clear them and regenerate
             to ensure they are in DER format instead of BER format
+
+        :param der:
+            Enforce strict DER canonical encoding rules when re-encoding
 
         :return:
             A byte string of the DER-encoded value
@@ -1019,7 +1032,7 @@ class Any(Asn1Value):
         if self._parsed is None:
             self.parse()
 
-        return self._parsed[0].dump(force=force)
+        return self._parsed[0].dump(force=force, der=der)
 
 
 class Choice(Asn1Value):
@@ -1337,13 +1350,16 @@ class Choice(Asn1Value):
         self._name = other._name
         self._parsed = copy_func(other._parsed)
 
-    def dump(self, force=False):
+    def dump(self, force=False, der=False):
         """
         Encodes the value using DER
 
         :param force:
             If the encoded contents already exist, clear them and regenerate
             to ensure they are in DER format instead of BER format
+
+        :param der:
+            Enforce strict DER canonical encoding rules when re-encoding
 
         :return:
             A byte string of the DER-encoded value
@@ -1353,7 +1369,7 @@ class Choice(Asn1Value):
         if self._header is not None and self._header[-1:] == b'\x80':
             force = True
 
-        self._contents = self.chosen.dump(force=force)
+        self._contents = self.chosen.dump(force=force, der=der)
         if self._header is None or force:
             self._header = b''
             if self.explicit is not None:
@@ -1547,7 +1563,7 @@ class Concat(object):
         for child in self._children:
             child.debug(nest_level + 2)
 
-    def dump(self, force=False):
+    def dump(self, force=False, der=False):
         """
         Encodes the value using DER
 
@@ -1555,13 +1571,16 @@ class Concat(object):
             If the encoded contents already exist, clear them and regenerate
             to ensure they are in DER format instead of BER format
 
+        :param der:
+            Enforce strict DER canonical encoding rules when re-encoding
+
         :return:
             A byte string of the DER-encoded value
         """
 
         contents = b''
         for child in self._children:
-            contents += child.dump(force=force)
+            contents += child.dump(force=force, der=der)
         return contents
 
     @property
@@ -1714,13 +1733,16 @@ class Primitive(Asn1Value):
         if self._trailer != b'':
             self._trailer = b''
 
-    def dump(self, force=False):
+    def dump(self, force=False, der=False):
         """
         Encodes the value using DER
 
         :param force:
             If the encoded contents already exist, clear them and regenerate
             to ensure they are in DER format instead of BER format
+
+        :param der:
+            Enforce strict DER canonical encoding rules when re-encoding
 
         :return:
             A byte string of the DER-encoded value
@@ -2877,13 +2899,16 @@ class ParsableOctetString(Constructable, Castable, Primitive):
 
         return self._parsed[0]
 
-    def dump(self, force=False):
+    def dump(self, force=False, der=False):
         """
         Encodes the value using DER
 
         :param force:
             If the encoded contents already exist, clear them and regenerate
             to ensure they are in DER format instead of BER format
+
+        :param der:
+            Enforce strict DER canonical encoding rules when re-encoding
 
         :return:
             A byte string of the DER-encoded value
@@ -2895,7 +2920,7 @@ class ParsableOctetString(Constructable, Castable, Primitive):
 
         if force:
             if self._parsed is not None:
-                native = self.parsed.dump(force=force)
+                native = self.parsed.dump(force=force, der=der)
             else:
                 native = self.native
             self.contents = None
@@ -3670,7 +3695,7 @@ class Sequence(Asn1Value):
         for info in self._fields:
             yield info[0]
 
-    def _set_contents(self, force=False):
+    def _set_contents(self, force=False, der=False):
         """
         Updates the .contents attribute of the value with the encoded value of
         all of the child objects
@@ -3678,6 +3703,8 @@ class Sequence(Asn1Value):
         :param force:
             Ensure all contents are in DER format instead of possibly using
             cached BER-encoded data
+        :param der:
+            Enforce strict DER canonical encoding rules when re-encoding
         """
 
         if self.children is None:
@@ -3690,11 +3717,11 @@ class Sequence(Asn1Value):
                 child_dump = b''
             elif child.__class__ == tuple:
                 if force:
-                    child_dump = self._lazy_child(index).dump(force=force)
+                    child_dump = self._lazy_child(index).dump(force=force, der=der)
                 else:
                     child_dump = child[3] + child[4] + child[5]
             else:
-                child_dump = child.dump(force=force)
+                child_dump = child.dump(force=force, der=der)
             # Skip values that are the same as the default
             if info[2] and 'default' in info[2]:
                 default_value = info[1](**info[2])
@@ -3893,6 +3920,7 @@ class Sequence(Asn1Value):
 
         cls = self.__class__
         if self._contents is None:
+            self._duplicate_fields = {}
             if self._fields:
                 self.children = [VOID] * len(self._fields)
                 for index, (_, _, params) in enumerate(self._fields):
@@ -4124,13 +4152,16 @@ class Sequence(Asn1Value):
                 print('%s    Field "%s"' % (prefix, field_name))
                 child.debug(nest_level + 3)
 
-    def dump(self, force=False):
+    def dump(self, force=False, der=False):
         """
         Encodes the value using DER
 
         :param force:
             If the encoded contents already exist, clear them and regenerate
             to ensure they are in DER format instead of BER format
+
+        :param der:
+            Enforce strict DER canonical encoding rules when re-encoding
 
         :return:
             A byte string of the DER-encoded value
@@ -4144,8 +4175,11 @@ class Sequence(Asn1Value):
         if force and self._fields == [] and self.__class__ is Sequence:
             force = False
 
+        if der:
+            force = True
+
         if force:
-            self._set_contents(force=force)
+            self._set_contents(force=force, der=der)
 
         if self._fields and self.children is not None:
             for index, (field_name, _, params) in enumerate(self._fields):
@@ -4471,13 +4505,15 @@ class SequenceOf(Asn1Value):
 
         self._mutated = True
 
-    def _set_contents(self, force=False):
+    def _set_contents(self, force=False, der=False):
         """
         Encodes all child objects into the contents for this object
 
         :param force:
             Ensure all contents are in DER format instead of possibly using
             cached BER-encoded data
+        :param der:
+            Enforce strict DER canonical encoding rules when re-encoding
         """
 
         if self.children is None:
@@ -4485,7 +4521,7 @@ class SequenceOf(Asn1Value):
 
         contents = BytesIO()
         for child in self:
-            contents.write(child.dump(force=force))
+            contents.write(child.dump(force=force, der=der))
         self._contents = contents.getvalue()
         self._mutated = False
         self._header = None
@@ -4597,13 +4633,16 @@ class SequenceOf(Asn1Value):
         for child in self:
             child.debug(nest_level + 1)
 
-    def dump(self, force=False):
+    def dump(self, force=False, der=False):
         """
         Encodes the value using DER
 
         :param force:
             If the encoded contents already exist, clear them and regenerate
             to ensure they are in DER format instead of BER format
+
+        :param der:
+            Enforce strict DER canonical encoding rules when re-encoding
 
         :return:
             A byte string of the DER-encoded value
@@ -4613,8 +4652,11 @@ class SequenceOf(Asn1Value):
         if self._header is not None and self._header[-1:] == b'\x80':
             force = True
 
+        if der:
+            force = True
+
         if force:
-            self._set_contents(force=force)
+            self._set_contents(force=force, der=der)
 
         return Asn1Value.dump(self)
 
@@ -4632,6 +4674,13 @@ class Set(Sequence):
     # A dict of 2-element tuples in the form (class_, tag) as keys and integers
     # as values that are the index of the field in _fields
     _field_ids = None
+
+    # A dict mapping a field index to the one-based positions of any extra
+    # encodings of that field found while parsing BER input. Populated by
+    # _parse_children(); an empty dict means no duplicated elements were
+    # present. Schema fields are single-valued, so duplicates are only
+    # rejected when strict DER output is requested.
+    _duplicate_fields = None
 
     def _setup(self):
         """
@@ -4688,6 +4737,12 @@ class Set(Sequence):
 
         try:
             child_map = {}
+            # Maps a field index to the positions (zero-based) at which an
+            # encoding for the field was encountered. BER permits duplicate
+            # encodings for backwards compatibility, so these are retained
+            # instead of being silently overwritten; strict DER output checks
+            # the cardinality against the schema.
+            duplicate_field_positions = {}
             contents_length = len(self.contents)
             child_pointer = 0
             seen_field = 0
@@ -4726,6 +4781,8 @@ class Set(Sequence):
                     if isinstance(child, (Sequence, SequenceOf)):
                         child._parse_children(recurse=True)
 
+                if field in child_map:
+                    duplicate_field_positions.setdefault(field, []).append(seen_field)
                 child_map[field] = child
                 seen_field += 1
 
@@ -4765,30 +4822,77 @@ class Set(Sequence):
             self.children = []
             for index in range(0, total_fields):
                 self.children.append(child_map[index])
+            self._duplicate_fields = duplicate_field_positions
 
         except (ValueError, TypeError) as e:
             args = e.args[1:]
             e.args = (e.args[0] + '\n    while parsing %s' % type_name(self),) + args
             raise e
 
-    def _set_contents(self, force=False):
+    def _copy(self, other, copy_func):
+        """
+        Copies the contents of another Set object to itself, including the
+        record of any duplicate elements found while parsing BER input
+
+        :param other:
+            Another instance of the same class
+
+        :param copy_func:
+            A reference of copy.copy() or copy.deepcopy() to use when copying
+            lists, dicts and objects
+        """
+
+        super(Set, self)._copy(other, copy_func)
+        duplicate_fields = getattr(other, '_duplicate_fields', None)
+        self._duplicate_fields = copy_func(duplicate_fields) if duplicate_fields else {}
+
+    def _set_contents(self, force=False, der=False):
         """
         Encodes all child objects into the contents for this object.
 
         This method is overridden because a Set needs to be encoded by
-        removing defaulted fields and then sorting the fields by tag.
+        removing defaulted fields and then sorting the fields according to
+        the canonical DER ordering rules (X.690 section 11.6).
 
         :param force:
             Ensure all contents are in DER format instead of possibly using
             cached BER-encoded data
+        :param der:
+            Enforce strict DER canonical ordering and reject duplicated
+            elements that violate the schema cardinality
         """
 
         if self.children is None:
             self._parse_children()
 
-        child_tag_encodings = []
+        if der and self._duplicate_fields:
+            field_index = sorted(self._duplicate_fields.keys())[0]
+            positions = self._duplicate_fields[field_index]
+            field_name = self._fields[field_index][0]
+            raise ValueError(unwrap(
+                '''
+                Duplicate element %s for field "%s" of %s is not allowed by
+                the schema: each named SET field has a cardinality of one,
+                but additional encodings were found at SET position(s) %s
+                ''',
+                positions[0] + 1,
+                field_name,
+                type_name(self),
+                ', '.join(str_cls(position + 1) for position in positions)
+            ))
+
+        child_encodings = []
+        child_field_indexes = []
         for index, child in enumerate(self.children):
-            child_encoding = child.dump(force=force)
+            if child is None or child is VOID:
+                child_encoding = b''
+            elif child.__class__ == tuple:
+                if force:
+                    child_encoding = self._lazy_child(index).dump(force=force, der=der)
+                else:
+                    child_encoding = child[3] + child[4] + child[5]
+            else:
+                child_encoding = child.dump(force=force, der=der)
 
             # Skip encoding defaulted children
             name, spec, field_params = self._fields[index]
@@ -4796,10 +4900,37 @@ class Set(Sequence):
                 if spec(**field_params).dump() == child_encoding:
                     continue
 
-            child_tag_encodings.append((child.tag, child_encoding))
-        child_tag_encodings.sort(key=lambda ct: ct[0])
+            # Unset optional fields have no encoding
+            if not child_encoding:
+                continue
 
-        self._contents = b''.join([ct[1] for ct in child_tag_encodings])
+            child_encodings.append(child_encoding)
+            child_field_indexes.append(index)
+
+        if der:
+            def element_label(position):
+                field_name_for_position = self._fields[child_field_indexes[position]][0]
+                return 'for field "%s"' % field_name_for_position
+
+            # SET sorts by the full tag, length and contents octets of each
+            # DER encoding. Every schema field maps to a unique tag. BER
+            # input may have arrived in a different order, so the canonical
+            # order is restored during DER re-encoding.
+            child_encodings = _der_set_encodings(
+                child_encodings,
+                type_name(self),
+                element_label
+            )
+        else:
+            # The legacy behavior sorts by the schema tag number so existing
+            # BER-based round-trips keep their output byte-for-byte.
+            order = sorted(
+                range(len(child_encodings)),
+                key=lambda position: self.children[child_field_indexes[position]].tag
+            )
+            child_encodings = [child_encodings[position] for position in order]
+
+        self._contents = b''.join(child_encodings)
         self._mutated = False
         self._header = None
         if self._trailer != b'':
@@ -4814,16 +4945,27 @@ class SetOf(SequenceOf):
 
     tag = 17
 
-    def _set_contents(self, force=False):
+    # Schema cardinality flag. A plain ASN.1 SET OF permits duplicate
+    # elements, so this defaults to False and duplicates are preserved.
+    # Subclasses modeling an ASN.1 SET OF with a uniqueness constraint may
+    # set this to True, in which case dump(der=True) rejects duplicate
+    # complete DER encodings instead of silently dropping them.
+    _unique = False
+
+    def _set_contents(self, force=False, der=False):
         """
         Encodes all child objects into the contents for this object.
 
         This method is overridden because a SetOf needs to be encoded by
-        sorting the child encodings.
+        sorting the complete DER encoding of each child byte-by-byte, per
+        X.690 section 11.6.
 
         :param force:
             Ensure all contents are in DER format instead of possibly using
             cached BER-encoded data
+        :param der:
+            Enforce strict DER canonical ordering, and reject duplicate
+            elements when the schema declares _unique = True
         """
 
         if self.children is None:
@@ -4831,7 +4973,33 @@ class SetOf(SequenceOf):
 
         child_encodings = []
         for child in self:
-            child_encodings.append(child.dump(force=force))
+            child_encodings.append(child.dump(force=force, der=der))
+
+        if der and self._unique:
+            seen_encodings = {}
+            for index, encoding in enumerate(child_encodings):
+                if encoding in seen_encodings:
+                    raise ValueError(unwrap(
+                        '''
+                        Duplicate element %s of %s has the same complete DER
+                        encoding as element %s, but this SET OF requires unique
+                        elements according to its schema cardinality
+                        ''',
+                        index + 1,
+                        type_name(self),
+                        seen_encodings[encoding] + 1
+                    ))
+                seen_encodings[encoding] = index
+
+        if der:
+            def element_label(position):
+                return 'at index %s' % position
+
+            child_encodings = _der_set_encodings(
+                child_encodings,
+                type_name(self),
+                element_label
+            )
 
         self._contents = b''.join(sorted(child_encodings))
         self._mutated = False
@@ -5377,6 +5545,139 @@ def _build_id_tuple(params, spec):
     required_tag = params.get('tag', required_tag)
 
     return (required_class, required_tag)
+
+
+def _der_tlv_sort_key(encoding):
+    """
+    Splits a DER-encoded TLV into the components used for the canonical
+    ordering of SET and SET OF contents (X.690 section 11.6).
+
+    The key is (identifier octets, length octets, value octets). Comparing
+    these tuples is equivalent to comparing the complete DER encodings
+    byte-by-byte, while also allowing callers to report which part of an
+    element violated the ordering rules.
+
+    :param encoding:
+        A byte string of a complete DER-encoded element
+
+    :return:
+        A 3-element tuple of byte strings (identifier, length, contents)
+    """
+
+    if not isinstance(encoding, byte_cls) or not encoding:
+        raise ValueError(unwrap(
+            '''
+            Invalid DER element passed to canonical SET ordering: element is
+            empty or is not a byte string
+            '''
+        ))
+
+    pointer = 0
+    identifier_octets = chr_cls(encoding[pointer])
+    pointer += 1
+    # Multi-byte (high tag number) identifiers
+    if encoding[0] & 0x1F == 0x1F:
+        while pointer < len(encoding):
+            identifier_octets += chr_cls(encoding[pointer])
+            if encoding[pointer] & 0x80 == 0:
+                pointer += 1
+                break
+            pointer += 1
+        else:
+            raise ValueError(unwrap(
+                '''
+                Invalid DER element passed to canonical SET ordering: tag
+                octets are not properly terminated
+                '''
+            ))
+
+    if pointer >= len(encoding):
+        raise ValueError(unwrap(
+            '''
+            Invalid DER element passed to canonical SET ordering: missing
+            length octets
+            '''
+        ))
+
+    first_length_octet = encoding[pointer]
+    if first_length_octet & 0x80 == 0:
+        length_octets = chr_cls(first_length_octet)
+        pointer += 1
+        contents_length = first_length_octet
+    else:
+        num_length_octets = first_length_octet & 0x7F
+        if num_length_octets == 0:
+            raise ValueError(unwrap(
+                '''
+                Invalid DER element passed to canonical SET ordering:
+                indefinite lengths are not allowed in DER
+                '''
+            ))
+        pointer += 1
+        if pointer + num_length_octets > len(encoding):
+            raise ValueError(unwrap(
+                '''
+                Invalid DER element passed to canonical SET ordering:
+                length octets are truncated
+                '''
+            ))
+        length_octets = encoding[pointer:pointer + num_length_octets]
+        contents_length = int_from_bytes(length_octets)
+        pointer += num_length_octets
+
+    if pointer + contents_length != len(encoding):
+        raise ValueError(unwrap(
+            '''
+            Invalid DER element passed to canonical SET ordering: length does
+            not match the encoded contents
+            '''
+        ))
+
+    contents_octets = encoding[pointer:pointer + contents_length]
+    return (identifier_octets, length_octets, contents_octets)
+
+
+def _der_set_encodings(encodings, type_label, element_label):
+    """
+    Returns the canonical DER ordering of already-encoded elements of a SET
+    or SET OF (X.690 section 11.6), sorting them by their tag, length and
+    contents octets.
+
+    BER input may present elements in any order, so the canonical order is
+    restored during DER re-encoding instead of rejecting the input. If an
+    element can not be parsed as a complete DER TLV, a ValueError naming the
+    offending element is raised.
+
+    :param encodings:
+        A list of byte strings, each a complete DER-encoded element
+
+    :param type_label:
+        A unicode string naming the containing type, used in error messages
+
+    :param element_label:
+        A callable taking an integer index and returning a unicode string
+        identifying the element at that index, used in error messages
+
+    :return:
+        A list of byte strings in canonical DER order
+    """
+
+    encoded_with_keys = []
+    for index, encoding in enumerate(encodings):
+        try:
+            key = _der_tlv_sort_key(encoding)
+        except ValueError as e:
+            raise ValueError(unwrap(
+                '''
+                %s element %s can not be canonicalized for DER output: %s
+                ''',
+                type_label,
+                element_label(index),
+                e.args[0]
+            ))
+        encoded_with_keys.append((encoding, key))
+    encoded_with_keys.sort(key=lambda item: item[1])
+    return [encoding for encoding, _ in encoded_with_keys]
 
 
 def _int_to_bit_tuple(value, bits):

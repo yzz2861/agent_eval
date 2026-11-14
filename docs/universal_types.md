@@ -146,6 +146,27 @@ parsed = Sequence.load(der_byte_string)
 der_serialized = parsed.dump(force=True)
 ```
 
+To additionally enforce the strict DER canonical form of `Set` and `SetOf`
+contents, pass `der=True`. BER input may carry a `SET` or `SET OF` in any
+order, and a regular `.dump()` preserves those bytes for compatibility;
+`.dump(der=True)` re-encodes the value, restores the canonical ordering rules
+from X.690 section 11.6 and applies the schema cardinality checks.
+
+```python
+from asn1crypto.core import SetOf, Integer
+
+class Integers(SetOf):
+    _child_spec = Integer
+
+parsed = Integers.load(ber_byte_string)
+canonical_der = parsed.dump(der=True)
+```
+
+A plain `SetOf` allows duplicate elements, matching the ASN.1 definition. A
+subclass that models a `SET OF` with a uniqueness constraint may set
+`_unique = True`; duplicate complete DER encodings are then rejected by
+`.dump(der=True)` instead of being silently discarded.
+
 The `.copy()` method creates a deep copy of an object, allowing child fields to
 be modified without affecting the original.
 

@@ -1,5 +1,22 @@
 # changelog
 
+## Unreleased
+
+ - Added the `der` keyword argument to `Asn1Value.dump()` and all
+   subclasses. `dump(der=True)` re-encodes the value and enforces strict DER
+   canonical form for `Set` and `SetOf` contents: a `SET OF` is ordered by the
+   complete DER encoding byte-by-byte, while a `SET` is ordered by the tag,
+   length and contents octets (X.690 section 11.6).
+ - BER parsing remains permissive and a regular `dump()` still preserves the
+   original bytes. `dump(der=True)` restores canonical ordering from
+   non-canonical BER input and surfaces schema cardinality violations:
+   duplicate named `SET` fields are rejected, and a `SetOf` subclass may set
+   `_unique = True` to reject duplicate elements. Errors identify the offending
+   element position or field name without embedding element contents.
+ - `x509.Name`, `x509.Certificate` and `crl.CertificateList` SHA-1/SHA-256
+   fingerprints are now computed from the canonical DER bytes via
+   `dump(der=True)`.
+
 ## 1.5.1
 
  - Handle RSASSA-PSS in `keys.PrivateKeyInfo.bit_size` and

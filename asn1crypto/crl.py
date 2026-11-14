@@ -516,20 +516,22 @@ class CertificateList(Sequence):
     def sha1(self):
         """
         :return:
-            The SHA1 hash of the DER-encoded bytes of this certificate list
+            The SHA1 hash of the canonical DER-encoded bytes of this
+            certificate list
         """
 
         if self._sha1 is None:
-            self._sha1 = hashlib.sha1(self.dump()).digest()
+            self._sha1 = hashlib.sha1(self.dump(der=True)).digest()
         return self._sha1
 
     @property
     def sha256(self):
         """
         :return:
-            The SHA-256 hash of the DER-encoded bytes of this certificate list
+            The SHA-256 hash of the canonical DER-encoded bytes of this
+            certificate list
         """
 
         if self._sha256 is None:
-            self._sha256 = hashlib.sha256(self.dump()).digest()
+            self._sha256 = hashlib.sha256(self.dump(der=True)).digest()
         return self._sha256

@@ -548,6 +548,37 @@ class X509Tests(unittest.TestCase):
             'E5 6D 97 3A 22 77 55 E4 85 6F 71 78 DA 4D 69 93 0C E2 87 F8 85 5E BE 1A 8C F7 FE 78 80 EB A5 F0',
             cert.sha256_fingerprint)
 
+    def test_name_fingerprint_uses_canonical_der(self):
+        first = x509.NameTypeAndValue({
+            'type': x509.NameType('2.5.4.3'),
+            'value': core.UTF8String('alpha'),
+        })
+        second = x509.NameTypeAndValue({
+            'type': x509.NameType('2.5.4.10'),
+            'value': core.UTF8String('beta'),
+        })
+
+        ordered_rdn = x509.RelativeDistinguishedName([first, second])
+        shuffled_rdn = x509.RelativeDistinguishedName.load(
+            x509.RelativeDistinguishedName([second, first]).dump()
+        )
+
+        ordered_name = x509.Name({'': x509.RDNSequence([ordered_rdn])})
+        shuffled_name = x509.Name.load(
+            x509.Name({'': x509.RDNSequence([shuffled_rdn])}).dump()
+        )
+
+        self.assertEqual(
+            ordered_name.dump(der=True),
+            shuffled_name.dump(der=True)
+        )
+        self.assertEqual(ordered_name.sha1, shuffled_name.sha1)
+        self.assertEqual(ordered_name.sha256, shuffled_name.sha256)
+
+    def test_valid_cert_der_dump_matches_default_dump(self):
+        cert = self._load_cert('geotrust_certs/codex.crt')
+        self.assertEqual(cert.dump(), cert.dump(der=True))
+
     def test_punycode_common_name(self):
         cert = self._load_cert('chromium/punycodetest.pem')
         self.assertEqual('xn--wgv71a119e.com', cert['tbs_certificate']['subject'].native['common_name'])
