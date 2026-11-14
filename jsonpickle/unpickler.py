@@ -5,12 +5,24 @@
 # This software is licensed as described in the file COPYING, which
 # you should have received as part of this distribution.
 import dataclasses
+import time
 import warnings
 from collections.abc import Callable, Iterator, Sequence
 from typing import Any, TypeAlias
 
 from . import errors, handlers, tags, util
 from .backend import json
+
+# Default per-decode graph budgets. They are deliberately generous so that
+# legitimate round-trips keep working, while still bounding hostile payloads
+# that would otherwise grow without limit until the process runs out of
+# memory. Any of them can be overridden (or disabled with ``None``) per
+# :func:`decode` / :class:`Unpickler`.
+DEFAULT_MAX_OBJECTS = 1_000_000
+DEFAULT_MAX_REF_TABLE_ENTRIES = 100_000
+DEFAULT_MAX_DEPTH = 500
+DEFAULT_MAX_CONTAINER_WIDTH = 100_000
+DEFAULT_MAX_DECODE_TIME = 10.0
 
 # class names to class objects (or sequence of classes)
 ClassesType: TypeAlias = type | dict[str, type] | Sequence[type] | None
@@ -29,6 +41,11 @@ def decode(
     on_missing: MissingHandler = "ignore",
     handle_readonly: bool = False,
     handler_context: Any = None,
+    max_objects: int | None = DEFAULT_MAX_OBJECTS,
+    max_ref_table_entries: int | None = DEFAULT_MAX_REF_TABLE_ENTRIES,
+    max_depth: int | None = DEFAULT_MAX_DEPTH,
+    max_container_width: int | None = DEFAULT_MAX_CONTAINER_WIDTH,
+    max_decode_time: float | None = DEFAULT_MAX_DECODE_TIME,
 ) -> Any:
     """Convert a JSON string into a Python object.
 
@@ -81,6 +98,18 @@ def decode(
         behavior at runtime based off data. Defaults to ``None``. An example can
         be found in the examples/ directory on GitHub.
 
+    :param max_objects: Maximum number of JSON values restored during this
+        decode; this bounds the total amount of work. ``None`` disables it.
+    :param max_ref_table_entries: Maximum number of entries in the per-decode
+        object reference table, i.e. the largest valid ``py/id`` plus one.
+        ``None`` disables it.
+    :param max_depth: Maximum nesting depth of containers and tagged objects.
+        ``None`` disables it.
+    :param max_container_width: Maximum number of entries allowed in a single
+        list, dict, set, tuple or other container. ``None`` disables it.
+    :param max_decode_time: Maximum wall-clock time, in seconds, spent inside
+        the restore machinery for this decode. ``None`` disables it.
+
     >>> decode('"my string"') == 'my string'
     True
     >>> decode('36')
@@ -101,6 +130,11 @@ def decode(
         on_missing=on_missing,
         handle_readonly=handle_readonly,
         handler_context=handler_context,
+        max_objects=max_objects,
+        max_ref_table_entries=max_ref_table_entries,
+        max_depth=max_depth,
+        max_container_width=max_container_width,
+        max_decode_time=max_decode_time,
     )
     if handler_context is not None:
         context.handler_context = handler_context
@@ -167,6 +201,15 @@ class _Proxy:
 
 
 class _IDProxy(_Proxy):
+    """Historical placeholder for unresolved ``py/id`` references.
+
+    Forward references are no longer created: the reference policy now
+    requires every ``py/id`` to resolve to an already-registered object,
+    otherwise :class:`errors.InvalidReferenceError` is raised. The class is
+    retained purely for backwards compatibility with code that imported it;
+    the restore machinery never instantiates it.
+    """
+
     def __init__(self, objs: list[Any], index: int) -> None:
         self._index = index
         self._objs = objs
@@ -324,6 +367,11 @@ class Unpickler:
         on_missing: MissingHandler = "ignore",
         handle_readonly: bool = False,
         handler_context: Any = None,
+        max_objects: int | None = DEFAULT_MAX_OBJECTS,
+        max_ref_table_entries: int | None = DEFAULT_MAX_REF_TABLE_ENTRIES,
+        max_depth: int | None = DEFAULT_MAX_DEPTH,
+        max_container_width: int | None = DEFAULT_MAX_CONTAINER_WIDTH,
+        max_decode_time: float | None = DEFAULT_MAX_DECODE_TIME,
     ) -> None:
         self.backend = json
         self.keys = keys
@@ -332,6 +380,15 @@ class Unpickler:
         self.handle_readonly = handle_readonly
         # Custom context passed through to custom handlers, see #452
         self.handler_context = handler_context
+
+        # Per-decode graph budgets. These live on the instance but are reset
+        # together with the rest of the state in reset(), so every top-level
+        # decode() call starts with a fresh, isolated budget.
+        self.max_objects = max_objects
+        self.max_ref_table_entries = max_ref_table_entries
+        self.max_depth = max_depth
+        self.max_container_width = max_container_width
+        self.max_decode_time = max_decode_time
 
         self.reset()
 
@@ -345,6 +402,58 @@ class Unpickler:
         # Extra local classes not accessible globally
         self._classes = {}
 
+        # Graph budget counters, isolated per decode() invocation.
+        self._object_count = 0
+        self._depth = 0
+        self._deadline = None
+
+    def _exceeded(self, budget_name: str, limit: Any, value: Any) -> None:
+        """Raise the dedicated exception for an exhausted graph budget."""
+        raise errors.GraphBudgetExceededError(
+            f"jsonpickle decode exceeded the {budget_name} budget "
+            f"(limit={limit!r}, reached={value!r})"
+        )
+
+    def _check_time_budget(self) -> None:
+        if self._deadline is None:
+            return
+        now = time.monotonic()
+        if now > self._deadline:
+            elapsed = now - (self._deadline - self.max_decode_time)
+            self._exceeded("decode time", self.max_decode_time, elapsed)
+
+    def _enter_value(self, obj: Any) -> None:
+        """Apply the object-count, depth, width and time budgets.
+
+        Called once for every JSON value handed to _restore(). The width
+        check inspects the container itself before its children are walked,
+        so an oversized container is rejected before any of its entries are
+        restored and no truncated object can ever be produced.
+        """
+        self._object_count += 1
+        if self.max_objects is not None and self._object_count > self.max_objects:
+            self._exceeded("object count", self.max_objects, self._object_count)
+
+        if (
+            isinstance(obj, (list, tuple, set, dict))
+            and self.max_container_width is not None
+        ):
+            width = len(obj)
+            if width > self.max_container_width:
+                self._exceeded("container width", self.max_container_width, width)
+
+        self._check_time_budget()
+
+    def _enter_container(self) -> None:
+        """Step down one nesting level and enforce the depth budget."""
+        self._depth += 1
+        if self.max_depth is not None and self._depth > self.max_depth:
+            self._exceeded("nesting depth", self.max_depth, self._depth)
+
+    def _exit_container(self) -> None:
+        """Step back up one nesting level."""
+        self._depth -= 1
+
     def _swap_proxies(self) -> None:
         """Replace proxies with their corresponding instances"""
         for obj, attr, proxy, method in self._proxies:
@@ -354,12 +463,19 @@ class Unpickler:
     def _restore(
         self, obj: Any, _passthrough: Callable[[Any], Any] = _passthrough
     ) -> Any:
+        self._enter_value(obj)
         # if obj isn't in these types, neither it nor nothing in it can have a tag
         # don't change the tuple of types to a set, it won't work with isinstance
         if not isinstance(obj, (str, list, dict, set, tuple)):
             restore = _passthrough
         else:
             restore = self._restore_tags(obj)
+        if type(obj) in (list, dict):
+            self._enter_container()
+            try:
+                return restore(obj)
+            finally:
+                self._exit_container()
         return restore(obj)
 
     def restore(
@@ -380,9 +496,16 @@ class Unpickler:
             self.reset()
         if classes:
             self.register_classes(classes)
-        value = self._restore(obj)
-        if reset:
-            self._swap_proxies()
+        if reset and self.max_decode_time is not None:
+            self._deadline = time.monotonic() + self.max_decode_time
+        try:
+            value = self._restore(obj)
+            if reset:
+                self._swap_proxies()
+        finally:
+            if reset:
+                # Do not retain deadline state across independent decodes.
+                self._deadline = None
         return value
 
     def register_classes(self, classes: ClassesType) -> None:
@@ -440,6 +563,15 @@ class Unpickler:
         try:
             _ = self._obj_to_idx[obj_id]
         except KeyError:
+            if (
+                self.max_ref_table_entries is not None
+                and len(self._objs) >= self.max_ref_table_entries
+            ):
+                self._exceeded(
+                    "reference table entries",
+                    self.max_ref_table_entries,
+                    len(self._objs) + 1,
+                )
             self._obj_to_idx[obj_id] = len(self._objs)
             self._objs.append(obj)
         return obj
@@ -557,13 +689,31 @@ class Unpickler:
         return stage1
 
     def _restore_id(self, obj: dict[str, Any]) -> Any:
+        # Deterministic reference policy: a py/id may only point at an id that
+        # has already been registered while walking the payload. Backward
+        # references, including references to in-progress cycles, resolve to
+        # the registered object (or its _Proxy placeholder, which is swapped
+        # for the real instance during the final proxy sweep). Forward /
+        # dangling ids and non-integer ids are rejected outright instead of
+        # producing silent None values or ever-growing ID proxy chains.
         try:
             idx = obj[tags.ID]
+        except KeyError:
+            raise errors.InvalidReferenceError(
+                "jsonpickle decode encountered a reference without a py/id value"
+            )
+        # ``bool`` is an ``int`` subclass but is never a legal reference id.
+        if type(idx) is not int or idx < 0:
+            raise errors.InvalidReferenceError(
+                f"jsonpickle decode encountered an invalid py/id reference: {idx!r}"
+            )
+        try:
             return self._objs[idx]
         except IndexError:
-            return _IDProxy(self._objs, idx)
-        except TypeError:
-            return None
+            raise errors.InvalidReferenceError(
+                f"jsonpickle decode encountered a dangling py/id reference {idx}; "
+                f"only {len(self._objs)} object(s) have been registered so far"
+            )
 
     def _restore_type(self, obj: dict[str, Any]) -> Any:
         typeref = util.loadclass(obj[tags.TYPE], classes=self._classes)

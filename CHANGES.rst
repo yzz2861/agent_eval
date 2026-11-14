@@ -137,6 +137,16 @@ v5.0.0
     * The unpickler was made more robust to object payloads that contained non-string
       object attribute names. (+637)
     * The test suite was made compatible with ruff 0.17.0. (+637)
+    * **Security**: ``decode()`` now enforces per-call graph budgets -- maximum object
+      count, reference table size, nesting depth, single-container width and total decode
+      time -- via the new ``max_objects``, ``max_ref_table_entries``, ``max_depth``,
+      ``max_container_width`` and ``max_decode_time`` arguments (each can be disabled with
+      ``None``). Exceeding a budget raises the new
+      ``jsonpickle.errors.GraphBudgetExceededError`` instead of exhausting memory. A
+      ``py/id`` may now only reference an already-registered object; dangling and forward
+      references raise ``jsonpickle.errors.InvalidReferenceError`` rather than silently
+      creating ``_IDProxy`` placeholders. Cycles remain supported through the existing
+      proxy-swap mechanism and are never recursively copied.
 
 v4.1.2
 ======

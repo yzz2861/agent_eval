@@ -494,9 +494,21 @@ def test_reduce_with_invalid_data(value, unpickler):
 
 @pytest.mark.parametrize("value", ["", "x", 1, True, [], {}])
 def test_restore_id_with_invalid_data(value, unpickler):
-    """Invalid serialized ID data results in None"""
-    result = unpickler.restore({"ref": {tags.ID: value}})
-    assert result["ref"] is None
+    """Invalid / dangling py/id entries are rejected instead of becoming None
+
+    A reference may only point at an already-registered object, so a payload
+    whose id is missing, non-integer, negative or not yet registered raises
+    InvalidReferenceError rather than silently producing a truncated object.
+    """
+    with pytest.raises(jsonpickle.errors.InvalidReferenceError):
+        unpickler.restore({"ref": {tags.ID: value}})
+
+
+def test_restore_id_backward_reference_still_works(unpickler):
+    """Legal backward references, including the id 0, resolve directly"""
+    result = unpickler.restore([{"ref": {tags.ID: 0}}, {"other": {tags.ID: 0}}])
+    assert result[0]["ref"] is result
+    assert result[1]["other"] is result
 
 
 def test_dict(pickler, unpickler):
