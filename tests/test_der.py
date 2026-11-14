@@ -22,6 +22,31 @@ class Asn1ToolsDerTest(Asn1ToolsBaseTest):
 
     maxDiff = None
 
+    def test_decode_budget(self):
+        foo = asn1tools.compile_string(
+            'Foo DEFINITIONS ::= '
+            'BEGIN '
+            'A ::= SEQUENCE { b B } '
+            'B ::= SEQUENCE { c INTEGER } '
+            'END',
+            'der')
+
+        encoded = foo.encode('A', {'b': {'c': 1}})
+
+        # Decodes fine when the nesting depth is within the budget.
+        budget = asn1tools.DecodeBudget(max_depth=2)
+        self.assertEqual(foo.decode('A', encoded, budget=budget),
+                         {'b': {'c': 1}})
+
+        # Exceeding the depth budget raises a dedicated error.
+        budget = asn1tools.DecodeBudget(max_depth=1)
+
+        with self.assertRaises(asn1tools.DecodeBudgetExceededError) as cm:
+            foo.decode('A', encoded, budget=budget)
+
+        self.assertEqual(cm.exception.reason, 'depth')
+        self.assertIsInstance(cm.exception, asn1tools.DecodeError)
+
     def test_integer(self):
         foo = asn1tools.compile_string(
             "Foo DEFINITIONS ::= "

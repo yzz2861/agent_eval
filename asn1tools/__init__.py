@@ -33,6 +33,8 @@ from .errors import EncodeError
 from .errors import DecodeError
 from .errors import CompileError
 from .errors import ConstraintsError
+from .codecs.ber import DecodeBudget
+from .codecs.ber import DecodeBudgetExceededError
 from . source import c
 from . source import rust
 from .version import __version__

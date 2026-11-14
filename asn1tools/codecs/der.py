@@ -29,6 +29,8 @@ from .ber import ObjectDescriptor
 from .ber import Date
 from .ber import TimeOfDay
 from .ber import DateTime
+from .ber import DecodeBudget
+from .ber import DecodeBudgetExceededError
 # These imports are not used in this module but referenced externally
 from .ber import encode_tag
 from .ber import encode_real
@@ -85,14 +87,22 @@ class ArrayType(StandardEncodeMixin, Type):
         return encoded_elements
 
     def decode_content(self, data, offset, length):
-        decoded = []
-        start_offset = offset
+        budget = ber._current_budget()
+        if budget is not None:
+            budget.enter(offset)
 
-        while (offset - start_offset) < length:
-            decoded_element, offset = self.element_type.decode(data, offset)
-            decoded.append(decoded_element)
+        try:
+            decoded = []
+            start_offset = offset
 
-        return decoded, offset
+            while (offset - start_offset) < length:
+                decoded_element, offset = self.element_type.decode(data, offset)
+                decoded.append(decoded_element)
+
+            return decoded, offset
+        finally:
+            if budget is not None:
+                budget.exit()
 
     def __repr__(self):
         return '{}({}, {})'.format(self.__class__.__name__,

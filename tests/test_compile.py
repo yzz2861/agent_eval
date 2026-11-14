@@ -31,6 +31,35 @@ class Asn1ToolsCompileTest(unittest.TestCase):
 
     maxDiff = None
 
+    def test_decode_budget(self):
+        foo = asn1tools.compile_string(
+            'A DEFINITIONS ::= BEGIN A ::= SEQUENCE OF INTEGER END')
+
+        encoded = b'\x30\x80' + 5 * b'\x02\x01\x00' + b'\x00\x00'
+
+        # decode() and decode_with_length() forward the budget to the
+        # codec, which rejects the message once the budget is exceeded.
+        budget = asn1tools.DecodeBudget(max_nodes=3)
+
+        with self.assertRaises(asn1tools.DecodeBudgetExceededError) as cm:
+            foo.decode('A', encoded, budget=budget)
+
+        self.assertEqual(cm.exception.reason, 'nodes')
+
+        with self.assertRaises(asn1tools.DecodeBudgetExceededError):
+            foo.decode_with_length('A',
+                                   encoded,
+                                   budget=asn1tools.DecodeBudget(max_nodes=3))
+
+        # Within the budget both entry points decode normally.
+        budget = asn1tools.DecodeBudget(max_nodes=10)
+        self.assertEqual(foo.decode('A', encoded, budget=budget), [0] * 5)
+
+        decoded, length = foo.decode_with_length(
+            'A', encoded, budget=asn1tools.DecodeBudget(max_nodes=10))
+        self.assertEqual(decoded, [0] * 5)
+        self.assertEqual(length, len(encoded))
+
     def test_pre_process_extensibility_implied(self):
         actual = asn1tools.pre_process_dict(deepcopy(EXTENSIBILITY_IMPLIED))
         self.assertEqual(actual, EXTENSIBILITY_IMPLIED_PP)

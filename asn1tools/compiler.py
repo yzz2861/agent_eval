@@ -141,7 +141,7 @@ class Specification(object):
 
         return bytes(type_.encode(data, **kwargs))
 
-    def decode(self, name, data, check_constraints=False):
+    def decode(self, name, data, check_constraints=False, budget=None):
         """Decode given bytes object `data` as given type `name` and return
         the decoded data as a dictionary.
 
@@ -152,6 +152,12 @@ class Specification(object):
         the constraints check and minimize the runtime overhead, but
         instead allow decoding of values not fulfilling the
         constraints.
+
+        If `budget` is given as a DecodeBudget object, decoding is
+        aborted with a DecodeBudgetExceededError as soon as one of the
+        configured resource limits (nesting depth, node count,
+        expanded contents bytes or single segment length) is exceeded.
+        Only supported by the BER and DER codecs.
 
         >>> foo.decode('Question', b'0\\x0e\\x02\\x01\\x01\\x16\\x09Is 1+1=3?')
         {'id': 1, 'question': 'Is 1+1=3?'}
@@ -164,16 +170,21 @@ class Specification(object):
             raise DecodeError(
                 "Type '{}' not found in types dictionary.".format(name))
 
-        decoded = type_.decode(data)
+        if budget is None:
+            decoded = type_.decode(data)
+        else:
+            decoded = type_.decode(data, budget=budget)
 
         if check_constraints:
             type_.check_constraints(decoded)
 
         return decoded
 
-    def decode_with_length(self, name, data, check_constraints=False):
+    def decode_with_length(self, name, data, check_constraints=False, budget=None):
         """Same as :func:`~asn1tools.compiler.Specification.decode`, but also
         returns the byte length of the decoded data.
+
+        See the decode method for the optional `budget` parameter.
 
         Use to get the length of indefinite-length BER encoded data.
 
@@ -189,7 +200,10 @@ class Specification(object):
             raise DecodeError(
                 "Type '{}' not found in types dictionary.".format(name))
 
-        decoded, length = type_.decode_with_length(data)
+        if budget is None:
+            decoded, length = type_.decode_with_length(data)
+        else:
+            decoded, length = type_.decode_with_length(data, budget=budget)
 
         if check_constraints:
             type_.check_constraints(decoded)

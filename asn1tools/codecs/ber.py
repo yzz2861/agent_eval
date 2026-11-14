@@ -5,6 +5,7 @@
 import time
 import math
 import binascii
+import threading
 from copy import copy
 import datetime
 
@@ -183,6 +184,154 @@ class NoEndOfContentsTagError(DecodeError):
     pass
 
 
+class DecodeBudgetExceededError(DecodeError):
+    """
+    Error for when a configurable decode resource budget is exceeded.
+
+    The 'reason' attribute identifies which budget was exceeded. It is
+    one of the REASON_* constants defined on DecodeBudget. The error
+    message only contains offsets and configured limits, never raw
+    message bytes.
+    """
+
+    def __init__(self, reason, message, offset=None, location=None):
+        super(DecodeBudgetExceededError, self).__init__(message,
+                                                        offset=offset,
+                                                        location=location)
+        self.reason = reason
+
+
+class DecodeBudget(object):
+    """
+    Configurable resource budget for BER/DER decoding.
+
+    All limits are optional; a limit of None means unbounded. The
+    budget is checked before recursing into or constructing child
+    nodes, so an over-budget message is rejected before its full
+    object tree is built.
+
+    :param int max_depth: Maximum nesting depth of constructed types
+    :param int max_nodes: Maximum total number of decoded nodes (TLVs)
+    :param int max_expanded_bytes: Maximum total number of expanded
+        contents bytes summed over all decoded nodes
+    :param int max_segment_length: Maximum contents length of a single
+        node
+    """
+
+    REASON_DEPTH = 'depth'
+    REASON_NODES = 'nodes'
+    REASON_EXPANDED_BYTES = 'expanded_bytes'
+    REASON_SEGMENT_LENGTH = 'segment_length'
+
+    def __init__(self,
+                 max_depth=None,
+                 max_nodes=None,
+                 max_expanded_bytes=None,
+                 max_segment_length=None):
+        self.max_depth = max_depth
+        self.max_nodes = max_nodes
+        self.max_expanded_bytes = max_expanded_bytes
+        self.max_segment_length = max_segment_length
+        self.depth = 0
+        self.nodes = 0
+        self.expanded_bytes = 0
+
+    def check_node(self, offset):
+        """
+        Account for one decoded node. Called before the node contents
+        are decoded.
+        """
+        self.nodes += 1
+
+        if self.max_nodes is not None and self.nodes > self.max_nodes:
+            raise DecodeBudgetExceededError(
+                self.REASON_NODES,
+                'Decode budget exceeded: node count exceeds limit of {}.'.format(
+                    self.max_nodes),
+                offset=offset)
+
+    def check_length(self, length, offset):
+        """
+        Account for the contents length of one node. Called before the
+        node contents are decoded.
+        """
+        if length is None:
+            return
+
+        if (self.max_segment_length is not None
+                and length > self.max_segment_length):
+            raise DecodeBudgetExceededError(
+                self.REASON_SEGMENT_LENGTH,
+                'Decode budget exceeded: segment length {} exceeds limit of {}.'.format(
+                    length,
+                    self.max_segment_length),
+                offset=offset)
+
+        self.expanded_bytes += length
+
+        if (self.max_expanded_bytes is not None
+                and self.expanded_bytes > self.max_expanded_bytes):
+            raise DecodeBudgetExceededError(
+                self.REASON_EXPANDED_BYTES,
+                'Decode budget exceeded: expanded contents bytes exceed limit of {}.'.format(
+                    self.max_expanded_bytes),
+                offset=offset)
+
+    def enter(self, offset):
+        """
+        Enter one nesting level of a constructed type. Called before
+        decoding its children.
+        """
+        self.depth += 1
+
+        if self.max_depth is not None and self.depth > self.max_depth:
+            raise DecodeBudgetExceededError(
+                self.REASON_DEPTH,
+                'Decode budget exceeded: nesting depth exceeds limit of {}.'.format(
+                    self.max_depth),
+                offset=offset)
+
+    def exit(self):
+        """
+        Leave one nesting level of a constructed type.
+        """
+        self.depth -= 1
+
+
+_decode_context = threading.local()
+
+
+def _current_budget():
+    """
+    Get the decode budget active in the current thread, or None if
+    decoding is unbudgeted.
+    """
+    return getattr(_decode_context, 'budget', None)
+
+
+class _DecodeBudgetScope(object):
+    """
+    Context manager activating a decode budget for the current thread
+    while decoding. Restores any previously active budget on exit so
+    nested decodes behave correctly.
+    """
+
+    def __init__(self, budget):
+        self._budget = budget
+        self._previous = None
+
+    def __enter__(self):
+        self._previous = getattr(_decode_context, 'budget', None)
+        _decode_context.budget = self._budget
+
+        return self._budget
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        _decode_context.budget = self._previous
+
+        return False
+
+
 def encode_length_definite(length):
     if length <= 127:
         encoded = bytearray([length])
@@ -246,6 +395,11 @@ def decode_length(encoded, offset, enforce_definite=True):
             offset,
             length
         )
+
+    # Check the decode budget before any contents are decoded
+    budget = _current_budget()
+    if budget is not None:
+        budget.check_length(length, offset)
 
     return length, offset
 
@@ -545,6 +699,11 @@ class StandardDecodeMixin(object):
             # CompiledType.decode_with_length() will detect TAG_MISMATCH returned value and raise appropriate exception
             return TAG_MISMATCH, start_offset
 
+        # Account for this node in the decode budget before decoding contents
+        budget = _current_budget()
+        if budget is not None:
+            budget.check_node(start_offset)
+
         # Decode length
         length, offset = decode_length(data, offset, enforce_definite=not self.indefinite_allowed)
 
@@ -628,6 +787,11 @@ class PrimitiveOrConstructedType(Type):
             # Tag mismatch. Return DECODE_FAILED instead of raising DecodeError for performance
             return TAG_MISMATCH, start_offset
 
+        # Account for this node in the decode budget before decoding contents
+        budget = _current_budget()
+        if budget is not None:
+            budget.check_node(start_offset)
+
         length, offset = decode_length(data, offset, enforce_definite=False)
 
         if is_primitive:
@@ -637,20 +801,28 @@ class PrimitiveOrConstructedType(Type):
             return self.decode_constructed_contents(data, offset, length)
 
     def decode_constructed_contents(self, data, offset, length):
-        segments = []
+        budget = _current_budget()
+        if budget is not None:
+            budget.enter(offset)
 
-        end_offset = None if length is None else offset + length
+        try:
+            segments = []
 
-        while True:
-            end_of_data, offset = is_end_of_data(data, offset, end_offset)
-            if end_of_data:
-                break
+            end_offset = None if length is None else offset + length
 
-            decoded, offset = self.segment.decode(data, offset)
-            check_decode_error(self.segment, decoded, data, offset)
-            segments.append(decoded)
+            while True:
+                end_of_data, offset = is_end_of_data(data, offset, end_offset)
+                if end_of_data:
+                    break
 
-        return self.decode_constructed_segments(segments), offset
+                decoded, offset = self.segment.decode(data, offset)
+                check_decode_error(self.segment, decoded, data, offset)
+                segments.append(decoded)
+
+            return self.decode_constructed_segments(segments), offset
+        finally:
+            if budget is not None:
+                budget.exit()
 
     def decode_primitive_contents(self, data, offset, length):
         raise NotImplementedError('To be implemented by subclasses.')
@@ -748,26 +920,34 @@ class MembersType(StandardEncodeMixin, StandardDecodeMixin, Type):
 
     def decode_content(self, data, offset, length):
 
-        end_offset = None if length is None else offset + length
+        budget = _current_budget()
+        if budget is not None:
+            budget.enter(offset)
 
-        values = {}
+        try:
+            end_offset = None if length is None else offset + length
 
-        offset, out_of_data = self.decode_members(self.root_members, data, values, offset, end_offset)
+            values = {}
 
-        # Decode additions (even if out of data already, so defaults can be added)
-        if self.additions:
-            offset, out_of_data = self.decode_members(flatten(self.additions), data, values, offset, end_offset,
-                                                      ignore_missing=True)
+            offset, out_of_data = self.decode_members(self.root_members, data, values, offset, end_offset)
 
-        if out_of_data:
-            return values, offset
+            # Decode additions (even if out of data already, so defaults can be added)
+            if self.additions:
+                offset, out_of_data = self.decode_members(flatten(self.additions), data, values, offset, end_offset,
+                                                          ignore_missing=True)
 
-        if end_offset is None:
-            raise NoEndOfContentsTagError('Could not find end-of-contents tag for indefinite length field.',
-                                          offset=offset)
-        else:
-            # Extra data is allowed in cases of versioned additions
-            return values, end_offset
+            if out_of_data:
+                return values, offset
+
+            if end_offset is None:
+                raise NoEndOfContentsTagError('Could not find end-of-contents tag for indefinite length field.',
+                                              offset=offset)
+            else:
+                # Extra data is allowed in cases of versioned additions
+                return values, end_offset
+        finally:
+            if budget is not None:
+                budget.exit()
 
     def decode_members(self, members, data, values, offset, end_offset, ignore_missing=False):
         """
@@ -869,24 +1049,32 @@ class ArrayType(StandardEncodeMixin, StandardDecodeMixin, Type):
 
     def decode_content(self, data, offset, length):
 
-        decoded = []
-        start_offset = offset
-        # Loop through data until length exceeded or end-of-contents tag reached.
-        while True:
-            if length is None:
-                # Find end of indefinite sequence.
-                if detect_end_of_contents_tag(data, offset):
-                    offset += 2
-                    break
-            elif (offset - start_offset) >= length:
-                # End of definite length sequence.
-                break
-            decoded_element, offset = self.element_type.decode(data, offset)
-            # Invalid Tag
-            check_decode_error(self.element_type, decoded_element, data, offset)
-            decoded.append(decoded_element)
+        budget = _current_budget()
+        if budget is not None:
+            budget.enter(offset)
 
-        return decoded, offset
+        try:
+            decoded = []
+            start_offset = offset
+            # Loop through data until length exceeded or end-of-contents tag reached.
+            while True:
+                if length is None:
+                    # Find end of indefinite sequence.
+                    if detect_end_of_contents_tag(data, offset):
+                        offset += 2
+                        break
+                elif (offset - start_offset) >= length:
+                    # End of definite length sequence.
+                    break
+                decoded_element, offset = self.element_type.decode(data, offset)
+                # Invalid Tag
+                check_decode_error(self.element_type, decoded_element, data, offset)
+                decoded.append(decoded_element)
+
+            return decoded, offset
+        finally:
+            if budget is not None:
+                budget.exit()
 
     def __repr__(self):
         return '{}({}, {})'.format(self.__class__.__name__,
@@ -1404,6 +1592,11 @@ class Any(Type):
 
     def decode(self, data, offset, values=None):
         start = offset
+
+        budget = _current_budget()
+        if budget is not None:
+            budget.check_node(start)
+
         offset = skip_tag(data, offset)
         length, offset = decode_length(data, offset)
         end_offset = offset + length
@@ -1449,6 +1642,11 @@ class AnyDefinedBy(Type):
                     offset=offset)
         else:
             start = offset
+
+            budget = _current_budget()
+            if budget is not None:
+                budget.check_node(start)
+
             offset = skip_tag(data, offset)
             length, offset = decode_length(data, offset)
             end_offset = offset + length
@@ -1487,19 +1685,27 @@ class ExplicitTag(StandardEncodeMixin, StandardDecodeMixin, Type):
 
     def decode_content(self, data, offset, length):
 
-        values, end_offset = self.inner.decode(data, offset)
+        budget = _current_budget()
+        if budget is not None:
+            budget.enter(offset)
 
-        check_decode_error(self.inner, values, data, offset)
+        try:
+            values, end_offset = self.inner.decode(data, offset)
 
-        # Verify End of Contents tag exists for Indefinite field
-        if length is None:
-            if not detect_end_of_contents_tag(data, end_offset):
-                raise NoEndOfContentsTagError('Expected end-of-contents tag.',
-                                              offset=end_offset,
-                                              location=self)
-            end_offset += 2
+            check_decode_error(self.inner, values, data, offset)
 
-        return values, end_offset
+            # Verify End of Contents tag exists for Indefinite field
+            if length is None:
+                if not detect_end_of_contents_tag(data, end_offset):
+                    raise NoEndOfContentsTagError('Expected end-of-contents tag.',
+                                                  offset=end_offset,
+                                                  location=self)
+                end_offset += 2
+
+            return values, end_offset
+        finally:
+            if budget is not None:
+                budget.exit()
 
 
 class Recursive(compiler.Recursive, Type):
@@ -1546,17 +1752,21 @@ class CompiledType(compiler.CompiledType):
 
         return encoded
 
-    def decode(self, data):
-        return self.decode_with_length(data)[0]
+    def decode(self, data, budget=None):
+        return self.decode_with_length(data, budget=budget)[0]
 
-    def decode_with_length(self, data):
+    def decode_with_length(self, data, budget=None):
         """
         Decode and return decoded values as well as length of binary data decoded
         :param data:
+        :param DecodeBudget budget: Optional resource budget limiting
+            nesting depth, node count, expanded contents bytes and
+            single segment length while decoding
         :return:
         """
         try:
-            decoded, offset = self._type.decode(bytearray(data), 0)
+            with _DecodeBudgetScope(budget):
+                decoded, offset = self._type.decode(bytearray(data), 0)
             # Raise DecodeError
             check_decode_error(self._type, decoded, data, offset)
         except ErrorWithLocation as e:
@@ -1785,5 +1995,3 @@ def decode_full_length(data):
         return e.offset + e.expected_length
     except OutOfByteDataError:
         return None
-
-

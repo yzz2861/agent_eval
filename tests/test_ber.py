@@ -3231,6 +3231,111 @@ class Asn1ToolsBerTest(Asn1ToolsBaseTest):
             'A: Expected definite length, but got indefinite. (At offset: 1)',
             str(cm.exception))
 
+    def test_decode_budget_indefinite_length_nesting(self):
+        """A deeply nested indefinite-length constructed encoding must be
+        rejected as soon as the depth budget is exceeded, before the
+        whole object tree is built.
+
+        """
+
+        foo = asn1tools.compile_string(
+            'A DEFINITIONS ::= BEGIN A ::= OCTET STRING END')
+
+        depth = 100
+        encoded = (b'\x24\x80' * depth
+                   + b'\x04\x04\xde\xad\xbe\xef'
+                   + b'\x00\x00' * depth)
+
+        # Without a budget the same message decodes fine.
+        self.assertEqual(foo.decode('A', encoded), b'\xde\xad\xbe\xef')
+
+        budget = asn1tools.DecodeBudget(max_depth=10)
+
+        with self.assertRaises(asn1tools.DecodeBudgetExceededError) as cm:
+            foo.decode('A', encoded, budget=budget)
+
+        self.assertEqual(cm.exception.reason, 'depth')
+        self.assertIsInstance(cm.exception, asn1tools.DecodeError)
+        # The error message must not leak raw message bytes.
+        self.assertNotIn('deadbeef', str(cm.exception))
+
+    def test_decode_budget_many_siblings(self):
+        """A flat structure with many sibling nodes must be rejected as
+        soon as the node count budget is exceeded.
+
+        """
+
+        foo = asn1tools.compile_string(
+            'A DEFINITIONS ::= BEGIN A ::= SEQUENCE OF INTEGER END')
+
+        encoded = b'\x30\x80' + 100 * b'\x02\x01\x2a' + b'\x00\x00'
+
+        # Without a budget the same message decodes fine.
+        self.assertEqual(foo.decode('A', encoded), [42] * 100)
+
+        budget = asn1tools.DecodeBudget(max_nodes=10)
+
+        with self.assertRaises(asn1tools.DecodeBudgetExceededError) as cm:
+            foo.decode('A', encoded, budget=budget)
+
+        self.assertEqual(cm.exception.reason, 'nodes')
+
+    def test_decode_budget_max_segment_length(self):
+        foo = asn1tools.compile_string(
+            'A DEFINITIONS ::= BEGIN A ::= OCTET STRING END')
+
+        encoded = b'\x04\x0b' + 11 * b'\x00'
+
+        # Without a budget the same message decodes fine.
+        self.assertEqual(foo.decode('A', encoded), 11 * b'\x00')
+
+        budget = asn1tools.DecodeBudget(max_segment_length=10)
+
+        with self.assertRaises(asn1tools.DecodeBudgetExceededError) as cm:
+            foo.decode('A', encoded, budget=budget)
+
+        self.assertEqual(cm.exception.reason, 'segment_length')
+
+    def test_decode_budget_max_expanded_bytes(self):
+        foo = asn1tools.compile_string(
+            'A DEFINITIONS ::= BEGIN A ::= SEQUENCE OF OCTET STRING END')
+
+        encoded = b'\x30\x80' + 3 * (b'\x04\x64' + 100 * b'\x00') + b'\x00\x00'
+
+        # Without a budget the same message decodes fine.
+        self.assertEqual(foo.decode('A', encoded), [100 * b'\x00'] * 3)
+
+        budget = asn1tools.DecodeBudget(max_expanded_bytes=250)
+
+        with self.assertRaises(asn1tools.DecodeBudgetExceededError) as cm:
+            foo.decode('A', encoded, budget=budget)
+
+        self.assertEqual(cm.exception.reason, 'expanded_bytes')
+
+    def test_decode_budget_within_limits(self):
+        """A message within all configured budgets decodes normally and
+        the budget counters reflect the decoded message.
+
+        """
+
+        foo = asn1tools.compile_string(
+            'A DEFINITIONS ::= BEGIN A ::= OCTET STRING END')
+
+        depth = 5
+        encoded = (b'\x24\x80' * depth
+                   + b'\x04\x01\xff'
+                   + b'\x00\x00' * depth)
+
+        budget = asn1tools.DecodeBudget(max_depth=10,
+                                        max_nodes=20,
+                                        max_expanded_bytes=10,
+                                        max_segment_length=5)
+
+        self.assertEqual(foo.decode('A', encoded, budget=budget), b'\xff')
+        self.assertEqual(budget.nodes, 6)
+        self.assertEqual(budget.expanded_bytes, 1)
+        self.assertEqual(budget.depth, 0)
+
     def test_versions(self):
         foo = asn1tools.compile_files('tests/files/versions.asn')
 
