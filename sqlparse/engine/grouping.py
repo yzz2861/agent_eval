@@ -8,7 +8,8 @@
 from sqlparse import sql
 from sqlparse import tokens as T
 from sqlparse.exceptions import SQLParseError
-from sqlparse.utils import imt, recurse
+from sqlparse.limits import current_budget
+from sqlparse.utils import imt
 
 # Maximum recursion depth for grouping operations to prevent DoS attacks
 # Set to None to disable limit (not recommended for untrusted input)
@@ -28,16 +29,75 @@ _DELIMITED_GROUPS = (sql.Parenthesis, sql.SquareBrackets, sql.Case,
                      sql.If, sql.For, sql.Begin)
 
 
+def _active_budget():
+    """Return the per-invocation budget, if grouping runs inside a stack."""
+    return current_budget()
+
+
+def _check_entry(depth):
+    """Charge one grouping call before any work is done.
+
+    With an active per-invocation budget the module-level constants are not
+    consulted again; ``ParseLimits`` resolved them when the budget was built.
+    Without a budget (direct grouping calls, benchmarks) the historical
+    module constants remain in force.
+    """
+    budget = _active_budget()
+    if budget is not None:
+        budget.check_grouping_entry(depth)
+
+
+def _token_limit_exceeded(tlist):
+    budget = _active_budget()
+    if budget is not None:
+        limit = budget.limits.max_tokens
+        return limit is not None and budget.tokens > limit
+    return (MAX_GROUPING_TOKENS is not None
+            and len(tlist.tokens) > MAX_GROUPING_TOKENS)
+
+
+def _depth_limit_exceeded(depth):
+    budget = _active_budget()
+    if budget is not None:
+        limit = budget.limits.max_grouping_depth
+        return limit is not None and depth > limit
+    return MAX_GROUPING_DEPTH is not None and depth > MAX_GROUPING_DEPTH
+
+
+def recurse(*cls):
+    """Decorator recursing into sublists while charging the budget first.
+
+    Mirrors :func:`sqlparse.utils.recurse`, but each descent is validated
+    against the per-invocation budget *before* entering the next level so
+    the call stack itself stays within the configured depth.
+    """
+    def wrap(function):
+        def wrapped(tlist, depth=0):
+            _check_entry(depth)
+            for sublist in tlist.get_sublists():
+                if not isinstance(sublist, cls):
+                    wrapped(sublist, depth + 1)
+            function(tlist)
+
+        return wrapped
+
+    return wrap
+
+
 def _group_matching(tlist, cls, depth=0):
     """Groups Tokens that have beginning and end."""
-    if MAX_GROUPING_DEPTH is not None and depth > MAX_GROUPING_DEPTH:
+    budget = _active_budget()
+    if budget is not None:
+        budget.check_grouping_entry(depth)
+    elif _depth_limit_exceeded(depth):
         raise SQLParseError(
             f"Maximum grouping depth exceeded ({MAX_GROUPING_DEPTH})."
         )
 
-    # Limit the number of tokens to prevent DoS attacks
-    if MAX_GROUPING_TOKENS is not None \
-       and len(tlist.tokens) > MAX_GROUPING_TOKENS:
+    # Limit the number of tokens to prevent DoS attacks. Kept as a fallback
+    # guard for direct grouping calls; the lexer enforces the per-invocation
+    # token budget before the tree is built.
+    if budget is None and _token_limit_exceeded(tlist):
         raise SQLParseError(
             f"Maximum number of tokens exceeded ({MAX_GROUPING_TOKENS})."
         )
@@ -444,6 +504,9 @@ def group_values(tlist):
 
 
 def group(stmt):
+    budget = _active_budget()
+    if budget is not None:
+        budget.check_time(force=True)
     for func in [
         group_comments,
 
@@ -501,14 +564,16 @@ def _group(tlist, cls, match,
            depth=0
            ):
     """Groups together tokens that are joined by a middle token. i.e. x < y"""
-    if MAX_GROUPING_DEPTH is not None and depth > MAX_GROUPING_DEPTH:
+    budget = _active_budget()
+    if budget is not None:
+        budget.check_grouping_entry(depth)
+    elif _depth_limit_exceeded(depth):
         raise SQLParseError(
             f"Maximum grouping depth exceeded ({MAX_GROUPING_DEPTH})."
         )
 
-    # Limit the number of tokens to prevent DoS attacks
-    if MAX_GROUPING_TOKENS is not None \
-       and len(tlist.tokens) > MAX_GROUPING_TOKENS:
+    # Fallback guard for direct grouping calls; see _group_matching().
+    if budget is None and _token_limit_exceeded(tlist):
         raise SQLParseError(
             f"Maximum number of tokens exceeded ({MAX_GROUPING_TOKENS})."
         )

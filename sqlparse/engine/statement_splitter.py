@@ -12,7 +12,8 @@ from sqlparse import tokens as T
 class StatementSplitter:
     """Filter that split stream at individual statements"""
 
-    def __init__(self):
+    def __init__(self, budget=None):
+        self._budget = budget
         self._reset()
 
     def _reset(self):
@@ -144,9 +145,21 @@ class StatementSplitter:
             res = self._handle_nested_block(unified)
             if res is not None:
                 return res
+            # Handle closing keywords
+            return self._handle_closing_keyword(unified)
 
-        # Handle closing keywords
-        return self._handle_closing_keyword(unified)
+        # CASE blocks appear in ordinary queries (and inside expressions)
+        # without an enclosing BEGIN block; they still add nesting that the
+        # resource budget must account for.
+        if unified == 'CASE':
+            self._block_stack.append('CASE')
+            return 1
+        if unified in ('END CASE', 'END'):
+            if self._block_stack and self._block_stack[-1] == 'CASE':
+                self._block_stack.pop()
+                return -1
+            return 0
+        return 0
 
     def process(self, stream):
         """Process the stream"""
@@ -165,7 +178,16 @@ class StatementSplitter:
                 self._reset()
 
             # Change current split level (increase, decrease or remain equal)
-            self.level += self._change_splitlevel(ttype, value)
+            level_change = self._change_splitlevel(ttype, value)
+            if self._budget is not None:
+                if level_change > 0:
+                    token_start = self._budget.consumed - len(value)
+                    self._budget.consumed = token_start
+                    self._budget.enter_nesting()
+                    self._budget.consumed = token_start + len(value)
+                elif level_change < 0:
+                    self._budget.leave_nesting()
+            self.level += level_change
 
             # Append the token to the current statement
             self.tokens.append(sql.Token(ttype, value))

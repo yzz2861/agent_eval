@@ -4,7 +4,8 @@ from io import StringIO
 import pytest
 
 import sqlparse
-from sqlparse import sql, tokens as T, keywords
+from sqlparse import keywords, sql
+from sqlparse import tokens as T
 from sqlparse.lexer import Lexer
 
 
@@ -641,3 +642,57 @@ def test_json_operators(sql):
     assert len(p) == 1
     assert len(p[0].tokens) == 1
     assert p[0].tokens[0].ttype == sqlparse.tokens.Operator
+
+
+def test_parse_result_unchanged_with_explicit_limits():
+    sql_text = (
+        'select a.id, case when a.x then 1 else 2 end '
+        'from (select id from t) a where a.id in (1, 2);'
+    )
+    limits = sqlparse.ParseLimits(
+        max_tokens=10000,
+        max_nesting_depth=100,
+        max_grouping_depth=100,
+        max_token_length=1000,
+        timeout=30,
+    )
+    default_tree = [token.ttype for token in sqlparse.parse(sql_text)[0].flatten()]
+    limited_tree = [
+        token.ttype
+        for token in sqlparse.parse(sql_text, limits=limits)[0].flatten()
+    ]
+    assert limited_tree == default_tree
+    assert str(sqlparse.parse(sql_text, max_tokens=10000)[0]) == sql_text
+
+
+def test_format_and_split_accept_single_call_limits():
+    sql_text = 'select a from t; select b from u;'
+    expected = sqlparse.format(sql_text)
+    assert (
+        sqlparse.format(sql_text, limits=sqlparse.ParseLimits(timeout=30))
+        == expected
+    )
+    assert sqlparse.split(sql_text, max_tokens=10000) == [
+        'select a from t;',
+        'select b from u;',
+    ]
+
+
+def test_limit_error_carries_consumed_position():
+    sql_text = 'select ' + ', '.join(f'col{i}' for i in range(50))
+    with pytest.raises(sqlparse.SQLParseLimitError) as exc_info:
+        sqlparse.parse(sql_text, max_tokens=5)
+    error = exc_info.value
+    assert isinstance(error, sqlparse.SQLParseError)
+    assert error.limit == 'tokens'
+    assert 0 <= error.consumed < len(sql_text)
+
+
+def test_per_call_limits_do_not_leak_between_invocations():
+    strict = sqlparse.ParseLimits(max_tokens=20, max_nesting_depth=20)
+    for _ in range(5):
+        parsed = sqlparse.parse('select 1', limits=strict)
+        assert str(parsed[0]) == 'select 1'
+    # The default invocation is unaffected by the small custom instance.
+    wide = 'select ' + ', '.join(f'col{i}' for i in range(30))
+    assert str(sqlparse.parse(wide)[0]) == wide

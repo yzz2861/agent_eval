@@ -16,6 +16,7 @@ from io import TextIOBase
 from threading import Lock
 
 from sqlparse import keywords, tokens
+from sqlparse.limits import current_budget
 from sqlparse.utils import consume
 
 
@@ -103,7 +104,7 @@ class Lexer:
         else:
             return tokens.Name, value
 
-    def get_tokens(self, text, encoding=None):
+    def get_tokens(self, text, encoding=None, budget=None):
         """
         Return an iterable of (tokentype, value) pairs generated from
         `text`. If `unfiltered` is set to `True`, the filtering mechanism
@@ -137,6 +138,8 @@ class Lexer:
 
         iterable = enumerate(text)
         for pos, char in iterable:
+            if budget is not None:
+                budget.check_time()
             # Only positions the lexer actually reaches may open a
             # dollar-quoted literal or a multiline comment; a delimiter
             # inside a string literal or behind a "--" comment is skipped
@@ -145,7 +148,14 @@ class Lexer:
                 resolved = delimited_spans.resolve(pos)
                 if resolved is not None:
                     end, ttype = resolved
-                    yield ttype, text[pos:end]
+                    value = text[pos:end]
+                    if budget is not None:
+                        # Report the start of the offending token when the
+                        # budget fails; advance only after the check passes.
+                        budget.consumed = pos
+                        budget.count_token(value)
+                        budget.consumed = end
+                    yield ttype, value
                     consume(iterable, end - pos - 1)
                     continue
 
@@ -155,20 +165,36 @@ class Lexer:
                 if not m:
                     continue
                 elif isinstance(action, tokens._TokenType):
-                    yield action, m.group()
+                    value = m.group()
+                    if budget is not None:
+                        budget.consumed = pos
+                        budget.count_token(value)
+                        budget.consumed = m.end()
+                    yield action, value
                 elif action is keywords.PROCESS_AS_KEYWORD:
-                    yield self.is_keyword(m.group())
+                    value = m.group()
+                    if budget is not None:
+                        budget.consumed = pos
+                        budget.count_token(value)
+                        budget.consumed = m.end()
+                    yield self.is_keyword(value)
 
                 consume(iterable, m.end() - pos - 1)
                 break
             else:
+                if budget is not None:
+                    budget.consumed = pos
+                    budget.count_token(char)
+                    budget.consumed = pos + 1
                 yield tokens.Error, char
 
 
-def tokenize(sql, encoding=None):
+def tokenize(sql, encoding=None, budget=None):
     """Tokenize sql.
 
     Tokenize *sql* using the :class:`Lexer` and return a 2-tuple stream
     of ``(token type, value)`` items.
     """
-    return Lexer.get_default_instance().get_tokens(sql, encoding)
+    if budget is None:
+        budget = current_budget()
+    return Lexer.get_default_instance().get_tokens(sql, encoding, budget)

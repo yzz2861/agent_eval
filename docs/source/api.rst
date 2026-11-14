@@ -92,12 +92,55 @@ For developers working with very large SQL statements or in security-sensitive
 environments, sqlparse includes built-in protections against potential denial
 of service (DoS) attacks:
 
+**Per-Invocation Resource Budgets**
+  ``parse()``, ``format()`` and ``split()`` accept keyword arguments (or a
+  single :class:`sqlparse.ParseLimits` instance passed as ``limits``) that
+  scope a resource budget to one invocation.  Budgets are never stored on the
+  lexer singleton, so repeated calls do not accumulate state.
+
+  - ``max_tokens`` - Maximum number of tokens produced by the lexer.
+  - ``max_nesting_depth`` - Maximum parenthesis and CASE/IF/FOR/BEGIN depth.
+  - ``max_grouping_depth`` - Maximum recursion depth while grouping tokens.
+  - ``max_grouping_calls`` - Maximum number of grouping function calls.
+  - ``max_token_length`` - Maximum length of a single lexer token.
+  - ``timeout`` - Wall-clock budget in seconds (``time.monotonic`` based).
+
+  Exceeding a budget raises :class:`sqlparse.SQLParseLimitError`, a subclass
+  of :class:`sqlparse.SQLParseError`.  The exception exposes ``limit`` (the
+  name of the exhausted budget) and ``consumed`` (the character offset that
+  had been reached), so callers can reject the request instead of retrying
+  it.  Budgets are checked before descending into the next nesting or
+  grouping level; they do not wait for the full token tree to be built.
+
+  Example::
+
+    import sqlparse
+    from sqlparse import ParseLimits, SQLParseLimitError
+
+    limits = ParseLimits(
+        max_tokens=20_000,
+        max_nesting_depth=128,
+        max_grouping_depth=128,
+        max_token_length=10_000,
+        timeout=1.0,
+    )
+    try:
+        statements = sqlparse.parse(sql, limits=limits)
+    except SQLParseLimitError as err:
+        reject_request(f"rejected at offset {err.consumed}: {err}")
+
+  Individual keywords may be used instead of an instance::
+
+    sqlparse.format(sql, reindent=True, max_tokens=20_000, timeout=1.0)
+
 **Grouping Limits**
   The parser includes configurable limits to prevent excessive resource
   consumption when processing very large or deeply nested SQL structures:
 
-  - ``MAX_GROUPING_DEPTH`` (default: 100) - Limits recursion depth during token grouping
-  - ``MAX_GROUPING_TOKENS`` (default: 10,000) - Limits the number of tokens processed in a single grouping operation
+  - ``MAX_GROUPING_DEPTH`` (default: 100) - Fallback grouping recursion depth
+    used when no per-invocation ``max_grouping_depth`` is supplied.
+  - ``MAX_GROUPING_TOKENS`` (default: 10,000) - Fallback token cap used when
+    no per-invocation ``max_tokens`` is supplied.
 
   These limits can be modified by changing the constants in ``sqlparse.engine.grouping``
   if your application requires processing larger SQL statements. Set a limit to ``None``
