@@ -1,0 +1,285 @@
+from django.core.checks import (  # pylint: disable=redefined-builtin
+    Tags,
+    Warning,
+    register,
+)
+from django.utils.module_loading import import_string
+
+from axes.backends import AxesStandaloneBackend
+from axes.conf import LockoutTier, settings
+
+
+class Messages:
+    CACHE_INVALID = (
+        "You are using the django-axes cache handler for login attempt tracking."
+        " Your cache configuration is however invalid and will not work correctly with django-axes."
+        " This can leave security holes in your login systems as attempts are not tracked correctly."
+        " Reconfigure settings.AXES_CACHE and settings.CACHES per django-axes configuration documentation."
+    )
+    MIDDLEWARE_INVALID = (
+        "You do not have 'axes.middleware.AxesMiddleware' in your settings.MIDDLEWARE."
+    )
+    BACKEND_INVALID = "You do not have 'axes.backends.AxesStandaloneBackend' or a subclass in your settings.AUTHENTICATION_BACKENDS."
+    SETTING_DEPRECATED = "You have a deprecated setting {deprecated_setting} configured in your project settings"
+    CALLABLE_INVALID = "{callable_setting} is not a valid callable."
+    LOCKOUT_PARAMETERS_INVALID = (
+        "AXES_LOCKOUT_PARAMETERS does not contain 'ip_address'."
+        " This configuration allows attackers to bypass rate limits by rotating User-Agents or Cookies."
+    )
+    LOCKOUT_TIERS_CONFLICT = (
+        "AXES_LOCKOUT_TIERS is set alongside AXES_COOLOFF_TIME."
+        " When tiers are active, AXES_COOLOFF_TIME is ignored."
+        " Remove AXES_COOLOFF_TIME to silence this warning."
+    )
+    LOCKOUT_TIERS_INVALID = (
+        "AXES_LOCKOUT_TIERS must be a list of LockoutTier instances."
+    )
+
+
+class Hints:
+    CACHE_INVALID = None
+    MIDDLEWARE_INVALID = None
+    BACKEND_INVALID = "AxesModelBackend was renamed to AxesStandaloneBackend in django-axes version 5.0."
+    SETTING_DEPRECATED = None
+    CALLABLE_INVALID = None
+    LOCKOUT_PARAMETERS_INVALID = "Add 'ip_address' to AXES_LOCKOUT_PARAMETERS."
+    LOCKOUT_TIERS_CONFLICT = "Remove AXES_COOLOFF_TIME when using AXES_LOCKOUT_TIERS."
+    LOCKOUT_TIERS_INVALID = "Use: AXES_LOCKOUT_TIERS = [LockoutTier(failures=3, cooloff=timedelta(minutes=15)), ...]"
+
+
+class Codes:
+    CACHE_INVALID = "axes.W001"
+    MIDDLEWARE_INVALID = "axes.W002"
+    BACKEND_INVALID = "axes.W003"
+    SETTING_DEPRECATED = "axes.W004"
+    CALLABLE_INVALID = "axes.W005"
+    LOCKOUT_PARAMETERS_INVALID = "axes.W006"
+    LOCKOUT_TIERS_CONFLICT = "axes.W007"
+    LOCKOUT_TIERS_INVALID = "axes.W008"
+
+
+@register(Tags.security, Tags.caches, Tags.compatibility)
+def axes_cache_check(app_configs, **kwargs):  # pylint: disable=unused-argument
+    axes_handler = getattr(settings, "AXES_HANDLER", "")
+
+    axes_cache_key = getattr(settings, "AXES_CACHE", "default")
+    axes_cache_config = settings.CACHES.get(axes_cache_key, {})
+    axes_cache_backend = axes_cache_config.get("BACKEND", "")
+
+    axes_cache_backend_incompatible = [
+        "django.core.cache.backends.dummy.DummyCache",
+        "django.core.cache.backends.locmem.LocMemCache",
+        "django.core.cache.backends.filebased.FileBasedCache",
+    ]
+
+    warnings = []
+
+    if axes_handler == "axes.handlers.cache.AxesCacheHandler":
+        if axes_cache_backend in axes_cache_backend_incompatible:
+            warnings.append(
+                Warning(
+                    msg=Messages.CACHE_INVALID,
+                    hint=Hints.CACHE_INVALID,
+                    id=Codes.CACHE_INVALID,
+                )
+            )
+
+    return warnings
+
+
+@register(Tags.security, Tags.compatibility)
+def axes_middleware_check(app_configs, **kwargs):  # pylint: disable=unused-argument
+    warnings = []
+
+    if "axes.middleware.AxesMiddleware" not in settings.MIDDLEWARE:
+        warnings.append(
+            Warning(
+                msg=Messages.MIDDLEWARE_INVALID,
+                hint=Hints.MIDDLEWARE_INVALID,
+                id=Codes.MIDDLEWARE_INVALID,
+            )
+        )
+
+    return warnings
+
+
+@register(Tags.security, Tags.compatibility)
+def axes_backend_check(app_configs, **kwargs):  # pylint: disable=unused-argument
+    warnings = []
+
+    found = False
+    for name in settings.AUTHENTICATION_BACKENDS:
+        try:
+            backend = import_string(name)
+        except ModuleNotFoundError as e:
+            raise ModuleNotFoundError(
+                "Can not find module path defined in settings.AUTHENTICATION_BACKENDS"
+            ) from e
+        except ImportError as e:
+            raise ImportError(
+                "Can not import backend class defined in settings.AUTHENTICATION_BACKENDS"
+            ) from e
+
+        if issubclass(backend, AxesStandaloneBackend):
+            found = True
+            break
+
+    if not found:
+        warnings.append(
+            Warning(
+                msg=Messages.BACKEND_INVALID,
+                hint=Hints.BACKEND_INVALID,
+                id=Codes.BACKEND_INVALID,
+            )
+        )
+
+    return warnings
+
+
+@register(Tags.compatibility)
+def axes_deprecation_check(app_configs, **kwargs):  # pylint: disable=unused-argument
+    warnings = []
+
+    deprecated_settings = [
+        "AXES_DISABLE_SUCCESS_ACCESS_LOG",
+        "AXES_LOGGER",
+        # AXES_PROXY_ and AXES_META_ parameters were updated to more explicit
+        # AXES_IPWARE_PROXY_ and AXES_IPWARE_META_ prefixes in version 6.x
+        "AXES_PROXY_ORDER",
+        "AXES_PROXY_COUNT",
+        "AXES_PROXY_TRUSTED_IPS",
+        "AXES_META_PRECEDENCE_ORDER",
+        # AXES_ONLY_USER_FAILURES, AXES_USE_USER_AGENT and
+        # AXES_LOCK_OUT parameters were replaced with AXES_LOCKOUT_PARAMETERS
+        # in version 6.x
+        "AXES_ONLY_USER_FAILURES",
+        "AXES_LOCK_OUT_BY_USER_OR_IP",
+        "AXES_LOCK_OUT_BY_COMBINATION_USER_AND_IP",
+        "AXES_USE_USER_AGENT",
+    ]
+
+    for deprecated_setting in deprecated_settings:
+        try:
+            getattr(settings, deprecated_setting)
+            warnings.append(
+                Warning(
+                    msg=Messages.SETTING_DEPRECATED.format(
+                        deprecated_setting=deprecated_setting
+                    ),
+                    hint=None,
+                    id=Codes.SETTING_DEPRECATED,
+                )
+            )
+        except AttributeError:
+            pass
+
+    return warnings
+
+
+@register(Tags.security)
+def axes_lockout_params_check(app_configs, **kwargs):  # pylint: disable=unused-argument
+    warnings = []
+
+    lockout_params = getattr(settings, "AXES_LOCKOUT_PARAMETERS", None)
+
+    if isinstance(lockout_params, (list, tuple)):
+        has_ip = False
+        for param in lockout_params:
+            if param == "ip_address":
+                has_ip = True
+                break
+            if isinstance(param, (list, tuple)) and "ip_address" in param:
+                has_ip = True
+                break
+
+        if not has_ip:
+            warnings.append(
+                Warning(
+                    msg=Messages.LOCKOUT_PARAMETERS_INVALID,
+                    hint=Hints.LOCKOUT_PARAMETERS_INVALID,
+                    id=Codes.LOCKOUT_PARAMETERS_INVALID,
+                )
+            )
+
+    return warnings
+
+
+@register(Tags.security)
+def axes_lockout_tiers_check(app_configs, **kwargs):  # pylint: disable=unused-argument
+    warnings = []
+    tiers = getattr(settings, "AXES_LOCKOUT_TIERS", None)
+    if tiers is None:
+        return warnings
+
+    if not is_valid_tiers_list(tiers):
+        warnings.append(
+            Warning(
+                msg=Messages.LOCKOUT_TIERS_INVALID,
+                hint=Hints.LOCKOUT_TIERS_INVALID,
+                id=Codes.LOCKOUT_TIERS_INVALID,
+            )
+        )
+        return warnings
+
+    if getattr(settings, "AXES_COOLOFF_TIME", None) is not None:
+        warnings.append(
+            Warning(
+                msg=Messages.LOCKOUT_TIERS_CONFLICT,
+                hint=Hints.LOCKOUT_TIERS_CONFLICT,
+                id=Codes.LOCKOUT_TIERS_CONFLICT,
+            )
+        )
+
+    return warnings
+
+
+def is_valid_tiers_list(tiers) -> bool:
+    if not isinstance(tiers, (list, tuple)):
+        return False
+    return all(isinstance(t, LockoutTier) for t in tiers)
+
+
+@register
+def axes_conf_check(app_configs, **kwargs):  # pylint: disable=unused-argument
+    warnings = []
+
+    callable_settings = [
+        "AXES_CLIENT_IP_CALLABLE",
+        "AXES_CLIENT_STR_CALLABLE",
+        "AXES_LOCKOUT_CALLABLE",
+        "AXES_USERNAME_CALLABLE",
+        "AXES_WHITELIST_CALLABLE",
+        "AXES_COOLOFF_TIME",
+        "AXES_LOCKOUT_PARAMETERS",
+    ]
+
+    for callable_setting in callable_settings:
+        value = getattr(settings, callable_setting, None)
+        if not is_valid_callable(value):
+            warnings.append(
+                Warning(
+                    msg=Messages.CALLABLE_INVALID.format(
+                        callable_setting=callable_setting
+                    ),
+                    hint=Hints.CALLABLE_INVALID,
+                    id=Codes.CALLABLE_INVALID,
+                )
+            )
+
+    return warnings
+
+
+def is_valid_callable(value) -> bool:
+    if value is None:
+        return True
+
+    if callable(value):
+        return True
+
+    if isinstance(value, str):
+        try:
+            import_string(value)
+        except ImportError:
+            return False
+
+    return True
