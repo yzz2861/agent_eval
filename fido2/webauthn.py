@@ -418,6 +418,30 @@ class CollectedClientData(bytes):
     def __str__(self):  # Override default implementation from bytes.
         return repr(self)
 
+    def verify_origin(self, allowed_origins: Sequence[str]) -> bool:
+        """Check that the client data origin matches an explicit allow list.
+
+        Origins are compared exactly (scheme, host and port) after
+        normalization. An empty allow list rejects every origin. This method
+        never raises and never includes the origin or any credential data in
+        error reporting.
+
+        :param allowed_origins: Exact origins accepted by the relying party.
+        :return: True if the origin is allowed, False if not.
+        """
+        from .rpid import verify_origin
+
+        return verify_origin(self.origin, allowed_origins)
+
+    def check_origin(self, allowed_origins: Sequence[str]) -> None:
+        """Raise ValueError if the client data origin is not allowed.
+
+        The exception message intentionally does not contain the origin itself
+        or any credential data.
+        """
+        if not self.verify_origin(allowed_origins):
+            raise ValueError("Invalid origin in CollectedClientData.")
+
     @property
     def b64(self) -> str:
         return websafe_encode(self)

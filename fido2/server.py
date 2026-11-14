@@ -35,7 +35,12 @@ from cryptography.exceptions import InvalidSignature as _InvalidSignature
 from cryptography.hazmat.primitives import constant_time
 
 from .cose import CoseKey
-from .rpid import verify_rp_id
+from .rpid import (
+    OriginMismatchError,
+    RpIdMismatchError,
+    RpIdPolicy,
+    verify_rp_id,
+)
 from .utils import websafe_decode, websafe_encode
 from .webauthn import (
     AttestationConveyancePreference,
@@ -128,6 +133,12 @@ class Fido2Server:
     :param rp: Relying party data as `PublicKeyCredentialRpEntity` instance.
     :param attestation: (optional) Requirement on authenticator attestation.
     :param verify_origin: (optional) Alternative function to validate an origin.
+        Ignored when `allowed_origins` is provided.
+    :param allowed_origins: (optional) Exact list of origins accepted by this
+        relying party. Scheme, host and port must match exactly; userinfo,
+        paths and fragments are rejected. The same policy is used for both
+        registration and authentication. An empty list denies every origin.
+        When None (the default), the legacy RP ID suffix validation is used.
     :param verify_attestation: (optional) function to validate attestation, which is
         invoked with attestation_object and client_data_hash. It should return nothing
         and raise an exception on failure. By default, attestation is ignored.
@@ -140,10 +151,17 @@ class Fido2Server:
         attestation: AttestationConveyancePreference | None = None,
         verify_origin: VerifyOrigin | None = None,
         verify_attestation: VerifyAttestation | None = None,
+        allowed_origins: Sequence[str] | None = None,
     ):
         self.rp = PublicKeyCredentialRpEntity.from_dict(rp)
         assert self.rp.id is not None  # noqa: S101
-        self._verify = verify_origin or _verify_origin_for_rp(self.rp.id)
+        self._policy = RpIdPolicy(self.rp.id, allowed_origins)
+        if allowed_origins is not None:
+            self._verify: VerifyOrigin = self._policy.verify_origin
+            self._strict_origins = True
+        else:
+            self._verify = verify_origin or _verify_origin_for_rp(self.rp.id)
+            self._strict_origins = False
         self.timeout = None
         self.attestation = AttestationConveyancePreference(attestation)
         self.allowed_algorithms = [
@@ -154,6 +172,16 @@ class Fido2Server:
         ]
         self._verify_attestation = verify_attestation or _ignore_attestation
         logger.debug(f"Fido2Server initialized for RP: {self.rp}")
+
+    def _check_origin(self, client_data: CollectedClientData) -> None:
+        """Validate the client data origin without echoing sensitive data."""
+        if self._verify(client_data.origin):
+            return
+        if self._strict_origins:
+            raise OriginMismatchError(
+                "Origin is not in the list of allowed origins."
+            )
+        raise ValueError("Invalid origin in CollectedClientData.")
 
     def register_begin(
         self,
@@ -242,8 +270,7 @@ class Fido2Server:
 
         if client_data.type != CollectedClientData.TYPE.CREATE:
             raise ValueError("Incorrect type in CollectedClientData.")
-        if not self._verify(client_data.origin):
-            raise ValueError("Invalid origin in CollectedClientData.")
+        self._check_origin(client_data)
         if not constant_time.bytes_eq(
             websafe_decode(state["challenge"]), client_data.challenge
         ):
@@ -251,7 +278,7 @@ class Fido2Server:
         if not constant_time.bytes_eq(
             self.rp.id_hash or b"", attestation_object.auth_data.rp_id_hash
         ):
-            raise ValueError("Wrong RP ID hash in response.")
+            raise RpIdMismatchError("Wrong RP ID hash in response.")
         if not attestation_object.auth_data.is_user_present():
             raise ValueError("User Present flag not set.")
 
@@ -346,14 +373,13 @@ class Fido2Server:
 
         if client_data.type != CollectedClientData.TYPE.GET:
             raise ValueError("Incorrect type in CollectedClientData.")
-        if not self._verify(client_data.origin):
-            raise ValueError("Invalid origin in CollectedClientData.")
+        self._check_origin(client_data)
         if not constant_time.bytes_eq(
             websafe_decode(state["challenge"]), client_data.challenge
         ):
             raise ValueError("Wrong challenge in response.")
         if not constant_time.bytes_eq(self.rp.id_hash or b"", auth_data.rp_id_hash):
-            raise ValueError("Wrong RP ID hash in response.")
+            raise RpIdMismatchError("Wrong RP ID hash in response.")
         if not auth_data.is_user_present():
             raise ValueError("User Present flag not set.")
 

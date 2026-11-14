@@ -338,3 +338,63 @@ class TestWebAuthnDataTypes(unittest.TestCase):
                 challenge=b"request_challenge", user_verification="invalid"
             ).user_verification
         )
+
+
+class TestCollectedClientDataOrigin(unittest.TestCase):
+    def _client_data(self, origin):
+        return CollectedClientData.create(
+            CollectedClientData.TYPE.GET,
+            b"1234567890123456",
+            origin,
+        )
+
+    def test_origin_allow_list_match(self):
+        client_data = self._client_data("https://Example.COM.:443")
+        self.assertTrue(
+            client_data.verify_origin(["https://example.com", "https://other.com"])
+        )
+
+    def test_origin_allow_list_rejects_non_matching_origins(self):
+        client_data = self._client_data("https://evil.example.com")
+        self.assertFalse(client_data.verify_origin(["https://example.com"]))
+        for origin in (
+            "https://user@example.com",
+            "https://example.com/path",
+            "https://example.com#fragment",
+            "http://example.com",
+            "https://example.com:8443",
+        ):
+            self.assertFalse(
+                self._client_data(origin).verify_origin(["https://example.com"]),
+                origin,
+            )
+
+    def test_empty_allow_list_denies(self):
+        client_data = self._client_data("https://example.com")
+        self.assertFalse(client_data.verify_origin([]))
+        with self.assertRaisesRegex(ValueError, "Invalid origin"):
+            client_data.check_origin([])
+
+    def test_localhost_and_non_default_port(self):
+        client_data = self._client_data("http://localhost:8000")
+        self.assertTrue(
+            client_data.verify_origin(["http://localhost:8000"])
+        )
+        self.assertFalse(client_data.verify_origin(["http://localhost"]))
+
+    def test_idna_and_ip_origins(self):
+        self.assertTrue(
+            self._client_data("https://\u4f8b\u3048.jp").verify_origin(
+                ["https://xn--r8jz45g.jp"]
+            )
+        )
+        self.assertTrue(
+            self._client_data("https://192.168.0.1:8443").verify_origin(
+                ["https://192.168.0.1:8443"]
+            )
+        )
+        self.assertFalse(
+            self._client_data("https://192.168.0.1").verify_origin(
+                ["https://192.168.0.2"]
+            )
+        )
