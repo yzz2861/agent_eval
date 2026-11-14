@@ -45,7 +45,6 @@ from .public_key import import_certificate_subject
 from .public_key import load_public_keys, load_certificates
 
 
-_HostPattern = Union['_PlainHost', '_HashedHost']
 _HostEntry = Tuple[Optional[str], Optional[SSHKey],
                    Optional[SSHX509Certificate], Optional['X509NamePattern']]
 
@@ -61,6 +60,14 @@ _KnownHostsListArg = Union[str, Sequence[str], 'X509NamePattern']
 KnownHostsArg = Union[None, str, bytes, _KnownHostsCallable, 'SSHKnownHosts',
                       _KnownHostsResult, Sequence[_KnownHostsListArg]]
 
+# Host key conflict policies:
+#
+#   error:  Raise an error when conflicting host keys are found (default)
+#   first:  Trust only the first key found for each host key algorithm
+#   accept: Trust all matching host keys (legacy behavior)
+
+_CONFLICT_POLICIES = ('error', 'first', 'accept')
+
 
 def _load_subject_names(names: Sequence[str]) -> Sequence['X509NamePattern']:
     """Load a list of X.509 subject name patterns"""
@@ -71,13 +78,54 @@ def _load_subject_names(names: Sequence[str]) -> Sequence['X509NamePattern']:
     return list(map(X509NamePattern, names))
 
 
+def _normalize_host(host: str) -> str:
+    """Normalize a host name or IP address for known_hosts matching
+
+       Host names are case-insensitive and a trailing dot indicating
+       the DNS root is ignored. IPv6 addresses may optionally be
+       enclosed in square brackets, and all IP addresses are converted
+       to a canonical form so that different representations of the
+       same address produce the same result.
+
+    """
+
+    if host.startswith('[') and host.endswith(']'):
+        host = host[1:-1]
+
+    host = host.lower()
+
+    if host.endswith('.'):
+        host = host[:-1]
+
+    try:
+        return str(ip_address(host))
+    except ValueError:
+        return host
+
+
+def _parse_host_port(pattern: str) -> Tuple[str, Optional[int]]:
+    """Split a [host]:port pattern into a host and optional port"""
+
+    if pattern.startswith('['):
+        host, sep, port = pattern[1:].partition(']:')
+
+        if sep:
+            try:
+                return host, int(port)
+            except ValueError:
+                pass
+
+    return pattern, None
+
+
 class _PlainHost:
     """A plain host entry in a known_hosts file"""
 
     def __init__(self, pattern: str):
-        self._pattern = HostPatternList(pattern)
+        self._pattern = HostPatternList(pattern.lower())
 
-    def matches(self, host: str, addr: str, ip: Optional[IPAddress]) -> bool:
+    def matches(self, host: str, addr: str,
+                ip: Optional[IPAddress]) -> bool:
         """Return whether a host or address matches this host pattern list"""
 
         return self._pattern.matches(host, addr, ip)
@@ -102,24 +150,48 @@ class _HashedHost:
             raise ValueError(
                 f'Invalid known hosts hash type: {magic}') from None
 
-    def _match(self, value: str) -> bool:
+    def matches(self, value: str) -> bool:
         """Return whether this host hash matches a value"""
 
         hosthash = hmac.new(self._salt, value.encode(), sha1).digest()
         return hosthash == self._hosthash
 
-    def matches(self, host: str, addr: str, _ip: Optional[IPAddress]) -> bool:
-        """Return whether a host or address matches this host hash"""
-
-        return self._match(host) or self._match(addr)
-
 
 class SSHKnownHosts:
-    """An SSH known hosts list"""
+    """An SSH known hosts list
 
-    def __init__(self, known_hosts: Optional[str] = None):
-        self._exact_entries: Dict[Optional[str], List[_HostEntry]] = {}
-        self._pattern_entries: List[Tuple[_HostPattern, _HostEntry]] = []
+       Host names, IP addresses, and ports are normalized before
+       matching, so equivalent entries written with different case,
+       trailing dots, or IPv6 bracket notation are treated identically.
+
+       Matches are performed in the following priority order:
+
+       1. Exact entries matching the host key alias, if one is set
+       2. Exact entries matching the host name
+       3. Exact entries matching the IP address
+       4. Hashed host entries
+       5. Wildcard and CIDR pattern entries
+
+       When multiple conflicting host keys match (different keys for
+       the same host key algorithm), the conflict_policy argument
+       controls whether an error is raised ('error'), only the first
+       key found for each algorithm is trusted ('first'), or all
+       matching keys are trusted ('accept').
+
+    """
+
+    def __init__(self, known_hosts: Optional[str] = None,
+                 conflict_policy: str = 'error'):
+        if conflict_policy not in _CONFLICT_POLICIES:
+            raise ValueError(
+                f'Invalid known hosts conflict policy: {conflict_policy}')
+
+        self._conflict_policy = conflict_policy
+
+        self._exact_entries: Dict[str, List[Tuple[Optional[int],
+                                                  _HostEntry]]] = {}
+        self._hashed_entries: List[Tuple['_HashedHost', _HostEntry]] = []
+        self._pattern_entries: List[Tuple['_PlainHost', _HostEntry]] = []
 
         if known_hosts:
             self.load(known_hosts)
@@ -180,42 +252,69 @@ class SSHKnownHosts:
         """Add an exact match entry"""
 
         for host_pat in pattern.split(','):
-            if host_pat not in self._exact_entries:
-                self._exact_entries[host_pat] = []
+            host, port = _parse_host_port(host_pat)
+            host = _normalize_host(host)
 
-            self._exact_entries[host_pat].append(entry)
+            if host not in self._exact_entries:
+                self._exact_entries[host] = []
+
+            self._exact_entries[host].append((port, entry))
 
     def _add_pattern(self, pattern: str, entry: _HostEntry) -> None:
         """Add a pattern match entry"""
 
         if pattern.startswith('|'):
-            host_pat: _HostPattern = _HashedHost(pattern)
+            self._hashed_entries.append((_HashedHost(pattern), entry))
         else:
-            host_pat = _PlainHost(pattern)
+            self._pattern_entries.append((_PlainHost(pattern), entry))
 
-        self._pattern_entries.append((host_pat, entry))
-
-    def _match(self, host: str, addr: str,
-               port: Optional[int] = None) -> _KnownHostsResult:
+    def _match(self, host: str, addr: str, port: Optional[int] = None,
+               host_key_alias: Optional[str] = None) -> _KnownHostsResult:
         """Find host keys matching specified host, address, and port"""
 
-        if addr:
-            ip: Optional[IPAddress] = ip_address(addr)
-        else:
-            try:
-                ip = ip_address(host)
-            except ValueError:
-                ip = None
+        # A host key alias takes precedence over the configured host name
+        host = _normalize_host(host_key_alias or host)
+        addr = _normalize_host(addr) if addr else ''
+
+        try:
+            ip: Optional[IPAddress] = ip_address(addr or host)
+        except ValueError:
+            ip = None
+
+        names = [host] if host else []
+
+        if addr and addr != host:
+            names.append(addr)
+
+        # Hashed entries are matched against both the plain host/address
+        # and the [host]:port form used for non-default ports
+        hashed_names = list(names)
 
         if port:
-            host = f'[{host}]:{port}' if host else ''
-            addr = f'[{addr}]:{port}' if addr else ''
+            hashed_names += [f'[{name}]:{port}' for name in names]
 
-        matches = []
-        matches += self._exact_entries.get(host, [])
-        matches += self._exact_entries.get(addr, [])
-        matches += (match for (entry, match) in self._pattern_entries
-                    if entry.matches(host, addr, ip))
+        matches: List[_HostEntry] = []
+
+        # Exact host entries take priority over hashed and pattern entries
+        for name in names:
+            for entry_port, entry in self._exact_entries.get(name, ()):
+                if entry_port is None or entry_port == port:
+                    matches.append(entry)
+
+        # Hashed entries take priority over plain pattern entries
+        for hashed, entry in self._hashed_entries:
+            if any(map(hashed.matches, hashed_names)):
+                matches.append(entry)
+
+        for pattern, entry in self._pattern_entries:
+            if pattern.matches(host, addr, ip):
+                matches.append(entry)
+            elif port:
+                pattern_host = f'[{host}]:{port}' if host else ''
+                pattern_addr = f'[{addr}]:{port}' if addr else ''
+
+                if pattern.matches(pattern_host, pattern_addr, None):
+                    matches.append(entry)
 
         host_keys: List[SSHKey] = []
         ca_keys: List[SSHKey] = []
@@ -246,15 +345,48 @@ class SSHKnownHosts:
                 else:
                     x509_subjects.append(subject)
 
+        host_keys = self._apply_conflict_policy(host_keys)
+
         return (host_keys, ca_keys, revoked_keys, x509_certs, revoked_certs,
                 x509_subjects, revoked_subjects)
 
-    def match(self, host: str, addr: str,
-              port: Optional[int]) -> _KnownHostsResult:
+    def _apply_conflict_policy(self, host_keys: List[SSHKey]) -> List[SSHKey]:
+        """Apply the configured policy to conflicting host keys"""
+
+        if self._conflict_policy == 'accept':
+            return host_keys
+
+        result = []
+        keys_by_alg: Dict[bytes, SSHKey] = {}
+
+        for key in host_keys:
+            prev_key = keys_by_alg.get(key.algorithm)
+
+            if prev_key is None:
+                keys_by_alg[key.algorithm] = key
+                result.append(key)
+            elif prev_key.public_data != key.public_data:
+                if self._conflict_policy == 'error':
+                    raise ValueError('Conflicting host keys with algorithm '
+                                     f'{key.get_algorithm()} in known hosts')
+
+                # The 'first' policy keeps only the first key per algorithm
+
+        return result
+
+    def match(self, host: str, addr: str, port: Optional[int] = None,
+              host_key_alias: Optional[str] = None) -> _KnownHostsResult:
         """Match a host, IP address, and port against known_hosts patterns
 
-           If the port is not the default port and no match is found
-           for it, the lookup is attempted again without a port number.
+           Host names and IP addresses are normalized before matching,
+           so differences in case, trailing dots, and IPv6 bracket
+           notation don't affect the result. If a host key alias is
+           provided, it takes precedence over the host name when
+           looking up exact and hashed entries.
+
+           Entries without a port match connections on any port, while
+           entries of the form [host]:port only match connections on
+           that specific port.
 
            :param host:
                The hostname of the target host
@@ -262,27 +394,23 @@ class SSHKnownHosts:
                The IP address of the target host
            :param port:
                The port number on the target host, or `None` for the default
+           :param host_key_alias:
+               An optional alias to look up instead of the host name
            :type host: `str`
            :type addr: `str`
            :type port: `int`
+           :type host_key_alias: `str`
 
 
            :returns: A tuple of matching host keys, CA keys, and revoked keys
 
         """
 
-        host_keys, ca_keys, revoked_keys, x509_certs, revoked_certs, \
-            x509_subjects, revoked_subjects = self._match(host, addr, port)
-
-        if port and not (host_keys or ca_keys or x509_certs or x509_subjects):
-            host_keys, ca_keys, revoked_keys, x509_certs, revoked_certs, \
-                x509_subjects, revoked_subjects = self._match(host, addr)
-
-        return (host_keys, ca_keys, revoked_keys, x509_certs, revoked_certs,
-                x509_subjects, revoked_subjects)
+        return self._match(host, addr, port, host_key_alias)
 
 
-def import_known_hosts(data: str) -> SSHKnownHosts:
+def import_known_hosts(data: str, conflict_policy: str = 'error'
+                       ) -> SSHKnownHosts:
     """Import SSH known hosts
 
        This function imports known host patterns and keys in
@@ -290,16 +418,23 @@ def import_known_hosts(data: str) -> SSHKnownHosts:
 
        :param data:
            The known hosts data to import
+       :param conflict_policy:
+           The policy to apply when conflicting host keys match:
+           `'error'` to raise an error, `'first'` to trust only the
+           first key found for each algorithm, or `'accept'` to trust
+           all matching keys
        :type data: `str`
+       :type conflict_policy: `str`
 
        :returns: An :class:`SSHKnownHosts` object
 
     """
 
-    return SSHKnownHosts(data)
+    return SSHKnownHosts(data, conflict_policy)
 
 
-def read_known_hosts(filelist: Union[str, Sequence[str]]) -> SSHKnownHosts:
+def read_known_hosts(filelist: Union[str, Sequence[str]],
+                     conflict_policy: str = 'error') -> SSHKnownHosts:
     """Read SSH known hosts from a file or list of files
 
        This function reads known host patterns and keys in
@@ -307,13 +442,19 @@ def read_known_hosts(filelist: Union[str, Sequence[str]]) -> SSHKnownHosts:
 
        :param filelist:
            The file or list of files to read the known hosts from
+       :param conflict_policy:
+           The policy to apply when conflicting host keys match:
+           `'error'` to raise an error, `'first'` to trust only the
+           first key found for each algorithm, or `'accept'` to trust
+           all matching keys
        :type filelist: `str` or `list` of `str`
+       :type conflict_policy: `str`
 
        :returns: An :class:`SSHKnownHosts` object
 
     """
 
-    known_hosts = SSHKnownHosts()
+    known_hosts = SSHKnownHosts(conflict_policy=conflict_policy)
 
     if isinstance(filelist, str):
         filelist = [filelist]
@@ -325,7 +466,9 @@ def read_known_hosts(filelist: Union[str, Sequence[str]]) -> SSHKnownHosts:
 
 
 def match_known_hosts(known_hosts: KnownHostsArg, host: str,
-                      addr: str, port: Optional[int]) -> _KnownHostsResult:
+                      addr: str, port: Optional[int],
+                      host_key_alias: Optional[str] = None
+                      ) -> _KnownHostsResult:
     """Match a host, IP address, and port against a known_hosts list
 
        This function looks up a host, IP address, and port in a list of
@@ -344,8 +487,11 @@ def match_known_hosts(known_hosts: KnownHostsArg, host: str,
            * lists of trusted host keys, trusted CA keys, and revoked keys
              to load without doing any matching
 
-       If the port is not the default port and no match is found
-       for it, the lookup is attempted again without a port number.
+       Host names and IP addresses are normalized before matching, so
+       differences in case, trailing dots, and IPv6 bracket notation
+       don't affect the result. If a host key alias is provided, it
+       takes precedence over the host name when looking up exact and
+       hashed entries.
 
        :param known_hosts:
            The host patterns to match against
@@ -355,9 +501,12 @@ def match_known_hosts(known_hosts: KnownHostsArg, host: str,
            The IP address of the target host
        :param port:
            The port number on the target host, or `None` for the default
+       :param host_key_alias:
+           An optional alias to look up instead of the host name
        :type host: `str`
        :type addr: `str`
        :type port: `int`
+       :type host_key_alias: `str`
 
        :returns: A tuple of matching host keys, CA keys, and revoked keys
 
@@ -371,7 +520,7 @@ def match_known_hosts(known_hosts: KnownHostsArg, host: str,
         known_hosts = import_known_hosts(known_hosts.decode())
 
     if isinstance(known_hosts, SSHKnownHosts):
-        known_hosts = known_hosts.match(host, addr, port)
+        known_hosts = known_hosts.match(host, addr, port, host_key_alias)
     else:
         if callable(known_hosts):
             known_hosts = known_hosts(host, addr, port)

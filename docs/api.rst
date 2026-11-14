@@ -1817,6 +1817,21 @@ marker to indicate keys and certificates which should be trusted as
 certificate authorities and the ``@revoked`` marker to indicate keys and
 certificates which should be explicitly reported as no longer trusted.
 
+Host names and IP addresses are normalized before matching, so
+differences in case, trailing dots, and IPv6 bracket notation don't
+affect the result. When a host key alias is configured, it takes
+precedence over the target host name when looking up exact and hashed
+entries. Exact host entries are matched first, followed by hashed host
+entries, and finally wildcard and CIDR pattern entries.
+
+If multiple conflicting host keys match (different keys for the same
+host key algorithm), an error is raised by default. This behavior can
+be changed with the ``conflict_policy`` argument to
+:class:`SSHKnownHosts`, :func:`import_known_hosts`, and
+:func:`read_known_hosts`: ``'error'`` raises an error,
+``'first'`` trusts only the first key found for each algorithm,
+and ``'accept'`` trusts all matching keys.
+
 .. index:: Specifying known hosts
 .. _SpecifyingKnownHosts:
 

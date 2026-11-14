@@ -94,7 +94,7 @@ class _TestKnownHosts(TempDirTestCase):
 
     def check_hosts(self, patlists, results=None, host='host', addr='1.2.3.4',
                     port=22, from_file=False, from_bytes=False,
-                    as_callable=False, as_tuple=False):
+                    as_callable=False, as_tuple=False, conflict_policy='error'):
         """Check a known_hosts file built from the specified patterns"""
 
         def call_match(host, addr, port):
@@ -125,7 +125,8 @@ class _TestKnownHosts(TempDirTestCase):
             known_hosts = asyncssh.match_known_hosts(known_hosts, host,
                                                      addr, port)
         else:
-            known_hosts = asyncssh.import_known_hosts(known_hosts)
+            known_hosts = asyncssh.import_known_hosts(known_hosts,
+                                                      conflict_policy)
 
         return self.check_match(known_hosts, results, host, addr, port)
 
@@ -197,6 +198,131 @@ class _TestKnownHosts(TempDirTestCase):
                          ([0], [], [], [], [], [], []), port=None)
         self.check_hosts((['[host]:22'], [], [], [], [], [], []),
                          ([], [], [], [], [], [], []), port=None)
+
+    def test_case_insensitive(self):
+        """Test that host matching is case-insensitive"""
+
+        self.check_hosts((['HOST'], [], [], [], [], [], []),
+                         ([0], [], [], [], [], [], []))
+        self.check_hosts((['host'], [], [], [], [], [], []),
+                         ([0], [], [], [], [], [], []), host='HOST')
+        self.check_hosts((['*.ExAmPlE.CoM'], [], [], [], [], [], []),
+                         ([0], [], [], [], [], [], []),
+                         host='host.example.com')
+
+    def test_trailing_dot(self):
+        """Test that a trailing dot in a host name is ignored"""
+
+        self.check_hosts((['host.'], [], [], [], [], [], []),
+                         ([0], [], [], [], [], [], []))
+        self.check_hosts((['host'], [], [], [], [], [], []),
+                         ([0], [], [], [], [], [], []), host='host.')
+        self.check_hosts(([_hash('host')], [], [], [], [], [], []),
+                         ([0], [], [], [], [], [], []), host='host.')
+
+    def test_ipv6(self):
+        """Test matching of IPv6 addresses"""
+
+        self.check_hosts((['2001:db8::1'], [], [], [], [], [], []),
+                         ([0], [], [], [], [], [], []), addr='2001:db8::1')
+        self.check_hosts((['2001:DB8::1'], [], [], [], [], [], []),
+                         ([0], [], [], [], [], [], []), addr='2001:db8::1')
+        self.check_hosts((['2001:db8:0:0:0:0:0:1'], [], [], [], [], [], []),
+                         ([0], [], [], [], [], [], []), addr='2001:db8::1')
+
+    def test_ipv6_brackets(self):
+        """Test that brackets around IPv6 addresses are ignored"""
+
+        self.check_hosts((['[2001:db8::1]'], [], [], [], [], [], []),
+                         ([0], [], [], [], [], [], []), addr='2001:db8::1')
+        self.check_hosts((['2001:db8::1'], [], [], [], [], [], []),
+                         ([0], [], [], [], [], [], []), addr='[2001:db8::1]')
+        self.check_hosts((['[2001:db8::1]:22'], [], [], [], [], [], []),
+                         ([0], [], [], [], [], [], []),
+                         addr='2001:db8::1', port=22)
+        self.check_hosts((['[2001:db8::1]:22'], [], [], [], [], [], []),
+                         ([], [], [], [], [], [], []),
+                         addr='2001:db8::1', port=23)
+
+    def test_hashed_host_with_port(self):
+        """Test matching hashed hosts with and without a port"""
+
+        self.check_hosts(([_hash('[host]:2222')], [], [], [], [], [], []),
+                         ([0], [], [], [], [], [], []), port=2222)
+        self.check_hosts(([_hash('[host]:2222')], [], [], [], [], [], []),
+                         ([], [], [], [], [], [], []), port=2223)
+        self.check_hosts(([_hash('host')], [], [], [], [], [], []),
+                         ([0], [], [], [], [], [], []), port=2222)
+
+    def test_host_key_alias(self):
+        """Test that a host key alias takes precedence over the host name"""
+
+        known_hosts = asyncssh.import_known_hosts(
+            'alias ' + self.keylists[0][0] +
+            'host ' + self.keylists[0][1])
+
+        matches = asyncssh.match_known_hosts(known_hosts, 'host', '1.2.3.4',
+                                             22, host_key_alias='ALIAS.')
+        self.assertEqual(list(matches[0]), [self.imported_keylists[0][0]])
+
+        matches = asyncssh.match_known_hosts(known_hosts, 'host', '1.2.3.4',
+                                             22)
+        self.assertEqual(list(matches[0]), [self.imported_keylists[0][1]])
+
+    def test_conflicting_keys(self):
+        """Test that conflicting host keys raise an error by default"""
+
+        with self.assertRaises(ValueError):
+            self.check_hosts((['host', 'host'], [], [], [], [], [], []))
+
+    def test_conflicting_host_and_addr(self):
+        """Test conflict between host and address entries for one machine"""
+
+        with self.assertRaises(ValueError):
+            self.check_hosts((['host', '1.2.3.4'], [], [], [], [], [], []))
+
+    def test_conflicting_exact_and_wildcard(self):
+        """Test conflict between exact and wildcard entries"""
+
+        with self.assertRaises(ValueError):
+            self.check_hosts((['host', 'hos*'], [], [], [], [], [], []))
+
+    def test_conflict_accept_policy(self):
+        """Test accepting all keys when conflicts are present"""
+
+        self.check_hosts((['host', 'host'], [], [], [], [], [], []),
+                         ([0, 1], [], [], [], [], [], []),
+                         conflict_policy='accept')
+
+    def test_conflict_first_policy(self):
+        """Test trusting only the first key when conflicts are present"""
+
+        self.check_hosts((['host', 'host'], [], [], [], [], [], []),
+                         ([0], [], [], [], [], [], []),
+                         conflict_policy='first')
+
+    def test_conflict_first_policy_priority(self):
+        """Test that exact matches take priority over wildcard matches"""
+
+        self.check_hosts((['host', 'hos*'], [], [], [], [], [], []),
+                         ([0], [], [], [], [], [], []),
+                         conflict_policy='first')
+
+    def test_duplicate_key(self):
+        """Test that duplicate entries for the same key don't conflict"""
+
+        key = self.keylists[0][0]
+        known_hosts = asyncssh.import_known_hosts(f'host {key}host {key}')
+
+        matches = asyncssh.match_known_hosts(known_hosts, 'host',
+                                             '1.2.3.4', 22)
+        self.assertEqual(list(matches[0]), [self.imported_keylists[0][0]])
+
+    def test_invalid_conflict_policy(self):
+        """Test that an invalid conflict policy is rejected"""
+
+        with self.assertRaises(ValueError):
+            asyncssh.import_known_hosts('', conflict_policy='xxx')
 
     def test_no_match(self):
         """Test for cases where no match is found"""

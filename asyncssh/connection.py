@@ -1273,13 +1273,15 @@ class SSHConnection(SSHPacketHandler, asyncio.Protocol):
         self._tunnel = tunnel
 
     def _match_known_hosts(self, known_hosts: KnownHostsArg, host: str,
-                           addr: str, port: Optional[int]) -> None:
+                           addr: str, port: Optional[int],
+                           host_key_alias: Optional[str] = None) -> None:
         """Determine the set of trusted host keys and certificates"""
 
         trusted_host_keys, trusted_ca_keys, revoked_host_keys, \
             trusted_x509_certs, revoked_x509_certs, \
             trusted_x509_subjects, revoked_x509_subjects = \
-                match_known_hosts(known_hosts, host, addr, port)
+                match_known_hosts(known_hosts, host, addr, port,
+                                  host_key_alias)
 
         assert self._trusted_host_keys is not None
 
@@ -3569,8 +3571,8 @@ class SSHClientConnection(SSHConnection):
             port = self._port if self._port != DEFAULT_PORT else None
 
             self._match_known_hosts(cast(KnownHostsArg, self._known_hosts),
-                                    self._host_key_alias or self._host,
-                                    self._peer_addr, port)
+                                    self._host, self._peer_addr, port,
+                                    self._host_key_alias)
 
         default_host_key_algs = []
 
