@@ -1,5 +1,23 @@
 # changelog
 
+## 0.12.0
+
+ - Fixed a security issue where a validation path could be anchored at a
+   certificate that is not one of the caller's trust roots when cross-signed
+   or same-subject-name root certificates were present. Path building and
+   path validation are now bound to the exact trust roots provided, and a
+   single validation will never switch to a different root chain.
+ - Validation paths are now explicitly prioritized - shorter paths and paths
+   anchored at earlier-specified trust roots are preferred, and validation
+   backtracks through candidate paths in that order.
+ - Issuer lookup within a validation path now only considers certificates
+   located before the certificate in the path, uses the authority key
+   identifier and authority issuer/serial number to disambiguate duplicate
+   subject names, and raises a stable error when the issuer is ambiguous.
+ - Path building now detects certificate loops (including cross-signed
+   loops) and paths exceeding the maximum length of 8 certificates, raising
+   a stable `PathBuildingError` for each case.
+
 ## 0.11.1
 
  - Updated [asn1crypto](https://github.com/wbond/asn1crypto) dependency to

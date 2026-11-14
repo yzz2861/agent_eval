@@ -58,15 +58,73 @@ class ValidationPath():
             An asn1crypto.x509.Certificate object of the issuer
         """
 
-        for entry in self:
-            if entry.subject == cert.issuer:
-                if entry.key_identifier and cert.authority_key_identifier:
-                    if entry.key_identifier == cert.authority_key_identifier:
-                        return entry
-                else:
-                    return entry
+        return self._certs[self._locate_issuer(cert)]
 
-        raise LookupError('Unable to find the issuer of the certificate specified')
+    def _locate_issuer(self, cert):
+        """
+        Determines the index of the issuer of a certificate within this path.
+        When the path contains multiple certificates with the same subject
+        name (such as with cross-signed or renewed roots), the authority key
+        identifier and the authority key identifier issuer/serial number are
+        used to disambiguate. Only certificates located before the certificate
+        in the path are considered, preventing a path from being anchored to
+        a different trust root than the one the path was built to.
+
+        :param cert:
+            An asn1crypto.x509.Certificate object to locate the issuer of
+
+        :raises:
+            LookupError - when the issuer could not be found, or multiple
+                          issuers match and the choice is ambiguous
+
+        :return:
+            An integer index into the path
+        """
+
+        # If the cert is part of the path, its issuer must come before it -
+        # this prevents a cross-signed certificate later in the path from
+        # being mistaken for the issuer
+        entries = self._certs
+        for index, entry in enumerate(self._certs):
+            if entry.issuer_serial == cert.issuer_serial:
+                entries = self._certs[:index]
+                break
+
+        matches = []
+        for index, entry in enumerate(entries):
+            if entry.subject != cert.issuer:
+                continue
+            # Info from the authority key identifier extension is used to
+            # eliminate options when multiple certificates share a subject
+            # name, such as with cross-signing or duplicate roots
+            if cert.authority_key_identifier and entry.key_identifier:
+                if cert.authority_key_identifier != entry.key_identifier:
+                    continue
+            matches.append(index)
+
+        if not matches:
+            raise LookupError('Unable to find the issuer of the certificate specified')
+
+        if len(matches) > 1 and cert.authority_issuer_serial:
+            serial_matches = [
+                index for index in matches
+                if entries[index].issuer_serial == cert.authority_issuer_serial
+            ]
+            if len(serial_matches) == 1:
+                return serial_matches[0]
+
+        if len(matches) > 1:
+            raise LookupError(pretty_message(
+                '''
+                Unable to determine the issuer of the certificate specified -
+                the path contains multiple certificates named "%s", and the
+                certificate does not contain enough information to
+                disambiguate them
+                ''',
+                cert.issuer.human_friendly
+            ))
+
+        return matches[0]
 
     def truncate_to(self, cert):
         """
@@ -111,19 +169,7 @@ class ValidationPath():
             The current ValidationPath object, for chaining
         """
 
-        issuer_index = None
-        for index, entry in enumerate(self):
-            if entry.subject == cert.issuer:
-                if entry.key_identifier and cert.authority_key_identifier:
-                    if entry.key_identifier == cert.authority_key_identifier:
-                        issuer_index = index
-                        break
-                else:
-                    issuer_index = index
-                    break
-
-        if issuer_index is None:
-            raise LookupError('Unable to find the issuer of the certificate specified')
+        issuer_index = self._locate_issuer(cert)
 
         while len(self) > issuer_index + 1:
             self.pop()

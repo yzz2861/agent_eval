@@ -8,7 +8,9 @@ import os
 from asn1crypto import pem, x509
 from asn1crypto.util import timezone
 from certvalidator import CertificateValidator, ValidationContext
-from certvalidator.errors import PathValidationError
+from certvalidator.errors import PathBuildingError, PathValidationError
+from certvalidator.path import ValidationPath
+from certvalidator.validate import validate_path
 
 from ._unittest_compat import patch
 
@@ -122,3 +124,167 @@ class CertificateValidatorTests(unittest.TestCase):
 
         # If whitelist does not work, this will raise exception for key usage
         validator.validate_usage(set(['crl_sign']))
+
+
+class PathBuildingValidatorTests(unittest.TestCase):
+
+    def _load_cert(self, filename):
+        with open(os.path.join(fixtures_dir, 'path_building', filename), 'rb') as f:
+            cert_bytes = f.read()
+            if pem.detect(cert_bytes):
+                _, _, cert_bytes = pem.unarmor(cert_bytes)
+            return x509.Certificate.load(cert_bytes)
+
+    def _context(self, trust_roots):
+        moment = datetime(2020, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+        return ValidationContext(trust_roots=trust_roots, moment=moment)
+
+    def test_hierarchical_chain_validates(self):
+        root_a = self._load_cert('root-a.pem')
+        intermediate = self._load_cert('intermediate-a.pem')
+        leaf = self._load_cert('leaf-a.pem')
+
+        context = self._context([root_a])
+        validator = CertificateValidator(leaf, [intermediate], context)
+        path = validator.validate_usage(set(['digital_signature']))
+
+        self.assertEqual(
+            [root_a.sha256, intermediate.sha256, leaf.sha256],
+            [cert.sha256 for cert in path]
+        )
+
+    def test_cross_signed_root_not_used_when_untrusted(self):
+        root_a = self._load_cert('root-a.pem')
+        root_b = self._load_cert('root-b.pem')
+        cross_a_by_b = self._load_cert('root-a-cross-by-b.pem')
+        leaf = self._load_cert('leaf-root-a.pem')
+
+        # Only root A is trusted - root B and the cross certificate are
+        # supplied as untrusted intermediates, so validation must remain
+        # anchored at root A and never switch to root B's chain
+        context = self._context([root_a])
+        validator = CertificateValidator(leaf, [cross_a_by_b, root_b], context)
+        path = validator.validate_usage(set(['digital_signature']))
+
+        self.assertEqual(
+            [root_a.sha256, leaf.sha256],
+            [cert.sha256 for cert in path]
+        )
+
+    def test_cross_signed_root_validates_via_trusted_signer(self):
+        root_b = self._load_cert('root-b.pem')
+        cross_a_by_b = self._load_cert('root-a-cross-by-b.pem')
+        leaf = self._load_cert('leaf-root-a.pem')
+
+        # Only root B is trusted, so the cross-signed copy of root A must be
+        # used as an intermediate
+        context = self._context([root_b])
+        validator = CertificateValidator(leaf, [cross_a_by_b], context)
+        path = validator.validate_usage(set(['digital_signature']))
+
+        self.assertEqual(
+            [root_b.sha256, cross_a_by_b.sha256, leaf.sha256],
+            [cert.sha256 for cert in path]
+        )
+
+    def test_cross_signed_roots_prefer_direct_anchor(self):
+        root_a = self._load_cert('root-a.pem')
+        root_b = self._load_cert('root-b.pem')
+        cross_a_by_b = self._load_cert('root-a-cross-by-b.pem')
+        leaf = self._load_cert('leaf-root-a.pem')
+
+        context = self._context([root_a, root_b])
+        validator = CertificateValidator(leaf, [cross_a_by_b], context)
+        path = validator.validate_usage(set(['digital_signature']))
+
+        self.assertEqual(root_a.sha256, path.first.sha256)
+        self.assertEqual(2, len(path))
+
+    def test_same_name_roots_aki_selects_correct_root(self):
+        root_1 = self._load_cert('shared-root-1.pem')
+        root_2 = self._load_cert('shared-root-2.pem')
+        intermediate = self._load_cert('intermediate-shared.pem')
+        leaf = self._load_cert('leaf-shared.pem')
+
+        context = self._context([root_1, root_2])
+        validator = CertificateValidator(leaf, [intermediate], context)
+        path = validator.validate_usage(set(['digital_signature']))
+
+        self.assertEqual(root_2.sha256, path.first.sha256)
+
+    def test_same_name_roots_without_aki_backtracks(self):
+        root_1 = self._load_cert('shared-noski-root-1.pem')
+        root_2 = self._load_cert('shared-noski-root-2.pem')
+        leaf = self._load_cert('leaf-shared-noski.pem')
+
+        # Without AKI/SKI information, the path to root 1 is tried first and
+        # fails the signature check, so validation must backtrack to root 2
+        context = self._context([root_1, root_2])
+        validator = CertificateValidator(leaf, [], context)
+        path = validator.validate_usage(set(['digital_signature']))
+
+        self.assertEqual(root_2.sha256, path.first.sha256)
+
+    def test_missing_intermediate_fails(self):
+        root_a = self._load_cert('root-a.pem')
+        leaf = self._load_cert('leaf-a.pem')
+
+        context = self._context([root_a])
+        validator = CertificateValidator(leaf, [], context)
+
+        with self.assertRaisesRegex(PathBuildingError, 'no issuer matching'):
+            validator.validate_usage(set(['digital_signature']))
+
+    def test_cross_signed_loop_fails(self):
+        cross_a_by_b = self._load_cert('root-a-cross-by-b.pem')
+        cross_b_by_a = self._load_cert('root-b-cross-by-a.pem')
+        leaf = self._load_cert('leaf-root-a.pem')
+
+        context = self._context([])
+        validator = CertificateValidator(leaf, [cross_a_by_b, cross_b_by_a], context)
+
+        with self.assertRaisesRegex(PathBuildingError, 'loop'):
+            validator.validate_usage(set(['digital_signature']))
+
+    def test_overlong_chain_fails(self):
+        root = self._load_cert('long-root.pem')
+        intermediates = [
+            self._load_cert('long-int-%d.pem' % i) for i in range(1, 8)
+        ]
+        leaf = self._load_cert('long-leaf.pem')
+
+        context = self._context([root])
+        validator = CertificateValidator(leaf, intermediates, context)
+
+        with self.assertRaisesRegex(PathBuildingError, 'maximum length'):
+            validator.validate_usage(set(['digital_signature']))
+
+    def test_max_length_boundary_chain_validates(self):
+        root = self._load_cert('long-root.pem')
+        intermediates = [
+            self._load_cert('long-int-%d.pem' % i) for i in range(2, 8)
+        ]
+        leaf = self._load_cert('long-leaf-2.pem')
+
+        context = self._context([root])
+        validator = CertificateValidator(leaf, intermediates, context)
+        path = validator.validate_usage(set(['digital_signature']))
+
+        self.assertEqual(8, len(path))
+        self.assertEqual(root.sha256, path.first.sha256)
+
+    def test_validate_path_rejects_untrusted_anchor(self):
+        root_a = self._load_cert('root-a.pem')
+        intermediate = self._load_cert('intermediate-a.pem')
+        leaf = self._load_cert('leaf-a.pem')
+
+        context = self._context([root_a])
+
+        # A path anchored at a certificate that is not one of the caller's
+        # trust roots must not validate, even if every signature in it is
+        # otherwise verifiable
+        path = ValidationPath(leaf)
+        path.prepend(intermediate)
+
+        with self.assertRaisesRegex(PathValidationError, 'not one of the trusted root'):
+            validate_path(context, path)

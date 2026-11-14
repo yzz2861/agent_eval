@@ -15,6 +15,11 @@ class CertificateRegistry():
     Contains certificate lists used to build validation paths
     """
 
+    # The maximum number of certificates allowed in a validation path. This
+    # prevents pathological or malicious certificate sets from causing
+    # excessive path building work.
+    MAX_PATH_LENGTH = 8
+
     # A dict with keys being asn1crypto.x509.Certificate.Name.hashable byte
     # string. Each value is a list of asn1crypto.x509.Certificate objects.
     _subject_map = None
@@ -26,6 +31,18 @@ class CertificateRegistry():
     # A dict with keys being asn1crypto.x509.Certificate.signature byte string.
     # Each value is a bool - if the certificate is a CA cert.
     _ca_lookup = None
+
+    # A list of asn1crypto.x509.Certificate objects that are trust roots, in
+    # the order they were provided
+    _trust_roots = None
+
+    # A set of asn1crypto.x509.Certificate.signature byte strings of the
+    # trust roots - used to bind path building and validation to the exact
+    # certificates the caller decided to trust. The signature bytes are used
+    # as the identity since they are unique per certificate and, unlike
+    # .sha256, do not require dumping the certificate, which can alter the
+    # lazy-parsed state of BER-encoded certificates.
+    _trust_root_lookup = None
 
     def __init__(self, trust_roots=None, extra_trust_roots=None, other_certs=None):
         """
@@ -92,6 +109,8 @@ class CertificateRegistry():
         self._subject_map = {}
         self._key_identifier_map = {}
         self._ca_lookup = {}
+        self._trust_roots = []
+        self._trust_root_lookup = set()
 
         for trust_root in trust_roots:
             hashable = trust_root.subject.hashable
@@ -101,6 +120,8 @@ class CertificateRegistry():
             if trust_root.key_identifier:
                 self._key_identifier_map[trust_root.key_identifier] = trust_root
             self._ca_lookup[trust_root.signature] = True
+            self._trust_roots.append(trust_root)
+            self._trust_root_lookup.add(trust_root.signature)
 
         for other_cert in other_certs:
             hashable = other_cert.subject.hashable
@@ -156,6 +177,22 @@ class CertificateRegistry():
         """
 
         return self._ca_lookup.get(cert.signature, False)
+
+    def is_trust_root(self, cert):
+        """
+        Checks if a certificate is one of the trust roots in this registry.
+        Unlike is_ca(), this matches the exact certificate, so a cross-signed
+        or same-name copy of a trust root that was supplied as an untrusted
+        certificate will not be accepted.
+
+        :param cert:
+            An asn1crypto.x509.Certificate object
+
+        :return:
+            A boolean - if the certificate is one of the trust roots
+        """
+
+        return cert.signature in self._trust_root_lookup
 
     def add_other_cert(self, cert):
         """
@@ -310,7 +347,34 @@ class CertificateRegistry():
 
         if len(paths) == 0:
             cert_name = end_entity_cert.subject.human_friendly
-            missing_issuer_name = failed_paths[0].first.issuer.human_friendly
+            reasons = set(reason for _, reason in failed_paths)
+
+            if 'length' in reasons and 'no_issuer' not in reasons:
+                raise PathBuildingError(pretty_message(
+                    '''
+                    Unable to build a validation path for the certificate "%s"
+                    - the path exceeds the maximum length of %s certificates
+                    ''',
+                    cert_name,
+                    self.MAX_PATH_LENGTH
+                ))
+
+            if 'no_issuer' not in reasons:
+                raise PathBuildingError(pretty_message(
+                    '''
+                    Unable to build a validation path for the certificate "%s"
+                    - a certificate loop was detected
+                    ''',
+                    cert_name
+                ))
+
+            # Pick the deepest failed path with a missing issuer so the error
+            # message points at the issuer that is actually missing
+            no_issuer_failures = [fp for fp in failed_paths if fp[1] == 'no_issuer']
+            no_issuer_failures.sort(
+                key=lambda fp: (0 - len(fp[0]), fp[0].first.issuer.human_friendly)
+            )
+            missing_issuer_name = no_issuer_failures[0][0].first.issuer.human_friendly
             raise PathBuildingError(pretty_message(
                 '''
                 Unable to build a validation path for the certificate "%s" - no
@@ -320,7 +384,34 @@ class CertificateRegistry():
                 missing_issuer_name
             ))
 
+        # Order the paths so that the most preferred path is first - shorter
+        # paths are preferred over cross-signed detours, and paths anchored
+        # at trust roots specified earlier by the caller come first
+        paths.sort(key=self._path_priority)
+
         return paths
+
+    def _path_priority(self, path):
+        """
+        Determines the sort priority of a validation path. Paths that reach a
+        trust root in fewer hops are preferred, and amongst paths of equal
+        length, the trust roots are preferred in the order they were provided
+        by the caller.
+
+        :param path:
+            A certvalidator.path.ValidationPath object
+
+        :return:
+            A tuple that can be used to sort paths by preference
+        """
+
+        anchor = path.first
+        trust_index = len(self._trust_roots)
+        for index, trust_root in enumerate(self._trust_roots):
+            if trust_root.signature == anchor.signature:
+                trust_index = index
+                break
+        return (len(path), trust_index)
 
     def _walk_issuers(self, path, paths, failed_paths):
         """
@@ -337,25 +428,51 @@ class CertificateRegistry():
             results are found.
 
         :param failed_paths:
-            A list of certvalidator.path.ValidationPath objects that failed due
-            to no matching issuer before reaching a certificate from the CA
-            certs list
+            A list of tuples, each containing a certvalidator.path.ValidationPath
+            object that failed before reaching a trust root, and a unicode
+            string of the reason - one of "no_issuer", "loop" or "length"
         """
 
-        if path.first.signature in self._ca_lookup:
+        # A path is only complete once it is anchored at one of the exact
+        # trust roots - a cross-signed or same-name certificate supplied as
+        # an untrusted certificate must not terminate a path
+        if path.first.signature in self._trust_root_lookup:
             paths.append(path)
             return
 
+        if len(path) >= self.MAX_PATH_LENGTH:
+            failed_paths.append((path, 'length'))
+            return
+
+        # Track the subject name and key of every certificate already in the
+        # path so that cross-signed loops (certificates with the same key and
+        # subject, but signed by different CAs) are detected and rejected
+        seen_keys = set()
+        for path_cert in path:
+            seen_keys.add((
+                path_cert.subject.hashable,
+                path_cert.key_identifier or path_cert.public_key.sha1
+            ))
+
         new_branches = 0
+        loop_detected = False
         for issuer in self._possible_issuers(path.first):
+            issuer_key = (
+                issuer.subject.hashable,
+                issuer.key_identifier or issuer.public_key.sha1
+            )
+            if issuer_key in seen_keys:
+                loop_detected = True
+                continue
             try:
                 self._walk_issuers(path.copy().prepend(issuer), paths, failed_paths)
                 new_branches += 1
             except (DuplicateCertificateError):
-                pass
+                loop_detected = True
 
         if not new_branches:
-            failed_paths.append(path)
+            reason = 'loop' if loop_detected else 'no_issuer'
+            failed_paths.append((path, reason))
 
     def _possible_issuers(self, cert):
         """
@@ -369,7 +486,17 @@ class CertificateRegistry():
         if issuer_hashable not in self._subject_map:
             return
 
-        for issuer in self._subject_map[issuer_hashable]:
+        candidates = self._subject_map[issuer_hashable]
+
+        # Trust roots are preferred since they terminate a path, keeping the
+        # path anchored as directly as possible. The sort is stable, so the
+        # order certificates were added to the registry is otherwise kept.
+        candidates = sorted(
+            candidates,
+            key=lambda candidate: 0 if candidate.signature in self._trust_root_lookup else 1
+        )
+
+        for issuer in candidates:
             # Info from the authority key identifier extension can be used to
             # eliminate possible options when multiple keys with the same
             # subject exist, such as during a transition, or with cross-signing.

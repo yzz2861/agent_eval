@@ -6,6 +6,8 @@ import os
 
 from asn1crypto import pem, x509
 from certvalidator.registry import CertificateRegistry
+from certvalidator.errors import PathBuildingError
+from certvalidator.path import ValidationPath
 
 
 tests_root = os.path.dirname(__file__)
@@ -74,3 +76,183 @@ class RegistryTests(unittest.TestCase):
             ],
             [item.subject.sha1 for item in path]
         )
+
+
+class PathBuildingTests(unittest.TestCase):
+
+    def _load_cert(self, filename):
+        with open(os.path.join(fixtures_dir, 'path_building', filename), 'rb') as f:
+            cert_bytes = f.read()
+            if pem.detect(cert_bytes):
+                _, _, cert_bytes = pem.unarmor(cert_bytes)
+            return x509.Certificate.load(cert_bytes)
+
+    def test_build_paths_cross_signed_roots(self):
+        root_a = self._load_cert('root-a.pem')
+        root_b = self._load_cert('root-b.pem')
+        cross_a_by_b = self._load_cert('root-a-cross-by-b.pem')
+        leaf = self._load_cert('leaf-root-a.pem')
+
+        repo = CertificateRegistry(
+            trust_roots=[root_a, root_b],
+            other_certs=[cross_a_by_b]
+        )
+        paths = repo.build_paths(leaf)
+
+        self.assertEqual(2, len(paths))
+
+        # The shortest path, anchored directly at the issuer's own root,
+        # must be preferred over the cross-signed detour
+        self.assertEqual(
+            [root_a.sha256, leaf.sha256],
+            [cert.sha256 for cert in paths[0]]
+        )
+        self.assertEqual(
+            [root_b.sha256, cross_a_by_b.sha256, leaf.sha256],
+            [cert.sha256 for cert in paths[1]]
+        )
+
+    def test_build_paths_cross_signed_root_not_trusted(self):
+        root_a = self._load_cert('root-a.pem')
+        root_b = self._load_cert('root-b.pem')
+        cross_a_by_b = self._load_cert('root-a-cross-by-b.pem')
+        leaf = self._load_cert('leaf-root-a.pem')
+
+        # root_b is supplied as an untrusted certificate, so no path may be
+        # anchored at it
+        repo = CertificateRegistry(
+            trust_roots=[root_a],
+            other_certs=[cross_a_by_b, root_b]
+        )
+        paths = repo.build_paths(leaf)
+
+        self.assertEqual(1, len(paths))
+        self.assertEqual(
+            [root_a.sha256, leaf.sha256],
+            [cert.sha256 for cert in paths[0]]
+        )
+
+    def test_build_paths_same_subject_roots_aki(self):
+        root_1 = self._load_cert('shared-root-1.pem')
+        root_2 = self._load_cert('shared-root-2.pem')
+        intermediate = self._load_cert('intermediate-shared.pem')
+        leaf = self._load_cert('leaf-shared.pem')
+
+        repo = CertificateRegistry(
+            trust_roots=[root_1, root_2],
+            other_certs=[intermediate]
+        )
+        paths = repo.build_paths(leaf)
+
+        # The AKI/SKI pair must ensure the path is built to the root that
+        # actually signed the intermediate, despite both roots sharing a
+        # subject name
+        self.assertEqual(1, len(paths))
+        self.assertEqual(
+            [root_2.sha256, intermediate.sha256, leaf.sha256],
+            [cert.sha256 for cert in paths[0]]
+        )
+
+    def test_build_paths_same_subject_roots_no_aki(self):
+        root_1 = self._load_cert('shared-noski-root-1.pem')
+        root_2 = self._load_cert('shared-noski-root-2.pem')
+        leaf = self._load_cert('leaf-shared-noski.pem')
+
+        repo = CertificateRegistry(trust_roots=[root_1, root_2])
+        paths = repo.build_paths(leaf)
+
+        # Without AKI/SKI information both roots are possible issuers, and
+        # the caller's trust root order defines the priority
+        self.assertEqual(2, len(paths))
+        self.assertEqual(root_1.sha256, paths[0].first.sha256)
+        self.assertEqual(root_2.sha256, paths[1].first.sha256)
+
+    def test_build_paths_missing_intermediate(self):
+        root_a = self._load_cert('root-a.pem')
+        leaf = self._load_cert('leaf-a.pem')
+
+        repo = CertificateRegistry(trust_roots=[root_a])
+
+        with self.assertRaisesRegex(PathBuildingError, 'no issuer matching'):
+            repo.build_paths(leaf)
+
+    def test_build_paths_loop(self):
+        cross_a_by_b = self._load_cert('root-a-cross-by-b.pem')
+        cross_b_by_a = self._load_cert('root-b-cross-by-a.pem')
+        leaf = self._load_cert('leaf-root-a.pem')
+
+        repo = CertificateRegistry(
+            trust_roots=[],
+            other_certs=[cross_a_by_b, cross_b_by_a]
+        )
+
+        with self.assertRaisesRegex(PathBuildingError, 'loop'):
+            repo.build_paths(leaf)
+
+    def test_build_paths_max_length(self):
+        root = self._load_cert('long-root.pem')
+        intermediates = [
+            self._load_cert('long-int-%d.pem' % i) for i in range(1, 8)
+        ]
+        leaf = self._load_cert('long-leaf.pem')
+
+        repo = CertificateRegistry(
+            trust_roots=[root],
+            other_certs=intermediates
+        )
+
+        with self.assertRaisesRegex(PathBuildingError, 'maximum length'):
+            repo.build_paths(leaf)
+
+    def test_build_paths_max_length_boundary(self):
+        root = self._load_cert('long-root.pem')
+        intermediates = [
+            self._load_cert('long-int-%d.pem' % i) for i in range(2, 8)
+        ]
+        leaf = self._load_cert('long-leaf-2.pem')
+
+        repo = CertificateRegistry(
+            trust_roots=[root],
+            other_certs=intermediates
+        )
+        paths = repo.build_paths(leaf)
+
+        self.assertEqual(1, len(paths))
+        self.assertEqual(8, len(paths[0]))
+        self.assertEqual(root.sha256, paths[0].first.sha256)
+
+    def test_find_issuer_uses_aki_with_duplicate_subjects(self):
+        root_1 = self._load_cert('shared-root-1.pem')
+        root_2 = self._load_cert('shared-root-2.pem')
+        intermediate = self._load_cert('intermediate-shared.pem')
+
+        path = ValidationPath(intermediate)
+        path.prepend(root_2)
+        path.prepend(root_1)
+
+        issuer = path.find_issuer(intermediate)
+        self.assertEqual(root_2.sha256, issuer.sha256)
+
+    def test_find_issuer_ambiguous_duplicate_subjects(self):
+        root_1 = self._load_cert('shared-noski-root-1.pem')
+        root_2 = self._load_cert('shared-noski-root-2.pem')
+        leaf = self._load_cert('leaf-shared-noski.pem')
+
+        path = ValidationPath(leaf)
+        path.prepend(root_2)
+        path.prepend(root_1)
+
+        with self.assertRaisesRegex(LookupError, 'multiple certificates named'):
+            path.find_issuer(leaf)
+
+    def test_find_issuer_only_searches_before_cert(self):
+        root_1 = self._load_cert('shared-root-1.pem')
+        root_2 = self._load_cert('shared-root-2.pem')
+
+        path = ValidationPath(root_2)
+        path.prepend(root_1)
+
+        # The first certificate in the path has no issuer within the path,
+        # even though another certificate with the same subject name follows
+        with self.assertRaisesRegex(LookupError, 'Unable to find the issuer'):
+            path.find_issuer(root_1)

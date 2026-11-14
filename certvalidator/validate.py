@@ -258,6 +258,20 @@ def _validate_path(validation_context, path, end_entity_name_override=None):
 
     trust_anchor = path.first
 
+    # The trust anchor must be one of the exact trust roots from the
+    # validation context. This binds path validation to the trust roots the
+    # caller provided, so that a path can not be validated against a
+    # different root certificate - such as a cross-signed or same-name
+    # certificate that was supplied as an untrusted certificate.
+    if not validation_context.certificate_registry.is_trust_root(trust_anchor):
+        raise PathValidationError(pretty_message(
+            '''
+            The path could not be validated because the trust anchor "%s" is
+            not one of the trusted root certificates
+            ''',
+            trust_anchor.subject.human_friendly
+        ))
+
     # We skip the trust anchor when measuring the path since technically
     # the trust anchor is not part of the path
     path_length = len(path) - 1
