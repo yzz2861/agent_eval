@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[co]
+
+# builds
+/dist/
+/docs/build/
+
+# test
+*.sqlite3
+/test/config/env-*.toml
+
+# Other tools
+/.coverage
