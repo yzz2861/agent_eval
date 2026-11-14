@@ -214,10 +214,19 @@ def print_errors(errors):
             print("RPACK:",binascii.hexlify(err_data[1]))
             print(DNSRecord.parse(err_data[1]))
 
-def test_generator(f):
+def generate_test(f):
     def test(self):
         self.assertEqual(check_decode(f),[])
     return test
+
+# Register the packet round-trip cases at import time so the module is
+# collectable by pytest (which does not execute the __main__ block below).
+_testdir = os.path.join(os.path.dirname(__file__),"test")
+if os.path.isdir(_testdir):
+    for _f in sorted(glob.glob(os.path.join(_testdir,"*"))):
+        if os.path.isfile(_f):
+            _name = 'test_%s' % os.path.basename(_f)
+            setattr(TestContainer, _name, generate_test(_f))
 
 if __name__ == '__main__':
 
@@ -278,11 +287,9 @@ if __name__ == '__main__':
             for f in glob.iglob(args.glob):
                 if os.path.isfile(f):
                     test_name = 'test_%s' % f
-                    test = test_generator(f)
+                    test = generate_test(f)
                     setattr(TestContainer,test_name,test)
             unittest.main(argv=[__name__],
                           verbosity=2 if args.verbose else 1,
                           failfast=args.failfast)
-
-
 

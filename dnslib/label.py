@@ -17,8 +17,29 @@ from dnslib.buffer import Buffer, BufferError
 LDH = set(range(33,127))
 ESCAPE = re.compile(r'\\([0-9][0-9][0-9])')
 
+# Strict bounds for (possibly compressed) name decompression (RFC 1035)
+MAX_LABEL_SIZE = 63          # Max length of an uncompressed label
+MAX_NAME_SIZE = 255          # Max expanded name length in wire octets
+MAX_LABEL_COUNT = 127        # Max number of labels in an expanded name
+MAX_POINTER_HOPS = 127       # Max compression pointers followed per name
+
 class DNSLabelError(Exception):
     pass
+
+class DNSDecodeError(BufferError):
+    """Base class for errors decoding a (possibly compressed) DNS name"""
+
+class DNSPointerOutOfBoundsError(DNSDecodeError):
+    """Compression pointer references an offset outside the message"""
+
+class DNSCompressionLoopError(DNSDecodeError):
+    """Compression pointer is forward/self-referential or repeats an offset"""
+
+class DNSNameTooLongError(DNSDecodeError):
+    """Expanded name exceeds the label count / name size limits"""
+
+class DNSInvalidLabelError(DNSDecodeError):
+    """Uncompressed label has an invalid type, length or content"""
 
 class DNSLabel(object):
 
@@ -258,42 +279,110 @@ class DNSBuffer(Buffer):
         super(DNSBuffer,self).__init__(data)
         self.names = {}
 
-    def decode_name(self,last=-1):
+    def decode_name(self):
         """
-            Decode label at current offset in buffer (following pointers
-            to cached elements where necessary)
+            Decode label at current offset in buffer, following compression
+            pointers where necessary.
+
+            Decompression is iterative (never recursive) and enforces strict
+            bounds:
+
+            - Compression pointers must point strictly backwards to an offset
+              within the message; self loops, forward jumps and repeated
+              offsets are rejected.
+            - The expanded name is bounded by label count, wire size and
+              total pointer hop limits.
+            - Uncompressed labels are validated for type, length and content.
+
+            On failure the buffer offset is restored to the start of the name
+            so a failed name cannot corrupt parsing of subsequent records.
         """
+        start = self.offset
         label = []
+        visited = set()
+        pointer_hops = 0
+        wire_size = 1
+        end = None
         done = False
-        while not done:
-            (length,) = self.unpack("!B")
-            if get_bits(length,6,2) == 3:
-                # Pointer
-                self.offset -= 1
-                pointer = get_bits(self.unpack("!H")[0],0,14)
-                save = self.offset
-                if last == save:
-                    raise BufferError("Recursive pointer in DNSLabel [offset=%d,pointer=%d,length=%d]" %
-                            (self.offset,pointer,len(self.data)))
-                if pointer < self.offset:
+        try:
+            while not done:
+                if self.remaining() < 1:
+                    raise DNSDecodeError("Truncated label length octet in DNSLabel "\
+                            "[offset=%d,length=%d]" % (self.offset,len(self.data)))
+                length = self.data[self.offset]
+                label_type = get_bits(length,6,2)
+                if label_type == 3:
+                    # Compression pointer (two octets)
+                    if self.remaining() < 2:
+                        raise DNSPointerOutOfBoundsError("Truncated compression pointer "\
+                                "in DNSLabel [offset=%d,length=%d]" %
+                                (self.offset,len(self.data)))
+                    source = self.offset
+                    pointer = get_bits(self.unpack("!H")[0],0,14)
+                    if end is None:
+                        # Name ends in the enclosing stream after the pointer
+                        end = self.offset
+                    pointer_hops += 1
+                    if pointer_hops > MAX_POINTER_HOPS:
+                        raise DNSCompressionLoopError("Too many compression pointer hops "\
+                                "in DNSLabel [offset=%d,pointer=%d,hops=%d]" %
+                                (self.offset,pointer,pointer_hops))
+                    if pointer >= len(self.data):
+                        raise DNSPointerOutOfBoundsError("Compression pointer outside "\
+                                "message in DNSLabel [offset=%d,pointer=%d,length=%d]" %
+                                (self.offset,pointer,len(self.data)))
+                    if pointer >= source:
+                        # Pointers may only point to data strictly earlier
+                        # than the pointer itself
+                        raise DNSCompressionLoopError("Invalid/recursive compression "\
+                                "pointer in DNSLabel [offset=%d,pointer=%d,length=%d]" %
+                                (self.offset,pointer,len(self.data)))
+                    if pointer in visited:
+                        # Repeated offset in the pointer chain - a loop
+                        raise DNSCompressionLoopError("Repeated name offset in DNSLabel "\
+                                "[offset=%d,pointer=%d,length=%d]" %
+                                (self.offset,pointer,len(self.data)))
+                    visited.add(source)
                     self.offset = pointer
+                elif label_type == 0:
+                    # Uncompressed label
+                    self.offset += 1
+                    size = get_bits(length,0,6)
+                    if size > MAX_LABEL_SIZE:
+                        raise DNSInvalidLabelError("Label component too long in "\
+                                "DNSLabel [offset=%d,size=%d]" % (self.offset,size))
+                    if self.remaining() < size:
+                        raise DNSInvalidLabelError("Truncated label in DNSLabel "\
+                                "[offset=%d,size=%d,length=%d]" %
+                                (self.offset,size,len(self.data)))
+                    if size > 0:
+                        component = self.get(size)
+                        try:
+                            component.decode()
+                        except UnicodeDecodeError:
+                            raise DNSInvalidLabelError("Invalid label <%s>" % component)
+                        label.append(component)
+                        if len(label) > MAX_LABEL_COUNT:
+                            raise DNSNameTooLongError("Too many label components in "\
+                                    "DNSLabel [offset=%d,limit=%d]" %
+                                    (self.offset,MAX_LABEL_COUNT))
+                        wire_size += size + 1
+                        if wire_size > MAX_NAME_SIZE:
+                            raise DNSNameTooLongError("Domain label too long in "\
+                                    "DNSLabel [offset=%d,wire_size=%d,limit=%d]" %
+                                    (self.offset,wire_size,MAX_NAME_SIZE))
+                    else:
+                        # Root label - end of name
+                        done = True
                 else:
-                    # Pointer can't point forwards
-                    raise BufferError("Invalid pointer in DNSLabel [offset=%d,pointer=%d,length=%d]" %
-                            (self.offset,pointer,len(self.data)))
-                label.extend(self.decode_name(save).label)
-                self.offset = save
-                done = True
-            else:
-                if length > 0:
-                    l = self.get(length)
-                    try:
-                        l.decode()
-                    except UnicodeDecodeError:
-                        raise BufferError("Invalid label <%s>" % l)
-                    label.append(l)
-                else:
-                    done = True
+                    # Reserved label types (0b01 / 0b10) are not valid names
+                    raise DNSInvalidLabelError("Invalid label type in DNSLabel "\
+                            "[offset=%d,type=%d]" % (self.offset,label_type))
+        except BufferError:
+            self.offset = start
+            raise
+        if end is not None:
+            self.offset = end
         return DNSLabel(label)
 
     def encode_name(self,name):
