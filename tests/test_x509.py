@@ -30,7 +30,7 @@ class X509Tests(unittest.TestCase):
         with open(os.path.join(fixtures_dir, relative_path), 'rb') as f:
             cert_bytes = f.read()
             if pem.detect(cert_bytes):
-                _, _, cert_bytes = pem.unarmor(cert_bytes)
+                cert_bytes = pem.unarmor_certificate(cert_bytes)
             return x509.Certificate.load(cert_bytes)
 
     @staticmethod
@@ -3656,7 +3656,7 @@ class X509Tests(unittest.TestCase):
         with open(os.path.join(fixtures_dir, 'sender_dummycorp.com.crt'), 'rb') as f:
             cert_bytes = f.read()
             if pem.detect(cert_bytes):
-                _, _, cert_bytes = pem.unarmor(cert_bytes)
+                cert_bytes = pem.unarmor_certificate(cert_bytes)
             trusted_cert = x509.TrustedCertificate.load(cert_bytes)
 
         cert = trusted_cert[0]
@@ -3688,7 +3688,7 @@ class X509Tests(unittest.TestCase):
         with open(os.path.join(fixtures_dir, 'admin.ch.crt'), 'rb') as f:
             cert_bytes = f.read()
             if pem.detect(cert_bytes):
-                _, _, cert_bytes = pem.unarmor(cert_bytes)
+                cert_bytes = pem.unarmor_certificate(cert_bytes)
             cert = x509.Certificate.load(cert_bytes)
 
         self.assertEqual(

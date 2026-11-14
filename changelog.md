@@ -1,5 +1,18 @@
 # changelog
 
+## Unreleased
+
+ - Reworked `pem.unarmor()` to return an explicit, fully validated list of
+   `pem.PEMBlock` objects, including byte offsets for every block. It now
+   rejects mismatched labels, malformed boundaries, empty or nested blocks,
+   non-canonical base64, invalid DER prefixes and any data outside of PEM
+   blocks, while preserving support for multi-block bundles, CRLF, blank lines
+   and legacy header fields
+ - Added `pem.unarmor_one()`, `pem.unarmor_certificate()`,
+   `pem.unarmor_certificates()` and `pem.unarmor_private_key()` so callers
+   must declare the expected PEM label instead of implicitly using the first
+   block; private-key parsing no longer falls back to certificate data
+
 ## 1.5.1
 
  - Handle RSASSA-PSS in `keys.PrivateKeyInfo.bit_size` and
