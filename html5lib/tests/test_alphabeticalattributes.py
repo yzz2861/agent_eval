@@ -69,10 +69,7 @@ def test_with_serializer():
         alphabetical_attributes=True,
         quote_attr_values='always'
     )
-
-    # FIXME(willkg): The "xlink" namespace gets dropped by the serializer. When
-    # that gets fixed, we can fix this expected result.
     assert (
         ser.render(walker(dom)) ==
-        '<svg><pattern id="patt1" href="#patt2"></pattern></svg>'
+        '<svg><pattern id="patt1" xlink:href="#patt2"></pattern></svg>'
     )

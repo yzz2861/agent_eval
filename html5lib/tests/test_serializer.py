@@ -4,12 +4,14 @@ import os
 import json
 
 import pytest
+from six import text_type
 
 from .support import get_data_files
 
-from html5lib import constants
+from html5lib import constants, parse
+from html5lib.treewalkers import getTreeWalker
 from html5lib.filters.lint import Filter as Lint
-from html5lib.serializer import HTMLSerializer, serialize
+from html5lib.serializer import HTMLSerializer, SerializeError, serialize
 from html5lib.treewalkers.base import TreeWalker
 
 # pylint:disable=wrong-import-position
@@ -23,6 +25,7 @@ except ImportError:
 # pylint:enable=wrong-import-position
 
 default_namespace = constants.namespaces["html"]
+namespaces = constants.namespaces
 
 
 class JsonWalker(TreeWalker):
@@ -224,3 +227,190 @@ def test_serializer(input, expected, options):
         assert expected[0] == result, "Expected:\n%s\nActual:\n%s\nOptions:\n%s" % (expected[0], result, str(options))
     elif result not in expected:
         assert False, "Expected: %s, Received: %s" % (expected, result)
+
+
+def _attributes_by_element(document):
+    walker = getTreeWalker("etree")
+    return [((token["namespace"], token["name"]),
+             sorted(token["data"].items(), key=lambda item: text_type(item[0])))
+            for token in walker(document)
+            if token["type"] in ("StartTag", "EmptyTag")]
+
+
+def _round_trip(markup, **options):
+    document = parse(markup)
+    serialized = serialize(document, omit_optional_tags=False, **options)
+    reparsed = parse(serialized)
+    return serialized, _attributes_by_element(document), _attributes_by_element(reparsed)
+
+
+def test_namespaced_attribute_keeps_prefix():
+    # Regression test: xlink:href used to be serialized as a plain href and
+    # therefore changed namespace on reparse, bypassing sanitizer checks.
+    serialized, before, after = _round_trip(
+        "<svg><a xlink:href='javascript:alert(1)'></a></svg>")
+    assert "xlink:href=javascript:alert(1)" in serialized
+    assert before == after
+    assert ((namespaces["svg"], "a"),
+            [((namespaces["xlink"], "href"), "javascript:alert(1)")]) in after
+
+
+def test_namespaced_and_plain_attribute_do_not_collapse():
+    serialized, before, after = _round_trip(
+        "<svg><a href='plain' xlink:href='linked'></a></svg>")
+    assert before == after
+    assert "href=plain" in serialized
+    assert "xlink:href=linked" in serialized
+
+
+def test_xml_namespace_attributes_round_trip():
+    serialized, before, after = _round_trip(
+        "<svg><text xml:lang='en' xml:space='preserve'>x</text></svg>")
+    assert before == after
+    assert "xml:lang=en" in serialized
+    assert "xml:space=preserve" in serialized
+
+
+def test_foreign_local_names_are_preserved():
+    serialized, before, after = _round_trip(
+        "<svg viewBox='0 0 1 1'></svg>"
+        "<math><mi definitionURL='http://example.com/'>x</mi></math>")
+    assert before == after
+    assert 'viewBox="0 0 1 1"' in serialized
+    assert 'definitionURL="http://example.com/"' in serialized
+
+
+def test_html_attribute_names_are_lowercased():
+    serialized, before, after = _round_trip("<div CLASS='c' data-FOO='b'></div>")
+    assert before == after
+    assert "class=c" in serialized
+    assert "data-foo=b" in serialized
+
+
+def test_unknown_prefix_attribute_is_literal():
+    serialized, before, after = _round_trip("<div a:b='1'></div>")
+    assert before == after
+    assert "a:b=1" in serialized
+
+
+def test_namespaced_attribute_escaping_round_trips():
+    serialized, before, after = _round_trip(
+        "<svg><a xlink:href='a&#13;b&amp;c&#0;d'></a></svg>")
+    assert before == after
+    assert "&#13;" in serialized
+    assert "&amp;" in serialized
+
+
+def test_namespaced_attribute_control_characters_are_quoted_and_escaped():
+    result = serialize_html(
+        [["StartTag", namespaces["svg"], "a", [
+            {"namespace": namespaces["xlink"], "name": "href",
+             "value": "a\x00b"},
+            {"namespace": namespaces["xlink"], "name": "title",
+             "value": "c\rd"}]],
+         ["EndTag", namespaces["svg"], "a"]], {})
+    assert 'xlink:href="a&#0;b"' in result
+    assert 'xlink:title="c&#13;d"' in result
+
+
+def test_namespaced_attribute_quote_selection():
+    double_quote = serialize(
+        parse("<svg><a xlink:href=\"a'b\"></a></svg>"),
+        omit_optional_tags=False)
+    assert "xlink:href=\"a'b\"" in double_quote
+
+    single_quote = serialize(
+        parse("<svg><a xlink:href='a&quot;b'></a></svg>"),
+        omit_optional_tags=False)
+    assert "xlink:href='a\"b'" in single_quote
+
+
+def test_prefix_conflict_is_reported_and_dropped():
+    walker = JsonWalker([
+        ["StartTag", namespaces["svg"], "svg", [
+            {"namespace": namespaces["xmlns"], "name": "xlink",
+             "value": "urn:bogus"}]],
+        ["StartTag", namespaces["svg"], "a", [
+            {"namespace": namespaces["xlink"], "name": "href",
+             "value": "1"}]],
+        ["EndTag", namespaces["svg"], "a"],
+        ["EndTag", namespaces["svg"], "svg"],
+    ])
+    serializer = HTMLSerializer(omit_optional_tags=False)
+    result = serializer.render(Lint(walker, False))
+    assert "xmlns:xlink=urn:bogus" in result
+    assert "xlink:href" not in result
+    assert serializer.errors
+
+
+def test_unknown_namespace_attribute_is_reported_and_dropped():
+    unknown_namespace = "http://example.invalid/ns"
+    walker = JsonWalker([
+        ["StartTag", namespaces["svg"], "a", [
+            {"namespace": unknown_namespace, "name": "href",
+             "value": "javascript:evil()"},
+            {"namespace": namespaces["xlink"], "name": "title",
+             "value": "ok"}]],
+        ["EndTag", namespaces["svg"], "a"],
+    ])
+    serializer = HTMLSerializer(omit_optional_tags=False)
+    result = serializer.render(Lint(walker, False))
+    assert "javascript:evil()" not in result
+    assert "xlink:title=ok" in result
+    assert len(serializer.errors) == 1
+
+    strict = HTMLSerializer(omit_optional_tags=False)
+    strict.strict = True
+    with pytest.raises(SerializeError):
+        strict.render(Lint(JsonWalker([
+            ["StartTag", namespaces["svg"], "a", [
+                {"namespace": unknown_namespace, "name": "href",
+                 "value": "x"}]],
+            ["EndTag", namespaces["svg"], "a"],
+        ]), False))
+
+
+def test_duplicate_attribute_after_folding_is_reported():
+    walker = JsonWalker([
+        ["StartTag", namespaces["svg"], "a", [
+            {"namespace": None, "name": "Href", "value": "1"},
+            {"namespace": None, "name": "href", "value": "2"}]],
+        ["EndTag", namespaces["svg"], "a"],
+    ])
+    serializer = HTMLSerializer(omit_optional_tags=False)
+    result = serializer.render(Lint(walker, False))
+    assert result.lower().count("href") == 1
+    assert serializer.errors
+
+
+def test_invalid_local_names_are_reported_and_dropped():
+    walker = JsonWalker([
+        ["StartTag", namespaces["svg"], "a", [
+            {"namespace": namespaces["xlink"], "name": "href",
+             "value": "1"},
+            {"namespace": namespaces["xlink"], "name": "bad name",
+             "value": "2"},
+            {"namespace": None, "name": "a b", "value": "4"}]],
+        ["EndTag", namespaces["svg"], "a"],
+    ])
+    serializer = HTMLSerializer(omit_optional_tags=False)
+    result = serializer.render(walker)
+    assert "xlink:href=1" in result
+    assert "bad name" not in result
+    assert "a b" not in result
+    assert len(serializer.errors) == 2
+
+
+def test_empty_local_name_is_reported_and_dropped():
+    walker = JsonWalker([
+        ["StartTag", namespaces["svg"], "a", [
+            {"namespace": namespaces["xlink"], "name": "href",
+             "value": "1"},
+            {"namespace": namespaces["xlink"], "name": "",
+             "value": "3"}]],
+        ["EndTag", namespaces["svg"], "a"],
+    ])
+    serializer = HTMLSerializer(omit_optional_tags=False)
+    result = serializer.render(walker)
+    assert "xlink:href=1" in result
+    assert len(serializer.errors) == 1
