@@ -4,11 +4,11 @@ import abc
 import json
 import logging
 import math
+from collections.abc import Mapping
 from typing import (
     Any,
     Callable,
     Dict,
-    Mapping,
     Optional,
     Sequence,
     Tuple,
@@ -21,10 +21,31 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 
+from josepy import b64
 import josepy.util
 from josepy import errors, json_util, util
 
 logger = logging.getLogger(__name__)
+
+
+def _reject_duplicate_members(pairs: Sequence[Tuple[str, Any]]) -> Dict[str, Any]:
+    """``object_pairs_hook`` rejecting JSON objects with duplicate members.
+
+    RFC 8259 states that member names within a JSON object SHOULD be
+    unique and that receivers' behavior on duplicates is otherwise
+    unpredictable.  JWK thumbprints (RFC 7638) are defined over canonical
+    member sets, so silently accepting the last occurrence could make two
+    textual representations of the same JWK compare differently.  Refuse
+    such input instead.
+    """
+    jobj: Dict[str, Any] = {}
+    members = set()
+    for name, value in pairs:
+        if name in members:
+            raise errors.DeserializationError('Duplicate JSON object member: "{0}"'.format(name))
+        members.add(name)
+        jobj[name] = value
+    return jobj
 
 
 class JWK(json_util.TypedJSONObjectWithFields, metaclass=abc.ABCMeta):
@@ -38,16 +59,52 @@ class JWK(json_util.TypedJSONObjectWithFields, metaclass=abc.ABCMeta):
     required: Sequence[str] = NotImplemented
     """Required members of public key's representation as defined by JWK/JWA."""
 
-    _thumbprint_json_dumps_params: Dict[str, Union[Optional[int], Sequence[str], bool]] = {
-        # "no whitespace or line breaks before or after any syntactic
-        # elements"
-        "indent": None,
-        "separators": (",", ":"),
-        # "members ordered lexicographically by the Unicode [UNICODE]
-        # code points of the member names"
-        "sort_keys": True,
-    }
     key: Any
+
+    @classmethod
+    def json_loads(cls, json_string: Union[str, bytes]) -> "JWK":
+        """Deserialize a JWK from a JSON document.
+
+        Unlike the generic loader, JSON objects with duplicate member
+        names are rejected so the result cannot depend on parser-specific
+        duplicate handling.
+        """
+        try:
+            jobj = json.loads(json_string, object_pairs_hook=_reject_duplicate_members)
+        except ValueError as error:
+            raise errors.DeserializationError(error)
+        return cls.from_json(jobj)
+
+    def thumbprint_members(self) -> Dict[str, str]:
+        """Return the canonical RFC 7638 members of this key.
+
+        Only the members required by the key type's algorithm are kept;
+        private parameters (e.g. RSA/EC ``d``) and metadata members such
+        as ``kid``, ``use``, ``key_ops`` and ``x5c`` are excluded.  The
+        values are re-encoded from the underlying key, so the result does
+        not depend on the whitespace, member order, base64url padding or
+        spelling of the original JSON document.
+        """
+        exported = self.to_partial_json()
+        missing = tuple(name for name in self.required if name not in exported)
+        if missing:
+            raise errors.SerializationError(
+                "The following JWK members are required: {0}".format(",".join(missing))
+            )
+        return {name: exported[name] for name in self.required}
+
+    @staticmethod
+    def _canonical_thumbprint_json(members: Mapping[str, str]) -> bytes:
+        # RFC 7638 section 3: no whitespace or line breaks before or after
+        # any syntactic elements and members ordered lexicographically by
+        # the Unicode code points of the member names, UTF-8 encoded.
+        return json.dumps(
+            dict(members),
+            indent=None,
+            separators=(",", ":"),
+            sort_keys=True,
+            ensure_ascii=False,
+        ).encode("utf-8")
 
     def thumbprint(
         self, hash_function: Callable[[], hashes.HashAlgorithm] = hashes.SHA256
@@ -60,13 +117,29 @@ class JWK(json_util.TypedJSONObjectWithFields, metaclass=abc.ABCMeta):
 
         """
         digest = hashes.Hash(hash_function(), backend=default_backend())
-        digest.update(
-            json.dumps(
-                {k: v for k, v in self.to_json().items() if k in self.required},
-                **self._thumbprint_json_dumps_params,  # type: ignore[arg-type]
-            ).encode()
-        )
+        digest.update(self._canonical_thumbprint_json(self.thumbprint_members()))
         return digest.finalize()
+
+    @property
+    def key_id(self) -> str:
+        """RFC 7638 JWK thumbprint encoded as unpadded base64url.
+
+        This is the canonical, representation-independent key identifier:
+        JWKs describing the same key with or without ``kid``, in any
+        member order or base64url padding produce the same value.
+        """
+        return b64.b64encode(self.thumbprint()).decode("ascii")
+
+    def same_key(self, other: "JWK") -> bool:
+        """Whether both JWKs represent the same key.
+
+        Comparison is performed on the shared RFC 7638 thumbprint rather
+        than on the textual JWK representation, so it is unaffected by
+        ``kid``, member order, base64url padding or private parameters.
+        """
+        if not isinstance(other, JWK):
+            return False
+        return self.thumbprint() == other.thumbprint()
 
     @abc.abstractmethod
     def public_key(self) -> "JWK":  # pragma: no cover

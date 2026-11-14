@@ -208,15 +208,13 @@ class JWKRSATest(unittest.TestCase, JWKTestBaseMixin):
         # https://github.com/square/go-jose/blob/4ddd71883fa547d37fbf598071f04512d8bafee3/jwk_test.go#L384
         from josepy.jwk import JWKRSA
 
-        key = JWKRSA.json_loads(
-            """{
+        key = JWKRSA.json_loads("""{
     "kty": "RSA",
     "kid": "bilbo.baggins@hobbiton.example",
     "use": "sig",
     "n": "n4EPtAOCc9AlkeQHPzHStgAbgs7bTZLwUBZdR8_KuKPEHLd4rHVTeT-O-XV2jRojdNhxJWTDvNd7nqQ0VEiZQHz_AJmSCpMaJMRBSFKrKb2wqVwGU_NsYOYL-QtiWN2lbzcEe6XC0dApr5ydQLrHqkHHig3RBordaZ6Aj-oBHqFEHYpPe7Tpe-OfVfHd1E6cS6M1FZcD1NNLYD5lFHpPI9bTwJlsde3uhGqC0ZCuEHg8lhzwOHrtIQbS0FVbb9k3-tVTU4fg_3L_vniUFAKwuCLqKnS2BYwdq_mzSnbLY7h_qixoR7jig3__kRhuaxwUkRz5iaiQkqgc5gHdrNP5zw",
     "e": "AQAB"
-}"""  # noqa
-        )
+}""")  # noqa
         assert (
             binascii.hexlify(key.thumbprint())
             == b"f63838e96077ad1fc01c3f8405774dedc0641f558ebb4b40dccf5f9b6d66a932"
@@ -384,6 +382,137 @@ AwEHoUQDQgAEGS5RvStca15z2FEanCM3juoX7tE/LB7iD44GWawGE40APAl/iZuH
         assert y[0] == 0
         assert len(y) == 32
         JWK.from_json(json)
+
+
+class JWKThumbprintTest(unittest.TestCase):
+    """RFC 7638 thumbprint and account key comparison tests."""
+
+    GO_JOSE_JWK = (
+        '{"kty": "RSA",'
+        '"kid": "bilbo.baggins@hobbiton.example",'
+        '"use": "sig",'
+        '"n": "n4EPtAOCc9AlkeQHPzHStgAbgs7bTZLwUBZdR8_KuKPEHLd4rHVTeT-O-XV2jRojdNhxJWTDvNd7nqQ0VEiZQHz_AJmSCpMaJMRBSFKrKb2wqVwGU_NsYOYL-QtiWN2lbzcEe6XC0dApr5ydQLrHqkHHig3RBordaZ6Aj-oBHqFEHYpPe7Tpe-OfVfHd1E6cS6M1FZcD1NNLYD5lFHpPI9bTwJlsde3uhGqC0ZCuEHg8lhzwOHrtIQbS0FVbb9k3-tVTU4fg_3L_vniUFAKwuCLqKnS2BYwdq_mzSnbLY7h_qixoR7jig3__kRhuaxwUkRz5iaiQkqgc5gHdrNP5zw",'
+        '"e": "AQAB"}'
+    )
+
+    def setUp(self) -> None:
+        from josepy.jwk import JWK, JWKEC, JWKRSA
+
+        self.JWK = JWK
+        self.JWKEC = JWKEC
+        self.JWKRSA = JWKRSA
+        self.rsa = JWKRSA(key=RSA256_KEY)
+        self.rsa_public_json = self.rsa.public_key().to_partial_json()
+        self.ec = JWKEC(key=EC_P256_KEY)
+        self.ec_public_json = self.ec.public_key().to_partial_json()
+
+    def test_thumbprint_uses_only_required_members(self) -> None:
+        # kid/use/key_ops/x5c and private parameters must be excluded.
+        with_kid = dict(self.rsa_public_json)
+        with_kid.update(
+            {
+                "kid": "acme-account-key",
+                "use": "sig",
+                "key_ops": ["verify"],
+                "x5c": [],
+            }
+        )
+        assert self.JWK.from_json(with_kid).thumbprint() == self.rsa.thumbprint()
+        assert self.rsa.thumbprint() == self.rsa.public_key().thumbprint()
+
+    def test_thumbprint_independent_of_member_order_and_padding(self) -> None:
+        def padded(value: str) -> str:
+            return value + "=" * (-len(value) % 4)
+
+        shuffled = {
+            "e": padded(self.rsa_public_json["e"]),
+            "n": padded(self.rsa_public_json["n"]),
+            "kty": "RSA",
+        }
+        parsed = self.JWK.from_json(shuffled)
+        assert parsed.thumbprint() == self.rsa.thumbprint()
+        assert parsed.key_id == self.rsa.key_id
+
+    def test_key_id_is_base64url_thumbprint(self) -> None:
+        from josepy import b64
+
+        assert self.rsa.key_id == b64.b64encode(self.rsa.thumbprint()).decode("ascii")
+        assert "=" not in self.rsa.key_id
+
+    def test_same_key_shared_thumbprint(self) -> None:
+        alternative = self.JWK.from_json({"kid": "rotated-kid", **self.rsa_public_json})
+        assert self.rsa.same_key(alternative)
+        assert alternative.same_key(self.rsa.public_key())
+        assert not self.rsa.same_key(self.JWKEC(key=EC_P256_KEY))
+        assert not self.rsa.same_key("not a JWK")
+
+    def test_same_key_private_and_public_forms(self) -> None:
+        for private in (self.rsa, self.ec):
+            assert private.same_key(private.public_key())
+            assert private.key_id == private.public_key().key_id
+
+    def test_duplicate_members_rejected(self) -> None:
+        duplicate = '{"kty": "RSA", "e": "AQAB", "n": "x", "n": "y"}'
+        with pytest.raises(errors.DeserializationError, match="Duplicate"):
+            self.JWK.json_loads(duplicate)
+
+    def test_extra_members_are_ignored(self) -> None:
+        extra = dict(self.ec_public_json)
+        extra["custom_extension"] = "ignored"
+        assert self.JWK.from_json(extra).thumbprint() == self.ec.thumbprint()
+
+    def test_curve_name_is_case_sensitive(self) -> None:
+        lowercase_crv = dict(self.ec_public_json)
+        lowercase_crv["crv"] = "p-256"
+        with pytest.raises(errors.DeserializationError):
+            self.JWK.from_json(lowercase_crv)
+
+    def test_thumbprint_differs_across_curves(self) -> None:
+        from josepy.jwk import JWKEC
+
+        p256 = JWKEC(key=EC_P256_KEY.public_key())
+        p384 = JWKEC(key=EC_P384_KEY.public_key())
+        p521 = JWKEC(key=EC_P521_KEY.public_key())
+        thumbprints = {p256.thumbprint(), p384.thumbprint(), p521.thumbprint()}
+        assert len(thumbprints) == 3
+        for key in (p256, p384, p521):
+            assert key.thumbprint_members() == {
+                name: key.to_partial_json()[name] for name in ("crv", "kty", "x", "y")
+            }
+
+    def test_oct_thumbprint_members(self) -> None:
+        from josepy.jwk import JWKOct
+
+        oct_key = JWKOct(key=b"foo")
+        assert oct_key.thumbprint_members() == {
+            "k": json_util.encode_b64jose(b"foo"),
+            "kty": "oct",
+        }
+
+    def test_go_jose_fixed_vector_ignores_kid(self) -> None:
+        key = self.JWKRSA.json_loads(self.GO_JOSE_JWK)
+        without_kid = self.JWKRSA.from_json(
+            {
+                name: value
+                for name, value in key.to_partial_json().items()
+                if name in ("kty", "n", "e")
+            }
+        )
+        assert (
+            binascii.hexlify(key.thumbprint())
+            == b"f63838e96077ad1fc01c3f8405774dedc0641f558ebb4b40dccf5f9b6d66a932"
+        )
+        assert key.key_id == without_kid.key_id
+        assert key.same_key(without_kid)
+
+    def test_errors_do_not_leak_private_exponent(self) -> None:
+        private_json = self.rsa.to_partial_json()
+        assert "d" in private_json
+        broken = dict(private_json)
+        broken["n"] = ""
+        with pytest.raises(errors.Error) as exc_info:
+            self.JWK.from_json(broken)
+        assert private_json["d"] not in str(exc_info.value)
 
 
 if __name__ == "__main__":
