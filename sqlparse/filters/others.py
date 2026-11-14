@@ -33,16 +33,25 @@ class StripCommentsFilter:
                 return sql.Token(T.Whitespace, ' ')
 
         sql_hints = (T.Comment.Multiline.Hint, T.Comment.Single.Hint)
+
+        def _is_executable_comment(token):
+            # MySQL executable comments (/*! ... */) contain real SQL
+            # that the server runs; stripping them would drop statements.
+            return (token.ttype == T.Comment.Multiline
+                    and token.value.startswith('/*!'))
+
         tidx, token = get_next_comment()
         while token:
             # skipping token remove if token is a SQL-Hint. issue262
             is_sql_hint = False
-            if token.ttype in sql_hints:
+            if token.ttype in sql_hints or _is_executable_comment(token):
                 is_sql_hint = True
             elif isinstance(token, sql.Comment):
                 comment_tokens = token.tokens
                 if len(comment_tokens) > 0:
-                    if comment_tokens[0].ttype in sql_hints:
+                    if (comment_tokens[0].ttype in sql_hints
+                            or any(_is_executable_comment(t)
+                                   for t in comment_tokens)):
                         is_sql_hint = True
 
             if is_sql_hint:

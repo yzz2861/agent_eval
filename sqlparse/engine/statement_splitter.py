@@ -7,6 +7,13 @@
 
 from sqlparse import sql
 from sqlparse import tokens as T
+from sqlparse.exceptions import SQLParseError
+
+# Maximum length in characters of a single statement. Statements are
+# assembled in memory, so an unbounded statement (e.g. one giant literal
+# in an adversarial script) is a memory-exhaustion vector.
+# Set to None to disable the limit (not recommended for untrusted input).
+MAX_STATEMENT_LENGTH = 10_000_000
 
 
 class StatementSplitter:
@@ -22,6 +29,7 @@ class StatementSplitter:
         self._unconfirmed_start = None
         self._is_create = False
         self._seen_begin = False
+        self._stmt_length = 0
 
         self.consume_ws = False
         self.tokens = []
@@ -169,6 +177,13 @@ class StatementSplitter:
 
             # Append the token to the current statement
             self.tokens.append(sql.Token(ttype, value))
+            self._stmt_length += len(value)
+            if MAX_STATEMENT_LENGTH is not None \
+               and self._stmt_length > MAX_STATEMENT_LENGTH:
+                raise SQLParseError(
+                    f'Maximum statement length exceeded '
+                    f'({MAX_STATEMENT_LENGTH}).'
+                )
 
             # Check if we get the end of a statement
             # Issue762: Allow GO (or "GO 2") as statement splitter.

@@ -39,12 +39,12 @@ This project uses `uv` for dependency and environment management. Common command
 
 The parsing and formatting workflow follows this sequence:
 
-1. **Lexing** (`sqlparse/lexer.py`): Tokenizes SQL text into `(token_type, value)` pairs using regex-based pattern matching
+1. **Lexing** (`sqlparse/lexer.py`): Tokenizes SQL text into `(token_type, value)` pairs using regex-based pattern matching. Delimited constructs (quoted strings, dollar-quoted literals, nested `/* */` and MySQL `/*! */` comments) are located first by the recoverable lexical state machine in `sqlparse/lexstate.py`, so statement boundaries only ever see lexically complete tokens
 2. **Filtering** (`sqlparse/engine/filter_stack.py`): Processes token stream through a `FilterStack` with three stages:
    - `preprocess`: Token-level filters
    - `stmtprocess`: Statement-level filters
    - `postprocess`: Final output filters
-3. **Statement Splitting** (`sqlparse/engine/statement_splitter.py`): Splits token stream into individual SQL statements
+3. **Statement Splitting** (`sqlparse/engine/statement_splitter.py`): Splits token stream into individual SQL statements; only semicolons outside every quoting/commenting construct (as determined by `lexstate.scan()`) end a statement
 4. **Grouping** (`sqlparse/engine/grouping.py`): Groups tokens into higher-level syntactic structures (parentheses, functions, identifiers, etc.)
 5. **Formatting** (`sqlparse/formatter.py` + `sqlparse/filters/`): Applies formatting filters based on options
 
@@ -115,7 +115,7 @@ The main entry points in `sqlparse/__init__.py`:
 Use `Lexer.add_keywords()` to extend the parser with new keywords for different SQL dialects.
 
 ### DoS Prevention
-Be aware of recursion limits and token count limits in grouping operations when handling untrusted SQL input.
+Be aware of recursion limits and token count limits in grouping operations when handling untrusted SQL input. Additional budgets: `lexstate.MAX_COMMENT_DEPTH` (block comment nesting) and `statement_splitter.MAX_STATEMENT_LENGTH` (characters per statement); both raise `SQLParseError` when exceeded. Unclosed strings/comments recover by extending to end of input; unclosed dollar quotes fall back to ordinary text.
 
 ## Testing Conventions
 

@@ -527,3 +527,17 @@ def test_max_recursion(limit_recursion):
 ])
 def test_format_malformed_input_does_not_crash(sql, options):
     assert isinstance(sqlparse.format(sql, **options), str)
+
+
+def test_split_semicolon_in_nested_block_comment():
+    # A semicolon inside a nested block comment used to be treated as a
+    # batch boundary; the whole nested comment is one lexical construct.
+    sql = 'SELECT 1 /* x /* y */ ; */ ; SELECT 2'
+    assert sqlparse.split(sql) == ['SELECT 1 /* x /* y */ ; */ ;', 'SELECT 2']
+
+
+def test_split_mysql_executable_comment_not_dropped():
+    # MySQL executable comments must survive statement splitting.
+    sql = 'SELECT 1; /*!40101 SET @x=1 */; SELECT 2;'
+    assert sqlparse.split(sql) == [
+        'SELECT 1;', '/*!40101 SET @x=1 */;', 'SELECT 2;']

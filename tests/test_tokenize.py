@@ -273,3 +273,23 @@ def test_cli_commands():
 ])
 def test_delimiters_in_strings_and_comments(sql, expected):
     assert expected in list(lexer.tokenize(sql))
+
+
+def test_tokenize_nested_block_comment():
+    tokens = list(lexer.tokenize('SELECT /* a /* b */ c */ 1'))
+    assert (T.Comment.Multiline, '/* a /* b */ c */') in tokens
+
+
+def test_tokenize_mysql_executable_comment():
+    tokens = list(lexer.tokenize('/*!40101 SET @x=1 */'))
+    assert tokens == [(T.Comment.Multiline, '/*!40101 SET @x=1 */')]
+
+
+def test_tokenize_unclosed_string_recovers_to_eof():
+    tokens = list(lexer.tokenize("SELECT 'abc"))
+    assert tokens[-1] == (T.String.Single, "'abc")
+
+
+def test_tokenize_unclosed_comment_recovers_to_eof():
+    tokens = list(lexer.tokenize('SELECT /* abc'))
+    assert tokens[-1] == (T.Comment.Multiline, '/* abc')

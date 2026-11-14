@@ -92,7 +92,9 @@ class TestFormat:
         sql = 'select (/* sql starts here */ select 2)'
         res = sqlparse.format(sql, strip_comments=True, strip_whitespace=True)
         assert res == 'select (select 2)'
-        sql = 'select (/* sql /* starts here */ select 2)'
+        # Block comments nest (PostgreSQL), so the comment below ends at
+        # the second "*/" and still gets stripped completely.
+        sql = 'select (/* sql /* nested */ starts here */ select 2)'
         res = sqlparse.format(sql, strip_comments=True, strip_whitespace=True)
         assert res == 'select (select 2)'
 
