@@ -25,12 +25,8 @@ from .constants3 import (
     TEMPORAL_METRICS,
     OrderedDict,
 )
-from .exceptions import (
-    CVSS3MalformedError,
-    CVSS3MandatoryError,
-    CVSS3RHMalformedError,
-    CVSS3RHScoreDoesNotMatch,
-)
+from .exceptions import CVSS3RHMalformedError, CVSS3RHScoreDoesNotMatch
+from .parser import parse_cvss3_vector
 
 
 def round_up(value):
@@ -67,23 +63,21 @@ class CVSS3(object):
             score, base_vector = vector.split("/", 1)
         except ValueError:
             raise CVSS3RHMalformedError(
-                'Malformed CVSS3 vector in Red Hat notation "{0}"'.format(vector)
+                "Malformed CVSS3 vector in Red Hat notation, expected score and vector"
             )
         try:
             score_value = float(score)
         except ValueError:
             raise CVSS3RHMalformedError(
-                'Malformed CVSS3 vector in Red Hat notation "{0}"'.format(vector)
+                "Malformed CVSS3 vector in Red Hat notation, score is not a float"
             )
         cvss_object = cls(base_vector)
         if cvss_object.scores()[0] == score_value:
             return cvss_object
         else:
             raise CVSS3RHScoreDoesNotMatch(
-                'CVSS3 vector in Red Hat notation "{0}" has score of '
-                '"{1}" which does not match specified score of "{2}"'.format(
-                    base_vector, cvss_object.scores()[0], score
-                )
+                'CVSS3 vector in Red Hat notation has computed score of "{0}" which does '
+                'not match specified score of "{1}"'.format(cvss_object.scores()[0], score)
             )
 
     def __init__(self, vector):
@@ -92,9 +86,11 @@ class CVSS3(object):
             vector (str): string specifying CVSS3 vector, fields may be out of order, fields which
                           are not mandatory may be missing
         """
+        metrics, minor_version = parse_cvss3_vector(vector)
+
         self.vector = vector
-        self.minor_version = None
-        self.metrics = {}
+        self.minor_version = minor_version
+        self.metrics = metrics
         self.original_metrics = None
         self.missing_metrics = []
 
@@ -111,8 +107,6 @@ class CVSS3(object):
         self.modified_isc = None
         self.modified_esc = None
 
-        self.parse_vector()
-        self.check_mandatory()
         self.handle_scope()
         self.add_missing_optional()
         self.compute_base_score()
@@ -121,56 +115,9 @@ class CVSS3(object):
 
     def parse_vector(self):
         """
-        Parses metrics from the CVSS3 vector.
-
-        Raises:
-            CVSS3MalformedError: if vector is not in expected format
+        Parsing is performed by ``parse_cvss3_vector`` before object state is initialized.
         """
-        if self.vector == "":
-            raise CVSS3MalformedError("Malformed CVSS3 vector, vector is empty")
-
-        if self.vector.endswith("/"):
-            raise CVSS3MalformedError('Malformed CVSS3 vector, trailing "/"')
-
-        # Handle 'CVSS:3.x' in the beginning of vector and split vector
-        if self.vector.startswith("CVSS:3.0/"):
-            self.minor_version = 0
-        elif self.vector.startswith("CVSS:3.1/"):
-            self.minor_version = 1
-        else:
-            raise CVSS3MalformedError(
-                'Malformed CVSS3 vector "{0}" is missing mandatory prefix '
-                "or uses unsupported CVSS version".format(self.vector)
-            )
-
-        try:
-            fields = self.vector.split("/")[1:]
-        except IndexError:
-            raise CVSS3MalformedError('Malformed CVSS3 vector "{0}"'.format(self.vector))
-
-        # Parse fields
-        for field in fields:
-            if field == "":
-                raise CVSS3MalformedError('Empty field in CVSS3 vector "{0}"'.format(self.vector))
-
-            try:
-                metric, value = field.split(":")
-            except ValueError:
-                raise CVSS3MalformedError('Malformed CVSS3 field "{0}"'.format(field))
-
-            if metric in METRICS_ABBREVIATIONS:
-                if value in METRICS_VALUES[metric]:
-                    if metric in self.metrics:
-                        raise CVSS3MalformedError('Duplicate metric "{0}"'.format(metric))
-                    self.metrics[metric] = value
-                else:
-                    raise CVSS3MalformedError(
-                        'Unknown value "{0}" in field "{1}"'.format(value, field)
-                    )
-            else:
-                raise CVSS3MalformedError(
-                    'Unknown metric "{0}" in field "{1}"'.format(metric, field)
-                )
+        return None
 
     def handle_scope(self):
         """
@@ -183,17 +130,9 @@ class CVSS3(object):
 
     def check_mandatory(self):
         """
-        Checks if mandatory fields are in CVSS3 vector.
-
-        Raises:
-            CVSS3MandatoryError: if mandatory metric is missing in the vector
+        Mandatory fields are checked by ``parse_cvss3_vector`` before object initialization.
         """
-        missing = []
-        for mandatory_metric in METRICS_MANDATORY:
-            if mandatory_metric not in self.metrics:
-                missing.append(mandatory_metric)
-        if missing:
-            raise CVSS3MandatoryError('Missing mandatory metrics "{0}"'.format(", ".join(missing)))
+        return None
 
     def add_missing_optional(self):
         """

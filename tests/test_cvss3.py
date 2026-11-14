@@ -200,8 +200,126 @@ class TestCVSS3(unittest.TestCase):
         self.assertRaises(CVSS3MalformedError, CVSS3, v)
 
         # Empty field
-        "CVSS:3.0//AC:H/PR:H/UI:R/S:U/C:L/I:N/A:L"
+        v = "CVSS:3.0//AC:H/PR:H/UI:R/S:U/C:L/I:N/A:L"
         self.assertRaises(CVSS3MalformedError, CVSS3, v)
+
+    def test_vector_validation_details(self):
+        valid_base = "CVSS:3.1/AC:L/AV:N/UI:N/PR:N/S:U/C:N/I:N/A:N"
+        metrics, minor_version = parser.parse_cvss3_vector(valid_base)
+        self.assertEqual(1, minor_version)
+        self.assertEqual(
+            {
+                "AV": "N",
+                "AC": "L",
+                "PR": "N",
+                "UI": "N",
+                "S": "U",
+                "C": "N",
+                "I": "N",
+                "A": "N",
+            },
+            metrics,
+        )
+
+        valid_30 = (
+            "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N/"
+            "E:H/RL:O/RC:R/CR:H/IR:M/AR:L/MAV:P/MAC:H/MPR:L/MUI:R/MS:C/MC:H/MI:L/MA:N"
+        )
+        metrics, minor_version = parser.parse_cvss3_vector(valid_30)
+        self.assertEqual(0, minor_version)
+        self.assertEqual(22, len(metrics))
+        self.assertEqual(
+            valid_30,
+            CVSS3(valid_30).clean_vector(),
+        )
+
+        duplicate = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N/AV:P"
+        with self.assertRaises(CVSS3MalformedError) as context:
+            parser.parse_cvss3_vector(duplicate)
+        error = context.exception
+        self.assertEqual("AV", error.metric)
+        self.assertEqual(9, error.position)
+        self.assertEqual(9, error.field_position)
+        self.assertNotIn(duplicate, str(error))
+
+        unknown_metric = "CVSS:3.1/AV:N/AX:L/PR:N/UI:N/S:U/C:N/I:N/A:N"
+        with self.assertRaises(CVSS3MalformedError) as context:
+            parser.parse_cvss3_vector(unknown_metric)
+        self.assertEqual("AX", context.exception.metric)
+        self.assertEqual(2, context.exception.position)
+        self.assertNotIn(unknown_metric, str(context.exception))
+
+        unknown_value = "CVSS:3.1/AV:W/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N"
+        with self.assertRaises(CVSS3MalformedError) as context:
+            parser.parse_cvss3_vector(unknown_value)
+        self.assertEqual("AV", context.exception.metric)
+        self.assertEqual("W", context.exception.value)
+        self.assertEqual(1, context.exception.position)
+        self.assertNotIn(unknown_value, str(context.exception))
+
+        empty_value = "CVSS:3.1/AV:/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N"
+        with self.assertRaises(CVSS3MalformedError) as context:
+            parser.parse_cvss3_vector(empty_value)
+        self.assertEqual("AV", context.exception.metric)
+        self.assertEqual("", context.exception.value)
+        self.assertEqual(1, context.exception.position)
+        self.assertNotIn(empty_value, str(context.exception))
+
+        empty_field = "CVSS:3.1//AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N"
+        with self.assertRaises(CVSS3MalformedError) as context:
+            parser.parse_cvss3_vector(empty_field)
+        self.assertEqual(1, context.exception.position)
+        self.assertNotIn(empty_field, str(context.exception))
+
+        malformed_field = "CVSS:3.1/AV:N:X/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N"
+        with self.assertRaises(CVSS3MalformedError) as context:
+            parser.parse_cvss3_vector(malformed_field)
+        self.assertEqual(1, context.exception.position)
+        self.assertNotIn(malformed_field, str(context.exception))
+
+        missing_mandatory = "CVSS:3.1/AV:N/AC:L/UI:N/S:U/C:N/I:N/A:N"
+        with self.assertRaises(CVSS3MandatoryError) as context:
+            parser.parse_cvss3_vector(missing_mandatory)
+        self.assertEqual("PR", context.exception.metric)
+        self.assertEqual(3, context.exception.position)
+        self.assertEqual(["PR"], context.exception.metrics)
+        self.assertNotIn(missing_mandatory, str(context.exception))
+
+        lower_prefix = "cvss:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N"
+        lower_metric = "CVSS:3.1/av:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N"
+        lower_value = "CVSS:3.1/AV:n/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N"
+        self.assertRaises(CVSS3MalformedError, CVSS3, lower_prefix)
+        with self.assertRaises(CVSS3MalformedError) as context:
+            CVSS3(lower_metric)
+        self.assertEqual("av", context.exception.metric)
+        self.assertEqual(1, context.exception.position)
+        with self.assertRaises(CVSS3MalformedError) as context:
+            CVSS3(lower_value)
+        self.assertEqual("AV", context.exception.metric)
+        self.assertEqual("n", context.exception.value)
+        self.assertEqual(1, context.exception.position)
+
+        base_without_prefix = "AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N"
+        for version in ("2.9", "3.0", "3.1", "3.2"):
+            vector = "CVSS:{0}/".format(version) + base_without_prefix
+            if version in ("3.0", "3.1"):
+                self.assertEqual(
+                    int(version[-1]),
+                    parser.parse_cvss3_vector(vector)[1],
+                )
+            else:
+                with self.assertRaises(CVSS3MalformedError) as context:
+                    parser.parse_cvss3_vector(vector)
+                self.assertNotIn(vector, str(context.exception))
+
+    def test_failed_parsing_does_not_initialize_object(self):
+        invalid_vector = "CVSS:3.1/AV:N/AV:P/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N"
+        cvss = object.__new__(CVSS3)
+        self.assertFalse(hasattr(cvss, "metrics"))
+        with self.assertRaises(CVSS3MalformedError):
+            cvss.__init__(invalid_vector)
+        self.assertFalse(hasattr(cvss, "metrics"))
+        self.assertFalse(hasattr(cvss, "vector"))
 
     def test_rh_vector(self):
         """
