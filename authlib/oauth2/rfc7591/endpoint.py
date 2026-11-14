@@ -12,6 +12,7 @@ from authlib.common.security import generate_token
 from ..rfc6749 import InvalidRequestError
 from ..rfc6749 import JsonResponse
 from ..rfc6749 import MissingAuthorizationError
+from ..rfc6749 import scope_to_list
 from ..rfc6750 import InvalidTokenError
 from .claims import ClientMetadataClaims
 from .errors import InvalidClientMetadataError
@@ -52,6 +53,9 @@ class ClientRegistrationEndpoint:
 
         request.credential = token
 
+        # The client metadata is fully validated before anything is
+        # persisted, so a rejected request cannot leave a half-registered
+        # client behind.
         client_metadata = self.extract_client_metadata(request)
         client_info = self.generate_client_info(request)
         body = {}
@@ -71,6 +75,7 @@ class ClientRegistrationEndpoint:
         software_statement = json_data.pop("software_statement", None)
         if software_statement and self.software_statement_alg_values_supported:
             data = self.extract_software_statement(software_statement, request)
+            self.check_software_statement_scope(json_data, data)
             json_data.update(data)
 
         client_metadata = {}
@@ -89,6 +94,30 @@ class ClientRegistrationEndpoint:
 
             client_metadata.update(**claims.get_registered_claims())
         return client_metadata
+
+    def check_software_statement_scope(self, json_data, statement_data):
+        """Check that the software statement ``scope`` does not exceed the
+        scope requested at the top level of the registration request.
+
+        When both the request and the software statement carry a ``scope``
+        value, the statement value MUST be a subset of the requested one, so
+        that a software statement cannot widen the client permissions beyond
+        what was applied for. Developers MAY rewrite this method to enforce
+        their own policy.
+
+        :param json_data: the top-level registration request payload
+        :param statement_data: the software statement claims
+        """
+        requested_scope = json_data.get("scope")
+        statement_scope = statement_data.get("scope")
+        if not requested_scope or not statement_scope:
+            return
+
+        requested = set(scope_to_list(requested_scope))
+        if not set(scope_to_list(statement_scope)).issubset(requested):
+            raise UnapprovedSoftwareStatementError(
+                "The software statement 'scope' exceeds the requested scope."
+            )
 
     def extract_software_statement(self, software_statement, request):
         key = self.resolve_public_key(request)
@@ -116,6 +145,17 @@ class ClientRegistrationEndpoint:
             raise InvalidSoftwareStatementError(
                 "The 'aud' claim does not identify this server."
             )
+
+        # The statement issuer MUST be approved by the local policy when the
+        # server declares one. The error description MUST NOT echo the
+        # configured issuers or the resolved key.
+        issuers = self.get_software_statement_issuers()
+        if issuers is not None:
+            iss = token.claims.get("iss")
+            if not iss or not audience_matches(iss, issuers):
+                raise UnapprovedSoftwareStatementError(
+                    "The software statement issuer is not approved."
+                )
 
         return token.claims
 
@@ -178,6 +218,23 @@ class ClientRegistrationEndpoint:
         """
         issuer = (self.get_server_metadata() or {}).get("issuer")
         return [issuer] if issuer else []
+
+    def get_software_statement_issuers(self):
+        """Return the accepted values of the software statement ``iss`` claim.
+
+        When it returns a list, a software statement without ``iss``, or with
+        an ``iss`` value not in the list, is rejected with an
+        ``unapproved_software_statement`` error. The default of ``None``
+        disables the issuer check, in which case trust is established only
+        by :meth:`resolve_public_key`. Deployments SHOULD re-implement this
+        method to name their approved software statement issuers::
+
+            def get_software_statement_issuers(self):
+                return ["https://directory.example.com"]
+
+        :return: list of strings, or ``None``
+        """
+        return None
 
     def authenticate_token(self, request):
         """Authenticate current credential who is requesting to register a client.

@@ -7,6 +7,7 @@ from joserfc.jwk import KeySet
 from joserfc.jwk import RSAKey
 
 from authlib.deprecate import AuthlibDeprecationWarning
+from authlib.oauth2.rfc7591 import ClientMetadataClaims
 from authlib.oauth2.rfc7591 import (
     ClientRegistrationEndpoint as _ClientRegistrationEndpoint,
 )
@@ -514,3 +515,220 @@ def test_software_statement_custom_audiences(test_client, server, metadata):
     body = {"software_statement": jwt.encode({"alg": "RS256"}, payload, key)}
     rv = test_client.post("/create_client", json=body, headers=headers)
     assert json.loads(rv.data)["error"] == "invalid_software_statement"
+
+
+def test_invalid_metadata_is_not_persisted(test_client, app):
+    """A rejected request leaves no half-registered client behind."""
+    headers = {"Authorization": "bearer abc"}
+    body = {"client_name": "Authlib", "redirect_uris": ["not a uri"]}
+    rv = test_client.post("/create_client", json=body, headers=headers)
+    assert rv.status_code == 400
+    assert Client.query.count() == 0
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "com.example.app:/callback",
+        "com.example.app://callback",
+        "http://client.test/callback",
+        "https://client.test/callback#fragment",
+        "https://user@client.test/callback",
+        "https://client.test@attacker.test/callback",
+    ],
+    ids=[
+        "custom-scheme-path",
+        "custom-scheme-authority",
+        "http-scheme",
+        "fragment",
+        "userinfo",
+        "disguised-host",
+    ],
+)
+def test_redirect_uris_rejected(test_client, uri):
+    """redirect_uris only accept declared schemes, without fragment or userinfo."""
+    headers = {"Authorization": "bearer abc"}
+    body = {"client_name": "Authlib", "redirect_uris": [uri]}
+    rv = test_client.post("/create_client", json=body, headers=headers)
+    resp = json.loads(rv.data)
+    assert rv.status_code == 400
+    assert resp["error"] == "invalid_client_metadata"
+    assert "redirect_uris" in resp["error_description"]
+    assert Client.query.count() == 0
+
+
+def test_redirect_uris_declared_schemes(test_client, server, metadata):
+    """The authorization server can declare extra redirect URI schemes."""
+
+    class NativeAppMetadataClaims(ClientMetadataClaims):
+        redirect_uri_schemes = frozenset({"https", "com.example.app"})
+
+    class NativeAppRegistration(ClientRegistrationEndpoint):
+        def get_server_metadata(self):
+            return metadata
+
+    endpoint = NativeAppRegistration(server, claims_classes=[NativeAppMetadataClaims])
+    server._endpoints[ClientRegistrationEndpoint.ENDPOINT_NAME] = [endpoint]
+
+    headers = {"Authorization": "bearer abc"}
+    body = {
+        "client_name": "Authlib",
+        "redirect_uris": ["com.example.app://callback"],
+    }
+    rv = test_client.post("/create_client", json=body, headers=headers)
+    resp = json.loads(rv.data)
+    assert rv.status_code == 201
+    assert resp["redirect_uris"] == ["com.example.app://callback"]
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["client_uri", "logo_uri", "tos_uri", "policy_uri", "jwks_uri"],
+)
+def test_uri_metadata_schemes(test_client, key):
+    """URI metadata only accept declared schemes."""
+    headers = {"Authorization": "bearer abc"}
+
+    body = {"client_name": "Authlib", key: "http://client.test/page"}
+    rv = test_client.post("/create_client", json=body, headers=headers)
+    resp = json.loads(rv.data)
+    assert rv.status_code == 400
+    assert resp["error"] == "invalid_client_metadata"
+    assert key in resp["error_description"]
+
+    body = {"client_name": "Authlib", key: "https://client.test/page"}
+    rv = test_client.post("/create_client", json=body, headers=headers)
+    resp = json.loads(rv.data)
+    assert rv.status_code == 201
+    assert resp["client_name"] == "Authlib"
+
+
+def test_jwks_max_keys(test_client):
+    """A jwks document with too many keys is rejected."""
+    headers = {"Authorization": "bearer abc"}
+    keyset = KeySet.generate_key_set("EC", "P-256", count=11)
+    body = {"client_name": "Authlib", "jwks": keyset.as_dict(private=False)}
+    rv = test_client.post("/create_client", json=body, headers=headers)
+    resp = json.loads(rv.data)
+    assert rv.status_code == 400
+    assert resp["error"] == "invalid_client_metadata"
+    assert "jwks" in resp["error_description"]
+    assert Client.query.count() == 0
+
+
+@pytest.mark.parametrize(
+    "grant_types,response_types",
+    [
+        (["authorization_code"], ["code"]),
+        (["implicit"], ["token"]),
+        (["authorization_code", "implicit"], ["code id_token token"]),
+        (["authorization_code", "refresh_token"], ["code"]),
+    ],
+    ids=["code", "implicit", "hybrid", "extra-grant"],
+)
+def test_compatible_grant_types_response_types(
+    test_client, grant_types, response_types
+):
+    headers = {"Authorization": "bearer abc"}
+    body = {
+        "client_name": "Authlib",
+        "grant_types": grant_types,
+        "response_types": response_types,
+    }
+    rv = test_client.post("/create_client", json=body, headers=headers)
+    assert rv.status_code == 201
+
+
+@pytest.mark.parametrize(
+    "grant_types,response_types",
+    [
+        (["client_credentials"], ["code"]),
+        (["authorization_code"], ["token"]),
+        (["implicit"], ["code"]),
+        (["authorization_code"], ["code", "id_token"]),
+    ],
+    ids=[
+        "no-code-grant",
+        "missing-implicit",
+        "missing-code",
+        "missing-implicit-hybrid",
+    ],
+)
+def test_incompatible_grant_types_response_types(
+    test_client, grant_types, response_types
+):
+    """grant_types and response_types must be consistent with each other."""
+    headers = {"Authorization": "bearer abc"}
+    body = {
+        "client_name": "Authlib",
+        "grant_types": grant_types,
+        "response_types": response_types,
+    }
+    rv = test_client.post("/create_client", json=body, headers=headers)
+    resp = json.loads(rv.data)
+    assert rv.status_code == 400
+    assert resp["error"] == "invalid_client_metadata"
+    assert "grant_types" in resp["error_description"]
+    assert Client.query.count() == 0
+
+
+def test_software_statement_issuers(test_client, server, metadata):
+    """Only approved software statement issuers are accepted."""
+
+    class IssuersClientRegistrationEndpoint(ClientRegistrationEndpoint):
+        def get_server_metadata(self):
+            return metadata
+
+        def get_software_statement_issuers(self):
+            return ["https://directory.test"]
+
+    server._endpoints[ClientRegistrationEndpoint.ENDPOINT_NAME] = [
+        IssuersClientRegistrationEndpoint(server)
+    ]
+    key = RSAKey.import_key(read_file_path("rsa_private.pem"))
+    headers = {"Authorization": "bearer abc"}
+
+    payload = {"client_name": "Authlib", "iss": "https://directory.test"}
+    body = {"software_statement": jwt.encode({"alg": "RS256"}, payload, key)}
+    rv = test_client.post("/create_client", json=body, headers=headers)
+    assert json.loads(rv.data)["client_name"] == "Authlib"
+
+    payload = {"client_name": "Authlib", "iss": "https://attacker.test"}
+    body = {"software_statement": jwt.encode({"alg": "RS256"}, payload, key)}
+    rv = test_client.post("/create_client", json=body, headers=headers)
+    resp = json.loads(rv.data)
+    assert resp["error"] == "unapproved_software_statement"
+    assert "directory.test" not in resp.get("error_description", "")
+
+    payload = {"client_name": "Authlib"}
+    body = {"software_statement": jwt.encode({"alg": "RS256"}, payload, key)}
+    rv = test_client.post("/create_client", json=body, headers=headers)
+    resp = json.loads(rv.data)
+    assert resp["error"] == "unapproved_software_statement"
+
+
+def test_software_statement_scope(test_client):
+    """The software statement scope cannot be wider than the requested one."""
+    key = RSAKey.import_key(read_file_path("rsa_private.pem"))
+    headers = {"Authorization": "bearer abc"}
+
+    # The statement scope is a subset of the requested scope: accepted.
+    payload = {"client_name": "Authlib", "scope": "profile"}
+    body = {
+        "scope": "profile email",
+        "software_statement": jwt.encode({"alg": "RS256"}, payload, key),
+    }
+    rv = test_client.post("/create_client", json=body, headers=headers)
+    resp = json.loads(rv.data)
+    assert resp["client_name"] == "Authlib"
+    assert resp["scope"] == "profile"
+
+    # The statement scope is wider than the requested scope: rejected.
+    payload = {"client_name": "Authlib", "scope": "profile email admin"}
+    body = {
+        "scope": "profile email",
+        "software_statement": jwt.encode({"alg": "RS256"}, payload, key),
+    }
+    rv = test_client.post("/create_client", json=body, headers=headers)
+    resp = json.loads(rv.data)
+    assert resp["error"] == "unapproved_software_statement"

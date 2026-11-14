@@ -82,6 +82,23 @@ should be implemented:
             # can be a string, bytes, jwk and jwk set
             return request.user.public_jwk_set
 
+The client metadata is always validated before the client is saved, so a
+rejected request cannot leave a half-registered client behind. The validation
+enforces the local policy:
+
+- URI metadata only accept the schemes declared by
+  :attr:`ClientMetadataClaims.uri_schemes` and
+  :attr:`ClientMetadataClaims.redirect_uri_schemes` (``https`` by default),
+  and MUST NOT contain a fragment or a userinfo component.
+- ``jwks`` and ``jwks_uri`` MUST NOT both be present, and a ``jwks`` document
+  is bounded to :attr:`ClientMetadataClaims.jwks_max_keys` keys.
+- ``grant_types`` and ``response_types`` MUST be consistent with each other
+  when both are present.
+- A software statement is rejected when its ``iss`` is not approved by
+  :meth:`ClientRegistrationEndpoint.get_software_statement_issuers`, when its
+  ``aud`` does not identify the server, or when its ``scope`` is wider than
+  the scope requested at the top level of the registration request.
+
 Register this endpoint and use this endpoint in routes:
 
 .. code-block:: python

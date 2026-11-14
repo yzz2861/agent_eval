@@ -45,6 +45,20 @@ class ClientMetadataClaims(BaseClaims):
         "software_version": str,
     }
 
+    #: URI schemes accepted in ``redirect_uris`` values. Custom schemes used
+    #: by native applications and loopback ``http`` URIs are rejected unless
+    #: the authorization server explicitly declares them here.
+    redirect_uri_schemes = frozenset({"https"})
+
+    #: URI schemes accepted in the other URI metadata values, such as
+    #: ``client_uri``, ``logo_uri``, ``tos_uri``, ``policy_uri`` and
+    #: ``jwks_uri``.
+    uri_schemes = frozenset({"https"})
+
+    #: Maximum number of keys accepted in a ``jwks`` document. It bounds the
+    #: resources needed to import and store the key set.
+    jwks_max_keys = 10
+
     def validate(self, now=None, leeway=0):
         super().validate(now, leeway)
         self.validate_redirect_uris()
@@ -75,7 +89,9 @@ class ClientMetadataClaims(BaseClaims):
         uris = self.get("redirect_uris")
         if uris:
             for uri in uris:
-                self._validate_uri("redirect_uris", uri)
+                self._validate_uri(
+                    "redirect_uris", uri, schemes=self.redirect_uri_schemes
+                )
 
     def validate_token_endpoint_auth_method(self):
         """String indicator of the requested authentication method for the
@@ -88,7 +104,26 @@ class ClientMetadataClaims(BaseClaims):
     def validate_grant_types(self):
         """Array of OAuth 2.0 grant type strings that the client can use at
         the token endpoint.
+
+        When ``response_types`` is also present, both values MUST be
+        consistent: the ``code`` response type requires the
+        ``authorization_code`` grant type, and response types containing
+        ``token`` or ``id_token`` require the ``implicit`` grant type.
         """
+        grant_types = self.get("grant_types")
+        response_types = self.get("response_types")
+        if not grant_types or not response_types:
+            return
+
+        required = set()
+        for response_type in response_types:
+            values = set(response_type.split())
+            if "code" in values:
+                required.add("authorization_code")
+            if values.intersection({"token", "id_token"}):
+                required.add("implicit")
+        if not required.issubset(grant_types):
+            raise InvalidClaimError("grant_types")
 
     def validate_response_types(self):
         """Array of the OAuth 2.0 response type strings that the client can
@@ -193,6 +228,12 @@ class ClientMetadataClaims(BaseClaims):
             #  The "jwks_uri" and "jwks" parameters MUST NOT both  be present
             raise InvalidClaimError("jwks")
 
+        # Bound the key set size before importing it, so that a huge
+        # document cannot exhaust server resources.
+        keys = self["jwks"].get("keys")
+        if isinstance(keys, list) and len(keys) > self.jwks_max_keys:
+            raise InvalidClaimError("jwks")
+
         try:
             key_set = KeySet.import_key_set(self["jwks"])
         except (JoseError, ValueError, KeyError, TypeError) as exc:
@@ -231,10 +272,12 @@ class ClientMetadataClaims(BaseClaims):
         of this specification.
         """
 
-    def _validate_uri(self, key, uri=None):
+    def _validate_uri(self, key, uri=None, schemes=None):
+        if schemes is None:
+            schemes = self.uri_schemes
         if uri is None:
             uri = self.get(key)
-        if uri and not is_valid_url(uri, fragments_allowed=False):
+        if uri and not is_valid_url(uri, fragments_allowed=False, schemes=schemes):
             raise InvalidClaimError(key)
 
     @classmethod

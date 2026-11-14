@@ -139,7 +139,7 @@ def extract_params(raw):
         return None
 
 
-def is_valid_url(url: str, fragments_allowed=True):
+def is_valid_url(url: str, fragments_allowed=True, schemes=None):
     try:
         parsed = urlparse.urlparse(url)
     except ValueError:
@@ -148,6 +148,11 @@ def is_valid_url(url: str, fragments_allowed=True):
     # The userinfo component can disguise the actual host,
     # as in "https://provider.test@attacker.test/".
     if "@" in parsed.netloc:
+        return False
+
+    # Only explicitly declared schemes are accepted, so that custom
+    # schemes cannot sneak in where the server did not opt in.
+    if schemes is not None and parsed.scheme not in schemes:
         return False
 
     return bool(
