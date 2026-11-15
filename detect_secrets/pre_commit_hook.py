@@ -29,6 +29,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     for filename in args.filenames:
         secrets.scan_file(filename)
 
+    if secrets.has_plugin_errors:
+        # A plugin failed partway through, so we cannot vouch for these files.
+        # Block the commit instead of silently scanning only part of it.
+        _report_plugin_errors(secrets)
+        return 2
+
     new_secrets = secrets
     if args.baseline:
         new_secrets = secrets - args.baseline
@@ -70,6 +76,30 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 3
 
     return 0
+
+
+def _report_plugin_errors(secrets: SecretsCollection) -> None:
+    """Summarizes isolated plugin failures without exposing secret values."""
+    errors = secrets.plugin_errors.errors
+    print(
+        color.colorize(
+            'ERROR: Scan completed with {} plugin error(s); results are incomplete!'.format(
+                len(errors),
+            ),
+            color.AnsiColor.RED,
+        ),
+    )
+    for error in errors:
+        location = error.filename
+        if error.line_number:
+            location = f'{location}:{error.line_number}'
+        print(
+            '  [{error_type}] {plugin} failed while scanning {location}'.format(
+                error_type=error.error_type,
+                plugin=error.plugin,
+                location=location,
+            ),
+        )
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:

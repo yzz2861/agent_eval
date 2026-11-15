@@ -27,7 +27,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         log.set_debug_level(args.verbose)
 
     if args.action == 'scan':
-        handle_scan_action(args)
+        return handle_scan_action(args)
     elif args.action == 'audit':
         handle_audit_action(args)
 
@@ -38,12 +38,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     return ParserBuilder().add_console_use_arguments().parse_args(argv)
 
 
-def handle_scan_action(args: argparse.Namespace) -> None:
+def handle_scan_action(args: argparse.Namespace) -> int:
     if args.list_all_plugins:
         # NOTE: If there was a baseline provided, it would already have been parsed and
         # settings populated by the time it reaches here.
         print('\n'.join(get_settings().plugins))
-        return
+        return 0
 
     if args.string:
         line = args.string
@@ -52,7 +52,7 @@ def handle_scan_action(args: argparse.Namespace) -> None:
             line = sys.stdin.read().splitlines()[0]
 
         print(scan_adhoc_string(line))
-        return
+        return 0
 
     if args.only_allowlisted:
         secrets = SecretsCollection(root=args.custom_root)
@@ -65,7 +65,7 @@ def handle_scan_action(args: argparse.Namespace) -> None:
                 secrets[secret.filename].add(secret)
 
         print(json.dumps(baseline.format_for_output(secrets), indent=2))
-        return
+        return 0
 
     secrets = baseline.create(
         *args.path,
@@ -87,6 +87,34 @@ def handle_scan_action(args: argparse.Namespace) -> None:
         baseline.save_to_file(secrets, args.baseline_filename)
     else:
         print(json.dumps(baseline.format_for_output(secrets, is_slim_mode=args.slim), indent=2))
+
+    if secrets.has_plugin_errors:
+        # The scan did not cover every (plugin, file) pair, so its results are
+        # incomplete. Signal failure rather than letting CI treat a partial
+        # scan as a clean one.
+        _report_plugin_errors(secrets)
+        return 2
+
+    return 0
+
+
+def _report_plugin_errors(secrets: SecretsCollection) -> None:
+    """Summarizes isolated plugin failures on stderr (without leaking secrets)."""
+    errors = secrets.plugin_errors.errors
+    log.error(
+        'Scan completed with %d plugin error(s); the results are incomplete:' % len(errors),
+    )
+    for error in errors:
+        location = error.filename
+        if error.line_number:
+            location = f'{location}:{error.line_number}'
+        log.error(
+            '  [{error_type}] plugin "{plugin}" while scanning "{location}"'.format(
+                error_type=error.error_type,
+                plugin=error.plugin,
+                location=location,
+            ),
+        )
 
 
 def scan_adhoc_string(line: str) -> str:

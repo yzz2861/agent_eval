@@ -9,8 +9,10 @@ from typing import Optional
 from typing import Set
 from typing import Tuple
 
-from . import scan
 from ..util.path import convert_local_os_path
+from . import scan
+from .plugin_errors import PluginError
+from .plugin_errors import PluginErrorSink
 from .potential_secret import PotentialSecret
 from detect_secrets.settings import configure_settings_from_baseline
 from detect_secrets.settings import get_settings
@@ -35,6 +37,10 @@ class SecretsCollection:
         self.data: Dict[str, Set[PotentialSecret]] = defaultdict(set)
         self.root = root
 
+        # Failures isolated while scanning are aggregated here so callers can
+        # tell a clean scan apart from an incomplete one.
+        self.plugin_errors = PluginErrorSink()
+
     @classmethod
     def load_from_baseline(cls, baseline: Dict[str, Any]) -> 'SecretsCollection':
         output = cls()
@@ -48,6 +54,10 @@ class SecretsCollection:
     @property
     def files(self) -> Set[str]:
         return set(self.data.keys())
+
+    @property
+    def has_plugin_errors(self) -> bool:
+        return bool(self.plugin_errors)
 
     def scan_files(self, *filenames: str, num_processors: Optional[int] = None) -> None:
         """Just like scan_file, but optimized through parallel processing."""
@@ -65,15 +75,22 @@ class SecretsCollection:
             initializer=configure_settings_from_baseline,
             initargs=(child_process_settings,),
         ) as p:
-            for secrets in p.imap_unordered(
+            for secrets, errors in p.imap_unordered(
                 _scan_file_and_serialize,
                 [os.path.join(self.root, filename) for filename in filenames],
             ):
                 for secret in secrets:
                     self[os.path.relpath(secret.filename, self.root)].add(secret)
 
+                # Errors are picklable dataclasses, so failures in worker
+                # processes are aggregated just like the discovered secrets.
+                self.plugin_errors.extend(errors)
+
     def scan_file(self, filename: str) -> None:
-        for secret in scan.scan_file(os.path.join(self.root, convert_local_os_path(filename))):
+        for secret in scan.scan_file(
+            os.path.join(self.root, convert_local_os_path(filename)),
+            error_sink=self.plugin_errors,
+        ):
             self[convert_local_os_path(filename)].add(secret)
 
     def scan_diff(self, diff: str) -> None:
@@ -81,7 +98,7 @@ class SecretsCollection:
         :raises: UnidiffParseError
         """
         try:
-            for secret in scan.scan_diff(diff):
+            for secret in scan.scan_diff(diff, error_sink=self.plugin_errors):
                 self[secret.filename].add(secret)
         except ImportError:     # pragma: no cover
             raise NotImplementedError(
@@ -313,6 +330,10 @@ class SecretsCollection:
         return sum(len(secrets) for secrets in self.data.values())
 
 
-def _scan_file_and_serialize(filename: str) -> List[PotentialSecret]:
+def _scan_file_and_serialize(
+    filename: str,
+) -> Tuple[List[PotentialSecret], List[PluginError]]:
     """Used for multiprocessing, since lambdas can't be serialized."""
-    return list(scan.scan_file(filename))
+    sink = PluginErrorSink()
+    secrets = list(scan.scan_file(filename, error_sink=sink))
+    return secrets, sink.errors

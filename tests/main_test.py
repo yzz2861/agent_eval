@@ -222,6 +222,48 @@ class TestScanOnlyAllowlisted:
         assert not output['results']
 
 
+def test_scan_returns_incomplete_exit_code_on_plugin_errors():
+    from detect_secrets.core.plugin_errors import PluginError
+    from detect_secrets.core.plugin_errors import PluginErrorSink
+
+    collection = SecretsCollection()
+    collection.plugin_errors = PluginErrorSink()
+    collection.plugin_errors.errors.append(
+        PluginError(
+            filename='file.txt',
+            plugin='BrokenPlugin',
+            error_type='error',
+            message='plugin raised an exception while scanning file',
+            line_number=3,
+        ),
+    )
+
+    with mock.patch.object(baseline, 'create', return_value=collection), mock_printer(
+        main_module,
+    ) as printer:
+        exit_code = main_module.main(['scan', 'test_data'])
+
+    assert exit_code == 2
+    payload = json.loads(printer.message)
+    # The baseline output schema stays compatible: errors are reported on
+    # stderr, not mixed into the JSON baseline.
+    assert set(payload.keys()) >= {
+        'version',
+        'plugins_used',
+        'filters_used',
+        'results',
+        'generated_at',
+    }
+
+
+def test_scan_returns_zero_when_complete():
+    collection = SecretsCollection()
+    with mock.patch.object(baseline, 'create', return_value=collection), mock_printer(
+        main_module,
+    ):
+        assert main_module.main(['scan', 'test_data']) == 0
+
+
 def test_list_all_plugins():
     with mock_printer(main_module) as printer:
         assert main_module.main(['scan', '--list-all-plugins']) == 0

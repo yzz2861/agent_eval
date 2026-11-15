@@ -227,3 +227,41 @@ def assert_commit_blocked(command: List[str]):
 
 def assert_commit_blocked_with_diff_exit_code(command: List[str]):
     assert main(command) == 3
+
+
+def test_incomplete_scan_due_to_plugin_error_is_blocked():
+    from detect_secrets.core.plugin_errors import PluginError
+    from detect_secrets.core.plugin_errors import PluginErrorSink
+
+    def scan_with_error(self, filename):
+        self.plugin_errors = PluginErrorSink()
+        self.plugin_errors.errors.append(
+            PluginError(
+                filename=filename,
+                plugin='BrokenPlugin',
+                error_type='error',
+                message='plugin raised an exception while scanning file',
+            ),
+        )
+
+    with mock.patch.object(SecretsCollection, 'scan_file', scan_with_error):
+        assert main(['test_data/files/file_with_no_secrets.py']) == 2
+
+
+def test_timeout_scan_is_blocked():
+    from detect_secrets.core.plugin_errors import PluginError
+    from detect_secrets.core.plugin_errors import PluginErrorSink
+
+    def scan_with_timeout(self, filename):
+        self.plugin_errors = PluginErrorSink()
+        self.plugin_errors.errors.append(
+            PluginError(
+                filename=filename,
+                plugin='SlowPlugin',
+                error_type='timeout',
+                message='plugin timed out while scanning file',
+            ),
+        )
+
+    with mock.patch.object(SecretsCollection, 'scan_file', scan_with_timeout):
+        assert main(['test_data/files/file_with_no_secrets.py']) == 2

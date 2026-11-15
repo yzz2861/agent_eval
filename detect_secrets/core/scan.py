@@ -22,6 +22,10 @@ from ..util.code_snippet import get_code_snippet
 from ..util.inject import call_function_with_arguments
 from ..util.path import get_relative_path
 from .log import log
+from .plugin_errors import bind_plugin_error_sink
+from .plugin_errors import PluginErrorSink
+from .plugin_errors import reset_plugin_error_sink
+from .plugin_errors import run_plugin
 from .plugins import Plugin
 from .potential_secret import PotentialSecret
 
@@ -137,7 +141,10 @@ def scan_line(line: str) -> Generator[PotentialSecret, None, None]:
     )
 
 
-def scan_file(filename: str) -> Generator[PotentialSecret, None, None]:
+def scan_file(
+    filename: str,
+    error_sink: PluginErrorSink = None,
+) -> Generator[PotentialSecret, None, None]:
     try:
         if not get_plugins():   # pragma: no cover
             log.error('No plugins to scan with!')
@@ -149,6 +156,11 @@ def scan_file(filename: str) -> Generator[PotentialSecret, None, None]:
     if _is_filtered_out(required_filter_parameters=['filename'], filename=filename):
         return
 
+    # Bind the (possibly caller-supplied) sink for the generator's lifetime.
+    # We bind/reset explicitly rather than via a context manager so that
+    # failures flow into the exact sink the caller is reading from.
+    sink = error_sink if error_sink is not None else PluginErrorSink()
+    token = bind_plugin_error_sink(sink)
     try:
         has_secret = False
         for lines in _get_lines_from_file(filename):
@@ -164,9 +176,14 @@ def scan_file(filename: str) -> Generator[PotentialSecret, None, None]:
     except IOError:
         log.warning(f'Unable to open file: {filename}')
         return
+    finally:
+        reset_plugin_error_sink(token)
 
 
-def scan_diff(diff: str) -> Generator[PotentialSecret, None, None]:
+def scan_diff(
+    diff: str,
+    error_sink: PluginErrorSink = None,
+) -> Generator[PotentialSecret, None, None]:
     """
     :raises: ImportError
     """
@@ -174,8 +191,13 @@ def scan_diff(diff: str) -> Generator[PotentialSecret, None, None]:
         log.error('No plugins to scan with!')
         return
 
-    for filename, lines in _get_lines_from_diff(diff):
-        yield from _process_line_based_plugins(lines, filename=filename)
+    sink = error_sink if error_sink is not None else PluginErrorSink()
+    token = bind_plugin_error_sink(sink)
+    try:
+        for filename, lines in _get_lines_from_diff(diff):
+            yield from _process_line_based_plugins(lines, filename=filename)
+    finally:
+        reset_plugin_error_sink(token)
 
 
 def scan_for_allowlisted_secrets_in_file(filename: str) -> Generator[PotentialSecret, None, None]:
@@ -362,13 +384,24 @@ def _scan_line(
 ) -> Generator[PotentialSecret, None, None]:
     # NOTE: We don't apply filter functions here yet, because we don't have any filters
     # that operate on (filename, line, plugin) without `secret`
-    secrets = call_function_with_arguments(
-        plugin.analyze_line,
+    def invoke_plugin() -> Any:
+        return call_function_with_arguments(
+            plugin.analyze_line,
+            filename=filename,
+            line=line,
+            line_number=line_number,
+            context=context,
+            **kwargs,
+        )
+
+    # A single broken plugin must not abort the scan: failures are recorded
+    # (with the file and plugin name) and `None` is returned so the remaining
+    # plugins and files keep being processed.
+    secrets = run_plugin(
+        type(plugin).__name__,
+        invoke_plugin,
         filename=filename,
-        line=line,
         line_number=line_number,
-        context=context,
-        **kwargs,
     )
     if not secrets:
         return

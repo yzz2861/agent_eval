@@ -1,14 +1,19 @@
 import os
+import re
+import time
 import textwrap
 from pathlib import Path
 
 import pytest
 
 from detect_secrets.core import scan
+from detect_secrets.core.plugin_errors import PluginErrorSink
+from detect_secrets.plugins.base import RegexBasedDetector
 from detect_secrets.settings import transient_settings
 from detect_secrets.util import git
 from detect_secrets.util.path import get_relative_path_if_in_cwd
 from testing.mocks import mock_named_temporary_file
+from testing.plugins import register_plugin
 
 
 class TestGetFilesToScan:
@@ -95,6 +100,125 @@ class TestScanFile:
             f.seek(0)
 
             assert not list(scan.scan_file(f.name))
+
+
+class WorkingTestDetector(RegexBasedDetector):
+    secret_type = 'WorkingTestDetector'
+    denylist = (re.compile(r'working-secret-[a-z0-9]+'),)
+
+
+class BrokenTestDetector(RegexBasedDetector):
+    secret_type = 'BrokenTestDetector'
+    denylist = (re.compile(r'broken-trigger'),)
+
+    def analyze_string(self, string):
+        raise RuntimeError('token AKIA-LEAKED-SECRET-0000 should not be logged')
+
+
+class SlowTestDetector(RegexBasedDetector):
+    secret_type = 'SlowTestDetector'
+    denylist = (re.compile(r'slow-trigger'),)
+
+    def analyze_string(self, string):
+        time.sleep(2)
+        yield from super().analyze_string(string)
+
+
+class TestPluginIsolation:
+    @pytest.fixture
+    def secret_file(self):
+        with mock_named_temporary_file(suffix='.txt') as f:
+            f.write(
+                os.linesep.join([
+                    'working-secret-aaaa1111 and broken-trigger',
+                    'working-secret-bbbb2222 alone',
+                ]).encode(),
+            )
+            f.seek(0)
+            yield f.name
+
+    @staticmethod
+    def test_broken_plugin_does_not_abort_scan(secret_file):
+        with register_plugin(BrokenTestDetector()), register_plugin(
+            WorkingTestDetector(),
+        ), transient_settings({
+            'plugins_used': [
+                {'name': 'BrokenTestDetector'},
+                {'name': 'WorkingTestDetector'},
+            ],
+            'filters_used': [],
+        }):
+            sink = PluginErrorSink()
+            secrets = list(scan.scan_file(secret_file, error_sink=sink))
+
+        # Candidates discovered by the healthy plugin must not be swallowed.
+        assert len(secrets) == 2
+        assert all(secret.type == 'WorkingTestDetector' for secret in secrets)
+
+        # The failure is recorded with file and plugin name.
+        assert len(sink.errors) >= 1
+        error = sink.errors[0]
+        assert error.plugin == 'BrokenTestDetector'
+        assert error.filename == secret_file
+        assert error.error_type == 'error'
+        assert 'AKIA-LEAKED-SECRET-0000' not in str(sink.errors)
+
+    @staticmethod
+    def test_scan_continues_without_a_supplied_sink(secret_file, mock_log):
+        with register_plugin(BrokenTestDetector()), register_plugin(
+            WorkingTestDetector(),
+        ), transient_settings({
+            'plugins_used': [
+                {'name': 'BrokenTestDetector'},
+                {'name': 'WorkingTestDetector'},
+            ],
+            'filters_used': [],
+        }):
+            secrets = list(scan.scan_file(secret_file))
+
+        assert len(secrets) == 2
+        assert 'AKIA-LEAKED-SECRET-0000' not in mock_log.messages.get('error', '')
+
+    @staticmethod
+    def test_timeout_is_isolated_and_distinct(monkeypatch, secret_file):
+        monkeypatch.setenv('DETECT_SECRETS_PLUGIN_TIMEOUT', '0.2')
+        with register_plugin(SlowTestDetector()), register_plugin(
+            WorkingTestDetector(),
+        ), transient_settings({
+            'plugins_used': [
+                {'name': 'SlowTestDetector'},
+                {'name': 'WorkingTestDetector'},
+            ],
+            'filters_used': [],
+        }):
+            sink = PluginErrorSink()
+            start = time.monotonic()
+            secrets = list(scan.scan_file(secret_file, error_sink=sink))
+            elapsed = time.monotonic() - start
+
+        assert elapsed < 1.5
+        assert len(secrets) == 2
+        assert any(error.error_type == 'timeout' for error in sink.errors)
+        assert all(error.plugin == 'SlowTestDetector' for error in sink.errors)
+
+
+class TestAdhocScanLineIsolation:
+    @staticmethod
+    def test_broken_plugin_does_not_kill_adhoc_scan():
+        with register_plugin(BrokenTestDetector()), register_plugin(
+            WorkingTestDetector(),
+        ), transient_settings({
+            'plugins_used': [
+                {'name': 'BrokenTestDetector'},
+                {'name': 'WorkingTestDetector'},
+            ],
+            'filters_used': [],
+        }):
+            secrets = list(
+                scan.scan_line('broken-trigger and working-secret-adhoc1'),
+            )
+
+        assert [secret.type for secret in secrets] == ['WorkingTestDetector']
 
 
 @pytest.fixture(autouse=True)
