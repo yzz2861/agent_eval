@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from detect_secrets.core import scan
+from detect_secrets.plugins.high_entropy_strings import Base64HighEntropyString
 from detect_secrets.settings import transient_settings
 from detect_secrets.util import git
 from detect_secrets.util.path import get_relative_path_if_in_cwd
@@ -85,6 +86,29 @@ class TestScanFile:
             f.seek(0)
 
             assert not list(scan.scan_file(f.name))
+
+    @staticmethod
+    def test_skips_oversized_high_entropy_line_without_hanging(mock_log_warning):
+
+        long_line = (
+            chr(34)
+            + ("A" * (Base64HighEntropyString.MAX_LINE_LENGTH + 1))
+            + chr(34)
+            + chr(10)
+        )
+        with transient_settings({
+            "plugins_used": [{"name": "Base64HighEntropyString"}],
+        }):
+            with mock_named_temporary_file(suffix=".env") as f:
+                f.write(long_line.encode())
+                f.seek(0)
+
+                assert not list(scan.scan_file(f.name))
+
+        assert (
+            "line length exceeded maximum allowed line length"
+            in mock_log_warning.warning_messages
+        )
 
     @staticmethod
     def test_handles_binary_files_gracefully():
