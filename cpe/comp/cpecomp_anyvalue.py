@@ -56,12 +56,7 @@ class CPEComponentAnyValue(CPEComponentLogical):
         :rtype: boolean
         """
 
-        from .cpecomp_empty import CPEComponentEmpty
-        from .cpecomp_undefined import CPEComponentUndefined
-
-        return (isinstance(other, CPEComponentUndefined) or
-                isinstance(other, CPEComponentEmpty) or
-                isinstance(other, CPEComponentAnyValue))
+        return isinstance(other, CPEComponentAnyValue)
 
     def __init__(self):
         """

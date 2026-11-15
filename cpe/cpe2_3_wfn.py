@@ -138,7 +138,8 @@ class CPE2_3_WFN(CPE2_3):
             for e in list_component:
                 # Whitespace not valid in component names and values
                 if e.find(" ") != -1:
-                    msg = "Bad-formed CPE Name: WFN with too many whitespaces"
+                    msg = "Bad-formed CPE Name: whitespace in component '{0}'".format(
+                        e)
                     raise ValueError(msg)
 
                 # Split pair attribute-value
@@ -168,7 +169,8 @@ class CPE2_3_WFN(CPE2_3):
                     elif strUpper == CPEComponent2_3_WFN.VALUE_NA:
                         comp = CPEComponentNotApplicable()
                     else:
-                        msg = "Invalid logical value '{0}'".format(att_value)
+                        msg = "Invalid logical value '{0}' in attribute '{1}'".format(
+                            att_value, att_name)
                         raise ValueError(msg)
 
                 elif att_value.startswith('"') and att_value.endswith('"'):
@@ -177,8 +179,8 @@ class CPE2_3_WFN(CPE2_3):
 
                 else:
                     # Bad value
-                    msg = "Bad-formed CPE Name: invalid value '{0}'".format(
-                        att_value)
+                    msg = "Bad-formed CPE Name: invalid value '{0}' in attribute '{1}'".format(
+                        att_value, att_name)
                     raise ValueError(msg)
 
                 components[att_name] = comp
@@ -248,6 +250,20 @@ class CPE2_3_WFN(CPE2_3):
                 lc.append(value)
 
         return lc
+
+    def get_attribute_components(self, att_name):
+        """
+        Returns the typed components of attribute "att_name" of CPE Name,
+        preserving the distinction between logical values (ANY, NA),
+        wildcards and unassigned states.
+
+        :param string att_name: Attribute name to get
+        :returns: List of Component objects of the attribute in CPE Name
+        :rtype: list
+        :exception: ValueError - invalid attribute name
+        """
+
+        return self._get_attribute_components(att_name)
 
 if __name__ == "__main__":
     import doctest

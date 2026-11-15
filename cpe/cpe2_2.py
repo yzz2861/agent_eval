@@ -179,7 +179,8 @@ class CPE2_2(CPE):
         # #######################
 
         # If part component is undefined, store it in the part without name
-        if components[CPEComponent.ATT_PART] == CPEComponentUndefined():
+        if isinstance(components[CPEComponent.ATT_PART],
+                     (CPEComponentUndefined, CPEComponentEmpty)):
             system = CPEComponent.VALUE_PART_UNDEFINED
         else:
             system = parts_match.group(CPEComponent.ATT_PART)

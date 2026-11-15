@@ -173,7 +173,17 @@ class CPE(dict):
                 elem_other = elements_other[i]
 
                 for ck in CPEComponent.CPE_COMP_KEYS_EXTENDED:
-                    if (elem_self[ck] != elem_other[ck]):
+                    comp_self = elem_self[ck]
+                    comp_other = elem_other[ck]
+
+                    if (isinstance(comp_self, CPEComponentLogical) and
+                       isinstance(comp_other, CPEComponentLogical)):
+
+                        # Logical values of different versions are
+                        # compatible according to the legacy truth table
+                        if not comp_self.is_compatible_with(comp_other):
+                            return False
+                    elif (comp_self != comp_other):
                         return False
 
         return True

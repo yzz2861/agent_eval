@@ -190,15 +190,35 @@ class CPE2_3_URI(CPE2_3):
                 for ck in CPEComponent.CPE_COMP_KEYS:
                     if (count == i):
                         if ck == CPEComponent.ATT_EDITION:
-                            empty_ed = elem.get(ck) == CPEComponentUndefined()
+                            empty_ed = isinstance(
+                                elem.get(ck),
+                                (CPEComponentUndefined,
+                                 CPEComponentEmpty,
+                                 CPEComponentAnyValue))
                             k = CPEComponent.ATT_SW_EDITION
-                            empty_sw_ed = elem.get(k) == CPEComponentUndefined()
+                            empty_sw_ed = isinstance(
+                                elem.get(k),
+                                (CPEComponentUndefined,
+                                 CPEComponentEmpty,
+                                 CPEComponentAnyValue))
                             k = CPEComponent.ATT_TARGET_SW
-                            empty_tg_sw = elem.get(k) == CPEComponentUndefined()
+                            empty_tg_sw = isinstance(
+                                elem.get(k),
+                                (CPEComponentUndefined,
+                                 CPEComponentEmpty,
+                                 CPEComponentAnyValue))
                             k = CPEComponent.ATT_TARGET_HW
-                            empty_tg_hw = elem.get(k) == CPEComponentUndefined()
+                            empty_tg_hw = isinstance(
+                                elem.get(k),
+                                (CPEComponentUndefined,
+                                 CPEComponentEmpty,
+                                 CPEComponentAnyValue))
                             k = CPEComponent.ATT_OTHER
-                            empty_oth = elem.get(k) == CPEComponentUndefined()
+                            empty_oth = isinstance(
+                                elem.get(k),
+                                (CPEComponentUndefined,
+                                 CPEComponentEmpty,
+                                 CPEComponentAnyValue))
 
                             if (empty_ed and empty_sw_ed and empty_tg_sw and
                                empty_tg_hw and empty_oth):
@@ -311,10 +331,13 @@ class CPE2_3_URI(CPE2_3):
                 comp = components[ck]
                 if check_change:
                     check_change = ((ck != CPEComponent.ATT_EDITION) and
-                                   (comp == CPEComponentUndefined()) or
+                                   isinstance(comp,
+                                              (CPEComponentUndefined,
+                                               CPEComponentAnyValue)) or
                                    (ck == CPEComponent.ATT_EDITION and
                                    (len(edition_parts) == 0)))
-                elif comp == CPEComponentUndefined():
+                elif isinstance(comp, (CPEComponentUndefined,
+                                       CPEComponentAnyValue)):
                     comp = CPEComponentAnyValue()
 
                 components[ck] = comp

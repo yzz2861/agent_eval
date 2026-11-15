@@ -62,12 +62,7 @@ class CPEComponentUndefined(CPEComponentLogical):
         :returns: True if other == self, False otherwise
         """
 
-        from .cpecomp_anyvalue import CPEComponentAnyValue
-        from .cpecomp_empty import CPEComponentEmpty
-
-        return (isinstance(other, CPEComponentUndefined) or
-                isinstance(other, CPEComponentEmpty) or
-                isinstance(other, CPEComponentAnyValue))
+        return isinstance(other, CPEComponentUndefined)
 
     def __init__(self):
         """

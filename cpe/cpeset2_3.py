@@ -33,6 +33,10 @@ feedback about it, please contact:
 from .cpe2_3 import CPE2_3
 from .cpe2_3_wfn import CPE2_3_WFN
 from .comp.cpecomp import CPEComponent
+from .comp.cpecomp_anyvalue import CPEComponentAnyValue
+from .comp.cpecomp_empty import CPEComponentEmpty
+from .comp.cpecomp_notapplicable import CPEComponentNotApplicable
+from .comp.cpecomp_undefined import CPEComponentUndefined
 from .comp.cpecomp2_3_wfn import CPEComponent2_3_WFN
 from .cpeset import CPESet
 
@@ -119,6 +123,58 @@ class CPESet2_3(CPESet):
 
         # If we get to this point, we are comparing two strings
         return CPESet2_3._compare_strings(source, target)
+
+    @classmethod
+    def _compare_components(cls, source, target):
+        """
+        Compares two typed components associated with an attribute of two
+        WFNs, using the explicit comparison truth table:
+
+        - ANY matches every value except NA.
+        - NA matches only NA.
+        - UNDEFINED matches every value except NA.
+        - EMPTY matches every value except NA.
+
+        :param CPEComponent source: component of the source WFN
+        :param CPEComponent target: component of the target WFN
+        :returns: The comparison relation among input components.
+        :rtype: int
+        """
+
+        # Target with unquoted wildcards makes the relation undefined
+        if isinstance(target, CPEComponent2_3_WFN):
+            target_value = target.as_wfn()
+            if CPESet2_3._contains_wildcards(target_value):
+                return CPESet2_3.LOGICAL_VALUE_UNDEFINED
+
+        # Strict equality of logical states and string values
+        if type(source) is type(target):
+            if isinstance(source, CPEComponent2_3_WFN):
+                if source.as_wfn().lower() == target.as_wfn().lower():
+                    return CPESet2_3.LOGICAL_VALUE_EQUAL
+            elif source == target:
+                return CPESet2_3.LOGICAL_VALUE_EQUAL
+
+        # Source is unconstrained (ANY, UNDEFINED or EMPTY)
+        if isinstance(source, (CPEComponentAnyValue,
+                              CPEComponentUndefined,
+                              CPEComponentEmpty)):
+            return CPESet2_3.LOGICAL_VALUE_SUPERSET
+
+        # Target is unconstrained
+        if isinstance(target, (CPEComponentAnyValue,
+                              CPEComponentUndefined,
+                              CPEComponentEmpty)):
+            return CPESet2_3.LOGICAL_VALUE_SUBSET
+
+        # Either is NA
+        if isinstance(source, CPEComponentNotApplicable) or \
+           isinstance(target, CPEComponentNotApplicable):
+            return CPESet2_3.LOGICAL_VALUE_DISJOINT
+
+        # Both are strings
+        return CPESet2_3._compare_strings(source.as_wfn().lower(),
+                                         target.as_wfn().lower())
 
     @classmethod
     def _compare_strings(cls, source, target):
@@ -291,17 +347,17 @@ class CPESet2_3(CPESet):
 
         # Compare results using the get() function in WFN
         for att in CPEComponent.CPE_COMP_KEYS_EXTENDED:
-            value_src = source.get_attribute_values(att)[0]
-            if value_src.find('"') > -1:
-                # Not a logical value: del double quotes
-                value_src = value_src[1:-1]
+            comps_src = source.get_attribute_components(att)
+            comps_tar = target.get_attribute_components(att)
 
-            value_tar = target.get_attribute_values(att)[0]
-            if value_tar.find('"') > -1:
-                # Not a logical value: del double quotes
-                value_tar = value_tar[1:-1]
+            if len(comps_src) != 1 or len(comps_tar) != 1:
+                # Ambiguous multi-element expression: refuse to compare
+                errmsg = "Cannot compare attribute '{0}': ambiguous multi-element WFN".format(
+                    att)
+                raise ValueError(errmsg)
 
-            yield (att, CPESet2_3._compare(value_src, value_tar))
+            yield (att, CPESet2_3._compare_components(comps_src[0],
+                                                         comps_tar[0]))
 
     @classmethod
     def cpe_disjoint(cls, source, target):

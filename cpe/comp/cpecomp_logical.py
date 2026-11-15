@@ -34,8 +34,46 @@ from .cpecomp import CPEComponent
 
 class CPEComponentLogical(CPEComponent):
     """
-    Represents a generic logical component of CPE name,
-    compatible with the components of all versions of CPE specification.
+    Represents a generic logical component of CPE name, compatible with
+    the components of all versions of CPE specification.
+
+    The logical values form a small, closed type system that is kept
+    strictly separate from ordinary string values:
+
+    - ANY: matches every value except NA.
+    - NA: matches only NA.
+    - UNDEFINED: matches every value except NA (unconstrained).
+    - EMPTY: matches every value except NA (legacy empty component).
+
+    Equality truth table (strict, no cross-state equality):
+
+    - ANY == ANY, NA == NA, UNDEFINED == UNDEFINED, EMPTY == EMPTY.
+    - Any other combination is not equal.
+
+    Containment truth table ("in" operator):
+
+    - ANY contains every value (including NA).
+    - NA contains only NA.
+    - UNDEFINED contains every value (including NA).
+    - EMPTY contains every value (including NA).
+
+    Set operations truth table:
+
+    - intersection: NA ∩ x = NA, ANY ∩ x = x, UNDEFINED ∩ x = x,
+      EMPTY ∩ x = x, x ∩ x = x.
+    - union: ANY ∪ x = ANY, NA ∪ x = x, UNDEFINED ∪ EMPTY = ANY,
+      x ∪ x = x.
+    - difference: x - ANY = NA, NA - x = NA, x - x = NA, otherwise x.
+
+    Serialization truth table (WFN syntax):
+
+    - ANY → ANY, NA → NA, UNDEFINED → ANY, EMPTY → ANY.
+
+    Legacy compatibility truth table (used when comparing CPE names
+    across versions, e.g. 1.1 vs 2.3):
+
+    - NA is only compatible with NA.
+    - ANY, UNDEFINED and EMPTY are mutually compatible.
     """
 
     ###############
@@ -101,6 +139,149 @@ class CPEComponentLogical(CPEComponent):
 
         errmsg = "Class method not implemented. Use the method of some child class"
         raise NotImplementedError(errmsg)
+
+    def matches(self, other):
+        """
+        Returns True if the logical value of self matches the logical
+        value of other, according to the matching truth table:
+
+        - ANY matches every value.
+        - NA matches only NA.
+        - UNDEFINED matches every value.
+        - EMPTY matches every value.
+
+        :param CPEComponent other: component to match
+        :returns: True if other is matched by self, False otherwise
+        :rtype: boolean
+        """
+
+        return other in self
+
+    def intersection(self, other):
+        """
+        Returns the intersection of self and other, according to
+        the set-operation truth table.
+
+        :param CPEComponent other: component to intersect
+        :returns: Intersection component
+        :rtype: CPEComponentLogical
+        """
+
+        from .cpecomp_notapplicable import CPEComponentNotApplicable
+        from .cpecomp_anyvalue import CPEComponentAnyValue
+
+        if isinstance(self, CPEComponentNotApplicable) or \
+           isinstance(other, CPEComponentNotApplicable):
+            return CPEComponentNotApplicable()
+
+        if isinstance(self, CPEComponentAnyValue):
+            return other
+
+        if isinstance(other, CPEComponentAnyValue):
+            return self
+
+        if type(self) is type(other):
+            return self
+
+        # UNDEFINED ∩ EMPTY: both unconstrained, result is unconstrained
+        from .cpecomp_undefined import CPEComponentUndefined
+        return CPEComponentUndefined()
+
+    def union(self, other):
+        """
+        Returns the union of self and other, according to
+        the set-operation truth table.
+
+        :param CPEComponent other: component to unite
+        :returns: Union component
+        :rtype: CPEComponentLogical
+        """
+
+        from .cpecomp_anyvalue import CPEComponentAnyValue
+        from .cpecomp_notapplicable import CPEComponentNotApplicable
+
+        if isinstance(self, CPEComponentAnyValue) or \
+           isinstance(other, CPEComponentAnyValue):
+            return CPEComponentAnyValue()
+
+        if isinstance(self, CPEComponentNotApplicable):
+            return other
+
+        if isinstance(other, CPEComponentNotApplicable):
+            return self
+
+        if type(self) is type(other):
+            return self
+
+        # UNDEFINED ∪ EMPTY: both unconstrained, result is unconstrained
+        return CPEComponentAnyValue()
+
+    def difference(self, other):
+        """
+        Returns the difference of self and other, according to
+        the set-operation truth table.
+
+        :param CPEComponent other: component to subtract
+        :returns: Difference component
+        :rtype: CPEComponentLogical
+        """
+
+        from .cpecomp_notapplicable import CPEComponentNotApplicable
+        from .cpecomp_anyvalue import CPEComponentAnyValue
+
+        # NA - x = NA
+        if isinstance(self, CPEComponentNotApplicable):
+            return self
+
+        # x - ANY = NA
+        if isinstance(other, CPEComponentAnyValue):
+            return CPEComponentNotApplicable()
+
+        # x - x = NA
+        if type(self) is type(other):
+            return CPEComponentNotApplicable()
+
+        # otherwise self
+        return self
+
+    def is_compatible_with(self, other):
+        """
+        Returns True if self and other are compatible logical values
+        across versions of CPE specification, according to the legacy
+        compatibility truth table.
+
+        :param CPEComponent other: component to check
+        :returns: True if compatible, False otherwise
+        :rtype: boolean
+        """
+
+        from .cpecomp_notapplicable import CPEComponentNotApplicable
+
+        # NA only compatible with NA
+        if isinstance(self, CPEComponentNotApplicable) or \
+           isinstance(other, CPEComponentNotApplicable):
+            return (isinstance(self, CPEComponentNotApplicable) and
+                    isinstance(other, CPEComponentNotApplicable))
+
+        # ANY, UNDEFINED and EMPTY are mutually compatible
+        return True
+
+    def as_wfn(self):
+        """
+        Returns the value of component encoded as Well-Formed Name (WFN)
+         string, according to the serialization truth table.
+
+         :returns: WFN string associated with component
+         :rtype: string
+         """
+
+        from .cpecomp2_3_wfn import CPEComponent2_3_WFN
+        from .cpecomp_notapplicable import CPEComponentNotApplicable
+
+        if isinstance(self, CPEComponentNotApplicable):
+            return CPEComponent2_3_WFN.VALUE_NA
+
+        return CPEComponent2_3_WFN.VALUE_ANY
 
 if __name__ == "__main__":
     import doctest
