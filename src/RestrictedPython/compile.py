@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import ast
+import collections
 import collections.abc
+import hashlib
 import os
+import threading
 import types
 import typing
+import weakref
 import warnings
 
 from RestrictedPython._compat import IS_CPYTHON
@@ -38,6 +42,247 @@ _T_ast_compilable: typing.TypeAlias = (
 _T_source: typing.TypeAlias = str | ReadableBuffer | _T_ast_compilable
 
 
+@typing.final
+class ExecutionContext(object):
+    """Tenant-specific execution context bound to a compiled script.
+
+    The context identifies everything that may change the semantics of
+    restricted code or of the guards and builtins it runs with:
+
+    * the tenant owning the script,
+    * the policy version applied while compiling,
+    * the restricted builtins collection,
+    * the guard provider supplying the guard functions.
+
+    Two contexts share a cached code object only when every identifying
+    part is equal. A tenant that rotates its policy version, swaps its
+    builtins collection or replaces its guard provider therefore never
+    receives a stale object compiled for an older context.
+    """
+
+    __slots__ = (
+        'tenant_id',
+        'policy_version',
+        'builtins',
+        'builtins_key',
+        'guard_provider',
+        'guard_key',
+        '_hash',
+        '__weakref__',
+    )
+
+    def __init__(
+            self,
+            tenant_id: typing.Hashable,
+            policy_version: typing.Hashable,
+            builtins: collections.abc.Mapping[str, typing.Any] | None = None,
+            builtins_key: typing.Hashable | None = None,
+            guard_provider: typing.Any = None,
+            guard_key: typing.Hashable | None = None,
+    ) -> None:
+        object.__setattr__(self, 'tenant_id', tenant_id)
+        object.__setattr__(self, 'policy_version', policy_version)
+        object.__setattr__(self, 'builtins', builtins)
+        object.__setattr__(self, 'builtins_key', builtins_key)
+        object.__setattr__(self, 'guard_provider', guard_provider)
+        object.__setattr__(self, 'guard_key', guard_key)
+        object.__setattr__(
+            self,
+            '_hash',
+            hash(self.identity_parts()))
+
+    def identity_parts(self) -> tuple[typing.Hashable, ...]:
+        """Return the hashable parts discriminating two contexts."""
+        if self.builtins_key is not None:
+            builtins_identity: typing.Hashable = self.builtins_key
+        elif self.builtins is not None:
+            builtins_identity = ('builtins-id', id(self.builtins))
+        else:
+            builtins_identity = ('builtins-id', None)
+        if self.guard_key is not None:
+            guard_identity: typing.Hashable = self.guard_key
+        elif self.guard_provider is not None:
+            guard_identity = ('guard-id', id(self.guard_provider))
+        else:
+            guard_identity = ('guard-id', None)
+        return (
+            self.tenant_id,
+            self.policy_version,
+            builtins_identity,
+            guard_identity,
+        )
+
+    def __hash__(self) -> int:
+        return self._hash
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, ExecutionContext):
+            return NotImplemented
+        return self.identity_parts() == other.identity_parts()
+
+    def __repr__(self) -> str:
+        return (
+            'ExecutionContext(tenant_id={0!r}, policy_version={1!r})'.format(
+                self.tenant_id, self.policy_version))
+
+
+class _CacheEntry:
+    """A cached compilation result plus the context it belongs to.
+
+    The context is referenced weakly so eviction releases the tenant
+    builtins collection and guard provider instead of keeping sensitive
+    objects alive for the lifetime of the process.
+    """
+
+    __slots__ = ('result', 'context_ref', 'key')
+
+    def __init__(
+            self,
+            key: tuple[typing.Hashable, ...],
+            result: CompileResult,
+            context: ExecutionContext,
+    ) -> None:
+        self.key = key
+        self.result = result
+        self.context_ref: (
+            weakref.ReferenceType[ExecutionContext] | None) = (
+            weakref.ref(context))
+
+    def release(self) -> None:
+        """Drop references owned by the cache for this entry."""
+        self.context_ref = None
+
+
+class RestrictedCompileCache:
+    """Thread-safe, bounded LRU cache for restricted compilation.
+
+    Cache keys combine the source, the compilation parameters and the
+    ExecutionContext. The same source compiled for another tenant,
+    policy version, builtins collection or guard provider gets a
+    distinct cache entry, while legitimate reuse within one context is
+    preserved.
+    """
+
+    def __init__(self, maxsize: int = 128) -> None:
+        if maxsize < 1:
+            raise ValueError('maxsize must be a positive integer')
+        self._maxsize = maxsize
+        self._entries: collections.OrderedDict[
+            tuple[typing.Hashable, ...], _CacheEntry] = (
+                collections.OrderedDict())
+        self._lock = threading.RLock()
+
+    @property
+    def maxsize(self) -> int:
+        return self._maxsize
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._entries)
+
+    def __contains__(self, key: tuple[typing.Hashable, ...]) -> bool:
+        with self._lock:
+            return key in self._entries
+
+    @staticmethod
+    def build_key(
+            source: _T_source,
+            filename: str | bytes | os.PathLike[typing.Any],
+            mode: str,
+            flags: int,
+            dont_inherit: bool,
+            policy: type[ast.NodeTransformer] | None,
+            context: ExecutionContext,
+    ) -> tuple[typing.Hashable, ...]:
+        if isinstance(source, (str, bytes, bytearray)):
+            if isinstance(source, str):
+                source_bytes = source.encode('utf-8')
+            else:
+                source_bytes = bytes(source)
+            source_identity: typing.Hashable = (
+                'source', hashlib.sha256(source_bytes).digest())
+        else:
+            source_identity = ('ast', id(source))
+        filename_identity = (
+            filename if isinstance(filename, str) else os.fspath(filename))
+        policy_identity: typing.Hashable
+        if policy is None:
+            policy_identity = None
+        else:
+            policy_identity = (policy.__module__, policy.__qualname__)
+        return (
+            source_identity,
+            filename_identity,
+            mode,
+            flags,
+            dont_inherit,
+            policy_identity,
+            context.identity_parts(),
+        )
+
+    def get(
+            self,
+            key: tuple[typing.Hashable, ...],
+    ) -> CompileResult | None:
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                return None
+            self._entries.move_to_end(key)
+            return entry.result
+
+    def put(
+            self,
+            key: tuple[typing.Hashable, ...],
+            result: CompileResult,
+            context: ExecutionContext,
+    ) -> None:
+        with self._lock:
+            if key in self._entries:
+                self._entries.move_to_end(key)
+                return
+            self._entries[key] = _CacheEntry(key, result, context)
+            while len(self._entries) > self._maxsize:
+                _, evicted = self._entries.popitem(last=False)
+                evicted.release()
+
+    def invalidate(
+            self,
+            tenant_id: typing.Hashable | None = None,
+            policy_version: typing.Hashable | None = None,
+    ) -> int:
+        """Drop entries, optionally scoped to one tenant/version.
+
+        Returns the number of removed entries. Every removed entry
+        releases its weak context reference.
+        """
+        removed = 0
+        with self._lock:
+            for key in list(self._entries):
+                context_parts = typing.cast(
+                    tuple[typing.Hashable, ...], key[-1])
+                tenant, version = context_parts[0], context_parts[1]
+                if tenant_id is not None and tenant != tenant_id:
+                    continue
+                if policy_version is not None and version != policy_version:
+                    continue
+                entry = self._entries.pop(key)
+                entry.release()
+                removed += 1
+        return removed
+
+    def clear(self) -> None:
+        with self._lock:
+            for entry in self._entries.values():
+                entry.release()
+            self._entries.clear()
+
+
+# Shared, process-wide cache used when callers pass an ExecutionContext
+# without providing their own cache instance.
+default_compile_cache = RestrictedCompileCache()
+
+
 def _compile_restricted_mode(
         source: _T_source,
         filename: str | bytes | os.PathLike[typing.Any] = '<string>',
@@ -45,11 +290,49 @@ def _compile_restricted_mode(
         flags: int = 0,
         dont_inherit: bool = False,
         policy: type[ast.NodeTransformer] | None = RestrictingNodeTransformer,
+        context: ExecutionContext | None = None,
+        cache: RestrictedCompileCache | None = None,
 ) -> CompileResult:
 
     if not IS_CPYTHON:
         warnings.warn_explicit(
             NOT_CPYTHON_WARNING, RuntimeWarning, 'RestrictedPython', 0)
+
+    if context is not None:
+        active_cache = cache if cache is not None else default_compile_cache
+        cache_key = active_cache.build_key(
+            source, filename, mode, flags, dont_inherit, policy, context)
+        cached_result = active_cache.get(cache_key)
+        if cached_result is not None:
+            return cached_result
+        result = _compile_restricted_mode_uncached(
+            source,
+            filename=filename,
+            mode=mode,
+            flags=flags,
+            dont_inherit=dont_inherit,
+            policy=policy)
+        if result.code is not None and not result.errors:
+            active_cache.put(cache_key, result, context)
+        return result
+
+    return _compile_restricted_mode_uncached(
+        source,
+        filename=filename,
+        mode=mode,
+        flags=flags,
+        dont_inherit=dont_inherit,
+        policy=policy)
+
+
+def _compile_restricted_mode_uncached(
+        source: _T_source,
+        filename: str | bytes | os.PathLike[typing.Any] = '<string>',
+        mode: typing.Literal["exec", "eval", "single"] = "exec",
+        flags: int = 0,
+        dont_inherit: bool = False,
+        policy: type[ast.NodeTransformer] | None = RestrictingNodeTransformer,
+) -> CompileResult:
 
     byte_code = None
     collected_errors: list[str] = []
@@ -79,22 +362,19 @@ def _compile_restricted_mode(
                 c_ast = typing.cast(
                     _T_ast_compilable, ast.parse(
                         source, filename, mode))
-            except SyntaxError as v:
+            except SyntaxError as value:
                 collected_errors.append(syntax_error_template.format(
-                    lineno=v.lineno,
-                    type=v.__class__.__name__,
-                    msg=v.msg,
-                    statement=v.text.strip() if v.text else None
+                    lineno=value.lineno,
+                    type=value.__class__.__name__,
+                    msg=value.msg,
+                    statement=value.text.strip() if value.text else None
                 ))
         if c_ast:
             policy_instance = policy(
                 collected_errors, collected_warnings, used_names)
             policy_instance.visit(c_ast)
             if not collected_errors:
-                byte_code = compile(c_ast, filename, mode=mode  # ,
-                                    # flags=flags,
-                                    # dont_inherit=dont_inherit
-                                    )
+                byte_code = compile(c_ast, filename, mode=mode)
     else:
         raise TypeError('Unallowed policy provided for RestrictedPython')
     return CompileResult(
@@ -110,6 +390,8 @@ def compile_restricted_exec(
         flags: int = 0,
         dont_inherit: bool = False,
         policy: type[ast.NodeTransformer] | None = RestrictingNodeTransformer,
+        context: ExecutionContext | None = None,
+        cache: RestrictedCompileCache | None = None,
 ) -> CompileResult:
     """Compile restricted for the mode `exec`."""
     return _compile_restricted_mode(
@@ -118,7 +400,9 @@ def compile_restricted_exec(
         mode='exec',
         flags=flags,
         dont_inherit=dont_inherit,
-        policy=policy)
+        policy=policy,
+        context=context,
+        cache=cache)
 
 
 def compile_restricted_eval(
@@ -127,6 +411,8 @@ def compile_restricted_eval(
         flags: int = 0,
         dont_inherit: bool = False,
         policy: type[ast.NodeTransformer] | None = RestrictingNodeTransformer,
+        context: ExecutionContext | None = None,
+        cache: RestrictedCompileCache | None = None,
 ) -> CompileResult:
     """Compile restricted for the mode `eval`."""
     return _compile_restricted_mode(
@@ -135,7 +421,9 @@ def compile_restricted_eval(
         mode='eval',
         flags=flags,
         dont_inherit=dont_inherit,
-        policy=policy)
+        policy=policy,
+        context=context,
+        cache=cache)
 
 
 def compile_restricted_single(
@@ -144,6 +432,8 @@ def compile_restricted_single(
         flags: int = 0,
         dont_inherit: bool = False,
         policy: type[ast.NodeTransformer] | None = RestrictingNodeTransformer,
+        context: ExecutionContext | None = None,
+        cache: RestrictedCompileCache | None = None,
 ) -> CompileResult:
     """Compile restricted for the mode `single`."""
     return _compile_restricted_mode(
@@ -152,7 +442,9 @@ def compile_restricted_single(
         mode='single',
         flags=flags,
         dont_inherit=dont_inherit,
-        policy=policy)
+        policy=policy,
+        context=context,
+        cache=cache)
 
 
 def compile_restricted_function(
@@ -165,6 +457,8 @@ def compile_restricted_function(
         flags: int = 0,
         dont_inherit: bool = False,
         policy: type[ast.NodeTransformer] | None = RestrictingNodeTransformer,
+        context: ExecutionContext | None = None,
+        cache: RestrictedCompileCache | None = None,
 ) -> CompileResult:
     """Compile a restricted code object for a function.
 
@@ -182,12 +476,12 @@ def compile_restricted_function(
     else:
         try:
             body_ast = ast.parse(body, '<func code>', 'exec').body
-        except SyntaxError as v:
+        except SyntaxError as value:
             error = syntax_error_template.format(
-                lineno=v.lineno,
-                type=v.__class__.__name__,
-                msg=v.msg,
-                statement=v.text.strip() if v.text else None)
+                lineno=value.lineno,
+                type=value.__class__.__name__,
+                msg=value.msg,
+                statement=value.text.strip() if value.text else None)
             return CompileResult(
                 code=None, errors=(error,), warnings=(), used_names={})
 
@@ -215,7 +509,9 @@ def compile_restricted_function(
         mode='exec',
         flags=flags,
         dont_inherit=dont_inherit,
-        policy=policy)
+        policy=policy,
+        context=context,
+        cache=cache)
 
     return result
 
@@ -227,6 +523,8 @@ def compile_restricted(
         flags: int = 0,
         dont_inherit: bool = False,
         policy: type[ast.NodeTransformer] | None = RestrictingNodeTransformer,
+        context: ExecutionContext | None = None,
+        cache: RestrictedCompileCache | None = None,
 ) -> types.CodeType:
     """Replacement for the built-in compile() function.
 
@@ -240,7 +538,9 @@ def compile_restricted(
             mode=mode,
             flags=flags,
             dont_inherit=dont_inherit,
-            policy=policy)
+            policy=policy,
+            context=context,
+            cache=cache)
     else:
         raise TypeError('unknown mode %s', mode)
     for warning in result.warnings:

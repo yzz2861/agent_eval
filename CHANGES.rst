@@ -4,7 +4,13 @@ Changes
 9.1 (unreleased)
 ----------------
 
-- Nothing changed yet.
+- Add a tenant-aware, thread-safe compile cache. ``ExecutionContext`` binds
+  cached code to the tenant id, policy version, restricted builtins and guard
+  provider, so the same source no longer reuses objects across tenants or after
+  a policy upgrade, while reuse within one context is preserved. Eviction drops
+  weak context references, and ``RestrictionCapableEval`` builds a fresh global
+  scope per evaluation so concurrent requests cannot share ``_getattr_`` or
+  ``__builtins__`` state.
 
 
 9.0 (2026-11-04)

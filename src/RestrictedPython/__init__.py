@@ -34,9 +34,13 @@ from RestrictedPython.Utilities import utility_builtins  # isort:skip
 # Helper Methods
 from RestrictedPython.PrintCollector import PrintCollector  # isort:skip
 from RestrictedPython.compile import CompileResult  # isort:skip
+from RestrictedPython.compile import ExecutionContext  # isort:skip
+from RestrictedPython.compile import RestrictedCompileCache  # isort:skip
 
 # Policy
 from RestrictedPython.transformer import RestrictingNodeTransformer  # isort:skip
 
 #
-from RestrictedPython.Eval import RestrictionCapableEval
+from RestrictedPython.Eval import DefaultGuardProvider  # isort:skip
+from RestrictedPython.Eval import GuardProvider  # isort:skip
+from RestrictedPython.Eval import RestrictionCapableEval  # isort:skip
