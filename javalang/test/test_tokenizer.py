@@ -188,5 +188,135 @@ int k;
         self.assertEqual(token[0].position.column, 1)
         self.assertEqual(token[3].position.column, 1)
 
+    def test_unicode_escape_positions_use_original_source(self):
+        # \u0061 is six characters in the source but one character after
+        # Unicode escape translation. The following token must still point at
+        # its original column (10), not column 5 in the translated text.
+        code = u"\\u0061bc int x;"
+
+        tokens = list(tokenizer.tokenize(code))
+
+        self.assertEqual(tokens[0].value, u"abc")
+        self.assertEqual(tokens[0].position, tokenizer.Position(1, 1))
+        self.assertEqual(tokens[1].value, u"int")
+        self.assertEqual(tokens[1].position, tokenizer.Position(1, 10))
+
+    def test_u2028_escape_does_not_shift_later_columns(self):
+        # A Unicode escape is a single logical character, but its source
+        # representation is six characters wide. Positions after it must use
+        # the original source width. U+2028 is an invalid input character
+        # outside literals/comments, so tokenization is continued with
+        # ignore_errors.
+        code = u"int a;\\u2028 int b;"
+        lexer = tokenizer.JavaTokenizer(code, ignore_errors=True)
+
+        tokens = list(lexer.tokenize())
+        int_tokens = [t for t in tokens if t.value == u"int"]
+
+        self.assertEqual([t.position for t in int_tokens],
+                         [tokenizer.Position(1, 1),
+                          tokenizer.Position(1, 14)])
+        self.assertEqual(lexer.errors[0].position,
+                         tokenizer.Position(1, 7))
+
+    def test_split_unicode_escape_is_not_translated_twice(self):
+        # The escape produces a backslash. The produced backslash must not
+        # participate in another Unicode escape: u005a remains a literal
+        # identifier suffix instead of becoming Z.
+        code = u"\\u005cu005a"
+        lexer = tokenizer.JavaTokenizer(code, ignore_errors=True)
+
+        tokens = list(lexer.tokenize())
+        identifiers = [t.value for t in tokens
+                       if isinstance(t, tokenizer.Identifier)]
+
+        self.assertEqual(identifiers, [u"u005a"])
+        self.assertEqual(len(lexer.errors), 1)
+
+    def test_escaped_backslash_does_not_start_unicode_escape(self):
+        # Two raw backslashes are a legal escaped backslash in a string; the
+        # second one is not eligible to start a Unicode escape.
+        code = u"\"\\\\u005a\""
+
+        tokens = list(tokenizer.tokenize(code))
+
+        self.assertEqual(len(tokens), 1)
+        self.assertEqual(tokens[0].value, u"\"\\\\u005a\"")
+        self.assertEqual(tokens[0].position, tokenizer.Position(1, 1))
+
+    def test_invalid_unicode_escape_reports_location_and_recovers(self):
+        code = u"class A {\n    \\u12\n    int ok;\n}"
+        lexer = tokenizer.JavaTokenizer(code, ignore_errors=True)
+
+        tokens = list(lexer.tokenize())
+        int_token = [t for t in tokens
+                     if isinstance(t, tokenizer.BasicType)
+                     and t.value == u"int"][0]
+
+        self.assertEqual(int_token.position, tokenizer.Position(3, 5))
+        self.assertEqual(len(lexer.errors), 1)
+        self.assertEqual(lexer.errors[0].position,
+                         tokenizer.Position(2, 9))
+        self.assertEqual(lexer.errors[0].token_position,
+                         tokenizer.Position(2, 5))
+
+    def test_unterminated_block_comment_reports_and_recovers(self):
+        code = u"int a; /* unterminated\nint b;\n"
+        lexer = tokenizer.JavaTokenizer(code, ignore_errors=True)
+
+        tokens = list(lexer.tokenize())
+        int_tokens = [t for t in tokens if t.value == u"int"]
+
+        self.assertEqual([t.position for t in int_tokens],
+                         [tokenizer.Position(1, 1),
+                          tokenizer.Position(2, 1)])
+        self.assertEqual(len(lexer.errors), 1)
+        self.assertEqual(lexer.errors[0].position,
+                         tokenizer.Position(1, 8))
+        self.assertEqual(lexer.errors[0].token_position,
+                         tokenizer.Position(1, 8))
+
+    def test_crlf_and_cr_are_single_line_terminators(self):
+        code = u"int a;\r\nint b;\rint c;\nint d;"
+
+        tokens = list(tokenizer.tokenize(code))
+        int_tokens = [t for t in tokens if t.value == u"int"]
+
+        self.assertEqual([t.position for t in int_tokens],
+                         [tokenizer.Position(1, 1),
+                          tokenizer.Position(2, 1),
+                          tokenizer.Position(3, 1),
+                          tokenizer.Position(4, 1)])
+
+    def test_line_comment_ends_at_carriage_return(self):
+        code = u"// comment\rint x;"
+
+        tokens = list(tokenizer.tokenize(code))
+        int_tokens = [t for t in tokens if t.value == u"int"]
+
+        self.assertEqual(int_tokens[0].position, tokenizer.Position(2, 1))
+
+    def test_leading_bom_is_ignored_for_positions(self):
+        for code in (u"\ufeffint x;", b"\xef\xbb\xbfint x;"):
+            tokens = list(tokenizer.tokenize(code))
+            self.assertEqual(tokens[0].position, tokenizer.Position(1, 1))
+            self.assertEqual(tokens[1].position, tokenizer.Position(1, 5))
+
+    def test_token_position_after_very_long_line(self):
+        code = u" " * 100000 + u"int x;"
+
+        tokens = list(tokenizer.tokenize(code))
+
+        self.assertEqual(tokens[0].position, tokenizer.Position(1, 100001))
+        self.assertEqual(tokens[1].position, tokenizer.Position(1, 100005))
+
+    def test_token_position_after_very_long_comment(self):
+        code = u"/*" + u"x" * 100000 + u"*/\nint x;"
+
+        tokens = list(tokenizer.tokenize(code))
+        int_token = [t for t in tokens if t.value == u"int"][0]
+
+        self.assertEqual(int_token.position, tokenizer.Position(2, 1))
+
 if __name__=="__main__":
     unittest.main()
