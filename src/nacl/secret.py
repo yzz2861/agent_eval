@@ -13,12 +13,17 @@
 # limitations under the License.
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import ClassVar, Optional
 
 import nacl.bindings
 from nacl import encoding
 from nacl import exceptions as exc
-from nacl.utils import EncryptedMessage, StringFixer, random
+from nacl.utils import (
+    EncryptedMessage,
+    NonceGenerator,
+    StringFixer,
+    random,
+)
 
 
 class SecretBox(encoding.Encodable, StringFixer):
@@ -59,7 +64,10 @@ class SecretBox(encoding.Encodable, StringFixer):
     )
 
     def __init__(
-        self, key: bytes, encoder: encoding.Encoder = encoding.RawEncoder
+        self,
+        key: bytes,
+        encoder: encoding.Encoder = encoding.RawEncoder,
+        nonce_generator: Optional[NonceGenerator] = None,
     ):
         key = encoder.decode(key)
         if not isinstance(key, bytes):
@@ -71,6 +79,13 @@ class SecretBox(encoding.Encodable, StringFixer):
             )
 
         self._key = key
+        if nonce_generator is not None and not isinstance(
+            nonce_generator, NonceGenerator
+        ):
+            raise exc.TypeError(
+                "nonce_generator must be a nacl.utils.NonceGenerator instance"
+            )
+        self._nonce_generator = nonce_generator
 
     def __bytes__(self) -> bytes:
         return self._key
@@ -98,7 +113,10 @@ class SecretBox(encoding.Encodable, StringFixer):
         :rtype: [:class:`nacl.utils.EncryptedMessage`]
         """
         if nonce is None:
-            nonce = random(self.NONCE_SIZE)
+            if self._nonce_generator is None:
+                nonce = random(self.NONCE_SIZE)
+            else:
+                nonce = self._nonce_generator(self.NONCE_SIZE)
 
         if len(nonce) != self.NONCE_SIZE:
             raise exc.ValueError(

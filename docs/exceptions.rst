@@ -74,6 +74,27 @@ standard library exception to :py:class:`~nacl.exceptions.CryptoError`.
     ValueError
 
 
+.. class:: NonceReuseError
+
+    is a subclass of :class:`~nacl.exceptions.ValueError`, raised by a
+    :class:`~nacl.utils.NonceGenerator` when asked to hand out a nonce that
+    was already issued within its scope.
+
+
+.. class:: NonceOverflowError
+
+    is a subclass of :class:`~nacl.exceptions.ValueError`, raised by a
+    :class:`~nacl.utils.CounterNonceGenerator` when the counter no longer
+    fits in the nonce bytes left after the prefix.
+
+
+.. class:: NonceGeneratorForkError
+
+    is a subclass of :class:`~nacl.exceptions.RuntimeError`, raised when a
+    :class:`~nacl.utils.CounterNonceGenerator` created before a
+    :func:`os.fork` is used inside the child process.
+
+
 Utility functions for exception handling
 ----------------------------------------
 

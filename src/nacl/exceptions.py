@@ -66,6 +66,35 @@ class UnavailableError(RuntimeError):
     """
 
 
+class NonceReuseError(ValueError):
+    """
+    Raised by a nonce generator when it is asked to produce (or accept) a
+    nonce which has already been issued within the same scope. Reusing a
+    nonce for a given key breaks the security guarantees of the underlying
+    cipher, so the operation is refused instead of silently returning a
+    duplicate.
+    """
+
+
+class NonceOverflowError(ValueError):
+    """
+    Raised by a counter based nonce generator when the next counter value
+    does not fit in the bytes reserved for it. The counter is deliberately
+    not wrapped, because wrapping would cause nonce reuse.
+    """
+
+
+class NonceGeneratorForkError(RuntimeError):
+    """
+    Raised when a nonce generator is used in a different process than the
+    one which created it (for example after :func:`os.fork`). A forked
+    generator shares its internal counter and issued-nonce history with the
+    parent, so continuing to use it would make nonce collisions between the
+    processes possible. Each process must create its own generator, for
+    example through :meth:`nacl.utils.CounterNonceGenerator.for_process`.
+    """
+
+
 def ensure(cond: bool, *args: object, **kwds: type[Exception]) -> None:
     """
     Return if a condition is true, otherwise raise a caller-configurable

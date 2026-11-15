@@ -1,6 +1,16 @@
 Changelog
 =========
 
+UNRELEASED
+----------
+* Added an injectable nonce generation strategy to
+  :class:`nacl.secret.SecretBox` via the ``nonce_generator`` parameter.
+  :class:`nacl.utils.CounterNonceGenerator` provides process unique
+  prefixes, monotonic counters with explicit overflow handling, nonce
+  reuse detection with scope reporting, fork detection and pickle-safe
+  state; :class:`nacl.utils.RandomNonceGenerator` preserves the previous
+  random behaviour.
+
 1.6.2 (2026-01-01)
 ------------------
 * Updated ``libsodium`` to 1.0.20-stable (2025-12-31 build) to resolve

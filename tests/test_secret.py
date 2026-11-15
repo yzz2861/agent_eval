@@ -16,6 +16,8 @@
 from __future__ import annotations
 
 import binascii
+import os
+import pickle
 import re
 from typing import TypeVar
 
@@ -23,7 +25,9 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+import nacl.utils
 from nacl.encoding import HexEncoder
+from nacl import exceptions
 from nacl.exceptions import CryptoError
 from nacl.secret import Aead, SecretBox
 
@@ -310,3 +314,106 @@ def test_secret_box_bad_decryption():
     with pytest.raises(CryptoError):
         # completely changes everything
         box.decrypt(b"\x00" + ciphertext)
+
+
+def test_secret_box_accepts_nonce_generator():
+    key = b"\x11" * SecretBox.KEY_SIZE
+    generator = nacl.utils.CounterNonceGenerator(b"integration-w")
+    box = SecretBox(key, nonce_generator=generator)
+
+    first = box.encrypt(b"first message")
+    second = box.encrypt(b"second message")
+
+    assert first.nonce.startswith(b"integration-w")
+    assert first.nonce != second.nonce
+    assert box.decrypt(first) == b"first message"
+    assert box.decrypt(second) == b"second message"
+    assert generator.counter == 2
+
+
+def test_secret_box_nonce_generator_is_type_checked():
+    with pytest.raises(exceptions.TypeError):
+        SecretBox(b"\x11" * SecretBox.KEY_SIZE, nonce_generator=object())
+
+
+def test_secret_box_explicit_nonce_bypasses_generator():
+    generator = nacl.utils.CounterNonceGenerator(b"bypass-w")
+    box = SecretBox(b"\x11" * SecretBox.KEY_SIZE, nonce_generator=generator)
+    explicit_nonce = b"\x42" * SecretBox.NONCE_SIZE
+
+    encrypted = box.encrypt(b"message", explicit_nonce)
+
+    assert encrypted.nonce == explicit_nonce
+    assert box.decrypt(encrypted) == b"message"
+    assert generator.counter == 0
+
+
+def test_secret_box_random_nonce_generator_roundtrip():
+    box = SecretBox(
+        b"\x11" * SecretBox.KEY_SIZE,
+        nonce_generator=nacl.utils.RandomNonceGenerator(),
+    )
+
+    encrypted = box.encrypt(b"message")
+
+    assert len(encrypted.nonce) == SecretBox.NONCE_SIZE
+    assert box.decrypt(encrypted) == b"message"
+
+
+def test_secret_box_default_behavior_stays_random():
+    box = SecretBox(b"\x11" * SecretBox.KEY_SIZE)
+
+    first = box.encrypt(b"message")
+    second = box.encrypt(b"message")
+
+    assert first.nonce != second.nonce
+
+
+def test_secret_box_generator_survives_pickle():
+    generator = nacl.utils.CounterNonceGenerator(b"pickle-box-w")
+    box = SecretBox(b"\x11" * SecretBox.KEY_SIZE, nonce_generator=generator)
+    first_nonce = box.encrypt(b"message").nonce
+
+    restored_generator = pickle.loads(pickle.dumps(generator))
+    restored_box = SecretBox(
+        b"\x11" * SecretBox.KEY_SIZE,
+        nonce_generator=restored_generator,
+    )
+
+    assert restored_generator.counter == 1
+    second_nonce = restored_box.encrypt(b"message").nonce
+    assert second_nonce != first_nonce
+    with pytest.raises(exceptions.NonceReuseError):
+        restored_generator.check_nonce(first_nonce)
+
+
+def test_secret_box_generator_rejects_use_after_fork():
+    generator = nacl.utils.CounterNonceGenerator(b"fork-box-w")
+    box = SecretBox(b"\x11" * SecretBox.KEY_SIZE, nonce_generator=generator)
+    box.encrypt(b"message")
+
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - runs in the forked child
+        os.close(read_fd)
+        try:
+            box.encrypt(b"message")
+        except exceptions.NonceGeneratorForkError:
+            child_generator = nacl.utils.CounterNonceGenerator.for_process(
+                b"child-box", nonce_size=SecretBox.NONCE_SIZE
+            )
+            child_box = SecretBox(
+                b"\x11" * SecretBox.KEY_SIZE,
+                nonce_generator=child_generator,
+            )
+            child_box.encrypt(b"message")
+            os.write(write_fd, b"fork-ok")
+        finally:
+            os.close(write_fd)
+            os._exit(0)
+
+    os.close(write_fd)
+    result = os.read(read_fd, 4096)
+    os.waitpid(pid, 0)
+
+    assert result == b"fork-ok"

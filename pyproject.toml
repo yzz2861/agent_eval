@@ -156,6 +156,8 @@ exclude_also = [
 show_contexts = true
 
 [tool.pytest.ini_options]
-addopts = "-r s --capture=no"
+# Limit conftest discovery to the test tree so collection does not
+# stat directories above the repository root (restricted sandboxes).
+addopts = "-r s --capture=no --confcutdir=tests"
 console_output_style = "progress-even-when-capture-no"
 

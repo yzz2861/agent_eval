@@ -220,6 +220,32 @@ You can safely generate random nonces by calling:
 :func:`~nacl.utils.random` with ``Aead.NONCE_SIZE`` for Aead.
 
 
+When several processes or workers encrypt under the same key, give each
+worker an explicit nonce strategy so nonces can never collide. A
+:class:`~nacl.utils.CounterNonceGenerator` combines a process unique prefix
+with a monotonic counter, rejects reuse within its scope and raises a clear
+error if it is accidentally reused across a :func:`os.fork`:
+
+.. testcode::
+
+    import nacl.utils
+
+    generator = nacl.utils.CounterNonceGenerator.for_process(
+        worker_id=b"worker-0",
+        nonce_size=nacl.secret.SecretBox.NONCE_SIZE,
+    )
+    box = nacl.secret.SecretBox(key, nonce_generator=generator)
+
+    encrypted_0 = box.encrypt(message)
+    encrypted_1 = box.encrypt(message)
+    assert encrypted_0.nonce != encrypted_1.nonce
+
+The generator state (including the counter and every nonce already issued)
+can be serialized with :mod:`pickle`; restoring it never silently resets
+the counter, and replaying an issued nonce raises
+:class:`~nacl.exceptions.NonceReuseError`.
+
+
 Aad
 ~~~
 
@@ -239,7 +265,7 @@ A default empty bytes object will be used if not set when calling
 Reference
 ---------
 
-.. class:: SecretBox(key, encoder)
+.. class:: SecretBox(key, encoder, nonce_generator=None)
 
     The SecretBox class encrypts and decrypts messages using the given secret
     key.
@@ -254,6 +280,10 @@ Reference
 
     :param bytes key: The secret key used to encrypt and decrypt messages.
     :param encoder: A class that is able to decode the ``key``.
+    :param nonce_generator: An optional
+        :class:`~nacl.utils.NonceGenerator` used to produce the nonce when
+        :meth:`encrypt` is called without an explicit nonce. When omitted,
+        a random nonce is generated as in previous releases.
 
     .. method:: encrypt(plaintext, nonce, encoder)
 
