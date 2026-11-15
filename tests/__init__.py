@@ -8,7 +8,8 @@ from unittest import TestCase
 from freezegun import freeze_time
 
 from onetimepass import (
-    _is_possible_token, get_hotp, get_totp, valid_hotp, valid_totp,
+    TokenError, _is_possible_token, _normalize_token, get_hotp, get_totp,
+    valid_hotp, valid_totp,
 )
 
 
@@ -50,6 +51,109 @@ class PreliminaryChecksTestCase(TestCase):
         self.assertTrue(_is_possible_token(123456, token_length=7))
         # Invalid token with correct length:
         self.assertFalse(_is_possible_token('abcdefg', token_length=7))
+
+
+class TokenNormalizationTestCase(TestCase):
+    """
+    Check that int, bytes and str tokens follow one length policy.
+    """
+    secret = b'MFRGGZDFMZTWQ2LK'
+
+    def test_cross_type_six_digit_tokens(self):
+        token = get_hotp(self.secret, 2)
+        for candidate in (token, str(token), str(token).encode('ascii')):
+            self.assertTrue(_is_possible_token(candidate))
+            self.assertEqual(
+                valid_hotp(candidate, self.secret, last=1, trials=1),
+                2,
+            )
+
+    def test_cross_type_eight_digit_tokens(self):
+        token = get_hotp(self.secret, 2, token_length=8)
+        for candidate in (token, str(token), str(token).encode('ascii')):
+            self.assertTrue(_is_possible_token(candidate, token_length=8))
+            self.assertEqual(
+                valid_hotp(
+                    candidate, self.secret, last=1, trials=1,
+                    token_length=8,
+                ),
+                2,
+            )
+
+    def test_cross_type_totp_tokens(self):
+        with freeze_time(datetime.now()):
+            token = get_totp(self.secret, token_length=8)
+            for candidate in (token, str(token), str(token).encode('ascii')):
+                self.assertTrue(
+                    valid_totp(candidate, self.secret, token_length=8),
+                )
+
+    def test_leading_zero_tokens(self):
+        token = get_hotp(self.secret, 19)
+        self.assertEqual(
+            get_hotp(self.secret, 19, as_string=True),
+            b'088239',
+        )
+        for candidate in (token, '088239', b'088239'):
+            self.assertEqual(
+                valid_hotp(candidate, self.secret, last=18, trials=1),
+                19,
+            )
+
+        token = get_hotp(self.secret, 12, token_length=8)
+        self.assertEqual(
+            get_hotp(self.secret, 12, as_string=True, token_length=8),
+            b'08870288',
+        )
+        for candidate in (token, '08870288', b'08870288'):
+            self.assertEqual(
+                valid_hotp(
+                    candidate, self.secret, last=11, trials=1,
+                    token_length=8,
+                ),
+                12,
+            )
+
+    def test_overlong_tokens_are_rejected_not_truncated(self):
+        for candidate in ('1234567', b'1234567', 1234567, '0001234'):
+            self.assertFalse(_is_possible_token(candidate))
+            self.assertFalse(
+                valid_hotp(candidate, self.secret, last=0, trials=2),
+            )
+
+        # A token generated for an 8-digit tenant must not be compared as a
+        # 6-digit token by a tenant configured for length 6.
+        token = get_hotp(self.secret, 2, token_length=8)
+        self.assertFalse(
+            valid_hotp(token, self.secret, last=1, trials=1),
+        )
+        token = get_totp(
+            self.secret, as_string=True, token_length=8, clock=1234567890,
+        )
+        self.assertFalse(valid_totp(token, self.secret, clock=1234567890))
+
+    def test_empty_tokens_are_rejected(self):
+        for candidate in ('', b'', None, [], 12.5):
+            self.assertFalse(_is_possible_token(candidate))
+            self.assertFalse(
+                valid_hotp(candidate, self.secret, last=0, trials=1),
+            )
+            self.assertFalse(
+                valid_totp(candidate, self.secret, clock=0),
+            )
+
+    def test_invalid_characters_are_rejected(self):
+        for candidate in (
+                '+12345', '-12345', '12 345', '\u0661\u0662\u0663\u0664\u0665'
+                '\u0666', b'12\xff45'):
+            self.assertFalse(_is_possible_token(candidate))
+
+    def test_error_object_contains_only_reason_and_length(self):
+        error = _normalize_token(b'', token_length=8)
+        self.assertIsInstance(error, TokenError)
+        self.assertEqual(error.reason, 'empty')
+        self.assertEqual(error.expected_length, 8)
+        self.assertEqual(sorted(vars(error)), ['expected_length', 'reason'])
 
 
 class HotpGenerationTestCase(TestCase):

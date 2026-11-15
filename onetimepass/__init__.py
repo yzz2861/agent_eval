@@ -34,6 +34,7 @@ import hashlib
 import hmac
 import struct
 import time
+from dataclasses import dataclass
 from typing import Any, Callable
 
 __author__ = 'Tomasz Jaskowski <tadeck@gmail.com>'
@@ -43,11 +44,85 @@ __version__ = '%s.%s.%s' % __version_info__
 __license__ = 'MIT'
 
 
+@dataclass(frozen=True)
+class TokenError(Exception):
+    """Reason a token was rejected, without retaining the token itself.
+
+    Validation errors intentionally expose only a reason code and the
+    configured token length. This keeps malformed token material out of
+    exception messages and logs.
+    """
+    reason: str
+    expected_length: int
+
+
+def _normalize_token(
+        token: int | bytes | str,
+        token_length: int = 6,
+) -> str | TokenError:
+    """Convert a token to the canonical representation used for comparison.
+
+    The canonical form is a string of exactly ``token_length`` ASCII decimal
+    digits. Supported inputs are non-negative integers, ASCII digit bytes and
+    ASCII digit strings. Shorter inputs are left-padded with zeros; inputs
+    longer than the configured length are rejected instead of truncated.
+
+    :param token: token value to be normalized
+    :type token: int or bytes or str
+    :param token_length: configured length of the token
+    :type token_length: int
+    :return: canonical token string, or a ``TokenError`` describing rejection
+    :rtype: str or TokenError
+
+    >>> _normalize_token(123, 6)
+    '000123'
+    >>> _normalize_token(b'012345', 6)
+    '012345'
+    >>> _normalize_token('1234567', 6).reason
+    'too_long'
+    >>> _normalize_token('', 6).reason
+    'empty'
+    """
+    if (isinstance(token_length, bool)
+            or not isinstance(token_length, int)
+            or token_length <= 0):
+        return TokenError('invalid_length', token_length)
+
+    if isinstance(token, bool):
+        return TokenError('invalid_type', token_length)
+    if isinstance(token, int):
+        if token < 0:
+            return TokenError('invalid_character', token_length)
+        try:
+            token_str = str(token)
+        except ValueError:
+            # Python limits int-to-str conversion for very large values.
+            return TokenError('too_long', token_length)
+    elif isinstance(token, bytes):
+        try:
+            token_str = token.decode('ascii')
+        except UnicodeDecodeError:
+            return TokenError('invalid_character', token_length)
+    elif isinstance(token, str):
+        token_str = token
+    else:
+        return TokenError('invalid_type', token_length)
+
+    if not token_str:
+        return TokenError('empty', token_length)
+    if not (token_str.isascii() and token_str.isdigit()):
+        return TokenError('invalid_character', token_length)
+    if len(token_str) > token_length:
+        return TokenError('too_long', token_length)
+    return token_str.zfill(token_length)
+
+
 def _is_possible_token(token: int | bytes | str, token_length: int = 6) -> bool:
     """Determines if given value is acceptable as a token. Used when validating
     tokens.
 
-    Currently allows only numeric tokens no longer than 6 chars.
+    Allows only non-empty ASCII decimal tokens no longer than the configured
+    length.
 
     :param token: token value to be checked
     :type token: int or str
@@ -65,9 +140,7 @@ def _is_possible_token(token: int | bytes | str, token_length: int = 6) -> bool:
     >>> _is_possible_token(b'12345678')
     False
     """
-    if not isinstance(token, bytes):
-        token = str(token).encode('utf-8')
-    return token.isdigit() and len(token) <= token_length
+    return isinstance(_normalize_token(token, token_length), str)
 
 
 def get_hotp(
@@ -206,9 +279,9 @@ def valid_hotp(
     >>> valid_hotp(713385, secret, last=4, trials=5)
     False
     """
-    if not _is_possible_token(token, token_length=token_length):
+    token_str = _normalize_token(token, token_length=token_length)
+    if isinstance(token_str, TokenError):
         return False
-    token_str = '{:0{}d}'.format(int(token), token_length)
     for i in range(last + 1, last + trials + 1):
         token_candidate = get_hotp(
             secret=secret,
@@ -216,7 +289,9 @@ def valid_hotp(
             digest_method=digest_method,
             token_length=token_length,
         )
-        candidate_str = '{:0{}d}'.format(token_candidate, token_length)
+        candidate_str = _normalize_token(token_candidate, token_length)
+        if isinstance(candidate_str, TokenError):
+            return False
         if hmac.compare_digest(candidate_str, token_str):
             return i
     return False
@@ -265,21 +340,24 @@ def valid_totp(
     >>> valid_totp(token + b'1', secret)
     False
     """
-    if _is_possible_token(token, token_length=token_length):
-        if clock is None:
-            clock = time.time()
-        token_str = '{:0{}d}'.format(int(token), token_length)
-        for w in range(-window, window+1):
-            candidate = get_totp(
-                secret,
-                digest_method=digest_method,
-                token_length=token_length,
-                interval_length=interval_length,
-                clock=int(clock)+(w*interval_length)
-            )
-            candidate_str = '{:0{}d}'.format(candidate, token_length)
-            if hmac.compare_digest(candidate_str, token_str):
-                return True
+    token_str = _normalize_token(token, token_length=token_length)
+    if isinstance(token_str, TokenError):
+        return False
+    if clock is None:
+        clock = time.time()
+    for w in range(-window, window+1):
+        candidate = get_totp(
+            secret,
+            digest_method=digest_method,
+            token_length=token_length,
+            interval_length=interval_length,
+            clock=int(clock)+(w*interval_length)
+        )
+        candidate_str = _normalize_token(candidate, token_length)
+        if isinstance(candidate_str, TokenError):
+            return False
+        if hmac.compare_digest(candidate_str, token_str):
+            return True
     return False
 
 __all__ = [
