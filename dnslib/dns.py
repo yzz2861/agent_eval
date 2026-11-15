@@ -72,7 +72,11 @@ OPCODE = Bimap('OPCODE',{0:'QUERY', 1:'IQUERY', 2:'STATUS', 4:'NOTIFY', 5:'UPDAT
                 DNSError)
 
 def label(label,origin=None):
-    if label.endswith("."):
+    if label == "@":
+        # '@' always refers to the current origin (root if not specified)
+        return (origin if isinstance(origin,DNSLabel)
+                       else DNSLabel(origin))
+    elif label.endswith("."):
         return DNSLabel(label)
     else:
         return (origin if isinstance(origin,DNSLabel)
@@ -835,11 +839,11 @@ class RR(object):
                                 buffer.offset,e))
 
     @classmethod
-    def fromZone(cls,zone,origin="",ttl=0):
+    def fromZone(cls,zone,origin="",ttl=0,fname=None):
         """
             Parse RR data from zone file and return list of RRs
         """
-        return list(ZoneParser(zone,origin=origin,ttl=ttl))
+        return list(ZoneParser(zone,origin=origin,ttl=ttl,fname=fname))
 
     def __init__(self,rname=None,rtype=1,rclass=1,ttl=0,rdata=None):
         self.rname = rname
@@ -1086,7 +1090,16 @@ def _isprint(c):
 
 
 def _bytes_to_printable(b):
-    return '"' + ''.join([ (c if _isprint(c) else "\\{0:03o}".format(ord(c))) for c in b.decode(errors='replace') ]) + '"'
+    out = []
+    for c in b.decode(errors='replace'):
+        if c in ('"','\\'):
+            # Escape quote/backslash so that output can be re-parsed
+            out.append('\\' + c)
+        elif _isprint(c):
+            out.append(c)
+        else:
+            out.append("\\{0:03o}".format(ord(c)))
+    return '"' + ''.join(out) + '"'
 
 class TXT(RD):
     """
@@ -1439,7 +1452,7 @@ class SRV(RD):
 
     @classmethod
     def fromZone(cls,rd,origin=None):
-        return cls(int(rd[0]),int(rd[1]),int(rd[2]),rd[3])
+        return cls(int(rd[0]),int(rd[1]),int(rd[2]),label(rd[3],origin))
 
     def __init__(self,priority=0,weight=0,port=0,target=None):
         self.priority = priority
@@ -1644,7 +1657,7 @@ class RRSIG(RD):
         return cls(getattr(QTYPE,rd[0]),int(rd[1]),int(rd[2]),int(rd[3]),
                         int(calendar.timegm(time.strptime(rd[4]+'UTC',"%Y%m%d%H%M%S%Z"))),
                         int(calendar.timegm(time.strptime(rd[5]+'UTC',"%Y%m%d%H%M%S%Z"))),
-                        int(rd[6]),rd[7],
+                        int(rd[6]),label(rd[7],origin),
                         base64.b64decode(("".join(rd[8:])).encode('ascii')))
 
     def __init__(self,covered,algorithm,labels,orig_ttl,
@@ -1751,7 +1764,7 @@ class NSEC(RD):
 
     @classmethod
     def fromZone(cls,rd,origin=None):
-        return cls(rd.pop(0),rd)
+        return cls(label(rd.pop(0),origin),rd)
 
     def __init__(self,label,rrlist):
         self.label = label
@@ -2496,17 +2509,66 @@ def parse_time(s):
     else:
         return int(s)
 
+class ZoneError(DNSError):
+
+    """
+        Error parsing zone file. The error message includes the source
+        file name and line number (but never echoes the zone contents).
+    """
+
+    pass
+
+def _trunc(s,n=60):
+    """
+        Truncate token for inclusion in error messages (avoids echoing
+        large amounts of zone data - e.g. key material - into errors)
+    """
+    s = str(s)
+    return s if len(s) <= n else "%s..." % s[:n]
+
 class ZoneParser:
 
     """
-        Zone file parser
+        Zone file parser.
+
+        The parser maintains an explicit context (current origin, default
+        TTL, current owner name, source file/line) which is updated as
+        the zone is read:
+
+        - Owner names and names in RDATA are expanded against the current
+          origin: '@' means the origin itself, a trailing dot marks an
+          absolute name, anything else is relative to the origin
+        - TTL and class are inherited from $TTL / previous records but
+          are validated (TTL must be in the range 0..2^31-1)
+        - Parentheses continue records across lines, ';' starts a
+          comment, quoted strings and \\DDD octal escapes are supported
+        - $ORIGIN and $TTL directives take effect in order
+        - Exact duplicate records are dropped; a CNAME conflicting with
+          other record types at the same name (excluding DNSSEC
+          RRSIG/NSEC/KEY) is an error
+
+        Errors raise ZoneError including the source file name and line
+        number.
 
         >>> z = ZoneParser("www.example.com. 60 IN A 1.2.3.4")
         >>> list(z.parse())
         [<DNS RR: 'www.example.com.' rtype=A rclass=IN ttl=60 rdata='1.2.3.4'>]
+        >>> list(ZoneParser("@ 60 IN A 1.2.3.4",origin="example.com"))
+        [<DNS RR: 'example.com.' rtype=A rclass=IN ttl=60 rdata='1.2.3.4'>]
+        >>> list(ZoneParser("alias 60 IN CNAME @",origin="example.com"))
+        [<DNS RR: 'alias.example.com.' rtype=CNAME rclass=IN ttl=60 rdata='example.com.'>]
     """
 
-    def __init__(self,zone,origin="",ttl=0):
+    # Record types which can legitimately coexist with a CNAME (DNSSEC)
+    cname_exempt = ('RRSIG','NSEC','KEY')
+
+    # Map zone file class names to CLASS bimap entries
+    rclass_map = {'IN':'IN','CS':'CS','CH':'CH','HS':'Hesiod'}
+
+    # Maximum TTL value (RFC 2181)
+    max_ttl = 2147483647
+
+    def __init__(self,zone,origin="",ttl=0,fname=None):
         self.l = WordLexer(zone)
         self.l.commentchars = ';'
         self.l.nltok = ('NL',None)
@@ -2515,40 +2577,110 @@ class ZoneParser:
         if type(origin) is DNSLabel:
             self.origin = origin
         else:
-            self.origin= DNSLabel(origin)
+            self.origin = DNSLabel(origin)
         self.ttl = ttl
         self.label = DNSLabel("")
         self.prev = None
+        self.fname = fname or "<zone>"
+        self.line = 1
+        self.rr_line = 1
+        self.rrtypes = {}
+        self.rrdups = set()
+
+    def error(self,msg,line=None):
+        return ZoneError("%s:%d: %s" % (self.fname,
+                                        self.rr_line if line is None else line,
+                                        msg))
 
     def expect(self,expect):
-        t,val = next(self.i)
+        try:
+            t,val = next(self.i)
+        except StopIteration:
+            raise self.error("Unexpected end of zone (expecting: %s)" % expect)
+        except ValueError as e:
+            raise self.error(_trunc(e),line=self.line)
         if t != expect:
-            raise ValueError("Invalid Token: %s (expecting: %s)" % (t,expect))
+            raise self.error("Invalid token: %s (expecting: %s)" % (t,expect))
         return val
 
+    def parse_ttl(self,tok):
+        try:
+            ttl = parse_time(tok)
+        except (ValueError,IndexError):
+            raise self.error("Invalid TTL: %s" % _trunc(tok))
+        if ttl < 0 or ttl > self.max_ttl:
+            raise self.error("TTL out of range (0..%d): %s" % (
+                                        self.max_ttl,_trunc(tok)))
+        return ttl
+
+    def parse_name(self,name):
+        if name == "@":
+            return self.origin
+        elif name.endswith("."):
+            return DNSLabel(name)
+        else:
+            return self.origin.add(name)
+
     def parse_label(self,label):
-        if label.endswith("."):
-            self.label = DNSLabel(label)
-        elif label == "@":
-            self.label = self.origin
-        elif label == '':
+        if label == '':
+            # Blank owner - inherit from previous record
             pass
         else:
-            self.label = self.origin.add(label)
+            self.label = self.parse_name(label)
         return self.label
 
     def parse_rr(self,rr):
         label = self.parse_label(rr.pop(0))
-        ttl = int(rr.pop(0)) if rr[0].isdigit() else self.ttl
-        rclass = rr.pop(0) if rr[0] in ('IN','CH','HS') else 'IN'
+        ttl = self.ttl
+        rclass = CLASS.IN
+        # TTL & class can appear in either order (and are optional)
+        if rr and rr[0][:1].isdigit():
+            ttl = self.parse_ttl(rr.pop(0))
+            if rr and rr[0] in self.rclass_map:
+                rclass = getattr(CLASS,self.rclass_map[rr.pop(0)])
+        elif rr and rr[0] in self.rclass_map:
+            rclass = getattr(CLASS,self.rclass_map[rr.pop(0)])
+            if rr and rr[0][:1].isdigit():
+                ttl = self.parse_ttl(rr.pop(0))
+        if not rr:
+            raise self.error("Missing record type")
         rtype = rr.pop(0)
-        rdata = rr
+        try:
+            qtype = getattr(QTYPE,rtype)
+        except DNSError:
+            raise self.error("Unknown record type: %s" % _trunc(rtype))
         rd = RDMAP.get(rtype,RD)
-        return RR(rname=label,
-                         ttl=ttl,
-                         rclass=getattr(CLASS,rclass),
-                         rtype=getattr(QTYPE,rtype),
-                         rdata=rd.fromZone(rdata,self.origin))
+        try:
+            rdata = rd.fromZone(rr,self.origin)
+        except (IndexError,ValueError,DNSError) as e:
+            raise self.error("Invalid %s record data: %s" % (
+                                        rtype,_trunc(e)))
+        return RR(rname=label,ttl=ttl,rclass=rclass,rtype=qtype,rdata=rdata)
+
+    def check_rr(self,r):
+        """
+            Check record for duplicates / CNAME conflicts.
+            Returns True if the record should be included in the output.
+        """
+        rtype = QTYPE[r.rtype]
+        # Exact duplicate (same owner/type/rdata) - keep first only
+        dup = (r.rname,r.rtype,str(r.rdata))
+        if dup in self.rrdups:
+            return False
+        self.rrdups.add(dup)
+        # CNAME cannot coexist with other record types at the same name
+        types = self.rrtypes.setdefault(r.rname,set())
+        if rtype == 'CNAME':
+            conflict = types.difference(self.cname_exempt)
+            if conflict:
+                raise self.error("CNAME record at %s conflicts with "
+                                 "existing %s record" % (
+                                        r.rname,sorted(conflict)[0]))
+        elif rtype not in self.cname_exempt and 'CNAME' in types:
+            raise self.error("%s record at %s conflicts with "
+                             "existing CNAME record" % (rtype,r.rname))
+        types.add(rtype)
+        return True
 
     def __iter__(self):
         return self.parse()
@@ -2558,33 +2690,53 @@ class ZoneParser:
         paren = False
         try:
             while True:
-                tok,val = next(self.i)
+                try:
+                    tok,val = next(self.i)
+                except ValueError as e:
+                    raise self.error(_trunc(e),line=self.line)
                 if tok == 'NL':
+                    self.line += 1
                     if not paren and rr:
                         self.prev = tok
-                        yield self.parse_rr(rr)
+                        r = self.parse_rr(rr)
                         rr = []
+                        if self.check_rr(r):
+                            yield r
                 elif tok == 'SPACE' and self.prev == 'NL' and not paren:
                     rr.append('')
                 elif tok == 'ATOM':
                     if val == '(':
+                        if paren:
+                            raise self.error("Nested parenthesis")
                         paren = True
                     elif val == ')':
+                        if not paren:
+                            raise self.error("Unbalanced parenthesis")
                         paren = False
-                    elif val == '$ORIGIN':
+                    elif val.upper() == '$ORIGIN':
                         self.expect('SPACE')
                         origin = self.expect('ATOM')
-                        self.origin = self.label = DNSLabel(origin)
-                    elif val == '$TTL':
+                        self.origin = self.label = self.parse_name(origin)
+                    elif val.upper() == '$TTL':
                         self.expect('SPACE')
                         ttl = self.expect('ATOM')
-                        self.ttl = parse_time(ttl)
+                        self.ttl = self.parse_ttl(ttl)
+                    elif val.startswith('$'):
+                        raise self.error("Unknown directive: %s" % _trunc(val))
                     else:
+                        if not rr:
+                            self.rr_line = self.line
                         rr.append(val)
+                elif tok == 'COMMENT':
+                    pass
                 self.prev = tok
         except StopIteration:
+            if paren:
+                raise self.error("Unbalanced parenthesis")
             if rr:
-                yield self.parse_rr(rr)
+                r = self.parse_rr(rr)
+                if self.check_rr(r):
+                    yield r
 
 if __name__ == '__main__':
     import doctest,sys

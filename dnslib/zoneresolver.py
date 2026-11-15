@@ -17,8 +17,14 @@ class ZoneResolver(BaseResolver):
             Initialise resolver from zone file.
             Stores RRs as a list of (label,type,rr) tuples
             If 'glob' is True use glob match against zone file
+
+            The zone can be supplied as a string, bytes or a file
+            object. If a file object is used its name is included in
+            any parse errors (file:line).
         """
-        self.zone = [(rr.rname,QTYPE[rr.rtype],rr) for rr in RR.fromZone(zone)]
+        fname = getattr(zone,'name',None)
+        self.zone = [(rr.rname,QTYPE[rr.rtype],rr) for rr in
+                                RR.fromZone(zone,fname=fname)]
         self.glob = glob
         self.eq = 'matchGlob' if glob else '__eq__'
 
@@ -115,4 +121,3 @@ if __name__ == '__main__':
 
     while udp_server.isAlive():
         time.sleep(1)
-

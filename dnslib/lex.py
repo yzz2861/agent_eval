@@ -115,16 +115,27 @@ class Lexer(object):
         if c in self.escape_chars:
             self.escaped = True
             n = self.peek(3)
-            if n.isdigit():
+            if n == '':
+                raise ValueError("Truncated escape at end of input")
+            elif n.isdigit():
                 n = self.read(3)
                 if self.debug:
                     print("Escape: >%s<" % n)
-                return chr(int(n,8))
+                try:
+                    v = int(n,8)
+                except ValueError:
+                    raise ValueError("Invalid octal escape: \\%s" % n)
+                if v > 0o377:
+                    raise ValueError("Octal escape out of range: \\%s" % n)
+                return chr(v)
             elif n[0] in 'x':
                 x = self.read(3)
                 if self.debug:
                     print("Escape: >%s<" % x)
-                return chr(int(x[1:],16))
+                try:
+                    return chr(int(x[1:],16))
+                except ValueError:
+                    raise ValueError("Invalid hex escape: \\%s" % x)
             else:
                 c = self.read(1)
                 if self.debug:
@@ -235,12 +246,18 @@ class WordLexer(Lexer):
         s = []
         tok = lambda n : (('ATOM',''.join(s)),n)
         q = self.read(1)
+        closed = False
         while not self.eof:
             c = self.readescaped()
             if c == q and not self.escaped:
+                closed = True
                 break
+            elif c in self.nlchars and not self.escaped:
+                raise ValueError("Unterminated quoted string")
             else:
                 s.append(c)
+        if not closed:
+            raise ValueError("Unterminated quoted string")
         return tok(self.lexSpace)
 
 class RandomLexer(Lexer):
@@ -352,4 +369,3 @@ if __name__ == '__main__':
             # Don't run stream test
             doctest.run_docstring_examples(Lexer, globals())
             doctest.run_docstring_examples(WordLexer, globals())
-

@@ -219,6 +219,17 @@ def test_generator(f):
         self.assertEqual(check_decode(f),[])
     return test
 
+# Helper - not a test itself (stops pytest trying to collect it)
+test_generator.__test__ = False
+
+# Generate test methods at import time so that the module can be
+# collected and run directly by pytest as well as via unittest
+_testdir = os.path.join(os.path.dirname(__file__),"test")
+for _f in glob.iglob(os.path.join(_testdir,"*")):
+    if os.path.isfile(_f):
+        _test_name = 'test_%s' % os.path.basename(_f)
+        setattr(TestContainer,_test_name,test_generator(_f))
+
 if __name__ == '__main__':
 
     testdir = os.path.join(os.path.dirname(__file__),"test")
@@ -283,6 +294,5 @@ if __name__ == '__main__':
             unittest.main(argv=[__name__],
                           verbosity=2 if args.verbose else 1,
                           failfast=args.failfast)
-
 
 
