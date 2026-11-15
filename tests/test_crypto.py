@@ -50,7 +50,9 @@ from OpenSSL.crypto import (
     get_elliptic_curve,
     get_elliptic_curves,
     load_certificate,
+    load_certificates,
     load_privatekey,
+    load_privatekeys,
     load_publickey,
 )
 
@@ -2063,6 +2065,267 @@ class TestLoadPublicKey:
         dumped_pem = dump_publickey(FILETYPE_PEM, key)
 
         assert dumped_pem == cleartextPublicKeyPEM
+
+
+class TestLoadCertificates:
+    """
+    Tests for :func:`load_certificates` and strict ``load_certificate``.
+    """
+
+    def test_load_multiple_certificates_pem(self) -> None:
+        """
+        `load_certificates` loads every certificate from a PEM chain file,
+        preserving order.
+        """
+        chain = root_cert_pem + intermediate_cert_pem
+        certs = load_certificates(FILETYPE_PEM, chain)
+
+        assert len(certs) == 2
+        assert dump_certificate(FILETYPE_ASN1, certs[0]) == dump_certificate(
+            FILETYPE_ASN1, load_certificate(FILETYPE_PEM, root_cert_pem)
+        )
+        assert dump_certificate(FILETYPE_ASN1, certs[1]) == dump_certificate(
+            FILETYPE_ASN1, load_certificate(FILETYPE_PEM, intermediate_cert_pem)
+        )
+
+    def test_load_certificates_pem_blank_lines_tolerated(self) -> None:
+        """
+        `load_certificates` tolerates whitespace between PEM blocks.
+        """
+        chain = root_cert_pem + b"\n\n" + intermediate_cert_pem + b"\n"
+        assert len(load_certificates(FILETYPE_PEM, chain)) == 2
+
+    def test_load_multiple_certificates_der(self) -> None:
+        """
+        `load_certificates` loads concatenated DER certificates.
+        """
+        der_root = dump_certificate(
+            FILETYPE_ASN1, load_certificate(FILETYPE_PEM, root_cert_pem)
+        )
+        der_intermediate = dump_certificate(
+            FILETYPE_ASN1, load_certificate(FILETYPE_PEM, intermediate_cert_pem)
+        )
+        certs = load_certificates(FILETYPE_ASN1, der_root + der_intermediate)
+
+        assert len(certs) == 2
+        assert dump_certificate(FILETYPE_ASN1, certs[0]) == der_root
+        assert dump_certificate(FILETYPE_ASN1, certs[1]) == der_intermediate
+
+    def test_load_certificates_der_trailing_garbage(self) -> None:
+        """
+        `load_certificates` rejects trailing garbage after a DER object and
+        reports the object index.
+        """
+        der_root = dump_certificate(
+            FILETYPE_ASN1, load_certificate(FILETYPE_PEM, root_cert_pem)
+        )
+        with pytest.raises(Error, match="DER object 2"):
+            load_certificates(FILETYPE_ASN1, der_root + b"garbage")
+
+    def test_load_certificates_unexpected_label(self) -> None:
+        """
+        `load_certificates` rejects non-certificate PEM blocks (such as
+        private keys) instead of silently ignoring them.
+        """
+        chain = root_cert_pem + root_key_pem
+        with pytest.raises(Error, match="PEM object 2"):
+            load_certificates(FILETYPE_PEM, chain)
+
+    def test_load_certificates_error_excludes_private_key(self) -> None:
+        """
+        Errors raised by `load_certificates` never include private key
+        material from the input.
+        """
+        chain = root_cert_pem + root_key_pem
+        with pytest.raises(Error) as err:
+            load_certificates(FILETYPE_PEM, chain)
+        key_fragment = root_key_pem.split(b"\n")[1][:24]
+        assert key_fragment not in str(err.value).encode("ascii")
+
+    def test_load_certificates_truncated_pem(self) -> None:
+        """
+        `load_certificates` rejects a PEM file whose last block is missing
+        its END line, identifying the truncated object.
+        """
+        truncated = root_cert_pem + intermediate_cert_pem[
+            : len(intermediate_cert_pem) // 2
+        ]
+        with pytest.raises(Error, match="PEM object 2"):
+            load_certificates(FILETYPE_PEM, truncated)
+
+    def test_load_certificates_mismatched_end_label(self) -> None:
+        """
+        `load_certificates` rejects a PEM block whose END label does not
+        match its BEGIN label.
+        """
+        bad = root_cert_pem.replace(
+            b"-----END CERTIFICATE-----",
+            b"-----END TRUSTED CERTIFICATE-----",
+        )
+        with pytest.raises(Error, match="PEM object 1"):
+            load_certificates(FILETYPE_PEM, bad)
+
+    def test_load_certificates_invalid_base64(self) -> None:
+        """
+        `load_certificates` rejects a PEM block with invalid base64 data.
+        """
+        bad = root_cert_pem.replace(b"MIIE7j", b"!!!!!!", 1)
+        with pytest.raises(Error, match="PEM object 1"):
+            load_certificates(FILETYPE_PEM, bad)
+
+    def test_load_certificates_trailing_data(self) -> None:
+        """
+        `load_certificates` rejects non-whitespace data (such as rotation
+        notes) after the last PEM block.
+        """
+        with pytest.raises(Error, match="trailing data after PEM object 1"):
+            load_certificates(
+                FILETYPE_PEM, root_cert_pem + b"rotation notes\n"
+            )
+
+    def test_load_certificates_invalid_type(self) -> None:
+        """
+        `load_certificates` raises `ValueError` for an unknown filetype.
+        """
+        with pytest.raises(ValueError):
+            load_certificates(100, root_cert_pem)
+
+    def test_load_certificate_default_ignores_chain(self) -> None:
+        """
+        `load_certificate` without ``strict`` keeps its historical
+        behavior: only the first certificate is parsed.
+        """
+        cert = load_certificate(
+            FILETYPE_PEM, root_cert_pem + intermediate_cert_pem
+        )
+        assert dump_certificate(FILETYPE_ASN1, cert) == dump_certificate(
+            FILETYPE_ASN1, load_certificate(FILETYPE_PEM, root_cert_pem)
+        )
+
+    def test_load_certificate_strict_single(self) -> None:
+        """
+        `load_certificate` with ``strict=True`` loads a single certificate
+        and rejects inputs with additional objects or trailing data.
+        """
+        cert = load_certificate(FILETYPE_PEM, root_cert_pem, strict=True)
+        assert isinstance(cert, X509)
+
+        with pytest.raises(Error, match="exactly one certificate"):
+            load_certificate(
+                FILETYPE_PEM,
+                root_cert_pem + intermediate_cert_pem,
+                strict=True,
+            )
+
+        der_root = dump_certificate(FILETYPE_ASN1, cert)
+        assert isinstance(
+            load_certificate(FILETYPE_ASN1, der_root, strict=True), X509
+        )
+        with pytest.raises(Error, match="DER object 2"):
+            load_certificate(
+                FILETYPE_ASN1, der_root + b"trailing", strict=True
+            )
+
+
+class TestLoadPrivateKeys:
+    """
+    Tests for :func:`load_privatekeys` and strict ``load_privatekey``.
+    """
+
+    def test_load_multiple_privatekeys_pem(self) -> None:
+        """
+        `load_privatekeys` loads every private key from a multi-object PEM
+        buffer.
+        """
+        keys = load_privatekeys(
+            FILETYPE_PEM, root_key_pem + normalized_root_key_pem
+        )
+        assert len(keys) == 2
+        assert all(isinstance(key, PKey) for key in keys)
+
+    def test_load_privatekeys_encrypted_requires_passphrase(self) -> None:
+        """
+        `load_privatekeys` raises `Error` identifying the object when an
+        encrypted private key is present but no passphrase was given.
+        """
+        chain = root_key_pem + encryptedPrivateKeyPEM
+        with pytest.raises(Error, match="PEM object 2"):
+            load_privatekeys(FILETYPE_PEM, chain)
+
+    def test_load_privatekeys_encrypted_with_passphrase(self) -> None:
+        """
+        `load_privatekeys` loads a mix of cleartext and encrypted private
+        keys when given the passphrase.
+        """
+        keys = load_privatekeys(
+            FILETYPE_PEM,
+            root_key_pem + encryptedPrivateKeyPEM,
+            encryptedPrivateKeyPEMPassphrase,
+        )
+        assert len(keys) == 2
+
+    def test_load_privatekeys_wrong_passphrase_object_index(self) -> None:
+        """
+        `load_privatekeys` reports the object index when the passphrase
+        does not decrypt an encrypted private key.
+        """
+        chain = root_key_pem + encryptedPrivateKeyPEM
+        with pytest.raises(Error, match="PEM object 2"):
+            load_privatekeys(FILETYPE_PEM, chain, b"quack")
+
+    def test_load_privatekeys_unexpected_label(self) -> None:
+        """
+        `load_privatekeys` rejects PEM blocks that are not private keys.
+        """
+        with pytest.raises(Error, match="PEM object 1"):
+            load_privatekeys(FILETYPE_PEM, root_cert_pem)
+
+    def test_load_privatekeys_truncated_pem(self) -> None:
+        """
+        `load_privatekeys` rejects a truncated PEM block.
+        """
+        truncated = root_key_pem[: len(root_key_pem) // 2]
+        with pytest.raises(Error, match="PEM object 1"):
+            load_privatekeys(FILETYPE_PEM, truncated)
+
+    def test_load_privatekeys_der_trailing_garbage(self) -> None:
+        """
+        `load_privatekeys` rejects trailing garbage after a DER object.
+        """
+        key = load_privatekey(FILETYPE_PEM, root_key_pem)
+        der = dump_privatekey(FILETYPE_ASN1, key)
+        with pytest.raises(Error, match="DER object 2"):
+            load_privatekeys(FILETYPE_ASN1, der + b"garbage")
+
+    def test_load_privatekeys_der_passphrase_rejected(self) -> None:
+        """
+        `load_privatekeys` raises `ValueError` when a passphrase is given
+        for a format that does not support encryption.
+        """
+        with pytest.raises(ValueError):
+            load_privatekeys(FILETYPE_ASN1, b"whatever", b"secret")
+
+    def test_load_privatekeys_invalid_type(self) -> None:
+        """
+        `load_privatekeys` raises `ValueError` for an unknown filetype.
+        """
+        with pytest.raises(ValueError):
+            load_privatekeys(100, root_key_pem)
+
+    def test_load_privatekey_strict(self) -> None:
+        """
+        `load_privatekey` with ``strict=True`` loads a single key and
+        rejects inputs with additional objects.
+        """
+        key = load_privatekey(FILETYPE_PEM, root_key_pem, strict=True)
+        assert isinstance(key, PKey)
+
+        with pytest.raises(Error, match="exactly one private key"):
+            load_privatekey(
+                FILETYPE_PEM,
+                root_key_pem + normalized_root_key_pem,
+                strict=True,
+            )
 
 
 class TestFunction:

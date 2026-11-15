@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import binascii
 import calendar
 import datetime
 import functools
+import re
 import sys
 import typing
-from base64 import b16encode
+from base64 import b16encode, b64decode
 from collections.abc import Sequence
 from functools import partial
 from typing import (
@@ -68,7 +70,9 @@ __all__ = [
     "get_elliptic_curve",
     "get_elliptic_curves",
     "load_certificate",
+    "load_certificates",
     "load_privatekey",
+    "load_privatekeys",
     "load_publickey",
 ]
 
@@ -1635,7 +1639,183 @@ class X509StoreContext:
         return result
 
 
-def load_certificate(type: int, buffer: bytes) -> X509:
+_PEM_BEGIN_MARKER = b"-----BEGIN "
+_PEM_END_MARKER = b"-----END "
+_PEM_LABEL_ALPHABET = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ")
+_PEM_HEADER_LINE_RE = re.compile(rb"[ \t]*[A-Za-z0-9-]+:[^\n]*(\n|$)")
+_PEM_WHITESPACE_RE = re.compile(rb"\s+")
+
+
+def _valid_pem_label(label: bytes) -> bool:
+    """
+    Check that *label* is a well-formed RFC 7468 label.
+    """
+    return (
+        len(label) > 0
+        and not label.startswith(b" ")
+        and not label.endswith(b" ")
+        and b"  " not in label
+        and all(char in _PEM_LABEL_ALPHABET for char in label)
+    )
+
+
+def _validate_pem_body(index: int, body: bytes) -> None:
+    """
+    Validate the base64 payload of a single PEM block.
+
+    Legacy encryption headers (e.g. ``Proc-Type``/``DEK-Info``) preceding
+    the payload are permitted.  The block contents are never included in
+    the raised errors so that private key material cannot leak into logs.
+    """
+    rest = body
+    while True:
+        match = _PEM_HEADER_LINE_RE.match(rest)
+        if match is None:
+            break
+        rest = rest[match.end() :]
+
+    compact = _PEM_WHITESPACE_RE.sub(b"", rest)
+    if not compact:
+        raise Error(f"PEM object {index}: missing base64 payload")
+    try:
+        b64decode(compact, validate=True)
+    except binascii.Error:
+        raise Error(f"PEM object {index}: invalid base64 data") from None
+
+
+def _parse_pem_blocks(buffer: bytes) -> list[tuple[int, bytes, bytes]]:
+    """
+    Split *buffer* into its PEM blocks, validating labels, base64
+    boundaries, and rejecting non-whitespace data outside of blocks.
+
+    Returns a list of ``(index, label, raw_block)`` tuples where *index*
+    is the 1-based position of the block and *raw_block* holds the exact
+    bytes of the block from its BEGIN line through its END line.
+
+    Error messages identify the offending object by index but never
+    include block contents, so private key material cannot leak.
+    """
+    blocks = []
+    pos = 0
+    while True:
+        begin = buffer.find(_PEM_BEGIN_MARKER, pos)
+        if begin == -1:
+            if buffer[pos:].strip():
+                if blocks:
+                    raise Error(
+                        f"trailing data after PEM object {len(blocks)}"
+                    )
+                raise Error("no PEM objects found in input")
+            break
+        if buffer[pos:begin].strip():
+            raise Error(
+                f"unexpected data before PEM object {len(blocks) + 1}"
+            )
+
+        index = len(blocks) + 1
+        header_end = buffer.find(b"\n", begin)
+        if header_end == -1:
+            raise Error(f"PEM object {index}: truncated BEGIN line")
+        header = buffer[begin:header_end].rstrip(b"\r")
+        if not header.endswith(b"-----"):
+            raise Error(f"PEM object {index}: malformed BEGIN line")
+        label = header[len(_PEM_BEGIN_MARKER) : -len(b"-----")]
+        if not _valid_pem_label(label):
+            raise Error(f"PEM object {index}: invalid label in BEGIN line")
+
+        end_start = buffer.find(_PEM_END_MARKER, header_end)
+        if end_start == -1:
+            raise Error(
+                f"PEM object {index} ({label.decode('ascii')}): "
+                f"truncated PEM, missing END line"
+            )
+        end_line_end = buffer.find(b"\n", end_start)
+        if end_line_end == -1:
+            end_line_end = len(buffer)
+        end_line = buffer[end_start:end_line_end].rstrip(b"\r")
+        if end_line != _PEM_END_MARKER + label + b"-----":
+            raise Error(
+                f"PEM object {index}: END line does not match BEGIN "
+                f"label {label.decode('ascii')!r}"
+            )
+
+        _validate_pem_body(index, buffer[header_end + 1 : end_start])
+
+        block_end = (
+            end_line_end
+            if end_line_end == len(buffer)
+            else end_line_end + 1
+        )
+        blocks.append((index, label, buffer[begin:block_end]))
+        pos = block_end
+
+    if not blocks:
+        raise Error("no PEM objects found in input")
+    return blocks
+
+
+def _bio_read_all(bio: Any) -> bytes:
+    """
+    Drain the remaining unread bytes from a memory BIO.
+    """
+    chunks = []
+    buf = _ffi.new("char[]", 8192)
+    while True:
+        count = _lib.BIO_read(bio, buf, len(buf))
+        if count <= 0:
+            break
+        chunks.append(_ffi.buffer(buf, count)[:])
+    return b"".join(chunks)
+
+
+def _raise_object_error(kind: str, index: int) -> typing.NoReturn:
+    """
+    Re-raise the current OpenSSL error with the 1-based object index
+    prepended, so failures in multi-object inputs can be located.
+    """
+    try:
+        _raise_current_error()
+    except Error as error:
+        raise Error(f"{kind} object {index}: {error}") from error
+
+
+def _load_pem_certificate(raw: bytes, index: int | None) -> X509:
+    """
+    Load a single certificate from one PEM block.  When *index* is not
+    None, parse failures are reported with that 1-based object index.
+    """
+    bio = _new_mem_buf(raw)
+    x509 = _lib.PEM_read_bio_X509(bio, _ffi.NULL, _ffi.NULL, _ffi.NULL)
+    if x509 == _ffi.NULL:
+        if index is None:
+            _raise_current_error()
+        _raise_object_error("PEM", index)
+    return X509._from_raw_x509_ptr(x509)
+
+
+def _load_der_certificates(buffer: bytes) -> list[X509]:
+    """
+    Load every certificate from a buffer of concatenated DER objects,
+    rejecting trailing garbage.
+    """
+    certificates = []
+    remaining = buffer
+    while remaining:
+        index = len(certificates) + 1
+        bio = _new_mem_buf(remaining)
+        x509 = _lib.d2i_X509_bio(bio, _ffi.NULL)
+        if x509 == _ffi.NULL:
+            _raise_object_error("DER", index)
+        certificates.append(X509._from_raw_x509_ptr(x509))
+        remaining = _bio_read_all(bio)
+    if not certificates:
+        raise Error("no DER objects found in input")
+    return certificates
+
+
+def load_certificate(
+    type: int, buffer: bytes, *, strict: bool = False
+) -> X509:
     """
     Load a certificate (X509) from the string *buffer* encoded with the
     type *type*.
@@ -1644,24 +1824,74 @@ def load_certificate(type: int, buffer: bytes) -> X509:
 
     :param bytes buffer: The buffer the certificate is stored in
 
+    :param strict: When True, require *buffer* to contain exactly one
+        certificate: PEM labels, base64 boundaries, and any trailing data
+        are validated and extra objects are rejected.  The default
+        (False) preserves the historical behavior of parsing only the
+        first object and silently ignoring the rest of the buffer.
+
     :return: The X509 object
     """
     if isinstance(buffer, str):
         buffer = buffer.encode("ascii")
 
-    bio = _new_mem_buf(buffer)
-
-    if type == FILETYPE_PEM:
-        x509 = _lib.PEM_read_bio_X509(bio, _ffi.NULL, _ffi.NULL, _ffi.NULL)
-    elif type == FILETYPE_ASN1:
-        x509 = _lib.d2i_X509_bio(bio, _ffi.NULL)
-    else:
+    if type not in (FILETYPE_PEM, FILETYPE_ASN1):
         raise ValueError("type argument must be FILETYPE_PEM or FILETYPE_ASN1")
 
+    if strict:
+        certificates = load_certificates(type, buffer)
+        if len(certificates) != 1:
+            raise Error(
+                f"expected exactly one certificate, "
+                f"found {len(certificates)}"
+            )
+        return certificates[0]
+
+    if type == FILETYPE_PEM:
+        return _load_pem_certificate(buffer, None)
+
+    bio = _new_mem_buf(buffer)
+    x509 = _lib.d2i_X509_bio(bio, _ffi.NULL)
     if x509 == _ffi.NULL:
         _raise_current_error()
-
     return X509._from_raw_x509_ptr(x509)
+
+
+def load_certificates(type: int, buffer: bytes) -> list[X509]:
+    """
+    Load all certificates (X509) from the string *buffer* encoded with
+    the type *type*.
+
+    Unlike :func:`load_certificate`, every object in *buffer* is parsed:
+    PEM input must consist solely of ``CERTIFICATE`` blocks, DER input
+    must consist solely of concatenated certificates, and any trailing
+    data is rejected.  Errors identify the offending object by its
+    1-based index; object contents (such as private key material) are
+    never included in error messages.
+
+    :param type: The file type (one of FILETYPE_PEM, FILETYPE_ASN1)
+
+    :param bytes buffer: The buffer the certificates are stored in
+
+    :return: The list of X509 objects, in the order they appear
+    """
+    if isinstance(buffer, str):
+        buffer = buffer.encode("ascii")
+
+    if type == FILETYPE_PEM:
+        certificates = []
+        for index, label, raw in _parse_pem_blocks(buffer):
+            if label != b"CERTIFICATE":
+                raise Error(
+                    f"PEM object {index}: unexpected label "
+                    f"{label.decode('ascii')!r}, expected 'CERTIFICATE'"
+                )
+            certificates.append(_load_pem_certificate(raw, index))
+        return certificates
+    elif type == FILETYPE_ASN1:
+        return _load_der_certificates(buffer)
+    else:
+        raise ValueError("type argument must be FILETYPE_PEM or FILETYPE_ASN1")
 
 
 def dump_certificate(type: int, cert: X509) -> bytes:
@@ -1916,10 +2146,55 @@ def load_publickey(type: int, buffer: str | bytes) -> PKey:
     return pkey
 
 
+_PRIVATE_KEY_LABELS = (
+    b"PRIVATE KEY",
+    b"ENCRYPTED PRIVATE KEY",
+    b"RSA PRIVATE KEY",
+    b"EC PRIVATE KEY",
+    b"DSA PRIVATE KEY",
+)
+
+
+def _is_encrypted_pem_block(label: bytes, raw: bytes) -> bool:
+    """
+    Check whether a PEM block holds an encrypted private key, either in
+    PKCS#8 form or legacy form with ``Proc-Type`` headers.
+    """
+    return (
+        label == b"ENCRYPTED PRIVATE KEY"
+        or b"Proc-Type: 4,ENCRYPTED" in raw
+    )
+
+
+def _load_pem_privatekey(
+    raw: bytes, passphrase: PassphraseCallableT | None, index: int | None
+) -> PKey:
+    """
+    Load a single private key from one PEM block.  When *index* is not
+    None, parse failures are reported with that 1-based object index.
+    """
+    bio = _new_mem_buf(raw)
+    helper = _PassphraseHelper(FILETYPE_PEM, passphrase)
+    evp_pkey = _lib.PEM_read_bio_PrivateKey(
+        bio, _ffi.NULL, helper.callback, helper.callback_args
+    )
+    helper.raise_if_problem()
+    if evp_pkey == _ffi.NULL:
+        if index is None:
+            _raise_current_error()
+        _raise_object_error("PEM", index)
+
+    pkey = PKey.__new__(PKey)
+    pkey._pkey = _ffi.gc(evp_pkey, _lib.EVP_PKEY_free)
+    return pkey
+
+
 def load_privatekey(
     type: int,
     buffer: str | bytes,
     passphrase: PassphraseCallableT | None = None,
+    *,
+    strict: bool = False,
 ) -> PKey:
     """
     Load a private key (PKey) from the string *buffer* encoded with the type
@@ -1930,28 +2205,108 @@ def load_privatekey(
     :param passphrase: (optional) if encrypted PEM format, this can be
                        either the passphrase to use, or a callback for
                        providing the passphrase.
+    :param strict: When True, require *buffer* to contain exactly one
+                   private key: PEM labels, base64 boundaries, and any
+                   trailing data are validated and extra objects are
+                   rejected.  The default (False) preserves the
+                   historical behavior of parsing only the first object
+                   and silently ignoring the rest of the buffer.
 
     :return: The PKey object
     """
     if isinstance(buffer, str):
         buffer = buffer.encode("ascii")
 
-    bio = _new_mem_buf(buffer)
-
-    helper = _PassphraseHelper(type, passphrase)
-    if type == FILETYPE_PEM:
-        evp_pkey = _lib.PEM_read_bio_PrivateKey(
-            bio, _ffi.NULL, helper.callback, helper.callback_args
-        )
-        helper.raise_if_problem()
-    elif type == FILETYPE_ASN1:
-        evp_pkey = _lib.d2i_PrivateKey_bio(bio, _ffi.NULL)
-    else:
+    if type not in (FILETYPE_PEM, FILETYPE_ASN1):
         raise ValueError("type argument must be FILETYPE_PEM or FILETYPE_ASN1")
 
+    if strict:
+        keys = load_privatekeys(type, buffer, passphrase)
+        if len(keys) != 1:
+            raise Error(
+                f"expected exactly one private key, found {len(keys)}"
+            )
+        return keys[0]
+
+    if type == FILETYPE_PEM:
+        return _load_pem_privatekey(buffer, passphrase, None)
+
+    if passphrase is not None:
+        raise ValueError("only FILETYPE_PEM key format supports encryption")
+
+    bio = _new_mem_buf(buffer)
+    evp_pkey = _lib.d2i_PrivateKey_bio(bio, _ffi.NULL)
     if evp_pkey == _ffi.NULL:
         _raise_current_error()
 
     pkey = PKey.__new__(PKey)
     pkey._pkey = _ffi.gc(evp_pkey, _lib.EVP_PKEY_free)
     return pkey
+
+
+def load_privatekeys(
+    type: int,
+    buffer: str | bytes,
+    passphrase: PassphraseCallableT | None = None,
+) -> list[PKey]:
+    """
+    Load all private keys (PKey) from the string *buffer* encoded with
+    the type *type*.
+
+    Unlike :func:`load_privatekey`, every object in *buffer* is parsed:
+    PEM input must consist solely of private key blocks, DER input must
+    consist solely of concatenated private keys, and any trailing data is
+    rejected.  Errors identify the offending object by its 1-based index;
+    object contents (such as private key material) are never included in
+    error messages.
+
+    :param type: The file type (one of FILETYPE_PEM, FILETYPE_ASN1)
+    :param buffer: The buffer the keys are stored in
+    :param passphrase: (optional) if encrypted PEM format, this can be
+                       either the passphrase to use, or a callback for
+                       providing the passphrase.  Required if any block
+                       holds an encrypted private key.
+
+    :return: The list of PKey objects, in the order they appear
+    """
+    if isinstance(buffer, str):
+        buffer = buffer.encode("ascii")
+
+    if type == FILETYPE_PEM:
+        keys = []
+        for index, label, raw in _parse_pem_blocks(buffer):
+            if label not in _PRIVATE_KEY_LABELS:
+                raise Error(
+                    f"PEM object {index}: unexpected label "
+                    f"{label.decode('ascii')!r}, expected a private key "
+                    f"label"
+                )
+            if passphrase is None and _is_encrypted_pem_block(label, raw):
+                raise Error(
+                    f"PEM object {index}: encrypted private key requires "
+                    f"a passphrase"
+                )
+            keys.append(_load_pem_privatekey(raw, passphrase, index))
+        return keys
+    elif type == FILETYPE_ASN1:
+        if passphrase is not None:
+            raise ValueError(
+                "only FILETYPE_PEM key format supports encryption"
+            )
+        keys = []
+        remaining = buffer
+        while remaining:
+            index = len(keys) + 1
+            bio = _new_mem_buf(remaining)
+            evp_pkey = _lib.d2i_PrivateKey_bio(bio, _ffi.NULL)
+            if evp_pkey == _ffi.NULL:
+                _raise_object_error("DER", index)
+            pkey = PKey.__new__(PKey)
+            pkey._pkey = _ffi.gc(evp_pkey, _lib.EVP_PKEY_free)
+            keys.append(pkey)
+            remaining = _bio_read_all(bio)
+        if not keys:
+            raise Error("no DER objects found in input")
+        return keys
+    else:
+        raise ValueError("type argument must be FILETYPE_PEM or FILETYPE_ASN1")
