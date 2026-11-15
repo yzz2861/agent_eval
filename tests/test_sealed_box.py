@@ -159,3 +159,111 @@ def test_sealed_box_too_short_msg():
     msg = enc_box.encrypt(empty_plaintext)
     with pytest.raises(CryptoError):
         dec_box.decrypt(msg[:-1])
+
+def test_sealed_box_truncated_ciphertext_raises_crypto_error():
+    k = PrivateKey.generate()
+    enc_box = SealedBox(k.public_key)
+    dec_box = SealedBox(k)
+
+    message = enc_box.encrypt(b"a non-empty sealed message")
+
+    # Every prefix shorter than the SEALBYTES overhead is a truncated box
+    # and must be rejected with the same CryptoError, never accepted as an
+    # empty plaintext.
+    for length in range(0, len(message)):
+        with pytest.raises(CryptoError):
+            dec_box.decrypt(message[:length])
+
+
+def test_sealed_box_minimum_length_is_sealbytes():
+    import nacl.bindings as bindings
+
+    k = PrivateKey.generate()
+    pk = bytes(k.public_key)
+    sk = bytes(k)
+
+    # A ciphertext shorter than SEALBYTES cannot hold even the embedded
+    # ephemeral public key and MAC, so it must be rejected outright.
+    for length in range(0, bindings.crypto_box_SEALBYTES):
+        with pytest.raises(CryptoError):
+            bindings.crypto_box_seal_open(b"\x00" * length, pk, sk)
+
+
+def test_sealed_box_does_not_decrypt_truncated_input(monkeypatch):
+    import nacl.bindings as crypto_box_module
+    from nacl import _sodium
+
+    k = PrivateKey.generate()
+    pk = bytes(k.public_key)
+    sk = bytes(k)
+
+    calls = 0
+    original = _sodium.lib.crypto_box_seal_open
+
+    def _boom(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("native seal_open must not be invoked")
+
+    monkeypatch.setattr(_sodium.lib, "crypto_box_seal_open", _boom)
+    assert hasattr(crypto_box_module, "crypto_box_seal_open")
+    for length in (0, 1, 16, 31, 47):
+        with pytest.raises(CryptoError):
+            crypto_box_module.crypto_box_seal_open(
+                b"\x00" * length, pk, sk
+            )
+    assert calls == 0
+    monkeypatch.setattr(_sodium.lib, "crypto_box_seal_open", original)
+
+
+def test_sealed_box_wrong_key_rejects_without_leaking():
+    recipient = PrivateKey.generate()
+    other = PrivateKey.generate()
+    enc_box = SealedBox(recipient.public_key)
+    wrong_box = SealedBox(other)
+
+    ciphertext = enc_box.encrypt(b"secret payload")
+
+    with pytest.raises(CryptoError):
+        wrong_box.decrypt(ciphertext)
+
+
+def test_sealed_box_padding_is_not_accepted_as_plaintext():
+    k = PrivateKey.generate()
+    enc_box = SealedBox(k.public_key)
+    dec_box = SealedBox(k)
+
+    ciphertext = enc_box.encrypt(b"padded message")
+
+    # Appending zero bytes changes the authenticated ciphertext length and
+    # therefore fails the MAC check instead of being silently stripped.
+    for padding in (1, 2, 16):
+        with pytest.raises(CryptoError):
+            dec_box.decrypt(ciphertext + b"\x00" * padding)
+
+
+def test_sealed_box_legitimate_empty_message_still_roundtrips():
+    k = PrivateKey.generate()
+    enc_box = SealedBox(k.public_key)
+    dec_box = SealedBox(k)
+
+    ciphertext = enc_box.encrypt(b"")
+    assert len(ciphertext) == 48
+    assert dec_box.decrypt(ciphertext) == b""
+
+    # A genuine SEALBYTES-long box that is corrupted is still rejected.
+    damaged = bytearray(ciphertext)
+    damaged[-1] ^= 1
+    with pytest.raises(CryptoError):
+        dec_box.decrypt(bytes(damaged))
+
+
+def test_sealed_box_cross_language_reference_vectors_still_compatible():
+    # The published libsodium cross-language reference vectors exercise the
+    # exact wire format; they must continue to decrypt after hardening.
+    for privalice, _pubalice, plaintext, encrypted in sealbox_vectors():
+        priv = PrivateKey(privalice, encoder=HexEncoder)
+        box = SealedBox(priv)
+        decoded = box.decrypt(encrypted, encoder=HexEncoder)
+        assert binascii.hexlify(decoded) == plaintext
+

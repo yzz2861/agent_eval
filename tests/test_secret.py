@@ -310,3 +310,74 @@ def test_secret_box_bad_decryption():
     with pytest.raises(CryptoError):
         # completely changes everything
         box.decrypt(b"\x00" + ciphertext)
+
+def test_secret_box_truncated_ciphertext_rejected():
+    box = SecretBox(b"\x16" * SecretBox.KEY_SIZE)
+    encrypted = box.encrypt(b"truncate me")
+
+    # Anything shorter than nonce + MAC cannot possibly authenticate.
+    minimum = SecretBox.NONCE_SIZE + SecretBox.MACBYTES
+    for length in range(0, minimum + 1):
+        with pytest.raises((CryptoError, TypeError, ValueError)):
+            box.decrypt(encrypted[:length])
+
+
+def test_secret_box_padding_rejected():
+    box = SecretBox(b"\x21" * SecretBox.KEY_SIZE)
+    encrypted = box.encrypt(b"pad me")
+
+    # Extra zero bytes alter the authenticated length and must fail rather
+    # than be silently trimmed.
+    for padding in (1, 2, 16):
+        with pytest.raises(CryptoError):
+            box.decrypt(encrypted + b"\x00" * padding)
+
+
+def test_secret_box_wrong_key_rejected():
+    box = SecretBox(b"\x2c" * SecretBox.KEY_SIZE)
+    other = SecretBox(b"\x37" * SecretBox.KEY_SIZE)
+    encrypted = box.encrypt(b"wrong key secret")
+
+    with pytest.raises(CryptoError):
+        other.decrypt(encrypted)
+
+
+def test_secret_box_overlong_rejected(monkeypatch):
+    import nacl.bindings as bindings
+    from nacl import _sodium
+
+    box = SecretBox(b"\x42" * SecretBox.KEY_SIZE)
+    encrypted = box.encrypt(b"overlong")
+    nonce = encrypted[: SecretBox.NONCE_SIZE]
+    valid_ct = encrypted[SecretBox.NONCE_SIZE :]
+
+    # A structurally invalid (shorter than MAC) message must be refused at the
+    # boundary without ever invoking the native primitive.
+    calls = 0
+    original = _sodium.lib.crypto_secretbox_open_easy
+
+    def _boom(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("native open must not run for invalid input")
+
+    monkeypatch.setattr(_sodium.lib, "crypto_secretbox_open_easy", _boom)
+    for length in range(0, SecretBox.MACBYTES):
+        with pytest.raises((CryptoError, TypeError)):
+            bindings.crypto_secretbox_open_easy(
+                valid_ct[:length], nonce, bytes(box)
+            )
+    assert calls == 0
+    monkeypatch.setattr(
+        _sodium.lib, "crypto_secretbox_open_easy", original
+    )
+
+
+def test_secret_box_empty_message_roundtrips_and_corruption_rejected():
+    box = SecretBox(b"\x4d" * SecretBox.KEY_SIZE)
+    encrypted = box.encrypt(b"")
+    assert box.decrypt(encrypted) == b""
+
+    with pytest.raises(CryptoError):
+        box.decrypt(flip_byte(encrypted, len(encrypted) - 1))
+

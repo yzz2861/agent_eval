@@ -447,15 +447,58 @@ def crypto_box_seal_open(ciphertext: bytes, pk: bytes, sk: bytes) -> bytes:
 
     _clen = len(ciphertext)
 
+    # Boundary validation. A sealed box stores the ephemeral sender
+    # public key followed by a crypto_box_easy ciphertext, whose only
+    # fixed overhead is the MAC; the box nonce is derived from the
+    # recipient and ephemeral public keys and is never transmitted. So
+    # SEALBYTES equals PUBLICKEYBYTES + MACBYTES and is the smallest
+    # structurally valid ciphertext. All malformed inputs are rejected at
+    # this boundary, before the native primitive runs, which prevents key
+    # material or partial plaintext from reaching libsodium.
+    expected_sealbytes = crypto_box_PUBLICKEYBYTES + crypto_box_MACBYTES
+    ensure(
+        crypto_box_SEALBYTES == expected_sealbytes,
+        "Unexpected sealed box length constants",
+        raising=exc.RuntimeError,
+    )
+
+    # Minimum total length: anything shorter is a truncated sealed box.
     ensure(
         _clen >= crypto_box_SEALBYTES,
-        (f"Input ciphertext must be at least {crypto_box_SEALBYTES} long"),
-        raising=exc.TypeError,
+        (
+            "Input ciphertext must be at least "
+            f"{crypto_box_SEALBYTES} bytes long",
+        ),
+        raising=exc.CryptoError,
     )
 
     _mlen = _clen - crypto_box_SEALBYTES
 
-    # zero-length malloc results are implementation.dependent
+    # Validate each on-wire component length without decrypting. The
+    # ephemeral public key occupies the first PUBLICKEYBYTES bytes and
+    # the MAC the next MACBYTES bytes; the remaining _mlen bytes are the
+    # encrypted message. Any inconsistency means the box was truncated or
+    # otherwise corrupted.
+    _offset = 0
+    _components = (
+        ("ephemeral public key", crypto_box_PUBLICKEYBYTES),
+        ("message authentication code", crypto_box_MACBYTES),
+    )
+    for _label, _size in _components:
+        _offset += _size
+        ensure(
+            _offset <= _clen,
+            "Truncated sealed box: missing bytes for the " + _label,
+            raising=exc.CryptoError,
+        )
+    ensure(
+        _offset == crypto_box_SEALBYTES
+        and _offset + _mlen == _clen,
+        "Malformed sealed box: inconsistent ciphertext component lengths",
+        raising=exc.CryptoError,
+    )
+
+    # zero-length malloc results are implementation dependent
     plaintext = ffi.new("unsigned char[]", max(1, _mlen))
 
     res = lib.crypto_box_seal_open(plaintext, ciphertext, _clen, pk, sk)
