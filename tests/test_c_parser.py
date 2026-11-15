@@ -6887,5 +6887,72 @@ class TestCParser_typenames(TestCParser_base):
         )
 
 
+class TestCParserIncludesAndPositions(unittest.TestCase):
+    """Include callback and dual logical/physical error positions."""
+
+    def _parser(self, include_func=None):
+        return c_parser.CParser(include_func=include_func)
+
+    def test_nested_include_ast_coords(self):
+        files = {
+            "a.h": "int from_a;\n",
+            "b.h": "#include \"a.h\"\nint from_b;\n",
+        }
+        ast = self._parser(files.get).parse(
+            "#include \"b.h\"\nint root;\n", filename="main.c"
+        )
+        coords = [(node.name, str(node.coord)) for node in ast.ext]
+        self.assertEqual(
+            coords,
+            [
+                ("from_a", "a.h:1:5"),
+                ("from_b", "b.h:1:5"),
+                ("root", "main.c:1:5"),
+            ],
+        )
+
+    def test_lex_error_keeps_logical_and_physical_coords(self):
+        # The illegal character lives physically on line 3 of main.c, but
+        # a line marker remaps the logical position into "remap.c".
+        parser = self._parser(lambda name: None)
+        with self.assertRaises(c_parser.ParseError) as caught:
+            parser.parse("#line 50 \"remap.c\"\nint ok;\nint @;\n", "main.c")
+        error = caught.exception
+        self.assertEqual(str(error.location.file), "remap.c")
+        self.assertEqual(error.location.line, 51)
+        self.assertEqual(str(error.physical.file), "main.c")
+        self.assertEqual(error.physical.line, 3)
+        self.assertIn("Illegal character", str(error))
+
+    def test_missing_include_error_points_at_enclosing_source(self):
+        parser = self._parser(lambda name: None)
+        with self.assertRaises(c_parser.ParseError) as caught:
+            parser.parse("#include \"missing.h\"\n", filename="main.c")
+        error = caught.exception
+        self.assertIn("include file not found", str(error))
+        self.assertEqual(str(error.location.file), "main.c")
+        self.assertEqual(str(error.physical.file), "main.c")
+
+    def test_error_inside_include_uses_physical_include_file(self):
+        files = {"bad.h": "int x @;\n"}
+        parser = self._parser(files.get)
+        with self.assertRaises(c_parser.ParseError) as caught:
+            parser.parse("#include \"bad.h\"\nint ok;\n", "main.c")
+        error = caught.exception
+        self.assertEqual(str(error.physical.file), "bad.h")
+        self.assertEqual(error.physical.line, 1)
+        self.assertEqual(str(error.location.file), "bad.h")
+
+    def test_line_markers_do_not_change_ast(self):
+        marked = self._parser().parse(
+            "#line 5 \"x.h\"\n# 9 \"y.c\" 1\nint a;\n#line 1\n"
+        )
+        plain = self._parser().parse("int a;\n")
+        self.assertEqual(len(marked.ext), len(plain.ext))
+        self.assertEqual(type(marked.ext[0]).__name__, "Decl")
+        self.assertEqual(marked.ext[0].name, plain.ext[0].name)
+
+
+
 if __name__ == "__main__":
     unittest.main()

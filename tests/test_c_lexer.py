@@ -3,7 +3,7 @@ import sys
 import unittest
 
 sys.path.insert(0, "..")
-from pycparser.c_lexer import CLexer, Token
+from pycparser.c_lexer import CLexer, SourceLocation, Token
 
 
 def require_token(tok: Token | None) -> Token:
@@ -176,16 +176,27 @@ class TestCLexerNoErrors(unittest.TestCase):
         )
 
     def test_line_directive_digit_separators(self):
-        self.clex.input('#line 1\'000 "file.c"\nvalue')
+        self.clex.input('#line 1' + chr(39) + '000 "file.c"\nvalue')
+        token = require_token(self.clex.token())
+        self.assertEqual(token.type, "ID")
+        self.assertEqual(token.value, "value")
+        # Logical position follows the #line remap; physical position
+        # still points at line 2 of the text actually being scanned.
         self.assertEqual(
-            token_list(self.clex), [Token("ID", "value", 1000, 1, filename="file.c")]
+            token.logical,
+            SourceLocation(filename="file.c", lineno=1000, column=1),
+        )
+        self.assertEqual(
+            token.physical,
+            SourceLocation(filename="", lineno=2, column=1),
         )
         self.assertEqual(self.clex.filename, "file.c")
 
         self.clex.input("#line 0'010\nvalue")
-        self.assertEqual(
-            token_list(self.clex), [Token("ID", "value", 10, 1, filename="")]
-        )
+        token = require_token(self.clex.token())
+        self.assertEqual(token.lineno, 10)
+        self.assertEqual(token.filename, "")
+        self.assertEqual(token.physical, SourceLocation("", 2, 1))
 
     def test_bitint_constants(self):
         # Numeric regexes are shared, so even the legacy lexer recognizes
@@ -861,6 +872,146 @@ class TestCLexerFastPaths(unittest.TestCase):
                         re.match(rule.regex_pattern, char + suffix),
                         f"{rule.tok_type} {char + suffix!r}",
                     )
+
+
+class TestCLexerLineMarkersAndIncludes(unittest.TestCase):
+    """Unified position model: line markers, file stack, includes."""
+
+    def setUp(self):
+        self.errors = []
+
+    def error_func(self, msg, line, column, **kwargs):
+        self.errors.append(
+            (msg, kwargs.get("location"), kwargs.get("physical"))
+        )
+
+    def tokens(self, text, include_func=None, filename="main.c"):
+        clex = CLexer(self.error_func, include_func=include_func)
+        clex.input(text, filename=filename)
+        return token_list(clex), clex
+
+    def test_nested_line_markers_push_and_pop(self):
+        text = (
+            "# 1 \"main.c\"\n"
+            "int outer;\n"
+            "# 1 \"inner.h\" 1\n"
+            "int inner;\n"
+            "# 3 \"main.c\" 2\n"
+            "int back;\n"
+        )
+        toks, clex = self.tokens(text)
+        names = [(t.value, t.logical.filename) for t in toks if t.type == "ID"]
+        self.assertEqual(
+            names,
+            [("outer", "main.c"), ("inner", "inner.h"), ("back", "main.c")],
+        )
+        # Physical positions stay in the single scanned buffer.
+        inner_tok = next(t for t in toks if t.value == "inner")
+        self.assertEqual(inner_tok.logical.filename, "inner.h")
+        self.assertEqual(inner_tok.physical.filename, "main.c")
+        self.assertEqual(inner_tok.physical.lineno, 4)
+        self.assertEqual(self.errors, [])
+
+    def test_consecutive_entry_markers_do_not_replay_tokens(self):
+        text = "#line 5 \"x.h\"\n# 9 \"y.c\" 1\nint a;\n"
+        toks, _ = self.tokens(text, filename="")
+        self.assertEqual([t.value for t in toks if t.type == "ID"], ["a"])
+        only = next(t for t in toks if t.type == "ID")
+        self.assertEqual(only.logical, SourceLocation("y.c", 9, 5))
+
+    def test_plain_line_directive_keeps_single_frame(self):
+        toks, clex = self.tokens("#line 42 \"remap.c\"\nint v;\n")
+        self.assertEqual(len(clex._file_stack), 1)
+        ident = next(t for t in toks if t.type == "ID")
+        self.assertEqual(ident.logical, SourceLocation("remap.c", 42, 5))
+        self.assertEqual(ident.physical.filename, "main.c")
+
+    def test_nested_include_merges_buffers(self):
+        files = {
+            "a.h": "int from_a;\n",
+            "b.h": "#include \"a.h\"\nint from_b;\n",
+        }
+        toks, clex = self.tokens(
+            "#include \"b.h\"\nint root;\n", include_func=files.get
+        )
+        ids = [(t.value, t.logical.filename) for t in toks if t.type == "ID"]
+        self.assertEqual(
+            ids,
+            [("from_a", "a.h"), ("from_b", "b.h"), ("root", "main.c")],
+        )
+        root_tok = next(t for t in toks if t.value == "root")
+        self.assertEqual(root_tok.logical.filename, "main.c")
+        self.assertEqual(root_tok.physical.filename, "main.c")
+
+    def test_include_angle_brackets(self):
+        requested = []
+        def resolver(name):
+            requested.append(name)
+            return "int angle;\n"
+        toks, _ = self.tokens("#include <system/h.h>\n", include_func=resolver)
+        self.assertEqual(requested, ["system/h.h"])
+        self.assertIn(("angle", "system/h.h"),
+                      [(t.value, t.logical.filename) for t in toks])
+
+    def test_missing_include_keeps_following_tokens(self):
+        toks, _ = self.tokens(
+            "#include \"missing.h\"\nint kept;\n", include_func=lambda n: None
+        )
+        self.assertEqual(
+            [(t.type, t.value) for t in toks],
+            [("INT", "int"), ("ID", "kept"), ("SEMI", ";")],
+        )
+        self.assertIn("include file not found", self.errors[0][0])
+        self.assertEqual(self.errors[0][1].filename, "main.c")
+        self.assertEqual(self.errors[0][2].filename, "main.c")
+
+    def test_bad_encoding_include_reports_and_continues(self):
+        def resolver(name):
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad byte")
+        toks, _ = self.tokens("#include \"x.h\"\nint y;\n", include_func=resolver)
+        self.assertEqual([t.value for t in toks if t.type == "ID"], ["y"])
+        self.assertIn("bad encoding", self.errors[0][0])
+
+    def test_oserror_include_reports_and_continues(self):
+        def resolver(name):
+            raise FileNotFoundError(name)
+        toks, _ = self.tokens("#include \"z.h\"\nint z;\n", include_func=resolver)
+        self.assertEqual([t.value for t in toks if t.type == "ID"], ["z"])
+        self.assertIn("cannot include", self.errors[0][0])
+
+    def test_missing_quote_include_emits_pphash_without_loop(self):
+        toks, _ = self.tokens(
+            "#include \"noend\nint kept2;\n", include_func=lambda n: n
+        )
+        self.assertEqual(toks[0].type, "PPHASH")
+        self.assertEqual(toks[0].value, "#")
+        self.assertIn("kept2", [t.value for t in toks])
+        self.assertTrue(self.errors)
+
+    def test_include_without_callback_emits_pphash(self):
+        toks, _ = self.tokens("#include \"h.h\"\nint nocb;\n")
+        self.assertEqual(toks[0].type, "PPHASH")
+        self.assertIn("nocb", [t.value for t in toks])
+        self.assertIn("include callback not set", self.errors[0][0])
+
+    def test_garbage_include_does_not_swallow_tokens(self):
+        toks, _ = self.tokens("#include 123\nint g;\n", include_func=lambda n: n)
+        self.assertEqual(toks[0].type, "PPHASH")
+        self.assertIn(("INT_CONST_DEC", "123"), [(t.type, t.value) for t in toks])
+
+    def test_legacy_three_arg_error_callback_still_works(self):
+        legacy_errors = []
+        clex = CLexer(lambda msg, line, column: legacy_errors.append((msg, line, column)))
+        clex.input("@")
+        token_list(clex)
+        self.assertEqual(legacy_errors[0][0], "Illegal character " + repr("@"))
+        self.assertEqual(legacy_errors[0][1], 1)
+
+    def test_logical_and_physical_locations_diverge_after_line(self):
+        toks, _ = self.tokens("int a;\n#line 99 \"far.c\"\nint b;\n")
+        b_tok = next(t for t in toks if t.value == "b")
+        self.assertEqual(b_tok.logical, SourceLocation("far.c", 99, 5))
+        self.assertEqual(b_tok.physical, SourceLocation("main.c", 3, 5))
 
 
 if __name__ == "__main__":

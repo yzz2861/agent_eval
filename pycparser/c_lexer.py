@@ -6,6 +6,7 @@
 # Eli Bendersky [https://eli.thegreenplace.net/]
 # License: BSD
 # ------------------------------------------------------------------------------
+import inspect
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -16,13 +17,53 @@ from typing import Literal, assert_never
 Dialect = Literal["legacy", "c23"]
 
 
+@dataclass(frozen=True, slots=True)
+class SourceLocation:
+    """A position in a C source.
+
+    Logical coordinates follow preprocessor line markers (``#line`` and
+    ``# N "file"`` directives) and therefore describe where the code was
+    written before preprocessing. Physical coordinates describe where the
+    lexed text actually lives, so a failure inside an included file keeps both
+    the logical origin and the concrete physical source.
+    """
+
+    filename: str
+    lineno: int
+    column: int
+
+
+@dataclass(slots=True)
+class FileFrame:
+    """Scanning state for one source in the include stack."""
+    lexdata: str
+    logical_filename: str
+    logical_lineno: int
+    physical_filename: str
+    physical_lineno: int
+    physical_line_start: int
+    pos: int
+    line_start: int
+    shared_physical: bool = False
+
 @dataclass(slots=True)
 class Token:
     type: str
     value: str
     lineno: int
     column: int
-    filename: str
+    filename: str = ""
+    logical: SourceLocation | None = None
+    physical: SourceLocation | None = None
+
+
+    def __post_init__(self) -> None:
+        if self.logical is None:
+            self.logical = SourceLocation(self.filename, self.lineno, self.column)
+        if self.physical is None:
+            self.physical = SourceLocation(
+                self.logical.filename, self.logical.lineno, self.logical.column
+            )
 
 
 class CLexer:
@@ -34,6 +75,13 @@ class CLexer:
         dialect:
             "legacy" preserves the existing keyword set. "c23" also recognizes
             C23 keywords and predefined constants.
+        include_func:
+            Optional callback invoked when an ``#include`` directive is
+            encountered. It is called with the directive's filename (a raw
+            string, without the surrounding quotes or angle brackets) and
+            returns the text of the included file, or None when the file is
+            unavailable. None makes the lexer report an error and continue
+            with the parent file without swallowing any tokens.
 
     Call input(text) to initialize lexing, and then keep calling token() to
     get the next token, until it returns None (at end of input).
@@ -47,6 +95,7 @@ class CLexer:
         error_func: Callable[[str, int, int], None],
         *,
         dialect: Dialect = "legacy",
+        include_func: Callable[[str], str | None] | None = None,
     ) -> None:
         if dialect not in ("legacy", "c23"):
             raise ValueError(f"Unknown dialect {dialect!r}; expected 'legacy' or 'c23'")
@@ -57,27 +106,89 @@ class CLexer:
             self._keyword_map.update(_c23_keywords)
 
         self.error_func = error_func
+        try:
+            params = inspect.signature(error_func).parameters
+        except (TypeError, ValueError):
+            params = {}
+        self._error_func_accepts_locations = (
+            any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+            or "location" in params
+        )
+        self.include_func = include_func
         self._init_state()
 
     def input(self, text: str, filename: str = "") -> None:
         """Initialize the lexer to the given input text.
 
         filename is an optional name identifying the initial file from which the
-        input comes. The lexer may modify it if #line directives are
-        encountered.
+        input comes. Line markers and includes update the logical filename,
+        which is exposed through the filename property.
         """
         self._init_state()
-        self._lexdata = text
-        self._filename = filename
+        self._push_frame(text, filename)
 
     def _init_state(self) -> None:
         self._lexdata = ""
-        self._filename = ""
         self._pos = 0
         self._line_start = 0
+        self._physical_line_start = 0
+        self._physical_lineno = 1
+        self._physical_filename = ""
         self._pending_tok: Token | None = None
-        self._lineno = 1
         self._in_attribute = False
+        self._file_stack: list[FileFrame] = []
+        # Frames popped while unwinding unbalanced line markers.
+        self._popped_frames: list[FileFrame] = []
+
+    def _push_frame(self, text: str, filename: str) -> None:
+        frame = FileFrame(
+            lexdata=text,
+            logical_filename=filename,
+            logical_lineno=1,
+            physical_filename=filename,
+            physical_lineno=1,
+            physical_line_start=0,
+            pos=0,
+            line_start=0,
+        )
+        self._file_stack.append(frame)
+        self._sync_state(frame)
+
+    def _sync_state(self, frame: FileFrame) -> None:
+        self._lexdata = frame.lexdata
+        self._pos = frame.pos
+        self._line_start = frame.line_start
+        self._physical_line_start = frame.physical_line_start
+        self._physical_lineno = frame.physical_lineno
+        self._physical_filename = frame.physical_filename
+        self._lineno = frame.logical_lineno
+        self._filename = frame.logical_filename
+
+    def _capture_state(self) -> None:
+        frame = self._file_stack[-1]
+        frame.pos = self._pos
+        frame.line_start = self._line_start
+        frame.physical_line_start = self._physical_line_start
+        frame.physical_lineno = self._physical_lineno
+        frame.logical_lineno = self._lineno
+        frame.logical_filename = self._filename
+        # Same-buffer line-marker overlays share one physical cursor;
+        # propagate it down to the frame that owns the buffer so a
+        # later pop resumes at the advanced position, not the old one.
+        if getattr(frame, "shared_physical", False):
+            root = self._file_stack[0]
+            root.pos = self._pos
+            root.line_start = self._line_start
+            root.physical_line_start = self._physical_line_start
+            root.physical_lineno = self._physical_lineno
+
+    def _pop_frame(self) -> bool:
+        if len(self._file_stack) <= 1:
+            return False
+        self._capture_state()
+        self._popped_frames.append(self._file_stack.pop())
+        self._sync_state(self._file_stack[-1])
+        return True
 
     @property
     def filename(self) -> str:
@@ -89,15 +200,19 @@ class CLexer:
         # - We maintain a current position (self._pos), line number, and the
         #   byte offset of the current line start. The lexer is a simple loop
         #   that skips whitespace/newlines and emits one token per call.
+        #   A stack of FileFrame objects lets an #include switch to another
+        #   text buffer and transparently resume the parent afterwards.
         #
         # - A small amount of logic is handled manually before regex matching:
         #
         #   * Preprocessor-style directives: if we see '#', we check whether
-        #     it's a #line or #pragma directive and consume it inline. #line
-        #     updates lineno/filename and produces no tokens. #pragma can yield
-        #     both PPPRAGMA and PPPRAGMASTR, but token() returns a single token,
-        #     so we stash the PPPRAGMASTR as _pending_tok to return on the next
-        #     token() call. Otherwise we return PPHASH.
+        #     it's a #line, #include or #pragma directive and consume it
+        #     inline. #line updates the logical position and produces no
+        #     tokens; #include delegates to the include callback and pushes a
+        #     new frame on success. #pragma can yield both PPPRAGMA and
+        #     PPPRAGMASTR, but token() returns a single token, so we stash the
+        #     PPPRAGMASTR as _pending_tok to return on the next token() call.
+        #     Otherwise we return PPHASH.
         #   * Newlines update lineno/line-start tracking so tokens can record
         #     accurate columns.
         #
@@ -119,35 +234,65 @@ class CLexer:
             self._pending_tok = None
             return tok
 
-        while self._pos < n:
-            match text[self._pos]:
-                case " " | "\t" | "\f" | "\v":
-                    self._pos += 1
-                case "\n":
-                    self._lineno += 1
-                    self._pos += 1
-                    self._line_start = self._pos
-                case "#":
-                    if _line_pattern.match(text, self._pos + 1):
+        while True:
+            while self._pos < n:
+                match text[self._pos]:
+                    case " " | "\t" | "\f" | "\v":
                         self._pos += 1
-                        self._handle_ppline()
-                        continue
-                    if _pragma_pattern.match(text, self._pos + 1):
+                    case "\n":
+                        self._lineno += 1
+                        self._physical_lineno += 1
                         self._pos += 1
-                        toks = self._handle_pppragma()
-                        if len(toks) > 1:
-                            self._pending_tok = toks[1]
-                        if len(toks) > 0:
-                            return toks[0]
-                        continue
-                    tok = self._make_token("PPHASH", "#", self._pos)
-                    self._pos += 1
-                    return tok
-                case _:
-                    if tok := self._match_token():
+                        self._line_start = self._pos
+                        self._physical_line_start = self._pos
+                    case "#":
+                        directive = self._match_directive(text, self._pos + 1)
+                        if directive == "line":
+                            self._pos += 1
+                            self._handle_ppline()
+                            text = self._lexdata
+                            n = len(text)
+                            continue
+                        if directive == "include":
+                            self._pos += 1
+                            included_tok = self._handle_ppinclude()
+                            if included_tok is not None:
+                                return included_tok
+                            text = self._lexdata
+                            n = len(text)
+                            continue
+                        if directive == "pragma":
+                            self._pos += 1
+                            toks = self._handle_pppragma()
+                            if len(toks) > 1:
+                                self._pending_tok = toks[1]
+                            if len(toks) > 0:
+                                return toks[0]
+                            continue
+                        tok = self._make_token("PPHASH", "#", self._pos)
+                        self._pos += 1
                         return tok
-                    else:
-                        continue
+                    case _:
+                        if tok := self._match_token():
+                            return tok
+                        else:
+                            continue
+            # Reached the end of the current text buffer. Pop any included
+            # frame and resume its parent; the top-level frame ends lexing.
+            if not self._pop_frame():
+                return None
+            text = self._lexdata
+            n = len(text)
+
+    def _match_directive(self, text: str, pos: int) -> str | None:
+        """Classify the '#' directive whose body starts at pos."""
+        if _line_pattern.match(text, pos):
+            return "line"
+        if _pragma_pattern.match(text, pos):
+            return "pragma"
+        if _include_pattern.match(text, pos):
+            return "include"
+        return None
 
     def _match_token(self) -> Token | None:
         """Match one token at the current position.
@@ -268,9 +413,13 @@ class CLexer:
         """
         value = self._lexdata[self._pos : end]
         tok = self._make_token(kind, value, self._pos)
-        self._lineno += value.count("\n")
-        if "\n" in value:
-            self._line_start = self._pos + value.rfind("\n") + 1
+        newline_count = value.count("\n")
+        self._lineno += newline_count
+        self._physical_lineno += newline_count
+        if newline_count:
+            last_newline = self._pos + value.rfind("\n") + 1
+            self._line_start = last_newline
+            self._physical_line_start = last_newline
         self._pos = end
         return tok
 
@@ -337,48 +486,78 @@ class CLexer:
         return None
 
     def _make_token(self, tok_type: str, value: str, pos: int) -> Token:
-        """Create a Token at an absolute input position.
-
-        Expects tok_type/value and the absolute byte offset pos in the current
-        input. Does not advance lexer state; callers manage _pos themselves.
-        Returns a Token with the current filename and line/column coordinates.
-        """
         column = pos - self._line_start + 1
-        tok = Token(tok_type, value, self._lineno, column, self._filename)
-        return tok
+        logical = SourceLocation(self._filename, self._lineno, column)
+        physical = self._physical_location(pos)
+        return Token(
+            tok_type,
+            value,
+            self._lineno,
+            column,
+            self._filename,
+            logical,
+            physical,
+        )
+
+    def _physical_location(self, pos: int) -> SourceLocation:
+        return SourceLocation(
+            self._physical_filename,
+            self._physical_lineno,
+            pos - self._physical_line_start + 1,
+        )
 
     def _error(self, msg: str, pos: int) -> None:
-        column = pos - self._line_start + 1
-        self.error_func(msg, self._lineno, column)
+        physical = self._physical_location(pos)
+        logical = SourceLocation(
+            self._filename,
+            self._lineno,
+            pos - self._line_start + 1,
+        )
+        # Keep the legacy (msg, line, column) positional signature so
+        # existing 3-argument error callbacks keep working; the dual
+        # positions are only passed when the callback accepts them.
+        if self._error_func_accepts_locations:
+            self.error_func(
+                msg,
+                logical.lineno,
+                logical.column,
+                location=logical,
+                physical=physical,
+            )
+        else:
+            self.error_func(msg, logical.lineno, logical.column)
+
+    def _consume_directive_line(self, line_end: int) -> None:
+        """Advance physical scanning past a directive line.
+
+        Logical line numbering is controlled by the marker itself, so
+        only the physical counters move here.
+        """
+        text = self._lexdata
+        if line_end < len(text):
+            self._pos = line_end + 1
+            self._physical_lineno += 1
+            self._line_start = self._pos
+            self._physical_line_start = self._pos
+        else:
+            self._pos = line_end
+
+    def _fail_directive(self, msg: str, line_end: int, error_pos: int) -> None:
+        self._error(msg, error_pos)
+        self._consume_directive_line(line_end)
 
     def _handle_ppline(self) -> None:
-        # Since #line directives aren't supposed to return tokens but should
-        # only affect the lexer's state (update line/filename for coords), this
-        # method does a bit of parsing on its own. It doesn't return anything,
-        # but its side effect is to update self._pos past the directive, and
-        # potentially update self._lineno and self._filename, based on the
-        # directive's contents.
-        #
-        # Accepted #line forms from preprocessors:
-        # - "#line 66 \"kwas\\df.h\""
-        # - "# 9"
-        # - "#line 10 \"include/me.h\" 1 2 3" (extra numeric flags)
-        # - "# 1 \"file.h\" 3"
-        # Errors we must report:
-        # - "#line \"file.h\"" (filename before line number)
-        # - "#line df" (garbage instead of number/string)
-        #
-        # We scan the directive line once (after an optional 'line' keyword),
-        # validating the order: NUMBER, optional STRING, then any NUMBERs.
-        # The NUMBERs tail is only accepted if a filename STRING was present.
+        # A line marker ("# N" / "#line N [file] [flags...]") carries no
+        # tokens. It remaps the logical position and, when a filename with
+        # entry/return flags is present, drives the include file stack.
         text = self._lexdata
         n = len(text)
         line_end = text.find("\n", self._pos)
         if line_end == -1:
             line_end = n
-        line = text[self._pos : line_end]
-        pos = 0
+        line = text[self._pos:line_end]
         line_len = len(line)
+        pos = 0
 
         def skip_ws() -> None:
             nonlocal pos
@@ -386,73 +565,238 @@ class CLexer:
                 pos += 1
 
         skip_ws()
-        if line.startswith("line", pos):
+        explicit_line_keyword = line.startswith("line", pos)
+        if explicit_line_keyword:
             pos += 4
-
-        def success(pp_line: str | None, pp_filename: str | None) -> None:
-            if pp_line is None:
-                self._error("line number missing in #line", self._pos + line_len)
-            else:
-                try:
-                    self._lineno = int(pp_line.replace("'", ""))
-                except ValueError:
-                    self._error("invalid #line directive", self._pos + line_len)
-                    return
-                if pp_filename is not None:
-                    self._filename = pp_filename
-            self._pos = line_end + 1
-            self._line_start = self._pos
-
-        def fail(msg: str, offset: int) -> None:
-            self._error(msg, self._pos + offset)
-            self._pos = line_end + 1
-            self._line_start = self._pos
-
         skip_ws()
         if pos >= line_len:
-            success(None, None)
+            self._fail_directive(
+                "line number missing in #line", line_end, self._pos + line_len
+            )
             return
-        if line[pos] == '"':
-            fail("filename before line number in #line", pos)
+        if line[pos] == "\"":
+            self._fail_directive(
+                "filename before line number in #line",
+                line_end,
+                self._pos + pos,
+            )
             return
 
-        # Line numbers allow digit separators, but no integer suffixes.
-        m = re.match(_decimal_digits, line[pos:])
-        if not m:
-            fail("invalid #line directive", pos)
+        match = re.match(_decimal_digits, line[pos:])
+        if not match:
+            self._fail_directive(
+                "invalid #line directive", line_end, self._pos + pos
+            )
             return
-
-        pp_line = m.group(0)
+        pp_line = match.group(0)
         pos += len(pp_line)
         skip_ws()
-        if pos >= line_len:
-            success(pp_line, None)
-            return
 
-        if line[pos] != '"':
-            fail("invalid #line directive", pos)
-            return
+        pp_filename = None
+        if pos < line_len and line[pos] == "\"":
+            match = re.match(_string_literal, line[pos:])
+            if not match:
+                self._fail_directive(
+                    "invalid #line directive", line_end, self._pos + pos
+                )
+                return
+            quoted = match.group(0)
+            pp_filename = quoted[1:-1]
+            pos += len(quoted)
 
-        m = re.match(_string_literal, line[pos:])
-        if not m:
-            fail("invalid #line directive", pos)
-            return
-
-        pp_filename = m.group(0).lstrip('"').rstrip('"')
-        pos += len(m.group(0))
-
-        # Consume arbitrary sequence of numeric flags after the directive
-        while True:
+        flags = []
+        while pos < line_len:
             skip_ws()
             if pos >= line_len:
                 break
-            m = re.match(_decimal_digits, line[pos:])
-            if not m:
-                fail("invalid #line directive", pos)
+            match = re.match(_decimal_digits, line[pos:])
+            if not match:
+                self._fail_directive(
+                    "invalid #line directive", line_end, self._pos + pos
+                )
                 return
-            pos += len(m.group(0))
+            flags.append(int(match.group(0).replace("\x27", "")))
+            pos += len(match.group(0))
 
-        success(pp_line, pp_filename)
+        try:
+            new_lineno = int(pp_line.replace("\x27", ""))
+        except ValueError:
+            self._fail_directive(
+                "invalid #line directive", line_end, self._pos + line_len
+            )
+            return
+
+        self._consume_directive_line(line_end)
+        if pp_filename is not None:
+            self._apply_line_marker_file(
+                pp_filename, flags, explicit_line_keyword, line_end
+            )
+        self._lineno = new_lineno
+
+    def _apply_line_marker_file(
+        self,
+        filename: str,
+        flags: list[int],
+        explicit_line_keyword: bool,
+        line_end: int,
+    ) -> None:
+        """Apply the filename/flags part of a line marker to the stack."""
+        # GCC-style markers use flag 1 for an entry and flag 2 for a
+        # return. A plain "#line N file" without flags only remaps the
+        # logical filename inside the current source.
+        if explicit_line_keyword or not flags:
+            self._filename = filename
+            return
+        first_flag = flags[0]
+        if first_flag == 1:
+            # A new entry while a same-buffer overlay is active means
+            # the previous logical file ended without an explicit
+            # return marker. Settle it first so its shared cursor is
+            # handed back rather than scanned twice.
+            if len(self._file_stack) > 1 and getattr(
+                self._file_stack[-1], "shared_physical", False
+            ):
+                top = self._file_stack[-1]
+                parent = self._file_stack[-2]
+                parent.pos = self._pos
+                parent.line_start = self._line_start
+                parent.physical_line_start = self._physical_line_start
+                parent.physical_lineno = self._physical_lineno
+                self._file_stack.pop()
+                self._popped_frames.append(top)
+                self._sync_state(parent)
+            # An entry marker overlays a new logical file on the SAME
+            # physical buffer. The overlay frame borrows the parent
+            # physical state, so there is one scanning cursor shared by
+            # the nested logical files (real includes get separate text).
+            self._capture_state()
+            parent = self._file_stack[-1]
+            nested = FileFrame(
+                lexdata=parent.lexdata,
+                logical_filename=filename,
+                logical_lineno=1,
+                physical_filename=parent.physical_filename,
+                physical_lineno=parent.physical_lineno,
+                physical_line_start=parent.physical_line_start,
+                pos=parent.pos,
+                line_start=parent.line_start,
+            )
+            nested.shared_physical = True
+            self._file_stack.append(nested)
+            self._filename = filename
+        elif first_flag == 2:
+            # A return marker drops the same-buffer overlay and resumes
+            # the enclosing logical file. Its physical cursor was shared,
+            # so no position is rewound or replayed. A missing or
+            # non-shared frame degrades to a plain filename remap.
+            if len(self._file_stack) > 1:
+                top = self._file_stack[-1]
+                if getattr(top, "shared_physical", False):
+                    # Hand the advanced physical cursor back to
+                    # the parent so scanning continues, not replays.
+                    parent = self._file_stack[-2]
+                    parent.pos = self._pos
+                    parent.line_start = self._line_start
+                    parent.physical_line_start = self._physical_line_start
+                    parent.physical_lineno = self._physical_lineno
+                    self._file_stack.pop()
+                    self._popped_frames.append(top)
+                    self._sync_state(parent)
+            if filename:
+                self._filename = filename
+        else:
+            # System-header/extern flags (3, 4...): only annotate.
+            self._filename = filename
+
+    def _handle_ppinclude(self) -> Token | None:
+        # Handle "# include \"name\"" / "#include <name>" by delegating to
+        # the include callback. A failure (missing file, bad encoding,
+        # malformed filename) is reported through the error callback but
+        # never consumes surrounding tokens: malformed directives rewind to
+        # the "#" and emit it normally, while failed lookups simply resume
+        # the enclosing source.
+        text = self._lexdata
+        n = len(text)
+        line_end = text.find("\n", self._pos)
+        if line_end == -1:
+            line_end = n
+        line = text[self._pos:line_end]
+        hash_pos = self._pos - 1
+        stripped = line.lstrip(" \t")
+        body = stripped[len("include"):]
+        filename, quoted, malformed = self._parse_include_filename(body)
+        if malformed or filename is None:
+            # Rewind to the "#" and hand it back as a normal
+            # PPHASH token so the directive is never silently dropped or looped on.
+            self._pos = hash_pos
+            self._error("malformed #include directive", hash_pos)
+            tok = self._make_token("PPHASH", "#", hash_pos)
+            self._pos = hash_pos + 1
+            return tok
+        if self.include_func is None:
+            # No resolver configured: surface the "#" instead of dropping it.
+            self._pos = hash_pos
+            self._error("include callback not set", hash_pos)
+            tok = self._make_token("PPHASH", "#", hash_pos)
+            self._pos = hash_pos + 1
+            return tok
+        try:
+            included = self.include_func(filename)
+        except UnicodeDecodeError as exc:
+            self._error(f"bad encoding in include {filename!r}: {exc}", hash_pos)
+            self._consume_directive_line(line_end)
+            return
+        except OSError as exc:
+            self._error(f"cannot include {filename!r}: {exc}", hash_pos)
+            self._consume_directive_line(line_end)
+            return
+        if included is None:
+            self._error(f"include file not found: {filename!r}", hash_pos)
+            self._consume_directive_line(line_end)
+            return
+        if not isinstance(included, str):
+            self._error("include callback must return str or None", hash_pos)
+            self._consume_directive_line(line_end)
+            return
+        # Commit the directive in the parent, then push the included text.
+        self._consume_directive_line(line_end)
+        self._capture_state()
+        self._push_frame(included, filename)
+
+    def _parse_include_filename(
+        self, body: str
+    ) -> tuple[str | None, bool, bool]:
+        """Parse the filename part of an #include directive body.
+
+        Returns (filename, quoted, malformed). quoted distinguishes
+        "name" from <name>; malformed marks a missing/closing quote or
+        angle bracket. A missing filename yields (None, False, True).
+        """
+        pos = 0
+        while pos < len(body) and body[pos] in " \t":
+            pos += 1
+        if pos >= len(body):
+            return None, False, True
+        opener = body[pos]
+        if opener == "\"":
+            end = body.find("\"", pos + 1)
+            if end == -1:
+                return None, True, True
+            name = body[pos + 1:end]
+            tail = body[end + 1:].strip(" \t")
+            if tail:
+                return None, True, True
+            return name, True, False
+        if opener == "<":
+            end = body.find(">", pos + 1)
+            if end == -1:
+                return None, False, True
+            name = body[pos + 1:end]
+            tail = body[end + 1:].strip(" \t")
+            if tail:
+                return None, False, True
+            return name, False, False
+        return None, False, True
 
     def _handle_pppragma(self) -> list[Token]:
         # Parse a full #pragma line; returns a list of tokens with 1 or 2
@@ -493,7 +837,9 @@ class CLexer:
             toks.append(self._make_token("PPPRAGMASTR", text[start:pos], start))
         if pos < n and text[pos] == "\n":
             self._lineno += 1
+            self._physical_lineno += 1
             pos += 1
+            self._physical_line_start = pos
             self._line_start = pos
         self._pos = pos
         return toks
@@ -888,3 +1234,4 @@ for _bucket in _fixed_tokens_by_first.values():
 
 _line_pattern: re.Pattern[str] = re.compile(r"([ \t]*line\W)|([ \t]*\d+)")
 _pragma_pattern: re.Pattern[str] = re.compile(r"[ \t]*pragma\W")
+_include_pattern: re.Pattern[str] = re.compile(r"[ \t]*include\W")

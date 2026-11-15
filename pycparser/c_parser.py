@@ -20,7 +20,7 @@ from typing import (
 
 from . import c_ast
 from .ast_transforms import fix_atomic_specifiers, fix_switch_cases
-from .c_lexer import CLexer, Dialect, Token
+from .c_lexer import CLexer, Dialect, SourceLocation, Token
 
 
 # ASTs contain many coordinates, so slots reduce their memory overhead.
@@ -44,7 +44,15 @@ class Coord:
 
 
 class ParseError(Exception):
-    pass
+    """A parse/lex failure."""
+
+    def __init__(
+        self, message: str, location: Coord | None = None,
+        physical: Coord | None = None
+    ) -> None:
+        super().__init__(message)
+        self.location = location
+        self.physical = physical
 
 
 class CParser:
@@ -74,10 +82,12 @@ class CParser:
         taboutputdir: str = "",
         *,
         dialect: Dialect = "legacy",
+        include_func: Callable[[str], str | None] | None = None,
     ) -> None:
         self.clex: CLexer = lexer(
             error_func=self._lex_error_func,
             dialect=dialect,
+            include_func=include_func,
         )
         self._dialect = dialect
 
@@ -124,7 +134,10 @@ class CParser:
     # Scope and declaration helpers
     # ------------------------------------------------------------------
     def _parse_error(self, msg: str, coord: Coord | str | None) -> NoReturn:
-        raise ParseError(f"{coord}: {msg}")
+        error = ParseError(f"{coord}: {msg}")
+        if isinstance(coord, Coord):
+            error.location = coord
+        raise error
 
     def _push_scope(self) -> None:
         self._scope_stack.append({})
@@ -166,8 +179,31 @@ class CParser:
                 return scope[name]
         return False
 
-    def _lex_error_func(self, msg: str, line: int, column: int) -> None:
-        self._parse_error(msg, Coord(file=self.clex.filename, line=line, column=column))
+    def _lex_error_func(
+        self,
+        msg: str,
+        line: int,
+        column: int,
+        *,
+        location: SourceLocation | None = None,
+        physical: SourceLocation | None = None,
+    ) -> None:
+        logical_coord = (
+            Coord(file=location.filename, line=location.lineno,
+                  column=location.column)
+            if location is not None
+            else Coord(file=self.clex.filename, line=line, column=column)
+        )
+        physical_coord = (
+            Coord(file=physical.filename, line=physical.lineno,
+                  column=physical.column)
+            if physical is not None
+            else None
+        )
+        error = ParseError(f"{logical_coord}: {msg}")
+        error.location = logical_coord
+        error.physical = physical_coord
+        raise error
 
     # To understand what's going on here, read sections A.8.5 and
     # A.8.6 of K&R2 very carefully.
