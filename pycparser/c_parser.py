@@ -8,12 +8,14 @@
 # ------------------------------------------------------------------------------
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import wraps
 from typing import (
     Any,
     Literal,
     NoReturn,
     NotRequired,
     Optional,
+    TypeVar,
     TypedDict,
     cast,
 )
@@ -47,6 +49,47 @@ class ParseError(Exception):
     pass
 
 
+# Default budget of nested syntactic constructs (declarations, expressions,
+# initializers, and type specifiers) the parser descends into before
+# reporting an error. Budget units approximate Python stack frames: each
+# guarded construct charges its worst-case frame cost, so the budget stays
+# below the interpreter's recursion limit for the default
+# sys.getrecursionlimit() of 1000, leaving headroom for the caller's own
+# frames.
+_DEFAULT_RECURSION_LIMIT = 600
+
+# Frame costs charged to the recursion budget per nesting level. They
+# deliberately overestimate the Python frames a guarded parse method and its
+# unguarded helpers add to the call stack, so that exhausting the budget
+# always happens before the interpreter raises RecursionError.
+_DECLARATION_NESTING_COST = 3
+_EXPRESSION_NESTING_COST = 3
+_INITIALIZER_NESTING_COST = 4
+_TYPE_SPECIFIER_NESTING_COST = 6
+
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def _limit_nesting(construct: str, cost: int) -> Callable[[_F], _F]:
+    """Decorate a recursive parse method to consume the shared recursion
+    budget, so that deeply nested input raises ParseError instead of
+    overflowing the Python call stack with a RecursionError.
+    """
+
+    def decorator(fn: _F) -> _F:
+        @wraps(fn)
+        def wrapper(self: "CParser", *args: Any, **kwargs: Any) -> Any:
+            self._enter_nesting(construct, cost)
+            try:
+                return fn(self, *args, **kwargs)
+            finally:
+                self._exit_nesting(cost)
+
+        return cast(_F, wrapper)
+
+    return decorator
+
+
 class CParser:
     """Recursive-descent C parser.
 
@@ -61,6 +104,11 @@ class CParser:
     The keyword-only `dialect` parameter selects keyword recognition: "legacy"
     preserves existing behavior, while "c23" enables C23 spellings, predefined
     constants, and other C23-only features.
+
+    The keyword-only `recursion_limit` parameter caps how deeply nested
+    declarations, expressions, initializers, and type specifiers may be
+    before a ParseError with an explicit position is raised. This unified
+    budget protects against RecursionError from pathological input.
     """
 
     def __init__(
@@ -74,12 +122,15 @@ class CParser:
         taboutputdir: str = "",
         *,
         dialect: Dialect = "legacy",
+        recursion_limit: int = _DEFAULT_RECURSION_LIMIT,
     ) -> None:
         self.clex: CLexer = lexer(
             error_func=self._lex_error_func,
             dialect=dialect,
         )
         self._dialect = dialect
+        self._recursion_limit = recursion_limit
+        self._recursion_depth = 0
 
         # Stack of scopes for keeping track of symbols. _scope_stack[-1] is
         # the current (topmost) scope. Each scope is a dictionary that
@@ -111,6 +162,7 @@ class CParser:
         """
         self._scope_stack = [{}]
         self._typedef_checked_token = None
+        self._recursion_depth = 0
         self.clex.input(text, filename)
         self._tokens = _TokenStream(self.clex.token)
 
@@ -125,6 +177,24 @@ class CParser:
     # ------------------------------------------------------------------
     def _parse_error(self, msg: str, coord: Coord | str | None) -> NoReturn:
         raise ParseError(f"{coord}: {msg}")
+
+    def _enter_nesting(self, construct: str, cost: int) -> None:
+        """Charge *cost* frame units to the unified recursion budget.
+
+        Exceeding the budget raises ParseError with the position of the
+        offending construct, never a RecursionError.
+        """
+        if self._recursion_depth + cost > self._recursion_limit:
+            tok = self._peek()
+            coord = self._tok_coord(tok) if tok is not None else self.clex.filename
+            self._parse_error(
+                f"Nesting limit of {self._recursion_limit} exceeded in {construct}",
+                coord,
+            )
+        self._recursion_depth += cost
+
+    def _exit_nesting(self, cost: int) -> None:
+        self._recursion_depth -= cost
 
     def _push_scope(self) -> None:
         self._scope_stack.append({})
@@ -608,6 +678,7 @@ class CParser:
             decl = self._parse_id_declarator()
         return decl, True
 
+    @_limit_nesting("declaration", _DECLARATION_NESTING_COST)
     def _scan_declarator_name_info(
         self, after_lparen: bool = False
     ) -> tuple[str | None, bool]:
@@ -1115,6 +1186,7 @@ class CParser:
         return quals
 
     # BNF: alignment_specifier : _ALIGNAS '(' type_name | constant_expression ')'
+    @_limit_nesting("type specifier", _TYPE_SPECIFIER_NESTING_COST)
     def _parse_alignment_specifier(self) -> c_ast.Alignas:
         tok = self._expect("_ALIGNAS")
         self._expect("LPAREN")
@@ -1129,6 +1201,7 @@ class CParser:
         return c_ast.Alignas(expr, self._tok_coord(tok))
 
     # BNF: atomic_specifier : _ATOMIC '(' type_name ')'
+    @_limit_nesting("type specifier", _TYPE_SPECIFIER_NESTING_COST)
     def _parse_atomic_specifier(self) -> c_ast.Node:
         self._expect("_ATOMIC")
         self._expect("LPAREN")
@@ -1138,6 +1211,7 @@ class CParser:
         return typ
 
     # BNF: typeof_specifier : (TYPEOF | TYPEOF_UNQUAL) '(' (type_name | expression) ')'
+    @_limit_nesting("type specifier", _TYPE_SPECIFIER_NESTING_COST)
     def _parse_typeof_specifier(self) -> c_ast.TypeOf:
         tok = self._advance()
         self._expect("LPAREN")
@@ -1182,6 +1256,7 @@ class CParser:
     # ------------------------------------------------------------------
     # BNF: struct_or_union_specifier : struct_or_union ID? '{' struct_declaration_list? '}'
     #                                | struct_or_union ID
+    @_limit_nesting("type specifier", _TYPE_SPECIFIER_NESTING_COST)
     def _parse_struct_or_union_specifier(self) -> c_ast.Node:
         tok = self._advance()
         attributes = self._parse_attribute_specifier_sequence()
@@ -1313,6 +1388,7 @@ class CParser:
 
     # BNF: enum_specifier : ENUM ID? enum_type_specifier? '{' enumerator_list '}'
     #                     | ENUM ID enum_type_specifier?
+    @_limit_nesting("type specifier", _TYPE_SPECIFIER_NESTING_COST)
     def _parse_enum_specifier(self) -> c_ast.Node:
         tok = self._expect("ENUM")
         attributes = self._parse_attribute_specifier_sequence()
@@ -1423,6 +1499,7 @@ class CParser:
     # BNF: direct_declarator : ID | TYPEID | '(' declarator ')'
     #                        | direct_declarator '[' ... ']'
     #                        | direct_declarator '(' ... ')'
+    @_limit_nesting("declaration", _DECLARATION_NESTING_COST)
     def _parse_direct_declarator(self, kind: str) -> c_ast.Node:
         if self._accept("LPAREN"):
             decl = self._parse_declarator_kind(kind)
@@ -1687,6 +1764,7 @@ class CParser:
     # BNF: direct_abstract_declarator : '(' parameter_type_list_opt ')'
     #                                 | '(' abstract_declarator ')'
     #                                 | '[' ... ']'
+    @_limit_nesting("declaration", _DECLARATION_NESTING_COST)
     def _parse_direct_abstract_declarator(self) -> c_ast.Node:
         lparen_tok = self._accept("LPAREN")
         if lparen_tok:
@@ -1965,6 +2043,7 @@ class CParser:
 
     # BNF: assignment_expression : conditional_expression
     #                            | unary_expression assignment_op assignment_expression
+    @_limit_nesting("expression", _EXPRESSION_NESTING_COST)
     def _parse_assignment_expression(self) -> c_ast.Node:
         expr = self._parse_conditional_expression()
         if self._is_assignment_op():
@@ -1975,6 +2054,7 @@ class CParser:
 
     # BNF: conditional_expression : binary_expression
     #                            | binary_expression '?' expression ':' conditional_expression
+    @_limit_nesting("expression", _EXPRESSION_NESTING_COST)
     def _parse_conditional_expression(self) -> c_ast.Node:
         expr = self._parse_binary_expression()
         if self._accept("CONDOP"):
@@ -2019,6 +2099,7 @@ class CParser:
 
     # BNF: cast_expression  : '(' type_name ')' cast_expression
     #                       | unary_expression
+    @_limit_nesting("expression", _EXPRESSION_NESTING_COST)
     def _parse_cast_expression(self) -> c_ast.Node:
         result = self._try_parse_paren_type_name()
         if result is not None:
@@ -2040,6 +2121,7 @@ class CParser:
     #                       | 'sizeof' unary_expression
     #                       | 'sizeof' '(' type_name ')'
     #                       | '_Alignof' '(' type_name ')'
+    @_limit_nesting("expression", _EXPRESSION_NESTING_COST)
     def _parse_unary_expression(self) -> c_ast.Node:
         tok_type = self._peek_type()
         if tok_type in {"PLUSPLUS", "MINUSMINUS"}:
@@ -2403,6 +2485,7 @@ class CParser:
     # BNF: initializer : assignment_expression
     #                 | '{' initializer_list ','? '}'
     #                 | '{' '}'
+    @_limit_nesting("initializer", _INITIALIZER_NESTING_COST)
     def _parse_initializer(self) -> c_ast.Node:
         lbrace_tok = self._accept("LBRACE")
         if lbrace_tok:

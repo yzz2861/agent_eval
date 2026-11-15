@@ -6887,5 +6887,111 @@ class TestCParser_typenames(TestCParser_base):
         )
 
 
+class TestRecursionLimit(unittest.TestCase):
+    """Deeply nested input raises ParseError with an explicit position,
+    never RecursionError, while legal deep constructs keep parsing.
+    """
+
+    def parse(self, txt, **kwargs):
+        return c_parser.CParser(**kwargs).parse(txt, filename="test.c")
+
+    def assert_nesting_error(self, src, construct):
+        with self.assertRaises(ParseError) as cm:
+            self.parse(src)
+        msg = str(cm.exception)
+        self.assertIn("test.c:1:", msg)
+        self.assertIn(construct, msg)
+
+    # Legal deep constructs: iterative constructs do not consume the
+    # recursion budget at all, and moderate nesting stays within it.
+
+    def test_deep_array_dimensions(self):
+        src = "int a" + "[2]" * 300 + ";"
+        ast = self.parse(src)
+        node = ast.ext[0].type
+        count = 0
+        while isinstance(node, ArrayDecl):
+            count += 1
+            node = node.type
+        self.assertEqual(count, 300)
+
+    def test_long_binary_expression(self):
+        src = "int x = " + "1+" * 20000 + "1;"
+        ast = self.parse(src)
+        self.assertIsInstance(ast.ext[0].init, BinaryOp)
+
+    def test_chained_typedefs(self):
+        lines = ["typedef int T0;"]
+        lines += [f"typedef T{i} T{i + 1};" for i in range(300)]
+        ast = self.parse("\n".join(lines))
+        self.assertEqual(len(ast.ext), 301)
+        self.assertTrue(all(isinstance(decl, Typedef) for decl in ast.ext))
+
+    def test_moderate_nesting_parses(self):
+        self.parse("int x = " + "(" * 20 + "1?2:3" + ")" * 20 + ";")
+        self.parse("int y = " + "{" * 20 + "1" + "}" * 20 + ";")
+        self.parse("int " + "(" * 20 + "z" + ")" * 20 + ";")
+
+    # Pathological nesting: every category fails with a catchable
+    # ParseError carrying the position of the offending construct.
+
+    def test_deep_ternary_expression(self):
+        self.assert_nesting_error("int x = " + "1?2:" * 5000 + "3;", "expression")
+
+    def test_deep_parenthesized_expression(self):
+        src = "int x = " + "(" * 5000 + "1" + ")" * 5000 + ";"
+        self.assert_nesting_error(src, "expression")
+
+    def test_deep_unary_expression(self):
+        self.assert_nesting_error("int x = " + "!" * 5000 + "1;", "expression")
+
+    def test_deep_nested_declarator(self):
+        src = "int " + "(" * 5000 + "x" + ")" * 5000 + ";"
+        self.assert_nesting_error(src, "declaration")
+
+    def test_deep_abstract_declarator(self):
+        src = "int x = sizeof(int " + "(" * 5000 + ")" * 5000 + ");"
+        self.assert_nesting_error(src, "declaration")
+
+    def test_deep_nested_initializers(self):
+        src = "int x = " + "{" * 5000 + "1" + "}" * 5000 + ";"
+        self.assert_nesting_error(src, "initializer")
+
+    def test_deep_nested_type_specifiers(self):
+        src = "typedef " + "struct {" * 2000 + "int x;" + "} " * 2000 + "T;"
+        self.assert_nesting_error(src, "type specifier")
+        src = "typedef " + "_Atomic(" * 2000 + "int" + ")" * 2000 + " T;"
+        self.assert_nesting_error(src, "type specifier")
+
+    # The budget is configurable, unified across constructs, and a
+    # violation leaves no partial state behind.
+
+    def test_custom_recursion_limit(self):
+        parser = c_parser.CParser(recursion_limit=24)
+        parser.parse("int x = 1 + 2;")
+        with self.assertRaises(ParseError):
+            parser.parse("int x = " + "(" * 20 + "1" + ")" * 20 + ";")
+
+    def test_shared_budget_across_constructs(self):
+        # Declarations, expressions, initializers, and type specifiers draw
+        # from one budget, so mixed nesting accumulates.
+        parser = c_parser.CParser(recursion_limit=150)
+        parser.parse("int x = " + "{" * 20 + "1" + "}" * 20 + ";")
+        parser.parse("int y = " + "(" * 10 + "1" + ")" * 10 + ";")
+        with self.assertRaises(ParseError):
+            parser.parse(
+                "int z = " + "{" * 20 + "(" * 10 + "1" + ")" * 10 + "}" * 20 + ";"
+            )
+
+    def test_parser_reusable_after_nesting_error(self):
+        parser = c_parser.CParser()
+        with self.assertRaises(ParseError):
+            parser.parse("int x = " + "{" * 5000 + "1" + "}" * 5000 + ";")
+        self.assertEqual(parser._recursion_depth, 0)
+        ast = parser.parse("int ok;")
+        self.assertEqual(len(ast.ext), 1)
+        self.assertEqual(ast.ext[0].name, "ok")
+
+
 if __name__ == "__main__":
     unittest.main()
