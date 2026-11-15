@@ -45,6 +45,60 @@ class IDNACodecTests(unittest.TestCase):
         self.assertRaises(idna.IDNAError, decoder.decode, b"\xc3\x9f", True)
         self.assertRaises(idna.IDNAError, b"\x80".decode, CODEC_NAME)
 
+    def testIncrementalDecoderSplitUTF8(self):
+        # A multi-byte UTF-8 sequence split across chunks must be buffered
+        # instead of being treated as the end of the input. The wire form is
+        # still pure ASCII, so once the sequence is complete (or the stream
+        # ends) it is rejected as invalid ASCII, with the chained
+        # UnicodeDecodeError naming the offending byte by object/start/end.
+        decoder = codecs.getincrementaldecoder(CODEC_NAME)()
+        self.assertEqual(decoder.decode(b"abc\xc3"), "")
+        with self.assertRaises(idna.IDNAError) as ctx:
+            decoder.decode(b"\x9f", True)
+        self.assertEqual(ctx.exception.code, "invalid_ascii")
+        cause = ctx.exception.__cause__
+        self.assertIsInstance(cause, UnicodeDecodeError)
+        self.assertEqual((cause.object, cause.start, cause.end), (b"abc\xc3\x9f", 3, 4))
+
+    def testIncrementalDecoderTrailingIncompleteSequence(self):
+        # A dangling lead byte at the end of the final chunk is an error,
+        # located on the accumulated input, matching the one-shot decoder.
+        decoder = codecs.getincrementaldecoder(CODEC_NAME)()
+        with self.assertRaises(idna.IDNAError) as ctx:
+            decoder.decode(b"abc\xc3", True)
+        self.assertEqual(ctx.exception.code, "invalid_ascii")
+        cause = ctx.exception.__cause__
+        self.assertIsInstance(cause, UnicodeDecodeError)
+        self.assertEqual((cause.object, cause.start, cause.end), (b"abc\xc3", 3, 4))
+
+        # A lead that never receives its continuation after more ASCII input
+        # is likewise located precisely, not swallowed or mis-attributed.
+        decoder = codecs.getincrementaldecoder(CODEC_NAME)()
+        self.assertEqual(decoder.decode(b"ab"), "")
+        with self.assertRaises(idna.IDNAError) as ctx:
+            decoder.decode(b"c\xe2\x82", True)
+        cause = ctx.exception.__cause__
+        self.assertEqual(ctx.exception.code, "invalid_ascii")
+        self.assertEqual((cause.object, cause.start, cause.end), (b"abc\xe2\x82", 3, 4))
+
+    def testIncrementalDecoderEmptyInput(self):
+        # The empty domain is a legal, empty result however it is delivered.
+        self.assertEqual(b"".decode(CODEC_NAME), "")
+        decoder = codecs.getincrementaldecoder(CODEC_NAME)()
+        self.assertEqual(decoder.decode(b""), "")
+        self.assertEqual(decoder.decode(b"", True), "")
+        self.assertEqual("".join(codecs.iterdecode(iter(()), CODEC_NAME)), "")
+
+    def testIncrementalDecoderChunkedEquivalence(self):
+        # Streaming any valid domain, in arbitrary chunk sizes, must equal
+        # the one-shot idna.decode() result.
+        for domain in (b"python.org", b"python.org.", b"xn--pythn-mua.org", b"xn--xample-9ta.org.", b"a.b.c.d.e"):
+            expected = idna.decode(domain)
+            for cut in range(len(domain) + 1):
+                decoder = codecs.getincrementaldecoder(CODEC_NAME)()
+                streamed = decoder.decode(domain[:cut]) + decoder.decode(domain[cut:], True)
+                self.assertEqual(streamed, expected, domain)
+
     def testStreamReader(self):
         def decode(obj):
             if isinstance(obj, str):
