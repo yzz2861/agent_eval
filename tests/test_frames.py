@@ -1,10 +1,11 @@
 from hyperframe.frame import (
     Frame, Flags, DataFrame, PriorityFrame, RstStreamFrame, SettingsFrame,
     PushPromiseFrame, PingFrame, GoAwayFrame, WindowUpdateFrame, HeadersFrame,
-    ContinuationFrame, AltSvcFrame, ExtensionFrame
+    ContinuationFrame, AltSvcFrame, ExtensionFrame, FrameValidator
 )
 from hyperframe.exceptions import (
-    UnknownFrameError, InvalidPaddingError, InvalidFrameError, InvalidDataError
+    UnknownFrameError, InvalidPaddingError, InvalidFrameError,
+    InvalidDataError, FrameBoundaryError
 )
 import pytest
 
@@ -995,3 +996,246 @@ class TestExtensionFrame:
     def test_repr(self):
         f = ExtensionFrame(0xFF, 1, 42, b'hello')
         assert repr(f).endswith("type=255, flag_byte=42, body=<hex:68656c6c6f>")
+
+
+class TestFrameValidator:
+    def test_default_state(self):
+        v = FrameValidator()
+        assert v.max_frame_size == 2**14
+        assert v.connection_window == 65535
+        assert v.initial_window_size == 65535
+        assert v.frames_processed == 0
+
+    def test_invalid_initial_max_frame_size(self):
+        with pytest.raises(InvalidDataError):
+            FrameValidator(max_frame_size=2**14 - 1)
+        with pytest.raises(InvalidDataError):
+            FrameValidator(max_frame_size=2**24)
+
+    def test_window_increment_exactly_at_limit(self):
+        # A legal 31-bit window increment that brings the connection window
+        # to exactly 2^31-1 must be accepted.
+        v = FrameValidator()
+        f = WindowUpdateFrame(0, window_increment=2**31 - 1 - 65535)
+        v.validate(f)
+        assert v.connection_window == 2**31 - 1
+        assert v.frames_processed == 1
+
+    def test_window_increment_overflow_connection(self):
+        v = FrameValidator()
+        v.validate(WindowUpdateFrame(0, window_increment=2**31 - 1 - 65535))
+
+        with pytest.raises(FrameBoundaryError) as excinfo:
+            v.validate(WindowUpdateFrame(0, window_increment=1))
+
+        exc = excinfo.value
+        assert exc.frame_type == 0x08
+        assert exc.stream_id == 0
+        assert exc.connection_state["connection_window"] == 2**31 - 1
+        assert "WINDOW_UPDATE" in str(exc) or "WindowUpdateFrame" in str(exc)
+        # The failed frame must not have been committed.
+        assert v.connection_window == 2**31 - 1
+        assert v.frames_processed == 1
+
+    def test_window_increment_overflow_stream(self):
+        v = FrameValidator()
+        v.validate(WindowUpdateFrame(1, window_increment=2**31 - 1 - 65535))
+        assert v.stream_windows[1] == 2**31 - 1
+
+        with pytest.raises(FrameBoundaryError):
+            v.validate(WindowUpdateFrame(1, window_increment=1))
+        assert v.stream_windows[1] == 2**31 - 1
+
+    def test_stream_windows_tracked_independently(self):
+        v = FrameValidator()
+        v.validate(WindowUpdateFrame(1, window_increment=100))
+        v.validate(WindowUpdateFrame(3, window_increment=200))
+        assert v.stream_windows == {1: 65635, 3: 65735}
+        assert v.connection_window == 65535
+
+    @pytest.mark.parametrize('increment', [0, -1, 2**31])
+    def test_invalid_window_increment(self, increment):
+        v = FrameValidator()
+        with pytest.raises(FrameBoundaryError) as excinfo:
+            v.validate(WindowUpdateFrame(0, window_increment=increment))
+        assert excinfo.value.frame_type == 0x08
+        assert v.connection_window == 65535
+        assert v.frames_processed == 0
+
+    def test_zero_window_increment_on_stream(self):
+        v = FrameValidator()
+        with pytest.raises(FrameBoundaryError):
+            v.validate(WindowUpdateFrame(1, window_increment=0))
+        assert v.stream_windows == {}
+
+    def test_frame_size_exceeds_default_max(self):
+        v = FrameValidator()
+        f = DataFrame(1, data=b'\x01' * (2**14 + 1))
+        f.serialize()
+        with pytest.raises(FrameBoundaryError) as excinfo:
+            v.validate(f)
+        assert excinfo.value.frame_type == 0x0
+        assert excinfo.value.connection_state["max_frame_size"] == 2**14
+
+    def test_frame_size_at_default_max_accepted(self):
+        v = FrameValidator()
+        f = DataFrame(1, data=b'\x01' * 2**14)
+        f.serialize()
+        v.validate(f)
+        assert v.frames_processed == 1
+
+    def test_settings_max_frame_size_too_small(self):
+        v = FrameValidator()
+        f = SettingsFrame(settings={SettingsFrame.MAX_FRAME_SIZE: 100})
+        with pytest.raises(FrameBoundaryError) as excinfo:
+            v.validate(f)
+        assert excinfo.value.frame_type == 0x04
+        # The invalid setting must not take effect.
+        assert v.max_frame_size == 2**14
+
+    def test_settings_max_frame_size_too_large(self):
+        v = FrameValidator()
+        f = SettingsFrame(settings={SettingsFrame.MAX_FRAME_SIZE: 2**24})
+        with pytest.raises(FrameBoundaryError):
+            v.validate(f)
+        assert v.max_frame_size == 2**14
+
+    @pytest.mark.parametrize('value', [2**14, 2**24 - 1])
+    def test_settings_max_frame_size_boundary_values_accepted(self, value):
+        v = FrameValidator()
+        v.validate(SettingsFrame(settings={SettingsFrame.MAX_FRAME_SIZE: value}))
+        assert v.max_frame_size == value
+
+    def test_settings_max_frame_size_applies_to_later_frames(self):
+        v = FrameValidator()
+        v.validate(SettingsFrame(
+            settings={SettingsFrame.MAX_FRAME_SIZE: 2**14},
+        ))
+        f = DataFrame(1, data=b'\x01' * (2**14 + 1))
+        f.serialize()
+        with pytest.raises(FrameBoundaryError):
+            v.validate(f)
+
+        # Raising the limit via SETTINGS allows the same frame through.
+        v.validate(SettingsFrame(
+            settings={SettingsFrame.MAX_FRAME_SIZE: 2**15},
+        ))
+        v.validate(f)
+
+    def test_settings_initial_window_size_too_large(self):
+        v = FrameValidator()
+        f = SettingsFrame(
+            settings={SettingsFrame.INITIAL_WINDOW_SIZE: 2**31},
+        )
+        with pytest.raises(FrameBoundaryError):
+            v.validate(f)
+        assert v.initial_window_size == 65535
+
+    def test_settings_initial_window_size_adjusts_stream_windows(self):
+        v = FrameValidator()
+        v.validate(WindowUpdateFrame(1, window_increment=100))
+        v.validate(SettingsFrame(
+            settings={SettingsFrame.INITIAL_WINDOW_SIZE: 70000},
+        ))
+        assert v.initial_window_size == 70000
+        assert v.stream_windows[1] == 65635 + (70000 - 65535)
+
+    @pytest.mark.parametrize('setting', [
+        SettingsFrame.ENABLE_PUSH,
+        SettingsFrame.ENABLE_CONNECT_PROTOCOL,
+    ])
+    def test_settings_boolean_values(self, setting):
+        v = FrameValidator()
+        with pytest.raises(FrameBoundaryError):
+            v.validate(SettingsFrame(settings={setting: 2}))
+        v.validate(SettingsFrame(settings={setting: 1}))
+
+    def test_settings_ack_skips_validation(self):
+        v = FrameValidator()
+        v.validate(SettingsFrame(flags=('ACK',)))
+        assert v.frames_processed == 1
+
+    @pytest.mark.parametrize('stream_id', [-1, 2**31, 2**32])
+    def test_invalid_stream_id(self, stream_id):
+        v = FrameValidator()
+        f = WindowUpdateFrame(0, window_increment=1)
+        f.stream_id = stream_id
+        with pytest.raises(FrameBoundaryError) as excinfo:
+            v.validate(f)
+        assert excinfo.value.stream_id == stream_id
+
+    def test_error_carries_frame_type_and_connection_state(self):
+        v = FrameValidator()
+        v.validate(WindowUpdateFrame(0, window_increment=10))
+        with pytest.raises(FrameBoundaryError) as excinfo:
+            v.validate(WindowUpdateFrame(0, window_increment=2**31 - 1))
+        exc = excinfo.value
+        assert exc.frame_type == 0x08
+        assert exc.connection_state == {
+            "frames_processed": 1,
+            "connection_window": 65535 + 10,
+            "initial_window_size": 65535,
+            "max_frame_size": 2**14,
+        }
+        assert "type=8" in str(exc)
+        assert "connection state" in str(exc)
+
+    def test_recovery_after_failed_frame(self):
+        # A rejected frame leaves the validator usable: subsequent valid
+        # frames are processed against the unchanged state.
+        v = FrameValidator()
+        v.validate(WindowUpdateFrame(0, window_increment=2**31 - 1 - 65535))
+        with pytest.raises(FrameBoundaryError):
+            v.validate(WindowUpdateFrame(0, window_increment=1))
+
+        # The connection can still make progress, e.g. on a stream.
+        v.validate(WindowUpdateFrame(1, window_increment=512))
+        assert v.stream_windows[1] == 65535 + 512
+        assert v.connection_window == 2**31 - 1
+        assert v.frames_processed == 2
+
+    def test_parse_frames_processes_batch(self):
+        v = FrameValidator()
+        data = (
+            WindowUpdateFrame(0, window_increment=100).serialize() +
+            WindowUpdateFrame(1, window_increment=200).serialize() +
+            PingFrame(opaque_data=b'\x01' * 8).serialize()
+        )
+        frames = v.parse_frames(data)
+        assert [type(f) for f in frames] == [
+            WindowUpdateFrame, WindowUpdateFrame, PingFrame,
+        ]
+        assert v.connection_window == 65535 + 100
+        assert v.stream_windows[1] == 65535 + 200
+        assert v.frames_processed == 3
+
+    def test_parse_frames_stops_at_failure(self):
+        v = FrameValidator()
+        data = (
+            WindowUpdateFrame(0, window_increment=2**31 - 1 - 65535).serialize() +
+            WindowUpdateFrame(0, window_increment=1).serialize() +
+            PingFrame(opaque_data=b'\x01' * 8).serialize()
+        )
+        with pytest.raises(FrameBoundaryError) as excinfo:
+            v.parse_frames(data)
+        assert excinfo.value.frame_type == 0x08
+        # Only the first frame was committed; the PING was never reached.
+        assert v.connection_window == 2**31 - 1
+        assert v.frames_processed == 1
+
+    def test_parse_frames_rejects_oversized_frame_header(self):
+        v = FrameValidator()
+        f = DataFrame(1, data=b'\x01' * (2**14 + 1))
+        with pytest.raises(FrameBoundaryError):
+            v.parse_frames(f.serialize())
+        assert v.frames_processed == 0
+
+    def test_parse_frames_rejects_truncated_body(self):
+        v = FrameValidator()
+        data = PingFrame(opaque_data=b'\x01' * 8).serialize()[:-2]
+        with pytest.raises(InvalidFrameError):
+            v.parse_frames(data)
+
+    def test_parse_frames_empty_input(self):
+        v = FrameValidator()
+        assert v.parse_frames(b'') == []

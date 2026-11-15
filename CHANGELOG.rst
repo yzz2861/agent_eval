@@ -6,6 +6,13 @@ dev
 
 **API Changes (Backward Compatible)**
 
+- Added ``FrameValidator``, a stateful per-connection boundary validator that
+  rejects flow-control window overflows beyond 2^31-1, frames exceeding the
+  peer's SETTINGS_MAX_FRAME_SIZE, out-of-range stream identifiers, and invalid
+  settings values. Violations raise the new ``FrameBoundaryError``, which
+  carries the offending frame type and a snapshot of the connection state.
+  ``FrameValidator.parse_frames`` processes batches of frames and stops at the
+  first failure without committing partial state.
 - Setting Identifier are now correctly serialized as 16-bit values, instead of 8-bit.
 - GoAwayFrame and WindowUpdateFrame now correctly mask off the reserved bit during
   parsing and serialization of stream IDs and window increments, as per RFC 9113,

@@ -14,7 +14,13 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Iterable  # pragma: no cover
 
-from .exceptions import InvalidDataError, InvalidFrameError, InvalidPaddingError, UnknownFrameError
+from .exceptions import (
+    FrameBoundaryError,
+    InvalidDataError,
+    InvalidFrameError,
+    InvalidPaddingError,
+    UnknownFrameError,
+)
 from .flags import Flag, Flags
 
 # The maximum initial length of a frame. Some frames have shorter maximum
@@ -23,6 +29,18 @@ FRAME_MAX_LEN = (2 ** 14)
 
 # The maximum allowed length of a frame.
 FRAME_MAX_ALLOWED_LEN = (2 ** 24) - 1
+
+# The maximum value of a flow-control window, and therefore the maximum legal
+# WINDOW_UPDATE increment. RFC 9113, Section 6.9.1
+MAX_WINDOW = (2 ** 31) - 1
+
+# The initial value of the connection-level flow-control window and of the
+# per-stream windows before SETTINGS_INITIAL_WINDOW_SIZE is applied.
+# RFC 9113, Section 6.9.2
+INITIAL_WINDOW_SIZE = 65535
+
+# The maximum valid stream identifier: 31 bits. RFC 9113, Section 4.1
+MAX_STREAM_ID = (2 ** 31) - 1
 
 # Stream association enumerations.
 _STREAM_ASSOC_HAS_STREAM = "has-stream"
@@ -945,3 +963,228 @@ _FRAME_CLASSES: list[type[Frame]] = [
 #: FRAMES maps the type byte for each frame to the class used to represent that
 #: frame.
 FRAMES = {cls.type: cls for cls in _FRAME_CLASSES}
+
+
+class FrameValidator:
+    """
+    Stateful boundary validation for the frames of a single HTTP/2
+    connection.
+
+    Tracks connection-level state (the connection flow-control window,
+    per-stream flow-control windows, and the peer's SETTINGS_MAX_FRAME_SIZE)
+    and rejects frames that would push the connection outside the limits of
+    RFC 9113, instead of relying on callers to clamp or truncate values
+    themselves.
+
+    Validation is transactional: a frame that fails validation leaves the
+    validator state untouched, so processing can recover and continue with
+    subsequent frames.
+
+    .. versionadded:: 6.2.0
+    """
+
+    def __init__(self, max_frame_size: int = FRAME_MAX_LEN) -> None:
+        if not FRAME_MAX_LEN <= max_frame_size <= FRAME_MAX_ALLOWED_LEN:
+            msg = (
+                f"max_frame_size must be between {FRAME_MAX_LEN} and "
+                f"{FRAME_MAX_ALLOWED_LEN}: got {max_frame_size}"
+            )
+            raise InvalidDataError(msg)
+
+        #: The maximum frame payload size currently accepted, as advertised
+        #: by the peer via SETTINGS_MAX_FRAME_SIZE. Defaults to 2**14.
+        self.max_frame_size = max_frame_size
+
+        #: The current connection-level flow-control window.
+        self.connection_window = INITIAL_WINDOW_SIZE
+
+        #: The window applied to new streams, from
+        #: SETTINGS_INITIAL_WINDOW_SIZE.
+        self.initial_window_size = INITIAL_WINDOW_SIZE
+
+        #: Per-stream flow-control windows for streams that have received
+        #: WINDOW_UPDATE frames.
+        self.stream_windows: dict[int, int] = {}
+
+        #: The number of frames successfully validated so far.
+        self.frames_processed = 0
+
+    @property
+    def connection_state(self) -> dict[str, int]:
+        """
+        A snapshot of the connection state, attached to raised errors.
+        """
+        return {
+            "frames_processed": self.frames_processed,
+            "connection_window": self.connection_window,
+            "initial_window_size": self.initial_window_size,
+            "max_frame_size": self.max_frame_size,
+        }
+
+    def validate(self, frame: Frame) -> None:
+        """
+        Validate a single frame against the connection state, committing
+        state changes only if the frame is fully valid.
+
+        :param frame: The frame to validate.
+        :raises FrameBoundaryError: If the frame violates a protocol
+            boundary.
+        """
+        self._validate_stream_id(frame)
+        self._validate_frame_size(frame)
+        if isinstance(frame, WindowUpdateFrame):
+            self._validate_window_update(frame)
+        elif isinstance(frame, SettingsFrame):
+            self._validate_settings(frame)
+        self.frames_processed += 1
+
+    def parse_frames(self, data: bytes) -> list[Frame]:
+        """
+        Parse and validate every complete frame present in ``data``.
+
+        Processing stops at the first frame that fails to parse or validate:
+        the error propagates to the caller and the validator state reflects
+        only the frames that were successfully processed before the failure.
+
+        :param data: A bytestring containing zero or more complete frames.
+        :returns: The frames that were parsed and validated, in order.
+        """
+        frames = []
+        view = memoryview(data)
+        offset = 0
+        while offset < len(view):
+            frame, length = Frame.parse_frame_header(view[offset:offset + 9])
+            if length > self.max_frame_size:
+                self._fail(
+                    frame,
+                    f"frame length {length} exceeds max frame size "
+                    f"{self.max_frame_size}",
+                )
+            body = view[offset + 9:offset + 9 + length]
+            if len(body) < length:
+                msg = (
+                    f"Invalid frame body: expected {length} bytes, "
+                    f"got {len(body)}"
+                )
+                raise InvalidFrameError(msg)
+            frame.parse_body(body)
+            self.validate(frame)
+            frames.append(frame)
+            offset += 9 + length
+        return frames
+
+    def _fail(self, frame: Frame, reason: str) -> None:
+        state = self.connection_state
+        msg = (
+            f"{type(frame).__name__} (type={frame.type}) on stream "
+            f"{frame.stream_id} violates connection boundary: {reason}; "
+            f"connection state: {state}"
+        )
+        raise FrameBoundaryError(
+            msg,
+            frame_type=frame.type,
+            stream_id=frame.stream_id,
+            connection_state=state,
+        )
+
+    def _validate_stream_id(self, frame: Frame) -> None:
+        if not 0 <= frame.stream_id <= MAX_STREAM_ID:
+            self._fail(
+                frame,
+                f"stream id {frame.stream_id} outside valid range "
+                f"0..{MAX_STREAM_ID}",
+            )
+
+    def _validate_frame_size(self, frame: Frame) -> None:
+        if frame.body_len > self.max_frame_size:
+            self._fail(
+                frame,
+                f"frame size {frame.body_len} exceeds max frame size "
+                f"{self.max_frame_size}",
+            )
+
+    def _validate_window_update(self, frame: WindowUpdateFrame) -> None:
+        increment = frame.window_increment
+        if not 1 <= increment <= MAX_WINDOW:
+            self._fail(
+                frame,
+                f"window increment {increment} outside valid range "
+                f"1..{MAX_WINDOW}",
+            )
+
+        if frame.stream_id == 0:
+            current = self.connection_window
+        else:
+            current = self.stream_windows.get(
+                frame.stream_id, self.initial_window_size,
+            )
+
+        new_window = current + increment
+        if new_window > MAX_WINDOW:
+            self._fail(
+                frame,
+                f"flow-control window would overflow: {current} + "
+                f"{increment} exceeds {MAX_WINDOW}",
+            )
+
+        if frame.stream_id == 0:
+            self.connection_window = new_window
+        else:
+            self.stream_windows[frame.stream_id] = new_window
+
+    def _validate_settings(self, frame: SettingsFrame) -> None:
+        if "ACK" in frame.flags:
+            return
+
+        new_max_frame_size = self.max_frame_size
+        new_initial_window_size = self.initial_window_size
+        for setting, value in frame.settings.items():
+            if setting == SettingsFrame.ENABLE_PUSH and value not in (0, 1):
+                self._fail(
+                    frame,
+                    f"SETTINGS_ENABLE_PUSH must be 0 or 1: got {value}",
+                )
+            elif setting == SettingsFrame.ENABLE_CONNECT_PROTOCOL and value not in (0, 1):
+                self._fail(
+                    frame,
+                    f"SETTINGS_ENABLE_CONNECT_PROTOCOL must be 0 or 1: "
+                    f"got {value}",
+                )
+            elif setting == SettingsFrame.INITIAL_WINDOW_SIZE:
+                if value > MAX_WINDOW:
+                    self._fail(
+                        frame,
+                        f"SETTINGS_INITIAL_WINDOW_SIZE {value} exceeds "
+                        f"{MAX_WINDOW}",
+                    )
+                new_initial_window_size = value
+            elif setting == SettingsFrame.MAX_FRAME_SIZE:
+                if not FRAME_MAX_LEN <= value <= FRAME_MAX_ALLOWED_LEN:
+                    self._fail(
+                        frame,
+                        f"SETTINGS_MAX_FRAME_SIZE {value} outside valid "
+                        f"range {FRAME_MAX_LEN}..{FRAME_MAX_ALLOWED_LEN}",
+                    )
+                new_max_frame_size = value
+
+        # Commit the new initial window: existing stream windows are
+        # adjusted by the delta, as per RFC 9113, Section 6.9.2. Compute the
+        # adjustments before applying any of them so a failure leaves the
+        # state untouched.
+        delta = new_initial_window_size - self.initial_window_size
+        if delta:
+            adjusted_windows = {}
+            for stream_id, window in self.stream_windows.items():
+                adjusted = window + delta
+                if adjusted > MAX_WINDOW:
+                    self._fail(
+                        frame,
+                        f"stream {stream_id} window would overflow when "
+                        f"applying SETTINGS_INITIAL_WINDOW_SIZE: {window} + "
+                        f"{delta} exceeds {MAX_WINDOW}",
+                    )
+                adjusted_windows[stream_id] = adjusted
+            self.stream_windows.update(adjusted_windows)
+
+        self.initial_window_size = new_initial_window_size
+        self.max_frame_size = new_max_frame_size
