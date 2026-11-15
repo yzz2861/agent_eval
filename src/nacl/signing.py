@@ -13,14 +13,22 @@
 # limitations under the License.
 from __future__ import annotations
 
+from typing import ClassVar
+
 import nacl.bindings
 from nacl import encoding
 from nacl import exceptions as exc
+from nacl.public import (
+    KeyPurpose,
+)
 from nacl.public import (
     PrivateKey as _Curve25519_PrivateKey,
 )
 from nacl.public import (
     PublicKey as _Curve25519_PublicKey,
+)
+from nacl.public import (
+    ensure_key_purpose,
 )
 from nacl.utils import StringFixer, random
 
@@ -65,7 +73,12 @@ class VerifyKey(encoding.Encodable, StringFixer):
 
     :param key: [:class:`bytes`] Serialized Ed25519 public key
     :param encoder: A class that is able to decode the `key`
+
+    :cvar PURPOSE: The :class:`~nacl.public.KeyPurpose` this key is
+        declared for
     """
+
+    PURPOSE: ClassVar[KeyPurpose] = KeyPurpose.SIGNING
 
     def __init__(
         self, key: bytes, encoder: encoding.Encoder = encoding.RawEncoder
@@ -115,6 +128,20 @@ class VerifyKey(encoding.Encodable, StringFixer):
             signature.
         :rtype: :class:`bytes`
         """
+        # Reject keys declared for a different purpose (e.g. a Curve25519
+        #   encryption public key passed via an unbound method call).
+        ensure_key_purpose(self, KeyPurpose.SIGNING)
+
+        # Reject low-order or otherwise invalid Ed25519 public keys, for
+        #   which forged signatures could otherwise be accepted.
+        if (
+            nacl.bindings.has_crypto_core_ed25519
+            and not nacl.bindings.crypto_core_ed25519_is_valid_point(self._key)
+        ):
+            raise exc.ValueError(
+                "The verify key is not a valid Ed25519 public key"
+            )
+
         if signature is not None:
             # If we were given the message and signature separately, validate
             #   signature size and combine them.
@@ -134,6 +161,15 @@ class VerifyKey(encoding.Encodable, StringFixer):
         else:
             # Decode the signed message
             smessage = encoder.decode(smessage)
+
+            # A combined signed message must be at least as long as a
+            #   signature; anything shorter is a truncated signature (an
+            #   empty message conflicts with the combined-message policy).
+            if len(smessage) < nacl.bindings.crypto_sign_BYTES:
+                raise exc.ValueError(
+                    "The signed message must be at least "
+                    f"{nacl.bindings.crypto_sign_BYTES} bytes long",
+                )
 
         return nacl.bindings.crypto_sign_open(smessage, self._key)
 
@@ -165,7 +201,12 @@ class SigningKey(encoding.Encodable, StringFixer):
 
     :ivar: verify_key: [:class:`~nacl.signing.VerifyKey`] The verify
         (i.e. public) key that corresponds with this signing key.
+
+    :cvar PURPOSE: The :class:`~nacl.public.KeyPurpose` this key is
+        declared for
     """
+
+    PURPOSE: ClassVar[KeyPurpose] = KeyPurpose.SIGNING
 
     def __init__(
         self,
@@ -230,6 +271,10 @@ class SigningKey(encoding.Encodable, StringFixer):
         :param encoder: A class that is used to encode the signed message.
         :rtype: :class:`~nacl.signing.SignedMessage`
         """
+        # Reject keys declared for a different purpose (e.g. a Curve25519
+        #   encryption private key passed via an unbound method call).
+        ensure_key_purpose(self, KeyPurpose.SIGNING)
+
         raw_signed = nacl.bindings.crypto_sign(message, self._signing_key)
 
         crypto_sign_BYTES = nacl.bindings.crypto_sign_BYTES

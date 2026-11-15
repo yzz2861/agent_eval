@@ -18,10 +18,64 @@ import binascii
 import pytest
 
 from nacl.bindings import crypto_box_PUBLICKEYBYTES, crypto_box_SECRETKEYBYTES
-from nacl.public import Box, PrivateKey, PublicKey
+from nacl.public import (
+    Box,
+    KeyPurpose,
+    PrivateKey,
+    PublicKey,
+    ensure_key_purpose,
+)
+from nacl.signing import SigningKey
 from nacl.utils import random
 
 from .utils import assert_equal, assert_not_equal
+
+
+class TestKeyPurpose:
+    def test_encryption_keys_have_encryption_purpose(self):
+        assert PublicKey.PURPOSE is KeyPurpose.ENCRYPTION
+        assert PrivateKey.PURPOSE is KeyPurpose.ENCRYPTION
+
+    def test_ensure_key_purpose_accepts_encryption_keys(self):
+        private_key = PrivateKey.generate()
+        ensure_key_purpose(private_key, KeyPurpose.ENCRYPTION)
+        ensure_key_purpose(private_key.public_key, KeyPurpose.ENCRYPTION)
+
+    def test_ensure_key_purpose_rejects_wrong_purpose(self):
+        private_key = PrivateKey.generate()
+        with pytest.raises(TypeError):
+            ensure_key_purpose(private_key, KeyPurpose.SIGNING)
+        with pytest.raises(TypeError):
+            ensure_key_purpose(private_key.public_key, KeyPurpose.SIGNING)
+
+    def test_ensure_key_purpose_rejects_signing_keys(self):
+        signing_key = SigningKey.generate()
+        with pytest.raises(TypeError):
+            ensure_key_purpose(signing_key, KeyPurpose.ENCRYPTION)
+        with pytest.raises(TypeError):
+            ensure_key_purpose(signing_key.verify_key, KeyPurpose.ENCRYPTION)
+
+    def test_ensure_key_purpose_rejects_non_key_objects(self):
+        with pytest.raises(TypeError):
+            ensure_key_purpose(
+                b"\x00" * crypto_box_PUBLICKEYBYTES, KeyPurpose.ENCRYPTION
+            )
+        with pytest.raises(TypeError):
+            ensure_key_purpose(12, KeyPurpose.SIGNING)
+
+    def test_ensure_key_purpose_error_has_no_key_material(self):
+        private_key = PrivateKey.generate()
+        with pytest.raises(TypeError) as excinfo:
+            ensure_key_purpose(private_key, KeyPurpose.SIGNING)
+        assert bytes(private_key).hex() not in str(excinfo.value)
+
+    def test_box_rejects_signing_keys(self):
+        signing_key = SigningKey.generate()
+        other = PrivateKey.generate()
+        with pytest.raises(TypeError):
+            Box(signing_key, other.public_key)
+        with pytest.raises(TypeError):
+            Box(other, signing_key.verify_key)
 
 
 class TestPublicKey:

@@ -13,6 +13,7 @@
 # limitations under the License.
 from __future__ import annotations
 
+import enum
 from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar
 
 import nacl.bindings
@@ -25,6 +26,42 @@ if TYPE_CHECKING:
     from typing_extensions import Self
 
 
+class KeyPurpose(enum.Enum):
+    """
+    Declares the intended usage of a key.
+
+    Every NaCl key object carries a ``PURPOSE`` class attribute set to one
+    of these values, so that a key created for one operation (e.g.
+    encryption) cannot be silently reused where a key for a different
+    operation (e.g. signing) is expected.
+    """
+
+    ENCRYPTION = b"encryption"
+    SIGNING = b"signing"
+
+
+def ensure_key_purpose(key: object, purpose: KeyPurpose) -> None:
+    """
+    Ensure ``key`` is a NaCl key object declared for ``purpose``.
+
+    The purpose tags are compared in constant time and the raised error
+    never includes key material or message contents.
+
+    :param key: The key object to check
+    :param purpose: The :class:`KeyPurpose` the key must be declared for
+    :raises nacl.exceptions.TypeError: if ``key`` is not a NaCl key object
+        declared for ``purpose``
+    """
+    actual = getattr(key, "PURPOSE", None)
+    if not isinstance(actual, KeyPurpose) or not nacl.bindings.sodium_memcmp(
+        actual.value, purpose.value
+    ):
+        raise exc.TypeError(
+            f"{type(key).__name__} cannot be used as a "
+            f"{purpose.name.lower()} key"
+        )
+
+
 class PublicKey(encoding.Encodable, StringFixer):
     """
     The public key counterpart to an Curve25519 :class:`nacl.public.PrivateKey`
@@ -34,9 +71,11 @@ class PublicKey(encoding.Encodable, StringFixer):
     :param encoder: A class that is able to decode the `public_key`
 
     :cvar SIZE: The size that the public key is required to be
+    :cvar PURPOSE: The :class:`KeyPurpose` this key is declared for
     """
 
     SIZE: ClassVar[int] = nacl.bindings.crypto_box_PUBLICKEYBYTES
+    PURPOSE: ClassVar[KeyPurpose] = KeyPurpose.ENCRYPTION
 
     def __init__(
         self,
@@ -82,10 +121,12 @@ class PrivateKey(encoding.Encodable, StringFixer):
     :cvar SIZE: The size that the private key is required to be
     :cvar SEED_SIZE: The size that the seed used to generate the
                      private key is required to be
+    :cvar PURPOSE: The :class:`KeyPurpose` this key is declared for
     """
 
     SIZE: ClassVar[int] = nacl.bindings.crypto_box_SECRETKEYBYTES
     SEED_SIZE: ClassVar[int] = nacl.bindings.crypto_box_SEEDBYTES
+    PURPOSE: ClassVar[KeyPurpose] = KeyPurpose.ENCRYPTION
 
     def __init__(
         self,
@@ -194,6 +235,8 @@ class Box(encoding.Encodable, StringFixer):
             raise exc.TypeError(
                 "Box must be created from a PrivateKey and a PublicKey"
             )
+        ensure_key_purpose(private_key, KeyPurpose.ENCRYPTION)
+        ensure_key_purpose(public_key, KeyPurpose.ENCRYPTION)
         self._shared_key = nacl.bindings.crypto_box_beforenm(
             public_key.encode(encoder=encoding.RawEncoder),
             private_key.encode(encoder=encoding.RawEncoder),
@@ -354,6 +397,7 @@ class SealedBox(encoding.Encodable, StringFixer, Generic[_Key]):
             raise exc.TypeError(
                 "SealedBox must be created from a PublicKey or a PrivateKey"
             )
+        ensure_key_purpose(recipient_key, KeyPurpose.ENCRYPTION)
 
     def __bytes__(self) -> bytes:
         return self._public_key

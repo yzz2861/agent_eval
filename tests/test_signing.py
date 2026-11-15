@@ -17,9 +17,14 @@ import binascii
 
 import pytest
 
-from nacl.bindings import crypto_sign_PUBLICKEYBYTES, crypto_sign_SEEDBYTES
+from nacl.bindings import (
+    crypto_sign_BYTES,
+    crypto_sign_PUBLICKEYBYTES,
+    crypto_sign_SEEDBYTES,
+)
 from nacl.encoding import Base64Encoder, HexEncoder
 from nacl.exceptions import BadSignatureError
+from nacl.public import PrivateKey as Curve25519PrivateKey
 from nacl.signing import SignedMessage, SigningKey, VerifyKey
 
 from .utils import (
@@ -95,6 +100,13 @@ class TestSigningKey:
     def test_initialization_with_seed(self, seed: bytes):
         SigningKey(seed, encoder=HexEncoder)
 
+    def test_sign_rejects_encryption_key_type(self):
+        # A Curve25519 encryption private key must not be usable where a
+        # signing key is expected (e.g. via an unbound method call).
+        encryption_private_key = Curve25519PrivateKey.generate()
+        with pytest.raises(TypeError):
+            SigningKey.sign(encryption_private_key, b"A Test Message!")
+
     @pytest.mark.parametrize(
         ("seed", "_public_key", "message", "signature", "expected"),
         ed25519_known_answers(),
@@ -119,6 +131,16 @@ class TestSigningKey:
         assert signed == expected
         assert signed.message == message
         assert signed.signature == signature
+
+    def test_long_message_signing(self):
+        signing_key = SigningKey.generate()
+        message = bytes(range(256)) * 4096  # 1 MiB
+
+        signed = signing_key.sign(message)
+
+        assert signed.message == message
+        assert len(signed.signature) == crypto_sign_BYTES
+        assert bytes(signed) == signed.signature + message
 
 
 class TestVerifyKey:
@@ -218,6 +240,94 @@ class TestVerifyKey:
 
         with pytest.raises(ValueError):
             skey.verify_key.verify(signature + message, b"")
+
+    def test_verify_rejects_truncated_signature(self):
+        skey = SigningKey.generate()
+        message = b"A Test Message!"
+        signed = skey.sign(message)
+        signature = signed.signature
+
+        # Detached signature truncated by a single byte
+        with pytest.raises(ValueError):
+            skey.verify_key.verify(message, signature[:-1])
+
+        # Combined signed message truncated below the signature length
+        with pytest.raises(ValueError):
+            skey.verify_key.verify(bytes(signed)[: crypto_sign_BYTES - 1])
+
+        # Combined signed message truncated but still signature-sized
+        # fails verification instead of being silently accepted
+        with pytest.raises(BadSignatureError):
+            skey.verify_key.verify(bytes(signed)[:-1])
+
+    def test_verify_rejects_empty_combined_message(self):
+        skey = SigningKey.generate()
+        signed = skey.sign(b"")
+
+        # Detached verification of an empty message remains valid
+        assert skey.verify_key.verify(b"", signed.signature) == b""
+
+        # An empty combined message conflicts with the combined-message
+        # policy (it can never contain a signature) and is rejected
+        with pytest.raises(ValueError):
+            skey.verify_key.verify(b"")
+
+    @pytest.mark.parametrize(
+        "key_bytes",
+        [
+            # canonical encoding of a point of order 4
+            b"\x00" * crypto_sign_PUBLICKEYBYTES,
+            # the identity point
+            b"\x01" + b"\x00" * (crypto_sign_PUBLICKEYBYTES - 1),
+            # the point of order 2 (y = -1)
+            b"\xec" + b"\xff" * (crypto_sign_PUBLICKEYBYTES - 2) + b"\x7f",
+        ],
+    )
+    def test_verify_rejects_low_order_public_key(self, key_bytes: bytes):
+        skey = SigningKey.generate()
+        smessage = skey.sign(b"A Test Message!")
+
+        key = VerifyKey(key_bytes)
+        with pytest.raises(ValueError):
+            key.verify(bytes(smessage))
+
+    def test_verify_rejects_encryption_key_type(self):
+        # A Curve25519 encryption public key must not be usable where a
+        # verify key is expected (e.g. via an unbound method call).
+        skey = SigningKey.generate()
+        smessage = skey.sign(b"A Test Message!")
+        signature, message = smessage.signature, smessage.message
+
+        encryption_public_key = Curve25519PrivateKey.generate().public_key
+        with pytest.raises(TypeError):
+            VerifyKey.verify(encryption_public_key, message, signature)
+
+    def test_verify_error_does_not_contain_message(self):
+        skey = SigningKey.generate()
+        message = b"message content that must not leak"
+        signature = skey.sign(message).signature
+
+        with pytest.raises(ValueError) as excinfo:
+            skey.verify_key.verify(message, signature[:-1])
+        assert "message content" not in str(excinfo.value)
+
+        with pytest.raises(BadSignatureError) as excinfo:
+            skey.verify_key.verify(b"A Forged Test Message!", signature)
+        assert "message content" not in str(excinfo.value)
+
+    def test_long_message_sign_and_verify(self):
+        skey = SigningKey.generate()
+        message = bytes(range(256)) * 4096  # 1 MiB
+
+        signed = skey.sign(message)
+
+        assert skey.verify_key.verify(bytes(signed)) == message
+        assert skey.verify_key.verify(message, signed.signature) == message
+
+        forged = bytearray(signed)
+        forged[-1] ^= 0x01
+        with pytest.raises(BadSignatureError):
+            skey.verify_key.verify(bytes(forged))
 
     def test_base64_smessage_with_detached_sig_matches_with_attached_sig(self):
         sk = SigningKey.generate()
