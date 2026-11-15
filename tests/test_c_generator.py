@@ -1639,6 +1639,153 @@ struct S { [[deprecated]] int z _Pragma("member"); };""")
             )
 
 
+class TestGeneratorHardening(unittest.TestCase):
+    """Regression tests for safe regeneration of security-sensitive ASTs."""
+
+    def setUp(self):
+        self.generator = c_generator.CGenerator()
+        self.coord = c_parser.Coord("patch.c", 7, 13)
+
+    def _assert_round_trip(self, source, parser=None):
+        parser = parser or _c_parser
+        ast = parser.parse(source)
+        generated = c_generator.CGenerator().visit(ast)
+        self.assertTrue(
+            compare_asts(ast, parser.parse(generated)),
+            f"{source!r} != {generated!r}",
+        )
+        return generated
+
+    def _dangerous_call(self, name="system", argument='"rm -rf /"'):
+        return c_ast.FuncCall(
+            c_ast.ID(name, self.coord),
+            c_ast.ExprList(
+                [c_ast.Constant("string", argument, self.coord)], self.coord
+            ),
+            self.coord,
+        )
+
+    def test_unknown_func_call_subclass_cannot_drop_parentheses(self):
+        class DangerousCall(c_ast.FuncCall):
+            pass
+
+        call = self._dangerous_call()
+        node = DangerousCall(call.name, call.args, self.coord)
+        with self.assertRaises(c_generator.CGeneratorError) as raised:
+            self.generator.visit(node)
+        message = str(raised.exception)
+        self.assertIn("DangerousCall", message)
+        self.assertIn("patch.c:7:13", message)
+
+    def test_unknown_attribute_subclass_cannot_disappear(self):
+        class VendorAttribute(c_ast.Attribute):
+            pass
+
+        node = VendorAttribute("__attribute__", None, "(noreturn)", self.coord)
+        with self.assertRaises(ValueError) as raised:
+            self.generator.visit(node)
+        self.assertIn("patch.c:7:13", str(raised.exception))
+
+    def test_unknown_extension_preserves_explicit_source_text(self):
+        class MacroPlaceholder(c_ast.Node):
+            __slots__ = ("source", "coord", "__weakref__")
+
+            def __init__(self, source, coord=None):
+                self.source = source
+                self.coord = coord
+
+            def __str__(self):
+                raise AssertionError("generator must not use str()")
+
+        source = "__attribute__((noreturn))"
+        node = MacroPlaceholder(source, self.coord)
+        self.assertEqual(self.generator.visit(node), source)
+
+    def test_unknown_node_failure_names_the_location(self):
+        class UnknownExtension(c_ast.Node):
+            __slots__ = ("coord", "__weakref__")
+
+            def __init__(self, coord=None):
+                self.coord = coord
+
+        with self.assertRaises(c_generator.CGeneratorError) as raised:
+            self.generator.visit(UnknownExtension(self.coord))
+        self.assertIn("UnknownExtension", str(raised.exception))
+        self.assertIn("patch.c:7:13", str(raised.exception))
+
+    def test_attribute_arguments_preserve_raw_spelling(self):
+        text = r'"old \"name\", (1, 2), [f(x)]"'
+        node = c_ast.Attribute("deprecated", None, text, self.coord)
+        self.assertEqual(self.generator.visit(node), "deprecated(" + text + ")")
+        self.assertEqual(
+            self.generator.visit(c_ast.AttributeSpecifier([node])),
+            "[[deprecated(" + text + ")]]",
+        )
+
+    def test_attribute_arguments_can_be_ast_nodes(self):
+        node = c_ast.Attribute("__attribute__", None, c_ast.ID("noreturn"), self.coord)
+        self.assertEqual(self.generator.visit(node), "__attribute__(noreturn)")
+
+    def test_c23_attribute_lists_round_trip(self):
+        parser = c_parser.CParser(dialect="c23")
+        sources = [
+            '[[gnu::aligned(16), deprecated("use f(a,b)")]] int x;',
+            '[[foo("]"), bar((1, 2))]] void f(void);',
+            'struct S { [[deprecated]] int x; } s;',
+            'void f(void) { [[fallthrough]]; }',
+        ]
+        for source in sources:
+            with self.subTest(source=source):
+                self._assert_round_trip(source, parser)
+
+    def test_string_and_character_escapes_round_trip(self):
+        sources = [
+            r'char *s = "\x1" "a";',
+            r'char *s = "\1" "23";',
+            r'char *s = "a\"b";',
+            r'char *s = "a\\b";',
+            r"char c = '\\';",
+            r"char c = '\'';",
+            r'char *s = "?";',
+            r'char *s = "?" "?=";',
+        ]
+        for source in sources:
+            with self.subTest(source=source):
+                self.assertEqual(self._assert_round_trip(source), source + "\n")
+
+        # Unicode escapes may be joined when the quote boundary cannot change
+        # the meaning; the AST must still compare equal.
+        self._assert_round_trip(r'char *s = "\u00e9" "x";')
+
+    def test_dangerous_function_names_keep_parentheses_and_precedence(self):
+        source = """
+            int f(void) {
+                int a = system("a") + (int)system("b");
+                int b = (system)("c") * 2;
+                int c = (*system)("d") ? system("e") : system("f");
+                return (system)("g");
+            }
+        """
+        generated = self._assert_round_trip(source)
+        self.assertIn('system("a")', generated)
+        self.assertIn('system("c")', generated)
+        self.assertIn('(*system)("d")', generated)
+
+    def test_attribute_declarations_are_not_dropped(self):
+        parser = c_parser.CParser(dialect="c23")
+        source = """
+            [[vendor::global]];
+            void f(void) {
+                [[maybe_unused]] int x = 1;
+            }
+        """
+        ast = parser.parse(source)
+        generated = c_generator.CGenerator().visit(ast)
+        self.assertIn("[[vendor::global]];", generated)
+        self.assertIn("[[maybe_unused]] int x = 1;", generated)
+        self.assertTrue(compare_asts(ast, parser.parse(generated)))
+
+
 class TestCasttoC(unittest.TestCase):
     def _find_file(self, name):
         test_dir = os.path.dirname(__file__)

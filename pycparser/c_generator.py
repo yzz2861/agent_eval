@@ -12,6 +12,26 @@ from typing import ClassVar
 from . import c_ast
 
 
+class CGeneratorError(ValueError):
+    """Raised when an AST node cannot be generated without losing semantics."""
+
+    def __init__(self, message: str, node: c_ast.Node | None = None) -> None:
+        self.node = node
+        if node is not None:
+            message += f" (at {_node_location(node)})"
+        super().__init__(message)
+
+
+def _node_location(node: c_ast.Node) -> str:
+    """Return a file:line:column location for diagnostics.
+
+    Coordinates are intentionally stringified directly: they describe a
+    position and are not AST nodes, so they cannot smuggle generated code.
+    """
+    coord = getattr(node, "coord", None)
+    return str(coord) if coord is not None else "<unknown location>"
+
+
 class CGenerator:
     """Uses the same visitor pattern as c_ast.NodeVisitor, but modified to
     return a value from each visit method, using string accumulation in
@@ -40,25 +60,103 @@ class CGenerator:
         return getattr(self, method, self.generic_visit)(node)
 
     def generic_visit(self, node: c_ast.Node | None) -> str:
+        """Render nodes without a dedicated ``visit_*`` method.
+
+        Unknown extension nodes must never be rendered by blindly
+        concatenating their children: doing so silently drops operators,
+        parentheses, quotes, and attribute delimiters. For example, an
+        extension subclass of ``FuncCall`` would turn ``system("rm")`` into
+        ``system"rm"``. Such nodes either provide their original source text
+        through a ``source``/``src``/``text``/``raw``/``code`` attribute, or
+        generation fails with the node's location.
+        """
         if node is None:
             return ""
-        else:
-            return "".join(self.visit(c) for c_name, c in node.children())
+        raw_text = self._original_text(node)
+        if raw_text is not None:
+            return raw_text
+        raise CGeneratorError(
+            f"Cannot generate C code for unsupported AST node "
+            f"{type(node).__name__}; add a visit_ method or provide the "
+            f"original text via a 'source' attribute",
+            node,
+        )
+
+    def _original_text(self, node: c_ast.Node) -> str | None:
+        """Return explicitly preserved source text for an extension node."""
+        for attr_name in ("source", "src", "text", "raw", "code"):
+            text = getattr(node, attr_name, None)
+            if isinstance(text, str):
+                return text
+        return None
+
+    def _text(self, value: object, node: c_ast.Node, field: str) -> str:
+        """Render a textual field without falling back to ``str()``.
+
+        String fields hold source spelling and are returned verbatim. Node
+        fields are generated through the normal visitor so their own
+        parentheses and escaping rules apply.
+        """
+        if isinstance(value, str):
+            return value
+        if isinstance(value, c_ast.Node):
+            return self.visit(value)
+        raise CGeneratorError(
+            f"Unsupported {field} value on {type(node).__name__}: "
+            f"expected str or AST node, got {type(value).__name__}",
+            node,
+        )
 
     def visit_Constant(self, n: c_ast.Constant) -> str:
+        if not isinstance(n.value, str):
+            raise CGeneratorError(
+                "Constant value must be source text", n
+            )
+        # Source spelling is retained verbatim: decoding and re-quoting could
+        # change escape boundaries such as "\x1" "a".
         return n.value
 
     def visit_ID(self, n: c_ast.ID) -> str:
-        return n.name
+        return self._text(n.name, n, "name")
 
     def _generate_attributes(self, attributes: list[c_ast.AttributeSpecifier]) -> str:
         return " ".join(self.visit(attribute) for attribute in attributes)
 
     def visit_Attribute(self, n: c_ast.Attribute) -> str:
-        s = (n.namespace + "::" if n.namespace is not None else "") + n.name
+        namespace = (
+            self._text(n.namespace, n, "namespace") + "::"
+            if n.namespace is not None
+            else ""
+        )
+        s = namespace + self._text(n.name, n, "name")
         if n.arguments is not None:
-            s += "(" + n.arguments + ")"
+            s += "(" + self._render_attribute_arguments(n.arguments, n) + ")"
         return s
+
+    def _render_attribute_arguments(
+        self, arguments: object, node: c_ast.Node
+    ) -> str:
+        """Render raw attribute text or AST nodes without ``str()``.
+
+        The lexer normally stores balanced source text in this field, which
+        preserves commas, strings, and nested parentheses exactly. Supporting
+        nodes here keeps manually constructed ASTs safe as well.
+        """
+        if isinstance(arguments, str):
+            return arguments
+        if isinstance(arguments, c_ast.ExprList):
+            return self.visit(arguments)
+        if isinstance(arguments, c_ast.Node):
+            return self._visit_expr(arguments)
+        if isinstance(arguments, (list, tuple)):
+            return ", ".join(
+                self._text(arg, node, "attribute argument") for arg in arguments
+            )
+        raise CGeneratorError(
+            f"Unsupported attribute arguments on {type(node).__name__}: "
+            f"expected str or AST node, got {type(arguments).__name__}",
+            node,
+        )
 
     def visit_AttributeSpecifier(self, n: c_ast.AttributeSpecifier) -> str:
         return "[[" + ", ".join(self.visit(a) for a in n.attributes) + "]]"
@@ -81,7 +179,7 @@ class CGenerator:
             return "_Pragma(" + self.visit(n.string) + ")"
         ret = "#pragma"
         if n.string:
-            ret += " " + n.string
+            ret += " " + self._text(n.string, n, "string")
         return ret
 
     def visit_ArrayRef(self, n: c_ast.ArrayRef) -> str:
@@ -405,6 +503,18 @@ class CGenerator:
             return f"{self._make_indent()}{name},\n"
         else:
             return f"{self._make_indent()}{name} = {self._visit_expr(n.value)},\n"
+
+    def visit_EnumeratorList(self, n: c_ast.EnumeratorList) -> str:
+        """Render an enumerator list without the trailing commas used inline."""
+        parts = []
+        for enumerator in n.enumerators:
+            name = enumerator.name
+            if enumerator.attributes:
+                name += " " + self._generate_attributes(enumerator.attributes)
+            if enumerator.value is not None:
+                name += " = " + self._visit_expr(enumerator.value)
+            parts.append(name)
+        return ", ".join(parts)
 
     def visit_FuncDef(self, n: c_ast.FuncDef) -> str:
         decl = self.visit(n.decl)
