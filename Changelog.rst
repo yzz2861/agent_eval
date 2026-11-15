@@ -12,6 +12,10 @@ New features
   for the encryption of storage.
 * CTR mode is about 35% faster on short ``bytes`` messages.
 
+Resolved issues
+---------------
+* Hardened DER decoding in ``Crypto.Util.asn1`` against hostile inputs: a single bounded validation pass now enforces limits on nesting depth, number of elements, total size and INTEGER payload size, and every length field is checked for truncation and minimal encoding. Violations raise the new structured ``DerDecodeError`` (a subclass of ``ValueError``), while legitimate X.509 certificates and the existing ``DerSequence`` API remain fully compatible.
+
 4.4.0 (7 November 2026)
 +++++++++++++++++++++++++++
 

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import struct
 from collections.abc import Iterable, Iterator, Sequence
+from contextvars import ContextVar
 from typing import Any, Optional, TypeVar, Union, cast
 
 from Crypto.Util.number import bytes_to_long, long_to_bytes
@@ -33,6 +34,7 @@ DerSetElement = Union[bytes, int]
 
 __all__ = [
     "ContextTag",
+    "DerDecodeError",
     "DerObject",
     "DerInteger",
     "DerBoolean",
@@ -43,6 +45,74 @@ __all__ = [
     "DerBitString",
     "DerSetOf",
 ]
+
+# Bounds enforced while decoding DER, to keep a hostile input from
+# exhausting the stack or the memory. The values are comfortably above
+# anything found in a legitimate X.509 certificate or related key object.
+
+#: Maximum nesting depth of constructed elements (SEQUENCE/SET/EXPLICIT ...).
+MAX_DER_DEPTH = 128
+#: Maximum number of DER elements decoded as part of one structure.
+MAX_DER_ELEMENTS = 1_000_000
+#: Maximum total size, in bytes, of an encoded DER structure.
+MAX_DER_TOTAL_BYTES = 64 * 1024 * 1024
+#: Maximum size, in bytes, of the payload of a DER INTEGER.
+MAX_DER_INTEGER_LENGTH = 65_536
+#: Maximum number of octets allowed in a definite long-form length field.
+MAX_DER_LENGTH_OCTETS = 8
+
+
+class DerDecodeError(ValueError):
+    """A DER element cannot be decoded because it violates one of the
+    safety limits enforced by the parser.
+
+    This exception is a :class:`ValueError`, so existing code catching
+    :class:`ValueError` keeps working.
+
+    Attributes:
+      limit (str): the name of the limit that was exceeded.
+      value (int): the offending value (depth, count or size).
+      maximum (int): the maximum value allowed by the limit.
+    """
+
+    def __init__(self, limit: str, value: int, maximum: int) -> None:
+        self.limit = limit
+        self.value = value
+        self.maximum = maximum
+        super().__init__("DER decoding limit '%s' exceeded: %d > %d" % (limit, value, maximum))
+
+
+# The state of the decode currently in progress, if any. It is kept in a
+# context variable so that the budgets are shared when an application decodes
+# nested structures through repeated calls to ``decode()``.
+_current_parse_state: ContextVar[Optional[_DerParseState]] = ContextVar("_current_parse_state", default=None)
+
+
+class _DerParseState:
+    """Budgets shared by every element of one decoded DER structure."""
+
+    def __init__(self, total_bytes: int) -> None:
+        if total_bytes > MAX_DER_TOTAL_BYTES:
+            raise DerDecodeError("total_bytes", total_bytes, MAX_DER_TOTAL_BYTES)
+        self.total_bytes = total_bytes
+        self.depth = 0
+        self.elements = 0
+
+    def enter_element(self) -> None:
+        self.elements += 1
+        if self.elements > MAX_DER_ELEMENTS:
+            raise DerDecodeError("elements", self.elements, MAX_DER_ELEMENTS)
+
+    def enter_constructed(self, is_constructed: bool) -> None:
+        if is_constructed:
+            self.depth += 1
+            if self.depth > MAX_DER_DEPTH:
+                raise DerDecodeError("depth", self.depth, MAX_DER_DEPTH)
+
+    def exit_constructed(self, is_constructed: bool) -> None:
+        if is_constructed:
+            self.depth -= 1
+
 
 # Useful references:
 # - https://luca.ntop.org/Teaching/Appunti/asn1.html
@@ -66,10 +136,11 @@ class BytesIO_EOF:
     """This class differs from BytesIO in that a ValueError exception is
     raised whenever EOF is reached."""
 
-    def __init__(self, initial_bytes: bytes) -> None:
+    def __init__(self, initial_bytes: bytes, state: Optional[_DerParseState] = None) -> None:
         self._buffer = initial_bytes
         self._index = 0
         self._bookmark: Optional[int] = None
+        self.state = state if state is not None else _DerParseState(len(initial_bytes))
 
     def set_bookmark(self) -> None:
         self._bookmark = self._index
@@ -125,6 +196,84 @@ class ContextTag:
 
     def __repr__(self) -> str:
         return "ContextTag(%d)" % self.number
+
+
+def _validate_der_structure(data: bytes, state: _DerParseState) -> None:
+    """Walk every TLV in *data* and enforce the shared budgets.
+
+    The walk is recursive, but the recursion depth is capped by
+    MAX_DER_DEPTH, so a hostile input cannot exhaust the stack.
+    All length fields are decoded with the same boundary and minimal
+    encoding checks as the regular parser.
+    """
+
+    stream = BytesIO_EOF(data, state)
+    length_reader = DerObject.__new__(DerObject)
+    _validate_der_stream(stream, state, 0, length_reader)
+    if stream.remaining_data() > 0:
+        raise ValueError("Unexpected extra data after the DER structure")
+
+
+def _validate_opaque_constructed(
+    stream: BytesIO_EOF,
+    state: _DerParseState,
+    depth: int,
+    length_reader: DerObject,
+) -> None:
+    """Validate the body of a constructed element that decode() keeps
+    opaque.
+
+    Well-formed TLVs are walked so that nesting and element budgets still
+    apply (for instance, an explicit tag wrapping a deeply nested
+    SEQUENCE). If the body is not made of TLVs, parsing stops silently:
+    the element is treated as opaque, exactly like decode() does.
+    """
+
+    while stream.remaining_data() > 0:
+        bookmark = stream._index
+        try:
+            _validate_der_stream(stream, state, depth, length_reader)
+        except DerDecodeError:
+            # A budget violation must always surface, even inside an
+            # element whose content is otherwise treated as opaque.
+            raise
+        except ValueError:
+            # Not a sequence of TLVs: keep the element opaque like decode().
+            stream._index = bookmark
+            return
+
+
+def _validate_der_stream(
+    stream: BytesIO_EOF,
+    state: _DerParseState,
+    depth: int,
+    length_reader: DerObject,
+) -> None:
+    state.enter_element()
+    tag = stream.read_byte()
+    length = length_reader._decodeLen(stream)
+    content = stream.read(length)
+
+    # Every constructed element adds a nesting level, including
+    # context-specific explicit tags ([n] CONSTRUCTED).
+    if tag & 0x20:
+        next_depth = depth + 1
+        if next_depth > MAX_DER_DEPTH:
+            raise DerDecodeError("depth", next_depth, MAX_DER_DEPTH)
+    else:
+        next_depth = depth
+
+    # Universal SEQUENCE/SET OF always contain other TLVs. Constructed
+    # elements with any other tag (e.g. an explicit context-specific tag)
+    # normally wrap a TLV too, but decode() keeps their content opaque, so
+    # a body that is not made of TLVs must not be rejected here.
+    if (tag & 0x20) and content:
+        inner = BytesIO_EOF(content, state)
+        if tag in (0x30, 0x31):
+            while inner.remaining_data() > 0:
+                _validate_der_stream(inner, state, next_depth, length_reader)
+        else:
+            _validate_opaque_constructed(inner, state, next_depth, length_reader)
 
 
 class DerObject:
@@ -254,7 +403,13 @@ class DerObject:
         length = s.read_byte()
 
         if length > 127:
-            encoded_length = s.read(length & 0x7F)
+            # BER indefinite form (0x80) and reserved forms (0xFF) are
+            # not valid DER.
+            num_octets = length & 0x7F
+            if num_octets == 0 or num_octets > MAX_DER_LENGTH_OCTETS:
+                raise ValueError("Invalid DER: unsupported length form")
+
+            encoded_length = s.read(num_octets)
             if encoded_length[0] == 0:
                 raise ValueError("Invalid DER: length has leading zero")
             length = bytes_to_long(encoded_length)
@@ -277,8 +432,24 @@ class DerObject:
         if not isinstance(der_encoded, bytes):
             raise ValueError("Input is not a byte string")
 
-        s = BytesIO_EOF(der_encoded)
-        self._decodeFromStream(s, strict)
+        # Reuse the state of an outer decode() so that the budgets are
+        # shared across nested structures; start a new one otherwise.
+        state = _current_parse_state.get()
+        token = None
+        if state is None:
+            state = _DerParseState(len(der_encoded))
+            token = _current_parse_state.set(state)
+        try:
+            # A single bounded walk of the whole structure enforces the
+            # nesting, element and length budgets up front, before any
+            # payload is allocated or any sub-element is instantiated.
+            if token is not None:
+                _validate_der_structure(der_encoded, state)
+            s = BytesIO_EOF(der_encoded, state)
+            self._decodeFromStream(s, strict)
+        finally:
+            if token is not None:
+                _current_parse_state.reset(token)
 
         # There shouldn't be other bytes left
         if s.remaining_data() > 0:
@@ -295,22 +466,31 @@ class DerObject:
                 raise ValueError("Unexpected DER tag")
         else:
             self._tag_octet = idOctet
-        length = self._decodeLen(s)
-        self.payload = s.read(length)
 
-        # In case of an EXTERNAL tag, further decode the inner
-        # element.
-        if hasattr(self, "_inner_tag_octet"):
-            p = BytesIO_EOF(self.payload)
-            inner_octet = p.read_byte()
-            if inner_octet != self._inner_tag_octet:
-                raise ValueError("Unexpected internal DER tag")
-            length = self._decodeLen(p)
-            self.payload = p.read(length)
+        # The constructed bit marks an element that contains other TLVs.
+        # Track its nesting level so that deeply nested inputs fail with a
+        # structured error instead of exhausting the stack.
+        is_constructed = bool(idOctet & 0x20)
+        s.state.enter_constructed(is_constructed)
+        try:
+            length = self._decodeLen(s)
+            self.payload = s.read(length)
 
-            # There shouldn't be other bytes left
-            if p.remaining_data() > 0:
-                raise ValueError("Unexpected extra data after the DER structure")
+            # In case of an EXTERNAL tag, further decode the inner
+            # element.
+            if hasattr(self, "_inner_tag_octet"):
+                p = BytesIO_EOF(self.payload, s.state)
+                inner_octet = p.read_byte()
+                if inner_octet != self._inner_tag_octet:
+                    raise ValueError("Unexpected internal DER tag")
+                length = self._decodeLen(p)
+                self.payload = p.read(length)
+
+                # There shouldn't be other bytes left
+                if p.remaining_data() > 0:
+                    raise ValueError("Unexpected extra data after the DER structure")
+        finally:
+            s.state.exit_constructed(is_constructed)
 
 
 class DerInteger(DerObject):
@@ -394,6 +574,15 @@ class DerInteger(DerObject):
 
         # Fill up self.payload
         DerObject._decodeFromStream(self, s, strict)
+        self._decode_value(strict)
+
+    def _decode_value(self, strict: bool) -> None:
+        """Derive self.value from the already decoded self.payload."""
+
+        # The size of an INTEGER is bounded, so that a huge payload cannot
+        # be turned into an arbitrarily big Python integer.
+        if len(self.payload) > MAX_DER_INTEGER_LENGTH:
+            raise DerDecodeError("integer_length", len(self.payload), MAX_DER_INTEGER_LENGTH)
 
         if strict:
             if len(self.payload) == 0:
@@ -727,11 +916,12 @@ class DerSequence(DerObject):
 
         self._seq = []
 
-        # Fill up self.payload
+        # Fill up self.payload. The nesting level is already accounted for
+        # by DerObject based on the constructed bit of the tag.
         DerObject._decodeFromStream(self, s, strict)
 
         # Add one item at a time to self.seq, by scanning self.payload
-        p = BytesIO_EOF(self.payload)
+        p = BytesIO_EOF(self.payload, s.state)
         while p.remaining_data() > 0:
             p.set_bookmark()
 
@@ -743,8 +933,9 @@ class DerSequence(DerObject):
                 self._seq.append(p.data_since_bookmark())
             else:
                 derInt = DerInteger()
-                data = p.data_since_bookmark()
-                derInt.decode(data, strict=strict)
+                derInt._tag_octet = der._tag_octet
+                derInt.payload = der.payload
+                derInt._decode_value(strict)
                 self._seq.append(derInt.value)
 
         ok = True
@@ -1146,11 +1337,12 @@ class DerSetOf(DerObject):
 
         self._seq = []
 
-        # Fill up self.payload
+        # Fill up self.payload. The nesting level is already accounted for
+        # by DerObject based on the constructed bit of the tag.
         DerObject._decodeFromStream(self, s, strict)
 
         # Add one item at a time to self.seq, by scanning self.payload
-        p = BytesIO_EOF(self.payload)
+        p = BytesIO_EOF(self.payload, s.state)
         setIdOctet: Optional[int] = -1
         while p.remaining_data() > 0:
             p.set_bookmark()
@@ -1170,7 +1362,9 @@ class DerSetOf(DerObject):
                 self._seq.append(p.data_since_bookmark())
             else:
                 derInt = DerInteger()
-                derInt.decode(p.data_since_bookmark(), strict)
+                derInt._tag_octet = der._tag_octet
+                derInt.payload = der.payload
+                derInt._decode_value(strict)
                 self._seq.append(derInt.value)
         # end
 

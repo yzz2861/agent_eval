@@ -8,10 +8,14 @@
 
 import pytest
 
+import Crypto.Util.asn1 as asn1_module
 from Crypto.Util.asn1 import (
+    MAX_DER_DEPTH,
+    MAX_DER_INTEGER_LENGTH,
     ContextTag,
     DerBitString,
     DerBoolean,
+    DerDecodeError,
     DerInteger,
     DerNull,
     DerObject,
@@ -923,3 +927,150 @@ class TestDerBoolean:
         # Payload too long
         with pytest.raises(ValueError):
             der.decode(b"\x01\x01\x00\xff")
+
+
+def _der_length(length):
+    """Encode an integer as a DER definite-form length field."""
+    if length < 128:
+        return bytes([length])
+    body = length.to_bytes((length.bit_length() + 7) // 8, "big")
+    return bytes([0x80 | len(body)]) + body
+
+
+def _nested_sequence(depth, leaf=b"\x02\x01\x00"):
+    """Build *depth* nested SEQUENCE wrappers around *leaf*."""
+    data = leaf
+    for _ in range(depth):
+        data = b"\x30" + _der_length(len(data)) + data
+    return data
+
+
+class TestDerLimits:
+    def test_structured_error_is_value_error(self):
+        assert issubclass(DerDecodeError, ValueError)
+        err = DerDecodeError("depth", 2, 1)
+        assert err.limit == "depth"
+        assert err.value == 2
+        assert err.maximum == 1
+        assert isinstance(err, ValueError)
+
+    def test_oversized_integer(self):
+        payload = b"\x00" * (MAX_DER_INTEGER_LENGTH + 1)
+        der = b"\x02" + _der_length(len(payload)) + payload
+        with pytest.raises(DerDecodeError) as exc:
+            DerInteger().decode(der)
+        assert exc.value.limit == "integer_length"
+        assert exc.value.value == len(payload)
+        assert exc.value.maximum == MAX_DER_INTEGER_LENGTH
+
+    def test_oversized_integer_inside_sequence(self):
+        payload = b"\x00" * (MAX_DER_INTEGER_LENGTH + 1)
+        integer = b"\x02" + _der_length(len(payload)) + payload
+        sequence = b"\x30" + _der_length(len(integer)) + integer
+        with pytest.raises(DerDecodeError) as exc:
+            DerSequence().decode(sequence)
+        assert exc.value.limit == "integer_length"
+
+    def test_integer_at_limit_is_accepted(self):
+        payload = b"\x00" * MAX_DER_INTEGER_LENGTH
+        der = b"\x02" + _der_length(len(payload)) + payload
+        assert DerInteger().decode(der).value == 0
+
+    def test_nested_sequence_exceeds_depth(self):
+        # A 100k-layer nesting is a few hundred kilobytes, not gigabytes,
+        # so the depth limit (and not memory) must stop the parse.
+        attack = _nested_sequence(100_000)
+        assert len(attack) < 1024 * 1024
+        with pytest.raises(DerDecodeError) as exc:
+            DerSequence().decode(attack)
+        assert exc.value.limit == "depth"
+        assert exc.value.maximum == MAX_DER_DEPTH
+
+    def test_nested_sequence_boundary(self):
+        DerSequence().decode(_nested_sequence(MAX_DER_DEPTH))
+        with pytest.raises(DerDecodeError) as exc:
+            DerSequence().decode(_nested_sequence(MAX_DER_DEPTH + 1))
+        assert exc.value.limit == "depth"
+        assert exc.value.value == MAX_DER_DEPTH + 1
+
+    def test_nested_sequence_with_reentrant_decode(self):
+        # The budgets are shared when an application walks nested
+        # structures through repeated calls to decode().
+        attack = _nested_sequence(MAX_DER_DEPTH + 5)
+        outer = DerSequence()
+        with pytest.raises(DerDecodeError) as exc:
+            current = attack
+            for _ in range(MAX_DER_DEPTH + 5):
+                outer.decode(current)
+                current = outer[0]
+        assert exc.value.limit == "depth"
+
+    def test_nested_set_of_exceeds_depth(self):
+        data = b"\x02\x01\x01"
+        for _ in range(MAX_DER_DEPTH + 1):
+            data = b"\x31" + _der_length(len(data)) + data
+        with pytest.raises(DerDecodeError) as exc:
+            DerSetOf().decode(data)
+        assert exc.value.limit == "depth"
+
+    def test_element_budget(self, monkeypatch):
+        monkeypatch.setattr(asn1_module, "MAX_DER_ELEMENTS", 3)
+        sequence = DerSequence([1, 2, 3, 4]).encode()
+        with pytest.raises(DerDecodeError) as exc:
+            DerSequence().decode(sequence)
+        assert exc.value.limit == "elements"
+        assert exc.value.value > 3
+
+    def test_total_bytes_budget(self, monkeypatch):
+        monkeypatch.setattr(asn1_module, "MAX_DER_TOTAL_BYTES", 8)
+        der = DerSequence([1, 2, 3, 4]).encode()
+        assert len(der) > 8
+        with pytest.raises(DerDecodeError) as exc:
+            DerSequence().decode(der)
+        assert exc.value.limit == "total_bytes"
+
+    @pytest.mark.parametrize(
+        "truncated",
+        [
+            b"\x30",  # length missing
+            b"\x30\x03\x02\x01",  # payload truncated
+            b"\x30\x82\x01",  # long-form length truncated
+            b"\x30\x81",  # long-form length, no octet
+            b"\x02",  # integer, length missing
+            b"\x02\x02\x01",  # integer payload truncated
+            b"\x30\x81",  # sequence, length octet missing
+        ],
+    )
+    def test_truncated_tag_and_length(self, truncated):
+        with pytest.raises(ValueError):
+            DerObject().decode(truncated)
+        with pytest.raises(ValueError):
+            DerSequence().decode(truncated)
+
+    @pytest.mark.parametrize(
+        "bad_length",
+        [
+            b"\x30\x80",  # BER indefinite form
+            b"\x30\xff",  # reserved length form
+            b"\x30\x89" + b"\x00" * 9,  # too many length octets
+            b"\x30\x81\x00",  # leading zero in long form
+            b"\x30\x81\x03\x02\x01\x01",  # non-minimal length
+            b"\x02\x81\x01\x01",  # non-minimal integer length
+        ],
+    )
+    def test_invalid_length_encoding(self, bad_length):
+        with pytest.raises(ValueError):
+            DerObject().decode(bad_length)
+
+    def test_empty_input(self):
+        with pytest.raises(ValueError):
+            DerObject().decode(b"")
+        with pytest.raises(ValueError):
+            DerSequence().decode(b"")
+
+    def test_legacy_behavior_preserved(self):
+        # Legitimate mixed sequences still decode exactly as before.
+        der = DerSequence([1, 2, DerSequence([3, 4]).encode(), b"\x04\x01\x02"]).encode()
+        decoded = DerSequence().decode(der)
+        assert decoded[:] == [1, 2, DerSequence([3, 4]).encode(), b"\x04\x01\x02"]
+        assert decoded.encode() == der
