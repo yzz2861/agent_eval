@@ -21,6 +21,7 @@
 
 
 import warnings
+import time
 
 import pytest
 
@@ -448,6 +449,105 @@ class TestSentinel:
         assert cipher.decrypt(ct, sentinel, 16) == pt
         assert cipher.decrypt(ct, sentinel, 15) == sentinel
         assert cipher.decrypt(ct, sentinel, 17) == sentinel
+
+
+class TestConstantTimeAcceptance:
+    """Acceptance: repeated decryptions do not leak the padding check.
+
+    A padding oracle requires the party that submits the ciphertext to
+    distinguish, by any externally visible signal (returned value,
+    exception, warning, or timing), a ciphertext with correct padding
+    from one without. With implicit rejection, both take the same
+    constant-time path and only ever return bytes.
+    """
+
+    def setup_method(self):
+        self.key = RSA.generate(1024)
+        self.cipher = PKCS.new(self.key)
+
+    def _encrypt_raw(self, em):
+        return long_to_bytes(self.key._encrypt(bytes_to_long(em)), 128)
+
+    def test_consecutive_requests_do_not_leak_state(self):
+        # Correct and incorrect padding, interleaved: caches (such as the
+        # RSA blinding factors, regenerated every 32 private operations)
+        # and the RNG must not influence the results.
+        valid_ct = self.cipher.encrypt(b"yellow submarine")
+        invalid_ct = self._encrypt_raw(b"\x00\x01" + b"\xff" * 100 + b"\x00" + b"A" * 25)
+
+        pseudo_random = self.cipher.decrypt(invalid_ct)
+        assert isinstance(pseudo_random, bytes)
+        assert pseudo_random != b"yellow submarine"
+
+        for _ in range(40):  # cross the blinding-factor regeneration boundary
+            assert self.cipher.decrypt(valid_ct) == b"yellow submarine"
+            assert self.cipher.decrypt(invalid_ct) == pseudo_random
+
+        # A fresh cipher object derives the same pseudo-random message:
+        # it depends only on the key and the ciphertext, not on the
+        # number or the order of previous decryptions
+        assert PKCS.new(self.key).decrypt(invalid_ct) == pseudo_random
+
+    def test_short_blocks_raise_valueerror(self):
+        # A ciphertext with the wrong length (or not smaller than the
+        # modulus) is rejected before any private-key operation, always
+        # with ValueError, and the failure does not affect the cipher.
+        valid_ct = self.cipher.encrypt(b"XYZ")
+        for bad_ct in (b"", b"\x00" * 127, b"\x00" * 129, b"\xff" * 128):
+            for _ in range(3):
+                with pytest.raises(ValueError):
+                    self.cipher.decrypt(bad_ct)
+            assert self.cipher.decrypt(valid_ct) == b"XYZ"
+
+    def test_wrong_padding_is_externally_indistinguishable(self):
+        # Correct and incorrect padding produce the same observable
+        # behaviour: a byte string of bounded length, no exception,
+        # no warning.
+        outcomes = []
+        for em in (
+            None,  # placeholder for the valid ciphertext
+            b"\x00\x01" + b"\xff" * 100 + b"\x00" + b"A" * 25,  # wrong block type
+            b"\x00\x02" + b"\xff" * 126,  # no separator
+            b"\x00\x02" + b"\xff" * 7 + b"\x00" + b"\x45" * 118,  # PS too short
+        ):
+            ct = self.cipher.encrypt(b"curling") if em is None else self._encrypt_raw(em)
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                pt = self.cipher.decrypt(ct)
+            outcomes.append((type(pt), len(pt) <= 128 - 11))
+        assert outcomes == [(bytes, True)] * 4
+
+    @pytest.mark.slow
+    def test_repeated_calls_have_no_statistical_timing_difference(self):
+        # Acceptance item: the distributions of the decryption time for
+        # ciphertexts with correct and incorrect padding must not diverge
+        # in a way that an attacker could measure over millions of probes.
+        valid_ct = self.cipher.encrypt(b"timing")
+        invalid_ct = self._encrypt_raw(b"\x00\x01" + b"\xff" * 100 + b"\x00" + b"A" * 25)
+
+        def measure(ct, count):
+            start = time.perf_counter()
+            for _ in range(count):
+                self.cipher.decrypt(ct)
+            return (time.perf_counter() - start) / count
+
+        # Warm up (blinding factors, code paths)
+        measure(valid_ct, 16)
+        measure(invalid_ct, 16)
+
+        ratios = []
+        for round_ in range(9):
+            # Alternate the order to cancel drift within a round
+            t_first = measure(valid_ct if round_ % 2 == 0 else invalid_ct, 64)
+            t_second = measure(invalid_ct if round_ % 2 == 0 else valid_ct, 64)
+            t_valid, t_invalid = (t_first, t_second) if round_ % 2 == 0 else (t_second, t_first)
+            ratios.append(t_valid / t_invalid)
+
+        median_ratio = sorted(ratios)[len(ratios) // 2]
+        # With implicit rejection, correct and incorrect padding execute
+        # the same operations; an early failure branch would show up as a
+        # persistent ratio well below 1.
+        assert 0.85 < median_ratio < 1.15
 
 
 def _load_tests(filename):
