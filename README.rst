@@ -15,6 +15,15 @@ Changelog
 +---------+------------+------------------------------------------------------+
 | Version | Date       | Changes                                              |
 +=========+============+======================================================+
+| 2.1.0   | 2026-11-16 | - added algorithm parameter supporting SHA1,     |
+|         |            |   SHA256 and SHA512 for HOTP and TOTP (SHA1 stays    |
+|         |            |   the default),                                      |
+|         |            | - RFC 4226 dynamic truncation independent of digest  |
+|         |            |   length,                                            |
+|         |            | - validation of algorithm name, secret length and    |
+|         |            |   counter range,                                     |
+|         |            | - no cache or time step is shared across algorithms, |
++---------+------------+------------------------------------------------------+
 | 2.0.0   | 2026-06-21 | - dropped Python 2 support (now requires Python 3.8+),|
 |         |            | - removed the ``six`` dependency (no runtime deps),  |
 |         |            | - switched packaging to ``pyproject.toml``,          |
@@ -129,6 +138,30 @@ You can use this module in the following way:
      number of the working interval number (it should be saved into the
      database and supplied to the function as ``last`` argument next time the
      password is being checked, so you cannot use the same token again).
+
+Choosing the hash algorithm
+---------------------------
+
+For MFA compliance the library accepts the HMAC hash via the algorithm
+argument of get_hotp(), get_totp(), valid_hotp() and
+valid_totp(). Supported values are "SHA1" (the default),
+"SHA256" and "SHA512". Names are case-insensitive and the hyphen
+is optional, so "sha256" and "SHA-256" are equivalent::
+
+    import onetimepass as otp
+    my_secret = 'MFRGGZDFMZTWQ2LK'
+    sha256_token = otp.get_totp(my_secret, algorithm='SHA256')
+    is_valid = otp.valid_totp(
+        token=sha256_token, secret=my_secret, algorithm='SHA256',
+    )
+
+The default stays "SHA1", so existing callers keep producing the same
+tokens. Tokens generated with one algorithm are never accepted when
+validating with another, and each call uses its own time step - there is no
+shared cache between algorithms. An unsupported name raises ValueError
+listing the supported algorithms, while an empty secret or a counter outside
+the unsigned 64-bit range raise ValueError as well. Non-integer counters
+and non-string algorithm names raise TypeError.
 
 License
 =======
