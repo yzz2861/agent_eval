@@ -17,6 +17,8 @@ def parse_debug(method):
             if not hasattr(self, 'recursion_depth'):
                 self.recursion_depth = 0
 
+            self._enter_parse()
+
             if self.debug:
                 depth = "%02d" % (self.recursion_depth,)
                 token = six.text_type(self.tokens.look())
@@ -45,19 +47,28 @@ def parse_debug(method):
                     print("%s <%s %s(%s, %s) %s" %
                         (depth, sep, name, start_value, token, e_message))
                     self.recursion_depth -= 1
+                    self._exit_parse()
             else:
                 self.recursion_depth += 1
                 try:
                     r = method(self)
                 finally:
                     self.recursion_depth -= 1
+                    self._exit_parse()
 
             return r
 
         return _method
 
     else:
-        return method
+        def _method(self):
+            self._enter_parse()
+            try:
+                return method(self)
+            finally:
+                self._exit_parse()
+
+        return _method
 
 # ------------------------------------------------------------------------------
 # ---- Parsing exception ----
@@ -72,6 +83,14 @@ class JavaSyntaxError(JavaParserBaseException):
 
         self.description = description
         self.at = at
+
+class JavaRecursionLimitError(JavaSyntaxError):
+    # A depth-budget failure. It is a syntax error so existing callers that
+    # catch JavaSyntaxError keep working, but the parser's speculative
+    # backtracking points must not swallow it: a resource limit has to surface
+    # at the entry point rather than being misreported as an unrelated token
+    # mismatch.
+    pass
 
 class JavaParserError(JavaParserBaseException):
     pass
@@ -91,11 +110,95 @@ class Parser(object):
                             set(('+', '-')),
                             set(('*', '/', '%')) ]
 
+    # Bounded recursion budget. These caps are deliberately far larger than
+    # anything produced by legitimate Java sources, but small enough to keep
+    # the host interpreter well below its own recursion limit so that
+    # maliciously deep input surfaces as a JavaSyntaxError instead of a
+    # host-level RecursionError.
+    MAX_PARSE_DEPTH = 300
+    MAX_DECLARATION_DEPTH = 50
+    MAX_EXPRESSION_DEPTH = 80
+    MAX_TYPE_DEPTH = 80
+    MAX_ANNOTATION_DEPTH = 80
+    MAX_ARRAY_DIMENSIONS = 255
+
     def __init__(self, tokens):
         self.tokens = util.LookAheadListIterator(tokens)
         self.tokens.set_default(EndOfInput(None))
 
         self.debug = False
+
+        self._parse_depth = 0
+        self._declaration_depth = 0
+        self._expression_depth = 0
+        self._type_depth = 0
+        self._annotation_depth = 0
+
+    def _depth_error(self, description):
+        """Raise a syntax error, positioned at the current token, when a
+        recursion budget is exhausted."""
+        raise JavaRecursionLimitError(description, self.tokens.look())
+
+    def _enter_parse(self):
+        self._parse_depth += 1
+        if self._parse_depth > self.MAX_PARSE_DEPTH:
+            self._parse_depth -= 1
+            self._depth_error(
+                "Maximum parser nesting depth (%d) exceeded"
+                % (self.MAX_PARSE_DEPTH,))
+
+    def _exit_parse(self):
+        self._parse_depth -= 1
+
+    def _enter_declaration(self):
+        self._declaration_depth += 1
+        if self._declaration_depth > self.MAX_DECLARATION_DEPTH:
+            self._declaration_depth -= 1
+            self._depth_error(
+                "Maximum declaration nesting depth (%d) exceeded"
+                % (self.MAX_DECLARATION_DEPTH,))
+
+    def _exit_declaration(self):
+        self._declaration_depth -= 1
+
+    def _enter_expression(self):
+        self._expression_depth += 1
+        if self._expression_depth > self.MAX_EXPRESSION_DEPTH:
+            self._expression_depth -= 1
+            self._depth_error(
+                "Maximum expression nesting depth (%d) exceeded"
+                % (self.MAX_EXPRESSION_DEPTH,))
+
+    def _exit_expression(self):
+        self._expression_depth -= 1
+
+    def _enter_type(self):
+        self._type_depth += 1
+        if self._type_depth > self.MAX_TYPE_DEPTH:
+            self._type_depth -= 1
+            self._depth_error(
+                "Maximum type nesting depth (%d) exceeded"
+                % (self.MAX_TYPE_DEPTH,))
+
+    def _exit_type(self):
+        self._type_depth -= 1
+
+    def _enter_annotation(self):
+        self._annotation_depth += 1
+        if self._annotation_depth > self.MAX_ANNOTATION_DEPTH:
+            self._annotation_depth -= 1
+            self._depth_error(
+                "Maximum annotation nesting depth (%d) exceeded"
+                % (self.MAX_ANNOTATION_DEPTH,))
+
+    def _exit_annotation(self):
+        self._annotation_depth -= 1
+
+    def _enter_depth(self, category):
+        getattr(self, '_enter_' + category)()
+
+    def _exit_depth(self, category):
+        getattr(self, '_exit_' + category)()
 
 # ------------------------------------------------------------------------------
 # ---- Debug control ----
@@ -372,86 +475,102 @@ class Parser(object):
 
     @parse_debug
     def parse_normal_class_declaration(self):
-        name = None
-        type_params = None
-        extends = None
-        implements = None
-        body = None
+        self._enter_depth('declaration')
+        try:
+            name = None
+            type_params = None
+            extends = None
+            implements = None
+            body = None
 
-        self.accept('class')
+            self.accept('class')
 
-        name = self.parse_identifier()
+            name = self.parse_identifier()
 
-        if self.would_accept('<'):
-            type_params = self.parse_type_parameters()
+            if self.would_accept('<'):
+                type_params = self.parse_type_parameters()
 
-        if self.try_accept('extends'):
-            extends = self.parse_type()
+            if self.try_accept('extends'):
+                extends = self.parse_type()
 
-        if self.try_accept('implements'):
-            implements = self.parse_type_list()
+            if self.try_accept('implements'):
+                implements = self.parse_type_list()
 
-        body = self.parse_class_body()
+            body = self.parse_class_body()
 
-        return tree.ClassDeclaration(name=name,
-                                     type_parameters=type_params,
-                                     extends=extends,
-                                     implements=implements,
-                                     body=body)
+            return tree.ClassDeclaration(name=name,
+                                         type_parameters=type_params,
+                                         extends=extends,
+                                         implements=implements,
+                                         body=body)
+        finally:
+            self._exit_depth('declaration')
 
     @parse_debug
     def parse_enum_declaration(self):
-        name = None
-        implements = None
-        body = None
+        self._enter_depth('declaration')
+        try:
+            name = None
+            implements = None
+            body = None
 
-        self.accept('enum')
-        name = self.parse_identifier()
+            self.accept('enum')
+            name = self.parse_identifier()
 
-        if self.try_accept('implements'):
-            implements = self.parse_type_list()
+            if self.try_accept('implements'):
+                implements = self.parse_type_list()
 
-        body = self.parse_enum_body()
+            body = self.parse_enum_body()
 
-        return tree.EnumDeclaration(name=name,
-                                    implements=implements,
-                                    body=body)
+            return tree.EnumDeclaration(name=name,
+                                        implements=implements,
+                                        body=body)
+        finally:
+            self._exit_depth('declaration')
 
     @parse_debug
     def parse_normal_interface_declaration(self):
-        name = None
-        type_parameters = None
-        extends = None
-        body = None
+        self._enter_depth('declaration')
+        try:
+            name = None
+            type_parameters = None
+            extends = None
+            body = None
 
-        self.accept('interface')
-        name = self.parse_identifier()
+            self.accept('interface')
+            name = self.parse_identifier()
 
-        if self.would_accept('<'):
-            type_parameters = self.parse_type_parameters()
+            if self.would_accept('<'):
+                type_parameters = self.parse_type_parameters()
 
-        if self.try_accept('extends'):
-            extends = self.parse_type_list()
+            if self.try_accept('extends'):
+                extends = self.parse_type_list()
 
-        body = self.parse_interface_body()
+            body = self.parse_interface_body()
 
-        return tree.InterfaceDeclaration(name=name,
-                                         type_parameters=type_parameters,
-                                         extends=extends,
-                                         body=body)
+            return tree.InterfaceDeclaration(name=name,
+                                             type_parameters=type_parameters,
+                                             extends=extends,
+                                             body=body)
+        finally:
+            self._exit_depth('declaration')
 
     @parse_debug
     def parse_annotation_type_declaration(self):
-        name = None
-        body = None
+        self._enter_depth('declaration')
+        try:
+            name = None
+            body = None
 
-        self.accept('@', 'interface')
+            self.accept('@', 'interface')
 
-        name = self.parse_identifier()
-        body = self.parse_annotation_type_body()
+            name = self.parse_identifier()
+            body = self.parse_annotation_type_body()
 
-        return tree.AnnotationDeclaration(name=name,
-                                          body=body)
+            return tree.AnnotationDeclaration(name=name,
+                                              body=body)
+        finally:
+            self._exit_depth('declaration')
 
 # ------------------------------------------------------------------------------
 # -- Types --
@@ -498,16 +617,20 @@ class Parser(object):
     def parse_type_arguments(self):
         type_arguments = list()
 
-        self.accept('<')
+        self._enter_depth('type')
+        try:
+            self.accept('<')
 
-        while True:
-            type_argument = self.parse_type_argument()
-            type_arguments.append(type_argument)
+            while True:
+                type_argument = self.parse_type_argument()
+                type_arguments.append(type_argument)
 
-            if self.try_accept('>'):
-                break
+                if self.try_accept('>'):
+                    break
 
-            self.accept(',')
+                self.accept(',')
+        finally:
+            self._exit_depth('type')
 
         return type_arguments
 
@@ -619,6 +742,10 @@ class Parser(object):
 
         while self.try_accept('[', ']'):
             array_dimension += 1
+            if array_dimension > self.MAX_ARRAY_DIMENSIONS:
+                self.illegal(
+                    "Array declaration depth exceeds the maximum of %d dimensions"
+                    % self.MAX_ARRAY_DIMENSIONS)
 
         return [None] * array_dimension
 
@@ -668,19 +795,23 @@ class Parser(object):
 
     @parse_debug
     def parse_annotation(self):
-        qualified_identifier = None
-        annotation_element = None
+        self._enter_depth('annotation')
+        try:
+            qualified_identifier = None
+            annotation_element = None
 
-        self.accept('@')
-        qualified_identifier = self.parse_qualified_identifier()
+            self.accept('@')
+            qualified_identifier = self.parse_qualified_identifier()
 
-        if self.try_accept('('):
-            if not self.would_accept(')'):
-                annotation_element = self.parse_annotation_element()
-            self.accept(')')
+            if self.try_accept('('):
+                if not self.would_accept(')'):
+                    annotation_element = self.parse_annotation_element()
+                self.accept(')')
 
-        return tree.Annotation(name=qualified_identifier,
-                               element=annotation_element)
+            return tree.Annotation(name=qualified_identifier,
+                                   element=annotation_element)
+        finally:
+            self._exit_depth('annotation')
 
     @parse_debug
     def parse_annotation_element(self):
@@ -1240,26 +1371,30 @@ class Parser(object):
 
     @parse_debug
     def parse_array_initializer(self):
-        array_initializer = tree.ArrayInitializer(initializers=list())
+        self._enter_depth('expression')
+        try:
+            array_initializer = tree.ArrayInitializer(initializers=list())
 
-        self.accept('{')
+            self.accept('{')
 
-        if self.try_accept(','):
-            self.accept('}')
-            return array_initializer
-
-        if self.try_accept('}'):
-            return array_initializer
-
-        while True:
-            initializer = self.parse_variable_initializer()
-            array_initializer.initializers.append(initializer)
-
-            if not self.would_accept('}'):
-                self.accept(',')
+            if self.try_accept(','):
+                self.accept('}')
+                return array_initializer
 
             if self.try_accept('}'):
                 return array_initializer
+
+            while True:
+                initializer = self.parse_variable_initializer()
+                array_initializer.initializers.append(initializer)
+
+                if not self.would_accept('}'):
+                    self.accept(',')
+
+                if self.try_accept('}'):
+                    return array_initializer
+        finally:
+            self._exit_depth('expression')
 
 # ------------------------------------------------------------------------------
 # -- Blocks and statements --
@@ -1345,6 +1480,8 @@ class Parser(object):
                 statement = self.parse_local_variable_declaration_statement()
                 statement._position = token.position
                 return statement
+        except JavaRecursionLimitError:
+            raise
         except JavaSyntaxError:
             return self.parse_statement()
 
@@ -1665,6 +1802,8 @@ class Parser(object):
         try:
             with self.tokens:
                 return self.parse_for_var_control()
+        except JavaRecursionLimitError:
+            raise
         except JavaSyntaxError:
             pass
 
@@ -1770,18 +1909,22 @@ class Parser(object):
 
     @parse_debug
     def parse_expression(self):
-        expressionl = self.parse_expressionl()
-        assignment_type = None
-        assignment_expression = None
+        self._enter_depth('expression')
+        try:
+            expressionl = self.parse_expressionl()
+            assignment_type = None
+            assignment_expression = None
 
-        if self.tokens.look().value in Operator.ASSIGNMENT:
-            assignment_type = self.tokens.next().value
-            assignment_expression = self.parse_expression()
-            return tree.Assignment(expressionl=expressionl,
-                                   type=assignment_type,
-                                   value=assignment_expression)
-        else:
-            return expressionl
+            if self.tokens.look().value in Operator.ASSIGNMENT:
+                assignment_type = self.tokens.next().value
+                assignment_expression = self.parse_expression()
+                return tree.Assignment(expressionl=expressionl,
+                                       type=assignment_type,
+                                       value=assignment_expression)
+            else:
+                return expressionl
+        finally:
+            self._exit_depth('expression')
 
     @parse_debug
     def parse_expressionl(self):
@@ -1853,6 +1996,8 @@ class Parser(object):
                         lambda_exp = self.parse_lambda_expression()
                         if lambda_exp:
                             return lambda_exp
+            except JavaRecursionLimitError:
+                raise
             except JavaSyntaxError:
                 pass
             try:
@@ -1864,6 +2009,8 @@ class Parser(object):
 
                     return tree.Cast(type=cast_target,
                                      expression=expression)
+            except JavaRecursionLimitError:
+                raise
             except JavaSyntaxError:
                 pass
 
