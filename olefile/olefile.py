@@ -248,6 +248,19 @@ for keyword, var in list(vars().items()):
     if keyword[:3] == "VT_":
         VT[var] = keyword
 
+# Size in bytes of the fixed-size VT types that may be stored in a property
+# set. Variable-size types are handled explicitly by the property parser.
+_PROPERTY_TYPE_SIZES = {
+    VT_I1: 1, VT_UI1: 1,
+    VT_I2: 2, VT_UI2: 2, VT_BOOL: 2,
+    VT_I4: 4, VT_UI4: 4, VT_INT: 4, VT_UINT: 4, VT_ERROR: 4,
+    VT_I8: 8, VT_UI8: 8, VT_R4: 4, VT_R8: 8, VT_CY: 8, VT_DATE: 8,
+    VT_FILETIME: 8, VT_CLSID: 16,
+}
+
+# VT types made of a 32-bit length followed by that many bytes (or characters)
+_PROPERTY_TYPE_PREFIXED = frozenset((VT_BSTR, VT_LPSTR, VT_LPWSTR, VT_BLOB, VT_CF))
+
 #
 # --------------------------------------------------------------------
 # Some common document types (root.clsid fields)
@@ -402,6 +415,14 @@ class NotOleFileError(OleFileError):
     Error raised when the opened file is not an OLE file.
     """
     pass
+
+
+class _PropertySetParseError(ValueError):
+    """
+    Internal error raised while parsing a bounded property set structure.
+    """
+    pass
+
 
 class OleMetadata:
     """
@@ -2171,171 +2192,421 @@ class OleFileIO:
         fp = self.openstream(filename)
         data = {}
         try:
-            # header
-            s = fp.read(28)
-            clsid = _clsid(s[8:24])
-            # format id
-            s = fp.read(20)
-            fmtid = _clsid(s[:16])
-            fp.seek(i32(s, 16))
-            # get section
-            s = b"****" + fp.read(i32(fp.read(4))-4)
-            # number of properties:
-            num_props = i32(s, 4)
-        except BaseException as exc:
+            sections = self._parse_property_set_sections(
+                fp, streampath, convert_time, no_conversion)
+        except _PropertySetParseError as exc:
             # catch exception while parsing property header, and only raise
             # a DEFECT_INCORRECT then return an empty dict, because this is not
             # a fatal error when parsing the whole file
             msg = 'Error while parsing properties header in stream {}: {}'.format(
                 repr(streampath), exc)
-            self._raise_defect(DEFECT_INCORRECT, msg, type(exc))
+            self._raise_defect(DEFECT_INCORRECT, msg, OleFileError)
             return data
-        # clamp num_props based on the data length
-        num_props = min(num_props, int(len(s) / 8))
-        for i in iterrange(num_props):
-            property_id = 0 # just in case of an exception
-            try:
-                property_id = i32(s, 8+i*8)
-                offset = i32(s, 12+i*8)
-                property_type = i32(s, offset)
-
-                vt_name = VT.get(property_type, 'UNKNOWN')
-                log.debug('property id=%d: type=%d/%s offset=%X' % (property_id, property_type, vt_name, offset))
-
-                value = self._parse_property(s, offset+4, property_id, property_type, convert_time, no_conversion)
-                data[property_id] = value
-            except BaseException as exc:
-                # catch exception while parsing each property, and only raise
-                # a DEFECT_INCORRECT, because parsing can go on
-                msg = 'Error while parsing property id %d in stream %s: %s' % (
-                    property_id, repr(streampath), exc)
-                self._raise_defect(DEFECT_INCORRECT, msg, type(exc))
-
+        for section in sections:
+            data.update(section['properties'])
         return data
 
-    def _parse_property(self, s, offset, property_id, property_type, convert_time, no_conversion):
-        v = None
-        if property_type <= VT_BLOB or property_type in (VT_CLSID, VT_CF):
-            v, _ = self._parse_property_basic(s, offset, property_id, property_type, convert_time, no_conversion)
-        elif property_type == VT_VECTOR | VT_VARIANT:
-            log.debug('property_type == VT_VECTOR | VT_VARIANT')
-            off = 4
-            count = i32(s, offset)
+    def _get_stream_size(self, fp):
+        try:
+            size = fp.size
+            if isinstance(size, (int, long)) and size >= 0:
+                return size
+        except (AttributeError, TypeError):
+            pass
+        position = fp.tell()
+        fp.seek(0, 2)
+        size = fp.tell()
+        fp.seek(position)
+        return size
+
+    def _read_bounded(self, fp, limit, offset, size, what):
+        """
+        Read exactly size bytes at offset, without reading outside limit.
+
+        The error messages only describe the field being read. Property values
+        must never be included in an exception.
+        """
+        if offset < 0 or size < 0 or offset > limit or size > limit - offset:
+            raise _PropertySetParseError(
+                '%s is outside the property set bounds' % what)
+        try:
+            fp.seek(offset)
+            data = fp.read(size)
+        except Exception:
+            raise _PropertySetParseError('%s could not be read' % what)
+        if len(data) != size:
+            raise _PropertySetParseError('%s is truncated' % what)
+        return data
+
+    def _is_supported_property_type(self, property_type):
+        if property_type in (VT_EMPTY, VT_NULL):
+            return True
+        if property_type & VT_VECTOR:
+            base_type = property_type & ~VT_VECTOR
+            if base_type == VT_VARIANT:
+                return True
+            return (base_type in _PROPERTY_TYPE_SIZES or
+                    base_type in _PROPERTY_TYPE_PREFIXED)
+        return (property_type in _PROPERTY_TYPE_SIZES or
+                property_type in _PROPERTY_TYPE_PREFIXED)
+
+    def _parse_property_set_sections(self, fp, streampath, convert_time,
+                                     no_conversion):
+        stream_size = self._get_stream_size(fp)
+        if stream_size < 28:
+            raise _PropertySetParseError('property set header is truncated')
+        header = self._read_bounded(
+            fp, stream_size, 0, 28, 'property set header')
+        num_sections = i32(header, 24)
+        if num_sections == 0:
+            return []
+        if num_sections > (stream_size - 28) // 20:
+            raise _PropertySetParseError(
+                'property set section table is truncated')
+        section_table_size = num_sections * 20
+        section_table = self._read_bounded(
+            fp, stream_size, 28, section_table_size,
+            'property set section table')
+        first_section_offset = 28 + section_table_size
+        descriptors = []
+        seen_section_offsets = set()
+        for index in iterrange(num_sections):
+            table_offset = index * 20
+            fmtid = _clsid(section_table[table_offset:table_offset + 16])
+            section_offset = i32(section_table, table_offset + 16)
+            if (section_offset < first_section_offset or
+                    section_offset > stream_size - 8):
+                self._raise_defect(
+                    DEFECT_INCORRECT,
+                    'Invalid section offset for section %d in stream %s' % (
+                        index, repr(streampath)),
+                    OleFileError)
+                continue
+            if section_offset in seen_section_offsets:
+                self._raise_defect(
+                    DEFECT_INCORRECT,
+                    'Duplicate section offset for section %d in stream %s' % (
+                        index, repr(streampath)),
+                    OleFileError)
+                continue
+            seen_section_offsets.add(section_offset)
+            descriptors.append((index, fmtid, section_offset))
+
+        section_offsets = sorted(seen_section_offsets)
+        sections = []
+        for index, fmtid, section_offset in descriptors:
+            try:
+                next_offsets = [offset for offset in section_offsets
+                                if offset > section_offset]
+                section_limit = (next_offsets[0] if next_offsets
+                                 else stream_size)
+                section = self._parse_property_section(
+                    fp, section_limit, section_offset, streampath,
+                    convert_time, no_conversion)
+            except _PropertySetParseError as exc:
+                self._raise_defect(
+                    DEFECT_INCORRECT,
+                    'Error while parsing properties section %d in stream %s: %s'
+                    % (index, repr(streampath), exc),
+                    OleFileError)
+                continue
+            section['fmtid'] = fmtid
+            section['offset'] = section_offset
+            sections.append(section)
+        return sections
+
+    def _parse_property_section(self, fp, section_limit, section_offset,
+                                streampath, convert_time, no_conversion):
+        section_header = self._read_bounded(
+            fp, section_limit, section_offset, 8, 'property section header')
+        section_size = i32(section_header, 0)
+        num_props = i32(section_header, 4)
+        if section_size < 8:
+            raise _PropertySetParseError('property section size is invalid')
+        if section_size > section_limit - section_offset:
+            raise _PropertySetParseError(
+                'property section extends past its bounds')
+        if num_props > (section_size - 8) // 8:
+            raise _PropertySetParseError(
+                'property table exceeds the section size')
+        table_size = num_props * 8
+        table_end = 8 + table_size
+        property_table = self._read_bounded(
+            fp, section_limit, section_offset + 8, table_size,
+            'property table')
+        entries = []
+        seen_ids = set()
+        dictionary_offset = None
+        for index in iterrange(num_props):
+            table_offset = index * 8
+            property_id = i32(property_table, table_offset)
+            property_offset = i32(property_table, table_offset + 4)
+            if property_id in seen_ids:
+                self._raise_defect(
+                    DEFECT_INCORRECT,
+                    'Duplicate property id %d in stream %s' % (
+                        property_id, repr(streampath)),
+                    OleFileError)
+                continue
+            seen_ids.add(property_id)
+            if property_id == 0:
+                # Property id 0 is the user-defined property dictionary, not
+                # a typed value. Keep its offset for the dictionary parser.
+                if (property_offset < table_end or
+                        property_offset > section_size - 4):
+                    self._raise_defect(
+                        DEFECT_INCORRECT,
+                        'Invalid dictionary offset for property id 0 in stream %s'
+                        % repr(streampath),
+                        OleFileError)
+                else:
+                    dictionary_offset = property_offset
+                continue
+            if (property_offset < table_end or
+                    property_offset > section_size - 4):
+                self._raise_defect(
+                    DEFECT_INCORRECT,
+                    'Invalid offset for property id %d in stream %s' % (
+                        property_id, repr(streampath)),
+                    OleFileError)
+                continue
+            try:
+                type_data = self._read_bounded(
+                    fp, section_offset + section_size,
+                    section_offset + property_offset, 4, 'property type')
+                property_type = i32(type_data)
+                if not self._is_supported_property_type(property_type):
+                    raise _PropertySetParseError(
+                        'unsupported VT type 0x%X' % property_type)
+            except _PropertySetParseError as exc:
+                self._raise_defect(
+                    DEFECT_INCORRECT,
+                    'Error while parsing property id %d in stream %s: %s' % (
+                        property_id, repr(streampath), exc),
+                    OleFileError)
+                continue
+            entries.append((property_id, property_offset, property_type))
+
+        codepage = 1252
+        for property_id, property_offset, property_type in entries:
+            if property_id != 1 or property_type not in (
+                    VT_I2, VT_UI2, VT_I4, VT_UI4, VT_INT, VT_UINT):
+                continue
+            payload_offset = section_offset + property_offset + 4
+            section_end = section_offset + section_size
+            try:
+                codepage, _ = self._parse_property_value(
+                    fp, payload_offset, section_end, property_type,
+                    property_id, 1252, convert_time, no_conversion)
+            except _PropertySetParseError as exc:
+                codepage = None
+                self._raise_defect(
+                    DEFECT_INCORRECT,
+                    'Error while parsing property id %d in stream %s: %s' % (
+                        property_id, repr(streampath), exc),
+                    OleFileError)
+                break
+            if codepage not in (1200, 1252):
+                codepage = None
+                self._raise_defect(
+                    DEFECT_INCORRECT,
+                    'Error while parsing property id %d in stream %s: '
+                    'unsupported codepage' % (
+                        property_id, repr(streampath)),
+                    OleFileError)
+                break
+            codepage = int(codepage)
+            break
+
+        properties = {}
+        section_end = section_offset + section_size
+        for property_id, property_offset, property_type in entries:
+            payload_offset = section_offset + property_offset + 4
+            try:
+                value, _ = self._parse_property_value(
+                    fp, payload_offset, section_end, property_type,
+                    property_id, codepage, convert_time, no_conversion)
+            except _PropertySetParseError as exc:
+                self._raise_defect(
+                    DEFECT_INCORRECT,
+                    'Error while parsing property id %d in stream %s: %s' % (
+                        property_id, repr(streampath), exc),
+                    OleFileError)
+                continue
+            properties[property_id] = value
+        return {
+            'properties': properties,
+            'dictionary_offset': dictionary_offset,
+            'codepage': codepage,
+            'section_size': section_size,
+        }
+
+    def _parse_property_value(self, fp, offset, limit, property_type,
+                              property_id, codepage, convert_time,
+                              no_conversion):
+        """
+        Parse one property value and return (value, consumed_size).
+
+        Every read is bounded by limit (the end of the current section), and
+        the return size is derived from the VT type.
+        """
+        if property_type in (VT_EMPTY, VT_NULL):
+            return None, 0
+
+        if property_type & VT_VECTOR:
+            base_type = property_type & ~VT_VECTOR
+            count_data = self._read_bounded(
+                fp, limit, offset, 4, 'VT_VECTOR count')
+            count = i32(count_data)
+            if count > limit - (offset + 4):
+                raise _PropertySetParseError(
+                    'VT_VECTOR count exceeds the property bounds')
+            position = offset + 4
             values = []
-            for _ in range(count):
-                property_type = i32(s, offset + off)
-                v, sz  = self._parse_property_basic(s, offset + off + 4, property_id, property_type, convert_time, no_conversion)
-                values.append(v)
-                off += sz + 4
-            v = values
+            for _ in iterrange(count):
+                if base_type == VT_VARIANT:
+                    element_type_data = self._read_bounded(
+                        fp, limit, position, 4, 'VT_VARIANT element type')
+                    element_type = i32(element_type_data)
+                    if not self._is_supported_property_type(element_type):
+                        raise _PropertySetParseError(
+                            'unsupported VT type 0x%X in VT_VARIANT element'
+                            % element_type)
+                    element_value, element_size = self._parse_property_value(
+                        fp, position + 4, limit, element_type, property_id,
+                        codepage, convert_time, no_conversion)
+                    position += 4 + element_size
+                else:
+                    element_value, element_size = self._parse_property_value(
+                        fp, position, limit, base_type, property_id, codepage,
+                        convert_time, no_conversion)
+                    position += element_size
+                if position > limit:
+                    raise _PropertySetParseError(
+                        'VT_VECTOR element exceeds the property bounds')
+                values.append(element_value)
+            return values, position - offset
 
-        elif property_type & VT_VECTOR:
-            property_type_base = property_type & ~VT_VECTOR
-            log.debug('property_type == VT_VECTOR | %s' % VT.get(property_type_base, 'UNKNOWN'))
-            off = 4
-            count = i32(s, offset)
-            values = []
-            for _ in range(count):
-                v, sz = self._parse_property_basic(s, offset + off, property_id, property_type & ~VT_VECTOR, convert_time, no_conversion)
-                values.append(v)
-                off += sz
-            v = values
-        else:
-            log.debug('property id=%d: type=%d not implemented in parser yet' % (property_id, property_type))
-        return v
-
-    def _parse_property_basic(self, s, offset, property_id, property_type, convert_time, no_conversion):
-            value = None
-            size = 0
-            # test for common types first (should perhaps use
-            # a dictionary instead?)
-
-            if property_type == VT_I2: # 16-bit signed integer
-                value = i16(s, offset)
+        fixed_size = _PROPERTY_TYPE_SIZES.get(property_type)
+        if fixed_size is not None:
+            type_name = VT.get(property_type, 'UNKNOWN')
+            raw = self._read_bounded(
+                fp, limit, offset, fixed_size, 'VT_%s value' % type_name)
+            if property_type == VT_I1:
+                value = i8(raw)
+                if value >= 128:
+                    value -= 256
+            elif property_type == VT_UI1:
+                value = i8(raw)
+            elif property_type == VT_I2:
+                value = i16(raw)
                 if value >= 32768:
-                    value = value - 65536
-                size = 2
-            elif property_type == VT_UI2: # 2-byte unsigned integer
-                value = i16(s, offset)
-                size = 2
-            elif property_type in (VT_I4, VT_INT, VT_ERROR):
-                # VT_I4: 32-bit signed integer
-                # VT_ERROR: HRESULT, similar to 32-bit signed integer,
-                # see https://msdn.microsoft.com/en-us/library/cc230330.aspx
-                value = i32(s, offset)
-                size = 4
-            elif property_type in (VT_UI4, VT_UINT): # 4-byte unsigned integer
-                value = i32(s, offset) # FIXME
-                size = 4
-            elif property_type in (VT_BSTR, VT_LPSTR):
-                # CodePageString, see https://msdn.microsoft.com/en-us/library/dd942354.aspx
-                # size is a 32 bits integer, including the null terminator, and
-                # possibly trailing or embedded null chars
-                #TODO: if codepage is unicode, the string should be converted as such
-                count = i32(s, offset)
-                value = s[offset+4:offset+4+count-1]
-                # remove all null chars:
-                value = value.replace(b'\x00', b'')
-                size = 4 + count
-            elif property_type == VT_BLOB:
-                # binary large object (BLOB)
-                # see https://msdn.microsoft.com/en-us/library/dd942282.aspx
-                count = i32(s, offset)
-                value = s[offset+4:offset+4+count]
-                size = 4 + count
-            elif property_type == VT_LPWSTR:
-                # UnicodeString
-                # see https://msdn.microsoft.com/en-us/library/dd942313.aspx
-                # "the string should NOT contain embedded or additional trailing
-                # null characters."
-                count = i32(s, offset+4)
-                value = self._decode_utf16_str(s[offset+4:offset+4+count*2])
-                size = 4 + count * 2
+                    value -= 65536
+            elif property_type == VT_UI2:
+                value = i16(raw)
+            elif property_type in (VT_I4, VT_INT):
+                value = struct.unpack('<i', raw)[0]
+            elif property_type in (VT_UI4, VT_UINT, VT_ERROR):
+                value = i32(raw)
+            elif property_type == VT_I8:
+                value = struct.unpack('<q', raw)[0]
+            elif property_type == VT_UI8:
+                value = struct.unpack('<Q', raw)[0]
+            elif property_type == VT_R4:
+                value = struct.unpack('<f', raw)[0]
+            elif property_type in (VT_R8, VT_DATE):
+                value = struct.unpack('<d', raw)[0]
+            elif property_type == VT_CY:
+                value = struct.unpack('<q', raw)[0]
+            elif property_type == VT_BOOL:
+                value = bool(i16(raw))
+            elif property_type == VT_CLSID:
+                value = _clsid(raw)
             elif property_type == VT_FILETIME:
-                value = long(i32(s, offset)) + (long(i32(s, offset+4))<<32)
+                value = long(i32(raw)) + (long(i32(raw, 4)) << 32)
                 # FILETIME is a 64-bit int: "number of 100ns periods
                 # since Jan 1,1601".
                 if convert_time and property_id not in no_conversion:
                     log.debug('Converting property #%d to python datetime, value=%d=%fs'
-                            %(property_id, value, float(value)/10000000))
-                    # convert FILETIME to Python datetime.datetime
-                    # inspired from https://code.activestate.com/recipes/511425-filetime-to-datetime/
+                            % (property_id, value, float(value) / 10000000))
                     _FILETIME_null_date = datetime.datetime(1601, 1, 1, 0, 0, 0)
-                    log.debug('timedelta days=%d' % (value//(10*1000000*3600*24)))
-                    value = _FILETIME_null_date + datetime.timedelta(microseconds=value//10)
+                    log.debug('timedelta days=%d' % (value // (10 * 1000000 * 3600 * 24)))
+                    value = _FILETIME_null_date + datetime.timedelta(
+                        microseconds=value // 10)
                 else:
                     # legacy code kept for backward compatibility: returns a
                     # number of seconds since Jan 1,1601
-                    value = value // 10000000 # seconds
-                size = 8
-            elif property_type == VT_UI1: # 1-byte unsigned integer
-                value = i8(s[offset])
-                size = 1
-            elif property_type == VT_CLSID:
-                value = _clsid(s[offset:offset+16])
-                size = 16
-            elif property_type == VT_CF:
-                # PropertyIdentifier or ClipboardData??
-                # see https://msdn.microsoft.com/en-us/library/dd941945.aspx
-                count = i32(s, offset)
-                value = s[offset+4:offset+4+count]
-                size = 4 + count
-            elif property_type == VT_BOOL:
-                # VARIANT_BOOL, 16 bits bool, 0x0000=Fals, 0xFFFF=True
-                # see https://msdn.microsoft.com/en-us/library/cc237864.aspx
-                value = bool(i16(s, offset))
-                size = 2
+                    value = value // 10000000
             else:
-                value = None # everything else yields "None"
-                log.debug('property id=%d: type=%d not implemented in parser yet' % (property_id, property_type))
+                raise _PropertySetParseError(
+                    'unsupported VT type 0x%X' % property_type)
+            return value, fixed_size
 
-                # missing: VT_EMPTY, VT_NULL, VT_R4, VT_R8, VT_CY, VT_DATE,
-                # VT_DECIMAL, VT_I1, VT_I8, VT_UI8,
-                # see https://msdn.microsoft.com/en-us/library/dd942033.aspx
+        if property_type in (VT_BSTR, VT_LPSTR):
+            length_data = self._read_bounded(
+                fp, limit, offset, 4, 'VT_LPSTR length')
+            count = i32(length_data)
+            if count > limit - (offset + 4):
+                raise _PropertySetParseError(
+                    'VT_LPSTR length exceeds the property bounds')
+            raw = self._read_bounded(
+                fp, limit, offset + 4, count, 'VT_LPSTR value')
+            return self._decode_codepage_string(raw, codepage), 4 + count
 
-                #print("%08x" % property_id, repr(value), end=" ")
-                #print("(%s)" % VT[i32(s, offset) & 0xFFF])
-            return value, size
+        if property_type == VT_LPWSTR:
+            length_data = self._read_bounded(
+                fp, limit, offset, 4, 'VT_LPWSTR length')
+            count = i32(length_data)
+            if count > (limit - (offset + 4)) // 2:
+                raise _PropertySetParseError(
+                    'VT_LPWSTR length exceeds the property bounds')
+            raw = self._read_bounded(
+                fp, limit, offset + 4, count * 2, 'VT_LPWSTR value')
+            value = self._decode_utf16_str(raw)
+            if isinstance(value, bytes):
+                value = value.replace(b'\x00', b'')
+            else:
+                value = value.replace('\x00', '')
+            return value, 4 + count * 2
+
+        if property_type in (VT_BLOB, VT_CF):
+            length_data = self._read_bounded(
+                fp, limit, offset, 4, 'VT_BLOB length')
+            count = i32(length_data)
+            if count > limit - (offset + 4):
+                raise _PropertySetParseError(
+                    'VT_BLOB length exceeds the property bounds')
+            value = self._read_bounded(
+                fp, limit, offset + 4, count, 'VT_BLOB value')
+            return value, 4 + count
+
+        raise _PropertySetParseError(
+            'unsupported VT type 0x%X' % property_type)
+
+    def _decode_codepage_string(self, raw, codepage):
+        try:
+            if codepage == 1200:
+                if len(raw) % 2:
+                    raise _PropertySetParseError(
+                        'VT_LPSTR has an odd byte length for codepage 1200')
+                text = raw.decode('UTF-16LE')
+            elif codepage == 1252:
+                # Keep the historical bytes result for single-byte strings,
+                # but make sure the declared codepage can decode them.
+                text = raw.decode('cp1252')
+            else:
+                raise _PropertySetParseError(
+                    'VT_LPSTR has no supported codepage')
+        except UnicodeError:
+            raise _PropertySetParseError(
+                'VT_LPSTR is invalid for its declared codepage')
+        if codepage == 1252:
+            # The property value may contain trailing or embedded nulls.
+            return raw.replace(b'\x00', b'')
+        text = text.replace('\x00', '')
+        if self.path_encoding:
+            return text.encode(self.path_encoding, 'replace')
+        return text.encode('utf-8', 'replace')
 
 
     def get_metadata(self):
@@ -2349,6 +2620,66 @@ class OleFileIO:
         self.metadata = OleMetadata()
         self.metadata.parse_properties(self)
         return self.metadata
+
+    def _parse_property_dictionary(self, fp, section_offset,
+                                   section_size, dictionary_offset, codepage,
+                                   streampath):
+        if dictionary_offset is None:
+            return []
+        section_end = section_offset + section_size
+        position = section_offset + dictionary_offset
+        count_data = self._read_bounded(
+            fp, section_end, position, 4, 'property dictionary count')
+        entry_count = i32(count_data)
+        position += 4
+        if entry_count > (section_end - position) // 8:
+            raise _PropertySetParseError(
+                'property dictionary exceeds the section bounds')
+        entries = []
+        for _ in iterrange(entry_count):
+            entry_header = self._read_bounded(
+                fp, section_end, position, 8, 'property dictionary entry')
+            property_id = i32(entry_header, 0)
+            name_length = i32(entry_header, 4)
+            if name_length > section_end - (position + 8):
+                self._raise_defect(
+                    DEFECT_INCORRECT,
+                    'Error while parsing property id %d in stream %s: '
+                    'property dictionary entry is truncated' % (
+                        property_id, repr(streampath)),
+                    OleFileError)
+                break
+            raw_name = self._read_bounded(
+                fp, section_end, position + 8, name_length,
+                'property dictionary name')
+            try:
+                property_name = self._decode_dictionary_name(raw_name, codepage)
+            except _PropertySetParseError as exc:
+                self._raise_defect(
+                    DEFECT_INCORRECT,
+                    'Error while parsing property id %d in stream %s: %s' % (
+                        property_id, repr(streampath), exc),
+                    OleFileError)
+                break
+            entries.append((property_id, property_name))
+            position += 8 + name_length
+        return entries
+
+    def _decode_dictionary_name(self, raw_name, codepage):
+        try:
+            if codepage == 1200:
+                if len(raw_name) % 2:
+                    raise _PropertySetParseError(
+                        'property dictionary name has an odd byte length')
+                name = raw_name.decode('UTF-16LE')
+            elif codepage == 1252:
+                name = raw_name.decode('cp1252')
+            else:
+                name = raw_name.decode('utf-8')
+        except UnicodeError:
+            raise _PropertySetParseError(
+                'property dictionary name is invalid for its codepage')
+        return name.strip('\x00')
 
     def get_userdefined_properties(self, filename, convert_time=False, no_conversion=None):
         """
@@ -2364,179 +2695,47 @@ class OleFileIO:
         # REFERENCE: [MS-OLEPS] https://msdn.microsoft.com/en-us/library/dd942421.aspx
         # REFERENCE: https://docs.microsoft.com/en-us/openspecs/office_file_formats/ms-oshared/2ea8be67-a4a0-4e2e-b42f-49a182645562
         #'D5CDD502-2E9C-101B-9397-08002B2CF9AE'
-        # TODO: testing the code more rigorously
-        # TODO: adding exception handeling
-        FMTID_USERDEFINED_PROPERTIES = _clsid(b'\x05\xD5\xCD\xD5\x9C\x2E\x1B\x10\x93\x97\x08\x00\x2B\x2C\xF9\xAE')
+        FMTID_USERDEFINED_PROPERTIES = _clsid(
+            b'\x05\xD5\xCD\xD5\x9C\x2E\x1B\x10\x93\x97\x08\x00\x2B\x2C\xF9\xAE')
 
-        # make sure no_conversion is a list, just to simplify code below:
         if no_conversion == None:
             no_conversion = []
-        # stream path as a string to report exceptions:
         streampath = filename
         if not isinstance(streampath, str):
             streampath = '/'.join(streampath)
 
         fp = self.openstream(filename)
-
         data = []
-
-        # header
-        s = fp.read(28)
-        clsid = _clsid(s[8:24])
-
-        # PropertySetStream.cSections (4 bytes starts at 1c): number of property sets in this stream
-        sections_count = i32(s, 24)
-
-        section_file_pointers = []
-
         try:
-            for i in range(sections_count):
-                # format id
-                s = fp.read(20)
-                fmtid = _clsid(s[:16])
-
-                if fmtid == FMTID_USERDEFINED_PROPERTIES:
-                    file_pointer = i32(s, 16)
-                    fp.seek(file_pointer)
-                    # read saved sections
-                    s = b"****" + fp.read(i32(fp.read(4)) - 4)
-                    # number of properties:
-                    num_props = i32(s, 4)
-
-                    PropertyIdentifierAndOffset = s[8: 8+8*num_props]
-
-                    # property names (dictionary)
-                    # ref: https://docs.microsoft.com/en-us/openspecs/windows_protocols/MS-OLEPS/99127b7f-c440-4697-91a4-c853086d6b33
-                    index = 8+8*num_props
-                    entry_count = i32(s[index: index+4])
-                    index += 4
-                    for i in range(entry_count):
-                        identifier = s[index: index +4]
-                        str_size = i32(s[index+4: index + 8])
-                        string = s[index+8: index+8+str_size].decode('utf_8').strip('\0')
-                        data.append({'property_name':string, 'value':None})
-                        index = index+8+str_size
-                    # clamp num_props based on the data length
-                    num_props = min(num_props, int(len(s) / 8))
-
-                    # property values
-                    # ref: https://docs.microsoft.com/en-us/openspecs/windows_protocols/MS-OLEPS/f122b9d7-e5cf-4484-8466-83f6fd94b3cc
-                    for i in iterrange(2, num_props):
-                        property_id = 0  # just in case of an exception
-                        try:
-                            property_id = i32(s, 8 + i * 8)
-                            offset = i32(s, 12 + i * 8)
-                            property_type = i32(s, offset)
-
-                            vt_name = VT.get(property_type, 'UNKNOWN')
-                            log.debug('property id=%d: type=%d/%s offset=%X' % (property_id, property_type, vt_name, offset))
-
-                            # test for common types first (should perhaps use
-                            # a dictionary instead?)
-
-                            if property_type == VT_I2:  # 16-bit signed integer
-                                value = i16(s, offset + 4)
-                                if value >= 32768:
-                                    value = value - 65536
-                            elif property_type == 1:
-                                # supposed to be VT_NULL but seems it is not NULL
-                                str_size = i32(s, offset + 8)
-                                value = s[offset + 12:offset + 12 + str_size - 1]
-
-                            elif property_type == VT_UI2:  # 2-byte unsigned integer
-                                value = i16(s, offset + 4)
-                            elif property_type in (VT_I4, VT_INT, VT_ERROR):
-                                # VT_I4: 32-bit signed integer
-                                # VT_ERROR: HRESULT, similar to 32-bit signed integer,
-                                # see https://msdn.microsoft.com/en-us/library/cc230330.aspx
-                                value = i32(s, offset + 4)
-                            elif property_type in (VT_UI4, VT_UINT):  # 4-byte unsigned integer
-                                value = i32(s, offset + 4)  # FIXME
-                            elif property_type in (VT_BSTR, VT_LPSTR):
-                                # CodePageString, see https://msdn.microsoft.com/en-us/library/dd942354.aspx
-                                # size is a 32 bits integer, including the null terminator, and
-                                # possibly trailing or embedded null chars
-                                # TODO: if codepage is unicode, the string should be converted as such
-                                count = i32(s, offset + 4)
-                                value = s[offset + 8:offset + 8 + count - 1]
-                                # remove all null chars:
-                                value = value.replace(b'\x00', b'')
-                            elif property_type == VT_BLOB:
-                                # binary large object (BLOB)
-                                # see https://msdn.microsoft.com/en-us/library/dd942282.aspx
-                                count = i32(s, offset + 4)
-                                value = s[offset + 8:offset + 8 + count]
-                            elif property_type == VT_LPWSTR:
-                                # UnicodeString
-                                # see https://msdn.microsoft.com/en-us/library/dd942313.aspx
-                                # "the string should NOT contain embedded or additional trailing
-                                # null characters."
-                                count = i32(s, offset + 4)
-                                value = self._decode_utf16_str(s[offset + 8:offset + 8 + count * 2])
-                            elif property_type == VT_FILETIME:
-                                value = long(i32(s, offset + 4)) + (long(i32(s, offset + 8)) << 32)
-                                # FILETIME is a 64-bit int: "number of 100ns periods
-                                # since Jan 1,1601".
-                                if convert_time and property_id not in no_conversion:
-                                    log.debug('Converting property #%d to python datetime, value=%d=%fs'
-                                              % (property_id, value, float(value) / 10000000))
-                                    # convert FILETIME to Python datetime.datetime
-                                    # inspired from https://code.activestate.com/recipes/511425-filetime-to-datetime/
-                                    _FILETIME_null_date = datetime.datetime(1601, 1, 1, 0, 0, 0)
-                                    log.debug('timedelta days=%d' % (value // (10 * 1000000 * 3600 * 24)))
-                                    value = _FILETIME_null_date + datetime.timedelta(microseconds=value // 10)
-                                else:
-                                    # legacy code kept for backward compatibility: returns a
-                                    # number of seconds since Jan 1,1601
-                                    value = value // 10000000  # seconds
-                            elif property_type == VT_UI1:  # 1-byte unsigned integer
-                                value = i8(s[offset + 4])
-                            elif property_type == VT_CLSID:
-                                value = _clsid(s[offset + 4:offset + 20])
-                            elif property_type == VT_CF:
-                                # PropertyIdentifier or ClipboardData??
-                                # see https://msdn.microsoft.com/en-us/library/dd941945.aspx
-                                count = i32(s, offset + 4)
-                                value = s[offset + 8:offset + 8 + count]
-                            elif property_type == VT_BOOL:
-                                # VARIANT_BOOL, 16 bits bool, 0x0000=Fals, 0xFFFF=True
-                                # see https://msdn.microsoft.com/en-us/library/cc237864.aspx
-                                value = bool(i16(s, offset + 4))
-                            else:
-                                value = None  # everything else yields "None"
-                                log.debug(
-                                    'property id=%d: type=%d not implemented in parser yet' % (property_id, property_type))
-
-                            # missing: VT_EMPTY, VT_NULL, VT_R4, VT_R8, VT_CY, VT_DATE,
-                            # VT_DECIMAL, VT_I1, VT_I8, VT_UI8,
-                            # see https://msdn.microsoft.com/en-us/library/dd942033.aspx
-
-                            # FIXME: add support for VT_VECTOR
-                            # VT_VECTOR is a 32 uint giving the number of items, followed by
-                            # the items in sequence. The VT_VECTOR value is combined with the
-                            # type of items, e.g. VT_VECTOR|VT_BSTR
-                            # see https://msdn.microsoft.com/en-us/library/dd942011.aspx
-
-                            # print("%08x" % property_id, repr(value), end=" ")
-                            # print("(%s)" % VT[i32(s, offset) & 0xFFF])
-
-                            data[i-2]['value']=value
-                        except BaseException as exc:
-                            # catch exception while parsing each property, and only raise
-                            # a DEFECT_INCORRECT, because parsing can go on
-                            msg = 'Error while parsing property id %d in stream %s: %s' % (
-                                property_id, repr(streampath), exc)
-                            self._raise_defect(DEFECT_INCORRECT, msg, type(exc))
-
-        except BaseException as exc:
-            # catch exception while parsing property header, and only raise
-            # a DEFECT_INCORRECT then return an empty dict, because this is not
-            # a fatal error when parsing the whole file
+            sections = self._parse_property_set_sections(
+                fp, streampath, convert_time, no_conversion)
+        except _PropertySetParseError as exc:
             msg = 'Error while parsing properties header in stream %s: %s' % (
                 repr(streampath), exc)
-            self._raise_defect(DEFECT_INCORRECT, msg, type(exc))
+            self._raise_defect(DEFECT_INCORRECT, msg, OleFileError)
             return data
 
+        for section in sections:
+            if section['fmtid'] != FMTID_USERDEFINED_PROPERTIES:
+                continue
+            try:
+                names = self._parse_property_dictionary(
+                    fp, section['offset'], section['section_size'],
+                    section['dictionary_offset'], section['codepage'],
+                    streampath)
+            except _PropertySetParseError as exc:
+                self._raise_defect(
+                    DEFECT_INCORRECT,
+                    'Error while parsing property dictionary in stream %s: %s'
+                    % (repr(streampath), exc),
+                    OleFileError)
+                continue
+            properties = section['properties']
+            for property_id, property_name in names:
+                data.append({
+                    'property_name': property_name,
+                    'value': properties.get(property_id),
+                })
         return data
 
 

@@ -7,6 +7,7 @@ import unittest
 
 import os, sys
 import io
+import struct
 from shutil import copy2
 
 # Insert the olefile package relative to this test dir in the sys.path
@@ -20,6 +21,58 @@ if _parent_dir not in sys.path:
     sys.path.insert(0, _parent_dir)
 
 import olefile
+
+
+def _build_property_section(properties):
+    """
+    Build one PropertySet section from (property_id, VT type, payload) tuples.
+    """
+    table_end = 8 + 8 * len(properties)
+    offsets = []
+    values = []
+    position = table_end
+    for property_id, property_type, payload in properties:
+        offsets.append(position)
+        value = struct.pack('<I', property_type) + payload
+        values.append(value)
+        position += len(value)
+
+    section = [struct.pack('<II', position, len(properties))]
+    for (property_id, _, _), offset in zip(properties, offsets):
+        section.append(struct.pack('<II', property_id, offset))
+    section.extend(values)
+    return b''.join(section)
+
+
+def _build_property_set(sections):
+    """
+    Build a PropertySetStream from (fmtid, properties) tuples.
+    """
+    section_count = len(sections)
+    header = (struct.pack('<HHI', 0xFFFE, 0, 0) + b'\x00' * 16 +
+              struct.pack('<I', section_count))
+
+    offset = 28 + 20 * section_count
+    descriptors = []
+    section_data = []
+    for fmtid, properties in sections:
+        section = _build_property_section(properties)
+        descriptors.append(fmtid + struct.pack('<I', offset))
+        section_data.append(section)
+        offset += len(section)
+        padding = (-offset) % 4
+        if padding:
+            section_data.append(b'\x00' * padding)
+            offset += padding
+    return header + b''.join(descriptors) + b''.join(section_data)
+
+
+def _lpstr(value, codepage=1252):
+    if codepage == 1200:
+        raw = value.encode('utf-16le') + b'\x00\x00'
+    else:
+        raw = value.encode('cp1252') + b'\x00'
+    return struct.pack('<I', len(raw)) + raw
 
 
 class Test_isOleFile(unittest.TestCase):
@@ -274,6 +327,171 @@ class FileHandleCloseTest(unittest.TestCase):
     #
     #     # now should be closed
     #     self.assertTrue(file_handle.closed)
+
+
+class TestPropertySetParsing(unittest.TestCase):
+    'Tests for bounded property set parsing'
+
+    stream_name = "\x05SummaryInformation"
+
+    def setUp(self):
+        self.ole_file = "tests/images/test-ole-file.doc"
+
+    def _open_with_stream(self, stream_data,
+                          raise_defects=olefile.DEFECT_INCORRECT):
+        ole = olefile.OleFileIO(self.ole_file, raise_defects=raise_defects)
+        ole.openstream = lambda filename: io.BytesIO(stream_data)
+        return ole
+
+    def test_truncated_lpstr_is_bounded(self):
+        properties = [
+            (1, olefile.olefile.VT_I2, struct.pack('<h', 1252)),
+            (2, olefile.olefile.VT_LPSTR, _lpstr('previous value')),
+            (3, olefile.olefile.VT_LPSTR,
+             struct.pack('<I', 4096) + b'not-enough'),
+        ]
+        stream = _build_property_set([(b'\x01' * 16, properties)])
+        ole = self._open_with_stream(stream)
+        try:
+            with self.assertRaises(IOError) as raised:
+                ole.getproperties(self.stream_name)
+        finally:
+            ole.close()
+
+        message = str(raised.exception)
+        self.assertIn('SummaryInformation', message)
+        self.assertIn('property id 3', message)
+        self.assertNotIn('not-enough', message)
+
+    def test_truncated_lpstr_is_not_reused_when_defect_is_recorded(self):
+        properties = [
+            (1, olefile.olefile.VT_I2, struct.pack('<h', 1252)),
+            (2, olefile.olefile.VT_LPSTR, _lpstr('previous value')),
+            (3, olefile.olefile.VT_LPSTR,
+             struct.pack('<I', 4096) + b'not-enough'),
+        ]
+        stream = _build_property_set([(b'\x01' * 16, properties)])
+        ole = self._open_with_stream(stream, olefile.DEFECT_FATAL)
+        try:
+            values = ole.getproperties(self.stream_name)
+            issues = list(ole.parsing_issues)
+        finally:
+            ole.close()
+
+        self.assertEqual(values[2], b'previous value')
+        self.assertNotIn(3, values)
+        self.assertTrue(any('property id 3' in message
+                            for _, message in issues))
+
+    def test_unsupported_codepage_reports_property_id(self):
+        properties = [
+            (1, olefile.olefile.VT_I2, struct.pack('<h', 9999)),
+            (2, olefile.olefile.VT_LPSTR, _lpstr('sensitive-value')),
+        ]
+        stream = _build_property_set([(b'\x01' * 16, properties)])
+        ole = self._open_with_stream(stream)
+        try:
+            with self.assertRaises(IOError) as raised:
+                ole.getproperties(self.stream_name)
+        finally:
+            ole.close()
+
+        message = str(raised.exception)
+        self.assertIn('SummaryInformation', message)
+        self.assertIn('property id 1', message)
+        self.assertIn('codepage', message)
+        self.assertNotIn('sensitive-value', message)
+
+    def test_valid_codepages_and_empty_values(self):
+        properties = [
+            (1, olefile.olefile.VT_I2, struct.pack('<h', 1252)),
+            (2, olefile.olefile.VT_LPSTR, _lpstr(u'caf\xe9', 1252)),
+            (3, olefile.olefile.VT_EMPTY, b''),
+            (4, olefile.olefile.VT_NULL, b''),
+            (5, olefile.olefile.VT_LPSTR, struct.pack('<I', 0)),
+        ]
+        stream = _build_property_set([(b'\x01' * 16, properties)])
+        ole = self._open_with_stream(stream)
+        try:
+            values = ole.getproperties(self.stream_name)
+        finally:
+            ole.close()
+
+        self.assertEqual(values[2], u'caf\xe9'.encode('cp1252'))
+        self.assertIsNone(values[3])
+        self.assertIsNone(values[4])
+        self.assertEqual(values[5], b'')
+
+    def test_utf16_codepage_is_decoded(self):
+        properties = [
+            (1, olefile.olefile.VT_I2, struct.pack('<h', 1200)),
+            (2, olefile.olefile.VT_LPSTR, _lpstr(u'caf\xe9', 1200)),
+        ]
+        stream = _build_property_set([(b'\x01' * 16, properties)])
+        ole = self._open_with_stream(stream)
+        try:
+            values = ole.getproperties(self.stream_name)
+        finally:
+            ole.close()
+
+        self.assertEqual(values[2], u'caf\xe9'.encode('utf-8'))
+
+    def test_multiple_sections_are_parsed_independently(self):
+        first = [
+            (1, olefile.olefile.VT_I2, struct.pack('<h', 1252)),
+            (2, olefile.olefile.VT_LPSTR, _lpstr('first', 1252)),
+        ]
+        second = [
+            (1, olefile.olefile.VT_I2, struct.pack('<h', 1200)),
+            (3, olefile.olefile.VT_LPSTR, _lpstr(u'second', 1200)),
+        ]
+        stream = _build_property_set([
+            (b'\x01' * 16, first),
+            (b'\x02' * 16, second),
+        ])
+        ole = self._open_with_stream(stream)
+        try:
+            values = ole.getproperties(self.stream_name)
+        finally:
+            ole.close()
+
+        self.assertEqual(values[1], 1200)
+        self.assertEqual(values[2], b'first')
+        self.assertEqual(values[3], b'second')
+
+    def test_invalid_section_offset_reports_stream(self):
+        properties = [
+            (1, olefile.olefile.VT_I2, struct.pack('<h', 1252)),
+        ]
+        stream = bytearray(_build_property_set([(b'\x01' * 16, properties)]))
+        struct.pack_into('<I', stream, 28 + 16, 0)
+        ole = self._open_with_stream(bytes(stream))
+        try:
+            with self.assertRaises(IOError) as raised:
+                ole.getproperties(self.stream_name)
+        finally:
+            ole.close()
+
+        message = str(raised.exception)
+        self.assertIn('SummaryInformation', message)
+        self.assertIn('section offset', message)
+
+    def test_unsupported_vt_type_reports_property_id(self):
+        properties = [
+            (1, olefile.olefile.VT_I2, struct.pack('<h', 1252)),
+            (2, 0xFFFF, b''),
+        ]
+        stream = _build_property_set([(b'\x01' * 16, properties)])
+        ole = self._open_with_stream(stream)
+        try:
+            with self.assertRaises(IOError) as raised:
+                ole.getproperties(self.stream_name)
+        finally:
+            ole.close()
+
+        message = str(raised.exception)
+        self.assertIn('SummaryInformation', message)
+        self.assertIn('property id 2', message)
 
 
 if __name__ == '__main__':
