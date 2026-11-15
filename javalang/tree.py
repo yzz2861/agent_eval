@@ -53,6 +53,15 @@ class InterfaceDeclaration(TypeDeclaration):
 class AnnotationDeclaration(TypeDeclaration):
     attrs = ()
 
+    @property
+    def annotation_name(self):
+        return self.name
+
+    @property
+    def elements(self):
+        return [member for member in (self.body or [])
+                if isinstance(member, AnnotationMethod)]
+
 # ------------------------------------------------------------------------------
 
 class Type(Node):
@@ -76,6 +85,15 @@ class TypeParameter(Node):
 
 class Annotation(Node):
     attrs = ("name", "element")
+
+class MarkerAnnotation(Annotation):
+    attrs = ()
+
+class SingleElementAnnotation(Annotation):
+    attrs = ()
+
+class NormalAnnotation(Annotation):
+    attrs = ()
 
 class ElementValuePair(Node):
     attrs = ("name", "value")

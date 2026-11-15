@@ -668,19 +668,47 @@ class Parser(object):
 
     @parse_debug
     def parse_annotation(self):
-        qualified_identifier = None
         annotation_element = None
 
+        start_token = self.tokens.look()
         self.accept('@')
-        qualified_identifier = self.parse_qualified_identifier()
+        annotation_name = '<unknown>'
+        try:
+            if isinstance(self.tokens.look(), Identifier):
+                annotation_name = self.parse_qualified_identifier()
+            else:
+                self.illegal("Expected annotation name")
 
-        if self.try_accept('('):
-            if not self.would_accept(')'):
-                annotation_element = self.parse_annotation_element()
-            self.accept(')')
+            if self.try_accept('('):
+                if not self.would_accept(')'):
+                    annotation_element = self.parse_annotation_element()
+                self.accept(')')
+        except JavaSyntaxError as syntax_error:
+            location = self._format_token_location(syntax_error.at)
+            syntax_error.description = (
+                "Invalid annotation '%s'%s: %s"
+                % (annotation_name, location, syntax_error.description))
+            raise
 
-        return tree.Annotation(name=qualified_identifier,
-                               element=annotation_element)
+        if annotation_element is None:
+            annotation = tree.MarkerAnnotation(name=annotation_name)
+        elif isinstance(annotation_element, list):
+            annotation = tree.NormalAnnotation(
+                name=annotation_name, element=annotation_element)
+        else:
+            annotation = tree.SingleElementAnnotation(
+                name=annotation_name, element=annotation_element)
+
+        end_position = self.tokens.last().position
+        annotation._position = start_token.position
+        annotation._end_position = end_position
+
+        return annotation
+
+    def _format_token_location(self, token):
+        if token is not None and getattr(token, 'position', None) is not None:
+            return " at line %d, column %d" % token.position
+        return ''
 
     @parse_debug
     def parse_annotation_element(self):
@@ -732,7 +760,7 @@ class Parser(object):
         self.accept('{')
 
         if self.try_accept('}'):
-            return list()
+            return tree.ElementArrayValue(values=list())
 
         element_values = self.parse_element_values()
         self.try_accept(',')

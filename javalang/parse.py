@@ -51,3 +51,9 @@ def parse(s):
     tokens = tokenize(s)
     parser = Parser(tokens)
     return parser.parse()
+
+def parse_file(path):
+    with open(path, 'r') as f:
+        source = f.read()
+
+    return parse(source)
