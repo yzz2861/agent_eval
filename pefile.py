@@ -150,6 +150,15 @@ DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_ARCHITECTURE"] = DIRECTORY_ENTRY[
     "IMAGE_DIRECTORY_ENTRY_COPYRIGHT"
 ]
 
+# WIN_CERTIFICATE constants for the security (Authenticode) directory
+WIN_CERT_REVISION_1_0 = 0x0100
+WIN_CERT_REVISION_2_0 = 0x0200
+
+WIN_CERT_TYPE_X509 = 0x0001
+WIN_CERT_TYPE_PKCS_SIGNED_DATA = 0x0002
+WIN_CERT_TYPE_RESERVED_1 = 0x0003
+WIN_CERT_TYPE_TS_STACK_SIGNED = 0x0004
+
 image_characteristics = [
     ("IMAGE_FILE_RELOCS_STRIPPED", 0x0001),
     ("IMAGE_FILE_EXECUTABLE_IMAGE", 0x0002),
@@ -718,6 +727,67 @@ def set_flags(obj, flag_field, flags):
 
 def power_of_two(val):
     return val != 0 and (val & (val - 1)) == 0
+
+
+def is_valid_file_range(data_length, offset, size):
+    """Check whether the [offset, offset + size) range lies within the data.
+
+    Shared by the parsers that read structures at absolute file offsets
+    (Rich header, security directory) so their boundary checks stay
+    consistent.
+    """
+
+    return 0 <= offset <= data_length and 0 <= size <= data_length - offset
+
+
+def parse_der_header(data, offset=0):
+    """Parse a DER TLV header at `offset`.
+
+    Returns a (header_length, content_length) tuple, or None if the header
+    is truncated or uses the indefinite-length form (not valid DER).
+    """
+
+    if offset < 0 or offset + 2 > len(data):
+        return None
+    length_byte = data[offset + 1]
+    if length_byte & 0x80:
+        num_length_bytes = length_byte & 0x7F
+        # DER forbids the indefinite form (0x80); lengths encoded in more
+        # than 4 bytes are not expected inside a certificate blob.
+        if num_length_bytes == 0 or num_length_bytes > 4:
+            return None
+        if offset + 2 + num_length_bytes > len(data):
+            return None
+        content_length = int.from_bytes(
+            data[offset + 2 : offset + 2 + num_length_bytes], "big"
+        )
+        return 2 + num_length_bytes, content_length
+    return 2, length_byte
+
+
+def is_valid_der_sequence(data):
+    """Check that `data` holds a DER SEQUENCE within its boundaries.
+
+    Validates that the data starts with a SEQUENCE whose declared length
+    fits within the available bytes and that the first nested element also
+    fits within the SEQUENCE's content. Trailing bytes after the SEQUENCE
+    (e.g. alignment padding) are allowed.
+    """
+
+    if len(data) < 2 or data[0] != 0x30:  # 0x30 = SEQUENCE
+        return False
+    outer = parse_der_header(data, 0)
+    if outer is None:
+        return False
+    header_length, content_length = outer
+    if header_length + content_length > len(data):
+        return False
+    # The first nested element must fit within the SEQUENCE's content.
+    nested = parse_der_header(data, header_length)
+    if nested is None:
+        return False
+    nested_header_length, nested_content_length = nested
+    return nested_header_length + nested_content_length <= content_length
 
 
 class AddressSet(set):
@@ -1705,6 +1775,18 @@ class DebugData(DataContainer):
     """
 
 
+class SecurityDirData(DataContainer):
+    """Holds security directory (Authenticode) information.
+
+    certificates:   list of IMAGE_WIN_CERTIFICATE structures, each with a
+                    'Certificate' attribute holding the certificate blob
+    valid:          False when the directory is present but structurally
+                    invalid (truncated, misaligned, bad lengths, ...)
+    error:          short description of the first problem found; never
+                    contains certificate data
+    """
+
+
 class DynamicRelocationData(DataContainer):
     """Holds dynamic relocation information.
 
@@ -2548,6 +2630,11 @@ class PE:
     __IMAGE_DATA_DIRECTORY_format__ = (
         "IMAGE_DATA_DIRECTORY",
         ("I,VirtualAddress", "I,Size"),
+    )
+
+    __IMAGE_WIN_CERTIFICATE_format__ = (
+        "IMAGE_WIN_CERTIFICATE",
+        ("I,Length", "H,Revision", "H,CertificateType"),
     )
 
     __IMAGE_SECTION_HEADER_format__ = (
@@ -3405,6 +3492,12 @@ class PE:
         if rich_index == -1:
             return None
 
+        # The Rich signature is always followed by the 4-byte checksum (key).
+        # Make sure both dwords lie within the file before reading them.
+        if not is_valid_file_range(len(self.__data__), rich_index, 8):
+            self.__warnings.append("Rich Header is truncated")
+            return None
+
         if sys.version_info >= (3, 10):  # noqa: UP036
             sub = bytes(x ^ y for x, y in zip(b"DanS", self.__data__[rich_index + 4 : rich_index + 8], strict=True))
         else:
@@ -3418,6 +3511,9 @@ class PE:
         if dans_index == -1:
             # 'This program cannot be run in DOS mode' default stub
             dans_index = 0x80
+        if dans_index >= rich_index:
+            # The DanS signature must precede the Rich signature.
+            return None
 
         # Read a block of data
         try:
@@ -3429,16 +3525,19 @@ class PE:
             # truncated data that is not a multiple.
             rich_data = rich_data[: 4 * (len(rich_data) // 4)]
             data = list(struct.unpack(f"<{len(rich_data) // 4}I", rich_data))
-            if RICH not in data:
+            # The Rich signature and its key are the last two dwords of the
+            # structure; anything else means the "Rich" string was found at
+            # an arbitrary offset and no key can be trusted to follow it.
+            if len(data) < 2 or data[-2] != RICH:
                 return None
         except PEFormatError:
             return None
 
         # get key, raw_data and clear_data
-        key = struct.pack("<L", data[data.index(RICH) + 1])
+        key = struct.pack("<L", data[-1])
         result = {"key": key}
 
-        raw_data = rich_data[: rich_data.find(b"Rich")]
+        raw_data = rich_data[: 4 * (len(data) - 2)]
         result["raw_data"] = raw_data
 
         def ord_(c):
@@ -3772,7 +3871,7 @@ class PE:
             ("IMAGE_DIRECTORY_ENTRY_IMPORT", self.parse_import_directory),
             ("IMAGE_DIRECTORY_ENTRY_RESOURCE", self.parse_resources_directory),
             ("IMAGE_DIRECTORY_ENTRY_EXCEPTION", self.parse_exceptions_directory),
-            # IMAGE_DIRECTORY_ENTRY_SECURITY not processed
+            ("IMAGE_DIRECTORY_ENTRY_SECURITY", self.parse_security_directory),
             ("IMAGE_DIRECTORY_ENTRY_BASERELOC", self.parse_relocations_directory),
             ("IMAGE_DIRECTORY_ENTRY_DEBUG", self.parse_debug_directory),
             # IMAGE_DIRECTORY_ENTRY_COPYRIGHT not processed
@@ -3830,6 +3929,103 @@ class PE:
                 and (entry[0] in directories)
             ):
                 directories.remove(directory_index)
+
+    def parse_security_directory(self, rva, size):
+        """Parses the security directory (Authenticode signature).
+
+        Unlike the other data directories, the VirtualAddress field of the
+        security directory entry holds a file offset rather than an RVA.
+
+        Returns a SecurityDirData instance. When the directory is present
+        but structurally invalid, the returned object has 'valid' set to
+        False and 'error' describing the problem; neither the error nor the
+        warnings ever include certificate contents.
+        """
+
+        problems = []
+
+        def invalidate(message):
+            # Record only structural details (offsets and sizes), never
+            # certificate data.
+            problems.append(message)
+            self.__warnings.append(f"Security directory is invalid: {message}")
+
+        certificates = []
+        file_offset = rva
+
+        if size < 8:
+            invalidate(
+                f"directory size ({size}) is smaller than a WIN_CERTIFICATE header"
+            )
+        elif not is_valid_file_range(len(self.__data__), file_offset, size):
+            invalidate(
+                f"directory at file offset 0x{file_offset:x} with size {size} "
+                f"extends past the end of the file ({len(self.__data__)} bytes)"
+            )
+        elif file_offset % 8:
+            invalidate(
+                f"directory file offset 0x{file_offset:x} is not 8-byte aligned"
+            )
+
+        if not problems:
+            offset = 0
+            while offset < size:
+                if offset + 8 > size:
+                    invalidate(
+                        f"{size - offset} trailing byte(s) cannot hold a "
+                        "WIN_CERTIFICATE header"
+                    )
+                    break
+
+                certificate = self.__unpack_data__(
+                    self.__IMAGE_WIN_CERTIFICATE_format__,
+                    self.__data__[file_offset + offset : file_offset + offset + 8],
+                    file_offset=file_offset + offset,
+                )
+                if certificate is None:
+                    invalidate("failed to parse WIN_CERTIFICATE header")
+                    break
+
+                length = certificate.Length
+                if length < 8:
+                    invalidate(
+                        f"certificate at directory offset {offset} declares "
+                        f"an invalid length ({length})"
+                    )
+                    break
+                if length > size - offset:
+                    invalidate(
+                        f"certificate at directory offset {offset} declares "
+                        f"length {length} exceeding the remaining directory "
+                        f"size ({size - offset})"
+                    )
+                    break
+
+                certificate.Certificate = self.__data__[
+                    file_offset + offset + 8 : file_offset + offset + length
+                ]
+
+                if certificate.CertificateType in (
+                    WIN_CERT_TYPE_X509,
+                    WIN_CERT_TYPE_PKCS_SIGNED_DATA,
+                ) and not is_valid_der_sequence(certificate.Certificate):
+                    invalidate(
+                        f"certificate at directory offset {offset} contains "
+                        "a truncated or invalid ASN.1 blob"
+                    )
+                    break
+
+                certificates.append(certificate)
+
+                # Each entry starts at an 8-byte boundary; the declared
+                # length does not include the padding.
+                offset += (length + 7) & ~7
+
+        return SecurityDirData(
+            certificates=certificates,
+            valid=not problems,
+            error=problems[0] if problems else None,
+        )
 
     def parse_exceptions_directory(self, rva, size):
         """Parses exception directory
