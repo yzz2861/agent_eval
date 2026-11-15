@@ -639,3 +639,297 @@ class DictFileIncludeTests(unittest.TestCase):
     def testIncludeMissingFile(self):
         path = self.write('dictionary', '$INCLUDE dictionary.missing\n')
         self.assertRaises(IOError, Dictionary, path)
+
+
+class IncludeSecurityTests(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+
+    def write(self, name, content):
+        path = os.path.join(self.tmpdir.name, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as fd:
+            fd.write(content)
+        return path
+
+    def testParentTraversalIncludeRejected(self):
+        outside = os.path.join(os.path.dirname(self.tmpdir.name),
+                               'outside-dictionary')
+        with open(outside, 'w') as fd:
+            fd.write('ATTRIBUTE Evil 1 string\n')
+        self.addCleanup(os.unlink, outside)
+        path = self.write('dictionary',
+                          '$INCLUDE ../outside-dictionary\n')
+        with self.assertRaises(ParseError) as cm:
+            list(DictFile(path))
+        self.assertEqual(cm.exception.file, 'dictionary')
+        self.assertEqual(cm.exception.line, 1)
+        self.assertEqual(cm.exception.scope, 'dictionary')
+        self.assertIn('outside of the dictionary directory',
+                      str(cm.exception))
+        # the error reports file and line, never the dictionary contents
+        self.assertNotIn('Evil', str(cm.exception))
+
+    def testParentTraversalFromNestedDirectoryRejected(self):
+        outside = os.path.join(os.path.dirname(self.tmpdir.name),
+                               'outside-dictionary')
+        with open(outside, 'w') as fd:
+            fd.write('ATTRIBUTE Evil 1 string\n')
+        self.addCleanup(os.unlink, outside)
+        path = self.write('dictionary', '$INCLUDE sub/inner\n')
+        self.write('sub/inner', '$INCLUDE ../../outside-dictionary\n')
+        with self.assertRaises(ParseError) as cm:
+            list(DictFile(path))
+        self.assertEqual(cm.exception.file, 'inner')
+        self.assertIn('outside of the dictionary directory',
+                      str(cm.exception))
+
+    def testAbsoluteIncludeOutsideRootRejected(self):
+        outside = os.path.join(self.tmpdir.name, 'allowed')
+        path = self.write('dictionary', '$INCLUDE %s\n' % outside)
+        self.write('allowed', 'ATTRIBUTE Ok 1 string\n')
+        self.assertEqual(len(Dictionary(path)), 1)
+        other = self.write('dictionary.abs',
+                           '$INCLUDE %s\n'
+                           % os.path.join(os.path.dirname(self.tmpdir.name),
+                                          'outside-dictionary'))
+        with open(os.path.join(os.path.dirname(self.tmpdir.name),
+                               'outside-dictionary'), 'w') as fd:
+            fd.write('ATTRIBUTE Evil 1 string\n')
+        self.addCleanup(os.unlink,
+                        os.path.join(os.path.dirname(self.tmpdir.name),
+                                     'outside-dictionary'))
+        with self.assertRaises(ParseError):
+            list(DictFile(other))
+
+    def testIncludeInsideRootAllowed(self):
+        path = self.write('dictionary', '$INCLUDE sub/inner\n')
+        self.write('sub/inner',
+                   '$INCLUDE ../sibling\nATTRIBUTE Inner 2 string\n')
+        self.write('sibling', 'ATTRIBUTE Sibling 3 string\n')
+        dict = Dictionary(path)
+        self.assertEqual(dict.attrindex['Inner'], 2)
+        self.assertEqual(dict.attrindex['Sibling'], 3)
+
+    def testSymlinkEscapingRootRejected(self):
+        target = os.path.join(os.path.dirname(self.tmpdir.name),
+                              'outside-dictionary')
+        with open(target, 'w') as fd:
+            fd.write('ATTRIBUTE Evil 1 string\n')
+        self.addCleanup(os.unlink, target)
+        os.symlink(target, os.path.join(self.tmpdir.name, 'link'))
+        path = self.write('dictionary', '$INCLUDE link\n')
+        with self.assertRaises(ParseError) as cm:
+            list(DictFile(path))
+        self.assertIn('outside of the dictionary directory',
+                      str(cm.exception))
+
+    def testIncludeDepthLimit(self):
+        self.write('d0', '$INCLUDE d1\n')
+        for index in range(1, 110):
+            self.write('d%d' % index, '$INCLUDE d%d\n' % (index + 1))
+        self.write('d110', 'ATTRIBUTE Deep 1 string\n')
+        with self.assertRaises(ParseError) as cm:
+            list(DictFile(os.path.join(self.tmpdir.name, 'd0')))
+        self.assertIn('depth limit', str(cm.exception))
+        self.assertNotEqual(cm.exception.line, -1)
+
+    def testIncludeSnapshotRecordsGraph(self):
+        path = self.write('dictionary',
+                          '$INCLUDE sub/inner\nATTRIBUTE Root 1 string\n')
+        self.write('sub/inner', 'ATTRIBUTE Inner 2 string\n')
+        dict = Dictionary(path)
+        self.assertEqual(len(dict.include_snapshots), 1)
+        snapshot = dict.include_snapshots[0]
+        root = os.path.realpath(path)
+        inner = os.path.realpath(
+            os.path.join(self.tmpdir.name, 'sub', 'inner'))
+        self.assertEqual(snapshot.files, (root, inner))
+        self.assertEqual(snapshot.included_by[root], '')
+        self.assertEqual(snapshot.included_by[inner], root)
+        self.assertEqual(snapshot.include_lines[inner], (root, 1))
+        # the snapshot is read-only
+        with self.assertRaises(TypeError):
+            snapshot.included_by[root] = 'tampered'
+        with self.assertRaises(AttributeError):
+            snapshot.files = ()
+
+    def testSnapshotIsPerReadDictionaryCall(self):
+        first = self.write('first', 'ATTRIBUTE First 1 string\n')
+        second = self.write('second', 'ATTRIBUTE Second 2 string\n')
+        dict = Dictionary(first)
+        dict.ReadDictionary(second)
+        self.assertEqual(len(dict.include_snapshots), 2)
+        self.assertEqual(len(dict.include_snapshots[0]), 1)
+        self.assertEqual(len(dict.include_snapshots[1]), 1)
+
+
+class DuplicateDefinitionTests(unittest.TestCase):
+    def testDuplicateCodeKeepsAliasAndWarns(self):
+        with self.assertLogs('pyrad', 'WARNING') as cm:
+            dict = Dictionary(StringIO(
+                'ATTRIBUTE First-Name 10 string\n'
+                'ATTRIBUTE Second-Name 10 integer\n'))
+        # both names stay usable, the later one wins the reverse lookup
+        self.assertEqual(dict['First-Name'].type, 'string')
+        self.assertEqual(dict['Second-Name'].type, 'integer')
+        self.assertEqual(dict.attrindex['First-Name'], 10)
+        self.assertEqual(dict.attrindex['Second-Name'], 10)
+        self.assertEqual(dict.attrindex.GetBackward(10), 'Second-Name')
+        self.assertIn('duplicate attribute code', cm.output[0])
+        self.assertIn('Second-Name', cm.output[0])
+        # the source of both definitions is recorded
+        self.assertEqual(dict.SourceOf('First-Name')[1], 1)
+        self.assertEqual(dict.SourceOf('Second-Name')[1], 2)
+
+    def testRedefinitionSameNameReplacesAndWarns(self):
+        with self.assertLogs('pyrad', 'WARNING') as cm:
+            dict = Dictionary(StringIO(
+                'ATTRIBUTE Same-Name 10 string\n'
+                'ATTRIBUTE Same-Name 11 octets\n'))
+        self.assertEqual(dict['Same-Name'].type, 'octets')
+        self.assertEqual(dict.attrindex['Same-Name'], 11)
+        self.assertFalse(dict.attrindex.HasBackward(10))
+        self.assertEqual(dict.SourceOf('Same-Name')[1], 2)
+        self.assertIn('duplicate attribute', cm.output[0])
+
+    def testRedefinedTlvDropsOldSubAttributes(self):
+        with self.assertLogs('pyrad', 'WARNING'):
+            dict = Dictionary(StringIO(
+                'ATTRIBUTE Parent 7 tlv\n'
+                'ATTRIBUTE Parent-Str 7.1 string\n'
+                'ATTRIBUTE Parent 7 octets\n'))
+        self.assertEqual(dict['Parent'].type, 'octets')
+        self.assertNotIn('Parent-Str', dict)
+        self.assertFalse(dict.attrindex.HasBackward((7, 1)))
+
+    def testSubAttributeCodeOverride(self):
+        with self.assertLogs('pyrad', 'WARNING'):
+            dict = Dictionary(StringIO(
+                'ATTRIBUTE Parent 7 tlv\n'
+                'ATTRIBUTE Old-Sub 7.1 string\n'
+                'ATTRIBUTE New-Sub 7.1 integer\n'))
+        self.assertEqual(dict['Old-Sub'].type, 'string')
+        self.assertEqual(dict['New-Sub'].type, 'integer')
+        self.assertIs(dict['New-Sub'].parent, dict['Parent'])
+        self.assertEqual(dict['Parent'].sub_attributes[1], 'New-Sub')
+        self.assertEqual(dict.attrindex.GetBackward((7, 1)), 'New-Sub')
+
+    def testTlvAliasSharesSubAttributes(self):
+        with self.assertLogs('pyrad', 'WARNING'):
+            dict = Dictionary(StringIO(
+                'ATTRIBUTE Tlv-One 7 tlv\n'
+                'ATTRIBUTE Tlv-Sub 7.1 string\n'
+                'ATTRIBUTE Tlv-Two 7 tlv\n'))
+        self.assertEqual(dict['Tlv-One'].sub_attributes,
+                         {1: 'Tlv-Sub'})
+        self.assertIs(dict['Tlv-Two'].sub_attributes,
+                      dict['Tlv-One'].sub_attributes)
+        self.assertIs(dict['Tlv-Sub'].parent, dict['Tlv-One'])
+        self.assertEqual(dict.attrindex.GetBackward(7), 'Tlv-Two')
+
+
+    def testDuplicateWarningDoesNotEchoDictionary(self):
+        with self.assertLogs('pyrad', 'WARNING') as cm:
+            Dictionary(StringIO(
+                'ATTRIBUTE Secret-Attr 1 string\n'
+                'ATTRIBUTE Other-Attr 1 string\n'))
+        self.assertNotIn('ATTRIBUTE', cm.output[0])
+
+
+class ScopeConsistencyTests(unittest.TestCase):
+    def testSubAttributeOfTlvOfOtherVendorRejected(self):
+        dict = Dictionary(StringIO(
+            'VENDOR Vendor-A 100\n'
+            'VENDOR Vendor-B 200\n'
+            'BEGIN-VENDOR Vendor-A\n'
+            'ATTRIBUTE A-Tlv 5 tlv\n'
+            'END-VENDOR Vendor-A\n'))
+        with self.assertRaises(ParseError) as cm:
+            dict.ReadDictionary(StringIO(
+                'BEGIN-VENDOR Vendor-B\n'
+                'ATTRIBUTE B-Sub 5.1 string\n'
+                'END-VENDOR Vendor-B\n'))
+        self.assertEqual(cm.exception.line, 2)
+        self.assertEqual(cm.exception.scope, 'Vendor-B')
+        self.assertIn('unknown TLV 5', str(cm.exception))
+
+    def testVendorTlvSubAttributeOutsideVendorRejected(self):
+        dict = Dictionary(StringIO(
+            'VENDOR Vendor-A 100\n'
+            'BEGIN-VENDOR Vendor-A\n'
+            'ATTRIBUTE A-Tlv 5 tlv\n'
+            'END-VENDOR Vendor-A\n'))
+        with self.assertRaises(ParseError) as cm:
+            dict.ReadDictionary(StringIO(
+                'ATTRIBUTE Std-Sub 5.1 string\n'))
+        self.assertEqual(cm.exception.scope, '')
+        self.assertIn('unknown TLV 5', str(cm.exception))
+
+    def testSubAttributeOfStandardTlvFromVendorRejected(self):
+        dict = Dictionary(StringIO('ATTRIBUTE Std-Tlv 5 tlv\n'))
+        with self.assertRaises(ParseError) as cm:
+            dict.ReadDictionary(StringIO(
+                'VENDOR Vendor-A 100\n'
+                'BEGIN-VENDOR Vendor-A\n'
+                'ATTRIBUTE A-Sub 5.1 string\n'
+                'END-VENDOR Vendor-A\n'))
+        self.assertIn('unknown TLV 5', str(cm.exception))
+
+    def testMissingParentTlvReportsScope(self):
+        with self.assertRaises(ParseError) as cm:
+            Dictionary(StringIO('ATTRIBUTE Orphan 99.1 string\n'))
+        self.assertEqual(cm.exception.line, 1)
+        self.assertEqual(cm.exception.scope, '')
+        self.assertIn('unknown TLV 99', str(cm.exception))
+
+    def testValidVendorTlvStillParses(self):
+        dict = Dictionary(StringIO(
+            'VENDOR Vendor-A 100\n'
+            'BEGIN-VENDOR Vendor-A\n'
+            'ATTRIBUTE A-Tlv 5 tlv\n'
+            'ATTRIBUTE A-Sub 5.1 string\n'
+            'END-VENDOR Vendor-A\n'))
+        self.assertIs(dict['A-Sub'].parent, dict['A-Tlv'])
+        self.assertEqual(dict['A-Tlv'].sub_attributes, {1: 'A-Sub'})
+        self.assertEqual(dict.SourceOf('A-Sub')[2], 'Vendor-A')
+
+    def testParseErrorCarriesScopeName(self):
+        with self.assertRaises(ParseError) as cm:
+            Dictionary(StringIO(
+                'VENDOR Vendor-A 100\n'
+                'BEGIN-VENDOR Vendor-A\n'
+                'ATTRIBUTE Bad 1 not-a-type\n'
+                'END-VENDOR Vendor-A\n'))
+        self.assertEqual(cm.exception.scope, 'Vendor-A')
+        self.assertEqual(cm.exception.line, 3)
+        self.assertNotIn('not-a-type\n', str(cm.exception))
+
+
+class DefinitionSourceTests(unittest.TestCase):
+    def testSourceFromFiles(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = os.path.join(tmpdir, 'dictionary')
+            inc = os.path.join(tmpdir, 'included')
+            with open(inc, 'w') as fd:
+                fd.write('VENDOR Simplon 42\n')
+            with open(root, 'w') as fd:
+                fd.write('$INCLUDE included\n'
+                         'ATTRIBUTE Root-Attr 1 string\n')
+            dict = Dictionary(root)
+            self.assertEqual(dict.SourceOf('Simplon'),
+                             ('included', 1, 'included'))
+            self.assertEqual(dict.SourceOf('Root-Attr'),
+                             ('dictionary', 2, 'dictionary'))
+
+    def testSourceFromFileLikeObject(self):
+        dict = Dictionary(StringIO('ATTRIBUTE Attr 1 string\n'))
+        file, line, scope = dict.SourceOf('Attr')
+        self.assertEqual(file, '')
+        self.assertEqual(line, 1)
+        self.assertEqual(scope, '')
+
+    def testSourceOfUnknownName(self):
+        dict = Dictionary(StringIO(''))
+        self.assertIsNone(dict.SourceOf('Unknown'))

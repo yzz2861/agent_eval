@@ -36,7 +36,13 @@ The commands supported are:
 ``$INCLUDE <filename>``
   Read another dictionary file. A relative file name is relative to the
   directory of the current file, or to the current working directory if
-  the dictionary is read from a file-like object.
+  the dictionary is read from a file-like object. Include targets are
+  normalized and confined to the directory of the root file: a path that
+  escapes it (including with ``..`` or a symlink), a recursive include
+  or an include chain deeper than
+  :data:`pyrad.dictfile.MAX_INCLUDE_DEPTH` raises a ``ParseError``.
+  The visited files are recorded in the read-only include snapshots of
+  the dictionary.
 
 ``$INCLUDE- <filename>``
   Like ``$INCLUDE``, but a file that doesn't exist is ignored.
@@ -175,8 +181,9 @@ ATTRIBUTE_FLAGS = frozenset(['has_tag', 'encrypt', 'secret', 'array',
 class ParseError(Exception):
     """A dictionary file can't be parsed.
 
-    Raised for syntax errors and recursive includes. Note that it is not a
-    subclass of :exc:`ValueError`.
+    Raised for syntax errors, recursive includes and includes outside of
+    the dictionary directory. Note that it is not a subclass of
+    :exc:`ValueError`.
 
     :ivar msg: error message
     :vartype msg: str
@@ -184,12 +191,16 @@ class ParseError(Exception):
     :vartype file: str
     :ivar line: line number on which the error occurred, or -1
     :vartype line: int
+    :ivar scope: name of the scope (the current dictionary file) in which
+        the error occurred, or ``''``
+    :vartype scope: str
     """
 
     def __init__(self, msg=None, **data):
         self.msg = msg
         self.file = data.get('file', '')
         self.line = data.get('line', -1)
+        self.scope = data.get('scope', '')
 
     def __str__(self):
         str = ''
@@ -197,7 +208,11 @@ class ParseError(Exception):
             str += self.file
         if self.line > -1:
             str += '(%d)' % self.line
-        if self.file or self.line > -1:
+        if self.scope and self.scope != self.file:
+            if self.file or self.line > -1:
+                str += ' '
+            str += '[scope %s]' % self.scope
+        if self.file or self.line > -1 or self.scope:
             str += ': '
         str += 'Parse error'
         if self.msg:
@@ -276,6 +291,13 @@ class Dictionary:
         because pyrad does not support them; using them raises a
         :exc:`KeyError`
     :vartype skipped_attributes: set[str]
+    :ivar definition_sources: ``(file, line, scope)`` a vendor or attribute
+        was defined at, keyed by its name; the file is ``''`` for a
+        dictionary read from a file-like object
+    :vartype definition_sources: dict[str, tuple[str, int, str]]
+    :ivar include_snapshots: read-only snapshots of the files visited by
+        the :meth:`ReadDictionary` calls, oldest first
+    :vartype include_snapshots: list[pyrad.dictfile.IncludeSnapshot]
     """
 
     def __init__(self, dict=None, *dicts):
@@ -299,6 +321,12 @@ class Dictionary:
         # (vendor code, attribute code) of skipped top-level attributes,
         # whose sub-attributes are skipped as well
         self._skipped_codes = set()
+        # vendor owning each TLV by (vendor code, attribute code)
+        self._tlv_owner = {}
+        # definition location (file, line, scope) by attribute/vendor name
+        self.definition_sources = {}
+        # read-only snapshots of the include graph of each parsed file
+        self.include_snapshots = []
 
         if dict:
             self.ReadDictionary(dict)
@@ -317,6 +345,42 @@ class Dictionary:
 
     has_key = __contains__
 
+    def __DefinitionSource(self, state):
+        """Return the (file, line, scope) of the current definition."""
+        return (state['file'], state['line'], state['scope'])
+
+    def __WarnDuplicate(self, state, what, name, previous):
+        """Report a same-scope duplicate kept for FreeRADIUS compatibility.
+
+        Later definitions win, as in previous pyrad releases; the warning
+        and the recorded source make the override auditable. File contents
+        are never logged.
+        """
+        logger.warning(
+            '%s(%d): duplicate %s %r in scope %r overrides the definition '
+            'from %s(%d)',
+            state['file'], state['line'], what, name, state['scope'],
+            previous[0] or '<input>', previous[1])
+
+    def __CheckParent(self, state, parent, vendor):
+        """Validate that a sub-attribute TLV exists in its vendor scope.
+
+        TLVs are keyed by vendor, so a TLV defined under another vendor (or
+        in the standard scope) does not exist here: the sub-attribute is
+        rejected instead of being attached to the wrong parent.
+        """
+        owner = self._tlv_owner.get(
+            (self.vendors.GetForward(vendor), parent.code))
+        if owner is None or owner != self.vendors.GetForward(vendor):
+            if vendor:
+                msg = ('Sub-attribute of TLV %d defined by another vendor'
+                       % parent.code)
+            else:
+                msg = ('Sub-attribute of vendor TLV %d outside of a '
+                       'vendor scope' % parent.code)
+            raise ParseError(msg, file=state['file'], line=state['line'],
+                             scope=state['scope'])
+
     def __SkipAttribute(self, state, name, reason):
         self.skipped_attributes.add(name)
         state['skipped'].append(reason)
@@ -328,7 +392,7 @@ class Dictionary:
             raise ParseError(
                 'Incorrect number of tokens for attribute definition',
                 file=state['file'],
-                line=state['line'])
+                line=state['line'], scope=state['scope'])
 
         vendor = state['vendor']
         has_tag = False
@@ -350,7 +414,7 @@ class Dictionary:
             elif not is_flags:
                 raise ParseError('Unknown vendor ' + tokens[4],
                                  file=state['file'],
-                                 line=state['line'])
+                                 line=state['line'], scope=state['scope'])
             for (key, val) in options if is_flags else []:
                 if key == 'has_tag':
                     has_tag = True
@@ -359,7 +423,7 @@ class Dictionary:
                         raise ParseError(
                                 'Illegal attribute encryption: %s' % val,
                                 file=state['file'],
-                                line=state['line'])
+                                line=state['line'], scope=state['scope'])
                     encrypt = int(val)
                 elif key == 'array':
                     array = True
@@ -381,7 +445,7 @@ class Dictionary:
         except ValueError:
             raise ParseError('Illegal attribute code: ' + code,
                              file=state['file'],
-                             line=state['line'])
+                             line=state['line'], scope=state['scope'])
         codes = tmp
 
         datatype = datatype.split("[")[0]
@@ -389,7 +453,7 @@ class Dictionary:
         if datatype not in DATATYPES and datatype not in UNSUPPORTED_DATATYPES:
             raise ParseError('Illegal type: ' + datatype,
                              file=state['file'],
-                             line=state['line'])
+                             line=state['line'], scope=state['scope'])
 
         vendor_code = self.vendors.GetForward(vendor)
         if len(codes) > 1 and (vendor_code, codes[0]) in self._skipped_codes:
@@ -404,11 +468,13 @@ class Dictionary:
             if len(codes) == 1:
                 self._skipped_codes.add((vendor_code, codes[0]))
                 self._tlvs.pop((vendor_code, codes[0]), None)
+                self.definition_sources.pop(attribute, None)
             return self.__SkipAttribute(state, attribute,
                                         'data type ' + datatype)
         if array:
             return self.__SkipAttribute(state, attribute, 'array flag')
-        if len(codes) > 2 or (len(codes) == 2 and datatype == 'tlv'):
+        if (len(codes) > 2
+                or (len(codes) == 2 and datatype == 'tlv')):
             return self.__SkipAttribute(state, attribute, 'nested TLV')
 
         is_sub_attribute = (len(codes) > 1)
@@ -420,8 +486,9 @@ class Dictionary:
                 raise ParseError(
                     'Sub-attribute %s of unknown TLV %d' % (attribute,
                                                             parent_code),
-                    file=state['file'],
-                    line=state['line'])
+                    file=state['file'], line=state['line'],
+                    scope=state['scope'])
+            self.__CheckParent(state, parent, vendor)
         else:
             code = int(codes[0])
             parent_code = None
@@ -437,26 +504,88 @@ class Dictionary:
             else:
                 key = code
 
+        old_parent = None
+        old_name = None
+        if is_sub_attribute:
+            old_name = parent.sub_attributes.get(code)
+        elif self.attrindex.HasBackward(key):
+            old_name = self.attrindex.GetBackward(key)
+        if (old_name is not None and old_name != attribute
+                and old_name in self.attributes):
+            # Another name already maps to this code in this scope. For
+            # FreeRADIUS compatibility (aliases) the old attribute object
+            # stays reachable by name; the new name wins the reverse
+            # lookup. The override is warned about and its source recorded.
+            self.__WarnDuplicate(
+                state, 'attribute code', attribute,
+                self.definition_sources.get(
+                    old_name, (state['file'], state['line'],
+                               state['scope'])))
+            old = self.attributes[old_name]
+            if is_sub_attribute:
+                old_parent = old.parent
+            self.attrindex.backward.pop(key, None)
+        elif attribute in self.attributes:
+            # the same name is redefined: the later definition replaces it
+            self.__WarnDuplicate(
+                state, 'attribute', attribute,
+                self.definition_sources.get(
+                    attribute, (state['file'], state['line'],
+                                state['scope'])))
+            if self.attributes[attribute].is_sub_attribute:
+                old_parent = self.attributes[attribute].parent
+            del self.attrindex[attribute]
+
         self.attrindex.Add(attribute, key)
-        self.attributes[attribute] = Attribute(attribute, code, datatype, is_sub_attribute, vendor, encrypt=encrypt, has_tag=has_tag)
+        self.attributes[attribute] = Attribute(
+            attribute, code, datatype, is_sub_attribute, vendor,
+            encrypt=encrypt, has_tag=has_tag)
+        self.definition_sources[attribute] = self.__DefinitionSource(state)
         if is_sub_attribute:
             # save sub attribute in parent tlv and update their parent field
+            if old_parent is not None and old_parent is not parent:
+                old_parent.sub_attributes.pop(
+                    self.attributes[attribute].code, None)
             parent.sub_attributes[code] = attribute
             self.attributes[attribute].parent = parent
         else:
             # a (re)defined top-level attribute replaces a skipped attribute
-            # or TLV with the same code
+            # or TLV with the same code; drop the sub-attributes of a TLV
+            # that ceases to be one or that is redefined from scratch
+            old_tlv = self._tlvs.get((vendor_code, code))
+            if old_tlv is not None:
+                same_name_redefine = self.attributes[attribute] is old_tlv
+                tlv_aliased = (
+                    datatype == 'tlv' and not same_name_redefine
+                    and old_name is not None and old_name != attribute)
+                if not same_name_redefine and not tlv_aliased:
+                    # the code stops being a TLV, or the same TLV name is
+                    # redefined from scratch: its old sub-attributes vanish
+                    for sub_name in list(old_tlv.sub_attributes.values()):
+                        sub_key = self.attrindex.forward.pop(sub_name, None)
+                        if sub_key is not None:
+                            self.attrindex.backward.pop(sub_key, None)
+                        self.attributes.pop(sub_name, None)
+                        self.definition_sources.pop(sub_name, None)
+                    old_tlv.sub_attributes.clear()
+                elif tlv_aliased:
+                    # a second TLV name for the same code shares the
+                    # existing TLV and its sub-attributes
+                    self.attributes[attribute].sub_attributes = (
+                        old_tlv.sub_attributes)
             self._skipped_codes.discard((vendor_code, code))
             if datatype == 'tlv':
                 self._tlvs[(vendor_code, code)] = self.attributes[attribute]
+                self._tlv_owner[(vendor_code, code)] = vendor_code
             else:
                 self._tlvs.pop((vendor_code, code), None)
+                self._tlv_owner.pop((vendor_code, code), None)
 
     def __ParseValue(self, state, tokens, defer):
         if len(tokens) != 4:
             raise ParseError('Incorrect number of tokens for value definition',
                              file=state['file'],
-                             line=state['line'])
+                             line=state['line'], scope=state['scope'])
 
         (attr, key, value) = tokens[1:]
 
@@ -484,7 +613,7 @@ class Dictionary:
             raise ParseError('Illegal value %s for attribute %s: %s'
                              % (tokens[3], attr, e),
                              file=state['file'],
-                             line=state['line'])
+                             line=state['line'], scope=state['scope'])
         self.attributes[attr].values.Add(key, value)
 
     def __ParseVendor(self, state, tokens):
@@ -492,7 +621,7 @@ class Dictionary:
             raise ParseError(
                     'Incorrect number of tokens for vendor definition',
                     file=state['file'],
-                    line=state['line'])
+                    line=state['line'], scope=state['scope'])
 
         (vendorname, vendor) = tokens[1:3]
 
@@ -505,7 +634,7 @@ class Dictionary:
                 raise ParseError(
                         "Unknown option '%s' for vendor definition" % (fmt[0]),
                         file=state['file'],
-                        line=state['line'])
+                        line=state['line'], scope=state['scope'])
             try:
                 fmtargs = fmt[1].split(',')
                 # ",c": WiMAX continuation octet
@@ -517,12 +646,12 @@ class Dictionary:
                 raise ParseError(
                         'Syntax error in vendor specification',
                         file=state['file'],
-                        line=state['line'])
+                        line=state['line'], scope=state['scope'])
             if token not in [1, 2, 4] or length not in [0, 1, 2]:
                 raise ParseError(
                     'Unknown vendor format specification %s' % (fmt[1]),
                     file=state['file'],
-                    line=state['line'])
+                    line=state['line'], scope=state['scope'])
             if (token, length, continuation) != (1, 1, False):
                 self._unsupported_vendors.add(vendorname)
             else:
@@ -533,15 +662,16 @@ class Dictionary:
         except ValueError:
             raise ParseError('Illegal vendor code: ' + vendor,
                              file=state['file'],
-                             line=state['line'])
+                             line=state['line'], scope=state['scope'])
         self.vendors.Add(vendorname, vendor_code)
+        self.definition_sources[vendorname] = self.__DefinitionSource(state)
 
     def __ParseBeginVendor(self, state, tokens):
         if len(tokens) not in [2, 3]:
             raise ParseError(
                     'Incorrect number of tokens for begin-vendor statement',
                     file=state['file'],
-                    line=state['line'])
+                    line=state['line'], scope=state['scope'])
 
         # BEGIN-VENDOR <vendor> format=<Extended-Vendor-Specific attribute>
         # defines extended vendor-specific attributes (RFC 6929), which are
@@ -553,7 +683,7 @@ class Dictionary:
                         "Unknown option '%s' for begin-vendor statement" %
                         tokens[2],
                         file=state['file'],
-                        line=state['line'])
+                        line=state['line'], scope=state['scope'])
             vendor_format = tokens[2][len('format='):]
 
         vendor = tokens[1]
@@ -562,7 +692,7 @@ class Dictionary:
             raise ParseError(
                     'Unknown vendor %s in begin-vendor statement' % vendor,
                     file=state['file'],
-                    line=state['line'])
+                    line=state['line'], scope=state['scope'])
 
         state['vendor'] = vendor
         state['vendor_format'] = vendor_format
@@ -572,7 +702,7 @@ class Dictionary:
             raise ParseError(
                 'Incorrect number of tokens for end-vendor statement',
                 file=state['file'],
-                line=state['line'])
+                line=state['line'], scope=state['scope'])
 
         vendor = tokens[1]
 
@@ -580,25 +710,47 @@ class Dictionary:
             raise ParseError(
                     'Ending non-open vendor ' + vendor,
                     file=state['file'],
-                    line=state['line'])
+                    line=state['line'], scope=state['scope'])
         state['vendor'] = ''
         state['vendor_format'] = None
+
+    def SourceOf(self, name):
+        """Return where an attribute or vendor was defined.
+
+        :param name: an attribute or vendor name
+        :type name: str
+        :return: (file, line, scope) of its current definition, the
+            file being '' for a dictionary read from a file-like
+            object, or None for an unknown name
+        :rtype: tuple[str, int, str] or None
+        """
+        return self.definition_sources.get(name)
 
     def ReadDictionary(self, file):
         """Read a dictionary file.
 
         Its definitions are merged into the dictionary; later definitions
-        replace earlier ones. Unsupported attributes are skipped, listed in
-        ``skipped_attributes``, and reported with one warning on the
-        ``pyrad`` logger.
+        replace earlier ones. A redefinition of an attribute name replaces
+        it, while several names aliasing the same code in one scope are all
+        kept for FreeRADIUS compatibility; both cases log a warning, and
+        the definition location of every attribute and vendor is recorded
+        in ``definition_sources``. Unsupported attributes are skipped,
+        listed in ``skipped_attributes``, and reported with one warning
+        on the ``pyrad`` logger. A read-only snapshot of the include
+        graph is appended to ``include_snapshots``.
 
         :param file: path of a dictionary file or a file-like object
         :type  file: str or io.TextIOBase
-        :raises ParseError: for a syntax error or a recursive include
+        :raises ParseError: for a syntax error, a recursive or too deep
+            include, an include outside of the dictionary directory, an
+            unknown or cross-vendor TLV parent
         :raises OSError: if a file can't be opened
         """
 
         fil = dictfile.DictFile(file)
+        # walk the whole include graph first so the audit snapshot exists
+        # even if the parse of its lines fails afterwards
+        self.include_snapshots.append(fil.BuildSnapshot())
 
         state = {}
         state['vendor'] = ''
@@ -608,6 +760,8 @@ class Dictionary:
         for line in fil:
             state['file'] = fil.File()
             state['line'] = fil.Line()
+            # the scope is the active vendor block inside the current file
+            state['scope'] = state['vendor'] or fil.Scope()
             line = line.split('#', 1)[0].strip()
 
             tokens = line.split()

@@ -3,6 +3,28 @@ Changelog
 
 Unreleased
 ----------
+* Dictionary parsing hardening and auditability:
+
+  * ``$INCLUDE`` targets are normalized with ``realpath`` and confined
+    to the directory of the root dictionary; an include that escapes it,
+    including ``..`` traversal or a symlink, raises ``ParseError``.
+    Nested includes are additionally limited by
+    ``pyrad.dictfile.MAX_INCLUDE_DEPTH`` (100).
+  * ``DictFile`` records every visited file in a read-only
+    ``IncludeSnapshot`` (path, including file and directive line),
+    exposed as ``Dictionary.include_snapshots``.
+  * ``Dictionary.definition_sources`` and ``Dictionary.SourceOf()``
+    record the ``(file, line, scope)`` where every attribute and vendor
+    is defined; ``ParseError`` carries a ``scope`` and, when it
+    differs from the file, prints it. Dictionary contents are never logged
+    or echoed in errors.
+  * Same-name redefinitions still replace the earlier definition and
+    same-code aliases are still kept for FreeRADIUS compatibility; both
+    now log a warning with the location of the overridden definition.
+  * A TLV sub-attribute whose parent TLV does not exist in its vendor
+    scope (an unknown TLV or one defined under another vendor) is
+    rejected with a ``ParseError`` instead of being attached to the
+    wrong parent.
 
 * pyrad no longer depends on netaddr; it was only used by the tests and
   is now in the ``test`` dependency group. ipv6prefix values given as

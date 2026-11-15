@@ -41,6 +41,18 @@ pyrad cannot encode, such as the RFC 6929 extended attributes, are skipped
 with a warning and listed in ``Dictionary.skipped_attributes``; see
 :mod:`pyrad.dictionary` for the data types.
 
+The include graph of every parsed dictionary is auditable. Include
+targets are normalized and confined to the directory of the root
+dictionary, so a relative path containing ``..`` (or a symlink) that
+escapes it, a recursive include or a chain deeper than
+:data:`pyrad.dictfile.MAX_INCLUDE_DEPTH` fails with a
+:class:`~pyrad.dictionary.ParseError`. The visited files are kept as
+read-only snapshots in ``Dictionary.include_snapshots``, and
+``Dictionary.SourceOf(name)`` returns the ``(file, line, scope)``
+where an attribute or vendor is defined. Redefinitions follow a
+last-definition-wins rule and are reported on the ``pyrad`` logger;
+dictionary contents are never echoed in errors or log messages.
+
 The dictionary has to define every attribute that you want to use by
 name. Attributes which are not defined can still be sent and received
 as raw values (see `Attributes`_).
