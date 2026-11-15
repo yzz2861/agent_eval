@@ -11,6 +11,14 @@ Unreleased
 * The sdist and the wheel include the test dictionaries of
   ``pyrad/tests/data``, so the bundled tests run from an installed package
   or an unpacked sdist.
+* Proxy associates replies with an unpredictable Proxy-State value and
+  the client address and port, Identifier, Request Authenticator, home
+  server and send time instead of the Identifier alone. Requests are
+  re-signed with the home server secret. Replies need a valid Response
+  Authenticator, a Message-Authenticator must verify when present, and
+  Access- and Status-Server replies require one. The client Proxy-State
+  attributes are restored byte for byte. Duplicate states, proxy loops
+  and expired sessions are dropped.
 
 2.6.0 - Oct 18, 2026
 --------------------

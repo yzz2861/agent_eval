@@ -5,6 +5,7 @@
 import ipaddress
 import select
 import socket
+import time
 from pyrad import host
 from pyrad import packet
 import logging
@@ -444,7 +445,22 @@ class Server(host.Host):
             raise packet.PacketError('%s: %s' % (type(err).__name__, err))
         pkt.source = source
         pkt.fd = fd
+        pkt.received_at = time.monotonic()
+        self._AssociatePacket(pkt, fd)
         return pkt
+
+    def _AssociatePacket(self, pkt, fd):
+        """Attach server-specific association state to a received packet.
+
+        The default server has no association state. :class:`pyrad.proxy.Proxy`
+        overrides this to attach the matching proxy session to replies.
+
+        :param pkt: decoded packet, with ``source``, ``fd`` and
+            ``received_at`` set
+        :type  pkt: pyrad.packet.Packet
+        :param fd: socket the packet was received on
+        :type  fd: socket.socket
+        """
 
     def _PrepareSockets(self):
         """Prepare all sockets to receive packets."""

@@ -7,3 +7,6 @@
     :members:
     :private-members: _HandleProxyPacket
     :show-inheritance:
+
+  .. autoclass:: ProxySession
+    :members:

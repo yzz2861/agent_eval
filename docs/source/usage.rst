@@ -418,9 +418,22 @@ Proxy and Twisted
 =================
 
 :class:`~pyrad.proxy.Proxy` is a :class:`~pyrad.server.Server` with an
-additional socket to forward requests to other RADIUS servers. Their
-replies are passed to :meth:`~pyrad.proxy.Proxy._HandleProxyPacket`,
-which a subclass overrides to answer the client.
+additional socket to forward requests to other RADIUS servers. In a
+packet handler call :meth:`~pyrad.proxy.Proxy.ForwardRequest` with the
+received request and a home server from ``hosts``. The proxy appends an
+unpredictable Proxy-State value, re-signs the request with the home
+server secret and stores the client address and port, Identifier,
+Request Authenticator, home server and send time in a proxy session.
+
+Replies are matched by that session, not by the Identifier alone. The
+Response Authenticator and (for Access- and Status-Server) the
+Message-Authenticator must be valid for the home server secret. The
+client Proxy-State attributes are restored byte for byte, the reply is
+signed with the client secret and sent by the default
+:meth:`~pyrad.proxy.Proxy.HandleProxyPacket`. A subclass may override
+that method to inspect the verified reply instead. Duplicate
+Proxy-State values, proxy loops, expired sessions and replies from
+another home server are dropped.
 
 :mod:`pyrad.curved` provides the Twisted protocols
 :class:`~pyrad.curved.RADIUSAccess` and
