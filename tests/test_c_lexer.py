@@ -125,6 +125,22 @@ class TestCLexerNoErrors(unittest.TestCase):
         # - is MINUS, the rest a constnant
         self.assertTokensTypes("-1", ["MINUS", "INT_CONST_DEC"])
 
+    def test_integer_base_boundaries(self):
+        self.assertTokensTypes("0", ["INT_CONST_OCT"])
+        self.assertTokensTypes("00", ["INT_CONST_OCT"])
+        self.assertTokensTypes("0x0", ["INT_CONST_HEX"])
+        self.assertTokensTypes("0XABCDEF", ["INT_CONST_HEX"])
+        self.assertTokensTypes("0b0 0b1", ["INT_CONST_BIN", "INT_CONST_BIN"])
+
+        # A base prefix with no digits: the 0 is an octal constant and the
+        # rest lexes as an identifier.
+        self.assertTokensTypes("0x", ["INT_CONST_OCT", "ID"])
+        self.assertTokensTypes("0xZ", ["INT_CONST_OCT", "ID"])
+        self.assertTokensTypes("0b", ["INT_CONST_OCT", "ID"])
+        self.assertTokensTypes("0x1G", ["INT_CONST_HEX", "ID"])
+        self.assertTokensTypes("0b102", ["INT_CONST_BIN", "INT_CONST_DEC"])
+        self.assertTokensTypes("0x'1'", ["INT_CONST_OCT", "ID", "CHAR_CONST"])
+
     def test_integer_digit_separators(self):
         self.assertTokensTypes("1'000'000", ["INT_CONST_DEC"])
         self.assertTokensTypes("0'7'7", ["INT_CONST_OCT"])
@@ -400,6 +416,17 @@ class TestCLexerNoErrors(unittest.TestCase):
         self.assertTokensTypes(
             r"'\u' '\U' '\u123'", ["CHAR_CONST", "CHAR_CONST", "INT_CONST_CHAR"]
         )
+
+    def test_char_escape_boundaries(self):
+        # \x not followed by a hexadecimal digit is a simple escape.
+        self.assertTokensTypes(r"'\x'", ["CHAR_CONST"])
+        self.assertTokensTypes(r"'\xG'", ["INT_CONST_CHAR"])
+        # A hexadecimal escape consumes the whole run of hex digits.
+        self.assertTokensTypes(r"'\x2f12'", ["CHAR_CONST"])
+        # Incomplete universal character names are simple escapes; the
+        # following digits are separate c-chars.
+        self.assertTokensTypes(r"'\u00e'", ["INT_CONST_CHAR"])
+        self.assertTokensTypes(r"'\U0001F6000'", ["INT_CONST_CHAR"])
 
     def test_string_literal(self):
         self.assertTokensTypes('"a string"', ["STRING_LITERAL"])
@@ -714,6 +741,7 @@ class TestCLexerNoErrors(unittest.TestCase):
 ERR_ILLEGAL_CHAR = "Illegal character"
 ERR_OCTAL = "Invalid octal constant"
 ERR_UNMATCHED_QUOTE = "Unmatched '"
+ERR_UNMATCHED_STRING = 'Unmatched "'
 ERR_INVALID_CCONST = "Invalid char constant"
 ERR_STRING_ESCAPE = "String contains invalid escape"
 
@@ -766,6 +794,17 @@ class TestCLexerErrors(unittest.TestCase):
         self.assertLexerError("0'8", ERR_OCTAL)
         self.assertLexerError("0'7'9", ERR_OCTAL)
 
+    def test_integer_base_boundary_errors(self):
+        self.assertLexerError("08", ERR_OCTAL)
+        self.assertLexerError("018", ERR_OCTAL)
+        self.assertLexerError("09ul", ERR_OCTAL)
+        self.assertLexerError("00'8", ERR_OCTAL)
+
+    def test_char_escape_boundary_errors(self):
+        # Seven hex digits after \U do not form a universal character name;
+        # the constant ends up with more than four c-chars.
+        self.assertLexerError(r"'\U0001F60'", ERR_INVALID_CCONST)
+
     def test_char_constants(self):
         self.assertLexerError("'", ERR_UNMATCHED_QUOTE)
         self.assertLexerError("'b\n", ERR_UNMATCHED_QUOTE)
@@ -798,14 +837,15 @@ class TestCLexerErrors(unittest.TestCase):
             r'"\xf1\x23\xf1\x23\xf1\x23\xf1\x23\xf1\x23\xf1\x23\xf1\x23\xf1\x23\xf1\x23\x23\`\xf1\x23\xf1\x23\xf1\x23\xf1\x23\xf1\x23\xf1\x23\xf1\x23\xf1\x23\xf1\x23\xf1\x23"',
             ERR_STRING_ESCAPE,
         )
-        # Should not suffer from slow backtracking when there's no end quote
+        # Should not suffer from slow backtracking when there's no end quote;
+        # the unterminated literal is consumed up to the end of the line.
         self.assertLexerError(
             r'"\123\123\123\123\123\123\123\123\123\123\123\123\123\123\123\`\123\123\123\123\123\123\123\123\123\123\123\123\123\123\123\123\123\123\12\123456',
-            ERR_ILLEGAL_CHAR,
+            ERR_UNMATCHED_STRING,
         )
         self.assertLexerError(
             r'"\x23\x23\x23\x23\x23\x23\x23\x23\x23\x23\x23\x23\x23\x23\x23\`\x23\x23\x23\x23\x23\x23\x23\x23\x23\x23\x23\x23\x23\x23\x23\x23\x23\x23\x2\x23456',
-            ERR_ILLEGAL_CHAR,
+            ERR_UNMATCHED_STRING,
         )
 
     def test_preprocessor(self):
@@ -821,6 +861,125 @@ class TestCLexerErrors(unittest.TestCase):
         # a compatible preprocessor must remove comments.
         self.assertLexerError("//", ERR_COMMENT)
         self.assertLexerError("/*", ERR_COMMENT)
+
+
+class TestCLexerErrorRecovery(unittest.TestCase):
+    """After a lexing error, the lexer consumes the erroneous construct and
+    recovers: it does not emit fabricated tokens from the construct's
+    contents, and line/column tracking stays accurate for the rest of the
+    input. Errors are recorded as (message, line, column) triples.
+    """
+
+    def error_func(self, msg, line, column):
+        self.errors.append((msg, line, column))
+
+    def setUp(self):
+        self.errors = []
+        self.clex = CLexer(self.error_func)
+
+    def assertTokens(self, str, expected):
+        self.clex.input(str)
+        self.assertEqual(
+            [(t.type, t.value, t.lineno, t.column) for t in token_list(self.clex)],
+            expected,
+        )
+
+    def assertSingleError(self, error_like, line, column):
+        self.assertEqual(len(self.errors), 1)
+        msg, err_line, err_column = self.errors[0]
+        self.assertRegex(msg, error_like)
+        self.assertEqual((err_line, err_column), (line, column))
+
+    def test_unterminated_string_at_end_of_input(self):
+        self.assertTokens(
+            'int x;\n"abc',
+            [("INT", "int", 1, 1), ("ID", "x", 1, 5), ("SEMI", ";", 1, 6)],
+        )
+        self.assertSingleError(ERR_UNMATCHED_STRING, 2, 1)
+
+    def test_unterminated_string_consumes_to_end_of_line(self):
+        # The contents of an unterminated string must not become tokens, and
+        # the following line keeps its line number.
+        self.assertTokens(
+            '"abc def\nint x;',
+            [("INT", "int", 2, 1), ("ID", "x", 2, 5), ("SEMI", ";", 2, 6)],
+        )
+        self.assertSingleError(ERR_UNMATCHED_STRING, 1, 1)
+
+    def test_unterminated_string_only_quote(self):
+        self.assertTokens('"', [])
+        self.assertSingleError(ERR_UNMATCHED_STRING, 1, 1)
+
+    def test_unterminated_string_with_bad_escape(self):
+        # The structural error (unterminated) is reported, not the escape.
+        self.assertTokens(r'"a\*' + "\nx", [("ID", "x", 2, 1)])
+        self.assertSingleError(ERR_UNMATCHED_STRING, 1, 1)
+
+    def test_unterminated_prefixed_string(self):
+        # The prefix falls back to an identifier; the error is reported at
+        # the quote.
+        self.assertTokens('L"abc\nx', [("ID", "L", 1, 1), ("ID", "x", 2, 1)])
+        self.assertSingleError(ERR_UNMATCHED_STRING, 1, 2)
+
+    def test_unterminated_char_constant_line_tracking(self):
+        self.assertTokens("'abc\n\n\nx", [("ID", "x", 4, 1)])
+        self.assertSingleError(ERR_UNMATCHED_QUOTE, 1, 1)
+
+    def test_error_column_counts_unicode_characters(self):
+        self.assertTokens(
+            '"αβé" \'xy\nz',
+            [("STRING_LITERAL", '"αβé"', 1, 1), ("ID", "z", 2, 1)],
+        )
+        self.assertSingleError(ERR_UNMATCHED_QUOTE, 1, 7)
+
+    def test_nul_byte_reports_original_position(self):
+        self.assertTokens(
+            "x\0y\n\0z",
+            [("ID", "x", 1, 1), ("ID", "y", 1, 3), ("ID", "z", 2, 2)],
+        )
+        self.assertEqual(
+            self.errors,
+            [
+                ("Illegal character '\\x00'", 1, 2),
+                ("Illegal character '\\x00'", 2, 1),
+            ],
+        )
+
+    def test_nul_inside_string_literal(self):
+        self.assertTokens('"a\0b"', [("STRING_LITERAL", '"a\0b"', 1, 1)])
+        self.assertEqual(self.errors, [])
+
+    def test_overlong_c_comment(self):
+        self.assertTokens(
+            "/*" + "x" * 1_000_000 + "*/\nint y;",
+            [("INT", "int", 2, 1), ("ID", "y", 2, 5), ("SEMI", ";", 2, 6)],
+        )
+        self.assertSingleError(ERR_COMMENT, 1, 1)
+
+    def test_overlong_cxx_comment(self):
+        self.assertTokens(
+            "//" + "x" * 1_000_000 + "\nint y;",
+            [("INT", "int", 2, 1), ("ID", "y", 2, 5), ("SEMI", ";", 2, 6)],
+        )
+        self.assertSingleError(ERR_COMMENT, 1, 1)
+
+    def test_unterminated_comment_consumes_to_end_of_input(self):
+        self.assertTokens(
+            "int a;\n/*" + "x" * 1_000_000,
+            [("INT", "int", 1, 1), ("ID", "a", 1, 5), ("SEMI", ";", 1, 6)],
+        )
+        self.assertSingleError(ERR_COMMENT, 2, 1)
+
+    def test_comment_body_produces_no_tokens(self):
+        self.assertTokens(
+            "/* int a; \"str\" 'c' */ int b;",
+            [("INT", "int", 1, 24), ("ID", "b", 1, 28), ("SEMI", ";", 1, 29)],
+        )
+        self.assertSingleError(ERR_COMMENT, 1, 1)
+
+    def test_multiline_comment_line_tracking(self):
+        self.assertTokens("/*\n\n\n*/x", [("ID", "x", 4, 3)])
+        self.assertSingleError(ERR_COMMENT, 1, 1)
 
 
 class TestCLexerFastPaths(unittest.TestCase):

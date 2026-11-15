@@ -10,7 +10,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from string import ascii_letters, digits
+from string import ascii_letters, digits, hexdigits
 from typing import Literal, assert_never
 
 Dialect = Literal["legacy", "c23"]
@@ -103,14 +103,22 @@ class CLexer:
         #
         # - The bulk of tokens are recognized in _match_token:
         #
+        #   * String literals, character constants, and comments are scanned
+        #     by bounded state machines (see _scan_quoted_literal and the
+        #     comment handling in _match_token). They run in time linear in
+        #     the input size, report errors at the exact offset in the
+        #     original text, and consume the whole erroneous construct so no
+        #     fabricated tokens are produced from its contents.
+        #
         #   * _regex_rules: regex patterns for identifiers, literals, and other
         #     complex tokens (including error-producing patterns). The lexer
         #     uses a combined _regex_master to scan options at the same time.
         #   * _fixed_tokens: exact string matches for operators and punctuation,
         #     resolved by longest match.
         #
-        # - Error patterns call the error callback and advance minimally, which
-        #   keeps lexing resilient while reporting useful diagnostics.
+        # - Error patterns call the error callback and advance past the
+        #   erroneous construct, keeping line tracking accurate so subsequent
+        #   tokens report correct coordinates.
         text = self._lexdata
         n = len(text)
 
@@ -186,13 +194,29 @@ class CLexer:
             tok = self._make_token(tok_type, value, pos)
             self._pos = end
             return tok
-        # A plain string literal can't also match BAD_STRING_LITERAL, the only
-        # master-regex alternative before it that can start with '"'. Match it
-        # directly to skip the costly failed attempt at a bad escape.
-        if char == '"' and (m := _string_literal_pattern.match(text, pos)):
-            tok = self._make_token("STRING_LITERAL", m.group(), pos)
-            self._pos = m.end()
-            return tok
+        # Quoted literals and comments are scanned by bounded state machines
+        # rather than regexes. The scanners never backtrack, report errors at
+        # exact offsets in the original text, and consume the whole erroneous
+        # construct so its contents cannot fabricate tokens.
+        if char == '"':
+            return self._string_token(pos, "STRING_LITERAL")
+        if char == "'":
+            return self._char_const_token(pos)
+        if char == "/":
+            if text.startswith("/*", pos):
+                self._error(_comment_error_message, pos)
+                end = text.find("*/", pos + 2)
+                self._advance_to(len(text) if end < 0 else end + 2)
+                return None
+            if text.startswith("//", pos):
+                self._error(_comment_error_message, pos)
+                end = text.find("\n", pos + 2)
+                self._advance_to(len(text) if end < 0 else end)
+                return None
+        if char in "LuU":
+            prefix_len, quote = _literal_prefix(text, pos)
+            if prefix_len:
+                return self._prefixed_literal_token(pos, prefix_len, quote)
         # We pick the longest match between:
         # - the master regex (identifiers, literals, error patterns, etc.)
         # - fixed operator/punctuator literals from the bucket for text[pos]
@@ -232,7 +256,7 @@ class CLexer:
 
         if best is None:
             self._error(f"Illegal character {char!r}", pos)
-            self._pos += 1
+            self._advance_to(self._pos + 1)
             return None
 
         length, tok_type, value, action, msg = best
@@ -240,12 +264,10 @@ class CLexer:
             case _RegexAction.TOKEN:
                 pass
             case _RegexAction.ERROR:
-                if tok_type == "BAD_CHAR_CONST":
-                    msg = f"Invalid char constant {value}"
-                # All other ERROR rules provide a message.
+                # All ERROR rules provide a message.
                 assert msg is not None
                 self._error(msg, pos)
-                self._pos += max(1, length)
+                self._advance_to(self._pos + max(1, length))
                 return None
             case _RegexAction.ID:
                 tok_type = (
@@ -259,6 +281,117 @@ class CLexer:
 
         return tok
 
+    def _advance_to(self, end: int) -> None:
+        """Advance _pos to end, keeping line tracking accurate.
+
+        Every code path that consumes input must go through here (or update
+        _lineno/_line_start itself) so that tokens and errors following an
+        erroneous construct still report coordinates in the original text.
+        """
+        segment = self._lexdata[self._pos : end]
+        if "\n" in segment:
+            self._lineno += segment.count("\n")
+            self._line_start = self._pos + segment.rfind("\n") + 1
+        self._pos = end
+
+    def _scan_quoted_literal(self, start: int, quote: str) -> "_QuotedLiteral":
+        """Scan a quoted literal whose opening quote is at start.
+
+        A bounded two-state (ordinary character / escape sequence) machine:
+        it examines each input character at most once, so scanning is linear
+        in the literal length regardless of how the escapes are spelled.
+        Stops at the closing quote, at an unescaped newline, or at end of
+        input; never crosses a newline, so line tracking stays exact.
+        """
+        text = self._lexdata
+        n = len(text)
+        pos = start + 1
+        cchars = 0
+        bad_escape = -1
+        while pos < n:
+            ch = text[pos]
+            if ch == quote:
+                return _QuotedLiteral(pos + 1, True, cchars, bad_escape)
+            if ch == "\n":
+                break
+            if ch == "\\":
+                extent, valid = _escape_extent(text, pos)
+                if not valid and bad_escape < 0:
+                    bad_escape = pos
+                pos += extent
+            else:
+                pos += 1
+            cchars += 1
+        return _QuotedLiteral(pos, False, cchars, bad_escape)
+
+    def _string_token(self, start: int, tok_type: str) -> Token | None:
+        """Scan a string literal whose opening quote is at start.
+
+        On success, emit a tok_type token spanning the whole literal. On
+        failure, report the error at the opening quote and consume the
+        literal's extent (up to the closing quote, or to the end of the line
+        for unterminated literals) without emitting a token.
+        """
+        result = self._scan_quoted_literal(start, '"')
+        if result.closed and result.bad_escape < 0:
+            tok = self._make_token(tok_type, self._lexdata[start : result.end], start)
+            self._advance_to(result.end)
+            return tok
+        if result.closed:
+            self._error("String contains invalid escape code", start)
+        else:
+            self._error('Unmatched "', start)
+        self._advance_to(result.end)
+        return None
+
+    def _char_const_token(self, start: int) -> Token | None:
+        """Scan a character constant whose opening quote is at start.
+
+        A single c-char yields CHAR_CONST, two to four c-chars yield a
+        multicharacter INT_CONST_CHAR. Anything else (empty, too long,
+        invalid escape, or unterminated) is reported and consumed without
+        emitting a token.
+        """
+        result = self._scan_quoted_literal(start, "'")
+        if not result.closed:
+            self._error("Unmatched '", start)
+            self._advance_to(result.end)
+            return None
+        value = self._lexdata[start : result.end]
+        if result.bad_escape >= 0 or not 1 <= result.cchars <= 4:
+            self._error(f"Invalid char constant {value}", start)
+            self._advance_to(result.end)
+            return None
+        tok_type = "CHAR_CONST" if result.cchars == 1 else "INT_CONST_CHAR"
+        tok = self._make_token(tok_type, value, start)
+        self._advance_to(result.end)
+        return tok
+
+    def _prefixed_literal_token(self, pos: int, prefix_len: int, quote: str) -> Token:
+        """Scan a prefixed literal (L/u8/u/U followed by ' or \") at pos.
+
+        On success, emit the prefixed token spanning prefix and literal. On
+        failure, fall back to emitting the prefix as an identifier and let
+        the quote be re-scanned unprefixed on the next token() call; this
+        preserves maximal-munch behavior (e.g. L'ab' is ID + INT_CONST_CHAR)
+        and reports the error at the quote itself.
+        """
+        text = self._lexdata
+        prefix = text[pos : pos + prefix_len]
+        tok_type = _prefixed_literal_types[prefix, quote]
+        result = self._scan_quoted_literal(pos + prefix_len, quote)
+        if (
+            result.closed
+            and result.bad_escape < 0
+            and (quote == '"' or result.cchars == 1)
+        ):
+            tok = self._make_token(tok_type, text[pos : result.end], pos)
+            self._advance_to(result.end)
+            return tok
+        tok = self._make_token("ID", prefix, pos)
+        self._advance_to(pos + prefix_len)
+        return tok
+
     def _attribute_token(self, kind: str, end: int) -> Token:
         """Emit the text from _pos up to end and advance lexer state.
 
@@ -268,10 +401,7 @@ class CLexer:
         """
         value = self._lexdata[self._pos : end]
         tok = self._make_token(kind, value, self._pos)
-        self._lineno += value.count("\n")
-        if "\n" in value:
-            self._line_start = self._pos + value.rfind("\n") + 1
-        self._pos = end
+        self._advance_to(end)
         return tok
 
     def _attribute_arguments(self) -> Token | None:
@@ -333,7 +463,7 @@ class CLexer:
                     return tok
             pos += 1
         self._error(error, start)
-        self._pos = len(text)
+        self._advance_to(len(text))
         return None
 
     def _make_token(self, tok_type: str, value: str, pos: int) -> Token:
@@ -618,80 +748,119 @@ _bin_constant = _bin_prefix + _bin_digits + _integer_suffix_opt
 
 _bad_octal_constant = "0(?:'?[0-7])*'?[89]"
 
-# comments are not supported
-_unsupported_c_style_comment = r"\/\*"
-_unsupported_cxx_style_comment = r"\/\/"
+# Comments are not supported; the lexer reports them and skips their extent.
+_comment_error_message = (
+    "Comments are not supported, see https://github.com/eliben/pycparser#3using."
+)
 
-# Character constants and escape sequences.
+# String literals and character constants are scanned by a bounded state
+# machine (see CLexer._scan_quoted_literal), not by regexes, so malformed
+# literals cannot cause exponential backtracking
+# (https://github.com/eliben/pycparser/issues/61).
 #
 # Tokens preserve their source spelling; the lexer does not decode escapes or
-# validate Unicode code points. Each complete escape must match as one character
-# in _cconst_char, which is used for both single and multicharacter constants.
-# Matching is deliberately permissive: simple escapes accept extra letters and
-# punctuation, and numeric escapes accept decimal digits, not just octal digits.
-#
-# _cconst_char is also repeated in the error patterns. If an escape can match in
-# several ways, long malformed constants can cause exponential backtracking
-# (https://github.com/eliben/pycparser/issues/61). The lookaheads prevent this:
-# - Decimal and hexadecimal escapes consume the whole run of digits. For
-#   example, \123 cannot be split into \1 followed by the characters 2 and 3.
-# - A simple \x escape is allowed only when no hexadecimal digit follows it.
-# - A complete Unicode escape cannot fall back to a simple \u or \U escape.
-# _bad_escape also excludes all decimal digits to agree with this permissiveness.
+# validate Unicode code points. Escape handling is deliberately permissive:
+# simple escapes accept extra letters and punctuation, and numeric escapes
+# accept decimal digits, not just octal digits. The permissive spellings also
+# support Windows paths in #line filenames, which are matched with
+# _string_literal.
 
-# Universal character names consume exactly four hex digits after u or eight
-# after U. A following hex digit is a separate character, unlike with \x.
-_unicode_escape = r"(u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8})"
-# This lookahead runs immediately after the backslash. If a complete Unicode
-# escape follows, only _unicode_escape may match it: \u00e9 cannot be read as
-# \u followed by 0, 0, e, 9. Incomplete forms retain the permissive behavior
-# of simple escapes.
-_simple_escape = (
-    rf"(?!{_unicode_escape})" r"""([a-wyzA-Z._~!=&\^\-\\?'"]|x(?![0-9a-fA-F]))"""
-)
-_decimal_escape = r"""(\d+)(?!\d)"""
-_hex_escape = r"""(x[0-9a-fA-F]+)(?![0-9a-fA-F])"""
-_bad_escape = r"""([\\][^a-zA-Z._~^!=&\^\-\\?'"x0-9])"""
+# Characters that may follow a backslash in a string or character literal.
+_escape_follow_chars = frozenset(ascii_letters + digits + "._~!=&^-\\?'\"")
+_hex_digit_chars = frozenset(hexdigits)
 
-_escape_sequence = (
-    r"""(\\("""
-    + _simple_escape
-    + "|"
-    + _decimal_escape
-    + "|"
-    + _hex_escape
-    + "|"
-    + _unicode_escape
-    + "))"
-)
 
-# Strings do not need to count the characters represented by escapes. Match
-# just the backslash and a permitted following character; _string_char consumes
-# any remaining numeric or Unicode digits as ordinary text. This avoids matching
-# complete escape sequences repeatedly. The permissive spellings also support
-# Windows paths in #line filenames, which are matched with _string_literal.
-_escape_sequence_start_in_string = r"""(\\[0-9a-zA-Z._~!=&\^\-\\?'"])"""
+def _escape_extent(text: str, pos: int) -> tuple[int, bool]:
+    r"""Measure the escape sequence starting at the backslash at pos.
 
-_cconst_char = r"""([^'\\\n]|""" + _escape_sequence + ")"
-_char_const = "'" + _cconst_char + "'"
-_wchar_const = "L" + _char_const
-_u8char_const = "u8" + _char_const
-_u16char_const = "u" + _char_const
-_u32char_const = "U" + _char_const
-_multicharacter_constant = "'" + _cconst_char + "{2,4}'"
-_unmatched_quote = "('" + _cconst_char + "*\\n)|('" + _cconst_char + "*$)"
-_bad_char_const = (
-    r"""('""" + _cconst_char + """[^'\n]+')|('')|('""" + _bad_escape + r"""[^'\n]*')"""
-)
+    Returns (extent, valid). extent is the number of input characters the
+    escape occupies, counting the backslash; the whole extent forms a single
+    c-char. valid is False when the backslash is not followed by a character
+    that may begin an escape (or by nothing at all).
 
-# String literals, including wide and Unicode prefixes.
-_string_char = r"""([^"\\\n]|""" + _escape_sequence_start_in_string + ")"
+    - Decimal escapes consume the whole run of digits: \123 cannot be split
+      into \1 followed by the characters 2 and 3.
+    - Hexadecimal escapes consume the whole run of hex digits. A \x with no
+      following hex digit is a simple escape.
+    - Universal character names consume exactly four hex digits after \u or
+      eight after \U. A following hex digit is then a separate character,
+      unlike with \x. Incomplete forms are simple escapes.
+    """
+    n = len(text)
+    follow = pos + 1
+    if follow >= n:
+        return 1, False
+    ch = text[follow]
+    if ch in digits:
+        end = follow
+        while end < n and text[end] in digits:
+            end += 1
+        return end - pos, True
+    if ch == "x":
+        end = follow + 1
+        while end < n and text[end] in _hex_digit_chars:
+            end += 1
+        if end > follow + 1:
+            return end - pos, True
+        return 2, True
+    if ch == "u" or ch == "U":
+        width = 4 if ch == "u" else 8
+        digits_start = follow + 1
+        if digits_start + width <= n and all(
+            c in _hex_digit_chars for c in text[digits_start : digits_start + width]
+        ):
+            return 1 + 1 + width, True
+        return 2, True
+    if ch in _escape_follow_chars:
+        return 2, True
+    return 1, False
+
+
+@dataclass(slots=True)
+class _QuotedLiteral:
+    # end: offset just past the closing quote; for unterminated literals, the
+    #   offset of the terminating newline or the end of input
+    # closed: whether the closing quote was found
+    # cchars: number of c-chars scanned; each escape sequence counts as one
+    # bad_escape: offset of the first invalid escape, or -1 if none
+    end: int
+    closed: bool
+    cchars: int
+    bad_escape: int
+
+
+# Token types for string and character literals with encoding prefixes.
+_prefixed_literal_types: dict[tuple[str, str], str] = {
+    ("L", '"'): "WSTRING_LITERAL",
+    ("u8", '"'): "U8STRING_LITERAL",
+    ("u", '"'): "U16STRING_LITERAL",
+    ("U", '"'): "U32STRING_LITERAL",
+    ("L", "'"): "WCHAR_CONST",
+    ("u8", "'"): "U8CHAR_CONST",
+    ("u", "'"): "U16CHAR_CONST",
+    ("U", "'"): "U32CHAR_CONST",
+}
+
+
+def _literal_prefix(text: str, pos: int) -> tuple[int, str]:
+    """Match a literal encoding prefix (L, u8, u, U) at pos.
+
+    Returns (prefix_length, quote) when the characters at pos form a prefix
+    directly followed by a quote, or (0, "") otherwise.
+    """
+    ch = text[pos]
+    follow = text[pos + 1 : pos + 3]
+    if ch == "u" and follow.startswith("8") and follow[1:2] in ("'", '"'):
+        return 2, follow[1]
+    if follow[:1] in ("'", '"'):
+        return 1, follow[0]
+    return 0, ""
+
+
+# Strings in #line filenames: permissive escapes keep Windows paths such as
+# "..\dir\file" lexing as a single string.
+_string_char = r"""([^"\\\n]|""" + r"(\\[0-9a-zA-Z._~!=&\^\-\\?'\"])" + ")"
 _string_literal = '"' + _string_char + '*"'
-_wstring_literal = "L" + _string_literal
-_u8string_literal = "u8" + _string_literal
-_u16string_literal = "u" + _string_literal
-_u32string_literal = "U" + _string_literal
-_bad_string_literal = '"' + _string_char + "*" + _bad_escape + _string_char + '*"'
 
 # floating constants (K&R2: A.2.5.3)
 _exponent_part = "([eE][-+]?" + _decimal_digits + ")"
@@ -754,29 +923,6 @@ class _RegexRule:
 
 
 _regex_rules: list[_RegexRule] = [
-    _RegexRule(
-        "UNSUPPORTED_C_STYLE_COMMENT",
-        _unsupported_c_style_comment,
-        _RegexAction.ERROR,
-        "Comments are not supported, see https://github.com/eliben/pycparser#3using.",
-    ),
-    _RegexRule(
-        "UNSUPPORTED_CXX_STYLE_COMMENT",
-        _unsupported_cxx_style_comment,
-        _RegexAction.ERROR,
-        "Comments are not supported, see https://github.com/eliben/pycparser#3using.",
-    ),
-    _RegexRule(
-        "BAD_STRING_LITERAL",
-        _bad_string_literal,
-        _RegexAction.ERROR,
-        "String contains invalid escape code",
-    ),
-    _RegexRule("WSTRING_LITERAL", _wstring_literal, _RegexAction.TOKEN, None),
-    _RegexRule("U8STRING_LITERAL", _u8string_literal, _RegexAction.TOKEN, None),
-    _RegexRule("U16STRING_LITERAL", _u16string_literal, _RegexAction.TOKEN, None),
-    _RegexRule("U32STRING_LITERAL", _u32string_literal, _RegexAction.TOKEN, None),
-    _RegexRule("STRING_LITERAL", _string_literal, _RegexAction.TOKEN, None),
     _RegexRule("HEX_FLOAT_CONST", _hex_floating_constant, _RegexAction.TOKEN, None),
     _RegexRule("FLOAT_CONST", _floating_constant, _RegexAction.TOKEN, None),
     _RegexRule("INT_CONST_HEX", _hex_constant, _RegexAction.TOKEN, None),
@@ -789,14 +935,6 @@ _regex_rules: list[_RegexRule] = [
     ),
     _RegexRule("INT_CONST_OCT", _octal_constant, _RegexAction.TOKEN, None),
     _RegexRule("INT_CONST_DEC", _decimal_constant, _RegexAction.TOKEN, None),
-    _RegexRule("INT_CONST_CHAR", _multicharacter_constant, _RegexAction.TOKEN, None),
-    _RegexRule("CHAR_CONST", _char_const, _RegexAction.TOKEN, None),
-    _RegexRule("WCHAR_CONST", _wchar_const, _RegexAction.TOKEN, None),
-    _RegexRule("U8CHAR_CONST", _u8char_const, _RegexAction.TOKEN, None),
-    _RegexRule("U16CHAR_CONST", _u16char_const, _RegexAction.TOKEN, None),
-    _RegexRule("U32CHAR_CONST", _u32char_const, _RegexAction.TOKEN, None),
-    _RegexRule("UNMATCHED_QUOTE", _unmatched_quote, _RegexAction.ERROR, "Unmatched '"),
-    _RegexRule("BAD_CHAR_CONST", _bad_char_const, _RegexAction.ERROR, None),
     _RegexRule("ID", _identifier, _RegexAction.ID, None),
 ]
 
@@ -811,12 +949,13 @@ for _rule in _regex_rules:
 # regexes on every character while keeping the same token-level semantics.
 _regex_master: re.Pattern[str] = re.compile("|".join(_regex_pattern_parts))
 _identifier_pattern: re.Pattern[str] = re.compile(_identifier)
-_string_literal_pattern: re.Pattern[str] = re.compile(_string_literal)
 # Identifier start characters that cannot begin a literal prefix (L, u, U).
 _identifier_only_first_chars = frozenset(ascii_letters + "_$").difference("LuU")
 # Every master-regex alternative starts with one of these characters. Other
 # characters (most punctuators) can skip the regex and go to the fixed tokens.
-_regex_first_chars = frozenset(ascii_letters + digits + "_$.'\"/")
+# Quoted literals and comments are handled by bounded state machines before
+# the master regex is consulted, so their start characters are absent here.
+_regex_first_chars = frozenset(ascii_letters + digits + "_$.")
 
 
 @dataclass(frozen=True)
