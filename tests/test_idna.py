@@ -589,6 +589,114 @@ class IDNATests(unittest.TestCase):
         )
 
 
+class EncodeEntryTests(unittest.TestCase):
+    """The unified encode()/decode() entry applies UTS #46 label
+    separation, empty-label, Bidi and CONTEXTJ checks to whole domains."""
+
+    def test_empty_label_rejected(self):
+        # An empty label anywhere in the domain is an error, whether the
+        # separator is U+002E or one of the UTS #46 alternative dots.
+        for domain in ("a..b", "a。。b", "a．．b", "a｡｡b", ".a", "a..", ".."):
+            with self.subTest(domain=domain):
+                with self.assertRaises(idna.IDNAError) as ctx:
+                    idna.encode(domain)
+                self.assertEqual(ctx.exception.code, "empty_label")
+        with self.assertRaises(idna.IDNAError) as ctx:
+            idna.decode("a..b")
+        self.assertEqual(ctx.exception.code, "empty_label")
+        # A single trailing dot is the root label, not an empty label.
+        self.assertEqual(idna.encode("example.com."), b"example.com.")
+        self.assertEqual(idna.decode("example.com."), "example.com.")
+
+    def test_unicode_label_separators(self):
+        # U+3002, U+FF0E and U+FF61 all separate labels; decode rejoins
+        # with U+002E.
+        for domain in ("例え。テスト", "例え．テスト", "例え｡テスト"):
+            with self.subTest(domain=domain):
+                self.assertEqual(idna.encode(domain), b"xn--r8jz45g.xn--zckzah")
+                self.assertEqual(idna.decode(domain), "例え.テスト")
+        # With strict=True only U+002E separates labels, so U+3002 stays
+        # inside the label and is rejected as a codepoint.
+        self.assertRaises(idna.IDNAError, idna.encode, "例え。テスト", strict=True)
+
+    def test_rtl_labels_through_encode(self):
+        # A valid all-RTL domain round-trips through the unified entry.
+        domain = "مثال.إختبار"
+        encoded = idna.encode(domain)
+        self.assertEqual(encoded, b"xn--mgbh0fb.xn--kgbechtv")
+        self.assertEqual(idna.decode(encoded), domain)
+        # An LTR character in an RTL label violates Bidi rule 2 ...
+        with self.assertRaises(idna.IDNABidiError) as ctx:
+            idna.encode("אa.example")
+        self.assertEqual(ctx.exception.code, "bidi_rule_2")
+        # ... an RTL character in an LTR label violates rule 5 ...
+        with self.assertRaises(idna.IDNABidiError) as ctx:
+            idna.encode("aא.example")
+        self.assertEqual(ctx.exception.code, "bidi_rule_5")
+        # ... and mixing European with Arabic-Indic digits violates rule 4.
+        with self.assertRaises(idna.IDNABidiError) as ctx:
+            idna.encode("א0١.example")
+        self.assertEqual(ctx.exception.code, "bidi_rule_4")
+
+    def test_zwj_zwnj_through_encode(self):
+        # Joiners without a valid context are rejected per label.
+        for joiner in ("\u200c", "\u200d"):
+            with self.subTest(joiner=joiner):
+                with self.assertRaises(idna.InvalidCodepointContext) as ctx:
+                    idna.encode(f"a{joiner}b.example")
+                self.assertEqual(ctx.exception.code, "contextj")
+        # A joiner preceded by a virama satisfies CONTEXTJ and round-trips.
+        for domain in ("പ്\u200dര.example", "പ്\u200cര.example"):
+            with self.subTest(domain=domain):
+                self.assertEqual(idna.decode(idna.encode(domain)), domain)
+
+    def test_multi_label_boundaries(self):
+        # The longest legal label is accepted in every label position.
+        label = "a" * 63
+        domain = ".".join([label, label, label, "a" * 61])  # 253 octets
+        self.assertEqual(idna.encode(domain), domain.encode("ascii"))
+        # 254 octets without a trailing dot exceeds the domain limit.
+        with self.assertRaises(idna.IDNAError) as ctx:
+            idna.encode(domain + "b")
+        self.assertEqual(ctx.exception.code, "domain_too_long")
+        # A 64-octet label fails however short the rest of the domain is.
+        for domain in ("a" * 64 + ".b", "b." + "a" * 64):
+            with self.subTest(domain=domain):
+                with self.assertRaises(idna.IDNAError) as ctx:
+                    idna.encode(domain)
+                self.assertEqual(ctx.exception.code, "label_too_long")
+
+    def test_international_domain_round_trip(self):
+        for domain in ("münchen.de", "例え.テスト", "مثال.إختبار", "faß.de", "παράδειγμα.ελ"):
+            with self.subTest(domain=domain):
+                self.assertEqual(idna.decode(idna.encode(domain)), domain)
+
+    def test_uts46_error_distinction(self):
+        # A codepoint disallowed by the UTS #46 mapping table itself ...
+        with self.assertRaises(idna.InvalidCodepoint) as ctx:
+            idna.encode("a\x80b", uts46=True)
+        self.assertEqual(ctx.exception.code, "uts46_disallowed")
+        # ... is reported differently from one forbidden only by the
+        # caller's UseSTD3ASCIIRules configuration.
+        with self.assertRaises(idna.InvalidCodepoint) as ctx:
+            idna.encode("a_b", uts46=True, std3_rules=True)
+        self.assertEqual(ctx.exception.code, "uts46_std3")
+        self.assertEqual(idna.uts46_remap("a_b", std3_rules=False), "a_b")
+
+    def test_transitional_accepted_but_never_falls_back(self):
+        # Callers may set transitional; it warns and does not change
+        # deviation handling (UTS #46 deprecated transitional processing).
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            self.assertEqual(idna.encode("faß.de", uts46=True, transitional=True), b"xn--fa-hia.de")
+        self.assertTrue(any(issubclass(w.category, DeprecationWarning) for w in caught))
+        # A mapping failure still raises; there is no fallback to the
+        # original Unicode input.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            self.assertRaises(idna.IDNAError, idna.encode, "a\x80b", uts46=True, transitional=True)
+
+
 class UnicodeVersionTests(unittest.TestCase):
     def test_unicode_version_is_exported_and_consistent(self):
         import idna.idnadata
