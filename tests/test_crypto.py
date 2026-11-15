@@ -8,11 +8,13 @@ Unit tests for :py:mod:`OpenSSL.crypto`.
 from __future__ import annotations
 
 import base64
+import ipaddress
 import pathlib
 import sys
 import typing
 from datetime import datetime, timedelta, timezone
 from subprocess import PIPE, Popen
+from types import SimpleNamespace
 
 import pytest
 from cryptography import x509
@@ -35,7 +37,9 @@ from OpenSSL.crypto import (
     TYPE_RSA,
     X509,
     Error,
+    HostnameMismatchError,
     PKey,
+    VerificationError,
     X509Name,
     X509Store,
     X509StoreContext,
@@ -52,6 +56,7 @@ from OpenSSL.crypto import (
     load_certificate,
     load_privatekey,
     load_publickey,
+    match_hostname,
 )
 
 from . import conftest
@@ -2968,6 +2973,283 @@ class TestX509StoreContext:
         store.set_flags(X509StoreFlags.PARTIAL_CHAIN)
         store_ctx = X509StoreContext(store, self.intermediate_server_cert)
         assert store_ctx.verify_certificate() is None  # type: ignore[func-returns-value]
+
+
+class TestUnifiedVerification:
+    """
+    Tests for the unified verification flow in
+    `X509StoreContext.verify_certificate`: chain building against the
+    trust store, hostname/SAN verification, an explicit partial-chain
+    policy, and classified errors.
+    """
+
+    @staticmethod
+    def _name(common_name: str) -> x509.Name:
+        return x509.Name(
+            [x509.NameAttribute(x509.NameOID.COMMON_NAME, common_name)]
+        )
+
+    @classmethod
+    def _issue(
+        cls,
+        common_name: str,
+        issuer: x509.Name,
+        issuer_key: rsa.RSAPrivateKey,
+        key: rsa.RSAPrivateKey,
+        ca: bool = False,
+        san: x509.SubjectAlternativeName | None = None,
+    ) -> x509.Certificate:
+        now = datetime.now(timezone.utc)
+        builder = (
+            x509.CertificateBuilder()
+            .subject_name(cls._name(common_name))
+            .issuer_name(issuer)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(days=1))
+            .not_valid_after(now + timedelta(days=30))
+            .add_extension(
+                x509.BasicConstraints(ca=ca, path_length=None), critical=True
+            )
+        )
+        if san is not None:
+            builder = builder.add_extension(san, critical=False)
+        return builder.sign(issuer_key, hashes.SHA256())
+
+    @pytest.fixture(scope="class")
+    def pki(self) -> SimpleNamespace:
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        root = self._issue(
+            "Test Root CA", self._name("Test Root CA"), key, key, ca=True
+        )
+        intermediate = self._issue(
+            "Test Intermediate CA", root.subject, key, key, ca=True
+        )
+
+        def make_leaf(
+            common_name: str,
+            san: x509.SubjectAlternativeName | None = None,
+        ) -> X509:
+            return X509.from_cryptography(
+                self._issue(
+                    common_name, intermediate.subject, key, key, san=san
+                )
+            )
+
+        return SimpleNamespace(
+            key=key,
+            root=X509.from_cryptography(root),
+            intermediate=X509.from_cryptography(intermediate),
+            make_leaf=make_leaf,
+        )
+
+    @staticmethod
+    def _store_with(*certs: X509) -> X509Store:
+        store = X509Store()
+        for cert in certs:
+            store.add_cert(cert)
+        return store
+
+    def test_valid_chain_and_hostname(self, pki: SimpleNamespace) -> None:
+        """
+        A certificate with a full chain to a trusted root and a matching
+        dNSName SAN verifies successfully.
+        """
+        leaf = pki.make_leaf(
+            "service.internal",
+            san=x509.SubjectAlternativeName(
+                [x509.DNSName("service.internal")]
+            ),
+        )
+        store = self._store_with(pki.root, pki.intermediate)
+        store_ctx = X509StoreContext(store, leaf)
+        assert (
+            store_ctx.verify_certificate(hostname="service.internal") is None
+        )
+
+    def test_missing_root_rejected_by_default(
+        self, pki: SimpleNamespace
+    ) -> None:
+        """
+        A chain that ends at a trusted intermediate but has no root is
+        rejected unless partial chains are explicitly allowed.
+        """
+        leaf = pki.make_leaf("service.internal")
+        store = self._store_with(pki.intermediate)
+        store_ctx = X509StoreContext(store, leaf, chain=[pki.intermediate])
+
+        with pytest.raises(X509StoreContextError) as exc:
+            store_ctx.verify_certificate()
+
+        assert str(exc.value) == "unable to get issuer certificate"
+
+    def test_missing_root_allowed_with_explicit_partial_chain(
+        self, pki: SimpleNamespace
+    ) -> None:
+        """
+        With ``allow_partial_chain=True``, a chain ending at any trusted
+        certificate in the store is accepted.
+        """
+        leaf = pki.make_leaf("service.internal")
+        store = self._store_with(pki.intermediate)
+        store_ctx = X509StoreContext(store, leaf, chain=[pki.intermediate])
+
+        assert store_ctx.verify_certificate(allow_partial_chain=True) is None
+
+    def test_partial_chain_still_rejects_untrusted(
+        self, pki: SimpleNamespace
+    ) -> None:
+        """
+        ``allow_partial_chain=True`` does not help when no certificate in
+        the chain is trusted by the store.
+        """
+        leaf = pki.make_leaf("service.internal")
+        store = X509Store()
+        store_ctx = X509StoreContext(store, leaf, chain=[pki.intermediate])
+
+        with pytest.raises(X509StoreContextError):
+            store_ctx.verify_certificate(allow_partial_chain=True)
+
+    def test_wrong_san_rejected(self, pki: SimpleNamespace) -> None:
+        """
+        A valid certificate whose SANs do not cover the expected hostname
+        is rejected with `HostnameMismatchError`.
+        """
+        leaf = pki.make_leaf(
+            "service.internal",
+            san=x509.SubjectAlternativeName(
+                [x509.DNSName("service.internal")]
+            ),
+        )
+        store = self._store_with(pki.root, pki.intermediate)
+        store_ctx = X509StoreContext(store, leaf)
+
+        with pytest.raises(HostnameMismatchError) as exc:
+            store_ctx.verify_certificate(hostname="other.internal")
+
+        assert isinstance(exc.value, VerificationError)
+        assert not isinstance(exc.value, X509StoreContextError)
+        assert exc.value.hostname == "other.internal"
+        assert exc.value.certificate.to_cryptography() == (
+            leaf.to_cryptography()
+        )
+
+    def test_wildcard_san(self, pki: SimpleNamespace) -> None:
+        """
+        A ``*.example.com`` SAN matches exactly one left-most label.
+        """
+        leaf = pki.make_leaf(
+            "wildcard",
+            san=x509.SubjectAlternativeName([x509.DNSName("*.example.com")]),
+        )
+        store = self._store_with(pki.root, pki.intermediate)
+        store_ctx = X509StoreContext(store, leaf)
+
+        assert store_ctx.verify_certificate(hostname="www.example.com") is None
+        # Case and a trailing root dot are normalized away.
+        assert (
+            store_ctx.verify_certificate(hostname="WWW.Example.COM.") is None
+        )
+
+        for bad_hostname in ("example.com", "a.b.example.com"):
+            with pytest.raises(HostnameMismatchError):
+                store_ctx.verify_certificate(hostname=bad_hostname)
+
+    def test_partial_wildcard_treated_literally(
+        self, pki: SimpleNamespace
+    ) -> None:
+        """
+        A wildcard that is not the complete left-most label does not act
+        as a wildcard.
+        """
+        leaf = pki.make_leaf(
+            "wildcard",
+            san=x509.SubjectAlternativeName([x509.DNSName("ww*.example.com")]),
+        )
+        store = self._store_with(pki.root, pki.intermediate)
+        store_ctx = X509StoreContext(store, leaf)
+
+        with pytest.raises(HostnameMismatchError):
+            store_ctx.verify_certificate(hostname="www.example.com")
+
+    def test_ip_san_normalized(self, pki: SimpleNamespace) -> None:
+        """
+        iPAddress SANs match equivalent textual forms of the same address.
+        """
+        leaf = pki.make_leaf(
+            "ip-service",
+            san=x509.SubjectAlternativeName(
+                [x509.IPAddress(ipaddress.ip_address("::1"))]
+            ),
+        )
+        store = self._store_with(pki.root, pki.intermediate)
+        store_ctx = X509StoreContext(store, leaf)
+
+        assert store_ctx.verify_certificate(hostname="0:0:0:0:0:0:0:1") is None
+
+        with pytest.raises(HostnameMismatchError):
+            store_ctx.verify_certificate(hostname="1.2.3.4")
+
+    def test_idn_san_normalized(self, pki: SimpleNamespace) -> None:
+        """
+        Internationalized hostnames match their A-label (punycode) SAN.
+        """
+        leaf = pki.make_leaf(
+            "idn-service",
+            san=x509.SubjectAlternativeName(
+                [x509.DNSName("xn--bcher-kva.example")]
+            ),
+        )
+        store = self._store_with(pki.root, pki.intermediate)
+        store_ctx = X509StoreContext(store, leaf)
+
+        assert store_ctx.verify_certificate(hostname="bücher.example") is None
+
+    def test_common_name_fallback_without_san(
+        self, pki: SimpleNamespace
+    ) -> None:
+        """
+        Without a subjectAltName extension, the subject commonName is
+        checked instead.
+        """
+        leaf = pki.make_leaf("legacy.internal")
+        store = self._store_with(pki.root, pki.intermediate)
+        store_ctx = X509StoreContext(store, leaf)
+
+        assert store_ctx.verify_certificate(hostname="legacy.internal") is None
+
+        with pytest.raises(HostnameMismatchError):
+            store_ctx.verify_certificate(hostname="other.internal")
+
+    def test_san_preferred_over_common_name(
+        self, pki: SimpleNamespace
+    ) -> None:
+        """
+        When a subjectAltName extension is present, the commonName is not
+        consulted.
+        """
+        leaf = pki.make_leaf(
+            "legacy.internal",
+            san=x509.SubjectAlternativeName([x509.DNSName("san.internal")]),
+        )
+        store = self._store_with(pki.root, pki.intermediate)
+        store_ctx = X509StoreContext(store, leaf)
+
+        assert store_ctx.verify_certificate(hostname="san.internal") is None
+
+        with pytest.raises(HostnameMismatchError):
+            store_ctx.verify_certificate(hostname="legacy.internal")
+
+    def test_match_hostname_without_certificate_names(
+        self, pki: SimpleNamespace
+    ) -> None:
+        """
+        `match_hostname` rejects a certificate that carries neither a SAN
+        nor a matching commonName.
+        """
+        leaf = pki.make_leaf("legacy.internal")
+        with pytest.raises(HostnameMismatchError):
+            match_hostname(leaf, "unrelated.internal")
 
 
 class TestEllipticCurve:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import calendar
 import datetime
 import functools
+import ipaddress
 import sys
 import typing
 from base64 import b16encode
@@ -56,7 +57,9 @@ __all__ = [
     "TYPE_RSA",
     "X509",
     "Error",
+    "HostnameMismatchError",
     "PKey",
+    "VerificationError",
     "X509Name",
     "X509Store",
     "X509StoreContext",
@@ -70,6 +73,7 @@ __all__ = [
     "load_certificate",
     "load_privatekey",
     "load_publickey",
+    "match_hostname",
 ]
 
 
@@ -1460,7 +1464,21 @@ class X509Store:
             _raise_current_error()
 
 
-class X509StoreContextError(Exception):
+class VerificationError(Exception):
+    """
+    Base class for errors raised by the unified certificate verification
+    flow: chain building against the trust store, and hostname/SAN
+    verification.
+
+    Chain building and trust store failures are reported as
+    :class:`X509StoreContextError`; hostname/SAN mismatches are reported as
+    :class:`HostnameMismatchError`.
+
+    .. versionadded:: 26.5
+    """
+
+
+class X509StoreContextError(VerificationError):
     """
     An exception raised when an error occurred while verifying a certificate
     using `OpenSSL.X509StoreContext.verify_certificate`.
@@ -1474,6 +1492,27 @@ class X509StoreContextError(Exception):
     ) -> None:
         super().__init__(message)
         self.errors = errors
+        self.certificate = certificate
+
+
+class HostnameMismatchError(VerificationError):
+    """
+    An exception raised when a certificate is otherwise valid, but is not
+    valid for the expected hostname.
+
+    :ivar hostname: The hostname the certificate was expected to be valid
+        for.
+    :type hostname: :class:`str`
+
+    :ivar certificate: The certificate which did not match the hostname.
+    :type certificate: :class:`X509`
+
+    .. versionadded:: 26.5
+    """
+
+    def __init__(self, hostname: str, certificate: X509) -> None:
+        super().__init__(f"certificate is not valid for hostname {hostname!r}")
+        self.hostname = hostname
         self.certificate = certificate
 
 
@@ -1594,17 +1633,51 @@ class X509StoreContext:
         """
         self._store = store
 
-    def verify_certificate(self) -> None:
+    def verify_certificate(
+        self,
+        hostname: str | None = None,
+        allow_partial_chain: bool = False,
+    ) -> None:
         """
         Verify a certificate in a context.
 
         .. versionadded:: 0.15
 
+        .. versionchanged:: 26.5
+
+            Added the *hostname* and *allow_partial_chain* parameters,
+            turning this method into a unified verification flow covering
+            chain building, the trust store, and hostname/SAN verification.
+
+        :param hostname: If given, the expected hostname for the
+            certificate. The certificate's subject alternative names are
+            checked first; the subject's commonName is only used when the
+            certificate carries no subjectAltName extension. IP addresses,
+            wildcards, and internationalized domain names are all
+            normalized before comparison.
+        :type hostname: :class:`str` or ``None``
+
+        :param allow_partial_chain: Whether a chain ending at any trusted
+            certificate in the store (rather than a self-signed root) is
+            accepted. Defaults to ``False``, meaning a full chain to a
+            trusted root is required. When ``True``,
+            :data:`X509StoreFlags.PARTIAL_CHAIN` is set on the store; note
+            that this flag persists on the store, matching OpenSSL's
+            store-centric flag model.
+        :type allow_partial_chain: :class:`bool`
+
         :raises X509StoreContextError: If an error occurred when validating a
           certificate in the context. Sets ``certificate`` attribute to
           indicate which certificate caused the error.
+
+        :raises HostnameMismatchError: If *hostname* was given and the
+          certificate is not valid for it.
         """
+        if allow_partial_chain:
+            self._store.set_flags(X509StoreFlags.PARTIAL_CHAIN)
         self._verify_certificate()
+        if hostname is not None:
+            match_hostname(self._cert, hostname)
 
     def get_verified_chain(self) -> list[X509]:
         """
@@ -1633,6 +1706,132 @@ class X509StoreContext:
         # Free the stack but not the members which are freed by the X509 class.
         _lib.sk_X509_free(cert_stack)
         return result
+
+
+_IPAddress = Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
+_IP_ADDRESS_TYPES = (ipaddress.IPv4Address, ipaddress.IPv6Address)
+
+
+def _normalize_hostname(hostname: str) -> str | _IPAddress:
+    """
+    Normalize a hostname for comparison against certificate names.
+
+    IP addresses are parsed so that equivalent textual forms (such as
+    ``0:0:0:0:0:0:0:1`` and ``::1``) compare equal. DNS names are
+    lowercased, stripped of a trailing root dot, and IDNA-encoded so that
+    internationalized names compare equal to their A-label form.
+    """
+    try:
+        return ipaddress.ip_address(hostname)
+    except ValueError:
+        pass
+    hostname = hostname.rstrip(".").lower()
+    return hostname.encode("idna").decode("ascii")
+
+
+def _normalize_dns_pattern(pattern: str) -> str:
+    """
+    Normalize a DNS name from a certificate, which may be a wildcard
+    pattern, the same way :func:`_normalize_hostname` normalizes a
+    hostname.
+    """
+    pattern = pattern.rstrip(".").lower()
+    if pattern.startswith("*."):
+        return "*." + pattern[2:].encode("idna").decode("ascii")
+    return pattern.encode("idna").decode("ascii")
+
+
+def _dnsname_match(pattern: str, hostname: str) -> bool:
+    """
+    Match a normalized hostname against a normalized DNS name or wildcard
+    pattern from a certificate.
+
+    Wildcards are only recognized as the complete left-most label
+    (``*.example.com``) and match exactly one label, so ``*.example.com``
+    matches ``www.example.com`` but neither ``example.com`` nor
+    ``a.b.example.com``. Partial wildcards such as ``ww*.example.com`` are
+    not special-cased and only match literally.
+    """
+    if not pattern:
+        return False
+    if pattern == hostname:
+        return True
+    if not pattern.startswith("*."):
+        return False
+    suffix = pattern[2:]
+    if "." not in suffix:
+        # Refuse wildcard patterns like "*.com".
+        return False
+    if not hostname.endswith("." + suffix):
+        return False
+    prefix = hostname[: -len(suffix) - 1]
+    return prefix != "" and "." not in prefix
+
+
+def match_hostname(cert: X509, hostname: str) -> None:
+    """
+    Verify that *cert* is valid for *hostname*.
+
+    The certificate's subjectAltName extension is consulted first: IP
+    addresses are matched against iPAddress entries and DNS names against
+    dNSName entries, with wildcard and internationalized names normalized.
+    The subject's commonName is only used as a fallback when the
+    certificate carries no subjectAltName extension at all.
+
+    .. versionadded:: 26.5
+
+    :param cert: The certificate to check.
+    :type cert: :class:`X509`
+
+    :param hostname: The hostname that the certificate should be valid
+        for. May be a DNS name (internationalized names are normalized)
+        or an IP address in textual form.
+    :type hostname: :class:`str`
+
+    :raises HostnameMismatchError: If the certificate is not valid for
+        *hostname*.
+
+    :return: ``None`` if the certificate matches *hostname*.
+    """
+    normalized = _normalize_hostname(hostname)
+    crypto_cert = cert.to_cryptography()
+
+    san: x509.SubjectAlternativeName | None
+    try:
+        san = crypto_cert.extensions.get_extension_for_class(
+            x509.SubjectAlternativeName
+        ).value
+    except x509.ExtensionNotFound:
+        san = None
+
+    if san is not None:
+        if isinstance(normalized, _IP_ADDRESS_TYPES):
+            for ip in san.get_values_for_type(x509.IPAddress):
+                if ip == normalized:
+                    return
+        else:
+            for pattern in san.get_values_for_type(x509.DNSName):
+                if _dnsname_match(_normalize_dns_pattern(pattern), normalized):
+                    return
+        raise HostnameMismatchError(hostname, cert)
+
+    # Legacy fallback: without a subjectAltName extension, the subject's
+    # commonName is checked instead.
+    common_names = crypto_cert.subject.get_attributes_for_oid(
+        x509.NameOID.COMMON_NAME
+    )
+    for attribute in common_names:
+        value = attribute.value
+        if isinstance(normalized, _IP_ADDRESS_TYPES):
+            try:
+                candidate = ipaddress.ip_address(value)
+            except ValueError:
+                continue
+            if candidate == normalized:
+                return
+        elif _dnsname_match(_normalize_dns_pattern(value), normalized):
+            return
+    raise HostnameMismatchError(hostname, cert)
 
 
 def load_certificate(type: int, buffer: bytes) -> X509:
