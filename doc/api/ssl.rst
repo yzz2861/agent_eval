@@ -36,6 +36,20 @@ Context, Connection.
     These constants represent the different TLS versions to use when
     setting the minimum or maximum TLS version.
 
+.. py:data:: TLS_DIRECTION_SERVER
+             TLS_DIRECTION_CLIENT
+
+    Endpoint directions accepted by :class:. A server
+    policy is held one security level stricter than a client policy at
+    the same level because the server selects the cipher.
+
+.. py:data:: TLS_DEFAULT_SECURITY_LEVEL
+             TLS_MAXIMUM_SECURITY_LEVEL
+
+    The default and highest cipher security levels understood by
+    :class:. Ciphers classified below the configured
+    level are removed from the context.
+
 .. py:data:: VERIFY_NONE
              VERIFY_PEER
              VERIFY_FAIL_IF_NO_PEER_CERT
@@ -150,6 +164,9 @@ Context, Connection.
 .. autofunction:: OpenSSL_version
 
 
+.. autoclass:: SecurityPolicy
+   :noindex:
+
 .. autoclass:: Context
    :noindex:
 
@@ -176,6 +193,21 @@ Context, Connection.
     from the OpenSSL error queue, where each item is a tuple *(lib, function,
     reason)*. Here *lib*, *function* and *reason* are all strings, describing
     where and what the problem is. See :manpage:`err(3)` for more information.
+
+.. py:exception:: SecurityPolicyError
+
+    A :class:`SecurityPolicy` was applied to a :class:`Context` but its
+    requirements could not be satisfied by the underlying library, for
+    example when the configured protocol versions cannot be selected.
+    It is distinct from :class:`SecurityPolicyConfigurationError`.
+
+.. py:exception:: SecurityPolicyConfigurationError
+
+    A :class:`SecurityPolicy` was constructed or applied with an invalid
+    configuration, such as an unknown direction, an unknown TLS version,
+    an inverted version range, a security level outside the supported
+    range, or a cipher list that ends up empty. Subclasses
+    :class:`ValueError`.
 
 
 .. py:exception:: ZeroReturnError

@@ -5340,3 +5340,316 @@ class TestDTLS:
 
         with pytest.raises(Error):
             c.DTLSv1_handle_timeout()
+
+
+class TestSecurityPolicy:
+    """
+    Tests for the direction-aware TLS version and cipher policy applied
+    through :class:`OpenSSL.SSL.SecurityPolicy` and
+    :meth:`Context.set_security_policy`.
+    """
+
+    def _server_context(
+        self, policy: SSL.SecurityPolicy | None = None
+    ) -> Context:
+        context = Context(SSL.TLS_SERVER_METHOD, security_policy=policy)
+        context.use_certificate(load_certificate(FILETYPE_PEM, root_cert_pem))
+        context.use_privatekey(load_privatekey(FILETYPE_PEM, root_key_pem))
+        return context
+
+    def _client_context(
+        self, policy: SSL.SecurityPolicy | None = None
+    ) -> Context:
+        return Context(SSL.TLS_CLIENT_METHOD, security_policy=policy)
+
+    @staticmethod
+    def _write_root_ca_file(tmp_path: pathlib.Path) -> bytes:
+        ca_file = tmp_path / "policy-ca.pem"
+        ca_file.write_bytes(root_cert_pem)
+        return str(ca_file).encode("ascii")
+
+    def test_policy_direction_constants(self) -> None:
+        """
+        The client and server direction constants are distinct integers.
+        """
+        assert SSL.TLS_DIRECTION_SERVER != SSL.TLS_DIRECTION_CLIENT
+        assert isinstance(SSL.TLS_DIRECTION_SERVER, int)
+        assert isinstance(SSL.TLS_DIRECTION_CLIENT, int)
+
+    def test_context_infers_direction(self) -> None:
+        """
+        A context reports the endpoint direction implied by its method.
+        """
+        assert (
+            Context(SSL.TLS_SERVER_METHOD).get_tls_direction()
+            == SSL.TLS_DIRECTION_SERVER
+        )
+        assert (
+            Context(SSL.TLS_CLIENT_METHOD).get_tls_direction()
+            == SSL.TLS_DIRECTION_CLIENT
+        )
+        # The generic methods default to the stricter server direction.
+        assert (
+            Context(TLS_METHOD).get_tls_direction() == SSL.TLS_DIRECTION_SERVER
+        )
+
+    def test_default_policy_versions(self) -> None:
+        """
+        The default policy rejects everything below TLS 1.2 and keeps
+        TLS 1.3 available.
+        """
+        policy = SSL.SecurityPolicy()
+        assert policy.min_version == TLS1_2_VERSION
+        assert policy.max_version == TLS1_3_VERSION
+        assert policy.legacy is False
+        assert policy.effective_min_version() == TLS1_2_VERSION
+
+        server = self._server_context(policy)
+        client = self._client_context()
+        client.set_max_proto_version(SSL.TLS1_VERSION)
+
+        server_connection = Connection(server, None)
+        client_connection = Connection(client, None)
+        with pytest.raises(Error, match=r"(?i)no protocols"):
+            handshake_in_memory(client_connection, server_connection)
+
+    def test_tls12_and_tls13_handshake_succeed(self) -> None:
+        """
+        Policy-protected contexts still complete ordinary TLS 1.2 and TLS 1.3
+        handshakes.
+        """
+        server = self._server_context(
+            SSL.SecurityPolicy(direction=SSL.TLS_DIRECTION_SERVER)
+        )
+        client = self._client_context(
+            SSL.SecurityPolicy(direction=SSL.TLS_DIRECTION_CLIENT)
+        )
+
+        server_connection = Connection(server, None)
+        client_connection = Connection(client, None)
+        handshake_in_memory(client_connection, server_connection)
+
+        negotiated = client_connection.get_protocol_version_name()
+        assert negotiated in ("TLSv1.2", "TLSv1.3")
+        assert client_connection.get_cipher_name() is not None
+
+    def test_tls12_boundary_handshake(self) -> None:
+        """
+        Pinning both peers to TLS 1.2 still handshakes, while a client
+        capped below the policy minimum is refused.
+        """
+        server_policy = SSL.SecurityPolicy(
+            min_version=TLS1_2_VERSION,
+            max_version=TLS1_2_VERSION,
+            direction=SSL.TLS_DIRECTION_SERVER,
+        )
+        client_policy = SSL.SecurityPolicy(
+            min_version=TLS1_2_VERSION,
+            max_version=TLS1_2_VERSION,
+            direction=SSL.TLS_DIRECTION_CLIENT,
+        )
+        server = self._server_context(server_policy)
+        client = self._client_context(client_policy)
+
+        server_connection = Connection(server, None)
+        client_connection = Connection(client, None)
+        handshake_in_memory(client_connection, server_connection)
+        assert client_connection.get_protocol_version_name() == "TLSv1.2"
+
+    def test_downgrade_attempt_does_not_silently_negotiate(self) -> None:
+        """
+        A legacy client offering only TLS 1.0/1.1 fails the handshake against
+        a policy-protected server instead of being silently downgraded.
+        """
+        server = self._server_context(
+            SSL.SecurityPolicy(direction=SSL.TLS_DIRECTION_SERVER)
+        )
+        client = self._client_context()
+        client.set_max_proto_version(SSL.TLS1_1_VERSION)
+
+        server_connection = Connection(server, None)
+        client_connection = Connection(client, None)
+        with pytest.raises(Error):
+            handshake_in_memory(client_connection, server_connection)
+
+    def test_weak_cipher_filtered_from_context(self) -> None:
+        """
+        Anonymous, null and plain-SHA1 ciphers are removed from a context
+        that enforces the default policy.
+        """
+        context = self._server_context(
+            SSL.SecurityPolicy(direction=SSL.TLS_DIRECTION_SERVER)
+        )
+        ciphers = Connection(context, None).get_cipher_list()
+
+        assert ciphers
+        for name in ciphers:
+            assert not name.startswith(("ADH-", "AECDH-"))
+            assert "NULL" not in name
+            assert "RC4" not in name
+            assert "DES" not in name
+            assert not name.endswith("-SHA")
+
+    def test_client_and_server_cipher_sets_differ(self) -> None:
+        """
+        The same security level keeps a wider cipher set on clients than on
+        servers, because the server selects the cipher and is held one level
+        stricter.
+        """
+        server_policy = SSL.SecurityPolicy(direction=SSL.TLS_DIRECTION_SERVER)
+        client_policy = SSL.SecurityPolicy(direction=SSL.TLS_DIRECTION_CLIENT)
+
+        assert (
+            server_policy.effective_security_level()
+            > client_policy.effective_security_level()
+        )
+
+        server_ciphers = set(
+            Connection(
+                self._server_context(server_policy), None
+            ).get_cipher_list()
+        )
+        client_ciphers = set(
+            Connection(
+                self._client_context(client_policy), None
+            ).get_cipher_list()
+        )
+        assert server_ciphers.issubset(client_ciphers)
+        assert client_ciphers - server_ciphers
+
+    def test_security_level_filters_progressively(self) -> None:
+        """
+        Raising the security level can only shrink the permitted cipher set.
+        """
+        base = SSL.SecurityPolicy(
+            direction=SSL.TLS_DIRECTION_CLIENT, security_level=1
+        )
+        strict = SSL.SecurityPolicy(
+            direction=SSL.TLS_DIRECTION_CLIENT, security_level=3
+        )
+        base_ciphers = set(
+            Connection(self._client_context(base), None).get_cipher_list()
+        )
+        strict_ciphers = set(
+            Connection(self._client_context(strict), None).get_cipher_list()
+        )
+        assert strict_ciphers.issubset(base_ciphers)
+        assert base_ciphers - strict_ciphers
+
+    def test_legacy_policy_must_be_explicitly_enabled(self) -> None:
+        """
+        Weak ciphers and TLS 1.0 remain unavailable unless a caller builds a
+        policy with legacy=True; there is no implicit legacy mode.
+        """
+        modern = SSL.SecurityPolicy(direction=SSL.TLS_DIRECTION_CLIENT)
+        assert modern.legacy is False
+        assert modern.effective_min_version() == TLS1_2_VERSION
+        assert modern.effective_security_level() >= 2
+
+        legacy = SSL.SecurityPolicy(
+            direction=SSL.TLS_DIRECTION_SERVER, legacy=True
+        )
+        assert legacy.legacy is True
+        assert legacy.effective_min_version() == SSL.TLS1_VERSION
+        assert legacy.effective_security_level() == 0
+
+        legacy_ciphers = set(
+            Connection(self._server_context(legacy), None).get_cipher_list()
+        )
+        assert "AES128-SHA" in legacy_ciphers
+
+        modern_ciphers = set(
+            Connection(self._server_context(modern), None).get_cipher_list()
+        )
+        assert "AES128-SHA" not in modern_ciphers
+
+    def test_legacy_policy_never_enables_sslv3(self) -> None:
+        """
+        Even in legacy mode SSLv3 stays below the minimum version.
+        """
+        legacy = SSL.SecurityPolicy(legacy=True)
+        assert legacy.effective_min_version() > SSL.SSL3_VERSION
+
+    @pytest.mark.parametrize(
+        ("kwargs", "match"),
+        [
+            ({"direction": 42}, "direction"),
+            ({"security_level": -1}, "security_level"),
+            ({"security_level": 6}, "security_level"),
+            (
+                {
+                    "min_version": TLS1_3_VERSION,
+                    "max_version": TLS1_2_VERSION,
+                },
+                "min_version",
+            ),
+            ({"min_version": 123456}, "unknown TLS version"),
+            ({"legacy": "yes"}, "legacy"),
+        ],
+    )
+    def test_invalid_policy_configuration(
+        self, kwargs: dict[str, object], match: str
+    ) -> None:
+        """
+        Bad policy arguments raise the configuration error, distinct from a
+        runtime negotiation failure.
+        """
+        with pytest.raises(SSL.SecurityPolicyConfigurationError, match=match):
+            SSL.SecurityPolicy(**kwargs)  # type: ignore[arg-type]
+
+    def test_set_security_policy_rejects_wrong_type(self) -> None:
+        """
+        Applying something other than a SecurityPolicy raises the
+        configuration error.
+        """
+        with pytest.raises(SSL.SecurityPolicyConfigurationError):
+            Context(SSL.TLS_SERVER_METHOD).set_security_policy(
+                object()  # type: ignore[arg-type]
+            )
+
+    def test_policy_error_distinct_from_configuration_error(self) -> None:
+        """
+        The negotiation/runtime exception and the configuration exception are
+        separate classes so callers can handle them differently.
+        """
+        assert issubclass(SSL.SecurityPolicyError, Error)
+        assert issubclass(SSL.SecurityPolicyConfigurationError, ValueError)
+        assert not issubclass(
+            SSL.SecurityPolicyError, SSL.SecurityPolicyConfigurationError
+        )
+        assert not issubclass(
+            SSL.SecurityPolicyConfigurationError, SSL.SecurityPolicyError
+        )
+
+    def test_policy_tracked_on_context(self) -> None:
+        """
+        The applied policy is retrievable from the context, and contexts
+        without a policy report None.
+        """
+        bare = Context(SSL.TLS_SERVER_METHOD)
+        assert bare.get_security_policy() is None
+
+        policy = SSL.SecurityPolicy(direction=SSL.TLS_DIRECTION_SERVER)
+        configured = self._server_context(policy)
+        assert configured.get_security_policy() is policy
+
+    def test_context_callbacks_remain_compatible(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """
+        A verify callback registered on a policy-protected context is still
+        invoked during the handshake.
+        """
+        server = self._server_context(
+            SSL.SecurityPolicy(direction=SSL.TLS_DIRECTION_SERVER)
+        )
+        client = self._client_context(
+            SSL.SecurityPolicy(direction=SSL.TLS_DIRECTION_CLIENT)
+        )
+        client.load_verify_locations(self._write_root_ca_file(tmp_path))
+        client.set_verify(VERIFY_PEER, verify_cb)
+
+        server_connection = Connection(server, None)
+        client_connection = Connection(client, None)
+        handshake_in_memory(client_connection, server_connection)
+        assert client_connection.get_peer_certificate() is not None

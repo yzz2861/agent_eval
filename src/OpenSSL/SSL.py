@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import socket
 import sys
 import typing
@@ -128,6 +129,10 @@ __all__ = [
     "TLS1_3_VERSION",
     "TLS1_VERSION",
     "TLS_CLIENT_METHOD",
+    "TLS_DEFAULT_SECURITY_LEVEL",
+    "TLS_DIRECTION_CLIENT",
+    "TLS_DIRECTION_SERVER",
+    "TLS_MAXIMUM_SECURITY_LEVEL",
     "TLS_METHOD",
     "TLS_SERVER_METHOD",
     "VERIFY_CLIENT_ONCE",
@@ -145,6 +150,9 @@ __all__ = [
     "OP_NO_TLSv1_3",
     "SSLeay_version",
     "SSLv23_METHOD",
+    "SecurityPolicy",
+    "SecurityPolicyConfigurationError",
+    "SecurityPolicyError",
     "Session",
     "SysCallError",
     "TLSv1_1_METHOD",
@@ -464,6 +472,25 @@ class ZeroReturnError(Error):
 
 class SysCallError(Error):
     pass
+
+
+class SecurityPolicyError(Error):
+    """
+    A :class:`SecurityPolicy` was applied to a :class:`Context` but its
+    requirements could not be satisfied. This is raised, for example, when a
+    peer is only able to negotiate a TLS version or cipher that is weaker than
+    the minimum configured by the active policy.
+    """
+
+
+class SecurityPolicyConfigurationError(ValueError):
+    """
+    A :class:`SecurityPolicy` was constructed or applied with an invalid
+    configuration. Unlike :class:`SecurityPolicyError`, this indicates a
+    programming mistake in the policy itself (unknown direction, unknown TLS
+    version, an inverted version range, or a security level outside the
+    supported range) rather than a failed negotiation at runtime.
+    """
 
 
 class _VerifyHelper:
@@ -839,6 +866,225 @@ def _require_not_used(f: F) -> F:
     return typing.cast(F, inner)
 
 
+#: Direction of a TLS endpoint, used by :class:`SecurityPolicy`.
+TLS_DIRECTION_SERVER = 1
+TLS_DIRECTION_CLIENT = 2
+
+#: Default :class:`SecurityPolicy` security level.
+TLS_DEFAULT_SECURITY_LEVEL = 2
+
+#: Highest :class:`SecurityPolicy` security level.
+TLS_MAXIMUM_SECURITY_LEVEL = 5
+
+_TLS_DIRECTION_NAMES = {
+    TLS_DIRECTION_SERVER: "server",
+    TLS_DIRECTION_CLIENT: "client",
+}
+
+
+def _classify_cipher_security_level(cipher_name: str) -> int:
+    """
+    Map an OpenSSL cipher name to a :class:`SecurityPolicy` security level.
+
+    The levels deliberately mirror the semantics of OpenSSL's own
+    ``SSL_CTX_set_security_level`` so callers familiar with it get the same
+    minimum guarantees, but the classification is computed in Python because
+    not every supported OpenSSL build exposes that API through cffi.
+    """
+    name = cipher_name.upper()
+
+    # Anonymous, unauthenticated and null-encryption suites never offer any
+    # authentication, confidentiality or integrity guarantees.
+    if (
+        "NULL" in name
+        or name.startswith(("ADH-", "AECDH-"))
+        or "-ANON" in name
+    ):
+        return 0
+
+    # Export-grade suites, the broken RC4 stream cipher and single-DES
+    # (including triple DES, whose 64-bit block is vulnerable to SWEET32).
+    if "EXPORT" in name or "RC4" in name or "DES" in name or "MD5" in name:
+        return 1
+
+    # Static RSA key exchange and plain SHA-1 HMAC CBC suites provide no
+    # forward secrecy (or only legacy CBC integrity). They still negotiate on
+    # older peers but are not acceptable at the default modern level.
+    if name.startswith(("RSA-", "AES128-SHA", "AES256-SHA", "CAMELLIA")) or (
+        name.endswith("-SHA") and "SHA256" not in name and "SHA384" not in name
+    ):
+        return 1
+
+    bits_match = re.search(r"(\d+)", name)
+    if bits_match is None:
+        return 1
+    bits = int(bits_match.group(1))
+    if bits < 128:
+        return 1
+    if bits < 256:
+        return 2
+    return 3
+
+
+class SecurityPolicy:
+    """
+    Direction-aware description of the TLS versions and ciphers a
+    :class:`Context` is allowed to negotiate.
+
+    A policy is only applied to a context when a caller explicitly requests
+    one (via :meth:`Context.set_security_policy` or the
+    ``security_policy`` argument of the constructor). Constructing a
+    :class:`Context` without a policy keeps the historical, unrestricted
+    behavior.
+
+    :param min_version: Minimum negotiable TLS version, one of the
+        ``TLS*_VERSION`` constants. Defaults to :data:`TLS1_2_VERSION`.
+    :param max_version: Maximum negotiable TLS version, one of the
+        ``TLS*_VERSION`` constants. Defaults to :data:`TLS1_3_VERSION`.
+    :param security_level: Minimum cipher security level in the range 0-5.
+        Ciphers classified below the level are removed from the context.
+        Defaults to :data:`TLS_DEFAULT_SECURITY_LEVEL`.
+    :param direction: Endpoint direction the policy is being configured for,
+        either :data:`TLS_DIRECTION_SERVER` or :data:`TLS_DIRECTION_CLIENT`.
+        The same level selects progressively stricter cipher sets on servers,
+        which choose the cipher and therefore must never offer a weak suite.
+    :param legacy: When true, relax the policy to permit TLS 1.0/1.1 and the
+        weak ciphers required by legacy clients. This can only be enabled
+        explicitly by the caller and is never implied by other arguments.
+    """
+
+    _KNOWN_VERSIONS = frozenset(
+        {
+            SSL3_VERSION,
+            TLS1_VERSION,
+            TLS1_1_VERSION,
+            TLS1_2_VERSION,
+            TLS1_3_VERSION,
+        }
+    )
+
+    def __init__(
+        self,
+        min_version: int = TLS1_2_VERSION,
+        max_version: int = TLS1_3_VERSION,
+        security_level: int = TLS_DEFAULT_SECURITY_LEVEL,
+        direction: int = TLS_DIRECTION_SERVER,
+        legacy: bool = False,
+    ) -> None:
+        if direction not in (TLS_DIRECTION_SERVER, TLS_DIRECTION_CLIENT):
+            raise SecurityPolicyConfigurationError(
+                f"direction must be TLS_DIRECTION_SERVER or "
+                f"TLS_DIRECTION_CLIENT, got {direction!r}"
+            )
+        if not isinstance(legacy, bool):
+            raise SecurityPolicyConfigurationError("legacy must be a boolean")
+        if not isinstance(security_level, int) or isinstance(
+            security_level, bool
+        ):
+            raise SecurityPolicyConfigurationError(
+                "security_level must be an integer"
+            )
+        if not 0 <= security_level <= TLS_MAXIMUM_SECURITY_LEVEL:
+            raise SecurityPolicyConfigurationError(
+                f"security_level must be between 0 and "
+                f"{TLS_MAXIMUM_SECURITY_LEVEL}"
+            )
+        for label, version in (
+            ("min_version", min_version),
+            ("max_version", max_version),
+        ):
+            if not isinstance(version, int) or isinstance(version, bool):
+                raise SecurityPolicyConfigurationError(
+                    f"{label} must be an integer version constant"
+                )
+            if version not in self._KNOWN_VERSIONS:
+                raise SecurityPolicyConfigurationError(
+                    f"unknown TLS version {version!r} for {label}"
+                )
+        if min_version > max_version:
+            raise SecurityPolicyConfigurationError(
+                "min_version cannot be greater than max_version"
+            )
+
+        self._legacy = legacy
+        self._direction = direction
+        self._security_level = security_level
+        self._min_version = min_version
+        self._max_version = max_version
+
+    @property
+    def min_version(self) -> int:
+        return self._min_version
+
+    @property
+    def max_version(self) -> int:
+        return self._max_version
+
+    @property
+    def security_level(self) -> int:
+        return self._security_level
+
+    @property
+    def direction(self) -> int:
+        return self._direction
+
+    @property
+    def legacy(self) -> bool:
+        return self._legacy
+
+    def effective_min_version(self) -> int:
+        """
+        Return the minimum version actually enforced, taking legacy mode into
+        account. Legacy policies still reject SSLv3 and anything below it.
+        """
+        if self._legacy:
+            return min(self._min_version, TLS1_VERSION)
+        return self._min_version
+
+    def effective_security_level(self) -> int:
+        """
+        Return the cipher level actually enforced. Servers are held one level
+        above clients so that the endpoint selecting the cipher never offers a
+        weak suite, while clients retain enough compatibility to handshake.
+        Legacy mode drops the floor to permit weak legacy suites.
+        """
+        if self._legacy:
+            return 0
+        level = self._security_level
+        if self._direction == TLS_DIRECTION_SERVER:
+            level = min(level + 1, TLS_MAXIMUM_SECURITY_LEVEL)
+        return level
+
+    def allows_cipher(self, cipher_name: str) -> bool:
+        """
+        Return whether a cipher (identified by its OpenSSL name) is permitted
+        by this policy.
+        """
+        if cipher_name.startswith("TLS_"):
+            # TLS 1.3 suites are all modern AEAD suites; they are gated by
+            # the negotiated version rather than the cipher level.
+            return True
+        return (
+            _classify_cipher_security_level(cipher_name)
+            >= self.effective_security_level()
+        )
+
+    def filter_cipher_list(self, cipher_names: Sequence[str]) -> list[str]:
+        """
+        Return the subset of *cipher_names* permitted by this policy,
+        preserving the caller's preference order.
+        """
+        return [name for name in cipher_names if self.allows_cipher(name)]
+
+    def __repr__(self) -> str:
+        return (
+            f"SecurityPolicy(min_version={self._min_version}, "
+            f"max_version={self._max_version}, "
+            f"security_level={self._security_level}, "
+            f"direction={self._direction}, legacy={self._legacy})"
+        )
+
+
 class Context:
     """
     :class:`OpenSSL.SSL.Context` instances define the parameters for setting
@@ -865,7 +1111,11 @@ class Context:
         DTLS_CLIENT_METHOD: (_lib.DTLS_client_method, None),
     }
 
-    def __init__(self, method: int) -> None:
+    def __init__(
+        self,
+        method: int,
+        security_policy: SecurityPolicy | None = None,
+    ) -> None:
         if not isinstance(method, int):
             raise TypeError("method must be an integer")
 
@@ -905,6 +1155,8 @@ class Context:
             None
         )
         self._cookie_verify_helper: _CookieVerifyCallbackHelper | None = None
+        self._security_policy: SecurityPolicy | None = None
+        self._direction = self._direction_for_method(method)
 
         self.set_mode(
             _lib.SSL_MODE_ENABLE_PARTIAL_WRITE
@@ -913,6 +1165,9 @@ class Context:
         if version is not None:
             self.set_min_proto_version(version)
             self.set_max_proto_version(version)
+
+        if security_policy is not None:
+            self.set_security_policy(security_policy)
 
     @_require_not_used
     def set_min_proto_version(self, version: int) -> None:
@@ -941,6 +1196,92 @@ class Context:
         _openssl_assert(
             _lib.SSL_CTX_set_max_proto_version(self._context, version) == 1
         )
+
+    @staticmethod
+    def _direction_for_method(method: int) -> int:
+        if method in (TLS_CLIENT_METHOD, DTLS_CLIENT_METHOD):
+            return TLS_DIRECTION_CLIENT
+        if method in (TLS_SERVER_METHOD, DTLS_SERVER_METHOD):
+            return TLS_DIRECTION_SERVER
+        return TLS_DIRECTION_SERVER
+
+    @_require_not_used
+    def set_security_policy(self, policy: SecurityPolicy) -> None:
+        """
+        Apply a direction-aware TLS version and cipher policy.
+
+        The minimum protocol version of the context is raised to the
+        policy minimum, so a peer that can only offer an older version
+        fails the handshake instead of silently downgrading. The cipher
+        list is rebuilt from the ciphers the library supports after
+        filtering out every suite below the policy security level.
+
+        Legacy versions and weak ciphers are only reachable through a
+        :class:`SecurityPolicy` explicitly constructed with
+        ``legacy=True``; the policy must be opted into by the caller.
+
+        :param policy: The :class:`SecurityPolicy` to enforce.
+
+        :raises SecurityPolicyConfigurationError: if *policy* is not a
+            :class:`SecurityPolicy` or its requirements leave the
+            context without any usable cipher.
+        :raises SecurityPolicyError: if the underlying library cannot
+            satisfy the configured versions or ciphers.
+        """
+        if not isinstance(policy, SecurityPolicy):
+            raise SecurityPolicyConfigurationError(
+                "security_policy must be a SecurityPolicy instance"
+            )
+
+        min_version = policy.effective_min_version()
+        try:
+            self.set_min_proto_version(min_version)
+            self.set_max_proto_version(policy.max_version)
+        except Error as e:
+            raise SecurityPolicyError(
+                f"could not configure the policy protocol versions: {e}"
+            ) from e
+
+        # A throwaway connection enumerates the ciphers offered by this
+        # build. Creating it flips the context used-flag, so restore it
+        # afterwards to keep set_security_policy usable before the first
+        # real connection is created.
+        was_used = self._used
+        probe = Connection(self, None)
+        available = probe.get_cipher_list()
+        self._used = was_used
+        allowed = policy.filter_cipher_list(available)
+        if not allowed:
+            direction_name = _TLS_DIRECTION_NAMES[policy.direction]
+            level = policy.effective_security_level()
+            raise SecurityPolicyConfigurationError(
+                f"SecurityPolicy leaves no usable ciphers for the "
+                f"{direction_name} direction at security level "
+                f"{level}"
+            )
+        try:
+            self.set_cipher_list(":".join(allowed).encode("ascii"))
+        except Error as e:
+            raise SecurityPolicyError(
+                f"could not configure the policy cipher list: {e}"
+            ) from e
+
+        self._security_policy = policy
+
+    def get_security_policy(self) -> SecurityPolicy | None:
+        """
+        Return the :class:`SecurityPolicy` applied to this
+        context, or :obj:`None` when no policy has been applied.
+        """
+        return self._security_policy
+
+    def get_tls_direction(self) -> int:
+        """
+        Return the endpoint direction inferred from the context method:
+        :data:`TLS_DIRECTION_SERVER` or
+        :data:`TLS_DIRECTION_CLIENT`.
+        """
+        return self._direction
 
     @_require_not_used
     def load_verify_locations(

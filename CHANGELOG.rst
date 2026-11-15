@@ -21,6 +21,7 @@ Deprecations:
 Changes:
 ^^^^^^^^
 
+- Added :class:`OpenSSL.SSL.SecurityPolicy`, a direction-aware TLS version and cipher policy for :class:`OpenSSL.SSL.Context`. A context with a policy rejects peers that cannot meet its minimum TLS version instead of silently downgrading, and filters its cipher list according to a configurable security level (with servers held one level stricter than clients). TLS 1.0/1.1 and weak ciphers are only reachable through an explicit ``legacy=True`` policy, which the caller must opt into. Runtime negotiation failures raise :class:`OpenSSL.SSL.SecurityPolicyError` while invalid policy arguments raise :class:`OpenSSL.SSL.SecurityPolicyConfigurationError`. Contexts constructed without a policy keep their historical behavior.
 - Fixed a race in which an exception raised by a verify, ALPN selection, OCSP, or DTLS cookie callback for one ``Connection`` could be raised on an unrelated ``Connection`` created from the same ``Context`` and used concurrently from another thread. Exceptions from these callbacks are now tracked per ``Connection``. Discovered and reported by SecDim Security Research.
 - Fixed exceptions raised by a verify callback registered with ``Connection.set_verify`` being swallowed instead of being propagated to the caller.
 
