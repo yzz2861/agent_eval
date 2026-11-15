@@ -4676,6 +4676,15 @@ class PE:
         access it). This structure finally points to the resource data.
         All the members of this structure, IMAGE_RESOURCE_DATA_ENTRY,
         are available as its attributes.
+
+        The tree is traversed iteratively, keeping the state of every open
+        directory in a frame on an explicit stack, so that pathologically
+        deep resource trees cannot exhaust the interpreter stack. Parsing
+        is bounded by three budgets: MAX_RESOURCE_DEPTH (nesting levels),
+        MAX_RESOURCE_ENTRIES (total number of directory entries) and the
+        size of the file (total resource data). The RVA and length of every
+        directory and data entry are validated; entries whose contents
+        cannot be trusted keep their name (or id) but their data is skipped.
         """
 
         if dirs is None:
@@ -4684,157 +4693,166 @@ class PE:
         if base_rva is None:
             base_rva = rva
 
-        if level > MAX_RESOURCE_DEPTH:
-            self.__warnings.append(
-                "Error parsing the resources directory. "
-                f"Excessively nested table depth {level} (>{MAX_RESOURCE_DEPTH})"
-            )
-            return None
+        # Upper bound (exclusive) for the targets of directory and data
+        # entries, used to validate the RVA of every entry. Only enforced
+        # when the size of the resource directory is known.
+        resource_dir_end = base_rva + size if size else None
 
-        try:
-            # If the RVA is invalid all would blow up. Some EXEs seem to be
-            # specially nasty and have an invalid RVA.
-            data = self.get_data(
-                rva, Structure(self.__IMAGE_RESOURCE_DIRECTORY_format__).sizeof()
-            )
-        except PEFormatError:
-            self.__warnings.append(
-                "Invalid resources directory. Can't read "
-                f"directory data at RVA: {rva:#x}"
-            )
-            return None
+        # Result of the most recently completed directory, consumed by the
+        # parent frame when it resumes.
+        completed = None
+        # When set, an (rva, size, level, dirs) tuple with a directory to open.
+        to_open = (rva, size, level, dirs)
+        # Frames holding the parsing state of every open directory. Using an
+        # explicit stack instead of recursion keeps deeply nested resource
+        # trees from exhausting the interpreter stack.
+        stack = []
 
-        # Get the resource directory structure, that is, the header
-        # of the table preceding the actual entries
-        resource_dir = self.__unpack_data__(
-            self.__IMAGE_RESOURCE_DIRECTORY_format__,
-            data,
-            file_offset=self.get_offset_from_rva(rva),
-        )
-        if resource_dir is None:
-            # If we can't parse resources directory then silently return.
-            # This directory does not necessarily have to be valid to
-            # still have a valid PE file
-            self.__warnings.append(
-                "Invalid resources directory. Can't parse "
-                f"directory data at RVA: {rva:#x}"
-            )
-            return None
-
-        dir_entries = []
-
-        # Advance the RVA to the position immediately following the directory
-        # table header and pointing to the first entry in the table
-        rva += resource_dir.sizeof()
-
-        number_of_entries = (
-            resource_dir.NumberOfNamedEntries + resource_dir.NumberOfIdEntries
-        )
-
-        # Set a hard limit on the maximum reasonable number of entries
-        MAX_ALLOWED_ENTRIES = 4096
-        if number_of_entries > MAX_ALLOWED_ENTRIES:
-            self.__warnings.append(
-                "Error parsing the resources directory. "
-                f"The directory contains {number_of_entries} entries (>{MAX_ALLOWED_ENTRIES})"
-            )
-            return None
-
-        self.__total_resource_entries_count += number_of_entries
-        if self.__total_resource_entries_count > MAX_RESOURCE_ENTRIES:
-            self.__warnings.append(
-                "Error parsing the resources directory. "
-                f"The file contains at least {self.__total_resource_entries_count} entries (>{MAX_RESOURCE_ENTRIES})"
-            )
-            return None
-
-        strings_to_postprocess = []
-
-        # Keep track of the last name's start and end offsets in order
-        # to be able to detect overlapping entries that might suggest
-        # and invalid or corrupt directory.
-        last_name_begin_end = None
-        for idx in range(number_of_entries):
-            if (
-                not self.__resource_size_limit_reached
-                and self.__total_resource_bytes > self.__resource_size_limit_upperbounds
-            ):
-                self.__resource_size_limit_reached = True
+        def open_frame(dir_rva, dir_size, dir_level, dir_dirs):
+            """Read a directory header and create a frame to parse it."""
+            if dir_level > MAX_RESOURCE_DEPTH:
                 self.__warnings.append(
-                    f"Resource size {self.__total_resource_bytes:#x} exceeds file size "
-                    f"{self.__resource_size_limit_upperbounds:#x}, overlapping resources found."
+                    "Error parsing the resources directory. "
+                    f"Excessively nested table depth {dir_level} (>{MAX_RESOURCE_DEPTH})"
                 )
+                return None
 
-            res = self.parse_resource_entry(rva)
-            if res is None:
+            try:
+                # If the RVA is invalid all would blow up. Some EXEs seem to be
+                # specially nasty and have an invalid RVA.
+                data = self.get_data(
+                    dir_rva,
+                    Structure(self.__IMAGE_RESOURCE_DIRECTORY_format__).sizeof(),
+                )
+            except PEFormatError:
                 self.__warnings.append(
-                    "Error parsing the resources directory, "
-                    f"Entry {idx} is invalid, RVA = {rva:#x}. "
+                    "Invalid resources directory. Can't read "
+                    f"directory data at RVA: {dir_rva:#x}"
                 )
-                break
+                return None
 
-            entry_name = None
-            entry_id = None
+            # Get the resource directory structure, that is, the header
+            # of the table preceding the actual entries
+            resource_dir = self.__unpack_data__(
+                self.__IMAGE_RESOURCE_DIRECTORY_format__,
+                data,
+                file_offset=self.get_offset_from_rva(dir_rva),
+            )
+            if resource_dir is None:
+                # If we can't parse resources directory then silently return.
+                # This directory does not necessarily have to be valid to
+                # still have a valid PE file
+                self.__warnings.append(
+                    "Invalid resources directory. Can't parse "
+                    f"directory data at RVA: {dir_rva:#x}"
+                )
+                return None
 
-            if not res.NameIsString:
-                entry_id = res.Name
-            else:
-                ustr_offset = base_rva + res.NameOffset
+            number_of_entries = (
+                resource_dir.NumberOfNamedEntries + resource_dir.NumberOfIdEntries
+            )
+
+            # Set a hard limit on the maximum reasonable number of entries
+            MAX_ALLOWED_ENTRIES = 4096
+            if number_of_entries > MAX_ALLOWED_ENTRIES:
+                self.__warnings.append(
+                    "Error parsing the resources directory. "
+                    f"The directory contains {number_of_entries} entries (>{MAX_ALLOWED_ENTRIES})"
+                )
+                return None
+
+            self.__total_resource_entries_count += number_of_entries
+            if self.__total_resource_entries_count > MAX_RESOURCE_ENTRIES:
+                self.__warnings.append(
+                    "Error parsing the resources directory. "
+                    f"The file contains at least {self.__total_resource_entries_count} entries (>{MAX_RESOURCE_ENTRIES})"
+                )
+                return None
+
+            return {
+                "level": dir_level,
+                "size": dir_size,
+                "dirs": dir_dirs,
+                "resource_dir": resource_dir,
+                "dir_entries": [],
+                "strings_to_postprocess": [],
+                # Keep track of the last name's start and end offsets in order
+                # to be able to detect overlapping entries that might suggest
+                # and invalid or corrupt directory.
+                "last_name_begin_end": None,
+                # RVA of the next entry, right after the directory header
+                "rva": dir_rva + resource_dir.sizeof(),
+                "idx": 0,
+                "number_of_entries": number_of_entries,
+                # Entry waiting for its child directory to be parsed
+                "pending_entry": None,
+            }
+
+        def close_frame():
+            """Render the frame's pending strings and produce its result."""
+            nonlocal completed
+            frame = stack.pop()
+            strings_to_postprocess = frame["strings_to_postprocess"]
+            string_rvas = [s.get_rva() for s in strings_to_postprocess]
+            string_rvas.sort()
+
+            for s in strings_to_postprocess:
+                s.render_pascal_16()
+
+            completed = ResourceDirData(
+                struct=frame["resource_dir"], entries=frame["dir_entries"]
+            )
+
+        def parse_version_info(frame, res):
+            """Check if this entry contains version information."""
+            if frame["level"] != 0 or res.Id != RESOURCE_TYPE["RT_VERSION"]:
+                return
+
+            last_entry = frame["dir_entries"][-1] if frame["dir_entries"] else None
+            try:
+                version_entries = last_entry.directory.entries[0].directory.entries
+            except (AttributeError, IndexError):
+                # Maybe a malformed directory structure...?
+                # Let's ignore it
+                return
+
+            for version_entry in version_entries:
+                rt_version_struct = None
                 try:
-                    entry_name = UnicodeStringWrapperPostProcessor(self, ustr_offset)
-                    self.__total_resource_bytes += entry_name.get_pascal_16_length()
-                    # If the last entry's offset points before the current's but its end
-                    # is past the current's beginning, assume the overlap indicates a
-                    # corrupt name.
-                    if last_name_begin_end and (
-                        last_name_begin_end[0] < ustr_offset <= last_name_begin_end[1]
-                    ):
-                        # Remove the previous overlapping entry as it's likely to be
-                        # already corrupt data.
-                        strings_to_postprocess.pop()
-                        self.__warnings.append(
-                            "Error parsing the resources directory, "
-                            "attempting to read entry name. "
-                            f"Entry names overlap {ustr_offset:#x}"
-                        )
-                        break
+                    rt_version_struct = version_entry.data.struct
+                except (AttributeError, IndexError):
+                    # Maybe a malformed directory structure...?
+                    # Let's ignore it
+                    pass
 
-                    last_name_begin_end = (
-                        ustr_offset,
-                        ustr_offset + entry_name.get_pascal_16_length(),
-                    )
+                if rt_version_struct is not None:
+                    self.parse_version_information(rt_version_struct)
 
-                    strings_to_postprocess.append(entry_name)
+        while to_open is not None or stack:
+            if to_open is not None:
+                frame = open_frame(*to_open)
+                to_open = None
+                if frame is None:
+                    # The directory could not be opened; propagate the
+                    # failure to the parent frame (or to the caller when
+                    # this was the root directory).
+                    completed = None
+                else:
+                    stack.append(frame)
+                continue
 
-                except PEFormatError:
-                    self.__warnings.append(
-                        "Error parsing the resources directory, "
-                        "attempting to read entry name. "
-                        f"Can't read unicode string at offset {ustr_offset:#x}"
-                    )
+            frame = stack[-1]
 
-            if res.DataIsDirectory:
-                # One trick malware can do is to recursively reference the next
-                # directory. This causes hilarity to ensue when trying to parse
-                # everything correctly. If the original RVA given to this
-                # function is equal to the next one to parse, we assume that
-                # it's a trick. Instead of raising a PEFormatError this would
-                # skip some reasonable data so we just break.
-                #
-                # 9ee4d0a0caf095314fd7041a3e4404dc is the offending sample
-                if base_rva + res.OffsetToDirectory in dirs:
-                    break
+            if frame["pending_entry"] is not None:
+                # A child directory was just parsed; integrate its result.
+                res, entry_name, entry_id = frame["pending_entry"]
+                frame["pending_entry"] = None
+                entry_directory = completed
+                completed = None
 
-                entry_directory = self.parse_resources_directory(
-                    base_rva + res.OffsetToDirectory,
-                    size - (rva - base_rva),  # size
-                    base_rva=base_rva,
-                    level=level + 1,
-                    dirs=dirs + [base_rva + res.OffsetToDirectory],
-                )
-
-                if not entry_directory:
-                    break
+                if entry_directory is None:
+                    close_frame()
+                    continue
 
                 # Ange Albertini's code to process resources' strings
                 if entry_id == RESOURCE_TYPE["RT_STRING"]:
@@ -4880,7 +4898,7 @@ class PE:
 
                             resource_id.directory.strings = resource_strings
 
-                dir_entries.append(
+                frame["dir_entries"].append(
                     ResourceDirEntryData(
                         struct=res,
                         name=entry_name,
@@ -4888,62 +4906,185 @@ class PE:
                         directory=entry_directory,
                     )
                 )
+                parse_version_info(frame, res)
+                frame["rva"] += res.sizeof()
+                frame["idx"] += 1
+                continue
 
-            else:
-                struct = self.parse_resource_data_entry(
-                    base_rva + res.OffsetToDirectory
+            if frame["idx"] >= frame["number_of_entries"]:
+                close_frame()
+                continue
+            if (
+                not self.__resource_size_limit_reached
+                and self.__total_resource_bytes > self.__resource_size_limit_upperbounds
+            ):
+                self.__resource_size_limit_reached = True
+                self.__warnings.append(
+                    f"Resource size {self.__total_resource_bytes:#x} exceeds file size "
+                    f"{self.__resource_size_limit_upperbounds:#x}, overlapping resources found."
                 )
 
-                if struct:
-                    self.__total_resource_bytes += struct.Size
-                    entry_data = ResourceDataEntryData(
-                        struct=struct, lang=res.Name & 0x3FF, sublang=res.Name >> 10
-                    )
-
-                    dir_entries.append(
-                        ResourceDirEntryData(
-                            struct=res, name=entry_name, id=entry_id, data=entry_data
-                        )
-                    )
-
-                else:
-                    break
-
-            # Check if this entry contains version information
-            if level == 0 and res.Id == RESOURCE_TYPE["RT_VERSION"]:
-                if dir_entries:
-                    last_entry = dir_entries[-1]
-
+            entry_rva = frame["rva"]
+            res = self.parse_resource_entry(entry_rva)
+            if res is None:
                 try:
-                    version_entries = last_entry.directory.entries[0].directory.entries
-                except (AttributeError, IndexError):
-                    # Maybe a malformed directory structure...?
-                    # Let's ignore it
-                    pass
-                else:
-                    for version_entry in version_entries:
-                        rt_version_struct = None
-                        try:
-                            rt_version_struct = version_entry.data.struct
-                        except (AttributeError, IndexError):
-                            # Maybe a malformed directory structure...?
-                            # Let's ignore it
-                            pass
+                    invalid_entry = (
+                        f", file offset {self.get_offset_from_rva(entry_rva):#x}"
+                    )
+                except PEFormatError:
+                    invalid_entry = ""
+                self.__warnings.append(
+                    "Error parsing the resources directory, "
+                    f"Entry {frame['idx']} is invalid, "
+                    f"RVA = {entry_rva:#x}{invalid_entry}. "
+                )
+                close_frame()
+                continue
 
-                        if rt_version_struct is not None:
-                            self.parse_version_information(rt_version_struct)
+            # File offset of this directory entry, reported in errors so
+            # that corrupt entries can be located in the file.
+            entry_offset = res.get_file_offset()
 
-            rva += res.sizeof()
+            entry_name = None
+            entry_id = None
 
-        string_rvas = [s.get_rva() for s in strings_to_postprocess]
-        string_rvas.sort()
+            if not res.NameIsString:
+                entry_id = res.Name
+            else:
+                ustr_offset = base_rva + res.NameOffset
+                try:
+                    entry_name = UnicodeStringWrapperPostProcessor(self, ustr_offset)
+                    self.__total_resource_bytes += entry_name.get_pascal_16_length()
+                    # If the last entry's offset points before the current's but its end
+                    # is past the current's beginning, assume the overlap indicates a
+                    # corrupt name.
+                    last_name_begin_end = frame["last_name_begin_end"]
+                    if last_name_begin_end and (
+                        last_name_begin_end[0] < ustr_offset <= last_name_begin_end[1]
+                    ):
+                        # Remove the previous overlapping entry as it's likely to be
+                        # already corrupt data.
+                        frame["strings_to_postprocess"].pop()
+                        self.__warnings.append(
+                            "Error parsing the resources directory, "
+                            "attempting to read entry name. "
+                            f"Entry names overlap {ustr_offset:#x}"
+                        )
+                        close_frame()
+                        continue
 
-        for s in strings_to_postprocess:
-            s.render_pascal_16()
+                    frame["last_name_begin_end"] = (
+                        ustr_offset,
+                        ustr_offset + entry_name.get_pascal_16_length(),
+                    )
 
-        return ResourceDirData(
-            struct=resource_dir, entries=dir_entries
-        )
+                    frame["strings_to_postprocess"].append(entry_name)
+
+                except PEFormatError:
+                    self.__warnings.append(
+                        "Error parsing the resources directory, "
+                        "attempting to read entry name. "
+                        f"Can't read unicode string at offset {ustr_offset:#x}"
+                    )
+
+            if res.DataIsDirectory:
+                target_rva = base_rva + res.OffsetToDirectory
+
+                # One trick malware can do is to recursively reference the next
+                # directory. This causes hilarity to ensue when trying to parse
+                # everything correctly. If the RVA of any directory in the
+                # current path is equal to the next one to parse, we assume
+                # that it's a trick. Instead of raising a PEFormatError this
+                # would skip some reasonable data so we just stop parsing this
+                # directory.
+                #
+                # 9ee4d0a0caf095314fd7041a3e4404dc is the offending sample
+                if target_rva in frame["dirs"]:
+                    self.__warnings.append(
+                        "Error parsing the resources directory, "
+                        f"circular directory reference to RVA {target_rva:#x} "
+                        f"at entry offset {entry_offset:#x}."
+                    )
+                    close_frame()
+                    continue
+
+                if resource_dir_end is not None and not (
+                    base_rva <= target_rva < resource_dir_end
+                ):
+                    self.__warnings.append(
+                        "Error parsing the resources directory, "
+                        f"directory target RVA {target_rva:#x} at entry offset "
+                        f"{entry_offset:#x} lies outside the resource directory."
+                    )
+                    # Keep the entry's name but skip its out-of-bounds contents.
+                    frame["dir_entries"].append(
+                        ResourceDirEntryData(struct=res, name=entry_name, id=entry_id)
+                    )
+                    frame["rva"] += res.sizeof()
+                    frame["idx"] += 1
+                    continue
+
+                # Hand the child directory over to the explicit stack; this
+                # frame is resumed once the child has been parsed.
+                frame["pending_entry"] = (res, entry_name, entry_id)
+                to_open = (
+                    target_rva,
+                    frame["size"] - (entry_rva - base_rva),  # size
+                    frame["level"] + 1,
+                    frame["dirs"] + [target_rva],
+                )
+                continue
+
+            # The entry points to a data entry.
+            data_entry_rva = base_rva + res.OffsetToDirectory
+            struct = None
+            if resource_dir_end is not None and not (
+                base_rva <= data_entry_rva < resource_dir_end
+            ):
+                self.__warnings.append(
+                    "Error parsing the resources directory, "
+                    f"data entry RVA {data_entry_rva:#x} at entry offset "
+                    f"{entry_offset:#x} lies outside the resource directory."
+                )
+            else:
+                struct = self.parse_resource_data_entry(data_entry_rva)
+                if struct is None:
+                    self.__warnings.append(
+                        "Error parsing the resources directory, "
+                        f"can't read data entry at RVA {data_entry_rva:#x} "
+                        f"referenced by entry offset {entry_offset:#x}."
+                    )
+                elif not self.__resource_data_entry_is_valid(struct):
+                    self.__warnings.append(
+                        "Error parsing the resources directory, "
+                        f"data entry at entry offset {entry_offset:#x} has "
+                        f"an invalid data RVA {struct.OffsetToData:#x} or "
+                        f"size {struct.Size:#x}."
+                    )
+                    struct = None
+
+            if struct is not None:
+                self.__total_resource_bytes += struct.Size
+                entry_data = ResourceDataEntryData(
+                    struct=struct, lang=res.Name & 0x3FF, sublang=res.Name >> 10
+                )
+                frame["dir_entries"].append(
+                    ResourceDirEntryData(
+                        struct=res, name=entry_name, id=entry_id, data=entry_data
+                    )
+                )
+            else:
+                # Keep the entry's name but skip the unreadable or
+                # corrupt data.
+                frame["dir_entries"].append(
+                    ResourceDirEntryData(struct=res, name=entry_name, id=entry_id)
+                )
+
+            parse_version_info(frame, res)
+            frame["rva"] += res.sizeof()
+            frame["idx"] += 1
+
+        return completed
 
 
     def parse_resource_data_entry(self, rva):
@@ -4966,6 +5107,18 @@ class PE:
             data,
             file_offset=self.get_offset_from_rva(rva),
         )
+
+
+    def __resource_data_entry_is_valid(self, data_entry):
+        """Validate the data RVA and size of a resource data entry.
+
+        The data described by the entry must lie within the file.
+        """
+        try:
+            data_offset = self.get_offset_from_rva(data_entry.OffsetToData)
+        except PEFormatError:
+            return False
+        return data_offset + data_entry.Size <= len(self.__data__)
 
 
     def parse_resource_entry(self, rva):
