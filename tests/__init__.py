@@ -8,7 +8,9 @@ from unittest import TestCase
 from freezegun import freeze_time
 
 from onetimepass import (
-    _is_possible_token, get_hotp, get_totp, valid_hotp, valid_totp,
+    InvalidLengthError, InvalidSecretError, InvalidTokenError,
+    _decode_secret, _is_possible_token, _normalize_token,
+    get_hotp, get_totp, valid_hotp, valid_totp,
 )
 
 
@@ -276,3 +278,192 @@ class TotpValidityTestCase(TestCase):
         secret = b'MFRGGZDFMZTWQ2LK'
         with freeze_time(datetime.now()):
             self.assertFalse(valid_totp(get_hotp(secret, 1), secret))
+
+
+class SecretDecodingTestCase(TestCase):
+    """
+    Checks for unified Base32 secret decoding shared by generation and
+    validation paths.
+    """
+    def test_mixed_case_secret_decodes_like_uppercase(self):
+        """
+        Base32 secrets are case-insensitive, mixed case must decode the same
+        """
+        expected = _decode_secret(b'MFRGGZDFMZTWQ2LK')
+        self.assertEqual(_decode_secret(b'mfrggzdfmztwq2lk'), expected)
+        self.assertEqual(_decode_secret(b'MfrGgZdFmZtWq2Lk'), expected)
+        self.assertEqual(get_hotp('mfrggzdfmztwq2lk', 1), 765705)
+        self.assertEqual(get_hotp('MfrGgZdFmZtWq2Lk', 1), 765705)
+
+    def test_whitespace_is_ignored(self):
+        """
+        Spaces, tabs and newlines in the secret must not change the result
+        """
+        expected = _decode_secret(b'MFRGGZDFMZTWQ2LK')
+        self.assertEqual(_decode_secret(b'MFRG GZDF MZTW Q2LK'), expected)
+        self.assertEqual(_decode_secret(b'MFRG\tGZDF\nMZTW\r\nQ2LK'), expected)
+        self.assertEqual(get_hotp('MFRG GZDF\nMZTWQ2LK', 1), 765705)
+
+    def test_explicit_correct_padding_is_accepted(self):
+        """
+        Explicitly declared, correct padding must be accepted
+        """
+        self.assertEqual(_decode_secret(b'MY======'), _decode_secret(b'MY'))
+        self.assertEqual(
+            _decode_secret(b'MFRGGZDFMZTWQ2LK'),
+            _decode_secret(b'MFRGGZDFMZTWQ2LK'),
+        )
+        self.assertEqual(
+            get_hotp(b'MY======', 1),
+            get_hotp(b'MY', 1),
+        )
+
+    def test_missing_padding_is_derived(self):
+        """
+        Missing padding is derived from the length, like at import time
+        """
+        self.assertEqual(_decode_secret(b'MY'), _decode_secret(b'MY======'))
+        self.assertEqual(_decode_secret('mfrggzdfmztwq2lk'),
+                         _decode_secret('MFRGGZDFMZTWQ2LK'))
+
+    def test_incorrect_padding_is_rejected(self):
+        """
+        Declared padding that does not match the body length is a length error
+        """
+        with self.assertRaises(InvalidLengthError):
+            _decode_secret(b'MY=')
+        with self.assertRaises(InvalidLengthError):
+            _decode_secret(b'MY=====')
+        with self.assertRaises(InvalidLengthError):
+            _decode_secret(b'MFRGGZDFMZTWQ2LK=')
+
+    def test_illegal_length_is_rejected(self):
+        """
+        Lengths that cannot be Base32 bodies are reported as length errors
+        """
+        for secret in (b'M', b'MFR', b'MFRGGZ', b''):
+            with self.assertRaises(InvalidLengthError):
+                _decode_secret(secret)
+
+    def test_characters_outside_alphabet_are_rejected(self):
+        """
+        Characters outside of the Base32 alphabet are secret errors
+        """
+        for secret in (b'MFRGGZDFMZTWQ2L!', b'MFRGGZDF1ZTWQ2LK',
+                       b'MFRGGZDF=TWQ2LK'):
+            with self.assertRaises(InvalidSecretError):
+                _decode_secret(secret)
+
+    def test_control_characters_are_rejected(self):
+        """
+        Control characters (other than stripped whitespace) are rejected
+        """
+        for secret in (b'MFRGGZDF\x01MZTWQ2LK', b'MFRGGZDF\x7fMZTWQ2LK',
+                       b'\x00MFRGGZDFMZTWQ2LK'):
+            with self.assertRaises(InvalidSecretError):
+                _decode_secret(secret)
+
+    def test_non_ascii_secret_is_rejected(self):
+        """
+        Non-ASCII characters in the secret are secret errors
+        """
+        with self.assertRaises(InvalidSecretError):
+            _decode_secret('MFRGGZDFMZTÖQ2LK')
+
+    def test_invalid_secret_type_is_rejected(self):
+        """
+        Secrets that are neither bytes nor strings are secret errors
+        """
+        with self.assertRaises(InvalidSecretError):
+            _decode_secret(123456)
+
+    def test_generation_and_validation_share_decoding(self):
+        """
+        A secret imported with spaces, lowercase and missing padding must
+        validate tokens generated for the canonical form
+        """
+        canonical = b'MFRGGZDFMZTWQ2LK'
+        imported = 'mfrggzdf mztwq2lk'
+        with freeze_time(datetime.now()):
+            token = get_totp(canonical)
+            self.assertTrue(valid_totp(token, imported))
+            self.assertTrue(valid_totp(token, canonical))
+
+
+class TokenNormalizationTestCase(TestCase):
+    """
+    Checks for token normalization and the distinct error types used to
+    report token and length problems.
+    """
+    def test_non_numeric_token_is_token_error(self):
+        """
+        Non-numeric tokens are reported as token errors
+        """
+        with self.assertRaises(InvalidTokenError):
+            _normalize_token('abcdef')
+        with self.assertRaises(InvalidTokenError):
+            _normalize_token(b'12345a')
+        with self.assertRaises(InvalidTokenError):
+            _normalize_token(None)
+
+    def test_too_long_token_is_length_error(self):
+        """
+        Tokens longer than allowed are reported as length errors
+        """
+        with self.assertRaises(InvalidLengthError):
+            _normalize_token('1234567')
+        with self.assertRaises(InvalidLengthError):
+            _normalize_token(b'123456789', token_length=8)
+
+    def test_token_is_zero_padded(self):
+        """
+        Shorter numeric tokens are zero-padded to the expected length
+        """
+        self.assertEqual(_normalize_token(123), b'000123')
+        self.assertEqual(_normalize_token('123', token_length=8), b'00000123')
+
+    def test_malformed_tokens_fail_validation_without_raising(self):
+        """
+        Malformed tokens make validation return False, not raise
+        """
+        secret = b'MFRGGZDFMZTWQ2LK'
+        self.assertFalse(valid_totp('abcdef', secret))
+        self.assertFalse(valid_totp('1234567', secret))
+        self.assertFalse(valid_hotp('abcdef', secret))
+
+
+class TokenLengthCompatibilityTestCase(TestCase):
+    """
+    Checks that valid 6- and 8-digit tokens keep working with the existing
+    get_totp()/valid_totp() behaviour.
+    """
+    def test_six_digit_totp_roundtrip(self):
+        """
+        6-digit tokens generated by get_totp validate with valid_totp
+        """
+        secret = b'MFRGGZDFMZTWQ2LK'
+        with freeze_time(datetime.now()):
+            token = get_totp(secret, token_length=6)
+            self.assertTrue(valid_totp(token, secret, token_length=6))
+            self.assertFalse(valid_totp(token + 1, secret, token_length=6))
+
+    def test_eight_digit_totp_roundtrip(self):
+        """
+        8-digit tokens generated by get_totp validate with valid_totp
+        """
+        secret = b'MFRGGZDFMZTWQ2LK'
+        with freeze_time(datetime.now()):
+            token = get_totp(secret, token_length=8)
+            self.assertTrue(valid_totp(token, secret, token_length=8))
+            self.assertFalse(valid_totp(token + 1, secret, token_length=8))
+
+    def test_eight_digit_hotp_roundtrip(self):
+        """
+        8-digit HOTP tokens validate with valid_hotp
+        """
+        secret = b'MFRGGZDFMZTWQ2LK'
+        token = get_hotp(secret, 123, token_length=8)
+        self.assertEqual(
+            valid_hotp(token, secret, token_length=8),
+            123,
+        )

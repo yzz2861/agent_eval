@@ -30,6 +30,7 @@ False
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import hmac
 import struct
@@ -41,6 +42,110 @@ __date__ = '21 June 2026'
 __version_info__ = (2, 0, 0)
 __version__ = '%s.%s.%s' % __version_info__
 __license__ = 'MIT'
+
+
+class OTPError(ValueError):
+    """Base class for all errors raised by onetimepass."""
+
+
+class InvalidSecretError(OTPError):
+    """Secret contains characters outside of the Base32 alphabet."""
+
+
+class InvalidTokenError(OTPError):
+    """Token contains non-numeric characters."""
+
+
+class InvalidLengthError(OTPError):
+    """Secret or token has an illegal length or padding."""
+
+
+# ASCII whitespace that is tolerated (and stripped) in Base32 secrets:
+_SECRET_WHITESPACE = frozenset(b' \t\n\r\x0b\x0c')
+
+_BASE32_ALPHABET = frozenset(b'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567')
+
+_BASE32_ALPHABET_LOWER = frozenset(b'abcdefghijklmnopqrstuvwxyz')
+
+# Legal lengths of an unpadded Base32 body, modulo 8:
+_BASE32_VALID_REMAINDERS = frozenset((0, 2, 4, 5, 7))
+
+
+def _decode_secret(secret: bytes | str, casefold: bool = True) -> bytes:
+    """Normalize and decode a Base32-encoded secret.
+
+    Accepts secrets regardless of letter case, ignores ASCII whitespace and
+    allows padding to be either explicitly declared (and correct) or omitted
+    (it is then derived from the length). Control characters, characters
+    outside of the Base32 alphabet and illegal lengths are rejected.
+
+    :param secret: the base32-encoded string acting as secret key
+    :type secret: str or bytes
+    :param casefold: True (default), if should accept also lowercase alphabet
+    :type casefold: bool
+    :return: decoded secret key
+    :rtype: bytes
+    :raises InvalidSecretError: if secret contains illegal characters
+    :raises InvalidLengthError: if secret has illegal length or padding
+    """
+    if isinstance(secret, str):
+        secret = secret.encode('utf-8')
+    elif isinstance(secret, bytearray):
+        secret = bytes(secret)
+    if not isinstance(secret, bytes):
+        raise InvalidSecretError('Secret must be bytes or string')
+    cleaned = bytes(
+        char for char in secret if char not in _SECRET_WHITESPACE
+    )
+    for char in cleaned:
+        if char < 0x21 or char > 0x7e:
+            raise InvalidSecretError(
+                'Secret contains control or non-ASCII characters'
+            )
+    body = cleaned.rstrip(b'=')
+    padding = cleaned[len(body):]
+    if not casefold and any(
+            char in _BASE32_ALPHABET_LOWER for char in body
+    ):
+        raise InvalidSecretError('Lowercase secret not allowed here')
+    body = body.upper()
+    if any(char not in _BASE32_ALPHABET for char in body):
+        raise InvalidSecretError('Secret is not Base32-encoded')
+    remainder = len(body) % 8
+    if remainder not in _BASE32_VALID_REMAINDERS:
+        raise InvalidLengthError('Secret has illegal length')
+    expected_padding = b'=' * ((8 - remainder) % 8)
+    if cleaned != body and padding != expected_padding:
+        raise InvalidLengthError('Secret has incorrect padding')
+    if not body:
+        raise InvalidLengthError('Secret must not be empty')
+    try:
+        return base64.b32decode(body + expected_padding)
+    except (binascii.Error, TypeError) as exc:
+        raise InvalidSecretError('Incorrect secret') from exc
+
+
+def _normalize_token(token: int | bytes | str, token_length: int = 6) -> bytes:
+    """Normalize token to its zero-padded byte representation.
+
+    :param token: token value to be normalized
+    :type token: int or str or bytes
+    :param token_length: allowed length of token
+    :type token_length: int
+    :return: zero-padded token as bytes
+    :rtype: bytes
+    :raises InvalidTokenError: if token contains non-numeric characters
+    :raises InvalidLengthError: if token is longer than allowed
+    """
+    if isinstance(token, bool) or not isinstance(token, (int, bytes, str)):
+        raise InvalidTokenError('Token must be int, bytes or string')
+    if not isinstance(token, bytes):
+        token = str(token).encode('utf-8')
+    if not token.isdigit():
+        raise InvalidTokenError('Token must contain only digits')
+    if len(token) > token_length:
+        raise InvalidLengthError('Token is too long')
+    return token.rjust(token_length, b'0')
 
 
 def _is_possible_token(token: int | bytes | str, token_length: int = 6) -> bool:
@@ -65,9 +170,11 @@ def _is_possible_token(token: int | bytes | str, token_length: int = 6) -> bool:
     >>> _is_possible_token(b'12345678')
     False
     """
-    if not isinstance(token, bytes):
-        token = str(token).encode('utf-8')
-    return token.isdigit() and len(token) <= token_length
+    try:
+        _normalize_token(token, token_length=token_length)
+    except OTPError:
+        return False
+    return True
 
 
 def get_hotp(
@@ -106,15 +213,7 @@ def get_hotp(
     >>> result == b'816065'
     True
     """
-    if isinstance(secret, str):
-        # It is unicode, convert it to bytes
-        secret = secret.encode('utf-8')
-    # Get rid of all the spacing:
-    secret = secret.replace(b' ', b'')
-    try:
-        key = base64.b32decode(secret, casefold=casefold)
-    except (TypeError):
-        raise TypeError('Incorrect secret')
+    key = _decode_secret(secret, casefold=casefold)
     msg = struct.pack('>Q', intervals_no)
     hmac_digest = hmac.new(key, msg, digest_method).digest()
     ob = hmac_digest[19]
@@ -206,18 +305,19 @@ def valid_hotp(
     >>> valid_hotp(713385, secret, last=4, trials=5)
     False
     """
-    if not _is_possible_token(token, token_length=token_length):
+    try:
+        token_bytes = _normalize_token(token, token_length=token_length)
+    except OTPError:
         return False
-    token_str = '{:0{}d}'.format(int(token), token_length)
     for i in range(last + 1, last + trials + 1):
-        token_candidate = get_hotp(
+        candidate = get_hotp(
             secret=secret,
             intervals_no=i,
+            as_string=True,
             digest_method=digest_method,
             token_length=token_length,
         )
-        candidate_str = '{:0{}d}'.format(token_candidate, token_length)
-        if hmac.compare_digest(candidate_str, token_str):
+        if hmac.compare_digest(candidate, token_bytes):
             return i
     return False
 
@@ -265,24 +365,30 @@ def valid_totp(
     >>> valid_totp(token + b'1', secret)
     False
     """
-    if _is_possible_token(token, token_length=token_length):
-        if clock is None:
-            clock = time.time()
-        token_str = '{:0{}d}'.format(int(token), token_length)
-        for w in range(-window, window+1):
-            candidate = get_totp(
-                secret,
-                digest_method=digest_method,
-                token_length=token_length,
-                interval_length=interval_length,
-                clock=int(clock)+(w*interval_length)
-            )
-            candidate_str = '{:0{}d}'.format(candidate, token_length)
-            if hmac.compare_digest(candidate_str, token_str):
-                return True
+    try:
+        token_bytes = _normalize_token(token, token_length=token_length)
+    except OTPError:
+        return False
+    if clock is None:
+        clock = time.time()
+    for w in range(-window, window+1):
+        candidate = get_totp(
+            secret,
+            as_string=True,
+            digest_method=digest_method,
+            token_length=token_length,
+            interval_length=interval_length,
+            clock=int(clock)+(w*interval_length)
+        )
+        if hmac.compare_digest(candidate, token_bytes):
+            return True
     return False
 
 __all__ = [
+    'InvalidLengthError',
+    'InvalidSecretError',
+    'InvalidTokenError',
+    'OTPError',
     'get_hotp',
     'get_totp',
     'valid_hotp',
