@@ -98,7 +98,7 @@ __all__ = ['isOleFile', 'OleFileIO', 'OleMetadata', 'enable_logging',
            'DEFECT_FATAL', 'DEFAULT_PATH_ENCODING',
            'MAXREGSECT', 'DIFSECT', 'FATSECT', 'ENDOFCHAIN', 'FREESECT',
            'MAXREGSID', 'NOSTREAM', 'UNKNOWN_SIZE', 'WORD_CLSID',
-           'OleFileIONotClosed'
+           'OleFileIONotClosed', 'OleFileError', 'NotOleFileError'
 ]
 
 import io
@@ -889,65 +889,132 @@ class OleDirectoryEntry:
         """
         log.debug('build_storage_tree: SID=%d - %s - sid_child=%d'
             % (self.sid, repr(self.name), self.sid_child))
-        if self.sid_child != NOSTREAM:
-            # if child SID is not NOSTREAM, then this entry is a storage.
-            # Let's walk through the tree of children to fill the kids list:
-            self.append_kids(self.sid_child)
-
-            # Note from OpenOffice documentation: the safest way is to
-            # recreate the tree because some implementations may store broken
-            # red-black trees...
-
-            # in the OLE file, entries are sorted on (length, name).
-            # for convenience, we sort them on name instead:
-            # (see rich comparison methods in this class)
-            self.kids.sort()
+        self._build_storage_tree_iterative()
 
     def append_kids(self, child_sid):
         """
         Walk through red-black tree of children of this directory entry to add
-        all of them to the kids list. (recursive method)
+        all of them to the kids list. (iterative method)
 
         :param child_sid: index of child directory entry to use, or None when called
-            first time for the root. (only used during recursion)
+            first time for the root.
         """
         log.debug('append_kids: child_sid=%d' % child_sid)
-        # [PL] this method was added to use simple recursion instead of a complex
-        # algorithm.
-        # if this is not a storage or a leaf of the tree, nothing to do:
-        if child_sid == NOSTREAM:
-            return
-        # check if child SID is in the proper range:
-        if child_sid<0 or child_sid>=len(self.olefile.direntries):
-            self.olefile._raise_defect(DEFECT_INCORRECT, 'OLE DirEntry index out of range')
-        else:
-            # get child direntry:
-            child = self.olefile._load_direntry(child_sid) #direntries[child_sid]
-            log.debug('append_kids: child_sid=%d - %s - sid_left=%d, sid_right=%d, sid_child=%d'
-                % (child.sid, repr(child.name), child.sid_left, child.sid_right, child.sid_child))
-            # Check if kid was not already referenced in a storage:
-            if child.used:
-                self.olefile._raise_defect(DEFECT_INCORRECT,
-                    'OLE Entry referenced more than once')
+        self._build_storage_tree_iterative(child_sid)
+
+    def _check_directory_sid(self, sid, field_name):
+        """
+        Check that a directory entry ID can be followed.
+
+        :param int sid: directory entry index
+        :param str field_name: name of the pointer field, used in error messages
+        :returns: True if sid is in the directory, False for NOSTREAM or an
+            invalid value (an invalid value is reported as a fatal defect)
+        """
+        if sid == NOSTREAM:
+            return False
+        if sid < 0 or sid >= len(self.olefile.direntries):
+            self.olefile._raise_defect(DEFECT_FATAL,
+                'OLE directory %s index out of range: %d' % (field_name, sid))
+            return False
+        return True
+
+    def _build_storage_tree_iterative(self, child_sid=None):
+        """
+        Build the directory subtree below this entry without recursion.
+
+        A visited set is used for directory entry IDs, and another set tracks
+        processed storages. This makes self-references, mutual references and
+        duplicate IDs detectable without relying on the Python call stack.
+        """
+        ole = self.olefile
+        max_entries = len(ole.direntries)
+        if child_sid is None:
+            child_sid = self.sid_child
+
+        # All directory entries referenced by the tree, for duplicate/cycle
+        # detection. A directory entry may only appear once in a valid tree.
+        visited = set()
+        # Storages whose own child list has already been walked. This catches
+        # cycles that go through sid_child instead of left/right pointers.
+        processed_storages = set()
+        pending = [(self, child_sid)]
+
+        while pending:
+            storage, root_sid = pending.pop()
+            if storage.sid in processed_storages:
+                ole._raise_defect(DEFECT_FATAL,
+                    'OLE directory tree contains a cycle at SID %d'
+                    % storage.sid)
+                continue
+            processed_storages.add(storage.sid)
+            if len(processed_storages) > max_entries:
+                ole._raise_defect(DEFECT_FATAL,
+                    'OLE directory tree is too large')
                 return
-            child.used = True
-            # the directory entries are organized as a red-black tree.
-            # (cf. Wikipedia for details)
-            # First walk through left side of the tree:
-            self.append_kids(child.sid_left)
-            # Check if its name is not already used (case-insensitive):
-            name_lower = child.name.lower()
-            if name_lower in self.kids_dict:
-                self.olefile._raise_defect(DEFECT_INCORRECT,
-                    "Duplicate filename in OLE storage")
-            # Then the child_sid OleDirectoryEntry object is appended to the
-            # kids list and dictionary:
-            self.kids.append(child)
-            self.kids_dict[name_lower] = child
-            # Finally walk through right side of the tree:
-            self.append_kids(child.sid_right)
-            # Afterwards build kid's own tree if it's also a storage:
-            child.build_storage_tree()
+            if root_sid == NOSTREAM:
+                continue
+
+            # Iterative in-order walk of the red-black tree of siblings.
+            # The in-order order is preserved before the final name sort, so
+            # ordering remains deterministic for equal names.
+            stack = []
+            local_seen = set()
+            sid = root_sid
+            while stack or sid != NOSTREAM:
+                while sid != NOSTREAM:
+                    if not self._check_directory_sid(sid, 'child/sibling'):
+                        sid = NOSTREAM
+                        break
+                    if sid in local_seen:
+                        ole._raise_defect(DEFECT_FATAL,
+                            'OLE directory tree contains a cycle at SID %d'
+                            % sid)
+                        sid = NOSTREAM
+                        break
+                    if sid in visited:
+                        ole._raise_defect(DEFECT_FATAL,
+                            'OLE directory entry ID referenced more than once: %d'
+                            % sid)
+                        sid = NOSTREAM
+                        break
+                    entry = ole._load_direntry(sid)
+                    if entry.used:
+                        ole._raise_defect(DEFECT_FATAL,
+                            'OLE directory entry ID referenced more than once: %d'
+                            % sid)
+                        sid = NOSTREAM
+                        break
+                    local_seen.add(sid)
+                    stack.append(entry)
+                    sid = entry.sid_left
+                if not stack:
+                    break
+
+                entry = stack.pop()
+                visited.add(entry.sid)
+                entry.used = True
+                if len(visited) > max_entries:
+                    ole._raise_defect(DEFECT_FATAL,
+                        'OLE directory chain is too long')
+                    return
+
+                # Check if its name is not already used (case-insensitive):
+                name_lower = entry.name.lower()
+                if name_lower in storage.kids_dict:
+                    ole._raise_defect(DEFECT_INCORRECT,
+                        "Duplicate filename in OLE storage")
+                # Append the entry and remember its own storage subtree:
+                storage.kids.append(entry)
+                storage.kids_dict[name_lower] = entry
+                if self._check_directory_sid(entry.sid_child, 'child'):
+                    pending.append((entry, entry.sid_child))
+                sid = entry.sid_right
+
+            # in the OLE file, entries are sorted on (length, name).
+            # for convenience, we sort them on name instead:
+            # (see rich comparison methods in this class)
+            storage.kids.sort()
 
     def __eq__(self, other):
         "Compare entries by name"
@@ -972,19 +1039,22 @@ class OleDirectoryEntry:
         "Dump this entry, and all its subentries (for debug purposes only)"
         TYPES = ["(invalid)", "(storage)", "(stream)", "(lockbytes)",
                  "(property)", "(root)"]
-        try:
-            type_name = TYPES[self.entry_type]
-        except IndexError:
-            type_name = '(UNKNOWN)'
-        print(" "*tab + repr(self.name), type_name, end=' ')
-        if self.entry_type in (STGTY_STREAM, STGTY_ROOT):
-            print(self.size, "bytes", end=' ')
-        print()
-        if self.entry_type in (STGTY_STORAGE, STGTY_ROOT) and self.clsid:
-            print(" "*tab + "{%s}" % self.clsid)
+        stack = [(self, tab)]
+        while stack:
+            entry, indent = stack.pop()
+            try:
+                type_name = TYPES[entry.entry_type]
+            except IndexError:
+                type_name = '(UNKNOWN)'
+            print(" "*indent + repr(entry.name), type_name, end=' ')
+            if entry.entry_type in (STGTY_STREAM, STGTY_ROOT):
+                print(entry.size, "bytes", end=' ')
+            print()
+            if entry.entry_type in (STGTY_STORAGE, STGTY_ROOT) and entry.clsid:
+                print(" "*indent + "{%s}" % entry.clsid)
 
-        for kid in self.kids:
-            kid.dump(tab + 2)
+            for kid in reversed(entry.kids):
+                stack.append((kid, indent + 2))
 
     def getmtime(self):
         """
@@ -1887,15 +1957,23 @@ class OleFileIO:
         :param storages: bool, include storages if True (False by default) - new in v0.26
             (note: the root storage is never included)
         """
-        prefix = prefix + [node.name]
-        for entry in node.kids:
+        # Use an explicit stack of iterators to preserve the exact depth-first
+        # order of the former recursive implementation.
+        stack = [(prefix + [node.name], iter(node.kids))]
+        while stack:
+            prefix, kids = stack[-1]
+            try:
+                entry = next(kids)
+            except StopIteration:
+                stack.pop()
+                continue
             if entry.entry_type == STGTY_STORAGE:
                 # this is a storage
                 if storages:
                     # add it to the list
                     files.append(prefix[1:] + [entry.name])
                 # check its kids
-                self._list(files, prefix, entry, streams, storages)
+                stack.append((prefix + [entry.name], iter(entry.kids)))
             elif entry.entry_type == STGTY_STREAM:
                 # this is a stream
                 if streams:

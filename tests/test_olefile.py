@@ -7,6 +7,8 @@ import unittest
 
 import os, sys
 import io
+import hashlib
+import struct
 from shutil import copy2
 
 # Insert the olefile package relative to this test dir in the sys.path
@@ -207,6 +209,93 @@ class TestOleFileIO(unittest.TestCase):
             # it should raise ValueError:
             with self.assertRaises(ValueError):
                 ole.write_sect(ole.nb_sect - 1, b"x" * size)
+
+
+class TestDirectoryTreeValidation(unittest.TestCase):
+    'Tests for malformed directory trees and cyclic references'
+
+    def setUp(self):
+        self.ole_file = u"tests/images/test-ole-file.doc"
+        with open(self.ole_file, 'rb') as f:
+            self.original = bytearray(f.read())
+        sector_shift = struct.unpack_from('<H', self.original, 0x1E)[0]
+        self.sector_size = 1 << sector_shift
+        first_dir_sector = struct.unpack_from('<I', self.original, 0x30)[0]
+        # The test document's directory sectors are stored contiguously.
+        self.dir_offset = (first_dir_sector + 1) * self.sector_size
+
+    def _mutate(self, changes):
+        data = bytearray(self.original)
+        field_offsets = {'left': 68, 'right': 72, 'child': 76}
+        for sid, field, value in changes:
+            offset = self.dir_offset + sid * 128 + field_offsets[field]
+            struct.pack_into('<I', data, offset, value)
+        return data
+
+    def _assert_raises_ole_error(self, data):
+        with self.assertRaises(olefile.OleFileError):
+            olefile.OleFileIO(io.BytesIO(bytes(data)))
+
+    def test_normal_document_listdir_and_streams_unchanged(self):
+        expected_paths = [
+            [u'\x01CompObj'],
+            [u'\x05DocumentSummaryInformation'],
+            [u'\x05SummaryInformation'],
+            [u'1Table'],
+            [u'WordDocument'],
+        ]
+        expected_streams = [
+            (u'\x01CompObj', 114,
+             'f70fe384c672865fff4bb8ab60d73098bc751e8f2aa915b8aff2e2085648b428'),
+            (u'\x05DocumentSummaryInformation', 4096,
+             'a4952f48c6d318471d3f893427ee515e56fe4ce5e647d7753aee58a64029dfc1'),
+            (u'\x05SummaryInformation', 4096,
+             'de76ae07afb9258ad74d3c9df6f6bd1aade474a049217d3e7e521c33cca1d045'),
+            (u'1Table', 6438,
+             'fd02a4bd70a2a221509a32dac3378b781f8d41ecfaa4ab402d36d4b49f1c8076'),
+            (u'WordDocument', 4096,
+             '0ae30e8503d5b79034883c73930cbe5246eaf5cc0d229f109dff5eec0efa63d2'),
+        ]
+        with olefile.OleFileIO(self.ole_file) as ole:
+            self.assertEqual(ole.listdir(storages=True), expected_paths)
+            for name, size, digest in expected_streams:
+                stream = ole.openstream(name)
+                data = stream.read()
+                self.assertEqual(stream.size, size)
+                self.assertEqual(len(data), size)
+                self.assertEqual(hashlib.sha256(data).hexdigest(), digest)
+
+    def test_self_reference_through_root_child(self):
+        self._assert_raises_ole_error(self._mutate([(0, 'child', 0)]))
+
+    def test_self_reference_through_sibling(self):
+        self._assert_raises_ole_error(self._mutate([(3, 'left', 3)]))
+        self._assert_raises_ole_error(self._mutate([(3, 'right', 3)]))
+
+    def test_mutual_sibling_reference(self):
+        self._assert_raises_ole_error(
+            self._mutate([(3, 'left', 2), (2, 'right', 3)]))
+
+    def test_mutual_storage_reference(self):
+        self._assert_raises_ole_error(
+            self._mutate([(3, 'child', 4), (4, 'child', 3)]))
+
+    def test_duplicate_sibling_id(self):
+        self._assert_raises_ole_error(
+            self._mutate([(3, 'left', 2), (3, 'right', 2)]))
+
+    def test_duplicate_child_id(self):
+        self._assert_raises_ole_error(
+            self._mutate([(3, 'left', olefile.NOSTREAM),
+                          (3, 'child', 2),
+                          (4, 'child', 2)]))
+
+    def test_child_and_sibling_out_of_range(self):
+        out_of_range = 0xFFFFFFF0
+        self._assert_raises_ole_error(
+            self._mutate([(3, 'left', out_of_range)]))
+        self._assert_raises_ole_error(
+            self._mutate([(3, 'child', out_of_range)]))
 
 
 class FileHandleCloseTest(unittest.TestCase):
