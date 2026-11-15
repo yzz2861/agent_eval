@@ -96,6 +96,10 @@ __all__ = ['isOleFile', 'OleFileIO', 'OleMetadata', 'enable_logging',
            'STGTY_LOCKBYTES', 'MINIMAL_OLEFILE_SIZE',
            'DEFECT_UNSURE', 'DEFECT_POTENTIAL', 'DEFECT_INCORRECT',
            'DEFECT_FATAL', 'DEFAULT_PATH_ENCODING',
+           'detect_encryption', 'ENCRYPTION_NAMES',
+           'ENCRYPTION_NOT_OLE', 'ENCRYPTION_NONE', 'ENCRYPTION_STANDARD',
+           'ENCRYPTION_AGILE', 'ENCRYPTION_UNKNOWN', 'ENCRYPTION_CORRUPT',
+           'ENCRYPTION_TRUNCATED',
            'MAXREGSECT', 'DIFSECT', 'FATSECT', 'ENDOFCHAIN', 'FREESECT',
            'MAXREGSID', 'NOSTREAM', 'UNKNOWN_SIZE', 'WORD_CLSID',
            'OleFileIONotClosed'
@@ -267,6 +271,48 @@ DEFECT_FATAL =     40    # an error which cannot be ignored, parsing is
 # (this is used in isOleFile and OleFileIO.open)
 MINIMAL_OLEFILE_SIZE = 1536
 
+# [PL]: Encryption detection results, returned by detect_encryption() and
+# OleFileIO.detect_encryption(). These are enumerated values (not booleans)
+# so that callers such as e-mail security gateways can reliably tell an
+# encrypted Office package apart from a plain OLE container, and treat
+# damaged or incomplete files separately.
+ENCRYPTION_NOT_OLE = 0    #: not an OLE2 compound file (incorrect header/magic)
+ENCRYPTION_NONE = 1       #: plain OLE container, no encryption streams present
+ENCRYPTION_STANDARD = 2   #: encrypted package, ECMA-376 standard encryption
+ENCRYPTION_AGILE = 3      #: encrypted package, agile encryption [MS-OFFCRYPTO]
+ENCRYPTION_UNKNOWN = 4    #: encryption streams present, unknown version fields
+ENCRYPTION_CORRUPT = 5    #: damaged OLE structure or incomplete encryption streams
+ENCRYPTION_TRUNCATED = 6  #: encryption streams truncated (incomplete document)
+
+#: human-readable names for the ENCRYPTION_* result codes
+ENCRYPTION_NAMES = {
+    ENCRYPTION_NOT_OLE: 'NOT_OLE',
+    ENCRYPTION_NONE: 'NONE',
+    ENCRYPTION_STANDARD: 'STANDARD',
+    ENCRYPTION_AGILE: 'AGILE',
+    ENCRYPTION_UNKNOWN: 'UNKNOWN',
+    ENCRYPTION_CORRUPT: 'CORRUPT',
+    ENCRYPTION_TRUNCATED: 'TRUNCATED',
+}
+
+#: names of the two streams that make up an encrypted Office document,
+#: according to [MS-OFFCRYPTO] 2.3.4
+ENCRYPTION_INFO_STREAM = 'EncryptionInfo'
+ENCRYPTED_PACKAGE_STREAM = 'EncryptedPackage'
+
+#: size of the version header at the start of the EncryptionInfo stream:
+#: VersionMajor (2 bytes) + VersionMinor (2 bytes) + Flags/Reserved (4 bytes)
+ENCRYPTION_INFO_HEADER_SIZE = 8
+
+#: size of the header at the start of the EncryptedPackage stream:
+#: 64-bit little-endian size of the original (unencrypted) package
+ENCRYPTED_PACKAGE_HEADER_SIZE = 8
+
+#: known (VersionMajor, VersionMinor) values of the EncryptionInfo stream,
+#: according to [MS-OFFCRYPTO] 2.3.4.5 and 2.3.4.10
+ENCRYPTION_VERSIONS_STANDARD = ((3, 2), (4, 2))
+ENCRYPTION_VERSION_AGILE = (4, 4)
+
 #=== FUNCTIONS ===============================================================
 
 def isOleFile (filename=None, data=None):
@@ -328,6 +374,57 @@ def isOleFile (filename=None, data=None):
         return True
     else:
         return False
+
+
+def detect_encryption(filename=None, data=None):
+    """
+    Detect if a file is an encrypted Office document stored as an OLE2
+    compound file (e.g. a password-protected docx/xlsx/pptx file), without
+    attempting to decrypt it.
+
+    This function first checks the OLE2 header (magic bytes), then looks for
+    the ``EncryptionInfo`` and ``EncryptedPackage`` streams defined by
+    [MS-OFFCRYPTO], and validates their version/size header fields.
+    The result is an enumerated value (one of the ENCRYPTION_* constants),
+    not a boolean, so that damaged or incomplete files can be told apart
+    from encrypted packages and plain OLE containers:
+
+    - ENCRYPTION_NOT_OLE: not an OLE2 compound file
+    - ENCRYPTION_NONE: plain OLE container without encryption streams
+    - ENCRYPTION_STANDARD: encrypted package, standard encryption
+    - ENCRYPTION_AGILE: encrypted package, agile encryption
+    - ENCRYPTION_UNKNOWN: encryption streams present, unknown version
+    - ENCRYPTION_CORRUPT: damaged OLE structure or incomplete encryption streams
+    - ENCRYPTION_TRUNCATED: encryption streams are truncated
+
+    .. note::
+        This function never attempts to decrypt the contents of the file,
+        it only inspects the OLE structure and stream headers.
+
+    :param filename: filename, contents or file-like object of the file to
+        check (same accepted types as :func:`isOleFile`)
+    :param data: bytes string with the contents of the file, when the file
+        is in memory (if provided, filename is ignored)
+    :returns: one of the ENCRYPTION_* constants
+    :rtype: int
+    """
+    # first check the OLE2 header (magic bytes), without parsing further:
+    if not isOleFile(filename=filename, data=data):
+        return ENCRYPTION_NOT_OLE
+    source = data if data is not None else filename
+    try:
+        ole = OleFileIO(source)
+    except Exception:
+        # the OLE structure could not be parsed at all: damaged file
+        return ENCRYPTION_CORRUPT
+    try:
+        return ole.detect_encryption()
+    except Exception:
+        # a security gateway should get a result, not an exception,
+        # even for malformed files:
+        return ENCRYPTION_CORRUPT
+    finally:
+        ole.close()
 
 
 if bytes is str:
@@ -2148,6 +2245,85 @@ class OleFileIO:
         implementations.
         """
         return self.root.name
+
+    def detect_encryption(self):
+        """
+        Detect if this OLE file is an encrypted Office document, without
+        attempting to decrypt it.
+
+        An encrypted Office document (according to [MS-OFFCRYPTO]) is an OLE2
+        compound file containing an ``EncryptionInfo`` stream and an
+        ``EncryptedPackage`` stream. This method checks for the presence of
+        both streams and validates their header fields (version numbers and
+        declared package size), so that a plain OLE container with embedded
+        objects is not mistaken for an encrypted package.
+
+        .. note::
+            This method never attempts to decrypt the contents of the file,
+            it only inspects the OLE structure and stream headers.
+
+        :returns: one of the ENCRYPTION_* constants:
+
+            - ENCRYPTION_NONE: no encryption streams present
+            - ENCRYPTION_STANDARD: encrypted package, standard encryption
+            - ENCRYPTION_AGILE: encrypted package, agile encryption
+            - ENCRYPTION_UNKNOWN: encryption streams present, unknown version
+            - ENCRYPTION_CORRUPT: damaged or incomplete encryption structure
+            - ENCRYPTION_TRUNCATED: encryption streams are truncated
+        :rtype: int
+        """
+        has_encryption_info = self.exists(ENCRYPTION_INFO_STREAM)
+        has_encrypted_package = self.exists(ENCRYPTED_PACKAGE_STREAM)
+        if not has_encryption_info and not has_encrypted_package:
+            # plain OLE container, e.g. a regular Office 97-2003 document
+            # or a file with embedded objects:
+            return ENCRYPTION_NONE
+        if not (has_encryption_info and has_encrypted_package):
+            # only one of the two required streams: damaged file
+            return ENCRYPTION_CORRUPT
+        # read the version header of the EncryptionInfo stream:
+        try:
+            info_size = self.get_size(ENCRYPTION_INFO_STREAM)
+            info_stream = self.openstream(ENCRYPTION_INFO_STREAM)
+            try:
+                info_header = info_stream.read(ENCRYPTION_INFO_HEADER_SIZE)
+            finally:
+                info_stream.close()
+        except (IOError, OleFileError):
+            return ENCRYPTION_CORRUPT
+        if info_stream.size < info_size \
+                or len(info_header) < ENCRYPTION_INFO_HEADER_SIZE:
+            # EncryptionInfo is too short to even hold its version fields:
+            return ENCRYPTION_TRUNCATED
+        version_major = i16(info_header, 0)
+        version_minor = i16(info_header, 2)
+        # read the header of the EncryptedPackage stream, which declares the
+        # size of the original (unencrypted) package:
+        try:
+            package_size = self.get_size(ENCRYPTED_PACKAGE_STREAM)
+            package_stream = self.openstream(ENCRYPTED_PACKAGE_STREAM)
+            try:
+                package_header = package_stream.read(ENCRYPTED_PACKAGE_HEADER_SIZE)
+            finally:
+                package_stream.close()
+        except (IOError, OleFileError):
+            return ENCRYPTION_CORRUPT
+        if package_stream.size < package_size \
+                or len(package_header) < ENCRYPTED_PACKAGE_HEADER_SIZE:
+            # EncryptedPackage is too short to hold the declared size:
+            return ENCRYPTION_TRUNCATED
+        declared_size = struct.unpack('<Q', package_header)[0]
+        available_size = package_size - ENCRYPTED_PACKAGE_HEADER_SIZE
+        if declared_size > available_size:
+            # the encrypted package is incomplete/truncated:
+            return ENCRYPTION_TRUNCATED
+        if (version_major, version_minor) in ENCRYPTION_VERSIONS_STANDARD:
+            return ENCRYPTION_STANDARD
+        if (version_major, version_minor) == ENCRYPTION_VERSION_AGILE:
+            return ENCRYPTION_AGILE
+        # both streams are present and well-formed, but the version fields
+        # do not match any known encryption scheme:
+        return ENCRYPTION_UNKNOWN
 
     def getproperties(self, filename, convert_time=False, no_conversion=None):
         """
