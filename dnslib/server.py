@@ -109,6 +109,7 @@ except ImportError:
     import SocketServer as socketserver
 
 from dnslib import DNSRecord,DNSError,QTYPE,RCODE,RR
+from dnslib.dns import DNSHeader,EDNS0,EDNSDecodeError,EDNS_MIN_PAYLOAD
 
 class BaseResolver(object):
     """
@@ -140,6 +141,8 @@ class DNSHandler(socketserver.BaseRequestHandler):
     """
 
     udplen = 0                  # Max udp packet length (0 = ignore)
+    edns_len = 0                # Server max EDNS payload (0 = ignore)
+    link_mtu = 0                # Link MTU for payload clamp (0 = ignore)
 
     def handle(self):
         if self.server.socket_type == socket.SOCK_STREAM:
@@ -175,23 +178,106 @@ class DNSHandler(socketserver.BaseRequestHandler):
             self.server.logger.log_error(self,e)
 
     def get_reply(self,data):
-        request = DNSRecord.parse(data)
+        try:
+            request = DNSRecord.parse(data)
+        except EDNSDecodeError as e:
+            self.server.logger.log_error(self,e)
+            return self._edns_error_reply(data,e).pack()
+        except DNSError as e:
+            self.server.logger.log_error(self,e)
+            return self._formerr_reply(data).pack()
         self.server.logger.log_request(self,request)
+
+        try:
+            edns_payload = request.negotiate_edns(
+                                server_payload=self.edns_len,
+                                link_mtu=self.link_mtu)
+        except EDNSDecodeError as e:
+            self.server.logger.log_error(self,e)
+            error_reply = self._edns_error_reply(data,e,request)
+            return self._pack_udp(error_reply,EDNS_MIN_PAYLOAD)
 
         resolver = self.server.resolver
         reply = resolver.resolve(request,self)
         self.server.logger.log_reply(self,reply)
 
         if self.protocol == 'udp':
-            rdata = reply.pack()
-            if self.udplen and len(rdata) > self.udplen:
-                truncated_reply = reply.truncate()
-                rdata = truncated_reply.pack()
-                self.server.logger.log_truncated(self,truncated_reply)
+            if edns_payload is not None:
+                self._sync_opt(reply,request,edns_payload)
+                rdata = self._pack_udp(reply,edns_payload)
+            elif self.udplen:
+                rdata = reply.pack()
+                if len(rdata) > self.udplen:
+                    truncated_reply = reply.truncate()
+                    rdata = truncated_reply.pack()
+                    self.server.logger.log_truncated(self,truncated_reply)
+            else:
+                rdata = reply.pack()
         else:
             rdata = reply.pack()
 
         return rdata
+
+    def _pack_udp(self,reply,payload_limit):
+        """
+            Pack a UDP reply, setting TC and returning a trimmable
+            structure when the packed response exceeds `payload_limit`
+        """
+        rdata = reply.pack()
+        if len(rdata) > payload_limit:
+            truncated_reply = reply.truncate(payload_limit)
+            rdata = truncated_reply.pack()
+            self.server.logger.log_truncated(self,truncated_reply)
+        return rdata
+
+    def _sync_opt(self,reply,request,payload):
+        """
+            Ensure the reply carries exactly one OPT record (only when
+            the request did), advertising the negotiated UDP payload and
+            echoing the request DO bit/version. Unknown options are
+            retained unchanged.
+        """
+        request_opt = request.get_opt()
+        if request_opt is None:
+            return
+        reply.ar = [ ar for ar in reply.ar if ar.rtype != QTYPE.OPT ]
+        reply.add_ar(EDNS0(ext_rcode=0,
+                           version=request_opt.edns_ver,
+                           flags="do" if request_opt.edns_do else "",
+                           udp_len=payload,
+                           opts=request_opt.rdata))
+
+    def _request_id(self,data):
+        if len(data) >= 2:
+            return struct.unpack("!H",bytes(data[:2]))[0]
+        return 0
+
+    def _formerr_reply(self,data):
+        """
+            Minimal header-only FORMERR response. The full (possibly
+            malformed) query is never echoed back.
+        """
+        reply = DNSRecord(DNSHeader(id=self._request_id(data),
+                                    qr=1,ra=1,
+                                    rcode=RCODE.FORMERR))
+        return reply
+
+    def _edns_error_reply(self,data,error,request=None):
+        """
+            Build a FORMERR/BADVERS response for an invalid OPT record.
+            BADVERS (unsupported version) additionally carries an OPT
+            record holding the extended RCODE high byte.
+        """
+        msg_id = request.header.id if request is not None \
+                                    else self._request_id(data)
+        rd = request.header.rd if request is not None else 0
+        reply = DNSRecord(DNSHeader(id=msg_id,qr=1,ra=1,rd=rd,
+                                    rcode=error.rcode))
+        if error.ext_rcode:
+            reply.add_ar(EDNS0(ext_rcode=error.ext_rcode,
+                               version=0,
+                               udp_len=EDNS_MIN_PAYLOAD))
+        return reply
 
 class DNSLogger:
 

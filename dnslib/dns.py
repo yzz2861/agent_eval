@@ -71,6 +71,30 @@ RCODE =  Bimap('RCODE',
 OPCODE = Bimap('OPCODE',{0:'QUERY', 1:'IQUERY', 2:'STATUS', 4:'NOTIFY', 5:'UPDATE'},
                 DNSError)
 
+# EDNS(0) constants (RFC 6891)
+EDNS_VERSION      = 0       # Only EDNS version 0 is supported
+EDNS_MIN_PAYLOAD  = 512     # Minimum EDNS payload / legacy UDP limit
+EDNS_MAX_PAYLOAD  = 65535   # Maximum wire size
+EDNS_UDP_OVERHEAD = 28      # IPv4 UDP+IP header size (for MTU clamping)
+# BADVERS is an EDNS extended RCODE: base RCODE 1 (FORMERR) plus the
+# high 8-bit part of the extended RCODE carried in the OPT record TTL
+EDNS_BADVERS_BASE = 1
+EDNS_BADVERS_EXT  = 16
+
+class EDNSDecodeError(DNSError):
+    """
+        Error decoding/negotiating an EDNS(0) OPT record.
+
+        `rcode` holds the base RCODE to use in the response (FORMERR for
+        malformed OPT data, BADVERS for an unsupported EDNS version) and
+        `ext_rcode` holds the EDNS extended RCODE high byte (non-zero only
+        for BADVERS).
+    """
+    def __init__(self,message,rcode=RCODE.FORMERR,ext_rcode=0):
+        super(EDNSDecodeError,self).__init__(message)
+        self.rcode = rcode
+        self.ext_rcode = ext_rcode
+
 def label(label,origin=None):
     if label.endswith("."):
         return DNSLabel(label)
@@ -308,6 +332,88 @@ class DNSRecord(object):
         return self.rr[0] if self.rr else RR()
     a = property(get_a)
 
+    def get_opt(self):
+        """
+            Return the EDNS(0) OPT pseudo-record from the additional
+            section (or None if no OPT record is present)
+        """
+        for ar in self.ar:
+            if ar.rtype == QTYPE.OPT:
+                return ar
+        return None
+
+    def negotiate_edns(self,server_payload=0,link_mtu=0):
+        """
+            Validate the EDNS(0) OPT pseudo-record(s) in a request and
+            negotiate the safe UDP payload size.
+
+            Raises EDNSDecodeError (FORMERR/BADVERS) on:
+              - more than one OPT record
+              - unsupported EDNS version (BADVERS)
+              - non-zero extended RCODE in a query
+              - reserved (non-DO) flag bits set
+              - malformed OPT option length/data
+
+            Returns the negotiated UDP payload size (an int >= 512) which
+            is the minimum of:
+              - the requester advertised payload (floored at 512)
+              - the server configured maximum (`server_payload`, 0 = ignore)
+              - the link MTU minus UDP/IP overhead (`link_mtu`, 0 = ignore)
+
+            Returns None when the request contains no OPT record.
+
+            >>> q = DNSRecord.question("abc.com")
+            >>> q.add_ar(EDNS0(udp_len=4096,flags="do"))
+            >>> q.negotiate_edns()
+            4096
+            >>> q.negotiate_edns(link_mtu=1200)
+            1172
+            >>> q.negotiate_edns(server_payload=1400,link_mtu=1200)
+            1172
+        """
+        opts = [ ar for ar in self.ar if ar.rtype == QTYPE.OPT ]
+        if not opts:
+            return None
+        if len(opts) > 1:
+            raise EDNSDecodeError(
+                "EDNS(0) negotiation error: multiple OPT records (%d)"
+                % len(opts))
+        opt = opts[0]
+
+        if opt.edns_ver != EDNS_VERSION:
+            raise EDNSDecodeError(
+                "EDNS(0) negotiation error: unsupported version %d"
+                % opt.edns_ver,
+                rcode=EDNS_BADVERS_BASE,
+                ext_rcode=EDNS_BADVERS_EXT)
+        if opt.edns_rcode != 0:
+            raise EDNSDecodeError(
+                "EDNS(0) negotiation error: non-zero extended RCODE %d "
+                "in query" % opt.edns_rcode)
+        # Only the DO bit (bit 15 of the TTL) is defined; the lower 15
+        # flag bits are reserved and must be clear.
+        if (opt.ttl & 0xffff) != (opt.edns_do << 15):
+            raise EDNSDecodeError(
+                "EDNS(0) negotiation error: reserved flag bits set "
+                "(ttl=0x%08x)" % (opt.ttl & 0xffff))
+        # Every option must carry a self-consistent code/length/data
+        for option in opt.rdata:
+            if not isinstance(option,EDNSOption) or \
+               not isinstance(option.data,(bytes,bytearray)) or \
+               len(option.data) > 65535:
+                raise EDNSDecodeError(
+                    "EDNS(0) negotiation error: malformed OPT option")
+
+        # RFC 6891: values below 512 are treated as 512
+        payload = max(EDNS_MIN_PAYLOAD,int(opt.edns_len or 0))
+        if server_payload:
+            payload = min(payload,int(server_payload))
+        if link_mtu:
+            mtu_payload = max(EDNS_MIN_PAYLOAD,
+                              int(link_mtu) - EDNS_UDP_OVERHEAD)
+            payload = min(payload,mtu_payload)
+        return min(payload,EDNS_MAX_PAYLOAD)
+
     def pack(self):
         """
             Pack record into binary packet
@@ -339,10 +445,18 @@ class DNSRecord(object):
             ar.pack(buffer)
         return buffer.data
 
-    def truncate(self):
+    def truncate(self,size=None):
         """
-            Return truncated copy of DNSRecord (with TC flag set)
-            (removes all Questions & RRs and just returns header)
+            Return truncated copy of DNSRecord with the TC flag set.
+
+            With no `size` argument the legacy behaviour is retained: the
+            copy contains only the (TC-marked) header.
+
+            With an explicit `size` (the negotiated UDP payload limit) the
+            copy keeps the largest trimmable structure that packs to at most
+            `size` bytes: the question section is retained and answer,
+            authority and non-OPT additional records are dropped, then the
+            OPT record is dropped only if it still does not fit.
 
             >>> q = DNSRecord.question("abc.com")
             >>> a = q.reply()
@@ -355,11 +469,35 @@ class DNSRecord(object):
             >>> print(t)
             ;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: ...
             ;; flags: qr aa tc rd ra; QUERY: 0, ANSWER: 0, AUTHORITY: 0, ADDITIONAL: 0
-
+            >>> t2 = a.truncate(512)
+            >>> t2.header.tc
+            1
+            >>> len(t2.questions) == len(a.questions)
+            True
+            >>> len(t2.pack()) <= 512
+            True
         """
-        return DNSRecord(DNSHeader(id=self.header.id,
-                                   bitmap=self.header.bitmap,
-                                   tc=1))
+        if size is None:
+            return DNSRecord(DNSHeader(id=self.header.id,
+                                       bitmap=self.header.bitmap,
+                                       tc=1))
+
+        trimmed = DNSRecord(DNSHeader(id=self.header.id,
+                                      bitmap=self.header.bitmap,
+                                      tc=1),
+                            questions=copy.copy(self.questions))
+        opt = self.get_opt()
+        if opt is not None:
+            trimmed.add_ar(copy.copy(opt))
+            if len(trimmed.pack()) > size:
+                trimmed.ar = []
+                trimmed.set_header_qa()
+        # The header plus question section always fits any payload >= 512;
+        # guarantee the limit regardless of the configured size.
+        while len(trimmed.pack()) > size and trimmed.questions:
+            trimmed.questions.pop()
+            trimmed.set_header_qa()
+        return trimmed
 
     def send(self,dest,port=53,tcp=False,timeout=None,ipv6=False):
         """
@@ -818,8 +956,13 @@ class RR(object):
             if rtype == QTYPE.OPT:
                 options = []
                 option_buffer = Buffer(buffer.get(rdlength))
-                while option_buffer.remaining() > 4:
+                while option_buffer.remaining():
                     code,length = option_buffer.unpack("!HH")
+                    if length > option_buffer.remaining():
+                        raise DNSError(
+                            "Error unpacking OPT option [code=%d]: "
+                            "invalid length %d (remaining=%d)" % (
+                                code,length,option_buffer.remaining()))
                     data = option_buffer.get(length)
                     options.append(EDNSOption(code,data))
                 rdata = options
