@@ -188,5 +188,99 @@ int k;
         self.assertEqual(token[0].position.column, 1)
         self.assertEqual(token[3].position.column, 1)
 
+
+    def test_crlf_line_tracking(self):
+        code = "package a.b;\r\nint x;"
+        tokens = list(tokenizer.tokenize(code))
+
+        package_token = tokens[0]
+        int_token = next(t for t in tokens if t.value == "int")
+        self.assertEqual(package_token.position.line, 1)
+        self.assertEqual(int_token.position.line, 2)
+        self.assertEqual(int_token.position.column, 1)
+
+    def test_lone_carriage_return_is_line_terminator(self):
+        code = "a;\rb;"
+        tokens = list(tokenizer.tokenize(code))
+        self.assertEqual(tokens[0].position.line, 1)
+        self.assertEqual(tokens[2].position.line, 2)
+        self.assertEqual(tokens[2].position.column, 1)
+
+    def test_tab_counts_as_single_column(self):
+        code = "\tint x;"
+        tokens = list(tokenizer.tokenize(code))
+        self.assertEqual(tokens[0].value, "int")
+        self.assertEqual(tokens[0].position.line, 1)
+        self.assertEqual(tokens[0].position.column, 2)
+        self.assertEqual(tokens[1].position.column, 6)
+
+    def test_surrogate_pair_counts_as_one_code_point(self):
+        # An astral character is one Unicode code point; it must occupy a
+        # single column even though it spans two UTF-16 code units.
+        code = u"x = \"a\U0001F600b\";"
+        tokens = list(tokenizer.tokenize(code))
+        string_token = next(t for t in tokens if t.value.startswith("\""))
+        self.assertEqual(string_token.position.column, 5)
+        self.assertEqual(tokens[-1].position.column, 10)
+
+    def test_surrogate_pair_error_position(self):
+        code = u"ab \U0001F600 x;"
+        tokenizer_impl = tokenizer.JavaTokenizer(code, ignore_errors=True)
+        list(tokenizer_impl.tokenize())
+        self.assertEqual(len(tokenizer_impl.errors), 1)
+        self.assertEqual(tokenizer_impl.errors[0].position,
+                         tokenizer.Position(line=1, column=4))
+
+    def test_empty_input(self):
+        tokens = list(tokenizer.tokenize(""))
+        self.assertEqual(tokens, [])
+
+    def test_whitespace_only_input(self):
+        tokens = list(tokenizer.tokenize("  \r\n\t "))
+        self.assertEqual(tokens, [])
+
+    def test_comment_participates_in_position_tracking(self):
+        code = "// line comment\r\nint x;"
+        tokens = list(tokenizer.tokenize(code))
+        self.assertEqual(tokens[0].value, "int")
+        self.assertEqual(tokens[0].position, tokenizer.Position(line=2, column=1))
+
+        block_code = "/* a\r\nb */ int x;"
+        block_tokens = list(tokenizer.tokenize(block_code))
+        self.assertEqual(block_tokens[0].position.line, 2)
+
+    def test_error_position_is_serializable(self):
+        import json
+        import pickle
+
+        tokenizer_impl = tokenizer.JavaTokenizer("int #", ignore_errors=True)
+        list(tokenizer_impl.tokenize())
+        error = tokenizer_impl.errors[0]
+
+        self.assertEqual(error.position, tokenizer.Position(line=1, column=5))
+        self.assertEqual(error.position._asdict(),
+                         {"line": 1, "column": 5})
+        self.assertEqual(
+            json.loads(json.dumps(error.position._asdict())),
+            {"line": 1, "column": 5})
+        self.assertEqual(pickle.loads(pickle.dumps(error.position)),
+                         error.position)
+
+    def test_error_at_end_of_input_does_not_crash(self):
+        tokenizer_impl = tokenizer.JavaTokenizer("#", ignore_errors=True)
+        list(tokenizer_impl.tokenize())
+        self.assertEqual(len(tokenizer_impl.errors), 1)
+        self.assertEqual(tokenizer_impl.errors[0].position,
+                         tokenizer.Position(line=1, column=1))
+
+    def test_package_declaration_uses_token_position(self):
+        from .. import parse
+
+        ast = parse.parse("package org.example;\npublic class X {}")
+        self.assertEqual(ast.package.position,
+                         tokenizer.Position(line=1, column=9))
+        self.assertEqual(ast.types[0].position.line, 2)
+
+
 if __name__=="__main__":
     unittest.main()

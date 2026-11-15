@@ -1,4 +1,3 @@
-import re
 import unicodedata
 from collections import namedtuple
 
@@ -6,9 +5,98 @@ import six
 
 
 class LexerError(Exception):
-    pass
+
+    def __init__(self, message, position=None):
+        super(LexerError, self).__init__(message)
+        self.position = position
 
 Position = namedtuple('Position', ['line', 'column'])
+
+
+class PositionTracker(object):
+    """Tracks line/column positions inside a decoded source string.
+
+    The coordinate system is shared by every token, AST node and lexer error:
+
+    * ``line`` starts at 1 and is incremented for every line terminator.
+      ``\\r\\n``, ``\\r`` and ``\\n`` are all treated as a single line break.
+    * ``column`` starts at 1 and counts Unicode code points, not bytes or
+      UTF-16 code units. A surrogate pair therefore occupies one column and a
+      tab character occupies a single column (tabs are not expanded).
+
+    Indices refer to code unit offsets of the (already decoded) source string.
+    On narrow Python 2 builds surrogate pairs use two such offsets, which is
+    accounted for when converting an index to a column.
+    """
+
+    def __init__(self, data):
+        self.data = data
+        self.length = len(data)
+        self.index = 0
+        self.line = 1
+        self.column = 1
+        self._marks = []
+
+    def mark(self):
+        self._marks.append((self.index, self.line, self.column))
+
+    def reset(self):
+        self.index, self.line, self.column = self._marks.pop()
+
+    @staticmethod
+    def _advance_column(column, char, next_char=None):
+        if char == '\t':
+            # Tabs are not expanded; each character is one code point.
+            return column + 1
+        if unicodedata.category(char) == 'Cs':
+            # Surrogate code point. The leading surrogate (which is followed
+            # by a trailing surrogate) opens the single column of the whole
+            # astral character; the trailing surrogate stays in that column.
+            if next_char is not None and unicodedata.category(next_char) == 'Cs':
+                return column + 1
+            return column
+        return column + 1
+
+    def advance_to(self, index):
+        """Advance the tracked position up to (but not including) index."""
+        if index <= self.index:
+            return
+
+        index = min(index, self.length)
+        data = self.data
+
+        while self.index < index:
+            char = data[self.index]
+
+            if (char == '\r' and self.index + 1 < index
+                    and self.index + 1 < self.length
+                    and data[self.index + 1] == '\n'):
+                # CRLF is one line terminator; consume both code units.
+                self.index += 2
+                self.line += 1
+                self.column = 1
+            elif char in ('\r', '\n'):
+                self.index += 1
+                self.line += 1
+                self.column = 1
+            else:
+                next_char = data[self.index + 1] if self.index + 1 < self.length else None
+                self.column = self._advance_column(self.column, char, next_char)
+                self.index += 1
+
+    def position(self):
+        """Return the Position of the character at the current index."""
+        return Position(self.line, self.column)
+
+    def position_at(self, index):
+        """Return the 1-based Position of the character at ``index``."""
+        self.advance_to(index)
+        return Position(self.line, self.column)
+
+    def position_after(self, index):
+        """Position immediately following ``index``; safe at end of input."""
+        self.advance_to(index + 1)
+        return Position(self.line, self.column)
 
 class JavaToken(object):
     def __init__(self, value, position=None, javadoc=None):
@@ -154,40 +242,37 @@ class JavaTokenizer(object):
         self.ignore_errors = ignore_errors
         self.errors = []
 
-        # Rows and columns both start at 1
-        self.current_line = 1
-        self.start_of_line = -1
-
         self.operators = [set() for i in range(0, Operator.MAX_LEN)]
 
         for v in Operator.VALUES:
             self.operators[len(v) - 1].add(v)
 
-        self.whitespace_consumer = re.compile(r'[^\s]')
-
         self.javadoc = None
 
+        self.i = 0
+        self.j = 0
+        self.length = 0
+        self.tracker = None
 
     def reset(self):
         self.i = 0
         self.j = 0
+        self.tracker = PositionTracker(self.data)
 
     def consume_whitespace(self):
-        match = self.whitespace_consumer.search(self.data, self.i + 1)
+        i = self.i + 1
+        length = self.length
 
-        if not match:
+        while i < length and self.data[i].isspace():
+            i += 1
+
+        if i >= length:
             self.i = self.length
+            self.tracker.advance_to(self.length)
             return
 
-        i = match.start()
-
-        start_of_line = self.data.rfind('\n', self.i, i)
-
-        if start_of_line != -1:
-            self.start_of_line = start_of_line
-            self.current_line += self.data.count('\n', self.i, i)
-
         self.i = i
+        self.tracker.advance_to(i)
 
     def read_string(self):
         delim = self.data[self.i]
@@ -260,16 +345,12 @@ class JavaTokenizer(object):
         else:
             self.error('Unterminated block comment')
             partial_comment = self.data[self.i:]
+            self.tracker.advance_to(self.length)
             self.i = self.length
             return partial_comment
 
         comment = self.data[self.i:i]
-        start_of_line = self.data.rfind('\n', self.i, i)
-
-        if start_of_line != -1:
-            self.start_of_line = start_of_line
-            self.current_line += self.data.count('\n', self.i, i)
-
+        self.tracker.advance_to(i)
         self.i = i
 
         return comment
@@ -485,11 +566,10 @@ class JavaTokenizer(object):
 
         self.data = ''.join(new_data)
         self.length = len(self.data)
+        self.tracker = PositionTracker(self.data)
 
     def tokenize(self):
-        self.reset()
-
-        # Convert unicode escapes
+        # Convert unicode escapes (also initializes the position tracker)
         self.pre_tokenize()
 
         while self.i < self.length:
@@ -548,28 +628,37 @@ class JavaTokenizer(object):
                 self.i = self.i + 1
                 continue
 
-            position = Position(self.current_line, self.i - self.start_of_line)
+            position = self.tracker.position()
             token = token_type(self.data[self.i:self.j], position, self.javadoc)
             yield token
 
             if self.javadoc:
                 self.javadoc = None
 
+            self.tracker.advance_to(self.j)
             self.i = self.j
 
     def error(self, message, char=None):
-        # Provide additional information in the errors message
-        line_start = self.data.rfind('\n', 0, self.i) + 1
-        line_end = self.data.find('\n', self.i)
+        # Provide additional information in the error message. The position is
+        # attached to the LexerError as a serializable Position so callers can
+        # map failed input back to the same coordinates used by the tokens.
+        position = self.tracker.position()
+
+        if char is None:
+            if self.i < self.length:
+                char = self.data[self.i]
+            else:
+                char = u""
+
+        line_start = self.data.rfind("\n", 0, self.i) + 1
+        line_end = self.data.find("\n", self.i)
+        if line_end == -1:
+            line_end = self.length
         line = self.data[line_start:line_end].strip()
 
-        line_number = self.current_line
-
-        if not char:
-            char = self.data[self.j]
-
-        message = u'%s at "%s", line %s: %s' % (message, char, line_number, line)
-        error = LexerError(message)
+        message = u"%s at \"%s\", line %s, column %s: %s" % (
+            message, char, position.line, position.column, line)
+        error = LexerError(message, position)
         self.errors.append(error)
 
         if not self.ignore_errors:
