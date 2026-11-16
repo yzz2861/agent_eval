@@ -13,6 +13,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat,
 from lxml.etree import Comment, Element, QName, SubElement, _Element, strip_tags
 
 from .algorithms import (
+    AlgorithmPolicy,
     CanonicalizationMethod,
     DigestAlgorithm,
     SignatureConstructionMethod,
@@ -80,6 +81,10 @@ class XMLSigner(XMLSignatureProcessor):
     :param c14n_algorithm:
         Algorithm that will be used to canonicalize (serialize in a reproducible way) the XML that is signed. See
         :class:`CanonicalizationMethod` for the list of algorithm IDs supported.
+    :param algorithm_policy:
+        A centralized :class:`AlgorithmPolicy` whitelist restricting the signature method and digest algorithm that
+        may be used for signing. Algorithms outside the whitelist raise
+        :class:`signxml.exceptions.InvalidSignature`. If unset, SHA1-based algorithms are rejected.
     """
 
     signature_annotators: list
@@ -104,6 +109,7 @@ class XMLSigner(XMLSignatureProcessor):
         signature_algorithm: SignatureMethod | str = SignatureMethod.RSA_SHA256,
         digest_algorithm: DigestAlgorithm | str = DigestAlgorithm.SHA256,
         c14n_algorithm: CanonicalizationMethod | str = CanonicalizationMethod.CANONICAL_XML_1_1,
+        algorithm_policy: AlgorithmPolicy | None = None,
     ):
         if method is None or method not in SignatureConstructionMethod:
             raise InvalidInput(f"Unknown signature construction method {method}")
@@ -116,7 +122,11 @@ class XMLSigner(XMLSignatureProcessor):
             self.digest_alg = DigestAlgorithm.from_fragment(digest_algorithm)
         else:
             self.digest_alg = DigestAlgorithm(digest_algorithm)
-        self.check_deprecated_methods()
+        self.algorithm_policy = algorithm_policy
+        if algorithm_policy is None:
+            self.check_deprecated_methods()
+        else:
+            self._check_algorithm_policy(algorithm_policy)
         self.c14n_alg = CanonicalizationMethod(c14n_algorithm)
         self.namespaces: dict[str, str] = {"ds": namespaces.ds}
         self._parser = None
@@ -142,6 +152,9 @@ class XMLSigner(XMLSignatureProcessor):
             msg = "SHA1-based algorithms are not supported in the default configuration because they are not secure"
             raise InvalidInput(msg)
 
+    def _check_algorithm_policy(self, algorithm_policy: AlgorithmPolicy) -> None:
+        algorithm_policy.check(signature_algorithm=self.sign_alg, digest_algorithm=self.digest_alg)
+
     def sign(
         self,
         data,
@@ -163,6 +176,7 @@ class XMLSigner(XMLSignatureProcessor):
         inclusive_ns_prefixes: list[str] | None = None,
         signature_properties: _Element | list[_Element] | None = None,
         exclude_c14n_transform_element: bool = False,
+        algorithm_policy: AlgorithmPolicy | None = None,
     ) -> _Element:
         """
         Sign the data and return the root element of the resulting XML tree.
@@ -217,6 +231,10 @@ class XMLSigner(XMLSignatureProcessor):
             all transforms including canonicalization are added to the Transforms element, and in most cases this
             is the correct approach. Only set this to True if you need to comply with a specification where the
             c14n algorithm is fixed, and the specification forbids mentioning the algorithm.
+        :param algorithm_policy:
+            A centralized :class:`AlgorithmPolicy` whitelist to apply for this signing operation. If unset, the
+            policy given to the constructor is used. Algorithms outside the whitelist raise
+            :class:`signxml.exceptions.InvalidSignature`.
 
         :returns:
             A :class:`lxml.etree._Element` object representing the root of the XML tree containing the signature and
@@ -229,6 +247,12 @@ class XMLSigner(XMLSignatureProcessor):
         """
         if id_attribute is not None:
             self.id_attributes = (id_attribute,)
+
+        effective_algorithm_policy = algorithm_policy or self.algorithm_policy
+        if effective_algorithm_policy is not None:
+            self._check_algorithm_policy(effective_algorithm_policy)
+        else:
+            self.check_deprecated_methods()
 
         cert_chain = self._get_cert_chain(cert)
         if isinstance(key, ExternalSigningKey):

@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat,
 from lxml import etree
 
 from .algorithms import (
+    AlgorithmPolicy,
     CanonicalizationMethod,
     DigestAlgorithm,
     SignatureConstructionMethod,
@@ -67,18 +68,19 @@ class SignatureConfiguration:
     If set to a non-integer, any number of references is accepted (otherwise a mismatch raises an error).
     """
 
-    signature_methods: frozenset[SignatureMethod] = frozenset(sm for sm in SignatureMethod if "SHA1" not in sm.name)
+    signature_methods: frozenset[SignatureMethod] | None = None
     """
     Set of acceptable signature methods (signature algorithms). Any signature generated using an algorithm not listed
     here will fail verification. It is recommended that you restrict this set to only methods expected to be used in
-    signatures handled by your application.
+    signatures handled by your application. If unset, the allowed methods are inherited from ``algorithm_policy``.
     """
 
-    digest_algorithms: frozenset[DigestAlgorithm] = frozenset(da for da in DigestAlgorithm if "SHA1" not in da.name)
+    digest_algorithms: frozenset[DigestAlgorithm] | None = None
     """
     Set of acceptable digest algorithms. Any signature or reference transform generated using an algorithm not listed
     here will cause verification to fail. It is recommended that you restrict this set to only methods expected to be
-    used in signatures handled by your application.
+    used in signatures handled by your application. If unset, the allowed digests are inherited from
+    ``algorithm_policy``.
     """
 
     ignore_ambiguous_key_info: bool = False
@@ -105,6 +107,33 @@ class SignatureConfiguration:
     the digests and signature, but there are some uses of XML Signatures where the canonicalization method is
     fixed, and not added to the Transforms. This setting can be used to validate signatures in those use-cases.
     """
+
+    algorithm_policy: AlgorithmPolicy | None = None
+    """
+    Centralized whitelist of signature methods and digest algorithms. The policy applies to both signing and
+    verification, and any algorithm outside the whitelist raises :class:`signxml.exceptions.InvalidSignature`.
+    ``signature_methods`` and ``digest_algorithms`` can be set individually to override the corresponding
+    dimension of this policy. If this policy is unset, the default policy excludes SHA1-based algorithms.
+    """
+
+    def __post_init__(self):
+        if self.signature_methods is not None:
+            object.__setattr__(self, "signature_methods", frozenset(self.signature_methods))
+        if self.digest_algorithms is not None:
+            object.__setattr__(self, "digest_algorithms", frozenset(self.digest_algorithms))
+        if self.algorithm_policy is not None and not isinstance(self.algorithm_policy, AlgorithmPolicy):
+            object.__setattr__(self, "algorithm_policy", AlgorithmPolicy(**self.algorithm_policy))
+
+    @property
+    def effective_algorithm_policy(self) -> AlgorithmPolicy:
+        """
+        The algorithm policy after applying the per-dimension ``signature_methods`` and
+        ``digest_algorithms`` overrides.
+        """
+        policy = self.algorithm_policy or AlgorithmPolicy()
+        signature_methods = policy.signature_methods if self.signature_methods is None else self.signature_methods
+        digest_algorithms = policy.digest_algorithms if self.digest_algorithms is None else self.digest_algorithms
+        return AlgorithmPolicy(signature_methods=signature_methods, digest_algorithms=digest_algorithms)
 
 
 _DEFAULT_SIGNATURE_CONFIG = SignatureConfiguration()
@@ -366,12 +395,10 @@ class XMLVerifier(XMLSignatureProcessor):
                 )
 
     def check_digest_alg_expected(self, digest_alg):
-        if digest_alg not in self.config.digest_algorithms:
-            raise InvalidInput(f"Digest algorithm {digest_alg.name} forbidden by configuration")
+        self.config.effective_algorithm_policy.check_digest_algorithm(digest_alg)
 
     def check_signature_alg_expected(self, signature_alg):
-        if signature_alg not in self.config.signature_methods:
-            raise InvalidInput(f"Signature method {signature_alg.name} forbidden by configuration")
+        self.config.effective_algorithm_policy.check_signature_algorithm(signature_alg)
 
     def verify(
         self,
@@ -387,6 +414,7 @@ class XMLVerifier(XMLSignatureProcessor):
         uri_resolver: Callable | None = None,
         id_attribute: str | None = None,
         expect_config: SignatureConfiguration = _DEFAULT_SIGNATURE_CONFIG,
+        algorithm_policy: AlgorithmPolicy | None = None,
         ee_policy: x509.verification.ExtensionPolicy | None = None,
         ca_policy: x509.verification.ExtensionPolicy | None = None,
         **deprecated_kwargs,
@@ -479,6 +507,10 @@ class XMLVerifier(XMLSignatureProcessor):
         :param expect_config:
             Expected signature configuration. Pass a :class:`SignatureConfiguration` object to describe expected
             properties of the verified signature. Signatures with unexpected configurations will fail validation.
+        :param algorithm_policy:
+            A centralized :class:`AlgorithmPolicy` whitelist of signature methods and digest algorithms. This is
+            equivalent to setting ``expect_config.algorithm_policy`` and applies to all signatures verified by this
+            call. Algorithms outside the whitelist raise :class:`signxml.exceptions.InvalidSignature`.
         :param ee_policy:
             Custom x509.verification.ExtensionPolicy to use for validating the end-entity certificate.
         :param ca_policy:
@@ -489,14 +521,22 @@ class XMLVerifier(XMLSignatureProcessor):
 
         :raises: :class:`signxml.exceptions.InvalidSignature`
         """
+        if algorithm_policy is not None:
+            expect_config = replace(expect_config, algorithm_policy=algorithm_policy)
+
         self.hmac_key = hmac_key
         if hmac_key is not None:
-            if expect_config.signature_methods == SignatureConfiguration().signature_methods:  # default value
+            if expect_config.signature_methods is None and (
+                expect_config.algorithm_policy is None
+                or expect_config.algorithm_policy.signature_methods == AlgorithmPolicy().signature_methods
+            ):
                 expect_config = replace(
                     expect_config,
                     signature_methods=frozenset(sm for sm in SignatureMethod if sm.name.startswith("HMAC")),
                 )
-            elif any(not sm.name.startswith("HMAC") for sm in expect_config.signature_methods):
+            elif any(
+                not sm.name.startswith("HMAC") for sm in expect_config.effective_algorithm_policy.signature_methods
+            ):
                 raise InvalidInput("When hmac_key is set, all expected signature methods must use HMAC")
 
         self.config = expect_config

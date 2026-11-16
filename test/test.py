@@ -26,6 +26,7 @@ from lxml import etree
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from signxml import (
+    AlgorithmPolicy,
     CanonicalizationMethod,
     DigestAlgorithm,
     ExternalSigningKey,
@@ -1600,6 +1601,82 @@ class TestSignXML(unittest.TestCase, LoadExampleKeys):
         with self.assertRaisesRegex(InvalidInput, "Signature method RSA_SHA1 forbidden by configuration"):
             verifier.verify(signed, x509_cert=cert)
         verifier.verify(signed, x509_cert=cert, expect_config=sha1_ok_example_cert)
+
+    def test_algorithm_policy(self):
+        data = etree.parse(self.example_xml_files[0]).getroot()
+        cert, key = self.load_example_keys()
+        policy = AlgorithmPolicy(
+            signature_methods=frozenset({SignatureMethod.RSA_SHA256}),
+            digest_algorithms=frozenset({DigestAlgorithm.SHA256}),
+        )
+        config = SignatureConfiguration(algorithm_policy=policy, verification_time=example_cert_verification_time)
+
+        signed = XMLSigner(algorithm_policy=policy).sign(data, cert=cert, key=key)
+        XMLVerifier().verify(signed, x509_cert=cert, expect_config=config)
+        XMLVerifier().verify(signed, x509_cert=cert, expect_config=example_cert_config, algorithm_policy=policy)
+
+        with self.assertRaisesRegex(InvalidSignature, "Signature method RSA_SHA512 forbidden by configuration"):
+            XMLSigner(signature_algorithm=SignatureMethod.RSA_SHA512, algorithm_policy=policy)
+        with self.assertRaisesRegex(InvalidSignature, "Digest algorithm SHA512 forbidden by configuration"):
+            XMLSigner(digest_algorithm=DigestAlgorithm.SHA512, algorithm_policy=policy)
+        with self.assertRaisesRegex(InvalidSignature, "Digest algorithm SHA1 forbidden by configuration"):
+            XMLSigner(
+                signature_algorithm=SignatureMethod.RSA_SHA256,
+                digest_algorithm=DigestAlgorithm.SHA1,
+                algorithm_policy=policy,
+            )
+
+        downgraded_signature = XMLSignerWithSHA1(
+            signature_algorithm=SignatureMethod.RSA_SHA1,
+            digest_algorithm=DigestAlgorithm.SHA1,
+        ).sign(data, cert=cert, key=key)
+        with self.assertRaisesRegex(InvalidSignature, "Signature method RSA_SHA1 forbidden by configuration"):
+            XMLVerifier().verify(downgraded_signature, x509_cert=cert, expect_config=config)
+
+        downgraded_digest = XMLSignerWithSHA1(
+            signature_algorithm=SignatureMethod.RSA_SHA256,
+            digest_algorithm=DigestAlgorithm.SHA1,
+        ).sign(data, cert=cert, key=key)
+        with self.assertRaisesRegex(InvalidSignature, "Digest algorithm SHA1 forbidden by configuration"):
+            XMLVerifier().verify(downgraded_digest, x509_cert=cert, expect_config=config)
+
+        empty_policy = AlgorithmPolicy(signature_methods=frozenset(), digest_algorithms=frozenset())
+        with self.assertRaisesRegex(InvalidSignature, "Signature method RSA_SHA256 forbidden by configuration"):
+            XMLSigner(algorithm_policy=empty_policy)
+        with self.assertRaisesRegex(InvalidSignature, "Signature method RSA_SHA256 forbidden by configuration"):
+            XMLVerifier().verify(
+                signed,
+                x509_cert=cert,
+                expect_config=SignatureConfiguration(
+                    algorithm_policy=empty_policy,
+                    verification_time=example_cert_verification_time,
+                ),
+            )
+
+        per_digest_policy = AlgorithmPolicy(
+            signature_methods=frozenset({SignatureMethod.RSA_SHA256}),
+            digest_algorithms=frozenset({DigestAlgorithm.SHA512}),
+        )
+        XMLVerifier().verify(
+            signed,
+            x509_cert=cert,
+            expect_config=SignatureConfiguration(
+                algorithm_policy=per_digest_policy,
+                digest_algorithms=frozenset({DigestAlgorithm.SHA256}),
+                verification_time=example_cert_verification_time,
+            ),
+        )
+        with self.assertRaisesRegex(InvalidSignature, "Signature method RSA_SHA256 forbidden by configuration"):
+            XMLVerifier().verify(
+                signed,
+                x509_cert=cert,
+                expect_config=SignatureConfiguration(
+                    algorithm_policy=per_digest_policy,
+                    signature_methods=frozenset({SignatureMethod.RSA_SHA512}),
+                    digest_algorithms=frozenset({DigestAlgorithm.SHA256}),
+                    verification_time=example_cert_verification_time,
+                ),
+            )
 
 
 class TestExternalSigning(unittest.TestCase):

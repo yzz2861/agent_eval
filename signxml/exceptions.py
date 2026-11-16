@@ -31,5 +31,15 @@ class InvalidInput(ValueError, SignXMLException):
     pass
 
 
+class _AlgorithmPolicyViolation(InvalidSignature, InvalidInput):
+    """
+    Raised when a signature uses an algorithm forbidden by the configured algorithm policy.
+
+    This inherits from InvalidInput for compatibility with configurations that previously reported
+    algorithm whitelist violations as input errors. Callers that catch InvalidSignature will also
+    handle this exception.
+    """
+
+
 class RedundantCert(SignXMLException):
     pass

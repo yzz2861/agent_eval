@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, cast
 
 from cryptography.hazmat.primitives import hashes
 
-from .exceptions import InvalidInput
+from .exceptions import InvalidInput, _AlgorithmPolicyViolation
 
 
 class SignatureConstructionMethod(Enum):
@@ -141,6 +142,76 @@ class SignatureMethod(FragmentLookupMixin, InvalidInputErrorMixin, Enum):
     "See `SHA1 deprecation`_."
     SHA1_RSA_MGF1 = "http://www.w3.org/2007/05/xmldsig-more#sha1-rsa-MGF1"
     "See `SHA1 deprecation`_."
+
+
+@dataclass(frozen=True)
+class AlgorithmPolicy:
+    """
+    A centralized whitelist of signature methods and digest algorithms.
+
+    The same policy can be supplied to :class:`signxml.XMLSigner` and
+    :class:`signxml.SignatureConfiguration` to constrain both signing and verification. Algorithms outside the
+    whitelist raise :class:`signxml.exceptions.InvalidSignature`. An empty set denies every algorithm in that
+    category.
+
+    The default policy excludes SHA1-based algorithms, matching the default behavior of SignXML.
+    """
+
+    signature_methods: frozenset[SignatureMethod] = frozenset(sm for sm in SignatureMethod if "SHA1" not in sm.name)
+    """
+    Signature methods that are allowed. Set to an empty set to deny all signature methods.
+    """
+
+    digest_algorithms: frozenset[DigestAlgorithm] = frozenset(da for da in DigestAlgorithm if "SHA1" not in da.name)
+    """
+    Digest algorithms that are allowed. Set to an empty set to deny all digest algorithms.
+    """
+
+    def __post_init__(self):
+        object.__setattr__(self, "signature_methods", _normalize_algorithms(self.signature_methods, SignatureMethod))
+        object.__setattr__(self, "digest_algorithms", _normalize_algorithms(self.digest_algorithms, DigestAlgorithm))
+
+    def check_signature_algorithm(self, signature_algorithm: SignatureMethod) -> None:
+        """
+        Raise :class:`signxml.exceptions.InvalidSignature` if the signature method is not allowed.
+        """
+        if signature_algorithm not in self.signature_methods:
+            raise _AlgorithmPolicyViolation(f"Signature method {signature_algorithm.name} forbidden by configuration")
+
+    def check_digest_algorithm(self, digest_algorithm: DigestAlgorithm) -> None:
+        """
+        Raise :class:`signxml.exceptions.InvalidSignature` if the digest algorithm is not allowed.
+        """
+        if digest_algorithm not in self.digest_algorithms:
+            raise _AlgorithmPolicyViolation(f"Digest algorithm {digest_algorithm.name} forbidden by configuration")
+
+    def check(
+        self,
+        *,
+        signature_algorithm: SignatureMethod | str | None = None,
+        digest_algorithm: DigestAlgorithm | str | None = None,
+    ) -> None:
+        """
+        Validate one or both algorithms against this policy.
+        """
+        if signature_algorithm is not None:
+            if isinstance(signature_algorithm, str):
+                signature_algorithm = _coerce_algorithm(signature_algorithm, SignatureMethod)
+            self.check_signature_algorithm(signature_algorithm)
+        if digest_algorithm is not None:
+            if isinstance(digest_algorithm, str):
+                digest_algorithm = _coerce_algorithm(digest_algorithm, DigestAlgorithm)
+            self.check_digest_algorithm(digest_algorithm)
+
+
+def _coerce_algorithm(value: str, algorithm_type: type[SignatureMethod] | type[DigestAlgorithm]):
+    if "#" not in value:
+        return algorithm_type.from_fragment(value)
+    return algorithm_type(value)
+
+
+def _normalize_algorithms(values, algorithm_type: type[SignatureMethod] | type[DigestAlgorithm]) -> frozenset:
+    return frozenset(_coerce_algorithm(value, algorithm_type) if isinstance(value, str) else value for value in values)
 
 
 class CanonicalizationMethod(InvalidInputErrorMixin, Enum):
