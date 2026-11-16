@@ -930,7 +930,7 @@ class AuthnResponse(StatusResponse):
             while self.find_encrypt_data(resp) and decr_text_old != decr_text:
                 decr_text_old = decr_text
                 try:
-                    decr_text = self.sec.decrypt_keys(decr_text, keys=keys)
+                    decr_text = self.sec.decrypt_keys(decr_text, keys=keys, entity_id=self.issuer())
                 except DecryptError:
                     continue
                 else:
@@ -950,7 +950,7 @@ class AuthnResponse(StatusResponse):
             ) and decr_text_old != decr_text:
                 decr_text_old = decr_text
                 try:
-                    decr_text = self.sec.decrypt_keys(decr_text, keys=keys)
+                    decr_text = self.sec.decrypt_keys(decr_text, keys=keys, entity_id=self.issuer())
                 except DecryptError:
                     continue
                 else:

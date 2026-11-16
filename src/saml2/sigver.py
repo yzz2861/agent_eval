@@ -31,6 +31,15 @@ from saml2 import samlp
 from saml2.cert import CertificateError
 from saml2.cert import OpenSSLWrapper
 from saml2.cert import read_cert_from_file
+from saml2.encryption_errors import DecryptionCorruptError
+from saml2.encryption_errors import DecryptionError as _PolicyDecryptionError
+from saml2.encryption_errors import DecryptionKeyMismatchError
+from saml2.encryption_errors import DecryptionPolicyError
+from saml2.encryption_errors import EncryptionPolicyConfigurationError
+from saml2.encryption_policy import DEFAULT_PROFILE
+from saml2.encryption_policy import EncryptionPolicy
+from saml2.encryption_policy import EncryptionPolicyRegistry
+from saml2.encryption_policy import validate_encrypted_xml
 import saml2.cryptography.asymmetric
 import saml2.cryptography.pki
 import saml2.data.templates as _data_template
@@ -86,6 +95,16 @@ class MissingKey(SigverError):
 
 class DecryptError(XmlsecError):
     pass
+
+
+# Re-bind the policy-layer base class so every policy failure is also a
+# DecryptError for existing callers that catch the generic class.
+_PolicyDecryptionError.__bases__ = (DecryptError,)
+
+# Re-export of the policy-layer base class. The concrete failures
+# (DecryptionPolicyError / DecryptionKeyMismatchError /
+# DecryptionCorruptError) all inherit from DecryptionError.
+DecryptionError = _PolicyDecryptionError
 
 
 class EncryptError(XmlsecError):
@@ -751,7 +770,8 @@ class CryptoBackendXmlSec1(CryptoBackend):
         try:
             (_stdout, _stderr, output) = self._run_xmlsec(com_list, [tmp.name])
         except XmlsecError as e:
-            raise DecryptError(com_list) from e
+            # Never embed com_list: it contains the private key file path.
+            raise DecryptError("xmlsec decryption failed") from e
 
         return output.decode("utf-8")
 
@@ -1009,6 +1029,7 @@ def security_context(conf):
         encryption_keypairs=conf.encryption_keypairs,
         sec_backend=sec_backend,
         delete_tmpfiles=conf.delete_tmpfiles,
+        encryption_policy=getattr(conf, "encryption_policy", None),
     )
 
 
@@ -1195,6 +1216,7 @@ class SecurityContext:
         enc_cert_type="pem",
         sec_backend=None,
         delete_tmpfiles=True,
+        encryption_policy=None,
     ):
 
         if not isinstance(crypto, CryptoBackend):
@@ -1249,6 +1271,46 @@ class SecurityContext:
 
         self.encrypt_key_type = encrypt_key_type
         self.delete_tmpfiles = delete_tmpfiles
+        self.encryption_policy = self._init_encryption_policy(encryption_policy)
+        self._available_key_sizes = None
+
+    @staticmethod
+    def _init_encryption_policy(encryption_policy):
+        if encryption_policy is None:
+            return EncryptionPolicyRegistry(
+                default_policy=EncryptionPolicy.from_profile(DEFAULT_PROFILE)
+            )
+        if isinstance(encryption_policy, EncryptionPolicyRegistry):
+            return encryption_policy
+        if isinstance(encryption_policy, EncryptionPolicy):
+            return EncryptionPolicyRegistry(default_policy=encryption_policy)
+        if isinstance(encryption_policy, dict):
+            return EncryptionPolicyRegistry.from_config(encryption_policy)
+        if isinstance(encryption_policy, str):
+            return EncryptionPolicyRegistry(
+                default_policy=EncryptionPolicy.from_profile(encryption_policy)
+            )
+        raise EncryptionPolicyConfigurationError(
+            "Unsupported encryption_policy configuration type"
+        )
+
+    def _get_available_key_sizes(self):
+        """RSA modulus sizes (bits) of the local decryption keys."""
+        if self._available_key_sizes is None:
+            key_sizes = set()
+            for key_path in [self.key_file] + list(self.enc_key_files or []):
+                if not key_path:
+                    continue
+                try:
+                    private_key = import_rsa_key_from_file(key_path)
+                except Exception as err:
+                    logger.debug("Could not inspect decryption key: %s", type(err).__name__)
+                    continue
+                key_size = getattr(private_key, "key_size", None)
+                if key_size:
+                    key_sizes.add(int(key_size))
+            self._available_key_sizes = frozenset(key_sizes)
+        return self._available_key_sizes
 
     def correctly_signed(self, xml, must=False):
         logger.debug("verify correct signature")
@@ -1285,36 +1347,84 @@ class SecurityContext:
         """
         return self.crypto.encrypt_assertion(statement, enc_key, template, key_type, node_xpath)
 
-    def decrypt_keys(self, enctext, keys=None):
+    def enforce_encryption_policy(self, enctext, entity_id=None, extra_key_sizes=None):
+        """Validate an encrypted document before any backend call.
+
+        Raises one of the DecryptionError subclasses when the document
+        violates the configured policy; returns the policy that was
+        enforced otherwise. Key material is never part of the raised
+        exception.
+        """
+        available_key_sizes = set(self._get_available_key_sizes())
+        if extra_key_sizes:
+            available_key_sizes.update(extra_key_sizes)
+        return validate_encrypted_xml(
+            enctext,
+            self.encryption_policy,
+            available_key_sizes=available_key_sizes,
+            entity_id=entity_id,
+        )
+
+    @staticmethod
+    def _inspect_inline_key_sizes(keys):
+        key_sizes = set()
+        for key in keys:
+            data = key if isinstance(key, bytes) else key.encode("ascii")
+            try:
+                private_key = saml2.cryptography.asymmetric.load_pem_private_key(data)
+            except Exception as err:
+                logger.debug("Could not inspect inline decryption key: %s", type(err).__name__)
+                continue
+            key_size = getattr(private_key, "key_size", None)
+            if key_size:
+                key_sizes.add(int(key_size))
+        return frozenset(key_sizes)
+
+    def decrypt_keys(self, enctext, keys=None, entity_id=None):
         """Decrypting an encrypted text by the use of a private key.
 
         :param enctext: The encrypted text as a string
         :param keys: Keys to try to decrypt enctext with
+        :param entity_id: Optional entityID of the sender, used to select
+            a per-entity encryption policy override.
         :return: The decrypted text
         """
-        key_files = []
-
         if not isinstance(keys, list):
             keys = [keys]
 
-        keys_filtered = (key for key in keys if key)
+        keys_filtered = [key for key in keys if key]
+        inline_key_sizes = self._inspect_inline_key_sizes(keys_filtered)
+        self.enforce_encryption_policy(
+            enctext,
+            entity_id=entity_id,
+            extra_key_sizes=inline_key_sizes,
+        )
+
         keys_encoded = (key.encode("ascii") if not isinstance(key, bytes) else key for key in keys_filtered)
         key_files = list(make_temp(key, decode=False, delete_tmpfiles=self.delete_tmpfiles) for key in keys_encoded)
         key_file_names = list(tmp.name for tmp in key_files)
 
-        dectext = self.decrypt(enctext, key_file=key_file_names)
+        dectext = self.decrypt(enctext, key_file=key_file_names, skip_policy_check=True)
         return dectext
 
-    def decrypt(self, enctext, key_file=None):
+    def decrypt(self, enctext, key_file=None, skip_policy_check=False, entity_id=None):
         """Decrypting an encrypted text by the use of a private key.
 
         :param enctext: The encrypted text as a string
+        :param key_file: A private key file or a list of private key files
+        :param skip_policy_check: Internal flag used by decrypt_keys, which
+            enforces the policy itself before preparing key material.
+        :param entity_id: Optional entityID of the sender for per-entity
+            encryption policy overrides.
         :return: The decrypted text
         """
+        if not skip_policy_check:
+            self.enforce_encryption_policy(enctext, entity_id=entity_id)
+
         if not isinstance(key_file, list):
             key_file = [key_file]
 
-        key_files = [key for key in itertools.chain(key_file, self.enc_key_files) if key]
+        key_files = [key for key in itertools.chain(key_file, self.enc_key_files or []) if key]
         for key_file in key_files:
             try:
                 dectext = self.crypto.decrypt(enctext, key_file)
@@ -1324,9 +1434,9 @@ class SecurityContext:
                 if dectext:
                     return dectext
 
-        errmsg = "No key was able to decrypt the ciphertext. Keys tried: {keys}"
-        errmsg = errmsg.format(keys=key_files)
-        raise DecryptError(errmsg)
+        raise DecryptError(
+            "No available key was able to decrypt the ciphertext"
+        )
 
     def verify_signature(self, signedtext, cert_file=None, cert_type="pem", node_name=NODE_NAME, node_id=None):
         """Verifies the signature of a XML document.

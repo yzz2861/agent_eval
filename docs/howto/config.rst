@@ -345,6 +345,68 @@ Example::
         },
     ],
 
+encryption_policy
+^^^^^^^^^^^^^^^^^
+
+Controls which XML Encryption algorithms, key sizes and digests are accepted
+when decrypting assertions, attributes or name identifiers. The policy is
+enforced *before* the xmlsec backend is invoked, so a message that violates
+the policy never reaches the crypto library.
+
+The policy is an allow-list split by purpose:
+
+* key_transport - algorithms inside EncryptedKey (RSA-1.5 / RSA-OAEP)
+* block_encryption - algorithms inside EncryptedData (AES-GCM, AES-CBC, 3DES)
+* digest - digest algorithms accepted inside OAEP parameters
+
+There is no wildcard: a policy can never be configured to accept any
+algorithm. The simplest configuration selects one of the fixed named
+profiles::
+
+    "encryption_policy": {
+        "profile": "intermediate",
+    },
+
+Available profiles:
+
+* modern - RSA-OAEP (1.1 and up) with SHA-256+ digests, AES-GCM only,
+  minimum 2048-bit RSA. This is the recommended setting for new deployments.
+* intermediate - additionally allows rsa-oaep-mgf1p but still rejects
+  RSA-1.5, every CBC block cipher and RSA keys below 2048 bits.
+* legacy - explicitly re-enables RSA-1.5, the CBC family and 3DES together
+  with 1024-bit RSA. Use it only for peers that cannot be upgraded; the weak
+  algorithms are unavailable in any other profile.
+
+When the option is omitted, the backward-compatible legacy profile is
+used so existing encrypted assertions continue to decrypt. New deployments
+should set an explicit profile.
+
+An explicit allow-list may be provided instead of a profile name, and
+per-entity overrides can narrow the global policy for a specific IdP/SP. An
+override can never re-enable an algorithm the global policy forbids::
+
+    "encryption_policy": {
+        "profile": "modern",
+        "entity_overrides": {
+            "https://old-idp.example.com/entity": {
+                "profile": "intermediate",
+            },
+        },
+    }
+
+Failures raised before the backend runs are split into three categories:
+
+* saml2.encryption_errors.DecryptionPolicyError - algorithm or digest
+  forbidden by the policy;
+* saml2.encryption_errors.DecryptionKeyMismatchError - the available key
+  material does not match the ciphertext (for example an RSA key below the
+  policy minimum);
+* saml2.encryption_errors.DecryptionCorruptError - malformed structure,
+  invalid base64, bad IV length or truncated ciphertext.
+
+All three inherit from ``saml2.sigver.DecryptError``, and exception
+messages never contain key material or raw ciphertext.
+
 generate_cert_info
 ^^^^^^^^^^^^^^^^^^
 

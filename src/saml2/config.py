@@ -76,6 +76,7 @@ COMMON_ARGS = [
     "signing_algorithm",
     "digest_algorithm",
     "http_client_timeout",
+    "encryption_policy",
 ]
 
 SP_ARGS = [
@@ -230,6 +231,10 @@ class Config:
         self.signing_algorithm = None
         self.digest_algorithm = None
         self.http_client_timeout = None
+        # Decryption policy: None means the backward-compatible default
+        # profile. Accepts a profile name, an EncryptionPolicy/Registry
+        # or a mapping; see saml2.encryption_policy.
+        self.encryption_policy = None
 
     def setattr(self, context, attr, val):
         if context == "":
