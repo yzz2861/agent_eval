@@ -18,6 +18,8 @@ import nacl.encoding
 from nacl import exceptions as exc
 from nacl.exceptions import ensure
 
+from . import _params
+
 _strbytes_plus_one = nacl.bindings.crypto_pwhash_scryptsalsa208sha256_STRBYTES
 
 AVAILABLE = nacl.bindings.has_crypto_pwhash_scryptsalsa208sha256
@@ -54,6 +56,12 @@ MEMLIMIT_SENSITIVE = (
 
 OPSLIMIT_MODERATE = 8 * OPSLIMIT_INTERACTIVE
 MEMLIMIT_MODERATE = 8 * MEMLIMIT_INTERACTIVE
+
+# Server side upper bounds enforced in addition to the libsodium limits:
+# callers can never request resources large enough to exhaust the host.
+OPSLIMIT_SERVER_MAX = _params.SERVER_OPSLIMIT_MAX
+MEMLIMIT_SERVER_MAX = _params.SERVER_MEMLIMIT_MAX
+MEMLIMIT_ALIGNMENT = _params.MEMLIMIT_ALIGNMENT
 
 
 def kdf(
@@ -105,8 +113,14 @@ def kdf(
                      of the key derivation procedure's computational cost;
                      it must be between
                      :py:const:`.MEMLIMIT_MIN` and
-                     :py:const:`.MEMLIMIT_MAX`
+                     :py:const:`.MEMLIMIT_SERVER_MAX`, be aligned to
+                     :py:const:`.MEMLIMIT_ALIGNMENT` bytes and is always
+                     validated before the key derivation starts
     :type memlimit: int
+    :raises nacl.exceptions.TypeError: if an argument has the wrong type
+    :raises nacl.exceptions.ValueError: if the salt length or a work
+        factor is outside the accepted range; the salt contents are
+        never part of the error message
     :rtype: bytes
     :raises nacl.exceptions.UnavailableError: If called when using a
         minimal build of libsodium.
@@ -119,10 +133,15 @@ def kdf(
         raising=exc.UnavailableError,
     )
 
-    ensure(
-        len(salt) == SALTBYTES,
-        f"The salt must be exactly {SALTBYTES}, not {len(salt)} bytes long",
-        raising=exc.ValueError,
+    _params.check_salt(salt, SALTBYTES)
+
+    _params.check_pwhash_params(
+        opslimit,
+        memlimit,
+        OPSLIMIT_MIN,
+        OPSLIMIT_MAX,
+        MEMLIMIT_MIN,
+        MEMLIMIT_MAX,
     )
 
     n_log2, r, p = nacl.bindings.nacl_bindings_pick_scrypt_params(
@@ -160,9 +179,16 @@ def str(
     correct for the interactive user login case.
 
     :param bytes password:
-    :param int opslimit:
-    :param int memlimit:
+    :param int opslimit: must be between :py:const:`.OPSLIMIT_MIN`
+        and :py:const:`.OPSLIMIT_SERVER_MAX`
+    :param int memlimit: must be between :py:const:`.MEMLIMIT_MIN`
+        and :py:const:`.MEMLIMIT_SERVER_MAX` and aligned to
+        :py:const:`.MEMLIMIT_ALIGNMENT` bytes; the limits are checked
+        before hashing starts
     :rtype: bytes
+    :raises nacl.exceptions.TypeError: if a limit is not an integer
+    :raises nacl.exceptions.ValueError: if a limit is out of range or
+        not aligned
     :raises nacl.exceptions.UnavailableError: If called when using a
         minimal build of libsodium.
 
@@ -172,6 +198,15 @@ def str(
         AVAILABLE,
         "Not available in minimal build",
         raising=exc.UnavailableError,
+    )
+
+    _params.check_pwhash_params(
+        opslimit,
+        memlimit,
+        OPSLIMIT_MIN,
+        OPSLIMIT_MAX,
+        MEMLIMIT_MIN,
+        MEMLIMIT_MAX,
     )
 
     return nacl.bindings.crypto_pwhash_scryptsalsa208sha256_str(

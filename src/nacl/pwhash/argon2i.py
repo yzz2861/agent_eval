@@ -15,7 +15,7 @@
 import nacl.bindings
 import nacl.encoding
 
-from . import _argon2
+from . import _argon2, _params
 
 ALG = _argon2.ALG_ARGON2I13
 STRPREFIX = nacl.bindings.crypto_pwhash_argon2i_STRPREFIX
@@ -44,6 +44,12 @@ MEMLIMIT_SENSITIVE = nacl.bindings.crypto_pwhash_argon2i_MEMLIMIT_SENSITIVE
 
 OPSLIMIT_MODERATE = nacl.bindings.crypto_pwhash_argon2i_OPSLIMIT_MODERATE
 MEMLIMIT_MODERATE = nacl.bindings.crypto_pwhash_argon2i_MEMLIMIT_MODERATE
+
+# Server side upper bounds enforced in addition to the libsodium limits:
+# callers can never request resources large enough to exhaust the host.
+OPSLIMIT_SERVER_MAX = _params.SERVER_OPSLIMIT_MAX
+MEMLIMIT_SERVER_MAX = _params.SERVER_MEMLIMIT_MAX
+MEMLIMIT_ALIGNMENT = _params.MEMLIMIT_ALIGNMENT
 
 
 def kdf(
@@ -92,12 +98,29 @@ def kdf(
                      of the key derivation procedure's computational cost;
                      it must be between
                      :py:const:`.MEMLIMIT_MIN` and
-                     :py:const:`.MEMLIMIT_MAX`
+                     :py:const:`.MEMLIMIT_SERVER_MAX`, be aligned to
+                     :py:const:`.MEMLIMIT_ALIGNMENT` bytes and is always
+                     validated before the key derivation starts
     :type memlimit: int
+    :raises nacl.exceptions.TypeError: if an argument has the wrong type
+    :raises nacl.exceptions.ValueError: if the salt length or a work
+        factor is outside the accepted range; the salt contents are
+        never part of the error message
     :rtype: bytes
 
     .. versionadded:: 1.2
     """
+
+    _params.check_salt(salt, SALTBYTES)
+
+    _params.check_pwhash_params(
+        opslimit,
+        memlimit,
+        OPSLIMIT_MIN,
+        OPSLIMIT_MAX,
+        MEMLIMIT_MIN,
+        MEMLIMIT_MAX,
+    )
 
     return encoder.encode(
         nacl.bindings.crypto_pwhash_alg(
@@ -121,12 +144,28 @@ def str(
     correct for the interactive user login case.
 
     :param bytes password:
-    :param int opslimit:
-    :param int memlimit:
+    :param int opslimit: must be between :py:const:`.OPSLIMIT_MIN`
+        and :py:const:`.OPSLIMIT_SERVER_MAX`
+    :param int memlimit: must be between :py:const:`.MEMLIMIT_MIN`
+        and :py:const:`.MEMLIMIT_SERVER_MAX` and aligned to
+        :py:const:`.MEMLIMIT_ALIGNMENT` bytes; the limits are checked
+        before hashing starts
     :rtype: bytes
+    :raises nacl.exceptions.TypeError: if a limit is not an integer
+    :raises nacl.exceptions.ValueError: if a limit is out of range or
+        not aligned
 
     .. versionadded:: 1.2
     """
+    _params.check_pwhash_params(
+        opslimit,
+        memlimit,
+        OPSLIMIT_MIN,
+        OPSLIMIT_MAX,
+        MEMLIMIT_MIN,
+        MEMLIMIT_MAX,
+    )
+
     return nacl.bindings.crypto_pwhash_str_alg(
         password, opslimit, memlimit, ALG
     )

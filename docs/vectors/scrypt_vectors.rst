@@ -23,9 +23,9 @@ in python version 3.6 stdlib.
     >>> nacl.pwhash.scrypt.kdf(32,
     ...                        b'The quick brown fox jumps over the lazy dog.',
     ...                        b"ef537f25c895bfa782526529a9b63d97",
-    ...                        opslimit=20000, memlimit=100 * (2 ** 20))
+    ...                        opslimit=32768, memlimit=100 * (2 ** 20))
     b'\x10e>\xc8A8\x11\xde\x07\xf1\x0f\x98EG\xe6}V]\xd4yN\xae\xd3P\x87yP\x1b\xc7+n*'
-    >>> n_log2, r, p = pick_scrypt_params(20000, 100 * (2 ** 20))
+    >>> n_log2, r, p = pick_scrypt_params(32768, 100 * (2 ** 20))
     >>> print(2 ** n_log2, r, p)
     1024 8 1
     >>> hashlib.scrypt(b'The quick brown fox jumps over the lazy dog.',

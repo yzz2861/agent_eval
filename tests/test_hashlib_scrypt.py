@@ -140,3 +140,46 @@ def test_hashlib_scrypt_api(
 def test_hashlib_scrypt_unavailable():
     with pytest.raises(UnavailableError):
         nacl.hashlib.scrypt(b"")
+
+
+@pytest.mark.skipif(
+    not nacl.hashlib.SCRYPT_AVAILABLE,
+    reason="Requires full build of libsodium",
+)
+def test_hashlib_scrypt_enforces_maxmem_without_salt_leak():
+    secret_salt = b"super-secret-scrypt-salt-marker-value"
+    with pytest.raises(ValueError) as excinfo:
+        nacl.hashlib.scrypt(
+            b"password",
+            salt=secret_salt,
+            n=1024,
+            r=8,
+            p=1,
+            maxmem=1024,
+            dklen=64,
+        )
+    message = str(excinfo.value)
+    assert b"secret" not in message.encode()
+    assert b"marker" not in message.encode()
+    assert b"password" not in message.encode()
+
+
+@pytest.mark.skipif(
+    not nacl.hashlib.SCRYPT_AVAILABLE,
+    reason="Requires full build of libsodium",
+)
+def test_hashlib_scrypt_rejects_bad_block_params_without_salt_leak():
+    secret_salt = b"super-secret-scrypt-salt-marker-value"
+    with pytest.raises(ValueError) as excinfo:
+        nacl.hashlib.scrypt(
+            b"password",
+            salt=secret_salt,
+            n=1023,
+            r=8,
+            p=1,
+            maxmem=2 * (1024**3),
+            dklen=64,
+        )
+    message = str(excinfo.value)
+    assert b"secret" not in message.encode()
+    assert b"marker" not in message.encode()

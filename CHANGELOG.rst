@@ -1,6 +1,19 @@
 Changelog
 =========
 
+Unreleased
+----------
+* The ``nacl.pwhash.scrypt``, ``nacl.pwhash.argon2i`` and
+  ``nacl.pwhash.argon2id`` modules now validate the caller supplied
+  ``opslimit`` and ``memlimit`` against server side upper bounds
+  (``OPSLIMIT_SERVER_MAX`` and ``MEMLIMIT_SERVER_MAX``) and require
+  ``memlimit`` to be aligned to ``MEMLIMIT_ALIGNMENT`` bytes; out of
+  range values raise ``nacl.exceptions.ValueError`` before any key
+  derivation starts.
+* Salts are only accepted as raw bytes objects of the fixed length
+  expected by the construction; salt contents are never included in
+  error messages.
+
 1.6.2 (2026-01-01)
 ------------------
 * Updated ``libsodium`` to 1.0.20-stable (2025-12-31 build) to resolve

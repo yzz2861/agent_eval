@@ -27,6 +27,7 @@ import nacl.bindings
 import nacl.encoding
 import nacl.exceptions as exc
 import nacl.pwhash
+import nacl.pwhash._params as _pwhash_params
 
 _all_unicode = "".join(chr(i) for i in range(sys.maxunicode))
 PASSWD_CHARS = "".join(
@@ -115,7 +116,7 @@ def argon2id_raw_ref() -> list[tuple[int, str, str, int, int, str]]:
             32,
             b"The quick brown fox jumps over the lazy dog.",
             b"ef537f25c895bfa782526529a9b63d97",
-            20000,
+            32768,
             (2**20) * 100,
             (
                 b"\x10e>\xc8A8\x11\xde\x07\xf1\x0f\x98"
@@ -186,7 +187,7 @@ def test_scryptsalsa208sha256_verify_incorrect(password: bytes):
             32,
             b"The quick brown fox jumps over the lazy dog.",
             b"ef537f25c895bfa782526529a9",
-            20000,
+            32768,
             (2**20) * 100,
         ),
     ],
@@ -227,7 +228,7 @@ def test_wrong_hash_length(passwd_hash: bytes, password: bytes):
             32,
             b"The quick brown fox jumps over the lazy dog.",
             b"ef537f25c895bfa782526529a9b6",
-            20000,
+            32768,
             (2**20) * 100,
         ),
     ],
@@ -268,7 +269,7 @@ def test_str_verify_wrong_hash_length(passwd_hash: bytes, password: bytes):
             32,
             b"The quick brown fox jumps over the lazy dog.",
             b"ef537f25c895bfa782526529a9b63d97",
-            20000,
+            32768,
             (2**20) * 100,
             (
                 b"\x10e>\xc8A8\x11\xde\x07\xf1\x0f\x98"
@@ -336,7 +337,7 @@ def test_scrypt_verify_incorrect(password: bytes):
             32,
             b"The quick brown fox jumps over the lazy dog.",
             b"ef537f25c895bfa782526529a9",
-            20000,
+            32768,
             (2**20) * 100,
         ),
     ],
@@ -375,7 +376,7 @@ def test_wrong_scrypt_hash_length(passwd_hash: bytes, password: bytes):
             32,
             b"The quick brown fox jumps over the lazy dog.",
             b"ef537f25c895bfa782526529a9b6",
-            20000,
+            32768,
             (2**20) * 100,
         ),
     ],
@@ -450,7 +451,9 @@ def test_str_verify_argon2_ref_fail(password_hash: str, password: str):
 @given(
     text(alphabet=PASSWD_CHARS, min_size=5, max_size=20),
     integers(min_value=4, max_value=6),
-    integers(min_value=1024 * 1024, max_value=16 * 1024 * 1024),
+    integers(min_value=1024 * 1024, max_value=16 * 1024 * 1024).map(
+        lambda value: value - (value % 1024)
+    ),
 )
 @settings(deadline=None, max_examples=20)
 def test_argon2i_str_and_verify(password: str, ops: int, mem: int):
@@ -463,7 +466,9 @@ def test_argon2i_str_and_verify(password: str, ops: int, mem: int):
 @given(
     text(alphabet=PASSWD_CHARS, min_size=5, max_size=20),
     integers(min_value=1, max_value=4),
-    integers(min_value=1024 * 1024, max_value=16 * 1024 * 1024),
+    integers(min_value=1024 * 1024, max_value=16 * 1024 * 1024).map(
+        lambda value: value - (value % 1024)
+    ),
 )
 @settings(deadline=None, max_examples=20)
 def test_argon2id_str_and_verify(password: str, ops: int, mem: int):
@@ -476,7 +481,9 @@ def test_argon2id_str_and_verify(password: str, ops: int, mem: int):
 @given(
     text(alphabet=PASSWD_CHARS, min_size=5, max_size=20),
     integers(min_value=4, max_value=6),
-    integers(min_value=1024 * 1024, max_value=16 * 1024 * 1024),
+    integers(min_value=1024 * 1024, max_value=16 * 1024 * 1024).map(
+        lambda value: value - (value % 1024)
+    ),
 )
 @settings(deadline=None, max_examples=20)
 def test_argon2i_str_and_verify_fail(password: str, ops: int, mem: int):
@@ -676,3 +683,398 @@ def test_scrypt_unavailable():
         nacl.pwhash.scrypt.str(empty)
     with pytest.raises(exc.UnavailableError):
         nacl.pwhash.scrypt.verify(empty, empty)
+
+
+# ---------------------------------------------------------------------------
+# Server side validation of the work factor parameters and of the salt
+# ---------------------------------------------------------------------------
+
+
+LIMIT_CASES = [
+    # opslimit below the scrypt/argon2 minimums
+    ("opslimit_too_low", "ops", 32767, 16 * 1024 * 1024),
+    # opslimit above the service cap
+    (
+        "opslimit_too_high",
+        "ops",
+        _pwhash_params.SERVER_OPSLIMIT_MAX + 1,
+        16 * 1024 * 1024,
+    ),
+    # memlimit below the scrypt/argon2 minimums
+    ("memlimit_too_low", "mem", 33554432, 1024),
+    # memlimit above the service cap
+    (
+        "memlimit_too_high",
+        "mem",
+        33554432,
+        _pwhash_params.SERVER_MEMLIMIT_MAX + 1024,
+    ),
+    # memlimit not aligned to MEMLIMIT_ALIGNMENT
+    ("memlimit_misaligned", "mem", 33554432, 16 * 1024 * 1024 + 1),
+]
+
+
+@pytest.mark.skipif(
+    not nacl.pwhash.scrypt.AVAILABLE, reason="Requires full build of libsodium"
+)
+@pytest.mark.parametrize(("case", "kind", "opslimit", "memlimit"), LIMIT_CASES)
+def test_scrypt_kdf_rejects_out_of_limits(
+    monkeypatch, case, kind, opslimit, memlimit
+):
+    salt = b"a" * nacl.pwhash.scrypt.SALTBYTES
+
+    def boom(*args, **kwargs):
+        raise AssertionError("key derivation must not start for " + case)
+
+    monkeypatch.setattr(
+        nacl.bindings, "nacl_bindings_pick_scrypt_params", boom
+    )
+    with pytest.raises(exc.ValueError):
+        nacl.pwhash.scrypt.kdf(32, b"password", salt, opslimit, memlimit)
+
+
+@pytest.mark.skipif(
+    not nacl.pwhash.scrypt.AVAILABLE, reason="Requires full build of libsodium"
+)
+@pytest.mark.parametrize(("case", "kind", "opslimit", "memlimit"), LIMIT_CASES)
+def test_scrypt_str_rejects_out_of_limits(
+    monkeypatch, case, kind, opslimit, memlimit
+):
+    def boom(*args, **kwargs):
+        raise AssertionError("hashing must not start for " + case)
+
+    monkeypatch.setattr(
+        nacl.bindings, "crypto_pwhash_scryptsalsa208sha256_str", boom
+    )
+    with pytest.raises(exc.ValueError):
+        nacl.pwhash.scrypt.str(b"password", opslimit, memlimit)
+
+
+ARGON2_LIMIT_CASES = [
+    # opslimit below the per algorithm OPSLIMIT_MIN
+    ("opslimit_too_low", "ops", 0, 16 * 1024 * 1024),
+    # opslimit above the service cap
+    (
+        "opslimit_too_high",
+        "ops",
+        _pwhash_params.SERVER_OPSLIMIT_MAX + 1,
+        16 * 1024 * 1024,
+    ),
+    # memlimit below MEMLIMIT_MIN
+    ("memlimit_too_low", "mem", 4, 1024),
+    # memlimit above the service cap
+    (
+        "memlimit_too_high",
+        "mem",
+        4,
+        _pwhash_params.SERVER_MEMLIMIT_MAX + 1024,
+    ),
+    # memlimit not aligned to MEMLIMIT_ALIGNMENT
+    ("memlimit_misaligned", "mem", 4, 16 * 1024 * 1024 + 1),
+]
+
+
+@pytest.mark.parametrize("module", (nacl.pwhash.argon2i, nacl.pwhash.argon2id))
+@pytest.mark.parametrize(
+    ("case", "kind", "opslimit", "memlimit"), ARGON2_LIMIT_CASES
+)
+def test_argon2_kdf_rejects_out_of_limits(
+    monkeypatch, module, case, kind, opslimit, memlimit
+):
+    salt = b"a" * module.SALTBYTES
+
+    def boom(*args, **kwargs):
+        raise AssertionError("key derivation must not start for " + case)
+
+    monkeypatch.setattr(nacl.bindings, "crypto_pwhash_alg", boom)
+    with pytest.raises(exc.ValueError):
+        module.kdf(32, b"password", salt, opslimit, memlimit)
+
+
+@pytest.mark.parametrize("module", (nacl.pwhash.argon2i, nacl.pwhash.argon2id))
+@pytest.mark.parametrize(
+    ("case", "kind", "opslimit", "memlimit"), ARGON2_LIMIT_CASES
+)
+def test_argon2_str_rejects_out_of_limits(
+    monkeypatch, module, case, kind, opslimit, memlimit
+):
+    def boom(*args, **kwargs):
+        raise AssertionError("hashing must not start for " + case)
+
+    monkeypatch.setattr(nacl.bindings, "crypto_pwhash_str_alg", boom)
+    with pytest.raises(exc.ValueError):
+        module.str(b"password", opslimit, memlimit)
+
+
+@pytest.mark.parametrize("module", (nacl.pwhash.argon2i, nacl.pwhash.argon2id))
+def test_argon2_boundary_limits_are_accepted(monkeypatch, module):
+    salt = b"z" * module.SALTBYTES
+    accepted = object()
+    monkeypatch.setattr(nacl.bindings, "crypto_pwhash_alg", lambda *a: accepted)
+    monkeypatch.setattr(
+        nacl.bindings, "crypto_pwhash_str_alg", lambda *a: accepted
+    )
+
+    assert module.kdf(
+        32,
+        b"password",
+        salt,
+        module.OPSLIMIT_MIN,
+        module.MEMLIMIT_MIN,
+    ) is accepted
+    assert module.kdf(
+        32,
+        b"password",
+        salt,
+        module.OPSLIMIT_SERVER_MAX,
+        module.MEMLIMIT_SERVER_MAX,
+    ) is accepted
+    assert module.str(
+        b"password",
+        module.OPSLIMIT_SERVER_MAX,
+        module.MEMLIMIT_SERVER_MAX,
+    ) is accepted
+
+
+@pytest.mark.skipif(
+    not nacl.pwhash.scrypt.AVAILABLE, reason="Requires full build of libsodium"
+)
+def test_scrypt_boundary_limits_are_accepted(monkeypatch):
+    module = nacl.pwhash.scrypt
+    salt = b"z" * module.SALTBYTES
+    accepted = object()
+
+    monkeypatch.setattr(
+        nacl.bindings, "nacl_bindings_pick_scrypt_params", lambda *a: (4, 8, 1)
+    )
+    monkeypatch.setattr(
+        nacl.bindings,
+        "crypto_pwhash_scryptsalsa208sha256_ll",
+        lambda *a, **k: accepted,
+    )
+    monkeypatch.setattr(
+        nacl.bindings, "crypto_pwhash_scryptsalsa208sha256_str", lambda *a: accepted
+    )
+
+    assert module.kdf(
+        32,
+        b"password",
+        salt,
+        module.OPSLIMIT_MIN,
+        module.MEMLIMIT_MIN,
+    ) is accepted
+    assert module.kdf(
+        32,
+        b"password",
+        salt,
+        module.OPSLIMIT_SERVER_MAX,
+        module.MEMLIMIT_SERVER_MAX,
+    ) is accepted
+    assert module.str(
+        b"password",
+        module.OPSLIMIT_SERVER_MAX,
+        module.MEMLIMIT_SERVER_MAX,
+    ) is accepted
+
+
+@pytest.mark.parametrize("module", (nacl.pwhash.argon2i, nacl.pwhash.argon2id))
+def test_argon2_kdf_rejects_bad_salt(module):
+    secret_salt = b"\x00\x01\x02super-secret-salt-marker\x99"
+
+    with pytest.raises(exc.ValueError) as excinfo:
+        module.kdf(32, b"password", secret_salt[:-1], 4, 16 * 1024 * 1024)
+    message = str(excinfo.value)
+    assert str(module.SALTBYTES) in message
+    assert b"secret" not in message.encode()
+    assert b"marker" not in message.encode()
+
+    with pytest.raises(exc.TypeError):
+        module.kdf(
+            32,
+            b"password",
+            "not-raw-bytes",  # type: ignore[arg-type]
+            4,
+            16 * 1024 * 1024,
+        )
+
+
+@pytest.mark.skipif(
+    not nacl.pwhash.scrypt.AVAILABLE, reason="Requires full build of libsodium"
+)
+def test_scrypt_kdf_rejects_bad_salt():
+    module = nacl.pwhash.scrypt
+    secret_salt = b"\x00\x01\x02super-secret-scrypt-salt-marker" + b"\x99" * 8
+
+    with pytest.raises(exc.ValueError) as excinfo:
+        module.kdf(
+            32,
+            b"password",
+            secret_salt[:-1],
+            module.OPSLIMIT_INTERACTIVE,
+            module.MEMLIMIT_INTERACTIVE,
+        )
+    message = str(excinfo.value)
+    assert str(module.SALTBYTES) in message
+    assert b"secret" not in message.encode()
+    assert b"marker" not in message.encode()
+
+    with pytest.raises(exc.TypeError):
+        module.kdf(
+            32,
+            b"password",
+            "not-raw-bytes",  # type: ignore[arg-type]
+            module.OPSLIMIT_INTERACTIVE,
+            module.MEMLIMIT_INTERACTIVE,
+        )
+
+
+@pytest.mark.parametrize("module", (nacl.pwhash.argon2i, nacl.pwhash.argon2id))
+def test_argon2_bad_salt_fails_before_computation(monkeypatch, module):
+    def boom(*args, **kwargs):
+        raise AssertionError("key derivation must not start for a bad salt")
+
+    monkeypatch.setattr(nacl.bindings, "crypto_pwhash_alg", boom)
+    with pytest.raises((exc.ValueError, exc.TypeError)):
+        module.kdf(32, b"password", b"short", 4, 16 * 1024 * 1024)
+
+
+@pytest.mark.skipif(
+    not nacl.pwhash.scrypt.AVAILABLE, reason="Requires full build of libsodium"
+)
+def test_scrypt_bad_salt_fails_before_computation(monkeypatch):
+    def boom(*args, **kwargs):
+        raise AssertionError("key derivation must not start for a bad salt")
+
+    monkeypatch.setattr(
+        nacl.bindings, "nacl_bindings_pick_scrypt_params", boom
+    )
+    with pytest.raises((exc.ValueError, exc.TypeError)):
+        nacl.pwhash.scrypt.kdf(32, b"password", b"short")
+
+
+@pytest.mark.parametrize("module", (nacl.pwhash.argon2i, nacl.pwhash.argon2id))
+def test_argon2_kdf_rejects_non_integer_limits(module):
+    salt = b"a" * module.SALTBYTES
+    with pytest.raises(exc.TypeError):
+        module.kdf(
+            32, b"password", salt, 4.0, 16 * 1024 * 1024  # type: ignore[arg-type]
+        )
+    with pytest.raises(exc.TypeError):
+        module.kdf(
+            32, b"password", salt, 4, 16 * 1024 * 1024.0  # type: ignore[arg-type]
+        )
+    with pytest.raises(exc.TypeError):
+        module.str(b"password", True, 16 * 1024 * 1024)
+
+
+@pytest.mark.skipif(
+    not nacl.pwhash.scrypt.AVAILABLE, reason="Requires full build of libsodium"
+)
+def test_scrypt_kdf_rejects_non_integer_limits():
+    module = nacl.pwhash.scrypt
+    salt = b"a" * module.SALTBYTES
+    with pytest.raises(exc.TypeError):
+        module.kdf(
+            32,
+            b"password",
+            salt,
+            32768.0,  # type: ignore[arg-type]
+            module.MEMLIMIT_INTERACTIVE,
+        )
+    with pytest.raises(exc.TypeError):
+        module.kdf(
+            32,
+            b"password",
+            salt,
+            module.OPSLIMIT_INTERACTIVE,
+            16.0 * 1024 * 1024,  # type: ignore[arg-type]
+        )
+
+
+def test_limit_error_messages_are_diagnostic():
+    salt = b"a" * nacl.pwhash.argon2id.SALTBYTES
+    module = nacl.pwhash.argon2id
+    bad_mem = _pwhash_params.SERVER_MEMLIMIT_MAX + 1024
+    with pytest.raises(exc.ValueError) as excinfo:
+        module.kdf(32, b"password", salt, 4, bad_mem)
+    message = str(excinfo.value)
+    assert "memlimit" in message
+    assert str(_pwhash_params.SERVER_MEMLIMIT_MAX) in message
+    assert str(bad_mem) in message
+
+    bad_ops = _pwhash_params.SERVER_OPSLIMIT_MAX + 1
+    with pytest.raises(exc.ValueError) as excinfo:
+        module.str(b"password", bad_ops, module.MEMLIMIT_INTERACTIVE)
+    message = str(excinfo.value)
+    assert "opslimit" in message
+    assert str(_pwhash_params.SERVER_OPSLIMIT_MAX) in message
+    assert str(bad_ops) in message
+
+
+# ---------------------------------------------------------------------------
+# Legitimate hashing/verification keeps working through the public API
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("module", (nacl.pwhash.argon2i, nacl.pwhash.argon2id))
+def test_argon2_str_verify_consistency(module):
+    password = b"the quick brown fox"
+    password_hash = module.str(
+        password,
+        opslimit=module.OPSLIMIT_INTERACTIVE,
+        memlimit=module.MEMLIMIT_INTERACTIVE,
+    )
+    assert module.verify(password_hash, password) is True
+    assert nacl.pwhash.verify(password_hash, password) is True
+    with pytest.raises(exc.InvalidkeyError):
+        module.verify(password_hash, b"wrong password")
+
+
+@pytest.mark.skipif(
+    not nacl.pwhash.scrypt.AVAILABLE, reason="Requires full build of libsodium"
+)
+def test_scrypt_str_verify_consistency():
+    module = nacl.pwhash.scrypt
+    password = b"the quick brown fox"
+    password_hash = module.str(
+        password,
+        opslimit=module.OPSLIMIT_INTERACTIVE,
+        memlimit=module.MEMLIMIT_INTERACTIVE,
+    )
+    assert module.verify(password_hash, password) is True
+    assert nacl.pwhash.verify_scryptsalsa208sha256(password_hash, password) is True
+    assert nacl.pwhash.verify(password_hash, password) is True
+    with pytest.raises(exc.InvalidkeyError):
+        module.verify(password_hash, b"wrong password")
+
+
+@pytest.mark.skipif(
+    not nacl.pwhash.scrypt.AVAILABLE, reason="Requires full build of libsodium"
+)
+def test_scrypt_kdf_results_are_stable():
+    module = nacl.pwhash.scrypt
+    salt = b"0123456789abcdef0123456789abcdef"
+    args = (
+        32,
+        b"the quick brown fox",
+        salt,
+        module.OPSLIMIT_INTERACTIVE,
+        module.MEMLIMIT_INTERACTIVE,
+    )
+    first = module.kdf(*args)
+    second = nacl.pwhash.kdf_scryptsalsa208sha256(*args)
+    assert first == second
+    assert len(first) == 32
+
+
+@pytest.mark.parametrize("module", (nacl.pwhash.argon2i, nacl.pwhash.argon2id))
+def test_argon2_kdf_results_are_stable(module):
+    salt = b"0123456789abcdef"
+    args = (
+        32,
+        b"the quick brown fox",
+        salt,
+        module.OPSLIMIT_INTERACTIVE,
+        module.MEMLIMIT_INTERACTIVE,
+    )
+    assert module.kdf(*args) == module.kdf(*args)

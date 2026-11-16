@@ -101,6 +101,32 @@ and the recommended values for the opslimit and memlimit parameters
     values leading to a hashing time and memory cost intermediate between the
     interactive and the sensitive cases
 
+Server side validation of the work factors
+-------------------------------------------
+
+Every password hashing module intersects the limits documented by
+libsodium with service wide caps and rejects invalid requests before
+any memory is allocated or key derivation starts. ``opslimit`` must be
+an integer between the module ``OPSLIMIT_MIN`` and
+``OPSLIMIT_SERVER_MAX``; ``memlimit`` must be an integer between the
+module ``MEMLIMIT_MIN`` and ``MEMLIMIT_SERVER_MAX`` and a whole
+multiple of ``MEMLIMIT_ALIGNMENT``. Invalid values raise
+:py:class:`nacl.exceptions.ValueError`, while non integer values raise
+:py:class:`nacl.exceptions.TypeError`.
+
+Salts are only handled as fixed length raw bytes: a salt of the wrong
+length raises :py:class:`nacl.exceptions.ValueError`, a non bytes salt
+raises :py:class:`nacl.exceptions.TypeError`, and the salt contents are
+never echoed in error messages.
+
+.. py:data:: OPSLIMIT_SERVER_MAX
+.. py:data:: MEMLIMIT_SERVER_MAX
+.. py:data:: MEMLIMIT_ALIGNMENT
+
+    service wide maximum operation count, maximum memory occupation in
+    bytes and required ``memlimit`` alignment, shared by the scrypt,
+    argon2i and argon2id modules.
+
 Per-mechanism password hashing implementation modules
 -----------------------------------------------------
 
