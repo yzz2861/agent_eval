@@ -26,3 +26,9 @@ class InvalidKeyError(DecryptionError):
     """Raised when the given password or key is incorrect or cannot be verified."""
 
     pass
+
+
+class UnsupportedAlgorithmError(DecryptionError):
+    """Raised when the file uses an unsupported cryptographic algorithm."""
+
+    pass

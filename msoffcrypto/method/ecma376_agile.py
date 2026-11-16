@@ -60,7 +60,12 @@ def _normalize_key(key, n):
 
 
 def _get_hash_func(algorithm):
-    return ALGORITHM_HASH.get(algorithm, sha1)
+    try:
+        return ALGORITHM_HASH[algorithm]
+    except KeyError:
+        raise exceptions.UnsupportedAlgorithmError(
+            f"Unsupported hash algorithm: {algorithm}"
+        ) from None
 
 
 def _decrypt_aes_cbc(data, key, iv):
@@ -484,23 +489,40 @@ class ECMA376Agile:
         # NOTE: See https://docs.microsoft.com/en-us/openspecs/office_file_formats/ms-offcrypto/63d9c262-82b9-4fa3-a06d-d087b93e3b00
 
         hashCalc = _get_hash_func(keyDataHashAlgorithm)
+        hashSize = hashCalc().digest_size
+        encryptedHashSize = _round_up(hashSize, keyDataBlockSize)
+
+        # NOTE: Both dataIntegrity values must be exactly one hash digest padded to
+        # the cipher block size. Reject truncated or overlong values instead of
+        # truncating them and continuing with a partial comparison.
+        if (
+            len(encryptedHmacKey) != encryptedHashSize
+            or len(encryptedHmacValue) != encryptedHashSize
+        ):
+            return False
 
         iv1 = hashCalc(keyDataSalt + blkKey_dataIntegrity1).digest()
         iv1 = iv1[:keyDataBlockSize]
         iv2 = hashCalc(keyDataSalt + blkKey_dataIntegrity2).digest()
         iv2 = iv2[:keyDataBlockSize]
 
-        # NOTE: The decrypted HMAC key and value are padded to the block size and must
-        # be truncated to the hash size (e.g. 20 bytes for SHA1)
-        hashSize = hashCalc().digest_size
+        # NOTE: The decrypted HMAC key is padded to the block size and must be
+        # truncated to the hash size (e.g. 20 bytes for SHA1)
         hmacKey = _decrypt_aes_cbc(encryptedHmacKey, secretKey, iv1)[:hashSize]
-        hmacValue = _decrypt_aes_cbc(encryptedHmacValue, secretKey, iv2)[:hashSize]
 
         msg_hmac = hmac.new(hmacKey, stream.read(), hashCalc)
         actualHmac = msg_hmac.digest()
         stream.seek(0)
 
-        return hmac.compare_digest(hmacValue, actualHmac)
+        # NOTE: Re-encrypt the derived HMAC and compare it with the stored
+        # encryptedHmacValue. This verifies both the length and the content of
+        # the integrity value without silently ignoring extra ciphertext blocks.
+        expectedHmacValue = _encrypt_aes_cbc_padded(
+            actualHmac, secretKey, iv2, keyDataBlockSize
+        )
+        if len(encryptedHmacValue) != len(expectedHmacValue):
+            return False
+        return hmac.compare_digest(encryptedHmacValue, expectedHmacValue)
 
     @staticmethod
     def makekey_from_privkey(privkey, encryptedKeyValue):
