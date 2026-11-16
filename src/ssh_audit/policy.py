@@ -25,14 +25,18 @@ import copy
 import json
 import sys
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Sequence, Tuple
 from typing import Optional, Any, Union, cast
 from datetime import date
 
 from ssh_audit import exitcodes
+from ssh_audit.algorithm import Algorithm
 from ssh_audit.banner import Banner
 from ssh_audit.builtin_policies import BUILTIN_POLICIES
 from ssh_audit.globals import SNAP_PACKAGE, SNAP_PERMISSIONS_ERROR
+from ssh_audit.policy_rules import PolicyRule, PolicyValidationError, compose_rule_sets, parse_algorithm_rules, validate_rules
+from ssh_audit.policy_rules import TIER_BUILTIN, TIER_CLI, TIER_CUSTOM
+from ssh_audit.software import Software
 from ssh_audit.ssh2_kex import SSH2_Kex
 
 
@@ -57,10 +61,17 @@ class Policy:
         self._allow_algorithm_subset_and_reordering = False
         self._allow_hostkey_subset_and_reordering = False
         self._allow_larger_keys = False
+        self._algorithm_rules: List[PolicyRule] = []  # Explicit algorithm rules (fail/warn/info) with provenance.
+        self._allow_relaxation = False  # When True, this policy may weaken rules inherited from lower-precedence policies during composition.
+        self._is_builtin = False  # True when loaded from BUILTIN_POLICIES.
         self._errors: List[Any] = []
         self._updated_builtin_policy_available = False  # If True, an outdated built-in policy was loaded.
+        self._rule_results: List[Dict[str, Any]] = []  # Results of algorithm rule evaluation (ComposedPolicy only).
 
         self._name_and_version: str = ''
+
+        # Holds raw (severity, value) pairs for the algorithm rule directives until the policy name is known.
+        pending_algorithm_rules: List[Tuple[str, str]] = []
 
         # If invoked while JSON output is expected, send warnings to stderr instead of stdout (which would corrupt the JSON output).
         if json_output:
@@ -110,14 +121,14 @@ class Policy:
             key = None
             val = None
             try:
-                key, val = line.split('=')
+                key, val = line.split('=', 1)
             except ValueError as ve:
                 raise ValueError("could not parse line: %s" % line) from ve
 
             key = key.strip()
             val = val.strip()
 
-            if key not in ['name', 'version', 'banner', 'compressions', 'host keys', 'optional host keys', 'key exchanges', 'ciphers', 'macs', 'client policy', 'host_key_sizes', 'dh_modulus_sizes', 'allow_algorithm_subset_and_reordering', 'allow_hostkey_subset_and_reordering', 'allow_larger_keys'] and not key.startswith('hostkey_size_') and not key.startswith('cakey_size_') and not key.startswith('dh_modulus_size_'):
+            if key not in ['name', 'version', 'banner', 'compressions', 'host keys', 'optional host keys', 'key exchanges', 'ciphers', 'macs', 'client policy', 'host_key_sizes', 'dh_modulus_sizes', 'allow_algorithm_subset_and_reordering', 'allow_hostkey_subset_and_reordering', 'allow_larger_keys', 'fail algorithms', 'warn algorithms', 'info algorithms', 'allow_relaxation'] and not key.startswith('hostkey_size_') and not key.startswith('cakey_size_') and not key.startswith('dh_modulus_size_'):
                 raise ValueError("invalid field found in policy: %s" % line)
 
             if key in ['name', 'banner']:
@@ -217,6 +228,10 @@ class Policy:
                 self._allow_hostkey_subset_and_reordering = True
             elif key == 'allow_larger_keys' and val.lower() == 'true':
                 self._allow_larger_keys = True
+            elif key in ['fail algorithms', 'warn algorithms', 'info algorithms']:
+                pending_algorithm_rules.append((key.split(' ')[0], val))
+            elif key == 'allow_relaxation' and val.lower() == 'true':
+                self._allow_relaxation = True
 
         if self._name is None:
             raise ValueError('The policy does not have a name field.')
@@ -224,6 +239,12 @@ class Policy:
             raise ValueError('The policy does not have a version field.')
 
         self._name_and_version = "%s (version %s)" % (self._name, self._version)
+
+        # Parse & validate the explicit algorithm rules now that the policy name is known.  Any problem (unknown algorithm, duplicate rule, contradictory fail/warn rules, illegal severity) is reported here, before any scanning occurs.
+        default_scope = 'server' if self._server_policy else 'client'
+        for severity, rules_value in pending_algorithm_rules:
+            self._algorithm_rules.extend(parse_algorithm_rules(rules_value, severity, self._name_and_version, TIER_CUSTOM, default_scope))
+        validate_rules(self._algorithm_rules, self._name_and_version)
 
 
     def _append_error(self, mismatched_field: str, expected_required: Optional[List[str]], expected_optional: Optional[List[str]], actual: List[str]) -> None:
@@ -467,8 +488,70 @@ macs = %s
                         ret = False
                         self._append_error('Group exchange (%s) modulus sizes' % dh_modulus_type, [str(expected_dh_modulus_size)], None, [str(actual_dh_modulus_size)])
 
+        # Evaluate the explicit algorithm rules (fail/warn/info).  Fail-severity hits turn the overall result into a failure.
+        rule_violation_strs = self._evaluate_algorithm_rules(banner, kex)
+        if len(rule_violation_strs) > 0:
+            ret = False
+
         error_list, error_str = self._get_errors()
+        if len(rule_violation_strs) > 0:
+            error_str = "\n".join([error_str] + rule_violation_strs) if len(error_str) > 0 else "\n".join(rule_violation_strs)
         return ret, error_list, error_str
+
+
+    def _get_active_algorithm_rules(self) -> List['PolicyRule']:
+        '''Returns the algorithm rules evaluated by this policy.  ComposedPolicy overrides this to return the merged rule set.'''
+        return self._algorithm_rules
+
+
+    def _evaluate_algorithm_rules(self, banner: Optional['Banner'], kex: Optional['SSH2_Kex']) -> List[str]:
+        '''Evaluates the active algorithm rules against the target.  Returns a sorted list of fail-severity violation strings (with provenance); all hits are recorded in self._rule_results.'''
+
+        self._rule_results = []
+        if kex is None:
+            return []
+
+        rules = self._get_active_algorithm_rules()
+        if len(rules) == 0:
+            return []
+
+        software = Software.parse(banner) if isinstance(banner, Banner) else None
+        server_lists: Dict[str, List[str]] = {
+            'kex': kex.kex_algorithms,
+            'key': kex.key_algorithms,
+            'enc': kex.server.encryption,
+            'mac': kex.server.mac,
+        }
+
+        for rule in rules:
+            # Rules only apply to the scope (client/server) they were written for.
+            if (rule.scope == 'server') != self._server_policy:
+                continue
+
+            # Rules with a version constraint only apply when the target software matches it.
+            if rule.version_constraint is not None and not rule.version_constraint.matches(software):
+                continue
+
+            for actual_alg in server_lists.get(rule.alg_type or '', []):
+                if Algorithm.canonical_id(actual_alg) != rule.algorithm:
+                    continue
+                self._rule_results.append({
+                    'algorithm': actual_alg,
+                    'type': rule.alg_type,
+                    'severity': rule.severity,
+                    'rule': rule.spec,
+                    'source': rule.source,
+                    'contributors': list(rule.contributors),
+                    'scope': rule.scope,
+                })
+
+        violation_strs = []
+        for rule_result in self._rule_results:
+            if rule_result['severity'] != 'fail':
+                continue
+            violation_strs.append("  * Algorithm '%s' (%s) is denied by rule '%s' (severity: fail, source: %s)." % (rule_result['algorithm'], rule_result['type'], rule_result['rule'], rule_result['source']))
+        violation_strs.sort()
+        return violation_strs
 
 
     def _get_errors(self) -> Tuple[List[Any], str]:
@@ -519,6 +602,42 @@ macs = %s
     def is_server_policy(self) -> bool:
         '''Returns True if this is a server policy, or False if this is a client policy.'''
         return self._server_policy
+
+
+    def is_builtin(self) -> bool:
+        '''Returns True if this policy was loaded from the built-in policy database.'''
+        return self._is_builtin
+
+
+    def allows_relaxation(self) -> bool:
+        '''Returns True if this policy explicitly declares that it may weaken inherited rules when composed with other policies.'''
+        return self._allow_relaxation
+
+
+    def get_algorithm_rules(self) -> List[PolicyRule]:
+        '''Returns this policy's explicit algorithm rules.'''
+        return self._algorithm_rules
+
+
+    def get_rule_results(self) -> List[Dict[str, Any]]:
+        '''Returns the results of algorithm rule evaluation (only populated for composed policies).'''
+        return self._rule_results
+
+
+    def get_policy_chain(self) -> List[str]:
+        '''Returns the names of the policies (and command line overrides) that were composed into this policy, in precedence order.'''
+        return [self._name_and_version]
+
+
+    @staticmethod
+    def compose(policies: Sequence['Policy'], cli_rule_specs: Optional[Sequence[str]] = None, json_output: bool = False) -> 'Policy':
+        '''Composes multiple policies (and optional command line rules) into one policy with explicit, deterministic rule merging.  When a single policy is given without command line rules, it is returned unchanged.'''
+        cli_rule_specs = cli_rule_specs or []
+        if len(policies) == 0:
+            raise PolicyValidationError('no policies were provided for composition.')
+        if len(policies) == 1 and len(cli_rule_specs) == 0:
+            return policies[0]
+        return ComposedPolicy(policies, cli_rule_specs, json_output=json_output)
 
 
     @staticmethod
@@ -579,6 +698,7 @@ macs = %s
         if policy_name in BUILTIN_POLICIES:
             policy_struct = BUILTIN_POLICIES[policy_name]
             p = Policy(manual_load=True, json_output=json_output)
+            p._is_builtin = True  # pylint: disable=protected-access
             policy_name_without_version = policy_name[0:policy_name.rfind(' (')]
             p._name = policy_name_without_version  # pylint: disable=protected-access
             p._version = cast(str, policy_struct['version'])  # pylint: disable=protected-access
@@ -688,3 +808,82 @@ macs = %s
 
         del state['_warning_target_type']
         self.__dict__.update(state)
+
+
+# A policy composed of an ordered chain of policies (built-in and/or custom)
+# plus optional command line rule overrides.  The first policy in the chain
+# (the base policy) provides the traditional exact-match evaluation; every
+# policy in the chain contributes explicit algorithm rules, which are merged
+# deterministically (see policy_rules.compose_rule_sets) and evaluated with
+# full provenance.
+class ComposedPolicy(Policy):
+
+    def __init__(self, policies: Sequence[Policy], cli_rule_specs: Sequence[str], json_output: bool = False) -> None:
+        super().__init__(manual_load=True, json_output=json_output)
+
+        if len(policies) == 0:
+            raise PolicyValidationError('no policies were provided for composition.')
+
+        base = policies[0]
+
+        # All policies in the chain must share the same scope (client vs server).
+        for policy in policies:
+            if policy.is_server_policy() != base.is_server_policy():
+                raise PolicyValidationError("cannot compose %s policy '%s' with %s policy '%s': scopes differ." % ('server' if base.is_server_policy() else 'client', base.get_name_and_version(), 'server' if policy.is_server_policy() else 'client', policy.get_name_and_version()))
+
+        # The base policy provides the traditional exact-match evaluation fields.
+        self._name = base._name  # pylint: disable=protected-access
+        self._version = base._version  # pylint: disable=protected-access
+        self._banner = base._banner  # pylint: disable=protected-access
+        self._compressions = base._compressions  # pylint: disable=protected-access
+        self._host_keys = base._host_keys  # pylint: disable=protected-access
+        self._optional_host_keys = base._optional_host_keys  # pylint: disable=protected-access
+        self._kex = base._kex  # pylint: disable=protected-access
+        self._ciphers = base._ciphers  # pylint: disable=protected-access
+        self._macs = base._macs  # pylint: disable=protected-access
+        self._hostkey_sizes = base._hostkey_sizes  # pylint: disable=protected-access
+        self._dh_modulus_sizes = base._dh_modulus_sizes  # pylint: disable=protected-access
+        self._server_policy = base._server_policy  # pylint: disable=protected-access
+        self._allow_algorithm_subset_and_reordering = base._allow_algorithm_subset_and_reordering  # pylint: disable=protected-access
+        self._allow_hostkey_subset_and_reordering = base._allow_hostkey_subset_and_reordering  # pylint: disable=protected-access
+        self._allow_larger_keys = base._allow_larger_keys  # pylint: disable=protected-access
+        self._updated_builtin_policy_available = base._updated_builtin_policy_available  # pylint: disable=protected-access
+
+        self._policies = list(policies)
+        self._policy_chain: List[str] = [p.get_name_and_version() for p in policies]
+
+        # Gather the rule sets from every policy in the chain, in precedence order.
+        rule_sources: List[Tuple[int, str, List[PolicyRule], bool]] = []
+        for policy in self._policies:
+            tier = TIER_BUILTIN if policy.is_builtin() else TIER_CUSTOM
+            rule_sources.append((tier, policy.get_name_and_version(), policy.get_algorithm_rules(), policy.allows_relaxation()))
+
+        # Command line rules form the highest (and always explicit) tier.
+        cli_rules: List[PolicyRule] = []
+        if len(cli_rule_specs) > 0:
+            default_scope = 'server' if self._server_policy else 'client'
+            for spec in cli_rule_specs:
+                cli_rules.extend(parse_algorithm_rules(spec, None, 'command line', TIER_CLI, default_scope))
+            validate_rules(cli_rules, 'command line')
+            rule_sources.append((TIER_CLI, 'command line', cli_rules, True))
+            self._policy_chain.append('command line')
+
+        self._merged_rules = compose_rule_sets(rule_sources)
+
+        chain_str = ' + '.join(self._policy_chain)
+        self._name_and_version = chain_str
+
+
+    def get_policy_chain(self) -> List[str]:
+        '''Returns the names of the composed policies (and command line overrides) in precedence order.'''
+        return list(self._policy_chain)
+
+
+    def get_merged_rules(self) -> List[PolicyRule]:
+        '''Returns the final composed algorithm rules.'''
+        return list(self._merged_rules.values())
+
+
+    def _get_active_algorithm_rules(self) -> List[PolicyRule]:
+        '''Returns the merged rule set composed from all policies and command line overrides.'''
+        return list(self._merged_rules.values())

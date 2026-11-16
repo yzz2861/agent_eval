@@ -47,6 +47,8 @@ class AuditConf:
         self.ipv6 = False
         self.make_policy = False  # When True, creates a policy file from an audit scan.
         self.policy_file: Optional[str] = None   # File system path to a policy
+        self.policy_files: List[str] = []  # File system paths and/or built-in policy names, composed in the order given.
+        self.policy_rules: List[str] = []  # Command line rule overrides (i.e.: "fail:kex:diffie-hellman-group1-sha1").
         self.policy: Optional[Policy] = None  # Policy object
         self.timeout = 5.0
         self.timeout_set = False  # Set to True when the user explicitly sets it.
@@ -96,7 +98,7 @@ class AuditConf:
             if value == -1.0:
                 raise ValueError('invalid timeout: {}'.format(value))
             valid = True
-        elif name in ['ip_version_preference', 'lookup', 'policy_file', 'policy', 'target_file', 'target_list', 'gex_test']:
+        elif name in ['ip_version_preference', 'lookup', 'policy_file', 'policy_files', 'policy_rules', 'policy', 'target_file', 'target_list', 'gex_test']:
             valid = True
         elif name == "threads":
             valid, num_threads = True, Utils.parse_int(value)

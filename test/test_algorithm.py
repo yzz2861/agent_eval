@@ -24,6 +24,26 @@ class TestAlgorithm:
         assert ver('l10.7.4') == ('libssh', '0.7.4', False)
         assert ver('')[1] == ''
 
+    def test_canonical_id(self):
+        '''Algorithm aliases resolve to one canonical id; unknown names are unchanged.'''
+
+        def cid(v):
+            return self.algorithm.canonical_id(v)
+
+        # Historical renames and vendor-suffixed variants map to the same canonical id.
+        assert cid('sntrup761x25519-sha512@openssh.com') == 'sntrup761x25519-sha512'
+        assert cid('sntrup761x25519-sha512') == 'sntrup761x25519-sha512'
+        assert cid('curve25519-sha256@libssh.org') == 'curve25519-sha256'
+        assert cid('diffie-hellman-group14-sha256@ssh.com') == 'diffie-hellman-group14-sha256'
+        assert cid('aes128-gcm@openssh.com') == 'aes128-gcm'
+        assert cid('chacha20-poly1305@openssh.com') == 'chacha20-poly1305'
+        assert cid('ssh-rsa-sha2-256') == 'rsa-sha2-256'
+
+        # Canonical names and unknown names pass through unchanged.
+        assert cid('diffie-hellman-group1-sha1') == 'diffie-hellman-group1-sha1'
+        assert cid('ssh-ed25519') == 'ssh-ed25519'
+        assert cid('some-unknown-alg') == 'some-unknown-alg'
+
     def test_get_since_text(self):
         def gst(v):
             return self.algorithm.get_since_text(v)

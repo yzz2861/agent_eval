@@ -596,12 +596,19 @@ def evaluate_policy(out: OutputBuffer, aconf: AuditConf, banner: Optional['Banne
         raise RuntimeError('Internal error: cannot evaluate against null Policy!')
 
     passed, error_struct, error_str = aconf.policy.evaluate(banner, kex)
+    rule_results = aconf.policy.get_rule_results()
+    policy_chain = aconf.policy.get_policy_chain()
     if aconf.json:
         warnings: List[str] = []
         if aconf.policy.is_outdated_builtin_policy():
             warnings.append("A newer version of this built-in policy is available.")
 
         json_struct = {'host': aconf.host, 'port': aconf.port, 'policy': aconf.policy.get_name_and_version(), 'passed': passed, 'errors': error_struct, 'warnings': warnings}
+
+        # When policies were composed (and/or algorithm rules matched), include the provenance of the final result.  Single-policy scans keep the legacy output unchanged.
+        if len(policy_chain) > 1 or len(rule_results) > 0:
+            json_struct['policy_chain'] = policy_chain
+            json_struct['rule_results'] = rule_results
 
         out.info(json.dumps(json_struct, indent=4 if aconf.json_print_indent else None, sort_keys=True))
     else:
@@ -634,6 +641,12 @@ def evaluate_policy(out: OutputBuffer, aconf: AuditConf, banner: Optional['Banne
         else:
             out.fail("%sFailed!" % icon_fail)
             out.warn("\nErrors:\n%s" % error_str)
+
+        # Print non-failing rule hits (warn/info) with their provenance.
+        for rule_result in rule_results:
+            if rule_result['severity'] == 'fail':
+                continue
+            out.warn("Note: algorithm '%s' (%s) matched %s rule '%s' (source: %s)." % (rule_result['algorithm'], rule_result['type'], rule_result['severity'], rule_result['rule'], rule_result['source']))
 
         # If the user selected an out-dated built-in policy then issue a warning.
         if aconf.policy.is_outdated_builtin_policy():
@@ -781,7 +794,7 @@ def process_commandline(out: OutputBuffer, args: List[str]) -> 'AuditConf':  # p
     parser.add_argument("-M", "--make-policy", action="store", dest="make_policy", metavar="custom_policy.txt", type=str, default=None, help="creates a policy based on the target server (i.e.: the target server has the ideal configuration that other servers should adhere to), and stores it in the file path specified")
     parser.add_argument("-m", "--manual", action="store_true", dest="manual", default=False, help="print the man page (Docker, PyPI, Snap, and Windows builds only)")
     parser.add_argument("-n", "--no-colors", action="store_true", dest="no_colors", default=False, help="disable colors (automatic when the NO_COLOR environment variable is set)")
-    parser.add_argument("-P", "--policy", action="store", dest="policy", metavar="\"Built-In Policy Name\" / custom_policy.txt", type=str, default=None, help="run a policy test using the specified policy (use -L to see built-in policies, or specify filesystem path to custom policy created by -M)")
+    parser.add_argument("-P", "--policy", action="append", dest="policy", metavar="\"Built-In Policy Name\" / custom_policy.txt", type=str, default=None, help="run a policy test using the specified policy (use -L to see built-in policies, or specify filesystem path to custom policy created by -M).  May be given multiple times to compose several policies (i.e.: a built-in baseline plus a custom policy); later policies refine earlier ones")
     parser.add_argument("-p", "--port", action="store", dest="oport", metavar="N", type=int, default=None, help="the TCP port to connect to (or to listen on when -c is used)")
     parser.add_argument("-T", "--targets", action="store", dest="targets", metavar="targets.txt", type=str, default=None, help="a file containing a list of target hosts (one per line, format HOST[:PORT]). Use -p/--port to set the default port for all hosts.  Use --threads to control concurrent scans")
     parser.add_argument("-t", "--timeout", action="store", dest="timeout", metavar="N", type=int, default=5, help="timeout (in seconds) for connection and reading (default: %(default)s)")
@@ -793,6 +806,7 @@ def process_commandline(out: OutputBuffer, args: List[str]) -> 'AuditConf':  # p
     parser.add_argument("--dheat", action="store", dest="dheat", metavar="N[:kex[:e_len]]", type=str, default=None, help="continuously perform the DHEat DoS attack (CVE-2002-20001) against the target using N concurrent sockets.  Optionally, a specific key exchange algorithm can be specified instead of allowing it to be automatically chosen.  Additionally, a small length of the fake e value sent to the server can be chosen for a more efficient attack (such as 4).")
     parser.add_argument("--get-hardening-guide", action="store", metavar="platform", dest="get_hardening_guide", type=str, default=None, help="retrieves the hardening guide for the specified platform name (use --list-hardening-guides to see list of available guides).")
     parser.add_argument("--list-hardening-guides", action="store_true", dest="list_hardening_guides", default=False, help="list all official, built-in hardening guides for common systems.  Their full names can then be passed to --get-hardening-guide.  Add -v to this option to view hardening guide change logs and prior versions.")
+    parser.add_argument("--policy-rule", action="append", dest="policy_rules", metavar="severity:[scope:][type:]algorithm[@product<op>version]", type=str, default=None, help="add an explicit command line rule override to the policy test (i.e.: --policy-rule fail:kex:diffie-hellman-group1-sha1).  Command line rules take final precedence over all policy rules.  May be given multiple times")
     parser.add_argument("--lookup", action="store", dest="lookup", metavar="alg1[,alg2,...]", type=str, default=None, help="looks up an algorithm(s) without connecting to a server.")
     parser.add_argument("--skip-rate-test", action="store_true", dest="skip_rate_test", default=False, help="skip the connection rate test during standard audits (used to safely infer whether the DHEat attack is viable)")
     parser.add_argument("--socks5", action="store", dest="socks5_proxy", metavar="host:port", type=str, default=None, help="connect via a SOCKS5 proxy (implies --skip-rate-test)")
@@ -885,7 +899,11 @@ def process_commandline(out: OutputBuffer, args: List[str]) -> 'AuditConf':  # p
             aconf.policy_file = argument.make_policy
 
         if argument.policy is not None:
-            aconf.policy_file = argument.policy
+            aconf.policy_files = argument.policy
+            aconf.policy_file = argument.policy[0]
+
+        if argument.policy_rules is not None:
+            aconf.policy_rules = argument.policy_rules
 
         if argument.targets is not None:
             aconf.target_file = argument.targets
@@ -968,17 +986,27 @@ def process_commandline(out: OutputBuffer, args: List[str]) -> 'AuditConf':  # p
         # Strip out whitespace from each line in target file, and skip empty lines.
         aconf.target_list = [target.strip() for target in aconf.target_list if target not in ("", "\n")]
 
-    # If a policy file was provided, validate it.
-    if (aconf.policy_file is not None) and (aconf.make_policy is False):
+    # If one or more policies were provided, validate & compose them.
+    if (len(aconf.policy_files) > 0) and (aconf.make_policy is False):
 
-        # First, see if this is a built-in policy name.  If not, assume a file path was provided, and try to load it from disk.
-        aconf.policy = Policy.load_builtin_policy(aconf.policy_file, json_output=aconf.json)
-        if aconf.policy is None:
-            try:
-                aconf.policy = Policy(policy_file=aconf.policy_file, json_output=aconf.json)
-            except Exception as e:
-                out.fail("Error while loading policy file: %s: %s" % (str(e), traceback.format_exc()), write_now=True)
-                sys.exit(exitcodes.UNKNOWN_ERROR)
+        policies = []
+        for policy_spec in aconf.policy_files:
+            # First, see if this is a built-in policy name.  If not, assume a file path was provided, and try to load it from disk.
+            policy = Policy.load_builtin_policy(policy_spec, json_output=aconf.json)
+            if policy is None:
+                try:
+                    policy = Policy(policy_file=policy_spec, json_output=aconf.json)
+                except Exception as e:
+                    out.fail("Error while loading policy file: %s: %s" % (str(e), traceback.format_exc()), write_now=True)
+                    sys.exit(exitcodes.UNKNOWN_ERROR)
+            policies.append(policy)
+
+        # Compose the policy chain (and any command line rule overrides) into the final policy.  Invalid rules and conflicts are reported here, before any scanning occurs.
+        try:
+            aconf.policy = Policy.compose(policies, aconf.policy_rules, json_output=aconf.json)
+        except Exception as e:
+            out.fail("Error while composing policies: %s: %s" % (str(e), traceback.format_exc()), write_now=True)
+            sys.exit(exitcodes.UNKNOWN_ERROR)
 
         # If the user wants to do a client audit, but provided a server policy, terminate.
         if aconf.client_audit and aconf.policy.is_server_policy():

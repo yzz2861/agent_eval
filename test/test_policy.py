@@ -2,9 +2,13 @@ import hashlib
 import pytest
 from datetime import date
 
+from ssh_audit.banner import Banner
 from ssh_audit.builtin_policies import BUILTIN_POLICIES
 from ssh_audit.outputbuffer import OutputBuffer
 from ssh_audit.policy import Policy
+from ssh_audit.policy_rules import PolicyConflictError, PolicyValidationError
+from ssh_audit.policy_rules import TIER_BUILTIN, TIER_CLI, TIER_CUSTOM
+from ssh_audit.policy_rules import compose_rule_sets, parse_algorithm_rules
 from ssh_audit.ssh2_kex import SSH2_Kex
 from ssh_audit.writebuf import WriteBuf
 
@@ -520,6 +524,285 @@ macs = mac_alg2, mac_alg1, mac_alg3, mac_alg0'''
         assert ret is False
         assert len(errors) == 1
         assert error_str.find("Key exchanges did not match.") != -1
+
+
+    def _get_kex_with_real_algs(self, kex_algs=None, key_algs=None, enc_algs=None, mac_algs=None):
+        '''Returns an SSH2.Kex object with real algorithm names, for testing algorithm rules.'''
+
+        kex_algs = kex_algs if kex_algs is not None else ['curve25519-sha256']
+        key_algs = key_algs if key_algs is not None else ['ssh-ed25519']
+        enc_algs = enc_algs if enc_algs is not None else ['aes128-ctr']
+        mac_algs = mac_algs if mac_algs is not None else ['hmac-sha2-256']
+
+        w = self.wbuf()
+        w.write(b'\x00\x11\x22\x33\x44\x55\x66\x77\x88\x99\xaa\xbb\xcc\xdd\xee\xff')
+        w.write_list(kex_algs)
+        w.write_list(key_algs)
+        w.write_list(enc_algs)
+        w.write_list(enc_algs)
+        w.write_list(mac_algs)
+        w.write_list(mac_algs)
+        w.write_list(['none'])
+        w.write_list(['none'])
+        w.write_list([''])
+        w.write_list([''])
+        w.write_byte(False)
+        w.write_int(0)
+        return self.ssh2_kex.parse(self.OutputBuffer, w.write_flush())
+
+
+    def test_policy_algorithm_rules_parsing(self):
+        '''Ensure that fail/warn algorithm rule directives are parsed with scope, type resolution, and canonicalization.'''
+
+        policy_data = '''name = "Rule Policy"
+version = 1
+fail algorithms = kex:diffie-hellman-group1-sha1, ssh-rsa
+warn algorithms = client:enc:aes128-cbc
+'''
+        policy = self.Policy(policy_data=policy_data)
+        rules = policy.get_algorithm_rules()
+        assert len(rules) == 3
+
+        by_alg = {r.algorithm: r for r in rules}
+        assert by_alg['diffie-hellman-group1-sha1'].severity == 'fail'
+        assert by_alg['diffie-hellman-group1-sha1'].alg_type == 'kex'
+        assert by_alg['diffie-hellman-group1-sha1'].scope == 'server'  # Default scope follows the policy type.
+        assert by_alg['ssh-rsa'].alg_type == 'key'  # Type resolved from the database.
+        assert by_alg['aes128-cbc'].severity == 'warn'
+        assert by_alg['aes128-cbc'].scope == 'client'
+
+        # Every rule carries its source policy for provenance.
+        for rule in rules:
+            assert rule.source == 'Rule Policy (version 1)'
+
+
+    def test_policy_rules_unknown_algorithm(self):
+        '''Unknown algorithms in rules must be rejected before scanning.'''
+
+        policy_data = '''name = "Bad Policy"
+version = 1
+fail algorithms = kex:no-such-algorithm
+'''
+        with pytest.raises(PolicyValidationError):
+            self.Policy(policy_data=policy_data)
+
+
+    def test_policy_rules_duplicate_via_alias(self):
+        '''Aliases normalize to the same canonical id, so two spellings of one algorithm are a duplicate rule.'''
+
+        policy_data = '''name = "Bad Policy"
+version = 1
+fail algorithms = kex:sntrup761x25519-sha512@openssh.com, kex:sntrup761x25519-sha512
+'''
+        with pytest.raises(PolicyValidationError):
+            self.Policy(policy_data=policy_data)
+
+
+    def test_policy_rules_contradictory_fail_warn(self):
+        '''A policy that both fails and warns on the same canonical algorithm is contradictory.'''
+
+        policy_data = '''name = "Bad Policy"
+version = 1
+fail algorithms = ssh-rsa
+warn algorithms = key:ssh-rsa
+'''
+        with pytest.raises(PolicyValidationError):
+            self.Policy(policy_data=policy_data)
+
+
+    def test_policy_rules_invalid_severity(self):
+        '''Illegal severities are rejected.'''
+
+        with pytest.raises(PolicyValidationError):
+            parse_algorithm_rules('critical:kex:diffie-hellman-group1-sha1', None, 'test', TIER_CLI, 'server')
+
+
+    def test_policy_compose_single_policy_unchanged(self):
+        '''A single policy without command line rules is returned as-is (legacy behavior).'''
+
+        policy = self.Policy.load_builtin_policy('Hardened Debian 12 (version 3)')
+        assert self.Policy.compose([policy]) is policy
+
+
+    def test_policy_compose_scope_mismatch(self):
+        '''Server and client policies cannot be composed together.'''
+
+        server_policy = self.Policy(policy_data='name = "Server"\nversion = 1\n')
+        client_policy = self.Policy(policy_data='name = "Client"\nversion = 1\nclient policy = true\n')
+        with pytest.raises(PolicyValidationError):
+            self.Policy.compose([server_policy, client_policy])
+
+
+    def test_rule_merge_strictest_wins(self):
+        '''Rules from different precedence tiers resolve to the strictest severity, with provenance.'''
+
+        builtin_rules = parse_algorithm_rules('kex:diffie-hellman-group1-sha1', 'fail', 'Builtin (version 1)', TIER_BUILTIN, 'server')
+        custom_rules = parse_algorithm_rules('kex:diffie-hellman-group1-sha1', 'warn', 'Custom (version 1)', TIER_CUSTOM, 'server')
+        merged = compose_rule_sets([(TIER_BUILTIN, 'Builtin (version 1)', builtin_rules, False), (TIER_CUSTOM, 'Custom (version 1)', custom_rules, False)])
+
+        assert len(merged) == 1
+        rule = list(merged.values())[0]
+        assert rule.severity == 'fail'  # The custom policy may not weaken the built-in fail rule.
+        assert rule.source == 'Builtin (version 1)'
+        assert 'Custom (version 1)' in rule.contributors
+
+
+    def test_rule_merge_custom_tightens(self):
+        '''A custom policy may tighten a rule inherited from a built-in policy.'''
+
+        builtin_rules = parse_algorithm_rules('kex:diffie-hellman-group1-sha1', 'warn', 'Builtin (version 1)', TIER_BUILTIN, 'server')
+        custom_rules = parse_algorithm_rules('kex:diffie-hellman-group1-sha1', 'fail', 'Custom (version 1)', TIER_CUSTOM, 'server')
+        merged = compose_rule_sets([(TIER_BUILTIN, 'Builtin (version 1)', builtin_rules, False), (TIER_CUSTOM, 'Custom (version 1)', custom_rules, False)])
+
+        rule = list(merged.values())[0]
+        assert rule.severity == 'fail'
+        assert rule.source == 'Custom (version 1)'
+
+
+    def test_rule_merge_relaxation_requires_declaration(self):
+        '''A custom policy may only weaken an inherited rule when it declares allow_relaxation.'''
+
+        # With allow_relaxation declared, the custom policy's weaker severity wins.
+        builtin_rules = parse_algorithm_rules('kex:diffie-hellman-group1-sha1', 'fail', 'Builtin (version 1)', TIER_BUILTIN, 'server')
+        custom_rules = parse_algorithm_rules('kex:diffie-hellman-group1-sha1', 'warn', 'Custom (version 1)', TIER_CUSTOM, 'server')
+        merged = compose_rule_sets([(TIER_BUILTIN, 'Builtin (version 1)', builtin_rules, False), (TIER_CUSTOM, 'Custom (version 1)', custom_rules, True)])
+
+        rule = list(merged.values())[0]
+        assert rule.severity == 'warn'
+        assert rule.source == 'Custom (version 1)'
+
+
+    def test_rule_merge_same_tier_conflict(self):
+        '''Two rules at the same precedence tier with different severities are a hard conflict.'''
+
+        rules_a = parse_algorithm_rules('ssh-rsa', 'fail', 'Policy A (version 1)', TIER_CUSTOM, 'server')
+        rules_b = parse_algorithm_rules('key:ssh-rsa', 'warn', 'Policy B (version 1)', TIER_CUSTOM, 'server')
+        with pytest.raises(PolicyConflictError):
+            compose_rule_sets([(TIER_CUSTOM, 'Policy A (version 1)', rules_a, False), (TIER_CUSTOM, 'Policy B (version 1)', rules_b, False)])
+
+
+    def test_rule_merge_cli_override(self):
+        '''Command line rules take final precedence, even when weakening.'''
+
+        policy_data = '''name = "Custom"
+version = 1
+fail algorithms = key:ssh-rsa
+'''
+        policy = self.Policy(policy_data=policy_data)
+        composed = self.Policy.compose([policy], ['info:key:ssh-rsa'])
+
+        merged = composed.get_merged_rules()
+        assert len(merged) == 1
+        assert merged[0].severity == 'info'
+        assert merged[0].source == 'command line'
+        assert composed.get_policy_chain() == ['Custom (version 1)', 'command line']
+
+
+    def test_policy_evaluate_fail_rule(self):
+        '''A fail-severity rule hit fails the evaluation and reports the source policy and rule.'''
+
+        policy_data = '''name = "Custom"
+version = 1
+fail algorithms = kex:diffie-hellman-group1-sha1
+'''
+        policy = self.Policy(policy_data=policy_data)
+        kex = self._get_kex_with_real_algs(kex_algs=['diffie-hellman-group1-sha1', 'curve25519-sha256'])
+
+        ret, errors, error_str = policy.evaluate(None, kex)
+        assert ret is False
+        assert error_str.find("Algorithm 'diffie-hellman-group1-sha1' (kex) is denied by rule 'kex:diffie-hellman-group1-sha1'") != -1
+        assert error_str.find("source: Custom (version 1)") != -1
+
+        results = policy.get_rule_results()
+        assert len(results) == 1
+        assert results[0]['algorithm'] == 'diffie-hellman-group1-sha1'
+        assert results[0]['severity'] == 'fail'
+        assert results[0]['source'] == 'Custom (version 1)'
+
+
+    def test_policy_evaluate_warn_rule_passes(self):
+        '''A warn-severity rule hit does not fail the evaluation, but is reported with provenance.'''
+
+        policy_data = '''name = "Custom"
+version = 1
+warn algorithms = enc:aes128-cbc
+'''
+        policy = self.Policy(policy_data=policy_data)
+        kex = self._get_kex_with_real_algs(enc_algs=['aes128-cbc'])
+
+        ret, errors, error_str = policy.evaluate(None, kex)
+        assert ret is True
+        assert len(error_str) == 0
+
+        results = policy.get_rule_results()
+        assert len(results) == 1
+        assert results[0]['algorithm'] == 'aes128-cbc'
+        assert results[0]['severity'] == 'warn'
+        assert results[0]['source'] == 'Custom (version 1)'
+
+
+    def test_policy_evaluate_rule_alias_hit(self):
+        '''A rule written with one spelling hits a server advertising an alias spelling.'''
+
+        policy_data = '''name = "Custom"
+version = 1
+fail algorithms = kex:sntrup761x25519-sha512@openssh.com
+'''
+        policy = self.Policy(policy_data=policy_data)
+        kex = self._get_kex_with_real_algs(kex_algs=['sntrup761x25519-sha512'])
+
+        ret, errors, error_str = policy.evaluate(None, kex)
+        assert ret is False
+        assert error_str.find("Algorithm 'sntrup761x25519-sha512' (kex) is denied") != -1
+
+
+    def test_policy_evaluate_version_constraint(self):
+        '''Rules with version constraints only apply when the target software matches the range.'''
+
+        policy_data = '''name = "Custom"
+version = 1
+fail algorithms = kex:curve25519-sha256@openssh>=9.0
+'''
+        policy = self.Policy(policy_data=policy_data)
+        kex = self._get_kex_with_real_algs(kex_algs=['curve25519-sha256'])
+
+        # OpenSSH 8.5 does not match the constraint, so the rule does not apply.
+        ret, _, _ = policy.evaluate(Banner.parse('SSH-2.0-OpenSSH_8.5'), kex)
+        assert ret is True
+        assert len(policy.get_rule_results()) == 0
+
+        # OpenSSH 9.6 matches, so the rule fires.
+        ret, _, error_str = policy.evaluate(Banner.parse('SSH-2.0-OpenSSH_9.6'), kex)
+        assert ret is False
+        assert error_str.find("curve25519-sha256") != -1
+
+
+    def test_policy_compose_stacked_evaluation(self):
+        '''Stacking a built-in policy, a custom policy, and a CLI override yields a composed policy whose results carry provenance.'''
+
+        builtin = self.Policy.load_builtin_policy('Hardened Debian 12 (version 3)')
+        assert builtin is not None
+
+        custom = self.Policy(policy_data='''name = "Customer Baseline"
+version = 1
+warn algorithms = enc:aes128-cbc
+''')
+        composed = self.Policy.compose([builtin, custom], ['fail:mac:hmac-md5'])
+
+        assert composed.get_policy_chain() == ['Hardened Debian 12 (version 3)', 'Customer Baseline (version 1)', 'command line']
+        assert composed.get_name_and_version().find('Customer Baseline') != -1
+
+        kex = self._get_kex_with_real_algs(enc_algs=['aes128-cbc'], mac_algs=['hmac-md5'])
+        ret, _, error_str = composed.evaluate(None, kex)
+        assert ret is False  # The CLI fail rule on hmac-md5 fires.
+        assert error_str.find("source: command line") != -1
+
+        results = composed.get_rule_results()
+        by_sev = {r['severity']: r for r in results}
+        assert by_sev['fail']['source'] == 'command line'
+        assert by_sev['fail']['algorithm'] == 'hmac-md5'
+        assert by_sev['warn']['source'] == 'Customer Baseline (version 1)'
+        assert by_sev['warn']['algorithm'] == 'aes128-cbc'
 
 
     def test_policy_evaluate_subset_failing_3(self):

@@ -28,7 +28,30 @@ from typing import Callable, Optional, Union, Any  # noqa: F401
 from ssh_audit.product import Product
 
 
+# Maps algorithm aliases (i.e.: historical renames, vendor-suffixed variants,
+# and draft names) to their canonical algorithm id.  Policy rules are matched
+# against canonical ids so that different spellings of the same algorithm hit
+# the same rule.
+ALGORITHM_ALIASES: Dict[str, str] = {
+    'sntrup761x25519-sha512@openssh.com': 'sntrup761x25519-sha512',
+    'curve25519-sha256@libssh.org': 'curve25519-sha256',
+    'diffie-hellman-group14-sha256@ssh.com': 'diffie-hellman-group14-sha256',
+    'aes128-gcm@openssh.com': 'aes128-gcm',
+    'aes256-gcm@openssh.com': 'aes256-gcm',
+    'chacha20-poly1305@openssh.com': 'chacha20-poly1305',
+    'ssh-rsa-sha2-256': 'rsa-sha2-256',
+    'ssh-rsa-sha256@ssh.com': 'rsa-sha2-256',
+    'ssh-rsa-sha2-512': 'rsa-sha2-512',
+    'umac-128@openssh.com': 'umac-128',
+}
+
+
 class Algorithm:
+
+    @staticmethod
+    def canonical_id(alg_name: str) -> str:
+        '''Returns the canonical id for an algorithm name, resolving known aliases (i.e.: "sntrup761x25519-sha512@openssh.com" -> "sntrup761x25519-sha512").  Unknown names are returned unchanged.'''
+        return ALGORITHM_ALIASES.get(alg_name, alg_name)
 
     @staticmethod
     def get_ssh_version(version_desc: str) -> Tuple[str, str, bool]:

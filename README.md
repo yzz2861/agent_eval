@@ -47,6 +47,7 @@ usage: ssh-audit.py [-h] [-4] [-6] [-b] [-c] [-d]
                     [-p N] [-T targets.txt] [-t N] [-v]
                     [--conn-rate-test N[:max_rate]] [--dheat N[:kex[:e_len]]]
                     [--get-hardening-guide platform] [--list-hardening-guides]
+                    [--policy-rule severity:[scope:][type:]algorithm[@product<op>version]]
                     [--lookup alg1[,alg2,...]] [--skip-rate-test]
                     [--socks5 host:port] [--threads N]
                     [host]
@@ -123,6 +124,12 @@ optional arguments:
                         common systems. Their full names can then be passed to
                         --get-hardening-guide. Add -v to this option to view
                         hardening guide change logs and prior versions.
+  --policy-rule severity:[scope:][type:]algorithm[@product<op>version]
+                        add an explicit command line rule override to the
+                        policy test (i.e.: --policy-rule
+                        fail:kex:diffie-hellman-group1-sha1).  Command line
+                        rules take final precedence over all policy rules.
+                        May be given multiple times
   --lookup alg1[,alg2,...]
                         looks up an algorithm(s) without connecting to a
                         server.
@@ -190,10 +197,59 @@ To create a policy based on a target server (which can be manually edited):
 ssh-audit -M new_policy.txt targetserver
 ```
 
+To compose multiple policies into one audit (i.e.: a built-in baseline plus a custom policy; later policies refine earlier ones):
+```
+ssh-audit -P "Hardened Debian 12 (version 3)" -P path/to/custom_policy.txt targetserver
+```
+
+To add explicit command line rule overrides to a policy audit (command line rules take final precedence):
+```
+ssh-audit -P "Hardened Debian 12 (version 3)" --policy-rule fail:kex:diffie-hellman-group1-sha1 targetserver
+```
+
 To run the DHEat CPU exhaustion DoS attack ([CVE-2002-20001](https://nvd.nist.gov/vuln/detail/CVE-2002-20001)) against a target using 10 concurrent sockets:
 ```
 ssh-audit --dheat=10 targetserver
 ```
+
+## Policy Rules & Composition
+
+In addition to the exact-match algorithm lists, policies may define **explicit algorithm rules** with severities.  Each rule carries a source (the policy it came from), a scope (`client`/`server`), a severity (`info`, `warn`, or `fail`), and well-defined override relations.  Custom policy files support the following directives:
+
+```
+# Deny specific algorithms (fail the audit when present on the target):
+fail algorithms = kex:diffie-hellman-group1-sha1, ssh-rsa
+
+# Warn about specific algorithms (reported, but does not fail the audit):
+warn algorithms = enc:aes128-cbc
+
+# Informational rules are also available:
+info algorithms = mac:hmac-md5
+
+# When composed with other policies, allow this policy to weaken inherited rules
+# (without this declaration, custom policies may only tighten):
+allow_relaxation = true
+```
+
+Rule entries have the form `[scope:][type:]algorithm[@version-constraint]`:
+
+- `scope` is `server` or `client` (default: the policy's own type);
+- `type` is `kex`, `key`, `enc`, or `mac` (optional; resolved from the algorithm database when omitted);
+- `algorithm` may be any known algorithm name, including aliases (i.e.: `sntrup761x25519-sha512@openssh.com` and `sntrup761x25519-sha512` normalize to the same canonical id, so a rule hits either spelling);
+- an optional version constraint restricts the rule to matching target software, i.e.: `kex:curve25519-sha256@openssh>=9.0` (valid products: `openssh`, `dropbear`, `libssh`, `tinyssh`; valid operators: `<`, `<=`, `>`, `>=`, `==`, `!=`; multiple clauses may be joined with commas).
+
+Command line rules (`--policy-rule`) use the same syntax with a leading severity, i.e.: `--policy-rule fail:server:kex:diffie-hellman-group1-sha1`.
+
+When multiple policies are composed (`-P` given multiple times) and/or command line rules are added, the rule sets are merged deterministically:
+
+- **Same precedence level, conflicting severities**: two policies at the same level (both built-in, both custom, or both command line) that assign different severities to the same canonical target are a hard conflict; the audit fails before any scanning occurs.
+- **Different precedence levels**: the strictest severity wins (documented "most strict result" behavior).
+- **Custom policies may only tighten**: a custom policy cannot weaken a rule inherited from a lower level unless it declares `allow_relaxation = true`.
+- **Command line rules are explicit** and always take final precedence.
+
+The following problems are reported before any scanning occurs (never as double conclusions): missing policy files or unknown built-in policy names, unknown algorithms, duplicate rules (including duplicates introduced through alias spellings), illegal severities, and contradictory fail/warn rules within one policy.
+
+Policy audit output explains which policy and rule produced each final severity: text output annotates violations with `(severity: ..., source: ...)`, and JSON output adds `policy_chain` and `rule_results` fields (with `source` and `contributors` per result) while keeping all legacy fields unchanged.  Single-policy audits produce exactly the same output as before.
 
 To run the DHEat attack using the `diffie-hellman-group-exchange-sha256` key exchange algorithm:
 ```
