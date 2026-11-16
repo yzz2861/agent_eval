@@ -1,0 +1,55 @@
+import logging
+from typing import Any, Optional, Union
+
+from regipy.registry import RegistryHive
+
+PLUGINS: set[type] = set()
+
+logger = logging.getLogger(__name__)
+
+
+class Plugin:
+    NAME: Optional[str] = None
+    DESCRIPTION: Optional[str] = None
+    COMPATIBLE_HIVE: Optional[str] = None
+
+    def __init_subclass__(cls) -> None:
+        PLUGINS.add(cls)
+
+    def __init__(self, registry_hive: RegistryHive, as_json=False, trim_values=False):
+        self.registry_hive = registry_hive
+        self.as_json = as_json
+        self.trim_values = trim_values
+
+        self.partial_hive_path = registry_hive.partial_hive_path
+
+        # This variable should always hold the final result - in order to use it in anomaly detection and timeline gen.
+        # Can be either a list of dicts (most plugins) or a dict (some plugins that organize by key path)
+        self.entries: Union[list[dict[str, Any]], dict[str, Any]] = []
+
+    def can_run(self):
+        """
+        Whether the plugin can run or not, according to specific checks
+        :return:
+        """
+        return self.registry_hive.hive_type == self.COMPATIBLE_HIVE
+
+    def run(self):
+        """
+        Execute the plugin
+        :return:
+        """
+
+    def generate_timeline_artifacts(self):
+        """
+        Run on the output of a plugin and generate timeline entries
+        :return:
+        """
+        pass
+
+    def detect_anomalies(self):
+        """
+        Run on the output of a plugin and detect possible anomalies
+        :return:
+        """
+        pass

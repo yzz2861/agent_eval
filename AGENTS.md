@@ -1,0 +1,487 @@
+# AGENTS.md - regipy
+
+> OS-independent Python library for parsing offline Windows registry hives
+>
+> This file is the canonical agent-instructions file for the repo (supersedes
+> CLAUDE.md). It documents how to build, test, type-check, and — critically — how
+> the CI pipeline works and the non-obvious gotchas that will bite you if you
+> touch the workflow or add code that must run on the full Python 3.9–3.13 matrix.
+
+## Project Overview
+
+regipy is a forensic-focused library for parsing Windows registry hive files (files with REGF header). It's designed for digital forensics and incident response (DFIR) workflows, providing both a Python API and CLI tools.
+
+### Core Capabilities
+
+- Parse offline registry hives without Windows dependencies
+- Recursive traversal of keys and values from any path
+- Transaction log recovery (dirty hive reconstruction)
+- Hive comparison/diffing (like RegShot)
+- Extensible plugin system for artifact extraction
+- Timeline generation for forensic analysis
+
+## Architecture
+
+```
+regipy/
+├── registry.py          # Core RegistryHive class - entry point for all parsing
+├── structs.py           # Binary struct definitions (REGF header, NK/VK records, etc.)
+├── hive_types.py        # Hive type constants (NTUSER, SYSTEM, SOFTWARE, SAM, etc.)
+├── exceptions.py        # Custom exceptions (RegistryKeyNotFoundException, etc.)
+├── utils.py             # Helpers: convert_wintime, boomerang_stream, etc.
+├── recovery.py          # Transaction log application logic
+├── plugins/
+│   ├── plugin.py        # Base Plugin class - all plugins inherit from this
+│   ├── utils.py         # run_relevant_plugins() - auto-detects hive and runs matching plugins
+│   ├── ntuser/          # NTUSER.DAT plugins (persistence, typed_urls, user_assist, etc.)
+│   ├── system/          # SYSTEM hive plugins (computer_name, shimcache, bam, bootkey, etc.)
+│   ├── software/        # SOFTWARE hive plugins (installed_programs, profilelist, etc.)
+│   ├── sam/             # SAM hive plugins (local_sid, etc.)
+│   ├── security/        # SECURITY hive plugins
+│   ├── amcache/         # Amcache.hve plugins
+│   └── usrclass/        # UsrClass.dat plugins (shellbags)
+├── cli.py               # CLI entry points
+regipy_tests/
+├── data/                # Test hive files (often .xz compressed)
+├── validation/          # ValidationCase framework for plugin testing
+docs/
+└── PLUGINS.md           # Plugin development guide
+```
+
+## Key Classes and Patterns
+
+### RegistryHive
+
+The main entry point. Handles hive parsing, key navigation, and value retrieval.
+
+```python
+from regipy.registry import RegistryHive
+
+reg = RegistryHive("/path/to/NTUSER.DAT")
+
+# Navigate to a key
+key = reg.get_key(r"Software\Microsoft\Windows\CurrentVersion\Run")
+
+# Get values
+values = key.get_values(as_json=True)
+
+# Iterate subkeys
+for sk in key.iter_subkeys():
+    print(sk.name, sk.header.last_modified)
+
+# Recursive traversal
+for entry in reg.recurse_subkeys(as_json=True):
+    print(entry)
+
+# Control sets (SYSTEM hive)
+for path in reg.get_control_sets(r"Control\ComputerName\ComputerName"):
+    # Yields: ControlSet001\Control\..., ControlSet002\Control\..., etc.
+    pass
+```
+
+### Plugin System
+
+Plugins inherit from `Plugin` base class and define:
+
+- `NAME`: Snake_case identifier
+- `DESCRIPTION`: Human-readable description  
+- `COMPATIBLE_HIVE`: Hive type constant from `hive_types.py`
+- `run()`: Extraction logic, appends results to `self.entries`
+
+```python
+from regipy.hive_types import NTUSER_HIVE_TYPE
+from regipy.plugins.plugin import Plugin
+
+
+class MyPlugin(Plugin):
+    NAME = "my_plugin"
+    DESCRIPTION = "Extract something useful"
+    COMPATIBLE_HIVE = NTUSER_HIVE_TYPE
+
+    def run(self):
+        try:
+            key = self.registry_hive.get_key(r"Software\MyKey")
+            for value in key.get_values(as_json=self.as_json):
+                self.entries.append(value)
+        except RegistryKeyNotFoundException:
+            pass  # Key doesn't exist in this hive
+```
+
+### Timestamp Handling
+
+Always use `convert_wintime()` for Windows FILETIME conversion:
+
+```python
+from regipy.utils import convert_wintime
+
+timestamp = convert_wintime(key.header.last_modified, as_json=True)
+# Returns ISO format string when as_json=True, datetime object otherwise
+```
+
+### Transaction Log Recovery
+
+```python
+from regipy.recovery import apply_transaction_logs
+
+apply_transaction_logs(
+    hive_path="/path/to/NTUSER.DAT",
+    transaction_log_path="/path/to/NTUSER.DAT.LOG1",
+    restored_hive_path="/path/to/recovered.DAT",
+)
+```
+
+## Hive Types
+
+Defined in `hive_types.py`:
+
+| Constant | Typical Files |
+| ---------- | --------------- |
+| `NTUSER_HIVE_TYPE` | NTUSER.DAT |
+| `SYSTEM_HIVE_TYPE` | SYSTEM |
+| `SOFTWARE_HIVE_TYPE` | SOFTWARE |
+| `SAM_HIVE_TYPE` | SAM |
+| `SECURITY_HIVE_TYPE` | SECURITY |
+| `USRCLASS_HIVE_TYPE` | UsrClass.dat |
+| `AMCACHE_HIVE_TYPE` | Amcache.hve |
+| `BCD_HIVE_TYPE` | BCD |
+
+## CLI Tools
+
+- `regipy-parse-header` - Display hive header, validate checksums
+- `regipy-dump` - Export entire hive to JSON (or timeline with `-t`)
+- `regipy-plugins-run` - Auto-detect hive type and run relevant plugins
+- `regipy-diff` - Compare two hives, output differences to CSV
+- `regipy-process-transaction-logs` - Apply transaction logs to recover dirty hive
+
+## Development Guidelines
+
+### Adding a New Plugin
+
+1. Create file in appropriate `plugins/<hive_type>/` directory
+2. Inherit from `Plugin`, set `NAME`, `DESCRIPTION`, `COMPATIBLE_HIVE`
+3. Implement `run()` method - append results to `self.entries`
+4. Use try/except for `RegistryKeyNotFoundException` (key may not exist)
+5. Add validation case in `regipy_tests/validation/`
+
+### Validation Cases
+
+Required for all new plugins:
+
+```python
+from regipy_tests.validation.validation import ValidationCase
+from regipy.plugins.system.my_plugin import MyPlugin
+
+class MyPluginValidationCase(ValidationCase):
+    plugin = MyPlugin
+    test_hive_file_name = "SYSTEM_WIN_10.xz"  # Must be in regipy_tests/data/
+    
+    # Option 1: Check for presence of specific entries
+    expected_entries = [
+        {"field": "value", ...}
+    ]
+    
+    # Option 2: Exact match
+    exact_expected_result = [...]
+    
+    expected_entries_count = 5  # Optional count validation
+```
+
+### Code Style
+
+- Use `logging` module (not `logbook` in newer code)
+- Prefer `as_json=True` parameter for JSON-serializable output
+- Handle corrupted values gracefully (`is_corrupted` field)
+- Document Windows-specific quirks in comments
+
+### Commits and Pull Requests
+
+- One commit per logical change. Unrelated fixes discovered along the way (e.g.,
+  pre-existing lint/type issues) go in a separate commit stacked on the same branch —
+  never mixed into the bug-fix commit.
+- Never change default behavior. This is a DFIR library: output must be deterministic
+  and reproducible across versions. New behavior (error handling, new output fields,
+  etc.) must be opt-in via an explicit flag/parameter, with the default preserving the
+  original behavior exactly.
+- Push the branch and open a PR with a full test plan: what was tested, how to verify
+  manually, and the test-suite results.
+
+## Installation Variants
+
+```bash
+pip install regipy[full]  # All dependencies including compiled ones
+pip install regipy        # Minimal dependencies
+pip install regipy[rust]  # + Rust-accelerated parser backend (alpha)
+pip install -e .[full]    # Development install
+```
+
+## Rust Backend (alpha)
+
+The `regipy-rs/` directory contains a Rust (PyO3) port of the core REGF parser,
+published separately to PyPI as `regipy-rs`. It is opt-in and exposes a
+drop-in API:
+
+```python
+from regipy.registry_rs import RegistryHive  # instead of regipy.registry
+```
+
+Key facts:
+
+- `regipy/registry_rs.py` is a thin wrapper returning the same `Value`/`Subkey`
+  dataclasses and raising the same exceptions; all plugins work unchanged with
+  either backend.
+- Output parity is enforced by `regipy_tests/comparison_test.py`, which
+  compares both backends over every test hive: full traversal (every key path,
+  timestamp, value name/type/content), key navigation, security descriptors,
+  and end-to-end plugin output. Any behavioral change to `regipy/registry.py`
+  value decoding must be mirrored in `regipy-rs/src/parser.rs` (and vice versa)
+  or these tests will fail.
+- Timestamps are converted in Python (`convert_wintime`) from raw FILETIME
+  integers returned by Rust, so both backends produce bit-identical datetimes.
+- Build locally with `maturin build --release --manifest-path regipy-rs/Cargo.toml`.
+  Wheels are built in CI by `.github/workflows/regipy-rs.yml` and published on
+  GitHub releases tagged `regipy-rs-*`.
+- Benchmarks: `python regipy-rs/benchmark.py` regenerates `regipy-rs/BENCHMARKS.md`.
+
+### Releasing regipy-rs
+
+`regipy` and `regipy-rs` are **versioned and released independently** — a
+`regipy` release (e.g. 6.4.0) does not imply a `regipy-rs` release (its own
+alpha series, e.g. 0.1.0a1, in `regipy-rs/pyproject.toml`). A Rust release is only
+needed when the Rust surface actually changed: anything under `regipy-rs/src/`,
+`regipy-rs/Cargo.toml`, or runtime behavior in the `regipy/registry_rs.py`
+wrapper. Non-behavioral changes (`.pyi` stubs, type-ignore comments, docs) do
+not require one.
+
+Process (all automation lives in `.github/workflows/regipy-rs.yml`):
+
+1. **Bump the version** in `regipy-rs/pyproject.toml` (the maturin/PEP 440
+   version, e.g. `0.1.0a1` → `0.1.0a2`). This is the version maturin stamps
+   on the wheel and the one the release tag must match. Leave
+   `regipy-rs/Cargo.toml` alone: it carries the plain Rust crate version
+   (`0.1.0`), and Rust semver rejects PEP 440 pre-releases (`0.1.0a2` is
+   invalid; Rust would need `0.1.0-a2`), so the two files intentionally
+   differ.
+2. **Push a tag** named `regipy-rs-<version>` (e.g. `regipy-rs-0.1.0a2`).
+3. **Create a GitHub release** for that tag.
+
+The workflow's `publish` job fires only when the event is `release: published`
+**and** the tag starts with `regipy-rs-`. It needs the `parity`, `build-wheels`
+and `build-sdist` jobs to pass first, then publishes to PyPI via **trusted
+publishing** (`id-token: write`, `environment: pypi`) — no API token required.
+On PRs and non-`regipy-rs-` tags the publish job shows as *skipping*, which is
+expected, not a failure.
+
+## Testing
+
+```bash
+pytest regipy_tests/
+```
+
+Test hives are stored as `.xz` compressed files in `regipy_tests/data/`.
+
+The Rust parity suite (`regipy_tests/comparison_test.py`) is run separately and
+takes ~30–40 min; it is not part of the default `pytest regipy_tests/` invocation
+on the local machine (it requires `regipy-rs` built via `maturin develop -r`).
+
+## CI (GitHub Actions) — how it works and the gotchas
+
+The pipeline lives in `.github/workflows/ci.yml` (plus `regipy-rs.yml` for the
+Rust backend). It uses **`actions/setup-python` + `pip`** (not uv). Every job
+follows the same shape:
+
+```yaml
+- name: Set up Python
+  uses: actions/setup-python@v6
+  with:
+    python-version: "3.11"        # or ${{ matrix.python-version }}
+- name: Install dependencies
+  run: |
+    python -m pip install --upgrade pip
+    pip install -e ".[full,dev]"
+- name: Run <tool>
+  run: <tool> ...
+```
+
+> **Why pip and not uv:** an earlier revision migrated this workflow to
+> `astral-sh/setup-uv` + `uv`. That was not required and introduced avoidable
+> breakage — `uv pip install` needs a prior `uv venv`, and `uv run <tool>`
+> re-syncs a *separate* environment that drops the `.[full,dev]` extras and
+> doesn't expose `regipy_tests`. The `setup-python` + `pip` form below is the
+> simpler, known-good baseline; prefer it unless there's a specific reason to
+> move to uv.
+
+### Gotchas (each of these has broken CI before — do not regress them)
+
+1. **`plugin_validation.py` needs `PYTHONPATH=.`.** `regipy_tests` is a test
+   directory, not an installed package, so `python regipy_tests/validation/
+   plugin_validation.py` fails with `ModuleNotFoundError: No module named
+   'regipy_tests'` unless the repo root is on the path. Run it as
+   `PYTHONPATH=. python regipy_tests/validation/plugin_validation.py`.
+
+2. **Python 3.9 is in the test matrix — no PEP 604 unions in
+   runtime-evaluated annotations.** The matrix runs 3.9, 3.10, 3.11, 3.12, 3.13.
+   `X | Y` union syntax (PEP 604) is only valid at runtime on 3.10+. In a
+   `@dataclass`, field annotations are evaluated when the class body executes,
+   so `timestamp: dt.datetime | str` raises
+   `TypeError: unsupported operand type(s) for |: 'type' and 'type'` on 3.9
+   at import time. Use `typing.Union[X, Y]` (or `Optional[X]`) in any
+   annotation that is evaluated at runtime — i.e. in files that do **not** have
+   `from __future__ import annotations`. (mypy is configured with
+   `python_version = "3.9"`, but mypy does not always flag every runtime-evaluated
+   PEP 604 union, so don't rely on it as the only guard.)
+
+### Jobs
+
+- **lint** — `ruff check .` + `ruff format --check .` (3.11). Note ruff only
+  lints Python files; the `ci.yml` line lengths are not checked by ruff
+  (project `line-length` is 128 and `E501` is ignored).
+- **test** — matrix 3.9–3.13: `pytest` over `tests.py`, `cli_tests.py`,
+  `test_packaging.py`, then plugin validation.
+- **validation-docs** — regenerates `regipy_tests/validation/plugin_validation.md`
+  and uploads it as an artifact.
+- **type-check** — `mypy regipy/ --ignore-missing-imports` (3.11). Currently
+  runs with `continue-on-error: true`; drop that flag once typing is stable.
+- **security** — `pip-audit --skip-editable` + CycloneDX SBOM generation/upload.
+- **regipy-rs.yml** — builds the Rust wheels and runs the Python/Rust parity
+  tests (`comparison_test.py`) + the full suite with the Rust backend present.
+
+### Monitoring a PR's CI
+
+```bash
+gh pr checks <PR>                          # one-line status per check
+gh run view <run-id> --log-failed          # just the failing steps' logs
+gh run view --job <job-id>                # step-by-step status of one job
+```
+
+When a job fails, `--log-failed` is the fastest way to the root cause. The
+`test` matrix is the usual place to look; a `ModuleNotFoundError: No module
+named 'regipy_tests'` means a step dropped `PYTHONPATH=.`, and a
+`TypeError ... for |` at import means a PEP 604 union slipped into a
+runtime-evaluated annotation on the 3.9 leg.
+
+### Local verification that mirrors CI
+
+```bash
+python -m venv .venv && . .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -e ".[full,dev]"
+ruff check . && ruff format --check .
+pytest regipy_tests/ -v
+PYTHONPATH=. python regipy_tests/validation/plugin_validation.py
+mypy regipy/ --ignore-missing-imports
+# Rust parity (requires maturin + regipy-rs built):
+maturin develop -r --manifest-path regipy-rs/Cargo.toml
+pytest regipy_tests/comparison_test.py -v
+```
+
+## Common Forensic Artifacts by Hive
+
+**NTUSER.DAT**: User activity
+
+- Run/RunOnce keys (persistence)
+- TypedURLs (browser history)
+- UserAssist (program execution)
+- RecentDocs, MRU lists
+
+**SYSTEM**: System configuration
+
+- ComputerName
+- Shimcache/AppCompatCache (execution history)
+- BAM/DAM (background activity)
+- Services, network interfaces
+
+**SOFTWARE**: Installed software
+
+- Uninstall keys
+- ProfileList (user profiles)
+- Installed programs
+
+**Amcache.hve**: Application compatibility
+
+- File execution with SHA1 hashes
+- Driver information
+
+**UsrClass.dat**: Shell data
+
+- Shellbags (folder access history)
+
+## MCP Server Integration
+
+regipy includes an MCP (Model Context Protocol) server that enables natural language forensic analysis through Claude Desktop or other MCP-compatible AI assistants.
+
+### What it Does
+
+The MCP server bridges Claude and regipy's plugin ecosystem, allowing investigators to:
+
+- Ask forensic questions in plain English instead of remembering CLI syntax
+- Auto-detect hive types from a directory of collected registry files
+- Leverage all 75+ plugins without knowing which plugin extracts which artifact
+- Get correlated results across multiple hives in a single conversational query
+
+### Example Workflow
+
+Instead of:
+
+```bash
+regipy-plugins-run SYSTEM -o system_output.json
+regipy-plugins-run NTUSER.DAT -o ntuser_output.json
+# manually correlate results...
+```
+
+You can ask:
+> "What persistence mechanisms exist on this machine?"
+
+Claude will automatically run both `software_persistence` and `ntuser_persistence` plugins and synthesize the results.
+
+### Setup
+
+1. Install regipy with MCP support
+2. Configure Claude Desktop to use the regipy MCP server
+3. Point at your evidence directory
+4. Start investigating conversationally
+
+### Design Philosophy
+
+The MCP server exposes plugin metadata (names, descriptions, compatible hives) to Claude, letting it reason about which plugins to run based on the investigator's natural language questions. This means:
+
+- New plugins automatically become available to Claude without prompt updates
+- Claude can chain multiple plugins when a question spans artifacts
+- Investigators can follow their instincts with follow-up questions
+
+For more details, see the blog post: [Regipy MCP: Natural Language Registry Forensics with Claude](https://medium.com/dfir-dudes/regipy-mcp-natural-language-registry-forensics-with-claude-984d378784d6)
+
+## External References
+
+### Microsoft Documentation
+
+- [Registry Hives (Win32)](https://learn.microsoft.com/en-us/windows/win32/sysinfo/registry-hives) - Official overview of hive concepts, file formats, and locations
+- [Windows Registry for Advanced Users](https://learn.microsoft.com/en-us/troubleshoot/windows-server/performance/windows-registry-advanced-users) - Detailed reference on registry structure, data types, and hive files
+- [Inside the Registry](https://learn.microsoft.com/en-us/previous-versions/cc750583(v=technet.10)) - Mark Russinovich's deep dive into registry internals (cells, bins, hive file format)
+
+### Community Resources
+
+- [Windows Registry File Format Specification](https://github.com/msuhanov/regf) - Maxim Suhanov's comprehensive REGF format documentation (the de facto standard for forensic tool authors)
+- [Google Project Zero: Registry Hives](https://projectzero.google/2024/10/the-windows-registry-adventure-4-hives.html) - Deep technical analysis of hive internals and security boundaries
+
+### Registry File Locations
+
+| Hive | File Path |
+| ------ | ----------- |
+| SYSTEM | `%SystemRoot%\System32\config\SYSTEM` |
+| SOFTWARE | `%SystemRoot%\System32\config\SOFTWARE` |
+| SAM | `%SystemRoot%\System32\config\SAM` |
+| SECURITY | `%SystemRoot%\System32\config\SECURITY` |
+| DEFAULT | `%SystemRoot%\System32\config\DEFAULT` |
+| NTUSER.DAT | `%UserProfile%\NTUSER.DAT` |
+| UsrClass.dat | `%LocalAppData%\Microsoft\Windows\UsrClass.dat` |
+| Amcache.hve | `%SystemRoot%\AppCompat\Programs\Amcache.hve` |
+
+### Transaction Logs
+
+Registry hives use transaction logs (`.LOG1`, `.LOG2`) for crash recovery. When a hive's sequence numbers don't match (primary ≠ secondary), the hive is "dirty" and transaction logs should be applied before analysis. regipy handles this via:
+
+```bash
+regipy-process-transaction-logs NTUSER.DAT -p ntuser.dat.log1 -s ntuser.dat.log2 -o recovered.DAT
+```
+
+Or programmatically via `regipy.recovery.apply_transaction_logs()`.

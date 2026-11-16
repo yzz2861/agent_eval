@@ -1,0 +1,49 @@
+name: Scorecard supply-chain security
+
+on:
+  # For Branch-Protection check. Only the default branch is supported.
+  branch_protection_rule:
+  # To ensure Maintained check is refreshed periodically.
+  schedule:
+    - cron: '21 5 * * 2'
+  push:
+    branches: [ "master" ]
+
+# Declare default permissions as read only.
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write   # Needed to upload results to code scanning
+      id-token: write          # Needed for publishing to OSSF API
+      # contents: read         # Uncomment for private repos
+      # actions: read          # Uncomment for private repos
+
+    steps:
+      - name: "Checkout code"
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: "Run analysis"
+        uses: ossf/scorecard-action@v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+          # repo_token: ${{ secrets.SCORECARD_TOKEN }} # Optional: for private repos or enabling Branch-Protection on public ones
+
+      - name: "Upload artifact"
+        uses: actions/upload-artifact@v7
+        with:
+          name: SARIF file
+          path: results.sarif
+          retention-days: 5
+
+      - name: "Upload to code-scanning"
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: results.sarif
