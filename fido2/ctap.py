@@ -30,7 +30,7 @@ from __future__ import annotations
 import abc
 from enum import IntEnum, unique
 from threading import Event
-from typing import Callable, Iterator, cast
+from typing import Any, Callable, Iterator, Mapping, cast
 
 
 @unique
@@ -173,9 +173,137 @@ class CtapError(Exception):
         def __str__(self):
             return f"0x{self.value:02X} - {self.name}"
 
-    def __init__(self, code: int):
+    def __init__(
+        self,
+        code: int,
+        response: Mapping[Any, Any] | bytes | bytearray | int | None = None,
+        *,
+        state: Any = None,
+        retries: int | None = None,
+        uv_retries: int | None = None,
+        retry_after: float | None = None,
+        locked_until: float | None = None,
+    ):
         try:
             self.code = CtapError.ERR(code)
         except ValueError:
             self.code = cast(CtapError.ERR, CtapError.UNKNOWN_ERR(code))
-        super().__init__(f"CTAP error: {self.code}")
+
+        self.response = response
+        self.operation = None
+        metadata: Mapping[Any, Any] = {}
+        if isinstance(response, Mapping):
+            metadata = response
+        elif isinstance(response, int) and not isinstance(response, bool):
+            metadata = {3: response}
+        elif isinstance(response, (bytes, bytearray)) and response:
+            try:
+                from . import cbor
+
+                decoded = cbor.decode(bytes(response))
+                if isinstance(decoded, Mapping):
+                    metadata = decoded
+            except Exception:  # Malformed optional error metadata is ignored.
+                metadata = {}
+        self.metadata = dict(metadata)
+        try:
+            from .ctap2.pin_state import PinUvState, error_metadata_from_response
+
+            parsed = error_metadata_from_response(metadata)
+            self.state = state if state is not None else PinUvState.from_code(self.code)
+        except Exception:  # Keep CtapError importable on its own.
+            parsed = {}
+            self.state = state
+
+        self.retries = retries if retries is not None else parsed.get("retries")
+        self.uv_retries = (
+            uv_retries if uv_retries is not None else parsed.get("uv_retries")
+        )
+        self.retry_after = (
+            retry_after if retry_after is not None else parsed.get("retry_after")
+        )
+        self.locked_until = (
+            locked_until if locked_until is not None else parsed.get("locked_until")
+        )
+        if self.retry_after is None:
+            self.retry_after = 0.0
+        state_type = type(self.state)
+        if getattr(self.state, "name", None) == "PIN_INVALID" and self.retries == 0:
+            self.state = state_type.PIN_BLOCKED
+        if getattr(self.state, "name", None) == "UV_INVALID" and self.uv_retries == 0:
+            self.state = state_type.UV_BLOCKED
+        self.retryable = self._is_retryable()
+
+        message = f"CTAP error: {self.code}"
+        details = []
+        if self.retries is not None:
+            details.append(f"PIN retries remaining: {self.retries}")
+        if self.uv_retries is not None:
+            details.append(f"UV retries remaining: {self.uv_retries}")
+        if self.retry_after:
+            details.append(f"lockout: {self.retry_after:g}s")
+        if details:
+            message += " (" + ", ".join(details) + ")"
+        super().__init__(message)
+
+    @property
+    def pin_retries(self) -> int | None:
+        return self.retries
+
+    @property
+    def remaining_retries(self) -> int | None:
+        return self.retries
+
+    @property
+    def remaining_attempts(self) -> int | None:
+        return self.retries
+
+    @property
+    def lockout(self) -> float:
+        return self.retry_after
+
+    @property
+    def lockout_seconds(self) -> float:
+        return self.retry_after
+
+    @property
+    def pin_uv_state(self):
+        return self.state
+
+    @property
+    def is_locked(self) -> bool:
+        return bool(self.retry_after)
+
+    @property
+    def pin_retryable(self) -> bool:
+        if getattr(self, "operation", None) == "uv":
+            return False
+        state = getattr(self, "state", None)
+        if getattr(state, "name", None) in ("PIN_BLOCKED", "UNSUPPORTED"):
+            return False
+        if self.retry_after:
+            return False
+        if self.retries is not None and self.retries <= 0:
+            return False
+        return self.code in (
+            CtapError.ERR.PIN_INVALID,
+            CtapError.ERR.PIN_AUTH_INVALID,
+        )
+
+    @property
+    def uv_retryable(self) -> bool:
+        if getattr(self, "operation", None) == "pin":
+            return False
+        state = getattr(self, "state", None)
+        if getattr(state, "name", None) in ("UV_BLOCKED", "UNSUPPORTED"):
+            return False
+        if self.retry_after:
+            return False
+        if self.uv_retries is not None and self.uv_retries <= 0:
+            return False
+        if self.code == CtapError.ERR.PIN_INVALID:
+            return self.operation == "uv"
+        return self.code == CtapError.ERR.UV_INVALID
+
+    def _is_retryable(self) -> bool:
+        return self.pin_retryable or self.uv_retryable

@@ -33,6 +33,25 @@ from .base import (  # noqa
 )
 
 from .pin import ClientPin, PinProtocolV1, PinProtocolV2  # noqa
+from .pin_state import (  # noqa
+    CredentialPinUvState,
+    DictPinUvStore,
+    FilePinUvStore,
+    InMemoryPinUvStore,
+    JsonFilePinUvStore,
+    MemoryPinUvStore,
+    PinRetryError,
+    PinState,
+    PinStateMachine,
+    PinUvError,
+    PinUvState,
+    PinUvStateError,
+    PinUvStateMachine,
+    PinUvStatus,
+    PinUvStore,
+    PinUvTracker,
+    error_metadata_from_response,
+)
 from .credman import CredentialManagement  # noqa
 from .bio import FPBioEnrollment, CaptureError  # noqa
 from .blob import LargeBlobs  # noqa

@@ -45,6 +45,25 @@ from ..ctap import CtapDevice, CtapError
 from ..hid import CAPABILITY, CTAPHID
 from ..utils import _DataClassMapping
 from ..webauthn import Aaguid, AuthenticatorData
+from .pin_state import (  # noqa: F401
+    CredentialPinUvState,
+    DictPinUvStore,
+    FilePinUvStore,
+    InMemoryPinUvStore,
+    JsonFilePinUvStore,
+    MemoryPinUvStore,
+    PinRetryError,
+    PinState,
+    PinStateMachine,
+    PinUvError,
+    PinUvState,
+    PinUvStateError,
+    PinUvStateMachine,
+    PinUvStatus,
+    PinUvStore,
+    PinUvTracker,
+    device_identity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -285,7 +304,10 @@ class Ctap2:
         response = self.device.call(CTAPHID.CBOR, request, event, on_keepalive)
         status = response[0]
         if status != 0x00:
-            raise CtapError(status)
+            # CTAP error responses normally contain only the status byte, but
+            # some authenticators append retry/lockout metadata. Preserve it so
+            # the caller never has to guess how many attempts remain.
+            raise CtapError(status, response[1:])
         enc = response[1:]
         if not enc:
             return {}
@@ -358,6 +380,75 @@ class Ctap2:
             on_keepalive=on_keepalive,
         )
 
+    @property
+    def pin_uv_state(self) -> PinUvStatus:
+        """Current PIN/UV status for this authenticator."""
+        return self.get_pin_uv_status()
+
+    @property
+    def pin_uv_status(self) -> PinUvStatus:
+        return self.get_pin_uv_status()
+
+    @property
+    def pin_uv_state_machine(self) -> PinUvStateMachine:
+        return self.get_pin_uv_state_machine()
+
+    def get_pin_uv_status(
+        self,
+        credential_id: str | bytes | None = None,
+        *,
+        store: PinUvStore | str | None = None,
+        device_id: str | None = None,
+        **kwargs: Any,
+    ) -> PinUvStatus:
+        """Get PIN/UV status without sending a PIN/UV command."""
+        options = self.info.options
+        return PinUvStateMachine(
+            credential_id,
+            device_id=device_id or device_identity(self.info),
+            store=store,
+            pin_set=bool(options.get("clientPin")),
+            **kwargs,
+        ).status()
+
+    get_pin_uv_state = get_pin_uv_status
+
+    def get_pin_uv_state_machine(
+        self,
+        credential_id: str | bytes | None = None,
+        *,
+        store: PinUvStore | str | None = None,
+        device_id: str | None = None,
+        **kwargs: Any,
+    ) -> PinUvStateMachine:
+        options = self.info.options
+        return PinUvStateMachine(
+            credential_id,
+            device_id=device_id or device_identity(self.info),
+            store=store,
+            pin_set=bool(options.get("clientPin")),
+            **kwargs,
+        )
+
+    def reset_pin_uv_state(
+        self,
+        credential_id: str | bytes | None = None,
+        *,
+        store: PinUvStore | str | None = None,
+        device_id: str | None = None,
+        pin: bool = True,
+        uv: bool = True,
+        **kwargs: Any,
+    ) -> PinUvStatus:
+        """Explicit administrative reset of locally tracked PIN/UV state."""
+        machine = PinUvStateMachine(
+            credential_id,
+            device_id=device_id or device_identity(self.info),
+            store=store,
+            **kwargs,
+        )
+        return machine.admin_reset(pin=pin, uv=uv)
+
     def reset(
         self,
         *,
@@ -371,6 +462,7 @@ class Ctap2:
             messages from the authenticator.
         """
         self.send_cbor(Ctap2.CMD.RESET, event=event, on_keepalive=on_keepalive)
+        self.reset_pin_uv_state()
         logger.info("Reset completed - All data erased")
 
     def make_credential(

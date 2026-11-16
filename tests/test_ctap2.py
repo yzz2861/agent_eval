@@ -25,6 +25,7 @@
 # ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
+import threading
 import unittest
 from typing import Any, Mapping, cast
 from unittest import mock
@@ -33,6 +34,7 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import ec
 from fido2 import cbor
 from fido2.attestation import Attestation
+from fido2.ctap import CtapError
 from fido2.ctap1 import RegistrationData
 from fido2.ctap2 import (
     AssertionResponse,
@@ -40,7 +42,10 @@ from fido2.ctap2 import (
     ClientPin,
     Ctap2,
     Info,
+    InMemoryPinUvStore,
     PinProtocolV1,
+    PinUvState,
+    PinUvStateMachine,
 )
 from fido2.webauthn import AttestationObject, AttestedCredentialData, AuthenticatorData
 
@@ -366,3 +371,233 @@ class TestClientPin(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             prot.set_pin("1" * 256)
+
+
+class TestPinUvStateMachine(unittest.TestCase):
+    def make_state(self, clock=None, store=None, **kwargs):
+        clock = clock or (lambda: 1000.0)
+        return PinUvStateMachine(
+            "credential-1",
+            device_id="authenticator-1",
+            store=store or InMemoryPinUvStore(),
+            clock=clock,
+            **kwargs,
+        )
+
+    def test_pin_failures_are_monotonic(self):
+        state = self.make_state(soft_lock_after=1000)
+        for expected in (7, 6, 5):
+            status = state.record_pin_failure()
+            self.assertEqual(status.retries, expected)
+            self.assertEqual(status.state, PinUvState.PIN_INVALID)
+
+        status = state.sync_pin_retries(8)
+        self.assertEqual(status.retries, 5)
+        self.assertEqual(state.status().retries, 5)
+
+    def test_successful_pin_restores_attempts(self):
+        state = self.make_state()
+        state.record_pin_failure()
+        state.record_pin_failure()
+        self.assertEqual(state.status().retries, 6)
+
+        status = state.record_pin_success()
+        self.assertEqual(status.retries, 8)
+        self.assertEqual(status.state, PinUvState.READY)
+
+    def test_uv_failure_does_not_consume_pin_attempts(self):
+        state = self.make_state()
+        status = state.apply_error(
+            CtapError.ERR.PIN_INVALID, operation="uv", uv_retries=2
+        )
+        self.assertEqual(status.retries, 8)
+        self.assertEqual(status.uv_retries, 2)
+        self.assertEqual(status.state, PinUvState.UV_REQUIRED)
+        self.assertFalse(status.pin_retryable)
+
+    def test_lockout_expiry_does_not_restore_retries(self):
+        clock = [1000.0]
+        state = self.make_state(clock=lambda: clock[0], lockout_seconds=60)
+
+        for _ in range(3):
+            state.record_pin_failure()
+        locked = state.status()
+        self.assertEqual(locked.state, PinUvState.PIN_BLOCKED)
+        self.assertEqual(locked.retries, 5)
+        self.assertEqual(locked.retry_after, 60)
+
+        clock[0] += 61
+        expired = state.status()
+        self.assertEqual(expired.retries, 5)
+        self.assertEqual(expired.retry_after, 0)
+        self.assertTrue(expired.retryable)
+
+        after = state.record_pin_failure()
+        self.assertEqual(after.retries, 4)
+
+    def test_hard_lock_is_not_bypassed_by_reported_counts(self):
+        state = self.make_state(soft_lock_after=1000)
+        for _ in range(8):
+            state.record_pin_failure()
+        self.assertEqual(state.status().state, PinUvState.PIN_BLOCKED)
+        self.assertEqual(state.status().retries, 0)
+
+        status = state.sync_pin_retries(8)
+        self.assertEqual(status.retries, 0)
+        self.assertEqual(status.state, PinUvState.PIN_BLOCKED)
+
+        status = state.record_pin_failure()
+        self.assertEqual(status.retries, 0)
+        self.assertEqual(status.state, PinUvState.PIN_BLOCKED)
+
+        status = state.admin_reset()
+        self.assertEqual(status.retries, 8)
+        self.assertEqual(status.state, PinUvState.READY)
+
+    def test_restart_and_reenumeration_do_not_rewind(self):
+        store = InMemoryPinUvStore()
+        state = self.make_state(store=store, soft_lock_after=1000)
+        for _ in range(4):
+            state.record_pin_failure()
+
+        restarted = PinUvStateMachine(
+            "credential-1",
+            device_id="authenticator-1",
+            store=store,
+            clock=lambda: 1000.0,
+            soft_lock_after=1000,
+        )
+        self.assertEqual(restarted.status().retries, 4)
+        self.assertEqual(restarted.sync_pin_retries(8).retries, 4)
+
+        reenumerated = PinUvStateMachine(
+            "credential-1",
+            device_id="authenticator-1",
+            store=store,
+            clock=lambda: 1000.0,
+            soft_lock_after=1000,
+        )
+        self.assertEqual(reenumerated.status().retries, 4)
+
+    def test_clock_rollback_keeps_lockout_and_counters(self):
+        clock = [1000.0]
+        store = InMemoryPinUvStore()
+        state = self.make_state(clock=lambda: clock[0], store=store, lockout_seconds=60)
+        for _ in range(3):
+            state.record_pin_failure()
+
+        clock[0] = 500.0
+        restarted = PinUvStateMachine(
+            "credential-1",
+            device_id="authenticator-1",
+            store=store,
+            clock=lambda: clock[0],
+            lockout_seconds=60,
+        )
+        rolled_back = restarted.status()
+        self.assertEqual(rolled_back.state, PinUvState.PIN_BLOCKED)
+        self.assertEqual(rolled_back.retries, 5)
+        self.assertEqual(rolled_back.retry_after, 60)
+
+        self.assertEqual(restarted.record_pin_failure().retries, 5)
+
+        clock[0] = 1061.0
+        expired = restarted.status()
+        self.assertEqual(expired.state, PinUvState.PIN_INVALID)
+        self.assertEqual(expired.retries, 5)
+
+    def test_concurrent_failures_never_go_below_zero(self):
+        state = self.make_state(max_pin_retries=100, soft_lock_after=1000)
+        threads = []
+        for _ in range(8):
+            thread = threading.Thread(
+                target=lambda: [state.record_pin_failure() for _ in range(10)]
+            )
+            threads.append(thread)
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        status = state.status()
+        self.assertGreaterEqual(status.retries, 0)
+        self.assertLessEqual(status.retries, 100)
+        self.assertEqual(status.retries, 20)
+
+    def test_status_distinguishes_unsupported_and_uv_blocked(self):
+        state = self.make_state()
+        self.assertEqual(
+            state.apply_error(CtapError.ERR.INVALID_COMMAND).state,
+            PinUvState.UNSUPPORTED,
+        )
+
+        state = self.make_state()
+        status = state.apply_error(CtapError.ERR.UV_BLOCKED, operation="uv")
+        self.assertEqual(status.state, PinUvState.UV_BLOCKED)
+        self.assertFalse(status.uv_retryable)
+
+
+class TestCtapErrorMetadata(unittest.TestCase):
+    def test_extended_error_response_carries_retry_and_lockout(self):
+        device = mock.MagicMock()
+        device.call.return_value = b"\0" + _INFO
+        ctap = Ctap2(device)
+
+        device.call.return_value = bytes([CtapError.ERR.PIN_INVALID]) + cbor.encode(
+            {3: 4, 5: 2, 6: 30}
+        )
+        with self.assertRaises(CtapError) as raised:
+            ctap.send_cbor(Ctap2.CMD.CLIENT_PIN, {1: 1})
+
+        error = raised.exception
+        self.assertEqual(error.retries, 4)
+        self.assertEqual(error.uv_retries, 2)
+        self.assertEqual(error.retry_after, 30)
+        self.assertEqual(error.state, PinUvState.PIN_INVALID)
+        self.assertIn("PIN retries remaining: 4", str(error))
+
+
+class TestClientPinStateIntegration(unittest.TestCase):
+    def make_client(self, device_id):
+        ctap = mock.MagicMock()
+        ctap.info.options = {"clientPin": True, "uv": True, "pinUvAuthToken": True}
+        ctap.info.versions = ["FIDO_2_0"]
+        ctap.info.pin_uv_protocols = [1]
+        ctap.info.aaguid = b"\x11" * 16
+        return ClientPin(
+            ctap,
+            PinProtocolV1(),
+            device_id=device_id,
+            store=InMemoryPinUvStore(),
+        )
+
+    def test_bad_pin_consumes_attempt_even_if_device_reports_unchanged(self):
+        client = self.make_client("integration-pin")
+        client.ctap.client_pin.side_effect = CtapError(
+            CtapError.ERR.PIN_INVALID, {3: 8}
+        )
+        with mock.patch.object(client, "_get_shared_secret", return_value=({}, SHARED)):
+            with self.assertRaises(CtapError) as raised:
+                client.get_pin_token("wrong")
+
+        self.assertEqual(raised.exception.retries, 7)
+        self.assertTrue(raised.exception.pin_retryable)
+        self.assertEqual(client.retries, 7)
+
+        client.ctap.client_pin.side_effect = None
+        client.ctap.client_pin.return_value = {2: TOKEN_ENC}
+        with mock.patch.object(client, "_get_shared_secret", return_value=({}, SHARED)):
+            client.get_pin_token("correct")
+        self.assertEqual(client.retries, 8)
+
+    def test_uv_failure_does_not_consume_pin_attempts(self):
+        client = self.make_client("integration-uv")
+        client.ctap.client_pin.side_effect = CtapError(
+            CtapError.ERR.PIN_INVALID, {5: 2}
+        )
+        with mock.patch.object(client, "_get_shared_secret", return_value=({}, SHARED)):
+            with self.assertRaises(CtapError) as raised:
+                client.get_uv_token()
+
+        self.assertFalse(raised.exception.pin_retryable)
+        self.assertEqual(client.retries, 8)
+        self.assertEqual(client.uv_retries, 2)

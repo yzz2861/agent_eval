@@ -42,8 +42,25 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from ..cose import CoseKey
+from ..ctap import CtapError
 from ..utils import bytes2int, hmac_sha256, int2bytes, sha256
 from .base import Ctap2
+from .pin_state import (  # noqa: F401
+    FilePinUvStore,
+    InMemoryPinUvStore,
+    JsonFilePinUvStore,
+    PinRetryError,
+    PinState,
+    PinStateMachine,
+    PinUvError,
+    PinUvState,
+    PinUvStateError,
+    PinUvStateMachine,
+    PinUvStatus,
+    PinUvStore,
+    PinUvTracker,
+    device_identity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -263,7 +280,34 @@ class ClientPin:
         """Checks if pinUvAuthToken is supported."""
         return info.options.get("pinUvAuthToken") is True
 
-    def __init__(self, ctap: Ctap2, protocol: PinProtocol | None = None):
+    def __init__(
+        self,
+        ctap: Ctap2,
+        protocol: PinProtocol | None = None,
+        *,
+        device_id: str | bytes | None = None,
+        state: PinUvStateMachine | None = None,
+        state_machine: PinUvStateMachine | None = None,
+        store: PinUvStore | str | os.PathLike[str] | None = None,
+        lockout_seconds: float = 60.0,
+        soft_lock_after: int = 3,
+        max_pin_retries: int = 8,
+        max_uv_retries: int = 3,
+        enforce_locks: bool = False,
+        **kwargs: Any,
+    ):
+        if store is None:
+            store = kwargs.pop(
+                "state_store",
+                kwargs.pop("retry_store", kwargs.pop("state_path", None)),
+            )
+        if "lockout" in kwargs:
+            lockout_seconds = kwargs.pop("lockout")
+        if "soft_lock" in kwargs:
+            soft_lock_after = kwargs.pop("soft_lock")
+        if kwargs:
+            unknown = ", ".join(sorted(kwargs))
+            raise TypeError(f"Unexpected arguments: {unknown}")
         self.ctap = ctap
         if protocol is None:
             for proto in ClientPin.PROTOCOLS:
@@ -274,6 +318,223 @@ class ClientPin:
                 raise ValueError("No compatible PIN/UV protocols supported!")
         else:
             self.protocol = protocol
+
+        info = getattr(ctap, "info", None)
+        options = getattr(info, "options", {})
+        if not isinstance(options, Mapping):
+            options = {}
+        pin_supported = "clientPin" in options
+        pin_set = bool(options.get("clientPin"))
+        uv_supported = bool(options.get("uv"))
+        if device_id is None:
+            device_id = self._device_identity(info)
+        self._device_id = device_id
+        self._store = store
+        self._max_pin_retries = max_pin_retries
+        self._max_uv_retries = max_uv_retries
+        self._lockout_seconds = lockout_seconds
+        self._soft_lock_after = soft_lock_after
+        self._enforce_locks = enforce_locks
+        self._state_machines: dict[str | None, PinUvStateMachine] = {}
+        initial_state = state or state_machine
+        if initial_state is not None:
+            self._state_machines[None] = initial_state
+            self._pin_state = initial_state
+        else:
+            self._pin_state = self._make_state(
+                None,
+                pin_supported=pin_supported,
+                pin_set=pin_set,
+                uv_supported=uv_supported,
+                lockout_seconds=lockout_seconds,
+                soft_lock_after=soft_lock_after,
+                max_pin_retries=max_pin_retries,
+                max_uv_retries=max_uv_retries,
+                enforce_locks=enforce_locks,
+            )
+
+    @staticmethod
+    def _device_identity(info: Any) -> str:
+        return device_identity(info)
+
+    def _make_state(
+        self,
+        credential_id: str | bytes | None,
+        *,
+        pin_supported: bool | None = None,
+        pin_set: bool | None = None,
+        uv_supported: bool = False,
+        lockout_seconds: float = 60.0,
+        soft_lock_after: int = 3,
+        max_pin_retries: int = 8,
+        max_uv_retries: int = 3,
+        enforce_locks: bool = False,
+    ) -> PinUvStateMachine:
+        return PinUvStateMachine(
+            credential_id,
+            device_id=self._device_id,
+            pin_supported=pin_supported,
+            pin_set=pin_set,
+            uv_supported=uv_supported,
+            protocol_version=self.protocol.VERSION,
+            max_pin_retries=max_pin_retries,
+            max_uv_retries=max_uv_retries,
+            store=self._store,
+            lockout_seconds=lockout_seconds,
+            soft_lock_after=soft_lock_after,
+            enforce_locks=enforce_locks,
+        )
+
+    def _state_for(self, credential_id: str | bytes | None = None) -> PinUvStateMachine:
+        key = credential_id.hex() if isinstance(credential_id, bytes) else credential_id
+        machine = self._state_machines.get(key)
+        if machine is None:
+            info = getattr(self.ctap, "info", None)
+            options = getattr(info, "options", {})
+            if not isinstance(options, Mapping):
+                options = {}
+            machine = self._make_state(
+                credential_id,
+                pin_supported="clientPin" in options,
+                pin_set=bool(options.get("clientPin")),
+                uv_supported=bool(options.get("uv")),
+                lockout_seconds=self._lockout_seconds,
+                soft_lock_after=self._soft_lock_after,
+                max_pin_retries=self._max_pin_retries,
+                max_uv_retries=self._max_uv_retries,
+                enforce_locks=self._enforce_locks,
+            )
+            self._state_machines[key] = machine
+        return machine
+
+    @property
+    def state(self) -> PinUvStatus:
+        """Current PIN/UV state, including remaining attempts and lockout."""
+        return self._pin_state.status()
+
+    @property
+    def pin_state(self) -> PinUvStatus:
+        return self.state
+
+    @property
+    def state_machine(self) -> PinUvStateMachine:
+        return self._pin_state
+
+    @property
+    def pin_uv_state_machine(self) -> PinUvStateMachine:
+        return self._pin_state
+
+    @property
+    def retries(self) -> int:
+        return self._pin_state.retries
+
+    @property
+    def pin_retries(self) -> int:
+        return self._pin_state.retries
+
+    @property
+    def uv_retries(self) -> int:
+        return self._pin_state.uv_retries
+
+    def get_state(self, credential_id: str | bytes | None = None) -> PinUvStatus:
+        return self._state_for(credential_id).status()
+
+    def get_state_machine(
+        self, credential_id: str | bytes | None = None
+    ) -> PinUvStateMachine:
+        return self._state_for(credential_id)
+
+    state_machine_for = get_state_machine
+    pin_uv_state_machine_for = get_state_machine
+
+    def state_for(self, credential_id: str | bytes | None = None) -> PinUvStatus:
+        return self.get_state(credential_id)
+
+    def get_pin_state(self, credential_id: str | bytes | None = None) -> PinUvStatus:
+        return self.get_state(credential_id)
+
+    def get_uv_state(self, credential_id: str | bytes | None = None) -> PinUvStatus:
+        return self.get_state(credential_id)
+
+    def reset_state(
+        self,
+        credential_id: str | bytes | None = None,
+        *,
+        pin: bool = True,
+        uv: bool = True,
+    ) -> PinUvStatus:
+        """Explicitly reset locally tracked PIN/UV attempts."""
+        return self._state_for(credential_id).admin_reset(pin=pin, uv=uv)
+
+    def _record_success(
+        self, operation: str, credential_id: str | bytes | None = None
+    ) -> None:
+        machine = self._state_for(credential_id)
+        self._pin_state = machine
+        if operation == "uv":
+            machine.record_uv_success()
+        else:
+            machine.record_pin_success()
+
+    def _record_error(
+        self,
+        error: CtapError,
+        operation: str,
+        credential_id: str | bytes | None = None,
+    ) -> CtapError:
+        pin_errors = (
+            CtapError.ERR.PIN_INVALID,
+            CtapError.ERR.PIN_AUTH_INVALID,
+            CtapError.ERR.PIN_BLOCKED,
+            CtapError.ERR.PIN_AUTH_BLOCKED,
+        )
+        uv_errors = (
+            CtapError.ERR.UV_INVALID,
+            CtapError.ERR.UV_BLOCKED,
+            CtapError.ERR.PIN_INVALID,
+            CtapError.ERR.PIN_AUTH_INVALID,
+        )
+        if operation == "uv" and error.code in uv_errors and error.uv_retries is None:
+            try:
+                resp = self.ctap.client_pin(
+                    self.protocol.VERSION, ClientPin.CMD.GET_UV_RETRIES
+                )
+                if not isinstance(resp, Mapping):
+                    raise TypeError("Unexpected PIN response")
+                value = resp[ClientPin.RESULT.UV_RETRIES]
+                if not isinstance(value, int) or isinstance(value, bool):
+                    raise TypeError("Unexpected UV retry count")
+                error.uv_retries = value
+                error.retry_after = resp.get(0x06) or error.retry_after
+                error.locked_until = resp.get(0x07) or error.locked_until
+            except Exception:
+                logger.debug("Unable to query UV retries", exc_info=True)
+        elif operation != "uv" and error.code in pin_errors and error.retries is None:
+            try:
+                resp = self.ctap.client_pin(
+                    self.protocol.VERSION, ClientPin.CMD.GET_PIN_RETRIES
+                )
+                if not isinstance(resp, Mapping):
+                    raise TypeError("Unexpected PIN response")
+                value = resp[ClientPin.RESULT.PIN_RETRIES]
+                if not isinstance(value, int) or isinstance(value, bool):
+                    raise TypeError("Unexpected PIN retry count")
+                error.retries = value
+                error.retry_after = resp.get(0x06) or error.retry_after
+                error.locked_until = resp.get(0x07) or error.locked_until
+            except Exception:
+                logger.debug("Unable to query PIN retries", exc_info=True)
+        machine = self._state_for(credential_id)
+        self._pin_state = machine
+        status = machine.apply_ctap_error(error, operation=operation)
+        error.operation = operation
+        error.state = status.state
+        error.retries = status.retries
+        error.uv_retries = status.uv_retries
+        error.retry_after = status.retry_after
+        error.locked_until = status.locked_until
+        error.retryable = status.retryable
+        return error
 
     def _get_shared_secret(self):
         resp = self.ctap.client_pin(
@@ -288,6 +549,7 @@ class ClientPin:
         pin: str,
         permissions: ClientPin.PERMISSION | None = None,
         permissions_rpid: str | None = None,
+        credential_id: str | bytes | None = None,
     ) -> bytes:
         """Get a PIN/UV token from the authenticator using PIN.
 
@@ -298,33 +560,41 @@ class ClientPin:
         """
         if not ClientPin.is_supported(self.ctap.info):
             raise ValueError("Authenticator does not support get_pin_token")
+        if self._pin_state.enforce_locks:
+            self._pin_state.ensure_available()
 
-        key_agreement, shared_secret = self._get_shared_secret()
+        try:
+            key_agreement, shared_secret = self._get_shared_secret()
 
-        pin_hash = sha256(pin.encode())[:16]
-        pin_hash_enc = self.protocol.encrypt(shared_secret, pin_hash)
+            pin_hash = sha256(pin.encode())[:16]
+            pin_hash_enc = self.protocol.encrypt(shared_secret, pin_hash)
 
-        if ClientPin.is_token_supported(self.ctap.info) and permissions is not None:
-            cmd = ClientPin.CMD.GET_TOKEN_USING_PIN
-        else:
-            cmd = ClientPin.CMD.GET_TOKEN_USING_PIN_LEGACY
-            # Ignore permissions if not supported
-            permissions = None
-            permissions_rpid = None
+            if ClientPin.is_token_supported(self.ctap.info) and permissions is not None:
+                cmd = ClientPin.CMD.GET_TOKEN_USING_PIN
+            else:
+                cmd = ClientPin.CMD.GET_TOKEN_USING_PIN_LEGACY
+                # Ignore permissions if not supported
+                permissions = None
+                permissions_rpid = None
 
-        resp = self.ctap.client_pin(
-            self.protocol.VERSION,
-            cmd,
-            key_agreement=key_agreement,
-            pin_hash_enc=pin_hash_enc,
-            permissions=permissions,
-            permissions_rpid=permissions_rpid,
-        )
-        pin_token_enc = resp[ClientPin.RESULT.PIN_UV_TOKEN]
+            resp = self.ctap.client_pin(
+                self.protocol.VERSION,
+                cmd,
+                key_agreement=key_agreement,
+                pin_hash_enc=pin_hash_enc,
+                permissions=permissions,
+                permissions_rpid=permissions_rpid,
+            )
+            pin_token_enc = resp[ClientPin.RESULT.PIN_UV_TOKEN]
+            token = self.protocol.validate_token(
+                self.protocol.decrypt(shared_secret, pin_token_enc)
+            )
+        except CtapError as e:
+            self._record_error(e, "pin", credential_id)
+            raise
+        self._record_success("pin", credential_id)
         logger.debug(f"Got PIN token for permissions: {permissions}")
-        return self.protocol.validate_token(
-            self.protocol.decrypt(shared_secret, pin_token_enc)
-        )
+        return token
 
     def get_uv_token(
         self,
@@ -332,6 +602,7 @@ class ClientPin:
         permissions_rpid: str | None = None,
         event: Event | None = None,
         on_keepalive: Callable[[int], None] | None = None,
+        credential_id: str | bytes | None = None,
     ) -> bytes:
         """Get a PIN/UV token from the authenticator using built-in UV.
 
@@ -346,47 +617,79 @@ class ClientPin:
         """
         if not ClientPin.is_token_supported(self.ctap.info):
             raise ValueError("Authenticator does not support get_uv_token")
+        if self._pin_state.enforce_locks:
+            self._pin_state.ensure_available(uv=True)
 
-        key_agreement, shared_secret = self._get_shared_secret()
+        try:
+            key_agreement, shared_secret = self._get_shared_secret()
 
-        resp = self.ctap.client_pin(
-            self.protocol.VERSION,
-            ClientPin.CMD.GET_TOKEN_USING_UV,
-            key_agreement=key_agreement,
-            permissions=permissions,
-            permissions_rpid=permissions_rpid,
-            event=event,
-            on_keepalive=on_keepalive,
-        )
+            resp = self.ctap.client_pin(
+                self.protocol.VERSION,
+                ClientPin.CMD.GET_TOKEN_USING_UV,
+                key_agreement=key_agreement,
+                permissions=permissions,
+                permissions_rpid=permissions_rpid,
+                event=event,
+                on_keepalive=on_keepalive,
+            )
 
-        pin_token_enc = resp[ClientPin.RESULT.PIN_UV_TOKEN]
+            pin_token_enc = resp[ClientPin.RESULT.PIN_UV_TOKEN]
+            token = self.protocol.validate_token(
+                self.protocol.decrypt(shared_secret, pin_token_enc)
+            )
+        except CtapError as e:
+            self._record_error(e, "uv", credential_id)
+            raise
+        self._record_success("uv", credential_id)
         logger.debug(f"Got UV token for permissions: {permissions}")
-        return self.protocol.validate_token(
-            self.protocol.decrypt(shared_secret, pin_token_enc)
-        )
+        return token
 
     def get_pin_retries(self) -> tuple[int, int | None]:
         """Get the number of PIN retries remaining.
 
         :return: A tuple of the number of PIN attempts remaining until the
         authenticator is locked, and the power cycle state, if available.
+        The locally tracked counter is monotonic: a device report cannot
+        restore attempts that were already consumed.
         """
-        resp = self.ctap.client_pin(
-            self.protocol.VERSION, ClientPin.CMD.GET_PIN_RETRIES
+        try:
+            resp = self.ctap.client_pin(
+                self.protocol.VERSION, ClientPin.CMD.GET_PIN_RETRIES
+            )
+        except CtapError as e:
+            self._record_error(e, "pin")
+            raise
+        device_retries = int(resp[ClientPin.RESULT.PIN_RETRIES])
+        status = self._pin_state.sync_pin_retries(
+            device_retries,
+            retry_after=resp.get(0x06),
+            locked_until=resp.get(0x07),
         )
         return (
-            resp[ClientPin.RESULT.PIN_RETRIES],
+            device_retries if status.retries is None else status.retries,
             resp.get(ClientPin.RESULT.POWER_CYCLE_STATE),
         )
 
     def get_uv_retries(self) -> int:
         """Get the number of UV retries remaining.
 
-        :return: A tuple of the number of UV attempts remaining until the
-        authenticator is locked, and the power cycle state, if available.
+        :return: The number of UV attempts remaining until the authenticator
+        is locked.
         """
-        resp = self.ctap.client_pin(self.protocol.VERSION, ClientPin.CMD.GET_UV_RETRIES)
-        return resp[ClientPin.RESULT.UV_RETRIES]
+        try:
+            resp = self.ctap.client_pin(
+                self.protocol.VERSION, ClientPin.CMD.GET_UV_RETRIES
+            )
+        except CtapError as e:
+            self._record_error(e, "uv")
+            raise
+        device_retries = int(resp[ClientPin.RESULT.UV_RETRIES])
+        status = self._pin_state.sync_uv_retries(
+            device_retries,
+            retry_after=resp.get(0x06),
+            locked_until=resp.get(0x07),
+        )
+        return device_retries if status.uv_retries is None else status.uv_retries
 
     def set_pin(self, pin: str) -> None:
         """Set the PIN of the autenticator.
@@ -399,17 +702,22 @@ class ClientPin:
         if not ClientPin.is_supported(self.ctap.info):
             raise ValueError("Authenticator does not support ClientPin")
 
-        key_agreement, shared_secret = self._get_shared_secret()
+        try:
+            key_agreement, shared_secret = self._get_shared_secret()
 
-        pin_enc = self.protocol.encrypt(shared_secret, _pad_pin(pin))
-        pin_uv_param = self.protocol.authenticate(shared_secret, pin_enc)
-        self.ctap.client_pin(
-            self.protocol.VERSION,
-            ClientPin.CMD.SET_PIN,
-            key_agreement=key_agreement,
-            new_pin_enc=pin_enc,
-            pin_uv_param=pin_uv_param,
-        )
+            pin_enc = self.protocol.encrypt(shared_secret, _pad_pin(pin))
+            pin_uv_param = self.protocol.authenticate(shared_secret, pin_enc)
+            self.ctap.client_pin(
+                self.protocol.VERSION,
+                ClientPin.CMD.SET_PIN,
+                key_agreement=key_agreement,
+                new_pin_enc=pin_enc,
+                pin_uv_param=pin_uv_param,
+            )
+        except CtapError as e:
+            self._record_error(e, "pin")
+            raise
+        self._pin_state.admin_reset(pin=True, uv=False)
         logger.info("PIN has been set")
 
     def change_pin(self, old_pin: str, new_pin: str) -> None:
@@ -424,20 +732,25 @@ class ClientPin:
         if not ClientPin.is_supported(self.ctap.info):
             raise ValueError("Authenticator does not support ClientPin")
 
-        key_agreement, shared_secret = self._get_shared_secret()
+        try:
+            key_agreement, shared_secret = self._get_shared_secret()
 
-        pin_hash = sha256(old_pin.encode())[:16]
-        pin_hash_enc = self.protocol.encrypt(shared_secret, pin_hash)
-        new_pin_enc = self.protocol.encrypt(shared_secret, _pad_pin(new_pin))
-        pin_uv_param = self.protocol.authenticate(
-            shared_secret, new_pin_enc + pin_hash_enc
-        )
-        self.ctap.client_pin(
-            self.protocol.VERSION,
-            ClientPin.CMD.CHANGE_PIN,
-            key_agreement=key_agreement,
-            pin_hash_enc=pin_hash_enc,
-            new_pin_enc=new_pin_enc,
-            pin_uv_param=pin_uv_param,
-        )
+            pin_hash = sha256(old_pin.encode())[:16]
+            pin_hash_enc = self.protocol.encrypt(shared_secret, pin_hash)
+            new_pin_enc = self.protocol.encrypt(shared_secret, _pad_pin(new_pin))
+            pin_uv_param = self.protocol.authenticate(
+                shared_secret, new_pin_enc + pin_hash_enc
+            )
+            self.ctap.client_pin(
+                self.protocol.VERSION,
+                ClientPin.CMD.CHANGE_PIN,
+                key_agreement=key_agreement,
+                pin_hash_enc=pin_hash_enc,
+                new_pin_enc=new_pin_enc,
+                pin_uv_param=pin_uv_param,
+            )
+        except CtapError as e:
+            self._record_error(e, "pin")
+            raise
+        self._record_success("pin")
         logger.info("PIN has been changed")
