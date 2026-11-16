@@ -10,6 +10,7 @@ from .types import FONT as font_matchers
 from .types import IMAGE as image_matchers
 from .types import VIDEO as video_matchers
 from .types import TYPES
+from .registry import registry
 from .utils import get_bytes
 
 
@@ -34,6 +35,33 @@ def match(obj, matchers=TYPES):
             return matcher
 
     return None
+
+
+def match_all(obj, matchers=None):
+    """
+    Matches the given input against every available file type matcher
+    and returns all the matching types, ordered by effective priority.
+
+    More than one result indicates a polyglot file: several matchers
+    accept the same magic bytes.
+
+    Args:
+        obj: path to file, bytes or bytearray.
+        matchers: optional iterable of matchers. Defaults to a stable,
+            thread-safe snapshot of the current registry.
+
+    Returns:
+        List of matching Type instances (possibly empty).
+
+    Raises:
+        TypeError: if obj is not a supported type.
+    """
+    buf = get_bytes(obj)
+
+    if matchers is None:
+        matchers = registry.snapshot()
+
+    return [matcher for matcher in matchers if matcher.match(buf)]
 
 
 def image_match(obj):

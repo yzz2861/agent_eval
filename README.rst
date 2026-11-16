@@ -56,6 +56,65 @@ Simple file type checking
     if __name__ == '__main__':
         main()
 
+Add additional file type matchers
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Custom matchers can be registered at runtime from any thread. The registry
+is thread-safe and supports priorities: a matcher registered with a higher
+priority is evaluated first, so it can override a built-in MIME type or
+extension without patching the library.
+
+.. code-block:: python
+
+    import filetype
+    from filetype.types import Type
+
+
+    class RiskyJpeg(Type):
+        def __init__(self):
+            super(RiskyJpeg, self).__init__(
+                mime='image/x-risk-jpeg', extension='rjpg')
+
+        def match(self, buf):
+            return len(buf) > 2 and buf[0] == 0xFF and \
+                buf[1] == 0xD8 and buf[2] == 0xFF
+
+
+    # Higher priority wins over the built-in image/jpeg matcher
+    filetype.register_type(RiskyJpeg(), priority=10)
+    filetype.guess_mime(buffer)  # 'image/x-risk-jpeg'
+
+    # Remove it again, or scope it to a with block
+    filetype.unregister_type(mime='image/x-risk-jpeg')
+
+    with filetype.registered_type(RiskyJpeg(), priority=10):
+        ...
+
+    # Restore the built-in matchers only
+    filetype.reset_types()
+
+Confidence and polyglot detection
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``guess_info`` returns a ``MatchResult`` describing every matcher that
+accepts the input. When several matchers collide on the same magic bytes
+(a polyglot file), ``polyglot`` is True and the heuristic ``confidence``
+is split across the matches. The legacy ``guess``, ``guess_mime`` and
+``guess_extension`` functions keep their original return values.
+
+.. code-block:: python
+
+    result = filetype.guess_info(buffer)
+    result.mime        # winning MIME type, or None
+    result.extension   # winning extension, or None
+    result.confidence  # 1.0 for a unique match, 1/N for N matches
+    result.polyglot    # True when more than one matcher matched
+    result.matches     # all matching types, by effective priority
+
+    filetype.guess_mime_info(buffer)
+    filetype.guess_extension_info(buffer)
+    filetype.guess_all(buffer)
+
 Supported types
 ---------------
 
