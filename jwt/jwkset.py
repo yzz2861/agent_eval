@@ -15,6 +15,7 @@
 from collections import UserList
 from typing import TYPE_CHECKING
 
+from .exceptions import InvalidJWKSetError
 from .jwk import (
     AbstractJWKBase,
     jwk_from_dict,
@@ -35,15 +36,23 @@ class JWKSet(UserListBase):
         # they have different "kty" (key type) values but are considered to be
         # equivalent alternatives by the application using them.)
 
-        if kid and kty:
+        if kid is not None and kty is not None:
             return [
                 key
                 for key in self.data
                 if key.get_kty() == kty and key.get_kid() == kid
             ]
-        if kid:
-            return [key for key in self.data if key.get_kid() == kid]
-        if kty:
+        if kid is not None:
+            keys = [key for key in self.data if key.get_kid() == kid]
+            key_types = {key.get_kty() for key in keys}
+            if len(key_types) > 1:
+                raise InvalidJWKSetError(
+                    f"Multiple key types match kid {kid!r}: "
+                    f"{', '.join(sorted(key_types))}; specify kty to select a "
+                    "key"
+                )
+            return keys
+        if kty is not None:
             return [key for key in self.data if key.get_kty() == kty]
 
         return self.data.copy()
@@ -55,4 +64,16 @@ class JWKSet(UserListBase):
     @classmethod
     def from_dict(cls, dct):
         keys = [jwk_from_dict(key_dct) for key_dct in dct.get("keys", [])]
+        seen = set()
+        for key in keys:
+            kid = key.get_kid()
+            if kid is None:
+                continue
+            identity = (kid, key.get_kty())
+            if identity in seen:
+                raise InvalidJWKSetError(
+                    f"Duplicate kid {kid!r} for key type "
+                    f"{key.get_kty()!r} in JWK Set"
+                )
+            seen.add(identity)
         return cls(keys)

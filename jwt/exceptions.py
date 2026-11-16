@@ -27,6 +27,10 @@ class UnsupportedKeyTypeError(JWTException):
     pass
 
 
+class InvalidJWKSetError(JWTException, ValueError):
+    pass
+
+
 class InvalidKeyTypeError(JWTException):
     pass
 

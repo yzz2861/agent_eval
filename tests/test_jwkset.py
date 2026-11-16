@@ -15,6 +15,7 @@
 import json
 from unittest import TestCase
 
+from jwt.exceptions import InvalidJWKSetError
 from jwt.jwk import jwk_from_dict
 from jwt.jwkset import JWKSet
 
@@ -78,3 +79,47 @@ class JWKSetTest(TestCase):
         inst = JWKSet.from_dict({"keys": [self.oct_json, self.rsa_pub_json]})
         self.assertEqual(inst[0].to_dict(public_only=True), self.oct_json)
         self.assertEqual(inst[1].to_dict(public_only=True), self.rsa_pub_json)
+
+    def test_filter_keys_with_missing_kid(self):
+        self.assertEqual(self.inst.filter_keys(kid="unknown kid"), [])
+
+        no_kid_json = self.oct_json.copy()
+        del no_kid_json["kid"]
+        inst = JWKSet([jwk_from_dict(no_kid_json)])
+        self.assertEqual(
+            inst.filter_keys(kid="HMAC key used in JWS A.1 example"), []
+        )
+
+    def test_filter_keys_with_kid_shared_by_multiple_kty(self):
+        kid = "shared kid"
+        oct_json = dict(self.oct_json, kid=kid)
+        rsa_json = dict(self.rsa_pub_json, kid=kid)
+        inst = JWKSet.from_dict({"keys": [oct_json, rsa_json]})
+
+        with self.assertRaisesRegex(InvalidJWKSetError, "specify kty"):
+            inst.filter_keys(kid=kid)
+
+        self.assertEqual(
+            [
+                key.to_dict(public_only=True)
+                for key in inst.filter_keys(kid=kid, kty="oct")
+            ],
+            [oct_json],
+        )
+        self.assertEqual(
+            [
+                key.to_dict(public_only=True)
+                for key in inst.filter_keys(kid=kid, kty="RSA")
+            ],
+            [rsa_json],
+        )
+
+    def test_from_dict_rejects_duplicate_kid_for_same_kty(self):
+        with self.assertRaisesRegex(InvalidJWKSetError, "Duplicate kid"):
+            JWKSet.from_dict({"keys": [self.oct_json, dict(self.oct_json)]})
+
+    def test_from_dict_allows_keys_without_kid(self):
+        inst = JWKSet.from_dict(
+            {"keys": [self.rsa_pub_json, dict(self.rsa_pub_json)]}
+        )
+        self.assertEqual(len(inst), 2)
