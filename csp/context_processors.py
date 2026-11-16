@@ -7,6 +7,8 @@ if TYPE_CHECKING:
 
 
 def nonce(request: HttpRequest) -> dict[Literal["CSP_NONCE"], str]:
-    nonce = getattr(request, "csp_nonce", "")
+    # Evaluate the lazy object so the nonce is generated exactly once per
+    # request and ends up in the CSP header written by the middleware.
+    csp_nonce = str(getattr(request, "csp_nonce", ""))
 
-    return {"CSP_NONCE": nonce}
+    return {"CSP_NONCE": csp_nonce}

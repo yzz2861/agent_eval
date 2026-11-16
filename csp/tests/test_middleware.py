@@ -1,3 +1,5 @@
+import base64
+
 from django.http import (
     HttpResponse,
     HttpResponseNotFound,
@@ -9,13 +11,17 @@ from django.test.utils import override_settings
 
 import pytest
 
-from csp.constants import HEADER, HEADER_REPORT_ONLY, SELF
+from csp.constants import HEADER, HEADER_REPORT_ONLY, NONCE, SELF
 from csp.exceptions import CSPNonceError
-from csp.middleware import CheckableLazyObject, CSPMiddleware
+from csp.middleware import DEFAULT_NONCE_LENGTH, MIN_NONCE_LENGTH, CheckableLazyObject, CSPMiddleware
 from csp.tests.utils import response
 
 mw = CSPMiddleware(response())
 rf = RequestFactory()
+
+
+def _decoded_nonce_length(nonce: str) -> int:
+    return len(base64.b64decode(nonce))
 
 
 def test_checkable_lazy_object() -> None:
@@ -267,6 +273,85 @@ def test_nonce_regenerated_on_new_request() -> None:
     mw.process_response(request2, response2)
     assert nonce1 not in response2[HEADER]
     assert nonce2 not in response1[HEADER]
+
+
+def test_nonce_has_at_least_128_bits_of_entropy() -> None:
+    request = rf.get("/")
+    mw.process_request(request)
+    nonce = str(getattr(request, "csp_nonce"))
+    # 16 random bytes == 128 bits of entropy before base64 encoding.
+    assert _decoded_nonce_length(nonce) >= MIN_NONCE_LENGTH
+    assert _decoded_nonce_length(nonce) == DEFAULT_NONCE_LENGTH
+    assert len(nonce) >= MIN_NONCE_LENGTH
+
+
+def test_nonce_length_is_configurable() -> None:
+    request = rf.get("/")
+    with override_settings(
+        CONTENT_SECURITY_POLICY={"NONCE_LENGTH": 32, "DIRECTIVES": {"default-src": [SELF, NONCE]}},
+    ):
+        mw.process_request(request)
+        nonce = str(getattr(request, "csp_nonce"))
+        response = HttpResponse()
+        mw.process_response(request, response)
+
+    assert _decoded_nonce_length(nonce) == 32
+    assert response[HEADER] == f"default-src 'self' 'nonce-{nonce}'"
+
+
+@pytest.mark.parametrize("bad_length", [0, 8, 15, -1, "16", 16.0, True])
+def test_nonce_length_below_128_bits_raises(bad_length: object) -> None:
+    request = rf.get("/")
+    with override_settings(CONTENT_SECURITY_POLICY={"NONCE_LENGTH": bad_length}):
+        mw.process_request(request)
+        with pytest.raises(CSPNonceError):
+            str(getattr(request, "csp_nonce"))
+
+
+def test_nonce_reused_across_responses_raises() -> None:
+    # Simulate a cached page: the nonce generated for the first request ends
+    # up being written into a second response instead of a fresh nonce.
+    first_request = rf.get("/")
+    mw.process_request(first_request)
+    nonce = str(getattr(first_request, "csp_nonce"))
+    first_response = HttpResponse()
+    mw.process_response(first_request, first_response)
+    assert f"'nonce-{nonce}'" in first_response[HEADER]
+
+    cached_request = rf.get("/")
+    mw.process_request(cached_request)
+    # A cached response replays the previously consumed nonce.
+    setattr(cached_request, "_csp_nonce", nonce)
+    cached_response = HttpResponse()
+    with pytest.raises(CSPNonceError):
+        mw.process_response(cached_request, cached_response)
+
+
+def test_single_request_uses_single_nonce_in_both_headers() -> None:
+    request = rf.get("/")
+    mw.process_request(request)
+    nonce = str(getattr(request, "csp_nonce"))
+    response = HttpResponse()
+
+    with override_settings(
+        CONTENT_SECURITY_POLICY={"DIRECTIVES": {"default-src": [SELF, NONCE]}},
+        CONTENT_SECURITY_POLICY_REPORT_ONLY={"DIRECTIVES": {"default-src": [SELF, NONCE]}},
+    ):
+        mw.process_response(request, response)
+
+    assert response[HEADER] == f"default-src 'self' 'nonce-{nonce}'"
+    assert response[HEADER_REPORT_ONLY] == f"default-src 'self' 'nonce-{nonce}'"
+    assert f"'nonce-{nonce}'" in response[HEADER]
+    assert f"'nonce-{nonce}'" in response[HEADER_REPORT_ONLY]
+
+
+def test_unused_nonce_is_not_tracked_as_consumed() -> None:
+    # A nonce that was never written into a header must not be flagged later.
+    request = rf.get("/")
+    mw.process_request(request)
+    response = HttpResponse()
+    mw.process_response(request, response)
+    assert "nonce-" not in response[HEADER]
 
 
 def test_no_nonce_access_after_middleware_is_attribute_error() -> None:

@@ -17,7 +17,14 @@ from csp.exceptions import CSPNonceError
 from csp.utils import DIRECTIVES_T, build_policy
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from django.http import HttpRequest, HttpResponseBase
+
+# A nonce must carry at least 128 bits of entropy. The length is expressed in
+# random bytes before base64 encoding.
+MIN_NONCE_LENGTH = 16
+DEFAULT_NONCE_LENGTH = 16
 
 
 @dataclass
@@ -51,14 +58,51 @@ class CSPMiddleware(MiddlewareMixin):
     Can be customised by subclassing and extending the get_policy_parts method.
     """
 
+    def __init__(self, get_response: Callable[[HttpRequest], HttpResponseBase] | None = None) -> None:
+        super().__init__(get_response)
+        # Nonces that have already been written into a response header. A nonce
+        # must be used by exactly one response, so a repeat here means the same
+        # nonce is being served again (e.g. via a cached page).
+        self._consumed_nonces: set[str] = set()
+
     def _make_nonce(self, request: HttpRequest) -> str:
         # Ensure that any subsequent calls to request.csp_nonce return the same value
         stored_nonce = getattr(request, "_csp_nonce", None)
         if isinstance(stored_nonce, str):
             return stored_nonce
-        nonce = base64.b64encode(os.urandom(16)).decode("ascii")
+        nonce_length = self._get_nonce_length()
+        nonce = base64.b64encode(os.urandom(nonce_length)).decode("ascii")
         setattr(request, "_csp_nonce", nonce)
         return nonce
+
+    @staticmethod
+    def _get_nonce_length() -> int:
+        policy = getattr(settings, "CONTENT_SECURITY_POLICY", None) or {}
+        nonce_length = policy.get("NONCE_LENGTH", DEFAULT_NONCE_LENGTH)
+        if not isinstance(nonce_length, int) or isinstance(nonce_length, bool) or nonce_length < MIN_NONCE_LENGTH:
+            raise CSPNonceError(
+                f"CONTENT_SECURITY_POLICY['NONCE_LENGTH'] must be an integer of at least "
+                f"{MIN_NONCE_LENGTH} bytes (128 bits of entropy), got {nonce_length!r}."
+            )
+        return nonce_length
+
+    def _check_nonce_not_reused(self, request: HttpRequest, response: HttpResponseBase) -> None:
+        # Fail if the nonce generated for this request is being written into a
+        # second response, which would allow the same nonce to be replayed.
+        nonce = getattr(request, "_csp_nonce", None)
+        if not nonce:
+            return
+        nonce_marker = f"'nonce-{nonce}'"
+        written = any(nonce_marker in value for value in response.headers.values() if isinstance(value, str))
+        if not written:
+            return
+        if nonce in self._consumed_nonces:
+            raise CSPNonceError(
+                f"The CSP nonce {nonce!r} has already been written to a response. "
+                "A nonce must only be used by a single request/response; make sure cached "
+                "pages do not embed a nonce generated for a previous request."
+            )
+        self._consumed_nonces.add(nonce)
 
     @staticmethod
     def _csp_nonce_post_response() -> None:
@@ -108,6 +152,8 @@ class CSPMiddleware(MiddlewareMixin):
         # this has security implications.
         if getattr(request, "_csp_nonce", None) is None:
             setattr(request, "csp_nonce", CheckableLazyObject(self._csp_nonce_post_response))
+
+        self._check_nonce_not_reused(request=request, response=response)
 
         return response
 
