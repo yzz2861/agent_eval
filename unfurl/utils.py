@@ -1,0 +1,322 @@
+#!/usr/bin/env python3
+
+# Copyright 2021 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import base64
+import binascii
+import ipaddress
+import re
+import textwrap
+import zlib
+from datetime import datetime, timezone
+from typing import Union
+
+# A complete <a ...>...</a>, treated as one unbreakable unit when wrapping hover text.
+anchor_re = re.compile(r'<a\b[^>]*>.*?</a>', re.IGNORECASE | re.DOTALL)
+
+# Anchors are matched first so a link is held whole, link text and all; anything else
+# that looks like a tag is held on its own.
+markup_re = re.compile(rf'{anchor_re.pattern}|<[^>]+>', re.IGNORECASE | re.DOTALL)
+
+# A line break in hover text, in any of the forms an author might write.
+line_break_re = re.compile(r'<br\s*/?>', re.IGNORECASE)
+
+# Markup, and citation links, which a plain-text output can't render. A citation is a link
+# whose whole text is bracketed ("[ref]"); it goes entirely, since with the link gone the
+# brackets are all that's left. Brackets anywhere else are content and stay: a hover can
+# quote a value that contains them, such as a defanged URL.
+plain_text_strip_re = re.compile(r'<a\b[^>]*>\s*\[[^\]]*\]\s*</a>|<.*?>', re.IGNORECASE | re.DOTALL)
+long_int_re = re.compile(r'\d{8,}')
+urlsafe_b64_re = re.compile(r'[A-Za-z0-9_\-]{8,}={0,2}')
+standard_b64_re = re.compile(r'[A-Za-z0-9+/]{8,}={0,2}')
+base32_re = re.compile(r'[A-Z2-7]{8,}={0,6}')
+# Bitcoin/IPFS base58 alphabet: alphanumerics minus 0 O I l (no padding).
+# Unlike base32/64, base58 has no length structure -- nearly any alphanumeric
+# string decodes -- so a higher minimum length is needed to keep false positives
+# (measured) on par with the other base decoders.
+base58_re = re.compile(r'[1-9A-HJ-NP-Za-km-z]{16,}')
+hex_re = re.compile(r'([A-F0-9]{2})+', flags=re.IGNORECASE)
+digits_re = re.compile(r'\d+')
+letters_re = re.compile(r'[A-Z]+', flags=re.IGNORECASE)
+digits_and_slash_re = re.compile(r'[0-9/]+')
+letters_and_slash_re = re.compile(r'[A-Z/]+', flags=re.IGNORECASE)
+float_re = re.compile(r'\d+\.\d+')
+mac_addr_re = re.compile(r'(?P<mac_addr>[0-9A-Fa-f]{12}|([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2})')
+cisco_7_re = re.compile(r'\d{2}[A-F0-9]{4,}', re.IGNORECASE)
+octal_ip_re = re.compile(r'(0[0-7]{3})\.(0[0-7]{3})\.(0[0-7]{3})\.(0[0-7]{3})')
+
+
+# Printable ASCII bytes (visible characters plus tab, newline, and carriage
+# return). Used to decide whether decoded base32/base64 bytes look like a real
+# text payload rather than control-character garbage from a wrong guess.
+PRINTABLE_ASCII_BYTES = frozenset(range(0x20, 0x7f)) | {0x09, 0x0a, 0x0d}
+
+
+def is_printable_ascii(data: bytes) -> bool:
+    """Return True if data is non-empty and every byte is printable ASCII.
+
+    A strict ASCII decode still admits control bytes (0x00-0x1f), which is how
+    a wrong base32-vs-base64 guess sneaks through as "ASCII" garbage. Requiring
+    printable output is a much stronger signal that the decode is real.
+    """
+    return bool(data) and all(byte in PRINTABLE_ASCII_BYTES for byte in data)
+
+
+def try_base32_decode(value):
+    """Return base32-decoded bytes for value, or None if it isn't decodable base32.
+
+    Pure decode mechanics (alphabet, length, and padding handling) shared by the
+    base32 parser and the binary-consuming parsers (compression, protobuf) so they
+    can attempt a base32 decode of a source string without duplicating the logic.
+    """
+    if not isinstance(value, str) or not base32_re.fullmatch(value):
+        return None
+
+    unpadded = value.rstrip('=')
+
+    # Base32 encodes 5 bytes into 8 characters, so a valid (unpadded) length mod 8
+    # is one of 0, 2, 4, 5, or 7. Anything else can't be base32.
+    remainder = len(unpadded) % 8
+    if remainder in (1, 3, 6):
+        return None
+
+    padded = unpadded + ('=' * ((8 - remainder) % 8))
+    try:
+        return base64.b32decode(padded)
+    except (binascii.Error, ValueError):
+        return None
+
+
+urlsafe_b64_charset_re = re.compile(r'[A-Za-z0-9_\-]+')
+standard_b64_charset_re = re.compile(r'[A-Za-z0-9+/]+')
+
+
+def _try_b64_decode(value, charset_re, decoder, min_length):
+    if not isinstance(value, str):
+        return None
+
+    unpadded = value.rstrip('=')
+
+    # min_length of 1 (the floor) still rejects empty/all-padding values.
+    if len(unpadded) < max(min_length, 1):
+        return None
+
+    if not charset_re.fullmatch(unpadded):
+        return None
+
+    # Base64 encodes 3 bytes into 4 characters, so a valid (unpadded) length
+    # mod 4 is never 1.
+    if len(unpadded) % 4 == 1:
+        return None
+
+    padded = unpadded + ('=' * (-len(unpadded) % 4))
+    try:
+        return decoder(padded)
+    except (binascii.Error, ValueError):
+        return None
+
+
+def try_urlsafe_b64_decode(value, min_length=1):
+    """Return base64url-decoded bytes for value, or None if it isn't decodable.
+
+    Pure decode mechanics (alphabet, length, and padding handling) shared by any
+    parser that needs to attempt a base64 decode, mirroring try_base32_decode.
+
+    min_length is the minimum length of the encoded string (excluding padding).
+    Callers auto-detecting base64 in arbitrary values should pass a higher gate
+    (the base64 parser uses 8) to limit false positives; callers whose
+    surrounding structure already identifies the value as base64 (e.g. a segment
+    of an itsdangerous token) can leave the default.
+    """
+    return _try_b64_decode(value, urlsafe_b64_charset_re, base64.urlsafe_b64decode, min_length)
+
+
+def try_standard_b64_decode(value, min_length=1):
+    """Return base64-decoded bytes for value (standard alphabet, using + and /),
+    or None if it isn't decodable. See try_urlsafe_b64_decode for min_length."""
+    return _try_b64_decode(value, standard_b64_charset_re, base64.b64decode, min_length)
+
+
+def parse_ip_address(potential_ip):
+    if re.fullmatch(digits_re, potential_ip):
+        potential_ip = int(potential_ip)
+    elif re.fullmatch(r'0x[A-F0-9]{8}', potential_ip, flags=re.IGNORECASE):
+        potential_ip = int(potential_ip, base=16)
+    elif re.fullmatch(octal_ip_re, potential_ip):
+        m = re.fullmatch(octal_ip_re, potential_ip)
+        potential_ip = f"{int(m.group(1), 8)}.{int(m.group(2), 8)}.{int(m.group(3), 8)}.{int(m.group(4), 8)}"
+    try:
+        parsed_ip = ipaddress.ip_address(potential_ip)
+    except ValueError:
+        parsed_ip = None
+
+    return parsed_ip
+
+
+hard_break = '<br>'
+
+# Lines are wrapped at this width, but a run only a little longer is left alone: one
+# slightly long line reads better than a long line followed by a short orphan.
+wrap_width = 60
+wrap_slack = 10
+
+
+def _wrap_hover_segment(segment: str) -> str:
+    """Wrap one run of hover text, which contains no hard line breaks of its own."""
+
+    if not segment.strip():
+        return segment
+
+    # Hold markup aside as single unbreakable tokens, so a line break can never land
+    # inside a tag and split an href in half. The placeholder is shorter than the markup
+    # it stands in for, which is what we want: lines are measured by roughly what the
+    # reader sees rather than by the length of the HTML. Anchors are held whole, link
+    # text included, so a citation is never broken across lines.
+    held = []
+
+    def hold_markup(match):
+        held.append(match.group(0))
+        return f'\x00{len(held) - 1}\x00'
+
+    stashed = markup_re.sub(hold_markup, segment)
+
+    if len(stashed) < wrap_width + wrap_slack:
+        return segment
+
+    # break_on_hyphens would split a word like "full-size" across two lines.
+    wrapped = hard_break.join(
+        textwrap.wrap(stashed, width=wrap_width, break_on_hyphens=False))
+
+    for index, markup in enumerate(held):
+        wrapped = wrapped.replace(f'\x00{index}\x00', markup)
+    return wrapped
+
+
+def wrap_hover_text(hover_text: Union[str, None]) -> Union[str, None]:
+    """Wrap hover text for display, keeping any line breaks the author wrote.
+
+    A <br> in the source is a decision about where a line should end, so wrapping happens
+    between those breaks and never across them: each run is wrapped on its own and the
+    hard breaks stay put. Width is measured against what a reader actually sees, since
+    markup is held aside first -- a hover carrying a long href or several <b> tags is not
+    wrapped short because of characters that never render.
+    """
+
+    if not hover_text:
+        return None
+
+    if not isinstance(hover_text, str):
+        return None
+
+    return hard_break.join(
+        _wrap_hover_segment(segment) for segment in hover_text.split(hard_break))
+
+
+def strip_hover_markup(hover_text: Union[str, None]) -> Union[str, None]:
+    """Render hover text as plain text, for outputs that cannot show markup.
+
+    A <br> stands where a space would otherwise be, whether the author wrote it or
+    wrap_hover_text inserted it while wrapping, so it becomes a space. Deleting it
+    outright instead runs the words on either side together ("the tokenwas created").
+    Every other tag renders as nothing and is simply removed.
+    """
+
+    if not hover_text:
+        return hover_text
+
+    spaced = line_break_re.sub(' ', str(hover_text))
+    stripped = plain_text_strip_re.sub('', spaced)
+
+    # A run of breaks, or a tag sitting next to one, can leave several spaces behind.
+    return re.sub(r'\s{2,}', ' ', stripped).strip()
+
+
+def create_epoch_seconds_timestamp(
+        iso_timestamp: str | None = None, days_ahead: int | None = None,
+        offset: int | float = 0) -> int:
+    """
+    Create a timestamp (number of seconds since Unix epoch) from either an ISO 8601-formatted timestamp string or for
+    some number of days in the future. Optionally, an offset (in seconds) can be provided that will be subtracted
+    from the return timestamp.
+
+    :param iso_timestamp: An ISO 8601-formatted timestamp string (ex: 2015-02-01T00:00:00).
+        If it has no timezone, it is interpreted as UTC.
+    :param days_ahead: Number of days ahead the timestamp should be created for (ex: 365)
+    :param offset: The offset in seconds from the Unix epoch
+    :return: An integer timestamp (in seconds)
+    """
+
+    # Neither are set; make the timestamp now.
+    if not iso_timestamp and not days_ahead:
+        timestamp = int(datetime.now().timestamp())
+    # timestamp is a string; parse it to epoch seconds
+    elif iso_timestamp:
+        parsed = datetime.fromisoformat(iso_timestamp)
+        if parsed.tzinfo is None:
+            # Interpret naive timestamps as UTC; .timestamp() would otherwise
+            # assume local time, shifting the result by the machine's UTC offset.
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        timestamp = int(parsed.timestamp())
+    # Make the timestamp now + days_ahead
+    elif not iso_timestamp and days_ahead:
+        timestamp = int(datetime.now().timestamp()) + (days_ahead * 86400)
+    else:
+        raise ValueError('Invalid options passed')
+
+    return int(timestamp - offset)
+
+
+def extract_bits(identifier: int, start: int, end: int) -> int:
+    """
+    Extract a subset of bits from an integer based on specified start and
+    end positions. This operation shifts the specified bit range to the
+    rightmost (least-significant) position and applies a mask to select
+    the desired bits.
+
+    :param identifier: The integer value from which bits will be extracted.
+    :param start: The starting index of the bit range (inclusive).
+    :param end: The ending index of the bit range (exclusive).
+    :return: Extracted bits as an integer.
+    """
+
+    shifted = identifier >> start
+    mask = (1 << (end - start)) - 1
+    return shifted & mask
+
+
+def set_bits(value: int, offset: int, max_size=None) -> int:
+    return int(value << offset)
+
+
+# Maximum decompressed size (1MB) to prevent zip bomb attacks
+MAX_DECOMPRESSED_SIZE = 1_000_000
+
+
+def safe_decompress(data: bytes, max_size: int = MAX_DECOMPRESSED_SIZE) -> bytes:
+    """Decompress zlib or gzip data with a size limit to prevent zip bomb attacks.
+
+    Uses wbits=47 (32 + MAX_WBITS) to auto-detect zlib or gzip format.
+
+    :param data: Compressed bytes to decompress
+    :param max_size: Maximum allowed decompressed size in bytes
+    :return: Decompressed bytes
+    :raises ValueError: If decompressed data exceeds max_size
+    :raises zlib.error: If decompression fails
+    """
+    decompressor = zlib.decompressobj(wbits=32 + zlib.MAX_WBITS)
+    result = decompressor.decompress(data, max_size)
+    if decompressor.unconsumed_tail:
+        raise ValueError("Decompressed data exceeds size limit")
+    return result

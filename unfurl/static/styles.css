@@ -1,0 +1,560 @@
+/*Copyright 2019 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+     https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.*/
+
+.collapsible {
+  background-image: linear-gradient(to right, #C1D1AA , #5E8439);
+  color: black;
+  cursor: pointer;
+  padding: 18px;
+  border: none;
+  text-align: left;
+  outline: none;
+  font-size: 18px;
+}
+
+.spacer {
+    height:12px;
+}
+
+.collapsible.active, .collapsible:hover {
+  background-color: #555;
+}
+
+.collapsible:after {
+  content: '\002B';
+  color: white;
+  font-weight: bold;
+  float: right;
+  margin-left: 5px;
+}
+
+.collapsible.active:after {
+  content: "\2212";
+}
+
+.content {
+  padding: 0 18px;
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.2s ease-out;
+  background-color: #f1f1f1;
+}
+
+body {
+    padding: 0px;
+    margin: 0px;
+    background-color: #e0e0e0;
+    font-family: 'Open Sans', Helvetica, Arial, sans-serif;
+    font-size: 10pt;
+}
+
+h1 {
+    padding: 0px;
+    margin: 0px;
+    font-family: 'Open Sans Light', Helvetica, Arial, sans-serif;
+    font-weight: normal;
+}
+
+.top-bar {
+    color: #ffffff;
+    background-color: #444444;
+    width: 100%;
+    border-top: 2px solid #6fa30d;
+    border-bottom: 0px solid #e0e0e0;
+    border-left: 0px;
+    border-right: 0px;
+    display: inline-block;
+    padding: 4px;
+    margin: 0px;
+}
+
+.top-bar-table {
+    width: 100%;
+    padding-left: 10px;
+    padding-right: 20px;
+}
+
+.logo-text {
+    display: inline-block;
+    vertical-align: middle;
+    font-weight: normal;
+    font-size: smaller;
+    color: white;
+}
+
+.logo-version {
+    display: inline-block;
+    vertical-align: middle;
+    font-weight: normal;
+    font-size: smaller;
+    color: #8a8a8a;
+}
+
+.logo-bars {
+    display: inline-block;
+    vertical-align: middle;
+    color: white;
+}
+
+.social-logo {
+    width: 16px;
+    vertical-align: middle;
+}
+
+.main-body-wrapper {
+    text-align: center;
+}
+
+.main-body {
+    border-left: 1px solid #444444;
+    border-right: 1px solid #444444;
+    border-bottom: 1px solid #444444;
+    width: 95%;
+    display: inline-block;
+    background-color: #ffffff;
+    margin: 0px;
+    padding: 0px;
+}
+
+.h-logo-cell {
+    padding-right: 10px;
+    vertical-align: top;
+}
+
+.top-name {
+    text-align: left;
+    vertical-align: bottom;
+    border-bottom: 3px solid #444444;
+}
+
+.top-tagline {
+    text-align: right;
+    vertical-align: top;
+}
+
+.vis-tooltip {
+    text-align: left;
+    vertical-align: top;
+}
+
+.inputs-container {
+    width: 778px;
+    padding: 0px;
+    margin: 0px;
+    border: 0px;
+    box-shadow: 5px 5px 10px #8a8a8a;
+
+}
+
+.plugin-container {
+    width: 348px;
+    padding: 0px;
+    margin: 0px;
+    border: 0px;
+    box-shadow: 5px 5px 10px #8a8a8a;
+
+}
+
+.results-artifacts-container {
+    width: 348px;
+    padding: 0px;
+    margin: 0px;
+    border: 0px;
+    box-shadow: 5px 5px 10px #8a8a8a;
+
+}
+
+.results-plugins-container {
+    width: 778px;
+    padding: 0px;
+    margin: 0px;
+    border: 0px;
+    box-shadow: 5px 5px 10px #8a8a8a;
+
+}
+
+.results-options-container {
+    box-shadow: 5px 5px 10px #8a8a8a;
+
+}
+
+.layout-table {
+    padding: 15px;
+}
+
+.inputs-td {
+    padding: 15px;
+}
+
+.results-td {
+    padding: 15px;
+}
+
+.results-row {
+    line-height: 1.2;
+    padding-right: 50px;
+}
+
+.header-box {
+    color: #ffffff;
+    background-color: #444444;
+    /*width: 98%;*/
+    border-top: 2px solid #81d742;
+    border-bottom: 1px solid #444444;
+    border-left: 1px solid #444444;
+    border-right: 1px solid #444444;
+    display: block;
+    padding-top: 4px;
+    padding-bottom: 2px;
+    padding-left: 2px;
+    padding-right: 2px;
+    margin: 0px;
+    font-weight: bold;
+    text-align: center;
+}
+
+.selection-box {
+    color: #444444;
+    background-color: #ffffff;
+    /*width: 98%;*/
+    border-top: 0px solid #81d742;
+    border-bottom: 1px solid #444444;
+    border-left: 1px solid #444444;
+    border-right: 1px solid #444444;
+    display: block;
+    padding: 2px;
+    margin: 0px;
+}
+
+.input-description {
+    padding: 15px;
+}
+
+.version-text {
+    color: #808080;
+    font-size: smaller;
+}
+
+.input-option {
+    text-align: left;
+    padding-left: 19px;
+    white-space: nowrap;
+}
+
+.input-path {
+    color: #888888;
+}
+
+.h {
+    font-weight: bold;
+    color: #81d742;
+}
+
+/*.footer-text, a:visited, a:link {*/
+.footer-text {
+    color: #444444;
+    font-size: smaller;
+}
+
+.shadow-box {
+    box-shadow: 5px 5px 10px #8a8a8a;
+}
+
+.button {
+    /*background-color: #555555;*/
+    color: #444444;
+    box-shadow: 5px 5px 5px #8a8a8a;
+    /*font-size: medium;*/
+    height: 30px;
+    /*border-top: 2px solid #81d742;*/
+    border: 1px solid #444444;
+
+}
+
+.button:hover {
+    background-color: #cccccc;
+    color: #444444;
+    box-shadow: 5px 5px 5px #8a8a8a;
+    /*font-size: medium;*/
+    height: 30px;
+    border: 1px solid #444444;
+    /*border-top: 2px #81d742;*/
+}
+
+.button:active {
+    background-color: #81d742;
+    color: #FFFFFF;
+    box-shadow: 5px 5px 5px #8a8a8a;
+    /*font-size: medium;*/
+    height: 30px;
+    border: 1px solid #444444;
+    /*border-top: 2px #81d742;*/
+}
+
+.viewBtn {
+    background-color: #e0e0e0;
+    color: #444444;
+    border: 1px solid #444444;
+    padding: 6px 16px;
+    cursor: pointer;
+    font-size: 10pt;
+    font-family: 'Open Sans', Helvetica, Arial, sans-serif;
+}
+
+.viewBtn.active {
+    background-color: #444444;
+    color: #ffffff;
+    border-top: 2px solid #6fa30d;
+}
+
+.viewBtn:hover:not(.active) {
+    background-color: #cccccc;
+}
+
+#unfurl_tree {
+    background-color: #fafafa;
+    border: 1px solid #ddd;
+    color: #333;
+}
+
+/* ── D3 visual tree ──────────────────────────────────────────── */
+#unfurl_d3_wrapper {
+    min-height: 640px;
+    max-height: 80vh;
+    background-color: #fafafa;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    overflow: auto;
+}
+
+#unfurl_d3_wrapper svg {
+    display: block;
+}
+
+#unfurl_d3_wrapper .node-label {
+    font-size: 13px;
+    font-family: 'Open Sans', Helvetica, Arial, sans-serif;
+    dominant-baseline: middle;
+    user-select: none;
+}
+
+#unfurl_d3_wrapper .node-dot {
+    transition: r 0.1s;
+}
+
+#unfurl_d3_wrapper .node-group:hover .node-dot {
+    r: 6;
+}
+
+#unfurl_d3_wrapper .zoom-hint {
+    position: absolute;
+    bottom: 10px;
+    right: 12px;
+    font-size: 0.7rem;
+    color: #888888;
+    pointer-events: none;
+    opacity: 0.6;
+}
+
+/* ── D3 tree tooltip ─────────────────────────────────────────── */
+.unfurl-tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: #ffffff;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 0.8rem;
+    line-height: 1.4;
+    max-width: 280px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    opacity: 0;
+    transition: opacity 0.1s;
+    z-index: 10;
+    text-align: left;
+    color: #333333;
+}
+
+.unfurl-tooltip.visible {
+    opacity: 1;
+}
+
+.unfurl-tooltip .tip-label {
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+.unfurl-tooltip .tip-edge {
+    display: block;
+    color: #6fa30d;
+    font-size: 0.75rem;
+    margin-top: 3px;
+}
+
+.unfurl-tooltip .tip-title {
+    display: block;
+    color: #888888;
+    font-size: 0.75rem;
+    margin-top: 3px;
+    overflow-wrap: anywhere;
+}
+
+#unfurl_graph {
+   width: 100%;
+   height: 72%;
+   border: 0px;
+   text-align: center;
+   display: block;
+   overflow: auto;
+ }
+
+#optionsBox {
+    margin: 5px;
+}
+
+#unfurlOptions {
+    display: none;
+    margin: auto;
+    width: 550px;
+    margin-bottom: 10px;
+}
+
+vis.vis-configuration-wrapper {
+    text-align: center;
+    width: 550px;
+}
+
+#exampleBox {
+    text-align: left;
+    padding: 30px;
+    width: 650px;
+    display: inline-block;
+}
+
+#exampleBox a {
+    text-decoration: none;
+    color: #3d3d3d;
+    font-size: 1.2em;
+}
+
+#exampleBox a:hover {
+    text-decoration: none;
+    color: #73A322;
+    font-size: 1.2em;
+}
+
+#exampleBox li {
+    margin: 18px;
+}
+
+/* ── Dark mode toggle button ─────────────────────────────────── */
+.theme-toggle {
+    background: transparent;
+    border: 1px solid #6fa30d;
+    color: #ffffff;
+    border-radius: 4px;
+    padding: 4px 8px;
+    cursor: pointer;
+    line-height: 0;
+    vertical-align: middle;
+}
+
+.theme-toggle:hover {
+    background: rgba(255, 255, 255, 0.12);
+}
+
+.theme-toggle svg {
+    vertical-align: middle;
+}
+
+/* Show the moon (switch-to-dark) in light mode, the sun (switch-to-light) in dark mode.
+   Set display on the icon classes (not `.theme-toggle svg`) so these rules aren't
+   overridden by that more-specific selector. */
+.icon-moon { display: inline-block; }
+.icon-sun { display: none; }
+html.dark .icon-moon { display: none; }
+html.dark .icon-sun { display: inline-block; }
+
+/* Logo swap: dark-background wordmark only appears in dark mode */
+.logo-dark { display: none; }
+html.dark .logo-light { display: none; }
+html.dark .logo-dark { display: inline-block; }
+
+/* ── Dark mode theme overrides ───────────────────────────────────
+   Purely additive: light mode (the default) is left untouched. The
+   D3 tree paints its own SVG colors in JS — see getColors() and the
+   theme MutationObserver in graph.html, which re-render on toggle. */
+html.dark body {
+    background-color: #1a1a1a;
+    color: #e0e0e0;
+}
+
+html.dark .main-body {
+    background-color: #0d0d0d;
+    color: #e0e0e0;
+    border-color: #333333;
+}
+
+html.dark .content {
+    background-color: #1e1e1e;
+}
+
+html.dark #exampleBox a {
+    color: #b0b0b0;
+}
+
+html.dark #exampleBox a:hover {
+    color: #81d742;
+}
+
+html.dark #unfurl_tree {
+    background-color: #141414;
+    border-color: #333333;
+    color: #dddddd;
+}
+
+html.dark #unfurl_d3_wrapper {
+    background-color: #141414;
+    border-color: #333333;
+}
+
+html.dark .viewBtn {
+    background-color: #2a2a2a;
+    color: #dddddd;
+    border-color: #555555;
+}
+
+html.dark .viewBtn:hover:not(.active) {
+    background-color: #3a3a3a;
+}
+
+html.dark .viewBtn.active {
+    background-color: #81d742;
+    color: #ffffff;
+    border-color: #81d742;
+}
+
+html.dark .unfurl-tooltip {
+    background: #1e1e1e;
+    border-color: #333333;
+    color: #dddddd;
+}
+
+html.dark .unfurl-tooltip .tip-edge {
+    color: #81d742;
+}
+
+html.dark .unfurl-tooltip .tip-title {
+    color: #999999;
+}
