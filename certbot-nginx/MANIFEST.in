@@ -1,0 +1,5 @@
+include LICENSE.txt
+include README.rst
+include src/certbot_nginx/py.typed
+global-exclude __pycache__
+global-exclude *.py[cod]

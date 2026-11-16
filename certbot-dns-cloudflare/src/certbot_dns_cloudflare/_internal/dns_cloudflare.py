@@ -1,0 +1,333 @@
+"""DNS Authenticator for Cloudflare."""
+import logging
+import warnings
+from typing import Any
+from typing import Callable
+from typing import Literal
+from typing import Optional
+from typing import TypedDict
+
+# cloudflare 4.x includes a pydantic v1 compatibility shim that emits a
+# UserWarning on Python 3.14+.  Suppress it here so that this internal-detail
+# warning is not shown to users during plugin discovery.  In our test suite it
+# is filtered out via pytest.ini so it does not affect filterwarnings=error.
+with warnings.catch_warnings():
+    warnings.filterwarnings('ignore', message='Core Pydantic V1 functionality',
+                            category=UserWarning)
+    import cloudflare
+    from cloudflare.types.zones import Zone
+
+from certbot import errors
+from certbot.plugins import dns_common
+from certbot.plugins.dns_common import CredentialsConfiguration
+
+logger = logging.getLogger(__name__)
+
+ACCOUNT_URL = 'https://dash.cloudflare.com/?to=/:account/profile/api-tokens'
+
+# Cloudflare API error codes (https://developers.cloudflare.com/api/)
+ERR_RECORD_EXISTS = 81057  # "Record already exists."
+ERR_IDENTICAL_RECORD_EXISTS = 81058  # "A record with identical settings already exists."
+
+
+class Authenticator(dns_common.DNSAuthenticator):
+    """DNS Authenticator for Cloudflare
+
+    This Authenticator uses the Cloudflare API to fulfill a dns-01 challenge.
+    """
+
+    description = ('Obtain certificates using a DNS TXT record (if you are using Cloudflare for '
+                   'DNS).')
+    ttl = 120
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.credentials: Optional[CredentialsConfiguration] = None
+
+    @classmethod
+    def add_parser_arguments(cls, add: Callable[..., None],
+                             default_propagation_seconds: int = 10) -> None:
+        super().add_parser_arguments(add, default_propagation_seconds)
+        add('credentials', help='Cloudflare credentials INI file.')
+
+    def more_info(self) -> str:
+        return 'This plugin configures a DNS TXT record to respond to a dns-01 challenge using ' + \
+               'the Cloudflare API.'
+
+    def _validate_credentials(self, credentials: CredentialsConfiguration) -> None:
+        token = credentials.conf('api-token')
+        email = credentials.conf('email')
+        key = credentials.conf('api-key')
+        if token:
+            if email or key:
+                raise errors.PluginError('{}: dns_cloudflare_email and dns_cloudflare_api_key are '
+                                         'not needed when using an API Token'
+                                         .format(credentials.confobj.filename))
+        elif email or key:
+            if not email:
+                raise errors.PluginError('{}: dns_cloudflare_email is required when using a Global '
+                                         'API Key. (should be email address associated with '
+                                         'Cloudflare account)'.format(credentials.confobj.filename))
+            if not key:
+                raise errors.PluginError('{}: dns_cloudflare_api_key is required when using a '
+                                         'Global API Key. (see {})'
+                                         .format(credentials.confobj.filename, ACCOUNT_URL))
+        else:
+            raise errors.PluginError('{}: Either dns_cloudflare_api_token (recommended), or '
+                                     'dns_cloudflare_email and dns_cloudflare_api_key are required.'
+                                     ' (see {})'.format(credentials.confobj.filename, ACCOUNT_URL))
+
+    def _setup_credentials(self) -> None:
+        self.credentials = self._configure_credentials(
+            'credentials',
+            'Cloudflare credentials INI file',
+            None,
+            self._validate_credentials
+        )
+
+    def _perform(self, domain: str, validation_name: str, validation: str) -> None:
+        self._get_cloudflare_client().add_txt_record(domain, validation_name, validation, self.ttl)
+
+    def _cleanup(self, domain: str, validation_name: str, validation: str) -> None:
+        self._get_cloudflare_client().del_txt_record(domain, validation_name, validation)
+
+    def _get_cloudflare_client(self) -> "_CloudflareClient":
+        if not self.credentials:  # pragma: no cover
+            raise errors.Error("Plugin has not been prepared.")
+        if self.credentials.conf('api-token'):
+            return _CloudflareClient(api_token = self.credentials.conf('api-token'))
+        return _CloudflareClient(email = self.credentials.conf('email'),
+                                 api_key = self.credentials.conf('api-key'))
+
+
+class _CloudflareClient:
+    """
+    Encapsulates all communication with the Cloudflare API.
+    """
+
+    def __init__(self, email: Optional[str] = None, api_key: Optional[str] = None,
+                 api_token: Optional[str] = None) -> None:
+        if email:
+            # If an email was specified, we're using an email/key combination and not a token.
+            # We use named arguments here to match the cloudflare 4.x SDK's explicit parameter
+            # names (api_email and api_key), which correspond to the Global API Key credentials
+            # found in the Cloudflare dashboard under My Profile > API Tokens.
+            self.cf = cloudflare.Cloudflare(api_email=email, api_key=api_key)
+        else:
+            # If no email was specified, we're using just an API token. We use the named argument
+            # for clarity. API Tokens are the recommended authentication method as they support
+            # fine-grained permissions scoped to specific zones and operations.
+            self.cf = cloudflare.Cloudflare(api_token=api_token)
+
+    def add_txt_record(self, domain: str, record_name: str, record_content: str,
+                       record_ttl: int) -> None:
+        """
+        Add a TXT record using the supplied information.
+
+        If a TXT record with the same name and content already exists (e.g. from a
+        previous failed attempt or a reused authorization), the existing record is
+        left in place and this method returns successfully.
+
+        :param str domain: The domain to use to look up the Cloudflare zone.
+        :param str record_name: The record name (typically beginning with '_acme-challenge.').
+        :param str record_content: The record content (typically the challenge validation).
+        :param int record_ttl: The record TTL (number of seconds that the record may be cached).
+        :raises certbot.errors.PluginError: if an error occurs communicating with the Cloudflare API
+        """
+
+        zone_id = self._find_zone_id(domain)
+
+        data: _RecordData = {
+            'type': 'TXT',
+            'name': record_name,
+            'content': record_content,
+            'ttl': record_ttl,
+        }
+
+        try:
+            logger.debug('Attempting to add record to zone %s: %s', zone_id, data)
+            self.cf.dns.records.create(zone_id=zone_id, **data)
+        except cloudflare.APIStatusError as e:
+            code = _cf_error_code(e)
+
+            # Errors 81057 ("Record already exists") and 81058 ("A record with
+            # identical settings already exists") mean an identical TXT record
+            # (same name and content) is already present. This can happen when:
+            # - a previous certbot run terminated uncleanly after creating the
+            #   record but before cleanup, and the ACME server replays the same
+            #   pending authorization (leftover record, same validation token);
+            # - the same challenge record is requested twice in one run, e.g.
+            #   for an apex + wildcard certificate where both validations map
+            #   to the same TXT name and content;
+            # - a concurrent certbot invocation created the record first.
+            # In all cases the desired record exists, so treat it as success.
+            # Matches the codes tolerated by lexicon's cloudflare provider.
+            if code in (ERR_RECORD_EXISTS, ERR_IDENTICAL_RECORD_EXISTS):
+                logger.debug('TXT record already exists (error %s); '
+                             'treating as success.', code)
+                return
+
+            hint = None
+
+            if code == 1009:
+                hint = 'Does your API token have "Zone:DNS:Edit" permissions?'
+
+            logger.error('Encountered Cloudflare API error adding TXT record: %s', e)
+            raise errors.PluginError('Error communicating with the Cloudflare API: {0}{1}'
+                                     .format(e, ' ({0})'.format(hint) if hint else ''))
+        except cloudflare.APIConnectionError as e:
+            logger.error('Network error talking to the Cloudflare API: %s', e)
+            raise errors.PluginError('Network error communicating with the Cloudflare API '
+                                     'while adding a TXT record: {0}'.format(e))
+
+        record_id = self._find_txt_record_id(zone_id, record_name, record_content)
+        logger.debug('Successfully added TXT record with record_id: %s', record_id)
+
+    def del_txt_record(self, domain: str, record_name: str, record_content: str) -> None:
+        """
+        Delete a TXT record using the supplied information.
+
+        Note that both the record's name and content are used to ensure that similar records
+        created concurrently (e.g., due to concurrent invocations of this plugin) are not deleted.
+
+        Failures are logged, but not raised.
+
+        :param str domain: The domain to use to look up the Cloudflare zone.
+        :param str record_name: The record name (typically beginning with '_acme-challenge.').
+        :param str record_content: The record content (typically the challenge validation).
+        """
+
+        try:
+            zone_id = self._find_zone_id(domain)
+        except errors.PluginError as e:
+            logger.debug('Encountered error finding zone_id during deletion: %s', e)
+            logger.debug('Zone not found; no cleanup needed.')
+            return
+
+        record_id = self._find_txt_record_id(zone_id, record_name, record_content)
+        if record_id:
+            try:
+                self.cf.dns.records.delete(dns_record_id=record_id, zone_id=zone_id)
+                logger.debug('Successfully deleted TXT record.')
+            except cloudflare.APIStatusError as e:
+                logger.warning('Encountered Cloudflare API error deleting TXT record: %s', e)
+            except cloudflare.APIConnectionError as e:
+                logger.warning('Network error deleting TXT record from Cloudflare: %s', e)
+        else:
+            logger.debug('TXT record not found; no cleanup needed.')
+
+    def _find_zone_id(self, domain: str) -> str:
+        """
+        Find the zone_id for a given domain.
+
+        :param str domain: The domain for which to find the zone_id.
+        :returns: The zone_id for the first matching zone that has a non-empty
+            identifier. A zone with an empty/invalid id is treated as if no zone
+            were found, so this method never returns an empty string.
+        :rtype: str
+        :raises certbot.errors.PluginError: if no zone_id is found.
+        """
+
+        zone_name_guesses = dns_common.base_domain_name_guesses(domain)
+        zone: Zone | None = None
+        code = msg = None
+
+        for zone_name in zone_name_guesses:
+            try:
+                zone = next(iter(self.cf.zones.list(name=zone_name, per_page=1)), None)
+            except cloudflare.APIStatusError as e:
+                code = _cf_error_code(e)
+                msg = str(e)
+                hint = None
+
+                if code == 6003:
+                    hint = ('Did you copy your entire API token/key? '
+                            'See {} to manage your API tokens.'.format(ACCOUNT_URL))
+                elif code == 9103:
+                    hint = 'Did you enter the correct email address and Global key?'
+                elif code == 9109:
+                    hint = 'Did you enter a valid Cloudflare Token?'
+
+                if hint:
+                    raise errors.PluginError('Error determining zone_id: {0} {1}. Please confirm '
+                                  'that you have supplied valid Cloudflare API credentials. ({2})'
+                                                                         .format(code, msg, hint))
+                else:
+                    logger.debug('Unrecognised Cloudflare API error while finding zone_id: %s. '
+                                 'Continuing with next zone guess...', e)
+            except cloudflare.APIConnectionError as e:
+                raise errors.PluginError('Network error contacting the Cloudflare API while '
+                                         'looking up the zone for {0}: {1}'.format(domain, e))
+
+            if zone:
+                zone_id = zone.id
+                if zone_id:
+                    logger.debug('Found zone_id of %s for %s using name %s',
+                                 zone_id, domain, zone_name)
+                    return zone_id
+                break  # Found a zone but it has no usable ID; stop searching
+
+        if msg is not None:
+            if 'com.cloudflare.api.account.zone.list' in msg:
+                raise errors.PluginError('Unable to determine zone_id for {0} using zone names: '
+                                         '{1}. Please confirm that the domain name has been '
+                                         'entered correctly and your Cloudflare Token has access '
+                                         'to the domain.'.format(domain, zone_name_guesses))
+            else:
+                raise errors.PluginError('Unable to determine zone_id for {0} using zone names: '
+                                         '{1}. The error from Cloudflare was: {2} {3}.'
+                                         .format(domain, zone_name_guesses, code, msg))
+        else:
+            raise errors.PluginError('Unable to determine zone_id for {0} using zone names: '
+                                     '{1}. Please confirm that the domain name has been '
+                                     'entered correctly and is already associated with the '
+                                     'supplied Cloudflare account.'
+                                     .format(domain, zone_name_guesses))
+
+    def _find_txt_record_id(self, zone_id: str, record_name: str,
+                            record_content: str) -> Optional[str]:
+        """
+        Find the record_id for a TXT record with the given name and content.
+
+        :param str zone_id: The zone_id which contains the record.
+        :param str record_name: The record name (typically beginning with '_acme-challenge.').
+        :param str record_content: The record content (typically the challenge validation).
+        :returns: The record_id, if found.
+        :rtype: str
+        """
+
+        try:
+            records = list(self.cf.dns.records.list(
+                zone_id=zone_id, type='TXT', name={'exact': record_name},
+                content={'exact': record_content}, per_page=1))
+        except cloudflare.APIStatusError as e:
+            logger.debug('Encountered Cloudflare API error getting TXT record_id: %s', e)
+            records = []
+        except cloudflare.APIConnectionError as e:
+            logger.debug('Network error getting TXT record_id from Cloudflare: %s', e)
+            records = []
+
+        if records:
+            # Cleanup is returning the system to the state we found it. If, for some reason,
+            # there are multiple matching records, we only delete one because we only added one.
+            return records[0].id
+        logger.debug('Unable to find TXT record.')
+        return None
+
+
+class _RecordData(TypedDict):
+    """Offers type hints for dictionaries of Cloudflare API parameters."""
+
+    type: Literal['TXT']
+    name: str
+    content: str
+    ttl: int
+
+
+def _cf_error_code(e: cloudflare.APIStatusError) -> int | None:
+    """Extract the first Cloudflare error code from an API error response."""
+    try:
+        body = e.response.json()
+        return int(body['errors'][0]['code'])
+    except (ValueError, KeyError, IndexError, TypeError):  # pragma: no cover
+        return None
