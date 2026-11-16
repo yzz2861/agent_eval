@@ -136,3 +136,49 @@ class CVSS4RHMalformedError(CVSS4Error):
     """
 
     pass
+
+
+class CVSSParserError(CVSSError):
+    """
+    General exception for ambiguous or unsupported CVSS vectors found in text.
+    """
+
+    pass
+
+
+class CVSSPrefixConfusionError(CVSSParserError):
+    """
+    Exception for a CVSS vector candidate whose version prefix and metric set do
+    not belong to the same CVSS version, for example a 'CVSS:4.0' prefix combined
+    with CVSS3 metrics. Such a candidate is never scored with another version.
+    """
+
+    pass
+
+
+class CVSSUnknownPrefixError(CVSSParserError):
+    """
+    Exception for a CVSS vector candidate using a 'CVSS:x.y' version prefix whose
+    version is not supported by this library.
+    """
+
+    pass
+
+
+class CVSSVersionMismatchError(CVSSParserError):
+    """
+    Exception for a CVSS vector candidate whose detected version does not match
+    the target version explicitly requested by the caller. The parser never
+    silently downgrades or upgrades such a vector.
+    """
+
+    pass
+
+
+class CVSSMultipleVectorsError(CVSSParserError):
+    """
+    Exception for text containing more than one distinct CVSS vector candidate
+    when the caller asked for a single vector.
+    """
+
+    pass

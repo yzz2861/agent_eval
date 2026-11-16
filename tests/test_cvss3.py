@@ -14,6 +14,10 @@ from cvss.exceptions import (
     CVSS3MandatoryError,
     CVSS3RHMalformedError,
     CVSS3RHScoreDoesNotMatch,
+    CVSSMultipleVectorsError,
+    CVSSPrefixConfusionError,
+    CVSSUnknownPrefixError,
+    CVSSVersionMismatchError,
 )
 
 WD = path.dirname(path.abspath(sys.argv[0]))  # Manage to run script anywhere in the path
@@ -415,6 +419,107 @@ class TestCVSS3(unittest.TestCase):
         e = [CVSS3(v)]
         i = "Title: {0}\nThis is an overview of {0} problem.\nLinks: {0}".format(v)
         self.assertEqual(parser.parse_cvss_from_text(i), e)
+
+    def test_parse_from_text_empty_text(self):
+        # Empty and None-like text must return an empty list, not raise.
+        self.assertEqual(parser.parse_cvss_from_text(""), [])
+        self.assertEqual(parser.parse_cvss_from_text(None), [])
+        self.assertEqual(parser.parse_cvss_from_text("no vectors here"), [])
+
+    def test_parse_from_text_prefix_confusion(self):
+        # A CVSS4.0 prefix combined with a CVSS3 metric set is ambiguous and
+        # must never be silently scored with the 3.1 metric table.
+        v3_metrics = "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+        confused_v4 = "CVSS:4.0/" + v3_metrics
+        self.assertRaises(
+            CVSSPrefixConfusionError, parser.parse_cvss_from_text, confused_v4
+        )
+        self.assertRaises(
+            CVSSPrefixConfusionError, parser.parse_cvss_vector, confused_v4
+        )
+
+        # The reverse confusion: CVSS3 prefix with CVSS4 metrics.
+        v4_metrics = (
+            "AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:N"
+        )
+        confused_v3 = "CVSS:3.1/" + v4_metrics
+        self.assertRaises(
+            CVSSPrefixConfusionError, parser.parse_cvss_from_text, confused_v3
+        )
+
+        # A valid CVSS4 vector embedded in text is still accepted.
+        valid_v4 = "CVSS:4.0/" + v4_metrics
+        self.assertEqual(len(parser.parse_cvss_from_text("see " + valid_v4)), 1)
+
+    def test_parse_from_text_unknown_prefix(self):
+        # An explicitly versioned prefix the library does not support.
+        unknown = "CVSS:5.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+        self.assertRaises(CVSSUnknownPrefixError, parser.parse_cvss_from_text, unknown)
+        self.assertRaises(CVSSUnknownPrefixError, parser.parse_cvss_vector, unknown)
+
+        unknown_text = "blah CVSS:9.9/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H blah"
+        self.assertRaises(CVSSUnknownPrefixError, parser.parse_cvss_from_text, unknown_text)
+
+    def test_parse_from_text_target_version_no_downgrade(self):
+        v3 = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+        v4 = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:N"
+
+        # Matching target version is accepted.
+        result = parser.parse_cvss_from_text(v3, target_version=3)
+        self.assertEqual(result, [CVSS3(v3)])
+        result = parser.parse_cvss_from_text(v4, target_version="4")
+        self.assertEqual(len(result), 1)
+
+        # Mismatching target version must raise instead of silently downgrading.
+        self.assertRaises(
+            CVSSVersionMismatchError,
+            parser.parse_cvss_from_text,
+            v4,
+            3,
+        )
+        self.assertRaises(
+            CVSSVersionMismatchError,
+            parser.parse_cvss_vector,
+            v3,
+            4,
+        )
+
+        # Unknown target versions are rejected up front.
+        self.assertRaises(ValueError, parser.parse_cvss_from_text, v3, 5)
+
+    def test_parse_from_text_multiple_vectors_target_version(self):
+        v1 = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+        v2 = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N"
+
+        # Without a target version multiple distinct vectors are still returned
+        # in first-seen order.
+        result = parser.parse_cvss_from_text(v1 + " " + v2)
+        self.assertEqual([CVSS3(v1), CVSS3(v2)], result)
+
+        # Repeated identical vectors stay deduplicated to a single result.
+        self.assertEqual(
+            parser.parse_cvss_from_text("{0} {0}".format(v1), target_version=3),
+            [CVSS3(v1)],
+        )
+
+        # Asking for a single target version while two distinct vectors exist is
+        # reported rather than silently picking one.
+        self.assertRaises(
+            CVSSMultipleVectorsError,
+            parser.parse_cvss_from_text,
+            v1 + " " + v2,
+            3,
+        )
+
+    def test_parse_cvss_vector_single(self):
+        v3 = "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+        v2 = "AV:N/AC:L/Au:N/C:C/I:C/A:C"
+        self.assertEqual(parser.parse_cvss_vector(v3), CVSS3(v3))
+        self.assertEqual(parser.parse_cvss_vector(v2, target_version=2).vector, v2)
+
+        # Plain malformed single vectors raise the underlying CVSS error.
+        self.assertRaises(Exception, parser.parse_cvss_vector, "CVSS:3.0/AV:N")
+        self.assertRaises(Exception, parser.parse_cvss_vector, "")
 
     def test_json_ordering(self):
         vectors_to_schema = {
