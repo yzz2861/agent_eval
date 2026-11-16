@@ -21,6 +21,7 @@ __all__ = ['SeaSurf']
 import calendar
 import hashlib
 import random
+import time
 
 from datetime import datetime, timedelta
 import urllib.parse as urlparse
@@ -107,8 +108,18 @@ class SeaSurf(object):
     .. admonition:: Excluding Views From Validation
 
         For views that use methods which may be validated but for which you
-        wish to not run validation on you may make use of the :class:`exempt`
+    wish to not run validation on you may make use of the :class:`exempt`
         decorator to indicate that they should not be checked.
+
+    .. admonition:: Token Rotation
+
+        By default a new CSRF token is generated after every successful
+        validation and the previous token is only accepted for a short
+        grace period, limiting the window in which a leaked token can be
+        replayed. This can be tuned or disabled with the
+        ``CSRF_TOKEN_ROTATION`` and ``CSRF_TOKEN_ROTATION_GRACE`` config
+        values. Reading tokens from JSON bodies or the CSRF header can be
+        toggled with ``CSRF_CHECK_JSON`` and ``CSRF_CHECK_HEADER``.
     '''
 
     def __init__(self, app=None):
@@ -151,6 +162,16 @@ class SeaSurf(object):
         self._check_referer = app.config.get('CSRF_CHECK_REFERER', True)
         self._type = app.config.get('SEASURF_INCLUDE_OR_EXEMPT_VIEWS',
                                     'exempt')
+        self._csrf_check_json = app.config.get('CSRF_CHECK_JSON', True)
+        self._csrf_check_header = app.config.get('CSRF_CHECK_HEADER', True)
+        self._csrf_token_rotation = app.config.get('CSRF_TOKEN_ROTATION',
+                                                   True)
+        rotation_grace = app.config.get('CSRF_TOKEN_ROTATION_GRACE',
+                                        timedelta(seconds=30))
+        if not isinstance(rotation_grace, timedelta):
+            rotation_grace = timedelta(seconds=rotation_grace)
+        self._csrf_rotation_grace = rotation_grace
+        self._csrf_previous_name = '{0}_previous'.format(self._csrf_name)
 
         return self
 
@@ -322,7 +343,7 @@ class SeaSurf(object):
                 raise Forbidden(description=description)
 
         request_csrf_token = request.form.get(self._csrf_name, '')
-        if not request_csrf_token:
+        if not request_csrf_token and self._csrf_check_json:
             # Check to see if the data is being sent as JSON
             try:
                 if hasattr(request, 'is_json') and request.is_json \
@@ -333,16 +354,72 @@ class SeaSurf(object):
             except (BadRequest, AttributeError):
                 pass
 
-        if not request_csrf_token:
+        if not request_csrf_token and self._csrf_check_header:
             # As per the Django middleware, this makes AJAX easier and
             # PUT and DELETE possible.
             request_csrf_token = request.headers.get(self._csrf_header_name, '')
 
-        if not self._safe_str_cmp(request_csrf_token, server_csrf_token):
-            error = (REASON_BAD_TOKEN, request.path)
-            error = u'Forbidden ({0}): {1}'.format(*error)
-            current_app.logger.warning(error)
-            raise Forbidden(description=REASON_BAD_TOKEN)
+        if self._safe_str_cmp(request_csrf_token, server_csrf_token):
+            # The presented token matches the current token: rotate it so
+            # that a leaked token cannot be replayed indefinitely.
+            self._rotate_token()
+            return
+
+        if self._is_previous_token_valid(request_csrf_token):
+            # The presented token was just rotated out but is still within
+            # the grace window, e.g. a concurrent in-flight request.
+            return
+
+        error = (REASON_BAD_TOKEN, request.path)
+        error = u'Forbidden ({0}): {1}'.format(*error)
+        current_app.logger.warning(error)
+        raise Forbidden(description=REASON_BAD_TOKEN)
+
+    def _rotate_token(self):
+        '''
+        Rotates the CSRF token after a successful validation: a new token
+        becomes the current token and the previous one is kept for a short
+        grace period so concurrent in-flight requests do not fail.
+        '''
+        if not self._csrf_token_rotation:
+            return
+
+        previous_token = session.get(self._csrf_name, None)
+        new_token = self._generate_token()
+
+        session[self._csrf_name] = new_token
+        if previous_token is not None and \
+                self._csrf_rotation_grace.total_seconds() > 0:
+            expires = time.time() + self._csrf_rotation_grace.total_seconds()
+            session[self._csrf_previous_name] = [previous_token, expires]
+        else:
+            session.pop(self._csrf_previous_name, None)
+
+        g.seasurf_csrf_token = new_token
+
+    def _is_previous_token_valid(self, token):
+        '''
+        Determine whether the given token is the most recently rotated-out
+        token and its grace window has not yet expired.
+
+        :param token: The token presented by the request.
+        '''
+        if not self._csrf_token_rotation or not token:
+            return False
+
+        previous = session.get(self._csrf_previous_name, None)
+        if not previous:
+            return False
+
+        try:
+            previous_token, expires = previous
+        except (TypeError, ValueError):
+            return False
+
+        if time.time() > float(expires):
+            return False
+
+        return self._safe_str_cmp(token, previous_token)
 
     def generate_new_token(self):
         '''

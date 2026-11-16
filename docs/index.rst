@@ -85,6 +85,25 @@ be added to the Flask app's config:
      - Enable checking the `Referer` header.
      - True
 
+   * - `CSRF_CHECK_JSON`
+     - Enable reading the CSRF token from a JSON request body.
+     - True
+
+   * - `CSRF_CHECK_HEADER`
+     - Enable reading the CSRF token from the `CSRF_HEADER_NAME` header.
+     - True
+
+   * - `CSRF_TOKEN_ROTATION`
+     - Rotate the CSRF token after every successful validation so a leaked
+       token cannot be replayed indefinitely.
+     - True
+
+   * - `CSRF_TOKEN_ROTATION_GRACE`
+     - How long the previous token remains valid after rotation, to allow
+       concurrent in-flight requests. A `timedelta` or a number of seconds.
+       Set to `timedelta(0)` to invalidate rotated tokens immediately.
+     - `timedelta(seconds=30)`
+
    * - `CSRF_DISABLE`
      - Disables CSRF protection globally.
      - `False` unless `app.config['TESTING']` is set to `True`

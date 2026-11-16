@@ -1,5 +1,10 @@
 from __future__ import with_statement
 
+import threading
+import time
+
+from datetime import timedelta
+
 import mock
 import unittest
 
@@ -817,6 +822,285 @@ class SeaSurfTestCaseGenerateNewToken(BaseTestCase):
                           'CSRF cookie should have been set to the new token')
 
 
+class SeaSurfTestCaseTokenRotation(BaseTestCase):
+    def setUp(self):
+        app = Flask(__name__)
+        app.debug = True
+        app.secret_key = '1234'
+        self.app = app
+
+        csrf = SeaSurf()
+        csrf._csrf_disable = False
+        self.csrf = csrf
+
+        # Initialize CSRF protection.
+        self.csrf.init_app(app)
+
+        @app.route('/foo', methods=['GET'])
+        def foo():
+            return 'bar'
+
+        @app.route('/bar', methods=['POST'])
+        def bar():
+            return 'foo'
+
+    def _get_token(self, client):
+        client.get('/foo')
+        return self.csrf._get_token()
+
+    def test_token_rotates_after_successful_validation(self):
+        with self.app.test_client() as client:
+            token = self._get_token(client)
+
+            rv = client.post('/bar', data={'_csrf_token': token})
+            self.assertEqual(rv.status_code, 200, rv)
+
+            new_token = self.csrf._get_token()
+            self.assertNotEqual(token, new_token)
+            self.assertIn(new_token,
+                          rv.headers.get('Set-Cookie', ''),
+                          'CSRF cookie should have been set to the new token')
+
+            with client.session_transaction() as sess:
+                self.assertEqual(sess[self.csrf._csrf_name], new_token)
+                previous = sess[self.csrf._csrf_previous_name]
+                self.assertEqual(previous[0], token)
+                self.assertTrue(previous[1] > time.time())
+
+    def test_previous_token_accepted_within_grace_window(self):
+        """A concurrent in-flight request carrying the just-rotated token
+        should still validate while the grace window is open."""
+        with self.app.test_client() as client:
+            token = self._get_token(client)
+
+            rv = client.post('/bar', data={'_csrf_token': token})
+            self.assertEqual(rv.status_code, 200, rv)
+
+            rv = client.post('/bar', data={'_csrf_token': token})
+            self.assertEqual(rv.status_code, 200, rv)
+
+    def test_replay_rejected_after_grace_window_expires(self):
+        with self.app.test_client() as client:
+            token = self._get_token(client)
+
+            rv = client.post('/bar', data={'_csrf_token': token})
+            self.assertEqual(rv.status_code, 200, rv)
+
+            # Simulate the grace window expiring before the replay.
+            with client.session_transaction() as sess:
+                sess[self.csrf._csrf_previous_name] = [token, time.time() - 1]
+
+            rv = client.post('/bar', data={'_csrf_token': token})
+            self.assertEqual(rv.status_code, 403, rv)
+
+    def test_concurrent_requests_with_current_token(self):
+        """Concurrent requests all presenting the current token should all
+        succeed and each trigger a rotation."""
+        with self.app.test_client() as client:
+            token = self._get_token(client)
+            session_cookie = client.get_cookie('session')
+
+        results, errors = [], []
+
+        def worker():
+            try:
+                with self.app.test_client() as c:
+                    c.set_cookie(key='session',
+                                 value=session_cookie.value,
+                                 domain='localhost')
+                    rv = c.post('/bar', data={'_csrf_token': token})
+                    results.append(rv.status_code)
+            except Exception as exc:  # pragma: no cover
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(5)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(sorted(results), [200] * 5)
+
+    def test_concurrent_requests_with_previous_token_in_grace(self):
+        """Concurrent requests replaying the rotated-out token within the
+        grace window should all succeed."""
+        with self.app.test_client() as client:
+            token = self._get_token(client)
+            rv = client.post('/bar', data={'_csrf_token': token})
+            self.assertEqual(rv.status_code, 200, rv)
+            session_cookie = client.get_cookie('session')
+
+        results, errors = [], []
+
+        def worker():
+            try:
+                with self.app.test_client() as c:
+                    c.set_cookie(key='session',
+                                 value=session_cookie.value,
+                                 domain='localhost')
+                    rv = c.post('/bar', data={'_csrf_token': token})
+                    results.append(rv.status_code)
+            except Exception as exc:  # pragma: no cover
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(5)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(sorted(results), [200] * 5)
+
+
+class SeaSurfTestCaseTokenRotationStrict(BaseTestCase):
+    """With a zero-length grace window a rotated token is immediately
+    invalid and cannot be replayed."""
+    def setUp(self):
+        app = Flask(__name__)
+        app.debug = True
+        app.secret_key = '1234'
+        app.config['CSRF_TOKEN_ROTATION_GRACE'] = timedelta(0)
+        self.app = app
+
+        csrf = SeaSurf()
+        csrf._csrf_disable = False
+        self.csrf = csrf
+
+        # Initialize CSRF protection.
+        self.csrf.init_app(app)
+
+        @app.route('/foo', methods=['GET'])
+        def foo():
+            return 'bar'
+
+        @app.route('/bar', methods=['POST'])
+        def bar():
+            return 'foo'
+
+    def test_replay_rejected_immediately(self):
+        with self.app.test_client() as client:
+            client.get('/foo')
+            token = self.csrf._get_token()
+
+            rv = client.post('/bar', data={'_csrf_token': token})
+            self.assertEqual(rv.status_code, 200, rv)
+
+            rv = client.post('/bar', data={'_csrf_token': token})
+            self.assertEqual(rv.status_code, 403, rv)
+
+            new_token = self.csrf._get_token()
+            rv = client.post('/bar', data={'_csrf_token': new_token})
+            self.assertEqual(rv.status_code, 200, rv)
+
+
+class SeaSurfTestCaseTokenRotationDisabled(BaseTestCase):
+    def setUp(self):
+        app = Flask(__name__)
+        app.debug = True
+        app.secret_key = '1234'
+        app.config['CSRF_TOKEN_ROTATION'] = False
+        self.app = app
+
+        csrf = SeaSurf()
+        csrf._csrf_disable = False
+        self.csrf = csrf
+
+        # Initialize CSRF protection.
+        self.csrf.init_app(app)
+
+        @app.route('/foo', methods=['GET'])
+        def foo():
+            return 'bar'
+
+        @app.route('/bar', methods=['POST'])
+        def bar():
+            return 'foo'
+
+    def test_token_not_rotated_when_disabled(self):
+        with self.app.test_client() as client:
+            client.get('/foo')
+            token = self.csrf._get_token()
+
+            rv = client.post('/bar', data={'_csrf_token': token})
+            self.assertEqual(rv.status_code, 200, rv)
+            self.assertEqual(self.csrf._get_token(), token)
+
+            rv = client.post('/bar', data={'_csrf_token': token})
+            self.assertEqual(rv.status_code, 200, rv)
+
+            with client.session_transaction() as sess:
+                self.assertNotIn(self.csrf._csrf_previous_name, sess)
+
+
+class SeaSurfTestCaseTokenSourceToggles(BaseTestCase):
+    def _make_app(self, **config):
+        app = Flask(__name__)
+        app.debug = True
+        app.secret_key = '1234'
+        app.config.update(config)
+
+        csrf = SeaSurf()
+        csrf._csrf_disable = False
+        csrf.init_app(app)
+
+        @app.route('/bar', methods=['POST'])
+        def bar():
+            return 'foo'
+
+        return app, csrf
+
+    def _post_with_token(self, app, csrf, **kwargs):
+        with app.test_client() as client:
+            with client.session_transaction() as sess:
+                token = csrf._generate_token()
+                sess[csrf._csrf_name] = token
+            return client.post('/bar', **self._kwargs_with_token(csrf, token, kwargs))
+
+    def _kwargs_with_token(self, csrf, token, kwargs):
+        if kwargs.pop('use_json', False):
+            kwargs['json'] = {csrf._csrf_name: token}
+        elif kwargs.pop('use_header', False):
+            kwargs['headers'] = {csrf._csrf_header_name: token}
+        else:
+            kwargs['data'] = {csrf._csrf_name: token}
+        return kwargs
+
+    def test_json_token_rejected_when_json_check_disabled(self):
+        app, csrf = self._make_app(CSRF_CHECK_JSON=False)
+
+        rv = self._post_with_token(app, csrf, use_json=True)
+        self.assertEqual(rv.status_code, 403, rv)
+
+        rv = self._post_with_token(app, csrf, use_header=True)
+        self.assertEqual(rv.status_code, 200, rv)
+
+        rv = self._post_with_token(app, csrf)
+        self.assertEqual(rv.status_code, 200, rv)
+
+    def test_header_token_rejected_when_header_check_disabled(self):
+        app, csrf = self._make_app(CSRF_CHECK_HEADER=False)
+
+        rv = self._post_with_token(app, csrf, use_header=True)
+        self.assertEqual(rv.status_code, 403, rv)
+
+        rv = self._post_with_token(app, csrf, use_json=True)
+        self.assertEqual(rv.status_code, 200, rv)
+
+        rv = self._post_with_token(app, csrf)
+        self.assertEqual(rv.status_code, 200, rv)
+
+    def test_json_and_header_accepted_by_default(self):
+        app, csrf = self._make_app()
+
+        rv = self._post_with_token(app, csrf, use_json=True)
+        self.assertEqual(rv.status_code, 200, rv)
+
+        rv = self._post_with_token(app, csrf, use_header=True)
+        self.assertEqual(rv.status_code, 200, rv)
+
+
 def suite():
     suite = unittest.TestSuite()
 
@@ -832,6 +1116,10 @@ def suite():
     suite.addTest(unittest.TestLoader().loadTestsFromTestCase(SeaSurfTestCaseReferer))
     suite.addTest(unittest.TestLoader().loadTestsFromTestCase(SeaSurfTestManualValidation))
     suite.addTest(unittest.TestLoader().loadTestsFromTestCase(SeaSurfTestCaseGenerateNewToken))
+    suite.addTest(unittest.TestLoader().loadTestsFromTestCase(SeaSurfTestCaseTokenRotation))
+    suite.addTest(unittest.TestLoader().loadTestsFromTestCase(SeaSurfTestCaseTokenRotationStrict))
+    suite.addTest(unittest.TestLoader().loadTestsFromTestCase(SeaSurfTestCaseTokenRotationDisabled))
+    suite.addTest(unittest.TestLoader().loadTestsFromTestCase(SeaSurfTestCaseTokenSourceToggles))
     return suite
 
 
