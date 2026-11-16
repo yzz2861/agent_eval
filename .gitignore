@@ -1,0 +1,14 @@
+*.py?
+*~
+*.sw?
+.DS_Store
+._*
+/MANIFEST
+_build
+build
+dist
+.eggs
+*.egg-info
+.tox
+.coverage
+htmlcov
