@@ -427,6 +427,223 @@ class TestVerifyXML(unittest.TestCase, LoadExampleKeys):
         self.assertTrue(all(result is results[0] for result in results))
 
 
+class TestAdversarialReferenceHandling(unittest.TestCase):
+    """Adversarial regression tests for XMLSignatureProcessor._resolve_reference and XMLVerifier._apply_transforms.
+
+    Every case must either raise a specific, descriptive exception or verify deterministically;
+    none of them may require network access (external references use mock resolvers only).
+    """
+
+    hmac_key = b"secret"
+    config = SignatureConfiguration(require_x509=False)
+
+    def _sign_enveloped(self, payload=b'<data Id="p">hello</data>'):
+        signer = XMLSigner(signature_algorithm=SignatureMethod.HMAC_SHA256)
+        return signer, signer.sign(etree.fromstring(payload), key=self.hmac_key)
+
+    def _resign(self, signer, root):
+        # Re-authenticate the modified SignedInfo so rejection is attributable to the targeted check.
+        info = root.find("ds:Signature/ds:SignedInfo", namespaces)
+        mac = cryptography.hazmat.primitives.hmac.HMAC(self.hmac_key, hashes.SHA256())
+        mac.update(signer._c14n(info, algorithm=signer.c14n_alg))
+        root.find("ds:Signature/ds:SignatureValue", namespaces).text = b64encode(mac.finalize()).decode()
+
+    def _reference(self, root):
+        return root.find("ds:Signature/ds:SignedInfo/ds:Reference", namespaces)
+
+    def _replace_transforms(self, root, transforms):
+        reference = self._reference(root)
+        old_transforms = reference.find("ds:Transforms", namespaces)
+        if old_transforms is not None:
+            reference.remove(old_transforms)
+        transforms_el = etree.Element(ds_tag("Transforms"))
+        for algorithm, child in transforms:
+            transform = etree.SubElement(transforms_el, ds_tag("Transform"), Algorithm=algorithm)
+            if child is not None:
+                transform.append(child)
+        reference.insert(0, transforms_el)
+
+    def _set_digest(self, root, payload):
+        digest = self._reference(root).find("ds:DigestValue", namespaces)
+        digest.text = b64encode(hashlib.sha256(payload).digest()).decode()
+
+    def test_xpath_transform_escape(self):
+        xpath_expressions = [
+            "here()/ancestor-or-self::node()",
+            "not(self::node())",
+            "count(//. | //@*)",
+            "self::node() | //comment()",
+        ]
+        transform_algorithms = [
+            "http://www.w3.org/TR/1999/REC-xpath-19991116",
+            "http://www.w3.org/2002/06/xmldsig-filter2",
+            "http://www.nue.et-inf.uni-siegen.de/~geuer-pollmann#xpath-filter",
+        ]
+        for algorithm, expression in itertools.product(transform_algorithms, xpath_expressions):
+            with self.subTest(algorithm=algorithm, expression=expression):
+                signer, root = self._sign_enveloped()
+                xpath_child = etree.Element(ds_tag("XPath"))
+                if algorithm != "http://www.w3.org/TR/1999/REC-xpath-19991116":
+                    xpath_child = etree.Element(f"{{{algorithm}}}XPath")
+                xpath_child.text = expression
+                self._replace_transforms(root, [(algorithm, xpath_child)])
+                self._resign(signer, root)
+                with self.assertRaisesRegex(InvalidInput, "Unsupported transform algorithm"):
+                    XMLVerifier().verify(root, hmac_key=self.hmac_key, expect_config=self.config)
+
+        # The same rejection applies when _apply_transforms is invoked directly.
+        verifier = XMLVerifier()
+        transforms = etree.Element(ds_tag("Transforms"))
+        transform = etree.SubElement(
+            transforms, ds_tag("Transform"), Algorithm="http://www.w3.org/TR/1999/REC-xpath-19991116"
+        )
+        etree.SubElement(transform, ds_tag("XPath")).text = "here()"
+        with self.assertRaisesRegex(InvalidInput, "Unsupported transform algorithm"):
+            verifier._apply_transforms(
+                etree.fromstring(b"<data/>"), transforms_node=transforms, signature=etree.Element(ds_tag("Signature"))
+            )
+
+    def test_absolute_and_leading_path_reference_uris(self):
+        uris = [
+            "/etc/passwd",
+            "file:///etc/passwd",
+            "http://attacker.invalid/payload.xml",
+            "//attacker.invalid/share/payload",
+            "C:/Windows/system.ini",
+            "../outside-the-document.xml",
+        ]
+        for uri in uris:
+            with self.subTest(uri=uri):
+                signer, root = self._sign_enveloped()
+                self._reference(root).set("URI", uri)
+                self._resign(signer, root)
+                # Without a resolver, external dereferencing (including local paths) must be refused outright.
+                with self.assertRaisesRegex(InvalidInput, "External URI dereferencing is not configured"):
+                    XMLVerifier().verify(root, hmac_key=self.hmac_key, expect_config=self.config)
+                # A resolver that cannot produce content must also fail closed.
+                resolver = Mock(return_value=None)
+                with self.assertRaisesRegex(InvalidInput, "Unable to resolve reference URI"):
+                    XMLVerifier().verify(root, hmac_key=self.hmac_key, expect_config=self.config, uri_resolver=resolver)
+                resolver.assert_called_once_with(uri)
+
+    def test_resolve_reference_resolution_rules(self):
+        proc = XMLSignatureProcessor()
+        doc = etree.fromstring(b'<data Id="a"><item Id="b">text</item></data>')
+
+        with self.assertRaisesRegex(InvalidInput, "References without URIs"):
+            proc._resolve_reference(doc, etree.fromstring(b"<Reference/>"))
+        with self.assertRaisesRegex(InvalidInput, "XPointer references are not supported"):
+            proc._resolve_reference(doc, {"URI": "#xpointer(//item)"})
+        with self.assertRaisesRegex(InvalidInput, "Unable to resolve reference URI"):
+            proc._resolve_reference(doc, {"URI": "#missing"})
+        with self.assertRaisesRegex(InvalidInput, "External URI dereferencing is not configured"):
+            proc._resolve_reference(doc, {"URI": "/etc/passwd"})
+
+        ambiguous = etree.fromstring(b'<data><item Id="dup"/><item Id="dup"/></data>')
+        with self.assertRaisesRegex(InvalidInput, "Ambiguous reference URI"):
+            proc._resolve_reference(ambiguous, {"URI": "#dup"})
+
+        self.assertIs(proc._resolve_reference(doc, {"URI": ""}), doc)
+        self.assertIs(proc._resolve_reference(doc, {"URI": "#b"}), doc[0])
+        external = etree.fromstring(b"<external/>")
+        resolver = Mock(return_value=external)
+        self.assertIs(proc._resolve_reference(doc, {"URI": "payload.xml"}, uri_resolver=resolver), external)
+        resolver.assert_called_once_with("payload.xml")
+
+    def test_base64_transform_double_layer(self):
+        # Two stacked base64 transforms must decode deterministically, layer by layer.
+        inner = b64encode(b"Hello")
+        outer = b64encode(inner)
+        signer, root = self._sign_enveloped()
+        self._reference(root).set("URI", "payload.b64")
+        base64_transform = "http://www.w3.org/2000/09/xmldsig#base64"
+        self._replace_transforms(root, [(base64_transform, None), (base64_transform, None)])
+        self._set_digest(root, b"Hello")
+        self._resign(signer, root)
+
+        resolver = Mock(return_value=outer)
+        result = XMLVerifier().verify(root, hmac_key=self.hmac_key, expect_config=self.config, uri_resolver=resolver)
+        resolver.assert_called_once_with("payload.b64")
+        self.assertEqual(result.signed_data, b"Hello")
+        self.assertIsNone(result.signed_xml)
+
+        # Tampering with either layer must produce a digest failure, never a silent pass.
+        tampered_cases = [
+            (InvalidDigest, b64encode(b64encode(b"Hello!"))),
+            (InvalidInput, b64encode(inner.rstrip(b"="))),
+            (InvalidInput, outer[:-4] + b"AAAA"),
+            (InvalidInput, b"!!!not-base64!!!"),
+        ]
+        for expected_error, tampered in tampered_cases:
+            with self.subTest(tampered=tampered):
+                with self.assertRaises(expected_error):
+                    XMLVerifier().verify(
+                        root,
+                        hmac_key=self.hmac_key,
+                        expect_config=self.config,
+                        uri_resolver=Mock(return_value=tampered),
+                    )
+
+    def test_base64_transform_hidden_manifest_and_dtd(self):
+        # Hostile constructs hidden behind a base64 layer must be rejected once decoded.
+        base64_transform = "http://www.w3.org/2000/09/xmldsig#base64"
+        c14n_transform = CanonicalizationMethod.CANONICAL_XML_1_1.value
+        hostile_payloads = [
+            (
+                "Manifest elements are not supported",
+                b'<wrapper xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:Manifest Id="m">'
+                b'<ds:Reference URI="unchecked.xml"/>'
+                b"</ds:Manifest></wrapper>",
+            ),
+            (
+                "DTD declarations are not supported",
+                b'<!DOCTYPE data [<!ENTITY e "payload">]><data>&e;</data>',
+            ),
+        ]
+        for message, decoded in hostile_payloads:
+            with self.subTest(message=message):
+                signer, root = self._sign_enveloped()
+                self._reference(root).set("URI", "payload.b64")
+                self._replace_transforms(root, [(base64_transform, None), (c14n_transform, None)])
+                self._set_digest(root, decoded)
+                self._resign(signer, root)
+                with self.assertRaisesRegex(InvalidInput, message):
+                    XMLVerifier().verify(
+                        root,
+                        hmac_key=self.hmac_key,
+                        expect_config=self.config,
+                        uri_resolver=Mock(return_value=b64encode(decoded)),
+                    )
+
+    def test_external_reference_resolution_offline(self):
+        # A document containing an external Reference must verify offline via the supplied resolver,
+        # and must never be fetched implicitly.
+        payload = b"<data>external</data>"
+        signer, root = self._sign_enveloped()
+        reference = self._reference(root)
+        reference.set("URI", "http://attacker.invalid/payload.xml")
+        transforms = reference.find("ds:Transforms", namespaces)
+        if transforms is not None:
+            reference.remove(transforms)
+        self._set_digest(root, payload)
+        self._resign(signer, root)
+
+        resolver = Mock(return_value=payload)
+        result = XMLVerifier().verify(root, hmac_key=self.hmac_key, expect_config=self.config, uri_resolver=resolver)
+        resolver.assert_called_once_with("http://attacker.invalid/payload.xml")
+        self.assertEqual(result.signed_data, payload)
+        self.assertEqual(result.signed_xml.tag, "data")
+
+        # A resolver returning an XML element resolves to the same canonicalized octets.
+        resolver = Mock(return_value=etree.fromstring(payload))
+        result = XMLVerifier().verify(root, hmac_key=self.hmac_key, expect_config=self.config, uri_resolver=resolver)
+        self.assertEqual(result.signed_data, payload)
+
+        # Without a resolver the same document is rejected before any network access can occur.
+        with self.assertRaisesRegex(InvalidInput, "External URI dereferencing is not configured"):
+            XMLVerifier().verify(root, hmac_key=self.hmac_key, expect_config=self.config)
+
+
 class TestDSASignatureEncoding(unittest.TestCase):
     def test_dsa_sha1_matches_phaos_signature_width(self):
         # Phaos XML Toolkit supplies a signed document and its private key.

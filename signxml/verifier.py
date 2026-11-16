@@ -245,7 +245,10 @@ class XMLVerifier(XMLSignatureProcessor):
                 if isinstance(payload, etree._Element):
                     # XMLDSig 6.6.2: concatenate text nodes in document order before decoding.
                     payload = "".join(cast(Iterable[str], payload.itertext()))
-                payload = b64decode(payload or b"")
+                try:
+                    payload = b64decode(payload or b"")
+                except ValueError as exc:
+                    raise InvalidInput(f"Invalid base64 data in reference transform: {exc}") from exc
                 signature_index = None
                 continue
             if algorithm != SignatureConstructionMethod.enveloped.value:
