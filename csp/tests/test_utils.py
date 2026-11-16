@@ -1,8 +1,18 @@
+import copy
+
+import pytest
 from django.test.utils import override_settings
 from django.utils.functional import lazy
 
 from csp.constants import NONCE, NONE, SELF
-from csp.utils import DEFAULT_DIRECTIVES, build_policy, default_config
+from csp.utils import (
+    DEFAULT_DIRECTIVES,
+    build_policy,
+    deduplication_key,
+    default_config,
+    directive_name,
+    normalize_violation_report,
+)
 
 
 def policy_eq(a: str, b: str) -> None:
@@ -375,3 +385,156 @@ def test_boolean_directives() -> None:
         with override_settings(CONTENT_SECURITY_POLICY={"DIRECTIVES": {directive: False}}):
             policy = build_policy()
             policy_eq("default-src 'self'", policy)
+
+
+LEGACY_REPORT = {
+    "csp-report": {
+        "document-uri": "http://example.com/page.html",
+        "referrer": "http://example.com/",
+        "violated-directive": "img-src https://cdn.example.com",
+        "effective-directive": "img-src",
+        "original-policy": "default-src 'self'; img-src https://cdn.example.com",
+        "disposition": "enforce",
+        "blocked-uri": "http://evil.example.com/image.png",
+        "line-number": 12,
+        "column-number": 34,
+        "source-file": "http://example.com/script.js",
+        "status-code": 200,
+        "script-sample": "",
+    }
+}
+
+REPORTING_API_REPORT = {
+    "type": "csp-violation",
+    "url": "http://example.com/page.html",
+    "body": {
+        "documentURL": "http://example.com/page.html",
+        "referrer": "http://example.com/",
+        "violatedDirective": "script-src",
+        "effectiveDirective": "script-src",
+        "originalPolicy": "default-src 'self'",
+        "disposition": "report",
+        "blockedURL": "eval",
+        "lineNumber": 7,
+        "columnNumber": 9,
+        "sourceFile": "http://example.com/app.js",
+        "statusCode": 0,
+        "sample": "alert(1)",
+    },
+}
+
+
+def test_normalize_legacy_report() -> None:
+    event = normalize_violation_report(LEGACY_REPORT)
+    assert event["document_uri"] == "http://example.com/page.html"
+    assert event["referrer"] == "http://example.com/"
+    assert event["violated_directive"] == "img-src https://cdn.example.com"
+    assert event["effective_directive"] == "img-src"
+    assert event["original_policy"] == "default-src 'self'; img-src https://cdn.example.com"
+    assert event["blocked_uri"] == "http://evil.example.com/image.png"
+    assert event["source_file"] == "http://example.com/script.js"
+    assert event["line_number"] == 12
+    assert event["column_number"] == 34
+    assert event["status_code"] == 200
+    assert event["disposition"] == "enforce"
+    assert event["sample"] == ""
+    assert event["raw"] == LEGACY_REPORT
+
+
+def test_normalize_reporting_api_body() -> None:
+    event = normalize_violation_report(REPORTING_API_REPORT)
+    assert event["document_uri"] == "http://example.com/page.html"
+    assert event["violated_directive"] == "script-src"
+    assert event["effective_directive"] == "script-src"
+    assert event["blocked_uri"] == "eval"
+    assert event["line_number"] == 7
+    assert event["column_number"] == 9
+    assert event["sample"] == "alert(1)"
+    assert event["disposition"] == "report"
+
+
+def test_normalize_accepts_bare_report_body() -> None:
+    bare = LEGACY_REPORT["csp-report"]
+    event = normalize_violation_report(bare)
+    assert event["document_uri"] == "http://example.com/page.html"
+    assert event["blocked_uri"] == "http://evil.example.com/image.png"
+    assert event["raw"] == bare
+
+
+def test_normalize_missing_fields_use_unknown() -> None:
+    event = normalize_violation_report({"csp-report": {"violated-directive": "script-src"}})
+    assert event["document_uri"] == "unknown"
+    assert event["referrer"] == "unknown"
+    assert event["blocked_uri"] == "unknown"
+    assert event["original_policy"] == "unknown"
+    assert event["effective_directive"] == "script-src"
+    assert event["line_number"] is None
+    assert event["column_number"] is None
+    assert event["status_code"] is None
+    assert event["source_file"] is None
+    assert event["sample"] == ""
+    assert event["disposition"] == ""
+
+
+def test_normalize_effective_directive_derived_from_violated() -> None:
+    event = normalize_violation_report(
+        {"csp-report": {"violated-directive": "style-src 'self'", "document-uri": "http://x"}}
+    )
+    assert event["effective_directive"] == "style-src"
+
+
+def test_normalize_int_fields_tolerate_garbage() -> None:
+    event = normalize_violation_report(
+        {"csp-report": {"line-number": "nope", "column-number": True, "status-code": "418"}}
+    )
+    assert event["line_number"] is None
+    assert event["column_number"] is None
+    assert event["status_code"] == 418
+
+
+def test_normalize_rejects_non_object() -> None:
+    with pytest.raises(ValueError):
+        normalize_violation_report(["not", "an", "object"])
+
+
+def test_normalize_rejects_unrelated_object() -> None:
+    with pytest.raises(ValueError):
+        normalize_violation_report({"unexpected": "payload"})
+
+
+def test_normalize_rejects_non_csp_reporting_api_type() -> None:
+    with pytest.raises(ValueError):
+        normalize_violation_report({"type": "deprecation", "body": {"id": "abc"}})
+
+
+def test_directive_name_strips_source_list() -> None:
+    assert directive_name("img-src https://cdn.example.com") == "img-src"
+    assert directive_name("script-src") == "script-src"
+
+
+def test_deduplication_key_uses_source_directive_document() -> None:
+    event = normalize_violation_report(LEGACY_REPORT)
+    key = deduplication_key(event)
+    assert key == (
+        "http://evil.example.com/image.png",
+        "img-src",
+        "http://example.com/page.html",
+    )
+
+
+def test_deduplication_key_collapses_volatile_fields() -> None:
+    first = normalize_violation_report(LEGACY_REPORT)
+    second_payload = copy.deepcopy(LEGACY_REPORT)
+    second_body = second_payload["csp-report"]
+    second_body["line-number"] = 999
+    second_body["column-number"] = 1
+    second_body["violated-directive"] = "img-src 'self'"
+    second = normalize_violation_report(second_payload)
+    assert deduplication_key(first) == deduplication_key(second)
+
+
+def test_deduplication_key_distinguishes_sources() -> None:
+    first = normalize_violation_report(LEGACY_REPORT)
+    other = copy.deepcopy(LEGACY_REPORT)
+    other["csp-report"]["blocked-uri"] = "http://other.example.com/x.png"
+    assert deduplication_key(first) != deduplication_key(normalize_violation_report(other))

@@ -10,6 +10,13 @@ from django.utils.encoding import force_str
 
 from csp.constants import NONCE, SELF
 
+# Placeholder used when a violation report omits a field. It keeps the
+# normalized event auditable without crashing on incomplete browser payloads.
+REPORT_UNKNOWN = "unknown"
+
+# ``type`` value used by the Reporting API (``report-to``) for CSP violations.
+REPORT_TYPE_CSP_VIOLATION = "csp-violation"
+
 DEFAULT_DIRECTIVES = {
     # Fetch Directives
     "child-src": None,
@@ -216,3 +223,109 @@ def build_script_tag(content: str | None = None, **kwargs: Any) -> str:
     c = _unwrap_script(content) if content and not kwargs.get("src") else ""
     attrs = ATTR_FORMAT_STR.format(**data).rstrip()
     return f"<script{attrs}>{c}</script>".strip()
+
+
+def _normalized_string(value: Any) -> str:
+    if value is None:
+        return REPORT_UNKNOWN
+    if isinstance(value, str):
+        return value
+    return force_str(value)
+
+
+def _normalized_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.lstrip("-").isdigit():
+        return int(value)
+    return None
+
+
+def _extract_report_body(payload: Any) -> dict[str, Any]:
+    """Return the violation body for either supported report shape.
+
+    The legacy ``report-uri`` shape wraps the data in a ``csp-report`` key,
+    while the Reporting API (``report-to``) uses ``type``/``body``.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("CSP violation report must be a JSON object")
+
+    if isinstance(payload.get("csp-report"), dict):
+        return payload["csp-report"]
+
+    if isinstance(payload.get("body"), dict):
+        report_type = payload.get("type")
+        if report_type is None or report_type == REPORT_TYPE_CSP_VIOLATION:
+            return payload["body"]
+
+    if "document-uri" in payload or "violated-directive" in payload:
+        return payload
+
+    raise ValueError("CSP violation report contains no recognizable report body")
+
+
+def directive_name(directive: str) -> str:
+    """Return the directive name without any source-list value.
+
+    Browsers send ``violated-directive`` as e.g. ``"img-src https://example.com"``;
+    only the leading token identifies the directive.
+    """
+    return directive.strip().split(" ", 1)[0]
+
+
+def normalize_violation_report(payload: Any) -> dict[str, Any]:
+    """Normalize a raw CSP violation report into a flat, auditable event dict.
+
+    Missing or malformed fields fall back to safe defaults (``"unknown"`` for
+    strings, ``None`` for numbers) instead of raising, so partial browser
+    payloads can still be recorded. Raises ``ValueError`` only when the payload
+    does not contain any recognizable violation body.
+    """
+    body = _extract_report_body(payload)
+
+    def _field(legacy_key: str, reporting_key: str | None = None) -> Any:
+        """Read a field supporting both legacy kebab-case and Reporting API camelCase names."""
+        if legacy_key in body:
+            return body[legacy_key]
+        if reporting_key is not None and reporting_key in body:
+            return body[reporting_key]
+        return None
+
+    document_uri_value = _field("document-uri", "documentURL") or body.get("url")
+    violated_directive = _normalized_string(_field("violated-directive", "violatedDirective"))
+    effective_directive = _normalized_string(_field("effective-directive", "effectiveDirective"))
+    if effective_directive == REPORT_UNKNOWN and violated_directive != REPORT_UNKNOWN:
+        effective_directive = directive_name(violated_directive)
+    elif effective_directive != REPORT_UNKNOWN:
+        effective_directive = directive_name(effective_directive)
+
+    return {
+        "document_uri": _normalized_string(document_uri_value),
+        "referrer": _normalized_string(_field("referrer")),
+        "violated_directive": violated_directive,
+        "effective_directive": effective_directive,
+        "original_policy": _normalized_string(_field("original-policy", "originalPolicy")),
+        "blocked_uri": _normalized_string(_field("blocked-uri", "blockedURL")),
+        "source_file": _normalized_string(_field("source-file", "sourceFile")) if _field("source-file", "sourceFile") is not None else None,
+        "line_number": _normalized_int(_field("line-number", "lineNumber")),
+        "column_number": _normalized_int(_field("column-number", "columnNumber")),
+        "sample": _normalized_string(_field("script-sample", "sample")) if _field("script-sample", "sample") is not None else "",
+        "disposition": _normalized_string(_field("disposition")) if _field("disposition") is not None else "",
+        "status_code": _normalized_int(_field("status-code", "statusCode")),
+        "raw": payload if isinstance(payload, dict) else {},
+    }
+
+
+def deduplication_key(normalized: dict[str, Any]) -> tuple[str, str, str]:
+    """Build the source/directive/document-uri tuple used for dedup and throttling.
+
+    The directive is reduced to its name only, and the blocked URI is treated as
+    the violation source, so reports differing only in source-list values or
+    volatile fields (line numbers, samples) collapse into one auditable event.
+    """
+    source = _normalized_string(normalized.get("blocked_uri"))
+    directive = directive_name(_normalized_string(normalized.get("violated_directive")))
+    document_uri = _normalized_string(normalized.get("document_uri"))
+    return (source, directive, document_uri)
