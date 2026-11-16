@@ -1,7 +1,7 @@
 import cbor2
 import pytest
 
-from pycose.exceptions import CoseException, CoseIllegalAlgorithm, CoseIllegalKeyOps
+from pycose.exceptions import CoseException, CoseIllegalAlgorithm, CoseIllegalKeyOps, CoseIllegalExternalAad
 from pycose.keys import OKPKey, EC2Key
 from pycose.keys.cosekey import CoseKey
 from pycose.keys.keyops import SignOp, VerifyOp
@@ -201,3 +201,129 @@ def test_fail_on_illegal_keyops_verifying(ops):
         msg.verify_signature()
 
     assert "Illegal key operations specified." in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# Explicit external AAD handling
+# ---------------------------------------------------------------------------
+
+
+def test_external_aad_is_covered_byte_for_byte():
+    ec2_key = EC2Key.generate_key(crv='P_256', optional_params={'ALG': 'ES256'})
+    payload = b'signed message'
+    external_aad = b'some critical external data'
+
+    msg = Sign1Message(phdr={'ALG': 'ES256'}, payload=payload)
+    msg.key = ec2_key
+    encoded = msg.encode(external_aad=external_aad)
+
+    # The explicitly supplied AAD must not leak onto the message object.
+    assert msg.external_aad == b''
+
+    decoded = Sign1Message.decode(encoded)
+    decoded.key = ec2_key
+
+    # The exact AAD participates in the signature and verification succeeds.
+    assert decoded.verify_signature(external_aad=external_aad)
+    assert decoded.external_aad == b''
+
+    # A truncated AAD changes the authenticated structure and fails verification.
+    assert not decoded.verify_signature(external_aad=external_aad[:-1])
+
+
+def test_empty_external_aad_round_trip():
+    ec2_key = EC2Key.generate_key(crv='P_256', optional_params={'ALG': 'ES256'})
+    payload = b'signed message'
+
+    msg = Sign1Message(phdr={'ALG': 'ES256'}, payload=payload)
+    msg.key = ec2_key
+
+    # An explicit empty AAD is accepted both at signing and at verification.
+    encoded = msg.encode(external_aad=b'')
+    decoded = Sign1Message.decode(encoded)
+    decoded.key = ec2_key
+    assert decoded.verify_signature(external_aad=b'')
+
+
+def test_empty_aad_does_not_verify_non_empty_aad_message():
+    ec2_key = EC2Key.generate_key(crv='P_256', optional_params={'ALG': 'ES256'})
+    payload = b'signed message'
+    external_aad = b'authenticated-side-data'
+
+    msg = Sign1Message(phdr={'ALG': 'ES256'}, payload=payload, external_aad=external_aad)
+    msg.key = ec2_key
+    encoded = msg.encode()
+
+    decoded = Sign1Message.decode(encoded)
+    decoded.key = ec2_key
+
+    # Verifying with an empty AAD must fail because the original AAD was non-empty.
+    assert not decoded.verify_signature(external_aad=b'')
+    # The original AAD still verifies.
+    assert decoded.verify_signature(external_aad=external_aad)
+
+
+def test_external_aad_length_limit_is_configurable():
+    ec2_key = EC2Key.generate_key(crv='P_256', optional_params={'ALG': 'ES256'})
+    payload = b'signed message'
+
+    class LimitedSign1Message(Sign1Message):
+        MAX_EXTERNAL_AAD_LENGTH = 4
+
+    msg = LimitedSign1Message(phdr={'ALG': 'ES256'}, payload=payload)
+    msg.key = ec2_key
+
+    # An AAD exceeding the configured limit is rejected.
+    with pytest.raises(CoseIllegalExternalAad, match='exceeds the maximum allowed length'):
+        msg.encode(external_aad=b'12345')
+
+    # The failed override must not mutate the message state.
+    assert msg.external_aad == b''
+
+    # An AAD exactly at the limit is accepted.
+    assert msg.encode(external_aad=b'1234')
+
+
+def test_external_aad_length_limit_instance_override():
+    ec2_key = EC2Key.generate_key(crv='P_256', optional_params={'ALG': 'ES256'})
+
+    msg = Sign1Message(phdr={'ALG': 'ES256'}, payload=b'signed message')
+    msg.key = ec2_key
+    msg.MAX_EXTERNAL_AAD_LENGTH = 3
+
+    with pytest.raises(CoseIllegalExternalAad, match='exceeds the maximum allowed length'):
+        msg.external_aad = b'1234'
+
+    msg.external_aad = b'123'
+    assert msg.external_aad == b'123'
+
+
+def test_external_aad_must_be_bytes():
+    msg = Sign1Message(phdr={'ALG': 'ES256'}, payload=b'signed message')
+    with pytest.raises(TypeError, match='external_aad must be of type'):
+        msg.external_aad = 'not-bytes'
+
+
+def test_detached_payload_with_explicit_aad():
+    ec2_key = EC2Key.generate_key(crv='P_256', optional_params={'ALG': 'ES256'})
+    payload = b'signed message'
+    external_aad = b'detached-aad'
+
+    msg = Sign1Message(phdr={'ALG': 'ES256'})
+    msg.key = ec2_key
+    encoded = msg.encode(detached_payload=payload, external_aad=external_aad)
+
+    decoded = Sign1Message.decode(encoded)
+    decoded.key = ec2_key
+    assert decoded.payload is None
+
+    # Both the detached payload and the AAD must be supplied for verification.
+    assert decoded.verify_signature(detached_payload=payload, external_aad=external_aad)
+
+    # The wrong AAD breaks verification even with the correct detached payload.
+    assert not decoded.verify_signature(detached_payload=payload, external_aad=external_aad[:-1])
+
+    # A detached payload is mutually exclusive with an attached payload.
+    decoded.payload = b'other content'
+    with pytest.raises(CoseException, match='Detached payload must be None'):
+        decoded.verify_signature(detached_payload=payload, external_aad=external_aad)

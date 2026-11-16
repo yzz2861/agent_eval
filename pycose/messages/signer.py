@@ -49,22 +49,24 @@ class CoseSignature(SignCommon):
 
         self._payload = value
 
-    def _create_sig_structure(self, detached_payload: Optional[bytes] = None):
+    def _detached_content(self, detached_payload, external_aad, content_owner=None):
+        # The signed content lives on the parent COSE_Sign message, while the
+        # CoseSignature's own payload holds the signature value.
+        return super()._detached_content(detached_payload, external_aad, content_owner=self._parent)
+
+    def _create_sig_structure(self, payload: Optional[bytes] = None) -> bytes:
+        if payload is None:
+            if self._parent.payload is None:
+                raise CoseException("Missing payload and no detached payload provided")
+            payload = self._parent.payload
+
         sign_structure = [self._parent.context, self._parent.phdr_encoded]
 
         if len(self.phdr):
             sign_structure.append(self.phdr_encoded)
 
         sign_structure.append(self.external_aad)
-
-        if detached_payload is None:
-            if self._parent.payload is None:
-                raise CoseException("Missing payload and no detached payload provided")
-            sign_structure.append(self._parent.payload)
-        else:
-            if self._parent.payload is not None:
-                raise CoseException("Detached payload must be None when payload is set")
-            sign_structure.append(detached_payload)
+        sign_structure.append(payload)
 
         aad = cbor2.dumps(sign_structure)
         return aad

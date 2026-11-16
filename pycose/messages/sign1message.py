@@ -50,31 +50,51 @@ class Sign1Message(SignCommon):
 
         self._signature = value
 
-    def _create_sig_structure(self, detached_payload: Optional[bytes] = None):
+    def _create_sig_structure(self, payload: Optional[bytes] = None) -> bytes:
         """
-        Create the sig_structure that needs to be signed
+        Create the sig_structure that needs to be signed.
 
+        :param payload: The payload that is covered by the signature, either the attached
+            payload or an explicitly supplied detached payload. When ``None``, the payload
+            stored on the message is used.
         :return: to_be_signed
         """
-        sig_structure = [self.context]
-        sig_structure = self._base_structure(sig_structure)
-
-        if detached_payload is None:
+        if payload is None:
             if self.payload is None:
                 raise CoseException("Missing payload and no detached payload provided")
-            sig_structure.append(self.payload)
-        else:
-            if self.payload is not None:
-                raise CoseException("Detached payload must be None when payload is set")
-            sig_structure.append(detached_payload)
+            payload = self.payload
+
+        sig_structure = [self.context]
+        sig_structure = self._base_structure(sig_structure)
+        sig_structure.append(payload)
 
         return cbor2.dumps(sig_structure)
 
-    def encode(self, tag: bool = True, sign: bool = True, detached_payload: Optional[bytes] = None, *args, **kwargs) -> CBOR:
-        """ Encodes the message into a CBOR array with or without a CBOR tag. """
+    def encode(self,
+               tag: bool = True,
+               sign: bool = True,
+               detached_payload: Optional[bytes] = None,
+               external_aad: Optional[bytes] = None,
+               *args,
+               **kwargs) -> CBOR:
+        """
+        Encodes the message into a CBOR array with or without a CBOR tag.
+
+        :param tag: Boolean value which indicates if the COSE message will have a CBOR tag.
+        :param sign: Boolean which activates or deactivates the payload protection (re-signing).
+        :param detached_payload: Detached payload that is signed but not carried in the message.
+                                 Must be ``None`` when an attached payload is set.
+        :param external_aad: External AAD that is authenticated but not transported in the message.
+                             When given, it overrides ``self.external_aad`` for this operation.
+        """
 
         if sign:
-            message = [self.phdr_encoded, self.uhdr_encoded, self.payload, self.compute_signature(detached_payload)]
+            message = [
+                self.phdr_encoded,
+                self.uhdr_encoded,
+                self.payload,
+                self.compute_signature(detached_payload=detached_payload, external_aad=external_aad)
+            ]
         elif self.signature:
             message = [self.phdr_encoded, self.uhdr_encoded, self.payload, self.signature]
         else:

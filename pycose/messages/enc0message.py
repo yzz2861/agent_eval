@@ -50,18 +50,33 @@ class Enc0Message(enccommon.EncCommon):
 
         super().__init__(phdr, uhdr, payload, external_aad, key, *args, **kwargs)
 
-    def encode(self, tag: bool = True, encrypt: bool = True, *args, **kwargs) -> CBOR:
+    def encode(self, tag: bool = True, encrypt: bool = True,
+               detached_payload: Optional[bytes] = None,
+               external_aad: Optional[bytes] = None, *args, **kwargs) -> CBOR:
         """
         Encode and protect the COSE_Encrypt0 message.
 
         :param tag: Boolean value which indicates if the COSE message will have a CBOR tag.
         :param encrypt: Boolean which activates or deactivates the payload protection.
+        :param detached_payload: Optional detached plaintext. When given, the message is encoded
+            without a payload (nil) and the method returns a tuple of the encoded message and
+            the detached ciphertext, which must be transported out-of-band.
+        :param external_aad: Optional external authenticated data. When given it overrides the
+            message-level external_aad attribute for this operation and is checked against the
+            configured length limit.
 
-        :return: Returns a CBOR-encoded COSE Encrypt0 message.
+        :return: Returns a CBOR-encoded COSE Encrypt0 message, or a tuple (encoded,
+            detached_ciphertext) when a detached payload is provided.
         """
 
         if encrypt:
-            message = [self.phdr_encoded, self.uhdr_encoded, self.encrypt()]
+            if detached_payload is not None:
+                detached_ciphertext = self.encrypt(detached_payload=detached_payload,
+                                                   external_aad=external_aad)
+                message = [self.phdr_encoded, self.uhdr_encoded, None]
+                encoded = super(Enc0Message, self).encode(message, tag)
+                return encoded, detached_ciphertext
+            message = [self.phdr_encoded, self.uhdr_encoded, self.encrypt(external_aad=external_aad)]
         else:
             message = [self.phdr_encoded, self.uhdr_encoded, self.payload]
 

@@ -31,29 +31,54 @@ class EncCommon(CoseMessage, metaclass=abc.ABCMeta):
                  **kwargs):
         super().__init__(phdr, uhdr, payload, external_aad, key, *args, **kwargs)
 
-    def decrypt(self, *args, **kwargs) -> bytes:
+    def decrypt(self,
+                detached_payload: Optional[bytes] = None,
+                external_aad: Optional[bytes] = None,
+                *args,
+                **kwargs) -> bytes:
         """
         Decrypts the payload.
 
-        :raises CoseException: When the key is not of type 'SymmetricKey'.
+        :param detached_payload: The detached ciphertext. Must be provided when the message does not
+            carry a payload (i.e. the payload is ``None``).
+        :param external_aad: Optional external authenticated data. When given it overrides the
+            message-level ``external_aad`` attribute for this operation and is checked against the
+            configured length limit.
+
+        :raises CoseException: When the key is not of type 'SymmetricKey' or neither an attached
+            nor a detached payload is available.
         :returns: plaintext as bytes
         """
 
-        alg = self.get_attr(headers.Algorithm)
-        nonce = self._get_nonce()
+        with self._detached_content(detached_payload, external_aad, empty_means_absent=True) as payload:
+            alg = self.get_attr(headers.Algorithm)
+            nonce = self._get_nonce()
 
-        if self.key is None:
-            raise CoseException("Key cannot be None")
+            if self.key is None:
+                raise CoseException("Key cannot be None")
 
-        self.key.verify(SymmetricKey, alg, [DecryptOp])
+            self.key.verify(SymmetricKey, alg, [DecryptOp])
 
-        return alg.decrypt(key=self.key, ciphertext=self.payload, aad=self._enc_structure, nonce=nonce)
+            return alg.decrypt(key=self.key, ciphertext=payload, aad=self._enc_structure, nonce=nonce)
 
-    def encrypt(self, *args, **kwargs) -> bytes:
+    def encrypt(self,
+                detached_payload: Optional[bytes] = None,
+                external_aad: Optional[bytes] = None,
+                *args,
+                **kwargs) -> bytes:
         """
         Encrypts the payload.
 
-        :raises CoseException: When the key is not of type 'SymmetricKey'.
+        :param detached_payload: The detached plaintext. Must be provided when the message does not
+            carry a payload (i.e. the payload is ``None`` or empty). When given, the message is
+            encoded without a payload and the resulting ciphertext is returned to the caller for
+            out-of-band transport.
+        :param external_aad: Optional external authenticated data. When given it overrides the
+            message-level ``external_aad`` attribute for this operation and is checked against the
+            configured length limit.
+
+        :raises CoseException: When the key is not of type 'SymmetricKey' or neither an attached
+            nor a detached payload is available.
         :returns: ciphertext as bytes
         """
 
@@ -61,12 +86,13 @@ class EncCommon(CoseMessage, metaclass=abc.ABCMeta):
         if self.key is None:
             raise CoseException("Key cannot be None")
 
-        alg = self.get_attr(headers.Algorithm)
-        nonce = self._get_nonce()
+        with self._detached_content(detached_payload, external_aad, empty_means_absent=True) as payload:
+            alg = self.get_attr(headers.Algorithm)
+            nonce = self._get_nonce()
 
-        self.key.verify(SymmetricKey, alg, [EncryptOp])
+            self.key.verify(SymmetricKey, alg, [EncryptOp])
 
-        return alg.encrypt(key=self.key, data=self.payload, aad=self._enc_structure, nonce=nonce)
+            return alg.encrypt(key=self.key, data=payload, aad=self._enc_structure, nonce=nonce)
 
     @property
     def _enc_structure(self) -> bytes:

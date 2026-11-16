@@ -4,6 +4,8 @@ from typing import Optional, TypeVar, Type, TYPE_CHECKING
 import cbor2
 
 from pycose.exceptions import CoseInvalidKey
+from pycose.exceptions import CoseException
+from pycose.exceptions import CoseIllegalExternalAad
 from pycose.keys import CoseKey
 from pycose.keys.ec2 import EC2Key
 from pycose.keys.okp import OKPKey
@@ -19,6 +21,11 @@ class CoseMessage(CoseBase, metaclass=abc.ABCMeta):
 
     # private dictionary to record all COSE message types dynamically
     _COSE_MSG_ID = {}
+
+    #: Optional upper bound (in bytes) on the length of the external AAD.
+    #: Set to ``None`` (the default) to disable the limit. Override on a
+    #: subclass or instance to enforce a message-specific maximum length.
+    MAX_EXTERNAL_AAD_LENGTH = None
 
     @classmethod
     def record_cbor_tag(cls, cbor_tag: int):
@@ -109,7 +116,37 @@ class CoseMessage(CoseBase, metaclass=abc.ABCMeta):
     def external_aad(self, new_external_aad: bytes) -> None:
         if type(new_external_aad) is not bytes:
             raise TypeError("external_aad must be of type 'bytes'")
+        if self.MAX_EXTERNAL_AAD_LENGTH is not None and len(new_external_aad) > self.MAX_EXTERNAL_AAD_LENGTH:
+            raise CoseIllegalExternalAad(
+                f"external_aad length ({len(new_external_aad)} B) exceeds the maximum allowed length "
+                f"({self.MAX_EXTERNAL_AAD_LENGTH} B)")
         self._external_aad = new_external_aad
+
+    def _detached_content(self,
+                          detached_payload: Optional[bytes],
+                          external_aad: Optional[bytes],
+                          content_owner: Optional['CoseMessage'] = None,
+                          empty_means_absent: bool = False):
+        """
+        Context manager for an explicit protect/unprotect operation.
+
+        It (optionally) overrides the message's external AAD and selects the payload that
+        participates in the authenticated structure. The original external AAD is always
+        restored on exit, and the stored payload is never mutated.
+
+        :param detached_payload: Explicit payload supplied out-of-band. Mutually exclusive
+            with a payload stored on the message.
+        :param external_aad: Explicit external AAD. ``None`` leaves the message's own AAD
+            untouched; an explicit ``bytes`` value (including ``b''``) overrides it.
+        :param content_owner: Message that owns the signed/encrypted content. Defaults to
+            self; COSE_Signature objects point this at their parent message.
+        :param empty_means_absent: When True, an empty bytes payload is treated as no
+            attached payload (used by encryption messages that default to empty bytes).
+        :raises CoseException: When neither an attached nor a detached payload is available
+            or when both payload sources are provided.
+        """
+
+        return _DetachedContent(content_owner or self, detached_payload, external_aad, empty_means_absent)
 
     @property
     def key(self) -> CoseKey:
@@ -155,6 +192,52 @@ class CoseMessage(CoseBase, metaclass=abc.ABCMeta):
         structure.append(self._external_aad)
 
         return structure
+
+
+class _DetachedContent:
+    """
+    Context manager backing :meth:`CoseMessage._detached_content`.
+
+    Temporarily installs an explicit external AAD and resolves the payload that
+    participates in the authenticated structure, always restoring the original
+    external AAD on exit. The payload stored on the message is never mutated.
+    """
+
+    def __init__(self, msg, detached_payload, external_aad, empty_means_absent=False):
+        self._msg = msg
+        self._detached_payload = detached_payload
+        self._external_aad = external_aad
+        self._empty_means_absent = empty_means_absent
+        self._original_aad = None
+
+    def __enter__(self):
+        self._original_aad = self._msg.external_aad
+        if self._external_aad is not None:
+            self._msg.external_aad = self._external_aad
+
+        if self._empty_means_absent:
+            # Encryption messages default to b''. An empty payload is a valid plaintext
+            # unless an explicit detached payload is supplied, in which case it marks the
+            # message as carrying no attached payload.
+            attached = self._msg.payload
+            if attached is not None and len(attached) == 0 and self._detached_payload is not None:
+                attached = None
+        else:
+            attached = self._msg.payload
+
+        if self._detached_payload is not None:
+            if attached is not None:
+                raise CoseException("Detached payload must be None when payload is set")
+            return self._detached_payload
+
+        if attached is None:
+            raise CoseException("Missing payload and no detached payload provided")
+
+        return attached
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._msg.external_aad = self._original_aad
+        return False
 
 
 CM = TypeVar('CM', bound=CoseMessage)

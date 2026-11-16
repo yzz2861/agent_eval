@@ -24,3 +24,8 @@ class CoseInvalidKey(Exception):
 
 class CoseException(Exception):
     pass
+
+
+class CoseIllegalExternalAad(CoseException):
+    """ Raised when the external AAD is malformed or exceeds the configured length limit. """
+    pass
