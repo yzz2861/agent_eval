@@ -1,0 +1,94 @@
+[build-system]
+requires = ["setuptools >= 69.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jwt"
+version = "1.4.0"
+description = "JSON Web Token library for Python 3."
+readme = "README.rst"
+
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+dependencies = [
+    "cryptography >= 3.1, != 3.4.0",
+]
+
+requires-python = ">= 3.9"
+
+authors = [
+  {name = "Kohei YOSHIDA", email = "kohei.yoshida@gehirn.co.jp"},
+]
+
+[project.urls]
+Repository = "https://github.com/GehirnInc/python-jwt.git"
+
+[project.optional-dependencies]
+dev = [
+    "black",
+    "isort",
+    "mypy",
+    "types-freezegun",
+]
+
+test = [
+    "pytest ~= 6.0",
+    "pytest-cov",
+    "freezegun",
+]
+
+[tool.pytest.ini_options]
+addopts = "--cov jwt --cov-report term"
+
+[tool.coverage.report]
+show_missing = true
+
+[tool.black]
+line-length = 79
+target-version = ["py39", "py310", "py311", "py312", "py313"]
+
+[tool.isort]
+profile = "black"
+line_length = 79
+multi_line_output = 3
+force_grid_wrap = 2
+split_on_trailing_comma = true
+
+# https://github.com/PyCQA/isort/issues/2156
+# lines_before_imports = 1
+ensure_newline_before_comments = true
+
+[tool.mypy]
+check_untyped_defs = true
+follow_imports_for_stubs = true
+#disallow_any_decorated = true
+disallow_any_generics = true
+#disallow_incomplete_defs = true
+disallow_subclassing_any = true
+disallow_untyped_calls = true
+disallow_untyped_decorators = true
+#disallow_untyped_defs = true
+implicit_reexport = false
+no_implicit_optional = true
+show_error_codes = true
+strict_equality = true
+warn_incomplete_stub = true
+warn_redundant_casts = true
+warn_unreachable = true
+warn_unused_ignores = true
+disallow_any_unimported = true
+#warn_return_any = true

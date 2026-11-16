@@ -1,0 +1,16 @@
+---
+dist: bionic
+language: python
+python:
+    - "3.6"
+    - "3.7"
+    - "3.8"
+    - "3.9"
+install:
+    - pip install tox-travis coveralls
+    - pip install -r requirements-dev.txt
+script:
+    - mypy
+    - tox
+after_success:
+    - coveralls
