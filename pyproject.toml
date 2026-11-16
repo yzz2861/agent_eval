@@ -1,0 +1,223 @@
+# SPDX-License-Identifier: MIT
+
+[build-system]
+requires = ["hatchling", "hatch-vcs", "hatch-fancy-pypi-readme"]
+build-backend = "hatchling.build"
+
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/argon2"]
+
+
+[project]
+name = "argon2-cffi"
+description = "Argon2 for Python"
+authors = [{ name = "Hynek Schlawack", email = "hs@ox.cx" }]
+dynamic = ["version", "readme"]
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["password", "hash", "hashing", "security"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Programming Language :: Python :: Free Threading",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+    "Topic :: Security :: Cryptography",
+    "Typing :: Typed",
+]
+dependencies = ["argon2-cffi-bindings"]
+
+[dependency-groups]
+tests = ["hypothesis", "pytest>9"]
+cov = [{ include-group = "tests" }, "coverage[toml]"]
+typing = ["mypy"]
+pyright = ["pyright"]
+ty = ["ty"]
+pyrefly = ["pyrefly"]
+lint = ["ruff>=0.16", "prek>=0.4"]
+# -bare, because we bring our own uv.
+tox = ["tox>4", "tox-uv-bare"]
+docs = [
+    "sphinx",
+    "sphinx-notfound-page",
+    "sphinx-copybutton",
+    "furo",
+    "myst-parser",
+]
+docs-watch = [{ include-group = "docs" }, "watchfiles"]
+dev = [
+    { include-group = "tests" },
+    { include-group = "typing" },
+    { include-group = "lint" },
+    { include-group = "tox" },
+    { include-group = "pyrefly" },
+]
+
+[project.urls]
+Documentation = "https://argon2-cffi.readthedocs.io/"
+Changelog = "https://github.com/hynek/argon2-cffi/blob/main/CHANGELOG.md"
+GitHub = "https://github.com/hynek/argon2-cffi"
+Funding = "https://github.com/sponsors/hynek"
+Tidelift = "https://tidelift.com/?utm_source=lifter&utm_medium=referral&utm_campaign=hynek"
+
+
+[tool.uv]
+# Dependency cooldown
+exclude-newer = "1 week"
+
+[tool.uv.exclude-newer-package]
+argon2-cffi-bindings = false
+
+
+[tool.hatch.version]
+source = "vcs"
+raw-options = { local_scheme = "no-local-version" }
+
+
+[tool.hatch.metadata.hooks.fancy-pypi-readme]
+content-type = "text/markdown"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
+text = "# *argon2-cffi*: Argon2 for Python\n\n"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
+path = "README.md"
+start-after = "<!-- begin pypi -->\n"
+end-before = "\n<!-- end pypi -->"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
+text = """
+
+## Release Information
+
+"""
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
+path = "CHANGELOG.md"
+start-after = "<!-- changelog follows -->"
+pattern = "\n(###.+?\n)## "
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
+text = """
+---
+
+[Full Changelog →](https://github.com/hynek/argon2-cffi/blob/main/CHANGELOG.md)
+
+
+"""
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
+path = "README.md"
+start-at = "## Credits"
+
+
+[tool.pytest]
+strict = true
+testpaths = ["tests"]
+addopts = ["-ra", "--import-mode=importlib"]
+log_level = "INFO"
+
+
+[tool.coverage.run]
+parallel = true
+branch = true
+source = ["argon2"]
+
+[tool.coverage.paths]
+source = ["src", ".tox/*-tests/**/site-packages"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+
+[tool.interrogate]
+verbose = 2
+fail-under = 100
+whitelist-regex = ["test_.*"]
+
+
+[tool.pyrefly]
+project-includes = ["src", "typing_tests"]
+
+
+[[tool.ty.overrides]]
+include = ["tests"]
+rules.all = "ignore"
+
+
+[tool.pyright]
+include = ["src", "typing_tests"]
+disableBytesTypePromotions = true
+
+
+[tool.mypy]
+strict = true
+pretty = true
+
+show_error_codes = true
+enable_error_code = ["ignore-without-code"]
+
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+ignore_errors = true
+
+
+[tool.ruff]
+src = ["src", "tests", "noxfile.py"]
+line-length = 79
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "A001",    # shadowing is fine
+    "A002",    # shadowing is fine
+    "A003",    # shadowing is fine
+    "ANN",     # Mypy is better at this
+    "ARG001",  # unused arguments are normal when implementing interfaces
+    "COM",     # Formatter takes care of our commas
+    "CPY",     # they expect a very specific shape of a copyright notice
+    "D",       # We prefer our own docstring style.
+    "E501",    # leave line-length enforcement to formatter
+    "ERA001",  # Dead code detection is overly eager.
+    "FBT",     # we have one function that takes one bool; c'mon!
+    "FIX",     # Yes, we want XXX as a marker.
+    "INP001",  # sometimes we want Python files outside of packages
+    "ISC001",  # conflicts with ruff format
+    "PLC0415", # sometimes, imports must live elsewhere
+    "PLR0913", # leave complexity to me
+    "PLR0917", # leave complexity to me
+    "PLR2004", # numbers are sometimes fine
+    "PLW2901", # re-assigning within loop bodies is fine
+    "RUF001",  # leave my smart characters alone
+    "SLF001",  # private members are accessed by friendly functions
+    "TCH",     # TYPE_CHECKING blocks break autodocs
+    "TD",      # we don't follow other people's todo style
+]
+
+[tool.ruff.lint.per-file-ignores]
+"src/argon2/__main__.py" = ["T201"] # need print in CLI
+"tests/*" = [
+    "ARG",    # stubs don't care about arguments
+    "S101",   # assert
+    "SIM300", # Yoda rocks in asserts
+    "PT005",  # we always add underscores and explicit name
+    "PT011",  # broad is fine
+    "TRY002", # stock exceptions are fine in tests
+    "EM101",  # no need for exception msg hygiene in tests
+]
+
+[tool.ruff.lint.isort]
+lines-between-types = 1
+lines-after-imports = 2
