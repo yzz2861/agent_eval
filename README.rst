@@ -49,6 +49,39 @@ Changelog
 | 0.1.0   | 2011-12-19 | (initial public release)                             |
 +---------+------------+------------------------------------------------------+
 
+Security and validation status
+==============================
+
+``onetimepass`` treats HOTP counters and TOTP time steps as unsigned 64-bit
+integers. Negative values, values beyond ``MAX_COUNTER`` (``2**64 - 1``), and
+time steps that would exceed that range are rejected with ``ValueError``;
+counters are never wrapped or silently truncated.
+
+``valid_hotp()`` and ``valid_totp()`` keep their historical return values. To
+distinguish an expired token, a token from the future, and a replayed token,
+use ``validate_hotp()`` / ``validate_totp()`` (or pass
+``return_reason=True``)::
+
+    result = otp.validate_totp(
+        token=my_token,
+        secret=my_secret,
+        last=last_accepted_interval,
+        window=1,
+    )
+    if not result:
+        print(result.reason)  # "expired", "future", "replay", or "invalid"
+
+Supplying ``last`` is required for replay detection; TOTP validation itself
+keeps no state. All counters in the acceptance window are evaluated, so the
+number of HMAC calculations does not depend on where a match occurs.
+``window`` and ``trials`` are bounded by ``MAX_WINDOW`` and ``MAX_TRIALS`` to
+prevent unbounded validation work. Tokens of six and eight digits are
+supported through the existing ``token_length`` argument.
+
+Secret decoding failures raise ``TypeError('Incorrect secret')`` and never
+include the supplied secret or the underlying decoder message.
+
+
 What is OneTimePass
 ===================
 
