@@ -1,0 +1,536 @@
+Version history
+===============
+
+.. currentmodule:: cbor2
+
+This library adheres to `Semantic Versioning 2.0 <http://semver.org/>`_.
+
+**6.3.0** (2026-11-13)
+
+- Added the ``--format=json`` CLI option to encode JSON files or standard input as binary CBOR
+  (`#222 <https://github.com/agronholm/cbor2/issues/222>`_; PR by @Aschenbath)
+- Improved encoder performance significantly
+- Fixed a segmentation fault when encoding :class:`CBORTag` that are either self-referential or
+  deeply nested
+  (`GHSA-ffh5-vwcq-7ccw <https://github.com/agronholm/cbor2/security/advisories/GHSA-ffh5-vwcq-7ccw>`_)
+
+**6.2.1** (2026-11-07)
+
+- Fixed a segmentation fault on Python 3.12-3.13 when hashing, comparing or printing a
+  self-referential :class:`CBORTag` decoded from untrusted CBOR data, such as when used
+  as a map key or set element; a catchable ``RuntimeError`` (wrapped in a
+  ``CBORDecodeError`` during decoding) is now raised instead
+  (`GHSA-6rgc-8hxm-rj7p <https://github.com/agronholm/cbor2/security/advisories/GHSA-6rgc-8hxm-rj7p>`_)
+- Corrected the semantic-decoder example for immutable sets
+  (`#360 <https://github.com/agronholm/cbor2/issues/360>`_)
+
+**6.2.0.post2** (2026-11-02)
+
+- Build Pyodide (``pyemscripten``) wheels for Python 3.14
+  (`#351 <https://github.com/agronholm/cbor2/issues/351>`_)
+
+**6.2.0.post1** (2026-11-01)
+
+- No changes
+
+**6.2.0** (2026-11-01)
+
+- Added the ``strict_hashable_types`` parameter to :class:`CBORDecoder`, :func:`load` and
+  :func:`loads` which, when enabled, restricts map keys and set elements to text strings and byte
+  strings in order to prevent denial-of-service attacks via hash collisions
+  (`GHSA-p6xp-9h6j-r278 <https://github.com/agronholm/cbor2/security/advisories/GHSA-p6xp-9h6j-r278>`_)
+- Documented decoding concatenated CBOR objects with EOF checks between objects
+  (`#30 <https://github.com/agronholm/cbor2/issues/30>`_; PR by @arindamsikder)
+- Fixed ``CBOREncoder.encode_to_bytes()`` sharing the string reference namespace of the
+  enclosing encode operation when called from a default hook
+  (`#356 <https://github.com/agronholm/cbor2/pull/356>`_; PR by @17krishna8)
+- Fixed the encoder writing the ``repr()`` of a :class:`bytes` regular expression pattern
+  (tag 35) instead of the pattern itself, so the regular expression decoded back as the text
+  pattern ``b'...'`` and no longer matched the same input
+  (`#355 <https://github.com/agronholm/cbor2/pull/355>`_; PR by @sahvx655-wq)
+- Fixed shared references (tag 29) allowing the decoder to construct object graphs nested deeper
+  than ``max_depth``, which could crash the interpreter with a segmentation fault when such an
+  object was hashed (as a map key or set member)
+  (`GHSA-55vx-2phh-7grr <https://github.com/agronholm/cbor2/security/advisories/GHSA-55vx-2phh-7grr>`_)
+- Fixed mission conversion of date values (tags 100 and 1004) to JSON as ISO formatted strings
+  (`#358 <https://github.com/agronholm/cbor2/pull/358>`_; PR by @jadenfix)
+- Fixed a ``PanicException`` on Python 3.10 when decoding a string-form datetime (tag 0) whose
+  fractional seconds part contains a multi-byte Unicode numeric character, as the microsecond
+  padding treated those as digits and then truncated the part on a byte index inside one of them
+  (`#354 <https://github.com/agronholm/cbor2/pull/354>`_; PR by @sahvx655-wq)
+- Fixed the decoder accepting a set (tag 258) whose payload is not an array, folding a text
+  string, byte string or map into a set of its characters, bytes or keys instead of rejecting it
+  (`#352 <https://github.com/agronholm/cbor2/pull/352>`_; PR by @sahvx655-wq)
+- Fixed the decoder accepting a non-integer exponent or mantissa in a decimal fraction (tag 4) or
+  a bigfloat (tag 5)
+  (`#350 <https://github.com/agronholm/cbor2/pull/350>`_; PR by @sahvx655-wq)
+
+**6.1.5** (2026-10-01)
+
+- Fixed :class:`CBORSimpleValue` hashing inconsistently with the integer it compares equal to
+  (`#334 <https://github.com/agronholm/cbor2/pull/334>`_; PR by @sahvx655-wq)
+- Fixed canonical encoding with value sharing enabled emitting shared references to container
+  keys that were never written to the stream, because the throwaway encoding used to sort the keys
+  registered them as shared values; the output then failed to decode, or decoded with the wrong
+  keys substituted in
+  (`#339 <https://github.com/agronholm/cbor2/pull/339>`_; PR by @sahvx655-wq)
+- Fixed shared references (tag 29) to a map or an unhandled tag resolving to the raw
+  :class:`dict` or :class:`CBORTag` instead of the value returned by ``object_hook`` or
+  ``tag_hook``, a regression from 5.x
+  (`#343 <https://github.com/agronholm/cbor2/pull/343>`_; PR by @sahvx655-wq)
+- Fixed the encoder not giving a nested stringref namespace (tag 256) its own index space
+  (`#335 <https://github.com/agronholm/cbor2/pull/335>`_; PR by @dylanpulver)
+- Fixed the decoder returning its internal break marker as a value when a break stop code
+  appeared where a data item was expected
+  (`#305 <https://github.com/agronholm/cbor2/issues/305>`_; PR by @sahvx655-wq)
+- Fixed a ``PanicException`` when trying to decode an epoch-form date (tag 100) with a payload near
+  ``i32::MAX`` which then overflowed the addition instead of raising a clean decode error
+  (`#340 <https://github.com/agronholm/cbor2/pull/340>`_; PR by @sahvx655-wq)
+- Fixed the decoder accepting a string-form datetime (tag 0) without a UTC offset and returning
+  a naive :class:`~datetime.datetime` instead of rejecting it
+  (`#347 <https://github.com/agronholm/cbor2/pull/347>`_; PR by @sahvx655-wq)
+- Fixed a reused :class:`CBOREncoder` no longer flushing its output or resetting its shared
+  container and string reference tracking after an ``encode()`` call had raised an exception
+  (`#348 <https://github.com/agronholm/cbor2/pull/348>`_; PR by @sahvx655-wq)
+
+**6.1.4** (2026-08-01)
+
+- Fixed :class:`frozendict` deriving its hash from its keys and its values as two independent
+  sets, so that frozendicts holding the same keys and the same values all collided regardless of
+  how the two were paired; since the decoder builds a frozendict for every map in an immutable
+  position, a payload keyed by such maps decoded in quadratic time
+  (`#333 <https://github.com/agronholm/cbor2/pull/333>`_; PR by @sahvx655-wq)
+- Fixed the encoder not registering :class:`bytearray` values in the string reference namespace,
+  unlike :class:`bytes` and :class:`str`; since the decoder registers every byte string it reads, a
+  single ``bytearray`` desynchronised the namespace and made subsequent string references resolve
+  to the wrong value
+  (`#332 <https://github.com/agronholm/cbor2/pull/332>`_; PR by @sahvx655-wq)
+- Fixed the decoder silently accepting an indefinite-length map whose break marker arrives after a
+  key with no value, dropping that trailing key and returning a truncated map instead of rejecting
+  the ill-formed input
+  (`#331 <https://github.com/agronholm/cbor2/pull/331>`_; PR by @sahvx655-wq)
+- Fixed the decoder accepting a non-byte-string payload for a positive or negative bignum (tags 2
+  and 3). ``int.from_bytes()`` also accepts an array (or a map, whose keys it iterates), so a tag
+  wrapping one of those was coerced into an integer instead of being rejected as malformed
+  (`#326 <https://github.com/agronholm/cbor2/pull/326>`_; PR by @sahvx655-wq)
+
+**6.1.3** (2026-07-04)
+
+- Fixed the decoder registering 6-byte strings in the string reference namespace at indices
+  65536–4294967295 where the encoder does not, desynchronising the namespace and resolving later
+  string references to the wrong value
+  (`#313 <https://github.com/agronholm/cbor2/pull/313>`_; PR by @sahvx655-wq)
+- Fixed the IPv4/IPv6 network decoders (tags 52 and 54) silently truncating an address byte string
+  that is longer than the address size instead of rejecting it as malformed
+  (`#309 <https://github.com/agronholm/cbor2/pull/309>`_; PR by @sahvx655-wq)
+- Fixed quadratic decoding time for indefinite-length and large definite-length byte and text
+  strings, caused by concatenating each chunk onto the accumulated result with ``+`` instead of
+  building the result once
+  (`#316 <https://github.com/agronholm/cbor2/pull/316>`_; PR by @sahvx655-wq)
+- Fixed ``datetime_as_timestamp`` encoding whole-second datetimes before 1970 or after 2106 as
+  floats instead of integers, because the timestamp was narrowed through an unsigned 32-bit integer
+  (`#317 <https://github.com/agronholm/cbor2/pull/317>`_; PR by @sahvx655-wq)
+- Fixed the encoder measuring text strings by code point count instead of UTF-8 byte length when
+  deciding whether to add them to the string reference namespace, desynchronising it from the
+  decoder (which counts bytes) and corrupting later string references for non-ASCII strings
+  (`#314 <https://github.com/agronholm/cbor2/pull/314>`_; PR by @sahvx655-wq)
+- Fixed the decoder rejecting scoped IPv6 addresses (tag 54) with a ``CBORDecodeError`` reading
+  ``invalid types in input array``; the encoder emits them as ``[address, null, zone id]`` but the
+  decoder only handled the network and interface array forms, so a scoped
+  :class:`~ipaddress.IPv6Address` could not be decoded back
+  (`#324 <https://github.com/agronholm/cbor2/pull/324>`_; PR by @sahvx655-wq)
+
+**6.1.2** (2026-06-02)
+
+- Fixed incorrect tracking of string references for definite-length text strings of length greater
+  than 65536
+  (`#308 <https://github.com/agronholm/cbor2/pull/308>`_; PR by @sahvx655-wq)
+- Fixed ``cbor2.load()`` crash caused by incorrect handling
+  of internal read buffer extension during stream deserialization.
+  (`#307 <https://github.com/agronholm/cbor2/pull/307>`_; PR by @noderyos)
+
+**6.1.1** (2026-05-14)
+
+- Fixed ``cbor2.load()`` returning corrupted data for payloads exceeding 4096 bytes
+  (`#304 <https://github.com/agronholm/cbor2/issues/304>`_)
+
+**6.1.0** (2026-05-12)
+
+- Added the ``allow_duplicate_keys`` parameter to :class:`CBORDecoder`, :func:`load` and
+  :func:`loads` (default: ``True``). When set to ``False``, a :exc:`CBORDecodeError` is raised
+  upon encountering a duplicate key within the same map.
+  (`#283 <https://github.com/agronholm/cbor2/issues/283>`_)
+- Added support for decoding from any object supporting the buffer API (e.g. ``memoryview`` or
+  ``bytearray``) in addition to ``bytes``
+  (`#297 <https://github.com/agronholm/cbor2/issues/297>`_)
+- Fixed compatibility issues with 32-bit systems
+  (`#300 <https://github.com/agronholm/cbor2/issues/300>`_)
+
+**6.0.1** (2026-04-29)
+
+- Fixed an error in the mutability logic during decoding, leading to values being decoded as
+  immutable in unexpected places (`#295 <https://github.com/agronholm/cbor2/issues/295>`_)
+
+**6.0.0** (2026-04-28)
+
+- No changes since v6.0.0rc1
+
+**6.0.0rc1** (2026-03-26)
+
+- **MAJOR REWRITE**:
+  The Python and C implementations of the encoder and decoder were replaced with a single,
+  Rust-based implementation in the interest of maintainability.
+
+  Here are some of the highlights:
+
+  * Improved memory safety (100% safe-mode Rust)
+  * Complete elimination of reference leaks
+  * Support for free-threading and subinterpreters
+  * `Substantially improved performance`_
+  * Improved decoder error handling where any non-base exception gets wrapped in a
+    ``CBORDecodeError``
+  * Iterative, rather than recursive decoding, meaning the container nesting depth is limited only
+    by the available memory, rather than the C stack size
+- **BACKWARD INCOMPATIBLE** Changed the signature of the ``tag_hook`` decoder callables to accept
+  (``CBORTag``, ``immutable`` as arguments instead of ``CBORDecoder``, ``CBORTag``)
+- **BACKWARD INCOMPATIBLE** Changed the signature of the ``object_hook`` decoder callables to
+  accept (``Mapping[Any, Any]``, ``bool``) instead of (``CBORDecoder``, ``dict[Any, Any]``)
+- **BACKWARD INCOMPATIBLE** Removed the ``break_marker`` singleton as no longer necessary
+- **BACKWARD INCOMPATIBLE** Removed the ``CBORDecodeValueError`` exception, instead chaining
+  ``ValueError`` or ``TypeError`` to a ``CBORDecodeError``
+- **BACKWARD INCOMPATIBLE** Changed the decoding of semantic tag 261 to yield an ``IPv4Interface``
+  or ``IPv6Interface`` if the address contains host bits
+- **BACKWARD INCOMPATIBLE** Removed the individual decoding functions from the API as they were
+  mistakenly called directly by users. Please open an issue if you need them back.
+- **BACKWARD INCOMPATIBLE** Changed the encoding of IP addresses to use the semantic tags 52 and 54
+  instead of the deprecated 260 and 261 (`#232 <https://github.com/agronholm/cbor2/issues/232>`_)
+- **BACKWARD INCOMPATIBLE** Dropped the deprecated ``cbor2.decoder`` and ``cbor2.encoder``
+  modules – everything in the API is now importable directly from ``cbor2``
+- **BACKWARD INCOMPATIBLE** The ``cbor2.FrozenDict`` class has now been renamed ``frozendict`` and
+  is not available on Python 3.15 where the built-in ``frozendict`` class must be used instead
+- Added the ``semantic_decoders`` decoder option to add or override decoders for specific semantic
+  tags
+- Added the ``immutable`` decoder flag to always use immutable containers where possible when
+  decoding a CBOR stream
+- Added the ``allow_indefinite`` decoder option to optionally disallow indefinite-length strings
+  and containers
+- Dropped support for Python 3.9
+- Fixed the decoder not rejecting invalid two-byte simple value sequences (0xF800 - 0xF81F)
+
+.. _Substantially improved performance: \
+    https://github.com/agronholm/cbor2/pull/278#issuecomment-4126126089
+
+**5.9.0** (2026-03-22)
+
+- Added the ``max_depth`` decoder parameter to limit the maximum allowed nesting level of
+  containers, with a default value of 400 levels (CVE-2026-26209)
+- Changed the default ``read_size`` from 4096 to 1 for backwards compatibility.
+  The buffered reads introduced in 5.8.0 could cause issues when code needs to
+  access the stream position after decoding. Users can opt-in to faster decoding
+  by passing ``read_size=4096`` when they don't need to access the stream directly
+  after decoding. Added a direct read path for ``read_size=1`` to avoid buffer
+  management overhead.
+  (`#275 <https://github.com/agronholm/cbor2/pull/275>`_; PR by @andreer)
+- Fixed C encoder not respecting string referencing when encoding string-type datetimes (tag 0)
+  (`#254 <https://github.com/agronholm/cbor2/issues/254>`_)
+- Fixed a missed check for an exception in the C implementation of ``CBOREncoder.encode_shared()``
+  (`#287 <https://github.com/agronholm/cbor2/issues/287>`_)
+- Fixed two reference/memory leaks in the C extension's long string decoder
+  (`#290 <https://github.com/agronholm/cbor2/pull/290>`_ PR by @killiancowan82)
+- Fixed C decoder ignoring the ``str_errors`` setting when decoding strings, and improved
+  string decoding performance by using stack allocation for small strings and eliminating
+  unnecessary conditionals. Benchmarks show 9-17% faster deserialization.
+  (`#255 <https://github.com/agronholm/cbor2/issues/255>`_; PR by @andreer)
+
+**5.8.0** (2025-12-30)
+
+- Added readahead buffering to C decoder for improved performance.
+  The decoder now uses a 4 KB buffer by default to reduce the number of read calls.
+  Benchmarks show 20-140% performance improvements for decoding operations.
+  (`#268 <https://github.com/agronholm/cbor2/pull/268>`_; PR by @andreer)
+- Fixed Python decoder not preserving share index when decoding array items containing
+  nested shareable tags, causing shared references to resolve to wrong objects
+  (`#267 <https://github.com/agronholm/cbor2/pull/267>`_; PR by @andreer)
+- Reset shared reference state at the start of each top-level encode/decode operation
+  (`#266 <https://github.com/agronholm/cbor2/pull/266>`_; PR by @andreer)
+
+**5.7.1** (2025-10-24)
+
+- Improved performance on decoding large definite bytestrings
+  (`#240 <https://github.com/agronholm/cbor2/issues/240>`_; PR by @dwpaley)
+- Fixed a read(-1) vulnerability caused by boundary handling error
+  (`#264 <https://github.com/agronholm/cbor2/issues/264>`_; PR by @tylzh97)
+
+**5.7.0** (2025-08-14)
+
+- Added support for Python 3.14 (no free-threading support yet, sorry)
+- Dropped support for Python 3.8
+  (`#247 <https://github.com/agronholm/cbor2/pull/247>`_; PR by @hugovk)
+- Added support for encoding indefinite containers
+  (`#256 <https://github.com/agronholm/cbor2/pull/256>`_; PR by @CZDanol)
+- Added complex number support (tag 43000)
+  (`#249 <https://github.com/agronholm/cbor2/pull/249>`_; PR by @chillenb)
+
+**5.6.5** (2024-10-09)
+
+- Published binary wheels for Python 3.13
+
+**5.6.4** (2024-06-06)
+
+- Fixed compilation of C extension failing on GCC 14
+- Fixed compiler warnings when building C extension
+
+**5.6.3** (2024-04-11)
+
+- Fixed decoding of epoch-based dates being affected by the local time zone in the C extension
+
+**5.6.2** (2024-02-19)
+
+- Fixed ``__hash__()`` of the C version of the ``CBORTag`` type crashing when there's a recursive
+  reference cycle
+- Fixed type annotation for the file object in ``cbor2.dump()``, ``cbor2.load()``, ``CBOREncoder``
+  and ``CBORDecoder`` to be ``IO[bytes]`` instead of ``BytesIO``
+- Worked around a `CPython bug <https://github.com/python/cpython/issues/99612>`_ that caused
+  a ``SystemError`` to be raised, or even a buffer overflow to occur when decoding a long text
+  string that contained only ASCII characters
+- Changed the return type annotations of ``cbor2.load()`` and ``cbor2.load()`` to return ``Any``
+  instead of ``object`` so as not to force users to make type casts
+
+**5.6.1** (2024-02-01)
+
+- Fixed use-after-free in the decoder's C version when prematurely encountering the end of stream
+- Fixed the C version of the decoder improperly raising ``CBORDecodeEOF`` when decoding a text
+  string longer than 65536 bytes
+
+**5.6.0** (2024-01-17)
+
+- Added the ``cbor2`` command line tool (for ``pipx run cbor2``)
+- Added support for native date encoding (bschoenmaeckers)
+- Made the C extension mandatory when the environment variable ``CBOR2_BUILD_C_EXTENSION`` is set
+  to ``1``.
+- Fixed ``SystemError`` in the C extension when decoding a ``Fractional`` with a bad
+  number of arguments or a non-tuple value
+- Fixed ``SystemError`` in the C extension when the decoder object hook raises an
+  exception
+- Fixed a segmentation fault when decoding invalid unicode data
+- Fixed infinite recursion when trying to hash a CBOR tag whose value points to the tag
+  itself
+- Fixed ``MemoryError`` when maliciously constructed bytestrings or string (declared to be absurdly
+  large) are being decoded
+- Fixed ``UnicodeDecodeError`` from failed parsing of a UTF-8 text string not being wrapped as
+  ``CBORDecodeValueError``
+- Fixed ``TypeError`` or ``ZeroDivisionError`` from a failed decoding of ``Fraction`` not being
+  wrapped as ``CBORDecodeValueError``
+- Fixed ``TypeError`` or ``ValueError`` from a failed decoding of ``UUID`` not being wrapped as
+  ``CBORDecodeValueError``
+- Fixed ``TypeError`` from a failed decoding of ``MIMEMessage`` not being wrapped as
+  ``CBORDecodeValueError``
+- Fixed ``OverflowError``, ``OSError`` or ``ValueError`` from a failed decoding of epoch-based
+  ``datetime`` not being wrapped as ``CBORDecodeValueError``
+
+**5.5.1** (2023-11-02)
+
+- Fixed ``CBORSimpleValue`` allowing the use of reserved values (24 to 31) which resulted in
+  invalid byte sequences
+- Fixed encoding of simple values from 20 to 23 producing the wrong byte sequences
+
+**5.5.0** (2023-10-21)
+
+- The ``cbor2.encoder``, ``cbor2.decoder`` or ``cbor2.types`` modules were deprecated – import
+  their contents directly from ``cbor2`` from now on. The old modules will be removed in the next
+  major release.
+- Added support for Python 3.12
+- Added type annotations
+- Dropped support for Python 3.7
+- Fixed bug in the ``fp`` attribute of the built-in version of ``CBORDecoder`` and
+  ``CBOREncoder`` where the getter returns an invalid pointer if the ``read`` method of
+  the file was a built-in method
+
+**5.4.6** (2022-12-07)
+
+- Fix MemoryError when decoding Tags on 32bit architecture. (Sekenre)
+
+**5.4.5** (2022-11-29)
+
+- Added official Python 3.11 support (agronholm)
+- Raise proper exception on invalid bignums (Øyvind Rønningstad)
+- Make Tagged item usable as a map key (Niels Mündler)
+- Eliminate potential memory leak in tag handling (Niels Mündler)
+- Documentation tweaks (Adam Johnson)
+
+**5.4.4** (2022-11-28)
+
+**REMOVED** Due to potential memory leak bug
+
+**5.4.3** (2022-05-03)
+
+- Removed support for Python < 3.7
+- Various build system improvements for binary wheels (agronholm)
+- Migrated project to use ``pyproject.toml`` and pre-commit hooks (agronholm)
+
+**5.4.2** (2021-10-14)
+
+- Fix segfault when initializing CBORTag with incorrect arguments (Sekenre)
+- Fix sphinx build warnings (Sekenre)
+
+**5.4.1** (2021-07-23)
+
+- Fix SystemErrors when using C-backend, meaningful exceptions now raised (Sekenre)
+- Fix precision loss when decoding base10 decimal fractions (Sekenre)
+- Made CBORTag handling consistent between python and C-module (Sekenre)
+
+**5.4.0** (2021-06-04)
+
+- Fix various bounds checks in the C-backend (Sekenre)
+- More testing of invalid/corrupted data (Sekenre)
+- Support for `String References <http://cbor.schmorp.de/stringref>`_ (xurtis)
+- Update Docs to refer to new RFC8949
+
+**5.3.0** (2021-05-18)
+
+- Removed support for Python < 3.6
+
+**5.2.0** (2020-09-30)
+
+- Final version tested with Python 2.7 and 3.5
+- README: Announce deprecation of Python 2.7, 3.5
+- README: More detail and examples
+- Bugfix: Fix segfault on loading huge arrays with C-backend (Sekenre)
+- Build system: Allow packagers to force C-backend building or disable using env var (jameshilliard)
+- Feature: ``cbor2.tool`` Command line diagnostic tool (Sekenre)
+- Feature: Ignore semantic tag used for file magic 55799 AKA "Self-Described CBOR" (kalcutter)
+
+**5.1.2** (2020-07-21)
+
+- Bugfix: Refcount bug in C lib causing intermittent segfaults on shutdown (tdryer)
+
+**5.1.1** (2020-07-03)
+
+- Build system: Making C lib optional if it fails to compile (chiefnoah)
+- Build system: Better Glibc version detection (Sekenre and JayH5)
+- Tests: Positive and negative bignums (kalcutter)
+- Bugfix: Fractional seconds parsing in datetimes (kalcutter)
+
+**5.1.0** (2020-03-18)
+
+- Minor API change: ``CBORSimpleValue`` is now a subclass of namedtuple and allows
+  all numeric comparisons. This brings functional parity between C and Python modules.
+- Fixes for C-module on big-endian systems including floating point decoding, smallint encoding,
+  and boolean argument handling. Tested on s390x and MIPS32.
+- Increase version requred of setuptools during install due to unicode errors.
+
+**5.0.1** (2020-01-21)
+
+- Fix deprecation warning on python 3.7, 3.8 (mariano54)
+- Minor documentation tweaks
+
+**5.0.0** (2020-01-20)
+
+- **BACKWARD INCOMPATIBLE** CBOR does not have a bare DATE type, encoding dates as datetimes
+  is disabled by default (PR by Changaco)
+- **BACKWARD INCOMPATIBLE** ``CBORDecoder.set_shareable()`` only takes the instance to share, not
+  the shareable's index
+- **BACKWARD INCOMPATIBLE** ``CBORError`` now descends from ``Exception`` rather than
+  ``ValueError``; however, subordinate exceptions now descend from ``ValueError`` (where
+  appropriate) so most users should notice no difference
+- **BACKWARD INCOMPATIBLE** ``CBORDecoder`` can now raise ``CBORDecodeEOF`` which inherits
+  from ``EOFError`` supporting streaming applications
+- Optional Pure C implementation by waveform80 that functions identically to the pure Python
+  implementation with further contributions from: toravir, jonashoechst, Changaco
+- Drop Python 3.3 and 3.4 support from the build process; they should still work if built from
+  source but are no longer officially supported
+- Added support for encoding and decoding ``ipaddress.IPv4Address``,
+  ``ipaddress.IPv6Address``, ``ipaddress.IPv4Network``, and ``ipaddress.IPv6Network``
+  (semantic tags 260 and 261)
+
+**4.2.0** (2020-01-10)
+
+- **BROKEN BUILD** Removed
+
+**4.1.2** (2018-12-10)
+
+- Fixed bigint encoding taking quadratic time
+- Fixed overflow errors when encoding floating point numbers in canonical mode
+- Improved decoder performance for dictionaries
+- Minor documentation tweaks
+
+**4.1.1** (2018-10-14)
+
+- Fixed encoding of negative ``decimal.Decimal`` instances (PR by Sekenre)
+
+**4.1.0** (2018-05-27)
+
+- Added canonical encoding (via ``canonical=True``) (PR by Sekenre)
+- Added support for encoding/decoding sets (semantic tag 258) (PR by Sekenre)
+- Added support for encoding ``FrozenDict`` (hashable dict) as map keys or set elements (PR by
+  Sekenre)
+
+**4.0.1** (2017-08-21)
+
+- Fixed silent truncation of decoded data if there are not enough bytes in the stream for an exact
+  read (``CBORDecodeError`` is now raised instead)
+
+**4.0.0** (2017-04-24)
+
+- **BACKWARD INCOMPATIBLE** Value sharing has been disabled by default, for better compatibility
+  with other implementations and better performance (since it is rarely needed)
+- **BACKWARD INCOMPATIBLE** Replaced the ``semantic_decoders`` decoder option with the
+  ``CBORDecoder.tag_hook`` option
+- **BACKWARD INCOMPATIBLE** Replaced the ``encoders`` encoder option with the
+  ``CBOREncoder.default`` option
+- **BACKWARD INCOMPATIBLE** Factored out the file object argument (``fp``) from all callbacks
+- **BACKWARD INCOMPATIBLE** The encoder no longer supports every imaginable type implementing the
+  ``Sequence`` or ``Map`` interface, as they turned out to be too broad
+- Added the ``CBORDecoder.object_hook`` option for decoding dicts into complex objects (intended
+  for situations where JSON compatibility is required and semantic tags cannot be used)
+- Added encoding and decoding of simple values (``CBORSimpleValue``) (contributed by Jerry
+  Lundström)
+- Replaced the decoder for bignums with a simpler and faster version (contributed by orent)
+- Made all relevant classes and functions available directly in the ``cbor2`` namespace
+- Added proper documentation
+
+**3.0.4** (2016-09-24)
+
+- Fixed TypeError when trying to encode extension types (regression introduced in 3.0.3)
+
+**3.0.3** (2016-09-23)
+
+- No changes, just re-releasing due to git tagging screw-up
+
+**3.0.2** (2016-09-23)
+
+- Fixed decoding failure for datetimes with microseconds (tag 0)
+
+**3.0.1** (2016-08-08)
+
+- Fixed error in the cyclic structure detection code that could mistake one container for
+  another, sometimes causing a bogus error about cyclic data structures where there was none
+
+**3.0.0** (2016-07-03)
+
+- **BACKWARD INCOMPATIBLE** Encoder callbacks now receive three arguments: the encoder instance,
+  the value to encode and a file-like object. The callback must must now either write directly to
+  the file-like object or call another encoder callback instead of returning an iterable.
+- **BACKWARD INCOMPATIBLE** Semantic decoder callbacks now receive four arguments: the decoder
+  instance, the primitive value, a file-like object and the shareable index for the decoded value.
+  Decoders that support value sharing must now set the raw value at the given index in
+  ``decoder.shareables``.
+- **BACKWARD INCOMPATIBLE** Removed support for iterative encoding (``CBOREncoder.encode()`` is no
+  longer a generator function and always returns ``None``)
+- Significantly improved performance (encoder ~30 % faster, decoder ~60 % faster)
+- Fixed serialization round-trip for ``undefined`` (simple type 23)
+- Added proper support for value sharing in callbacks
+
+**2.0.0** (2016-06-11)
+
+- **BACKWARD INCOMPATIBLE** Deserialize unknown tags as ``CBORTag`` objects so as not to lose
+  information
+- Fixed error messages coming from nested structures
+
+**1.1.0** (2016-06-10)
+
+- Fixed deserialization of cyclic structures
+
+**1.0.0** (2016-06-08)
+
+- Initial release

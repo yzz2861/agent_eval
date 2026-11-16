@@ -1,0 +1,138 @@
+[build-system]
+requires = [
+    "setuptools >= 77",
+    "setuptools-rust",
+    "setuptools_scm[toml] >= 6.4"
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cbor2"
+description = "CBOR (de)serializer with extensive tag support"
+readme = "README.rst"
+authors = [{name = "Alex Grönholm", email = "alex.gronholm@nextday.fi"}]
+license = "MIT"
+keywords = ["serialization", "cbor"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: WebAssembly :: Emscripten",
+    "Intended Audience :: Developers",
+    "Typing :: Typed",
+    "Programming Language :: Python :: Free Threading :: 2 - Beta",
+    "Programming Language :: Rust",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+]
+requires-python = ">= 3.10"
+dynamic = ["version"]
+
+[project.urls]
+Changelog = "https://cbor2.readthedocs.io/en/latest/versionhistory.html"
+Documentation = "https://cbor2.readthedocs.org/en/latest/"
+"Source Code" = "https://github.com/agronholm/cbor2"
+"Issue Tracker" = "https://github.com/agronholm/cbor2/issues"
+
+[project.scripts]
+cbor2 = "cbor2.tool:main"
+
+[dependency-groups]
+test = [
+    "coverage >= 7",
+    "pytest",
+    "hypothesis",
+    "tzdata; platform_system == 'Windows'",
+]
+doc = [
+    "packaging",
+    "Sphinx >= 8.2.0",
+    "sphinx-rtd-theme >= 3.0.0",
+    "sphinx-autodoc-typehints >= 3.9.11",
+    "typing_extensions; python_version < '3.12'",
+]
+benchmarks = [
+    "pytest-benchmark==4.0.0",
+]
+fuzz = [
+    "atheris",
+]
+
+[tool.setuptools.packages.find]
+where = ["python"]
+
+[[tool.setuptools-rust.ext-modules]]
+target = "cbor2._cbor2"
+path = "rust/Cargo.toml"
+
+[tool.setuptools_scm]
+version_scheme = "post-release"
+local_scheme = "dirty-tag"
+
+[tool.ruff]
+line-length = 99
+
+[tool.ruff.lint]
+extend-select = [
+    "C4",           # flake8-comprehensions
+    "I",            # isort
+    "ISC",          # flake8-implicit-str-concat
+    "PERF",         # flake8-performance
+    "PGH",          # pygrep-hooks
+    "RUF100",       # unused noqa (yesqa)
+    "UP",           # pyupgrade
+    "W",            # pycodestyle warnings
+]
+ignore = [
+    "B015",
+    "B023",
+    "BLE001",
+    "DTZ001",
+    "DTZ005",
+    "ISC001",
+    "PYI025",
+    "S102",
+    "S110",
+    "SIM201",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["cbor2"]
+
+[tool.mypy]
+strict = true
+files = ["python", "tests"]
+exclude = ["tests/fuzzers"]
+
+[tool.pytest.ini_options]
+addopts = "-rsfE --tb=short"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["cbor2"]
+relative_files = true
+
+[tool.coverage.report]
+show_missing = true
+
+[tool.tox]
+env_list = ["py310", "py311", "py312", "py313", "py314", "py315", "py315t", "pypy3"]
+skip_missing_interpreters = true
+requires = ["tox >= 4.22"]
+
+[tool.tox.env_pkg_base]
+set_env = { RUSTFLAGS = "--deny warnings" }
+
+[tool.tox.env_run_base]
+commands = [["pytest", { replace = "posargs", extend = true }]]
+package = "wheel"
+dependency_groups = ["test"]
+set_env = { TZ = "America/New_York" }
+
+[tool.tox.env.docs]
+commands = [["sphinx-build", "-W", "-n", "docs", "build/sphinx"]]
+dependency_groups = ["doc"]
