@@ -1206,6 +1206,8 @@ class SectionStructure(Structure):
         Returns bytes().
         """
 
+        file_size = len(self.pe.__data__)
+
         if start is None:
             offset = self.get_PointerToRawData_adj()
         else:
@@ -1213,7 +1215,16 @@ class SectionStructure(Structure):
                 start - self.get_VirtualAddress_adj()
             ) + self.get_PointerToRawData_adj()
 
+        # A malformed section can place the requested RVA before the
+        # section's VirtualAddress. In that case the arithmetic above yields a
+        # negative offset; never let Python turn that into an index relative to
+        # the end of the file.
+        if offset is None or offset < 0 or offset > file_size:
+            return b""
+
         if length is not None:
+            if length < 0:
+                return b""
             end = offset + length
         elif self.SizeOfRawData is not None:
             end = offset + self.SizeOfRawData
@@ -1221,13 +1232,20 @@ class SectionStructure(Structure):
             end = offset
 
         if ignore_padding and end is not None and offset is not None:
-            end = min(end, offset + self.Misc_VirtualSize)
+            end = min(end, offset + (self.Misc_VirtualSize or 0))
 
         # PointerToRawData is not adjusted here as we might want to read any possible
         # extra bytes that might get cut off by aligning the start (and hence cutting
         # something off the end)
         if self.PointerToRawData is not None and self.SizeOfRawData is not None:
             end = min(end, self.PointerToRawData + self.SizeOfRawData)
+
+        # SizeOfRawData is attacker-controlled. Clamping here keeps reads inside
+        # the backing buffer even when the declaration extends past EOF or is
+        # vastly larger than the file.
+        end = min(end, file_size)
+        if end <= offset:
+            return b""
         return self.pe.__data__[offset:end]
 
     def __setattr__(self, name, val):
@@ -1254,14 +1272,16 @@ class SectionStructure(Structure):
     def contains_offset(self, offset):
         """Check whether the section contains the file offset provided."""
 
-        if self.PointerToRawData is None:
+        if self.PointerToRawData is None or not self.SizeOfRawData:
             # bss and other sections containing only uninitialized data must have 0
             # and do not take space in the file
             return False
         PointerToRawData_adj = self.get_PointerToRawData_adj()
-        return (
-            PointerToRawData_adj <= offset < PointerToRawData_adj + self.SizeOfRawData
-        )
+        file_size = len(self.pe.__data__)
+        if PointerToRawData_adj < 0 or PointerToRawData_adj >= file_size:
+            return False
+        end = min(PointerToRawData_adj + self.SizeOfRawData, file_size)
+        return PointerToRawData_adj <= offset < end
 
     def contains_rva(self, rva):
         """Check whether the section contains the address provided."""
@@ -1275,15 +1295,19 @@ class SectionStructure(Structure):
         # the whole PE file minus the start address of the section it could be
         # either truncated or the SizeOfRawData contains a misleading value.
         # In either of those cases we take the VirtualSize
-        if len(self.pe.__data__) - self.get_PointerToRawData_adj() < self.SizeOfRawData:
+        raw_size = self.SizeOfRawData or 0
+        virtual_size = self.Misc_VirtualSize or 0
+        if len(self.pe.__data__) - self.get_PointerToRawData_adj() < raw_size:
             # PECOFF documentation v8 says:
             # VirtualSize: The total size of the section when loaded into memory.
             # If this value is greater than SizeOfRawData, the section is zero-padded.
             # This field is valid only for executable images and should be set to zero
             # for object files.
-            size = self.Misc_VirtualSize
+            size = virtual_size
         else:
-            size = max(self.SizeOfRawData, self.Misc_VirtualSize)
+            size = max(raw_size, virtual_size)
+
+        size = max(size, 0)
 
         # Check whether there's any section after the current one that starts before
         # the calculated end for the current one. If so, cut the current section's size
@@ -1292,11 +1316,11 @@ class SectionStructure(Structure):
             self.next_section_virtual_address is not None
             and self.VirtualAddress < self.next_section_virtual_address < VirtualAddress_adj + size
         ):
-            size = self.next_section_virtual_address - VirtualAddress_adj
+            size = max(0, self.next_section_virtual_address - VirtualAddress_adj)
 
         self.section_min_addr = VirtualAddress_adj
         self.section_max_addr = VirtualAddress_adj + size
-        return VirtualAddress_adj <= rva < VirtualAddress_adj + size
+        return self.section_min_addr <= rva < self.section_max_addr
 
     def contains(self, rva):
         return self.contains_rva(rva)
@@ -3341,10 +3365,11 @@ class PE:
         # fc91013eb72529da005110a3403541b6 example
         # Should this throw an exception in the minimum header offset
         # can't be found?
+        file_size = len(self.__data__)
         rawDataPointers = [
             self.adjust_PointerToRawData(s.PointerToRawData)
             for s in self.sections
-            if s.PointerToRawData > 0
+            if 0 < s.PointerToRawData < file_size and s.SizeOfRawData
         ]
 
         if len(rawDataPointers) > 0:
@@ -3603,17 +3628,43 @@ class PE:
         """
 
         self.sections = []
-        MAX_SIMULTANEOUS_ERRORS = 3
+        file_size = len(self.__data__)
+        section_size = SectionStructure(
+            self.__IMAGE_SECTION_HEADER_format__, pe=self
+        ).sizeof()
+        number_of_sections = self.FILE_HEADER.NumberOfSections
+
+        if number_of_sections > MAX_SECTIONS:
+            self.__warnings.append(
+                f"Too many sections {number_of_sections} (>={MAX_SECTIONS})"
+            )
+            number_of_sections = MAX_SECTIONS
+
+        if number_of_sections and (offset < 0 or offset >= file_size):
+            self.__warnings.append(
+                f"Invalid section 0. The section table starts at file offset "
+                f"{offset:#x}, beyond the end of the file."
+            )
+            return offset
+
+        # Validate the table itself before unpacking anything. A declared
+        # section that is not fully present must not turn into a partial
+        # struct.unpack() attempt.
+        complete_entries = max(0, (file_size - offset) // section_size)
+        if number_of_sections > complete_entries:
+            self.__warnings.append(
+                f"Invalid section {complete_entries}. Section header is truncated "
+                f"at the end of the file ({file_size:#x} bytes)."
+            )
+            number_of_sections = complete_entries
+
+        raw_ranges = []
+        virtual_ranges = []
+
         # Currently pefile deviates from the specification by starting from zero and not one.
         # Entries in the section table are numbered starting from one (1).
         # https://learn.microsoft.com/en-us/windows/win32/debug/pe-format#section-table-section-headers
-        for i in range(self.FILE_HEADER.NumberOfSections):
-            if i >= MAX_SECTIONS:
-                self.__warnings.append(
-                    f"Too many sections {self.FILE_HEADER.NumberOfSections} (>={MAX_SECTIONS})"
-                )
-                break
-            simultaneous_errors = 0
+        for i in range(number_of_sections):
             section = SectionStructure(self.__IMAGE_SECTION_HEADER_format__, pe=self)
             if not section:
                 break
@@ -3632,50 +3683,57 @@ class PE:
                     "virtsectblXP?)."
                 )
                 break
-            section.__unpack__(section_data)
+            try:
+                section.__unpack__(section_data)
+            except PEFormatError as err:
+                self.__warnings.append(
+                    f"Invalid section {i}. Unable to unpack section header: {err}"
+                )
+                break
             self.__structures__.append(section)
 
-            if section.SizeOfRawData + section.PointerToRawData > len(self.__data__):
-                simultaneous_errors += 1
+            raw_size = section.SizeOfRawData
+            raw_pointer = section.PointerToRawData
+            virtual_size = section.Misc_VirtualSize
+            virtual_address = section.VirtualAddress
+            effective_raw_pointer = section.get_PointerToRawData_adj()
+
+            if raw_size and raw_pointer + raw_size > file_size:
                 self.__warnings.append(
                     f"Error parsing section {i}. SizeOfRawData is larger than file."
                 )
 
-            if self.adjust_PointerToRawData(section.PointerToRawData) > len(
-                self.__data__
-            ):
-                simultaneous_errors += 1
+            if effective_raw_pointer > file_size:
                 self.__warnings.append(
                     f"Error parsing section {i}. PointerToRawData points beyond "
                     "the end of the file."
                 )
 
-            if section.Misc_VirtualSize > max_offset:
-                simultaneous_errors += 1
+            if raw_size > max_offset:
+                self.__warnings.append(
+                    f"Suspicious value found parsing section {i}. SizeOfRawData is "
+                    f"extremely large > {human_readable_size(max_offset)}."
+                )
+
+            if virtual_size > max_offset:
                 self.__warnings.append(
                     f"Suspicious value found parsing section {i}. VirtualSize is "
                     f"extremely large > {human_readable_size(max_offset)}."
                 )
 
-            if (
-                self.adjust_SectionAlignment(
-                    section.VirtualAddress,
-                    self.OPTIONAL_HEADER.SectionAlignment,
-                    self.OPTIONAL_HEADER.FileAlignment,
-                )
-                > max_offset
-            ):
-                simultaneous_errors += 1
+            virtual_address_adj = self.adjust_SectionAlignment(
+                virtual_address,
+                self.OPTIONAL_HEADER.SectionAlignment,
+                self.OPTIONAL_HEADER.FileAlignment,
+            )
+            if virtual_address_adj > max_offset:
                 self.__warnings.append(
                     f"Suspicious value found parsing section {i}. VirtualAddress is "
                     f"beyond {max_offset:#x}."
                 )
 
-            if (
-                self.OPTIONAL_HEADER.FileAlignment != 0
-                and (section.PointerToRawData % self.OPTIONAL_HEADER.FileAlignment) != 0
-            ):
-                simultaneous_errors += 1
+            file_alignment = self.OPTIONAL_HEADER.FileAlignment
+            if file_alignment != 0 and (raw_pointer % file_alignment) != 0:
                 self.__warnings.append(
                     f"Error parsing section {i}. "
                     "PointerToRawData should normally be "
@@ -3683,9 +3741,33 @@ class PE:
                     "is trying to confuse tools which parse this incorrectly."
                 )
 
-            if simultaneous_errors >= MAX_SIMULTANEOUS_ERRORS:
-                self.__warnings.append("Too many warnings parsing section. Aborting.")
-                break
+            if file_alignment != 0 and raw_size and raw_size % file_alignment:
+                self.__warnings.append(
+                    f"Error parsing section {i}. "
+                    "SizeOfRawData should normally be a multiple of FileAlignment, "
+                    "this might imply the file is trying to confuse tools which "
+                    "parse this incorrectly."
+                )
+
+            section_alignment = self.OPTIONAL_HEADER.SectionAlignment
+            if section_alignment != 0 and virtual_address % section_alignment:
+                self.__warnings.append(
+                    f"Error parsing section {i}. "
+                    "VirtualAddress should normally be a multiple of "
+                    "SectionAlignment, this might imply the file is trying to "
+                    "confuse tools which parse this incorrectly."
+                )
+
+            if raw_size:
+                raw_end = min(raw_pointer + raw_size, file_size)
+                if 0 <= effective_raw_pointer < raw_end:
+                    raw_ranges.append((effective_raw_pointer, raw_end, i))
+
+            virtual_extent = max(raw_size, virtual_size, 0)
+            if virtual_extent and virtual_address_adj < max_offset:
+                virtual_end = min(virtual_address_adj + virtual_extent, max_offset)
+                if virtual_end > virtual_address_adj:
+                    virtual_ranges.append((virtual_address_adj, virtual_end, i))
 
             section_flags = retrieve_flags(SECTION_CHARACTERISTICS, "IMAGE_SCN_")
 
@@ -3695,6 +3777,24 @@ class PE:
             # Set the section's original index as it may change after being sorted by VirtualAddress
             section.index_in_file = i
             self.sections.append(section)
+
+        def warn_overlaps(ranges, description):
+            ranges.sort()
+            active_end = -1
+            active_index = None
+            for start, end, section_index in ranges:
+                if active_end > start:
+                    self.__warnings.append(
+                        f"Overlapping {description} ranges for sections "
+                        f"{active_index} and {section_index} "
+                        f"({start:#x}-{end:#x})."
+                    )
+                if end > active_end:
+                    active_end = end
+                    active_index = section_index
+
+        warn_overlaps(raw_ranges, "raw data")
+        warn_overlaps(virtual_ranges, "virtual address")
 
         # Sort the sections by their VirtualAddress and add a field to each of them
         # with the VirtualAddress of the next section. This will allow to check
@@ -3724,10 +3824,8 @@ class PE:
                         "This might indicate a packed executable."
                     )
 
-        if self.FILE_HEADER.NumberOfSections > 0 and self.sections:
-            return (
-                offset + self.sections[0].sizeof() * self.FILE_HEADER.NumberOfSections
-            )
+        if number_of_sections > 0 and self.sections:
+            return min(file_size, offset + section_size * number_of_sections)
         else:
             return offset
 
@@ -6324,8 +6422,8 @@ class PE:
             if section.Misc_VirtualSize == 0 and section.SizeOfRawData == 0:
                 continue
 
-            srd = section.SizeOfRawData
-            prd = self.adjust_PointerToRawData(section.PointerToRawData)
+            srd = section.SizeOfRawData or 0
+            prd = section.get_PointerToRawData_adj()
             VirtualAddress_adj = self.adjust_SectionAlignment(
                 section.VirtualAddress,
                 self.OPTIONAL_HEADER.SectionAlignment,
@@ -6345,10 +6443,21 @@ class PE:
             if padding_length > 0:
                 mapped_data += b"\0" * padding_length
             elif padding_length < 0:
-                mapped_data = mapped_data[:padding_length]
+                # A lower section can overlap the previously mapped range. Cut
+                # back to its VirtualAddress rather than using a negative slice
+                # index, which would incorrectly drop bytes from the end.
+                mapped_data = mapped_data[:VirtualAddress_adj]
 
             section_data = section.get_data()
-            virtual_size = section.Misc_VirtualSize
+            virtual_size = max(section.Misc_VirtualSize or 0, 0)
+            max_virtual_size = max(0, max_virtual_address - VirtualAddress_adj)
+            if virtual_size > max_virtual_size:
+                self.__warnings.append(
+                    f"Section {section.index_in_file} VirtualSize "
+                    f"({virtual_size:#x}) exceeds the mapped image limit; "
+                    f"truncating to {max_virtual_size:#x} bytes."
+                )
+                virtual_size = max_virtual_size
             if virtual_size and len(section_data) != virtual_size:
                 # Only Misc_VirtualSize bytes belong in the mapped view.
                 if virtual_size < len(section_data):
@@ -7469,10 +7578,14 @@ class PE:
         """
 
         for section in self.sections:
-            section_data_start = self.adjust_PointerToRawData(section.PointerToRawData)
-            section_data_end = section_data_start + section.SizeOfRawData
-            if section_data_start < len(self.__data__) and section_data_end < len(
-                self.__data__
+            section_data_start = section.get_PointerToRawData_adj()
+            section_data_size = section.SizeOfRawData or 0
+            section_data_end = section_data_start + section_data_size
+            file_size = len(self.__data__)
+            if (
+                section_data_size
+                and 0 <= section_data_start < file_size
+                and section_data_end <= file_size
             ):
                 self.set_data_bytes(section_data_start, section.get_data())
 
