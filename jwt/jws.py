@@ -24,6 +24,7 @@ from .exceptions import (
 )
 from .jwa import (
     AbstractSigningAlgorithm,
+    HMACAlgorithm,
     supported_signing_algorithms,
 )
 from .jwk import AbstractJWKBase
@@ -45,6 +46,44 @@ class JWS:
             return self._supported_algs[alg]
         except KeyError:
             raise JWSDecodeError("Unsupported signing algorithm.")
+
+    def _check_key_for_alg(
+        self,
+        key: AbstractJWKBase,
+        alg: str,
+        alg_impl: AbstractSigningAlgorithm,
+    ) -> None:
+        """
+        Ensure the selected JWK is allowed to verify a JWS signed with the
+        header's algorithm. JWKs without the optional constraint members
+        ("alg", "use", "key_ops") are accepted for backward compatibility.
+        """
+        key_params = key.to_dict(public_only=True)
+
+        key_alg = key_params.get("alg")
+        if key_alg is not None and key_alg != alg:
+            raise JWSDecodeError(
+                f"JWK alg '{key_alg}' does not match JWS header alg '{alg}'."
+            )
+
+        key_ops = key_params.get("key_ops")
+        if key_ops is not None and "verify" not in key_ops:
+            raise JWSDecodeError(
+                "JWK key_ops does not permit the 'verify' operation."
+            )
+
+        use = key_params.get("use")
+        if use is not None and use != "sig":
+            raise JWSDecodeError(
+                f"JWK use '{use}' does not permit signature verification."
+            )
+
+        if isinstance(alg_impl, HMACAlgorithm):
+            if key.get_kty() != "oct":
+                raise JWSDecodeError(
+                    f"Algorithm '{alg}' requires an octet (oct) JWK, but got "
+                    f"kty '{key.get_kty()}'."
+                )
 
     def encode(
         self,
@@ -104,6 +143,8 @@ class JWS:
             raise JWSDecodeError("Unsupported signing algorithm.")
 
         alg_impl = self._retrieve_alg(alg_value)
+        if do_verify and key is not None:
+            self._check_key_for_alg(key, alg_value, alg_impl)
         if do_verify and not alg_impl.verify(
             signing_message.encode("ascii"), key, signature
         ):
