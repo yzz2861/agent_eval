@@ -1,0 +1,125 @@
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = [ "setuptools>=77" ]
+
+[project]
+name = "django-csp"
+version = "4.0"
+description = "Django Content Security Policy support."
+readme = "README.rst"
+license = "BSD-3-Clause"
+maintainers = [
+  { name = "Mozilla MEAO team", email = "meao-backend@mozilla.com" },
+]
+authors = [ { name = "James Socol", email = "me@jamessocol.com" } ]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Environment :: Web Environment",
+  "Environment :: Web Environment :: Mozilla",
+  "Framework :: Django :: 4.2",
+  "Framework :: Django :: 5.0",
+  "Framework :: Django :: 5.1",
+  "Framework :: Django :: 5.2",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Python :: Implementation :: PyPy",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [ "django>=4.2", "packaging" ]
+optional-dependencies.dev = [
+  "django-stubs[compatible-mypy]",
+  "jinja2>=2.9.6",
+  "mypy",
+  "pre-commit",
+  "pytest",
+  "pytest-cov",
+  "pytest-django",
+  "pytest-ruff",
+  "sphinx",
+  "sphinx-rtd-theme",
+  "tox",
+  "tox-gh-actions",
+  "types-setuptools",
+]
+optional-dependencies.jinja2 = [ "jinja2>=2.9.6" ]
+optional-dependencies.tests = [
+  "jinja2>=2.9.6",
+  "pytest",
+  "pytest-cov",
+  "pytest-django",
+  "pytest-ruff",
+]
+optional-dependencies.typing = [
+  "django-stubs[compatible-mypy]",
+  "jinja2>=2.9.6",
+  "mypy",
+  "pytest",
+  "pytest-django",
+  "types-setuptools",
+]
+urls."Bug Tracker" = "https://github.com/mozilla/django-csp/issues"
+urls.Changelog = "https://github.com/mozilla/django-csp/blob/main/CHANGES.md"
+urls.Documentation = "http://django-csp.readthedocs.org/"
+urls.Homepage = "http://github.com/mozilla/django-csp"
+urls."Source Code" = "https://github.com/mozilla/django-csp"
+
+[tool.setuptools]
+zip-safe = false
+include-package-data = true
+
+[tool.setuptools.packages]
+find = { namespaces = false }
+
+[tool.ruff]
+target-version = "py39"
+line-length = 150
+indent-width = 4
+extend-exclude = [ "build", "dist", "docs" ]
+
+# Set what ruff should check for.
+# See https://docs.astral.sh//ruff/rules/ for a list of rules.
+lint.select = [
+  "A",   # flake8-builtin errors
+  "C4",  # flake8-comprehensions errors
+  "DJ",  # flake8-django errors
+  "E",   # pycodestyle errors
+  "F",   # pyflakes errors
+  "I",   # import sorting
+  "Q",   # flake8-quotes errors
+  "T20", # flake8-print errors
+  "UP",  # py-upgrade
+  "W",   # pycodestyle warnings
+  # "B", # bugbear errors - incompatible with our use of `gettattr` and `setattr`.
+]
+# Allow unused variables when underscore-prefixed.
+lint.dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+lint.isort.known-first-party = [ "csp" ]
+lint.isort.section-order = [
+  "future",
+  "standard-library",
+  "django",
+  "third-party",
+  "first-party",
+  "local-folder",
+]
+lint.isort.sections.django = [ "django" ]
+
+[tool.pytest.ini_options]
+addopts = "-vs --tb=short --ruff --ruff-format"
+DJANGO_SETTINGS_MODULE = "csp.tests.settings"
+
+[tool.mypy]
+plugins = [ "mypy_django_plugin.main" ]
+exclude = [ '^build/lib' ]
+strict = true
+
+[tool.django-stubs]
+django_settings_module = "csp.tests.settings"
