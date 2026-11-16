@@ -1,8 +1,10 @@
 import cbor2
 import pytest
 
+from pycose.exceptions import CoseException
 from pycose.keys.cosekey import CoseKey
 from pycose.keys.keyops import MacVerifyOp, MacCreateOp
+from pycose.keys.rsa import RSAKey
 from pycose.messages.cosemessage import CoseMessage
 from pycose.messages.mac0message import Mac0Message
 
@@ -48,3 +50,21 @@ def test_encrypt0_decoding(test_mac0):
     assert msg.uhdr == test_input['unprotected']
 
     assert msg.verify_tag()
+
+
+def test_fail_on_hmac_compute_with_rsa_key():
+    msg = Mac0Message(phdr={'ALG': 'HMAC_256'}, payload="mac message".encode('utf-8'))
+
+    msg.key = RSAKey.generate_key(2048)
+
+    with pytest.raises(CoseException, match="Wrong key type"):
+        msg.encode()
+
+
+def test_fail_on_hmac_verify_with_rsa_key():
+    msg = Mac0Message(phdr={'ALG': 'HMAC_256'}, payload="mac message".encode('utf-8'))
+
+    msg.key = RSAKey.generate_key(2048)
+
+    with pytest.raises(CoseException, match="Wrong key type"):
+        msg.verify_tag()

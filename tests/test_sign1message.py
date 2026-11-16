@@ -201,3 +201,27 @@ def test_fail_on_illegal_keyops_verifying(ops):
         msg.verify_signature()
 
     assert "Illegal key operations specified." in str(excinfo.value)
+
+
+def test_fail_on_eddsa_signing_with_ec2_key():
+    msg = Sign1Message(phdr={'ALG': 'EdDSA'}, payload="signed message".encode('utf-8'))
+
+    ec2_key = EC2Key.generate_key(crv='P_256')
+    msg.key = ec2_key
+
+    with pytest.raises(CoseException):
+        msg.encode()
+
+
+def test_fail_on_eddsa_verifying_with_ec2_key():
+    okp_key = OKPKey.generate_key(crv='Ed25519')
+
+    msg = Sign1Message(phdr={'ALG': 'EdDSA'}, payload="signed message".encode('utf-8'))
+    msg.key = okp_key
+    encoded = msg.encode()
+
+    msg = Sign1Message.decode(encoded)
+    msg.key = EC2Key.generate_key(crv='P_256')
+
+    with pytest.raises(CoseException):
+        msg.verify_signature()

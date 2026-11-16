@@ -452,6 +452,9 @@ class DirectKeyAgreement(CoseRecipient):
         if peer_key is None:
             raise CoseException("Unknown static receiver public key")
 
+        if self.key is None:
+            raise CoseException("Key cannot be None")
+
         peer_key.verify(EC2Key, alg, [DeriveKeyOp, DeriveBitsOp])
         self.key.verify(EC2Key, alg, [DeriveKeyOp, DeriveBitsOp])
 
@@ -540,6 +543,9 @@ class KeyAgreementWithKeyWrap(CoseRecipient):
                 # alg uses a static sender
                 raise CoseException("Static sender key cannot be None.")
 
+        peer_key.verify(EC2Key, alg, [DeriveKeyOp, DeriveBitsOp])
+        self.key.verify(EC2Key, alg, [DeriveKeyOp, DeriveBitsOp])
+
         key_bytes = self._compute_kek((self.get_attr(headers.Algorithm)).get_key_wrap_func(), peer_key, self.key, alg)
         wrap_func = alg.get_key_wrap_func()
 
@@ -556,6 +562,15 @@ class KeyAgreementWithKeyWrap(CoseRecipient):
             peer_key = self.get_attr(headers.StaticKey)
         else:
             raise CoseIllegalAlgorithm(f"Algorithm {alg} unsupported for {self.__name__}")
+
+        if peer_key is None:
+            raise CoseException("Unknown peer public key")
+
+        if self.key is None:
+            raise CoseException("Key cannot be None")
+
+        peer_key.verify(EC2Key, alg, [DeriveKeyOp, DeriveBitsOp])
+        self.key.verify(EC2Key, alg, [DeriveKeyOp, DeriveBitsOp])
 
         kek = SymmetricKey(k=self._compute_kek(alg.get_key_wrap_func(), peer_key, self.key, alg),
                            optional_params={KpAlg: alg, KpKeyOps: [UnwrapOp, DecryptOp]})
